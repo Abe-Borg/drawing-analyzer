@@ -389,6 +389,29 @@ def test_batch_detach_marks_sheets_and_leaves_files():
     assert client.files.deleted == []
 
 
+def test_batch_detach_reports_diagnostics_via_on_log():
+    """An uncollectable batch emits a leveled diagnostic through ``on_log``.
+
+    This is the channel the GUI routes to its activity log, so the operator can
+    see *why* a run came back incomplete rather than just losing the sheets.
+    """
+    client = _FakeClient(_succeed)
+    batch = submit_drawing_batch(
+        iter([_make_sheet(1)]), client=client, model=OPUS, total=1
+    )
+    logs: list[tuple[str, str]] = []
+    collect_drawing_batch(
+        batch,
+        client=client,
+        sleep=NOSLEEP,
+        max_elapsed_seconds=-1,  # force the poll past its bound → "detached"
+        on_log=lambda msg, level="info": logs.append((level, msg)),
+    )
+    assert any(
+        level == "warning" and "still processing" in msg for level, msg in logs
+    )
+
+
 # --------------------------------------------------------------------------- #
 # End-to-end via the pipeline (renders a synthetic PDF; needs PyMuPDF)
 # --------------------------------------------------------------------------- #
