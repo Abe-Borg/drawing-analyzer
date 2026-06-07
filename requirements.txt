@@ -1,0 +1,23 @@
+# Drawing Analyzer — runtime dependencies
+# Mirrors [project.dependencies] in pyproject.toml. Requires Python 3.11+.
+#
+#   pip install -r requirements.txt
+#
+# (Editable install via `pip install -e ".[gui]"` remains the recommended path;
+#  this file is provided for plain pip / non-editable workflows.)
+
+# --- Core engine (required) ---
+anthropic>=0.97,<0.98
+pymupdf            # AGPL-3.0 — see LICENSE and src/drawing_analyzer/render.py
+tiktoken
+platformdirs
+
+# --- GUI (optional; install for the desktop app / drag-and-drop) ---
+# customtkinter
+# tkinterdnd2
+
+# --- OS keyring (optional; secure API-key storage, file fallback otherwise) ---
+# keyring
+
+# --- Tests (optional) ---
+# pytest>=9.0
