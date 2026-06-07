@@ -36,6 +36,12 @@ from .render import iter_rendered_sheets, list_sheets
 # (done == total, label "Done").
 ProgressCallback = Callable[[int, int, str], None]
 
+# ``on_log(message, level=...)`` — leveled diagnostic messages from the batch
+# path (e.g. a batch that detached past the elapsed bound, or repeated poll
+# failures). Optional; when omitted the batch path falls back to surfacing these
+# on the progress line, preserving the prior behavior.
+LogCallback = Callable[..., None]
+
 # Default per-set digest concurrency. Vision calls are latency-bound, so a few
 # in flight cut wall-clock sharply; kept modest so a large set doesn't trip rate
 # limits (transient 429/5xx are retried per-sheet anyway — see digest.py).
@@ -210,6 +216,7 @@ def _digest_sheets_via_batch(
     cache: Any,
     progress: ProgressCallback | None,
     total: int,
+    on_log: LogCallback | None = None,
 ) -> list[SheetDigest]:
     """Batch path: render-stream → Files-API upload → one Message Batch.
 
@@ -225,8 +232,11 @@ def _digest_sheets_via_batch(
 
         client = _get_client()
 
-    def _log(msg: str, level: str = "info") -> None:
-        if progress is not None:
+    # Leveled batch diagnostics go to ``on_log`` when the caller supplies one
+    # (the GUI routes these to its activity log); otherwise fall back to the
+    # prior behavior of surfacing them on the progress line.
+    if on_log is None and progress is not None:
+        def on_log(msg: str, level: str = "info") -> None:
             progress(total, total, msg)
 
     batch = submit_drawing_batch(
@@ -241,7 +251,7 @@ def _digest_sheets_via_batch(
         total=total,
     )
     return collect_drawing_batch(
-        batch, client=client, cache=cache, progress=progress, on_log=_log
+        batch, client=client, cache=cache, progress=progress, on_log=on_log
     )
 
 
@@ -263,11 +273,16 @@ def extract_drawing_context(
     synthesize: bool = False,
     synthesis_model: str | None = None,
     use_batch: bool = False,
+    on_log: LogCallback | None = None,
 ) -> DrawingContext:
     """Render and digest every sheet in ``pdf_paths`` into one text context.
 
     ``progress`` (if given) is invoked as ``progress(done, total, label)`` as
     each sheet finishes and once at completion, so a GUI can show "k/n".
+    ``on_log(message, level=...)`` (batch path only) receives leveled
+    diagnostics — a batch that detached past the elapsed bound, or repeated poll
+    failures — so a GUI can surface *why* a partial run came back incomplete;
+    when omitted these fall back onto ``progress``.
     ``client`` is injectable for tests. Per-sheet failures are captured on the
     returned :class:`DrawingContext` (``errors`` and the failing sheet's
     ``SheetDigest.error``); they never abort the run.
@@ -325,7 +340,7 @@ def extract_drawing_context(
             paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
             client=client, model=model, max_tokens=max_tokens,
             use_thinking=use_thinking, effort=effort, cache=cache,
-            progress=progress, total=total,
+            progress=progress, total=total, on_log=on_log,
         )
     else:
         sheets = _digest_sheets_concurrent(

@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import shlex
 import threading
+from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox
 
@@ -59,6 +60,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._pdfs: list[Path] = []
         self._ctx: DrawingContext | None = None
         self._busy = False
+        self._last_log_msg: str | None = None
         self._has_key = self._load_api_key()
 
         self._build_ui()
@@ -150,13 +152,25 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         )
         self.progress_label.pack(fill="x", padx=16, pady=(0, 4))
 
-        # Output
-        self.output = ctk.CTkTextbox(
+        # Activity log — live status + per-sheet diagnostics. The digest itself
+        # is no longer shown here; it is written only to the saved Markdown file.
+        self.log_box = ctk.CTkTextbox(
             outer, fg_color=COLORS["bg_input"], border_color=COLORS["border"],
-            border_width=2, text_color=COLORS["text_primary"],
+            border_width=2, text_color=COLORS["text_secondary"],
             font=ctk.CTkFont(family="Consolas", size=12), wrap="word",
         )
-        self.output.pack(fill="both", expand=True, padx=16, pady=(4, 8))
+        self.log_box.pack(fill="both", expand=True, padx=16, pady=(4, 8))
+        for _tag, _color in (
+            ("muted", COLORS["text_muted"]),
+            ("info", COLORS["text_secondary"]),
+            ("accent", COLORS["accent_glow"]),
+            ("success", COLORS["success"]),
+            ("warning", COLORS["warning"]),
+            ("error", COLORS["error"]),
+            ("ts", COLORS["text_muted"]),
+        ):
+            self.log_box.tag_config(_tag, foreground=_color)
+        self.log_box.configure(state="disabled")
 
         self.save_btn = ctk.CTkButton(
             outer, text="Save Digest…", width=140, height=34,
@@ -166,12 +180,14 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         )
         self.save_btn.pack(anchor="e", padx=16, pady=(0, 16))
 
+        self._log("Ready — drop or browse for drawing PDFs to analyze.", level="muted")
         if not self._has_key:
-            self._set_progress_text(
+            warning = (
                 "No ANTHROPIC_API_KEY found — set it (or save a key file) before "
-                "analyzing.",
-                color=COLORS["warning"],
+                "analyzing."
             )
+            self._set_progress_text(warning, color=COLORS["warning"])
+            self._log(warning, level="warning")
 
     def _register_dnd(self) -> None:
         if DND_FILES is None:
@@ -231,7 +247,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             return
         self._pdfs = []
         self._ctx = None
-        self.output.delete("1.0", "end")
+        self._clear_log()
         self.save_btn.configure(state="disabled")
         self._set_progress_text("")
         self._refresh_summary()
@@ -290,7 +306,11 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self.analyze_btn.configure(state="disabled", text="Analyzing…")
         self.clear_btn.configure(state="disabled")
         self.save_btn.configure(state="disabled")
-        self.output.delete("1.0", "end")
+        self._clear_log()
+        self._log(
+            f"Starting analysis — {len(self._pdfs)} file(s), {len(refs)} sheet(s).",
+            level="accent",
+        )
         self._set_progress_text("Starting…", color=COLORS["text_secondary"])
 
         pdfs = list(self._pdfs)
@@ -302,6 +322,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 pdfs,
                 model=REVIEW_MODEL_DEFAULT,
                 progress=self._progress_from_thread,
+                on_log=self._log_from_thread,
                 use_cache=True,
                 synthesize=True,
                 use_batch=True,
@@ -314,48 +335,106 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
     def _progress_from_thread(self, done: int, total: int, label: str) -> None:
         self.after(0, lambda: self._set_progress(done, total, label))
 
+    def _log_from_thread(self, message: str, level: str = "info") -> None:
+        self.after(0, lambda: self._log(message, level=level))
+
     def _set_progress(self, done: int, total: int, label: str) -> None:
         pct = f"[{done}/{total}] " if total else ""
         self._set_progress_text(f"{pct}{label}", color=COLORS["text_secondary"])
+        # Mirror each *distinct* status into the log, collapsing the repeated
+        # batch-poll line so the history shows one entry per state change.
+        if label and label != self._last_log_msg:
+            self._last_log_msg = label
+            lowered = label.lower()
+            level = "warning" if ("fail" in lowered or "error" in lowered) else "muted"
+            self._log(f"{pct}{label}", level=level)
 
     def _set_progress_text(self, text: str, *, color: str | None = None) -> None:
         self.progress_label.configure(
             text=text, text_color=color or COLORS["text_muted"]
         )
 
+    def _log(self, message: str, *, level: str = "info") -> None:
+        """Append one timestamped, color-coded line to the activity log.
+
+        Called only on the main thread (worker-thread callbacks marshal through
+        ``self.after`` first). The box is kept read-only between writes.
+        """
+        ts = datetime.now().strftime("%H:%M:%S")
+        self.log_box.configure(state="normal")
+        self.log_box.insert("end", f"{ts}  ", "ts")
+        self.log_box.insert("end", f"{message}\n", level)
+        self.log_box.see("end")
+        self.log_box.configure(state="disabled")
+
+    def _clear_log(self) -> None:
+        self.log_box.configure(state="normal")
+        self.log_box.delete("1.0", "end")
+        self.log_box.configure(state="disabled")
+        self._last_log_msg = None
+
     def _on_done(self, ctx: DrawingContext) -> None:
         self._busy = False
         self._ctx = ctx
         self.analyze_btn.configure(state="normal", text="Analyze Drawings")
         self.clear_btn.configure(state="normal")
-        self.output.delete("1.0", "end")
-        self.output.insert("1.0", ctx.combined_text or "(no digest produced)")
-        if ctx.combined_text.strip():
+        has_text = bool(ctx.combined_text.strip())
+        if has_text:
             self.save_btn.configure(state="normal")
 
         ok = ctx.ok_sheet_count
         cached = ctx.cached_sheet_count
-        cached_note = f" ({cached} from cache)" if cached else ""
-        msg = (
-            f"Done — {ok}/{ctx.sheet_count} sheet(s) analyzed{cached_note} · "
-            f"input {ctx.total_input_tokens:,} tok, output "
-            f"{ctx.total_output_tokens:,} tok"
-        )
-        color = COLORS["success"] if not ctx.errors else COLORS["warning"]
+        failed = ctx.sheet_count - ok
+
+        # Per-sheet diagnostics — surface *why* each unprocessed sheet failed
+        # (image upload error, batch item errored/expired, empty digest, batch
+        # not collected, …) so a partial run is explainable rather than silent.
         if ctx.errors:
-            msg += f" · {len(ctx.errors)} error(s)"
-        self._set_progress_text(msg, color=color)
-        if ctx.errors:
-            messagebox.showwarning(
-                "Some sheets could not be analyzed", "\n".join(ctx.errors[:12])
+            self._log(
+                f"{len(ctx.errors)} issue(s) — per-sheet detail follows:",
+                level="warning",
             )
+            for err in ctx.errors:
+                self._log(f"  • {err}", level="error")
+
+        cached_note = f", {cached} from cache" if cached else ""
+        failed_note = f", {failed} failed" if failed else ""
+        summary = (
+            f"Done — {ok}/{ctx.sheet_count} sheet(s) analyzed{cached_note}"
+            f"{failed_note} · input {ctx.total_input_tokens:,} tok, "
+            f"output {ctx.total_output_tokens:,} tok"
+        )
+        self._log(summary, level="success" if not ctx.errors else "warning")
+        self._set_progress_text(
+            summary, color=COLORS["success"] if not ctx.errors else COLORS["warning"]
+        )
+        if has_text:
+            self._log(
+                "Digest ready — click “Save Digest…” to write the "
+                "Markdown file.",
+                level="accent",
+            )
+        else:
+            self._log("No digest text was produced for this set.", level="error")
 
     def _on_error(self, message: str) -> None:
         self._busy = False
         self.analyze_btn.configure(state="normal", text="Analyze Drawings")
         self.clear_btn.configure(state="normal")
+        self._log(f"Analysis failed: {message}", level="error")
         self._set_progress_text(f"Failed: {message}", color=COLORS["error"])
         messagebox.showerror("Analysis failed", message)
+
+    def _default_digest_filename(self) -> str:
+        """Suggested filename: ``<pdf-stem>-drawings-context-analysis-<stamp>.md``.
+
+        Named after the first uploaded PDF (the common case is one multi-sheet
+        set) and stamped with the local date/time, so each saved digest is
+        traceable back to its source drawings and the run that produced it.
+        """
+        stem = self._pdfs[0].stem if self._pdfs else "drawings"
+        stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        return f"{stem}-drawings-context-analysis-{stamp}.md"
 
     def _on_save(self) -> None:
         if not self._ctx or not self._ctx.combined_text.strip():
@@ -364,16 +443,18 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             title="Save drawing digest",
             defaultextension=".md",
             filetypes=[("Markdown", "*.md"), ("Text", "*.txt"), ("All files", "*.*")],
-            initialfile="drawing_context.md",
+            initialfile=self._default_digest_filename(),
         )
         if not path:
             return
         try:
             Path(path).write_text(self._ctx.combined_text, encoding="utf-8")
         except Exception as exc:  # noqa: BLE001
+            self._log(f"Save failed: {exc}", level="error")
             messagebox.showerror("Save failed", str(exc))
             return
         self._set_progress_text(f"Saved to {path}", color=COLORS["success"])
+        self._log(f"Saved digest to {path}", level="success")
 
 
 def main() -> None:
