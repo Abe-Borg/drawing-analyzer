@@ -51,7 +51,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             except Exception:
                 pass
 
-        self.title("Spec Critic — Drawing Context Analyzer")
+        self.title("Drawing Context Analyzer")
         self.geometry("820x680")
         self.minsize(640, 520)
         self.configure(fg_color=COLORS["bg_dark"])
