@@ -32,7 +32,7 @@ else:  # pragma: no cover - exercised only without tkinterdnd2
     _CTkDnDRoot = ctk.CTk
 
 from .core.api_config import REVIEW_MODEL_DEFAULT
-from .core.api_key_store import load_api_key_from_file
+from .core.api_key_store import load_api_key_from_file, save_api_key
 from .colors import COLORS
 from .cost import estimate_drawing_set_cost, format_drawing_cost_prompt
 from .pipeline import DrawingContext, extract_drawing_context
@@ -61,7 +61,9 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._ctx: DrawingContext | None = None
         self._busy = False
         self._last_log_msg: str | None = None
-        self._has_key = self._load_api_key()
+        self._key_shown = False
+        self._initial_key = self._load_api_key()
+        self._has_key = bool(self._initial_key)
 
         self._build_ui()
         self._register_dnd()
@@ -69,12 +71,17 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
 
     # ------------------------------------------------------------------ setup
 
-    def _load_api_key(self) -> bool:
+    def _load_api_key(self) -> str:
+        """Resolve a key from the environment or saved store and apply it.
+
+        Returns the resolved key (or ``""``) so the caller can both flip the
+        ``_has_key`` flag and pre-fill the key field. The env var wins over the
+        saved store, matching the precedence the rest of the app expects.
+        """
         key = os.environ.get("ANTHROPIC_API_KEY") or load_api_key_from_file()
         if key:
             os.environ["ANTHROPIC_API_KEY"] = key
-            return True
-        return False
+        return key
 
     def _build_ui(self) -> None:
         outer = ctk.CTkFrame(self, fg_color=COLORS["bg_card"], corner_radius=8)
@@ -98,6 +105,40 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             wraplength=740,
             justify="left",
         ).pack(anchor="w", padx=16, pady=(0, 10))
+
+        # API key — paste a key here when ANTHROPIC_API_KEY isn't set in the
+        # environment. Saving applies it to the running process immediately and
+        # persists it (OS keyring, or a local key file) for future launches.
+        key_row = ctk.CTkFrame(outer, fg_color="transparent")
+        key_row.pack(fill="x", padx=16, pady=(0, 10))
+        ctk.CTkLabel(
+            key_row, text="Anthropic API Key",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            text_color=COLORS["text_secondary"],
+        ).pack(side="left", padx=(0, 8))
+        self.key_entry = ctk.CTkEntry(
+            key_row, show="•",
+            fg_color=COLORS["bg_input"], border_color=COLORS["border"],
+            text_color=COLORS["text_primary"], height=32,
+        )
+        self.key_entry.pack(side="left", fill="x", expand=True)
+        self.key_entry.bind("<Return>", lambda _e: self._on_save_key())
+        if self._initial_key:
+            self.key_entry.insert(0, self._initial_key)
+        self.key_show_btn = ctk.CTkButton(
+            key_row, text="Show", width=64, height=32,
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            fg_color=COLORS["bg_input"], hover_color=COLORS["border"],
+            border_width=1, border_color=COLORS["border"],
+            text_color=COLORS["text_secondary"], command=self._on_toggle_key,
+        )
+        self.key_show_btn.pack(side="left", padx=(8, 0))
+        ctk.CTkButton(
+            key_row, text="Save", width=72, height=32,
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
+            command=self._on_save_key,
+        ).pack(side="left", padx=(8, 0))
 
         # Drop zone
         self.drop_zone = ctk.CTkFrame(
@@ -183,11 +224,13 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._log("Ready — drop or browse for drawing PDFs to analyze.", level="muted")
         if not self._has_key:
             warning = (
-                "No ANTHROPIC_API_KEY found — set it (or save a key file) before "
-                "analyzing."
+                "No API key found — paste your Anthropic API key above and click "
+                "Save before analyzing."
             )
             self._set_progress_text(warning, color=COLORS["warning"])
             self._log(warning, level="warning")
+        else:
+            self._log("Anthropic API key loaded.", level="muted")
 
     def _register_dnd(self) -> None:
         if DND_FILES is None:
@@ -197,6 +240,47 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             self.drop_zone.dnd_bind("<<Drop>>", self._on_drop)
         except Exception:  # pragma: no cover - platform dependent
             pass
+
+    # --------------------------------------------------------------- api key
+
+    def _on_toggle_key(self) -> None:
+        """Flip the key field between masked (•) and plaintext."""
+        self._key_shown = not self._key_shown
+        self.key_entry.configure(show="" if self._key_shown else "•")
+        self.key_show_btn.configure(text="Hide" if self._key_shown else "Show")
+
+    def _on_save_key(self) -> None:
+        """Apply the pasted key to this process and persist it for next time.
+
+        The key is set in the environment first so it is usable for this
+        session even if persistence fails (read-only config dir, locked
+        keychain). ``client.get_client`` re-reads the env on its next call and
+        rebuilds its cached client when the key changes, so no client reset is
+        needed here.
+        """
+        key = self.key_entry.get().strip()
+        if not key:
+            messagebox.showwarning(
+                "No API key", "Paste your Anthropic API key in the field first."
+            )
+            return
+        os.environ["ANTHROPIC_API_KEY"] = key
+        self._has_key = True
+        try:
+            location = save_api_key(key)
+        except Exception as exc:  # noqa: BLE001 - persistence is best-effort
+            self._log(
+                f"API key set for this session, but could not be saved: {exc}",
+                level="warning",
+            )
+            self._set_progress_text(
+                "API key set for this session (not saved).",
+                color=COLORS["warning"],
+            )
+            return
+        where = "OS keyring" if location is None else str(location)
+        self._log(f"API key saved ({where}).", level="success")
+        self._set_progress_text("API key saved.", color=COLORS["success"])
 
     # ------------------------------------------------------------- selection
 
@@ -285,8 +369,8 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         if not os.environ.get("ANTHROPIC_API_KEY"):
             messagebox.showerror(
                 "No API key",
-                "No ANTHROPIC_API_KEY is set. Set the environment variable or "
-                "save a key file, then reopen this window.",
+                "No Anthropic API key is set. Paste your key in the field at the "
+                "top and click Save, then try again.",
             )
             return
 
