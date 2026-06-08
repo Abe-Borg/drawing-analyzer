@@ -90,6 +90,34 @@ def _restrict_permissions(path: Path) -> None:
         pass
 
 
+def _write_key_file(path: Path, key: str) -> None:
+    """Write ``key`` to ``path`` without ever exposing it group/other-readable.
+
+    On POSIX the file is opened with ``O_CREAT`` mode ``0o600`` and is
+    ``fchmod``'d to owner-only *before* the secret is written. This closes the
+    brief window a plain ``write_text`` + post-hoc ``chmod`` leaves under a
+    typical ``022`` umask, where a freshly-created file — or a pre-existing
+    ``0644`` one — is readable by other users while it already holds the key.
+    On Windows, where ``os.chmod`` only toggles the read-only bit and access is
+    governed by ACLs rather than mode bits, we fall back to a plain text write.
+    """
+    if os.name != "posix":
+        path.write_text(key, encoding="utf-8")
+        return
+    # A new file is created at 0o600 (umask only clears bits, and 0o600 has no
+    # group/other bits to clear). O_CREAT's mode is ignored for an *existing*
+    # file, so fchmod before writing also tightens a legacy 0o644 key file
+    # before the secret bytes land rather than after.
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
+    except OSError:
+        os.close(fd)
+        raise
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(key)
+
+
 def load_api_key_from_file() -> str:
     """Resolve the Anthropic API key from keyring or the fallback file.
 
@@ -120,7 +148,9 @@ def save_api_key(key: str) -> Path | None:
     Storage prefers the OS keyring (the same backend
     :func:`load_api_key_from_file` consults first); when keyring is
     unavailable or fails, the key is written to the plaintext file in the
-    platform config dir and chmod-tightened to ``0600`` on POSIX.
+    platform config dir, created owner-only (``0600``) from the start on
+    POSIX so it is never momentarily group/other-readable (see
+    :func:`_write_key_file`).
 
     Returns the file :class:`~pathlib.Path` when the key was written to a
     file, or ``None`` when it was stored in the keyring (which has no
@@ -134,10 +164,11 @@ def save_api_key(key: str) -> Path | None:
     if _keyring_set(key):
         return None
     # Keyring unavailable / failed — fall back to the plaintext file in the
-    # canonical (writable) config dir, which is api_key_paths()[0].
+    # canonical (writable) config dir, which is api_key_paths()[0]. The file is
+    # created owner-only from the start (see _write_key_file) so the key is
+    # never momentarily exposed to other users on a shared machine.
     path = api_key_paths()[0]
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(key, encoding="utf-8")
-    _restrict_permissions(path)
+    _write_key_file(path, key)
     return path
 

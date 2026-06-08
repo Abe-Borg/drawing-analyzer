@@ -55,6 +55,22 @@ def test_saved_file_is_owner_only(key_file):
     assert mode == 0o600
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file-mode semantics only")
+def test_save_tightens_preexisting_loose_file(key_file):
+    """A legacy world/group-readable key file lands at 0600 after a re-save.
+
+    Exercises the existing-file branch where ``O_CREAT``'s mode is ignored, so
+    the explicit ``fchmod`` before the write is what closes the exposure window.
+    """
+    key_file.write_text("old-key", encoding="utf-8")
+    key_file.chmod(0o644)
+
+    api_key_store.save_api_key("sk-ant-new")
+
+    assert key_file.read_text(encoding="utf-8") == "sk-ant-new"
+    assert stat.S_IMODE(key_file.stat().st_mode) == 0o600
+
+
 def test_keyring_success_skips_file(tmp_path, monkeypatch):
     """When the keyring accepts the key, no plaintext file is written."""
     path = tmp_path / "drawing_analyzer_api_key.txt"
