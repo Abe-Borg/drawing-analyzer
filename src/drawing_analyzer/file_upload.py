@@ -23,7 +23,7 @@ from typing import Any
 
 from .diagnostics import get_logger, summarize_exc
 from .digest import (
-    _is_transient_error,
+    _is_transient_status_error,
     _retry_backoff_seconds,
     build_user_content_blocks,
 )
@@ -50,7 +50,10 @@ FILES_API_BETA = "files-api-2025-04-14"
 # the chance of hitting at least one transient blip is correspondingly higher —
 # hence a deeper budget than ``DEFAULT_DIGEST_MAX_RETRIES``. The backoff (2s, 4s,
 # 8s, 16s) rides through the wave; kept bounded so a genuine outage still ends
-# with a clean per-sheet error rather than hanging.
+# with a clean per-sheet error rather than hanging. Only transient *status*
+# rejections are retried here (see ``_is_transient_status_error``); ambiguous
+# connection/timeout errors are left to the SDK's idempotent internal retries so
+# a lost response can't orphan an already-stored file.
 DEFAULT_UPLOAD_MAX_RETRIES = 4
 
 
@@ -99,14 +102,18 @@ def upload_sheet_images(
     caller treats the sheet as failed and deletes any ids already uploaded, so a
     partial upload never leaks files.
 
-    Each image upload is retried on a *transient* failure
-    (:func:`~drawing_analyzer.digest._is_transient_error` — the Files-API
+    Each image upload is retried on a transient *status* rejection
+    (:func:`~drawing_analyzer.digest._is_transient_status_error` — the Files-API
     ``503 overloaded_error`` among them) up to ``max_retries`` times with
     exponential backoff, the same policy the per-sheet digest uses. The retry is
     per *image*, so a blip on one of a sheet's ~37 uploads no longer discards the
-    images already uploaded for that sheet. ``sleep`` is injectable so tests
-    don't wait; a permanent failure (or exhausted retries) re-raises for the
-    caller to capture as a failed sheet.
+    images already uploaded for that sheet. Connection / timeout errors are
+    deliberately *not* re-issued here: the server may have already stored the
+    file before the response was lost, so a fresh upload could orphan it (a file
+    id never captured for cleanup) — those are left to the SDK's idempotent
+    internal retries. ``sleep`` is injectable so tests don't wait; a permanent
+    failure (or exhausted retries) re-raises for the caller to capture as a
+    failed sheet.
     """
     stem = _safe_stem(sheet)
     label = sheet.ref.display_label
@@ -125,10 +132,15 @@ def upload_sheet_images(
                 break
             except Exception as exc:  # noqa: BLE001 - retried if transient, else re-raised
                 # A Files-API 503 "overloaded"/"temporarily unavailable" is the
-                # transient failure that doomed whole sheets one image at a time;
-                # re-attempt it with backoff (the SDK's own retries weren't enough
-                # to ride a sustained overload wave) before giving up on the sheet.
-                if _is_transient_error(exc) and attempt < max_retries:
+                # transient *status* failure that doomed whole sheets one image
+                # at a time; re-attempt it with backoff (the SDK's own retries
+                # weren't enough to ride a sustained overload wave) before giving
+                # up on the sheet. Only status rejections are retried: a 503 means
+                # the upload was cleanly rejected, so re-issuing is safe — whereas
+                # a connection/timeout is ambiguous (the file may already be
+                # stored) and re-issuing it as a fresh upload could orphan that
+                # first file, so those are left to the SDK's idempotent retries.
+                if _is_transient_status_error(exc) and attempt < max_retries:
                     backoff = _retry_backoff_seconds(attempt)
                     _log.warning(
                         "files-api upload transient error, retry %d/%d in %.0fs: "

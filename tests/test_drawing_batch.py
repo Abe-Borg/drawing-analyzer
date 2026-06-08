@@ -283,6 +283,30 @@ def test_upload_does_not_retry_permanent_error():
     assert slept == []  # never retried
 
 
+def test_upload_does_not_retry_ambiguous_timeout():
+    # A lost-response timeout is ambiguous: the server may have already stored
+    # the file. Re-issuing as a fresh upload would orphan that first id (it never
+    # lands in file_ids, so neither cleanup path can delete it), so the app-level
+    # loop retries transient *status* rejections only — connection/timeout
+    # classes are left to the SDK's idempotent internal retries.
+    slept: list[float] = []
+
+    class APITimeoutError(Exception):  # name matches the SDK's timeout class
+        pass
+
+    class _TimeoutFiles(_FakeFiles):
+        def upload(self, *, file):
+            raise APITimeoutError("response lost")
+
+    client = _FakeClient(_succeed)
+    client.files = _TimeoutFiles()
+    client.beta.files = client.files
+
+    with pytest.raises(APITimeoutError):
+        upload_sheet_images(client, _make_sheet(1), max_retries=5, sleep=slept.append)
+    assert slept == []  # ambiguous timeout is not app-retried
+
+
 # --------------------------------------------------------------------------- #
 # submit + collect
 # --------------------------------------------------------------------------- #
