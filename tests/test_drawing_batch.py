@@ -59,6 +59,36 @@ class _FakeFiles:
         self.deleted.append(file_id)
 
 
+class _Transient503(Exception):
+    """A Files-API ``503 overloaded_error`` lookalike (carries ``status_code``).
+
+    ``_is_transient_error`` classifies by the ``status_code`` attribute the SDK
+    errors expose, so this triggers the upload retry path; a plain
+    ``RuntimeError`` (used elsewhere) is treated as permanent and never retried.
+    """
+
+    status_code = 503
+
+    def __init__(self, message: str = "File storage is temporarily unavailable."):
+        super().__init__(message)
+        self.message = message
+
+
+class _FlakyFiles(_FakeFiles):
+    """Raise a transient 503 on the first ``fail_times`` upload calls, then OK."""
+
+    def __init__(self, fail_times: int):
+        super().__init__()
+        self.fail_times = fail_times
+        self.attempts = 0
+
+    def upload(self, *, file):
+        if self.attempts < self.fail_times:
+            self.attempts += 1
+            raise _Transient503()
+        return super().upload(file=file)
+
+
 class _FakeBatches:
     """Serves both the beta (create) and sync (retrieve/results) namespaces."""
 
@@ -199,6 +229,58 @@ def test_upload_failure_cleans_up_partial_upload():
         upload_sheet_images(client, _make_sheet(1))
     # The two images uploaded before the failure are deleted — no leak.
     assert client.files.deleted == ["file_0", "file_1"]
+
+
+def test_upload_retries_transient_503_then_succeeds():
+    # The first image 503s twice, then uploads — the exact Files-API
+    # "temporarily unavailable" wave that previously failed the whole sheet.
+    slept: list[float] = []
+    client = _FakeClient(_succeed)
+    client.files = _FlakyFiles(fail_times=2)
+    client.beta.files = client.files
+
+    up = upload_sheet_images(
+        client, _make_sheet(1, rows=2, cols=2),  # overview + 4 tiles = 5 images
+        max_retries=3, sleep=slept.append,
+    )
+
+    # All five images land despite the transient blips, and the backoff grew
+    # exponentially between attempts (2s, 4s) before the retry succeeded.
+    assert len(up.file_ids) == 5
+    assert slept == [2.0, 4.0]
+    assert client.files.deleted == []  # nothing discarded — the sheet completed
+
+
+def test_upload_retries_exhausted_then_raises_and_cleans_up():
+    # First image 503s forever; with max_retries=2 that is 3 attempts then raise.
+    slept: list[float] = []
+    client = _FakeClient(_succeed)
+    client.files = _FlakyFiles(fail_times=99)
+    client.beta.files = client.files
+
+    with pytest.raises(_Transient503):
+        upload_sheet_images(client, _make_sheet(1), max_retries=2, sleep=slept.append)
+    assert slept == [2.0, 4.0]  # two backoffs, then gave up
+    # The first image never uploaded, so there is nothing to clean up.
+    assert client.files.deleted == []
+
+
+def test_upload_does_not_retry_permanent_error():
+    # A non-transient error (no transient status / connection class) must fail
+    # fast — never sleep, never retry — so a genuine 4xx ends the sheet at once.
+    slept: list[float] = []
+
+    class _PermanentBoom(_FakeFiles):
+        def upload(self, *, file):
+            raise RuntimeError("bad request")
+
+    client = _FakeClient(_succeed)
+    client.files = _PermanentBoom()
+    client.beta.files = client.files
+
+    with pytest.raises(RuntimeError, match="bad request"):
+        upload_sheet_images(client, _make_sheet(1), max_retries=5, sleep=slept.append)
+    assert slept == []  # never retried
 
 
 # --------------------------------------------------------------------------- #
