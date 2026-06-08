@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import os
 import shlex
+import subprocess
+import sys
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -220,18 +222,37 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             self.log_box.tag_config(_tag, foreground=_color)
         self.log_box.configure(state="disabled")
 
+        # Bottom action row: open the on-disk diagnostics log (always available —
+        # the detailed request-level trace lives in a file, not this activity
+        # log), and save the digest (enabled once a run produces text).
+        btn_row = ctk.CTkFrame(outer, fg_color="transparent")
+        btn_row.pack(fill="x", padx=16, pady=(0, 16))
+        self.open_log_btn = ctk.CTkButton(
+            btn_row, text="Open Diagnostics Log", width=190, height=34,
+            font=ctk.CTkFont(family="Segoe UI", size=13),
+            fg_color=COLORS["bg_input"], hover_color=COLORS["border"],
+            border_width=1, border_color=COLORS["border"],
+            text_color=COLORS["text_secondary"], command=self._on_open_log,
+        )
+        self.open_log_btn.pack(side="left")
         self.save_btn = ctk.CTkButton(
-            outer, text="Save Digest…", width=140, height=34,
+            btn_row, text="Save Digest…", width=140, height=34,
             font=ctk.CTkFont(family="Segoe UI", size=13),
             fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
             command=self._on_save, state="disabled",
         )
-        self.save_btn.pack(anchor="e", padx=16, pady=(0, 16))
+        self.save_btn.pack(side="right")
 
         self._log("Ready — drop or browse for drawing PDFs to analyze.", level="muted")
         diag_path = diagnostics.configured_log_path()
         if diag_path is not None:
-            self._log(f"Diagnostics log: {diag_path}", level="muted")
+            # Surfaced prominently (info, not muted) and tied to the button, so
+            # the detailed trace is discoverable rather than hidden in a file.
+            self._log(
+                f"Diagnostics log: {diag_path}  ·  click “Open Diagnostics Log” "
+                f"below to view it any time.",
+                level="info",
+            )
         if not self._has_key:
             self._set_key_status("no key", COLORS["warning"])
             self._log(
@@ -579,6 +600,45 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             return
         self._set_progress_text(f"Saved to {path}", color=COLORS["success"])
         self._log(f"Saved digest to {path}", level="success")
+
+    # ----------------------------------------------------------- diagnostics
+
+    def _open_in_os(self, target: Path) -> None:
+        """Open a file or folder with the OS default handler (cross-platform)."""
+        if sys.platform.startswith("win"):
+            os.startfile(str(target))  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            subprocess.run(["open", str(target)], check=False)
+        else:
+            subprocess.run(["xdg-open", str(target)], check=False)
+
+    def _on_open_log(self) -> None:
+        """Open the diagnostics log file (or its folder) in the OS viewer.
+
+        The detailed, request-level trace (which image failed, HTTP status,
+        request-id, batch id) lives in a file rather than this activity log; this
+        button makes it reachable without hunting through the platform config
+        dir. Falls back to revealing the folder if the file does not exist yet,
+        and to a dialog showing the path if the OS opener fails.
+        """
+        path = diagnostics.configured_log_path()
+        if path is None:
+            messagebox.showinfo(
+                "Diagnostics log",
+                "Diagnostics file logging is not active for this session.\n\n"
+                "It is on by default; check that DRAWING_ANALYZER_DIAGNOSTICS is "
+                "not set to 0.",
+            )
+            return
+        target = path if path.exists() else path.parent
+        try:
+            self._open_in_os(target)
+            self._log(f"Opened diagnostics log: {path}", level="muted")
+        except Exception as exc:  # noqa: BLE001 - opener is best-effort
+            self._log(f"Could not open the diagnostics log: {exc}", level="warning")
+            messagebox.showinfo(
+                "Diagnostics log", f"The diagnostics log is here:\n\n{path}"
+            )
 
 
 def main() -> None:
