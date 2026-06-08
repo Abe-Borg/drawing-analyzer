@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from drawing_analyzer import diagnostics
 from drawing_analyzer.batch_digest import collect_drawing_batch, submit_drawing_batch
 from drawing_analyzer.digest_cache import DigestCache
 from drawing_analyzer.file_upload import FILES_API_BETA, upload_sheet_images
@@ -410,6 +411,38 @@ def test_batch_detach_reports_diagnostics_via_on_log():
     assert any(
         level == "warning" and "still processing" in msg for level, msg in logs
     )
+
+
+# --------------------------------------------------------------------------- #
+# Diagnostics trace
+# --------------------------------------------------------------------------- #
+
+
+def test_diagnostics_file_records_batch_run_detail(tmp_path):
+    """The on-disk diagnostics trace names everything needed to explain a partial
+    run: the batch id, the custom_id -> sheet rosetta map, and the failing item
+    attributed to its sheet with the cleaned error (an `api_error` 500 here)."""
+    diagnostics.reset_for_tests()
+    log_path = tmp_path / "diag.log"
+    assert diagnostics.configure_file_logging(log_path) == log_path
+    try:
+        def responder(req):
+            if req["custom_id"] == "sheet__1":
+                return batch_errored_result(
+                    custom_id="sheet__1", error_message="Internal Server Error"
+                )
+            return _succeed(req)
+
+        client = _FakeClient(responder)
+        _run_batch(client, [_make_sheet(i) for i in (1, 2, 3)])
+    finally:
+        diagnostics.reset_for_tests()
+
+    text = log_path.read_text(encoding="utf-8")
+    assert "batch submitted" in text and "batch_abc" in text
+    assert "sheet__1 -> M-102.pdf" in text            # custom_id -> human label
+    assert "FAILED" in text and "Internal Server Error" in text  # item attribution
+    assert "collect done" in text                      # ok/failed tally
 
 
 # --------------------------------------------------------------------------- #

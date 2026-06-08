@@ -31,6 +31,7 @@ if TkinterDnD is not None:
 else:  # pragma: no cover - exercised only without tkinterdnd2
     _CTkDnDRoot = ctk.CTk
 
+from . import diagnostics
 from .core.api_config import REVIEW_MODEL_DEFAULT
 from .core.api_key_store import load_api_key_from_file, save_api_key
 from .colors import COLORS
@@ -228,6 +229,9 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self.save_btn.pack(anchor="e", padx=16, pady=(0, 16))
 
         self._log("Ready — drop or browse for drawing PDFs to analyze.", level="muted")
+        diag_path = diagnostics.configured_log_path()
+        if diag_path is not None:
+            self._log(f"Diagnostics log: {diag_path}", level="muted")
         if not self._has_key:
             self._set_key_status("no key", COLORS["warning"])
             self._log(
@@ -509,6 +513,13 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             )
             for err in ctx.errors:
                 self._log(f"  • {err}", level="error")
+            diag_path = diagnostics.configured_log_path()
+            if diag_path is not None:
+                self._log(
+                    "Full request-level detail (status codes, request-ids, "
+                    f"batch id) in the diagnostics log:\n    {diag_path}",
+                    level="muted",
+                )
 
         cached_note = f", {cached} from cache" if cached else ""
         failed_note = f", {failed} failed" if failed else ""
@@ -571,6 +582,9 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
 
 
 def main() -> None:
+    # Start the on-disk diagnostics trace before anything else so the whole
+    # session (including startup) is captured. Best-effort: never fatal.
+    diagnostics.configure_file_logging()
     ctk.set_appearance_mode("dark")
     ctk.set_default_color_theme("blue")
     app = DrawingAnalyzerApp()

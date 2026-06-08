@@ -20,8 +20,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from .diagnostics import get_logger, summarize_exc
 from .digest import build_user_content_blocks
 from .models import ImageTile, RenderedSheet
+
+_log = get_logger()
 
 # Files API beta header. Current/recognized per Anthropic's Files API docs; the
 # SDK sets it automatically on ``client.beta.files.*`` calls. It must also be
@@ -72,21 +75,46 @@ def upload_sheet_images(client: Any, sheet: RenderedSheet) -> SheetUpload:
     partial upload never leaks files.
     """
     stem = _safe_stem(sheet)
+    label = sheet.ref.display_label
     file_ids: list[str] = []
     mapping: dict[int, str] = {}
+    total_images = 1 + len(sheet.tiles)
 
     def _upload(image: ImageTile, name: str) -> None:
-        uploaded = client.beta.files.upload(file=(name, image.png_bytes, "image/png"))
+        try:
+            uploaded = client.beta.files.upload(
+                file=(name, image.png_bytes, "image/png")
+            )
+        except Exception as exc:  # noqa: BLE001 - logged here, re-raised for the caller
+            # Pinpoint the exact image (overview vs which tile), its size, and
+            # the API status / request-id so a Files-API 503/500 that doomed
+            # this whole sheet is fully attributable after the fact.
+            _log.warning(
+                "files-api upload FAILED: sheet=%s image=%s (#%d/%d, %d bytes) | %s",
+                label, name, len(file_ids) + 1, total_images,
+                len(image.png_bytes), summarize_exc(exc),
+            )
+            raise
         fid = _uploaded_id(uploaded)
         file_ids.append(fid)
         mapping[id(image)] = fid
+        _log.debug(
+            "files-api upload ok: sheet=%s image=%s (#%d/%d) file_id=%s",
+            label, name, len(file_ids), total_images, fid,
+        )
 
+    _log.debug("uploading %d image(s) for sheet=%s", total_images, label)
     try:
         _upload(sheet.overview, f"{stem}-overview.png")
         for tile in sheet.tiles:
             _upload(tile, f"{stem}-r{tile.row + 1}c{tile.col + 1}.png")
     except Exception:
         delete_files(client, file_ids)  # don't leak a half-uploaded set
+        _log.warning(
+            "deleted %d already-uploaded image(s) after a failed sheet upload: "
+            "sheet=%s",
+            len(file_ids), label,
+        )
         raise
 
     content = build_user_content_blocks(sheet, lambda t: _file_image_block(mapping[id(t)]))
