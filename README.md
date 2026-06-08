@@ -22,6 +22,11 @@ Requires Python 3.11+. Set your API key:
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
+Or skip the env var and paste the key into the **Anthropic API Key** field at the
+top of the GUI — clicking **Save** applies it to the running app and stores it
+(OS keyring when available, otherwise a local key file) so it's remembered next
+launch. The env var still takes precedence when both are set.
+
 ## Usage
 
 ### GUI
@@ -73,7 +78,7 @@ PDFs → list sheets → render (overview + 6×6 tiles) → per-sheet vision dig
 
 | Variable | Default | Effect |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | — | Required. |
+| `ANTHROPIC_API_KEY` | — | Required (or paste/save the key in the GUI). |
 | `DRAWING_ANALYZER_MODEL` | Opus 4.8 | Vision model for per-sheet digests. |
 | `DRAWING_ANALYZER_SYNTHESIS_MODEL` | Opus 4.8 | Cross-sheet synthesis model (text-only). |
 | `DRAWING_ANALYZER_MAX_WORKERS` | `4` | Real-time digest concurrency (`1` = sequential). |
