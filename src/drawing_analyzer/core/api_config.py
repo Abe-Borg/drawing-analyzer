@@ -889,7 +889,7 @@ def extract_cache_usage(usage) -> dict[str, int]:
 ENV_CACHE_DIAGNOSTICS = "DRAWING_ANALYZER_CACHE_DIAGNOSTICS"
 CACHE_DIAGNOSTICS_BETA = "cache-diagnosis-2026-04-07"
 
-# Mirrors the disable-token convention used by the tracing / cache modules.
+# Mirrors the disable-token convention used by the diagnostics / cache modules.
 _DISABLE_TOKENS = frozenset({"0", "false", "no", "off"})
 
 

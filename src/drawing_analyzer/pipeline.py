@@ -22,6 +22,7 @@ from typing import Any, Callable
 
 from .core.api_config import REVIEW_MODEL_DEFAULT
 from .core.tokenizer import estimate_image_tokens
+from .diagnostics import get_logger
 from . import tiling
 from .digest import (
     DEFAULT_DIGEST_EFFORT,
@@ -48,6 +49,8 @@ LogCallback = Callable[..., None]
 # Override per-call via ``max_workers=`` or globally via
 # ``DRAWING_ANALYZER_MAX_WORKERS``.
 DEFAULT_DIGEST_WORKERS = 4
+
+_log = get_logger()
 
 
 def _resolve_workers(max_workers: int | None, total: int) -> int:
@@ -325,6 +328,13 @@ def extract_drawing_context(
     total = len(refs)
     file_count = len({r.pdf_path for r in refs})
 
+    _log.info(
+        "===== run start: %d file(s), %d sheet(s) | model=%s path=%s cache=%s "
+        "synthesize=%s =====",
+        file_count, total, model, "batch" if use_batch else "real-time",
+        bool(cache is not None or use_cache), synthesize,
+    )
+
     if total == 0:
         if progress is not None:
             progress(0, 0, "No sheets found")
@@ -373,18 +383,36 @@ def extract_drawing_context(
             progress(total, total, "Synthesizing set overview")
         from .synthesis import MIN_SHEETS_FOR_SYNTHESIS, synthesize_drawing_set
 
+        _log.info("synthesis: starting cross-sheet overview")
         result = synthesize_drawing_set(sheets, client=client, model=synthesis_model)
         if result.ok:
             synthesis_text = result.text
             # The synthesis call is billed, so its tokens belong in the run total.
             in_tok += result.input_tokens
             out_tok += result.output_tokens
+            _log.info(
+                "synthesis: ok (input=%d output=%d tok)",
+                result.input_tokens, result.output_tokens,
+            )
         elif result.error and len([s for s in sheets if s.ok]) >= MIN_SHEETS_FOR_SYNTHESIS:
             # A genuine failure (not the "too few sheets" skip) is worth surfacing.
             errors.append(f"Cross-sheet synthesis: {result.error}")
+            _log.warning("synthesis: failed: %s", result.error)
+        else:
+            _log.info("synthesis: skipped (<%d readable sheet(s))", MIN_SHEETS_FOR_SYNTHESIS)
 
     if progress is not None:
         progress(total, total, "Done")
+
+    ok_count = sum(1 for s in sheets if s.ok)
+    cached_count = sum(1 for s in sheets if s.cached)
+    _log.info(
+        "===== run done: %d/%d ok, %d cached, %d issue(s) | input=%d output=%d "
+        "image_est=%d tok =====",
+        ok_count, total, cached_count, len(errors), in_tok, out_tok, img_tok,
+    )
+    for err in errors:
+        _log.warning("issue: %s", err)
 
     return DrawingContext(
         combined_text=_combine(sheets, file_count=file_count, overview=synthesis_text),

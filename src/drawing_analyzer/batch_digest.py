@@ -28,7 +28,7 @@ from typing import Any, Callable
 
 from .core.api_config import REVIEW_MODEL_DEFAULT
 from .core.tokenizer import estimate_image_tokens_total
-from . import tracing as _trace
+from .diagnostics import get_logger, request_id_of, summarize_exc
 from .digest import (
     DEFAULT_DIGEST_EFFORT,
     DEFAULT_DIGEST_MAX_TOKENS,
@@ -56,6 +56,8 @@ DEFAULT_MAX_CONSECUTIVE_POLL_ERRORS = 10
 
 ProgressCallback = Callable[[int, int, str], None]
 LogCallback = Callable[..., None]
+
+_log = get_logger()
 
 
 @dataclass
@@ -169,6 +171,7 @@ def submit_drawing_batch(
                     cached=True,
                 )
                 slots.append(slot)
+                _log.debug("sheet %d cache hit: %s", index, sheet.ref.display_label)
                 if progress is not None:
                     progress(index + 1, total or 0, f"Cached {sheet.ref.display_label}")
                 continue
@@ -176,13 +179,24 @@ def submit_drawing_batch(
         try:
             upload = upload_sheet_images(client, sheet)
         except Exception as exc:  # noqa: BLE001 - one sheet's upload failing is captured, not fatal
+            # Surface the request-id (when the SDK carried one) on the sheet's
+            # error too, so the GUI's per-sheet line — not just the diagnostics
+            # file — names the exact call to quote to Anthropic.
+            rid = request_id_of(exc)
+            error = f"image upload failed: {_clean_error(exc)}"
+            if rid:
+                error += f" (request-id {rid})"
             slot.digest = SheetDigest(
                 ref=sheet.ref,
                 text="",
                 image_token_estimate=image_est,
-                error=f"image upload failed: {_clean_error(exc)}",
+                error=error,
             )
             slots.append(slot)
+            _log.warning(
+                "sheet %d upload failed (%s): %s",
+                index, sheet.ref.display_label, summarize_exc(exc),
+            )
             if progress is not None:
                 progress(index + 1, total or 0, f"Upload failed: {sheet.ref.display_label}")
             continue
@@ -204,6 +218,10 @@ def submit_drawing_batch(
             }
         )
         slots.append(slot)
+        _log.debug(
+            "sheet %d uploaded %d image(s) as %s: %s",
+            index, len(upload.file_ids), custom_id, sheet.ref.display_label,
+        )
         if progress is not None:
             progress(index + 1, total or 0, f"Uploaded {sheet.ref.display_label}")
 
@@ -211,9 +229,20 @@ def submit_drawing_batch(
     if reqs:
         mb = client.beta.messages.batches.create(requests=reqs, betas=[FILES_API_BETA])
         batch_id = _get(mb, "id")
-        _trace.capture_note(
-            None, "drawing batch submitted", batch_id=batch_id, request_count=len(reqs)
+        # Record the batch id + the custom_id → sheet map up front. This is the
+        # rosetta stone for reading the rest of the run: a later "item sheet__3
+        # FAILED" line, or a lookup of the batch in the Anthropic console, maps
+        # straight back to the human sheet label here.
+        _log.info(
+            "batch submitted: id=%s items=%d request_id=%s",
+            batch_id, len(reqs), request_id_of(mb),
         )
+        for s in slots:
+            if s.custom_id is not None:
+                _log.info(
+                    "  %s -> %s (%d image file(s))",
+                    s.custom_id, s.ref.display_label, len(s.file_ids),
+                )
 
     return DrawingBatch(batch_id=batch_id, slots=slots, total=total or len(slots))
 
@@ -240,6 +269,11 @@ def _poll_until_terminal(
     while True:
         elapsed = time.monotonic() - started
         if elapsed > max_elapsed_seconds:
+            _log.warning(
+                "batch %s detached: still processing after %.1fh; remote batch "
+                "left running (files retained)",
+                batch_id, max_elapsed_seconds / 3600,
+            )
             if on_log is not None:
                 on_log(
                     f"Drawing batch still processing after "
@@ -252,7 +286,13 @@ def _poll_until_terminal(
             consecutive_errors = 0
         except Exception as exc:  # noqa: BLE001 - retried; terminal after the cap
             consecutive_errors += 1
+            _log.warning(
+                "batch %s poll error %d/%d: %s",
+                batch_id, consecutive_errors, DEFAULT_MAX_CONSECUTIVE_POLL_ERRORS,
+                summarize_exc(exc),
+            )
             if consecutive_errors >= DEFAULT_MAX_CONSECUTIVE_POLL_ERRORS:
+                _log.error("batch %s poll failed repeatedly; giving up", batch_id)
                 if on_log is not None:
                     on_log(f"Drawing batch poll failed repeatedly: {exc}", level="error")
                 return "poll_failed"
@@ -265,10 +305,22 @@ def _poll_until_terminal(
             for k in ("succeeded", "errored", "canceled", "expired")
         )
         status = _normalize_status(_get(batch, "processing_status"))
+        _log.debug(
+            "poll batch=%s status=%s succeeded=%s errored=%s canceled=%s "
+            "expired=%s processing=%s elapsed=%.0fs",
+            batch_id, status,
+            _get(counts, "succeeded", 0), _get(counts, "errored", 0),
+            _get(counts, "canceled", 0), _get(counts, "expired", 0),
+            _get(counts, "processing", 0), elapsed,
+        )
         if progress is not None:
             done = min(total, cached_done + done_in_batch)
             progress(done, total, f"Analyzing {done}/{total} sheet(s) — batch {status}")
         if status in ("ended", "failed", "expired", "canceled"):
+            _log.info(
+                "batch %s reached terminal status=%s after %.0fs",
+                batch_id, status, elapsed,
+            )
             return status
         sleep(_progressive_interval(elapsed))
 
@@ -276,6 +328,10 @@ def _poll_until_terminal(
 def _parse_item(slot: _Slot, result: Any, *, cache: Any) -> SheetDigest:
     """Turn one batch result envelope into the sheet's :class:`SheetDigest`."""
     if result is None:
+        _log.warning(
+            "item %s (%s): batch returned no result envelope",
+            slot.custom_id, slot.ref.display_label,
+        )
         return SheetDigest(
             ref=slot.ref,
             text="",
@@ -284,17 +340,37 @@ def _parse_item(slot: _Slot, result: Any, *, cache: Any) -> SheetDigest:
         )
     rr = _get(result, "result")
     if _get(rr, "type") != "succeeded":
+        # A per-item failure inside the batch (e.g. an `api_error` 500 on one
+        # sheet while the rest succeed). Log the result type + cleaned error so
+        # the cause is attributable to the sheet, not just "3 failed".
+        item_error = _batch_item_error_text(rr)
+        _log.warning(
+            "item %s (%s) FAILED: result_type=%s detail=%s",
+            slot.custom_id, slot.ref.display_label,
+            _get(rr, "type", "errored"), item_error,
+        )
         return SheetDigest(
             ref=slot.ref,
             text="",
             image_token_estimate=slot.image_estimate,
-            error=_batch_item_error_text(rr),
+            error=item_error,
         )
     message = _get(rr, "message")
     text = _message_text(message)
     in_tok, out_tok = _message_usage(message)
     stop = _get(message, "stop_reason")
     error = None if text else f"empty digest (stop_reason={stop!r})"
+    if error is not None:
+        _log.warning(
+            "item %s (%s): empty digest (stop_reason=%r)",
+            slot.custom_id, slot.ref.display_label, stop,
+        )
+    else:
+        _log.debug(
+            "item %s (%s) ok: in=%d out=%d stop=%s request_id=%s",
+            slot.custom_id, slot.ref.display_label, in_tok, out_tok, stop,
+            request_id_of(message),
+        )
     if cache is not None and slot.cache_key and error is None and text:
         cache.put(
             slot.cache_key,
@@ -383,9 +459,17 @@ def collect_drawing_batch(
     ref_by_index = {s.index: s.ref for s in batch.slots}
     for i, digest in enumerate(results):
         if digest is None:  # defensive — every slot resolves above
+            _log.error("slot %d produced no digest result (defensive backfill)", i)
             results[i] = SheetDigest(
                 ref=ref_by_index.get(i, batch.slots[0].ref if batch.slots else None),
                 text="",
                 error="sheet produced no digest result",
             )
-    return [r for r in results if r is not None]
+
+    final = [r for r in results if r is not None]
+    ok = sum(1 for r in final if r.error is None and (r.text or "").strip())
+    _log.info(
+        "batch collect done: %d/%d sheet(s) ok, %d failed (batch id=%s)",
+        ok, len(final), len(final) - ok, batch.batch_id,
+    )
+    return final
