@@ -75,16 +75,33 @@ def _error_status(exc: Exception) -> int | None:
     return status if isinstance(status, int) else None
 
 
+def _is_transient_status_error(exc: Exception) -> bool:
+    """True when ``exc`` carries a retry-worthy transient HTTP *status*.
+
+    A status response in :data:`_TRANSIENT_STATUSES` (429 / 5xx / 529) is a
+    *definitive* server rejection — the request was not processed — so
+    re-issuing it is safe even for a non-idempotent create. This is the narrower
+    predicate the Files-API upload retry uses: unlike :func:`_is_transient_error`
+    it deliberately excludes the connection / timeout classes, which are
+    *ambiguous* (the server may have already accepted the upload before the
+    response was lost) and so must not be blindly re-issued as a fresh upload —
+    that would orphan the first, accepted file. The SDK retries those connection
+    / timeout cases internally with a reused idempotency key instead.
+    """
+    status = _error_status(exc)
+    return status is not None and status in _TRANSIENT_STATUSES
+
+
 def _is_transient_error(exc: Exception) -> bool:
     """True when ``exc`` is a retry-worthy transient failure.
 
-    Recognizes both an HTTP status in :data:`_TRANSIENT_STATUSES` and the
-    connection / timeout SDK error classes by name. A plain ``RuntimeError``
-    (what the hermetic tests raise) is *not* transient, so the existing
-    capture-without-retry behavior is preserved and tests never sleep.
+    Recognizes both an HTTP status in :data:`_TRANSIENT_STATUSES` (via
+    :func:`_is_transient_status_error`) and the connection / timeout SDK error
+    classes by name. A plain ``RuntimeError`` (what the hermetic tests raise) is
+    *not* transient, so the existing capture-without-retry behavior is preserved
+    and tests never sleep.
     """
-    status = _error_status(exc)
-    if status is not None and status in _TRANSIENT_STATUSES:
+    if _is_transient_status_error(exc):
         return True
     name = type(exc).__name__
     return name in _CONNECTION_ERROR_NAMES or name in _TIMEOUT_ERROR_NAMES

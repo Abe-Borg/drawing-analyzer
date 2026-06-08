@@ -17,6 +17,7 @@ from drawing_analyzer.digest import (
     SheetDigest,
     _clean_error,
     _is_transient_error,
+    _is_transient_status_error,
     build_user_content,
     digest_sheet,
 )
@@ -187,6 +188,22 @@ def test_is_transient_error_classification():
     # Caller errors and unknown plain exceptions are NOT retried.
     assert _is_transient_error(_StatusError(400)) is False
     assert _is_transient_error(RuntimeError("nope")) is False
+
+
+def test_is_transient_status_error_excludes_ambiguous_connection_errors():
+    # The narrower predicate the non-idempotent Files-API upload retry uses:
+    # transient *status* rejections are safe to re-issue, but connection/timeout
+    # classes are ambiguous (the server may have already accepted the request)
+    # and must NOT count as retryable for a create — that distinguishes it from
+    # the broad _is_transient_error.
+    assert _is_transient_status_error(_StatusError(503)) is True
+    assert _is_transient_status_error(_StatusError(500)) is True
+    assert _is_transient_status_error(_StatusError(429)) is True
+    # Connection/timeout classes are transient for _is_transient_error but NOT
+    # status errors, so the upload path leaves them to the SDK's idempotent retry.
+    assert _is_transient_status_error(APIConnectionError("boom")) is False
+    assert _is_transient_status_error(_StatusError(400)) is False
+    assert _is_transient_status_error(RuntimeError("nope")) is False
 
 
 def test_clean_error_sanitizes_html_and_status():
