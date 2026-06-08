@@ -15,7 +15,7 @@ import shlex
 import threading
 from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox
+from tkinter import StringVar, filedialog, messagebox
 
 import customtkinter as ctk
 
@@ -64,6 +64,10 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._key_shown = False
         self._initial_key = self._load_api_key()
         self._has_key = bool(self._initial_key)
+        # Tracks what's currently persisted so finishing an edit only rewrites
+        # the store when the key actually changed (and never auto-persists an
+        # unchanged, env-supplied key).
+        self._persisted_key = self._initial_key
 
         self._build_ui()
         self._register_dnd()
@@ -107,8 +111,8 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         ).pack(anchor="w", padx=16, pady=(0, 10))
 
         # API key — paste a key here when ANTHROPIC_API_KEY isn't set in the
-        # environment. Saving applies it to the running process immediately and
-        # persists it (OS keyring, or a local key file) for future launches.
+        # environment. It applies the moment it's entered (no button), and is
+        # saved (OS keyring, or a local key file) when editing finishes.
         key_row = ctk.CTkFrame(outer, fg_color="transparent")
         key_row.pack(fill="x", padx=16, pady=(0, 10))
         ctk.CTkLabel(
@@ -116,15 +120,18 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
             text_color=COLORS["text_secondary"],
         ).pack(side="left", padx=(0, 8))
+        self._key_var = StringVar(value=self._initial_key or "")
         self.key_entry = ctk.CTkEntry(
-            key_row, show="•",
+            key_row, show="•", textvariable=self._key_var,
             fg_color=COLORS["bg_input"], border_color=COLORS["border"],
             text_color=COLORS["text_primary"], height=32,
         )
         self.key_entry.pack(side="left", fill="x", expand=True)
-        self.key_entry.bind("<Return>", lambda _e: self._on_save_key())
-        if self._initial_key:
-            self.key_entry.insert(0, self._initial_key)
+        # Apply on every edit (typing, Ctrl+V, right-click paste) so the app is
+        # ready to analyze as soon as a key is present; persist on finish.
+        self._key_var.trace_add("write", self._on_key_changed)
+        self.key_entry.bind("<FocusOut>", self._persist_key)
+        self.key_entry.bind("<Return>", self._persist_key)
         self.key_show_btn = ctk.CTkButton(
             key_row, text="Show", width=64, height=32,
             font=ctk.CTkFont(family="Segoe UI", size=12),
@@ -133,12 +140,11 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             text_color=COLORS["text_secondary"], command=self._on_toggle_key,
         )
         self.key_show_btn.pack(side="left", padx=(8, 0))
-        ctk.CTkButton(
-            key_row, text="Save", width=72, height=32,
-            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
-            fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
-            command=self._on_save_key,
-        ).pack(side="left", padx=(8, 0))
+        self.key_status_label = ctk.CTkLabel(
+            key_row, text="", font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color=COLORS["text_muted"],
+        )
+        self.key_status_label.pack(side="left", padx=(8, 0))
 
         # Drop zone
         self.drop_zone = ctk.CTkFrame(
@@ -223,13 +229,13 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
 
         self._log("Ready — drop or browse for drawing PDFs to analyze.", level="muted")
         if not self._has_key:
-            warning = (
-                "No API key found — paste your Anthropic API key above and click "
-                "Save before analyzing."
+            self._set_key_status("no key", COLORS["warning"])
+            self._log(
+                "No API key found — paste your Anthropic API key above to begin.",
+                level="warning",
             )
-            self._set_progress_text(warning, color=COLORS["warning"])
-            self._log(warning, level="warning")
         else:
+            self._set_key_status("loaded", COLORS["text_muted"])
             self._log("Anthropic API key loaded.", level="muted")
 
     def _register_dnd(self) -> None:
@@ -249,23 +255,48 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self.key_entry.configure(show="" if self._key_shown else "•")
         self.key_show_btn.configure(text="Hide" if self._key_shown else "Show")
 
-    def _on_save_key(self) -> None:
-        """Apply the pasted key to this process and persist it for next time.
+    def _set_key_status(self, text: str, color: str | None) -> None:
+        """Update the small status label beside the key field."""
+        self.key_status_label.configure(
+            text=text, text_color=color or COLORS["text_muted"]
+        )
 
-        The key is set in the environment first so it is usable for this
-        session even if persistence fails (read-only config dir, locked
-        keychain). ``client.get_client`` re-reads the env on its next call and
-        rebuilds its cached client when the key changes, so no client reset is
-        needed here.
+    def _on_key_changed(self, *_args) -> None:
+        """Apply the field's current value to the process as it is edited.
+
+        Bound to the entry's text variable so typing, Ctrl+V, and right-click
+        paste all take effect immediately — the app is ready to analyze the
+        moment a non-empty key is present, with no button to press.
+        ``client.get_client`` re-reads ``ANTHROPIC_API_KEY`` on its next call
+        and rebuilds its cached client when the key changes, so setting the env
+        var is enough. Writing to disk is deferred to :meth:`_persist_key` (on
+        finish) so a half-typed key is never persisted.
         """
-        key = self.key_entry.get().strip()
-        if not key:
-            messagebox.showwarning(
-                "No API key", "Paste your Anthropic API key in the field first."
-            )
+        key = self._key_var.get().strip()
+        if key:
+            os.environ["ANTHROPIC_API_KEY"] = key
+            self._has_key = True
+            # Show "set" only while there are unsaved edits, so we don't stomp
+            # the "saved"/"loaded" indicator when nothing actually changed.
+            if key != self._persisted_key:
+                self._set_key_status("set", COLORS["text_secondary"])
+        else:
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+            self._has_key = False
+            self._set_key_status("no key", COLORS["warning"])
+
+    def _persist_key(self, *_args) -> None:
+        """Save the current key for next launch once editing finishes.
+
+        Bound to ``<FocusOut>`` and ``<Return>``. No-ops when the field is
+        empty or unchanged since the last save, so merely tabbing through the
+        field never rewrites an unchanged (or env-supplied) key. Persistence is
+        best-effort: a failure leaves the key working for this session (already
+        applied by :meth:`_on_key_changed`) and is surfaced, not raised.
+        """
+        key = self._key_var.get().strip()
+        if not key or key == self._persisted_key:
             return
-        os.environ["ANTHROPIC_API_KEY"] = key
-        self._has_key = True
         try:
             location = save_api_key(key)
         except Exception as exc:  # noqa: BLE001 - persistence is best-effort
@@ -273,14 +304,12 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 f"API key set for this session, but could not be saved: {exc}",
                 level="warning",
             )
-            self._set_progress_text(
-                "API key set for this session (not saved).",
-                color=COLORS["warning"],
-            )
+            self._set_key_status("not saved", COLORS["warning"])
             return
+        self._persisted_key = key
         where = "OS keyring" if location is None else str(location)
         self._log(f"API key saved ({where}).", level="success")
-        self._set_progress_text("API key saved.", color=COLORS["success"])
+        self._set_key_status("saved", COLORS["success"])
 
     # ------------------------------------------------------------- selection
 
@@ -370,7 +399,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             messagebox.showerror(
                 "No API key",
                 "No Anthropic API key is set. Paste your key in the field at the "
-                "top and click Save, then try again.",
+                "top, then try again.",
             )
             return
 
