@@ -22,6 +22,7 @@ assembled in page order regardless of completion order. Per-sheet failures
 """
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -56,8 +57,54 @@ DEFAULT_MAX_CONSECUTIVE_POLL_ERRORS = 10
 
 ProgressCallback = Callable[[int, int, str], None]
 LogCallback = Callable[..., None]
+# ``on_status(text)`` — a transient, status-line-only update (never logged). Used
+# for high-frequency feedback (per-image upload progress) that would swamp the
+# milestone-oriented activity log, so the GUI can show continuous motion without
+# spamming its history.
+StatusCallback = Callable[[str], None]
 
 _log = get_logger()
+
+
+def _run_in_background(fn: Callable[[], None]) -> None:
+    """Run ``fn`` on a fire-and-forget daemon thread (seam for tests to stub)."""
+    threading.Thread(target=fn, daemon=True).start()
+
+
+def _release_uploaded_files(
+    client: Any,
+    file_ids: list[str],
+    *,
+    in_background: bool,
+    on_log: LogCallback | None,
+) -> None:
+    """Delete a collected batch's uploaded files; optionally off the hot path.
+
+    Cleanup deletes one file per request, so a collected set of a few hundred
+    images can take many minutes — and under a Files-API overload (the same wave
+    that makes the uploads themselves slow) it stretches further, all of it after
+    the digests are already in hand. Run synchronously it strands the result
+    behind a long, silent stall (the GUI looks frozen after the run is really
+    done). With ``in_background`` the digests return immediately and the
+    best-effort delete runs on a daemon thread; the files cost nothing to store,
+    so losing the tail of the cleanup if the process exits is harmless.
+    """
+    if not file_ids:
+        return
+    if not in_background:
+        delete_files(client, file_ids)
+        return
+    if on_log is not None:
+        on_log(
+            f"Releasing {len(file_ids)} uploaded file(s) in the background",
+            level="muted",
+        )
+
+    def _do() -> None:
+        delete_files(client, file_ids)
+        _log.debug("background cleanup released %d uploaded file(s)", len(file_ids))
+
+    _run_in_background(_do)
 
 
 @dataclass
@@ -131,6 +178,7 @@ def submit_drawing_batch(
     cache: Any = None,
     progress: ProgressCallback | None = None,
     total: int = 0,
+    on_status: StatusCallback | None = None,
 ) -> DrawingBatch:
     """Render-stream → cache-or-upload → submit one Message Batch.
 
@@ -176,8 +224,19 @@ def submit_drawing_batch(
                     progress(index + 1, total or 0, f"Cached {sheet.ref.display_label}")
                 continue
 
+        # Per-image status (status-line only) so a sheet's tens-of-seconds,
+        # multi-image upload — and any transient-503 retry wave within it — shows
+        # continuous motion instead of a frozen line. Built only when a status
+        # sink is wired, so the no-callback path (and the tests) is unchanged.
+        on_image = None
+        if on_status is not None:
+            def on_image(pos, n, retrying, *, _k=index + 1, _label=sheet.ref.display_label):
+                verb = "Retrying" if retrying else "Uploading"
+                tail = " after overload" if retrying else ""
+                on_status(f"[{_k}/{total}] {verb} image {pos}/{n}{tail} — {_label}")
+
         try:
-            upload = upload_sheet_images(client, sheet)
+            upload = upload_sheet_images(client, sheet, on_image=on_image)
         except Exception as exc:  # noqa: BLE001 - one sheet's upload failing is captured, not fatal
             # Surface the request-id (when the SDK carried one) on the sheet's
             # error too, so the GUI's per-sheet line — not just the diagnostics
@@ -402,12 +461,17 @@ def collect_drawing_batch(
     on_log: LogCallback | None = None,
     sleep: Callable[[float], None] = time.sleep,
     max_elapsed_seconds: int = DEFAULT_BATCH_MAX_ELAPSED_SECONDS,
+    cleanup_in_background: bool = False,
 ) -> list[SheetDigest]:
     """Poll the batch to completion and assemble per-sheet digests in page order.
 
     Cache hits / upload failures are already resolved on their slots. Submitted
     items are polled, collected, parsed, and (on success) written to the cache;
-    the uploaded files are then deleted. If the batch can't be collected
+    the uploaded files are then deleted. ``cleanup_in_background`` runs that final
+    delete on a daemon thread so the digests return immediately instead of
+    stalling behind a long, silent file-by-file cleanup (see
+    :func:`_release_uploaded_files`); left ``False`` (the default) the delete is
+    synchronous, which the unit tests rely on. If the batch can't be collected
     (detached past the elapsed bound, or repeated poll failures) the uploaded
     files are **left in place** (the remote batch may still be running and needs
     them) and each submitted sheet is marked with a clear, retriable error.
@@ -441,7 +505,12 @@ def collect_drawing_batch(
                 results[slot.index] = _parse_item(
                     slot, raw.get(slot.custom_id), cache=cache
                 )
-            delete_files(client, batch.all_file_ids)
+            _release_uploaded_files(
+                client,
+                batch.all_file_ids,
+                in_background=cleanup_in_background,
+                on_log=on_log,
+            )
         else:
             # Not collected — leave the uploaded files for the still-running
             # remote batch; surface a clear, retriable per-sheet error.

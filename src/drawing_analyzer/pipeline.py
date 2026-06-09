@@ -43,6 +43,12 @@ ProgressCallback = Callable[[int, int, str], None]
 # on the progress line, preserving the prior behavior.
 LogCallback = Callable[..., None]
 
+# ``on_status(text)`` — a transient, status-line-only update (never logged), for
+# high-frequency feedback like per-image upload progress that would otherwise
+# swamp the milestone-oriented activity log. Batch path only; ``progress`` and
+# ``on_log`` remain the channels that drive the log.
+StatusCallback = Callable[[str], None]
+
 # Default per-set digest concurrency. Vision calls are latency-bound, so a few
 # in flight cut wall-clock sharply; kept modest so a large set doesn't trip rate
 # limits (transient 429/5xx are retried per-sheet anyway — see digest.py).
@@ -220,6 +226,7 @@ def _digest_sheets_via_batch(
     progress: ProgressCallback | None,
     total: int,
     on_log: LogCallback | None = None,
+    on_status: StatusCallback | None = None,
 ) -> list[SheetDigest]:
     """Batch path: render-stream → Files-API upload → one Message Batch.
 
@@ -252,9 +259,19 @@ def _digest_sheets_via_batch(
         cache=cache,
         progress=progress,
         total=total,
+        on_status=on_status,
     )
+    # Run the post-batch file cleanup off the calling thread: the digests are
+    # already in hand, and deleting a few hundred uploaded images one-by-one
+    # (slower still under the Files-API overload that drove the run) would
+    # otherwise leave the UI frozen for minutes after the work is really done.
     return collect_drawing_batch(
-        batch, client=client, cache=cache, progress=progress, on_log=on_log
+        batch,
+        client=client,
+        cache=cache,
+        progress=progress,
+        on_log=on_log,
+        cleanup_in_background=True,
     )
 
 
@@ -277,6 +294,7 @@ def extract_drawing_context(
     synthesis_model: str | None = None,
     use_batch: bool = False,
     on_log: LogCallback | None = None,
+    on_status: StatusCallback | None = None,
 ) -> DrawingContext:
     """Render and digest every sheet in ``pdf_paths`` into one text context.
 
@@ -286,6 +304,10 @@ def extract_drawing_context(
     diagnostics — a batch that detached past the elapsed bound, or repeated poll
     failures — so a GUI can surface *why* a partial run came back incomplete;
     when omitted these fall back onto ``progress``.
+    ``on_status(text)`` (batch path only) receives transient status-line updates —
+    per-image upload progress, including any transient-503 retry wave — that are
+    intentionally *not* logged, so a GUI's status line keeps moving during a
+    sheet's multi-image upload without flooding its activity history.
     ``client`` is injectable for tests. Per-sheet failures are captured on the
     returned :class:`DrawingContext` (``errors`` and the failing sheet's
     ``SheetDigest.error``); they never abort the run.
@@ -350,7 +372,7 @@ def extract_drawing_context(
             paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
             client=client, model=model, max_tokens=max_tokens,
             use_thinking=use_thinking, effort=effort, cache=cache,
-            progress=progress, total=total, on_log=on_log,
+            progress=progress, total=total, on_log=on_log, on_status=on_status,
         )
     else:
         sheets = _digest_sheets_concurrent(

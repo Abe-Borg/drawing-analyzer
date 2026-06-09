@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from .diagnostics import get_logger, summarize_exc
 from .digest import (
@@ -87,12 +87,23 @@ def _safe_stem(sheet: RenderedSheet) -> str:
     return "".join(c if c.isalnum() else "_" for c in raw)[:60] or "sheet"
 
 
+# ``on_image(position, total_images, retrying)`` — called once per image as a
+# sheet uploads: with ``retrying=False`` after each image lands, and with
+# ``retrying=True`` just before a transient-503 backoff. A sheet's 37-image
+# upload otherwise takes tens of seconds with no signal, so surfacing this lets a
+# GUI keep its status line alive (and *show* an overload wave being ridden out)
+# instead of looking frozen. Diagnostics-only by nature, so it never affects the
+# upload result.
+ImageProgress = Callable[[int, int, bool], None]
+
+
 def upload_sheet_images(
     client: Any,
     sheet: RenderedSheet,
     *,
     max_retries: int = DEFAULT_UPLOAD_MAX_RETRIES,
     sleep: Any = time.sleep,
+    on_image: ImageProgress | None = None,
 ) -> SheetUpload:
     """Upload a sheet's overview + tiles via the Files API; build file-id content.
 
@@ -149,6 +160,8 @@ def upload_sheet_images(
                         position, total_images, len(image.png_bytes),
                         summarize_exc(exc),
                     )
+                    if on_image is not None:
+                        on_image(position, total_images, True)
                     sleep(backoff)
                     attempt += 1
                     continue
@@ -169,6 +182,8 @@ def upload_sheet_images(
             "files-api upload ok: sheet=%s image=%s (#%d/%d) file_id=%s",
             label, name, len(file_ids), total_images, fid,
         )
+        if on_image is not None:
+            on_image(len(file_ids), total_images, False)
 
     _log.debug("uploading %d image(s) for sheet=%s", total_images, label)
     try:
