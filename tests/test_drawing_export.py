@@ -1,65 +1,20 @@
 """Tests for ``drawing_export`` — serializing a drawing digest to a folder.
 
 Fully hermetic: no tkinter, no PyMuPDF, no network. The context and its sheets
-are duck-typed fakes exposing only the attributes ``drawing_export`` reads.
+are duck-typed fakes (``tests.fixtures.fake_context``) exposing only the
+attributes ``drawing_export`` reads.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from datetime import datetime
 
 from drawing_analyzer import export as dx
+from tests.fixtures.fake_context import FakeContext as _Ctx
+from tests.fixtures.fake_context import FakeRef as _Ref
+from tests.fixtures.fake_context import FakeSheet as _Sheet
 
 SRC = "Weld_County_Mechanical_Permit_Set.pdf"
 NOW = datetime(2026, 6, 7, 7, 2, 0)
-
-
-@dataclass
-class _Ref:
-    source_name: str
-    page_index: int
-    page_count: int
-
-    @property
-    def display_label(self) -> str:
-        return f"{self.source_name} (page {self.page_index + 1}/{self.page_count})"
-
-
-@dataclass
-class _Sheet:
-    ref: _Ref
-    text: str = ""
-    error: str | None = None
-    cached: bool = False
-    input_tokens: int = 0
-    output_tokens: int = 0
-
-    @property
-    def ok(self) -> bool:
-        return self.error is None and bool(self.text.strip())
-
-
-@dataclass
-class _Ctx:
-    sheets: list
-    synthesis_text: str = ""
-    combined_text: str = ""
-    file_count: int = 1
-    errors: list = field(default_factory=list)
-    total_input_tokens: int = 0
-    total_output_tokens: int = 0
-
-    @property
-    def sheet_count(self) -> int:
-        return len(self.sheets)
-
-    @property
-    def ok_sheet_count(self) -> int:
-        return sum(1 for s in self.sheets if s.ok)
-
-    @property
-    def cached_sheet_count(self) -> int:
-        return sum(1 for s in self.sheets if s.cached)
 
 
 def _make_ctx() -> _Ctx:
@@ -109,10 +64,13 @@ def test_build_export_documents_order_and_filenames():
     docs = dx.build_export_documents(_make_ctx(), source_names=[SRC], now=NOW)
     names = [n for n, _ in docs]
 
-    assert names[0] == "00_index.md"
-    assert names[1] == "00_synthesis.md"
+    # The browser report leads (it is where an operator should start), then the
+    # Markdown index / synthesis / per-sheet files / combined document.
+    assert names[0] == "report.html"
+    assert names[1] == "00_index.md"
+    assert names[2] == "00_synthesis.md"
     assert names[-1] == "combined.md"
-    middle = names[2:-1]
+    middle = names[3:-1]
     assert len(middle) == 3
     # Per-sheet files are in page order with a global NN prefix and p<page> suffix.
     assert middle[0].startswith("01_") and middle[0].endswith("_p1.md")
@@ -160,6 +118,7 @@ def test_index_lists_counts_errors_and_files():
     assert "## Errors" in index
     assert "api_error: Internal Server Error" in index
     assert "combined.md" in index and "00_synthesis.md" in index
+    assert "report.html" in index  # the index points operators at the browser view
 
 
 # --------------------------------------------------------------------------- #
@@ -175,6 +134,7 @@ def test_write_drawing_export_creates_folder_and_all_files(tmp_path):
     written = sorted(p.name for p in folder.iterdir())
     assert written == sorted(
         [
+            "report.html",
             "00_index.md",
             "00_synthesis.md",
             "01_Weld_County_Mechanical_Permit_Set_p1.md",

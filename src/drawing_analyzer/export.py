@@ -29,6 +29,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .html_report import build_html_report
+
 _SLUG_RE = re.compile(r"[^A-Za-z0-9]+")
 
 
@@ -135,6 +137,11 @@ def _index_document(
         "",
         f"_Generated {now.strftime('%Y-%m-%d %H:%M:%S')}._",
         "",
+        "> **Tip:** open **`report.html`** in any web browser for a navigable,"
+        " searchable view — jump between sheets and filter to just the"
+        " coordination items or the conflicts the model flagged. The Markdown"
+        " files below carry the same content for downstream use.",
+        "",
         f"- **Source file(s):** {len(source_names)}",
     ]
     for name in source_names:
@@ -163,6 +170,7 @@ def _index_document(
     lines += [
         "## Files in this export",
         "",
+        "- `report.html` — navigable, searchable browser view (start here)",
         "- `00_index.md` — this summary",
         "- `00_synthesis.md` — cross-sheet overview",
     ]
@@ -178,8 +186,11 @@ def build_export_documents(
 ) -> list[tuple[str, str]]:
     """Build the ordered ``(filename, content)`` list for an export folder.
 
-    Order: ``00_index.md`` → ``00_synthesis.md`` → one file per sheet (page
-    order) → ``combined.md``. Pure: no I/O, so it is the unit-testable core of
+    Order: ``report.html`` (the navigable browser view) → ``00_index.md`` →
+    ``00_synthesis.md`` → one file per sheet (page order) → ``combined.md``. The
+    HTML report is a self-contained, lossless re-presentation of the same
+    content (see :mod:`drawing_analyzer.html_report`); the Markdown files remain
+    for downstream/text use. Pure: no I/O, so it is the unit-testable core of
     :func:`write_drawing_export`.
     """
     sheets = list(getattr(ctx, "sheets", None) or [])
@@ -189,6 +200,7 @@ def build_export_documents(
     ]
 
     docs: list[tuple[str, str]] = [
+        ("report.html", build_html_report(ctx, source_names=source_names, now=now)),
         ("00_index.md", _index_document(ctx, source_names=source_names, now=now, sheet_files=sheet_files)),
         ("00_synthesis.md", _synthesis_document(ctx)),
     ]

@@ -38,6 +38,7 @@ from .core.api_config import REVIEW_MODEL_DEFAULT
 from .core.api_key_store import load_api_key_from_file, save_api_key
 from .colors import COLORS
 from .cost import estimate_drawing_set_cost, format_drawing_cost_prompt
+from .html_report import build_html_report
 from .pipeline import DrawingContext, extract_drawing_context
 from .render import list_sheets
 
@@ -235,13 +236,26 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             text_color=COLORS["text_secondary"], command=self._on_open_log,
         )
         self.open_log_btn.pack(side="left")
-        self.save_btn = ctk.CTkButton(
-            btn_row, text="Save Digest…", width=140, height=34,
+        # Two save options, enabled together once a run produces text. The HTML
+        # report is the recommended (primary/accent) output — a single
+        # self-contained, navigable, searchable file — while the Markdown digest
+        # stays available (secondary) for downstream/text use.
+        self.html_btn = ctk.CTkButton(
+            btn_row, text="Save HTML Report…", width=180, height=34,
             font=ctk.CTkFont(family="Segoe UI", size=13),
             fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
+            command=self._on_save_html, state="disabled",
+        )
+        self.html_btn.pack(side="right")
+        self.save_btn = ctk.CTkButton(
+            btn_row, text="Save Markdown…", width=150, height=34,
+            font=ctk.CTkFont(family="Segoe UI", size=13),
+            fg_color=COLORS["bg_input"], hover_color=COLORS["border"],
+            border_width=1, border_color=COLORS["border"],
+            text_color=COLORS["text_secondary"],
             command=self._on_save, state="disabled",
         )
-        self.save_btn.pack(side="right")
+        self.save_btn.pack(side="right", padx=(0, 8))
 
         self._log("Ready — drop or browse for drawing PDFs to analyze.", level="muted")
         diag_path = diagnostics.configured_log_path()
@@ -387,6 +401,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._ctx = None
         self._clear_log()
         self.save_btn.configure(state="disabled")
+        self.html_btn.configure(state="disabled")
         self._set_progress_text("")
         self._refresh_summary()
 
@@ -444,6 +459,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self.analyze_btn.configure(state="disabled", text="Analyzing…")
         self.clear_btn.configure(state="disabled")
         self.save_btn.configure(state="disabled")
+        self.html_btn.configure(state="disabled")
         self._clear_log()
         self._log(
             f"Starting analysis — {len(self._pdfs)} file(s), {len(refs)} sheet(s).",
@@ -519,6 +535,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         has_text = bool(ctx.combined_text.strip())
         if has_text:
             self.save_btn.configure(state="normal")
+            self.html_btn.configure(state="normal")
 
         ok = ctx.ok_sheet_count
         cached = ctx.cached_sheet_count
@@ -555,8 +572,8 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         )
         if has_text:
             self._log(
-                "Digest ready — click “Save Digest…” to write the "
-                "Markdown file.",
+                "Digest ready — click “Save HTML Report…” for a navigable, "
+                "searchable browser view, or “Save Markdown…” for the raw text.",
                 level="accent",
             )
         else:
@@ -570,8 +587,8 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._set_progress_text(f"Failed: {message}", color=COLORS["error"])
         messagebox.showerror("Analysis failed", message)
 
-    def _default_digest_filename(self) -> str:
-        """Suggested filename: ``<pdf-stem>-drawings-context-analysis-<stamp>.md``.
+    def _default_digest_filename(self, *, ext: str = ".md") -> str:
+        """Suggested filename: ``<pdf-stem>-drawings-context-analysis-<stamp><ext>``.
 
         Named after the first uploaded PDF (the common case is one multi-sheet
         set) and stamped with the local date/time, so each saved digest is
@@ -579,7 +596,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         """
         stem = self._pdfs[0].stem if self._pdfs else "drawings"
         stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-        return f"{stem}-drawings-context-analysis-{stamp}.md"
+        return f"{stem}-drawings-context-analysis-{stamp}{ext}"
 
     def _on_save(self) -> None:
         if not self._ctx or not self._ctx.combined_text.strip():
@@ -600,6 +617,43 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             return
         self._set_progress_text(f"Saved to {path}", color=COLORS["success"])
         self._log(f"Saved digest to {path}", level="success")
+
+    def _on_save_html(self) -> None:
+        """Write a single self-contained HTML report and open it in the browser.
+
+        One portable file (all styling/behavior inlined) with a sidebar table of
+        contents, full-text search, and category filters — so the operator can
+        isolate, e.g., just the coordination items or the conflicts the model
+        flagged — while still carrying every word of the digest verbatim. The
+        saved file is opened with the OS default handler as a convenience (the
+        whole point of the HTML view is to look at it); a failed open is
+        non-fatal — the file is already written and its path is logged.
+        """
+        if not self._ctx or not self._ctx.combined_text.strip():
+            return
+        path = filedialog.asksaveasfilename(
+            title="Save HTML report",
+            defaultextension=".html",
+            filetypes=[("HTML", "*.html"), ("All files", "*.*")],
+            initialfile=self._default_digest_filename(ext=".html"),
+        )
+        if not path:
+            return
+        try:
+            source_names = [p.name for p in self._pdfs]
+            html_doc = build_html_report(self._ctx, source_names=source_names)
+            Path(path).write_text(html_doc, encoding="utf-8")
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"HTML export failed: {exc}", level="error")
+            messagebox.showerror("HTML export failed", str(exc))
+            return
+        self._set_progress_text(f"Saved HTML report to {path}", color=COLORS["success"])
+        self._log(f"Saved HTML report to {path}", level="success")
+        try:
+            self._open_in_os(Path(path))
+            self._log("Opened the report in your browser.", level="muted")
+        except Exception as exc:  # noqa: BLE001 - opener is best-effort
+            self._log(f"Saved, but could not auto-open the report: {exc}", level="warning")
 
     # ----------------------------------------------------------- diagnostics
 
