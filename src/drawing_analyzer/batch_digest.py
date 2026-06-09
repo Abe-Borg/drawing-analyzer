@@ -241,7 +241,7 @@ def _resubmit_failed_items(
     progress: ProgressCallback | None,
     on_log: LogCallback | None,
     sleep: Callable[[float], None],
-    max_elapsed_seconds: int,
+    max_elapsed_seconds: float,
 ) -> bool:
     """One follow-up batch for a collected batch's retryable per-item failures.
 
@@ -253,6 +253,12 @@ def _resubmit_failed_items(
     items (via :func:`_item_retry_params`), resubmits them as one more batch
     reusing the same ``file_id`` references, polls it with the same policy as
     the primary batch, and fills the recovered digests into ``results``.
+
+    ``max_elapsed_seconds`` is the REMAINDER of the caller's collection budget
+    (the primary poll already spent the rest), so one ``collect`` call never
+    blocks past the bound it was given. With less than one poll interval left
+    the round is skipped outright — submitting a batch we won't wait for would
+    only strand the uploaded files behind a detach.
 
     One round only — a second-round failure keeps its (fresher) error rather
     than looping, so a systemic outage still ends with clean per-sheet errors.
@@ -268,6 +274,14 @@ def _resubmit_failed_items(
         if params is not None:
             retry.append((slot, params))
     if not retry:
+        return True
+
+    if max_elapsed_seconds < DEFAULT_POLL_INTERVAL_SECONDS:
+        _log.warning(
+            "skipping follow-up batch for %d retryable item(s): collection "
+            "budget exhausted (%.0fs remaining)",
+            len(retry), max_elapsed_seconds,
+        )
         return True
 
     _log.info("resubmitting %d failed batch item(s) in a follow-up batch", len(retry))
@@ -715,8 +729,10 @@ def collect_drawing_batch(
     failures (server-side ``api_error``/``overloaded_error``, ``expired``
     items, and the empty-at-``max_tokens`` digest) as ONE follow-up batch
     before cleanup, while the same uploaded ``file_id`` references are still
-    valid — see :func:`_resubmit_failed_items`. The pipeline opts in; direct
-    callers and the unit tests keep the single-round default.
+    valid — see :func:`_resubmit_failed_items`. The follow-up round runs on
+    whatever remains of this call's ``max_elapsed_seconds`` budget, so opting
+    in never lets a collect block past the bound it was given. The pipeline
+    opts in; direct callers and the unit tests keep the single-round default.
     """
     # Size by the actual slot count (one slot per rendered sheet, indices
     # 0..n-1 in page order) so a divergent display ``total`` can never
@@ -729,6 +745,7 @@ def collect_drawing_batch(
     submitted = batch.submitted_slots
     if batch.batch_id and submitted:
         cached_done = sum(1 for s in batch.slots if s.digest is not None)
+        collect_started = time.monotonic()
         status = _poll_until_terminal(
             client,
             batch.batch_id,
@@ -749,11 +766,15 @@ def collect_drawing_batch(
                 )
             files_released = True
             if retry_failed_items:
+                # The follow-up round spends what's LEFT of this call's
+                # collection budget — the bound the caller gave applies to
+                # the whole collect, not per batch round.
+                remaining = max_elapsed_seconds - (time.monotonic() - collect_started)
                 files_released = _resubmit_failed_items(
                     batch, results, raw,
                     client=client, cache=cache, progress=progress,
                     on_log=on_log, sleep=sleep,
-                    max_elapsed_seconds=max_elapsed_seconds,
+                    max_elapsed_seconds=remaining,
                 )
             if files_released:
                 _release_uploaded_files(

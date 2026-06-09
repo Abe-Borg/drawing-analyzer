@@ -771,6 +771,38 @@ def test_collect_does_not_resubmit_permanently_rejected_items():
     assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids)
 
 
+def test_followup_round_shares_the_collect_elapsed_budget(monkeypatch):
+    # The caller's max_elapsed_seconds bounds the WHOLE collect. When the
+    # primary poll drains it, the follow-up round must be skipped (no second
+    # create, no restarted clock) and the files still released — instead of
+    # blocking for up to another full budget.
+    client = _FakeClient(
+        _flaky_then_ok(
+            {"sheet__0": batch_errored_result("sheet__0", error_message="Internal Server Error")}
+        )
+    )
+    batch = submit_drawing_batch(
+        iter([_make_sheet(0)]), client=client, model=OPUS, total=1
+    )
+
+    clock = {"now": 0.0}
+
+    def fake_monotonic():
+        clock["now"] += 60.0  # every look at the clock burns a minute
+        return clock["now"]
+
+    monkeypatch.setattr(batch_digest.time, "monotonic", fake_monotonic)
+
+    digests = collect_drawing_batch(
+        batch, client=client, sleep=NOSLEEP, retry_failed_items=True,
+        max_elapsed_seconds=100,
+    )
+
+    assert not digests[0].ok and "Internal Server Error" in digests[0].error
+    assert len(client.create_calls) == 1  # follow-up skipped, budget exhausted
+    assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids)
+
+
 def test_collect_keeps_fresher_error_when_followup_also_fails():
     # One round only: a sheet that fails in BOTH rounds ends with a clean
     # error (no infinite retry loop), and no third batch is created.
