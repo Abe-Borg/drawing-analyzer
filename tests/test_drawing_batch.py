@@ -524,6 +524,114 @@ def test_submit_upload_failure_captures_sheet_and_continues():
     assert len(client.submitted) == 1
 
 
+class _RouteLevel404(Exception):
+    """A Files-API ``404 not_found_error`` lookalike (route/credential-level).
+
+    Carries ``status_code`` like the SDK's ``NotFoundError``; permanent, so the
+    upload helper fails the sheet on the first image without retrying.
+    """
+
+    status_code = 404
+
+    def __init__(self, message: str = "Not found"):
+        super().__init__(message)
+        self.message = message
+
+
+class _CountingBrokenFiles(_FakeFiles):
+    """Every upload raises ``exc_type``; counts the attempts."""
+
+    def __init__(self, exc_type=_RouteLevel404):
+        super().__init__()
+        self.exc_type = exc_type
+        self.attempts = 0
+
+    def upload(self, *, file):
+        self.attempts += 1
+        raise self.exc_type()
+
+
+def test_submit_stops_uploading_after_consecutive_route_level_failures():
+    # A 404 on /v1/files is credential/route-level: every upload in the run is
+    # doomed identically. After three sheets fail the same way, the remaining
+    # sheets must be marked skipped without further API calls (a real 33-sheet
+    # run previously spent minutes failing every sheet one request at a time).
+    client = _FakeClient(_succeed)
+    client.files = _CountingBrokenFiles()
+    client.beta.files = client.files
+
+    _, digests = _run_batch(client, [_make_sheet(i) for i in range(6)])
+
+    # Each tripping sheet failed on its first image: exactly 3 attempts total.
+    assert client.files.attempts == 3
+    assert len(digests) == 6 and not any(d.ok for d in digests)
+    for d in digests[:3]:
+        assert "upload failed" in d.error
+    for d in digests[3:]:
+        assert "upload skipped" in d.error
+        assert "3 consecutive HTTP 404" in d.error
+    # Nothing was submitted — and no batch exists to poll.
+    assert client.submitted == [] and client.create_calls == []
+
+
+def test_submit_404_error_carries_actionable_hint():
+    # "HTTP 404: Not found" alone says nothing about where to look; the sheet
+    # error must name the realistic causes (base-URL/proxy override, beta
+    # header, SDK install) so the operator can act without reading source.
+    client = _FakeClient(_succeed)
+    client.files = _CountingBrokenFiles()
+    client.beta.files = client.files
+
+    _, digests = _run_batch(client, [_make_sheet(1)])
+
+    assert not digests[0].ok
+    assert "ANTHROPIC_BASE_URL" in digests[0].error
+    assert "files-api-2025-04-14" in digests[0].error
+
+
+def test_submit_payload_4xx_does_not_trip_the_breaker():
+    # A 400 is payload-shaped (one bad image), not run-fatal: every sheet must
+    # still get its own upload attempt even when several fail in a row.
+    class _BadRequest(Exception):
+        status_code = 400
+
+        def __init__(self):
+            super().__init__("invalid image")
+            self.message = "invalid image"
+
+    client = _FakeClient(_succeed)
+    client.files = _CountingBrokenFiles(exc_type=_BadRequest)
+    client.beta.files = client.files
+
+    _, digests = _run_batch(client, [_make_sheet(i) for i in range(5)])
+
+    assert client.files.attempts == 5  # one attempt per sheet, no skipping
+    assert all("upload failed" in d.error for d in digests)
+    assert not any("upload skipped" in d.error for d in digests)
+
+
+def test_submit_breaker_still_serves_cache_hits(tmp_path):
+    # With uploads disabled, a sheet whose digest is already cached must still
+    # resolve from the cache — the breaker only stops Files-API calls.
+    cache = DigestCache(tmp_path / "cache.json")
+    warm_client = _FakeClient(_succeed)
+    _run_batch(warm_client, [_make_sheet(9)], cache=cache)  # seed sheet 9
+
+    client = _FakeClient(_succeed)
+    client.files = _CountingBrokenFiles()
+    client.beta.files = client.files
+
+    # Three doomed sheets trip the breaker; the cached sheet follows.
+    _, digests = _run_batch(
+        client, [_make_sheet(0), _make_sheet(1), _make_sheet(2), _make_sheet(9)],
+        cache=cache,
+    )
+
+    assert client.files.attempts == 3
+    assert [d.ok for d in digests] == [False, False, False, True]
+    assert digests[3].cached
+
+
 # --------------------------------------------------------------------------- #
 # Cleanup (post-batch file deletion)
 # --------------------------------------------------------------------------- #

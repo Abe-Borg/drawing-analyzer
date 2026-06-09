@@ -23,6 +23,7 @@ from typing import Any, Callable
 
 from .diagnostics import get_logger, summarize_exc
 from .digest import (
+    _error_status,
     _is_transient_status_error,
     _retry_backoff_seconds,
     build_user_content_blocks,
@@ -55,6 +56,54 @@ FILES_API_BETA = "files-api-2025-04-14"
 # connection/timeout errors are left to the SDK's idempotent internal retries so
 # a lost response can't orphan an already-stored file.
 DEFAULT_UPLOAD_MAX_RETRIES = 4
+
+# Statuses that doom every Files-API upload in the run, not just this sheet's.
+# 401/403 (key rejected / key lacking Files-API permission) and 404 (the
+# /v1/files route itself not resolving) are credential- or route-level
+# rejections shared by every upload the run will make — they don't depend on
+# the payload, so once seen, each remaining upload is guaranteed to fail
+# identically. The submit loop uses this to stop attempting uploads after a few
+# consecutive such failures (a real 33-sheet run burned ~2 minutes failing
+# every sheet one 404 at a time). Payload-shaped 4xx (400 invalid image, 413
+# too large) are deliberately NOT here: one bad sheet must not disable the
+# rest of the run.
+RUN_FATAL_UPLOAD_STATUSES = frozenset({401, 403, 404})
+
+# Operator-facing diagnosis per run-fatal status. The 404 text exists because
+# the per-request error ("HTTP 404: Not found") is uniquely unhelpful there:
+# the SDK attaches the required ``anthropic-beta: files-api-2025-04-14`` header
+# on every ``client.beta.files.upload`` call, so the route "not existing" means
+# the request that reached the server was not the one this code built — in
+# practice an ``ANTHROPIC_BASE_URL``/proxy override that doesn't serve (or
+# forward the beta header to) /v1/files, or a different installed ``anthropic``
+# package than the pinned one.
+_RUN_FATAL_UPLOAD_HINTS = {
+    401: "the API key was rejected — re-enter or rotate the key",
+    403: "the API key/workspace lacks permission for the Files API",
+    404: (
+        "the Files API endpoint was not found — an ANTHROPIC_BASE_URL/proxy "
+        "override may not serve /v1/files (or may strip the required "
+        "'anthropic-beta: files-api-2025-04-14' header), or the installed "
+        "anthropic SDK differs from the pinned version"
+    ),
+}
+
+
+def run_fatal_upload_status(exc: Exception) -> int | None:
+    """The HTTP status of a run-fatal upload rejection, else ``None``.
+
+    "Run-fatal" means credential- or route-level (see
+    :data:`RUN_FATAL_UPLOAD_STATUSES`): the same rejection will hit every
+    remaining upload in the run, so the caller may stop attempting them.
+    """
+    status = _error_status(exc)
+    return status if status in RUN_FATAL_UPLOAD_STATUSES else None
+
+
+def upload_failure_hint(exc: Exception) -> str | None:
+    """An actionable diagnosis for a run-fatal upload rejection, else ``None``."""
+    status = run_fatal_upload_status(exc)
+    return _RUN_FATAL_UPLOAD_HINTS.get(status) if status is not None else None
 
 
 def _file_image_block(file_id: str) -> dict:
