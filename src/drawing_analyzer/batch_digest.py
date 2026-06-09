@@ -42,7 +42,13 @@ from .digest import (
     build_digest_request_params,
 )
 from .digest_cache import digest_cache_key
-from .file_upload import FILES_API_BETA, delete_files, upload_sheet_images
+from .file_upload import (
+    FILES_API_BETA,
+    delete_files,
+    run_fatal_upload_status,
+    upload_failure_hint,
+    upload_sheet_images,
+)
 from .models import SheetRef
 
 # Bounded polling. Mirrors the review/verification batch policy: bound by total
@@ -54,6 +60,17 @@ DEFAULT_POLL_INTERVAL_SECONDS = 15
 DEFAULT_POLL_MAX_INTERVAL_SECONDS = 120
 DEFAULT_POLL_BACKOFF_AFTER_SECONDS = 5 * 60
 DEFAULT_MAX_CONSECUTIVE_POLL_ERRORS = 10
+
+# Consecutive sheets failing their upload with the SAME run-fatal status
+# (credential/route-level — see ``RUN_FATAL_UPLOAD_STATUSES``) tolerated before
+# the submit loop stops attempting uploads for the remaining sheets. Three
+# identical strikes rules out a one-off blip while keeping a real outage cheap:
+# a 33-sheet run against a dead /v1/files route previously spent ~2 minutes
+# failing every sheet one request at a time. Remaining sheets are still
+# rendered and reported (each carries a clear "skipped" error naming the
+# original failure), so the per-sheet result list stays complete — only the
+# doomed API calls stop.
+MAX_CONSECUTIVE_FATAL_UPLOAD_FAILURES = 3
 
 ProgressCallback = Callable[[int, int, str], None]
 LogCallback = Callable[..., None]
@@ -192,6 +209,14 @@ def submit_drawing_batch(
     slots: list[_Slot] = []
     reqs: list[dict] = []
 
+    # Upload circuit breaker. After MAX_CONSECUTIVE_FATAL_UPLOAD_FAILURES
+    # sheets in a row fail with the same credential/route-level status,
+    # ``uploads_disabled_error`` is set and the remaining sheets skip the
+    # Files API entirely (cache hits are still served — only uploads stop).
+    fatal_streak = 0
+    last_fatal_status: int | None = None
+    uploads_disabled_error: str | None = None
+
     for index, sheet in enumerate(rendered_sheets):
         image_est = estimate_image_tokens_total(sheet.image_sizes, model=model)
         slot = _Slot(index=index, ref=sheet.ref, image_estimate=image_est)
@@ -224,6 +249,27 @@ def submit_drawing_batch(
                     progress(index + 1, total or 0, f"Cached {sheet.ref.display_label}")
                 continue
 
+        # Breaker tripped: the same credential/route-level rejection already hit
+        # several sheets in a row, so this upload is guaranteed to fail too.
+        # Mark the sheet (keeping the per-sheet report complete) without
+        # spending more requests. Sits after the cache check so cached sheets
+        # are still served even when the Files API is unreachable.
+        if uploads_disabled_error is not None:
+            slot.digest = SheetDigest(
+                ref=sheet.ref,
+                text="",
+                image_token_estimate=image_est,
+                error=uploads_disabled_error,
+            )
+            slots.append(slot)
+            _log.debug(
+                "sheet %d upload skipped (uploads disabled): %s",
+                index, sheet.ref.display_label,
+            )
+            if progress is not None:
+                progress(index + 1, total or 0, f"Upload skipped: {sheet.ref.display_label}")
+            continue
+
         # Per-image status (status-line only) so a sheet's tens-of-seconds,
         # multi-image upload — and any transient-503 retry wave within it — shows
         # continuous motion instead of a frozen line. Built only when a status
@@ -240,11 +286,17 @@ def submit_drawing_batch(
         except Exception as exc:  # noqa: BLE001 - one sheet's upload failing is captured, not fatal
             # Surface the request-id (when the SDK carried one) on the sheet's
             # error too, so the GUI's per-sheet line — not just the diagnostics
-            # file — names the exact call to quote to Anthropic.
+            # file — names the exact call to quote to Anthropic. A run-fatal
+            # rejection (401/403/404) additionally carries an actionable
+            # diagnosis, because its raw API message ("Not found") says nothing
+            # about where to look.
             rid = request_id_of(exc)
+            hint = upload_failure_hint(exc)
             error = f"image upload failed: {_clean_error(exc)}"
             if rid:
                 error += f" (request-id {rid})"
+            if hint:
+                error += f" — {hint}"
             slot.digest = SheetDigest(
                 ref=sheet.ref,
                 text="",
@@ -258,7 +310,38 @@ def submit_drawing_batch(
             )
             if progress is not None:
                 progress(index + 1, total or 0, f"Upload failed: {sheet.ref.display_label}")
+
+            # Breaker accounting: only an unbroken run of the SAME
+            # credential/route-level status trips it; any other failure
+            # (transient retries exhausted, payload-shaped 4xx) resets the
+            # streak because it says nothing about the next sheet's fate.
+            status = run_fatal_upload_status(exc)
+            if status is None:
+                fatal_streak = 0
+                last_fatal_status = None
+                continue
+            fatal_streak = fatal_streak + 1 if status == last_fatal_status else 1
+            last_fatal_status = status
+            if fatal_streak >= MAX_CONSECUTIVE_FATAL_UPLOAD_FAILURES:
+                uploads_disabled_error = (
+                    f"image upload skipped: uploads stopped after {fatal_streak} "
+                    f"consecutive HTTP {status} upload failures"
+                )
+                if hint:
+                    uploads_disabled_error += f" — {hint}"
+                _log.warning(
+                    "disabling Files-API uploads for the remaining sheets after "
+                    "%d consecutive HTTP %d failures (last: %s)",
+                    fatal_streak, status, summarize_exc(exc),
+                )
             continue
+
+        # A successful upload proves the Files API is reachable with this key,
+        # so any accumulated run-fatal streak was intermittent after all —
+        # reset it, keeping the breaker true to its "consecutive" contract.
+        # (Cache hits never reach here, so they carry no signal either way.)
+        fatal_streak = 0
+        last_fatal_status = None
 
         custom_id = f"sheet__{index}"
         slot.custom_id = custom_id

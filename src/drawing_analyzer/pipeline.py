@@ -275,6 +275,25 @@ def _digest_sheets_via_batch(
     )
 
 
+def _api_environment_fingerprint() -> str:
+    """Name the SDK build and any base-URL override in one log token.
+
+    These are the two facts that decide where an API request actually lands. A
+    run whose every Files-API upload 404'd (a real incident) was undiagnosable
+    from the per-request errors alone — the code was identical to the previous
+    day's working run; what differed was the environment. Recording both at run
+    start turns the next such incident into a one-line diff between a good run
+    and a bad one. Import is lazy/defensive so the hermetic tests (which run
+    against fake clients, without the SDK) never need ``anthropic`` installed.
+    """
+    try:
+        from anthropic import __version__ as sdk_version
+    except Exception:  # noqa: BLE001 - a missing/odd SDK must not sink the run
+        sdk_version = "unavailable"
+    base_url = os.environ.get("ANTHROPIC_BASE_URL") or "default"
+    return f"sdk=anthropic-{sdk_version} base_url={base_url}"
+
+
 def extract_drawing_context(
     pdf_paths: list[Path],
     *,
@@ -352,9 +371,10 @@ def extract_drawing_context(
 
     _log.info(
         "===== run start: %d file(s), %d sheet(s) | model=%s path=%s cache=%s "
-        "synthesize=%s =====",
+        "synthesize=%s | %s =====",
         file_count, total, model, "batch" if use_batch else "real-time",
         bool(cache is not None or use_cache), synthesize,
+        _api_environment_fingerprint(),
     )
 
     if total == 0:
