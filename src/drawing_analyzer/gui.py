@@ -477,6 +477,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 model=REVIEW_MODEL_DEFAULT,
                 progress=self._progress_from_thread,
                 on_log=self._log_from_thread,
+                on_status=self._status_from_thread,
                 use_cache=True,
                 synthesize=True,
                 use_batch=True,
@@ -491,6 +492,19 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
 
     def _log_from_thread(self, message: str, level: str = "info") -> None:
         self.after(0, lambda: self._log(message, level=level))
+
+    def _status_from_thread(self, text: str) -> None:
+        """Update only the live status line (no activity-log entry).
+
+        High-frequency, status-line-only feedback from the batch path — per-image
+        upload progress, including any 503 retry wave — so the line keeps moving
+        during a sheet's tens-of-seconds upload instead of looking frozen, while
+        the activity log stays a clean per-sheet milestone history.
+        """
+        self.after(
+            0,
+            lambda t=text: self._set_progress_text(t, color=COLORS["text_secondary"]),
+        )
 
     def _set_progress(self, done: int, total: int, label: str) -> None:
         pct = f"[{done}/{total}] " if total else ""

@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from drawing_analyzer import diagnostics
+from drawing_analyzer import batch_digest, diagnostics
 from drawing_analyzer.batch_digest import collect_drawing_batch, submit_drawing_batch
 from drawing_analyzer.digest_cache import DigestCache
 from drawing_analyzer.file_upload import FILES_API_BETA, upload_sheet_images
@@ -307,9 +307,59 @@ def test_upload_does_not_retry_ambiguous_timeout():
     assert slept == []  # ambiguous timeout is not app-retried
 
 
+def test_upload_reports_per_image_progress():
+    # A sheet's multi-image upload is otherwise a silent, tens-of-seconds stall;
+    # ``on_image`` lets a GUI keep its status line alive, one tick per image.
+    client = _FakeClient(_succeed)
+    events: list[tuple[int, int, bool]] = []
+    up = upload_sheet_images(
+        client,
+        _make_sheet(1, rows=2, cols=2),  # overview + 4 tiles = 5 images
+        on_image=lambda pos, total, retrying: events.append((pos, total, retrying)),
+    )
+    assert len(up.file_ids) == 5
+    # One success tick per image, in order, with the running 1..5 of 5 counter.
+    assert events == [(1, 5, False), (2, 5, False), (3, 5, False), (4, 5, False), (5, 5, False)]
+
+
+def test_upload_progress_surfaces_transient_retry():
+    # The first image 503s twice before landing; the retry wave is surfaced
+    # (retrying=True) so the status line shows motion rather than freezing.
+    client = _FakeClient(_succeed)
+    client.files = _FlakyFiles(fail_times=2)
+    client.beta.files = client.files
+    events: list[tuple[int, bool]] = []
+    up = upload_sheet_images(
+        client,
+        _make_sheet(1, rows=2, cols=2),
+        max_retries=3,
+        sleep=lambda _s: None,
+        on_image=lambda pos, total, retrying: events.append((pos, retrying)),
+    )
+    assert len(up.file_ids) == 5
+    assert events.count((1, True)) == 2          # two retry notices for image #1
+    assert [retrying for _, retrying in events].count(False) == 5  # five successes
+
+
 # --------------------------------------------------------------------------- #
 # submit + collect
 # --------------------------------------------------------------------------- #
+
+
+def test_submit_emits_per_image_status_text():
+    client = _FakeClient(_succeed)
+    statuses: list[str] = []
+    submit_drawing_batch(
+        iter([_make_sheet(1, rows=2, cols=2)]),  # 5 images
+        client=client,
+        model=OPUS,
+        total=1,
+        on_status=statuses.append,
+    )
+    # One status-line update per image, naming the image counter and the sheet.
+    assert len(statuses) == 5
+    assert all("Uploading image" in s and "/5" in s for s in statuses)
+    assert all("M-101.pdf" in s for s in statuses)
 
 
 def test_batch_happy_path_parses_all_sheets():
@@ -472,6 +522,51 @@ def test_submit_upload_failure_captures_sheet_and_continues():
     assert not digests[1].ok and "upload failed" in digests[1].error
     # Only the good sheet became a batch item.
     assert len(client.submitted) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Cleanup (post-batch file deletion)
+# --------------------------------------------------------------------------- #
+
+
+def test_cleanup_in_background_returns_without_blocking_and_still_deletes(monkeypatch):
+    # The pipeline opts into background cleanup so the digests return immediately
+    # instead of stalling behind a long file-by-file delete. Stub the daemon-
+    # thread seam to run inline so the deletion is assertable deterministically.
+    ran: list[bool] = []
+    monkeypatch.setattr(
+        batch_digest, "_run_in_background", lambda fn: (ran.append(True), fn())
+    )
+    client = _FakeClient(_succeed)
+    batch = submit_drawing_batch(
+        iter([_make_sheet(1)]), client=client, model=OPUS, total=1
+    )
+    logs: list[tuple[str, str]] = []
+    digests = collect_drawing_batch(
+        batch,
+        client=client,
+        sleep=NOSLEEP,
+        cleanup_in_background=True,
+        on_log=lambda msg, level="info": logs.append((level, msg)),
+    )
+
+    assert digests[0].ok
+    assert ran == [True]  # the background seam was taken, not the inline delete
+    # Cleanup still happens (here, synchronously via the stub) — no file leak.
+    assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids)
+    assert any("background" in msg.lower() for _, msg in logs)
+
+
+def test_cleanup_synchronous_when_not_backgrounded():
+    # The default (used by direct callers and the rest of the suite) deletes
+    # inline before returning — no daemon thread, no leaked files.
+    client = _FakeClient(_succeed)
+    batch = submit_drawing_batch(
+        iter([_make_sheet(1)]), client=client, model=OPUS, total=1
+    )
+    digests = collect_drawing_batch(batch, client=client, sleep=NOSLEEP)
+    assert digests[0].ok
+    assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids)
 
 
 # --------------------------------------------------------------------------- #
