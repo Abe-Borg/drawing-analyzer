@@ -610,6 +610,37 @@ def test_submit_payload_4xx_does_not_trip_the_breaker():
     assert not any("upload skipped" in d.error for d in digests)
 
 
+def test_submit_breaker_resets_on_successful_upload():
+    # The breaker's contract is CONSECUTIVE failures. A successful upload in
+    # between proves the Files API is reachable, so 404 / ok / 404 / ok / 404
+    # must NOT trip it — every sheet still gets its own attempt.
+    class _IntermittentFiles(_FakeFiles):
+        """404 on chosen attempt numbers (1-based); succeed otherwise."""
+
+        def __init__(self, failing_attempts: set[int]):
+            super().__init__()
+            self.failing_attempts = failing_attempts
+            self.attempts = 0
+
+        def upload(self, *, file):
+            self.attempts += 1
+            if self.attempts in self.failing_attempts:
+                raise _RouteLevel404()
+            return super().upload(file=file)
+
+    client = _FakeClient(_succeed)
+    # 2x2-grid sheets upload 5 images each; a 404 kills a sheet on its first
+    # image. Failing attempts 1/7/13 fails sheets 0/2/4 and lets 1/3/5 land.
+    client.files = _IntermittentFiles({1, 7, 13})
+    client.beta.files = client.files
+
+    _, digests = _run_batch(client, [_make_sheet(i) for i in range(6)])
+
+    assert [d.ok for d in digests] == [False, True, False, True, False, True]
+    assert not any(d.error and "upload skipped" in d.error for d in digests)
+    assert len(client.submitted) == 3  # every successful sheet became an item
+
+
 def test_submit_breaker_still_serves_cache_hits(tmp_path):
     # With uploads disabled, a sheet whose digest is already cached must still
     # resolve from the cache — the breaker only stops Files-API calls.

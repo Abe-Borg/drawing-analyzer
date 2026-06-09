@@ -336,6 +336,13 @@ def submit_drawing_batch(
                 )
             continue
 
+        # A successful upload proves the Files API is reachable with this key,
+        # so any accumulated run-fatal streak was intermittent after all —
+        # reset it, keeping the breaker true to its "consecutive" contract.
+        # (Cache hits never reach here, so they carry no signal either way.)
+        fatal_streak = 0
+        last_fatal_status = None
+
         custom_id = f"sheet__{index}"
         slot.custom_id = custom_id
         slot.cache_key = cache_key
