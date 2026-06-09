@@ -265,6 +265,10 @@ def _digest_sheets_via_batch(
     # already in hand, and deleting a few hundred uploaded images one-by-one
     # (slower still under the Files-API overload that drove the run) would
     # otherwise leave the UI frozen for minutes after the work is really done.
+    # Retry the batch's own per-item failures (server-side 500s/overload,
+    # expired items, thinking-ate-the-budget empty digests) in one follow-up
+    # batch while the uploaded file_ids are still alive — a real run lost 10
+    # of 33 sheets to exactly these one-shot failures.
     return collect_drawing_batch(
         batch,
         client=client,
@@ -272,6 +276,7 @@ def _digest_sheets_via_batch(
         progress=progress,
         on_log=on_log,
         cleanup_in_background=True,
+        retry_failed_items=True,
     )
 
 

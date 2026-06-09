@@ -664,6 +664,167 @@ def test_submit_breaker_still_serves_cache_hits(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# Follow-up batch for retryable per-item failures
+# --------------------------------------------------------------------------- #
+
+
+def _flaky_then_ok(first_failures: dict[str, FakeBatchResult]):
+    """Responder serving ``first_failures`` once per custom_id, then success.
+
+    The fake batch ``results()`` iterates whatever the LAST ``create`` call
+    submitted, so this naturally models a first round with failures followed
+    by a follow-up round that succeeds.
+    """
+    served: set[str] = set()
+
+    def responder(req):
+        cid = req["custom_id"]
+        if cid in first_failures and cid not in served:
+            served.add(cid)
+            return first_failures[cid]
+        return _succeed(req)
+
+    return responder
+
+
+def test_collect_resubmits_server_errored_items_in_followup_batch():
+    # An api_error/overloaded_error batch item is a server blip ("safe to
+    # retry" per the Batches docs): one follow-up batch reusing the same
+    # uploaded file_ids must recover it, and the files must only be deleted
+    # after that round (the retry items still reference them).
+    client = _FakeClient(
+        _flaky_then_ok(
+            {"sheet__0": batch_errored_result("sheet__0", error_message="Internal Server Error")}
+        )
+    )
+    batch = submit_drawing_batch(
+        iter([_make_sheet(0), _make_sheet(1)]), client=client, model=OPUS, total=2
+    )
+    digests = collect_drawing_batch(
+        batch, client=client, sleep=NOSLEEP, retry_failed_items=True
+    )
+
+    assert all(d.ok for d in digests)
+    # Exactly one follow-up round, containing only the failed item, byte-same params.
+    assert len(client.create_calls) == 2
+    retry_reqs = client.create_calls[1]["requests"]
+    assert [r["custom_id"] for r in retry_reqs] == ["sheet__0"]
+    first_params = next(
+        r["params"] for r in client.create_calls[0]["requests"]
+        if r["custom_id"] == "sheet__0"
+    )
+    assert retry_reqs[0]["params"] == first_params
+    assert client.create_calls[1]["betas"] == [FILES_API_BETA]
+    # Every uploaded image was still released exactly once, after the retry.
+    assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids)
+
+
+def test_collect_retries_empty_max_tokens_digest_with_raised_cap():
+    # A "succeeded" item whose digest is EMPTY at stop_reason=max_tokens means
+    # adaptive thinking consumed the whole output budget. The follow-up round
+    # must resubmit it with the cap doubled so the digest has room to land.
+    empty = FakeBatchResult(
+        custom_id="sheet__0",
+        result=FakeBatchResultEnvelope(
+            type="succeeded",
+            message=FakeMessage(content=[], stop_reason="max_tokens"),
+        ),
+    )
+    client = _FakeClient(_flaky_then_ok({"sheet__0": empty}))
+    batch = submit_drawing_batch(
+        iter([_make_sheet(0)]), client=client, model=OPUS, total=1
+    )
+    digests = collect_drawing_batch(
+        batch, client=client, sleep=NOSLEEP, retry_failed_items=True
+    )
+
+    assert digests[0].ok
+    first_cap = client.create_calls[0]["requests"][0]["params"]["max_tokens"]
+    retry_cap = client.create_calls[1]["requests"][0]["params"]["max_tokens"]
+    assert retry_cap == min(first_cap * 2, batch_digest.MAX_TOKENS_RETRY_CEILING)
+
+
+def test_collect_does_not_resubmit_permanently_rejected_items():
+    # An invalid_request_error item would fail identically on resubmission —
+    # no follow-up batch may be created for it, and its error must stand.
+    bad_request = type(
+        "FakeError", (), {"message": "prompt too long", "type": "invalid_request_error"}
+    )()
+    always_bad = FakeBatchResult(
+        custom_id="sheet__0",
+        result=FakeBatchResultEnvelope(type="errored", error=bad_request),
+    )
+
+    client = _FakeClient(
+        lambda req: always_bad if req["custom_id"] == "sheet__0" else _succeed(req)
+    )
+    batch = submit_drawing_batch(
+        iter([_make_sheet(0), _make_sheet(1)]), client=client, model=OPUS, total=2
+    )
+    digests = collect_drawing_batch(
+        batch, client=client, sleep=NOSLEEP, retry_failed_items=True
+    )
+
+    assert not digests[0].ok and "prompt too long" in digests[0].error
+    assert digests[1].ok
+    assert len(client.create_calls) == 1  # no follow-up round
+    assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids)
+
+
+def test_followup_round_shares_the_collect_elapsed_budget(monkeypatch):
+    # The caller's max_elapsed_seconds bounds the WHOLE collect. When the
+    # primary poll drains it, the follow-up round must be skipped (no second
+    # create, no restarted clock) and the files still released — instead of
+    # blocking for up to another full budget.
+    client = _FakeClient(
+        _flaky_then_ok(
+            {"sheet__0": batch_errored_result("sheet__0", error_message="Internal Server Error")}
+        )
+    )
+    batch = submit_drawing_batch(
+        iter([_make_sheet(0)]), client=client, model=OPUS, total=1
+    )
+
+    clock = {"now": 0.0}
+
+    def fake_monotonic():
+        clock["now"] += 60.0  # every look at the clock burns a minute
+        return clock["now"]
+
+    monkeypatch.setattr(batch_digest.time, "monotonic", fake_monotonic)
+
+    digests = collect_drawing_batch(
+        batch, client=client, sleep=NOSLEEP, retry_failed_items=True,
+        max_elapsed_seconds=100,
+    )
+
+    assert not digests[0].ok and "Internal Server Error" in digests[0].error
+    assert len(client.create_calls) == 1  # follow-up skipped, budget exhausted
+    assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids)
+
+
+def test_collect_keeps_fresher_error_when_followup_also_fails():
+    # One round only: a sheet that fails in BOTH rounds ends with a clean
+    # error (no infinite retry loop), and no third batch is created.
+    def responder(req):
+        if req["custom_id"] == "sheet__0":
+            return batch_errored_result("sheet__0", error_message="Internal Server Error")
+        return _succeed(req)
+
+    client = _FakeClient(responder)
+    batch = submit_drawing_batch(
+        iter([_make_sheet(0), _make_sheet(1)]), client=client, model=OPUS, total=2
+    )
+    digests = collect_drawing_batch(
+        batch, client=client, sleep=NOSLEEP, retry_failed_items=True
+    )
+
+    assert not digests[0].ok and "Internal Server Error" in digests[0].error
+    assert digests[1].ok
+    assert len(client.create_calls) == 2
+
+
+# --------------------------------------------------------------------------- #
 # Cleanup (post-batch file deletion)
 # --------------------------------------------------------------------------- #
 

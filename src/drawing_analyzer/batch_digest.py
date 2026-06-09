@@ -137,6 +137,11 @@ class _Slot:
     custom_id: str | None = None
     cache_key: str | None = None
     file_ids: list[str] = field(default_factory=list)
+    # The exact request params this slot was submitted with. Kept so a
+    # retryable per-item failure can be resubmitted verbatim (the file_id
+    # references stay valid until cleanup) without re-rendering or
+    # re-uploading the sheet.
+    params: dict | None = None
 
 
 @dataclass
@@ -167,6 +172,170 @@ def _batch_item_error_text(result_obj: Any) -> str:
         if emsg:
             return f"{etype}: {emsg}" if etype else emsg
     return f"batch request {rtype}"
+
+
+# Batch-item error types that are PERMANENT: the request itself was rejected,
+# so resubmitting the identical item can only fail the same way. Anything else
+# on an ``errored`` item — ``api_error``, ``overloaded_error``, and whatever
+# transient types the future brings — is a server-side blip the Batches docs
+# call "safe to retry", and an ``expired`` item is explicitly "resubmit".
+_PERMANENT_ITEM_ERROR_TYPES = frozenset(
+    {
+        "invalid_request_error",
+        "authentication_error",
+        "permission_error",
+        "not_found_error",
+        "request_too_large",
+    }
+)
+
+# Output-cap ceiling for the empty-at-max_tokens resubmission. Batch items
+# never stream, so the ~16k non-streaming-timeout rationale behind
+# ``DEFAULT_DIGEST_MAX_TOKENS`` doesn't bind inside a batch; 64k stays within
+# every whitelisted model's hard output ceiling, and output is billed by
+# actual tokens, so the extra headroom costs nothing unless the sheet uses it.
+MAX_TOKENS_RETRY_CEILING = 64_000
+
+
+def _item_retry_params(
+    slot: _Slot, result_obj: Any, digest: SheetDigest | None
+) -> dict | None:
+    """The request params to resubmit this slot's failed item with, or ``None``.
+
+    Three retryable shapes: an ``errored`` item whose error type is not a
+    permanent request rejection (see ``_PERMANENT_ITEM_ERROR_TYPES``), an
+    ``expired`` item, and a "succeeded" item whose digest came back EMPTY at
+    ``stop_reason=max_tokens`` — adaptive thinking consumed the entire output
+    budget before any digest text landed, so that one is resubmitted with the
+    cap doubled to leave room for both the thinking and the digest.
+    """
+    if slot.params is None:
+        return None
+    rtype = _get(result_obj, "type", None)
+    if rtype == "expired":
+        return slot.params
+    if rtype == "errored":
+        error = _get(result_obj, "error", None)
+        inner = _get(error, "error", error) if error is not None else None
+        etype = str(_get(inner, "type", "") or "")
+        return None if etype in _PERMANENT_ITEM_ERROR_TYPES else slot.params
+    if (
+        rtype == "succeeded"
+        and digest is not None
+        and digest.error
+        and not digest.text
+        and digest.stop_reason == "max_tokens"
+    ):
+        old = int(slot.params.get("max_tokens") or DEFAULT_DIGEST_MAX_TOKENS)
+        return {**slot.params, "max_tokens": min(old * 2, MAX_TOKENS_RETRY_CEILING)}
+    return None
+
+
+def _resubmit_failed_items(
+    batch: DrawingBatch,
+    results: list,
+    raw: dict[str, Any],
+    *,
+    client: Any,
+    cache: Any,
+    progress: ProgressCallback | None,
+    on_log: LogCallback | None,
+    sleep: Callable[[float], None],
+    max_elapsed_seconds: float,
+) -> bool:
+    """One follow-up batch for a collected batch's retryable per-item failures.
+
+    A collected batch can carry failures that say nothing about the requests
+    themselves: server-side ``api_error``/``overloaded_error`` blips,
+    ``expired`` items, and the empty-at-``max_tokens`` digest. A real 33-sheet
+    run lost 10 sheets to exactly these — every one resubmittable for free,
+    because the sheet images stay uploaded until cleanup. This selects those
+    items (via :func:`_item_retry_params`), resubmits them as one more batch
+    reusing the same ``file_id`` references, polls it with the same policy as
+    the primary batch, and fills the recovered digests into ``results``.
+
+    ``max_elapsed_seconds`` is the REMAINDER of the caller's collection budget
+    (the primary poll already spent the rest), so one ``collect`` call never
+    blocks past the bound it was given. With less than one poll interval left
+    the round is skipped outright — submitting a batch we won't wait for would
+    only strand the uploaded files behind a detach.
+
+    One round only — a second-round failure keeps its (fresher) error rather
+    than looping, so a systemic outage still ends with clean per-sheet errors.
+    Returns ``True`` when the uploaded files are safe to delete afterwards;
+    ``False`` when the follow-up batch detached (still running remotely, so it
+    still needs the files — mirroring the primary batch's detach policy).
+    """
+    retry: list[tuple[_Slot, dict]] = []
+    for slot in batch.submitted_slots:
+        params = _item_retry_params(
+            slot, _get(raw.get(slot.custom_id), "result"), results[slot.index]
+        )
+        if params is not None:
+            retry.append((slot, params))
+    if not retry:
+        return True
+
+    if max_elapsed_seconds < DEFAULT_POLL_INTERVAL_SECONDS:
+        _log.warning(
+            "skipping follow-up batch for %d retryable item(s): collection "
+            "budget exhausted (%.0fs remaining)",
+            len(retry), max_elapsed_seconds,
+        )
+        return True
+
+    _log.info("resubmitting %d failed batch item(s) in a follow-up batch", len(retry))
+    if on_log is not None:
+        on_log(f"Retrying {len(retry)} failed sheet(s) in a follow-up batch")
+    reqs = [{"custom_id": s.custom_id, "params": p} for s, p in retry]
+    try:
+        mb = client.beta.messages.batches.create(requests=reqs, betas=[FILES_API_BETA])
+    except Exception as exc:  # noqa: BLE001 - recovery is best-effort; first-round errors stand
+        _log.warning("follow-up batch submit failed: %s", summarize_exc(exc))
+        return True
+    retry_id = _get(mb, "id")
+    _log.info(
+        "follow-up batch submitted: id=%s items=%d request_id=%s",
+        retry_id, len(reqs), request_id_of(mb),
+    )
+
+    status = _poll_until_terminal(
+        client,
+        retry_id,
+        total=batch.total,
+        cached_done=max(0, batch.total - len(retry)),
+        progress=progress,
+        on_log=on_log,
+        sleep=sleep,
+        max_elapsed_seconds=max_elapsed_seconds,
+    )
+    if status not in ("ended", "failed", "expired", "canceled"):
+        if on_log is not None:
+            on_log(
+                f"Follow-up batch still running (id={retry_id}); "
+                "keeping first-round errors",
+                level="warning",
+            )
+        return False
+
+    raw_retry: dict[str, Any] = {}
+    for result in client.messages.batches.results(retry_id):
+        raw_retry[_get(result, "custom_id")] = result
+    recovered = 0
+    for slot, _params in retry:
+        res = raw_retry.get(slot.custom_id)
+        if res is None:
+            continue  # keep the first-round error
+        digest = _parse_item(slot, res, cache=cache)
+        if digest.error is None:
+            recovered += 1
+        results[slot.index] = digest
+    _log.info(
+        "follow-up batch recovered %d/%d failed sheet(s)", recovered, len(retry)
+    )
+    if on_log is not None:
+        on_log(f"Recovered {recovered} of {len(retry)} failed sheet(s)")
+    return True
 
 
 def _normalize_status(status: Any) -> str:
@@ -347,18 +516,14 @@ def submit_drawing_batch(
         slot.custom_id = custom_id
         slot.cache_key = cache_key
         slot.file_ids = upload.file_ids
-        reqs.append(
-            {
-                "custom_id": custom_id,
-                "params": build_digest_request_params(
-                    upload.content,
-                    model=model,
-                    max_tokens=max_tokens,
-                    use_thinking=use_thinking,
-                    effort=effort,
-                ),
-            }
+        slot.params = build_digest_request_params(
+            upload.content,
+            model=model,
+            max_tokens=max_tokens,
+            use_thinking=use_thinking,
+            effort=effort,
         )
+        reqs.append({"custom_id": custom_id, "params": slot.params})
         slots.append(slot)
         _log.debug(
             "sheet %d uploaded %d image(s) as %s: %s",
@@ -545,6 +710,7 @@ def collect_drawing_batch(
     sleep: Callable[[float], None] = time.sleep,
     max_elapsed_seconds: int = DEFAULT_BATCH_MAX_ELAPSED_SECONDS,
     cleanup_in_background: bool = False,
+    retry_failed_items: bool = False,
 ) -> list[SheetDigest]:
     """Poll the batch to completion and assemble per-sheet digests in page order.
 
@@ -558,6 +724,15 @@ def collect_drawing_batch(
     (detached past the elapsed bound, or repeated poll failures) the uploaded
     files are **left in place** (the remote batch may still be running and needs
     them) and each submitted sheet is marked with a clear, retriable error.
+
+    ``retry_failed_items`` resubmits the collected batch's retryable per-item
+    failures (server-side ``api_error``/``overloaded_error``, ``expired``
+    items, and the empty-at-``max_tokens`` digest) as ONE follow-up batch
+    before cleanup, while the same uploaded ``file_id`` references are still
+    valid — see :func:`_resubmit_failed_items`. The follow-up round runs on
+    whatever remains of this call's ``max_elapsed_seconds`` budget, so opting
+    in never lets a collect block past the bound it was given. The pipeline
+    opts in; direct callers and the unit tests keep the single-round default.
     """
     # Size by the actual slot count (one slot per rendered sheet, indices
     # 0..n-1 in page order) so a divergent display ``total`` can never
@@ -570,6 +745,7 @@ def collect_drawing_batch(
     submitted = batch.submitted_slots
     if batch.batch_id and submitted:
         cached_done = sum(1 for s in batch.slots if s.digest is not None)
+        collect_started = time.monotonic()
         status = _poll_until_terminal(
             client,
             batch.batch_id,
@@ -588,12 +764,25 @@ def collect_drawing_batch(
                 results[slot.index] = _parse_item(
                     slot, raw.get(slot.custom_id), cache=cache
                 )
-            _release_uploaded_files(
-                client,
-                batch.all_file_ids,
-                in_background=cleanup_in_background,
-                on_log=on_log,
-            )
+            files_released = True
+            if retry_failed_items:
+                # The follow-up round spends what's LEFT of this call's
+                # collection budget — the bound the caller gave applies to
+                # the whole collect, not per batch round.
+                remaining = max_elapsed_seconds - (time.monotonic() - collect_started)
+                files_released = _resubmit_failed_items(
+                    batch, results, raw,
+                    client=client, cache=cache, progress=progress,
+                    on_log=on_log, sleep=sleep,
+                    max_elapsed_seconds=remaining,
+                )
+            if files_released:
+                _release_uploaded_files(
+                    client,
+                    batch.all_file_ids,
+                    in_background=cleanup_in_background,
+                    on_log=on_log,
+                )
         else:
             # Not collected — leave the uploaded files for the still-running
             # remote batch; surface a clear, retriable per-sheet error.
