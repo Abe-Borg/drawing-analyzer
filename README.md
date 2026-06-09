@@ -7,7 +7,13 @@ in a single vision request, which returns a structured text **digest** of the sh
 (sheet number, discipline, equipment, tags, notes, schedules, etc.). An optional
 cross-sheet **synthesis** pass reconciles tags and conflicts across the set.
 
-The output is plain Markdown — read it, save it, or feed it to anything downstream.
+The output comes two ways: a **self-contained HTML report** (`report.html`) — one
+portable file with a sidebar table of contents, full-text search, and category
+filters so you can isolate, say, just the coordination items or the conflicts the
+model flagged across the whole set — and the underlying **plain Markdown**, for
+reading, diffing, or feeding to anything downstream. The HTML is a lossless
+re-presentation of the same content (it even embeds the verbatim Markdown), so
+nothing the model returned is lost.
 
 ## Install
 
@@ -37,8 +43,23 @@ drawing-analyzer        # or:  python -m drawing_analyzer
 ```
 
 Drop in (or browse to) PDFs, confirm the estimated cost, and the analyzer digests
-every sheet and lets you save the result (per-sheet `.md` files, a synthesis, a
-combined document, and an index).
+every sheet. Save the result as a **navigable HTML report** (*Save HTML Report…* —
+opens in your browser, searchable and filterable) or as the raw **Markdown**
+digest (*Save Markdown…*).
+
+### Browsing the result
+
+The HTML report (the folder export's `report.html`, or *Save HTML Report…* in the
+GUI) makes a large set easy to navigate:
+
+- **Sidebar table of contents** — jump to the cross-sheet overview or any sheet;
+  each sheet shows an OK / cached / failed dot.
+- **Search** — live full-text filter across every sheet.
+- **Category filters** — one-click chips, including **⚠ Issues only**, which
+  isolates the *Coordination* and *Conflict* sections the model flagged across the
+  entire set. Those sections are also visually highlighted inline.
+- **Lossless** — a collapsed *Complete raw Markdown* block carries the exact model
+  output, so the original text is always one copy away.
 
 ### Library
 
