@@ -37,8 +37,23 @@ drawing-analyzer        # or:  python -m drawing_analyzer
 ```
 
 Drop in (or browse to) PDFs, confirm the estimated cost, and the analyzer digests
-every sheet and lets you save the result (per-sheet `.md` files, a synthesis, a
-combined document, and an index).
+every sheet. Save the result as a **navigable HTML report** (*Save HTML Report…*)
+or as the raw combined Markdown (*Save Markdown…*).
+
+The HTML report is a single self-contained file (open it by double-click, no
+server or network needed) built for *finding* things in a large set rather than
+scrolling a wall of text:
+
+- a sidebar table of contents with per-sheet status and discipline tags,
+- a live search box and filter chips (**All / Coordination & conflicts /
+  Failed / per-discipline**), and
+- an **Issues & Coordination** panel at the top that pulls together the
+  cross-sheet conflicts, every per-sheet coordination / cross-discipline item,
+  and any failed sheets — each linking back to its sheet.
+
+It is **lossless**: each sheet's exact digest is preserved verbatim in a
+collapsible *Raw digest (Markdown)* block, so the rendered view never drops or
+paraphrases anything the model returned.
 
 ### Library
 
@@ -59,6 +74,14 @@ for sheet in ctx.sheets:
 
 `extract_drawing_context` returns a `DrawingContext` (combined text, per-sheet
 `SheetDigest`s, token totals, errors, optional `synthesis_text`).
+
+Render that same result to the self-contained HTML report from code:
+
+```python
+from drawing_analyzer import write_html_report
+
+write_html_report(ctx, "report.html", source_names=["M-101.pdf", "P-201.pdf"])
+```
 
 ## How it works
 

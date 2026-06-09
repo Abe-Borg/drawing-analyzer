@@ -29,6 +29,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .html_report import build_html_report
+
 _SLUG_RE = re.compile(r"[^A-Za-z0-9]+")
 
 
@@ -163,6 +165,7 @@ def _index_document(
     lines += [
         "## Files in this export",
         "",
+        "- `report.html` — navigable HTML report (open this first)",
         "- `00_index.md` — this summary",
         "- `00_synthesis.md` — cross-sheet overview",
     ]
@@ -178,9 +181,9 @@ def build_export_documents(
 ) -> list[tuple[str, str]]:
     """Build the ordered ``(filename, content)`` list for an export folder.
 
-    Order: ``00_index.md`` → ``00_synthesis.md`` → one file per sheet (page
-    order) → ``combined.md``. Pure: no I/O, so it is the unit-testable core of
-    :func:`write_drawing_export`.
+    Order: ``report.html`` (the navigable entry point) → ``00_index.md`` →
+    ``00_synthesis.md`` → one file per sheet (page order) → ``combined.md``.
+    Pure: no I/O, so it is the unit-testable core of :func:`write_drawing_export`.
     """
     sheets = list(getattr(ctx, "sheets", None) or [])
     total = len(sheets)
@@ -189,6 +192,7 @@ def build_export_documents(
     ]
 
     docs: list[tuple[str, str]] = [
+        ("report.html", build_html_report(ctx, source_names=source_names, now=now)),
         ("00_index.md", _index_document(ctx, source_names=source_names, now=now, sheet_files=sheet_files)),
         ("00_synthesis.md", _synthesis_document(ctx)),
     ]

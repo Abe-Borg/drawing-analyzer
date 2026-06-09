@@ -28,6 +28,7 @@ Module layout::
 from __future__ import annotations
 
 from .digest import SheetDigest
+from .html_report import build_html_report, write_html_report
 from .pipeline import (
     DrawingContext,
     estimate_image_tokens_for_set,
@@ -41,5 +42,7 @@ __all__ = [
     "SheetDigest",
     "extract_drawing_context",
     "estimate_image_tokens_for_set",
+    "build_html_report",
+    "write_html_report",
     "__version__",
 ]

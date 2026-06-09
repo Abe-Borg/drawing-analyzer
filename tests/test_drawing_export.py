@@ -109,10 +109,11 @@ def test_build_export_documents_order_and_filenames():
     docs = dx.build_export_documents(_make_ctx(), source_names=[SRC], now=NOW)
     names = [n for n, _ in docs]
 
-    assert names[0] == "00_index.md"
-    assert names[1] == "00_synthesis.md"
+    assert names[0] == "report.html"
+    assert names[1] == "00_index.md"
+    assert names[2] == "00_synthesis.md"
     assert names[-1] == "combined.md"
-    middle = names[2:-1]
+    middle = names[3:-1]
     assert len(middle) == 3
     # Per-sheet files are in page order with a global NN prefix and p<page> suffix.
     assert middle[0].startswith("01_") and middle[0].endswith("_p1.md")
@@ -160,6 +161,7 @@ def test_index_lists_counts_errors_and_files():
     assert "## Errors" in index
     assert "api_error: Internal Server Error" in index
     assert "combined.md" in index and "00_synthesis.md" in index
+    assert "report.html" in index
 
 
 # --------------------------------------------------------------------------- #
@@ -175,6 +177,7 @@ def test_write_drawing_export_creates_folder_and_all_files(tmp_path):
     written = sorted(p.name for p in folder.iterdir())
     assert written == sorted(
         [
+            "report.html",
             "00_index.md",
             "00_synthesis.md",
             "01_Weld_County_Mechanical_Permit_Set_p1.md",
