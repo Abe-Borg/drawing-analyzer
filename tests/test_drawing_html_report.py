@@ -218,3 +218,79 @@ def test_report_handles_empty_synthesis():
     ctx.synthesis_text = ""
     doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
     assert "No cross-sheet synthesis was produced" in doc
+
+
+# --------------------------------------------------------------------------- #
+# per-run focus card + filter
+# --------------------------------------------------------------------------- #
+
+FOCUS = "the rooms, and what types of plumbing fixtures each has"
+
+
+def test_classify_section_focus():
+    assert hr.classify_section("Focus findings") == "focus"
+
+
+def test_report_without_focus_has_no_focus_card_or_chip():
+    doc = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW)
+    assert 'id="focus"' not in doc
+    assert 'data-filter="focus"' not in doc  # a chip that can't match is noise
+
+
+def test_report_with_focus_pins_the_report_card_and_chip():
+    ctx = _make_ctx()
+    ctx.focus = FOCUS
+    ctx.focus_report_text = (
+        "**Room-by-room**\n- Rm 101: `WC-1`, `LAV-2` (P-101, schedule P-501)\n"
+    )
+    ctx.sheets[0].text += (
+        "\n**Focus findings**\n- Rm 120: `WC-1` shown at north wall.\n"
+    )
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
+
+    assert 'id="focus"' in doc                       # the pinned report card
+    assert "the rooms, and what types of plumbing" in doc  # question quoted
+    assert "Rm 101" in doc                           # the report content
+    # The card leads the page: it appears before the overview card.
+    assert doc.index('id="focus"') < doc.index('id="overview"')
+    # Per-sheet "Focus findings" sections are tagged and filterable.
+    assert 'data-category="focus"' in doc
+    assert 'data-filter="focus"' in doc
+    # And the sidebar links to it.
+    assert 'data-target="focus"' in doc
+
+
+def test_report_with_focus_but_failed_report_explains_itself():
+    ctx = _make_ctx()
+    ctx.focus = FOCUS
+    ctx.focus_report_text = ""
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
+    assert 'id="focus"' in doc
+    assert "No focus report was produced" in doc
+
+
+def test_focus_card_body_survives_the_focus_filter():
+    # The report's own headers usually do NOT contain "focus" — they're shaped
+    # by the question ("Room-by-room", "Equipment & schedules", …) and would
+    # classify as other/equipment/etc. Every block inside the focus card must
+    # still carry data-category="focus", or selecting the Focus chip hides the
+    # report's body and the run looks like it produced no focus results.
+    ctx = _make_ctx()
+    ctx.focus = FOCUS
+    ctx.focus_report_text = (
+        "**Room-by-room**\n- Rm 101: `WC-1`, `LAV-2`\n\n"
+        "**Equipment & schedules**\n- `WC-1` wall-hung (schedule P-501)\n\n"
+        "**Cross-sheet / cross-discipline conflicts**\n- `LAV-2` scheduled, never drawn\n"
+    )
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
+
+    card = doc[doc.index('id="focus"'): doc.index('id="overview"')]
+    # Four blocks (ask + three report sections), all filterable as focus.
+    assert card.count('data-category="focus"') == 4
+    assert 'data-category="other"' not in card
+    assert 'data-category="equipment"' not in card
+    assert 'data-category="conflict"' not in card
+    assert "Rm 101" in card
+    # The informative pill still reflects the keyword classification, so the
+    # conflict section inside the report keeps its Conflicts tag.
+    assert "cat-conflict" in card

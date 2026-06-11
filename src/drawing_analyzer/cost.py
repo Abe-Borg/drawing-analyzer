@@ -26,6 +26,10 @@ _ASSUMED_PROMPT_TOKENS_PER_SHEET = 800
 _ASSUMED_OUTPUT_TOKENS_PER_SHEET = 2_000
 # The synthesis pass emits one set-level overview.
 _ASSUMED_SYNTHESIS_OUTPUT_TOKENS = 2_000
+# A per-run focus adds one per-sheet "Focus findings" section to each digest
+# and one set-level focus-report pass (text-only, like synthesis).
+_ASSUMED_FOCUS_SECTION_TOKENS_PER_SHEET = 500
+_ASSUMED_FOCUS_OUTPUT_TOKENS = 2_000
 
 
 @dataclass(frozen=True)
@@ -49,6 +53,7 @@ def estimate_drawing_set_cost(
     cols: int = tiling.DEFAULT_GRID_COLS,
     synthesize: bool = True,
     batch: bool = False,
+    focus: bool = False,
 ) -> DrawingCostEstimate:
     """Estimate the cost of digesting ``sheet_count`` sheets.
 
@@ -58,12 +63,16 @@ def estimate_drawing_set_cost(
     input). ``batch=True`` applies the 50% Message Batches discount to the
     per-sheet digest spend (the dominant cost); the synthesis pass runs
     synchronously, but folding it in at the batch rate too keeps the estimate
-    deliberately slightly-high rather than under-stated.
+    deliberately slightly-high rather than under-stated. ``focus`` mirrors a
+    per-run focus: each sheet's digest grows by a focus-findings section, and
+    one more text-only pass (the focus report) re-reads the digests.
     """
     image_tokens = estimate_image_tokens_for_set(
         sheet_count, rows=rows, cols=cols, model=model
     )
     digest_output = sheet_count * _ASSUMED_OUTPUT_TOKENS_PER_SHEET
+    if focus:
+        digest_output += sheet_count * _ASSUMED_FOCUS_SECTION_TOKENS_PER_SHEET
     input_tokens = image_tokens + sheet_count * _ASSUMED_PROMPT_TOKENS_PER_SHEET
     output_tokens = digest_output
 
@@ -71,6 +80,11 @@ def estimate_drawing_set_cost(
         # Synthesis re-reads the per-sheet digests (≈ digest_output) as text.
         input_tokens += digest_output + _ASSUMED_PROMPT_TOKENS_PER_SHEET
         output_tokens += _ASSUMED_SYNTHESIS_OUTPUT_TOKENS
+
+    if focus and sheet_count >= 1:
+        # The focus report likewise re-reads the per-sheet digests as text.
+        input_tokens += digest_output + _ASSUMED_PROMPT_TOKENS_PER_SHEET
+        output_tokens += _ASSUMED_FOCUS_OUTPUT_TOKENS
 
     total_cost = estimate_request_cost(
         input_tokens, output_tokens, model=model, batch=batch

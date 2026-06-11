@@ -57,8 +57,8 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 pass
 
         self.title("Drawing Context Analyzer")
-        self.geometry("820x680")
-        self.minsize(640, 520)
+        self.geometry("820x780")
+        self.minsize(640, 560)
         self.configure(fg_color=COLORS["bg_dark"])
 
         self._pdfs: list[Path] = []
@@ -171,6 +171,43 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             border_width=1, border_color=COLORS["border"],
             text_color=COLORS["text_secondary"], command=self._on_browse,
         ).pack(side="right", padx=(4, 16), pady=16)
+
+        # Optional per-run focus — free text the operator can add at their
+        # discretion. The standard digest is always produced unchanged; a focus
+        # additionally asks each sheet read for "Focus findings" and adds a
+        # set-level Focus Report deliverable answering it. Snapshotted when
+        # Analyze is pressed (mid-run edits don't affect a running analysis).
+        focus_row = ctk.CTkFrame(outer, fg_color="transparent")
+        focus_row.pack(fill="x", padx=16, pady=(0, 8))
+        ctk.CTkLabel(
+            focus_row, text="Per-run focus (optional)",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            text_color=COLORS["text_secondary"],
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            focus_row,
+            text=(
+                "Anything you particularly want pulled out this run — e.g. "
+                "“the rooms, and what types of plumbing fixtures each has”. "
+                "You always get the standard digest; a focus adds a Focus "
+                "Report on top. Changing the focus re-analyzes sheets (cached "
+                "results from other focuses don't apply)."
+            ),
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=COLORS["text_muted"],
+            wraplength=740,
+            justify="left",
+        ).pack(anchor="w")
+        self.focus_box = ctk.CTkTextbox(
+            focus_row, height=56, fg_color=COLORS["bg_input"],
+            border_color=COLORS["border"], border_width=2,
+            text_color=COLORS["text_primary"],
+            font=ctk.CTkFont(family="Segoe UI", size=12), wrap="word",
+        )
+        self.focus_box.pack(fill="x", pady=(4, 0))
+        # Keep the cost line live as the focus toggles between empty/non-empty
+        # (a focus adds the focus-report pass to the estimate).
+        self.focus_box.bind("<KeyRelease>", lambda _e: self._refresh_summary())
 
         # Summary + actions row
         row = ctk.CTkFrame(outer, fg_color="transparent")
@@ -405,6 +442,20 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._set_progress_text("")
         self._refresh_summary()
 
+    def _current_focus(self) -> str:
+        """The per-run focus currently in the box (stripped; "" when empty).
+
+        Defensive: returns "" before the box exists (early ``_refresh_summary``)
+        or if the widget read fails, so the focus can never break a refresh.
+        """
+        box = getattr(self, "focus_box", None)
+        if box is None:
+            return ""
+        try:
+            return box.get("1.0", "end").strip()
+        except Exception:  # noqa: BLE001 - a widget hiccup must not break refresh
+            return ""
+
     def _refresh_summary(self) -> None:
         if not self._pdfs:
             self.summary_label.configure(text="No drawings selected.")
@@ -413,7 +464,8 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         sheets = len(refs)
         files = len({r.pdf_path for r in refs})
         est = estimate_drawing_set_cost(
-            sheets, file_count=files, model=REVIEW_MODEL_DEFAULT, batch=True
+            sheets, file_count=files, model=REVIEW_MODEL_DEFAULT, batch=True,
+            focus=bool(self._current_focus()),
         )
         cost = (
             f"~${est.total_cost:,.2f} (est.)"
@@ -443,11 +495,16 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             )
             return
 
+        # Snapshot the focus with the file list, so mid-run edits to the box
+        # can't change what a running analysis was asked to do.
+        focus = self._current_focus()
+
         # Cost-confirm gate — show the estimated (batch-rate) spend before the
         # batch is submitted. Nothing is sent until this is confirmed.
         refs = list_sheets(self._pdfs)
         estimate = estimate_drawing_set_cost(
-            len(refs), file_count=len(self._pdfs), model=REVIEW_MODEL_DEFAULT, batch=True
+            len(refs), file_count=len(self._pdfs), model=REVIEW_MODEL_DEFAULT,
+            batch=True, focus=bool(focus),
         )
         if not messagebox.askyesno(
             "Confirm drawing analysis", format_drawing_cost_prompt(estimate)
@@ -460,17 +517,28 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self.clear_btn.configure(state="disabled")
         self.save_btn.configure(state="disabled")
         self.html_btn.configure(state="disabled")
+        self.focus_box.configure(state="disabled")
         self._clear_log()
         self._log(
             f"Starting analysis — {len(self._pdfs)} file(s), {len(refs)} sheet(s).",
             level="accent",
         )
+        if focus:
+            self._log(f"Per-run focus: {focus}", level="accent")
+            self._log(
+                "The standard digest is unchanged; a Focus Report will be added "
+                "for this focus. Sheets cached without this focus are "
+                "re-analyzed.",
+                level="muted",
+            )
         self._set_progress_text("Starting…", color=COLORS["text_secondary"])
 
         pdfs = list(self._pdfs)
-        threading.Thread(target=self._worker, args=(pdfs,), daemon=True).start()
+        threading.Thread(
+            target=self._worker, args=(pdfs, focus), daemon=True
+        ).start()
 
-    def _worker(self, pdfs: list[Path]) -> None:
+    def _worker(self, pdfs: list[Path], focus: str) -> None:
         try:
             ctx = extract_drawing_context(
                 pdfs,
@@ -481,6 +549,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 use_cache=True,
                 synthesize=True,
                 use_batch=True,
+                focus=focus or None,
             )
         except Exception as exc:  # noqa: BLE001 - surface any unexpected failure
             self.after(0, lambda e=exc: self._on_error(str(e)))
@@ -546,6 +615,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._ctx = ctx
         self.analyze_btn.configure(state="normal", text="Analyze Drawings")
         self.clear_btn.configure(state="normal")
+        self.focus_box.configure(state="normal")
         has_text = bool(ctx.combined_text.strip())
         if has_text:
             self.save_btn.configure(state="normal")
@@ -584,6 +654,20 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._set_progress_text(
             summary, color=COLORS["success"] if not ctx.errors else COLORS["warning"]
         )
+        if ctx.focus:
+            if ctx.focus_report_text.strip():
+                self._log(
+                    "Focus report ready — it leads the saved digest and has its "
+                    "own card in the HTML report.",
+                    level="success",
+                )
+            else:
+                self._log(
+                    "No focus report was produced for this run — see the "
+                    "issue(s) above. Per-sheet Focus findings (where present) "
+                    "are still in the digest.",
+                    level="warning",
+                )
         if has_text:
             self._log(
                 "Digest ready — click “Save HTML Report…” for a navigable, "
@@ -597,6 +681,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._busy = False
         self.analyze_btn.configure(state="normal", text="Analyze Drawings")
         self.clear_btn.configure(state="normal")
+        self.focus_box.configure(state="normal")
         self._log(f"Analysis failed: {message}", level="error")
         self._set_progress_text(f"Failed: {message}", color=COLORS["error"])
         messagebox.showerror("Analysis failed", message)

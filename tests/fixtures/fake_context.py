@@ -54,6 +54,8 @@ class FakeContext:
     errors: list = field(default_factory=list)
     total_input_tokens: int = 0
     total_output_tokens: int = 0
+    focus: str = ""
+    focus_report_text: str = ""
 
     @property
     def sheet_count(self) -> int:

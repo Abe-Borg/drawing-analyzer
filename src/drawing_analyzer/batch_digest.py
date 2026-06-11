@@ -40,6 +40,8 @@ from .digest import (
     _message_text,
     _message_usage,
     build_digest_request_params,
+    focus_cache_fragment,
+    normalize_focus,
 )
 from .digest_cache import digest_cache_key
 from .file_upload import (
@@ -365,6 +367,7 @@ def submit_drawing_batch(
     progress: ProgressCallback | None = None,
     total: int = 0,
     on_status: StatusCallback | None = None,
+    focus: str | None = None,
 ) -> DrawingBatch:
     """Render-stream → cache-or-upload → submit one Message Batch.
 
@@ -374,7 +377,14 @@ def submit_drawing_batch(
     Files API and become one batch item. Returns a :class:`DrawingBatch` to hand
     to :func:`collect_drawing_batch`. ``batch_id`` is ``None`` when every sheet
     was cached (or failed to upload) — there is nothing to poll.
+
+    ``focus`` (the optional per-run operator focus) rides on each item's system
+    prompt — the uploaded images and user content are unchanged — and is folded
+    into the cache key, so a focused run never reuses a no-focus digest and
+    vice-versa.
     """
+    focus = normalize_focus(focus)
+    focus_fragment = focus_cache_fragment(focus)
     slots: list[_Slot] = []
     reqs: list[dict] = []
 
@@ -399,6 +409,7 @@ def submit_drawing_batch(
                 max_tokens=max_tokens,
                 effort=effort,
                 use_thinking=use_thinking,
+                focus=focus_fragment,
             )
             hit = cache.get(cache_key)
             if hit is not None:
@@ -522,6 +533,7 @@ def submit_drawing_batch(
             max_tokens=max_tokens,
             use_thinking=use_thinking,
             effort=effort,
+            focus=focus,
         )
         reqs.append({"custom_id": custom_id, "params": slot.params})
         slots.append(slot)

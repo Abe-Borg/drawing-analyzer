@@ -18,6 +18,8 @@ Read surface (duck-typed):
   (``source_name`` / ``page_index`` / ``page_count`` / ``display_label``),
   ``.text``, ``.error``, ``.cached``, ``.input_tokens`` / ``.output_tokens``.
 - ``ctx.synthesis_text`` / ``ctx.combined_text`` — the set-level documents.
+- ``ctx.focus`` / ``ctx.focus_report_text`` — the optional per-run focus and
+  its set-level report (``00_focus.md`` is written only when a focus was set).
 - ``ctx.ok_sheet_count`` / ``ctx.sheet_count`` / ``ctx.file_count`` /
   ``ctx.cached_sheet_count`` / ``ctx.total_input_tokens`` /
   ``ctx.total_output_tokens`` / ``ctx.errors`` — run-level summary fields.
@@ -117,6 +119,38 @@ def _synthesis_document(ctx: Any) -> str:
     )
 
 
+def _focus_value(ctx: Any) -> str:
+    return (getattr(ctx, "focus", "") or "").strip()
+
+
+def _focus_document(ctx: Any) -> str:
+    """The focus report file (written only when a per-run focus was set).
+
+    The operator's question is quoted first so the file is self-describing,
+    then the set-level report. A focus whose report pass failed still gets the
+    file — with a pointer to the run errors — so the requested deliverable is
+    never silently absent.
+    """
+    focus = _focus_value(ctx)
+    report = (getattr(ctx, "focus_report_text", "") or "").strip()
+    lines = [
+        "# Focus Report (operator-requested)",
+        "",
+        f"**Operator focus for this run:** {focus}",
+        "",
+    ]
+    if report:
+        lines.append(report)
+    else:
+        lines.append(
+            "> No focus report was produced for this run — see `00_index.md` "
+            "for the error. The per-sheet files still carry any per-sheet "
+            "*Focus findings* sections."
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _index_document(
     ctx: Any,
     *,
@@ -146,6 +180,9 @@ def _index_document(
     ]
     for name in source_names:
         lines.append(f"  - {name}")
+    focus = _focus_value(ctx)
+    if focus:
+        lines.append(f"- **Per-run focus:** {focus} (see `00_focus.md`)")
     lines += [
         f"- **Sheets analyzed:** {ok}/{total}"
         + (f" ({cached} from cache)" if cached else ""),
@@ -174,6 +211,8 @@ def _index_document(
         "- `00_index.md` — this summary",
         "- `00_synthesis.md` — cross-sheet overview",
     ]
+    if focus:
+        lines.append("- `00_focus.md` — the focus report for this run's focus")
     for _, _, fname in sheet_files:
         lines.append(f"- `{fname}` — one sheet")
     lines.append("- `combined.md` — every sheet + the synthesis in one document")
@@ -187,10 +226,11 @@ def build_export_documents(
     """Build the ordered ``(filename, content)`` list for an export folder.
 
     Order: ``report.html`` (the navigable browser view) → ``00_index.md`` →
-    ``00_synthesis.md`` → one file per sheet (page order) → ``combined.md``. The
-    HTML report is a self-contained, lossless re-presentation of the same
-    content (see :mod:`drawing_analyzer.html_report`); the Markdown files remain
-    for downstream/text use. Pure: no I/O, so it is the unit-testable core of
+    ``00_synthesis.md`` → ``00_focus.md`` (only when a per-run focus was set) →
+    one file per sheet (page order) → ``combined.md``. The HTML report is a
+    self-contained, lossless re-presentation of the same content (see
+    :mod:`drawing_analyzer.html_report`); the Markdown files remain for
+    downstream/text use. Pure: no I/O, so it is the unit-testable core of
     :func:`write_drawing_export`.
     """
     sheets = list(getattr(ctx, "sheets", None) or [])
@@ -204,6 +244,8 @@ def build_export_documents(
         ("00_index.md", _index_document(ctx, source_names=source_names, now=now, sheet_files=sheet_files)),
         ("00_synthesis.md", _synthesis_document(ctx)),
     ]
+    if _focus_value(ctx):
+        docs.append(("00_focus.md", _focus_document(ctx)))
     for index, sheet, fname in sheet_files:
         docs.append((fname, _sheet_document(index, total, sheet)))
 

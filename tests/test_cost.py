@@ -11,6 +11,8 @@ from drawing_analyzer.core.pricing import (
     price_for,
 )
 from drawing_analyzer.cost import (
+    _ASSUMED_FOCUS_OUTPUT_TOKENS as FOCUS_OUT,
+    _ASSUMED_FOCUS_SECTION_TOKENS_PER_SHEET as FOCUS_PER_SHEET,
     _ASSUMED_OUTPUT_TOKENS_PER_SHEET as OUT_PER_SHEET,
     _ASSUMED_PROMPT_TOKENS_PER_SHEET as PROMPT_PER_SHEET,
     _ASSUMED_SYNTHESIS_OUTPUT_TOKENS as SYNTH_OUT,
@@ -125,6 +127,24 @@ def test_format_prompt_unknown_model_says_unavailable():
     msg = format_drawing_cost_prompt(est)
     assert "unavailable" in msg
     assert "Proceed" in msg
+
+
+def test_drawing_estimate_focus_adds_sections_and_a_pass():
+    base = estimate_drawing_set_cost(10, model=OPUS, synthesize=False)
+    focused = estimate_drawing_set_cost(10, model=OPUS, synthesize=False, focus=True)
+    digest_out = 10 * (OUT_PER_SHEET + FOCUS_PER_SHEET)
+    # Each sheet's digest grows by its focus-findings section, and the focus
+    # report re-reads the (grown) digests + one prompt overhead as input.
+    assert focused.output_tokens == digest_out + FOCUS_OUT
+    assert focused.input_tokens == base.input_tokens + digest_out + PROMPT_PER_SHEET
+    assert focused.total_cost > base.total_cost
+
+
+def test_drawing_estimate_no_focus_is_unchanged():
+    # focus=False is the default and must not perturb the existing math.
+    assert estimate_drawing_set_cost(10, model=OPUS) == estimate_drawing_set_cost(
+        10, model=OPUS, focus=False
+    )
 
 
 def test_drawing_estimate_batch_halves_cost():

@@ -21,6 +21,8 @@ Module layout::
     tiling.py    dependency-free tile geometry (clip rects + render zoom)
     render.py    PyMuPDF rasterization (the ONLY module that imports PyMuPDF)
     digest.py    per-sheet vision request -> structured text
+    synthesis.py cross-sheet reconciliation pass (text-only)
+    focus.py     optional per-run focus -> set-level Focus Report (text-only)
     pipeline.py  orchestration: PDFs -> sheets -> digests -> combined text
     gui.py       standalone CustomTkinter window
     __main__.py  ``python -m drawing_analyzer`` launches the GUI
