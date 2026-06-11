@@ -215,6 +215,84 @@ DIGEST_PROMPT_VERSION = hashlib.sha256(
 ).hexdigest()[:16]
 
 
+# ---------------------------------------------------------------------------
+# Optional per-run focus.
+#
+# The operator may supply a free-text focus for one run (e.g. "I am
+# particularly interested in the rooms, and what types of plumbing fixtures
+# each has"). The focus NEVER replaces or shrinks the standard digest — it is
+# appended to the system prompt as an addendum asking for one extra, final
+# `**Focus findings**` section per sheet, so the model reads the drawings with
+# the operator's question in mind while the default deliverable stays intact.
+# The set-level answer is then assembled by :mod:`drawing_analyzer.focus`.
+# ---------------------------------------------------------------------------
+
+# The exact section header the addendum asks for. Downstream consumers (the
+# HTML report's category filter, the focus-report pass) key off it.
+FOCUS_SECTION_HEADER = "Focus findings"
+
+_FOCUS_ADDENDUM_TEMPLATE = """\
+
+
+ADDITIONAL PER-RUN FOCUS — the operator running this analysis is particularly \
+interested in the following:
+
+<operator_focus>
+{focus}
+</operator_focus>
+
+Produce the standard digest in full first, exactly as instructed above — the \
+focus must not shrink or displace it. Then add ONE extra FINAL section headed \
+`**{header}**` reporting everything legible on THIS sheet that bears on the \
+operator's focus: transcribe the relevant rooms/spaces, tags, fixture or \
+equipment types, sizes, and notes verbatim, and say where on the sheet each \
+appears. The same rules apply — never invent or guess. If the sheet shows \
+nothing relevant to the focus, the section body should be exactly \
+`Nothing relevant to the focus on this sheet.`"""
+
+
+def normalize_focus(focus: Any) -> str | None:
+    """Normalize an operator-supplied per-run focus: stripped text, or ``None``.
+
+    ``None`` / empty / whitespace-only all mean "no focus" — the single
+    normalization every entry point (pipeline, digest, batch) applies so the
+    no-focus request and cache key stay byte-identical to a run that never
+    heard of the feature.
+    """
+    if focus is None:
+        return None
+    text = str(focus).strip()
+    return text or None
+
+
+def build_focus_addendum(focus: str) -> str:
+    """Render the system-prompt addendum for a (normalized, non-empty) focus."""
+    return _FOCUS_ADDENDUM_TEMPLATE.format(focus=focus, header=FOCUS_SECTION_HEADER)
+
+
+def digest_system_prompt(focus: str | None = None) -> str:
+    """The effective system prompt: the standard digest prompt, plus the focus
+    addendum when a per-run focus is set."""
+    focus = normalize_focus(focus)
+    if focus is None:
+        return DIGEST_SYSTEM_PROMPT
+    return DIGEST_SYSTEM_PROMPT + build_focus_addendum(focus)
+
+
+def focus_cache_fragment(focus: Any) -> str | None:
+    """The digest-cache-key component for a per-run focus (``None`` disables it).
+
+    Hashes the *rendered* addendum — instruction template + operator text — so a
+    cached digest is reused only when both the focus and the way it is spliced
+    into the prompt are unchanged (the same rationale as
+    :data:`DIGEST_PROMPT_VERSION` for the static prompt). ``None`` (no focus)
+    leaves the key byte-identical to a pre-focus key, so existing cached
+    digests stay valid and a later no-focus re-run still hits them.
+    """
+    focus = normalize_focus(focus)
+    return build_focus_addendum(focus) if focus is not None else None
+
+
 def _image_block(png_bytes: bytes) -> dict:
     """A base64 PNG image content block."""
     data = base64.standard_b64encode(png_bytes).decode("ascii")
@@ -287,6 +365,7 @@ def build_digest_request_params(
     max_tokens: int = DEFAULT_DIGEST_MAX_TOKENS,
     use_thinking: bool = True,
     effort: str | None = DEFAULT_DIGEST_EFFORT,
+    focus: str | None = None,
 ) -> dict[str, Any]:
     """Build the Messages-API request body for one sheet digest.
 
@@ -295,12 +374,15 @@ def build_digest_request_params(
     (:mod:`drawing_analyzer.batch_digest`), so the two can't drift on model /
     thinking / effort. ``thinking`` and ``output_config`` are attached only when
     the model supports them (Opus 4.8 supports both; an unknown override
-    silently omits them, never producing an API-rejected request).
+    silently omits them, never producing an API-rejected request). ``focus``
+    (an optional per-run operator focus) rides only on the system prompt, so
+    the user content — including the batch path's uploaded images — is
+    identical with or without it.
     """
     params: dict[str, Any] = {
         "model": model,
         "max_tokens": max_tokens,
-        "system": DIGEST_SYSTEM_PROMPT,
+        "system": digest_system_prompt(focus),
         "messages": [{"role": "user", "content": content}],
     }
     if use_thinking and model_supports_adaptive_thinking(model):
@@ -375,6 +457,7 @@ def digest_sheet(
     max_retries: int = DEFAULT_DIGEST_MAX_RETRIES,
     sleep: Any = time.sleep,
     cache: Any = None,
+    focus: str | None = None,
 ) -> SheetDigest:
     """Run a single vision request for one sheet and return its text digest.
 
@@ -391,7 +474,14 @@ def digest_sheet(
     non-empty digest — so an unchanged sheet on a re-run is served from cache
     with ``cached=True`` and no token cost. The key folds in the rendered images,
     the model, the prompt fingerprint, and the output-shaping params.
+
+    ``focus`` (an optional per-run operator focus — see :func:`normalize_focus`)
+    asks for one extra ``**Focus findings**`` section after the standard digest.
+    It is folded into the cache key, so a focused run never reuses a digest
+    produced without (or under a different) focus, while a no-focus run keeps
+    hitting pre-existing cache entries.
     """
+    focus = normalize_focus(focus)
     image_est = estimate_image_tokens_total(sheet.image_sizes, model=model)
 
     cache_key: str | None = None
@@ -403,6 +493,7 @@ def digest_sheet(
             max_tokens=max_tokens,
             effort=effort,
             use_thinking=use_thinking,
+            focus=focus_cache_fragment(focus),
         )
         hit = cache.get(cache_key)
         if hit is not None:
@@ -428,6 +519,7 @@ def digest_sheet(
         max_tokens=max_tokens,
         use_thinking=use_thinking,
         effort=effort,
+        focus=focus,
     )
 
     attempt = 0

@@ -61,6 +61,7 @@ def digest_cache_key(
     max_tokens: int,
     effort: str | None,
     use_thinking: bool,
+    focus: str | None = None,
 ) -> str:
     """Content-address one sheet's digest request.
 
@@ -69,6 +70,12 @@ def digest_cache_key(
     overlap → different crops → different bytes → different key). Folding in the
     model, prompt fingerprint, and output-shaping params means a model swap or a
     prompt edit re-digests rather than serving a stale cached read.
+
+    ``focus`` carries the per-run focus prompt fragment
+    (:func:`drawing_analyzer.digest.focus_cache_fragment`) when one is set. It is
+    folded in **only when non-empty**, so a no-focus key is byte-identical to a
+    key produced before the focus feature existed — pre-existing cache entries
+    stay valid — while any focus (or a change to it) re-digests.
     """
     h = hashlib.sha256()
     for part in (
@@ -80,6 +87,9 @@ def digest_cache_key(
         f"thinking={'1' if use_thinking else '0'}",
     ):
         h.update(part.encode("utf-8"))
+        h.update(b"\x00")
+    if focus:
+        h.update(f"focus={focus}".encode("utf-8"))
         h.update(b"\x00")
     h.update(sheet.overview.png_bytes)
     for tile in sheet.tiles:

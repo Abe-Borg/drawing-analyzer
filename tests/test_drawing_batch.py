@@ -494,6 +494,66 @@ def test_partial_cache_only_submits_the_miss():
 
 
 # --------------------------------------------------------------------------- #
+# Per-run focus (batch path)
+# --------------------------------------------------------------------------- #
+
+FOCUS = "the rooms, and what types of plumbing fixtures each has"
+
+
+def test_batch_focus_rides_on_system_prompt_only():
+    from drawing_analyzer.digest import DIGEST_SYSTEM_PROMPT
+
+    plain = _FakeClient(_succeed)
+    submit_drawing_batch(iter([_make_sheet(1)]), client=plain, model=OPUS, total=1)
+    focused = _FakeClient(_succeed)
+    submit_drawing_batch(
+        iter([_make_sheet(1)]), client=focused, model=OPUS, total=1, focus=FOCUS
+    )
+
+    p_params = plain.create_calls[0]["requests"][0]["params"]
+    f_params = focused.create_calls[0]["requests"][0]["params"]
+    assert p_params["system"] == DIGEST_SYSTEM_PROMPT
+    assert f_params["system"].startswith(DIGEST_SYSTEM_PROMPT)
+    assert FOCUS in f_params["system"]
+    # The user content (and so the uploaded images) is identical either way.
+    assert p_params["messages"] == f_params["messages"]
+
+
+def test_batch_focus_is_cache_isolated():
+    cache = DigestCache(None, persist=False)
+    sheets = [_make_sheet(1)]
+
+    # Warm the cache with a no-focus run.
+    _run_batch(_FakeClient(_succeed), sheets, cache=cache)
+
+    # A focused run must not be served the no-focus digest — it re-submits.
+    client = _FakeClient(_succeed)
+    batch = submit_drawing_batch(
+        iter(sheets), client=client, model=OPUS, cache=cache, total=1, focus=FOCUS
+    )
+    digests = collect_drawing_batch(batch, client=client, cache=cache, sleep=NOSLEEP)
+    assert digests[0].cached is False and digests[0].ok
+    assert len(client.submitted) == 1
+
+    # Same focus again: now served from the (focus-keyed) cache.
+    client2 = _FakeClient(_succeed)
+    batch2 = submit_drawing_batch(
+        iter(sheets), client=client2, model=OPUS, cache=cache, total=1, focus=FOCUS
+    )
+    digests2 = collect_drawing_batch(batch2, client=client2, cache=cache, sleep=NOSLEEP)
+    assert digests2[0].cached is True
+    assert client2.create_calls == []
+
+    # And the original no-focus entry is still intact.
+    client3 = _FakeClient(_succeed)
+    batch3 = submit_drawing_batch(
+        iter(sheets), client=client3, model=OPUS, cache=cache, total=1
+    )
+    digests3 = collect_drawing_batch(batch3, client=client3, cache=cache, sleep=NOSLEEP)
+    assert digests3[0].cached is True
+
+
+# --------------------------------------------------------------------------- #
 # Upload-failure handling at submit time
 # --------------------------------------------------------------------------- #
 

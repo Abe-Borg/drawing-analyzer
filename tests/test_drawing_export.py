@@ -155,3 +155,44 @@ def test_write_drawing_export_unique_on_collision(tmp_path):
     assert first != second
     assert second.name.endswith("_2")
     assert first.exists() and second.exists()
+
+
+# --------------------------------------------------------------------------- #
+# per-run focus deliverable (00_focus.md)
+# --------------------------------------------------------------------------- #
+
+FOCUS = "the rooms, and what types of plumbing fixtures each has"
+
+
+def test_no_focus_writes_no_focus_file():
+    docs = dict(dx.build_export_documents(_make_ctx(), source_names=[SRC], now=NOW))
+    assert "00_focus.md" not in docs
+    assert "Per-run focus" not in docs["00_index.md"]
+
+
+def test_focus_adds_its_own_document_and_index_entries():
+    ctx = _make_ctx()
+    ctx.focus = FOCUS
+    ctx.focus_report_text = "Room 101: WC-1, LAV-2 (per P-101/P-501)."
+    docs = dx.build_export_documents(ctx, source_names=[SRC], now=NOW)
+    names = [n for n, _ in docs]
+
+    # The focus report slots in after the synthesis, before the per-sheet files,
+    # and the rest of the export is unchanged.
+    assert names[2] == "00_synthesis.md" and names[3] == "00_focus.md"
+    body = dict(docs)["00_focus.md"]
+    assert FOCUS in body                                  # self-describing
+    assert "Room 101: WC-1, LAV-2" in body                # the report itself
+    index = dict(docs)["00_index.md"]
+    assert f"**Per-run focus:** {FOCUS}" in index
+    assert "`00_focus.md`" in index
+
+
+def test_focus_with_failed_report_still_writes_the_file():
+    ctx = _make_ctx()
+    ctx.focus = FOCUS
+    ctx.focus_report_text = ""  # the report pass failed
+    docs = dict(dx.build_export_documents(ctx, source_names=[SRC], now=NOW))
+    body = docs["00_focus.md"]
+    assert FOCUS in body
+    assert "No focus report was produced" in body

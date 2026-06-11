@@ -13,9 +13,10 @@ isolate exactly the sections they care about.
 Design constraints, mirroring :mod:`drawing_analyzer.export`:
 
 - **Pure & duck-typed.** Reads only the documented attributes off the context
-  (``sheets`` / ``synthesis_text`` / ``combined_text`` / the run-summary counts /
-  ``errors``); it never imports the engine, tkinter, PyMuPDF, or the network, so
-  it unit-tests in isolation. See :func:`build_html_report`.
+  (``sheets`` / ``synthesis_text`` / ``focus`` / ``focus_report_text`` /
+  ``combined_text`` / the run-summary counts / ``errors``); it never imports the
+  engine, tkinter, PyMuPDF, or the network, so it unit-tests in isolation. See
+  :func:`build_html_report`.
 - **Lossless.** The structured view is rendered from each sheet's digest, and the
   exact, verbatim ``combined_text`` is also embedded (collapsed) so the original
   Markdown is always one click / copy away — the rendering can never *drop*
@@ -54,6 +55,8 @@ CATEGORY_OTHER = "other"
 
 # (id, label, (keyword, ...)) in priority order.
 _CATEGORY_SPECS: list[tuple[str, str, tuple[str, ...]]] = [
+    ("focus", "Focus",
+     ("focus",)),
     ("conflict", "Conflicts",
      ("conflict", "inconsist", "discrepan", "mismatch", "disagree", "contradic",
       "never drawn", "never shown", "but not", "missing")),
@@ -412,7 +415,7 @@ def _block_html(header: str | None, body_md: str) -> str:
         cat_label = CATEGORY_LABELS.get(category, "")
         tag = (
             f'<span class="cat-tag cat-{category}">{html.escape(cat_label)}</span>'
-            if category in ("coordination", "conflict")
+            if category in ("coordination", "conflict", "focus")
             else ""
         )
         head = f'<h4 class="block-title">{_render_inline(header)}{tag}</h4>'
@@ -484,6 +487,43 @@ def _sheet_card(index: int, total: int, sheet: Any) -> str:
     )
 
 
+def _focus_value(ctx: Any) -> str:
+    return (getattr(ctx, "focus", "") or "").strip()
+
+
+def _focus_card(ctx: Any) -> str:
+    """The pinned Focus Report card (rendered only when a per-run focus was set).
+
+    Quotes the operator's question first so the card is self-describing, then
+    the set-level report. A failed/absent report still renders the card with a
+    pointer to the run summary — the requested deliverable is never silently
+    missing from the page.
+    """
+    focus = _focus_value(ctx)
+    report = (getattr(ctx, "focus_report_text", "") or "").strip()
+    ask = (
+        '<section class="block" data-category="focus">'
+        f'<p class="focus-ask"><strong>Operator focus:</strong> '
+        f"{html.escape(focus)}</p></section>"
+    )
+    if report:
+        body = ask + _render_digest_blocks(report)
+    else:
+        body = ask + (
+            '<section class="block" data-category="focus"><p class="muted">'
+            "No focus report was produced for this run — see the run summary "
+            "for errors. Any per-sheet <em>Focus findings</em> sections still "
+            "appear under their sheets below.</p></section>"
+        )
+    return _card(
+        card_id="focus",
+        title_html='<span class="seq">◎</span> Focus Report',
+        badges_html='<span class="badge badge-focus">Per-run focus</span>',
+        status="focus",
+        body_html=body,
+    )
+
+
 def _overview_card(ctx: Any) -> str:
     synthesis = (getattr(ctx, "synthesis_text", "") or "").strip()
     if synthesis:
@@ -505,11 +545,18 @@ def _overview_card(ctx: Any) -> str:
 
 
 def _toc_html(ctx: Any, sheets: list[Any]) -> str:
-    rows = [
+    rows = []
+    if _focus_value(ctx):
+        rows.append(
+            '<a class="toc-item" data-target="focus" href="#focus">'
+            '<span class="toc-dot dot-focus"></span>'
+            '<span class="toc-label">Focus Report</span></a>'
+        )
+    rows.append(
         '<a class="toc-item" data-target="overview" href="#overview">'
         '<span class="toc-dot dot-overview"></span>'
         '<span class="toc-label">Drawing Set Overview</span></a>'
-    ]
+    )
     total = len(sheets)
     for i, sheet in enumerate(sheets, start=1):
         ref = _ref_of(sheet)
@@ -524,12 +571,16 @@ def _toc_html(ctx: Any, sheets: list[Any]) -> str:
     return "".join(rows)
 
 
-def _filter_chips_html() -> str:
+def _filter_chips_html(*, include_focus: bool = False) -> str:
+    """The filter chip row. The Focus chip appears only when the run had a
+    per-run focus — otherwise it would be a chip that can never match."""
     chips = [
         '<button class="chip chip-active" data-filter="all">All</button>',
         '<button class="chip chip-issues" data-filter="issues">⚠ Issues only</button>',
     ]
     for cid, _label, _kw in _CATEGORY_SPECS:
+        if cid == "focus" and not include_focus:
+            continue
         chips.append(
             f'<button class="chip" data-filter="{cid}">{html.escape(CATEGORY_LABELS[cid])}</button>'
         )
@@ -613,7 +664,9 @@ def build_html_report(
     if source_names:
         title = f"{Path(source_names[0]).stem} — Drawing Digest"
 
-    cards = [_overview_card(ctx)]
+    has_focus = bool(_focus_value(ctx))
+    cards = [_focus_card(ctx)] if has_focus else []
+    cards.append(_overview_card(ctx))
     cards += [_sheet_card(i, total, s) for i, s in enumerate(sheets, start=1)]
 
     body = f"""<aside class="sidebar">
@@ -622,7 +675,7 @@ def build_html_report(
   <div class="search-wrap">
     <input id="search" type="search" placeholder="Search all sheets…" autocomplete="off">
   </div>
-  <div class="chips">{_filter_chips_html()}</div>
+  <div class="chips">{_filter_chips_html(include_focus=has_focus)}</div>
   <div class="result-count" id="result-count"></div>
   <nav class="toc" id="toc">{_toc_html(ctx, sheets)}</nav>
 </aside>
@@ -662,6 +715,7 @@ _CSS = """
   --line:#e3e7ee; --accent:#2f6df0; --accent-soft:#eaf1ff;
   --ok:#1f9d57; --cached:#8a6d1f; --failed:#d23b3b; --overview:#7a3ff0;
   --coord:#b5710d; --coord-soft:#fff5e6; --conflict:#d23b3b; --conflict-soft:#fdecec;
+  --focus:#0e8a8a; --focus-soft:#e7f7f6;
   --radius:10px;
 }
 *{box-sizing:border-box}
@@ -707,6 +761,7 @@ a{color:var(--accent); text-decoration:none}
 .toc-dot{width:8px; height:8px; border-radius:50%; flex:0 0 8px}
 .dot-ok{background:var(--ok)} .dot-cached{background:var(--cached)}
 .dot-failed{background:var(--failed)} .dot-overview{background:var(--overview)}
+.dot-focus{background:var(--focus)}
 
 /* Content */
 .content{flex:1 1 auto; padding:26px 34px; max-width:1000px; margin:0 auto; width:100%}
@@ -748,6 +803,7 @@ a{color:var(--accent); text-decoration:none}
 .card[data-status="cached"] .card-head{border-left-color:var(--cached)}
 .card[data-status="failed"] .card-head{border-left-color:var(--failed)}
 .card[data-status="overview"] .card-head{border-left-color:var(--overview)}
+.card[data-status="focus"] .card-head{border-left-color:var(--focus)}
 .card-title{font-weight:600; flex:1 1 auto; font-size:15px}
 .seq{color:var(--muted); font-variant-numeric:tabular-nums; margin-right:4px}
 .badges{display:flex; gap:6px; flex-wrap:wrap; align-items:center}
@@ -756,6 +812,7 @@ a{color:var(--accent); text-decoration:none}
 .badge-cached{background:#fbf3df; color:var(--cached)}
 .badge-failed{background:var(--conflict-soft); color:var(--failed)}
 .badge-overview{background:#f1eaff; color:var(--overview)}
+.badge-focus{background:var(--focus-soft); color:var(--focus)}
 .badge-tok{background:#eef1f6; color:var(--muted); font-variant-numeric:tabular-nums}
 .chevron{color:var(--muted); transition:transform .15s}
 .card.collapsed .chevron{transform:rotate(-90deg)}
@@ -776,9 +833,15 @@ a{color:var(--accent); text-decoration:none}
   background:var(--conflict-soft); border-left:3px solid var(--conflict);
   padding-left:12px; border-radius:6px; border-bottom:none; margin:8px 0;
 }
+.block[data-category="focus"]{
+  background:var(--focus-soft); border-left:3px solid var(--focus);
+  padding-left:12px; border-radius:6px; border-bottom:none; margin:8px 0;
+}
 .cat-tag{font-size:10px; font-weight:700; padding:2px 7px; border-radius:999px; text-transform:uppercase; letter-spacing:.4px}
 .cat-coordination{background:var(--coord); color:#fff}
 .cat-conflict{background:var(--conflict); color:#fff}
+.cat-focus{background:var(--focus); color:#fff}
+.focus-ask{color:var(--ink)}
 
 /* Markdown body */
 .block h1,.block h2,.block h3,.block h4,.block h5,.block h6{margin:10px 0 6px; line-height:1.3}

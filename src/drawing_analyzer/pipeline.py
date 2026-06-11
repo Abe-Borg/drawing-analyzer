@@ -29,6 +29,7 @@ from .digest import (
     DEFAULT_DIGEST_MAX_TOKENS,
     SheetDigest,
     digest_sheet,
+    normalize_focus,
 )
 from .render import iter_rendered_sheets, list_sheets
 
@@ -94,6 +95,13 @@ class DrawingContext:
     # for <2 readable sheets, or failed). When present it is also prepended into
     # ``combined_text`` as the "Drawing Set Overview" section.
     synthesis_text: str = ""
+    # The operator's per-run focus (normalized; "" when none was supplied) and
+    # the set-level focus report answering it (empty when no focus, no readable
+    # sheets, or the focus pass failed). When present the report is also woven
+    # into ``combined_text`` as the "Focus Report" section. The standard
+    # deliverable is never displaced by these — they are additive.
+    focus: str = ""
+    focus_report_text: str = ""
 
     @property
     def ok_sheet_count(self) -> int:
@@ -109,12 +117,23 @@ def _sheet_header(index: int, total: int, ref) -> str:
     return f"## Sheet {index}/{total}: {ref.display_label}"
 
 
-def _combine(sheets: list[SheetDigest], *, file_count: int, overview: str = "") -> str:
+def _combine(
+    sheets: list[SheetDigest],
+    *,
+    file_count: int,
+    overview: str = "",
+    focus: str = "",
+    focus_report: str = "",
+) -> str:
     """Build the combined digest document from per-sheet results.
 
     When ``overview`` (the cross-sheet synthesis) is non-empty it is inserted as
     a "Drawing Set Overview" section right after the intro and before the
     per-sheet sections, so a reviewer reads the reconciled set picture first.
+    When ``focus_report`` is non-empty it is inserted as a "Focus Report"
+    section ahead of even the overview — it answers the question the operator
+    explicitly asked this run — quoting the ``focus`` so the document is
+    self-describing. Both are additive; the per-sheet digests are unchanged.
     """
     total = len(sheets)
     lines: list[str] = [
@@ -126,6 +145,16 @@ def _combine(sheets: list[SheetDigest], *, file_count: int, overview: str = "") 
         f"show._",
         "",
     ]
+    if focus_report.strip():
+        lines.append("## Focus Report (operator-requested)")
+        lines.append("")
+        if focus.strip():
+            lines.append(f"_Operator focus for this run: {focus.strip()}_")
+            lines.append("")
+        lines.append(focus_report.strip())
+        lines.append("")
+        lines.append("---")
+        lines.append("")
     if overview.strip():
         lines.append("## Drawing Set Overview (cross-sheet synthesis)")
         lines.append("")
@@ -161,6 +190,7 @@ def _digest_sheets_concurrent(
     progress: ProgressCallback | None,
     total: int,
     max_workers: int | None,
+    focus: str | None = None,
 ) -> list[SheetDigest]:
     """Real-time path: render sequentially, digest on a bounded thread pool.
 
@@ -182,6 +212,7 @@ def _digest_sheets_concurrent(
             use_thinking=use_thinking,
             effort=effort,
             cache=cache,
+            focus=focus,
         )
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -227,6 +258,7 @@ def _digest_sheets_via_batch(
     total: int,
     on_log: LogCallback | None = None,
     on_status: StatusCallback | None = None,
+    focus: str | None = None,
 ) -> list[SheetDigest]:
     """Batch path: render-stream → Files-API upload → one Message Batch.
 
@@ -260,6 +292,7 @@ def _digest_sheets_via_batch(
         progress=progress,
         total=total,
         on_status=on_status,
+        focus=focus,
     )
     # Run the post-batch file cleanup off the calling thread: the digests are
     # already in hand, and deleting a few hundred uploaded images one-by-one
@@ -319,6 +352,8 @@ def extract_drawing_context(
     use_batch: bool = False,
     on_log: LogCallback | None = None,
     on_status: StatusCallback | None = None,
+    focus: str | None = None,
+    focus_model: str | None = None,
 ) -> DrawingContext:
     """Render and digest every sheet in ``pdf_paths`` into one text context.
 
@@ -363,11 +398,25 @@ def extract_drawing_context(
     thread; the cross-sheet synthesis still runs as one synchronous text-only
     call afterward. Caching, page ordering, and per-sheet error capture behave
     identically to the real-time path.
+
+    ``focus`` (optional, at the operator's discretion) is a free-text per-run
+    focus — e.g. *"I am particularly interested in the rooms, and what types of
+    plumbing fixtures each has"*. The standard deliverable is unchanged; the
+    focus is purely additive: each sheet's digest gains a final ``**Focus
+    findings**`` section (the vision pass reads the drawings with the question
+    in mind), and one extra text-only pass assembles the set-level **Focus
+    Report** answering it (exposed on ``DrawingContext.focus_report_text`` and
+    woven into ``combined_text``; ``focus_model`` overrides its model). The
+    focus is folded into the digest cache key, so re-running with the same
+    focus is served from cache, while changing or clearing it re-digests —
+    a no-focus run keeps hitting pre-focus cache entries.
     """
     if cache is None and use_cache:
         from .digest_cache import get_default_digest_cache
 
         cache = get_default_digest_cache()
+
+    focus = normalize_focus(focus) or ""
 
     paths = [Path(p) for p in pdf_paths]
     refs = list_sheets(paths)
@@ -376,9 +425,10 @@ def extract_drawing_context(
 
     _log.info(
         "===== run start: %d file(s), %d sheet(s) | model=%s path=%s cache=%s "
-        "synthesize=%s | %s =====",
+        "synthesize=%s focus=%s | %s =====",
         file_count, total, model, "batch" if use_batch else "real-time",
         bool(cache is not None or use_cache), synthesize,
+        repr(focus[:80]) if focus else False,
         _api_environment_fingerprint(),
     )
 
@@ -398,6 +448,7 @@ def extract_drawing_context(
             client=client, model=model, max_tokens=max_tokens,
             use_thinking=use_thinking, effort=effort, cache=cache,
             progress=progress, total=total, on_log=on_log, on_status=on_status,
+            focus=focus or None,
         )
     else:
         sheets = _digest_sheets_concurrent(
@@ -405,6 +456,7 @@ def extract_drawing_context(
             client=client, model=model, max_tokens=max_tokens,
             use_thinking=use_thinking, effort=effort, cache=cache,
             progress=progress, total=total, max_workers=max_workers,
+            focus=focus or None,
         )
 
     errors: list[str] = []
@@ -448,6 +500,36 @@ def extract_drawing_context(
         else:
             _log.info("synthesis: skipped (<%d readable sheet(s))", MIN_SHEETS_FOR_SYNTHESIS)
 
+    # Set-level focus report (one text-only call; independent of synthesis).
+    # Additive: a failure here is recorded and the standard deliverable —
+    # per-sheet digests plus any synthesis — ships exactly as it would have.
+    focus_report_text = ""
+    if focus:
+        if progress is not None:
+            progress(total, total, "Generating focus report")
+        from .focus import MIN_SHEETS_FOR_FOCUS, generate_focus_report
+
+        _log.info("focus report: starting set-level pass")
+        fresult = generate_focus_report(
+            sheets, focus, client=client, model=focus_model
+        )
+        if fresult.ok:
+            focus_report_text = fresult.text
+            # The focus call is billed, so its tokens belong in the run total.
+            in_tok += fresult.input_tokens
+            out_tok += fresult.output_tokens
+            _log.info(
+                "focus report: ok (input=%d output=%d tok)",
+                fresult.input_tokens, fresult.output_tokens,
+            )
+        elif fresult.error and len([s for s in sheets if s.ok]) >= MIN_SHEETS_FOR_FOCUS:
+            errors.append(f"Focus report: {fresult.error}")
+            _log.warning("focus report: failed: %s", fresult.error)
+        else:
+            _log.info(
+                "focus report: skipped (<%d readable sheet(s))", MIN_SHEETS_FOR_FOCUS
+            )
+
     if progress is not None:
         progress(total, total, "Done")
 
@@ -462,7 +544,13 @@ def extract_drawing_context(
         _log.warning("issue: %s", err)
 
     return DrawingContext(
-        combined_text=_combine(sheets, file_count=file_count, overview=synthesis_text),
+        combined_text=_combine(
+            sheets,
+            file_count=file_count,
+            overview=synthesis_text,
+            focus=focus,
+            focus_report=focus_report_text,
+        ),
         sheets=sheets,
         file_count=file_count,
         sheet_count=total,
@@ -471,6 +559,8 @@ def extract_drawing_context(
         total_image_token_estimate=img_tok,
         errors=errors,
         synthesis_text=synthesis_text,
+        focus=focus,
+        focus_report_text=focus_report_text,
     )
 
 

@@ -218,3 +218,52 @@ def test_report_handles_empty_synthesis():
     ctx.synthesis_text = ""
     doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
     assert "No cross-sheet synthesis was produced" in doc
+
+
+# --------------------------------------------------------------------------- #
+# per-run focus card + filter
+# --------------------------------------------------------------------------- #
+
+FOCUS = "the rooms, and what types of plumbing fixtures each has"
+
+
+def test_classify_section_focus():
+    assert hr.classify_section("Focus findings") == "focus"
+
+
+def test_report_without_focus_has_no_focus_card_or_chip():
+    doc = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW)
+    assert 'id="focus"' not in doc
+    assert 'data-filter="focus"' not in doc  # a chip that can't match is noise
+
+
+def test_report_with_focus_pins_the_report_card_and_chip():
+    ctx = _make_ctx()
+    ctx.focus = FOCUS
+    ctx.focus_report_text = (
+        "**Room-by-room**\n- Rm 101: `WC-1`, `LAV-2` (P-101, schedule P-501)\n"
+    )
+    ctx.sheets[0].text += (
+        "\n**Focus findings**\n- Rm 120: `WC-1` shown at north wall.\n"
+    )
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
+
+    assert 'id="focus"' in doc                       # the pinned report card
+    assert "the rooms, and what types of plumbing" in doc  # question quoted
+    assert "Rm 101" in doc                           # the report content
+    # The card leads the page: it appears before the overview card.
+    assert doc.index('id="focus"') < doc.index('id="overview"')
+    # Per-sheet "Focus findings" sections are tagged and filterable.
+    assert 'data-category="focus"' in doc
+    assert 'data-filter="focus"' in doc
+    # And the sidebar links to it.
+    assert 'data-target="focus"' in doc
+
+
+def test_report_with_focus_but_failed_report_explains_itself():
+    ctx = _make_ctx()
+    ctx.focus = FOCUS
+    ctx.focus_report_text = ""
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
+    assert 'id="focus"' in doc
+    assert "No focus report was produced" in doc

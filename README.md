@@ -5,7 +5,9 @@ vision. Each PDF page is treated as one *sheet*; every sheet is rendered to an
 overview image plus a 6×6 grid of high-resolution tiles and sent to Claude Opus 4.8
 in a single vision request, which returns a structured text **digest** of the sheet
 (sheet number, discipline, equipment, tags, notes, schedules, etc.). An optional
-cross-sheet **synthesis** pass reconciles tags and conflicts across the set.
+cross-sheet **synthesis** pass reconciles tags and conflicts across the set, and an
+optional **per-run focus** (anything you particularly want pulled out — see below)
+adds a dedicated **Focus Report** on top of the standard output.
 
 The output comes two ways: a **self-contained HTML report** (`report.html`) — one
 portable file with a sidebar table of contents, full-text search, and category
@@ -47,6 +49,10 @@ every sheet. Save the result as a **navigable HTML report** (*Save HTML Report�
 opens in your browser, searchable and filterable) or as the raw **Markdown**
 digest (*Save Markdown…*).
 
+Optionally, type a **per-run focus** before pressing Analyze — e.g. *"the rooms,
+and what types of plumbing fixtures each has"*. You always get the standard
+digest; a focus adds the Focus Report on top (see [Per-run focus](#per-run-focus)).
+
 ### Browsing the result
 
 The HTML report (the folder export's `report.html`, or *Save HTML Report…* in the
@@ -72,20 +78,23 @@ ctx = extract_drawing_context(
     use_batch=True,     # Message Batches API (≈50% cheaper)
     use_cache=True,     # skip re-paying for unchanged sheets
     synthesize=True,    # add a cross-sheet overview
+    focus="the rooms, and what types of plumbing fixtures each has",  # optional
 )
 print(ctx.combined_text)
+print(ctx.focus_report_text)   # the set-level answer to the focus ("" if none)
 for sheet in ctx.sheets:
     print(sheet.ref.display_label, "->", "ok" if sheet.ok else sheet.error)
 ```
 
 `extract_drawing_context` returns a `DrawingContext` (combined text, per-sheet
-`SheetDigest`s, token totals, errors, optional `synthesis_text`).
+`SheetDigest`s, token totals, errors, optional `synthesis_text`, and — when a
+focus was given — `focus` / `focus_report_text`).
 
 ## How it works
 
 ```
 PDFs → list sheets → render (overview + 6×6 tiles) → per-sheet vision digest
-     → optional cross-sheet synthesis → combined Markdown
+     → optional cross-sheet synthesis → optional focus report → combined Markdown
 ```
 
 - **Batch mode** (`use_batch=True`, the GUI default) digests every uncached sheet
@@ -96,6 +105,28 @@ PDFs → list sheets → render (overview + 6×6 tiles) → per-sheet vision dig
 - **Caching** is content-keyed per sheet, so re-running a set after editing one
   sheet only re-pays vision for the changed sheet.
 
+## Per-run focus
+
+The analyzer's built-in goals are fixed (a spec-reviewer-oriented digest). A
+**per-run focus** lets you add your own, for one run, at your discretion — it is
+never required, and the standard output is always produced unchanged. With a
+focus set:
+
+- **Each sheet is read with your question in mind** — the vision prompt asks for
+  one extra, final **`Focus findings`** section per sheet (the standard digest
+  sections are unaffected).
+- **A set-level Focus Report** is assembled in one extra text-only pass: a
+  direct, cross-sheet answer to your focus, citing the sheets that carry each
+  fact. It leads the combined Markdown, is written as `00_focus.md` in folder
+  exports, and gets a pinned card (plus a *Focus* filter chip) in the HTML
+  report.
+
+Cache interplay: the focus is folded into the per-sheet cache key. Re-running
+with the **same** focus is served from cache; **changing or adding** a focus
+re-analyzes the sheets (the model must re-read the drawings with the new
+question), while your existing no-focus cache entries remain valid for ordinary
+runs.
+
 ## Configuration
 
 | Variable | Default | Effect |
@@ -103,6 +134,7 @@ PDFs → list sheets → render (overview + 6×6 tiles) → per-sheet vision dig
 | `ANTHROPIC_API_KEY` | — | Required (or paste the key into the GUI). |
 | `DRAWING_ANALYZER_MODEL` | Opus 4.8 | Vision model for per-sheet digests. |
 | `DRAWING_ANALYZER_SYNTHESIS_MODEL` | Opus 4.8 | Cross-sheet synthesis model (text-only). |
+| `DRAWING_ANALYZER_FOCUS_MODEL` | Opus 4.8 | Focus-report model (text-only). |
 | `DRAWING_ANALYZER_MAX_WORKERS` | `4` | Real-time digest concurrency (`1` = sequential). |
 | `DRAWING_ANALYZER_CACHE_PATH` | `~/.drawing_analyzer/drawing_digest_cache.json` | On-disk digest cache. |
 | `DRAWING_ANALYZER_CACHE_PERSIST` | on | Disable to keep the cache in-memory only. |
