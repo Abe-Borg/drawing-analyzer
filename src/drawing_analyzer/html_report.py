@@ -407,15 +407,25 @@ def _esc_attr(text: str) -> str:
     return html.escape(text, quote=True)
 
 
-def _block_html(header: str | None, body_md: str) -> str:
-    """Render one digest section as a filterable ``<section>`` with its category."""
-    category = classify_section(header)
+def _block_html(header: str | None, body_md: str, *, category: str | None = None) -> str:
+    """Render one digest section as a filterable ``<section>`` with its category.
+
+    ``category`` forces the block's ``data-category`` instead of classifying by
+    header keywords. The Focus Report card uses this: its body sections are
+    headed however the report is organized (``Room-by-room``, ``Equipment``, …),
+    and classifying those by keyword would scatter them across other categories
+    — selecting the Focus chip would then hide the report's own body. The
+    highlight pill still reflects the keyword classification, so an e.g.
+    "Conflicts" section inside the report keeps its informative tag.
+    """
+    classified = classify_section(header)
+    category = category or classified
     head = ""
     if header:
-        cat_label = CATEGORY_LABELS.get(category, "")
+        cat_label = CATEGORY_LABELS.get(classified, "")
         tag = (
-            f'<span class="cat-tag cat-{category}">{html.escape(cat_label)}</span>'
-            if category in ("coordination", "conflict", "focus")
+            f'<span class="cat-tag cat-{classified}">{html.escape(cat_label)}</span>'
+            if classified in ("coordination", "conflict", "focus")
             else ""
         )
         head = f'<h4 class="block-title">{_render_inline(header)}{tag}</h4>'
@@ -425,8 +435,10 @@ def _block_html(header: str | None, body_md: str) -> str:
     )
 
 
-def _render_digest_blocks(text: str) -> str:
-    return "".join(_block_html(h, b) for h, b in split_into_sections(text))
+def _render_digest_blocks(text: str, *, category: str | None = None) -> str:
+    return "".join(
+        _block_html(h, b, category=category) for h, b in split_into_sections(text)
+    )
 
 
 def _card(
@@ -507,7 +519,11 @@ def _focus_card(ctx: Any) -> str:
         f"{html.escape(focus)}</p></section>"
     )
     if report:
-        body = ask + _render_digest_blocks(report)
+        # Every body block is forced to the "focus" category: the whole card IS
+        # the focus deliverable, and it must survive the Focus filter chip no
+        # matter how the report's own section headers read (a `## Rooms` header
+        # would otherwise classify elsewhere and be hidden by the chip).
+        body = ask + _render_digest_blocks(report, category="focus")
     else:
         body = ask + (
             '<section class="block" data-category="focus"><p class="muted">'
