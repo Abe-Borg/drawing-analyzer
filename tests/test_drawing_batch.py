@@ -119,17 +119,26 @@ class _FakeBatches:
 
 
 class _FakeClient:
-    def __init__(self, responder, *, status="ended", reverse_results=False):
+    def __init__(
+        self, responder, *, status="ended", reverse_results=False, inline_responder=None
+    ):
         self.responder = responder
         self.status = status
         self.reverse_results = reverse_results
+        self.inline_responder = inline_responder or _inline_ok
         self.create_calls: list[dict] = []
         self.retrieve_calls: list[str] = []
         self.submitted: list[dict] = []
+        # Synchronous ``messages.create`` calls (the inline-base64 fallback path).
+        self.messages_create_calls: list[dict] = []
         self.files = _FakeFiles()
         batches = _FakeBatches(self)
         self.beta = _Obj(files=self.files, messages=_Obj(batches=batches))
-        self.messages = _Obj(batches=batches)
+        self.messages = _Obj(batches=batches, create=self._messages_create)
+
+    def _messages_create(self, **kwargs):
+        self.messages_create_calls.append(kwargs)
+        return self.inline_responder(kwargs)
 
 
 def _succeed(req, *, in_tok=100, out_tok=20):
@@ -141,6 +150,20 @@ def _succeed(req, *, in_tok=100, out_tok=20):
     )
     return FakeBatchResult(
         custom_id=cid, result=FakeBatchResultEnvelope(type="succeeded", message=msg)
+    )
+
+
+def _inline_ok(_kwargs):
+    """Default ``messages.create`` response for the inline-base64 fallback path.
+
+    The Files-API outage fallback digests a sheet via the real-time
+    ``digest_sheet`` (one synchronous ``messages.create``); this returns a
+    non-empty digest so the inlined sheet resolves OK.
+    """
+    return FakeMessage(
+        content=[FakeTextBlock(text="inline digest body")],
+        usage=FakeUsage(input_tokens=70, output_tokens=15),
+        stop_reason="end_turn",
     )
 
 
@@ -585,15 +608,32 @@ def test_submit_upload_failure_captures_sheet_and_continues():
 
 
 class _RouteLevel404(Exception):
-    """A Files-API ``404 not_found_error`` lookalike (route/credential-level).
+    """A Files-API ``404 not_found_error`` lookalike (route-level).
 
     Carries ``status_code`` like the SDK's ``NotFoundError``; permanent, so the
-    upload helper fails the sheet on the first image without retrying.
+    upload helper fails the sheet on the first image without retrying. A 404 is
+    the inline-fallback-eligible status: the upload route is down but the
+    Messages/Batches API still works.
     """
 
     status_code = 404
 
     def __init__(self, message: str = "Not found"):
+        super().__init__(message)
+        self.message = message
+
+
+class _Credential401(Exception):
+    """A Files-API ``401 authentication_error`` lookalike (credential-level).
+
+    Carries ``status_code`` like the SDK's ``AuthenticationError``. Unlike a
+    404, an inline request would hit the same rejection, so the breaker keeps
+    the stop-and-skip behavior for this status.
+    """
+
+    status_code = 401
+
+    def __init__(self, message: str = "invalid x-api-key"):
         super().__init__(message)
         self.message = message
 
@@ -611,42 +651,46 @@ class _CountingBrokenFiles(_FakeFiles):
         raise self.exc_type()
 
 
-def test_submit_stops_uploading_after_consecutive_route_level_failures():
-    # A 404 on /v1/files is credential/route-level: every upload in the run is
-    # doomed identically. After three sheets fail the same way, the remaining
-    # sheets must be marked skipped without further API calls (a real 33-sheet
-    # run previously spent minutes failing every sheet one request at a time).
+def test_submit_inlines_sheets_after_consecutive_404_failures():
+    # A 404 on /v1/files means the upload route is unavailable while the
+    # Messages/Batches API is healthy, so every 404'd sheet is digested INLINE
+    # (base64, one synchronous vision call) instead of lost. After three
+    # consecutive 404s the doomed upload attempts stop and the remaining sheets
+    # go straight to the inline path — no sheet is dropped, only uploads stop.
     client = _FakeClient(_succeed)
-    client.files = _CountingBrokenFiles()
+    client.files = _CountingBrokenFiles()  # every upload 404s
     client.beta.files = client.files
 
     _, digests = _run_batch(client, [_make_sheet(i) for i in range(6)])
 
-    # Each tripping sheet failed on its first image: exactly 3 attempts total.
+    # Uploads stop after the breaker trips at 3; the rest skip the upload.
     assert client.files.attempts == 3
-    assert len(digests) == 6 and not any(d.ok for d in digests)
-    for d in digests[:3]:
-        assert "upload failed" in d.error
-    for d in digests[3:]:
-        assert "upload skipped" in d.error
-        assert "3 consecutive HTTP 404" in d.error
-    # Nothing was submitted — and no batch exists to poll.
+    # Every sheet still produced a digest — inline, via the real-time path.
+    assert len(digests) == 6 and all(d.ok for d in digests)
+    assert len(client.messages_create_calls) == 6
+    # No batch was submitted and nothing was uploaded/left behind.
     assert client.submitted == [] and client.create_calls == []
+    assert client.files.uploaded_ids == [] and client.files.deleted == []
 
 
-def test_submit_404_error_carries_actionable_hint():
-    # "HTTP 404: Not found" alone says nothing about where to look; the sheet
-    # error must name the realistic causes (base-URL/proxy override, beta
-    # header, SDK install) so the operator can act without reading source.
+def test_submit_credential_401_skips_with_actionable_hint():
+    # A 401 is credential-level: an inline request would hit the same rejection,
+    # so the breaker keeps the stop-and-skip behavior. The doomed sheets carry
+    # the actionable hint, and once tripped the rest are skipped with it too.
     client = _FakeClient(_succeed)
-    client.files = _CountingBrokenFiles()
+    client.files = _CountingBrokenFiles(exc_type=_Credential401)
     client.beta.files = client.files
 
-    _, digests = _run_batch(client, [_make_sheet(1)])
+    _, digests = _run_batch(client, [_make_sheet(i) for i in range(5)])
 
-    assert not digests[0].ok
-    assert "ANTHROPIC_BASE_URL" in digests[0].error
-    assert "files-api-2025-04-14" in digests[0].error
+    assert client.files.attempts == 3  # breaker stops further uploads
+    assert not any(d.ok for d in digests)
+    assert len(client.messages_create_calls) == 0  # never inlined
+    for d in digests[:3]:
+        assert "upload failed" in d.error and "rotate the key" in d.error
+    for d in digests[3:]:
+        assert "upload skipped" in d.error and "3 consecutive HTTP 401" in d.error
+    assert client.submitted == [] and client.create_calls == []
 
 
 def test_submit_payload_4xx_does_not_trip_the_breaker():
@@ -673,7 +717,8 @@ def test_submit_payload_4xx_does_not_trip_the_breaker():
 def test_submit_breaker_resets_on_successful_upload():
     # The breaker's contract is CONSECUTIVE failures. A successful upload in
     # between proves the Files API is reachable, so 404 / ok / 404 / ok / 404
-    # must NOT trip it — every sheet still gets its own attempt.
+    # must NOT trip the all-inline switch — each 404'd sheet is inlined
+    # individually while the reachable sheets keep uploading as batch items.
     class _IntermittentFiles(_FakeFiles):
         """404 on chosen attempt numbers (1-based); succeed otherwise."""
 
@@ -696,14 +741,17 @@ def test_submit_breaker_resets_on_successful_upload():
 
     _, digests = _run_batch(client, [_make_sheet(i) for i in range(6)])
 
-    assert [d.ok for d in digests] == [False, True, False, True, False, True]
+    # Every sheet resolves OK: 0/2/4 inlined, 1/3/5 uploaded as batch items.
+    assert all(d.ok for d in digests)
+    assert len(client.messages_create_calls) == 3  # the three 404'd sheets
+    assert len(client.submitted) == 3  # every reachable sheet became an item
     assert not any(d.error and "upload skipped" in d.error for d in digests)
-    assert len(client.submitted) == 3  # every successful sheet became an item
 
 
 def test_submit_breaker_still_serves_cache_hits(tmp_path):
-    # With uploads disabled, a sheet whose digest is already cached must still
-    # resolve from the cache — the breaker only stops Files-API calls.
+    # A sheet whose digest is already cached must resolve from the cache even
+    # when the Files API is down — the cache check sits ahead of both the upload
+    # and the inline fallback, so a cached sheet costs nothing either way.
     cache = DigestCache(tmp_path / "cache.json")
     warm_client = _FakeClient(_succeed)
     _run_batch(warm_client, [_make_sheet(9)], cache=cache)  # seed sheet 9
@@ -712,15 +760,74 @@ def test_submit_breaker_still_serves_cache_hits(tmp_path):
     client.files = _CountingBrokenFiles()
     client.beta.files = client.files
 
-    # Three doomed sheets trip the breaker; the cached sheet follows.
+    # Three uncached sheets 404 and are inlined; the cached sheet is served free.
     _, digests = _run_batch(
         client, [_make_sheet(0), _make_sheet(1), _make_sheet(2), _make_sheet(9)],
         cache=cache,
     )
 
     assert client.files.attempts == 3
-    assert [d.ok for d in digests] == [False, False, False, True]
-    assert digests[3].cached
+    assert all(d.ok for d in digests)
+    assert len(client.messages_create_calls) == 3  # the three uncached sheets
+    assert digests[3].cached and not any(d.cached for d in digests[:3])
+
+
+def test_submit_inline_fallback_coexists_with_uploaded_sheets():
+    # The Files API works for the first sheet, then starts 404ing. The uploaded
+    # sheet rides the batch (file_id); the 404'd sheets are inlined. Both
+    # resolve, and only the uploaded sheet's files are cleaned up.
+    class _DiesAfterFirstSheet(_FakeFiles):
+        """Upload OK for the first ``ok_uploads`` images, then 404 every upload."""
+
+        def __init__(self, ok_uploads: int):
+            super().__init__()
+            self.ok_uploads = ok_uploads
+            self.attempts = 0
+
+        def upload(self, *, file):
+            self.attempts += 1
+            if self.attempts <= self.ok_uploads:
+                return super().upload(file=file)
+            raise _RouteLevel404()
+
+    client = _FakeClient(_succeed)
+    # 2x2 sheets = 5 images each; let the first sheet's 5 images land, then die.
+    client.files = _DiesAfterFirstSheet(ok_uploads=5)
+    client.beta.files = client.files
+
+    _, digests = _run_batch(client, [_make_sheet(i) for i in range(4)])
+
+    assert all(d.ok for d in digests)
+    assert len(client.submitted) == 1  # only sheet 0 became a batch item
+    assert len(client.messages_create_calls) == 3  # sheets 1-3 inlined
+    # Only the uploaded sheet's images exist and are cleaned up afterwards.
+    assert len(client.files.uploaded_ids) == 5
+    assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids)
+
+
+def test_submit_inline_fallback_digest_is_cached(tmp_path):
+    # An inlined sheet's digest is written to the cache under the SAME key a
+    # batch digest would use, so a later run is served from cache — proving the
+    # fallback path stays cache-compatible with the Files-API path.
+    cache = DigestCache(tmp_path / "cache.json")
+    client = _FakeClient(_succeed)
+    client.files = _CountingBrokenFiles()  # every upload 404s -> inline
+    client.beta.files = client.files
+
+    _, first = _run_batch(client, [_make_sheet(7)], cache=cache)
+    assert first[0].ok and not first[0].cached
+    assert client.files.attempts == 1 and len(client.messages_create_calls) == 1
+
+    # Re-run against a still-broken Files API: the cache hit serves the sheet,
+    # so neither an upload nor an inline call is made.
+    client2 = _FakeClient(_succeed)
+    client2.files = _CountingBrokenFiles()
+    client2.beta.files = client2.files
+    _, second = _run_batch(client2, [_make_sheet(7)], cache=cache)
+
+    assert second[0].ok and second[0].cached
+    assert client2.files.attempts == 0  # never even attempted an upload
+    assert len(client2.messages_create_calls) == 0  # served from cache
 
 
 # --------------------------------------------------------------------------- #

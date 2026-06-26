@@ -19,6 +19,19 @@ re-run is served from the digest cache and never enters the batch. Results are
 assembled in page order regardless of completion order. Per-sheet failures
 (upload error, batch item ``errored``/``expired``) are captured on that sheet's
 :class:`SheetDigest` and never abort the rest of the set.
+
+Files-API outage fallback: if a sheet's image upload comes back ``404`` (the
+/v1/files route is unavailable for the key/workspace while the Messages/Batches
+API itself is healthy), that sheet is digested *inline* via the real-time path
+(:func:`~drawing_analyzer.digest.digest_sheet`, base64 images in one synchronous
+vision request) and its result is attached straight to the slot — so a dead
+Files API degrades the run to per-sheet inline digests instead of zeroing it
+out. After a few consecutive 404s the doomed upload attempts stop and every
+remaining sheet goes straight to the inline path. The inline digest is the same
+shape (and shares the same cache key) as a batch digest; it just forgoes the
+50% batch discount, which is the right trade when the alternative is no result.
+A 401/403 upload rejection is credential-level — an inline request would fail
+identically — so those keep the original stop-and-skip behavior.
 """
 from __future__ import annotations
 
@@ -40,6 +53,7 @@ from .digest import (
     _message_text,
     _message_usage,
     build_digest_request_params,
+    digest_sheet,
     focus_cache_fragment,
     normalize_focus,
 )
@@ -48,6 +62,7 @@ from .file_upload import (
     FILES_API_BETA,
     delete_files,
     run_fatal_upload_status,
+    upload_failure_allows_inline_fallback,
     upload_failure_hint,
     upload_sheet_images,
 )
@@ -389,12 +404,55 @@ def submit_drawing_batch(
     reqs: list[dict] = []
 
     # Upload circuit breaker. After MAX_CONSECUTIVE_FATAL_UPLOAD_FAILURES
-    # sheets in a row fail with the same credential/route-level status,
-    # ``uploads_disabled_error`` is set and the remaining sheets skip the
-    # Files API entirely (cache hits are still served — only uploads stop).
+    # sheets in a row fail with the same credential/route-level status, the
+    # remaining sheets stop attempting the (doomed) upload:
+    #   - 404 (Files API route down, Messages/Batches healthy) -> inline the
+    #     images as base64 instead, via ``inline_fallback_active``. No sheet is
+    #     lost; only the upload round-trips stop.
+    #   - 401/403 (credential) -> ``uploads_disabled_error`` skips the sheet with
+    #     a clear, actionable error, since an inline request would fail the same
+    #     way. Cache hits are still served in either case — only uploads stop.
     fatal_streak = 0
     last_fatal_status: int | None = None
     uploads_disabled_error: str | None = None
+    inline_fallback_active = False
+
+    def _serve_inline(slot: _Slot, sheet) -> None:
+        """Digest a sheet inline (base64, real-time) and resolve its slot.
+
+        The Files-API upload route is unavailable, so the sheet's images ride
+        inline in one synchronous vision request instead of being uploaded and
+        referenced by ``file_id``. The result is attached straight to the slot
+        (exactly like a cache hit), so the sheet never becomes a batch item —
+        which also keeps the inline payload out of the 256 MB batch envelope —
+        and :func:`collect_drawing_batch` resolves it with no special-casing.
+        Reuses :func:`~drawing_analyzer.digest.digest_sheet`, so caching,
+        transient-retry, and error capture match the real-time path; the only
+        cost is forgoing the 50% batch discount for this sheet.
+        """
+        if on_status is not None:
+            on_status(
+                f"[{slot.index + 1}/{total}] Inlining {sheet.ref.display_label} "
+                "(Files API unavailable)"
+            )
+        slot.digest = digest_sheet(
+            sheet,
+            client=client,
+            model=model,
+            max_tokens=max_tokens,
+            use_thinking=use_thinking,
+            effort=effort,
+            cache=cache,
+            focus=focus,
+        )
+        slots.append(slot)
+        verb = "Inlined" if slot.digest.ok else "Inline digest failed for"
+        _log.debug(
+            "sheet %d served inline (Files API unavailable): %s",
+            slot.index, sheet.ref.display_label,
+        )
+        if progress is not None:
+            progress(slot.index + 1, total or 0, f"{verb} {sheet.ref.display_label}")
 
     for index, sheet in enumerate(rendered_sheets):
         image_est = estimate_image_tokens_total(sheet.image_sizes, model=model)
@@ -429,11 +487,19 @@ def submit_drawing_batch(
                     progress(index + 1, total or 0, f"Cached {sheet.ref.display_label}")
                 continue
 
-        # Breaker tripped: the same credential/route-level rejection already hit
-        # several sheets in a row, so this upload is guaranteed to fail too.
-        # Mark the sheet (keeping the per-sheet report complete) without
-        # spending more requests. Sits after the cache check so cached sheets
-        # are still served even when the Files API is unreachable.
+        # Files API confirmed unavailable (consecutive 404s already proved the
+        # /v1/files route is down while Messages/Batches is healthy): inline this
+        # sheet's images as base64 rather than attempt a doomed upload. Sits
+        # after the cache check so cached sheets are still served for free.
+        if inline_fallback_active:
+            _serve_inline(slot, sheet)
+            continue
+
+        # Breaker tripped on a credential rejection (401/403): the same
+        # rejection will hit every remaining upload, and an inline request would
+        # fail identically, so mark the sheet (keeping the per-sheet report
+        # complete) without spending more requests. Sits after the cache check
+        # so cached sheets are still served even when the Files API is dead.
         if uploads_disabled_error is not None:
             slot.digest = SheetDigest(
                 ref=sheet.ref,
@@ -464,14 +530,44 @@ def submit_drawing_batch(
         try:
             upload = upload_sheet_images(client, sheet, on_image=on_image)
         except Exception as exc:  # noqa: BLE001 - one sheet's upload failing is captured, not fatal
-            # Surface the request-id (when the SDK carried one) on the sheet's
-            # error too, so the GUI's per-sheet line — not just the diagnostics
-            # file — names the exact call to quote to Anthropic. A run-fatal
-            # rejection (401/403/404) additionally carries an actionable
-            # diagnosis, because its raw API message ("Not found") says nothing
-            # about where to look.
             rid = request_id_of(exc)
             hint = upload_failure_hint(exc)
+            status = run_fatal_upload_status(exc)
+
+            # A Files-API 404 means the upload route is unavailable while the
+            # Messages/Batches API (this batch's own transport) is healthy, so
+            # inline this sheet's images as base64 rather than lose it. The
+            # breaker still counts the consecutive 404s: once it trips, every
+            # remaining sheet skips the doomed upload and goes straight to the
+            # inline path above. No sheet is dropped — only the upload attempts
+            # stop. (Cache hits never reach here, so they carry no signal.)
+            if upload_failure_allows_inline_fallback(exc):
+                _log.warning(
+                    "sheet %d Files-API upload 404'd; inlining images as base64: "
+                    "%s (%s)",
+                    index, sheet.ref.display_label, summarize_exc(exc),
+                )
+                _serve_inline(slot, sheet)
+                fatal_streak = fatal_streak + 1 if status == last_fatal_status else 1
+                last_fatal_status = status
+                if (
+                    fatal_streak >= MAX_CONSECUTIVE_FATAL_UPLOAD_FAILURES
+                    and not inline_fallback_active
+                ):
+                    inline_fallback_active = True
+                    _log.warning(
+                        "Files API unreachable after %d consecutive HTTP 404 "
+                        "upload failure(s); inlining images as base64 for the "
+                        "remaining sheets%s",
+                        fatal_streak, f" — {hint}" if hint else "",
+                    )
+                continue
+
+            # Credential-level (401/403) or non-fatal failure: capture it on the
+            # sheet and continue. The request-id (when the SDK carried one) and
+            # the actionable hint are surfaced on the sheet error so the GUI's
+            # per-sheet line — not just the diagnostics file — names the exact
+            # call to quote and what to check.
             error = f"image upload failed: {_clean_error(exc)}"
             if rid:
                 error += f" (request-id {rid})"
@@ -495,7 +591,6 @@ def submit_drawing_batch(
             # credential/route-level status trips it; any other failure
             # (transient retries exhausted, payload-shaped 4xx) resets the
             # streak because it says nothing about the next sheet's fate.
-            status = run_fatal_upload_status(exc)
             if status is None:
                 fatal_streak = 0
                 last_fatal_status = None

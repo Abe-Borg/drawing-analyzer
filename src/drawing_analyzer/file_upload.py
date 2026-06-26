@@ -69,20 +69,35 @@ DEFAULT_UPLOAD_MAX_RETRIES = 4
 # rest of the run.
 RUN_FATAL_UPLOAD_STATUSES = frozenset({401, 403, 404})
 
+# Of the run-fatal statuses, the one for which an inline-base64 fallback is a
+# viable substitute. A 404 means the /v1/files *route* is unavailable while the
+# Messages/Batches API — the digest batch's own transport — is healthy, so the
+# sheet's images can ride inline as base64 in a normal vision request instead of
+# being uploaded and referenced by ``file_id``. A 401/403 is a credential-level
+# rejection an inline request would hit identically, so those keep the
+# stop-and-skip behavior; only 404 routes to the fallback.
+INLINE_FALLBACK_UPLOAD_STATUSES = frozenset({404})
+
 # Operator-facing diagnosis per run-fatal status. The 404 text exists because
-# the per-request error ("HTTP 404: Not found") is uniquely unhelpful there:
-# the SDK attaches the required ``anthropic-beta: files-api-2025-04-14`` header
-# on every ``client.beta.files.upload`` call, so the route "not existing" means
-# the request that reached the server was not the one this code built — in
-# practice an ``ANTHROPIC_BASE_URL``/proxy override that doesn't serve (or
-# forward the beta header to) /v1/files, or a different installed ``anthropic``
-# package than the pinned one.
+# the per-request error ("HTTP 404: Not found") is uniquely unhelpful there.
+# The pinned SDK *does* post to ``/v1/files`` with the required
+# ``anthropic-beta: files-api-2025-04-14`` header on every
+# ``client.beta.files.upload`` call (verified against the 0.97.x resource), and
+# the call still comes back with an Anthropic ``request_id`` — so a 404 there is
+# the server declining the route, not a malformed request. In practice that is
+# the Files API not being enabled for the key/workspace, an
+# ``ANTHROPIC_BASE_URL``/proxy override that doesn't forward /v1/files (or strips
+# the beta header), or a different installed ``anthropic`` package than the
+# pinned one. The run no longer dies on it — it inlines the images as base64
+# instead (see ``INLINE_FALLBACK_UPLOAD_STATUSES``) — but the diagnosis is still
+# logged so the underlying misconfiguration stays visible.
 _RUN_FATAL_UPLOAD_HINTS = {
     401: "the API key was rejected — re-enter or rotate the key",
     403: "the API key/workspace lacks permission for the Files API",
     404: (
-        "the Files API endpoint was not found — an ANTHROPIC_BASE_URL/proxy "
-        "override may not serve /v1/files (or may strip the required "
+        "the Files API is not answering /v1/files for this key — most often it "
+        "is not enabled on the workspace, or an ANTHROPIC_BASE_URL/proxy "
+        "override is not forwarding /v1/files (or is stripping the "
         "'anthropic-beta: files-api-2025-04-14' header), or the installed "
         "anthropic SDK differs from the pinned version"
     ),
@@ -104,6 +119,18 @@ def upload_failure_hint(exc: Exception) -> str | None:
     """An actionable diagnosis for a run-fatal upload rejection, else ``None``."""
     status = run_fatal_upload_status(exc)
     return _RUN_FATAL_UPLOAD_HINTS.get(status) if status is not None else None
+
+
+def upload_failure_allows_inline_fallback(exc: Exception) -> bool:
+    """Whether a failed upload can be served by inlining the image as base64.
+
+    True only for a Files-API 404 (see :data:`INLINE_FALLBACK_UPLOAD_STATUSES`):
+    the upload route is unavailable but the Messages/Batches API still works, so
+    the sheet is digested inline instead of lost. A credential-level 401/403
+    would fail an inline request the same way, so it is *not* inline-eligible —
+    the caller keeps the stop-and-skip behavior for those.
+    """
+    return _error_status(exc) in INLINE_FALLBACK_UPLOAD_STATUSES
 
 
 def _file_image_block(file_id: str) -> dict:
