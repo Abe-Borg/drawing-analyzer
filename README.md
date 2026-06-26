@@ -99,7 +99,10 @@ PDFs → list sheets → render (overview + 6×6 tiles) → per-sheet vision dig
 
 - **Batch mode** (`use_batch=True`, the GUI default) digests every uncached sheet
   through the Message Batches API, uploading images via the Files API so no request
-  body approaches the 32 MB limit. ~50% cheaper than real time.
+  body approaches the 32 MB limit. ~50% cheaper than real time. If the Files API is
+  unavailable for your key/workspace (uploads return `404`), each affected sheet
+  falls back to an inline real-time digest so the run still completes instead of
+  producing nothing.
 - **Real-time mode** (`use_batch=False`) digests sheets concurrently on a bounded
   thread pool while rendering stays sequential (PyMuPDF is not thread-safe).
 - **Caching** is content-keyed per sheet, so re-running a set after editing one
