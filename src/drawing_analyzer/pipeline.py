@@ -301,7 +301,10 @@ def _digest_sheets_via_batch(
     # Retry the batch's own per-item failures (server-side 500s/overload,
     # expired items, thinking-ate-the-budget empty digests) in one follow-up
     # batch while the uploaded file_ids are still alive — a real run lost 10
-    # of 33 sheets to exactly these one-shot failures.
+    # of 33 sheets to exactly these one-shot failures. Items the follow-up
+    # batch still can't land (the batch backend itself erroring — a real run
+    # lost all 8 sheets to `api_error` in both rounds) are digested via
+    # synchronous per-item Messages calls on the same file_ids before cleanup.
     return collect_drawing_batch(
         batch,
         client=client,

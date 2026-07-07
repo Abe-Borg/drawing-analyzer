@@ -32,6 +32,18 @@ shape (and shares the same cache key) as a batch digest; it just forgoes the
 50% batch discount, which is the right trade when the alternative is no result.
 A 401/403 upload rejection is credential-level — an inline request would fail
 identically — so those keep the original stop-and-skip behavior.
+
+Batch-backend outage fallback: a collected batch's retryable per-item failures
+are resubmitted as one follow-up batch (:func:`_resubmit_failed_items`) — but
+when the Batches backend *itself* is the sick component, the follow-up rides
+the same sick component and fails identically (a real 8-sheet run watched every
+item fail with ``api_error: Internal Server Error`` in BOTH rounds while the
+same run's ~300 Files-API uploads had just succeeded). Items still failing
+retryably after the follow-up round are therefore rescued via synchronous,
+streamed Messages calls carrying each item's exact request params
+(:func:`_rescue_failed_items_sync`) — the uploaded ``file_id`` references stay
+alive until cleanup, so the rescue bypasses batch processing entirely at the
+cost of the 50% discount for just the rescued sheets.
 """
 from __future__ import annotations
 
@@ -45,13 +57,16 @@ from .core.tokenizer import estimate_image_tokens_total
 from .diagnostics import get_logger, request_id_of, summarize_exc
 from .digest import (
     DEFAULT_DIGEST_EFFORT,
+    DEFAULT_DIGEST_MAX_RETRIES,
     DEFAULT_DIGEST_MAX_TOKENS,
     DIGEST_PROMPT_VERSION,
     SheetDigest,
     _clean_error,
     _get,
+    _is_transient_error,
     _message_text,
     _message_usage,
+    _retry_backoff_seconds,
     build_digest_request_params,
     digest_sheet,
     focus_cache_fragment,
@@ -211,11 +226,19 @@ _PERMANENT_ITEM_ERROR_TYPES = frozenset(
 # ``DEFAULT_DIGEST_MAX_TOKENS`` doesn't bind inside a batch; 64k stays within
 # every whitelisted model's hard output ceiling, and output is billed by
 # actual tokens, so the extra headroom costs nothing unless the sheet uses it.
+# The direct-call rescue can carry this raised cap too because it STREAMS its
+# request (see ``_rescue_failed_items_sync``) — the SDK refuses a plain
+# non-streaming ``create`` whose cap implies >10 minutes of output (a
+# client-side ValueError at ~21k tokens under the default timeout).
 MAX_TOKENS_RETRY_CEILING = 64_000
 
 
 def _item_retry_params(
-    slot: _Slot, result_obj: Any, digest: SheetDigest | None
+    slot: _Slot,
+    result_obj: Any,
+    digest: SheetDigest | None,
+    *,
+    params: dict | None = None,
 ) -> dict | None:
     """The request params to resubmit this slot's failed item with, or ``None``.
 
@@ -225,17 +248,24 @@ def _item_retry_params(
     ``stop_reason=max_tokens`` — adaptive thinking consumed the entire output
     budget before any digest text landed, so that one is resubmitted with the
     cap doubled to leave room for both the thinking and the digest.
+
+    ``params`` is the request the item was LAST submitted with (defaults to
+    ``slot.params``, the primary round's request). The empty-at-``max_tokens``
+    doubling starts from it, so evaluating a follow-up-round failure keeps
+    raising the cap (2x → 4x, bounded by :data:`MAX_TOKENS_RETRY_CEILING`)
+    instead of re-proposing the exact cap that just came back empty.
     """
-    if slot.params is None:
+    params = slot.params if params is None else params
+    if params is None:
         return None
     rtype = _get(result_obj, "type", None)
     if rtype == "expired":
-        return slot.params
+        return params
     if rtype == "errored":
         error = _get(result_obj, "error", None)
         inner = _get(error, "error", error) if error is not None else None
         etype = str(_get(inner, "type", "") or "")
-        return None if etype in _PERMANENT_ITEM_ERROR_TYPES else slot.params
+        return None if etype in _PERMANENT_ITEM_ERROR_TYPES else params
     if (
         rtype == "succeeded"
         and digest is not None
@@ -243,9 +273,125 @@ def _item_retry_params(
         and not digest.text
         and digest.stop_reason == "max_tokens"
     ):
-        old = int(slot.params.get("max_tokens") or DEFAULT_DIGEST_MAX_TOKENS)
-        return {**slot.params, "max_tokens": min(old * 2, MAX_TOKENS_RETRY_CEILING)}
+        old = int(params.get("max_tokens") or DEFAULT_DIGEST_MAX_TOKENS)
+        return {**params, "max_tokens": min(old * 2, MAX_TOKENS_RETRY_CEILING)}
     return None
+
+
+def _rescue_failed_items_sync(
+    rescue: list[tuple[_Slot, dict]],
+    results: list,
+    *,
+    client: Any,
+    cache: Any,
+    sleep: Callable[[float], None],
+    max_elapsed_seconds: float,
+) -> int:
+    """Digest still-failed batch items via synchronous Messages calls.
+
+    The terminal recovery stage, for the one failure the follow-up batch cannot
+    fix: the Batches backend itself erroring server-side. A real 8-sheet run
+    watched every item fail with ``api_error: Internal Server Error`` in BOTH
+    batch rounds while the same run's ~300 Files-API uploads had just succeeded
+    — the batch backend was the sick component, and the follow-up batch rode it
+    straight back into the same failure. Each still-retryable item is re-issued
+    here as one synchronous, *streamed* Messages call
+    (``client.beta.messages.stream``) carrying the item's exact request params
+    (the uploaded ``file_id`` references are still alive — cleanup runs only
+    after recovery), so batch processing is bypassed entirely. Costs the 50%
+    batch discount for just the rescued sheets — the same trade the 404 inline
+    fallback makes when the alternative is no result.
+
+    Sequential and bounded by ``max_elapsed_seconds`` (the remainder of the
+    collect budget). The bound is best-effort in the same sense as the batch
+    poll loop's: it is re-checked before every call *and* before every retry
+    backoff — never mid-call — so the worst overrun is one in-flight request
+    (itself capped by the SDK's own timeout), and once the budget is spent no
+    further sheet is attempted. Sheets not reached keep their batch error. A
+    transient failure on a rescue call is retried with the real-time digest
+    policy (:data:`~drawing_analyzer.digest.DEFAULT_DIGEST_MAX_RETRIES`,
+    exponential backoff); a permanent one keeps that sheet's — fresher —
+    batch error. Returns the number of sheets recovered.
+    """
+    started = time.monotonic()
+    recovered = 0
+    out_of_budget = False
+    for pos, (slot, params) in enumerate(rescue):
+        if out_of_budget or time.monotonic() - started >= max_elapsed_seconds:
+            _log.warning(
+                "direct-call rescue stopped by the collection budget: %d of %d "
+                "sheet(s) not attempted",
+                len(rescue) - pos, len(rescue),
+            )
+            break
+        attempt = 0
+        message = None
+        while True:
+            try:
+                # Streamed rather than a plain ``create``: the rescue may
+                # carry a raised max_tokens cap (up to
+                # ``MAX_TOKENS_RETRY_CEILING``) for an empty-at-max_tokens
+                # item, and the SDK refuses a non-streaming call whose cap
+                # implies >10 minutes of output — a client-side ValueError,
+                # before any HTTP request, at ~21k tokens under the default
+                # timeout (some model overrides carry even lower non-streaming
+                # caps). Streaming lifts that ceiling; ``get_final_message()``
+                # returns the same Message shape ``create`` would have.
+                with client.beta.messages.stream(
+                    **params, betas=[FILES_API_BETA]
+                ) as stream:
+                    message = stream.get_final_message()
+                break
+            except Exception as exc:  # noqa: BLE001 - retried if transient; else the batch error stands
+                if _is_transient_error(exc) and attempt < DEFAULT_DIGEST_MAX_RETRIES:
+                    backoff = _retry_backoff_seconds(attempt)
+                    remaining = max_elapsed_seconds - (time.monotonic() - started)
+                    if backoff >= remaining:
+                        # Sleeping would spend budget no remaining sheet has —
+                        # this sheet keeps its batch error and the stage ends.
+                        out_of_budget = True
+                        _log.warning(
+                            "direct-call rescue out of collection budget "
+                            "mid-retry for %s (%s); keeping the batch error | %s",
+                            slot.custom_id, slot.ref.display_label,
+                            summarize_exc(exc),
+                        )
+                        break
+                    _log.warning(
+                        "direct-call rescue transient error, retry %d/%d in "
+                        "%.0fs: %s (%s) | %s",
+                        attempt + 1, DEFAULT_DIGEST_MAX_RETRIES, backoff,
+                        slot.custom_id, slot.ref.display_label,
+                        summarize_exc(exc),
+                    )
+                    sleep(backoff)
+                    attempt += 1
+                    continue
+                _log.warning(
+                    "direct-call rescue FAILED for %s (%s); keeping the batch "
+                    "error | %s",
+                    slot.custom_id, slot.ref.display_label, summarize_exc(exc),
+                )
+                break
+        if message is None:
+            continue  # the sheet keeps its batch-round error
+        digest = _digest_from_message(slot, message, cache=cache)
+        # Even an empty-digest result is fresher provenance than the batch
+        # error it replaces, and its stop_reason names what happened.
+        results[slot.index] = digest
+        if digest.error is None:
+            recovered += 1
+            _log.info(
+                "direct-call rescue ok: %s (%s) in=%d out=%d",
+                slot.custom_id, slot.ref.display_label,
+                digest.input_tokens, digest.output_tokens,
+            )
+        else:
+            _log.warning(
+                "direct-call rescue returned no digest for %s (%s): %s",
+                slot.custom_id, slot.ref.display_label, digest.error,
+            )
+    return recovered
 
 
 def _resubmit_failed_items(
@@ -277,12 +423,40 @@ def _resubmit_failed_items(
     the round is skipped outright — submitting a batch we won't wait for would
     only strand the uploaded files behind a detach.
 
-    One round only — a second-round failure keeps its (fresher) error rather
-    than looping, so a systemic outage still ends with clean per-sheet errors.
+    One follow-up *batch* only — but an item still failing retryably after it
+    (or a follow-up submit that itself errors) is handed to the direct-call
+    rescue (:func:`_rescue_failed_items_sync`): one synchronous Messages call
+    per item, reusing the same params and still-uploaded ``file_id``s, so a
+    Batches-backend outage no longer zeroes the run. A sheet the rescue can't
+    recover keeps its (fresher) error rather than looping, so a systemic
+    outage still ends with clean per-sheet errors.
     Returns ``True`` when the uploaded files are safe to delete afterwards;
     ``False`` when the follow-up batch detached (still running remotely, so it
     still needs the files — mirroring the primary batch's detach policy).
     """
+    started = time.monotonic()
+
+    def _rescue_remaining(items: list[tuple[_Slot, dict]]) -> None:
+        """Run the direct-call rescue on whatever budget this round has left."""
+        remaining = max_elapsed_seconds - (time.monotonic() - started)
+        _log.info(
+            "digesting %d still-failed batch item(s) via direct Messages calls",
+            len(items),
+        )
+        if on_log is not None:
+            on_log(
+                f"Batch retries exhausted; digesting {len(items)} sheet(s) "
+                "directly"
+            )
+        n = _rescue_failed_items_sync(
+            items, results,
+            client=client, cache=cache, sleep=sleep,
+            max_elapsed_seconds=remaining,
+        )
+        _log.info("direct-call rescue recovered %d/%d sheet(s)", n, len(items))
+        if on_log is not None:
+            on_log(f"Recovered {n} of {len(items)} sheet(s) directly")
+
     retry: list[tuple[_Slot, dict]] = []
     for slot in batch.submitted_slots:
         params = _item_retry_params(
@@ -307,8 +481,15 @@ def _resubmit_failed_items(
     reqs = [{"custom_id": s.custom_id, "params": p} for s, p in retry]
     try:
         mb = client.beta.messages.batches.create(requests=reqs, betas=[FILES_API_BETA])
-    except Exception as exc:  # noqa: BLE001 - recovery is best-effort; first-round errors stand
-        _log.warning("follow-up batch submit failed: %s", summarize_exc(exc))
+    except Exception as exc:  # noqa: BLE001 - recovery is best-effort; unrescued errors stand
+        # The batch backend rejecting even the submit is the strongest signal
+        # yet that batch processing is the sick component — skip straight to
+        # the direct-call rescue instead of giving up.
+        _log.warning(
+            "follow-up batch submit failed: %s; falling back to direct calls",
+            summarize_exc(exc),
+        )
+        _rescue_remaining(retry)
         return True
     retry_id = _get(mb, "id")
     _log.info(
@@ -327,6 +508,21 @@ def _resubmit_failed_items(
         max_elapsed_seconds=max_elapsed_seconds,
     )
     if status not in ("ended", "failed", "expired", "canceled"):
+        if status == "poll_failed":
+            # Repeated retrieve failures are themselves a batch-backend-sick
+            # signal: the follow-up batch's results are unreachable from here
+            # whether or not it is still running, so recover what the budget
+            # allows via the direct calls. Returning False keeps the uploaded
+            # files retained either way — the remote batch may still be
+            # running and referencing them.
+            if on_log is not None:
+                on_log(
+                    f"Follow-up batch unreachable (id={retry_id}); "
+                    "digesting the failed sheets directly",
+                    level="warning",
+                )
+            _rescue_remaining(retry)
+            return False
         if on_log is not None:
             on_log(
                 f"Follow-up batch still running (id={retry_id}); "
@@ -339,19 +535,35 @@ def _resubmit_failed_items(
     for result in client.messages.batches.results(retry_id):
         raw_retry[_get(result, "custom_id")] = result
     recovered = 0
-    for slot, _params in retry:
+    rescue: list[tuple[_Slot, dict]] = []
+    for slot, params in retry:
         res = raw_retry.get(slot.custom_id)
         if res is None:
-            continue  # keep the first-round error
+            # No envelope for the item in the follow-up round. The first-round
+            # error stands for now — but it was retryable (that is why the item
+            # was resubmitted), so the direct-call rescue still gets a shot.
+            rescue.append((slot, params))
+            continue
         digest = _parse_item(slot, res, cache=cache)
         if digest.error is None:
             recovered += 1
         results[slot.index] = digest
+        # An item still failing retryably after BOTH batch rounds is the batch
+        # backend itself erroring — hand it to the direct-call rescue. Passing
+        # the follow-up round's params keeps the empty-at-max_tokens cap
+        # doubling cumulative instead of re-proposing the cap that just failed.
+        again = _item_retry_params(
+            slot, _get(res, "result"), digest, params=params
+        )
+        if again is not None:
+            rescue.append((slot, again))
     _log.info(
         "follow-up batch recovered %d/%d failed sheet(s)", recovered, len(retry)
     )
     if on_log is not None:
         on_log(f"Recovered {recovered} of {len(retry)} failed sheet(s)")
+    if rescue:
+        _rescue_remaining(rescue)
     return True
 
 
@@ -739,6 +951,39 @@ def _poll_until_terminal(
         sleep(_progressive_interval(elapsed))
 
 
+def _digest_from_message(slot: _Slot, message: Any, *, cache: Any) -> SheetDigest:
+    """Parse one Messages-API response into the slot's :class:`SheetDigest`.
+
+    Shared by the batch item parse (:func:`_parse_item`) and the direct-call
+    rescue (:func:`_rescue_failed_items_sync`), so a rescued digest is shaped —
+    and cached, under the same key — exactly as if the batch had returned it.
+    """
+    text = _message_text(message)
+    in_tok, out_tok = _message_usage(message)
+    stop = _get(message, "stop_reason")
+    error = None if text else f"empty digest (stop_reason={stop!r})"
+    if cache is not None and slot.cache_key and error is None and text:
+        cache.put(
+            slot.cache_key,
+            {
+                "text": text,
+                "input_tokens": in_tok,
+                "output_tokens": out_tok,
+                "stop_reason": stop,
+                "created_ts": time.time(),
+            },
+        )
+    return SheetDigest(
+        ref=slot.ref,
+        text=text,
+        input_tokens=in_tok,
+        output_tokens=out_tok,
+        image_token_estimate=slot.image_estimate,
+        stop_reason=stop,
+        error=error,
+    )
+
+
 def _parse_item(slot: _Slot, result: Any, *, cache: Any) -> SheetDigest:
     """Turn one batch result envelope into the sheet's :class:`SheetDigest`."""
     if result is None:
@@ -770,41 +1015,19 @@ def _parse_item(slot: _Slot, result: Any, *, cache: Any) -> SheetDigest:
             error=item_error,
         )
     message = _get(rr, "message")
-    text = _message_text(message)
-    in_tok, out_tok = _message_usage(message)
-    stop = _get(message, "stop_reason")
-    error = None if text else f"empty digest (stop_reason={stop!r})"
-    if error is not None:
+    digest = _digest_from_message(slot, message, cache=cache)
+    if digest.error is not None:
         _log.warning(
             "item %s (%s): empty digest (stop_reason=%r)",
-            slot.custom_id, slot.ref.display_label, stop,
+            slot.custom_id, slot.ref.display_label, digest.stop_reason,
         )
     else:
         _log.debug(
             "item %s (%s) ok: in=%d out=%d stop=%s request_id=%s",
-            slot.custom_id, slot.ref.display_label, in_tok, out_tok, stop,
-            request_id_of(message),
+            slot.custom_id, slot.ref.display_label, digest.input_tokens,
+            digest.output_tokens, digest.stop_reason, request_id_of(message),
         )
-    if cache is not None and slot.cache_key and error is None and text:
-        cache.put(
-            slot.cache_key,
-            {
-                "text": text,
-                "input_tokens": in_tok,
-                "output_tokens": out_tok,
-                "stop_reason": stop,
-                "created_ts": time.time(),
-            },
-        )
-    return SheetDigest(
-        ref=slot.ref,
-        text=text,
-        input_tokens=in_tok,
-        output_tokens=out_tok,
-        image_token_estimate=slot.image_estimate,
-        stop_reason=stop,
-        error=error,
-    )
+    return digest
 
 
 def collect_drawing_batch(
@@ -836,10 +1059,14 @@ def collect_drawing_batch(
     failures (server-side ``api_error``/``overloaded_error``, ``expired``
     items, and the empty-at-``max_tokens`` digest) as ONE follow-up batch
     before cleanup, while the same uploaded ``file_id`` references are still
-    valid — see :func:`_resubmit_failed_items`. The follow-up round runs on
-    whatever remains of this call's ``max_elapsed_seconds`` budget, so opting
-    in never lets a collect block past the bound it was given. The pipeline
-    opts in; direct callers and the unit tests keep the single-round default.
+    valid — see :func:`_resubmit_failed_items`. Items still failing retryably
+    after that round (the Batches backend itself erroring — the outage that
+    once zeroed a run in both rounds) are then digested via synchronous
+    per-item Messages calls reusing the same params and ``file_id``s
+    (:func:`_rescue_failed_items_sync`). Both stages run on whatever remains
+    of this call's ``max_elapsed_seconds`` budget, so opting in never lets a
+    collect block past the bound it was given. The pipeline opts in; direct
+    callers and the unit tests keep the single-round default.
     """
     # Size by the actual slot count (one slot per rendered sheet, indices
     # 0..n-1 in page order) so a divergent display ``total`` can never
