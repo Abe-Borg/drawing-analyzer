@@ -11,6 +11,8 @@ Model identifiers may be overridden via env vars:
     DRAWING_ANALYZER_VERIFICATION_ESCALATION_MODEL — escalation (default Opus 4.8).
     DRAWING_ANALYZER_TRIAGE_MODEL                — verification triage
                                               (default Haiku 4.5).
+    DRAWING_ANALYZER_CHAT_MODEL           — the in-report Q&A assistant
+                                              (default Opus 4.8).
 """
 from __future__ import annotations
 
@@ -48,6 +50,13 @@ VERIFICATION_ESCALATION_MODEL = os.environ.get(
 # whether a finding can be locally resolved or needs web verification. The
 # task is shallow classification over short inputs; Haiku fits.
 TRIAGE_MODEL_DEFAULT = os.environ.get("DRAWING_ANALYZER_TRIAGE_MODEL", MODEL_HAIKU_45)
+
+# The Q&A assistant embedded in the HTML report (html_report.py) calls the API
+# directly from the reader's browser. It needs a model that supports the
+# `web_search_20260209` / `web_fetch_20260209` server tools and adaptive
+# thinking, i.e. the current Opus/Sonnet generation — overriding this to an
+# older model will break the widget's requests.
+CHAT_MODEL_DEFAULT = os.environ.get("DRAWING_ANALYZER_CHAT_MODEL", MODEL_OPUS_48)
 
 
 # Convenience sets for output-cap dispatch. Every Opus family member shares

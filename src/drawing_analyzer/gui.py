@@ -740,7 +740,13 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             return
         try:
             source_names = [p.name for p in self._pdfs]
-            html_doc = build_html_report(self._ctx, source_names=source_names)
+            # The same key that ran the analysis powers the report's built-in
+            # Ask-AI assistant. It is embedded in the HTML so the file works
+            # with no server — which also means the file must not be shared.
+            api_key = os.environ.get("ANTHROPIC_API_KEY") or load_api_key_from_file()
+            html_doc = build_html_report(
+                self._ctx, source_names=source_names, api_key=api_key or None
+            )
             Path(path).write_text(html_doc, encoding="utf-8")
         except Exception as exc:  # noqa: BLE001
             self._log(f"HTML export failed: {exc}", level="error")
@@ -748,6 +754,12 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             return
         self._set_progress_text(f"Saved HTML report to {path}", color=COLORS["success"])
         self._log(f"Saved HTML report to {path}", level="success")
+        if api_key:
+            self._log(
+                "The report includes the Ask-AI assistant; your API key is "
+                "embedded in the file, so don't share it.",
+                level="muted",
+            )
         try:
             self._open_in_os(Path(path))
             self._log("Opened the report in your browser.", level="muted")

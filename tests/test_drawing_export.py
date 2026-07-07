@@ -121,6 +121,23 @@ def test_index_lists_counts_errors_and_files():
     assert "report.html" in index  # the index points operators at the browser view
 
 
+def test_build_export_documents_forwards_api_key_to_html_report_only():
+    key = "sk-ant-test-456"
+    docs = dict(
+        dx.build_export_documents(_make_ctx(), source_names=[SRC], now=NOW, api_key=key)
+    )
+    # The HTML report gains the Q&A assistant (and, by design, the key)…
+    assert 'id="da-chat-config"' in docs["report.html"]
+    assert key in docs["report.html"]
+    # …while the key never leaks into any Markdown deliverable.
+    for name, content in docs.items():
+        if name != "report.html":
+            assert key not in content
+    # Default (no key) keeps the report key-free.
+    plain = dict(dx.build_export_documents(_make_ctx(), source_names=[SRC], now=NOW))
+    assert "da-chat-config" not in plain["report.html"]
+
+
 # --------------------------------------------------------------------------- #
 # write_drawing_export
 # --------------------------------------------------------------------------- #

@@ -25,6 +25,22 @@ Design constraints, mirroring :mod:`drawing_analyzer.export`:
   ``.html`` file the operator can double-click, search, filter, print, or email
   with no server, build step, or internet access.
 
+Optional in-report Q&A assistant
+--------------------------------
+When :func:`build_html_report` is given an ``api_key``, the report additionally
+embeds a chat widget ("Ask AI") that answers questions about the results. It
+calls the Anthropic Messages API **directly from the reader's browser** (no
+server), grounded in the very report text already embedded in the page (the
+``#raw-md`` block), with streaming, adaptive thinking, and the server-side web
+search / web fetch tools enabled. The report block is sent with a prompt-cache
+breakpoint so follow-up questions re-read the (large) report at cache prices.
+
+**The API key is embedded verbatim in the HTML file.** That is the explicit
+design trade-off for a zero-server, double-clickable report: anyone who can
+read the file can read the key. The widget is therefore opt-in (no key → no
+widget, byte-identical to the previous output), and the page shows a "don't
+share this file" notice. The *Python* module still performs no network I/O.
+
 The Markdown→HTML conversion is a small, deliberately-scoped renderer
 (:func:`markdown_to_html`) covering exactly the constructs the digests use —
 headings, ``**bold**``, ``` `code` ```, bullet/numbered lists, GFM pipe tables
@@ -35,10 +51,13 @@ escaped paragraph, so nothing is ever lost.
 from __future__ import annotations
 
 import html
+import json
 import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from .core.api_config import CHAT_MODEL_DEFAULT
 
 # --------------------------------------------------------------------------- #
 # Section categories — the spine of the "isolate what I care about" feature.
@@ -663,7 +682,11 @@ def _raw_html(ctx: Any) -> str:
 
 
 def build_html_report(
-    ctx: Any, *, source_names: list[str], now: datetime | None = None
+    ctx: Any,
+    *,
+    source_names: list[str],
+    now: datetime | None = None,
+    api_key: str | None = None,
 ) -> str:
     """Render a :class:`DrawingContext` to one self-contained HTML document.
 
@@ -671,6 +694,13 @@ def build_html_report(
     the run-summary attributes, embeds all CSS/JS, and returns the full HTML as a
     string. ``source_names`` is listed in the run summary; ``now`` stamps the
     report (defaults to :func:`datetime.now`).
+
+    ``api_key`` — when a non-blank Anthropic API key is given, the report also
+    embeds the in-page Q&A assistant (see the module docstring), **including the
+    key itself in clear text** so the file can call the API from the reader's
+    browser with no server. Pass ``None`` (the default) for the previous,
+    key-free output; the emitted document is then byte-identical to before this
+    feature existed.
     """
     now = now or datetime.now()
     sheets = list(getattr(ctx, "sheets", None) or [])
@@ -711,13 +741,24 @@ def build_html_report(
   verbatim model digest, reorganized for navigation.</footer>
 </main>"""
 
+    chat_css = chat_markup = chat_script = ""
+    if (api_key or "").strip():
+        chat_css = _CHAT_CSS
+        chat_markup = "\n" + _chat_bootstrap_html(
+            api_key=(api_key or "").strip(),
+            title=title,
+            generated=now.strftime("%Y-%m-%d %H:%M"),
+            source_names=source_names,
+        )
+        chat_script = f"<script>{_CHAT_JS}</script>\n"
+
     return (
         "<!DOCTYPE html>\n"
         '<html lang="en">\n<head>\n<meta charset="utf-8">\n'
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
         f"<title>{html.escape(title)}</title>\n"
-        f"<style>{_CSS}</style>\n"
-        f"</head>\n<body>\n{body}\n<script>{_JS}</script>\n</body>\n</html>\n"
+        f"<style>{_CSS}{chat_css}</style>\n"
+        f"</head>\n<body>\n{body}{chat_markup}\n<script>{_JS}</script>\n{chat_script}</body>\n</html>\n"
     )
 
 
@@ -1033,5 +1074,622 @@ _JS = r"""
   });
 
   apply();
+})();
+"""
+
+
+# --------------------------------------------------------------------------- #
+# Optional in-report Q&A assistant ("Ask AI").
+#
+# Everything below is emitted only when build_html_report() is given an API
+# key. The widget is deliberately self-sufficient: it reads its grounding
+# context out of the page's own #raw-md block (the verbatim combined digest) so
+# the large report text is never duplicated into the file, and it talks to the
+# Anthropic Messages API straight from the browser (the API's CORS opt-in
+# header `anthropic-dangerous-direct-browser-access` makes that possible).
+# Request shape: streaming, adaptive thinking with summarized display, the
+# server-side web_search/web_fetch tools, and a prompt-cache breakpoint on the
+# report block so every question after the first re-reads the report at cache
+# prices.
+# --------------------------------------------------------------------------- #
+
+
+def _chat_bootstrap_html(
+    *, api_key: str, title: str, generated: str, source_names: list[str]
+) -> str:
+    """The chat widget's markup + its JSON config block (key, model, run info).
+
+    The config is embedded as a ``type="application/json"`` script and parsed
+    by the widget at startup. ``</`` is escaped to ``<\\/`` (a JSON no-op) so no
+    value — however adversarial a source filename — can close the script tag
+    and inject markup.
+    """
+    config = {
+        "apiKey": api_key,
+        "model": CHAT_MODEL_DEFAULT,
+        "title": title,
+        "generated": generated,
+        "sources": list(source_names),
+    }
+    config_json = json.dumps(config).replace("</", "<\\/")
+    return (
+        f'<script id="da-chat-config" type="application/json">{config_json}</script>'
+        + _CHAT_HTML
+    )
+
+
+_CHAT_HTML = """
+<button id="da-chat-fab" type="button" title="Ask questions about this report">✦ Ask AI</button>
+<section id="da-chat-panel" hidden aria-label="Report Q&amp;A">
+  <header class="da-chat-head">
+    <span class="da-chat-title">Report Q&amp;A</span>
+    <span class="da-chat-model" id="da-chat-model"></span>
+    <button id="da-chat-clear" type="button" class="ghost-btn">New chat</button>
+    <button id="da-chat-close" type="button" aria-label="Close">×</button>
+  </header>
+  <div id="da-chat-msgs">
+    <div class="da-msg da-hint">Ask anything about this drawing set — <em>“What are the
+    biggest conflicts?”</em>, <em>“Which sheets mention VAV-3?”</em>, <em>“Summarize the
+    plumbing coordination items.”</em> Answers are grounded in this report; the assistant
+    can also search the web for codes, standards, and product data.</div>
+  </div>
+  <div class="da-chat-compose">
+    <textarea id="da-chat-input" rows="2" placeholder="Ask about this report…"></textarea>
+    <button id="da-chat-send" type="button">Send</button>
+    <button id="da-chat-stop" type="button" hidden>Stop</button>
+  </div>
+  <div class="da-chat-foot">AI-generated answers — verify against the drawings.
+  This file embeds your API key; don't share it.</div>
+</section>
+"""
+
+_CHAT_CSS = """
+/* ---- In-report Q&A assistant ---- */
+#da-chat-fab{
+  position:fixed; right:22px; bottom:22px; z-index:60;
+  background:var(--accent); color:#fff; border:none; border-radius:999px;
+  padding:12px 18px; font-size:14px; font-weight:600; cursor:pointer;
+  box-shadow:0 4px 16px rgba(31,60,120,.28);
+}
+#da-chat-fab:hover{filter:brightness(1.08)}
+#da-chat-panel{
+  position:fixed; right:22px; bottom:22px; z-index:61;
+  width:430px; max-width:calc(100vw - 44px); height:72vh; min-height:420px;
+  display:flex; flex-direction:column; background:var(--panel);
+  border:1px solid var(--line); border-radius:14px; overflow:hidden;
+  box-shadow:0 12px 40px rgba(15,25,45,.25);
+}
+#da-chat-panel[hidden]{display:none}
+.da-chat-head{
+  display:flex; align-items:center; gap:8px; padding:10px 12px;
+  border-bottom:1px solid var(--line); background:#fbfcfe;
+}
+.da-chat-title{font-weight:700; font-size:14px}
+.da-chat-model{
+  font-size:11px; color:var(--muted); flex:1 1 auto; overflow:hidden;
+  text-overflow:ellipsis; white-space:nowrap;
+}
+#da-chat-close{
+  border:none; background:none; font-size:20px; line-height:1; cursor:pointer;
+  color:var(--muted); padding:2px 6px;
+}
+#da-chat-close:hover{color:var(--ink)}
+#da-chat-msgs{flex:1 1 auto; overflow-y:auto; padding:14px; display:flex; flex-direction:column; gap:10px}
+.da-msg{border-radius:10px; padding:9px 12px; font-size:13.5px; line-height:1.5; max-width:100%; overflow-wrap:break-word}
+.da-hint{background:var(--accent-soft); color:var(--ink)}
+.da-user{background:var(--accent); color:#fff; align-self:flex-end; max-width:88%; white-space:pre-wrap}
+.da-ai{background:#f4f6fa; border:1px solid var(--line); align-self:stretch}
+.da-err{background:var(--conflict-soft); border:1px solid var(--conflict); color:#8d2020}
+.da-note{color:var(--muted); font-size:12px; font-style:italic; margin-top:6px}
+.da-think{margin:2px 0 8px; font-size:12px}
+.da-think summary{cursor:pointer; color:var(--muted)}
+.da-think-body{
+  color:var(--muted); white-space:pre-wrap; border-left:2px solid var(--line);
+  padding:4px 10px; margin-top:4px; max-height:180px; overflow-y:auto;
+}
+.da-tool{
+  display:flex; align-items:center; gap:7px; font-size:12px; color:var(--muted);
+  background:#eef1f6; border-radius:7px; padding:5px 9px; margin:5px 0;
+}
+.da-tool.da-tool-done{color:#3c4655}
+.da-tool.da-tool-err{background:var(--conflict-soft); color:#8d2020}
+.da-cites{margin-left:2px}
+.da-cites a{
+  font-size:10px; background:var(--accent-soft); border-radius:4px; padding:1px 4px;
+  margin-left:2px; vertical-align:super;
+}
+/* markdown inside answers reuses .block's look, scoped smaller */
+.da-md p{margin:6px 0}
+.da-md ul,.da-md ol{margin:6px 0; padding-left:20px}
+.da-md li{margin:2px 0}
+.da-md h1,.da-md h2,.da-md h3,.da-md h4{margin:8px 0 5px; line-height:1.3; font-size:14px}
+.da-md h1{font-size:16px}.da-md h2{font-size:15px}
+.da-md code{background:#e8ecf3; padding:1px 4px; border-radius:4px; font-size:.9em;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",monospace}
+.da-md pre{background:#0f1622; color:#d6e2f5; padding:10px; border-radius:7px; overflow:auto; font-size:12px}
+.da-md pre code{background:none; color:inherit; padding:0}
+.da-md table{border-collapse:collapse; width:100%; margin:8px 0; font-size:12.5px}
+.da-md th,.da-md td{border:1px solid var(--line); padding:4px 7px; text-align:left; vertical-align:top}
+.da-md th{background:#f3f5f9; font-weight:600}
+.da-md blockquote{margin:6px 0; padding:4px 10px; border-left:3px solid var(--line); color:var(--muted)}
+.da-md a{text-decoration:underline}
+.da-chat-compose{
+  display:flex; gap:8px; padding:10px 12px; border-top:1px solid var(--line);
+  background:#fbfcfe; align-items:flex-end;
+}
+#da-chat-input{
+  flex:1 1 auto; resize:none; border:1px solid var(--line); border-radius:8px;
+  padding:8px 10px; font:13.5px/1.4 inherit; color:var(--ink); background:#fff;
+  font-family:inherit;
+}
+#da-chat-input:focus{outline:none; border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft)}
+#da-chat-send,#da-chat-stop{
+  border:none; border-radius:8px; padding:9px 15px; font-size:13px; font-weight:600;
+  cursor:pointer; color:#fff; background:var(--accent);
+}
+#da-chat-send:disabled{opacity:.5; cursor:default}
+#da-chat-stop{background:var(--conflict)}
+.da-chat-foot{
+  font-size:10.5px; color:var(--muted); padding:6px 12px 9px; background:#fbfcfe;
+  border-top:1px solid var(--line);
+}
+@media (max-width:600px){
+  #da-chat-panel{right:0; bottom:0; width:100vw; max-width:100vw; height:92vh; border-radius:14px 14px 0 0}
+}
+@media print{
+  #da-chat-fab,#da-chat-panel{display:none !important}
+}
+"""
+
+_CHAT_JS = r"""
+(function(){
+  'use strict';
+  var cfgEl = document.getElementById('da-chat-config');
+  if(!cfgEl) return;
+  var CFG;
+  try { CFG = JSON.parse(cfgEl.textContent); } catch(e){ return; }
+  if(!CFG || !CFG.apiKey) return;
+
+  var API_URL = 'https://api.anthropic.com/v1/messages';
+  var MAX_CONTINUATIONS = 5;   // pause_turn auto-resumes (server tool loops)
+  var rawEl = document.getElementById('raw-md');
+  var REPORT = rawEl ? rawEl.textContent : '';
+
+  // ---------------------------------------------------------------- markdown
+  // Small renderer mirroring the Python subset the digests use: headings, hr,
+  // blockquotes, pipe tables, fenced code, nested lists, bold/italic/code
+  // spans, plus [text](url) links (answers cite web sources). All input is
+  // escaped first; unknown lines degrade to plain paragraphs.
+  function esc(s){
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+  function inline(s){
+    s = esc(s);
+    var codes = [];
+    s = s.replace(/`([^`]+)`/g, function(_, c){
+      codes.push('<code>' + c + '</code>');
+      return '\x00' + (codes.length - 1) + '\x00';
+    });
+    s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+      '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    s = s.replace(/(^|[^\w*])\*([^\s*](?:[^*]*[^\s*])?)\*(?![\w*])/g, '$1<em>$2</em>');
+    return s.replace(/\x00(\d+)\x00/g, function(_, i){ return codes[+i]; });
+  }
+  var HR_RE = /^\s*([-*_])(?:\s*\1){2,}\s*$/;
+  var LIST_RE = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/;
+  var TABLE_SEP_RE = /^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)+\|?\s*$/;
+  function renderMd(md, depth){
+    depth = depth || 0;
+    if(!md || !md.trim()) return '';
+    var lines = md.replace(/\r\n?/g, '\n').split('\n');
+    var out = [], i = 0, n = lines.length;
+    while(i < n){
+      var line = lines[i], st = line.trim();
+      if(!st){ i++; continue; }
+      if(st.indexOf('```') === 0){
+        var body = []; i++;
+        while(i < n && lines[i].trim().indexOf('```') !== 0){ body.push(lines[i]); i++; }
+        if(i < n) i++;
+        out.push('<pre><code>' + esc(body.join('\n')) + '</code></pre>');
+        continue;
+      }
+      if(HR_RE.test(line)){ out.push('<hr>'); i++; continue; }
+      var h = st.match(/^(#{1,6})\s+(.*)$/);
+      if(h){
+        var lvl = Math.min(h[1].length + 2, 6); // demote: h1 -> h3 inside a bubble
+        out.push('<h' + lvl + '>' + inline(h[2].trim()) + '</h' + lvl + '>');
+        i++; continue;
+      }
+      if(st.charAt(0) === '>' && depth < 3){
+        var quote = [];
+        while(i < n && lines[i].trim().charAt(0) === '>'){
+          quote.push(lines[i].replace(/^\s*>\s?/, '')); i++;
+        }
+        out.push('<blockquote>' + renderMd(quote.join('\n'), depth + 1) + '</blockquote>');
+        continue;
+      }
+      if(line.indexOf('|') !== -1 && i + 1 < n && TABLE_SEP_RE.test(lines[i + 1])){
+        var cells = function(row){
+          return row.trim().replace(/^\||\|$/g, '').split('|').map(function(c){ return c.trim(); });
+        };
+        var head = cells(line);
+        i += 2;
+        var t = ['<table><thead><tr>'];
+        head.forEach(function(c){ t.push('<th>' + inline(c) + '</th>'); });
+        t.push('</tr></thead><tbody>');
+        while(i < n && lines[i].indexOf('|') !== -1 && lines[i].trim()){
+          t.push('<tr>');
+          cells(lines[i]).forEach(function(c){ t.push('<td>' + inline(c) + '</td>'); });
+          t.push('</tr>'); i++;
+        }
+        t.push('</tbody></table>');
+        out.push(t.join(''));
+        continue;
+      }
+      if(LIST_RE.test(line)){
+        // Stack-based nesting (port of the Python renderer's loss-proof list builder).
+        var parts = [], stack = [];
+        while(i < n){
+          var m = lines[i].match(LIST_RE);
+          if(!m) break;
+          var indent = m[1].replace(/\t/g, '    ').length;
+          var tag = (m[2] === '-' || m[2] === '*' || m[2] === '+') ? 'ul' : 'ol';
+          while(stack.length && indent < stack[stack.length - 1].indent){
+            parts.push('</li></' + stack.pop().tag + '>');
+          }
+          if(!stack.length || indent > stack[stack.length - 1].indent){
+            parts.push('<' + tag + '>');
+            stack.push({indent: indent, tag: tag});
+          } else {
+            parts.push('</li>');
+          }
+          parts.push('<li>' + inline(m[3]));
+          i++;
+        }
+        while(stack.length){ parts.push('</li></' + stack.pop().tag + '>'); }
+        out.push(parts.join(''));
+        continue;
+      }
+      var para = [];
+      while(i < n && lines[i].trim() && !isBlockStart(lines, i)){
+        para.push(lines[i].trim()); i++;
+      }
+      out.push('<p>' + para.map(inline).join('<br>') + '</p>');
+    }
+    return out.join('');
+  }
+  function isBlockStart(lines, i){
+    var line = lines[i], st = line.trim();
+    if(st.indexOf('```') === 0 || st.charAt(0) === '>') return true;
+    if(HR_RE.test(line) || /^#{1,6}\s+/.test(st) || LIST_RE.test(line)) return true;
+    return line.indexOf('|') !== -1 && i + 1 < lines.length && TABLE_SEP_RE.test(lines[i + 1]);
+  }
+
+  // ------------------------------------------------------------------ request
+  function systemBlocks(){
+    var preamble =
+      'You are the built-in Q&A assistant of a Drawing Analyzer report — an ' +
+      'AI-generated analysis of a set of construction drawings.\n\n' +
+      'Report: ' + CFG.title + '\nGenerated: ' + CFG.generated +
+      '\nSource file(s): ' + (CFG.sources && CFG.sources.length ? CFG.sources.join(', ') : '(unknown)') +
+      '\n\nThe next system block is the complete report text, verbatim. Ground your answers in it:\n' +
+      '- Answer from the report first, and name the sheet labels / section headers you used ' +
+      '(e.g. "M-501", "Coordination items") so the reader can find them in the page above this chat.\n' +
+      '- You can see only this report, not the drawings themselves. If the report does not contain ' +
+      'the answer, say so plainly — never invent drawing content.\n' +
+      '- Use web_search / web_fetch for outside knowledge (codes, standards, manufacturer or product ' +
+      'data, definitions) or when the user asks you to — not for questions the report already answers.\n' +
+      '- Write for a construction / MEP engineering reader: concise, specific, markdown formatting, ' +
+      'tables for enumerable facts.';
+    return [
+      {type: 'text', text: preamble},
+      // The report is byte-identical on every request, so this breakpoint lets
+      // every question after the first read it from the prompt cache.
+      {type: 'text',
+       text: '=== FULL REPORT (verbatim) ===\n\n' + (REPORT || '(no report text was embedded)'),
+       cache_control: {type: 'ephemeral'}}
+    ];
+  }
+  var history = [];   // alternating {role, content}; assistant content = raw API blocks
+
+  function buildRequest(){
+    return {
+      model: CFG.model,
+      max_tokens: 16000,
+      system: systemBlocks(),
+      thinking: {type: 'adaptive', display: 'summarized'},
+      tools: [
+        {type: 'web_search_20260209', name: 'web_search', max_uses: 8},
+        {type: 'web_fetch_20260209', name: 'web_fetch', max_uses: 8}
+      ],
+      messages: history,
+      stream: true
+    };
+  }
+
+  // ---------------------------------------------------------------------- UI
+  var fab = document.getElementById('da-chat-fab');
+  var panel = document.getElementById('da-chat-panel');
+  var msgs = document.getElementById('da-chat-msgs');
+  var input = document.getElementById('da-chat-input');
+  var sendBtn = document.getElementById('da-chat-send');
+  var stopBtn = document.getElementById('da-chat-stop');
+  var closeBtn = document.getElementById('da-chat-close');
+  var clearBtn = document.getElementById('da-chat-clear');
+  document.getElementById('da-chat-model').textContent = CFG.model + ' · web search · thinking';
+
+  fab.addEventListener('click', function(){ panel.hidden = false; fab.hidden = true; input.focus(); });
+  closeBtn.addEventListener('click', function(){ panel.hidden = true; fab.hidden = false; });
+  clearBtn.addEventListener('click', function(){
+    if(aborter) aborter.abort();
+    history = [];
+    while(msgs.children.length > 1) msgs.removeChild(msgs.lastChild); // keep the hint
+  });
+
+  function nearBottom(){ return msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight < 60; }
+  function scrollDown(force){ if(force || nearBottom()) msgs.scrollTop = msgs.scrollHeight; }
+  function addMsg(cls, text){
+    var div = document.createElement('div');
+    div.className = 'da-msg ' + cls;
+    if(text !== undefined) div.textContent = text;
+    msgs.appendChild(div);
+    scrollDown(true);
+    return div;
+  }
+  function note(parent, text){
+    var d = document.createElement('div');
+    d.className = 'da-note';
+    d.textContent = text;
+    parent.appendChild(d);
+    scrollDown();
+  }
+
+  // ------------------------------------------------------------- SSE plumbing
+  function sseEvents(text, state, onEvent){
+    state.buf += text;
+    var idx;
+    while((idx = state.buf.indexOf('\n\n')) !== -1){
+      var frame = state.buf.slice(0, idx);
+      state.buf = state.buf.slice(idx + 2);
+      var data = '';
+      frame.split('\n').forEach(function(l){
+        if(l.lastIndexOf('data:', 0) === 0) data += l.slice(5).trim();
+      });
+      if(data){
+        var ev = null;
+        try { ev = JSON.parse(data); } catch(e){ /* partial/garbled frame */ }
+        if(ev) onEvent(ev);
+      }
+    }
+  }
+
+  var streaming = false, aborter = null;
+
+  // One POST + SSE read. Appends UI into `bubble`, returns {blocks, stopReason}.
+  function streamOnce(bubble){
+    aborter = new AbortController();
+    return fetch(API_URL, {
+      method: 'POST',
+      signal: aborter.signal,
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': CFG.apiKey,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true'
+      },
+      body: JSON.stringify(buildRequest())
+    }).then(function(resp){
+      if(!resp.ok){
+        return resp.json().catch(function(){ return {}; }).then(function(body){
+          var msg = (body && body.error && body.error.message) || ('HTTP ' + resp.status);
+          if(resp.status === 401) msg = 'The API key embedded in this report was rejected (401). Regenerate the report with a valid key.';
+          if(resp.status === 429) msg = 'Rate limited by the API (429) — wait a moment and try again. ' + msg;
+          throw new Error(msg);
+        });
+      }
+      var st = {
+        buf: '', blocks: [], partial: {}, stopReason: null,
+        els: {}, think: null, mdDirty: {}, toolChips: {}, citeUrls: {}, citeCount: 0
+      };
+      var reader = resp.body.getReader();
+      var decoder = new TextDecoder();
+      function pump(){
+        return reader.read().then(function(r){
+          if(r.done){
+            sseEvents(decoder.decode(), st, function(ev){ handleEvent(ev, st, bubble); });
+            return st;
+          }
+          sseEvents(decoder.decode(r.value, {stream: true}), st, function(ev){ handleEvent(ev, st, bubble); });
+          return pump();
+        });
+      }
+      return pump();
+    });
+  }
+
+  function handleEvent(ev, st, bubble){
+    if(ev.type === 'content_block_start'){
+      st.blocks[ev.index] = JSON.parse(JSON.stringify(ev.content_block));
+      startBlockUI(st, ev.index, bubble);
+    } else if(ev.type === 'content_block_delta'){
+      var b = st.blocks[ev.index], d = ev.delta;
+      if(!b || !d) return;
+      if(d.type === 'text_delta'){
+        b.text = (b.text || '') + d.text;
+        touchText(st, ev.index);
+      } else if(d.type === 'thinking_delta'){
+        b.thinking = (b.thinking || '') + d.thinking;
+        touchThinking(st, ev.index, bubble, b.thinking);
+      } else if(d.type === 'input_json_delta'){
+        st.partial[ev.index] = (st.partial[ev.index] || '') + d.partial_json;
+      } else if(d.type === 'signature_delta'){
+        b.signature = d.signature;
+      } else if(d.type === 'citations_delta' && d.citation){
+        (b.citations = b.citations || []).push(d.citation);
+      }
+    } else if(ev.type === 'content_block_stop'){
+      finishBlock(st, ev.index, bubble);
+    } else if(ev.type === 'message_delta'){
+      if(ev.delta && ev.delta.stop_reason) st.stopReason = ev.delta.stop_reason;
+    } else if(ev.type === 'error'){
+      var err = new Error((ev.error && ev.error.message) || 'stream error');
+      err.mid_stream = true;
+      throw err;
+    }
+  }
+
+  function startBlockUI(st, index, bubble){
+    var b = st.blocks[index];
+    if(b.type === 'text'){
+      var div = document.createElement('div');
+      div.className = 'da-md';
+      bubble.appendChild(div);
+      st.els[index] = div;
+    } else if(b.type === 'server_tool_use'){
+      var chip = document.createElement('div');
+      chip.className = 'da-tool';
+      chip.textContent = b.name === 'web_fetch' ? '🌐 Reading a page…' : '🔍 Searching the web…';
+      bubble.appendChild(chip);
+      st.els[index] = chip;
+      st.toolChips[b.id] = chip;
+    }
+    // thinking gets its element lazily (first non-empty delta), so the
+    // display:"omitted" fallback never shows an empty box.
+    scrollDown();
+  }
+
+  function touchThinking(st, index, bubble, textNow){
+    var el = st.els[index];
+    if(!el){
+      var wrap = document.createElement('details');
+      wrap.className = 'da-think';
+      wrap.innerHTML = '<summary>Thinking…</summary>';
+      var body = document.createElement('div');
+      body.className = 'da-think-body';
+      wrap.appendChild(body);
+      bubble.appendChild(wrap);
+      el = st.els[index] = body;
+    }
+    el.textContent = textNow;
+    scrollDown();
+  }
+
+  function touchText(st, index){
+    if(st.mdDirty[index]) return;
+    st.mdDirty[index] = true;
+    setTimeout(function(){
+      st.mdDirty[index] = false;
+      var b = st.blocks[index], el = st.els[index];
+      if(b && el){ el.innerHTML = renderMd(b.text || ''); scrollDown(); }
+    }, 90);
+  }
+
+  function finishBlock(st, index, bubble){
+    var b = st.blocks[index];
+    if(!b) return;
+    if(st.partial[index] !== undefined){
+      try { b.input = JSON.parse(st.partial[index] || '{}'); } catch(e){ b.input = {}; }
+      delete st.partial[index];
+    }
+    var el = st.els[index];
+    if(b.type === 'text' && el){
+      el.innerHTML = renderMd(b.text || '');
+      if(b.citations && b.citations.length){
+        var span = document.createElement('span');
+        span.className = 'da-cites';
+        b.citations.forEach(function(c){
+          if(!c || !c.url || st.citeUrls[c.url]) return;
+          st.citeUrls[c.url] = ++st.citeCount;
+          var a = document.createElement('a');
+          a.href = c.url; a.target = '_blank'; a.rel = 'noopener';
+          a.textContent = '[' + st.citeUrls[c.url] + ']';
+          a.title = c.title || c.url;
+          span.appendChild(a);
+        });
+        if(span.children.length) el.appendChild(span);
+      }
+    } else if(b.type === 'server_tool_use' && el){
+      var q = b.input && (b.input.query || b.input.url);
+      if(q){
+        try { if(b.input.url) q = new URL(b.input.url).hostname; } catch(e){}
+        el.textContent = (b.name === 'web_fetch' ? '🌐 Reading ' : '🔍 Searching: ') + '“' + q + '”';
+      }
+    } else if(b.type === 'web_search_tool_result' || b.type === 'web_fetch_tool_result'){
+      var chip = st.toolChips[b.tool_use_id];
+      if(chip){
+        if(Array.isArray(b.content)){
+          chip.textContent = '🔍 ' + chip.textContent.replace(/^..\s*/, '') + ' — ' + b.content.length + ' result(s)';
+          chip.className = 'da-tool da-tool-done';
+        } else if(b.content && b.content.error_code){
+          chip.textContent = '⚠ ' + (b.type === 'web_fetch_tool_result' ? 'Fetch' : 'Search') + ' failed: ' + b.content.error_code;
+          chip.className = 'da-tool da-tool-err';
+        } else {
+          chip.className = 'da-tool da-tool-done';
+        }
+      }
+    }
+    scrollDown();
+  }
+
+  // ------------------------------------------------------------ turn driver
+  function setStreaming(on){
+    streaming = on;
+    sendBtn.disabled = on;
+    stopBtn.hidden = !on;
+    if(!on) aborter = null;
+  }
+
+  function runTurn(question){
+    history.push({role: 'user', content: question});
+    addMsg('da-user', question);
+    var bubble = addMsg('da-ai');
+    setStreaming(true);
+    var pushed = false; // any assistant content committed to history yet?
+
+    function step(round){
+      return streamOnce(bubble).then(function(st){
+        var blocks = st.blocks.filter(function(b){ return !!b; });
+        if(blocks.length){ history.push({role: 'assistant', content: blocks}); pushed = true; }
+        if(st.stopReason === 'pause_turn' && round < MAX_CONTINUATIONS){
+          return step(round + 1); // server tool loop paused — resume automatically
+        }
+        if(st.stopReason === 'refusal') note(bubble, 'The model declined to answer this request.');
+        else if(st.stopReason === 'max_tokens') note(bubble, '(Answer truncated — output limit reached.)');
+        else if(!st.stopReason) throw new Error('The stream ended unexpectedly — check your connection and try again.');
+      });
+    }
+
+    step(0).catch(function(err){
+      var aborted = err && (err.name === 'AbortError' || err.code === 20);
+      if(!pushed){
+        history.pop();               // keep history consistent for the next question
+        if(!aborted) input.value = question;   // let the user retry without retyping
+      }
+      if(aborted){
+        note(bubble, '⏹ Stopped.');
+      } else {
+        var msg = (err && err.message) || 'Request failed.';
+        if(err instanceof TypeError) msg = 'Could not reach api.anthropic.com — the assistant needs an internet connection.';
+        addMsg('da-err', msg);
+      }
+    }).then(function(){
+      if(!bubble.childNodes.length) bubble.remove(); // nothing ever rendered
+      setStreaming(false);
+      scrollDown(true);
+    });
+  }
+
+  function send(){
+    var q = input.value.trim();
+    if(!q || streaming) return;
+    input.value = '';
+    runTurn(q);
+  }
+  sendBtn.addEventListener('click', send);
+  stopBtn.addEventListener('click', function(){ if(aborter) aborter.abort(); });
+  input.addEventListener('keydown', function(e){
+    if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); send(); }
+  });
 })();
 """

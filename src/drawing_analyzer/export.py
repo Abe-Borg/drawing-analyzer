@@ -221,7 +221,7 @@ def _index_document(
 
 
 def build_export_documents(
-    ctx: Any, *, source_names: list[str], now: datetime
+    ctx: Any, *, source_names: list[str], now: datetime, api_key: str | None = None
 ) -> list[tuple[str, str]]:
     """Build the ordered ``(filename, content)`` list for an export folder.
 
@@ -232,6 +232,10 @@ def build_export_documents(
     :mod:`drawing_analyzer.html_report`); the Markdown files remain for
     downstream/text use. Pure: no I/O, so it is the unit-testable core of
     :func:`write_drawing_export`.
+
+    ``api_key`` is forwarded to :func:`build_html_report`: when given, the HTML
+    report embeds the in-page Q&A assistant **and the key itself** (see the
+    security note there). Default ``None`` keeps the report key-free.
     """
     sheets = list(getattr(ctx, "sheets", None) or [])
     total = len(sheets)
@@ -240,7 +244,8 @@ def build_export_documents(
     ]
 
     docs: list[tuple[str, str]] = [
-        ("report.html", build_html_report(ctx, source_names=source_names, now=now)),
+        ("report.html",
+         build_html_report(ctx, source_names=source_names, now=now, api_key=api_key)),
         ("00_index.md", _index_document(ctx, source_names=source_names, now=now, sheet_files=sheet_files)),
         ("00_synthesis.md", _synthesis_document(ctx)),
     ]
@@ -266,17 +271,25 @@ def _unique_dir(path: Path) -> Path:
 
 
 def write_drawing_export(
-    ctx: Any, parent_dir: Any, *, source_names: list[str], now: datetime | None = None
+    ctx: Any,
+    parent_dir: Any,
+    *,
+    source_names: list[str],
+    now: datetime | None = None,
+    api_key: str | None = None,
 ) -> Path:
     """Create a named subfolder under ``parent_dir`` and write the export to it.
 
     Returns the created folder ``Path``. The operator picks ``parent_dir``; the
     subfolder is named deterministically (:func:`export_folder_name`) and made
-    unique so a re-run never clobbers a prior export.
+    unique so a re-run never clobbers a prior export. ``api_key`` is forwarded
+    to the HTML report (see :func:`build_export_documents`).
     """
     now = now or datetime.now()
     folder = _unique_dir(Path(parent_dir) / export_folder_name(source_names, now=now))
     folder.mkdir(parents=True, exist_ok=False)
-    for name, content in build_export_documents(ctx, source_names=source_names, now=now):
+    for name, content in build_export_documents(
+        ctx, source_names=source_names, now=now, api_key=api_key
+    ):
         (folder / name).write_text(content, encoding="utf-8")
     return folder

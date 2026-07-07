@@ -17,6 +17,17 @@ reading, diffing, or feeding to anything downstream. The HTML is a lossless
 re-presentation of the same content (it even embeds the verbatim Markdown), so
 nothing the model returned is lost.
 
+The HTML report also includes an **Ask AI** assistant (bottom-right button): a chat
+grounded in the report's own text, so you can ask things like *"what are the biggest
+conflicts?"* or *"which sheets mention VAV-3?"* right inside the file. It streams
+answers, shows its reasoning, and can search / read the web (codes, standards,
+product data) — all by calling the Anthropic API **directly from your browser**;
+there is no server. To make that work with a double-clickable file, **the API key
+that ran the analysis is embedded in the report**, so treat the file like a
+credential: don't email or share it. (Reports generated without a key simply omit
+the assistant.) The chat model defaults to Opus 4.8 and can be overridden with
+`DRAWING_ANALYZER_CHAT_MODEL`.
+
 ## Install
 
 ```bash
