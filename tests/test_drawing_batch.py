@@ -120,25 +120,41 @@ class _FakeBatches:
 
 class _FakeClient:
     def __init__(
-        self, responder, *, status="ended", reverse_results=False, inline_responder=None
+        self,
+        responder,
+        *,
+        status="ended",
+        reverse_results=False,
+        inline_responder=None,
+        rescue_responder=None,
     ):
         self.responder = responder
         self.status = status
         self.reverse_results = reverse_results
         self.inline_responder = inline_responder or _inline_ok
+        self.rescue_responder = rescue_responder or _rescue_ok
         self.create_calls: list[dict] = []
         self.retrieve_calls: list[str] = []
         self.submitted: list[dict] = []
         # Synchronous ``messages.create`` calls (the inline-base64 fallback path).
         self.messages_create_calls: list[dict] = []
+        # Synchronous ``beta.messages.create`` calls (the direct-call rescue).
+        self.rescue_calls: list[dict] = []
         self.files = _FakeFiles()
         batches = _FakeBatches(self)
-        self.beta = _Obj(files=self.files, messages=_Obj(batches=batches))
+        self.beta = _Obj(
+            files=self.files,
+            messages=_Obj(batches=batches, create=self._beta_messages_create),
+        )
         self.messages = _Obj(batches=batches, create=self._messages_create)
 
     def _messages_create(self, **kwargs):
         self.messages_create_calls.append(kwargs)
         return self.inline_responder(kwargs)
+
+    def _beta_messages_create(self, *, betas=None, **kwargs):
+        self.rescue_calls.append({"betas": betas, "params": kwargs})
+        return self.rescue_responder(kwargs)
 
 
 def _succeed(req, *, in_tok=100, out_tok=20):
@@ -163,6 +179,20 @@ def _inline_ok(_kwargs):
     return FakeMessage(
         content=[FakeTextBlock(text="inline digest body")],
         usage=FakeUsage(input_tokens=70, output_tokens=15),
+        stop_reason="end_turn",
+    )
+
+
+def _rescue_ok(_kwargs):
+    """Default ``beta.messages.create`` response for the direct-call rescue.
+
+    The batch-backend outage fallback re-issues a still-failed batch item as
+    one synchronous call on the same params/file_ids; this returns a non-empty
+    digest so the rescued sheet resolves OK.
+    """
+    return FakeMessage(
+        content=[FakeTextBlock(text="rescued digest body")],
+        usage=FakeUsage(input_tokens=90, output_tokens=25),
         stop_reason="end_turn",
     )
 
@@ -970,15 +1000,61 @@ def test_followup_round_shares_the_collect_elapsed_budget(monkeypatch):
     assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids)
 
 
-def test_collect_keeps_fresher_error_when_followup_also_fails():
-    # One round only: a sheet that fails in BOTH rounds ends with a clean
-    # error (no infinite retry loop), and no third batch is created.
+# --------------------------------------------------------------------------- #
+# Direct-call rescue (the batch backend erroring in every round)
+# --------------------------------------------------------------------------- #
+
+
+def _always_errored(req):
+    """Batch responder for a full batch-backend outage: every item errors."""
+    return batch_errored_result(
+        req["custom_id"], error_message="Internal Server Error"
+    )
+
+
+def test_collect_rescues_batch_backend_outage_via_direct_calls():
+    # The incident this guards: EVERY item failed with `api_error: Internal
+    # Server Error` in the primary batch AND the follow-up batch, while the
+    # same run's uploads had all just succeeded — the batch backend was the
+    # sick component, and the run ended 0/8. Items still failing retryably
+    # after the follow-up round must be digested via synchronous
+    # beta.messages.create calls carrying the byte-same params (and the
+    # Files-API beta, since they reference file_ids), with the uploaded files
+    # deleted only after the rescue.
+    client = _FakeClient(_always_errored)
+    batch = submit_drawing_batch(
+        iter([_make_sheet(0), _make_sheet(1)]), client=client, model=OPUS, total=2
+    )
+    digests = collect_drawing_batch(
+        batch, client=client, sleep=NOSLEEP, retry_failed_items=True
+    )
+
+    assert all(d.ok for d in digests)
+    assert len(client.create_calls) == 2  # primary + one follow-up, no third batch
+    assert [c["params"] for c in client.rescue_calls] == [
+        r["params"] for r in client.create_calls[0]["requests"]
+    ]
+    assert all(c["betas"] == [FILES_API_BETA] for c in client.rescue_calls)
+    # The rescued digests carry the direct calls' usage, and the files were
+    # still released exactly once, after the rescue.
+    assert all(d.input_tokens == 90 and d.output_tokens == 25 for d in digests)
+    assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids)
+
+
+def test_rescue_failure_keeps_the_batch_error():
+    # A sheet that fails in both batch rounds AND whose direct call fails
+    # permanently ends with its clean batch error — no infinite retry loop, no
+    # third batch, exactly one direct attempt (a permanent error is not
+    # re-issued).
+    def rescue_responder(_kwargs):
+        raise RuntimeError("still broken")
+
     def responder(req):
         if req["custom_id"] == "sheet__0":
-            return batch_errored_result("sheet__0", error_message="Internal Server Error")
+            return _always_errored(req)
         return _succeed(req)
 
-    client = _FakeClient(responder)
+    client = _FakeClient(responder, rescue_responder=rescue_responder)
     batch = submit_drawing_batch(
         iter([_make_sheet(0), _make_sheet(1)]), client=client, model=OPUS, total=2
     )
@@ -989,6 +1065,198 @@ def test_collect_keeps_fresher_error_when_followup_also_fails():
     assert not digests[0].ok and "Internal Server Error" in digests[0].error
     assert digests[1].ok
     assert len(client.create_calls) == 2
+    assert len(client.rescue_calls) == 1  # only the failed sheet, no retry loop
+    assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids)
+
+
+def test_rescue_retries_transient_error_then_succeeds():
+    # The rescue call itself rides out a transient blip (the same 429/5xx
+    # policy as the real-time digest) instead of abandoning the sheet.
+    state = {"n": 0}
+
+    def rescue_responder(kwargs):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise _Transient503("Overloaded")
+        return _rescue_ok(kwargs)
+
+    slept: list[float] = []
+    client = _FakeClient(_always_errored, rescue_responder=rescue_responder)
+    batch = submit_drawing_batch(
+        iter([_make_sheet(0)]), client=client, model=OPUS, total=1
+    )
+    digests = collect_drawing_batch(
+        batch, client=client, sleep=slept.append, retry_failed_items=True
+    )
+
+    assert digests[0].ok
+    assert len(client.rescue_calls) == 2  # first attempt + one retry
+    assert slept  # backed off between the attempts
+
+
+def test_rescue_skipped_when_followup_rejects_permanently():
+    # Round 1: retryable api_error. Round 2: invalid_request_error — a
+    # permanent request rejection a direct call would only repeat. No direct
+    # call is made and the fresher (permanent) error stands.
+    bad = type(
+        "FakeError", (), {"message": "prompt too long", "type": "invalid_request_error"}
+    )()
+    state = {"round": 0}
+
+    def responder(req):
+        if req["custom_id"] != "sheet__0":
+            return _succeed(req)
+        state["round"] += 1
+        if state["round"] == 1:
+            return _always_errored(req)
+        return FakeBatchResult(
+            custom_id="sheet__0",
+            result=FakeBatchResultEnvelope(type="errored", error=bad),
+        )
+
+    client = _FakeClient(responder)
+    batch = submit_drawing_batch(
+        iter([_make_sheet(0), _make_sheet(1)]), client=client, model=OPUS, total=2
+    )
+    digests = collect_drawing_batch(
+        batch, client=client, sleep=NOSLEEP, retry_failed_items=True
+    )
+
+    assert not digests[0].ok and "prompt too long" in digests[0].error
+    assert digests[1].ok
+    assert client.rescue_calls == []
+
+
+def test_rescue_raises_the_cap_again_after_two_empty_max_tokens_rounds():
+    # Empty-at-max_tokens in BOTH rounds: the follow-up already ran at 2x, so
+    # the direct rescue must double from the follow-up's cap (4x, bounded by
+    # the ceiling) instead of re-proposing the cap that just came back empty.
+    def responder(req):
+        return FakeBatchResult(
+            custom_id=req["custom_id"],
+            result=FakeBatchResultEnvelope(
+                type="succeeded",
+                message=FakeMessage(content=[], stop_reason="max_tokens"),
+            ),
+        )
+
+    client = _FakeClient(responder)
+    batch = submit_drawing_batch(
+        iter([_make_sheet(0)]), client=client, model=OPUS, total=1
+    )
+    digests = collect_drawing_batch(
+        batch, client=client, sleep=NOSLEEP, retry_failed_items=True
+    )
+
+    assert digests[0].ok  # the direct call landed the digest
+    base = client.create_calls[0]["requests"][0]["params"]["max_tokens"]
+    followup = client.create_calls[1]["requests"][0]["params"]["max_tokens"]
+    rescued = client.rescue_calls[0]["params"]["max_tokens"]
+    assert followup == min(base * 2, batch_digest.MAX_TOKENS_RETRY_CEILING)
+    assert rescued == min(followup * 2, batch_digest.MAX_TOKENS_RETRY_CEILING)
+    assert rescued > followup
+
+
+def test_followup_submit_failure_falls_back_to_direct_calls():
+    # The batch backend rejecting even the follow-up submit is the strongest
+    # signal that batch processing is the sick component: recovery must skip
+    # straight to the direct calls instead of giving up.
+    class _SecondCreateFails(_FakeBatches):
+        def __init__(self, client):
+            super().__init__(client)
+            self.creates = 0
+
+        def create(self, *, requests, betas=None):
+            self.creates += 1
+            if self.creates >= 2:
+                raise RuntimeError("batch backend down")
+            return super().create(requests=requests, betas=betas)
+
+    client = _FakeClient(_always_errored)
+    batches = _SecondCreateFails(client)
+    client.beta.messages.batches = batches
+    client.messages.batches = batches
+    batch = submit_drawing_batch(
+        iter([_make_sheet(0)]), client=client, model=OPUS, total=1
+    )
+    digests = collect_drawing_batch(
+        batch, client=client, sleep=NOSLEEP, retry_failed_items=True
+    )
+
+    assert digests[0].ok
+    assert len(client.rescue_calls) == 1
+    assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids)
+
+
+def test_rescue_covers_items_missing_from_the_followup_results():
+    # The follow-up round returns NO envelope for the item. Its first-round
+    # error was retryable (that is why it was resubmitted), so the direct
+    # rescue still gets a shot at it.
+    class _DropsRetryResults(_FakeBatches):
+        def results(self, batch_id):
+            # Primary round serves normally; the follow-up round yields nothing.
+            if len(self._c.create_calls) >= 2:
+                return iter(())
+            return super().results(batch_id)
+
+    client = _FakeClient(_always_errored)
+    batches = _DropsRetryResults(client)
+    client.beta.messages.batches = batches
+    client.messages.batches = batches
+    batch = submit_drawing_batch(
+        iter([_make_sheet(0)]), client=client, model=OPUS, total=1
+    )
+    digests = collect_drawing_batch(
+        batch, client=client, sleep=NOSLEEP, retry_failed_items=True
+    )
+
+    assert digests[0].ok
+    assert len(client.rescue_calls) == 1
+
+
+def test_rescued_digest_is_cached(tmp_path):
+    # A rescued digest is written to the cache under the SAME key the batch
+    # digest would have used, so a later run is served from cache.
+    cache = DigestCache(tmp_path / "cache.json")
+    client = _FakeClient(_always_errored)
+    batch = submit_drawing_batch(
+        iter([_make_sheet(3)]), client=client, model=OPUS, cache=cache, total=1
+    )
+    digests = collect_drawing_batch(
+        batch, client=client, cache=cache, sleep=NOSLEEP, retry_failed_items=True
+    )
+    assert digests[0].ok and not digests[0].cached
+
+    # Re-run: served from cache — no upload, no batch, no rescue call.
+    client2 = _FakeClient(_succeed)
+    _, second = _run_batch(client2, [_make_sheet(3)], cache=cache)
+    assert second[0].ok and second[0].cached
+    assert client2.create_calls == [] and client2.rescue_calls == []
+    assert client2.files.uploaded_ids == []
+
+
+def test_rescue_respects_exhausted_budget():
+    # With no collection budget left the rescue attempts nothing: the batch
+    # errors stand and no direct call is made.
+    client = _FakeClient(_succeed)
+    ref = _make_sheet(0).ref
+    slot = batch_digest._Slot(
+        index=0, ref=ref, image_estimate=5, custom_id="sheet__0",
+        params={"model": OPUS},
+    )
+    failed = batch_digest.SheetDigest(
+        ref=ref, text="", error="api_error: Internal Server Error"
+    )
+    results: list = [failed]
+
+    recovered = batch_digest._rescue_failed_items_sync(
+        [(slot, slot.params)], results,
+        client=client, cache=None, sleep=NOSLEEP, max_elapsed_seconds=0.0,
+    )
+
+    assert recovered == 0
+    assert results[0] is failed
+    assert client.rescue_calls == []
 
 
 # --------------------------------------------------------------------------- #
