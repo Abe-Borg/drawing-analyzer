@@ -1212,6 +1212,34 @@ def test_followup_submit_failure_falls_back_to_direct_calls():
     assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids)
 
 
+def test_followup_poll_failure_falls_back_to_direct_calls():
+    # Ten consecutive retrieve failures on the FOLLOW-UP batch are themselves
+    # a batch-backend-sick signal: its results are unreachable whether or not
+    # it is still running, so the direct rescue must still recover the sheets.
+    # The uploaded files stay retained (the remote batch may still be running
+    # and referencing them) — only the digests are rescued.
+    class _RetrieveDiesOnFollowup(_FakeBatches):
+        def retrieve(self, batch_id):
+            if len(self._c.create_calls) >= 2:
+                raise RuntimeError("batches.retrieve down")
+            return super().retrieve(batch_id)
+
+    client = _FakeClient(_always_errored)
+    batches = _RetrieveDiesOnFollowup(client)
+    client.beta.messages.batches = batches
+    client.messages.batches = batches
+    batch = submit_drawing_batch(
+        iter([_make_sheet(0)]), client=client, model=OPUS, total=1
+    )
+    digests = collect_drawing_batch(
+        batch, client=client, sleep=NOSLEEP, retry_failed_items=True
+    )
+
+    assert digests[0].ok
+    assert len(client.rescue_calls) == 1
+    assert client.files.deleted == []  # retained for the unreachable batch
+
+
 def test_rescue_covers_items_missing_from_the_followup_results():
     # The follow-up round returns NO envelope for the item. Its first-round
     # error was retryable (that is why it was resubmitted), so the direct

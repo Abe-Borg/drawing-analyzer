@@ -508,6 +508,21 @@ def _resubmit_failed_items(
         max_elapsed_seconds=max_elapsed_seconds,
     )
     if status not in ("ended", "failed", "expired", "canceled"):
+        if status == "poll_failed":
+            # Repeated retrieve failures are themselves a batch-backend-sick
+            # signal: the follow-up batch's results are unreachable from here
+            # whether or not it is still running, so recover what the budget
+            # allows via the direct calls. Returning False keeps the uploaded
+            # files retained either way — the remote batch may still be
+            # running and referencing them.
+            if on_log is not None:
+                on_log(
+                    f"Follow-up batch unreachable (id={retry_id}); "
+                    "digesting the failed sheets directly",
+                    level="warning",
+                )
+            _rescue_remaining(retry)
+            return False
         if on_log is not None:
             on_log(
                 f"Follow-up batch still running (id={retry_id}); "
