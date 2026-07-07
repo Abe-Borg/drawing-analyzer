@@ -39,8 +39,8 @@ when the Batches backend *itself* is the sick component, the follow-up rides
 the same sick component and fails identically (a real 8-sheet run watched every
 item fail with ``api_error: Internal Server Error`` in BOTH rounds while the
 same run's ~300 Files-API uploads had just succeeded). Items still failing
-retryably after the follow-up round are therefore rescued via synchronous
-``client.beta.messages.create`` calls carrying each item's exact request params
+retryably after the follow-up round are therefore rescued via synchronous,
+streamed Messages calls carrying each item's exact request params
 (:func:`_rescue_failed_items_sync`) — the uploaded ``file_id`` references stay
 alive until cleanup, so the rescue bypasses batch processing entirely at the
 cost of the 50% discount for just the rescued sheets.
@@ -226,6 +226,10 @@ _PERMANENT_ITEM_ERROR_TYPES = frozenset(
 # ``DEFAULT_DIGEST_MAX_TOKENS`` doesn't bind inside a batch; 64k stays within
 # every whitelisted model's hard output ceiling, and output is billed by
 # actual tokens, so the extra headroom costs nothing unless the sheet uses it.
+# The direct-call rescue can carry this raised cap too because it STREAMS its
+# request (see ``_rescue_failed_items_sync``) — the SDK refuses a plain
+# non-streaming ``create`` whose cap implies >10 minutes of output (a
+# client-side ValueError at ~21k tokens under the default timeout).
 MAX_TOKENS_RETRY_CEILING = 64_000
 
 
@@ -291,24 +295,29 @@ def _rescue_failed_items_sync(
     batch rounds while the same run's ~300 Files-API uploads had just succeeded
     — the batch backend was the sick component, and the follow-up batch rode it
     straight back into the same failure. Each still-retryable item is re-issued
-    here as one synchronous ``client.beta.messages.create`` call carrying the
-    item's exact request params (the uploaded ``file_id`` references are still
-    alive — cleanup runs only after recovery), so batch processing is bypassed
-    entirely. Costs the 50% batch discount for just the rescued sheets — the
-    same trade the 404 inline fallback makes when the alternative is no result.
+    here as one synchronous, *streamed* Messages call
+    (``client.beta.messages.stream``) carrying the item's exact request params
+    (the uploaded ``file_id`` references are still alive — cleanup runs only
+    after recovery), so batch processing is bypassed entirely. Costs the 50%
+    batch discount for just the rescued sheets — the same trade the 404 inline
+    fallback makes when the alternative is no result.
 
     Sequential and bounded by ``max_elapsed_seconds`` (the remainder of the
-    collect budget): the budget is checked before each call, and sheets not
-    reached keep their batch error. A transient failure on a rescue call is
-    retried with the real-time digest policy
-    (:data:`~drawing_analyzer.digest.DEFAULT_DIGEST_MAX_RETRIES`, exponential
-    backoff); a permanent one keeps that sheet's — fresher — batch error.
-    Returns the number of sheets recovered.
+    collect budget). The bound is best-effort in the same sense as the batch
+    poll loop's: it is re-checked before every call *and* before every retry
+    backoff — never mid-call — so the worst overrun is one in-flight request
+    (itself capped by the SDK's own timeout), and once the budget is spent no
+    further sheet is attempted. Sheets not reached keep their batch error. A
+    transient failure on a rescue call is retried with the real-time digest
+    policy (:data:`~drawing_analyzer.digest.DEFAULT_DIGEST_MAX_RETRIES`,
+    exponential backoff); a permanent one keeps that sheet's — fresher —
+    batch error. Returns the number of sheets recovered.
     """
     started = time.monotonic()
     recovered = 0
+    out_of_budget = False
     for pos, (slot, params) in enumerate(rescue):
-        if time.monotonic() - started >= max_elapsed_seconds:
+        if out_of_budget or time.monotonic() - started >= max_elapsed_seconds:
             _log.warning(
                 "direct-call rescue stopped by the collection budget: %d of %d "
                 "sheet(s) not attempted",
@@ -319,13 +328,35 @@ def _rescue_failed_items_sync(
         message = None
         while True:
             try:
-                message = client.beta.messages.create(
+                # Streamed rather than a plain ``create``: the rescue may
+                # carry a raised max_tokens cap (up to
+                # ``MAX_TOKENS_RETRY_CEILING``) for an empty-at-max_tokens
+                # item, and the SDK refuses a non-streaming call whose cap
+                # implies >10 minutes of output — a client-side ValueError,
+                # before any HTTP request, at ~21k tokens under the default
+                # timeout (some model overrides carry even lower non-streaming
+                # caps). Streaming lifts that ceiling; ``get_final_message()``
+                # returns the same Message shape ``create`` would have.
+                with client.beta.messages.stream(
                     **params, betas=[FILES_API_BETA]
-                )
+                ) as stream:
+                    message = stream.get_final_message()
                 break
             except Exception as exc:  # noqa: BLE001 - retried if transient; else the batch error stands
                 if _is_transient_error(exc) and attempt < DEFAULT_DIGEST_MAX_RETRIES:
                     backoff = _retry_backoff_seconds(attempt)
+                    remaining = max_elapsed_seconds - (time.monotonic() - started)
+                    if backoff >= remaining:
+                        # Sleeping would spend budget no remaining sheet has —
+                        # this sheet keeps its batch error and the stage ends.
+                        out_of_budget = True
+                        _log.warning(
+                            "direct-call rescue out of collection budget "
+                            "mid-retry for %s (%s); keeping the batch error | %s",
+                            slot.custom_id, slot.ref.display_label,
+                            summarize_exc(exc),
+                        )
+                        break
                     _log.warning(
                         "direct-call rescue transient error, retry %d/%d in "
                         "%.0fs: %s (%s) | %s",

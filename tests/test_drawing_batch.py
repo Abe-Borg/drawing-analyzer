@@ -138,13 +138,13 @@ class _FakeClient:
         self.submitted: list[dict] = []
         # Synchronous ``messages.create`` calls (the inline-base64 fallback path).
         self.messages_create_calls: list[dict] = []
-        # Synchronous ``beta.messages.create`` calls (the direct-call rescue).
+        # Streamed ``beta.messages.stream`` calls (the direct-call rescue).
         self.rescue_calls: list[dict] = []
         self.files = _FakeFiles()
         batches = _FakeBatches(self)
         self.beta = _Obj(
             files=self.files,
-            messages=_Obj(batches=batches, create=self._beta_messages_create),
+            messages=_Obj(batches=batches, stream=self._beta_messages_stream),
         )
         self.messages = _Obj(batches=batches, create=self._messages_create)
 
@@ -152,9 +152,33 @@ class _FakeClient:
         self.messages_create_calls.append(kwargs)
         return self.inline_responder(kwargs)
 
-    def _beta_messages_create(self, *, betas=None, **kwargs):
+    def _beta_messages_stream(self, *, betas=None, **kwargs):
         self.rescue_calls.append({"betas": betas, "params": kwargs})
-        return self.rescue_responder(kwargs)
+        return _FakeStreamManager(self.rescue_responder, kwargs)
+
+
+class _FakeStreamManager:
+    """Context-manager stand-in for ``beta.messages.stream(...)``.
+
+    Mirrors the SDK: the request is issued on ``__enter__`` (that is where a
+    status/connection error raises) and ``get_final_message()`` returns the
+    accumulated Message.
+    """
+
+    def __init__(self, responder, kwargs):
+        self._responder = responder
+        self._kwargs = kwargs
+        self._message = None
+
+    def __enter__(self):
+        self._message = self._responder(self._kwargs)
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def get_final_message(self):
+        return self._message
 
 
 def _succeed(req, *, in_tok=100, out_tok=20):
@@ -184,10 +208,10 @@ def _inline_ok(_kwargs):
 
 
 def _rescue_ok(_kwargs):
-    """Default ``beta.messages.create`` response for the direct-call rescue.
+    """Default ``beta.messages.stream`` final message for the direct-call rescue.
 
     The batch-backend outage fallback re-issues a still-failed batch item as
-    one synchronous call on the same params/file_ids; this returns a non-empty
+    one streamed call on the same params/file_ids; this returns a non-empty
     digest so the rescued sheet resolves OK.
     """
     return FakeMessage(
@@ -1017,8 +1041,8 @@ def test_collect_rescues_batch_backend_outage_via_direct_calls():
     # Server Error` in the primary batch AND the follow-up batch, while the
     # same run's uploads had all just succeeded — the batch backend was the
     # sick component, and the run ended 0/8. Items still failing retryably
-    # after the follow-up round must be digested via synchronous
-    # beta.messages.create calls carrying the byte-same params (and the
+    # after the follow-up round must be digested via synchronous streamed
+    # beta.messages.stream calls carrying the byte-same params (and the
     # Files-API beta, since they reference file_ids), with the uploaded files
     # deleted only after the rescue.
     client = _FakeClient(_always_errored)
@@ -1257,6 +1281,46 @@ def test_rescue_respects_exhausted_budget():
     assert recovered == 0
     assert results[0] is failed
     assert client.rescue_calls == []
+
+
+def test_rescue_stops_instead_of_sleeping_past_the_budget():
+    # A transient error whose backoff would overrun the remaining collection
+    # budget must NOT be slept through: the failing sheet keeps its batch
+    # error, no backoff sleep happens, and the remaining sheets are not
+    # attempted — the collect bound outranks the retry policy.
+    def rescue_responder(_kwargs):
+        raise _Transient503("Overloaded")
+
+    client = _FakeClient(_succeed, rescue_responder=rescue_responder)
+    ref0, ref1 = _make_sheet(0).ref, _make_sheet(1).ref
+    slots = [
+        batch_digest._Slot(
+            index=i, ref=ref, image_estimate=5, custom_id=f"sheet__{i}",
+            params={"model": OPUS},
+        )
+        for i, ref in enumerate([ref0, ref1])
+    ]
+    failed = [
+        batch_digest.SheetDigest(
+            ref=s.ref, text="", error="api_error: Internal Server Error"
+        )
+        for s in slots
+    ]
+    results: list = list(failed)
+    slept: list[float] = []
+
+    recovered = batch_digest._rescue_failed_items_sync(
+        [(s, s.params) for s in slots], results,
+        client=client, cache=None, sleep=slept.append,
+        # Tiny but non-zero: the first attempt is allowed, but the 2s backoff
+        # after its transient failure exceeds what is left.
+        max_elapsed_seconds=1.0,
+    )
+
+    assert recovered == 0
+    assert slept == []  # never slept past the bound
+    assert len(client.rescue_calls) == 1  # sheet 0 attempted once; sheet 1 never
+    assert results[0] is failed[0] and results[1] is failed[1]
 
 
 # --------------------------------------------------------------------------- #
