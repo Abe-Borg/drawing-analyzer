@@ -294,3 +294,52 @@ def test_focus_card_body_survives_the_focus_filter():
     # The informative pill still reflects the keyword classification, so the
     # conflict section inside the report keeps its Conflicts tag.
     assert "cat-conflict" in card
+
+
+# --------------------------------------------------------------------------- #
+# in-report Q&A assistant (opt-in via api_key)
+# --------------------------------------------------------------------------- #
+
+
+def test_report_without_key_has_no_chat_and_no_network_references():
+    doc = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW)
+    assert "da-chat" not in doc
+    assert "api.anthropic.com" not in doc
+    # Blank / whitespace keys behave exactly like no key.
+    blank = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW, api_key="  ")
+    assert blank == doc
+
+
+def test_report_with_key_embeds_the_chat_widget():
+    doc = hr.build_html_report(
+        _make_ctx(), source_names=[SRC], now=NOW, api_key="sk-ant-test-123"
+    )
+    # The config block carries the key + chat model for the browser-side JS.
+    assert 'id="da-chat-config"' in doc
+    assert "sk-ant-test-123" in doc
+    assert hr.CHAT_MODEL_DEFAULT in doc
+    # The widget calls the Messages API directly from the browser (CORS opt-in),
+    # streams, thinks adaptively, and declares the server-side web tools.
+    assert "api.anthropic.com/v1/messages" in doc
+    assert "anthropic-dangerous-direct-browser-access" in doc
+    assert "web_search_20260209" in doc and "web_fetch_20260209" in doc
+    assert "adaptive" in doc
+    # The report block is cache-marked so follow-ups reread it at cache prices.
+    assert "cache_control" in doc
+    # The reader is warned about the embedded key.
+    assert "don't share it" in doc
+
+
+def test_chat_config_cannot_break_out_of_its_script_tag():
+    # `</` in any config value (e.g. a hostile source filename) must be escaped
+    # to `<\/` so it can never close the JSON <script> block early.
+    doc = hr.build_html_report(
+        _make_ctx(),
+        source_names=['evil</script><script>alert(1)//x.pdf'],
+        now=NOW,
+        api_key="sk-ant-test-123",
+    )
+    start = doc.index('id="da-chat-config"')
+    config = doc[start: doc.index("</script>", start)]
+    assert "</" not in config[config.index(">"):]
+    assert "<\\/script" in config
