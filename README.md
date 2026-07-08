@@ -166,6 +166,32 @@ that fails validation (logging the count). A malformed or missing block is never
 fatal — the prose digest still ships; the findings simply come back empty. Parsed
 findings are cached with the digest, so a cached re-run restores them for free.
 
+## Anchoring findings
+
+A finding is only useful on a marked-up drawing if it sits **on the thing it's
+about**. The anchor resolver maps each finding's verbatim `source_quote` back to
+a rectangle on its page (in the PDF's own points), offline and with no model
+call, using a tiered strategy that records which tier fired:
+
+- **EXACT** — the normalized quote matches a run of words verbatim. When the
+  quote appears more than once on the sheet (the *"BATTERY ROOM in two schedule
+  rows"* trap), the occurrence inside the tile the model reported is preferred;
+  if that still doesn't settle it, the finding is flagged `exact_ambiguous`.
+- **FUZZY** — no exact run, but a sliding window of words overlaps the quote's
+  tokens ≥ 85%, or the longest distinctive sub-phrase (≥ 3 tokens) of the quote
+  appears verbatim. Whitespace/linebreak artifacts and Unicode punctuation (dashes,
+  curly quotes, the `2 1/2"` vs `2-1/2"` and `″`/`"` inch marks, the `Ø` diameter
+  symbol) are the usual reason exact fails; normalization folds most of them.
+- **TILE** — a graphics-only finding (empty quote) is anchored to its reported
+  tile's rectangle: coarse, but honest.
+- **UNANCHORED** — a *non-empty* quote that matches nothing anywhere. This is the
+  **hallucination signal**: the finding is kept and flagged, but never clouded by
+  default (a wrong cloud on an issued drawing is worse than a missing one).
+
+Findings the deterministic auditors already placed (the reference audit) arrive
+pre-anchored and are left untouched. Like the tile geometry, the resolver imports
+no PDF engine — it works on the extracted word rectangles alone.
+
 ## Reference audit
 
 Construction sheets constantly point at each other — *"SEE DRAWING F-D-01-1"*,
