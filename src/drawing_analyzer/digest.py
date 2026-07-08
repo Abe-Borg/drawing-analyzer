@@ -536,6 +536,7 @@ def digest_sheet(
             effort=effort,
             use_thinking=use_thinking,
             focus=focus_cache_fragment(focus),
+            sheet_text=sheet.sheet_text,
         )
         hit = cache.get(cache_key)
         if hit is not None:

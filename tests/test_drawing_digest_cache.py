@@ -22,7 +22,9 @@ from tests.fixtures.fake_anthropic import FakeMessage, FakeTextBlock, FakeUsage
 OPUS = "claude-opus-4-8"
 
 
-def _sheet(overview: bytes = b"OVERVIEW", tiles=(b"T0", b"T1")) -> RenderedSheet:
+def _sheet(
+    overview: bytes = b"OVERVIEW", tiles=(b"T0", b"T1"), sheet_text: str = ""
+) -> RenderedSheet:
     ref = SheetRef(
         pdf_path=Path("M-101.pdf"), page_index=0, source_name="M-101.pdf", page_count=1
     )
@@ -33,7 +35,7 @@ def _sheet(overview: bytes = b"OVERVIEW", tiles=(b"T0", b"T1")) -> RenderedSheet
     ]
     return RenderedSheet(
         ref=ref, overview=ov, tiles=tl, page_width_pt=100, page_height_pt=80,
-        rows=len(tl), cols=1,
+        rows=len(tl), cols=1, sheet_text=sheet_text,
     )
 
 
@@ -84,6 +86,21 @@ def test_key_changes_with_content_model_and_params():
     assert _key(_sheet(), max_tokens=8000) != base
     assert _key(_sheet(), effort="low") != base
     assert _key(_sheet(), use_thinking=False) != base
+
+
+def test_key_folds_in_sheet_text():
+    base = _key(_sheet())  # no sheet_text -> not folded
+    # Same rendered pixels, different text layer (the corrected-OCR case, where
+    # a hidden text layer changes without re-rendering) must yield a new key.
+    assert _key(_sheet(), sheet_text="flow test 540") != _key(
+        _sheet(), sheet_text="flow test 660"
+    )
+    # Adding text where there was none also changes the key.
+    assert _key(_sheet(), sheet_text="VAV-3") != base
+    # Empty / absent text leaves the key byte-identical: a raster sheet keys on
+    # its pixels, and empty text implies the (different) raster render target.
+    assert _key(_sheet(), sheet_text="") == base
+    assert _key(_sheet(), sheet_text=None) == base
 
 
 # --------------------------------------------------------------------------- #
@@ -170,6 +187,23 @@ def test_digest_sheet_cache_miss_on_model_change():
     # Different model → different key → another API call.
     sd = digest_sheet(_sheet(), client=client, model="claude-sonnet-4-6", cache=cache)
     assert sd.cached is False
+    assert client.calls == 2
+
+
+def test_digest_sheet_cache_miss_on_sheet_text_change():
+    cache = DigestCache(None, persist=False)
+    client = _CountingClient(_ok_response)
+
+    digest_sheet(_sheet(sheet_text="flow test 540"), client=client, model=OPUS, cache=cache)
+    assert client.calls == 1
+    # Identical rendered pixels but a corrected text layer (hidden-OCR fix) →
+    # different key → re-digest rather than serving the stale digest.
+    sd = digest_sheet(_sheet(sheet_text="flow test 660"), client=client, model=OPUS, cache=cache)
+    assert sd.cached is False
+    assert client.calls == 2
+    # Re-running the corrected sheet is now served from cache.
+    again = digest_sheet(_sheet(sheet_text="flow test 660"), client=client, model=OPUS, cache=cache)
+    assert again.cached is True
     assert client.calls == 2
 
 

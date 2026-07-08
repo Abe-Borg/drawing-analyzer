@@ -582,12 +582,15 @@ def estimate_image_tokens_for_set(
 
     Assumes every image (overview + tiles) lands at the per-model cap, which is
     the worst case for a dense sheet at the target render resolution. Uses the
-    long-edge target the request size implies (>20 images -> the many-image
-    target, a margin under the 2000 px hard cap), so the per-image size fed to
-    the estimator matches what the renderer produces.
+    **raster** long-edge target as that per-image size: a sheet's rasterness is
+    unknown before rendering, and a raster sheet renders larger (the raster
+    target) than a vector one (the reduced default), so quoting the raster target
+    keeps this a true upper bound that never under-quotes. Vector sheets — the
+    common case — then render smaller and cost less than quoted, which is the
+    safe direction for a pre-run budget confirmation.
     """
     images_per_sheet = tiling.total_images_for_grid(rows, cols)
-    long_edge = tiling.target_long_edge_px(images_per_sheet)
+    long_edge = tiling.target_long_edge_px(images_per_sheet, is_raster=True)
     # A square image at the long-edge target is the largest area (hence most
     # tokens) the renderer can emit, so it bounds the per-image cost from above.
     per_image = estimate_image_tokens(long_edge, long_edge, model=model)
