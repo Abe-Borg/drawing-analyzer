@@ -305,6 +305,10 @@ def _digest_sheets_via_batch(
     # batch still can't land (the batch backend itself erroring — a real run
     # lost all 8 sheets to `api_error` in both rounds) are digested via
     # synchronous per-item Messages calls on the same file_ids before cleanup.
+    # The same opt-in covers a batch that never terminates at all (two real
+    # runs sat `in_progress` with zero completions for the full 4h bound and
+    # returned nothing): the stuck batch is canceled and every sheet digested
+    # via those direct calls instead of the run coming back empty.
     return collect_drawing_batch(
         batch,
         client=client,
