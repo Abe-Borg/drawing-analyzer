@@ -62,14 +62,24 @@ def digest_cache_key(
     effort: str | None,
     use_thinking: bool,
     focus: str | None = None,
+    sheet_text: str | None = None,
 ) -> str:
     """Content-address one sheet's digest request.
 
-    The rendered images **are** the model's input, so hashing them captures the
-    page content *and* every tiling parameter at once (different rows / cols /
-    overlap → different crops → different bytes → different key). Folding in the
-    model, prompt fingerprint, and output-shaping params means a model swap or a
-    prompt edit re-digests rather than serving a stale cached read.
+    The rendered images are a model input, so hashing them captures the page
+    content *and* every tiling parameter at once (different rows / cols / overlap
+    → different crops → different bytes → different key). Folding in the model,
+    prompt fingerprint, and output-shaping params means a model swap or a prompt
+    edit re-digests rather than serving a stale cached read.
+
+    ``sheet_text`` is the sheet's verbatim vector text layer, now sent in the
+    prompt as a *second* model input. It is normally implied by the pixels (both
+    derive from the same page), but not always: a scanned sheet's hidden OCR
+    layer can be corrected/regenerated **without changing the rendered pixels**,
+    so the text must be folded into the key too or a corrected re-run would serve
+    the stale digest. Folded **only when non-empty**, so a text-free (raster)
+    sheet's key is unaffected — its rendered pixels already key it, and empty
+    text ⟺ raster render target, which changes the pixels anyway.
 
     ``focus`` carries the per-run focus prompt fragment
     (:func:`drawing_analyzer.digest.focus_cache_fragment`) when one is set. It is
@@ -90,6 +100,10 @@ def digest_cache_key(
         h.update(b"\x00")
     if focus:
         h.update(f"focus={focus}".encode("utf-8"))
+        h.update(b"\x00")
+    if sheet_text:
+        h.update(b"sheet_text=")
+        h.update(sheet_text.encode("utf-8"))
         h.update(b"\x00")
     h.update(sheet.overview.png_bytes)
     for tile in sheet.tiles:

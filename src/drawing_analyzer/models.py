@@ -6,8 +6,9 @@ Only :mod:`render` produces these; everything else just consumes them.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -39,7 +40,23 @@ class ImageTile:
 
 @dataclass
 class RenderedSheet:
-    """A sheet rendered to an overview image plus a grid of tile images."""
+    """A sheet rendered to an overview image plus a grid of tile images.
+
+    Beyond the imagery, :mod:`render` also lifts the page's vector text layer
+    (free, lossless) so the digest can be *grounded* in exact strings and later
+    stages can *anchor* findings to on-sheet rectangles:
+
+    - ``sheet_text`` — plain reading-order text (``page.get_text()``), capped and
+      marked ``[TRUNCATED]`` if it runs long. Sent verbatim in the digest prompt.
+    - ``words`` — ``page.get_text("words")`` output (``(x0, y0, x1, y1, word,
+      block, line, word_no)`` tuples, plain Python — no PyMuPDF types leak here).
+      Consumed offline by the anchor resolver; never sent to the model.
+    - ``is_raster`` — ``True`` when ``words`` is empty (a scanned / pasted-raster
+      sheet). Drives the higher raster render target, a prompt disclosure line,
+      and a report badge.
+    - ``omitted_tiles`` — grid positions dropped by blank-tile suppression
+      (populated later; empty by default).
+    """
 
     ref: SheetRef
     overview: ImageTile
@@ -48,6 +65,10 @@ class RenderedSheet:
     page_height_pt: float
     rows: int
     cols: int
+    sheet_text: str = ""
+    words: list[Any] = field(default_factory=list)
+    is_raster: bool = False
+    omitted_tiles: list[tuple[int, int]] = field(default_factory=list)
 
     @property
     def image_sizes(self) -> list[tuple[int, int]]:

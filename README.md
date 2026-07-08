@@ -2,7 +2,8 @@
 
 Extract structured information from a set of construction-drawing PDFs using Claude
 vision. Each PDF page is treated as one *sheet*; every sheet is rendered to an
-overview image plus a 6×6 grid of high-resolution tiles and sent to Claude Opus 4.8
+overview image plus a 6×6 grid of high-resolution tiles — **and its vector text
+layer is extracted and sent verbatim alongside the images** — to Claude Opus 4.8
 in a single vision request, which returns a structured text **digest** of the sheet
 (sheet number, discipline, equipment, tags, notes, schedules, etc.). An optional
 cross-sheet **synthesis** pass reconciles tags and conflicts across the set, and an
@@ -104,10 +105,24 @@ focus was given — `focus` / `focus_report_text`).
 ## How it works
 
 ```
-PDFs → list sheets → render (overview + 6×6 tiles) → per-sheet vision digest
+PDFs → list sheets → render (overview + 6×6 tiles) + extract vector text layer
+     → per-sheet vision digest (images + verbatim text layer)
      → optional cross-sheet synthesis → optional focus report → combined Markdown
 ```
 
+- **Text-layer grounding.** Before rasterizing, each sheet's vector text layer is
+  lifted losslessly (`page.get_text()` — free, ~0.3 s for 8 sheets) and spliced
+  into the digest prompt **verbatim, before the images**, as the source of truth
+  for exact strings (tags, schedule values, note numbers, sheet references). Vector
+  text can't misread a digit the way OCR of a low-resolution embedded raster can,
+  so grounding the read in it is the antidote to that class of error.
+- **Render resolution.** Ordinary (vector) sheets now render each tile at a
+  **1560 px** long edge (down from 1992 px) — the text layer carries the exact
+  strings, so the tiles trade ~40% of their PNG bytes and image tokens for a
+  smaller, cheaper request while staying crisp for note text. **Raster fallback:**
+  a sheet with an *empty* text layer (scanned or pasted-raster) instead renders at
+  **1992 px**, because there the pixels are the only information channel; such
+  sheets are flagged in the run and (later) badged in the report.
 - **Batch mode** (`use_batch=True`, the GUI default) digests every uncached sheet
   through the Message Batches API, uploading images via the Files API so no request
   body approaches the 32 MB limit. ~50% cheaper than real time. If the Files API is
@@ -117,7 +132,10 @@ PDFs → list sheets → render (overview + 6×6 tiles) → per-sheet vision dig
 - **Real-time mode** (`use_batch=False`) digests sheets concurrently on a bounded
   thread pool while rendering stays sequential (PyMuPDF is not thread-safe).
 - **Caching** is content-keyed per sheet, so re-running a set after editing one
-  sheet only re-pays vision for the changed sheet.
+  sheet only re-pays vision for the changed sheet. Note: the new render target
+  changes the rendered PNG bytes (and the digest prompt now carries the text
+  layer), so **every pre-existing cache entry is naturally invalidated** — the
+  first run after this change re-digests each sheet once, then caches as before.
 
 ## Per-run focus
 

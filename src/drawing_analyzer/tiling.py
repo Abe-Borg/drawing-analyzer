@@ -23,17 +23,34 @@ resized. A 6x6 sheet is 36 tiles + 1 overview = 37 images, so the 2000 px hard
 cap applies to every drawing-digest request (Anthropic vision docs, "General
 limits").
 
-We therefore render the long edge a few px *under* the cap, not to it. The
-rasterizer (PyMuPDF) sizes a clipped pixmap by rounding the transformed clip to
-a whole-pixel rectangle — floor the low corner, ceil the high corner (MuPDF
+We therefore render the long edge *under* the cap, not to it. The rasterizer
+(PyMuPDF) sizes a clipped pixmap by rounding the transformed clip to a
+whole-pixel rectangle — floor the low corner, ceil the high corner (MuPDF
 ``fz_round_rect``) — so a tile whose edge doesn't fall on an exact pixel
 boundary after scaling (the common case for interior tiles, whose origins are
 ``cell*r - overlap``) comes out at cap+1 px when rendered "to exactly the cap",
-and the whole request is rejected. ``TARGET_LONG_EDGE_PX_MANY_IMAGES`` bakes in
-a small margin so that can't happen (~272 effective DPI on a 34"x44" E-size
-sheet, vs. ~49 DPI for the whole sheet sent as one image; the margin costs
-<0.5% of linear resolution). This failure mode is invisible to the hermetic
-tests because a fake client never rasterizes or serializes the pixmap.
+and the whole request is rejected.
+
+Two many-image render targets both sit under the cap:
+
+- ``TARGET_LONG_EDGE_PX_DEFAULT`` (1560 px) is the target for an ordinary
+  (vector) sheet. The sheet's machine-extracted text layer is now sent verbatim
+  in the digest prompt as the source of truth for exact strings (tags, schedule
+  values, note numbers), so the tiles no longer have to carry every character at
+  maximum resolution — 1560 px keeps note text legible while cutting PNG bytes
+  and image tokens ~40% vs the legacy 1992 px. It sits far enough under the cap
+  that rounding can never approach it.
+- ``TARGET_LONG_EDGE_PX_RASTER`` (1992 px = cap − 8 px) is the fallback for a
+  sheet with an *empty* text layer (a scanned or pasted-raster sheet), where the
+  pixels are the only information channel and dropping resolution would drop
+  data. It renders a few px under the cap; the 8 px margin covers the proven
+  ``<=1`` px per-axis ``fz_round_rect`` overshoot (~272 effective DPI on a
+  34"x44" E-size sheet, vs. ~49 DPI for the whole sheet sent as one image; the
+  margin costs <0.5% of linear resolution), so a rounded tile can never reach
+  cap+1 and trip the rejection.
+
+This failure mode is invisible to the hermetic tests because a fake client never
+rasterizes or serializes the pixmap.
 """
 from __future__ import annotations
 
@@ -53,18 +70,30 @@ DEFAULT_OVERLAP_FRAC = 0.08
 # module docstring. This is the ceiling, not the render target.
 MANY_IMAGES_LONG_EDGE_CAP_PX = 2000
 
-# Margin subtracted from the cap to pick the render target. The rasterizer
-# rounds a clipped pixmap UP to whole pixels (module docstring), so rendering
-# "to exactly the cap" lands a tile at cap+1 px and trips the rejection. The
-# proven worst-case overshoot is <=1 px per axis; 8 px is generous headroom for
-# any backend/version rounding variance, at <0.5% linear-resolution cost.
+# Margin subtracted from the cap to pick the raster render target. The
+# rasterizer rounds a clipped pixmap UP to whole pixels (module docstring), so
+# rendering "to exactly the cap" lands a tile at cap+1 px and trips the
+# rejection. The proven worst-case overshoot is <=1 px per axis; 8 px is
+# generous headroom for any backend/version rounding variance, at <0.5%
+# linear-resolution cost.
 _MANY_IMAGES_RENDER_MARGIN_PX = 8
 
-# Long-edge render targets. Many-image requests render a margin under the hard
-# cap (above); few-image requests use the full Opus native long edge, because
-# at <=20 images the API downscales an oversized image rather than rejecting it
-# (so no margin is needed — an off-by-one there is harmless).
-TARGET_LONG_EDGE_PX_MANY_IMAGES = MANY_IMAGES_LONG_EDGE_CAP_PX - _MANY_IMAGES_RENDER_MARGIN_PX
+# Long-edge render targets for a many-image (>20) request; both sit under the
+# hard cap above.
+#
+# DEFAULT — an ordinary vector sheet. The verbatim text layer now rides in the
+# digest prompt as the source of truth for exact strings, so the tiles don't
+# have to resolve every character: 1560 px stays crisp for note text while
+# cutting PNG bytes / image tokens ~40% vs the legacy 1992 px target. Far enough
+# under the cap that rounding can never approach it.
+TARGET_LONG_EDGE_PX_DEFAULT = 1560
+# RASTER — a sheet whose text layer is empty (scanned / pasted raster). Pixels
+# are the only channel there, so it renders at the legacy margin-under-cap
+# target rather than dropping resolution outright.
+TARGET_LONG_EDGE_PX_RASTER = MANY_IMAGES_LONG_EDGE_CAP_PX - _MANY_IMAGES_RENDER_MARGIN_PX
+# Few-image (<=20) requests use the full Opus native long edge, because at <=20
+# images the API downscales an oversized image rather than rejecting it (so no
+# margin is needed — an off-by-one there is harmless).
 TARGET_LONG_EDGE_PX_FEW_IMAGES = 2576
 
 # The >20-images rule is a hard threshold in the vision docs.
@@ -95,17 +124,22 @@ class TileRect:
         return self.y1 - self.y0
 
 
-def target_long_edge_px(total_images: int) -> int:
-    """Pick the per-image long-edge *render target* given the request's image count.
+def target_long_edge_px(total_images: int, *, is_raster: bool = False) -> int:
+    """Pick the per-image long-edge *render target* for a request.
 
     >20 images must stay strictly under the hard 2000 px dimension cap (the API
-    rejects anything over it), so this returns ``TARGET_LONG_EDGE_PX_MANY_IMAGES``
-    — a margin below the cap to absorb rasterizer rounding (see module docstring).
-    At <=20 images an oversized image is downscaled rather than rejected, so the
-    full Opus native long edge (``TARGET_LONG_EDGE_PX_FEW_IMAGES``) is safe.
+    rejects anything over it). Within that regime an ordinary (vector) sheet
+    renders at ``TARGET_LONG_EDGE_PX_DEFAULT``: the text layer, sent verbatim in
+    the prompt, carries the exact strings, so the tiles trade resolution for a
+    ~40% smaller payload. A raster sheet (``is_raster`` — empty text layer)
+    instead renders at ``TARGET_LONG_EDGE_PX_RASTER``, a margin below the cap to
+    absorb rasterizer rounding (see module docstring), because there the pixels
+    are the only information channel. At <=20 images an oversized image is
+    downscaled rather than rejected, so the full Opus native long edge
+    (``TARGET_LONG_EDGE_PX_FEW_IMAGES``) is safe.
     """
     if total_images > MANY_IMAGES_THRESHOLD:
-        return TARGET_LONG_EDGE_PX_MANY_IMAGES
+        return TARGET_LONG_EDGE_PX_RASTER if is_raster else TARGET_LONG_EDGE_PX_DEFAULT
     return TARGET_LONG_EDGE_PX_FEW_IMAGES
 
 

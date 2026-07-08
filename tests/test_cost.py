@@ -157,6 +157,26 @@ def test_drawing_estimate_batch_halves_cost():
     assert batch.total_cost == pytest.approx(full.total_cost * BATCH_DISCOUNT)
 
 
+def test_image_token_estimate_uses_the_raster_upper_bound():
+    # A sheet's rasterness is unknown before rendering, and raster sheets render
+    # at the higher target — so the pre-render budget preview must quote the
+    # raster target or it would under-quote a scanned-sheet run. It equals the
+    # raster-target computation and is >= the reduced vector default.
+    from drawing_analyzer import tiling
+    from drawing_analyzer.core.tokenizer import estimate_image_tokens
+    from drawing_analyzer.pipeline import estimate_image_tokens_for_set
+
+    images_per_sheet = tiling.total_images_for_grid(6, 6)  # 37 -> many-image regime
+    raster_edge = tiling.TARGET_LONG_EDGE_PX_RASTER
+    vector_edge = tiling.TARGET_LONG_EDGE_PX_DEFAULT
+    expected = 3 * images_per_sheet * estimate_image_tokens(raster_edge, raster_edge, model=OPUS)
+    vector_bound = 3 * images_per_sheet * estimate_image_tokens(vector_edge, vector_edge, model=OPUS)
+
+    est = estimate_image_tokens_for_set(3, rows=6, cols=6, model=OPUS)
+    assert est == expected
+    assert est >= vector_bound  # never under-quotes the vector render
+
+
 def test_format_prompt_batch_mode_notes_batch_and_latency():
     est = estimate_drawing_set_cost(8, file_count=3, model=OPUS, batch=True)
     msg = format_drawing_cost_prompt(est)
