@@ -170,6 +170,7 @@ def render_sheet(
         sheet_text=sheet_text,
         words=words,
         is_raster=is_raster,
+        overlap_frac=overlap_frac,
     )
 
 

@@ -57,6 +57,10 @@ class RenderedSheet:
       and a report badge.
     - ``omitted_tiles`` — grid positions dropped by blank-tile suppression
       (populated later; empty by default).
+    - ``overlap_frac`` — the fractional tile overlap the sheet was rendered with,
+      retained so the anchor resolver can reconstruct the exact tile rectangles
+      (``tiling.tile_rects``) it needs for tile-preference disambiguation and
+      tile-level anchors. Defaults to the tiling module default.
     """
 
     ref: SheetRef
@@ -70,6 +74,7 @@ class RenderedSheet:
     words: list[Any] = field(default_factory=list)
     is_raster: bool = False
     omitted_tiles: list[tuple[int, int]] = field(default_factory=list)
+    overlap_frac: float = 0.08  # mirrors tiling.DEFAULT_OVERLAP_FRAC
 
     @property
     def image_sizes(self) -> list[tuple[int, int]]:
