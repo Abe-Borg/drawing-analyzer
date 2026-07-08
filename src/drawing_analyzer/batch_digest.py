@@ -84,8 +84,10 @@ from .digest import (
     _retry_backoff_seconds,
     build_digest_request_params,
     digest_sheet,
+    findings_from_cache,
     focus_cache_fragment,
     normalize_focus,
+    parse_findings,
 )
 from .digest_cache import digest_cache_key
 from .file_upload import (
@@ -824,6 +826,7 @@ def submit_drawing_batch(
                     stop_reason=hit.get("stop_reason"),
                     error=None,
                     cached=True,
+                    findings=findings_from_cache(hit, sheet.ref),
                 )
                 slots.append(slot)
                 _log.debug("sheet %d cache hit: %s", index, sheet.ref.display_label)
@@ -1118,11 +1121,14 @@ def _digest_from_message(slot: _Slot, message: Any, *, cache: Any) -> SheetDiges
     rescue (:func:`_rescue_failed_items_sync`), so a rescued digest is shaped —
     and cached, under the same key — exactly as if the batch had returned it.
     """
-    text = _message_text(message)
+    raw_text = _message_text(message)
     in_tok, out_tok = _message_usage(message)
     stop = _get(message, "stop_reason")
-    error = None if text else f"empty digest (stop_reason={stop!r})"
-    if cache is not None and slot.cache_key and error is None and text:
+    error = None if raw_text else f"empty digest (stop_reason={stop!r})"
+    # Same transport-agnostic split as the real-time path: prose (findings block
+    # stripped) becomes ``text``; structured findings ride separately (I-2).
+    text, findings, findings_note = parse_findings(raw_text, slot.ref)
+    if cache is not None and slot.cache_key and error is None and raw_text:
         cache.put(
             slot.cache_key,
             {
@@ -1130,6 +1136,7 @@ def _digest_from_message(slot: _Slot, message: Any, *, cache: Any) -> SheetDiges
                 "input_tokens": in_tok,
                 "output_tokens": out_tok,
                 "stop_reason": stop,
+                "findings": [f.to_dict() for f in findings],
                 "created_ts": time.time(),
             },
         )
@@ -1141,6 +1148,8 @@ def _digest_from_message(slot: _Slot, message: Any, *, cache: Any) -> SheetDiges
         image_token_estimate=slot.image_estimate,
         stop_reason=stop,
         error=error,
+        findings=findings,
+        findings_note=findings_note,
     )
 
 

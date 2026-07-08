@@ -594,7 +594,8 @@ def test_batch_focus_rides_on_system_prompt_only():
 
     p_params = plain.create_calls[0]["requests"][0]["params"]
     f_params = focused.create_calls[0]["requests"][0]["params"]
-    assert p_params["system"] == DIGEST_SYSTEM_PROMPT
+    assert p_params["system"].startswith(DIGEST_SYSTEM_PROMPT)
+    assert FOCUS not in p_params["system"]
     assert f_params["system"].startswith(DIGEST_SYSTEM_PROMPT)
     assert FOCUS in f_params["system"]
     # The user content (and so the uploaded images) is identical either way.
@@ -1687,3 +1688,46 @@ def test_pipeline_use_batch_combines_digests(tmp_path):
     assert ctx.total_input_tokens == 200  # 2 sheets × 100
     assert len(client.create_calls) == 1  # one batch for the set
     assert progress[-1] == (2, 2, "Done")
+
+
+# --------------------------------------------------------------------------- #
+# Structured findings on the batch path (Phase 3)
+# --------------------------------------------------------------------------- #
+
+
+def _findings_block(items):
+    import json as _json
+    return "```json\n" + _json.dumps({"findings": items}) + "\n```"
+
+
+def test_batch_digest_from_message_parses_findings_and_cleans_prose():
+    ref = SheetRef(pdf_path=Path("M-101.pdf"), page_index=0, source_name="M-101.pdf", page_count=1)
+    slot = batch_digest._Slot(index=0, ref=ref, image_estimate=1234)
+    raw = "Sheet M-101 digest.\n\n" + _findings_block([
+        {"sheet_id": "M-101", "category": "code", "severity": "high",
+         "text": "issue", "source_quote": "VAV-3", "tile": [1, 2]},
+    ])
+    sd = batch_digest._digest_from_message(
+        slot, FakeMessage(content=[FakeTextBlock(text=raw)]), cache=None
+    )
+    assert sd.text == "Sheet M-101 digest."          # prose only, block stripped
+    assert "```" not in sd.text
+    assert len(sd.findings) == 1 and sd.findings[0].source_quote == "VAV-3"
+
+
+def test_batch_digest_from_message_caches_findings():
+    ref = SheetRef(pdf_path=Path("M-101.pdf"), page_index=0, source_name="M-101.pdf", page_count=1)
+    slot = batch_digest._Slot(index=0, ref=ref, image_estimate=10)
+    slot.cache_key = "batch-key-1"
+    cache = DigestCache(None, persist=False)
+    raw = "Prose.\n" + _findings_block([
+        {"category": "conflict", "severity": "low", "text": "x"},
+    ])
+    sd = batch_digest._digest_from_message(
+        slot, FakeMessage(content=[FakeTextBlock(text=raw)]), cache=cache
+    )
+    assert len(sd.findings) == 1
+    # The findings are serialized into the cache entry and reconstruct cleanly.
+    from drawing_analyzer.digest import findings_from_cache
+    reconstructed = findings_from_cache(cache.get("batch-key-1"), ref)
+    assert len(reconstructed) == 1 and reconstructed[0].category == "conflict"

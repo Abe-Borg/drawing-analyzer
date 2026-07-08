@@ -186,7 +186,7 @@ def _routing_client(pymupdf_calls: list):
                 content=[FakeTextBlock(text="SET OVERVIEW: VAV-3 spans M-101/M-501")],
                 usage=FakeUsage(input_tokens=300, output_tokens=50),
             )
-        assert kw["system"] == DIGEST_SYSTEM_PROMPT
+        assert kw["system"].startswith(DIGEST_SYSTEM_PROMPT)
         return FakeMessage(
             content=[FakeTextBlock(text="per-sheet digest body")],
             usage=FakeUsage(input_tokens=100, output_tokens=20),
@@ -234,7 +234,7 @@ def test_pipeline_no_synthesis_by_default(tmp_path):
     assert ctx.synthesis_text == ""
     assert "Drawing Set Overview" not in ctx.combined_text
     # No synthesis call was made (only the 2 digest calls).
-    assert all(kw["system"] == DIGEST_SYSTEM_PROMPT for kw in calls)
+    assert all(kw["system"].startswith(DIGEST_SYSTEM_PROMPT) for kw in calls)
     assert len(calls) == 2
 
 

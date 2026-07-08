@@ -77,3 +77,28 @@ def test_finding_defaults_are_unanchored_and_skipped():
     assert f.anchor.status == "UNANCHORED" and f.anchor.rect_pdf is None
     assert f.verification.status == "SKIPPED"
     assert f.tile is None and f.refs == []
+
+
+def test_finding_dict_round_trips_including_id():
+    f = Finding(
+        sheet_id="F-D-01-1", source_name="set.pdf", page_index=2,
+        category="conflict", severity="high", text="VAV-3 conflicts with duct.",
+        source_quote="VAV-3", tile=[4, 5], refs=["CMC 310", "NFPA 90A"],
+        anchor=Anchor(status="TILE", rect_pdf=[10.5, 20.0, 88.0, 33.0], method="tile"),
+        verification=Verification(status="VERIFIED", note="ok", evidence_png="evidence/x.png"),
+    )
+    back = Finding.from_dict(f.to_dict())
+    assert back == f                    # exact round-trip (dataclass equality)
+    assert back.id == f.id              # id preserved, not recomputed
+
+
+def test_finding_from_dict_tolerates_missing_optional_fields():
+    minimal = {
+        "sheet_id": "M-101", "source_name": "s.pdf", "page_index": 0,
+        "category": "code", "severity": "low", "text": "x",
+    }
+    f = Finding.from_dict(minimal)
+    assert f.tile is None and f.refs == []
+    assert f.anchor.status == "UNANCHORED"
+    assert f.verification.status == "SKIPPED"
+    assert f.id  # recomputed from content when absent

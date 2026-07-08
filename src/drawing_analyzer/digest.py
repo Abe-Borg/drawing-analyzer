@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
 from .core.api_config import (
@@ -22,8 +24,11 @@ from .core.api_config import (
     model_supports_effort,
 )
 from .core.tokenizer import estimate_image_tokens_total
+from .diagnostics import get_logger
 from .digest_cache import digest_cache_key
-from .models import ImageTile, RenderedSheet, SheetRef
+from .models import Finding, ImageTile, RenderedSheet, SheetRef
+
+_log = get_logger()
 
 # Room for adaptive thinking plus a thorough per-sheet digest; stays at/under the
 # ~16k non-streaming-safe ceiling so a single sheet completes well within the
@@ -223,9 +228,31 @@ _SHEET_TEXT_LAYER_RASTER_PLACEHOLDER = (
     "[none — this sheet is raster-only; rely on the images]"
 )
 
+# Appended to the *end* of the effective system prompt (after any focus
+# addendum) so the model emits a machine-readable findings block as the very
+# last thing in its output. The prose digest is unchanged and sacred (I-2); the
+# parser (:func:`parse_findings`) strips this block back off before the prose
+# reaches ``combined_text``. Categories deliberately exclude "reference" — that
+# belongs to the deterministic reference auditor, not the model's own read.
+_FINDINGS_INSTRUCTION = """\
+
+
+FINDINGS (final section, machine-read):
+After the digest — after every prose section above, including any Focus \
+findings section — output a single fenced code block labeled json containing \
+{"findings": [ ... ]}. Each finding is an object with: sheet_id; category (one \
+of code, conflict, coordination, question); severity (one of high, medium, \
+low); text (the finding, at most two sentences); source_quote (COPY VERBATIM \
+from the SHEET TEXT LAYER above — exact characters — or "" ONLY if the issue is \
+purely graphical with no supporting text); tile ([row, col] of the tile where \
+you saw it); refs (an array of any code or spec references you believe apply — \
+cite conservatively). Emit at most 40 findings, most important first; emit \
+{"findings": []} if there are none. Put nothing but the JSON object inside the \
+block, and write no prose after it."""
+
 # Folded into the digest cache key so any edit to the prompt, the task
-# instruction, or the text-layer framing re-digests rather than serving a cached
-# read produced under the old prompt.
+# instruction, the text-layer framing, or the findings instruction re-digests
+# rather than serving a cached read produced under the old prompt.
 DIGEST_PROMPT_VERSION = hashlib.sha256(
     (
         DIGEST_SYSTEM_PROMPT
@@ -235,6 +262,8 @@ DIGEST_PROMPT_VERSION = hashlib.sha256(
         + _SHEET_TEXT_LAYER_HEADER
         + "\x00"
         + _SHEET_TEXT_LAYER_RASTER_PLACEHOLDER
+        + "\x00"
+        + _FINDINGS_INSTRUCTION
     ).encode("utf-8")
 ).hexdigest()[:16]
 
@@ -295,12 +324,17 @@ def build_focus_addendum(focus: str) -> str:
 
 
 def digest_system_prompt(focus: str | None = None) -> str:
-    """The effective system prompt: the standard digest prompt, plus the focus
-    addendum when a per-run focus is set."""
+    """The effective system prompt: the standard digest prompt, the focus
+    addendum when a per-run focus is set, then the findings-block instruction.
+
+    The findings instruction is appended **last** (after any focus addendum) so
+    the machine-read JSON block is emitted after every prose section — including
+    the optional ``Focus findings`` section — which is what keeps the parser's
+    "last fenced block" rule unambiguous.
+    """
     focus = normalize_focus(focus)
-    if focus is None:
-        return DIGEST_SYSTEM_PROMPT
-    return DIGEST_SYSTEM_PROMPT + build_focus_addendum(focus)
+    base = DIGEST_SYSTEM_PROMPT if focus is None else DIGEST_SYSTEM_PROMPT + build_focus_addendum(focus)
+    return base + _FINDINGS_INSTRUCTION
 
 
 def focus_cache_fragment(focus: Any) -> str | None:
@@ -449,6 +483,14 @@ class SheetDigest:
     # token counts on a cache hit are the originally-recorded usage; no new
     # tokens were billed.
     cached: bool = False
+    # Structured findings parsed out of the raw response (empty when the model
+    # emitted none or the block failed to parse). ``text`` is the prose with the
+    # findings block already stripped (I-2), so ``findings`` and ``text`` never
+    # overlap. ``findings_note`` is error-adjacent telemetry (dropped/capped/
+    # malformed) that NEVER marks the sheet failed — the prose digest still
+    # shipped, so a findings-parse problem must not touch ``error`` or ``ok``.
+    findings: list[Finding] = field(default_factory=list)
+    findings_note: str = ""
 
     @property
     def ok(self) -> bool:
@@ -486,6 +528,223 @@ def _message_usage(resp: Any) -> tuple[int, int]:
         int(_get(usage, "input_tokens", 0) or 0),
         int(_get(usage, "output_tokens", 0) or 0),
     )
+
+
+# ---------------------------------------------------------------------------
+# Structured findings parsing.
+#
+# The model appends a fenced ``json`` block ({"findings": [...]}) after the
+# prose digest. The parser pulls that block out, validates each item, and hands
+# back the prose with the block removed — so the sacred prose digest (I-2) is
+# byte-identical to a pre-feature response when no block is present, and the
+# structured findings live only in their own artifacts.
+# ---------------------------------------------------------------------------
+
+# At most this many findings per sheet are kept (the instruction asks the model
+# for the same cap; anything beyond is truncated, most-important-first).
+MAX_FINDINGS_PER_SHEET = 40
+
+# Categories the *model* may emit. "reference" is intentionally excluded — that
+# category belongs to the deterministic reference auditor, not the vision read.
+_MODEL_FINDING_CATEGORIES = frozenset({"code", "conflict", "coordination", "question"})
+_FINDING_SEVERITIES = frozenset({"high", "medium", "low"})
+
+# A fenced code block: optional language label, then body up to the closing
+# fence. DOTALL so the body spans lines; non-greedy so blocks don't merge.
+_FENCE_RE = re.compile(r"```[ \t]*([A-Za-z0-9_+-]*)[ \t]*\r?\n(.*?)```", re.DOTALL)
+
+
+def _strip_trailing_commas(s: str) -> str:
+    """Drop commas that sit (ignoring whitespace) right before a ``}`` or ``]``.
+
+    **String-aware**: a comma inside a JSON string literal is never touched, so a
+    verbatim ``source_quote`` like ``"KEYNOTES 3,]"`` survives intact. Only used
+    as a repair pass on JSON that already failed to parse as-is.
+    """
+    out: list[str] = []
+    in_str = False
+    escaped = False
+    n = len(s)
+    for i, ch in enumerate(s):
+        if in_str:
+            out.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+            out.append(ch)
+            continue
+        if ch == ",":
+            j = i + 1
+            while j < n and s[j] in " \t\r\n":
+                j += 1
+            if j < n and s[j] in "}]":
+                continue  # structural trailing comma → drop it
+        out.append(ch)
+    return "".join(out)
+
+
+def _tolerant_json_object(block_body: str) -> dict | None:
+    """Best-effort parse of a JSON object from a fenced block body.
+
+    Tolerant of the small ways models drift: surrounding prose (trim to the
+    outermost ``{...}``) and a trailing comma before a closing brace/bracket.
+    Well-formed JSON is parsed **as-is and never mutated**, so a verbatim
+    ``source_quote`` is preserved exactly; the trailing-comma repair (itself
+    string-aware) runs only when the raw candidate fails to parse. Returns the
+    dict, or ``None`` if it can't be parsed into one.
+    """
+    s = block_body.strip()
+    start, end = s.find("{"), s.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        return None
+    candidate = s[start : end + 1]
+    try:
+        obj = json.loads(candidate)
+    except (ValueError, TypeError):
+        try:
+            obj = json.loads(_strip_trailing_commas(candidate))
+        except (ValueError, TypeError):
+            return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _coerce_tile(value: Any) -> list[int] | None:
+    if isinstance(value, (list, tuple)) and len(value) == 2:
+        try:
+            return [int(value[0]), int(value[1])]
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _coerce_refs(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(v) for v in value if isinstance(v, (str, int, float))][:20]
+    return []
+
+
+def _fallback_sheet_id(ref: SheetRef) -> str:
+    return f"{Path(ref.source_name).stem}-p{ref.page_index + 1}"
+
+
+def _validate_finding_item(item: Any, ref: SheetRef) -> Finding | None:
+    """Build a validated :class:`Finding` from one model item, or drop it (None).
+
+    Required: a recognized ``category`` and ``severity`` and a non-empty ``text``.
+    A missing/blank ``sheet_id`` falls back to the source stem + page. Quotes are
+    kept **verbatim** — a non-empty ``source_quote`` that later fails anchoring is
+    the hallucination signal the resolver reports; we never "fix" it here.
+    """
+    if not isinstance(item, dict):
+        return None
+    category = str(item.get("category", "")).strip().lower()
+    severity = str(item.get("severity", "")).strip().lower()
+    text = item.get("text", "")
+    if category not in _MODEL_FINDING_CATEGORIES or severity not in _FINDING_SEVERITIES:
+        return None
+    if not isinstance(text, str) or not text.strip():
+        return None
+    quote = item.get("source_quote", "")
+    if not isinstance(quote, str):
+        quote = ""
+    sheet_id = str(item.get("sheet_id", "")).strip() or _fallback_sheet_id(ref)
+    return Finding(
+        sheet_id=sheet_id,
+        source_name=ref.source_name,
+        page_index=ref.page_index,
+        category=category,
+        severity=severity,
+        text=text.strip(),
+        source_quote=quote,
+        tile=_coerce_tile(item.get("tile")),
+        refs=_coerce_refs(item.get("refs")),
+    )
+
+
+def parse_findings(raw_text: str, ref: SheetRef) -> tuple[str, list[Finding], str]:
+    """Split a raw digest response into ``(prose, findings, telemetry_note)``.
+
+    Extraction uses the **last** fenced block whose body parses to a
+    ``{"findings": [...]}`` object (models sometimes emit a corrected second
+    block); prose is cut at the **first** such block's fence so a duplicate block
+    never leaks into the prose. When no findings block is present the prose is
+    returned **byte-for-byte unchanged** — a pre-feature (prose-only) response is
+    untouched (I-2).
+
+    ``note`` is error-adjacent telemetry (dropped-item count, cap hit, malformed
+    block). It is logged and returned for the report but must NEVER mark the
+    sheet failed: the prose digest shipped regardless.
+    """
+    matches = list(_FENCE_RE.finditer(raw_text))
+    findings_blocks = [
+        (m, obj)
+        for m in matches
+        if isinstance((obj := _tolerant_json_object(m.group(2))), dict)
+        and isinstance(obj.get("findings"), list)
+    ]
+
+    if not findings_blocks:
+        # No parseable findings block. If the model clearly *tried* (a json-
+        # labeled block mentioning "findings" that we couldn't parse), strip it
+        # from the prose and record the telemetry; otherwise the response is
+        # plain prose and is returned untouched.
+        malformed = [
+            m for m in matches
+            if (m.group(1) or "").lower() == "json" and "findings" in m.group(2).lower()
+        ]
+        if not malformed:
+            return raw_text, [], ""
+        prose = raw_text[: malformed[0].start()].rstrip()
+        note = "findings block present but unparseable"
+        _log.warning("findings parse: %s (%s)", note, ref.display_label)
+        return prose, [], note
+
+    prose = raw_text[: findings_blocks[0][0].start()].rstrip()
+    raw_items = findings_blocks[-1][1].get("findings") or []
+
+    findings: list[Finding] = []
+    dropped = 0
+    truncated = False
+    for item in raw_items:
+        if len(findings) >= MAX_FINDINGS_PER_SHEET:
+            truncated = True
+            break
+        finding = _validate_finding_item(item, ref)
+        if finding is None:
+            dropped += 1
+            continue
+        findings.append(finding)
+
+    notes: list[str] = []
+    if dropped:
+        notes.append(f"dropped {dropped} invalid finding(s)")
+    if truncated:
+        notes.append(f"capped at {MAX_FINDINGS_PER_SHEET}")
+    note = "; ".join(notes)
+    if note:
+        _log.info("findings parse: %s (%s)", note, ref.display_label)
+    return prose, findings, note
+
+
+def findings_from_cache(hit: dict, ref: SheetRef) -> list[Finding]:
+    """Reconstruct cached findings for a digest cache hit (defensive)."""
+    raw = hit.get("findings")
+    if not isinstance(raw, list):
+        return []
+    out: list[Finding] = []
+    for item in raw:
+        if isinstance(item, dict):
+            try:
+                out.append(Finding.from_dict(item))
+            except Exception:  # noqa: BLE001 - a bad cached row must never sink a run
+                continue
+    return out
 
 
 def digest_sheet(
@@ -549,6 +808,7 @@ def digest_sheet(
                 stop_reason=hit.get("stop_reason"),
                 error=None,
                 cached=True,
+                findings=findings_from_cache(hit, sheet.ref),
             )
 
     if client is None:
@@ -582,17 +842,22 @@ def digest_sheet(
                 error=_clean_error(exc),
             )
 
-    text = _message_text(resp)
+    raw_text = _message_text(resp)
     in_tok, out_tok = _message_usage(resp)
     stop = _get(resp, "stop_reason")
 
     error: str | None = None
-    if not text:
+    if not raw_text:
         error = f"empty digest (stop_reason={stop!r})"
+
+    # Split the findings block off the prose. ``text`` is the prose only, so
+    # ``combined_text`` never sees the JSON (I-2); ``findings`` and the telemetry
+    # note ride separately. A parse problem never marks the sheet failed.
+    text, findings, findings_note = parse_findings(raw_text, sheet.ref)
 
     # Cache only a real, successful digest — never an empty/error result (those
     # are transient and a re-run should re-attempt them).
-    if cache is not None and cache_key is not None and error is None and text:
+    if cache is not None and cache_key is not None and error is None and raw_text:
         cache.put(
             cache_key,
             {
@@ -600,6 +865,7 @@ def digest_sheet(
                 "input_tokens": in_tok,
                 "output_tokens": out_tok,
                 "stop_reason": stop,
+                "findings": [f.to_dict() for f in findings],
                 "created_ts": time.time(),
             },
         )
@@ -612,4 +878,6 @@ def digest_sheet(
         image_token_estimate=image_est,
         stop_reason=stop,
         error=error,
+        findings=findings,
+        findings_note=findings_note,
     )
