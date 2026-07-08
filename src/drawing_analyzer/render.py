@@ -99,6 +99,63 @@ def _render_clip(
     return pix.tobytes("png"), pix.width, pix.height
 
 
+# The verification pass renders a small crop around a finding at high DPI. This
+# caps the crop's long edge so a coarse (whole-tile) anchor can't produce a huge
+# pixmap; it sits under the single-image regime's native long edge, so a crop is
+# never API-rejected.
+VERIFY_CROP_DPI = 300
+_VERIFY_MAX_LONG_EDGE_PX = 2000
+
+
+def render_region(
+    page: "pymupdf.Page",
+    rect_pts: "tuple[float, float, float, float] | list[float]",
+    dpi: int = VERIFY_CROP_DPI,
+) -> tuple[bytes, int, int]:
+    """Render a rectangular region (in PDF points) of ``page`` at ``dpi`` DPI.
+
+    Used by the verification pass for a surgical, high-resolution re-look at one
+    finding's anchored region. Returns ``(png_bytes, width_px, height_px)``. The
+    effective zoom is reduced if ``dpi`` would push the long edge past
+    :data:`_VERIFY_MAX_LONG_EDGE_PX`, so even a whole-tile anchor stays a
+    reasonable single image. The clip is intersected with the page so a rect that
+    was padded past the sheet edge still renders.
+    """
+    clip = pymupdf.Rect(*rect_pts) & page.rect
+    long_pt = max(clip.width, clip.height)
+    zoom = dpi / 72.0
+    if long_pt > 0:
+        zoom = min(zoom, _VERIFY_MAX_LONG_EDGE_PX / long_pt)
+    matrix = pymupdf.Matrix(zoom, zoom)
+    pix = page.get_pixmap(matrix=matrix, clip=clip, alpha=False)
+    return pix.tobytes("png"), pix.width, pix.height
+
+
+def iter_region_crops(
+    pdf_path: Path,
+    requests: list[tuple],
+) -> Iterator[tuple]:
+    """Render a batch of region crops from one PDF, opening it exactly once.
+
+    ``requests`` is a list of ``(key, page_index, rect_pts, dpi)``. Yields
+    ``(key, png_bytes)`` in request order, or ``(key, None)`` for a crop that
+    failed to render (a bad page index / rect must not sink the whole pass). This
+    keeps all PyMuPDF use inside :mod:`render` (I-5) — the verification pass never
+    imports the PDF engine.
+    """
+    path = Path(pdf_path)
+    doc = pymupdf.open(str(path))
+    try:
+        for key, page_index, rect_pts, dpi in requests:
+            try:
+                png, _w, _h = render_region(doc[page_index], rect_pts, dpi)
+                yield key, png
+            except Exception:  # noqa: BLE001 - one bad crop must not abort the batch
+                yield key, None
+    finally:
+        doc.close()
+
+
 def render_sheet(
     page: "pymupdf.Page",
     ref: SheetRef,
