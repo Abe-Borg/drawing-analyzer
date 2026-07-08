@@ -132,6 +132,35 @@ def test_parse_tolerates_trailing_comma():
     assert len(findings) == 1
 
 
+def test_parse_preserves_verbatim_quote_with_comma_before_bracket():
+    # A comma INSIDE a string value that happens to precede "]"/"}" must NOT be
+    # stripped — well-formed JSON is parsed as-is, so the verbatim source_quote
+    # (which drives anchoring and the finding id) survives exactly.
+    raw = (
+        "prose\n```json\n"
+        '{"findings":[{"category":"coordination","severity":"low",'
+        '"text":"see note","source_quote":"KEYNOTES 3,]","tile":null,"refs":[]}]}'
+        "\n```"
+    )
+    _, findings, _ = parse_findings(raw, _ref())
+    assert len(findings) == 1
+    assert findings[0].source_quote == "KEYNOTES 3,]"   # not "KEYNOTES 3]"
+
+
+def test_parse_trailing_comma_repair_is_string_aware():
+    # Genuine trailing comma (before ]) is repaired, while a comma-before-bracket
+    # inside a string value in the SAME payload is preserved.
+    raw = (
+        "prose\n```json\n"
+        '{"findings":[{"category":"code","severity":"low",'
+        '"text":"a, b]","source_quote":"x",},]}'
+        "\n```"
+    )
+    _, findings, _ = parse_findings(raw, _ref())
+    assert len(findings) == 1
+    assert findings[0].text == "a, b]"                  # verbatim, comma intact
+
+
 # --------------------------------------------------------------------------- #
 # digest_sheet integration
 # --------------------------------------------------------------------------- #

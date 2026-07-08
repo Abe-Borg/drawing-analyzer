@@ -552,26 +552,65 @@ _FINDING_SEVERITIES = frozenset({"high", "medium", "low"})
 # A fenced code block: optional language label, then body up to the closing
 # fence. DOTALL so the body spans lines; non-greedy so blocks don't merge.
 _FENCE_RE = re.compile(r"```[ \t]*([A-Za-z0-9_+-]*)[ \t]*\r?\n(.*?)```", re.DOTALL)
-_TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
+
+
+def _strip_trailing_commas(s: str) -> str:
+    """Drop commas that sit (ignoring whitespace) right before a ``}`` or ``]``.
+
+    **String-aware**: a comma inside a JSON string literal is never touched, so a
+    verbatim ``source_quote`` like ``"KEYNOTES 3,]"`` survives intact. Only used
+    as a repair pass on JSON that already failed to parse as-is.
+    """
+    out: list[str] = []
+    in_str = False
+    escaped = False
+    n = len(s)
+    for i, ch in enumerate(s):
+        if in_str:
+            out.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+            out.append(ch)
+            continue
+        if ch == ",":
+            j = i + 1
+            while j < n and s[j] in " \t\r\n":
+                j += 1
+            if j < n and s[j] in "}]":
+                continue  # structural trailing comma → drop it
+        out.append(ch)
+    return "".join(out)
 
 
 def _tolerant_json_object(block_body: str) -> dict | None:
     """Best-effort parse of a JSON object from a fenced block body.
 
-    Tolerant of the small ways models drift: surrounding prose, a trailing comma
-    before a closing brace/bracket. Trims to the outermost ``{...}`` and strips
-    trailing commas before loading. Returns the dict, or ``None`` if it can't be
-    parsed into one.
+    Tolerant of the small ways models drift: surrounding prose (trim to the
+    outermost ``{...}``) and a trailing comma before a closing brace/bracket.
+    Well-formed JSON is parsed **as-is and never mutated**, so a verbatim
+    ``source_quote`` is preserved exactly; the trailing-comma repair (itself
+    string-aware) runs only when the raw candidate fails to parse. Returns the
+    dict, or ``None`` if it can't be parsed into one.
     """
     s = block_body.strip()
     start, end = s.find("{"), s.rfind("}")
     if start == -1 or end == -1 or end < start:
         return None
-    candidate = _TRAILING_COMMA_RE.sub(r"\1", s[start : end + 1])
+    candidate = s[start : end + 1]
     try:
         obj = json.loads(candidate)
     except (ValueError, TypeError):
-        return None
+        try:
+            obj = json.loads(_strip_trailing_commas(candidate))
+        except (ValueError, TypeError):
+            return None
     return obj if isinstance(obj, dict) else None
 
 
