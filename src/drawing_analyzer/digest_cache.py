@@ -24,7 +24,10 @@ import threading
 from pathlib import Path
 from typing import Any
 
-_SCHEMA_VERSION = 1
+# Bumped to 2 when the cache entry gained a serialized ``findings`` list (Phase
+# 3): the entry shape changed, so every v1 entry is discarded on load and the
+# key (which folds in the schema version) changes, forcing a clean re-digest.
+_SCHEMA_VERSION = 2
 
 _FALSEY = {"0", "false", "no", "off", ""}
 

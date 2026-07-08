@@ -144,6 +144,15 @@ class Anchor:
             "method": self.method,
         }
 
+    @classmethod
+    def from_dict(cls, d: dict) -> "Anchor":
+        rect = d.get("rect_pdf")
+        return cls(
+            status=d.get("status", "UNANCHORED"),
+            rect_pdf=[float(v) for v in rect] if rect else None,
+            method=d.get("method", ""),
+        )
+
 
 @dataclass
 class Verification:
@@ -165,6 +174,14 @@ class Verification:
             "note": self.note,
             "evidence_png": self.evidence_png,
         }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Verification":
+        return cls(
+            status=d.get("status", "SKIPPED"),
+            note=d.get("note", ""),
+            evidence_png=d.get("evidence_png", ""),
+        )
 
 
 @dataclass
@@ -213,3 +230,26 @@ class Finding:
             "anchor": self.anchor.to_dict(),
             "verification": self.verification.to_dict(),
         }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Finding":
+        """Reconstruct a Finding from its :meth:`to_dict` form (cache round-trip).
+
+        Preserves the stored ``id`` verbatim rather than recomputing it, so a
+        finding served from cache is byte-identical to the one first produced.
+        """
+        tile = d.get("tile")
+        return cls(
+            sheet_id=d.get("sheet_id", ""),
+            source_name=d.get("source_name", ""),
+            page_index=int(d.get("page_index", 0) or 0),
+            category=d.get("category", ""),
+            severity=d.get("severity", ""),
+            text=d.get("text", ""),
+            source_quote=d.get("source_quote", ""),
+            tile=[int(v) for v in tile] if tile else None,
+            refs=list(d.get("refs", []) or []),
+            anchor=Anchor.from_dict(d.get("anchor") or {}),
+            verification=Verification.from_dict(d.get("verification") or {}),
+            id=d.get("id", ""),
+        )

@@ -180,7 +180,8 @@ def test_digest_sheet_success_shape_and_request():
 
     kw = client.messages.calls[0]
     assert kw["model"] == OPUS
-    assert kw["system"] == DIGEST_SYSTEM_PROMPT
+    assert kw["system"].startswith(DIGEST_SYSTEM_PROMPT)
+    assert "FINDINGS (final section" in kw["system"]    # machine-read block instruction
     assert kw["thinking"] == {"type": "adaptive"}      # Opus supports adaptive
     assert kw["output_config"] == {"effort": "high"}
     assert kw["messages"][0]["role"] == "user"

@@ -137,6 +137,35 @@ PDFs → list sheets → render (overview + 6×6 tiles) + extract vector text la
   layer), so **every pre-existing cache entry is naturally invalidated** — the
   first run after this change re-digests each sheet once, then caches as before.
 
+## Structured findings
+
+Alongside the prose digest, the vision model emits a **machine-readable findings
+block** — a fenced `json` block appended after all prose:
+
+```json
+{"findings": [
+  {"sheet_id": "M-101", "category": "code", "severity": "high",
+   "text": "VAV-3 has no shown clearance to the wall.",
+   "source_quote": "VAV-3", "tile": [2, 3], "refs": ["CMC 310"]}
+]}
+```
+
+Each finding carries a `category` (`code` / `conflict` / `coordination` /
+`question`), a `severity` (`high` / `medium` / `low`), a one-to-two-sentence
+`text`, a `source_quote` copied **verbatim** from the sheet's text layer (the
+hook the anchor resolver uses to place it, and the hallucination alarm when a
+quote can't be found), the `tile` where the model saw it, and any `refs` it
+believes apply. The model emits at most 40 per sheet.
+
+A tolerant parser splits this block off and **strips it from the prose**, so the
+digest text — and the `combined_text` a downstream spec reviewer consumes — is
+byte-for-byte what it was before the block existed (the prose digest is sacred).
+The parser absorbs the small ways models drift: it takes the last fenced block,
+trims to the outermost `{…}`, tolerates a trailing comma, and drops any item
+that fails validation (logging the count). A malformed or missing block is never
+fatal — the prose digest still ships; the findings simply come back empty. Parsed
+findings are cached with the digest, so a cached re-run restores them for free.
+
 ## Reference audit
 
 Construction sheets constantly point at each other — *"SEE DRAWING F-D-01-1"*,

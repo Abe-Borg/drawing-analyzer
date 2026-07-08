@@ -92,20 +92,27 @@ def test_normalize_focus():
 
 
 def test_digest_system_prompt_without_focus_is_unchanged():
-    # The default deliverable's prompt is byte-identical with no focus — the
-    # feature is purely additive.
-    assert digest_system_prompt(None) == DIGEST_SYSTEM_PROMPT
-    assert digest_system_prompt("") == DIGEST_SYSTEM_PROMPT
-    assert digest_system_prompt("  ") == DIGEST_SYSTEM_PROMPT
+    # No focus -> no focus addendum (the feature is purely additive). The three
+    # no-focus spellings are identical; the standard prompt still leads, and the
+    # always-present findings instruction is the only thing after it.
+    base = digest_system_prompt(None)
+    assert digest_system_prompt("") == base
+    assert digest_system_prompt("  ") == base
+    assert base.startswith(DIGEST_SYSTEM_PROMPT)
+    assert "ADDITIONAL PER-RUN FOCUS" not in base
+    assert "FINDINGS (final section" in base
 
 
 def test_digest_system_prompt_with_focus_appends_addendum():
     prompt = digest_system_prompt(ROOMS_FOCUS)
-    # The standard prompt leads, in full, then the addendum.
+    # The standard prompt leads, then the focus addendum, then the findings
+    # instruction (emitted after all prose, including the Focus findings section).
     assert prompt.startswith(DIGEST_SYSTEM_PROMPT)
     assert ROOMS_FOCUS in prompt
     assert FOCUS_SECTION_HEADER in prompt
-    assert prompt == DIGEST_SYSTEM_PROMPT + build_focus_addendum(ROOMS_FOCUS)
+    addendum = build_focus_addendum(ROOMS_FOCUS)
+    assert prompt.startswith(DIGEST_SYSTEM_PROMPT + addendum)
+    assert prompt.index(addendum) < prompt.index("FINDINGS (final section")
 
 
 def test_focus_does_not_change_user_content():
@@ -119,7 +126,8 @@ def test_focus_does_not_change_user_content():
     digest_sheet(sheet, client=plain, model=OPUS)
     digest_sheet(sheet, client=focused, model=OPUS, focus=ROOMS_FOCUS)
     assert plain.calls[0]["messages"] == focused.calls[0]["messages"]
-    assert plain.calls[0]["system"] == DIGEST_SYSTEM_PROMPT
+    assert plain.calls[0]["system"].startswith(DIGEST_SYSTEM_PROMPT)
+    assert "ADDITIONAL PER-RUN FOCUS" not in plain.calls[0]["system"]
     assert focused.calls[0]["system"].startswith(DIGEST_SYSTEM_PROMPT)
     assert ROOMS_FOCUS in focused.calls[0]["system"]
 
@@ -404,9 +412,10 @@ def test_pipeline_no_focus_changes_nothing(tmp_path):
 
     assert ctx.focus == "" and ctx.focus_report_text == ""
     assert "Focus Report" not in ctx.combined_text
-    # Only the two digest calls, with the unmodified system prompt.
+    # Only the two digest calls, none carrying a focus addendum.
     assert len(calls) == 2
-    assert all(kw["system"] == DIGEST_SYSTEM_PROMPT for kw in calls)
+    assert all(kw["system"].startswith(DIGEST_SYSTEM_PROMPT) for kw in calls)
+    assert all("ADDITIONAL PER-RUN FOCUS" not in kw["system"] for kw in calls)
 
 
 def test_pipeline_focus_report_failure_ships_digests(tmp_path):
