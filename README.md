@@ -137,6 +137,37 @@ PDFs → list sheets → render (overview + 6×6 tiles) + extract vector text la
   layer), so **every pre-existing cache entry is naturally invalidated** — the
   first run after this change re-digests each sheet once, then caches as before.
 
+## Reference audit
+
+Construction sheets constantly point at each other — *"SEE DRAWING F-D-01-1"*,
+detail bubbles like `04/F-G-02-0`, spec citations like `23 21 13`. When a sheet
+is revised those pointers go stale (a note still says `F-D-01-0` after the sheet
+reissued as `F-D-01-1`) or send the reader to a sheet that isn't in the package.
+
+The analyzer includes a **deterministic, zero-API reference auditor** that reads
+only the extracted vector text layers — no model call, milliseconds of CPU — and
+flags broken cross-references. It:
+
+- **learns the set's own sheet-ID convention** by detecting each sheet's ID from
+  its title block (bottom-right) and generalizing the grammar from that harvest,
+  so it works across offices without a hardcoded numbering scheme;
+- **harvests references** — trigger phrases (`SEE DRAWING/SHEET X`, `SEE X FOR`,
+  `REFER TO X`, `PER X`, `ON DRAWING X`), detail bubbles (`NN/<sheet-id>`), and
+  CSI spec sections (collected as informational, since the drawing set can't
+  confirm a spec reference);
+- **resolves** each against the set: present → no finding; well-formed but
+  **not present in the provided set** → a finding at the reference's exact
+  location, with the closest in-set ID suggested by edit distance; a malformed
+  pointer → flagged as a likely typo.
+
+It never claims a referenced sheet *doesn't exist* — only that it *isn't in the
+set you provided* — because a partial set legitimately omits sheets. Every
+reference finding is anchored to its own word rectangle and marked
+`DETERMINISTIC` (trusted without a model re-check). On a real 8-sheet
+fire-protection set this caught three genuine coordination errors. The auditor is
+exposed as `drawing_analyzer.reference_audit.audit_references(rendered_sheets)`;
+it wires into the run output alongside the QC-markup workflow (forthcoming).
+
 ## Per-run focus
 
 The analyzer's built-in goals are fixed (a spec-reviewer-oriented digest). A

@@ -6,6 +6,7 @@ Only :mod:`render` produces these; everything else just consumes them.
 """
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -76,3 +77,139 @@ class RenderedSheet:
         sizes = [(self.overview.width_px, self.overview.height_px)]
         sizes.extend((t.width_px, t.height_px) for t in self.tiles)
         return sizes
+
+
+# ---------------------------------------------------------------------------
+# QC findings — the structured, anchorable, verifiable unit the QC stages
+# (reference audit, structured digest findings, critique, cross-sheet QC, the
+# deterministic auditors) all produce and every downstream stage (anchor,
+# verify, markup, CSV/JSON export, HTML report) consumes. A ``Finding`` carries
+# its own provenance and, as it flows through the pipeline, is progressively
+# filled in: parsed → anchored (a rectangle on the page) → verified (a small
+# per-finding model check, or DETERMINISTIC for the offline auditors).
+#
+# String taxonomies are kept as plain constants (not ``enum``) so a ``Finding``
+# round-trips to/from JSON without custom (de)serialization.
+# ---------------------------------------------------------------------------
+
+# ``category`` — what kind of issue.
+FINDING_CATEGORIES = frozenset(
+    {"code", "conflict", "coordination", "reference", "question"}
+)
+# ``severity`` — how much it matters.
+FINDING_SEVERITIES = frozenset({"high", "medium", "low"})
+# ``anchor.status`` — how confidently the finding was placed on the page.
+ANCHOR_STATUSES = frozenset({"EXACT", "FUZZY", "TILE", "UNANCHORED"})
+# ``verification.status`` — the outcome of the (model or deterministic) check.
+VERIFICATION_STATUSES = frozenset(
+    {"VERIFIED", "REJECTED", "UNCERTAIN", "DETERMINISTIC", "SKIPPED"}
+)
+
+
+def compute_finding_id(sheet_id: str, category: str, quote_or_text: str) -> str:
+    """Stable short id for a finding: ``sha1(sheet_id + category + quote/text)``.
+
+    Deterministic and content-derived so the *same* finding gets the *same* id
+    across runs (and so two harvests of one issue collapse to one id, which the
+    later dedup/ledger stages rely on). ``quote_or_text`` should be the verbatim
+    ``source_quote`` when present, else the finding ``text``.
+    """
+    h = hashlib.sha1()
+    h.update(sheet_id.encode("utf-8"))
+    h.update(b"\x00")
+    h.update(category.encode("utf-8"))
+    h.update(b"\x00")
+    h.update(quote_or_text.encode("utf-8"))
+    return h.hexdigest()[:12]
+
+
+@dataclass
+class Anchor:
+    """Where a finding sits on its page (filled by the anchor resolver).
+
+    ``rect_pdf`` is ``[x0, y0, x1, y1]`` in **PyMuPDF top-left-origin points**
+    (the same coordinate space ``get_text("words")`` reports and the markup
+    writer draws in — no flip needed as long as both stay in PyMuPDF). ``None``
+    until/unless the finding is anchored.
+    """
+
+    status: str = "UNANCHORED"          # one of ANCHOR_STATUSES
+    rect_pdf: list[float] | None = None
+    method: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "status": self.status,
+            "rect_pdf": list(self.rect_pdf) if self.rect_pdf is not None else None,
+            "method": self.method,
+        }
+
+
+@dataclass
+class Verification:
+    """The verification verdict for a finding (filled by the verify pass).
+
+    ``DETERMINISTIC`` marks a finding produced by an offline auditor that never
+    hit the API (a reference/arithmetic/naming check); such findings are trusted
+    without a model re-check. ``evidence_png`` is a run-relative path to the crop
+    the verifier saw (empty for deterministic findings, which have none).
+    """
+
+    status: str = "SKIPPED"             # one of VERIFICATION_STATUSES
+    note: str = ""
+    evidence_png: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "status": self.status,
+            "note": self.note,
+            "evidence_png": self.evidence_png,
+        }
+
+
+@dataclass
+class Finding:
+    """One QC finding: a single reviewable issue anchored to a sheet.
+
+    See §4.1 of the QC plan for the full contract. ``source_quote`` is a string
+    copied **verbatim** from the sheet's text layer (required when the sheet has
+    a text layer; ``""`` only for a purely graphical finding). ``tile`` is the
+    ``[row, col]`` grid position the model reported (``None`` for offline /
+    deterministic findings, which carry exact anchors instead). ``id`` is derived
+    from the content when not supplied, so callers normally omit it.
+    """
+
+    sheet_id: str
+    source_name: str
+    page_index: int
+    category: str                       # one of FINDING_CATEGORIES
+    severity: str                       # one of FINDING_SEVERITIES
+    text: str
+    source_quote: str = ""
+    tile: list[int] | None = None
+    refs: list[str] = field(default_factory=list)
+    anchor: Anchor = field(default_factory=Anchor)
+    verification: Verification = field(default_factory=Verification)
+    id: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.id:
+            self.id = compute_finding_id(
+                self.sheet_id, self.category, self.source_quote or self.text
+            )
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "sheet_id": self.sheet_id,
+            "source_name": self.source_name,
+            "page_index": self.page_index,
+            "category": self.category,
+            "severity": self.severity,
+            "text": self.text,
+            "source_quote": self.source_quote,
+            "tile": list(self.tile) if self.tile is not None else None,
+            "refs": list(self.refs),
+            "anchor": self.anchor.to_dict(),
+            "verification": self.verification.to_dict(),
+        }
