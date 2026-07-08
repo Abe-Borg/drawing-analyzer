@@ -47,12 +47,28 @@ def _anchor(quote, words, tile=None):
 
 
 def test_normalize_folds_unicode_and_whitespace():
-    # NFKC, dash/quote/prime folding, hyphen->space, lowercase, whitespace collapse.
-    assert _normalize("VAV‑ 3") == "vav 3"                 # non-breaking hyphen
-    assert _normalize("2-1/2\"") == _normalize("2 1/2″")   # hyphen==space, ″ -> "
+    # NFKC, dash/quote/prime folding, infix-hyphen->space, lowercase, collapse.
+    assert _normalize("VAV‑3") == "vav 3"                  # non-breaking infix hyphen
+    assert _normalize("2-1/2\"") == _normalize("2 1/2″")   # infix hyphen==space, ″ -> "
     assert _normalize("  RELIEF\nVALVE  ") == "relief valve"    # linebreak collapse
     assert _normalize("“QUOTED”") == '"quoted"'       # curly -> straight
     assert _normalize("Ø6 PIPE") == "o6 pipe"              # Ø diameter -> o
+
+
+def test_normalize_preserves_leading_sign_hyphen():
+    # Only an INFIX hyphen folds to a space; a leading/sign hyphen is kept, so a
+    # below-datum value never collapses onto its above-datum twin.
+    assert _normalize("-6\"") != _normalize("6\"")
+    assert _normalize("VAV-3") == "vav 3"                  # infix still folds
+
+
+def test_signed_value_does_not_anchor_to_unsigned_twin():
+    # A quoted below-datum "-6\"" must not EXACT-match a separate above-datum "6\"".
+    words = [_w(100, 100, '6"'), _w(2900, 2200, '-6"')]
+    f = _finding('-6"', tile=None)
+    resolve_anchors([f], _sheet(words))
+    # It anchors to the actual "-6\"" word (bottom-right), not the "6\"" (top-left).
+    assert f.anchor.status == "EXACT" and f.anchor.rect_pdf[0] > 2000
 
 
 # --------------------------------------------------------------------------- #
@@ -111,6 +127,16 @@ def test_fuzzy_window_on_token_off():
         ["FIRE", "PUMP", "RATED", "AT", "500", "GPM", "AND", "100"])]
     a = _anchor("fire pump rated at 500 gpm and XXX", words)  # 8 tokens, 7 match
     assert a.status == "FUZZY" and a.method == "fuzzy_window"
+
+
+def test_fuzzy_window_uses_multiset_overlap_not_set():
+    # A quote with repeated tokens whose DISTINCT set is fully present on the
+    # sheet must NOT spuriously fuzzy-match — bag overlap (count/m), not set
+    # overlap, is what preserves the UNANCHORED hallucination signal here.
+    words = [_w(100, 100, "PUMP"), _w(160, 100, "VALVE"),
+             _w(220, 100, "X"), _w(280, 100, "TANK")]
+    a = _anchor("valve valve valve x", words)  # bag overlap 2/4 = 0.5 < 0.85
+    assert a.status == "UNANCHORED"
 
 
 def test_fuzzy_subphrase_partial_match():

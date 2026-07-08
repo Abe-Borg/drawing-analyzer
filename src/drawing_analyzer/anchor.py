@@ -26,12 +26,18 @@ geometry, so it is unit-testable without PyMuPDF.
 """
 from __future__ import annotations
 
+import re
 import unicodedata
 from collections import Counter
 from typing import Any, Iterable
 
 from . import tiling
 from .models import Anchor, Finding
+
+# A hyphen to fold to a space: only one sitting *between* two word characters
+# (``2-1/2"`` → ``2 1/2"``, ``VAV-3`` → ``VAV 3``). A leading/sign hyphen is
+# preserved so a signed value (``-5``) does not collapse onto its unsigned twin.
+_INFIX_HYPHEN_RE = re.compile(r"(?<=\w)-(?=\w)")
 
 # Padding added around a matched word-rect union so the cloud has a little air
 # (PyMuPDF points). Tile rects are already coarse and are not padded.
@@ -63,16 +69,17 @@ for _c in "­​‌‍﻿":  # soft hyphen, zero-widths, BOM
 def _normalize(text: str) -> str:
     """Fold ``text`` to a canonical matching form.
 
-    NFKC, then map Unicode punctuation to ASCII, treat hyphens as spaces (so
-    ``2-1/2"`` and ``2 1/2"`` compare equal), lowercase, and collapse all
-    whitespace to single spaces (the prototype's misses were whitespace/linebreak
-    artifacts).
+    NFKC, then map Unicode punctuation to ASCII, treat an *infix* hyphen as a
+    space (so ``2-1/2"`` and ``2 1/2"`` compare equal) while preserving a
+    leading/sign hyphen (so ``-5`` does not collapse onto ``5``), lowercase, and
+    collapse all whitespace to single spaces (the prototype's misses were
+    whitespace/linebreak artifacts).
     """
     t = unicodedata.normalize("NFKC", text).translate(_CHAR_FOLD)
     # NFKC decomposes the double-prime inch mark (″) into two primes, which the
     # fold turns into '' — canonicalize that (and a literal '') to a plain " so
     # inches written as ", ″, or '' all compare equal.
-    t = t.replace("''", '"').replace("-", " ").lower()
+    t = _INFIX_HYPHEN_RE.sub(" ", t.replace("''", '"')).lower()
     return " ".join(t.split())
 
 
@@ -225,12 +232,17 @@ def _try_fuzzy_window(
     n = len(stream.tokens)
     if m == 0 or m > n:
         return None
-    qset = set(query)
+    # Multiset (bag) overlap: how many of the query's m tokens, counting
+    # repeats, are present in the window — divided by m. A plain set overlap
+    # would dedupe repeats and let a window that merely contains the *distinct*
+    # query tokens (scattered among unrelated words) score 100%, spuriously
+    # anchoring a phrase that isn't there and defeating the UNANCHORED signal.
+    qcount = Counter(query)
     best_overlap = 0.0
     best_starts: list[int] = []
     for k in range(n - m + 1):
         window = stream.tokens[k : k + m]
-        overlap = len(qset & set(window)) / len(qset)
+        overlap = sum((qcount & Counter(window)).values()) / m
         if overlap < _FUZZY_WINDOW_MIN_OVERLAP:
             continue
         if overlap > best_overlap:
