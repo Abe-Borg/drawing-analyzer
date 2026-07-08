@@ -208,10 +208,34 @@ _DIGEST_TASK_INSTRUCTION = (
     "- <title>` header line."
 )
 
-# Folded into the digest cache key so any edit to the prompt or task instruction
-# re-digests rather than serving a cached read produced under the old prompt.
+# The verbatim vector text layer is spliced into the user turn *before* the
+# images so the model treats it as the source of truth for exact strings (a
+# real flow-test table OCR'd "540" as "660" from a low-res raster in the
+# prototype; the vector text can't make that class of error). The header framing
+# is a fixed template; a raster sheet with no text layer gets the placeholder
+# instead — the explicit "rely on the images" disclosure.
+_SHEET_TEXT_LAYER_HEADER = (
+    "SHEET TEXT LAYER (machine-extracted, verbatim, in reading order — use it "
+    "for exact strings such as tags, schedule values, note numbers, and sheet "
+    "references; it may be empty for scanned sheets):"
+)
+_SHEET_TEXT_LAYER_RASTER_PLACEHOLDER = (
+    "[none — this sheet is raster-only; rely on the images]"
+)
+
+# Folded into the digest cache key so any edit to the prompt, the task
+# instruction, or the text-layer framing re-digests rather than serving a cached
+# read produced under the old prompt.
 DIGEST_PROMPT_VERSION = hashlib.sha256(
-    (DIGEST_SYSTEM_PROMPT + "\x00" + _DIGEST_TASK_INSTRUCTION).encode("utf-8")
+    (
+        DIGEST_SYSTEM_PROMPT
+        + "\x00"
+        + _DIGEST_TASK_INSTRUCTION
+        + "\x00"
+        + _SHEET_TEXT_LAYER_HEADER
+        + "\x00"
+        + _SHEET_TEXT_LAYER_RASTER_PLACEHOLDER
+    ).encode("utf-8")
 ).hexdigest()[:16]
 
 
@@ -310,6 +334,18 @@ def _text_block(text: str) -> dict:
     return {"type": "text", "text": text}
 
 
+def _sheet_text_layer_block(sheet: RenderedSheet) -> dict:
+    """The verbatim-text-layer text block for one sheet.
+
+    Renders the extracted ``sheet_text`` under the fixed header, or the
+    raster-only placeholder when the sheet has no usable text layer (empty
+    ``sheet_text`` — a scanned / pasted-raster sheet). Placed before the images
+    so the model reads the exact strings first.
+    """
+    body = sheet.sheet_text if sheet.sheet_text.strip() else _SHEET_TEXT_LAYER_RASTER_PLACEHOLDER
+    return _text_block(f"{_SHEET_TEXT_LAYER_HEADER}\n{body}")
+
+
 def build_user_content_blocks(
     sheet: RenderedSheet, image_block: "Callable[[ImageTile], dict]"
 ) -> list[dict]:
@@ -325,6 +361,11 @@ def build_user_content_blocks(
     (the batch digest, which references each uploaded image by ``file_id`` to
     keep the request body under the 32 MB Messages-API limit) share one
     byte-stable prompt shape — only the image source differs.
+
+    The sheet's verbatim text layer is inserted right after the framing text and
+    before any image, so both transports carry the exact-strings grounding the
+    resolution drop relies on (a raster sheet gets the "rely on the images"
+    placeholder instead).
     """
     blocks: list[dict] = [
         _text_block(
@@ -333,6 +374,7 @@ def build_user_content_blocks(
             f"followed by a {sheet.rows}x{sheet.cols} grid of overlapping "
             f"high-resolution tiles. Read them together as a single sheet."
         ),
+        _sheet_text_layer_block(sheet),
         _text_block("OVERVIEW (entire sheet):"),
         image_block(sheet.overview),
     ]

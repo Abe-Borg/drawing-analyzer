@@ -57,25 +57,39 @@ def test_overlap_increases_total_area_and_adjacent_tiles_overlap():
 
 
 def test_target_long_edge_respects_20_image_threshold():
-    # <=20 images: full Opus long edge; >20 images: a margin under the hard cap.
+    # <=20 images: full Opus long edge; >20 images: the reduced vector default.
     assert tiling.target_long_edge_px(10) == tiling.TARGET_LONG_EDGE_PX_FEW_IMAGES
     assert tiling.target_long_edge_px(20) == tiling.TARGET_LONG_EDGE_PX_FEW_IMAGES
-    assert tiling.target_long_edge_px(21) == tiling.TARGET_LONG_EDGE_PX_MANY_IMAGES
+    assert tiling.target_long_edge_px(21) == tiling.TARGET_LONG_EDGE_PX_DEFAULT
     # A 6x6 sheet (36 tiles + overview = 37 images) lands in the clamped regime.
     assert tiling.total_images_for_grid(6, 6) == 37
-    assert tiling.target_long_edge_px(37) == tiling.TARGET_LONG_EDGE_PX_MANY_IMAGES
+    assert tiling.target_long_edge_px(37) == tiling.TARGET_LONG_EDGE_PX_DEFAULT
 
 
-def test_many_image_target_is_strictly_under_the_hard_cap():
-    # The many-image target must sit BELOW the API's hard reject cap, so that
+def test_raster_sheet_renders_at_the_higher_raster_target():
+    # A raster sheet (empty text layer) forgoes the token-saving default: pixels
+    # are its only information channel, so it renders at the legacy margin-under-
+    # cap target. The <=20-image regime is unaffected (downscale-safe).
+    assert tiling.target_long_edge_px(37, is_raster=True) == tiling.TARGET_LONG_EDGE_PX_RASTER
+    assert tiling.target_long_edge_px(37, is_raster=False) == tiling.TARGET_LONG_EDGE_PX_DEFAULT
+    assert tiling.TARGET_LONG_EDGE_PX_RASTER > tiling.TARGET_LONG_EDGE_PX_DEFAULT
+    assert tiling.target_long_edge_px(10, is_raster=True) == tiling.TARGET_LONG_EDGE_PX_FEW_IMAGES
+
+
+def test_default_target_dropped_to_1560():
+    # Locked product decision: the many-image render target drops 1992 -> 1560.
+    assert tiling.TARGET_LONG_EDGE_PX_DEFAULT == 1560
+
+
+def test_many_image_targets_are_strictly_under_the_hard_cap():
+    # Both many-image targets must sit BELOW the API's hard reject cap, so that
     # rasterizer rounding (which can round a tile UP by ~1 px) never produces an
     # image that exceeds the cap and gets the whole request rejected (HTTP 400).
-    assert (
-        tiling.TARGET_LONG_EDGE_PX_MANY_IMAGES
-        < tiling.MANY_IMAGES_LONG_EDGE_CAP_PX
-    )
-    # The margin must comfortably exceed the proven <=1 px rounding overshoot.
-    margin = tiling.MANY_IMAGES_LONG_EDGE_CAP_PX - tiling.TARGET_LONG_EDGE_PX_MANY_IMAGES
+    assert tiling.TARGET_LONG_EDGE_PX_DEFAULT < tiling.MANY_IMAGES_LONG_EDGE_CAP_PX
+    assert tiling.TARGET_LONG_EDGE_PX_RASTER < tiling.MANY_IMAGES_LONG_EDGE_CAP_PX
+    # The raster target is the tight one (cap - 8 px); its margin must comfortably
+    # exceed the proven <=1 px rounding overshoot.
+    margin = tiling.MANY_IMAGES_LONG_EDGE_CAP_PX - tiling.TARGET_LONG_EDGE_PX_RASTER
     assert margin >= 2
 
 
@@ -102,18 +116,20 @@ def test_rendered_tile_never_exceeds_hard_cap_under_rounding():
     # rendered edge exceeds the hard cap, for the real 6x6 grid on an E-size
     # sheet plus a near-square aspect ratio (the worst case for the short edge).
     cap = tiling.MANY_IMAGES_LONG_EDGE_CAP_PX
-    target = tiling.target_long_edge_px(tiling.total_images_for_grid(6, 6))
-    for page_w, page_h in [(E_W, E_H), (E_H, E_W), (3024.0, 3024.0), (2448.0, 3168.0)]:
-        for rect in tiling.tile_rects(page_w, page_h, rows=6, cols=6, overlap_frac=0.08):
-            zoom = tiling.zoom_for_rect(rect.width, rect.height, target)
-            w_px = _mupdf_round_pixels(rect.x0, rect.width, zoom)
-            h_px = _mupdf_round_pixels(rect.y0, rect.height, zoom)
-            assert w_px <= cap, (page_w, page_h, rect.row, rect.col, w_px)
-            assert h_px <= cap, (page_w, page_h, rect.row, rect.col, h_px)
-        # The overview (whole page at the same target) must also stay under cap.
-        zoom = tiling.zoom_for_rect(page_w, page_h, target)
-        assert _mupdf_round_pixels(0.0, page_w, zoom) <= cap
-        assert _mupdf_round_pixels(0.0, page_h, zoom) <= cap
+    # Check both many-image targets: the reduced vector default AND the raster
+    # target (cap - 8 px), which is the tight one the margin exists to protect.
+    for target in (tiling.TARGET_LONG_EDGE_PX_DEFAULT, tiling.TARGET_LONG_EDGE_PX_RASTER):
+        for page_w, page_h in [(E_W, E_H), (E_H, E_W), (3024.0, 3024.0), (2448.0, 3168.0)]:
+            for rect in tiling.tile_rects(page_w, page_h, rows=6, cols=6, overlap_frac=0.08):
+                zoom = tiling.zoom_for_rect(rect.width, rect.height, target)
+                w_px = _mupdf_round_pixels(rect.x0, rect.width, zoom)
+                h_px = _mupdf_round_pixels(rect.y0, rect.height, zoom)
+                assert w_px <= cap, (target, page_w, page_h, rect.row, rect.col, w_px)
+                assert h_px <= cap, (target, page_w, page_h, rect.row, rect.col, h_px)
+            # The overview (whole page at the same target) must also stay under cap.
+            zoom = tiling.zoom_for_rect(page_w, page_h, target)
+            assert _mupdf_round_pixels(0.0, page_w, zoom) <= cap
+            assert _mupdf_round_pixels(0.0, page_h, zoom) <= cap
 
 
 def test_zoom_for_rect_hits_target_long_edge():

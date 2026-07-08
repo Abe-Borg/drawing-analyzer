@@ -47,7 +47,13 @@ class _FakeClient:
         self.messages = _Msgs(responder)
 
 
-def _make_sheet(rows: int = 2, cols: int = 2) -> RenderedSheet:
+def _make_sheet(
+    rows: int = 2,
+    cols: int = 2,
+    *,
+    sheet_text: str = "",
+    is_raster: bool = False,
+) -> RenderedSheet:
     ref = SheetRef(
         pdf_path=Path("M-101.pdf"),
         page_index=0,
@@ -78,6 +84,8 @@ def _make_sheet(rows: int = 2, cols: int = 2) -> RenderedSheet:
         page_height_pt=2448,
         rows=rows,
         cols=cols,
+        sheet_text=sheet_text,
+        is_raster=is_raster,
     )
 
 
@@ -112,6 +120,41 @@ def test_build_user_content_orders_images_before_final_task():
 
     texts = " ".join(b["text"] for b in blocks if b["type"] == "text")
     assert "Tile r1c1" in texts  # zero-based (0,0) renders as r1c1
+
+
+def test_build_user_content_includes_verbatim_text_layer_before_images():
+    sheet = _make_sheet(rows=2, cols=2, sheet_text="VAV-3 SCHEDULE\nFP-2 riser @ 165 psi")
+    blocks = build_user_content(sheet)
+
+    # The text-layer block carries the header framing + the verbatim text, and
+    # lands before the first image (index of the text block < index of overview).
+    text_layer_idx = next(
+        i for i, b in enumerate(blocks)
+        if b["type"] == "text" and "SHEET TEXT LAYER" in b["text"]
+    )
+    first_image_idx = next(i for i, b in enumerate(blocks) if b["type"] == "image")
+    assert text_layer_idx < first_image_idx
+
+    block_text = blocks[text_layer_idx]["text"]
+    assert "machine-extracted, verbatim" in block_text
+    assert "VAV-3 SCHEDULE" in block_text
+    assert "FP-2 riser @ 165 psi" in block_text
+    # Framing text still leads; task instruction still trails.
+    assert blocks[0]["type"] == "text" and "single sheet" in blocks[0]["text"].lower()
+    assert blocks[-1]["type"] == "text" and "digest" in blocks[-1]["text"].lower()
+
+
+def test_build_user_content_raster_sheet_gets_disclosure_placeholder():
+    sheet = _make_sheet(rows=2, cols=2, sheet_text="", is_raster=True)
+    blocks = build_user_content(sheet)
+
+    text_layer = next(
+        b["text"] for b in blocks
+        if b["type"] == "text" and "SHEET TEXT LAYER" in b["text"]
+    )
+    # A raster sheet (empty text layer) gets the "rely on the images" disclosure,
+    # never a fabricated text body.
+    assert "raster-only; rely on the images" in text_layer
 
 
 # --------------------------------------------------------------------------- #

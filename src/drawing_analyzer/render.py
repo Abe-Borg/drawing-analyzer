@@ -24,7 +24,31 @@ from typing import Iterator
 import pymupdf  # AGPL-3.0 — see module docstring.
 
 from . import tiling
+from .diagnostics import get_logger
 from .models import ImageTile, RenderedSheet, SheetRef
+
+_log = get_logger()
+
+# Cap on the extracted text layer spliced into the digest prompt. A dense E-size
+# sheet runs a few thousand words (~6.6k words / ~40k chars measured on an 8-sheet
+# set); 15k chars comfortably holds a normal sheet's text while bounding the
+# prompt for a pathological one (a giant embedded schedule). Overflow is truncated
+# with an explicit marker so the model knows the text was clipped, and the event
+# is logged (it should be rare).
+SHEET_TEXT_MAX_CHARS = 15_000
+_SHEET_TEXT_TRUNCATION_MARKER = "\n\n[TRUNCATED]"
+
+
+def _cap_sheet_text(text: str) -> str:
+    """Bound ``text`` to :data:`SHEET_TEXT_MAX_CHARS`, appending a clear marker.
+
+    Pure helper (no rendering) so the cap is unit-testable in isolation. Returns
+    ``text`` unchanged when it fits; otherwise the first ``SHEET_TEXT_MAX_CHARS``
+    characters plus :data:`_SHEET_TEXT_TRUNCATION_MARKER`.
+    """
+    if len(text) <= SHEET_TEXT_MAX_CHARS:
+        return text
+    return text[:SHEET_TEXT_MAX_CHARS] + _SHEET_TEXT_TRUNCATION_MARKER
 
 
 def list_sheets(pdf_paths: list[Path]) -> list[SheetRef]:
@@ -83,13 +107,34 @@ def render_sheet(
     cols: int = tiling.DEFAULT_GRID_COLS,
     overlap_frac: float = tiling.DEFAULT_OVERLAP_FRAC,
 ) -> RenderedSheet:
-    """Render one already-open page into an overview + ``rows*cols`` tiles."""
+    """Render one already-open page into an overview + ``rows*cols`` tiles.
+
+    Before rasterizing, the page's vector text layer is lifted (cheap and
+    lossless): ``page.get_text()`` for the reading-order text spliced into the
+    digest prompt, and ``page.get_text("words")`` for the word-rect list the
+    anchor resolver consumes. A page with **no** words is treated as raster
+    (scanned / pasted image) and rendered at the higher raster target, since
+    there the pixels are the only information channel.
+    """
     page_rect = page.rect
     w_pt = float(page_rect.width)
     h_pt = float(page_rect.height)
 
+    # Text layer first — negligible cost (measured 0.32 s / 8 sheets / 6,636
+    # words) and it decides the render target. ``words`` are plain tuples, so no
+    # PyMuPDF type escapes this module (I-5 isolation).
+    raw_text = page.get_text() or ""
+    words = list(page.get_text("words"))
+    is_raster = len(words) == 0
+    sheet_text = _cap_sheet_text(raw_text)
+    if len(sheet_text) != len(raw_text):
+        _log.info(
+            "sheet text truncated to %d chars (from %d): %s",
+            SHEET_TEXT_MAX_CHARS, len(raw_text), ref.display_label,
+        )
+
     total_images = tiling.total_images_for_grid(rows, cols)
-    target_px = tiling.target_long_edge_px(total_images)
+    target_px = tiling.target_long_edge_px(total_images, is_raster=is_raster)
 
     overview_png, ow, oh = _render_clip(page, page_rect, target_px)
     overview = ImageTile(
@@ -122,6 +167,9 @@ def render_sheet(
         page_height_pt=h_pt,
         rows=rows,
         cols=cols,
+        sheet_text=sheet_text,
+        words=words,
+        is_raster=is_raster,
     )
 
 
