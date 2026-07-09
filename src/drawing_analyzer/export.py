@@ -410,19 +410,24 @@ def write_qc_outputs(ctx: Any, folder: Path) -> list[str]:
     Idempotent and defensive: a missing reviewed PDF / evidence file is skipped
     rather than sinking the export. Writes nothing when the run had no QC stage.
     """
+    if not has_qc_outputs(ctx):
+        return []
+
     findings = _qc_findings(ctx)
     geometries = list(getattr(ctx, "sheet_geometries", None) or [])
     reviewed = list(getattr(ctx, "reviewed_pdf_paths", None) or [])
     work_dir = getattr(ctx, "qc_work_dir", None)
     written: list[str] = []
 
-    if findings:
-        (folder / "findings.json").write_text(
-            json.dumps({"findings": [f.to_dict() for f in findings]}, indent=2),
-            encoding="utf-8",
-        )
-        write_findings_csv(findings, folder / "findings.csv")
-        written += ["findings.json", "findings.csv"]
+    # Findings inventory — written whenever a QC stage ran, even when it found
+    # nothing, so the files the index advertises always exist on disk. A clean
+    # run is a valid result: a header-only CSV and ``{"findings": []}`` JSON.
+    (folder / "findings.json").write_text(
+        json.dumps({"findings": [f.to_dict() for f in findings]}, indent=2),
+        encoding="utf-8",
+    )
+    write_findings_csv(findings, folder / "findings.csv")
+    written += ["findings.json", "findings.csv"]
 
     if geometries:
         st_dir = folder / "sheet_text"

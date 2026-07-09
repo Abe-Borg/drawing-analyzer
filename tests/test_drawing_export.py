@@ -355,3 +355,24 @@ def test_write_qc_outputs_tolerates_missing_reviewed_pdf(tmp_path):
     dx.write_qc_outputs(ctx, folder)   # must not raise
     assert not (folder / "vanished.pdf").exists()
     assert (folder / "findings.json").exists()   # the rest still written
+
+
+def test_write_qc_outputs_writes_empty_findings_when_qc_ran(tmp_path):
+    # A clean QC run (geometry captured, but zero findings) still advertises
+    # findings.json/csv in the index, so both must exist on disk — empty.
+    ctx = SimpleNamespace(
+        findings=[], reference_findings=[],
+        reviewed_pdf_paths=[], sheet_geometries=[_geom()], qc_work_dir=None,
+    )
+    assert dx.has_qc_outputs(ctx) is True
+    folder = tmp_path / "out"
+    folder.mkdir()
+    written = dx.write_qc_outputs(ctx, folder)
+
+    assert (folder / "findings.json").exists()
+    import json
+    assert json.loads((folder / "findings.json").read_text()) == {"findings": []}
+    # Header-only CSV, BOM intact, still a valid file for the index to point at.
+    csv_bytes = (folder / "findings.csv").read_bytes()
+    assert csv_bytes[:3] == b"\xef\xbb\xbf"
+    assert "findings.json" in written and "findings.csv" in written
