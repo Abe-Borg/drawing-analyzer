@@ -125,6 +125,7 @@ ctx = extract_drawing_context(
     qc_markups=True,             # anchor → verify → cloud; write reviewed PDFs
     markup_verified_only=True,   # cloud only verified/deterministic findings
     verify_findings=True,        # run the per-finding verification pass
+    critique=True,               # second "reviewer" read/sheet, self-consistent (pricier)
     qc_work_dir=Path("run-out"), # where evidence crops + reviewed PDFs land
 )
 print(ctx.combined_text)
@@ -231,6 +232,14 @@ so the digest cache's schema version is bumped — **every pre-existing cache en
 is invalidated once**; the first run after upgrading re-digests each sheet, then
 caches as before.
 
+**Cost of the exhaustive critique.** A plain digest is roughly $0.4–0.6/sheet
+real-time (~half that via Batches). Turning on the [critique pass](#critique-pass-the-reviewer)
+adds a second full-coverage read run twice — on the order of **$1–1.5/sheet** at
+Opus pricing, plus its re-render — so an exhaustive `critique=True` run lands
+around **$2–3.5/sheet** once verification is included. The offline stages
+(reference audit, anchoring, markup, text extraction) stay $0. Every stage is
+individually cached, so a re-run of an unchanged set skips the model calls.
+
 ## Structured findings
 
 Alongside the prose digest, the vision model emits a **machine-readable findings
@@ -259,6 +268,45 @@ trims to the outermost `{…}`, tolerates a trailing comma, and drops any item
 that fails validation (logging the count). A malformed or missing block is never
 fatal — the prose digest still ships; the findings simply come back empty. Parsed
 findings are cached with the digest, so a cached re-run restores them for free.
+
+## Critique pass (the reviewer)
+
+The digest *describes* a sheet; the critique *attacks* it. Turned on with
+`critique=True` (the exhaustive QC mode), the analyzer makes a **second
+full-coverage vision read** of each sheet — the same overview + tile grid +
+verbatim text layer the digest saw — but under a different persona: a senior
+engineer performing a rigorous back-check / QA markup of a check print before it
+is issued, whose *only* job is to find problems. It is instructed to report, with
+severity: outright errors; likely code concerns (cited conservatively); RFI-worthy
+ambiguities; internal inconsistencies; stale / copy-paste text; and — crucially —
+**absences**: content a complete sheet of that discipline should show but this one
+doesn't (a required test, drain, sign, clearance, note, or detail), each phrased
+*"expected X; not found on this sheet."* Absence and sheet-level findings carry an
+`anchor_hint` of `SHEET` instead of a quote, so the anchor resolver places them
+against the whole sheet.
+
+The critique emits only the machine-readable findings block — no prose — so the
+prose digest (and `combined_text`) is untouched (I-2).
+
+**Self-consistency.** The critique runs **twice**. Two independent reads of the
+same sheet disagree at the margins, and that disagreement is signal: a finding
+both runs surface is **corroborated** (`reproduced = true`); a singleton one run
+raised is *kept* (more markups is better) but flagged `reproduced = false`. The
+merge deduplicates by position (anchor-rect overlap once anchored, else the same
+reported tile) and normalized-text overlap. The digest's findings and the merged
+critique's then pool into one per-sheet set before anchoring — an issue the digest
+*and* the critique independently raised is also marked reproduced. `reproduced`
+is a soft confidence signal surfaced in the report and markup; it **never**
+suppresses a finding.
+
+The merged critique is cached under its own key, so a re-run skips the extra
+calls. Because the digest's images are gone by the time the critique runs (the
+batch path streams and discards them), the critique **re-renders** each sheet —
+so `critique=True` is meaningfully more expensive than a plain digest (see
+[Performance](#performance)). It is additive and non-fatal: a failure is recorded
+and the standard deliverable ships. The model defaults to Opus 4.8
+(`DRAWING_ANALYZER_CRITIQUE_MODEL`); the run count is `DRAWING_ANALYZER_CRITIQUE_RUNS`
+(default 2; set 1 to disable self-consistency).
 
 ## Anchoring findings
 
@@ -405,6 +453,8 @@ runs.
 | `DRAWING_ANALYZER_SYNTHESIS_MODEL` | Opus 4.8 | Cross-sheet synthesis model (text-only). |
 | `DRAWING_ANALYZER_FOCUS_MODEL` | Opus 4.8 | Focus-report model (text-only). |
 | `DRAWING_ANALYZER_VERIFY_MODEL` | Opus 4.8 | Per-finding verification model (crop + short prompt). |
+| `DRAWING_ANALYZER_CRITIQUE_MODEL` | Opus 4.8 | Critique-pass vision model (`critique=True`). |
+| `DRAWING_ANALYZER_CRITIQUE_RUNS` | `2` | Critique self-consistency reads to merge (`1` disables it). |
 | `DRAWING_ANALYZER_MAX_WORKERS` | `4` | Real-time digest concurrency (`1` = sequential). |
 | `DRAWING_ANALYZER_UPLOAD_WORKERS` | `6` | Files-API image-upload concurrency per sheet (`1` = sequential). |
 | `DRAWING_ANALYZER_SUPPRESS_NEAR_BLANK` | off | Also drop near-blank tiles (PNG-byte threshold), not just pixel-uniform ones. |

@@ -488,6 +488,85 @@ class _QCResult:
     output_tokens: int = 0
 
 
+def _run_critique_stage(
+    paths: list[Path],
+    *,
+    rows: int,
+    cols: int,
+    overlap_frac: float,
+    client: Any,
+    cache: Any,
+    progress: ProgressCallback | None,
+    total: int,
+    max_workers: int | None,
+) -> tuple[list[Finding], int, int]:
+    """Critique every sheet (Phase 11): re-render, then self-consistent critique.
+
+    Path-agnostic — it re-renders from the PDFs because none of the digest paths
+    (batch, real time, or a cache hit) retain the images the critique needs — so
+    it streams renders on the calling thread while the per-sheet self-consistent
+    critiques run on the same bounded pool the digests use. Each sheet's *merged*
+    critique is cached under its own key, so a re-run skips the model calls (the
+    render still runs; a level-1 render-skip for the critique is a later
+    optimization). Additive and non-fatal: a per-sheet failure is logged and
+    contributes no findings; the run continues.
+
+    Returns ``(critique_findings, input_tokens, output_tokens)``; the findings are
+    sorted deterministically so the pooled result is independent of completion
+    order (I-7).
+    """
+    from .critique import critique_sheet_self_consistent
+
+    workers = _resolve_workers(max_workers, total)
+    findings: list[Finding] = []
+    in_tok = out_tok = 0
+    done = 0
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        in_flight: set = set()
+
+        def _collect_one() -> None:
+            nonlocal done, in_tok, out_tok
+            finished, _ = wait(in_flight, return_when=FIRST_COMPLETED)
+            for fut in finished:
+                in_flight.discard(fut)
+                done += 1
+                try:
+                    res = fut.result()
+                except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
+                    _log.warning("critique failed for a sheet: %s", exc)
+                    continue
+                if res.error:
+                    _log.warning("critique degraded for a sheet: %s", res.error)
+                findings.extend(res.findings)
+                # A cache hit made no API call this run, so exclude its (original)
+                # token cost — keeping run totals honest, as the digest path does
+                # for cached sheets.
+                if not res.cached:
+                    in_tok += res.input_tokens
+                    out_tok += res.output_tokens
+                if progress is not None:
+                    progress(total, total, f"Critiquing sheet {done}/{total}")
+
+        for rendered in iter_rendered_sheets(
+            paths, rows=rows, cols=cols, overlap_frac=overlap_frac
+        ):
+            in_flight.add(
+                executor.submit(
+                    critique_sheet_self_consistent,
+                    rendered, client=client, cache=cache,
+                )
+            )
+            while len(in_flight) >= workers:
+                _collect_one()
+        while in_flight:
+            _collect_one()
+
+    findings.sort(key=lambda f: (f.source_name, f.page_index, f.id))
+    _log.info("critique: %d finding(s) across %d sheet(s)", len(findings), total)
+    return findings, in_tok, out_tok
+
+
 def _run_qc_stages(
     *,
     sheets: list[SheetDigest],
@@ -502,6 +581,7 @@ def _run_qc_stages(
     progress: ProgressCallback | None,
     total: int,
     errors: list[str],
+    critique_findings: list[Finding] | None = None,
 ) -> _QCResult:
     """Run the QC pipeline after the digests: audit → anchor → verify → markups.
 
@@ -510,8 +590,20 @@ def _run_qc_stages(
     the parsed digests; reference findings from the deterministic audit (already
     anchored). Reviewed PDFs and evidence crops are written under ``work_dir`` (a
     fresh temp dir when none is given), to be exported later.
+
+    ``critique_findings`` (Phase 11), when present, are pooled with the digest
+    findings before anchoring: :func:`drawing_analyzer.critique.merge_finding_groups`
+    deduplicates the two sources per sheet (``_is_duplicate`` is same-sheet-gated,
+    so passing the whole set as two groups only ever merges within a sheet) and
+    marks an issue both the digest and the critique raised as ``reproduced``.
     """
-    findings = [f for sd in sheets for f in getattr(sd, "findings", None) or []]
+    digest_findings = [f for sd in sheets for f in getattr(sd, "findings", None) or []]
+    if critique_findings:
+        from .critique import merge_finding_groups
+
+        findings = merge_finding_groups([digest_findings, critique_findings])
+    else:
+        findings = digest_findings
     reference_findings: list[Finding] = []
     work_dir = qc_work_dir
 
@@ -528,7 +620,7 @@ def _run_qc_stages(
             _log.warning("reference audit failed: %s", exc)
 
     # Anchor model findings (reference findings arrive already anchored).
-    if findings and geometries and (qc_markups or reference_audit_enabled):
+    if findings and geometries and (qc_markups or reference_audit_enabled or critique_findings):
         if progress is not None:
             progress(total, total, "Anchoring findings")
         from .anchor import resolve_anchors
@@ -634,6 +726,7 @@ def extract_drawing_context(
     qc_markups: bool = False,
     markup_verified_only: bool = True,
     verify_findings: bool = True,
+    critique: bool = False,
     qc_work_dir: Path | None = None,
 ) -> DrawingContext:
     """Render and digest every sheet in ``pdf_paths`` into one text context.
@@ -691,6 +784,17 @@ def extract_drawing_context(
     focus is folded into the digest cache key, so re-running with the same
     focus is served from cache, while changing or clearing it re-digests —
     a no-focus run keeps hitting pre-focus cache entries.
+
+    ``critique=True`` (Phase 11) adds a dedicated **critique pass**: a second
+    full-coverage vision read per sheet, under a senior-QA-engineer persona, whose
+    only job is finding problems (errors, code concerns, RFI-worthy ambiguities,
+    inconsistencies, stale text, and *absences*). It runs self-consistently — two
+    independent reads merged, an issue both raise flagged ``reproduced`` — and its
+    findings pool with the digest's before anchoring, so ``findings`` carries the
+    union. Additive and non-fatal (a failure is recorded in ``errors``); the prose
+    digest is untouched (I-2). The merged critique is cached under its own key, so
+    a re-run skips the extra calls. It re-renders each sheet (the digest images are
+    gone by then), so it is meaningfully more expensive — the exhaustive QC mode.
     """
     if cache is None and use_cache:
         from .digest_cache import get_default_digest_cache
@@ -727,7 +831,7 @@ def extract_drawing_context(
     # each sheet's text/geometry after the digests, so capture that lightweight
     # record as sheets render (the batch path discards the rendered sheets after
     # upload). Only captured when a QC stage will actually use it.
-    need_geometry = reference_audit or qc_markups
+    need_geometry = reference_audit or qc_markups or critique
     sheet_geometries: list[SheetGeometry] = []
     geometry_sink = sheet_geometries if need_geometry else None
 
@@ -811,11 +915,32 @@ def extract_drawing_context(
         if sd.error:
             errors.append(f"{sd.ref.display_label}: {sd.error}")
 
+    # Critique pass (Phase 11): a second, adversarial full-coverage read per sheet
+    # whose only job is finding problems, run self-consistently (twice) and merged.
+    # Additive and non-fatal; its findings pool with the digest findings in the QC
+    # stage below. Re-renders each sheet (the digest images are gone by now), so
+    # it runs before the QC stages that consume the pooled findings.
+    critique_findings: list[Finding] = []
+    if critique:
+        if progress is not None:
+            progress(total, total, "Critiquing sheets")
+        try:
+            critique_findings, c_in, c_out = _run_critique_stage(
+                paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
+                client=client, cache=cache, progress=progress, total=total,
+                max_workers=max_workers,
+            )
+            in_tok += c_in
+            out_tok += c_out
+        except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
+            errors.append(f"Critique: {exc}")
+            _log.warning("critique stage failed: %s", exc)
+
     # QC pipeline (audit → anchor → verify → markups). Additive and non-fatal;
     # runs before synthesis/focus so those are untouched. Only the reference
     # audit and the markups are gated by their flags; findings are always parsed
-    # off the digests, but they are only anchored/verified when a QC stage needs
-    # them (``need_geometry``).
+    # off the digests (and pooled with any critique findings), but they are only
+    # anchored/verified when a QC stage needs them (``need_geometry``).
     qc = _QCResult()
     if need_geometry:
         qc = _run_qc_stages(
@@ -823,7 +948,7 @@ def extract_drawing_context(
             reference_audit_enabled=reference_audit, qc_markups=qc_markups,
             markup_verified_only=markup_verified_only, verify_enabled=verify_findings,
             client=client, qc_work_dir=qc_work_dir, progress=progress,
-            total=total, errors=errors,
+            total=total, errors=errors, critique_findings=critique_findings,
         )
         in_tok += qc.input_tokens
         out_tok += qc.output_tokens
