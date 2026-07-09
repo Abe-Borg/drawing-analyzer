@@ -419,7 +419,18 @@ python -m pytest
 ```
 
 The suite is hermetic — no API key, no network. Tests that render real PDFs are
-skipped when PyMuPDF is unavailable.
+skipped when PyMuPDF is unavailable. `tests/test_drawing_acceptance.py` encodes
+the QC acceptance script end to end (a fresh both-checkbox run, the reviewed-PDF
+appearance streams, the stale-reference suggestion, a zero-digest-API cached
+re-run, and the raster fallback) against fake clients, so the whole findings →
+verify → cloud chain is exercised without a key.
+
+## Changelog
+
+See [`CHANGELOG.md`](CHANGELOG.md) for a consolidated record of changes,
+including the QC findings / verification / markup integration and the periodic
+re-verification of the Anthropic vision / Files / Batches API facts these
+constants depend on.
 
 ## Licensing
 

@@ -178,13 +178,20 @@ def count_tokens(text: str) -> int:
 # clamped to a per-model token cap. The published cost tables match
 # ``ceil(w*h/750)`` with no extra padding, so we mirror that exactly:
 #
-#   * Opus 4.7 / 4.8 (high-resolution): up to 4784 tokens, long edge <= 2576 px.
-#   * Other models (Sonnet 4.6 / Haiku 4.5 / unknown): up to 1568 tokens,
+#   * High-resolution tier: up to 4784 tokens, long edge <= 2576 px.
+#   * Standard tier (Sonnet 4.6 / Haiku 4.5 / unknown): up to 1568 tokens,
 #     long edge <= 1568 px.
 #
-# These are local *estimates* for budgeting (mirroring the documented formula);
-# the authoritative number is still Anthropic's ``count_tokens`` endpoint, which
-# accepts image/document blocks like any other content.
+# Which models are high-resolution is a moving roster (as of the 2026-07 docs
+# re-verification it had grown beyond Opus to include Sonnet 5 / Fable 5 / Mythos
+# 5). Rather than track that whole list, ``_image_caps_for_model`` keys the
+# hi-res tier off the Opus whitelist alone: this tool digests only with Opus 4.8
+# (a locked product decision), so that is exact for every model it actually
+# runs, and any other model falls to the standard tier — a safe under-estimate,
+# never an over-run of the request. These are local *estimates* for budgeting
+# (mirroring the documented formula); the authoritative number is still
+# Anthropic's ``count_tokens`` endpoint, which accepts image/document blocks like
+# any other content.
 
 _IMAGE_TOKEN_DIVISOR = 750
 
