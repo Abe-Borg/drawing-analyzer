@@ -119,3 +119,109 @@ def test_render_sheet_target_selection_vector_vs_raster():
     assert abs(raster_long_edge - tiling.TARGET_LONG_EDGE_PX_RASTER) <= 2
     # The raster fallback is unmistakably higher-resolution than the vector default.
     assert raster_long_edge > vector_long_edge
+
+
+# --------------------------------------------------------------------------- #
+# Blank-tile suppression (Phase 9)
+# --------------------------------------------------------------------------- #
+
+
+def test_render_sheet_suppresses_blank_tiles():
+    pymupdf = pytest.importorskip("pymupdf")
+    from drawing_analyzer.render import render_sheet
+
+    # Text only in the top-left corner: on a 2x2 grid only that tile has content;
+    # the other three are pixel-uniform white and are dropped + disclosed.
+    doc = pymupdf.open()
+    page = doc.new_page(width=792, height=612)
+    page.insert_text((40, 40), "M-101 NORTH")
+    try:
+        rs = render_sheet(doc[0], _ref(0), rows=2, cols=2)
+    finally:
+        doc.close()
+
+    assert len(rs.tiles) == 1                 # three blank tiles suppressed
+    assert len(rs.omitted_tiles) == 3
+    assert (0, 0) not in rs.omitted_tiles      # the content tile survives
+    # The overview is never suppressed, even if sparse.
+    assert rs.overview.png_bytes
+
+
+def test_render_sheet_near_blank_is_off_by_default(monkeypatch):
+    pymupdf = pytest.importorskip("pymupdf")
+    from drawing_analyzer.render import render_sheet
+
+    # A tile with a tiny mark is NOT pixel-uniform, so the strict default keeps
+    # it; only the opt-in near-blank heuristic (env) would drop it.
+    doc = pymupdf.open()
+    page = doc.new_page(width=400, height=400)
+    page.insert_text((10, 20), ".")          # a single faint mark, top-left tile
+    try:
+        monkeypatch.delenv("DRAWING_ANALYZER_SUPPRESS_NEAR_BLANK", raising=False)
+        strict = render_sheet(doc[0], _ref(0), rows=2, cols=2)
+        monkeypatch.setenv("DRAWING_ANALYZER_SUPPRESS_NEAR_BLANK", "1")
+        monkeypatch.setenv("DRAWING_ANALYZER_NEAR_BLANK_MAX_BYTES", "100000")
+        aggressive = render_sheet(doc[0], _ref(0), rows=2, cols=2)
+    finally:
+        doc.close()
+
+    # Strict keeps the marked tile; near-blank (huge threshold) drops it too.
+    assert (0, 0) not in strict.omitted_tiles
+    assert (0, 0) in aggressive.omitted_tiles
+
+
+# --------------------------------------------------------------------------- #
+# Render identity (Phase 9 level-1 key input)
+# --------------------------------------------------------------------------- #
+
+
+def test_sheet_render_identity_stable_and_content_sensitive():
+    pymupdf = pytest.importorskip("pymupdf")
+    from drawing_analyzer.render import sheet_render_identity
+
+    doc = pymupdf.open()
+    p0 = doc.new_page(width=792, height=612)
+    p0.insert_text((72, 72), "SHEET A")
+    p1 = doc.new_page(width=792, height=612)
+    p1.insert_text((72, 72), "SHEET B DIFFERENT")
+    try:
+        id_a = sheet_render_identity(doc[0], rows=6, cols=6)
+        id_a2 = sheet_render_identity(doc[0], rows=6, cols=6)
+        id_b = sheet_render_identity(doc[1], rows=6, cols=6)
+        id_a_grid = sheet_render_identity(doc[0], rows=2, cols=2)
+    finally:
+        doc.close()
+
+    assert id_a == id_a2                      # deterministic for the same page+params
+    assert id_a != id_b                       # different page content
+    assert id_a != id_a_grid                  # grid/target is part of the identity
+    assert pymupdf.__version__ in id_a        # engine version folded in
+
+
+def test_sheet_render_identity_covers_form_xobjects():
+    # A page whose content stream only *invokes* a Form XObject (the real drawing
+    # lives in the form) must still re-key when that form changes — otherwise a
+    # regenerated sheet would hit a stale level-1 cache entry and skip rendering.
+    pymupdf = pytest.importorskip("pymupdf")
+    from drawing_analyzer.render import sheet_render_identity
+
+    def _wrapped(text):
+        src = pymupdf.open()
+        sp = src.new_page(width=200, height=200)
+        sp.insert_text((30, 100), text)               # content lives in the form
+        tgt = pymupdf.open()
+        tp = tgt.new_page(width=400, height=400)
+        tp.show_pdf_page(pymupdf.Rect(0, 0, 400, 400), src, 0)  # invoke as a form
+        return tgt, tp
+
+    d1, p1 = _wrapped("TITLE BLOCK V1")
+    d2, p2 = _wrapped("TITLE BLOCK V2 CHANGED")
+    try:
+        id1 = sheet_render_identity(p1, rows=2, cols=2)
+        id2 = sheet_render_identity(p2, rows=2, cols=2)
+    finally:
+        d1.close()
+        d2.close()
+    # The wrapper page content is identical; only the invoked form's stream
+    # differs — the identity must reflect it (the P1 review fix).
+    assert id1 != id2

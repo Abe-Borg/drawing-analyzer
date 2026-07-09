@@ -14,6 +14,7 @@ from drawing_analyzer.digest_cache import (
     DigestCache,
     default_cache_path,
     digest_cache_key,
+    digest_cache_key_level1,
     persistence_enabled,
 )
 from drawing_analyzer.models import ImageTile, RenderedSheet, SheetRef
@@ -101,6 +102,54 @@ def test_key_folds_in_sheet_text():
     # its pixels, and empty text implies the (different) raster render target.
     assert _key(_sheet(), sheet_text="") == base
     assert _key(_sheet(), sheet_text=None) == base
+
+
+# --------------------------------------------------------------------------- #
+# Level-1 (pre-render) key
+# --------------------------------------------------------------------------- #
+
+
+def _l1(identity="pymupdf=1.28.0|rows=6|cols=6|page=abc", **over):
+    base = dict(
+        model=OPUS, prompt_version=DIGEST_PROMPT_VERSION,
+        max_tokens=16000, effort="high", use_thinking=True,
+    )
+    base.update(over)
+    return digest_cache_key_level1(identity, **base)
+
+
+def test_level1_key_stable_for_same_identity_and_params():
+    assert _l1() == _l1()
+
+
+def test_level1_key_changes_with_render_identity_and_params():
+    base = _l1()
+    # The render identity carries the PyMuPDF version, render target, and the
+    # page-content fingerprint; any change re-keys (and so re-renders).
+    assert _l1(identity="pymupdf=1.28.0|rows=6|cols=6|page=XYZ") != base  # page content
+    assert _l1(identity="pymupdf=1.29.0|rows=6|cols=6|page=abc") != base  # engine ver
+    assert _l1(identity="pymupdf=1.28.0|rows=2|cols=2|page=abc") != base  # grid/target
+    # The same request params as the level-2 key re-key it too.
+    assert _l1(model="claude-sonnet-4-6") != base
+    assert _l1(prompt_version="other") != base
+    assert _l1(max_tokens=8000) != base
+    assert _l1(effort="low") != base
+    assert _l1(use_thinking=False) != base
+
+
+def test_level1_key_folds_in_focus_only_when_present():
+    base = _l1()
+    assert _l1(focus=None) == base                 # no focus == pre-focus key
+    assert _l1(focus="rooms and fixtures") != base  # a focus re-keys
+
+
+def test_level1_key_never_collides_with_level2_key():
+    # Different namespaces (level=1 tag vs the PNG-bytes hash), so a pre-render key
+    # can never accidentally match a rendered-bytes key.
+    sheet = _sheet()
+    l2 = _key(sheet)
+    l1 = _l1()
+    assert l1 != l2
 
 
 # --------------------------------------------------------------------------- #

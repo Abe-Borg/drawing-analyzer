@@ -17,7 +17,10 @@ file storage from accumulating a fresh image set on every run.
 """
 from __future__ import annotations
 
+import os
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -56,6 +59,31 @@ FILES_API_BETA = "files-api-2025-04-14"
 # connection/timeout errors are left to the SDK's idempotent internal retries so
 # a lost response can't orphan an already-stored file.
 DEFAULT_UPLOAD_MAX_RETRIES = 4
+
+# A sheet's ~37 image uploads are independent and each blocks on network round
+# trips, so they run on a small pool instead of one-at-a-time — the dominant
+# batch-path latency after rendering. Kept modest (default 6) to be a courteous
+# Files-API client under the same overload the retry budget exists for.
+# Overridable via ``DRAWING_ANALYZER_UPLOAD_WORKERS``. Parallelism changes only
+# *scheduling*: each image keeps the exact same retry taxonomy (transient status
+# rejections re-issued here; ambiguous connection/timeout left to the SDK's
+# idempotent retries), so a lost response still can't orphan a stored file.
+DEFAULT_UPLOAD_WORKERS = 6
+_UPLOAD_WORKERS_ENV = "DRAWING_ANALYZER_UPLOAD_WORKERS"
+
+
+def _resolve_upload_workers(image_count: int, override: int | None = None) -> int:
+    """Concurrency for one sheet's uploads: explicit ``override`` wins, else the
+    ``DRAWING_ANALYZER_UPLOAD_WORKERS`` env, else the default — then clamped to
+    ``[1, image_count]`` (never more workers than images)."""
+    if override is not None:
+        workers = override
+    else:
+        workers = DEFAULT_UPLOAD_WORKERS
+        raw = os.environ.get(_UPLOAD_WORKERS_ENV)
+        if raw and raw.strip().isdigit():
+            workers = int(raw.strip())
+    return max(1, min(workers, max(1, image_count)))
 
 # Statuses that doom every Files-API upload in the run, not just this sheet's.
 # 401/403 (key rejected / key lacking Files-API permission) and 404 (the
@@ -178,6 +206,7 @@ def upload_sheet_images(
     sheet: RenderedSheet,
     *,
     max_retries: int = DEFAULT_UPLOAD_MAX_RETRIES,
+    max_workers: int | None = None,
     sleep: Any = time.sleep,
     on_image: ImageProgress | None = None,
 ) -> SheetUpload:
@@ -189,29 +218,52 @@ def upload_sheet_images(
     caller treats the sheet as failed and deletes any ids already uploaded, so a
     partial upload never leaks files.
 
-    Each image upload is retried on a transient *status* rejection
+    The images upload concurrently on a small pool (:data:`DEFAULT_UPLOAD_WORKERS`,
+    env-overridable; ``max_workers=1`` forces the old sequential order). This
+    changes only *scheduling* — each image keeps the exact same retry taxonomy:
+    a transient *status* rejection
     (:func:`~drawing_analyzer.digest._is_transient_status_error` — the Files-API
-    ``503 overloaded_error`` among them) up to ``max_retries`` times with
-    exponential backoff, the same policy the per-sheet digest uses. The retry is
-    per *image*, so a blip on one of a sheet's ~37 uploads no longer discards the
-    images already uploaded for that sheet. Connection / timeout errors are
-    deliberately *not* re-issued here: the server may have already stored the
-    file before the response was lost, so a fresh upload could orphan it (a file
-    id never captured for cleanup) — those are left to the SDK's idempotent
-    internal retries. ``sleep`` is injectable so tests don't wait; a permanent
-    failure (or exhausted retries) re-raises for the caller to capture as a
-    failed sheet.
+    ``503 overloaded_error`` among them) is re-issued here up to ``max_retries``
+    times with exponential backoff, so a blip on one of a sheet's ~37 uploads no
+    longer discards the images already uploaded for that sheet; while connection /
+    timeout errors are deliberately *not* re-issued here (the server may have
+    already stored the file before the response was lost, so a fresh upload could
+    orphan it) — those are left to the SDK's idempotent internal retries.
+    ``sleep`` is injectable so tests don't wait; a permanent failure (or exhausted
+    retries) re-raises for the caller to capture as a failed sheet. On the first
+    failure, every image that *did* upload is deleted, so a partial upload never
+    leaks files no matter which image failed.
+
+    Progress callbacks are throttled to completion events: ``on_image`` fires once
+    as each image lands (and once per transient-retry wave), carrying a coherent
+    running completed-count so a concurrent upload's status line stays sensible.
     """
     stem = _safe_stem(sheet)
     label = sheet.ref.display_label
-    file_ids: list[str] = []
-    mapping: dict[int, str] = {}
     total_images = 1 + len(sheet.tiles)
 
-    def _upload(image: ImageTile, name: str) -> None:
-        position = len(file_ids) + 1  # 1-based index of this image within the sheet
+    jobs: list[tuple[int, ImageTile, str]] = [(0, sheet.overview, f"{stem}-overview.png")]
+    for i, tile in enumerate(sheet.tiles, start=1):
+        jobs.append((i, tile, f"{stem}-r{tile.row + 1}c{tile.col + 1}.png"))
+
+    lock = threading.Lock()
+    completed = 0
+    # Once any image fails for good, queued uploads short-circuit instead of
+    # hammering the API for a sheet that is already doomed — mirroring the
+    # sequential path, which stopped at the first failure.
+    aborted = threading.Event()
+
+    def _notify(retrying: bool) -> None:
+        # Called under ``lock`` so the completed-count it reports is coherent.
+        if on_image is not None:
+            on_image(completed, total_images, retrying)
+
+    def _upload_one(position: int, image: ImageTile, name: str) -> tuple[int, str | None]:
+        nonlocal completed
         attempt = 0
         while True:
+            if aborted.is_set():
+                return position, None  # another image already failed the sheet
             try:
                 uploaded = client.beta.files.upload(
                     file=(name, image.png_bytes, "image/png")
@@ -233,11 +285,11 @@ def upload_sheet_images(
                         "files-api upload transient error, retry %d/%d in %.0fs: "
                         "sheet=%s image=%s (#%d/%d, %d bytes) | %s",
                         attempt + 1, max_retries, backoff, label, name,
-                        position, total_images, len(image.png_bytes),
+                        position + 1, total_images, len(image.png_bytes),
                         summarize_exc(exc),
                     )
-                    if on_image is not None:
-                        on_image(position, total_images, True)
+                    with lock:
+                        _notify(True)
                     sleep(backoff)
                     attempt += 1
                     continue
@@ -247,34 +299,56 @@ def upload_sheet_images(
                 # attributable after the fact.
                 _log.warning(
                     "files-api upload FAILED: sheet=%s image=%s (#%d/%d, %d bytes) | %s",
-                    label, name, position, total_images,
+                    label, name, position + 1, total_images,
                     len(image.png_bytes), summarize_exc(exc),
                 )
+                aborted.set()  # stop the sheet's other (queued) uploads
                 raise
         fid = _uploaded_id(uploaded)
-        file_ids.append(fid)
-        mapping[id(image)] = fid
-        _log.debug(
-            "files-api upload ok: sheet=%s image=%s (#%d/%d) file_id=%s",
-            label, name, len(file_ids), total_images, fid,
-        )
-        if on_image is not None:
-            on_image(len(file_ids), total_images, False)
+        with lock:
+            completed += 1
+            _log.debug(
+                "files-api upload ok: sheet=%s image=%s (#%d/%d) file_id=%s",
+                label, name, completed, total_images, fid,
+            )
+            _notify(False)
+        return position, fid
 
     _log.debug("uploading %d image(s) for sheet=%s", total_images, label)
-    try:
-        _upload(sheet.overview, f"{stem}-overview.png")
-        for tile in sheet.tiles:
-            _upload(tile, f"{stem}-r{tile.row + 1}c{tile.col + 1}.png")
-    except Exception:
-        delete_files(client, file_ids)  # don't leak a half-uploaded set
+    workers = _resolve_upload_workers(total_images, max_workers)
+    by_position: dict[int, str] = {}
+    error: Exception | None = None
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(_upload_one, pos, image, name): pos
+            for pos, image, name in jobs
+        }
+        for future in as_completed(futures):
+            try:
+                pos, fid = future.result()
+                if fid is not None:            # None => skipped after an abort
+                    by_position[pos] = fid
+            except Exception as exc:  # noqa: BLE001 - first failure fails the sheet
+                if error is None:
+                    error = exc
+
+    if error is not None:
+        # Delete every image that DID upload, regardless of which one failed, so
+        # a partial upload never leaks — the same guarantee the sequential path
+        # gave, now order-independent.
+        uploaded_ids = list(by_position.values())
+        delete_files(client, uploaded_ids)
         _log.warning(
             "deleted %d already-uploaded image(s) after a failed sheet upload: "
             "sheet=%s",
-            len(file_ids), label,
+            len(uploaded_ids), label,
         )
-        raise
+        raise error
 
+    # file_ids in stable job order (overview first, then tiles) for readable
+    # cleanup logs; the content assembly maps each image to its own id directly.
+    mapping = {id(image): by_position[pos] for pos, image, _name in jobs}
+    file_ids = [by_position[pos] for pos, _image, _name in jobs]
     content = build_user_content_blocks(sheet, lambda t: _file_image_block(mapping[id(t)]))
     return SheetUpload(content=content, file_ids=file_ids)
 

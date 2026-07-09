@@ -31,6 +31,15 @@ OPUS = "claude-opus-4-8"
 NOSLEEP = lambda _s: None  # noqa: E731 - tests never actually wait on the poll
 
 
+@pytest.fixture(autouse=True)
+def _sequential_uploads_by_default(monkeypatch):
+    # The upload fakes in this module are deliberately simple and NOT thread-safe,
+    # so default the per-sheet upload pool to 1 — the submit/breaker tests then
+    # stay deterministic. The dedicated parallel-upload tests re-raise the worker
+    # count via their own ``monkeypatch.setenv`` (which runs after this fixture).
+    monkeypatch.setenv("DRAWING_ANALYZER_UPLOAD_WORKERS", "1")
+
+
 # --------------------------------------------------------------------------- #
 # Fakes
 # --------------------------------------------------------------------------- #
@@ -281,7 +290,9 @@ def test_upload_sheet_images_uses_file_ids_not_base64():
     client = _FakeClient(_succeed)
     sheet = _make_sheet(1, rows=2, cols=2)  # overview + 4 tiles = 5 images
 
-    up = upload_sheet_images(client, sheet)
+    # max_workers=1 keeps the (non-thread-safe) fake deterministic; the parallel
+    # path has its own coverage below.
+    up = upload_sheet_images(client, sheet, max_workers=1)
 
     images = [b for b in up.content if b["type"] == "image"]
     assert len(images) == 5
@@ -308,7 +319,7 @@ def test_upload_failure_cleans_up_partial_upload():
     client.beta.files = client.files
 
     with pytest.raises(RuntimeError, match="upload exploded"):
-        upload_sheet_images(client, _make_sheet(1))
+        upload_sheet_images(client, _make_sheet(1), max_workers=1)
     # The two images uploaded before the failure are deleted — no leak.
     assert client.files.deleted == ["file_0", "file_1"]
 
@@ -323,7 +334,7 @@ def test_upload_retries_transient_503_then_succeeds():
 
     up = upload_sheet_images(
         client, _make_sheet(1, rows=2, cols=2),  # overview + 4 tiles = 5 images
-        max_retries=3, sleep=slept.append,
+        max_retries=3, sleep=slept.append, max_workers=1,
     )
 
     # All five images land despite the transient blips, and the backoff grew
@@ -341,7 +352,8 @@ def test_upload_retries_exhausted_then_raises_and_cleans_up():
     client.beta.files = client.files
 
     with pytest.raises(_Transient503):
-        upload_sheet_images(client, _make_sheet(1), max_retries=2, sleep=slept.append)
+        upload_sheet_images(client, _make_sheet(1), max_retries=2, sleep=slept.append,
+                            max_workers=1)
     assert slept == [2.0, 4.0]  # two backoffs, then gave up
     # The first image never uploaded, so there is nothing to clean up.
     assert client.files.deleted == []
@@ -361,7 +373,8 @@ def test_upload_does_not_retry_permanent_error():
     client.beta.files = client.files
 
     with pytest.raises(RuntimeError, match="bad request"):
-        upload_sheet_images(client, _make_sheet(1), max_retries=5, sleep=slept.append)
+        upload_sheet_images(client, _make_sheet(1), max_retries=5, sleep=slept.append,
+                            max_workers=1)
     assert slept == []  # never retried
 
 
@@ -385,7 +398,8 @@ def test_upload_does_not_retry_ambiguous_timeout():
     client.beta.files = client.files
 
     with pytest.raises(APITimeoutError):
-        upload_sheet_images(client, _make_sheet(1), max_retries=5, sleep=slept.append)
+        upload_sheet_images(client, _make_sheet(1), max_retries=5, sleep=slept.append,
+                            max_workers=1)
     assert slept == []  # ambiguous timeout is not app-retried
 
 
@@ -397,6 +411,7 @@ def test_upload_reports_per_image_progress():
     up = upload_sheet_images(
         client,
         _make_sheet(1, rows=2, cols=2),  # overview + 4 tiles = 5 images
+        max_workers=1,
         on_image=lambda pos, total, retrying: events.append((pos, total, retrying)),
     )
     assert len(up.file_ids) == 5
@@ -416,11 +431,101 @@ def test_upload_progress_surfaces_transient_retry():
         _make_sheet(1, rows=2, cols=2),
         max_retries=3,
         sleep=lambda _s: None,
+        max_workers=1,
         on_image=lambda pos, total, retrying: events.append((pos, retrying)),
     )
     assert len(up.file_ids) == 5
-    assert events.count((1, True)) == 2          # two retry notices for image #1
-    assert [retrying for _, retrying in events].count(False) == 5  # five successes
+    # Two retry notices (the retry wave is surfaced) and five success ticks; the
+    # notices carry the coherent running completed-count rather than a per-image
+    # index (completion-throttled progress).
+    assert [retrying for _, retrying in events].count(True) == 2
+    assert [retrying for _, retrying in events].count(False) == 5
+
+
+class _ThreadSafeFiles(_FakeFiles):
+    """A concurrency-safe upload fake for the parallel-pool tests.
+
+    ``fail_map`` maps an image-name substring to how many times an upload of a
+    matching image should 503 before succeeding (a large count is effectively
+    permanent). Id generation and bookkeeping are guarded so concurrent uploads
+    can't race on the counter.
+    """
+
+    def __init__(self, fail_map: dict[str, int] | None = None):
+        super().__init__()
+        self._lock = threading.Lock()
+        self._fail_map = dict(fail_map or {})
+
+    def upload(self, *, file):
+        name, data, ctype = file
+        assert ctype == "image/png"
+        with self._lock:
+            for key, remaining in self._fail_map.items():
+                if key in name and remaining > 0:
+                    self._fail_map[key] = remaining - 1
+                    raise _Transient503()
+            fid = f"file_{self._n}"
+            self._n += 1
+            self.uploaded_ids.append(fid)
+            return _Obj(id=fid)
+
+    def delete(self, file_id):
+        with self._lock:
+            self.deleted.append(file_id)
+
+
+def test_upload_parallel_pool_uploads_all_images(monkeypatch):
+    # The default pool uploads a sheet's images concurrently; every image still
+    # lands, with a distinct id, and the file-id content is assembled correctly.
+    monkeypatch.setenv("DRAWING_ANALYZER_UPLOAD_WORKERS", "4")
+    client = _FakeClient(_succeed)
+    client.files = _ThreadSafeFiles()
+    client.beta.files = client.files
+
+    up = upload_sheet_images(client, _make_sheet(1, rows=2, cols=2))  # 5 images
+
+    assert len(up.file_ids) == 5
+    assert len(set(up.file_ids)) == 5           # unique ids — no counter race
+    images = [b for b in up.content if b["type"] == "image"]
+    assert len(images) == 5
+    assert all(b["source"]["file_id"] in up.file_ids for b in images)
+
+
+def test_upload_parallel_rides_out_transient_503(monkeypatch):
+    # A transient 503 on one image is app-retried even under the pool (the
+    # idempotency taxonomy is unchanged by parallelism); the sheet completes.
+    monkeypatch.setenv("DRAWING_ANALYZER_UPLOAD_WORKERS", "4")
+    slept: list[float] = []
+    client = _FakeClient(_succeed)
+    client.files = _ThreadSafeFiles(fail_map={"overview": 2})
+    client.beta.files = client.files
+
+    up = upload_sheet_images(
+        client, _make_sheet(1, rows=2, cols=2),
+        max_retries=3, sleep=slept.append,
+    )
+
+    assert len(up.file_ids) == 5           # the blip was ridden out
+    assert client.files.deleted == []      # nothing discarded
+    assert slept == [2.0, 4.0]             # only the overview retried (2 backoffs)
+
+
+def test_upload_parallel_cleanup_is_order_independent(monkeypatch):
+    # One image fails permanently; every image that DID upload is cleaned up,
+    # regardless of which one failed or the order they finished in.
+    monkeypatch.setenv("DRAWING_ANALYZER_UPLOAD_WORKERS", "5")
+    client = _FakeClient(_succeed)
+    client.files = _ThreadSafeFiles(fail_map={"r2c2": 999})
+    client.beta.files = client.files
+
+    with pytest.raises(_Transient503):
+        upload_sheet_images(
+            client, _make_sheet(1, rows=2, cols=2),
+            max_retries=1, sleep=lambda _s: None,
+        )
+    # The four images that uploaded are exactly the ones deleted — no leak.
+    assert set(client.files.deleted) == set(client.files.uploaded_ids)
+    assert len(client.files.deleted) == 4
 
 
 # --------------------------------------------------------------------------- #

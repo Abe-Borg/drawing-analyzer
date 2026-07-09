@@ -401,13 +401,23 @@ def build_user_content_blocks(
     resolution drop relies on (a raster sheet gets the "rely on the images"
     placeholder instead).
     """
+    framing = (
+        f"You are given ONE construction drawing sheet "
+        f"({sheet.ref.display_label}), rendered as a low-resolution overview "
+        f"followed by a {sheet.rows}x{sheet.cols} grid of overlapping "
+        f"high-resolution tiles. Read them together as a single sheet."
+    )
+    # Blank-tile suppression drops pixel-uniform tiles before upload; tell the
+    # model which grid positions are absent because they were empty (1-based
+    # (row, col), matching the per-tile labels below) so a missing tile reads as
+    # "nothing there", not "withheld".
+    if getattr(sheet, "omitted_tiles", None):
+        positions = ", ".join(f"(r{r + 1}c{c + 1})" for r, c in sheet.omitted_tiles)
+        framing += (
+            f" Tiles omitted as completely blank (no content): {positions}."
+        )
     blocks: list[dict] = [
-        _text_block(
-            f"You are given ONE construction drawing sheet "
-            f"({sheet.ref.display_label}), rendered as a low-resolution overview "
-            f"followed by a {sheet.rows}x{sheet.cols} grid of overlapping "
-            f"high-resolution tiles. Read them together as a single sheet."
-        ),
+        _text_block(framing),
         _sheet_text_layer_block(sheet),
         _text_block("OVERVIEW (entire sheet):"),
         image_block(sheet.overview),
@@ -745,6 +755,46 @@ def findings_from_cache(hit: dict, ref: SheetRef) -> list[Finding]:
             except Exception:  # noqa: BLE001 - a bad cached row must never sink a run
                 continue
     return out
+
+
+def sheet_digest_from_cache_entry(entry: dict, ref: SheetRef) -> SheetDigest:
+    """Build a cached :class:`SheetDigest` from a digest-cache ``entry`` + ``ref``.
+
+    Used by the pipeline's level-1 (pre-render) cache hit — the sheet was never
+    rasterized, so there are no image sizes to estimate from and
+    ``image_token_estimate`` is 0 (nothing was sent). Otherwise byte-for-byte the
+    same cached shape :func:`digest_sheet` returns on a level-2 hit (``cached``
+    True, original token counts, findings rehydrated), so downstream can't tell
+    which cache tier served it.
+    """
+    return SheetDigest(
+        ref=ref,
+        text=entry.get("text", ""),
+        input_tokens=int(entry.get("input_tokens", 0) or 0),
+        output_tokens=int(entry.get("output_tokens", 0) or 0),
+        image_token_estimate=0,
+        stop_reason=entry.get("stop_reason"),
+        error=None,
+        cached=True,
+        findings=findings_from_cache(entry, ref),
+    )
+
+
+def cache_entry_from_digest(sd: SheetDigest) -> dict:
+    """The digest-cache entry for a computed/served :class:`SheetDigest`.
+
+    Mirrors the dict :func:`digest_sheet` writes on a fresh digest, so the
+    pipeline can store a miss's result under its level-1 key too (store-under-both
+    continuity). ``created_ts`` is stamped here; callers persist it verbatim.
+    """
+    return {
+        "text": sd.text,
+        "input_tokens": int(sd.input_tokens or 0),
+        "output_tokens": int(sd.output_tokens or 0),
+        "stop_reason": sd.stop_reason,
+        "findings": [f.to_dict() for f in (sd.findings or [])],
+        "created_ts": time.time(),
+    }
 
 
 def digest_sheet(

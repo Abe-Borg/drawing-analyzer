@@ -27,12 +27,17 @@ from . import tiling
 from .digest import (
     DEFAULT_DIGEST_EFFORT,
     DEFAULT_DIGEST_MAX_TOKENS,
+    DIGEST_PROMPT_VERSION,
     SheetDigest,
+    cache_entry_from_digest,
     digest_sheet,
+    focus_cache_fragment,
     normalize_focus,
+    sheet_digest_from_cache_entry,
 )
+from .digest_cache import digest_cache_key_level1
 from .models import Finding, SheetGeometry
-from .render import iter_rendered_sheets, list_sheets
+from .render import iter_rendered_sheets, iter_sheet_prescan, list_sheets
 
 # ``progress(done, total, label)`` — called once as each sheet *finishes*
 # (done = number completed so far, in completion order) and once at the end
@@ -213,6 +218,7 @@ def _rendered_stream(
     cols: int,
     overlap_frac: float,
     geometry_sink: list | None,
+    only: "set[tuple[str, int]] | None" = None,
 ) -> "Any":
     """Stream :class:`RenderedSheet`, capturing each sheet's lightweight geometry.
 
@@ -222,8 +228,15 @@ def _rendered_stream(
     and discards each rendered sheet after upload, so this is the only place the
     per-sheet geometry survives. ``None`` disables capture (a plain digest run
     keeps no findings state and holds nothing extra).
+
+    ``only`` restricts rendering to the given sheet identities (the level-1 cache
+    passes the set of sheets that missed, so cached sheets never render). Geometry
+    for cached sheets is captured separately during the pre-scan, so when ``only``
+    is in play the caller passes ``geometry_sink=None`` here.
     """
-    for rendered in iter_rendered_sheets(paths, rows=rows, cols=cols, overlap_frac=overlap_frac):
+    for rendered in iter_rendered_sheets(
+        paths, rows=rows, cols=cols, overlap_frac=overlap_frac, only=only
+    ):
         if geometry_sink is not None:
             geometry_sink.append(SheetGeometry.from_rendered(rendered))
         yield rendered
@@ -246,6 +259,7 @@ def _digest_sheets_concurrent(
     max_workers: int | None,
     focus: str | None = None,
     geometry_sink: list | None = None,
+    only: "set[tuple[str, int]] | None" = None,
 ) -> list[SheetDigest]:
     """Real-time path: render sequentially, digest on a bounded thread pool.
 
@@ -287,7 +301,7 @@ def _digest_sheets_concurrent(
         for index, rendered in enumerate(
             _rendered_stream(
                 paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
-                geometry_sink=geometry_sink,
+                geometry_sink=geometry_sink, only=only,
             )
         ):
             in_flight.add(executor.submit(_run, index, rendered))
@@ -318,6 +332,7 @@ def _digest_sheets_via_batch(
     on_status: StatusCallback | None = None,
     focus: str | None = None,
     geometry_sink: list | None = None,
+    only: "set[tuple[str, int]] | None" = None,
 ) -> list[SheetDigest]:
     """Batch path: render-stream → Files-API upload → one Message Batch.
 
@@ -345,7 +360,7 @@ def _digest_sheets_via_batch(
     batch = submit_drawing_batch(
         _rendered_stream(
             paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
-            geometry_sink=geometry_sink,
+            geometry_sink=geometry_sink, only=only,
         ),
         client=client,
         model=model,
@@ -382,6 +397,66 @@ def _digest_sheets_via_batch(
         cleanup_in_background=True,
         retry_failed_items=True,
     )
+
+
+def _refkey(ref: Any) -> tuple[str, int]:
+    """Full sheet identity (PDF path + page) — the merge/skip key for level-1."""
+    return (str(getattr(ref, "pdf_path", "")), int(getattr(ref, "page_index", 0) or 0))
+
+
+def _level1_partition(
+    paths: list[Path],
+    *,
+    rows: int,
+    cols: int,
+    overlap_frac: float,
+    cache: Any,
+    model: str,
+    max_tokens: int,
+    use_thinking: bool,
+    effort: str | None,
+    focus: str | None,
+) -> "tuple[dict, set, dict, list]":
+    """Pre-render level-1 cache scan (Phase 9).
+
+    Walks every sheet with :func:`iter_sheet_prescan` — page access only, no
+    rasterization — and, per sheet, computes the level-1 key and probes the cache.
+    Returns ``(cached_by_ref, miss_only, level1_keys, geometries)``:
+
+    - ``cached_by_ref`` — ``_refkey`` → a cached :class:`SheetDigest` for each hit
+      (served without ever rendering, ``cached=True``);
+    - ``miss_only`` — the set of ``(str(path), page_index)`` that missed, handed to
+      the render stream's ``only`` so exactly those sheets rasterize;
+    - ``level1_keys`` — ``_refkey`` → level-1 key, so a miss's fresh digest can be
+      stored under it;
+    - ``geometries`` — every sheet's lightweight geometry (hit or miss), for QC.
+    """
+    cached_by_ref: dict[tuple[str, int], SheetDigest] = {}
+    miss_only: set[tuple[str, int]] = set()
+    level1_keys: dict[tuple[str, int], str] = {}
+    geometries: list[SheetGeometry] = []
+    focus_frag = focus_cache_fragment(focus)
+    for ref, identity, geometry in iter_sheet_prescan(
+        paths, rows=rows, cols=cols, overlap_frac=overlap_frac
+    ):
+        geometries.append(geometry)
+        key = digest_cache_key_level1(
+            identity,
+            model=model,
+            prompt_version=DIGEST_PROMPT_VERSION,
+            max_tokens=max_tokens,
+            effort=effort,
+            use_thinking=use_thinking,
+            focus=focus_frag,
+        )
+        rk = _refkey(ref)
+        level1_keys[rk] = key
+        entry = cache.get(key)
+        if entry is not None:
+            cached_by_ref[rk] = sheet_digest_from_cache_entry(entry, ref)
+        else:
+            miss_only.add(rk)
+    return cached_by_ref, miss_only, level1_keys, geometries
 
 
 def _api_environment_fingerprint() -> str:
@@ -656,22 +731,71 @@ def extract_drawing_context(
     sheet_geometries: list[SheetGeometry] = []
     geometry_sink = sheet_geometries if need_geometry else None
 
-    if use_batch:
-        sheets = _digest_sheets_via_batch(
-            paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
-            client=client, model=model, max_tokens=max_tokens,
-            use_thinking=use_thinking, effort=effort, cache=cache,
-            progress=progress, total=total, on_log=on_log, on_status=on_status,
-            focus=focus or None, geometry_sink=geometry_sink,
+    # Level-1 cache pre-scan (Phase 9): recognize unchanged sheets *before*
+    # rendering and skip rasterization for them (the dominant re-run cost). Only
+    # when a cache is active — with no cache every sheet renders as before, and
+    # geometry (for the QC stages) is captured during that render.
+    cached_by_ref: dict[tuple[str, int], SheetDigest] = {}
+    level1_keys: dict[tuple[str, int], str] = {}
+    only: set[tuple[str, int]] | None = None
+    if cache is not None:
+        cached_by_ref, only, level1_keys, prescan_geoms = _level1_partition(
+            paths, rows=rows, cols=cols, overlap_frac=overlap_frac, cache=cache,
+            model=model, max_tokens=max_tokens, use_thinking=use_thinking,
+            effort=effort, focus=focus or None,
         )
-    else:
-        sheets = _digest_sheets_concurrent(
-            paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
-            client=client, model=model, max_tokens=max_tokens,
-            use_thinking=use_thinking, effort=effort, cache=cache,
-            progress=progress, total=total, max_workers=max_workers,
-            focus=focus or None, geometry_sink=geometry_sink,
+        if need_geometry:
+            sheet_geometries.extend(prescan_geoms)
+        # The pre-scan already captured geometry for every sheet, so the render
+        # stream must not re-capture (it only sees the misses anyway).
+        geometry_sink = None
+        _log.info(
+            "level-1 cache: %d/%d sheet(s) hit — skipping render for them",
+            len(cached_by_ref), total,
         )
+        if cached_by_ref and progress is not None:
+            progress(
+                len(cached_by_ref), total,
+                f"{len(cached_by_ref)} sheet(s) from cache — skipping render",
+            )
+
+    miss_total = total if only is None else len(only)
+
+    miss_sheets: list[SheetDigest] = []
+    if miss_total > 0:
+        if use_batch:
+            miss_sheets = _digest_sheets_via_batch(
+                paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
+                client=client, model=model, max_tokens=max_tokens,
+                use_thinking=use_thinking, effort=effort, cache=cache,
+                progress=progress, total=miss_total, on_log=on_log,
+                on_status=on_status, focus=focus or None,
+                geometry_sink=geometry_sink, only=only,
+            )
+        else:
+            miss_sheets = _digest_sheets_concurrent(
+                paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
+                client=client, model=model, max_tokens=max_tokens,
+                use_thinking=use_thinking, effort=effort, cache=cache,
+                progress=progress, total=miss_total, max_workers=max_workers,
+                focus=focus or None, geometry_sink=geometry_sink, only=only,
+            )
+
+    # Store each miss's result under its level-1 key too (store-under-both), so a
+    # next run recognizes the sheet pre-render and skips rasterization. Only a
+    # real, non-empty digest is stored — mirroring digest_sheet's own guard.
+    if cache is not None:
+        for sd in miss_sheets:
+            if sd.error is None and (sd.text or "").strip():
+                key = level1_keys.get(_refkey(sd.ref))
+                if key is not None:
+                    cache.put(key, cache_entry_from_digest(sd))
+
+    # Merge cached + freshly-digested sheets, restoring original (page) order.
+    by_ref = dict(cached_by_ref)
+    for sd in miss_sheets:
+        by_ref[_refkey(sd.ref)] = sd
+    sheets = [by_ref[_refkey(r)] for r in refs if _refkey(r) in by_ref]
 
     errors: list[str] = []
     in_tok = out_tok = img_tok = 0
