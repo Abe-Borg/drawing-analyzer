@@ -357,6 +357,51 @@ def test_verify_colliding_finding_ids_are_not_dropped_or_double_counted():
     assert res.verified == 2 and res.skipped == 0   # neither dropped nor doubled
 
 
+def test_verify_colliding_ids_get_distinct_evidence_files(tmp_path):
+    # Two findings sharing a content-derived id must not overwrite each other's
+    # evidence crop — the second occurrence gets a -N suffix.
+    ev = tmp_path / "evidence"
+    f1 = _finding("q")
+    f2 = _finding("q")
+    f2.text = "a different problem, same quote"
+    assert f1.id == f2.id
+
+    def distinct_renderer(items):
+        for i, (finding, sheet, rect, dpi) in enumerate(items):
+            yield finding, f"crop-{i}".encode()
+
+    verify_findings(
+        [f1, f2], [_sheet()], client=_FakeClient({}, default='{"verdict":"CONFIRMED"}'),
+        evidence_dir=ev, crop_renderer=distinct_renderer, sleep=lambda _s: None,
+    )
+    p1, p2 = f1.verification.evidence_png, f2.verification.evidence_png
+    assert p1 == f"evidence/{f1.id}.png"
+    assert p2 == f"evidence/{f1.id}-2.png"       # disambiguated
+    assert (ev / Path(p1).name).read_bytes() == b"crop-0"
+    assert (ev / Path(p2).name).read_bytes() == b"crop-1"   # not overwritten
+
+
+def test_verify_skips_ambiguous_duplicate_basename_sheets():
+    # Two distinct PDFs sharing a basename+page collide on the lookup key; a
+    # finding carries only the basename, so it can't be told which drawing it
+    # came from -> SKIPPED, never verified against the wrong crop.
+    def _sheet_at(pdf_path, source_name):
+        ref = SheetRef(pdf_path=Path(pdf_path), page_index=0, source_name=source_name, page_count=1)
+        ov = ImageTile(png_bytes=b"O", width_px=10, height_px=10, kind="overview")
+        return RenderedSheet(ref=ref, overview=ov, tiles=[], page_width_pt=PAGE_W,
+                             page_height_pt=PAGE_H, rows=6, cols=6)
+
+    s_a = _sheet_at("dirA/M-101.pdf", "M-101.pdf")
+    s_b = _sheet_at("dirB/M-101.pdf", "M-101.pdf")   # same basename, different file
+    f = _finding("q", source="M-101.pdf")
+    res = verify_findings(
+        [f], [s_a, s_b], client=_FakeClient({}), crop_renderer=_crop_renderer,
+        sleep=lambda _s: None,
+    )
+    assert f.verification.status == "SKIPPED" and "ambiguous" in f.verification.note
+    assert res.skipped == 1
+
+
 def test_verify_empty_when_nothing_verifiable():
     det = _finding("det", verif=Verification(status="DETERMINISTIC", note="ref"))
     res = verify_findings([det], [_sheet()], client=_FakeClient({}), crop_renderer=_crop_renderer)

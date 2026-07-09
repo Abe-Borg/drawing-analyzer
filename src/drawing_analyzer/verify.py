@@ -198,27 +198,56 @@ def _default_crop_renderer(items: list) -> Iterator[tuple]:
             yield by_key[key], png
 
 
-def _sheet_lookup(sheets: Iterable[Any]) -> dict[tuple, Any]:
+def _sheet_lookup(sheets: Iterable[Any]) -> tuple[dict[tuple, Any], set[tuple]]:
+    """Map ``(source_name, page_index) -> sheet``, plus the *ambiguous* keys.
+
+    ``source_name`` is a file **basename**, so two input PDFs that share a
+    basename (e.g. ``M-101.pdf`` from two folders) collide on the same key. A
+    finding carries only that basename, so it can't be told which PDF it came
+    from — verifying it against the wrong drawing would reject a valid finding or
+    save evidence from another sheet. We therefore flag those keys as ambiguous
+    and skip their findings rather than guess. (Phase 7 wiring associates each
+    finding with its originating sheet directly, avoiding the lookup entirely.)
+    """
     out: dict[tuple, Any] = {}
+    ambiguous: set[tuple] = set()
     for s in sheets:
         ref = getattr(s, "ref", None)
-        if ref is not None:
-            out[(ref.source_name, ref.page_index)] = s
-    return out
+        if ref is None:
+            continue
+        key = (ref.source_name, ref.page_index)
+        prev = out.get(key)
+        if prev is not None:
+            prev_path = getattr(getattr(prev, "ref", None), "pdf_path", None)
+            if prev_path != getattr(ref, "pdf_path", None):
+                ambiguous.add(key)   # same basename+page, different file
+        out[key] = s
+    return out, ambiguous
 
 
-def _save_evidence(evidence_dir: Path | None, finding_id: str, png: bytes) -> str:
+def _save_evidence(
+    evidence_dir: Path | None, finding_id: str, png: bytes, used: set[str]
+) -> str:
     """Write the crop to ``evidence/<id>.png``; return the run-relative path.
 
-    Best-effort — a write failure must not sink verification (the verdict still
-    stands), so it just drops the evidence path.
+    Two distinct findings can share a content-derived ``finding.id`` (same sheet
+    / category / quote), which would collide on one file and lose one crop — so a
+    name already claimed this run gets a ``-N`` suffix, keeping each record's
+    actual crop. Best-effort — a write failure just drops the evidence path (the
+    verdict still stands).
     """
     if evidence_dir is None:
         return ""
+    name = finding_id
+    n = 1
+    while name in used:
+        n += 1
+        name = f"{finding_id}-{n}"
+    used.add(name)
     try:
         evidence_dir.mkdir(parents=True, exist_ok=True)
-        (evidence_dir / f"{finding_id}.png").write_bytes(png)
-        return f"evidence/{finding_id}.png"
+        (evidence_dir / f"{name}.png").write_bytes(png)
+        return f"evidence/{name}.png"
     except OSError:
         _log.warning("could not write evidence for finding %s", finding_id)
         return ""
@@ -332,12 +361,21 @@ def verify_findings(
     if not verifiable:
         return result
 
-    lookup = _sheet_lookup(sheets)
+    lookup, ambiguous = _sheet_lookup(sheets)
 
-    # Build the crop work-list; a finding with no matching sheet can't be cropped.
+    # Build the crop work-list; a finding with no matching sheet — or one whose
+    # sheet key is ambiguous (two input PDFs share a basename) — can't be cropped
+    # against the right drawing, so it is skipped rather than verified wrongly.
     items: list = []
     for f in verifiable:
-        sheet = lookup.get((f.source_name, f.page_index))
+        key = (f.source_name, f.page_index)
+        if key in ambiguous:
+            f.verification = Verification(
+                status="SKIPPED", note="ambiguous sheet (duplicate file basename)"
+            )
+            result._count("SKIPPED")
+            continue
+        sheet = lookup.get(key)
         if sheet is None:
             f.verification = Verification(status="SKIPPED", note="sheet not available for crop")
             result._count("SKIPPED")
@@ -368,6 +406,7 @@ def verify_findings(
     fatal = threading.Event()
     total = len(items)
     done = 0
+    used_evidence_names: set[str] = set()
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         in_flight: dict = {}
@@ -405,7 +444,9 @@ def verify_findings(
                     result._count("SKIPPED")
                     done += 1
                     continue
-                evidence_png = _save_evidence(evidence_dir, finding.id, crop_png)
+                evidence_png = _save_evidence(
+                    evidence_dir, finding.id, crop_png, used_evidence_names
+                )
                 fut = executor.submit(
                     _verify_one, finding, crop_png, evidence_png,
                     client=client, model=model, max_retries=max_retries,
