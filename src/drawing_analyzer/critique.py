@@ -62,8 +62,42 @@ from .digest import (
 )
 from .digest_cache import critique_cache_key
 from .models import Finding, RenderedSheet
+from .profiles import (
+    Profile,
+    build_checklist_prompt,
+    chunk_items,
+    flatten_items,
+    profiles_cache_fragment,
+)
 
 _log = get_logger()
+
+# Above a rough character budget, a long review checklist is spread across the
+# self-consistency runs (each run covers a slice; the union is complete — never
+# truncated) rather than sent whole every run. Below it — the common case,
+# including the shipped profiles — every run gets the full checklist so the reads
+# stay directly comparable for self-consistency.
+_CHECKLIST_CHUNK_THRESHOLD_CHARS = 6000
+
+
+def _run_checklists(profiles: list[Profile] | None, runs: int) -> list[str]:
+    """The checklist block to inject into each of ``runs`` critique reads.
+
+    Normally the full checklist for every run. Only a checklist past the char
+    threshold is chunked across the runs (logged), trading some self-consistency
+    for coverage under token pressure, per the plan.
+    """
+    items = flatten_items(profiles or [])
+    full = build_checklist_prompt(items)
+    if not full:
+        return [""] * runs
+    if runs <= 1 or len(full) <= _CHECKLIST_CHUNK_THRESHOLD_CHARS:
+        return [full] * runs
+    _log.info(
+        "critique checklist long (%d chars); chunking %d item(s) across %d run(s)",
+        len(full), len(items), runs,
+    )
+    return [build_checklist_prompt(chunk) for chunk in chunk_items(items, runs)]
 
 # Critique shares the digest's output-shaping defaults: Opus 4.8, adaptive
 # thinking, effort high, 16k max_tokens (full coverage, deliberate reasoning).
@@ -171,9 +205,16 @@ CRITIQUE_PROMPT_VERSION = hashlib.sha256(
 ).hexdigest()[:16]
 
 
-def critique_system_prompt() -> str:
-    """The effective critique system prompt: persona + findings instruction."""
-    return CRITIQUE_SYSTEM_PROMPT + _CRITIQUE_FINDINGS_INSTRUCTION
+def critique_system_prompt(checklist: str = "") -> str:
+    """The effective critique system prompt: persona, then any review-profile
+    ``checklist`` (Phase 12), then the findings instruction.
+
+    The findings instruction stays **last** so the machine-read JSON block is
+    emitted after everything (the parser's "last fenced block" rule); the
+    checklist rides between the persona and it. Empty ``checklist`` reproduces the
+    pre-profiles prompt byte-for-byte.
+    """
+    return CRITIQUE_SYSTEM_PROMPT + (checklist or "") + _CRITIQUE_FINDINGS_INSTRUCTION
 
 
 def build_critique_request_params(
@@ -183,18 +224,20 @@ def build_critique_request_params(
     max_tokens: int = DEFAULT_CRITIQUE_MAX_TOKENS,
     use_thinking: bool = True,
     effort: str | None = DEFAULT_CRITIQUE_EFFORT,
+    checklist: str = "",
 ) -> dict[str, Any]:
     """Build the Messages-API request body for one critique read.
 
     Mirrors :func:`drawing_analyzer.digest.build_digest_request_params` (thinking
     / effort attached only when the model supports them) but with the critique
     system prompt. The user ``content`` is the digest's identical imagery + text
-    layer, built with the critique closing instruction.
+    layer, built with the critique closing instruction. ``checklist`` is the
+    review-profile block injected into the system prompt.
     """
     params: dict[str, Any] = {
         "model": model,
         "max_tokens": max_tokens,
-        "system": critique_system_prompt(),
+        "system": critique_system_prompt(checklist),
         "messages": [{"role": "user", "content": content}],
     }
     if use_thinking and model_supports_adaptive_thinking(model):
@@ -427,13 +470,15 @@ def critique_sheet(
     effort: str | None = DEFAULT_CRITIQUE_EFFORT,
     max_retries: int = DEFAULT_CRITIQUE_MAX_RETRIES,
     sleep: Any = time.sleep,
+    checklist: str = "",
 ) -> tuple[list[Finding], int, int, str | None]:
     """One critique read of a rendered sheet → ``(findings, in_tok, out_tok, err)``.
 
     Mirrors :func:`drawing_analyzer.digest.digest_sheet`'s call loop (transient
     retry + backoff reused verbatim; a permanent failure returns immediately). On
     any failure ``findings`` is empty and ``err`` is a sanitized message — the
-    caller degrades, the run never dies (I-3).
+    caller degrades, the run never dies (I-3). ``checklist`` is the review-profile
+    block to inject into the prompt (empty for a plain critique).
     """
     model = model or critique_model()
     if client is None:
@@ -447,6 +492,7 @@ def critique_sheet(
         max_tokens=max_tokens,
         use_thinking=use_thinking,
         effort=effort,
+        checklist=checklist,
     )
 
     attempt = 0
@@ -490,6 +536,7 @@ def critique_sheet_self_consistent(
     effort: str | None = DEFAULT_CRITIQUE_EFFORT,
     max_retries: int = DEFAULT_CRITIQUE_MAX_RETRIES,
     sleep: Any = time.sleep,
+    profiles: list[Profile] | None = None,
 ) -> CritiqueResult:
     """Critique one sheet ``runs`` times and merge (:func:`merge_self_consistency`).
 
@@ -497,9 +544,14 @@ def critique_sheet_self_consistent(
     is consulted first; on a hit the merged findings are served with no model
     call. Each run's failure is tolerated — the merge runs over whatever runs
     succeeded; only if *every* run fails is an error returned (empty findings).
+
+    ``profiles`` (Phase 12) are review-profile checklists injected into the
+    critique prompt; they fold into the cache key (so selecting or editing one
+    re-critiques) and, if very long, are chunked across the runs.
     """
     model = model or critique_model()
     runs = critique_runs() if runs is None else max(1, int(runs))
+    run_checklists = _run_checklists(profiles, runs)
 
     cache_key: str | None = None
     if cache is not None:
@@ -512,6 +564,7 @@ def critique_sheet_self_consistent(
             use_thinking=use_thinking,
             runs=runs,
             sheet_text=rendered.sheet_text,
+            profiles_key=profiles_cache_fragment(profiles or []),
         )
         hit = cache.get(cache_key)
         if hit is not None:
@@ -527,7 +580,7 @@ def critique_sheet_self_consistent(
     run_groups: list[list[Finding]] = []
     total_in = total_out = 0
     errors: list[str] = []
-    for _ in range(runs):
+    for i in range(runs):
         findings, in_tok, out_tok, err = critique_sheet(
             rendered,
             client=client,
@@ -537,6 +590,7 @@ def critique_sheet_self_consistent(
             effort=effort,
             max_retries=max_retries,
             sleep=sleep,
+            checklist=run_checklists[i],
         )
         total_in += in_tok
         total_out += out_tok

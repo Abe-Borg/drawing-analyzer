@@ -126,6 +126,7 @@ ctx = extract_drawing_context(
     markup_verified_only=True,   # cloud only verified/deterministic findings
     verify_findings=True,        # run the per-finding verification pass
     critique=True,               # second "reviewer" read/sheet, self-consistent (pricier)
+    profiles=["fire-protection"],# review-profile checklists to apply (needs critique=True)
     qc_work_dir=Path("run-out"), # where evidence crops + reviewed PDFs land
 )
 print(ctx.combined_text)
@@ -308,6 +309,72 @@ and the standard deliverable ships. The model defaults to Opus 4.8
 (`DRAWING_ANALYZER_CRITIQUE_MODEL`); the run count is `DRAWING_ANALYZER_CRITIQUE_RUNS`
 (default 2; set 1 to disable self-consistency).
 
+## Review profiles
+
+The critique reads with a senior engineer's *general* judgment. A **review
+profile** makes that judgment *specific and repeatable*: it is the owner's QC
+knowledge written down as a versioned checklist, injected into the critique
+prompt so the model applies each item deliberately, not incidentally. Pass the
+profile names to a critique run:
+
+```python
+ctx = extract_drawing_context(
+    pdfs, critique=True, qc_markups=True,
+    profiles=["fire-protection"],   # names of profiles to apply
+)
+```
+
+Selected profiles' checklists are appended to the critique prompt under *"APPLY
+THIS REVIEW CHECKLIST EXPLICITLY, ITEM BY ITEM"*, and the set of profiles (name +
+version + a content hash of each) folds into the critique cache key — so
+**editing a checklist re-critiques** the affected sheets, while an unchanged
+selection is served from cache. A very long checklist is split across the two
+self-consistency runs (each run covers a slice; the union is complete) rather
+than truncated. Profiles only take effect with `critique=True`; unknown names are
+skipped without failing the run.
+
+A starter **fire-protection** profile (NFPA 13 sprinkler QC) ships with the tool.
+`drawing_analyzer.profiles.suggest_profiles(sheet_ids)` proposes profiles whose
+disciplines match a set's sheet numbering (e.g. `F-…` sheets → the
+fire-protection profile).
+
+### Writing a profile
+
+A profile is a Markdown file with a small frontmatter header and a flat list of
+one-line checklist items:
+
+```markdown
+---
+name: fire-protection
+title: Fire Protection — NFPA 13 sprinkler QC
+disciplines: F, FP, SP
+version: 1
+author: Your Name
+date: 2026-07-08
+---
+
+- Dry/DIPA design areas carry the +30% increase over the wet base; flag a dry
+  row whose remote area equals the wet base. [high] (NFPA 13 §19.2.3.2.5)
+- EH standard-spray coverage ≤ 100 ft²; flag a larger max-area value. [medium]
+- Every dry/preaction system must show its ITV, air supply, low-point drains,
+  and gauges; flag any missing (an absence). [medium]
+```
+
+- **Frontmatter** (between the `---` lines): `name` (stable id — reused to
+  *shadow* a built-in), `title`, `disciplines` (comma-separated tags matched
+  against sheet-id prefixes for auto-suggest), `version`, `author`, `date`.
+- **Items**: each Markdown bullet is one check, injected **verbatim** — say what
+  to check, what "wrong" looks like, a severity hint in `[brackets]`, and a code
+  reference where one applies. Absences read best as *"expected X; not found on
+  this sheet."*
+
+Profiles are discovered from the built-in set shipped with the package and from
+your own directory — **`~/.drawing_analyzer/profiles/`** (override with
+`DRAWING_ANALYZER_PROFILES_DIR`) — where a file reusing a built-in `name` wins,
+so you can tune the shipped checklist without editing the install. Bump `version`
+(or just edit — the content hash changes either way) to re-run the critique
+against the new checklist.
+
 ## Anchoring findings
 
 A finding is only useful on a marked-up drawing if it sits **on the thing it's
@@ -455,6 +522,7 @@ runs.
 | `DRAWING_ANALYZER_VERIFY_MODEL` | Opus 4.8 | Per-finding verification model (crop + short prompt). |
 | `DRAWING_ANALYZER_CRITIQUE_MODEL` | Opus 4.8 | Critique-pass vision model (`critique=True`). |
 | `DRAWING_ANALYZER_CRITIQUE_RUNS` | `2` | Critique self-consistency reads to merge (`1` disables it). |
+| `DRAWING_ANALYZER_PROFILES_DIR` | `~/.drawing_analyzer/profiles` | User review-profile directory (wins over built-ins on name). |
 | `DRAWING_ANALYZER_MAX_WORKERS` | `4` | Real-time digest concurrency (`1` = sequential). |
 | `DRAWING_ANALYZER_UPLOAD_WORKERS` | `6` | Files-API image-upload concurrency per sheet (`1` = sequential). |
 | `DRAWING_ANALYZER_SUPPRESS_NEAR_BLANK` | off | Also drop near-blank tiles (PNG-byte threshold), not just pixel-uniform ones. |

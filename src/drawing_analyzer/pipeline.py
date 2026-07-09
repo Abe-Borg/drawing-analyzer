@@ -499,6 +499,7 @@ def _run_critique_stage(
     progress: ProgressCallback | None,
     total: int,
     max_workers: int | None,
+    profiles: list | None = None,
 ) -> tuple[list[Finding], int, int]:
     """Critique every sheet (Phase 11): re-render, then self-consistent critique.
 
@@ -554,7 +555,7 @@ def _run_critique_stage(
             in_flight.add(
                 executor.submit(
                     critique_sheet_self_consistent,
-                    rendered, client=client, cache=cache,
+                    rendered, client=client, cache=cache, profiles=profiles,
                 )
             )
             while len(in_flight) >= workers:
@@ -727,6 +728,7 @@ def extract_drawing_context(
     markup_verified_only: bool = True,
     verify_findings: bool = True,
     critique: bool = False,
+    profiles: list | None = None,
     qc_work_dir: Path | None = None,
 ) -> DrawingContext:
     """Render and digest every sheet in ``pdf_paths`` into one text context.
@@ -795,6 +797,13 @@ def extract_drawing_context(
     digest is untouched (I-2). The merged critique is cached under its own key, so
     a re-run skips the extra calls. It re-renders each sheet (the digest images are
     gone by then), so it is meaningfully more expensive — the exhaustive QC mode.
+
+    ``profiles`` (Phase 12) is a list of review-profile names (or
+    :class:`~drawing_analyzer.profiles.Profile` objects) whose checklists are
+    injected into the critique prompt, so the model applies the owner's encoded QC
+    knowledge item by item. Unknown names are skipped (non-fatal). The selected
+    profiles' fingerprint folds into the critique cache key, so choosing or editing
+    a profile re-critiques. Ignored unless ``critique=True``.
     """
     if cache is None and use_cache:
         from .digest_cache import get_default_digest_cache
@@ -925,10 +934,19 @@ def extract_drawing_context(
         if progress is not None:
             progress(total, total, "Critiquing sheets")
         try:
+            from .profiles import resolve_profiles
+
+            resolved_profiles = resolve_profiles(profiles)
+            if resolved_profiles:
+                _log.info(
+                    "critique: applying %d review profile(s): %s",
+                    len(resolved_profiles),
+                    ", ".join(p.name for p in resolved_profiles),
+                )
             critique_findings, c_in, c_out = _run_critique_stage(
                 paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
                 client=client, cache=cache, progress=progress, total=total,
-                max_workers=max_workers,
+                max_workers=max_workers, profiles=resolved_profiles,
             )
             in_tok += c_in
             out_tok += c_out

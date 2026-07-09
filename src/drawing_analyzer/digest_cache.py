@@ -176,6 +176,7 @@ def critique_cache_key(
     use_thinking: bool,
     runs: int,
     sheet_text: str | None = None,
+    profiles_key: str | None = None,
 ) -> str:
     """Content-address one sheet's *critique* (Phase 11) — a separate model read
     from the digest, over the same images.
@@ -190,6 +191,12 @@ def critique_cache_key(
     *merged* critique findings are cached under this key, so a re-run skips the
     model calls; the run-to-run sampling variance the merge feeds on is not itself
     reproducible, so only the merged outcome is stored (never an individual run).
+
+    ``profiles_key`` (Phase 12) is the fingerprint of the review profiles injected
+    into the critique prompt (:func:`drawing_analyzer.profiles.profiles_cache_fragment`
+    — sorted ``name@version@hash`` triples). Folded in **only when non-empty**, so
+    a no-profiles critique key stays byte-identical to a pre-profiles one (existing
+    entries valid), while selecting a profile — or editing one — re-critiques.
     """
     h = hashlib.sha256()
     for part in (
@@ -207,6 +214,10 @@ def critique_cache_key(
     if sheet_text:
         h.update(b"sheet_text=")
         h.update(sheet_text.encode("utf-8"))
+        h.update(b"\x00")
+    if profiles_key:
+        h.update(b"profiles=")
+        h.update(profiles_key.encode("utf-8"))
         h.update(b"\x00")
     h.update(sheet.overview.png_bytes)
     for tile in sheet.tiles:
