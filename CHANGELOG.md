@@ -6,6 +6,30 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Exhaustive QC — the critique pass
+
+Part II of the QC work: make the markup read like an experienced engineer's
+review, not the digest's incidental noticing.
+
+#### Added
+
+- **Critique pass (`critique=True`) — "the reviewer".** A second full-coverage
+  vision read per sheet (the same overview + tiles + text layer the digest sees),
+  under a senior-QA-engineer persona whose only job is to find problems: errors,
+  code concerns (cited conservatively), RFI-worthy ambiguities, internal
+  inconsistencies, stale/copy-paste text, and **absences** — content a complete
+  sheet should show but doesn't (`anchor_hint: "SHEET"`, no quote). It emits only
+  the findings block, so the prose digest and `combined_text` are untouched (I-2).
+- **Self-consistency.** The critique runs twice; a finding both reads surface is
+  corroborated (`reproduced`), a singleton is kept but flagged. The merge
+  deduplicates by anchor-rect overlap (IoU) once anchored, else the reported tile,
+  and by normalized-text overlap. Digest and critique findings then pool into one
+  per-sheet set before anchoring — cross-source agreement also marks `reproduced`.
+  The flag is a soft confidence signal; it never suppresses a finding.
+- **`Finding` gains `anchor_hint` and `reproduced`** (both optional, backward-
+  compatible — read tolerantly from cache, no cache invalidation) and the critique
+  is cached under its own key (a distinct namespace from the digest).
+
 ### QC findings, verification & markup integration
 
 Turns the analyzer from a pure coverage instrument into one that also

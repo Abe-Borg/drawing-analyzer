@@ -166,6 +166,54 @@ def digest_cache_key_level1(
     return h.hexdigest()
 
 
+def critique_cache_key(
+    sheet: Any,
+    *,
+    model: str,
+    prompt_version: str,
+    max_tokens: int,
+    effort: str | None,
+    use_thinking: bool,
+    runs: int,
+    sheet_text: str | None = None,
+) -> str:
+    """Content-address one sheet's *critique* (Phase 11) — a separate model read
+    from the digest, over the same images.
+
+    Mirrors :func:`digest_cache_key` (the rendered images key the page content
+    and every tiling parameter at once, and a non-empty ``sheet_text`` is folded
+    in so a corrected text layer re-critiques even when the pixels are unchanged),
+    but adds a ``stage=critique`` namespace tag, the critique prompt fingerprint,
+    and the self-consistency ``runs`` count — a one-run critique and a two-run
+    merge are different results. The distinct stage tag and prompt version mean a
+    critique key can never collide with a digest key over the same images. The
+    *merged* critique findings are cached under this key, so a re-run skips the
+    model calls; the run-to-run sampling variance the merge feeds on is not itself
+    reproducible, so only the merged outcome is stored (never an individual run).
+    """
+    h = hashlib.sha256()
+    for part in (
+        f"schema={_SCHEMA_VERSION}",
+        "stage=critique",
+        f"model={model or ''}",
+        f"prompt={prompt_version or ''}",
+        f"max_tokens={int(max_tokens)}",
+        f"effort={effort or ''}",
+        f"thinking={'1' if use_thinking else '0'}",
+        f"runs={int(runs)}",
+    ):
+        h.update(part.encode("utf-8"))
+        h.update(b"\x00")
+    if sheet_text:
+        h.update(b"sheet_text=")
+        h.update(sheet_text.encode("utf-8"))
+        h.update(b"\x00")
+    h.update(sheet.overview.png_bytes)
+    for tile in sheet.tiles:
+        h.update(tile.png_bytes)
+    return h.hexdigest()
+
+
 class DigestCache:
     """Thread-safe digest store, optionally persisted to ``path``.
 

@@ -381,7 +381,10 @@ def _sheet_text_layer_block(sheet: RenderedSheet) -> dict:
 
 
 def build_user_content_blocks(
-    sheet: RenderedSheet, image_block: "Callable[[ImageTile], dict]"
+    sheet: RenderedSheet,
+    image_block: "Callable[[ImageTile], dict]",
+    *,
+    task_instruction: str = _DIGEST_TASK_INSTRUCTION,
 ) -> list[dict]:
     """Assemble the user-turn content blocks for one sheet.
 
@@ -395,6 +398,11 @@ def build_user_content_blocks(
     (the batch digest, which references each uploaded image by ``file_id`` to
     keep the request body under the 32 MB Messages-API limit) share one
     byte-stable prompt shape — only the image source differs.
+
+    ``task_instruction`` is the final text block (default: the digest task). The
+    critique pass reuses this identical imagery + text-layer framing but passes
+    its own closing instruction, so the two vision reads see the same sheet
+    presentation and differ only in what they are asked to produce.
 
     The sheet's verbatim text layer is inserted right after the framing text and
     before any image, so both transports carry the exact-strings grounding the
@@ -430,18 +438,23 @@ def build_user_content_blocks(
             )
         )
         blocks.append(image_block(tile))
-    blocks.append(_text_block(_DIGEST_TASK_INSTRUCTION))
+    blocks.append(_text_block(task_instruction))
     return blocks
 
 
-def build_user_content(sheet: RenderedSheet) -> list[dict]:
+def build_user_content(
+    sheet: RenderedSheet, *, task_instruction: str = _DIGEST_TASK_INSTRUCTION
+) -> list[dict]:
     """Inline-base64 user content for one sheet (the real-time digest transport).
 
     Thin wrapper over :func:`build_user_content_blocks` that inlines each image
     as base64. The batch path uses the same builder with a ``file_id`` image
-    block (see :mod:`drawing_analyzer.file_upload`).
+    block (see :mod:`drawing_analyzer.file_upload`). ``task_instruction`` overrides
+    the closing instruction (the critique pass passes its own).
     """
-    return build_user_content_blocks(sheet, lambda t: _image_block(t.png_bytes))
+    return build_user_content_blocks(
+        sheet, lambda t: _image_block(t.png_bytes), task_instruction=task_instruction
+    )
 
 
 def build_digest_request_params(
@@ -664,6 +677,13 @@ def _validate_finding_item(item: Any, ref: SheetRef) -> Finding | None:
     if not isinstance(quote, str):
         quote = ""
     sheet_id = str(item.get("sheet_id", "")).strip() or _fallback_sheet_id(ref)
+    # ``anchor_hint`` is optional and only the critique pass emits it ("SHEET" for
+    # a sheet-level / absence finding). The digest never asks for it, so a digest
+    # item simply leaves it "" — the shared parser stays byte-compatible for
+    # digests while carrying the hint through for critique findings.
+    anchor_hint = str(item.get("anchor_hint", "")).strip().upper()
+    if anchor_hint != "SHEET":
+        anchor_hint = ""
     return Finding(
         sheet_id=sheet_id,
         source_name=ref.source_name,
@@ -674,6 +694,7 @@ def _validate_finding_item(item: Any, ref: SheetRef) -> Finding | None:
         source_quote=quote,
         tile=_coerce_tile(item.get("tile")),
         refs=_coerce_refs(item.get("refs")),
+        anchor_hint=anchor_hint,
     )
 
 

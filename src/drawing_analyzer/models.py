@@ -239,6 +239,16 @@ class Finding:
     ``[row, col]`` grid position the model reported (``None`` for offline /
     deterministic findings, which carry exact anchors instead). ``id`` is derived
     from the content when not supplied, so callers normally omit it.
+
+    ``anchor_hint`` is an optional coarse placement hint from the model — currently
+    ``"SHEET"`` for a sheet-level / *absence* finding (something the reviewer
+    expected but did not find), which has no ``source_quote`` to anchor and is
+    placed against the whole sheet rather than a rectangle. ``reproduced`` is a
+    soft confidence signal: ``True`` unless a self-consistency pass saw the finding
+    in only one of several independent reads (an uncorroborated singleton). It
+    never suppresses a finding — the report and the markup writer only *surface*
+    it — so it defaults ``True`` for every finding that never went through that
+    pass (digest findings, the deterministic auditors).
     """
 
     sheet_id: str
@@ -250,6 +260,8 @@ class Finding:
     source_quote: str = ""
     tile: list[int] | None = None
     refs: list[str] = field(default_factory=list)
+    anchor_hint: str = ""               # "SHEET" for a sheet-level / absence finding
+    reproduced: bool = True             # corroborated by a second read (self-consistency)
     anchor: Anchor = field(default_factory=Anchor)
     verification: Verification = field(default_factory=Verification)
     id: str = ""
@@ -272,6 +284,8 @@ class Finding:
             "source_quote": self.source_quote,
             "tile": list(self.tile) if self.tile is not None else None,
             "refs": list(self.refs),
+            "anchor_hint": self.anchor_hint,
+            "reproduced": self.reproduced,
             "anchor": self.anchor.to_dict(),
             "verification": self.verification.to_dict(),
         }
@@ -294,6 +308,8 @@ class Finding:
             source_quote=d.get("source_quote", ""),
             tile=[int(v) for v in tile] if tile else None,
             refs=list(d.get("refs", []) or []),
+            anchor_hint=d.get("anchor_hint", "") or "",
+            reproduced=bool(d.get("reproduced", True)),
             anchor=Anchor.from_dict(d.get("anchor") or {}),
             verification=Verification.from_dict(d.get("verification") or {}),
             id=d.get("id", ""),
