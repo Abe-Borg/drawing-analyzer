@@ -11,7 +11,9 @@ from __future__ import annotations
 from datetime import datetime
 
 from drawing_analyzer import html_report as hr
+from drawing_analyzer.models import Anchor, Finding, Verification
 from tests.fixtures.fake_context import FakeContext as _Ctx
+from tests.fixtures.fake_context import FakeGeometry as _Geom
 from tests.fixtures.fake_context import FakeRef as _Ref
 from tests.fixtures.fake_context import FakeSheet as _Sheet
 
@@ -310,24 +312,52 @@ def test_report_without_key_has_no_chat_and_no_network_references():
     assert blank == doc
 
 
-def test_report_with_key_embeds_the_chat_widget():
+def test_report_with_key_default_prompts_and_never_writes_the_key():
+    # Phase 8: the DEFAULT (no embed_api_key) includes the assistant but does NOT
+    # write the key into the file — it prompts at runtime and uses sessionStorage.
+    key = "sk-ant-SECRET-do-not-embed"
+    doc = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW, api_key=key)
+    # Widget present and wired to the API...
+    assert 'id="da-chat-config"' in doc
+    assert hr.CHAT_MODEL_DEFAULT in doc
+    assert "api.anthropic.com/v1/messages" in doc
+    assert "web_search_20260209" in doc and "web_fetch_20260209" in doc
+    # ...but the key literal appears NOWHERE, and the config carries no apiKey.
+    assert key not in doc
+    assert '"apiKey"' not in doc
+    # The runtime path uses sessionStorage and says the key isn't saved.
+    assert "sessionStorage" in doc
+    assert "never saved into this file" in doc
+
+
+def test_report_with_embed_api_key_embeds_the_key_with_a_warning():
     doc = hr.build_html_report(
-        _make_ctx(), source_names=[SRC], now=NOW, api_key="sk-ant-test-123"
+        _make_ctx(), source_names=[SRC], now=NOW,
+        api_key="sk-ant-test-123", embed_api_key=True,
     )
     # The config block carries the key + chat model for the browser-side JS.
     assert 'id="da-chat-config"' in doc
     assert "sk-ant-test-123" in doc
+    assert '"apiKey"' in doc
     assert hr.CHAT_MODEL_DEFAULT in doc
-    # The widget calls the Messages API directly from the browser (CORS opt-in),
-    # streams, thinks adaptively, and declares the server-side web tools.
     assert "api.anthropic.com/v1/messages" in doc
     assert "anthropic-dangerous-direct-browser-access" in doc
-    assert "web_search_20260209" in doc and "web_fetch_20260209" in doc
     assert "adaptive" in doc
     # The report block is cache-marked so follow-ups reread it at cache prices.
     assert "cache_control" in doc
-    # The reader is warned about the embedded key.
+    # The reader is warned (in red) about the embedded key.
     assert "don't share it" in doc
+    assert "da-key-warn" in doc
+
+
+def test_embed_api_key_without_a_key_stays_in_prompt_mode():
+    # embed flag but no key to embed → widget present, still no key literal.
+    doc = hr.build_html_report(
+        _make_ctx(), source_names=[SRC], now=NOW, api_key=None, embed_api_key=True
+    )
+    assert 'id="da-chat-config"' in doc
+    assert '"apiKey"' not in doc
+    assert "sessionStorage" in doc
 
 
 def test_chat_config_cannot_break_out_of_its_script_tag():
@@ -343,3 +373,131 @@ def test_chat_config_cannot_break_out_of_its_script_tag():
     config = doc[start: doc.index("</script>", start)]
     assert "</" not in config[config.index(">"):]
     assert "<\\/script" in config
+
+
+# --------------------------------------------------------------------------- #
+# QC Findings card + status chips (Phase 8)
+# --------------------------------------------------------------------------- #
+
+
+def _finding(sheet_id="M-101", category="code", severity="high",
+             text="VAV-3 has no shown clearance", quote="VAV-3",
+             page_index=0, source_name=SRC,
+             anchor_status="EXACT", verify_status="VERIFIED", evidence=""):
+    return Finding(
+        sheet_id=sheet_id, source_name=source_name, page_index=page_index,
+        category=category, severity=severity, text=text, source_quote=quote,
+        anchor=Anchor(status=anchor_status,
+                      rect_pdf=[0, 0, 1, 1] if anchor_status != "UNANCHORED" else None),
+        verification=Verification(status=verify_status, evidence_png=evidence),
+    )
+
+
+def _findings_ctx(findings=None, reference=None, geometries=None):
+    ctx = _make_ctx()
+    ctx.findings = findings or []
+    ctx.reference_findings = reference or []
+    ctx.sheet_geometries = geometries or []
+    return ctx
+
+
+def test_finding_display_status_priority():
+    # REJECTED wins; DETERMINISTIC and VERIFIED next; an unanchored non-empty
+    # quote reads UNANCHORED; anchored-but-unconfirmed collapses to UNCERTAIN.
+    f = hr._finding_display_status
+    assert f(_finding(verify_status="REJECTED")) == "REJECTED"
+    assert f(_finding(verify_status="DETERMINISTIC")) == "DETERMINISTIC"
+    assert f(_finding(verify_status="VERIFIED")) == "VERIFIED"
+    assert f(_finding(anchor_status="UNANCHORED", verify_status="SKIPPED")) == "UNANCHORED"
+    assert f(_finding(anchor_status="EXACT", verify_status="UNCERTAIN")) == "UNCERTAIN"
+    assert f(_finding(anchor_status="EXACT", verify_status="SKIPPED")) == "UNCERTAIN"
+
+
+def test_findings_card_renders_table_chips_and_sheet_link():
+    ctx = _findings_ctx(
+        findings=[
+            _finding(severity="high", verify_status="VERIFIED"),
+            _finding(text="stray note", quote="", category="question",
+                     severity="low", anchor_status="UNANCHORED", verify_status="SKIPPED"),
+        ],
+        reference=[
+            _finding(sheet_id="M-101", category="reference", severity="medium",
+                     text="References M-999; not present", quote="M-999",
+                     verify_status="DETERMINISTIC"),
+        ],
+    )
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
+    # The pinned card + its TOC entry appear.
+    assert 'id="findings"' in doc
+    assert 'data-target="findings"' in doc
+    assert "3 finding(s)" in doc
+    # Sortable headers carry the sort keys.
+    for key in ("sheet", "category", "severity", "status", "text", "quote"):
+        assert f'data-sort="{key}"' in doc
+    # Status chips render with their colored classes.
+    assert "fchip-verified" in doc
+    assert "fchip-deterministic" in doc
+    assert "fchip-unanchored" in doc
+    # Rows carry the filter/sort hooks the JS keys on.
+    assert 'class="finding-row"' in doc
+    assert 'data-severity="3"' in doc and 'data-status="VERIFIED"' in doc
+    # The sheet cell links to the card for the sheet the finding sits on.
+    assert 'href="#sheet-1"' in doc
+
+
+def test_no_findings_card_when_there_are_none():
+    doc = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW)
+    assert 'id="findings"' not in doc               # no card
+    assert 'data-target="findings"' not in doc      # no TOC entry
+
+
+def test_evidence_thumbnail_only_with_link_evidence():
+    ctx = _findings_ctx(findings=[_finding(evidence="evidence/abc123.png")])
+    plain = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
+    # The CSS class always exists; the <img> markup must not (single-file stays light).
+    assert 'class="evidence-thumb"' not in plain
+    linked = hr.build_html_report(ctx, source_names=[SRC], now=NOW, link_evidence=True)
+    assert 'class="evidence-thumb"' in linked
+    assert 'src="evidence/abc123.png"' in linked
+
+
+# --------------------------------------------------------------------------- #
+# Per-sheet raw text layer + raster badge (Phase 8)
+# --------------------------------------------------------------------------- #
+
+
+def test_rawtext_block_feeds_search_and_flags_raster():
+    ctx = _findings_ctx(geometries=[
+        _Geom(_Ref(SRC, 0, 3), sheet_text="PANEL SCHEDULE RAWMARKER-XYZ"),
+        _Geom(_Ref(SRC, 1, 3), sheet_text="", is_raster=True),
+    ])
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
+    # Sheet 1's raw text layer is embedded (searchable) in a collapsed block.
+    assert "Sheet text layer" in doc
+    assert "RAWMARKER-XYZ" in doc
+    assert 'class="block block-rawtext"' in doc
+    # Sheet 2 (empty text layer) is badged as raster with an explanatory note.
+    assert 'class="badge badge-raster"' in doc
+    assert "Raster sheet" in doc
+
+
+def test_same_basename_sheets_keep_their_own_text_layer():
+    # Two PDFs share the basename "M-101.pdf" but live in different directories.
+    # The geometry index keys on the full path, so each sheet card must show its
+    # OWN raw text layer — not the first sheet's (regression for the basename
+    # collision).
+    name = "M-101.pdf"
+    sheets = [
+        _Sheet(_Ref(name, 0, 1, pdf_path="/rev_a/M-101.pdf"), text="rev A digest"),
+        _Sheet(_Ref(name, 0, 1, pdf_path="/rev_b/M-101.pdf"), text="rev B digest"),
+    ]
+    geoms = [
+        _Geom(_Ref(name, 0, 1, pdf_path="/rev_a/M-101.pdf"), sheet_text="ALPHA_ONLY_TEXT"),
+        _Geom(_Ref(name, 0, 1, pdf_path="/rev_b/M-101.pdf"), sheet_text="BRAVO_ONLY_TEXT"),
+    ]
+    ctx = _Ctx(sheets=sheets, combined_text="x", sheet_geometries=geoms)
+    doc = hr.build_html_report(ctx, source_names=[name], now=NOW)
+    # Both distinct text layers survive; before the fix the second sheet reused
+    # the first geometry, so BRAVO_ONLY_TEXT would be missing entirely.
+    assert "ALPHA_ONLY_TEXT" in doc
+    assert "BRAVO_ONLY_TEXT" in doc

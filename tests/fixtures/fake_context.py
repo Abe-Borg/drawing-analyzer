@@ -16,11 +16,17 @@ from dataclasses import dataclass, field
 
 @dataclass
 class FakeRef:
-    """Stand-in for :class:`drawing_analyzer.models.SheetRef`."""
+    """Stand-in for :class:`drawing_analyzer.models.SheetRef`.
+
+    ``pdf_path`` mirrors the real ref's full-identity field (optional here so the
+    common ``FakeRef(name, page, count)`` positional call is unchanged); the
+    report uses it to disambiguate two sheets that share a basename.
+    """
 
     source_name: str
     page_index: int
     page_count: int
+    pdf_path: str | None = None
 
     @property
     def display_label(self) -> str:
@@ -44,6 +50,16 @@ class FakeSheet:
 
 
 @dataclass
+class FakeGeometry:
+    """Stand-in for :class:`drawing_analyzer.models.SheetGeometry` (the fields the
+    report reads: the sheet's raw text layer and its raster flag)."""
+
+    ref: FakeRef
+    sheet_text: str = ""
+    is_raster: bool = False
+
+
+@dataclass
 class FakeContext:
     """Stand-in for :class:`drawing_analyzer.pipeline.DrawingContext`."""
 
@@ -56,6 +72,10 @@ class FakeContext:
     total_output_tokens: int = 0
     focus: str = ""
     focus_report_text: str = ""
+    # QC record (Phase 7/8) — the report surfaces these when present.
+    findings: list = field(default_factory=list)
+    reference_findings: list = field(default_factory=list)
+    sheet_geometries: list = field(default_factory=list)
 
     @property
     def sheet_count(self) -> int:
