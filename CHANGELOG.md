@@ -38,10 +38,12 @@ review, not the digest's incidental noticing.
   (I-2). Findings carry **dual anchors** — a primary plus `also_on` legs resolved
   to their own sheets via the set's title-block ids — so the markup writer clouds
   **both** sheets of a conflict, each popup cross-referencing the other. `Finding`
-  gains a backward-compatible `also_on`; the anchor resolver, markup writer, and
-  pipeline gained additive dual-leg support (a finding with no legs is unchanged).
-  (Cross-sheet findings verify `UNCERTAIN` on a single crop today; a dual-crop
-  verifier is a planned refinement.)
+  gains a backward-compatible `also_on`; the anchor resolver, markup writer,
+  verification pass, and pipeline gained additive dual-leg support (a finding with
+  no legs is unchanged). Cross-sheet findings are verified with a **dual-crop**
+  pass — one crop per sheet in a single call — so a conflict can reach `VERIFIED`
+  and cloud under the default verified-only gating (a single-sheet crop could only
+  ever say NOT_VISIBLE).
 - **Review profiles (`profiles=[…]`).** The owner's QC knowledge as versioned,
   injectable Markdown checklists: each profile's items are appended to the
   critique prompt ("APPLY THIS REVIEW CHECKLIST EXPLICITLY, ITEM BY ITEM"), so the

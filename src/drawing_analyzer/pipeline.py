@@ -686,6 +686,28 @@ def _run_qc_stages(
             errors.append(f"Verification: {exc}")
             _log.warning("verification failed: %s", exc)
 
+        # Cross-sheet (dual-anchored) findings verify with one crop per leg in a
+        # single call, so the verifier can actually compare the sheets and reach
+        # VERIFIED/REJECTED (the single-crop pass above skips them — a cross-sheet
+        # claim can't be judged from one crop). Additive and non-fatal.
+        try:
+            from .verify import verify_cross_findings
+
+            cres = verify_cross_findings(
+                all_findings, geometries, client=client,
+                evidence_dir=evidence_dir, progress=_verify_progress,
+            )
+            v_in += cres.input_tokens
+            v_out += cres.output_tokens
+            if cres.verified or cres.rejected or cres.uncertain or cres.skipped:
+                _log.info(
+                    "cross-verification: %d verified, %d rejected, %d uncertain, %d skipped",
+                    cres.verified, cres.rejected, cres.uncertain, cres.skipped,
+                )
+        except Exception as exc:  # noqa: BLE001 - never fatal
+            errors.append(f"Cross-sheet verification: {exc}")
+            _log.warning("cross-sheet verification failed: %s", exc)
+
     reviewed_pdf_paths: list[Path] = []
     if qc_markups:
         from .annotate import write_reviewed_pdfs

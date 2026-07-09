@@ -163,6 +163,51 @@ def test_large_set_shards_by_discipline():
     assert client.calls == 2 and res.skipped is False    # 45 → chunks of 40 → 2 calls
 
 
+def test_dedup_keeps_distinct_conflicts_sharing_a_primary_quote():
+    # Two conflicts, same primary sheet + quote, but a DIFFERENT other sheet — a
+    # real "this value conflicts with two sheets in two ways" case. Keying dedup on
+    # Finding.id alone (which excludes also_on) would drop one; the full-conflict
+    # key keeps both.
+    c2 = {
+        "sheet_id": "F-D-01-1", "category": "conflict", "severity": "high",
+        "text": "COLO 5 also disagrees with the general sheet.",
+        "source_quote": "COLO 5", "tile": [0, 0],
+        "also_on": [{"sheet_id": "F-G-02-0", "source_quote": "COLO 5 zone", "tile": [1, 1]}],
+    }
+    res = cross_sheet_qc(
+        [_digest("a.pdf"), _digest("b.pdf"), _digest("c.pdf")],
+        [_geom("a.pdf", "F-D-01-1"), _geom("b.pdf", "F-A-01-1"), _geom("c.pdf", "F-G-02-0")],
+        client=_CrossClient([[_CONFLICT, c2]]), max_retries=0, sleep=_NOOP,
+    )
+    assert len(res.findings) == 2
+    assert {leg.sheet_id for f in res.findings for leg in f.also_on} == {"F-A-01-1", "F-G-02-0"}
+
+
+def test_leg_on_the_primary_sheet_is_not_a_second_sheet():
+    # also_on repeats the primary's sheet → only one DISTINCT sheet resolves → the
+    # finding is dropped (a conflict must span two real sheets).
+    item = dict(_CONFLICT, also_on=[{"sheet_id": "F-D-01-1", "source_quote": "COLO 5 again"}])
+    res = cross_sheet_qc(
+        [_digest("a.pdf"), _digest("b.pdf")],
+        [_geom("a.pdf", "F-D-01-1"), _geom("b.pdf", "F-A-01-1")],
+        client=_CrossClient([[item]]), max_retries=0, sleep=_NOOP,
+    )
+    assert res.findings == []
+
+
+def test_csv_export_includes_also_on_column():
+    from drawing_analyzer.export import FINDINGS_CSV_HEADER, build_findings_csv
+
+    assert "also_on" in FINDINGS_CSV_HEADER
+    f = Finding(
+        sheet_id="F-D-01-1", source_name="a.pdf", page_index=0, category="conflict",
+        severity="high", text="conflict", source_quote="COLO 5",
+        also_on=[ConflictLeg(sheet_id="F-A-01-1", source_quote="COLO 1")],
+    )
+    csv = build_findings_csv([f])
+    assert "F-A-01-1" in csv and "COLO 1" in csv
+
+
 # --------------------------------------------------------------------------- #
 # Leg anchoring (pure — word tuples)
 # --------------------------------------------------------------------------- #
@@ -263,17 +308,25 @@ def test_cross_finding_clouds_both_sheets_with_cross_reference(tmp_path):
 class _PipelineClient:
     """digest + cross-QC + verify. Cross-QC returns one COLO conflict."""
 
-    def __init__(self):
+    def __init__(self, *, verify_verdict="NOT_VISIBLE"):
         self.digest_calls = 0
         self.cross_calls = 0
+        self.verify_calls = 0
+        self.verify_image_counts = []
         outer = self
 
         class _Msgs:
             def create(self, **kw):  # noqa: ANN001, ANN202
                 system = kw.get("system", "")
                 if system == VERIFY_SYSTEM_PROMPT:
+                    outer.verify_calls += 1
+                    imgs = sum(
+                        1 for b in kw["messages"][0]["content"]
+                        if isinstance(b, dict) and b.get("type") == "image"
+                    )
+                    outer.verify_image_counts.append(imgs)
                     return FakeMessage(
-                        content=[FakeTextBlock(text='{"verdict":"NOT_VISIBLE","note":"cross-sheet"}')],
+                        content=[FakeTextBlock(text=f'{{"verdict":"{verify_verdict}","note":"x"}}')],
                         usage=FakeUsage(input_tokens=40, output_tokens=8))
                 if system.startswith(X.CROSS_QC_SYSTEM_PROMPT):
                     outer.cross_calls += 1
@@ -309,6 +362,27 @@ def test_pipeline_cross_qc_clouds_both_sheets(tmp_path):
     # I-2: the conflict never leaks into the prose.
     assert "COLO 5 vs COLO 1" not in ctx.combined_text
     assert "```json" not in ctx.combined_text
+
+
+def test_pipeline_dual_crop_verify_clouds_under_default_gating(tmp_path):
+    # The whole point of the dual-crop verifier: a cross-sheet finding gets one crop
+    # PER sheet in a single call, so it can reach VERIFIED and be clouded under the
+    # DEFAULT verified-only gating (a single-crop verify could only say NOT_VISIBLE).
+    a = _mkpdf(tmp_path / "F-D-01-1.pdf", "COLO 5 SERVES AREA", "F-D-01-1")
+    b = _mkpdf(tmp_path / "F-A-01-1.pdf", "COLO 1 SERVES AREA", "F-A-01-1")
+    client = _PipelineClient(verify_verdict="CONFIRMED")
+    ctx = extract_drawing_context(
+        [a, b], client=client, rows=2, cols=2, cross_qc=True, qc_markups=True,
+        qc_work_dir=tmp_path / "qc",          # markup_verified_only defaults True
+    )
+    conflict = next(f for f in ctx.findings if f.also_on)
+    assert conflict.verification.status == "VERIFIED"
+    assert conflict.verification.evidence_png.startswith("evidence/")
+    # The verify call carried a crop for EACH sheet (dual crop), not just one.
+    assert client.verify_calls == 1 and client.verify_image_counts == [2]
+    # Clouded on BOTH sheets under the default (verified-only) gate.
+    assert {p.name for p in ctx.reviewed_pdf_paths} == {"F-D-01-1_reviewed.pdf", "F-A-01-1_reviewed.pdf"}
+    assert all(count_annotations(p) == 1 for p in ctx.reviewed_pdf_paths)
 
 
 def test_pipeline_without_cross_qc_is_unchanged(tmp_path):

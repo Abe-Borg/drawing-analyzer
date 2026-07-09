@@ -99,11 +99,25 @@ Respond with ONLY a JSON object and nothing else:
 on what you actually see"}"""
 
 
+def _has_anchored_legs(finding: Finding) -> bool:
+    """True when a cross-sheet finding has an anchored primary *and* at least one
+    anchored ``also_on`` leg — the shape the dual-crop pass can actually check."""
+    legs = getattr(finding, "also_on", None)
+    if not legs:
+        return False
+    if finding.anchor is None or finding.anchor.rect_pdf is None:
+        return False
+    return any(l.anchor is not None and l.anchor.rect_pdf is not None for l in legs)
+
+
 def _is_verifiable(finding: Finding) -> bool:
-    """A finding this pass should re-check: anchored (has a rect) and not already
-    trusted by a deterministic auditor."""
+    """A finding the single-crop pass should re-check: anchored (has a rect), not
+    already trusted by a deterministic auditor, and not a dual-anchored cross-sheet
+    finding (:func:`verify_cross_findings` handles those with one crop per leg)."""
     v = finding.verification
     if v is not None and v.status in _TERMINAL_STATUSES:
+        return False
+    if _has_anchored_legs(finding):
         return False
     return finding.anchor is not None and finding.anchor.rect_pdf is not None
 
@@ -473,5 +487,171 @@ def verify_findings(
         "(input=%d output=%d tok)",
         result.verified, result.rejected, result.uncertain, result.skipped,
         result.input_tokens, result.output_tokens,
+    )
+    return result
+
+
+# --------------------------------------------------------------------------- #
+# Cross-sheet (dual-anchor) verification — Phase 13
+# --------------------------------------------------------------------------- #
+
+
+def _render_leg_crops(reqs: list, dpi: int) -> list:
+    """Render one crop per ``(pdf_path, page_index, rect)`` request, in order.
+
+    Grouped per PDF (each opens once); a failed render leaves that slot ``None``.
+    Stays PyMuPDF-free — crops come from :func:`render.iter_region_crops` (I-5).
+    """
+    from . import render
+
+    crops: list = [None] * len(reqs)
+    by_pdf: dict = {}
+    for i, (pdf_path, page_index, rect) in enumerate(reqs):
+        by_pdf.setdefault(pdf_path, []).append((i, page_index, rect, dpi))
+    for pdf_path, requests in by_pdf.items():
+        try:
+            for key, png in render.iter_region_crops(pdf_path, requests):
+                crops[key] = png
+        except Exception as exc:  # noqa: BLE001 - a bad crop leaves its slot None
+            _log.warning("cross-verify crop render failed for %s: %s", pdf_path, _clean_error(exc))
+    return crops
+
+
+def _build_dual_request(finding: Finding, labeled_crops: list, model: str) -> dict[str, Any]:
+    """A verify request carrying one crop per sheet, so the model can compare them."""
+    header = (
+        f"CROSS-SHEET FINDING to check (category={finding.category}, "
+        f"severity={finding.severity}):\n{finding.text.strip()}\n"
+        "This finding claims the sheets below CONFLICT. Using ONLY the crops, "
+        "judge whether they actually conflict."
+    )
+    content: list[Any] = [{"type": "text", "text": header}]
+    for label, png in labeled_crops:
+        content.append({"type": "text", "text": label})
+        content.append(_image_block(png))
+    content.append({"type": "text", "text": (
+        "Respond with the JSON verdict object only: CONFIRMED if the sheets "
+        "conflict as described, CONTRADICTED if they are actually consistent, "
+        "NOT_VISIBLE if the crops don't show enough to tell."
+    )})
+    return {
+        "model": model,
+        "max_tokens": DEFAULT_VERIFY_MAX_TOKENS,
+        "system": VERIFY_SYSTEM_PROMPT,
+        "messages": [{"role": "user", "content": content}],
+    }
+
+
+def _verify_cross_one(
+    finding: Finding, lookup: dict, ambiguous: set, *,
+    client: Any, model: str, evidence_dir: Path | None, dpi: int,
+    max_retries: int, sleep: Any, used: set,
+) -> tuple[Verification, int, int]:
+    """Render the primary + each anchored leg's crop and ask one verdict. Never raises."""
+    legs = [(finding.source_name, finding.page_index, finding.anchor.rect_pdf,
+             finding.sheet_id, finding.source_quote)]
+    for leg in finding.also_on:
+        if leg.anchor is not None and leg.anchor.rect_pdf is not None:
+            legs.append((leg.source_name, leg.page_index, leg.anchor.rect_pdf,
+                         leg.sheet_id, leg.source_quote))
+
+    reqs: list = []
+    labels: list = []
+    for source_name, page_index, rect, sid, quote in legs:
+        key = (source_name, page_index)
+        if key in ambiguous:
+            continue
+        sheet = lookup.get(key)
+        if sheet is None:
+            continue
+        pw = float(getattr(sheet, "page_width_pt", 0.0) or 0.0)
+        ph = float(getattr(sheet, "page_height_pt", 0.0) or 0.0)
+        reqs.append((sheet.ref.pdf_path, page_index, context_rect(rect, pw, ph)))
+        labels.append(f"Sheet {sid} crop" + (f' (quoted "{quote.strip()}")' if quote.strip() else "") + ":")
+
+    if len(reqs) < 2:
+        return Verification(status="SKIPPED", note="cross-sheet crops unavailable"), 0, 0
+    crops = _render_leg_crops(reqs, dpi)
+    labeled = [(labels[i], crops[i]) for i in range(len(crops)) if crops[i] is not None]
+    if len(labeled) < 2:
+        return Verification(status="SKIPPED", note="cross-sheet crop render failed"), 0, 0
+
+    evidence_png = _save_evidence(evidence_dir, finding.id, crops[0], used) if crops[0] is not None else ""
+    kwargs = _build_dual_request(finding, labeled, model)
+    attempt = 0
+    while True:
+        try:
+            resp = client.messages.create(**kwargs)
+            break
+        except Exception as exc:  # noqa: BLE001 - degrade, never raise
+            if _is_transient_error(exc) and attempt < max_retries:
+                sleep(_retry_backoff_seconds(attempt))
+                attempt += 1
+                continue
+            note = _clean_error(exc)
+            _log.warning("cross-verify finding %s failed: %s", finding.id, note)
+            return Verification(status="UNCERTAIN", note=note, evidence_png=evidence_png), 0, 0
+
+    status, note = parse_verdict(_message_text(resp))
+    in_tok, out_tok = _message_usage(resp)
+    return Verification(status=status, note=note, evidence_png=evidence_png), in_tok, out_tok
+
+
+def verify_cross_findings(
+    findings: Iterable[Finding],
+    sheets: Iterable[Any],
+    *,
+    client: Any = None,
+    model: str | None = None,
+    evidence_dir: Path | None = None,
+    dpi: int = 300,
+    max_retries: int = DEFAULT_DIGEST_MAX_RETRIES,
+    sleep: Any = time.sleep,
+    progress: Callable[[int, int, str], None] | None = None,
+) -> VerifyResult:
+    """Verify cross-sheet findings with **one crop per leg in a single call** (Phase
+    13), so the verifier sees every side and can actually judge the conflict —
+    unlike the single-crop pass, which for a cross-sheet claim can only say
+    NOT_VISIBLE. Only findings with an anchored primary *and* >=1 anchored leg are
+    handled (the rest fall to the single-crop pass or stay SKIPPED). Sequential
+    (cross findings are few); never raises (I-3)."""
+    result = VerifyResult()
+    dual = [f for f in findings if _has_anchored_legs(f)]
+    if not dual:
+        return result
+    model = model or default_verify_model()
+    lookup, ambiguous = _sheet_lookup(sheets)
+
+    if client is None:
+        try:
+            from .client import get_client as _get_client
+
+            client = _get_client()
+        except Exception as exc:  # noqa: BLE001 - no key etc. → skip the pass
+            note = _clean_error(exc)
+            for f in dual:
+                f.verification = Verification(status="SKIPPED", note=note)
+                result._count("SKIPPED")
+            _log.warning("cross-verification skipped (client unavailable): %s", note)
+            return result
+
+    used: set = set()
+    total = len(dual)
+    for i, f in enumerate(dual, 1):
+        verification, in_tok, out_tok = _verify_cross_one(
+            f, lookup, ambiguous, client=client, model=model,
+            evidence_dir=evidence_dir, dpi=dpi, max_retries=max_retries,
+            sleep=sleep, used=used,
+        )
+        f.verification = verification
+        result._count(verification.status)
+        result.input_tokens += in_tok
+        result.output_tokens += out_tok
+        if progress is not None:
+            progress(i, total, f"Verifying conflict {i}/{total}")
+
+    _log.info(
+        "cross-verification: %d verified, %d rejected, %d uncertain, %d skipped",
+        result.verified, result.rejected, result.uncertain, result.skipped,
     )
     return result

@@ -398,11 +398,11 @@ F-A-01-1: 'COLO 1'"*) — so a reviewer opening either drawing sees the conflict
 where its counterpart lives. The model defaults to Opus 4.8
 (`DRAWING_ANALYZER_CROSS_QC_MODEL`).
 
-> A cross-sheet conflict can't be confirmed from a single sheet's crop, so these
-> findings verify to `UNCERTAIN` in the standard [verification pass](#verification-pass)
-> and are clouded when **include-unverified** is on (`markup_verified_only=False`).
-> A dual-crop verifier that sees both sheets at once — so a cross-sheet conflict
-> can verify `VERIFIED`/`REJECTED` — is a planned refinement.
+A cross-sheet conflict can't be judged from one sheet's crop, so these findings
+get a **dual-crop verification**: the verifier is sent **one crop per sheet in a
+single call** and asked whether the sheets actually conflict — so a cross-sheet
+finding can reach `VERIFIED` / `REJECTED` and be clouded under the default
+verified-only gating, like any other finding.
 
 ## Anchoring findings
 

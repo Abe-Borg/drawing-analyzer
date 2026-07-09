@@ -180,8 +180,20 @@ def _validate_cross_item(item: Any, sheet_map: dict[str, Any]) -> Finding | None
                 "tile": _coerce_tile(leg.get("tile")),
             })
 
-    resolved = [(r, sheet_map[_norm_id(r["sheet_id"])])
-                for r in refs_raw if _norm_id(r["sheet_id"]) in sheet_map]
+    # Resolve refs to DISTINCT sheets: a conflict is *between* sheets, so a leg
+    # repeating the primary's sheet (or two legs on one sheet) must not count as a
+    # second sheet — that would cloud one sheet twice and cross-reference itself.
+    resolved = []
+    seen_sheets: set[tuple] = set()
+    for r in refs_raw:
+        geom = sheet_map.get(_norm_id(r["sheet_id"]))
+        if geom is None:
+            continue
+        sheet_key = (geom.ref.source_name, geom.ref.page_index)
+        if sheet_key in seen_sheets:
+            continue
+        seen_sheets.add(sheet_key)
+        resolved.append((r, geom))
     if len(resolved) < 2:
         return None
 
@@ -346,9 +358,21 @@ def cross_sheet_qc(
         return CrossQCResult(skipped=True)
 
     # Whole-set sheet-id map (shared across shards so a leg can resolve anywhere).
+    # First detection wins on a collision; warn, because the shadowed sheet then
+    # can't be resolved by id (a real conflict on it would silently fail to place).
     sheet_map: dict[str, Any] = {}
     for sheet_id, _t, _tl, geom in entries:
-        sheet_map.setdefault(_norm_id(sheet_id), geom)
+        key = _norm_id(sheet_id)
+        if not key:
+            continue
+        if key in sheet_map:
+            _log.warning(
+                "cross-qc: duplicate sheet id %r (%s shadows %s); the shadowed "
+                "sheet won't resolve by id", sheet_id,
+                sheet_map[key].ref.source_name, geom.ref.source_name,
+            )
+            continue
+        sheet_map[key] = geom
 
     if client is None:
         try:
@@ -374,13 +398,25 @@ def cross_sheet_qc(
             continue
         all_findings.extend(findings)
 
-    # Union across shards, de-duplicated by content id.
-    seen: set[str] = set()
+    # Union across shards, de-duplicated by the FULL conflict (primary + legs),
+    # normalized. Keying on ``Finding.id`` alone (sheet_id + category + quote,
+    # excluding also_on) would collapse two distinct conflicts that share a primary
+    # quote into one — and, being case-sensitive on the raw id, would also fail to
+    # merge the same conflict reported with a differently-cased sheet id.
+    def _conflict_key(f: Finding) -> tuple:
+        legs = tuple(sorted(
+            (_norm_id(l.sheet_id), (l.source_quote or "").strip().lower())
+            for l in f.also_on
+        ))
+        return (_norm_id(f.sheet_id), f.category, (f.source_quote or "").strip().lower(), legs)
+
+    seen: set[tuple] = set()
     deduped: list[Finding] = []
     for f in all_findings:
-        if f.id in seen:
+        key = _conflict_key(f)
+        if key in seen:
             continue
-        seen.add(f.id)
+        seen.add(key)
         deduped.append(f)
 
     _log.info(
