@@ -328,6 +328,35 @@ def test_sheet_index_ignored_without_a_header():
     assert audit_sheet_index([no_header]) == []
 
 
+def _index_page(source, own_id, entries):
+    words = [_w(300, 200, "DRAWING"), _w(500, 200, "INDEX")]
+    for i, e in enumerate(entries):
+        words.append(_w(300, 300 + 40 * i, e))
+    words.append(_titleblock(own_id))
+    return _sheet(source, 0, words)
+
+
+def test_sheet_index_unions_split_index_pages():
+    # A discipline-split / multi-page index: idx1 lists some sheets, idx2 the rest.
+    # A sheet listed on idx2 must NOT be reported missing when idx1 is processed —
+    # only a sheet listed on NEITHER page is a real omission.
+    sheets = [
+        _index_page("i1.pdf", "F-D-00-0", ["F-D-00-0", "F-D-00-1", "F-D-01-1"]),
+        _index_page("i2.pdf", "F-D-00-1", ["F-D-02-0", "F-D-00-0", "F-D-00-1"]),
+        _sheet("a.pdf", 0, [_titleblock("F-D-01-1")]),
+        _sheet("b.pdf", 0, [_titleblock("F-D-02-0")]),   # listed on idx2 only
+        _sheet("c.pdf", 0, [_titleblock("F-D-03-0")]),   # listed on NEITHER index
+    ]
+    findings = audit_sheet_index(sheets)
+    texts = " || ".join(f.text for f in findings)
+    # The real omission is flagged...
+    assert "F-D-03-0" in texts
+    # ...but the sheet listed on the other index page is NOT falsely flagged.
+    assert "F-D-02-0" not in texts
+    omissions = [f for f in findings if f.verification.note.startswith("set sheet missing")]
+    assert len(omissions) == 1
+
+
 # --------------------------------------------------------------------------- #
 # Orchestrator
 # --------------------------------------------------------------------------- #

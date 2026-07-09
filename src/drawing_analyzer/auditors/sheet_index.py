@@ -110,24 +110,36 @@ def _as_index_sheet(geom: Any, inventory: SheetInventory) -> _IndexSheet | None:
 
 
 def audit_sheet_index(rendered_sheets: Iterable[Any]) -> list[Finding]:
-    """Diff any drawing index against the set inventory, both directions.
+    """Diff the set's drawing index against the set inventory, both directions.
 
     Returns ``DETERMINISTIC`` reference findings. Empty when the set has no
     detectable index sheet. Side-effect-free.
+
+    A set's index legitimately spans **several sheets** — a multi-page index or
+    per-discipline cover sheets. Direction 1 (a listed entry not in the set) is
+    checked per index sheet and anchored on the entry where it appears. Direction 2
+    (a set sheet the index omits) is checked against the **union** of every detected
+    index sheet's entries, so a sheet listed on *another* index page is not falsely
+    reported as missing here; omissions are reported once, anchored on the first
+    index sheet's header.
     """
     sheets = list(rendered_sheets)
     inventory = build_inventory(sheets)
     if not inventory.ids:
         return []
 
-    findings: list[Finding] = []
-    for geom in sheets:
-        index = _as_index_sheet(geom, inventory)
-        if index is None:
-            continue
-        ref = index.geom.ref
+    index_sheets = [
+        idx for idx in (_as_index_sheet(g, inventory) for g in sheets) if idx is not None
+    ]
+    if not index_sheets:
+        return []
 
-        # Direction 1: entries listed in the index but not present in the set.
+    findings: list[Finding] = []
+
+    # Direction 1: entries listed in an index but not present in the set — checked
+    # per index sheet, anchored on the entry's own words.
+    for index in index_sheets:
+        ref = index.geom.ref
         for entry, rect in sorted(index.entries.items()):
             if entry in inventory.ids:
                 continue
@@ -150,32 +162,36 @@ def audit_sheet_index(rendered_sheets: Iterable[Any]) -> list[Finding]:
                 ),
             ))
 
-        # Direction 2: set sheets not listed in this index (anchored on the header).
-        listed = set(index.entries.keys())
-        for sid in sorted(inventory.ids):
-            if sid in listed:
-                continue
-            anchor = (
-                Anchor(status="EXACT", rect_pdf=list(index.header_rect), method="sheet_index_header")
-                if index.header_rect is not None
-                else Anchor(status="UNANCHORED", method="sheet_index_header")
-            )
-            findings.append(Finding(
-                sheet_id=index.display_id,
-                source_name=ref.source_name,
-                page_index=ref.page_index,
-                category="reference",
-                severity="low",
-                text=(
-                    f"Sheet {sid} is present in the set but not listed in the drawing "
-                    f"index on {index.display_id}."
-                ),
-                source_quote="",
-                refs=[],
-                anchor=anchor,
-                verification=Verification(
-                    status="DETERMINISTIC",
-                    note="set sheet missing from the drawing index",
-                ),
-            ))
+    # Direction 2: set sheets listed in NO index page (union across all of them),
+    # reported once and anchored on the first index sheet's header.
+    all_listed: set[str] = set()
+    for index in index_sheets:
+        all_listed |= set(index.entries.keys())
+    primary = index_sheets[0]
+    pref = primary.geom.ref
+    anchor = (
+        Anchor(status="EXACT", rect_pdf=list(primary.header_rect), method="sheet_index_header")
+        if primary.header_rect is not None
+        else Anchor(status="UNANCHORED", method="sheet_index_header")
+    )
+    for sid in sorted(inventory.ids):
+        if sid in all_listed:
+            continue
+        findings.append(Finding(
+            sheet_id=primary.display_id,
+            source_name=pref.source_name,
+            page_index=pref.page_index,
+            category="reference",
+            severity="low",
+            text=(
+                f"Sheet {sid} is present in the set but not listed in the drawing index."
+            ),
+            source_quote="",
+            refs=[],
+            anchor=anchor,
+            verification=Verification(
+                status="DETERMINISTIC",
+                note="set sheet missing from the drawing index",
+            ),
+        ))
     return findings
