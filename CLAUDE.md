@@ -1,0 +1,108 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Commands
+
+```bash
+pip install -e ".[dev]"      # engine + pytest   (GUI too: pip install -e ".[gui,dev]")
+python -m pytest             # full suite — hermetic: no API key, no network
+python -m pytest tests/test_drawing_ledger.py                # one file
+python -m pytest tests/test_drawing_ledger.py::test_name     # one test
+drawing-analyzer             # launch the GUI   (or: python -m drawing_analyzer)
+```
+
+Python 3.11+. No linter/formatter is configured. The `network` pytest marker is
+reserved for tests that need real API access; everything that runs by default
+uses the fakes in `tests/fixtures/fake_anthropic.py`.
+
+## Architecture
+
+A vision pipeline (src layout, package `drawing_analyzer`): each PDF page is one
+*sheet*, rendered to an overview + 6×6 tile grid and sent — together with its
+verbatim vector text layer — in a single vision request per sheet, returning a
+structured Markdown digest plus a machine-readable findings block.
+`pipeline.extract_drawing_context()` orchestrates everything and returns a
+`DrawingContext`. The per-module map lives in `src/drawing_analyzer/__init__.py`.
+
+**Digest path:** `tiling.py` (pure geometry) → `render.py` (rasterization) →
+`digest.py` (prompt + tolerant findings-block parser), or `batch_digest.py`
+(Message Batches + Files APIs, ~50% cheaper) → `digest_cache.py` (two-level
+content-keyed cache — a hit skips rendering entirely and restores parsed
+findings for free).
+
+**QC stack** (each stage optional and independently cached):
+
+- *Finders:* the digest's findings block; `critique.py` (a second full-coverage
+  vision read, run twice — self-consistency merge sets `reproduced`);
+  `cross_qc.py` (text-only cross-sheet conflict hunt; dual anchors via
+  `also_on` legs); `auditors/` (five deterministic zero-API auditors over the
+  text layers); `prose_harvest.py` (mirrors prose Coordination/Conflict items,
+  synthesis conflicts, and opted-in focus items into findings — match first,
+  one small structuring call for stragglers, degraded sheet-level entry on
+  failure).
+- ***`ledger.py` is the exclusive findings container*** (Part III §16): every
+  channel ingests into it with source tags; duplicates merge at ingest (union
+  `sources`, most-severe severity, longest quote; auditor anchors and
+  `DETERMINISTIC` verdicts survive merges in both directions); `freeze()`
+  assigns the `QC-###` ids. Anchoring, verification, the citation check, the
+  markup writer, the exports, and the report consume ledger entries and
+  nothing else.
+- *Disposition:* `anchor.py` (quote → PDF rect, tiered
+  EXACT/FUZZY/TILE/UNANCHORED — UNANCHORED is the hallucination signal) →
+  `verify.py` (high-DPI crop re-check → VERIFIED/REJECTED/UNCERTAIN) →
+  `citation_check.py` (server-side web-search per unique code ref) →
+  `annotate.py` (§18 gating: every entry gets ink except REJECTED, which is
+  index-listed; margin callouts for rect-less entries) → `export.py` /
+  `html_report.py`.
+
+`core/` is a shared kernel (model ids + env overrides in `api_config.py`, key
+store, pricing, tokenizer). `reference_audit.py` is a back-compat shim over
+`auditors/references.py`.
+
+## Binding invariants (cited by number in code comments)
+
+- **I-1 — full coverage:** every sheet is read whole (overview + all tiles);
+  optimizations may never drop content-bearing tiles.
+- **I-2 — the prose digest is sacred:** nothing may alter `combined_text`. The
+  findings block is stripped byte-exactly; prose QC items are *mirrored* into
+  the ledger, never moved or edited.
+- **I-3 — QC is additive and non-fatal:** every QC stage catches its own
+  exceptions, appends to `ctx.errors`, and lets the standard deliverable ship.
+- **I-4 — hermetic tests:** use `tests/fixtures/fake_anthropic.py`
+  (`FakeMessage`/`FakeTextBlock`/`FakeUsage`) and the routing-client patterns
+  in existing tests. No test may hit the network or need a key.
+- **I-5 — PyMuPDF isolation:** only `render.py` and `annotate.py` may import
+  PyMuPDF. The README's AGPL licensing story depends on this; `anchor.py` and
+  `tiling.py` work on extracted word rectangles precisely to preserve it.
+- **I-6 — cache correctness:** prompt versions are content hashes
+  (`DIGEST_PROMPT_VERSION`, `CRITIQUE_PROMPT_VERSION`), so prompt edits
+  auto-invalidate; `digest_cache._SCHEMA_VERSION` is manual — bump it whenever
+  what is stored or sent changes.
+- **I-7 — deterministic assembly:** same inputs → same ordering (QC numbering,
+  index rows, merged output); no randomness or time-dependence in assembly.
+- **The model never calculates:** models transcribe `NumericClaim`s;
+  `auditors/arithmetic.py` does the math with `Decimal` — never `eval`, never
+  the model's own arithmetic.
+- **Additive serialization:** `Finding.to_dict`/`from_dict` must default new
+  fields cleanly so cached payloads from older runs still load.
+- **Ledger coverage:** on markup runs every ledger entry must classify to
+  exactly one `ink_disposition` (cloud / margin / rejected / gated); the
+  pipeline logs the tally and records any mismatch as a bug.
+
+## PyMuPDF gotchas (hard-won; they crash or render blank)
+
+- A plain FreeText annot rejects `border_color` (raises unless rich text) —
+  severity is carried by colored *text* instead.
+- For FreeText, `/Contents` IS the displayed text: `set_info(content=...)`
+  overwrites what's drawn, so display prefixes (`[UNVERIFIED]`, `[SHEET]`)
+  must be composed into the content string, not set afterwards.
+- Annot objects unbind when the `annots()` generator advances or the page tree
+  changes (`insert_page`): snapshot properties during iteration, re-fetch pages
+  by index after inserting, and never call `.get_text()` on an annot.
+- `annot.update()` must be called to build the appearance stream (`/AP`), or
+  the annotation renders blank in Acrobat/Chromium.
+- Base-14 fonts miss `✓`, `…`, and em-dash glyphs — use ASCII in inserted page
+  text.
+- PyMuPDF is not thread-safe: rendering stays sequential; concurrency lives in
+  the API calls.

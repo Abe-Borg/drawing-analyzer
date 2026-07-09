@@ -6,6 +6,26 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Documentation
+
+- **README brought fully in line with the §18 gating amendment.** The GUI
+  section no longer describes the retired "Verified findings only (on by
+  default)" sub-toggle — it now documents the exhaustive-ink default, the
+  renamed **Verified & deterministic only** opt-in (default off), and the
+  **Include rejected (grey)** toggle; the cross-sheet-QC and anchoring sections
+  no longer reference the old verified-only default (an `UNANCHORED` finding is
+  documented as landing in a margin callout); the findings-card column list
+  gains the `ID` column; the configuration table gains the previously
+  undocumented `DRAWING_ANALYZER_CHAT_MODEL`, `DRAWING_ANALYZER_DIAGNOSTICS`,
+  `DRAWING_ANALYZER_DEBUG`, and `DRAWING_ANALYZER_CACHE_DIAGNOSTICS` variables.
+- **Package docstring updated** (`drawing_analyzer/__init__.py`): the module
+  map now covers the full QC stack, and the stale "render.py is the ONLY module
+  that imports PyMuPDF" claim is corrected (`annotate.py` is the second,
+  deliberate importer — matching the README's licensing section).
+- **`CLAUDE.md` added**: commands, big-picture architecture, the binding
+  invariants (I-1…I-7, no-eval arithmetic, additive serialization, ledger
+  coverage), and the PyMuPDF pitfalls, for AI-assisted development sessions.
+
 ### Fixed (post-Phase-16 review)
 
 - **Synthesis sheet-id matching is boundary-aware.** A set holding both `A-1`
