@@ -139,12 +139,19 @@ def iter_region_crops(
 
     ``requests`` is a list of ``(key, page_index, rect_pts, dpi)``. Yields
     ``(key, png_bytes)`` in request order, or ``(key, None)`` for a crop that
-    failed to render (a bad page index / rect must not sink the whole pass). This
+    failed to render — including a **whole-file open failure** (a missing /
+    corrupt / vanished source PDF): every request degrades to ``(key, None)``
+    rather than propagating, so the verification pass stays non-fatal (I-3). This
     keeps all PyMuPDF use inside :mod:`render` (I-5) — the verification pass never
     imports the PDF engine.
     """
     path = Path(pdf_path)
-    doc = pymupdf.open(str(path))
+    try:
+        doc = pymupdf.open(str(path))
+    except Exception:  # noqa: BLE001 - an unopenable PDF must not abort the batch
+        for req in requests:
+            yield req[0], None
+        return
     try:
         for key, page_index, rect_pts, dpi in requests:
             try:

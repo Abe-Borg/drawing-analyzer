@@ -177,19 +177,25 @@ CropRenderer = Callable[
 
 
 def _default_crop_renderer(items: list) -> Iterator[tuple]:
-    """Render crops via :mod:`render`, grouping by PDF so each opens once."""
+    """Render crops via :mod:`render`, grouping by PDF so each opens once.
+
+    Work items are keyed by their **position** in ``items``, not by
+    ``finding.id`` — two distinct findings can share a content-derived id (same
+    sheet / category / quote), and keying by id would drop one and render the
+    other twice. The positional key is unique per item.
+    """
     from . import render
 
     by_pdf: dict[Any, list] = {}
-    by_id: dict[str, Finding] = {}
-    for finding, sheet, rect, dpi in items:
+    by_key: dict[int, Finding] = {}
+    for i, (finding, sheet, rect, dpi) in enumerate(items):
         by_pdf.setdefault(sheet.ref.pdf_path, []).append(
-            (finding.id, sheet.ref.page_index, rect, dpi)
+            (i, sheet.ref.page_index, rect, dpi)
         )
-        by_id[finding.id] = finding
+        by_key[i] = finding
     for pdf_path, requests in by_pdf.items():
         for key, png in render.iter_region_crops(pdf_path, requests):
-            yield by_id[key], png
+            yield by_key[key], png
 
 
 def _sheet_lookup(sheets: Iterable[Any]) -> dict[tuple, Any]:
@@ -380,33 +386,46 @@ def verify_findings(
                 if progress is not None:
                     progress(done, total, f"Verifying finding {done}/{total}")
 
-        for finding, crop_png in renderer(items):
-            if fatal.is_set():
-                # A fatal failure already surfaced: skip the rest without calling.
-                finding.verification = Verification(
-                    status="SKIPPED", note="verification aborted (auth failure)"
+        handled: set[int] = set()
+        try:
+            for finding, crop_png in renderer(items):
+                handled.add(id(finding))
+                if fatal.is_set():
+                    # A fatal failure already surfaced: skip the rest without calling.
+                    finding.verification = Verification(
+                        status="SKIPPED", note="verification aborted (auth failure)"
+                    )
+                    result._count("SKIPPED")
+                    done += 1
+                    continue
+                if crop_png is None:
+                    finding.verification = Verification(
+                        status="SKIPPED", note="crop render failed"
+                    )
+                    result._count("SKIPPED")
+                    done += 1
+                    continue
+                evidence_png = _save_evidence(evidence_dir, finding.id, crop_png)
+                fut = executor.submit(
+                    _verify_one, finding, crop_png, evidence_png,
+                    client=client, model=model, max_retries=max_retries,
+                    sleep=sleep, fatal=fatal,
                 )
-                result._count("SKIPPED")
-                done += 1
-                continue
-            if crop_png is None:
-                finding.verification = Verification(
-                    status="SKIPPED", note="crop render failed"
-                )
-                result._count("SKIPPED")
-                done += 1
-                continue
-            evidence_png = _save_evidence(evidence_dir, finding.id, crop_png)
-            fut = executor.submit(
-                _verify_one, finding, crop_png, evidence_png,
-                client=client, model=model, max_retries=max_retries,
-                sleep=sleep, fatal=fatal,
-            )
-            in_flight[fut] = finding
-            while len(in_flight) >= workers:
-                _collect_one()
+                in_flight[fut] = finding
+                while len(in_flight) >= workers:
+                    _collect_one()
+        except Exception as exc:  # noqa: BLE001 - a renderer error must not sink the pass (I-3)
+            _log.warning("verification crop rendering failed: %s", _clean_error(exc))
         while in_flight:
             _collect_one()
+        # Any item the renderer never yielded (it raised before reaching it) is
+        # left SKIPPED and counted, so the tally always accounts for every item.
+        for finding, _sheet, _rect, _dpi in items:
+            if id(finding) not in handled:
+                finding.verification = Verification(
+                    status="SKIPPED", note="verification incomplete (crop rendering failed)"
+                )
+                result._count("SKIPPED")
 
     _log.info(
         "verification: %d verified, %d rejected, %d uncertain, %d skipped "

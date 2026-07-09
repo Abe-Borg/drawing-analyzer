@@ -314,6 +314,49 @@ def test_verify_client_unavailable_skips_all(monkeypatch):
     assert res.skipped == 2
 
 
+def test_verify_never_raises_on_unopenable_pdf(tmp_path):
+    # The default renderer opens the source PDF; a missing/corrupt file must
+    # degrade every crop to SKIPPED, not raise out of verify_findings (I-3).
+    findings = [_finding("a"), _finding("b")]
+    res = verify_findings(
+        findings, [_sheet("does-not-exist.pdf")], client=_FakeClient({}),
+        sleep=lambda _s: None,  # default (real) crop renderer -> tries to open the file
+    )
+    assert all(f.verification.status == "SKIPPED" for f in findings)
+    assert res.skipped == 2
+
+
+def test_verify_renderer_exception_skips_remaining_not_raises():
+    def _boom_renderer(items):
+        yield items[0][0], b"CROPPNG"   # first finding renders fine
+        raise RuntimeError("renderer blew up")  # then the renderer dies
+
+    findings = [_finding("a"), _finding("b"), _finding("c")]
+    res = verify_findings(
+        findings, [_sheet()], client=_FakeClient({}, default='{"verdict":"CONFIRMED"}'),
+        crop_renderer=_boom_renderer, sleep=lambda _s: None,
+    )
+    # First is verified; the two the renderer never yielded are SKIPPED, counted.
+    assert findings[0].verification.status == "VERIFIED"
+    assert findings[1].verification.status == "SKIPPED"
+    assert findings[2].verification.status == "SKIPPED"
+    assert res.verified == 1 and res.skipped == 2
+
+
+def test_verify_colliding_finding_ids_are_not_dropped_or_double_counted():
+    # Two DISTINCT findings sharing a content-derived id (same sheet/category/
+    # quote, different text) must each be verified exactly once — the default
+    # crop renderer keys by position, not id.
+    f1 = _finding("same-quote")
+    f2 = _finding("same-quote")
+    f2.text = "a different problem, same quoted line"
+    assert f1.id == f2.id                       # collision (Phase-3 content id)
+    res = _run([f1, f2], client=_FakeClient({}, default='{"verdict":"CONFIRMED"}'))
+    assert f1.verification.status == "VERIFIED"
+    assert f2.verification.status == "VERIFIED"
+    assert res.verified == 2 and res.skipped == 0   # neither dropped nor doubled
+
+
 def test_verify_empty_when_nothing_verifiable():
     det = _finding("det", verif=Verification(status="DETERMINISTIC", note="ref"))
     res = verify_findings([det], [_sheet()], client=_FakeClient({}), crop_renderer=_crop_renderer)
