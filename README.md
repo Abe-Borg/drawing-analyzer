@@ -220,6 +220,31 @@ rest `SKIPPED` — the run always completes. Each call is tiny (one ~1–2k-toke
 crop image + a short prompt), on the order of $0.01–0.03 per finding. The model
 defaults to Opus 4.8, overridable with `DRAWING_ANALYZER_VERIFY_MODEL`.
 
+## Reviewed PDFs & findings CSV
+
+The payoff is a **marked-up copy of the original drawing** — `<stem>_reviewed.pdf`
+— with each finding drawn as a **real annotation object**: a revision-cloud
+rectangle at the finding's anchor, colored by severity, carrying the finding
+(text, quoted line, verification note, code refs) as its popup comment and
+authored *"Drawing Analyzer (AI review)"* so its provenance is unmistakable.
+Opened in **Bluebeam Revu** the clouds populate the Markups List — filter, sort,
+reply, and export all work — and Acrobat and Chromium render them too (the
+appearance stream is built explicitly, so nothing shows up blank).
+
+Which findings get clouded (the cardinal sin is a wrong cloud on an issued
+drawing, so the default is conservative):
+
+- `VERIFIED` and `DETERMINISTIC` → clouded by default (solid revision cloud).
+- `UNCERTAIN` / unverified → clouded only with **include-unverified** on, in a
+  distinct dashed style with an `[UNVERIFIED]` prefix.
+- `REJECTED` → **never** clouded, but kept in `findings.csv` for the record.
+
+The writer opens the original read-only and saves a *new* file (the source is
+never touched), then reopens it and checks the annotation count as a self-test.
+Every finding — clouded or not — is also written to **`findings.csv`**, one row
+per finding with every field flattened, UTF-8 with a BOM and CRLF line endings so
+Excel on Windows opens it cleanly.
+
 ## Reference audit
 
 Construction sheets constantly point at each other — *"SEE DRAWING F-D-01-1"*,
@@ -299,7 +324,15 @@ skipped when PyMuPDF is unavailable.
 
 This project depends on **[PyMuPDF](https://pymupdf.readthedocs.io/), which is
 licensed AGPL-3.0**, so the project is distributed under **AGPL-3.0-or-later** (see
-`LICENSE`). All PyMuPDF usage is isolated to `src/drawing_analyzer/render.py` — the
-only module that imports it — so the PDF backend can be swapped for a
-permissively-licensed one (e.g. `pypdfium2` + `Pillow`) by rewriting that one file,
-should you want to relicense.
+`LICENSE`). All PyMuPDF usage is isolated to exactly **two** modules —
+`src/drawing_analyzer/render.py` (rasterizing sheets and crops) and
+`src/drawing_analyzer/annotate.py` (writing cloud annotations onto reviewed
+PDFs) — so the PDF backend can be swapped for a permissively-licensed one by
+rewriting just those two files, should you want to relicense.
+
+For the rasterization side, `pypdfium2` + `Pillow` is a drop-in permissive
+replacement. The markup writer is the harder swap: `pypdf` can build `/Square`
+annotations with a cloud border-effect dict (`/BE {/S /C /I 2}`), but it does
+**not** generate the appearance stream (`/AP`) that PyMuPDF's `annot.update()`
+produces, so some viewers render those annotations blank — which is why PyMuPDF
+is used here. That trade-off is documented in `annotate.py`'s module docstring.

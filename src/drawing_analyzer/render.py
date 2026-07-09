@@ -1,16 +1,17 @@
 """PyMuPDF rasterization of drawing PDFs into overview + tile images.
 
-This is the ONLY module in the codebase that imports PyMuPDF. Every other
-drawing module works with the dependency-free geometry in :mod:`tiling` and the
-in-memory :class:`RenderedSheet` / :class:`ImageTile` produced here, so the PDF
-backend can be replaced (e.g. with pypdfium2 + Pillow) by rewriting this file
-alone.
+This is one of only **two** modules in the codebase that import PyMuPDF (the
+other is :mod:`annotate`, which writes cloud annotations onto reviewed PDFs).
+Every other drawing module works with the dependency-free geometry in
+:mod:`tiling` and the in-memory :class:`RenderedSheet` / :class:`ImageTile`
+produced here, so the PDF backend can be replaced (e.g. with pypdfium2 + Pillow)
+by rewriting these files alone.
 
 .. warning::
    PyMuPDF is licensed **AGPL-3.0**. If this application is distributed, review
-   the licensing implications or swap this module for a permissively-licensed
-   backend. All PyMuPDF usage is contained here precisely to make that swap a
-   one-file change.
+   the licensing implications or swap the two PyMuPDF importers (this module and
+   :mod:`annotate`) for a permissively-licensed backend. All PyMuPDF usage is
+   contained in those two modules precisely to make that swap a two-file change.
 
 A PDF *page* is treated as one drawing *sheet* (the standard for construction
 sets — one D/E-size sheet per page). A multi-sheet PDF therefore yields multiple

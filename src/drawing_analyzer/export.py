@@ -26,6 +26,8 @@ Read surface (duck-typed):
 """
 from __future__ import annotations
 
+import csv
+import io
 import re
 from datetime import datetime
 from pathlib import Path
@@ -268,6 +270,86 @@ def _unique_dir(path: Path) -> Path:
         if not cand.exists():
             return cand
     return path  # give up; mkdir(exist_ok=False) will raise and the caller surfaces it
+
+
+# ---------------------------------------------------------------------------
+# Findings CSV (the QC-markup deliverable's flat, Excel-friendly export).
+#
+# Duck-typed on the §4.1 Finding shape so it stays PyMuPDF-free and testable:
+# one row per finding, every field flattened. Written UTF-8 with a BOM and CRLF
+# line endings so Excel on Windows (the owner's platform) opens it cleanly with
+# unicode intact.
+# ---------------------------------------------------------------------------
+
+FINDINGS_CSV_HEADER = [
+    "id", "sheet_id", "source_name", "page", "category", "severity",
+    "text", "source_quote", "tile", "refs",
+    "anchor_status", "anchor_method", "rect_pdf",
+    "verification_status", "verification_note", "evidence_png",
+]
+
+
+def _fmt_tile(tile: Any) -> str:
+    if isinstance(tile, (list, tuple)) and len(tile) == 2:
+        return f"{tile[0]},{tile[1]}"
+    return ""
+
+
+def _fmt_rect(rect: Any) -> str:
+    if isinstance(rect, (list, tuple)) and len(rect) == 4:
+        return ", ".join(f"{float(v):.1f}" for v in rect)
+    return ""
+
+
+def _finding_row(finding: Any) -> list[str]:
+    anchor = getattr(finding, "anchor", None)
+    verification = getattr(finding, "verification", None)
+    refs = list(getattr(finding, "refs", None) or [])
+    page_index = int(getattr(finding, "page_index", 0) or 0)
+    return [
+        str(getattr(finding, "id", "")),
+        str(getattr(finding, "sheet_id", "")),
+        str(getattr(finding, "source_name", "")),
+        str(page_index + 1),                       # 1-based page, for the reader
+        str(getattr(finding, "category", "")),
+        str(getattr(finding, "severity", "")),
+        str(getattr(finding, "text", "")),
+        str(getattr(finding, "source_quote", "")),
+        _fmt_tile(getattr(finding, "tile", None)),
+        "; ".join(str(r) for r in refs),
+        str(getattr(anchor, "status", "")) if anchor is not None else "",
+        str(getattr(anchor, "method", "")) if anchor is not None else "",
+        _fmt_rect(getattr(anchor, "rect_pdf", None)) if anchor is not None else "",
+        str(getattr(verification, "status", "")) if verification is not None else "",
+        str(getattr(verification, "note", "")) if verification is not None else "",
+        str(getattr(verification, "evidence_png", "")) if verification is not None else "",
+    ]
+
+
+def build_findings_csv(findings: list[Any]) -> str:
+    """The findings CSV as a string (header + one row per finding), CRLF-terminated.
+
+    Pure — no I/O — so it is the unit-testable core of :func:`write_findings_csv`.
+    The returned text carries no BOM; the writer adds it at encode time.
+    """
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator="\r\n")
+    writer.writerow(FINDINGS_CSV_HEADER)
+    for finding in findings:
+        writer.writerow(_finding_row(finding))
+    return buf.getvalue()
+
+
+def write_findings_csv(findings: list[Any], path: Any) -> Path:
+    """Write ``findings.csv`` to ``path`` (UTF-8 **with BOM**, CRLF), return it.
+
+    ``newline=""`` keeps the CSV module's ``\\r\\n`` terminators intact (no OS
+    translation); ``utf-8-sig`` prepends the BOM Excel wants to detect UTF-8.
+    """
+    path = Path(path)
+    with open(path, "w", encoding="utf-8-sig", newline="") as fp:
+        fp.write(build_findings_csv(findings))
+    return path
 
 
 def write_drawing_export(
