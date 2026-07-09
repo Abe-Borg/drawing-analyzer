@@ -529,6 +529,7 @@ def _finding_row_html(f: Any, card_index: int | None, *, link_evidence: bool) ->
     sheet_id = getattr(f, "sheet_id", "") or getattr(f, "source_name", "") or "—"
     text = getattr(f, "text", "") or ""
     quote = getattr(f, "source_quote", "") or ""
+    qc_id = getattr(f, "qc_id", "") or ""
 
     sheet_cell = (
         f'<a href="#sheet-{card_index}">{html.escape(sheet_id)}</a>'
@@ -539,6 +540,15 @@ def _finding_row_html(f: Any, card_index: int | None, *, link_evidence: bool) ->
         else '<span class="muted">—</span>'
     )
     text_cell = _render_inline(text)
+    citation = getattr(f, "citation", None)
+    if citation is not None and getattr(citation, "status", "UNCHECKED") != "UNCHECKED":
+        cite_label = "supports" if citation.status == "CHECKED_SUPPORTS" else "mismatch"
+        cite_note = (getattr(citation, "note", "") or "").strip()
+        text_cell += (
+            f' <span class="muted citation-note">[citation {html.escape(cite_label)}'
+            + (f": {html.escape(cite_note)}" if cite_note else "")
+            + "]</span>"
+        )
     if link_evidence:
         evidence = (getattr(getattr(f, "verification", None), "evidence_png", "") or "").strip()
         if evidence:
@@ -552,6 +562,7 @@ def _finding_row_html(f: Any, card_index: int | None, *, link_evidence: bool) ->
         f'<tr class="finding-row" data-category="{_esc_attr(category)}" '
         f'data-severity="{sev_rank}" data-status="{status}" '
         f'data-status-rank="{_STATUS_RANK.get(status, 0)}">'
+        f'<td class="fcol-qcid">{html.escape(qc_id) or "—"}</td>'
         f'<td class="fcol-sheet">{sheet_cell}</td>'
         f'<td class="fcol-cat">{html.escape(category)}</td>'
         f'<td class="fcol-sev sev-{html.escape(severity or "none")}">'
@@ -588,6 +599,7 @@ def _findings_card(ctx: Any, sheets: list[Any], *, link_evidence: bool = False) 
     table = (
         '<div class="findings-wrap"><table class="findings-table">'
         "<thead><tr>"
+        '<th data-sort="qcid">ID</th>'
         '<th data-sort="sheet">Sheet</th>'
         '<th data-sort="category">Category</th>'
         '<th data-sort="severity">Severity</th>'
@@ -1221,6 +1233,7 @@ mark{background:#ffe9a8; color:inherit; padding:0 1px; border-radius:2px}
 .findings-table thead th.sort-asc::after{content:" ▲"; color:var(--muted); font-size:10px}
 .findings-table thead th.sort-desc::after{content:" ▼"; color:var(--muted); font-size:10px}
 .findings-table tbody tr:nth-child(even) td{background:#fafbfd}
+.findings-table .fcol-qcid{white-space:nowrap; font-weight:600; color:var(--muted)}
 .findings-table .fcol-sheet{white-space:nowrap}
 .findings-table .fcol-cat{text-transform:capitalize; color:var(--muted)}
 .findings-table .fcol-sev{text-transform:capitalize; font-weight:600}
@@ -1385,7 +1398,7 @@ _JS = r"""
     var ftable = findingsCard.querySelector('.findings-table');
     var ftbody = ftable ? ftable.querySelector('tbody') : null;
     var fths = ftable ? Array.prototype.slice.call(ftable.querySelectorAll('th[data-sort]')) : [];
-    var COLS = {sheet:0, category:1, severity:2, status:3, text:4, quote:5};
+    var COLS = {qcid:0, sheet:1, category:2, severity:3, status:4, text:5, quote:6};
     var fsort = {key:null, dir:1};
     function fval(row, key){
       if(key === 'severity') return parseInt(row.getAttribute('data-severity') || '0', 10);

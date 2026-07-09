@@ -86,7 +86,7 @@ def run_auditors(
             log.warning("%s auditor failed: %s", name, exc)
             return []
 
-    ref_findings = _run("reference", lambda: audit_references(sheets))
+    ref_findings = _run("reference", lambda: audit_references(sheets, stats=stats))
     stats["reference_findings"] = len(ref_findings)
     findings.extend(ref_findings)
 

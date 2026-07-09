@@ -278,6 +278,38 @@ class ConflictLeg:
 
 
 @dataclass
+class Citation:
+    """The outcome of the web-search citation check for a finding's refs (Phase 15).
+
+    ``CHECKED_SUPPORTS`` — the cited section(s), in the edition the set adopts and
+    in the current edition, support the finding. ``CHECKED_MISMATCH`` — the check
+    found a discrepancy (a stale section number, a renumbered edition, a section
+    that says something else). A MISMATCH downgrades nothing automatically — it is
+    surfaced for the engineer; sometimes the stale citation *is* the finding.
+    ``UNCHECKED`` — the check didn't run or couldn't reach a verdict.
+    """
+
+    status: str = "UNCHECKED"           # CHECKED_SUPPORTS | CHECKED_MISMATCH | UNCHECKED
+    note: str = ""
+    edition_notes: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "status": self.status,
+            "note": self.note,
+            "edition_notes": self.edition_notes,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Citation":
+        return cls(
+            status=d.get("status", "UNCHECKED") or "UNCHECKED",
+            note=d.get("note", "") or "",
+            edition_notes=d.get("edition_notes", "") or "",
+        )
+
+
+@dataclass
 class Finding:
     """One QC finding: a single reviewable issue anchored to a sheet.
 
@@ -297,6 +329,11 @@ class Finding:
     never suppresses a finding — the report and the markup writer only *surface*
     it — so it defaults ``True`` for every finding that never went through that
     pass (digest findings, the deterministic auditors).
+
+    ``qc_id`` is the human-facing sequential review number (``QC-001`` …), assigned
+    once per run by :func:`assign_qc_ids` (ordered sheet → position) and shown on
+    the markup tag, the index page, the CSV, and the report. ``citation`` is the
+    optional web-search citation-check verdict for the finding's ``refs``.
     """
 
     sheet_id: str
@@ -313,6 +350,8 @@ class Finding:
     also_on: list["ConflictLeg"] = field(default_factory=list)  # cross-sheet legs (Phase 13)
     anchor: Anchor = field(default_factory=Anchor)
     verification: Verification = field(default_factory=Verification)
+    qc_id: str = ""                     # "QC-001" … (assigned by assign_qc_ids)
+    citation: Citation | None = None    # web-search citation check (Phase 15)
     id: str = ""
 
     def __post_init__(self) -> None:
@@ -322,8 +361,9 @@ class Finding:
             )
 
     def to_dict(self) -> dict:
-        return {
+        out = {
             "id": self.id,
+            "qc_id": self.qc_id,
             "sheet_id": self.sheet_id,
             "source_name": self.source_name,
             "page_index": self.page_index,
@@ -339,6 +379,9 @@ class Finding:
             "anchor": self.anchor.to_dict(),
             "verification": self.verification.to_dict(),
         }
+        if self.citation is not None:
+            out["citation"] = self.citation.to_dict()
+        return out
 
     @classmethod
     def from_dict(cls, d: dict) -> "Finding":
@@ -363,8 +406,39 @@ class Finding:
             also_on=[ConflictLeg.from_dict(leg) for leg in (d.get("also_on") or []) if isinstance(leg, dict)],
             anchor=Anchor.from_dict(d.get("anchor") or {}),
             verification=Verification.from_dict(d.get("verification") or {}),
+            qc_id=d.get("qc_id", "") or "",
+            citation=Citation.from_dict(d["citation"]) if isinstance(d.get("citation"), dict) else None,
             id=d.get("id", ""),
         )
+
+
+def assign_qc_ids(findings: list["Finding"]) -> list["Finding"]:
+    """Assign sequential review numbers (``QC-001`` …) across a run's findings.
+
+    Ordered **sheet then position** (Phase 15): source file, page, then the
+    anchor rectangle's top-left in reading order (top-to-bottom, left-to-right).
+    Findings with no rectangle (sheet-level / unanchored) sort after the anchored
+    ones on their sheet. The sort is deterministic — tie-broken by the stable
+    content ``id`` — so the same findings get the same numbers regardless of the
+    order they arrive in (I-7). Assigns in place and returns the same list; ids
+    are assigned exactly once per run (numbering everything, not only the inked
+    findings, so the CSV/report/index all share one namespace).
+    """
+
+    def _pos(f: "Finding") -> tuple:
+        rect = f.anchor.rect_pdf if f.anchor is not None else None
+        if rect:
+            return (0, float(rect[1]), float(rect[0]))
+        return (1, 0.0, 0.0)            # rect-less findings sort after anchored ones
+
+    ordered = sorted(
+        findings,
+        key=lambda f: (f.source_name, int(f.page_index or 0), _pos(f), f.id),
+    )
+    width = max(3, len(str(len(ordered))))
+    for n, finding in enumerate(ordered, start=1):
+        finding.qc_id = f"QC-{n:0{width}d}"
+    return findings
 
 
 @dataclass

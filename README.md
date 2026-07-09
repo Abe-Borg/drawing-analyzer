@@ -129,6 +129,7 @@ ctx = extract_drawing_context(
     critique=True,               # second "reviewer" read/sheet, self-consistent (pricier)
     profiles=["fire-protection"],# review-profile checklists to apply (needs critique=True)
     cross_qc=True,               # hunt cross-sheet conflicts; cloud both sheets
+    citation_check=True,         # web-search check of cited code sections
     qc_work_dir=Path("run-out"), # where evidence crops + reviewed PDFs land
 )
 print(ctx.combined_text)
@@ -152,7 +153,8 @@ carries the QC record: `findings` (the model's, anchored + verified),
 the `all_findings` / `finding_count` / `clouded_finding_count` conveniences,
 `reviewed_pdf_paths`, the lightweight `sheet_geometries`, `audit_stats` (the
 auditors' checks-passed tally), and `qc_work_dir` (holding `evidence/` crops and
-the reviewed PDFs). `write_drawing_export(ctx, parent_dir, ...)` folds all of it
+the reviewed PDFs). Every finding carries its sequential `qc_id` review number
+(`QC-001` …) and, when the citation check ran, a `citation` verdict. `write_drawing_export(ctx, parent_dir, ...)` folds all of it
 into the export folder — `findings.json`, `findings.csv`, `sheet_text/<sheet>.txt`
 per sheet, the `*_reviewed.pdf` copies, and the `evidence/` crops — alongside the
 prose digest and HTML report.
@@ -464,27 +466,78 @@ defaults to Opus 4.8, overridable with `DRAWING_ANALYZER_VERIFY_MODEL`.
 
 Turned on with the GUI's **QC Markups** checkbox or `qc_markups=True` in the
 library. The payoff is a **marked-up copy of the original drawing** — `<stem>_reviewed.pdf`
-— with each finding drawn as a **real annotation object**: a revision-cloud
-rectangle at the finding's anchor, colored by severity, carrying the finding
-(text, quoted line, verification note, code refs) as its popup comment and
-authored *"Drawing Analyzer (AI review)"* so its provenance is unmistakable.
-Opened in **Bluebeam Revu** the clouds populate the Markups List — filter, sort,
-reply, and export all work — and Acrobat and Chromium render them too (the
-appearance stream is built explicitly, so nothing shows up blank).
+— that reads like a numbered, navigable, senior plan-review set. Every annotation
+is a **real PDF object** authored *"Drawing Analyzer (AI review)"* so provenance
+is unmistakable: opened in **Bluebeam Revu** they populate the Markups List
+(filter, sort, reply, export all work), and Acrobat and Chromium render them too
+(the appearance stream is built explicitly, so nothing shows up blank).
 
-Which findings get clouded (the cardinal sin is a wrong cloud on an issued
+### Markup anatomy (the legend)
+
+- **QC numbers.** Every finding in the run gets a sequential review number
+  (`QC-001` …, ordered sheet → position). Each inked finding carries the number
+  as a small **FreeText tag** beside its markup, in the severity color; the same
+  number appears in `findings.csv`, `findings.json`, the HTML report, and the
+  index page — one namespace everywhere.
+- **Severity colors.** high = **red**, medium = **orange**, low and any
+  *question*-category finding = **blue**.
+- **Border styles say who found it.** A model finding that verified draws a
+  **revision cloud**; a **`DETERMINISTIC`** (auditor) finding draws a **solid**
+  border — the host computed it, no cloud theatrics; an opted-in unverified
+  finding draws **dashed** with an `[UNVERIFIED]` popup prefix.
+- **Sheet-level / absence findings** (`anchor_hint="SHEET"` — "expected X; not
+  found on this sheet") have no rectangle to cloud. They become **callout boxes
+  stacked in a computed clear margin band** — the largest text-free horizontal
+  strip on the sheet, found from the word rectangles — with a **leader-line
+  arrow** to the reported tile's centroid when one is known.
+- **Index page(s).** Each reviewed PDF opens with **"AI DRAFT REVIEW - FINDINGS
+  INDEX"** — a table (ID, sheet, severity, status, one-line finding) where every
+  row is a **GOTO link** that jumps straight to the finding's page and rectangle
+  (works in Revu, Acrobat, and Chromium). Multi-page as needed.
+- **Popups are exhaustive**: the finding text, the verbatim quote, the
+  cross-sheet pointer (dual-anchored conflicts cite each other by QC number),
+  verification status + verifier note, code refs plus the
+  [citation-check](#citation-check) verdict, the reproduced flag (when a
+  self-consistency read didn't corroborate it), the evidence-crop filename, and
+  both ids.
+- **Optional appendix** (`DRAWING_ANALYZER_MARKUP_APPENDIX=1`, off by default):
+  a final **"checked and consistent"** page listing what the deterministic
+  auditors verified *clean* — numeric relationships that checked out, references
+  that resolved — the balance column of a real review.
+
+Which findings get inked (the cardinal sin is a wrong cloud on an issued
 drawing, so the default is conservative):
 
-- `VERIFIED` and `DETERMINISTIC` → clouded by default (solid revision cloud).
-- `UNCERTAIN` / unverified → clouded only with **include-unverified** on, in a
-  distinct dashed style with an `[UNVERIFIED]` prefix.
-- `REJECTED` → **never** clouded, but kept in `findings.csv` for the record.
+- `VERIFIED` and `DETERMINISTIC` → inked by default.
+- `UNCERTAIN` / unverified → inked only with **include-unverified** on, in the
+  dashed style with an `[UNVERIFIED]` prefix.
+- `REJECTED` → **never** inked, but kept in `findings.csv` for the record.
 
 The writer opens the original read-only and saves a *new* file (the source is
 never touched), then reopens it and checks the annotation count as a self-test.
-Every finding — clouded or not — is also written to **`findings.csv`**, one row
-per finding with every field flattened, UTF-8 with a BOM and CRLF line endings so
-Excel on Windows opens it cleanly.
+Every finding — inked or not — is also written to **`findings.csv`**, one row per
+finding with every field flattened (`qc_id` first; citation columns at the end),
+UTF-8 with a BOM and CRLF line endings so Excel on Windows opens it cleanly.
+
+## Citation check
+
+Findings often cite code sections (`refs`), and citations have a failure mode of
+their own: a drawing citing **2016-era numbering under a 2019 basis** (the
+prototype found exactly that — NFPA 13's Table 13.2.1 became §4.3.1.7 in the 2019
+renumbering). The drawing set can't validate its own citations, so
+`citation_check=True` adds one **web-search-backed model call per unique
+citation** (the API's server-side `web_search` tool): does this section — in the
+edition the set adopts *and* in the current edition — actually support the
+finding citing it?
+
+The **adopted editions** are harvested offline from the sheet text layers (the
+general-notes "NFPA 13, 2016 EDITION" claims) and included in the prompt. Each
+verdict — `CHECKED_SUPPORTS` / `CHECKED_MISMATCH` / `UNCHECKED` — attaches to
+every finding citing that ref and appears in the markup popup, the CSV, and the
+report. **A MISMATCH downgrades nothing automatically** — it is surfaced for the
+engineer, because sometimes the stale citation *is* the finding. Real-time only
+(a handful of interactive calls; ~$0.03–0.08 per unique ref), additive, and
+non-fatal: any failure degrades that ref to `UNCHECKED`.
 
 ## Deterministic auditors
 
@@ -582,6 +635,9 @@ runs.
 | `DRAWING_ANALYZER_VERIFY_MODEL` | Opus 4.8 | Per-finding verification model (crop + short prompt). |
 | `DRAWING_ANALYZER_CRITIQUE_MODEL` | Opus 4.8 | Critique-pass vision model (`critique=True`). |
 | `DRAWING_ANALYZER_CROSS_QC_MODEL` | Opus 4.8 | Cross-sheet QC model, text-only (`cross_qc=True`). |
+| `DRAWING_ANALYZER_CITATION_MODEL` | Opus 4.8 | Citation-check model, with web search (`citation_check=True`). |
+| `DRAWING_ANALYZER_WEB_SEARCH_TOOL_TYPE` | `web_search_20260209` | Server-side web-search tool type string (survives an API rename). |
+| `DRAWING_ANALYZER_MARKUP_APPENDIX` | off | Append the "checked and consistent" page to reviewed PDFs. |
 | `DRAWING_ANALYZER_CRITIQUE_RUNS` | `2` | Critique self-consistency reads to merge (`1` disables it). |
 | `DRAWING_ANALYZER_ARITHMETIC_REL_TOL` | `0.01` | Arithmetic auditor's relative match tolerance (drawings round). |
 | `DRAWING_ANALYZER_NAMING_DOMINANT_MIN_FREQ` | `2` | Naming auditor: occurrences that make a tag "established" vocabulary. |

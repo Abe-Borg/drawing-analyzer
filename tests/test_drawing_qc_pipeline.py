@@ -116,10 +116,13 @@ def test_full_qc_chain(tmp_path):
     assert len(ctx.sheet_geometries) == 1
     assert len(ctx.sheet_geometries[0].words) > 0
 
-    # A reviewed PDF was written with both cloudable findings (VERIFIED + DETERMINISTIC).
+    # A reviewed PDF was written with both cloudable findings (VERIFIED +
+    # DETERMINISTIC), each carrying its QC-number tag (Phase 15): 2 clouds + 2 tags.
     assert len(ctx.reviewed_pdf_paths) == 1
     assert ctx.reviewed_pdf_paths[0].name == "M-101_reviewed.pdf"
-    assert _annot_count(ctx.reviewed_pdf_paths[0]) == 2
+    assert _annot_count(ctx.reviewed_pdf_paths[0]) == 4
+    # Sequential review numbers were assigned across the run's findings.
+    assert sorted(f.qc_id for f in ctx.all_findings) == ["QC-001", "QC-002"]
     # The original is untouched.
     assert _annot_count(src) == 0
     # Findings surface on the context.
@@ -167,8 +170,9 @@ def test_qc_markups_include_unverified(tmp_path):
         qc_work_dir=tmp_path / "qc",
     )
     assert ctx.findings[0].verification.status == "UNCERTAIN"
-    # Both the UNCERTAIN model finding and the DETERMINISTIC reference are inked.
-    assert _annot_count(ctx.reviewed_pdf_paths[0]) == 2
+    # Both the UNCERTAIN model finding and the DETERMINISTIC reference are inked,
+    # each with its QC tag (Phase 15): 2 clouds + 2 tags.
+    assert _annot_count(ctx.reviewed_pdf_paths[0]) == 4
 
 
 def test_verify_disabled_still_anchors_and_marks(tmp_path):
@@ -182,8 +186,8 @@ def test_verify_disabled_still_anchors_and_marks(tmp_path):
     assert client.verify_calls == 0
     assert ctx.findings[0].anchor.status == "EXACT"
     assert ctx.findings[0].verification.status == "SKIPPED"
-    # include-unverified inks the SKIPPED model finding.
-    assert _annot_count(ctx.reviewed_pdf_paths[0]) == 1
+    # include-unverified inks the SKIPPED model finding (cloud + QC tag).
+    assert _annot_count(ctx.reviewed_pdf_paths[0]) == 2
 
 
 # --------------------------------------------------------------------------- #

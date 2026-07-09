@@ -387,9 +387,9 @@ def test_pipeline_cross_qc_clouds_both_sheets(tmp_path):
     conflicts = [f for f in ctx.findings if f.also_on]
     assert len(conflicts) == 1 and conflicts[0].source_quote == "COLO 5"
     assert conflicts[0].also_on[0].source_name == "F-A-01-1.pdf"
-    # ...clouded on BOTH sheets.
+    # ...clouded on BOTH sheets (cloud + its QC tag on each, Phase 15).
     assert {p.name for p in ctx.reviewed_pdf_paths} == {"F-D-01-1_reviewed.pdf", "F-A-01-1_reviewed.pdf"}
-    assert all(count_annotations(p) == 1 for p in ctx.reviewed_pdf_paths)
+    assert all(count_annotations(p) == 2 for p in ctx.reviewed_pdf_paths)
     # I-2: the conflict never leaks into the prose.
     assert "COLO 5 vs COLO 1" not in ctx.combined_text
     assert "```json" not in ctx.combined_text
@@ -411,9 +411,10 @@ def test_pipeline_dual_crop_verify_clouds_under_default_gating(tmp_path):
     assert conflict.verification.evidence_png.startswith("evidence/")
     # The verify call carried a crop for EACH sheet (dual crop), not just one.
     assert client.verify_calls == 1 and client.verify_image_counts == [2]
-    # Clouded on BOTH sheets under the default (verified-only) gate.
+    # Clouded on BOTH sheets under the default (verified-only) gate — a cloud
+    # plus its QC tag on each sheet (Phase 15).
     assert {p.name for p in ctx.reviewed_pdf_paths} == {"F-D-01-1_reviewed.pdf", "F-A-01-1_reviewed.pdf"}
-    assert all(count_annotations(p) == 1 for p in ctx.reviewed_pdf_paths)
+    assert all(count_annotations(p) == 2 for p in ctx.reviewed_pdf_paths)
 
 
 def test_pipeline_without_cross_qc_is_unchanged(tmp_path):
