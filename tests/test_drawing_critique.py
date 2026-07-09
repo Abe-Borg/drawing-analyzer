@@ -155,7 +155,7 @@ def test_absence_finding_carries_sheet_anchor_hint():
         "text": "Expected low-point drain; not found on this sheet.",
         "source_quote": "", "anchor_hint": "SHEET",
     }
-    findings, _in, _out, err = critique_sheet(
+    findings, _claims, _in, _out, err = critique_sheet(
         rendered, client=_CritiqueClient([[absence]]), max_retries=0, sleep=_NOOP
     )
     assert err is None and len(findings) == 1
@@ -300,11 +300,65 @@ def test_self_consistent_cached_second_time():
     assert [f.to_dict() for f in r2.findings] == [f.to_dict() for f in r1.findings]
 
 
+# --- Numeric claims (Phase 14) ---------------------------------------------- #
+
+
+class _ClaimsClient:
+    """Returns a fixed findings+claims block for every critique call."""
+
+    def __init__(self, claims):
+        import json as _json
+
+        self._text = "```json\n" + _json.dumps({"findings": [], "claims": claims}) + "\n```"
+        self.calls = 0
+        outer = self
+
+        class _Msgs:
+            def create(self, **kw):  # noqa: ANN001, ANN202
+                outer.calls += 1
+                return FakeMessage(
+                    content=[FakeTextBlock(text=outer._text)],
+                    usage=FakeUsage(input_tokens=100, output_tokens=20),
+                )
+
+        self.messages = _Msgs()
+
+
+def test_critique_sheet_parses_numeric_claims():
+    claim = {"sheet_id": "F-D-01-1", "quote": "TOTAL 540", "kind": "sum",
+             "terms": [180, 180, 180], "expected": 540, "note": "flow total"}
+    findings, claims, _in, _out, err = critique_sheet(
+        _rendered(), client=_ClaimsClient([claim]), max_retries=0, sleep=_NOOP
+    )
+    assert err is None
+    assert len(claims) == 1
+    c = claims[0]
+    assert c.kind == "sum" and c.terms == [180, 180, 180] and c.expected == 540
+    # The emitting sheet is stamped on the claim so it anchors on that sheet.
+    assert c.source_name == "s.pdf" and c.page_index == 0
+
+
+def test_self_consistent_dedups_and_caches_claims():
+    claim = {"sheet_id": "F-D-01-1", "quote": "TOTAL 540", "kind": "sum",
+             "terms": [180, 180, 180], "expected": 540}
+    cache = DigestCache(None, persist=False)
+    client = _ClaimsClient([claim])
+    r1 = critique_sheet_self_consistent(_rendered(), client=client, cache=cache,
+                                        runs=2, max_retries=0, sleep=_NOOP)
+    # Both runs transcribed the same relationship → deduped to one claim.
+    assert len(r1.claims) == 1 and client.calls == 2
+    # Served from cache the second time, claims survive the round-trip.
+    r2 = critique_sheet_self_consistent(_rendered(), client=client, cache=cache,
+                                        runs=2, max_retries=0, sleep=_NOOP)
+    assert r2.cached is True and client.calls == 2
+    assert [c.to_dict() for c in r2.claims] == [c.to_dict() for c in r1.claims]
+
+
 def test_transient_error_is_retried_then_succeeds():
     rendered = _rendered()
     ok = {"sheet_id": "F", "category": "code", "severity": "low", "text": "t"}
     client = _CritiqueClient([_StatusError(503), [ok]])   # first attempt 503, then ok
-    findings, _in, _out, err = critique_sheet(
+    findings, _claims, _in, _out, err = critique_sheet(
         rendered, client=client, max_retries=2, sleep=_NOOP
     )
     assert err is None and len(findings) == 1
@@ -370,7 +424,7 @@ class _EmptyBodyClient:
 
 def test_empty_body_is_error_not_a_clean_sheet():
     # An empty response is a failed read, not "reviewed, nothing found".
-    findings, _in, _out, err = critique_sheet(
+    findings, _claims, _in, _out, err = critique_sheet(
         _rendered(), client=_EmptyBodyClient(), max_retries=0, sleep=_NOOP
     )
     assert findings == [] and err is not None and "empty" in err.lower()

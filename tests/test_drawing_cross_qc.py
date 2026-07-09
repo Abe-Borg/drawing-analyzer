@@ -82,6 +82,37 @@ def test_system_prompt_and_between_sheets_mandate():
     sysp = cross_qc_system_prompt()
     assert "CROSS-SHEET" in sysp and "FINDINGS" in sysp
     assert "also_on" in sysp
+    assert "claims" in sysp        # Phase 14: numeric-claim transcription
+
+
+class _ClaimsCrossClient:
+    """Returns a fixed cross-QC findings+claims block."""
+
+    def __init__(self, claims):
+        self._text = "```json\n" + json.dumps({"findings": [], "claims": claims}) + "\n```"
+        outer = self
+
+        class _Msgs:
+            def create(self, **kw):  # noqa: ANN001, ANN202
+                return FakeMessage(
+                    content=[FakeTextBlock(text=outer._text)],
+                    usage=FakeUsage(input_tokens=800, output_tokens=60),
+                )
+
+        self.messages = _Msgs()
+
+
+def test_cross_qc_returns_numeric_claims():
+    claim = {"sheet_id": "F-D-01-1", "quote": "TOTAL 540", "kind": "sum",
+             "terms": [180, 180, 180], "expected": 540}
+    res = cross_sheet_qc(
+        [_digest("a.pdf"), _digest("b.pdf")],
+        [_geom("a.pdf", "F-D-01-1"), _geom("b.pdf", "F-A-01-1")],
+        client=_ClaimsCrossClient([claim]), max_retries=0, sleep=_NOOP,
+    )
+    assert len(res.claims) == 1 and res.claims[0].kind == "sum"
+    # No emitting-sheet ref (the pass spans the set) — the auditor resolves by id.
+    assert res.claims[0].source_name == "" and res.claims[0].sheet_id == "F-D-01-1"
 
 
 def test_skips_below_two_readable_sheets():

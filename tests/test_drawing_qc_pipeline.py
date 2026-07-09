@@ -13,6 +13,7 @@ import pytest
 
 pymupdf = pytest.importorskip("pymupdf")
 
+from drawing_analyzer.critique import CRITIQUE_SYSTEM_PROMPT  # noqa: E402
 from drawing_analyzer.digest import DIGEST_SYSTEM_PROMPT  # noqa: E402
 from drawing_analyzer.pipeline import extract_drawing_context  # noqa: E402
 from drawing_analyzer.verify import VERIFY_SYSTEM_PROMPT  # noqa: E402
@@ -221,3 +222,57 @@ def test_combined_text_has_no_findings_block(tmp_path):
     assert "```json" not in ctx.combined_text
     assert '"findings"' not in ctx.combined_text
     assert "VAV-3 serves Room 120" in ctx.combined_text
+
+
+# --------------------------------------------------------------------------- #
+# Arithmetic auditor via critique-transcribed claims (Phase 14)
+# --------------------------------------------------------------------------- #
+
+
+class _ClaimsRoutingClient:
+    """Answers digest and critique calls; the critique emits a numeric claim."""
+
+    def __init__(self, claims: list[dict]):
+        self.digest_calls = 0
+        self.critique_calls = 0
+        prose = "Sheet M-101 - Mechanical - Plan\nVAV-3 serves Room 120."
+        digest_text = prose + "\n\n" + _digest_block([])
+        critique_text = "```json\n" + json.dumps({"findings": [], "claims": claims}) + "\n```"
+
+        class _Msgs:
+            def create(_self, **kw):
+                system = kw.get("system", "")
+                if system.startswith(CRITIQUE_SYSTEM_PROMPT):
+                    self.critique_calls += 1
+                    return FakeMessage(content=[FakeTextBlock(text=critique_text)],
+                                       usage=FakeUsage(input_tokens=500, output_tokens=80))
+                if system.startswith(DIGEST_SYSTEM_PROMPT):
+                    self.digest_calls += 1
+                    return FakeMessage(content=[FakeTextBlock(text=digest_text)],
+                                       usage=FakeUsage(input_tokens=500, output_tokens=80))
+                return FakeMessage(content=[FakeTextBlock(text="ok")])
+
+        self.messages = _Msgs()
+
+
+def test_arithmetic_auditor_flags_bad_claim_end_to_end(tmp_path):
+    src = _make_pdf(tmp_path / "M-101.pdf")
+    # The reviewer transcribes a column that should total 540 but is printed 200;
+    # the deterministic auditor — not the model — catches the bad arithmetic. The
+    # quote ("VAV-3") is on the sheet, so the finding anchors EXACT.
+    claim = {"sheet_id": "M-101", "quote": "VAV-3", "kind": "sum",
+             "terms": [100, 100], "expected": 540, "note": "column total"}
+    client = _ClaimsRoutingClient([claim])
+    ctx = extract_drawing_context(
+        [src], client=client, rows=2, cols=2,
+        reference_audit=True, critique=True, qc_markups=False,
+    )
+    assert client.critique_calls >= 1
+    arith = [f for f in ctx.reference_findings
+             if f.category == "conflict" and f.verification.status == "DETERMINISTIC"]
+    assert len(arith) == 1
+    assert "540" in arith[0].text and "200" in arith[0].text   # computed vs stated
+    assert arith[0].anchor.status == "EXACT"
+    # The report tally counts the relationship that was checked.
+    assert ctx.audit_stats.get("arithmetic_checked") == 1
+    assert ctx.audit_stats.get("arithmetic_mismatched") == 1

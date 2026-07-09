@@ -600,12 +600,34 @@ def _findings_card(ctx: Any, sheets: list[Any], *, link_evidence: bool = False) 
         '<p class="findings-hint muted">Click a column header to sort · click a '
         "sheet to jump to it · use the filter chips and search on the left.</p>"
     )
+    checks = _audit_checks_line(ctx)
     return _card(
         card_id="findings",
         title_html='<span class="seq">⚑</span> QC Findings',
         badges_html=f'<span class="badge badge-findings">{len(findings)} finding(s)</span>',
         status="findings",
-        body_html=f'<div class="findings-body">{hint}{table}</div>',
+        body_html=f'<div class="findings-body">{hint}{checks}{table}</div>',
+    )
+
+
+def _audit_checks_line(ctx: Any) -> str:
+    """A one-line "checks that passed" note from the deterministic-auditor tally.
+
+    The deterministic battery counts what it *verified clean*, not only what it
+    flagged — the balance column of a real review. Currently that's the arithmetic
+    auditor's "N numeric relationships checked ✓" (Phase 14); empty when no claims
+    were checked, so the line only appears when it has something to say.
+    """
+    stats = getattr(ctx, "audit_stats", None) or {}
+    checked = int(stats.get("arithmetic_checked", 0) or 0)
+    if checked <= 0:
+        return ""
+    matched = int(stats.get("arithmetic_matched", 0) or 0)
+    noun = "relationship" if checked == 1 else "relationships"
+    return (
+        '<p class="findings-hint muted">'
+        f"Deterministic checks: {matched} of {checked} numeric {noun} checked out ✓"
+        "</p>"
     )
 
 

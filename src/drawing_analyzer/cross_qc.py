@@ -42,9 +42,10 @@ from .digest import (
     _message_usage,
     _retry_backoff_seconds,
     _tolerant_json_object,
+    parse_numeric_claims,
 )
-from .models import ConflictLeg, Finding
-from .reference_audit import detect_sheet_id
+from .models import ConflictLeg, Finding, NumericClaim
+from .auditors.references import detect_sheet_id
 
 _log = get_logger()
 
@@ -99,16 +100,24 @@ _CROSS_QC_FINDINGS_INSTRUCTION = """\
 
 FINDINGS (machine-read — the ONLY thing you output):
 Output a SINGLE fenced code block labeled json and nothing else — no prose — \
-containing {"findings": [ ... ]}. Each finding is a CROSS-SHEET conflict with: \
-sheet_id (the PRIMARY sheet, one of the sheets involved); category (one of code, \
-conflict, coordination, question); severity (one of high, medium, low); text (the \
-conflict in <= 2 sentences, naming the sheets); source_quote (COPY VERBATIM the \
-conflicting string from the PRIMARY sheet's text layer); tile ([row, col] on the \
-primary sheet, or omit); also_on (an array of the OTHER sheets in the conflict, \
-each an object {"sheet_id", "source_quote" (verbatim from THAT sheet), "tile"}); \
-refs (optional array of codes/specs). Every finding MUST list at least one \
-also_on sheet — a conflict is between sheets. Emit at most 60 findings, most \
-important first; emit {"findings": []} if there are no cross-sheet conflicts."""
+containing {"findings": [ ... ], "claims": [ ... ]}. Each finding is a \
+CROSS-SHEET conflict with: sheet_id (the PRIMARY sheet, one of the sheets \
+involved); category (one of code, conflict, coordination, question); severity \
+(one of high, medium, low); text (the conflict in <= 2 sentences, naming the \
+sheets); source_quote (COPY VERBATIM the conflicting string from the PRIMARY \
+sheet's text layer); tile ([row, col] on the primary sheet, or omit); also_on (an \
+array of the OTHER sheets in the conflict, each an object {"sheet_id", \
+"source_quote" (verbatim from THAT sheet), "tile"}); refs (optional array of \
+codes/specs). Every finding MUST list at least one also_on sheet — a conflict is \
+between sheets. Emit at most 60 findings, most important first; emit \
+"findings": [] if there are no cross-sheet conflicts.
+
+Also include a "claims" array in the SAME object for numeric relationships a \
+reviewer should verify by CALCULATION (you only transcribe the numbers — never do \
+the arithmetic). Each claim: sheet_id (the sheet the numbers are on); quote (COPY \
+VERBATIM the on-sheet text); kind (one of sum, product, factor); terms (the \
+numbers as printed); expected (the stated result they should combine to); note (a \
+short phrase naming the relationship). Emit "claims": [] if there are none."""
 
 
 def cross_qc_system_prompt() -> str:
@@ -123,9 +132,15 @@ def cross_qc_system_prompt() -> str:
 
 @dataclass
 class CrossQCResult:
-    """The outcome of the cross-sheet QC pass."""
+    """The outcome of the cross-sheet QC pass.
+
+    ``claims`` are numeric relationships the pass transcribed (Phase 14) for the
+    deterministic arithmetic auditor; they carry no emitting-sheet ref (the pass
+    spans the set), so the auditor resolves each by its ``sheet_id``.
+    """
 
     findings: list[Finding] = field(default_factory=list)
+    claims: list[NumericClaim] = field(default_factory=list)
     input_tokens: int = 0
     output_tokens: int = 0
     error: str | None = None
@@ -279,8 +294,8 @@ def _one_cross_qc_call(
     model: str,
     max_retries: int,
     sleep: Any,
-) -> tuple[list[Finding], int, int, str | None]:
-    """One cross-QC model call over ``entries`` → ``(findings, in, out, err)``."""
+) -> tuple[list[Finding], list[NumericClaim], int, int, str | None]:
+    """One cross-QC model call over ``entries`` → ``(findings, claims, in, out, err)``."""
     kwargs: dict[str, Any] = {
         "model": model,
         "max_tokens": DEFAULT_CROSS_QC_MAX_TOKENS,
@@ -300,13 +315,13 @@ def _one_cross_qc_call(
                 sleep(_retry_backoff_seconds(attempt))
                 attempt += 1
                 continue
-            return [], 0, 0, _clean_error(exc)
+            return [], [], 0, 0, _clean_error(exc)
 
     raw = _message_text(resp)
     in_tok, out_tok = _message_usage(resp)
     if not raw:
-        return [], in_tok, out_tok, f"empty cross-qc (stop_reason={_get(resp, 'stop_reason')!r})"
-    return _parse_cross_findings(raw, sheet_map), in_tok, out_tok, None
+        return [], [], in_tok, out_tok, f"empty cross-qc (stop_reason={_get(resp, 'stop_reason')!r})"
+    return _parse_cross_findings(raw, sheet_map), parse_numeric_claims(raw), in_tok, out_tok, None
 
 
 def _shard_by_discipline(entries: list[tuple]) -> list[list[tuple]]:
@@ -384,10 +399,11 @@ def cross_sheet_qc(
 
     shards = [entries] if len(entries) <= MAX_SHEETS_SINGLE_CALL else _shard_by_discipline(entries)
     all_findings: list[Finding] = []
+    all_claims: list[NumericClaim] = []
     total_in = total_out = 0
     errors: list[str] = []
     for shard in shards:
-        findings, in_tok, out_tok, err = _one_cross_qc_call(
+        findings, claims, in_tok, out_tok, err = _one_cross_qc_call(
             shard, sheet_map, client=client, model=model,
             max_retries=max_retries, sleep=sleep,
         )
@@ -397,6 +413,7 @@ def cross_sheet_qc(
             errors.append(err)
             continue
         all_findings.extend(findings)
+        all_claims.extend(claims)
 
     # Union across shards, de-duplicated by the FULL conflict (primary + legs),
     # normalized. Keying on ``Finding.id`` alone (sheet_id + category + quote,
@@ -425,6 +442,7 @@ def cross_sheet_qc(
     )
     return CrossQCResult(
         findings=deduped,
+        claims=all_claims,
         input_tokens=total_in,
         output_tokens=total_out,
         error="; ".join(errors) or None,
