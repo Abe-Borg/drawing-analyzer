@@ -74,17 +74,22 @@ Two **QC review** checkboxes sit beside the focus:
 - **Reference audit** — a free, zero-API pass that runs the whole deterministic
   auditor battery: references, arithmetic, naming, title-block, and sheet-index
   (see [Deterministic auditors](#deterministic-auditors)).
-- **QC Markups** — runs the anchor → verify → cloud chain and produces a
+- **QC Markups** — runs the anchor → verify → ink chain and produces a
   **marked-up PDF + findings CSV** (see [Reviewed PDFs & findings CSV](#reviewed-pdfs--findings-csv)).
-  The sub-toggle **Verified findings only** (on by default) keeps only
-  verified/deterministic findings clouded; turning it off also clouds the
-  unverified ones in a distinct dashed style. The cost line notes the extra
-  per-finding verification spend (~$0.01–0.03 each) while this is on.
+  By default **every ledger entry gets ink except the ones the verifier proved
+  wrong** ([§18 gating](#gating--all-findings-get-ink-part-iii-18)): unverified
+  findings draw dashed with an `[UNVERIFIED]` prefix, rect-less ones become
+  margin callouts. Two sub-toggles adjust that — **Verified & deterministic
+  only** (off by default; the conservative opt-in that suppresses unverified
+  ink) and **Include rejected (grey)** (also inks verifier-rejected findings,
+  struck grey). The cost line notes the extra per-finding verification spend
+  (~$0.01–0.03 each) while markups are on.
 
-After a QC run, the completion summary reports the finding count and how many
-were clouded, and two extra buttons light up: **Save Findings CSV…** and **Save
-Reviewed PDF(s)…** (the latter copies every `*_reviewed.pdf` into a folder you
-pick).
+After a QC run, the completion summary reports the finding count, how many were
+clouded, and the ledger coverage tally
+(`Ledger 47: 39 clouded, 6 margin, 2 rejected (indexed)`), and two extra
+buttons light up: **Save Findings CSV…** and **Save Reviewed PDF(s)…** (the
+latter copies every `*_reviewed.pdf` into a folder you pick).
 
 ### Browsing the result
 
@@ -94,7 +99,7 @@ GUI) makes a large set easy to navigate:
 - **Sidebar table of contents** — jump to the QC findings, the cross-sheet
   overview, or any sheet; each sheet shows an OK / cached / failed dot.
 - **QC Findings card** (when a QC run produced findings) — a pinned, **sortable**
-  table (sheet, category, severity, status, finding, quote). Each row carries a
+  table (ID, sheet, category, severity, status, finding, quote). Each row carries a
   color-coded **status chip** — `Verified` (green), `Deterministic` (blue),
   `Uncertain` (amber), `Unanchored` (red outline), `Rejected` (struck grey) — and
   links to the sheet it sits on. The chips honour the filter chips and **⚠ Issues
@@ -409,8 +414,9 @@ where its counterpart lives. The model defaults to Opus 4.8
 A cross-sheet conflict can't be judged from one sheet's crop, so these findings
 get a **dual-crop verification**: the verifier is sent **one crop per sheet in a
 single call** and asked whether the sheets actually conflict — so a cross-sheet
-finding can reach `VERIFIED` / `REJECTED` and be clouded under the default
-verified-only gating, like any other finding.
+finding can reach `VERIFIED` / `REJECTED` on the merits like any other finding
+(and a rejected one loses its ink, [§18](#gating--all-findings-get-ink-part-iii-18))
+instead of idling at `UNCERTAIN`.
 
 ## Anchoring findings
 
@@ -431,8 +437,10 @@ call, using a tiered strategy that records which tier fired:
 - **TILE** — a graphics-only finding (empty quote) is anchored to its reported
   tile's rectangle: coarse, but honest.
 - **UNANCHORED** — a *non-empty* quote that matches nothing anywhere. This is the
-  **hallucination signal**: the finding is kept and flagged, but never clouded by
-  default (a wrong cloud on an issued drawing is worse than a missing one).
+  **hallucination signal**: with no rectangle to cloud, the finding lands as a
+  **margin callout** with an `[UNANCHORED]` prefix
+  ([§18](#gating--all-findings-get-ink-part-iii-18)) — flagged loudly, never
+  dropped, and never drawn as if it had a location.
 
 Findings the [deterministic auditors](#deterministic-auditors) already placed
 arrive pre-anchored and are left untouched. Like the tile geometry, the resolver
@@ -454,7 +462,7 @@ finding status:
 | Status | Source | Meaning |
 |---|---|---|
 | `VERIFIED` | verifier `CONFIRMED` | the crop shows the finding is correct |
-| `REJECTED` | verifier `CONTRADICTED` | the crop shows the finding is wrong — kept in the record but never clouded |
+| `REJECTED` | verifier `CONTRADICTED` | the crop shows the finding is wrong — pulled from the ink and listed in the index's *Rejected by verification* section (grey struck ink only with `ink_rejected=True`) |
 | `UNCERTAIN` | verifier `NOT_VISIBLE` (or a garbled reply) | can't be decided from this crop (e.g. it depends on another sheet) — a perfectly fine outcome |
 | `DETERMINISTIC` | the offline auditors | trusted without a model re-check (references, arithmetic, naming, title-block, sheet-index) |
 | `SKIPPED` | — | nothing to look at (unanchored), no crop, or the pass was unavailable (no key) |
@@ -705,6 +713,7 @@ runs.
 | `DRAWING_ANALYZER_CROSS_QC_MODEL` | Opus 4.8 | Cross-sheet QC model, text-only (`cross_qc=True`). |
 | `DRAWING_ANALYZER_CITATION_MODEL` | Opus 4.8 | Citation-check model, with web search (`citation_check=True`). |
 | `DRAWING_ANALYZER_HARVEST_MODEL` | Opus 4.8 | Prose-harvest structuring model (one small call per straggler). |
+| `DRAWING_ANALYZER_CHAT_MODEL` | Opus 4.8 | The HTML report's in-browser **Ask AI** assistant (needs current-generation web-search / thinking support). |
 | `DRAWING_ANALYZER_WEB_SEARCH_TOOL_TYPE` | `web_search_20260209` | Server-side web-search tool type string (survives an API rename). |
 | `DRAWING_ANALYZER_MARKUP_APPENDIX` | off | Append the "checked and consistent" page to reviewed PDFs. |
 | `DRAWING_ANALYZER_CRITIQUE_RUNS` | `2` | Critique self-consistency reads to merge (`1` disables it). |
@@ -718,6 +727,9 @@ runs.
 | `DRAWING_ANALYZER_NEAR_BLANK_MAX_BYTES` | `3072` | Near-blank PNG-byte threshold (only when the above is on). |
 | `DRAWING_ANALYZER_CACHE_PATH` | `~/.drawing_analyzer/drawing_digest_cache.json` | On-disk digest cache. |
 | `DRAWING_ANALYZER_CACHE_PERSIST` | on | Disable to keep the cache in-memory only. |
+| `DRAWING_ANALYZER_DIAGNOSTICS` | on | Set `0`/`false` to disable the rotating `drawing_analyzer.log` diagnostics file the GUI writes. |
+| `DRAWING_ANALYZER_DEBUG` | off | Also route the Anthropic SDK / httpx wire-level logs (status codes, request-ids, retries) into the diagnostics file. |
+| `DRAWING_ANALYZER_CACHE_DIAGNOSTICS` | off | Request the prompt-cache diagnostics beta on API calls (operator debugging only). |
 
 ## Testing
 

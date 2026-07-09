@@ -18,14 +18,31 @@ Design:
 
 Module layout::
 
-    tiling.py    dependency-free tile geometry (clip rects + render zoom)
-    render.py    PyMuPDF rasterization (the ONLY module that imports PyMuPDF)
-    digest.py    per-sheet vision request -> structured text
-    synthesis.py cross-sheet reconciliation pass (text-only)
-    focus.py     optional per-run focus -> set-level Focus Report (text-only)
-    pipeline.py  orchestration: PDFs -> sheets -> digests -> combined text
-    gui.py       standalone CustomTkinter window
-    __main__.py  ``python -m drawing_analyzer`` launches the GUI
+    tiling.py         dependency-free tile geometry (clip rects + render zoom)
+    render.py         PyMuPDF rasterization (PyMuPDF importer 1 of exactly 2)
+    digest.py         per-sheet vision request -> structured text + findings block
+    batch_digest.py   Message Batches / Files API digest path
+    digest_cache.py   two-level content-keyed digest cache
+    synthesis.py      cross-sheet reconciliation pass (text-only)
+    focus.py          optional per-run focus -> set-level Focus Report (text-only)
+    pipeline.py       orchestration: PDFs -> sheets -> digests -> QC -> combined text
+    ledger.py         the per-run findings ledger every QC channel feeds (Part III)
+    auditors/         deterministic zero-API auditors (references, arithmetic,
+                      naming, title-block, sheet-index)
+    critique.py       second full-coverage "reviewer" vision read (self-consistent)
+    cross_qc.py       cross-sheet conflict hunt (text-only, dual anchors)
+    prose_harvest.py  prose Coordination/Conflict/synthesis items -> ledger entries
+    anchor.py         finding quote -> PDF rectangle resolution (offline)
+    verify.py         per-finding crop verification pass
+    citation_check.py web-search check of cited code sections
+    annotate.py       reviewed-PDF markup writer (PyMuPDF importer 2 of exactly 2)
+    export.py         folder export: findings.csv/json, sheet text, evidence crops
+    html_report.py    self-contained HTML report (+ in-browser Ask AI assistant)
+    gui.py            standalone CustomTkinter window
+    __main__.py       ``python -m drawing_analyzer`` launches the GUI
+
+PyMuPDF (AGPL) is deliberately confined to ``render.py`` + ``annotate.py`` —
+see the README's Licensing section before adding an import elsewhere.
 """
 from __future__ import annotations
 
