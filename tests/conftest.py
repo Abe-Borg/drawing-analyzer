@@ -24,6 +24,11 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+# Obvious-fake key injected for hermetic collection so import-time helpers that
+# call ``client.get_client`` never raise. It is never used for a real call: the
+# autouse fixture below strips the key from every non-``network`` test.
+_PLACEHOLDER_KEY = "test-key-not-real-do-not-use"
+
 
 def _tkinter_available() -> bool:
     return importlib.util.find_spec("tkinter") is not None
@@ -49,7 +54,7 @@ def pytest_configure(config: pytest.Config) -> None:
     placeholder is obviously fake so any accidental real call will 401 instead
     of silently charging a different account.
     """
-    os.environ.setdefault("ANTHROPIC_API_KEY", "test-key-not-real-do-not-use")
+    os.environ.setdefault("ANTHROPIC_API_KEY", _PLACEHOLDER_KEY)
 
 
 def pytest_collection_modifyitems(
@@ -57,12 +62,30 @@ def pytest_collection_modifyitems(
 ) -> None:
     """Skip ``@pytest.mark.network`` tests unless a real API key is set."""
     real_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-    if real_key and real_key != "test-key-not-real-do-not-use":
+    if real_key and real_key != _PLACEHOLDER_KEY:
         return
     skip_marker = pytest.mark.skip(reason="ANTHROPIC_API_KEY not set; skipping network test")
     for item in items:
         if "network" in item.keywords:
             item.add_marker(skip_marker)
+
+
+@pytest.fixture(autouse=True)
+def _enforce_hermetic_api_key(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """I-4: no non-``network`` test may reach the API.
+
+    The pipeline and several QC stages (e.g. ``prose_harvest``) fall back to
+    ``client.get_client`` when no client is passed, and that reads a *real*
+    ``ANTHROPIC_API_KEY`` straight from the developer's environment. Setting a
+    key locally (a normal thing to do) would otherwise turn hermetic tests into
+    real, billable calls. Strip the key for every hermetic test so the fallback
+    raises — exercising the genuine no-client path — instead of building a live
+    client. Tests marked ``@pytest.mark.network`` opt out and keep the key.
+    """
+    if request.node.get_closest_marker("network") is None:
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
 
 # ---------------------------------------------------------------------------
