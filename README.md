@@ -65,6 +65,22 @@ Optionally, type a **per-run focus** before pressing Analyze — e.g. *"the room
 and what types of plumbing fixtures each has"*. You always get the standard
 digest; a focus adds the Focus Report on top (see [Per-run focus](#per-run-focus)).
 
+Two **QC review** checkboxes sit beside the focus:
+
+- **Reference audit** — a free, zero-API pass that flags stale/missing
+  cross-references (see [Reference audit](#reference-audit)).
+- **QC Markups** — runs the anchor → verify → cloud chain and produces a
+  **marked-up PDF + findings CSV** (see [Reviewed PDFs & findings CSV](#reviewed-pdfs--findings-csv)).
+  The sub-toggle **Verified findings only** (on by default) keeps only
+  verified/deterministic findings clouded; turning it off also clouds the
+  unverified ones in a distinct dashed style. The cost line notes the extra
+  per-finding verification spend (~$0.01–0.03 each) while this is on.
+
+After a QC run, the completion summary reports the finding count and how many
+were clouded, and two extra buttons light up: **Save Findings CSV…** and **Save
+Reviewed PDF(s)…** (the latter copies every `*_reviewed.pdf` into a folder you
+pick).
+
 ### Browsing the result
 
 The HTML report (the folder export's `report.html`, or *Save HTML Report…* in the
@@ -91,16 +107,37 @@ ctx = extract_drawing_context(
     use_cache=True,     # skip re-paying for unchanged sheets
     synthesize=True,    # add a cross-sheet overview
     focus="the rooms, and what types of plumbing fixtures each has",  # optional
+    # QC review (all optional, off by default):
+    reference_audit=True,        # free, zero-API stale/missing-reference audit
+    qc_markups=True,             # anchor → verify → cloud; write reviewed PDFs
+    markup_verified_only=True,   # cloud only verified/deterministic findings
+    verify_findings=True,        # run the per-finding verification pass
+    qc_work_dir=Path("run-out"), # where evidence crops + reviewed PDFs land
 )
 print(ctx.combined_text)
 print(ctx.focus_report_text)   # the set-level answer to the focus ("" if none)
 for sheet in ctx.sheets:
     print(sheet.ref.display_label, "->", "ok" if sheet.ok else sheet.error)
+
+# QC results (empty unless a QC flag was on):
+for f in ctx.all_findings:      # model findings + deterministic reference findings
+    print(f.sheet_id, f.category, f.anchor.status, f.verification.status, "-", f.text)
+print(ctx.finding_count, "findings,", ctx.clouded_finding_count, "clouded")
+for pdf in ctx.reviewed_pdf_paths:   # the *_reviewed.pdf files (qc_markups only)
+    print("marked-up:", pdf)
 ```
 
 `extract_drawing_context` returns a `DrawingContext` (combined text, per-sheet
 `SheetDigest`s, token totals, errors, optional `synthesis_text`, and — when a
-focus was given — `focus` / `focus_report_text`).
+focus was given — `focus` / `focus_report_text`). When a QC flag is on it also
+carries the QC record: `findings` (the model's, anchored + verified),
+`reference_findings` (the deterministic auditor's), the `all_findings` /
+`finding_count` / `clouded_finding_count` conveniences, `reviewed_pdf_paths`, the
+lightweight `sheet_geometries`, and `qc_work_dir` (holding `evidence/` crops and
+the reviewed PDFs). `write_drawing_export(ctx, parent_dir, ...)` folds all of it
+into the export folder — `findings.json`, `findings.csv`, `sheet_text/<sheet>.txt`
+per sheet, the `*_reviewed.pdf` copies, and the `evidence/` crops — alongside the
+prose digest and HTML report.
 
 ## How it works
 
@@ -108,6 +145,7 @@ focus was given — `focus` / `focus_report_text`).
 PDFs → list sheets → render (overview + 6×6 tiles) + extract vector text layer
      → per-sheet vision digest (images + verbatim text layer)
      → optional cross-sheet synthesis → optional focus report → combined Markdown
+     → optional QC: reference audit + anchor → verify → cloud (reviewed PDFs, CSV)
 ```
 
 - **Text-layer grounding.** Before rasterizing, each sheet's vector text layer is
@@ -222,7 +260,8 @@ defaults to Opus 4.8, overridable with `DRAWING_ANALYZER_VERIFY_MODEL`.
 
 ## Reviewed PDFs & findings CSV
 
-The payoff is a **marked-up copy of the original drawing** — `<stem>_reviewed.pdf`
+Turned on with the GUI's **QC Markups** checkbox or `qc_markups=True` in the
+library. The payoff is a **marked-up copy of the original drawing** — `<stem>_reviewed.pdf`
 — with each finding drawn as a **real annotation object**: a revision-cloud
 rectangle at the finding's anchor, colored by severity, carrying the finding
 (text, quoted line, verification note, code refs) as its popup comment and
@@ -273,8 +312,11 @@ set you provided* — because a partial set legitimately omits sheets. Every
 reference finding is anchored to its own word rectangle and marked
 `DETERMINISTIC` (trusted without a model re-check). On a real 8-sheet
 fire-protection set this caught three genuine coordination errors. The auditor is
-exposed as `drawing_analyzer.reference_audit.audit_references(rendered_sheets)`;
-it wires into the run output alongside the QC-markup workflow (forthcoming).
+exposed as `drawing_analyzer.reference_audit.audit_references(rendered_sheets)`,
+and wires into a run through `reference_audit=True` (or the GUI's **Reference
+audit** checkbox): its findings arrive on `ctx.reference_findings`, join
+`ctx.all_findings`, and — since they are already anchored and `DETERMINISTIC` —
+are clouded onto the reviewed PDFs by default when QC Markups is also on.
 
 ## Per-run focus
 

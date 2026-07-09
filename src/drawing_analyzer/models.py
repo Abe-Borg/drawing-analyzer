@@ -84,6 +84,46 @@ class RenderedSheet:
         return sizes
 
 
+@dataclass
+class SheetGeometry:
+    """A sheet's text + geometry, **without the rendered image bytes**.
+
+    The QC stages that run *after* the digests — the reference audit, the anchor
+    resolver, the verification pass, and the ``sheet_text`` export — need each
+    sheet's words / page size / grid, but not its (large) tile PNGs. The batch
+    path streams and then discards every :class:`RenderedSheet` after upload, so
+    the pipeline captures this lightweight record as sheets render and carries it
+    through instead. It exposes exactly the attributes those stages duck-type on
+    (``ref``, ``words``, ``page_width_pt`` / ``page_height_pt``, ``rows`` /
+    ``cols`` / ``overlap_frac``, ``sheet_text``), so a ``SheetGeometry`` is a
+    drop-in for a ``RenderedSheet`` everywhere images aren't needed.
+    """
+
+    ref: SheetRef
+    page_width_pt: float
+    page_height_pt: float
+    rows: int
+    cols: int
+    overlap_frac: float = 0.08
+    words: list[Any] = field(default_factory=list)
+    sheet_text: str = ""
+    is_raster: bool = False
+
+    @classmethod
+    def from_rendered(cls, rendered: "RenderedSheet") -> "SheetGeometry":
+        return cls(
+            ref=rendered.ref,
+            page_width_pt=rendered.page_width_pt,
+            page_height_pt=rendered.page_height_pt,
+            rows=rendered.rows,
+            cols=rendered.cols,
+            overlap_frac=rendered.overlap_frac,
+            words=rendered.words,
+            sheet_text=rendered.sheet_text,
+            is_raster=rendered.is_raster,
+        )
+
+
 # ---------------------------------------------------------------------------
 # QC findings — the structured, anchorable, verifiable unit the QC stages
 # (reference audit, structured digest findings, critique, cross-sheet QC, the

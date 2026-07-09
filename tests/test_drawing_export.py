@@ -279,3 +279,100 @@ def test_findings_csv_tolerates_sparse_finding():
     csv = dx.build_findings_csv([f])
     row = csv.split("\r\n")[1]
     assert row.startswith(f.id + ",F,s.pdf,1,conflict,low,x,")
+
+
+# --------------------------------------------------------------------------- #
+# QC review inventory (Phase 7)
+# --------------------------------------------------------------------------- #
+
+from types import SimpleNamespace  # noqa: E402
+
+
+def _geom(source="M-101.pdf", page=0, text="VAV-3 SERVES ROOM 120"):
+    return SimpleNamespace(ref=_Ref(source, page, 1), sheet_text=text)
+
+
+def _qc_ctx(tmp_path, *, with_reviewed=True, with_evidence=True):
+    findings = [_finding(), _finding(text="second", severity="low")]
+    reference = [
+        Finding(sheet_id="M-101", source_name="M-101.pdf", page_index=0,
+                category="reference", severity="medium", text="References M-999; not present"),
+    ]
+    reviewed = []
+    if with_reviewed:
+        rp = tmp_path / "qc" / "M-101_reviewed.pdf"
+        rp.parent.mkdir(parents=True, exist_ok=True)
+        rp.write_bytes(b"%PDF-1.7 fake")
+        reviewed = [rp]
+    if with_evidence:
+        ev = tmp_path / "qc" / "evidence"
+        ev.mkdir(parents=True, exist_ok=True)
+        (ev / f"{findings[0].id}.png").write_bytes(b"\x89PNG")
+    return SimpleNamespace(
+        findings=findings, reference_findings=reference,
+        reviewed_pdf_paths=reviewed, sheet_geometries=[_geom(), _geom(page=1)],
+        qc_work_dir=tmp_path / "qc",
+    )
+
+
+def test_has_qc_outputs():
+    assert dx.has_qc_outputs(_make_ctx()) is False   # a plain digest ctx
+    assert dx.has_qc_outputs(SimpleNamespace(findings=[_finding()])) is True
+
+
+def test_write_qc_outputs_writes_full_inventory(tmp_path):
+    ctx = _qc_ctx(tmp_path)
+    folder = tmp_path / "out"
+    folder.mkdir()
+    written = dx.write_qc_outputs(ctx, folder)
+
+    assert (folder / "findings.json").exists()
+    assert (folder / "findings.csv").read_bytes()[:3] == b"\xef\xbb\xbf"
+    # findings.json carries model + reference findings.
+    import json
+    data = json.loads((folder / "findings.json").read_text())
+    assert len(data["findings"]) == 3
+    # sheet_text/, reviewed PDF, and evidence all landed.
+    assert (folder / "sheet_text" / "M_101_p1.txt").read_text() == "VAV-3 SERVES ROOM 120"
+    assert (folder / "sheet_text" / "M_101_p2.txt").exists()
+    assert (folder / "M-101_reviewed.pdf").read_bytes() == b"%PDF-1.7 fake"
+    assert (folder / "evidence" / f"{ctx.findings[0].id}.png").exists()
+    assert "findings.csv" in written and "sheet_text/" in written
+
+
+def test_write_qc_outputs_noop_without_qc(tmp_path):
+    folder = tmp_path / "out"
+    folder.mkdir()
+    assert dx.write_qc_outputs(_make_ctx(), folder) == []
+    assert not (folder / "findings.csv").exists()
+
+
+def test_write_qc_outputs_tolerates_missing_reviewed_pdf(tmp_path):
+    ctx = _qc_ctx(tmp_path)
+    ctx.reviewed_pdf_paths = [tmp_path / "qc" / "vanished.pdf"]   # never written
+    folder = tmp_path / "out"
+    folder.mkdir()
+    dx.write_qc_outputs(ctx, folder)   # must not raise
+    assert not (folder / "vanished.pdf").exists()
+    assert (folder / "findings.json").exists()   # the rest still written
+
+
+def test_write_qc_outputs_writes_empty_findings_when_qc_ran(tmp_path):
+    # A clean QC run (geometry captured, but zero findings) still advertises
+    # findings.json/csv in the index, so both must exist on disk — empty.
+    ctx = SimpleNamespace(
+        findings=[], reference_findings=[],
+        reviewed_pdf_paths=[], sheet_geometries=[_geom()], qc_work_dir=None,
+    )
+    assert dx.has_qc_outputs(ctx) is True
+    folder = tmp_path / "out"
+    folder.mkdir()
+    written = dx.write_qc_outputs(ctx, folder)
+
+    assert (folder / "findings.json").exists()
+    import json
+    assert json.loads((folder / "findings.json").read_text()) == {"findings": []}
+    # Header-only CSV, BOM intact, still a valid file for the index to point at.
+    csv_bytes = (folder / "findings.csv").read_bytes()
+    assert csv_bytes[:3] == b"\xef\xbb\xbf"
+    assert "findings.json" in written and "findings.csv" in written

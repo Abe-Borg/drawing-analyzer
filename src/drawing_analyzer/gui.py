@@ -17,7 +17,7 @@ import sys
 import threading
 from datetime import datetime
 from pathlib import Path
-from tkinter import StringVar, filedialog, messagebox
+from tkinter import BooleanVar, StringVar, filedialog, messagebox
 
 import customtkinter as ctk
 
@@ -65,6 +65,12 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._ctx: DrawingContext | None = None
         self._busy = False
         self._last_log_msg: str | None = None
+        # QC review options (see _build_ui). Reference audit is free; QC markups
+        # add the verification pass + a marked-up PDF; the sub-toggle keeps only
+        # verified/deterministic findings clouded (the safe default).
+        self._qc_markups_var = BooleanVar(value=False)
+        self._qc_verified_only_var = BooleanVar(value=True)
+        self._reference_audit_var = BooleanVar(value=False)
         self._key_shown = False
         self._initial_key = self._load_api_key()
         self._has_key = bool(self._initial_key)
@@ -209,6 +215,37 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         # (a focus adds the focus-report pass to the estimate).
         self.focus_box.bind("<KeyRelease>", lambda _e: self._refresh_summary())
 
+        # QC review options.
+        qc_row = ctk.CTkFrame(outer, fg_color="transparent")
+        qc_row.pack(fill="x", padx=16, pady=(0, 8))
+        ctk.CTkLabel(
+            qc_row, text="QC review (optional)",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            text_color=COLORS["text_secondary"],
+        ).pack(anchor="w")
+        self._qc_markups_check = ctk.CTkCheckBox(
+            qc_row, text="QC Markups — produce a marked-up PDF + findings CSV",
+            variable=self._qc_markups_var, command=self._on_qc_toggle,
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color=COLORS["text_primary"],
+        )
+        self._qc_markups_check.pack(anchor="w", pady=(4, 0))
+        self._qc_verified_only_check = ctk.CTkCheckBox(
+            qc_row, text="Verified findings only (cloud only checked findings)",
+            variable=self._qc_verified_only_var,
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=COLORS["text_muted"],
+        )
+        self._qc_verified_only_check.pack(anchor="w", padx=(28, 0), pady=(2, 0))
+        self._reference_audit_check = ctk.CTkCheckBox(
+            qc_row, text="Reference audit — flag stale/missing cross-references (free)",
+            variable=self._reference_audit_var, command=self._refresh_summary,
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color=COLORS["text_primary"],
+        )
+        self._reference_audit_check.pack(anchor="w", pady=(2, 0))
+        self._on_qc_toggle()   # set the sub-toggle's initial enabled state
+
         # Summary + actions row
         row = ctk.CTkFrame(outer, fg_color="transparent")
         row.pack(fill="x", padx=16, pady=(0, 8))
@@ -293,6 +330,26 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             command=self._on_save, state="disabled",
         )
         self.save_btn.pack(side="right", padx=(0, 8))
+        # QC outputs — enabled only when a run actually produced findings /
+        # reviewed PDFs (see _on_done).
+        self.csv_btn = ctk.CTkButton(
+            btn_row, text="Save Findings CSV…", width=170, height=34,
+            font=ctk.CTkFont(family="Segoe UI", size=13),
+            fg_color=COLORS["bg_input"], hover_color=COLORS["border"],
+            border_width=1, border_color=COLORS["border"],
+            text_color=COLORS["text_secondary"],
+            command=self._on_save_csv, state="disabled",
+        )
+        self.csv_btn.pack(side="right", padx=(0, 8))
+        self.reviewed_btn = ctk.CTkButton(
+            btn_row, text="Save Reviewed PDF(s)…", width=190, height=34,
+            font=ctk.CTkFont(family="Segoe UI", size=13),
+            fg_color=COLORS["bg_input"], hover_color=COLORS["border"],
+            border_width=1, border_color=COLORS["border"],
+            text_color=COLORS["text_secondary"],
+            command=self._on_save_reviewed, state="disabled",
+        )
+        self.reviewed_btn.pack(side="right", padx=(0, 8))
 
         self._log("Ready — drop or browse for drawing PDFs to analyze.", level="muted")
         diag_path = diagnostics.configured_log_path()
@@ -439,7 +496,17 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._clear_log()
         self.save_btn.configure(state="disabled")
         self.html_btn.configure(state="disabled")
+        self.reviewed_btn.configure(state="disabled")
+        self.csv_btn.configure(state="disabled")
         self._set_progress_text("")
+        self._refresh_summary()
+
+    def _on_qc_toggle(self) -> None:
+        """Enable the 'verified only' sub-toggle only when QC Markups is on."""
+        on = self._qc_markups_var.get()
+        check = getattr(self, "_qc_verified_only_check", None)
+        if check is not None:
+            check.configure(state="normal" if on else "disabled")
         self._refresh_summary()
 
     def _current_focus(self) -> str:
@@ -472,10 +539,11 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             if est.total_cost is not None
             else "cost n/a"
         )
+        qc_note = "  ·  + QC verify (~$0.01–0.03/finding)" if self._qc_markups_var.get() else ""
         self.summary_label.configure(
             text=(
                 f"{files} file(s), {sheets} sheet(s)  ·  "
-                f"~{est.image_tokens:,} image tokens  ·  {cost}"
+                f"~{est.image_tokens:,} image tokens  ·  {cost}{qc_note}"
             )
         )
 
@@ -495,9 +563,12 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             )
             return
 
-        # Snapshot the focus with the file list, so mid-run edits to the box
+        # Snapshot the focus + QC options with the file list, so mid-run edits
         # can't change what a running analysis was asked to do.
         focus = self._current_focus()
+        qc_markups = self._qc_markups_var.get()
+        markup_verified_only = self._qc_verified_only_var.get()
+        reference_audit = self._reference_audit_var.get()
 
         # Cost-confirm gate — show the estimated (batch-rate) spend before the
         # batch is submitted. Nothing is sent until this is confirmed.
@@ -506,9 +577,13 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             len(refs), file_count=len(self._pdfs), model=REVIEW_MODEL_DEFAULT,
             batch=True, focus=bool(focus),
         )
-        if not messagebox.askyesno(
-            "Confirm drawing analysis", format_drawing_cost_prompt(estimate)
-        ):
+        prompt = format_drawing_cost_prompt(estimate)
+        if qc_markups:
+            prompt += (
+                "\n\nQC verification adds ~$0.01–0.03 per finding "
+                "(count unknown until digests complete)."
+            )
+        if not messagebox.askyesno("Confirm drawing analysis", prompt):
             return
 
         self._busy = True
@@ -517,6 +592,8 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self.clear_btn.configure(state="disabled")
         self.save_btn.configure(state="disabled")
         self.html_btn.configure(state="disabled")
+        self.reviewed_btn.configure(state="disabled")
+        self.csv_btn.configure(state="disabled")
         self.focus_box.configure(state="disabled")
         self._clear_log()
         self._log(
@@ -535,10 +612,19 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
 
         pdfs = list(self._pdfs)
         threading.Thread(
-            target=self._worker, args=(pdfs, focus), daemon=True
+            target=self._worker,
+            args=(pdfs, focus, qc_markups, markup_verified_only, reference_audit),
+            daemon=True,
         ).start()
 
-    def _worker(self, pdfs: list[Path], focus: str) -> None:
+    def _worker(
+        self,
+        pdfs: list[Path],
+        focus: str,
+        qc_markups: bool = False,
+        markup_verified_only: bool = True,
+        reference_audit: bool = False,
+    ) -> None:
         try:
             ctx = extract_drawing_context(
                 pdfs,
@@ -550,6 +636,9 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 synthesize=True,
                 use_batch=True,
                 focus=focus or None,
+                reference_audit=reference_audit,
+                qc_markups=qc_markups,
+                markup_verified_only=markup_verified_only,
             )
         except Exception as exc:  # noqa: BLE001 - surface any unexpected failure
             self.after(0, lambda e=exc: self._on_error(str(e)))
@@ -620,6 +709,11 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         if has_text:
             self.save_btn.configure(state="normal")
             self.html_btn.configure(state="normal")
+        # QC outputs — enable the save actions only when a run produced them.
+        if getattr(ctx, "finding_count", 0):
+            self.csv_btn.configure(state="normal")
+        if getattr(ctx, "reviewed_pdf_paths", None):
+            self.reviewed_btn.configure(state="normal")
 
         ok = ctx.ok_sheet_count
         cached = ctx.cached_sheet_count
@@ -668,6 +762,21 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                     "are still in the digest.",
                     level="warning",
                 )
+        # QC findings summary — surface the count (and how many would be inked
+        # under the default verified-only gating) when a QC run produced any.
+        finding_count = getattr(ctx, "finding_count", 0)
+        if finding_count:
+            clouded = getattr(ctx, "clouded_finding_count", 0)
+            reviewed = len(getattr(ctx, "reviewed_pdf_paths", None) or [])
+            parts = [f"{finding_count} QC finding(s)"]
+            if reviewed:
+                parts.append(f"{clouded} clouded across {reviewed} reviewed PDF(s)")
+            self._log(
+                f"{' · '.join(parts)}. Save the findings CSV"
+                + (" or the reviewed PDF(s)" if reviewed else "")
+                + " with the buttons below.",
+                level="accent",
+            )
         if has_text:
             self._log(
                 "Digest ready — click “Save HTML Report…” for a navigable, "
@@ -765,6 +874,70 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             self._log("Opened the report in your browser.", level="muted")
         except Exception as exc:  # noqa: BLE001 - opener is best-effort
             self._log(f"Saved, but could not auto-open the report: {exc}", level="warning")
+
+    def _on_save_csv(self) -> None:
+        """Write the findings CSV (Excel-friendly: UTF-8 BOM + CRLF)."""
+        ctx = self._ctx
+        if not ctx or not getattr(ctx, "finding_count", 0):
+            return
+        from .export import write_findings_csv
+
+        path = filedialog.asksaveasfilename(
+            title="Save findings CSV",
+            defaultextension=".csv",
+            filetypes=[("CSV", "*.csv"), ("All files", "*.*")],
+            initialfile=self._default_digest_filename(ext=".csv"),
+        )
+        if not path:
+            return
+        try:
+            write_findings_csv(ctx.all_findings, path)
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"CSV export failed: {exc}", level="error")
+            messagebox.showerror("CSV export failed", str(exc))
+            return
+        self._set_progress_text(f"Saved findings CSV to {path}", color=COLORS["success"])
+        self._log(f"Saved findings CSV to {path}", level="success")
+
+    def _on_save_reviewed(self) -> None:
+        """Copy the run's marked-up ``*_reviewed.pdf`` files into a chosen folder.
+
+        The reviewed PDFs live in the run's temporary work dir until saved; this
+        copies each one out into a directory the operator picks. Copies are
+        best-effort per file — a missing source is skipped and noted — so one bad
+        file never aborts the rest.
+        """
+        ctx = self._ctx
+        reviewed = list(getattr(ctx, "reviewed_pdf_paths", None) or [])
+        if not reviewed:
+            return
+        folder = filedialog.askdirectory(title="Save reviewed PDF(s) to folder")
+        if not folder:
+            return
+        import shutil
+
+        dest_dir = Path(folder)
+        saved = 0
+        for src in reviewed:
+            src_path = Path(src)
+            if not src_path.exists():
+                self._log(f"Skipped missing reviewed PDF: {src_path.name}", level="warning")
+                continue
+            try:
+                shutil.copy2(src_path, dest_dir / src_path.name)
+                saved += 1
+            except Exception as exc:  # noqa: BLE001
+                self._log(f"Could not copy {src_path.name}: {exc}", level="error")
+        if saved:
+            self._set_progress_text(
+                f"Saved {saved} reviewed PDF(s) to {dest_dir}", color=COLORS["success"]
+            )
+            self._log(f"Saved {saved} reviewed PDF(s) to {dest_dir}", level="success")
+        else:
+            self._log("No reviewed PDFs were saved.", level="warning")
+            messagebox.showwarning(
+                "Save reviewed PDFs", "None of the reviewed PDFs could be saved."
+            )
 
     # ----------------------------------------------------------- diagnostics
 
