@@ -71,6 +71,10 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._qc_markups_var = BooleanVar(value=False)
         self._qc_verified_only_var = BooleanVar(value=True)
         self._reference_audit_var = BooleanVar(value=False)
+        # HTML report: off by default the key is NOT written into the file (the
+        # Ask-AI panel prompts for one at runtime). On restores the old embedded
+        # -key convenience — with a red warning in the report; don't share it.
+        self._embed_key_var = BooleanVar(value=False)
         self._key_shown = False
         self._initial_key = self._load_api_key()
         self._has_key = bool(self._initial_key)
@@ -296,6 +300,21 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         ):
             self.log_box.tag_config(_tag, foreground=_color)
         self.log_box.configure(state="disabled")
+
+        # HTML report option — embedding the API key makes the report's Ask-AI
+        # work on a double-click with no key to paste, but writes the key into
+        # the file (so it must not be shared). Off by default: the report prompts
+        # for a key at first use and keeps it only in the browser tab.
+        opt_row = ctk.CTkFrame(outer, fg_color="transparent")
+        opt_row.pack(fill="x", padx=16, pady=(0, 4))
+        self._embed_key_check = ctk.CTkCheckBox(
+            opt_row,
+            text="Embed API key in HTML report (Ask-AI works offline; don't share the file)",
+            variable=self._embed_key_var,
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=COLORS["text_muted"],
+        )
+        self._embed_key_check.pack(anchor="w")
 
         # Bottom action row: open the on-disk diagnostics log (always available —
         # the detailed request-level trace lives in a file, not this activity
@@ -847,14 +866,17 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         )
         if not path:
             return
+        embed_key = self._embed_key_var.get()
         try:
             source_names = [p.name for p in self._pdfs]
             # The same key that ran the analysis powers the report's built-in
-            # Ask-AI assistant. It is embedded in the HTML so the file works
-            # with no server — which also means the file must not be shared.
+            # Ask-AI assistant. By default it is NOT written into the file (the
+            # panel prompts for a key at runtime); the checkbox embeds it for a
+            # zero-friction, but unshareable, report.
             api_key = os.environ.get("ANTHROPIC_API_KEY") or load_api_key_from_file()
             html_doc = build_html_report(
-                self._ctx, source_names=source_names, api_key=api_key or None
+                self._ctx, source_names=source_names, api_key=api_key or None,
+                embed_api_key=embed_key,
             )
             Path(path).write_text(html_doc, encoding="utf-8")
         except Exception as exc:  # noqa: BLE001
@@ -863,10 +885,16 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             return
         self._set_progress_text(f"Saved HTML report to {path}", color=COLORS["success"])
         self._log(f"Saved HTML report to {path}", level="success")
-        if api_key:
+        if embed_key and api_key:
             self._log(
-                "The report includes the Ask-AI assistant; your API key is "
-                "embedded in the file, so don't share it.",
+                "The report includes the Ask-AI assistant with your API key "
+                "embedded in the file — don't share it.",
+                level="warning",
+            )
+        elif api_key:
+            self._log(
+                "The report includes the Ask-AI assistant; it will ask for an "
+                "API key on first use (kept only in the browser, not in the file).",
                 level="muted",
             )
         try:

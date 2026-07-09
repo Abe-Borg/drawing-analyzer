@@ -27,19 +27,24 @@ Design constraints, mirroring :mod:`drawing_analyzer.export`:
 
 Optional in-report Q&A assistant
 --------------------------------
-When :func:`build_html_report` is given an ``api_key``, the report additionally
-embeds a chat widget ("Ask AI") that answers questions about the results. It
-calls the Anthropic Messages API **directly from the reader's browser** (no
-server), grounded in the very report text already embedded in the page (the
-``#raw-md`` block), with streaming, adaptive thinking, and the server-side web
-search / web fetch tools enabled. The report block is sent with a prompt-cache
-breakpoint so follow-up questions re-read the (large) report at cache prices.
+When :func:`build_html_report` is given an ``api_key`` (or ``embed_api_key`` is
+set), the report additionally embeds a chat widget ("Ask AI") that answers
+questions about the results. It calls the Anthropic Messages API **directly from
+the reader's browser** (no server), grounded in the very report text already
+embedded in the page (the ``#raw-md`` block), with streaming, adaptive thinking,
+and the server-side web search / web fetch tools enabled. The report block is
+sent with a prompt-cache breakpoint so follow-up questions re-read the (large)
+report at cache prices.
 
-**The API key is embedded verbatim in the HTML file.** That is the explicit
-design trade-off for a zero-server, double-clickable report: anyone who can
-read the file can read the key. The widget is therefore opt-in (no key → no
-widget, byte-identical to the previous output), and the page shows a "don't
-share this file" notice. The *Python* module still performs no network I/O.
+**Key handling.** By default the key is **not** written into the file: the
+widget asks the reader for a key on first use and keeps it only in the browser
+tab's ``sessionStorage`` — so the file is safe to share and the key never
+touches disk. Pass ``embed_api_key=True`` to bake the key into the HTML instead
+(the old zero-friction behavior: double-click and ask, no key to paste) — the
+file must then never be shared, and the report carries a **red warning** saying
+so. With no key and no ``embed_api_key`` the widget is omitted entirely, and the
+document is byte-identical to the key-free output from before this feature
+existed. The *Python* module still performs no network I/O.
 
 The Markdown→HTML conversion is a small, deliberately-scoped renderer
 (:func:`markdown_to_html`) covering exactly the constructs the digests use —
@@ -426,6 +431,169 @@ def _esc_attr(text: str) -> str:
     return html.escape(text, quote=True)
 
 
+# --------------------------------------------------------------------------- #
+# Findings — the QC record, surfaced as a pinned, sortable, filterable table.
+# Each finding collapses its anchor + verification outcomes into ONE "display
+# status" chip (the five states an operator triages on); the digest prose is
+# untouched (I-2) — these come from ctx.findings / ctx.reference_findings.
+# --------------------------------------------------------------------------- #
+
+# display status → (chip label, css suffix). Green/blue/amber/red-outline/grey
+# are defined in _CSS under .fchip-*.
+_FINDING_STATUS_CHIP: dict[str, tuple[str, str]] = {
+    "VERIFIED": ("Verified", "verified"),
+    "DETERMINISTIC": ("Deterministic", "deterministic"),
+    "UNCERTAIN": ("Uncertain", "uncertain"),
+    "UNANCHORED": ("Unanchored", "unanchored"),
+    "REJECTED": ("Rejected", "rejected"),
+}
+_SEVERITY_RANK = {"high": 3, "medium": 2, "low": 1}
+# Column-sort rank for the status chip (higher sorts first descending).
+_STATUS_RANK = {
+    "VERIFIED": 5, "DETERMINISTIC": 4, "UNCERTAIN": 3, "UNANCHORED": 2, "REJECTED": 1,
+}
+
+
+def _finding_display_status(f: Any) -> str:
+    """Blend a finding's anchor + verification outcomes into one triage state.
+
+    Priority: a ``REJECTED`` verdict wins (never clouded), then the trusted
+    ``DETERMINISTIC`` auditors, then a model ``VERIFIED``; an unanchored non-empty
+    quote surfaces as ``UNANCHORED`` (the hallucination signal); everything else
+    anchored-but-unconfirmed (``UNCERTAIN`` / ``SKIPPED``) reads as ``UNCERTAIN``.
+    """
+    v = getattr(getattr(f, "verification", None), "status", "") or "SKIPPED"
+    a = getattr(getattr(f, "anchor", None), "status", "") or "UNANCHORED"
+    if v == "REJECTED":
+        return "REJECTED"
+    if v == "DETERMINISTIC":
+        return "DETERMINISTIC"
+    if v == "VERIFIED":
+        return "VERIFIED"
+    if a == "UNANCHORED":
+        return "UNANCHORED"
+    return "UNCERTAIN"
+
+
+def _report_findings(ctx: Any) -> list[Any]:
+    """Model findings + deterministic reference findings (duck-typed on ctx)."""
+    return list(getattr(ctx, "findings", None) or []) + list(
+        getattr(ctx, "reference_findings", None) or []
+    )
+
+
+def _sheet_card_index(sheets: list[Any]) -> dict[tuple[str, int], int]:
+    """Map ``(source_name, page_index)`` → 1-based sheet-card index for links."""
+    out: dict[tuple[str, int], int] = {}
+    for i, sheet in enumerate(sheets, start=1):
+        ref = _ref_of(sheet)
+        key = (getattr(ref, "source_name", "") or "",
+               int(getattr(ref, "page_index", 0) or 0))
+        out.setdefault(key, i)
+    return out
+
+
+def _geometry_index(ctx: Any) -> dict[tuple[str, int], Any]:
+    """Map ``(source_name, page_index)`` → the sheet's captured geometry."""
+    out: dict[tuple[str, int], Any] = {}
+    for geom in getattr(ctx, "sheet_geometries", None) or []:
+        ref = _ref_of(geom)
+        key = (getattr(ref, "source_name", "") or "",
+               int(getattr(ref, "page_index", 0) or 0))
+        out.setdefault(key, geom)
+    return out
+
+
+def _finding_row_html(f: Any, card_index: int | None, *, link_evidence: bool) -> str:
+    status = _finding_display_status(f)
+    label, cls = _FINDING_STATUS_CHIP.get(status, ("Uncertain", "uncertain"))
+    category = getattr(f, "category", "") or "other"
+    severity = (getattr(f, "severity", "") or "").lower()
+    sev_rank = _SEVERITY_RANK.get(severity, 0)
+    sheet_id = getattr(f, "sheet_id", "") or getattr(f, "source_name", "") or "—"
+    text = getattr(f, "text", "") or ""
+    quote = getattr(f, "source_quote", "") or ""
+
+    sheet_cell = (
+        f'<a href="#sheet-{card_index}">{html.escape(sheet_id)}</a>'
+        if card_index else html.escape(sheet_id)
+    )
+    quote_cell = (
+        f"<code>{html.escape(quote)}</code>" if quote
+        else '<span class="muted">—</span>'
+    )
+    text_cell = _render_inline(text)
+    if link_evidence:
+        evidence = (getattr(getattr(f, "verification", None), "evidence_png", "") or "").strip()
+        if evidence:
+            src = _esc_attr(evidence)
+            text_cell += (
+                f' <a class="evidence-link" href="{src}" target="_blank" '
+                f'rel="noopener"><img class="evidence-thumb" src="{src}" '
+                f'alt="verification evidence crop" loading="lazy"></a>'
+            )
+    return (
+        f'<tr class="finding-row" data-category="{_esc_attr(category)}" '
+        f'data-severity="{sev_rank}" data-status="{status}" '
+        f'data-status-rank="{_STATUS_RANK.get(status, 0)}">'
+        f'<td class="fcol-sheet">{sheet_cell}</td>'
+        f'<td class="fcol-cat">{html.escape(category)}</td>'
+        f'<td class="fcol-sev sev-{html.escape(severity or "none")}">'
+        f'{html.escape(severity or "—")}</td>'
+        f'<td class="fcol-status"><span class="fchip fchip-{cls}">'
+        f"{html.escape(label)}</span></td>"
+        f'<td class="fcol-text">{text_cell}</td>'
+        f'<td class="fcol-quote">{quote_cell}</td>'
+        f"</tr>"
+    )
+
+
+def _findings_card(ctx: Any, sheets: list[Any], *, link_evidence: bool = False) -> str:
+    """The pinned QC Findings card: a sortable, filterable table (``""`` if none).
+
+    Default order is severity-desc then status-rank-desc; the columns are
+    click-sortable in the browser. Rows link to the sheet card they sit on and
+    carry ``data-category`` so the filter chips (and ⚠ Issues only) reach them.
+    """
+    findings = _report_findings(ctx)
+    if not findings:
+        return ""
+    index = _sheet_card_index(sheets)
+
+    def _key(f: Any):
+        sev = _SEVERITY_RANK.get((getattr(f, "severity", "") or "").lower(), 0)
+        return (-sev, -_STATUS_RANK.get(_finding_display_status(f), 0))
+
+    rows = []
+    for f in sorted(findings, key=_key):
+        ref_key = (getattr(f, "source_name", "") or "",
+                   int(getattr(f, "page_index", 0) or 0))
+        rows.append(_finding_row_html(f, index.get(ref_key), link_evidence=link_evidence))
+
+    table = (
+        '<div class="findings-wrap"><table class="findings-table">'
+        "<thead><tr>"
+        '<th data-sort="sheet">Sheet</th>'
+        '<th data-sort="category">Category</th>'
+        '<th data-sort="severity">Severity</th>'
+        '<th data-sort="status">Status</th>'
+        '<th data-sort="text">Finding</th>'
+        '<th data-sort="quote">Quote</th>'
+        "</tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>"
+    )
+    hint = (
+        '<p class="findings-hint muted">Click a column header to sort · click a '
+        "sheet to jump to it · use the filter chips and search on the left.</p>"
+    )
+    return _card(
+        card_id="findings",
+        title_html='<span class="seq">⚑</span> QC Findings',
+        badges_html=f'<span class="badge badge-findings">{len(findings)} finding(s)</span>',
+        status="findings",
+        body_html=f'<div class="findings-body">{hint}{table}</div>',
+    )
+
+
 def _block_html(header: str | None, body_md: str, *, category: str | None = None) -> str:
     """Render one digest section as a filterable ``<section>`` with its category.
 
@@ -476,7 +644,35 @@ def _card(
     )
 
 
-def _sheet_card(index: int, total: int, sheet: Any) -> str:
+def _rawtext_block(geometry: Any) -> str:
+    """A collapsed block carrying the sheet's raw extracted text layer.
+
+    The block is a real ``.block`` so its text feeds the report's full-text
+    search — search now runs over what the *sheet* says, not only what the
+    digest said about it. A raster sheet (empty text layer) gets a note instead.
+    """
+    if geometry is None:
+        return ""
+    raw = (getattr(geometry, "sheet_text", "") or "").strip()
+    is_raster = bool(getattr(geometry, "is_raster", False))
+    if not raw and not is_raster:
+        return ""
+    if raw:
+        inner = (
+            '<details class="rawtext"><summary>Sheet text layer '
+            "(raw extracted)</summary>"
+            f'<pre class="rawtext-pre">{html.escape(raw, quote=False)}</pre>'
+            "</details>"
+        )
+    else:
+        inner = (
+            '<p class="muted">Raster sheet — no extractable text layer '
+            "(the digest read the imagery only).</p>"
+        )
+    return f'<section class="block block-rawtext" data-category="other">{inner}</section>'
+
+
+def _sheet_card(index: int, total: int, sheet: Any, geometry: Any = None) -> str:
     ref = _ref_of(sheet)
     label = getattr(ref, "display_label", None) or f"Sheet {index}/{total}"
     status = _sheet_status(sheet)
@@ -487,6 +683,8 @@ def _sheet_card(index: int, total: int, sheet: Any) -> str:
 
     badge_text, badge_cls = _STATUS_BADGE[status]
     badges = [f'<span class="badge badge-{badge_cls}">{badge_text}</span>']
+    if geometry is not None and getattr(geometry, "is_raster", False):
+        badges.append('<span class="badge badge-raster">Raster</span>')
     if in_tok or out_tok:
         badges.append(
             f'<span class="badge badge-tok">{in_tok:,} in / {out_tok:,} out</span>'
@@ -505,6 +703,7 @@ def _sheet_card(index: int, total: int, sheet: Any) -> str:
             '<section class="block" data-category="other">'
             '<p class="muted">(empty digest)</p></section>'
         )
+    body += _rawtext_block(geometry)
 
     title = (
         f'<span class="seq">{index:02d}</span> {html.escape(label)}'
@@ -586,6 +785,12 @@ def _toc_html(ctx: Any, sheets: list[Any]) -> str:
             '<a class="toc-item" data-target="focus" href="#focus">'
             '<span class="toc-dot dot-focus"></span>'
             '<span class="toc-label">Focus Report</span></a>'
+        )
+    if _report_findings(ctx):
+        rows.append(
+            '<a class="toc-item" data-target="findings" href="#findings">'
+            '<span class="toc-dot dot-findings"></span>'
+            '<span class="toc-label">QC Findings</span></a>'
         )
     rows.append(
         '<a class="toc-item" data-target="overview" href="#overview">'
@@ -687,6 +892,8 @@ def build_html_report(
     source_names: list[str],
     now: datetime | None = None,
     api_key: str | None = None,
+    embed_api_key: bool = False,
+    link_evidence: bool = False,
 ) -> str:
     """Render a :class:`DrawingContext` to one self-contained HTML document.
 
@@ -695,16 +902,25 @@ def build_html_report(
     string. ``source_names`` is listed in the run summary; ``now`` stamps the
     report (defaults to :func:`datetime.now`).
 
-    ``api_key`` — when a non-blank Anthropic API key is given, the report also
-    embeds the in-page Q&A assistant (see the module docstring), **including the
-    key itself in clear text** so the file can call the API from the reader's
-    browser with no server. Pass ``None`` (the default) for the previous,
-    key-free output; the emitted document is then byte-identical to before this
-    feature existed.
+    ``api_key`` — when a non-blank Anthropic API key is given, the report includes
+    the in-page Q&A assistant (see the module docstring). **By default the key is
+    NOT written into the file**: the assistant asks the reader for a key on first
+    use and keeps it only in the browser tab's ``sessionStorage``. Pass
+    ``embed_api_key=True`` to bake the key into the file instead (the old
+    behavior — convenient, but the file must then never be shared; the report
+    carries a red warning saying so). With no key and no ``embed_api_key`` the
+    assistant is omitted entirely and the document is byte-identical to the
+    key-free output from before this feature existed.
+
+    ``link_evidence`` — when ``True`` (folder exports, where the evidence crops
+    are copied alongside), each finding row links a thumbnail of the crop the
+    verifier saw, via the run-relative ``verification.evidence_png`` path. The
+    single-file report leaves this off to stay light and self-contained.
     """
     now = now or datetime.now()
     sheets = list(getattr(ctx, "sheets", None) or [])
     total = len(sheets)
+    geoms = _geometry_index(ctx)
 
     title = "Drawing Set Digest"
     if source_names:
@@ -712,8 +928,18 @@ def build_html_report(
 
     has_focus = bool(_focus_value(ctx))
     cards = [_focus_card(ctx)] if has_focus else []
+    findings_card = _findings_card(ctx, sheets, link_evidence=link_evidence)
+    if findings_card:
+        cards.append(findings_card)
     cards.append(_overview_card(ctx))
-    cards += [_sheet_card(i, total, s) for i, s in enumerate(sheets, start=1)]
+    cards += [
+        _sheet_card(
+            i, total, s,
+            geoms.get((getattr(_ref_of(s), "source_name", "") or "",
+                       int(getattr(_ref_of(s), "page_index", 0) or 0))),
+        )
+        for i, s in enumerate(sheets, start=1)
+    ]
 
     body = f"""<aside class="sidebar">
   <div class="brand">Drawing Digest</div>
@@ -741,11 +967,18 @@ def build_html_report(
   verbatim model digest, reorganized for navigation.</footer>
 </main>"""
 
+    # The assistant is included when a key is available to embed *or* the caller
+    # explicitly opts into it; with neither, the output stays chat-free (and
+    # byte-identical to the pre-assistant report). The key is embedded only when
+    # embed_api_key is set — otherwise the widget prompts for it at runtime.
+    key_clean = (api_key or "").strip()
+    chat_enabled = embed_api_key or bool(key_clean)
     chat_css = chat_markup = chat_script = ""
-    if (api_key or "").strip():
+    if chat_enabled:
         chat_css = _CHAT_CSS
         chat_markup = "\n" + _chat_bootstrap_html(
-            api_key=(api_key or "").strip(),
+            api_key=key_clean,
+            embed_key=embed_api_key,
             title=title,
             generated=now.strftime("%Y-%m-%d %H:%M"),
             source_names=source_names,
@@ -772,7 +1005,7 @@ _CSS = """
   --line:#e3e7ee; --accent:#2f6df0; --accent-soft:#eaf1ff;
   --ok:#1f9d57; --cached:#8a6d1f; --failed:#d23b3b; --overview:#7a3ff0;
   --coord:#b5710d; --coord-soft:#fff5e6; --conflict:#d23b3b; --conflict-soft:#fdecec;
-  --focus:#0e8a8a; --focus-soft:#e7f7f6;
+  --focus:#0e8a8a; --focus-soft:#e7f7f6; --findings:#c2410c;
   --radius:10px;
 }
 *{box-sizing:border-box}
@@ -818,7 +1051,7 @@ a{color:var(--accent); text-decoration:none}
 .toc-dot{width:8px; height:8px; border-radius:50%; flex:0 0 8px}
 .dot-ok{background:var(--ok)} .dot-cached{background:var(--cached)}
 .dot-failed{background:var(--failed)} .dot-overview{background:var(--overview)}
-.dot-focus{background:var(--focus)}
+.dot-focus{background:var(--focus)} .dot-findings{background:var(--findings)}
 
 /* Content */
 .content{flex:1 1 auto; padding:26px 34px; max-width:1000px; margin:0 auto; width:100%}
@@ -861,6 +1094,7 @@ a{color:var(--accent); text-decoration:none}
 .card[data-status="failed"] .card-head{border-left-color:var(--failed)}
 .card[data-status="overview"] .card-head{border-left-color:var(--overview)}
 .card[data-status="focus"] .card-head{border-left-color:var(--focus)}
+.card[data-status="findings"] .card-head{border-left-color:var(--findings)}
 .card-title{font-weight:600; flex:1 1 auto; font-size:15px}
 .seq{color:var(--muted); font-variant-numeric:tabular-nums; margin-right:4px}
 .badges{display:flex; gap:6px; flex-wrap:wrap; align-items:center}
@@ -870,6 +1104,8 @@ a{color:var(--accent); text-decoration:none}
 .badge-failed{background:var(--conflict-soft); color:var(--failed)}
 .badge-overview{background:#f1eaff; color:var(--overview)}
 .badge-focus{background:var(--focus-soft); color:var(--focus)}
+.badge-findings{background:#fdeaea; color:var(--findings)}
+.badge-raster{background:#efe7fb; color:#6b3fb0}
 .badge-tok{background:#eef1f6; color:var(--muted); font-variant-numeric:tabular-nums}
 .chevron{color:var(--muted); transition:transform .15s}
 .card.collapsed .chevron{transform:rotate(-90deg)}
@@ -937,6 +1173,54 @@ a{color:var(--accent); text-decoration:none}
 .hidden{display:none !important}
 mark{background:#ffe9a8; color:inherit; padding:0 1px; border-radius:2px}
 
+/* QC Findings table */
+.findings-hint{font-size:12px; margin:2px 0 10px}
+.findings-wrap{overflow-x:auto}
+.findings-table{border-collapse:collapse; width:100%; font-size:13px}
+.findings-table th,.findings-table td{
+  border:1px solid var(--line); padding:6px 9px; text-align:left; vertical-align:top;
+}
+.findings-table thead th{
+  background:#f3f5f9; font-weight:600; cursor:pointer; user-select:none;
+  white-space:nowrap; position:relative;
+}
+.findings-table thead th:hover{background:#e9edf4}
+.findings-table thead th.sort-asc::after{content:" ▲"; color:var(--muted); font-size:10px}
+.findings-table thead th.sort-desc::after{content:" ▼"; color:var(--muted); font-size:10px}
+.findings-table tbody tr:nth-child(even) td{background:#fafbfd}
+.findings-table .fcol-sheet{white-space:nowrap}
+.findings-table .fcol-cat{text-transform:capitalize; color:var(--muted)}
+.findings-table .fcol-sev{text-transform:capitalize; font-weight:600}
+.findings-table .sev-high{color:var(--conflict)}
+.findings-table .sev-medium{color:var(--coord)}
+.findings-table .sev-low{color:var(--muted)}
+.findings-table code{
+  background:#eef1f6; padding:1px 5px; border-radius:4px; font-size:.9em;
+  font-family:"SFMono-Regular",Consolas,"Liberation Mono",monospace;
+}
+.evidence-thumb{
+  height:34px; width:auto; border:1px solid var(--line); border-radius:4px;
+  vertical-align:middle; margin-left:4px;
+}
+/* Finding status chips */
+.fchip{
+  display:inline-block; font-size:11px; font-weight:600; padding:2px 8px;
+  border-radius:999px; white-space:nowrap;
+}
+.fchip-verified{background:#e7f6ee; color:var(--ok)}
+.fchip-deterministic{background:#e7eefb; color:#2f5fd0}
+.fchip-uncertain{background:#fbf3df; color:var(--coord)}
+.fchip-unanchored{background:#fff; color:var(--conflict); border:1px solid var(--conflict)}
+.fchip-rejected{background:#eef0f3; color:var(--muted); text-decoration:line-through}
+
+/* Per-sheet raw text layer */
+.block-rawtext .rawtext summary{cursor:pointer; color:var(--muted); font-size:13px}
+.rawtext-pre{
+  background:#0f1622; color:#d6e2f5; padding:12px; border-radius:8px; overflow:auto;
+  font-size:12px; line-height:1.5; max-height:44vh; white-space:pre-wrap; word-break:break-word;
+  margin-top:8px;
+}
+
 @media (max-width:820px){
   body{flex-direction:column}
   .sidebar{width:100%; flex-basis:auto; height:auto; position:static; border-right:none; border-bottom:1px solid var(--line)}
@@ -958,6 +1242,9 @@ _JS = r"""
   var toc = Array.prototype.slice.call(document.querySelectorAll('.toc-item'));
   var resultCount = document.getElementById('result-count');
   var noResults = document.getElementById('no-results');
+  var findingsCard = document.getElementById('findings');
+  var findingRows = findingsCard ?
+    Array.prototype.slice.call(findingsCard.querySelectorAll('.finding-row')) : [];
   var ISSUE = ['coordination','conflict'];
   var activeFilter = 'all';
 
@@ -972,12 +1259,33 @@ _JS = r"""
     return null;
   }
 
+  // The findings table filters by row, not by .block: every finding is itself an
+  // issue, so ⚠ Issues only keeps them all; a specific category chip narrows to
+  // matching rows; search matches row text. Returns 1 if the card stays visible.
+  function applyFindings(q){
+    if(!findingsCard) return 0;
+    var shown = 0;
+    findingRows.forEach(function(row){
+      var cat = row.getAttribute('data-category');
+      var catOk = (activeFilter === 'all' || activeFilter === 'issues') || (cat === activeFilter);
+      var textOk = q === '' || row.textContent.toLowerCase().indexOf(q) !== -1;
+      var show = catOk && textOk;
+      row.classList.toggle('hidden', !show);
+      if(show) shown++;
+    });
+    var cardShow = shown > 0;
+    findingsCard.classList.toggle('hidden', !cardShow);
+    var t = tocFor('findings'); if(t) t.classList.toggle('hidden', !cardShow);
+    return cardShow ? 1 : 0;
+  }
+
   function apply(){
     var q = (search.value || '').trim().toLowerCase();
     var cats = activeCategories();
     var visibleCards = 0;
 
     cards.forEach(function(card){
+      if(card === findingsCard) return;   // handled by applyFindings below
       var blocks = Array.prototype.slice.call(card.querySelectorAll('.block'));
       var anyBlock = false;
       var titleEl = card.querySelector('.card-title');
@@ -999,6 +1307,8 @@ _JS = r"""
       if(t) t.classList.toggle('hidden', !cardShow);
       if(cardShow) visibleCards++;
     });
+
+    visibleCards += applyFindings(q);
 
     noResults.hidden = visibleCards !== 0;
     var filterLabel = activeFilter === 'all' ? '' :
@@ -1034,6 +1344,40 @@ _JS = r"""
   var ca = document.getElementById('collapse-all');
   if(ea) ea.addEventListener('click', function(){ cards.forEach(function(c){ c.classList.remove('collapsed'); }); });
   if(ca) ca.addEventListener('click', function(){ cards.forEach(function(c){ c.classList.add('collapsed'); }); });
+
+  // Findings table — click a column header to sort; re-clicking a column flips
+  // the direction. Severity and status sort by their numeric ranks (high→low,
+  // most-actionable→least), the rest lexically by the cell text.
+  if(findingsCard){
+    var ftable = findingsCard.querySelector('.findings-table');
+    var ftbody = ftable ? ftable.querySelector('tbody') : null;
+    var fths = ftable ? Array.prototype.slice.call(ftable.querySelectorAll('th[data-sort]')) : [];
+    var COLS = {sheet:0, category:1, severity:2, status:3, text:4, quote:5};
+    var fsort = {key:null, dir:1};
+    function fval(row, key){
+      if(key === 'severity') return parseInt(row.getAttribute('data-severity') || '0', 10);
+      if(key === 'status') return parseInt(row.getAttribute('data-status-rank') || '0', 10);
+      var cell = row.children[COLS[key]];
+      return cell ? cell.textContent.trim().toLowerCase() : '';
+    }
+    fths.forEach(function(th){
+      th.addEventListener('click', function(){
+        if(!ftbody) return;
+        var key = th.getAttribute('data-sort');
+        if(fsort.key === key) fsort.dir = -fsort.dir; else { fsort.key = key; fsort.dir = 1; }
+        var rows = Array.prototype.slice.call(ftbody.querySelectorAll('.finding-row'));
+        rows.sort(function(a, b){
+          var va = fval(a, key), vb = fval(b, key);
+          if(va < vb) return -fsort.dir;
+          if(va > vb) return fsort.dir;
+          return 0;
+        });
+        rows.forEach(function(r){ ftbody.appendChild(r); });
+        fths.forEach(function(t){ t.classList.remove('sort-asc','sort-desc'); });
+        th.classList.add(fsort.dir === 1 ? 'sort-asc' : 'sort-desc');
+      });
+    });
+  }
 
   // TOC click scrolls (native via href) and expands the target if collapsed.
   toc.forEach(function(item){
@@ -1081,10 +1425,12 @@ _JS = r"""
 # --------------------------------------------------------------------------- #
 # Optional in-report Q&A assistant ("Ask AI").
 #
-# Everything below is emitted only when build_html_report() is given an API
-# key. The widget is deliberately self-sufficient: it reads its grounding
-# context out of the page's own #raw-md block (the verbatim combined digest) so
-# the large report text is never duplicated into the file, and it talks to the
+# Everything below is emitted only when the Q&A assistant is enabled (an API key
+# is available to embed, or embed_api_key is set). The widget is deliberately
+# self-sufficient: it reads its grounding context out of the page's own #raw-md
+# block (the verbatim combined digest) so the large report text is never
+# duplicated into the file, resolves its key at runtime (embedded, or prompted
+# and cached in sessionStorage), and it talks to the
 # Anthropic Messages API straight from the browser (the API's CORS opt-in
 # header `anthropic-dangerous-direct-browser-access` makes that possible).
 # Request shape: streaming, adaptive thinking with summarized display, the
@@ -1095,26 +1441,46 @@ _JS = r"""
 
 
 def _chat_bootstrap_html(
-    *, api_key: str, title: str, generated: str, source_names: list[str]
+    *, api_key: str, embed_key: bool, title: str, generated: str,
+    source_names: list[str],
 ) -> str:
-    """The chat widget's markup + its JSON config block (key, model, run info).
+    """The chat widget's markup + its JSON config block (model, run info, key).
 
     The config is embedded as a ``type="application/json"`` script and parsed
     by the widget at startup. ``</`` is escaped to ``<\\/`` (a JSON no-op) so no
     value — however adversarial a source filename — can close the script tag
     and inject markup.
+
+    The key is written into the config **only** when ``embed_key`` is set and a
+    key is present; otherwise it is left out and the widget asks the reader for
+    one at first use (kept in ``sessionStorage``, never in the file). The footer
+    reflects which mode is active — a red warning when the key is embedded.
     """
-    config = {
-        "apiKey": api_key,
+    embedding = bool(embed_key and api_key)
+    config: dict[str, Any] = {
         "model": CHAT_MODEL_DEFAULT,
         "title": title,
         "generated": generated,
         "sources": list(source_names),
     }
+    if embedding:
+        config["apiKey"] = api_key
     config_json = json.dumps(config).replace("</", "<\\/")
+    if embedding:
+        foot = (
+            "AI-generated answers — verify against the drawings. "
+            '<span class="da-key-warn">This file embeds your API key in clear '
+            "text; don't share it.</span>"
+        )
+    else:
+        foot = (
+            "AI-generated answers — verify against the drawings. Your API key is "
+            "requested on first use and kept only in this browser tab "
+            "(sessionStorage) — it is never saved into this file."
+        )
     return (
         f'<script id="da-chat-config" type="application/json">{config_json}</script>'
-        + _CHAT_HTML
+        + _CHAT_HTML.replace("__CHAT_FOOT__", foot)
     )
 
 
@@ -1138,8 +1504,7 @@ _CHAT_HTML = """
     <button id="da-chat-send" type="button">Send</button>
     <button id="da-chat-stop" type="button" hidden>Stop</button>
   </div>
-  <div class="da-chat-foot">AI-generated answers — verify against the drawings.
-  This file embeds your API key; don't share it.</div>
+  <div class="da-chat-foot" id="da-chat-foot">__CHAT_FOOT__</div>
 </section>
 """
 
@@ -1233,6 +1598,7 @@ _CHAT_CSS = """
   font-size:10.5px; color:var(--muted); padding:6px 12px 9px; background:#fbfcfe;
   border-top:1px solid var(--line);
 }
+.da-key-warn{color:var(--conflict); font-weight:700}
 @media (max-width:600px){
   #da-chat-panel{right:0; bottom:0; width:100vw; max-width:100vw; height:92vh; border-radius:14px 14px 0 0}
 }
@@ -1248,12 +1614,38 @@ _CHAT_JS = r"""
   if(!cfgEl) return;
   var CFG;
   try { CFG = JSON.parse(cfgEl.textContent); } catch(e){ return; }
-  if(!CFG || !CFG.apiKey) return;
+  if(!CFG) return;
 
   var API_URL = 'https://api.anthropic.com/v1/messages';
   var MAX_CONTINUATIONS = 5;   // pause_turn auto-resumes (server tool loops)
   var rawEl = document.getElementById('raw-md');
   var REPORT = rawEl ? rawEl.textContent : '';
+  var KEY_STORE = 'da-api-key';
+
+  // Key resolution: an embedded key (opt-in) wins; otherwise the reader is
+  // asked once and the value is kept only in this tab's sessionStorage — never
+  // written back into the file. forgetKey() drops a rejected prompted key (but
+  // keeps an embedded one) so a fresh key can be entered on the next send.
+  var apiKey = (CFG.apiKey || '').trim() || null;
+  function ensureKey(){
+    if(apiKey) return apiKey;
+    var k = null;
+    try { k = sessionStorage.getItem(KEY_STORE); } catch(e){}
+    if(k && k.trim()){ apiKey = k.trim(); return apiKey; }
+    k = window.prompt('Enter your Anthropic API key to use the assistant.\n\n' +
+      'It is kept only in this browser tab (sessionStorage) and is NOT saved into this file.');
+    if(k && k.trim()){
+      apiKey = k.trim();
+      try { sessionStorage.setItem(KEY_STORE, apiKey); } catch(e){}
+      return apiKey;
+    }
+    return null;
+  }
+  function forgetKey(){
+    if(CFG.apiKey){ apiKey = CFG.apiKey.trim() || null; return; }
+    apiKey = null;
+    try { sessionStorage.removeItem(KEY_STORE); } catch(e){}
+  }
 
   // ---------------------------------------------------------------- markdown
   // Small renderer mirroring the Python subset the digests use: headings, hr,
@@ -1474,7 +1866,7 @@ _CHAT_JS = r"""
       signal: aborter.signal,
       headers: {
         'content-type': 'application/json',
-        'x-api-key': CFG.apiKey,
+        'x-api-key': apiKey,
         'anthropic-version': '2023-06-01',
         'anthropic-dangerous-direct-browser-access': 'true'
       },
@@ -1483,7 +1875,12 @@ _CHAT_JS = r"""
       if(!resp.ok){
         return resp.json().catch(function(){ return {}; }).then(function(body){
           var msg = (body && body.error && body.error.message) || ('HTTP ' + resp.status);
-          if(resp.status === 401) msg = 'The API key embedded in this report was rejected (401). Regenerate the report with a valid key.';
+          if(resp.status === 401){
+            forgetKey();
+            msg = CFG.apiKey
+              ? 'The API key embedded in this report was rejected (401). Regenerate the report with a valid key.'
+              : 'That API key was rejected (401). Send your question again to enter a different key.';
+          }
           if(resp.status === 429) msg = 'Rate limited by the API (429) — wait a moment and try again. ' + msg;
           throw new Error(msg);
         });
@@ -1683,6 +2080,11 @@ _CHAT_JS = r"""
   function send(){
     var q = input.value.trim();
     if(!q || streaming) return;
+    if(!ensureKey()){
+      addMsg('da-err', 'An Anthropic API key is required to use the assistant. ' +
+        'Click Send again to enter one.');
+      return;
+    }
     input.value = '';
     runTurn(q);
   }

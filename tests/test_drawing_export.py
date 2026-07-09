@@ -126,14 +126,22 @@ def test_build_export_documents_forwards_api_key_to_html_report_only():
     docs = dict(
         dx.build_export_documents(_make_ctx(), source_names=[SRC], now=NOW, api_key=key)
     )
-    # The HTML report gains the Q&A assistant (and, by design, the key)…
+    # The HTML report gains the Q&A assistant — but by default the key is NOT
+    # written into the file (Phase 8: it prompts at runtime, sessionStorage).
     assert 'id="da-chat-config"' in docs["report.html"]
-    assert key in docs["report.html"]
-    # …while the key never leaks into any Markdown deliverable.
-    for name, content in docs.items():
+    assert key not in docs["report.html"]
+    # The key never leaks into any deliverable at all in the default path.
+    for content in docs.values():
+        assert key not in content
+    # Opt in with embed_api_key=True to bake the key into the report only.
+    embedded = dict(dx.build_export_documents(
+        _make_ctx(), source_names=[SRC], now=NOW, api_key=key, embed_api_key=True
+    ))
+    assert key in embedded["report.html"]
+    for name, content in embedded.items():
         if name != "report.html":
             assert key not in content
-    # Default (no key) keeps the report key-free.
+    # Default (no key) keeps the report key-free (no assistant at all).
     plain = dict(dx.build_export_documents(_make_ctx(), source_names=[SRC], now=NOW))
     assert "da-chat-config" not in plain["report.html"]
 

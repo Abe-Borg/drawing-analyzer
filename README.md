@@ -23,10 +23,14 @@ grounded in the report's own text, so you can ask things like *"what are the big
 conflicts?"* or *"which sheets mention VAV-3?"* right inside the file. It streams
 answers, shows its reasoning, and can search / read the web (codes, standards,
 product data) — all by calling the Anthropic API **directly from your browser**;
-there is no server. To make that work with a double-clickable file, **the API key
-that ran the analysis is embedded in the report**, so treat the file like a
-credential: don't email or share it. (Reports generated without a key simply omit
-the assistant.) The chat model defaults to Opus 4.8 and can be overridden with
+there is no server. **By default the report does not contain your API key**: the
+assistant asks for one the first time you use it and keeps it only in that browser
+tab (`sessionStorage`), so the file is safe to share and the key never touches
+disk. If you'd rather have a zero-friction, double-click-and-ask file, tick **Embed
+API key in HTML report** (GUI) or pass `embed_api_key=True` — the key is then baked
+into the HTML, the report shows a red *"don't share this file"* warning, and you
+should treat the file like a credential. Reports generated without a key omit the
+assistant entirely. The chat model defaults to Opus 4.8 and can be overridden with
 `DRAWING_ANALYZER_CHAT_MODEL`.
 
 ## Install
@@ -86,12 +90,21 @@ pick).
 The HTML report (the folder export's `report.html`, or *Save HTML Report…* in the
 GUI) makes a large set easy to navigate:
 
-- **Sidebar table of contents** — jump to the cross-sheet overview or any sheet;
-  each sheet shows an OK / cached / failed dot.
-- **Search** — live full-text filter across every sheet.
+- **Sidebar table of contents** — jump to the QC findings, the cross-sheet
+  overview, or any sheet; each sheet shows an OK / cached / failed dot.
+- **QC Findings card** (when a QC run produced findings) — a pinned, **sortable**
+  table (sheet, category, severity, status, finding, quote). Each row carries a
+  color-coded **status chip** — `Verified` (green), `Deterministic` (blue),
+  `Uncertain` (amber), `Unanchored` (red outline), `Rejected` (struck grey) — and
+  links to the sheet it sits on. The chips honour the filter chips and **⚠ Issues
+  only**; folder exports also thumbnail the verifier's evidence crop on each row.
+- **Search** — live full-text filter across every sheet. When a QC run captured
+  the sheets' **raw text layers**, search runs over what each *sheet* actually
+  says (a collapsed *Sheet text layer* block per sheet), not only what the digest
+  said about it. Scanned / pasted-raster sheets are badged **Raster**.
 - **Category filters** — one-click chips, including **⚠ Issues only**, which
-  isolates the *Coordination* and *Conflict* sections the model flagged across the
-  entire set. Those sections are also visually highlighted inline.
+  isolates the *Coordination* and *Conflict* sections (and every finding) the
+  model flagged across the entire set. Those sections are also highlighted inline.
 - **Lossless** — a collapsed *Complete raw Markdown* block carries the exact model
   output, so the original text is always one copy away.
 

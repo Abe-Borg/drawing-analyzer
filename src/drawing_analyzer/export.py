@@ -241,7 +241,8 @@ def _index_document(
 
 
 def build_export_documents(
-    ctx: Any, *, source_names: list[str], now: datetime, api_key: str | None = None
+    ctx: Any, *, source_names: list[str], now: datetime, api_key: str | None = None,
+    embed_api_key: bool = False,
 ) -> list[tuple[str, str]]:
     """Build the ordered ``(filename, content)`` list for an export folder.
 
@@ -253,9 +254,11 @@ def build_export_documents(
     downstream/text use. Pure: no I/O, so it is the unit-testable core of
     :func:`write_drawing_export`.
 
-    ``api_key`` is forwarded to :func:`build_html_report`: when given, the HTML
-    report embeds the in-page Q&A assistant **and the key itself** (see the
-    security note there). Default ``None`` keeps the report key-free.
+    ``api_key`` is forwarded to :func:`build_html_report` to enable the in-page
+    Q&A assistant. By default the key is **not** embedded (the assistant prompts
+    for one at runtime); pass ``embed_api_key=True`` to bake it into the report
+    (see the security note there). The folder report links the verifier's
+    evidence crops (copied alongside by :func:`write_qc_outputs`).
     """
     sheets = list(getattr(ctx, "sheets", None) or [])
     total = len(sheets)
@@ -265,7 +268,8 @@ def build_export_documents(
 
     docs: list[tuple[str, str]] = [
         ("report.html",
-         build_html_report(ctx, source_names=source_names, now=now, api_key=api_key)),
+         build_html_report(ctx, source_names=source_names, now=now, api_key=api_key,
+                           embed_api_key=embed_api_key, link_evidence=True)),
         ("00_index.md", _index_document(ctx, source_names=source_names, now=now, sheet_files=sheet_files)),
         ("00_synthesis.md", _synthesis_document(ctx)),
     ]
@@ -466,19 +470,22 @@ def write_drawing_export(
     source_names: list[str],
     now: datetime | None = None,
     api_key: str | None = None,
+    embed_api_key: bool = False,
 ) -> Path:
     """Create a named subfolder under ``parent_dir`` and write the export to it.
 
     Returns the created folder ``Path``. The operator picks ``parent_dir``; the
     subfolder is named deterministically (:func:`export_folder_name`) and made
-    unique so a re-run never clobbers a prior export. ``api_key`` is forwarded
-    to the HTML report (see :func:`build_export_documents`).
+    unique so a re-run never clobbers a prior export. ``api_key`` /
+    ``embed_api_key`` are forwarded to the HTML report (see
+    :func:`build_export_documents`).
     """
     now = now or datetime.now()
     folder = _unique_dir(Path(parent_dir) / export_folder_name(source_names, now=now))
     folder.mkdir(parents=True, exist_ok=False)
     for name, content in build_export_documents(
-        ctx, source_names=source_names, now=now, api_key=api_key
+        ctx, source_names=source_names, now=now, api_key=api_key,
+        embed_api_key=embed_api_key,
     ):
         (folder / name).write_text(content, encoding="utf-8")
     # QC review inventory (findings.json/csv, sheet_text/, reviewed PDFs,
