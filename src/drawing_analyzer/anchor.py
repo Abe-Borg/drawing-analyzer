@@ -357,3 +357,25 @@ def resolve_anchors(findings: Iterable[Finding], rendered_sheet: Any) -> list[Fi
             continue
         finding.anchor = _anchor_one(finding, stream, words, tile_rects, w, h, rows, cols)
     return findings
+
+
+def resolve_conflict_legs(findings: Iterable[Finding], geom_by_key: dict) -> list[Finding]:
+    """Anchor the ``also_on`` legs of cross-sheet findings, each on its own sheet.
+
+    A :class:`~drawing_analyzer.models.ConflictLeg` duck-types as a finding for the
+    resolver (it has ``source_quote`` / ``tile`` / ``anchor``), so legs are grouped
+    by their sheet ``(source_name, page_index)`` and run through
+    :func:`resolve_anchors` against that sheet's geometry. ``geom_by_key`` maps
+    ``(source_name, page_index)`` → geometry; a leg whose sheet is absent is left
+    ``UNANCHORED`` (it simply won't be clouded). Returns ``findings`` for chaining.
+    """
+    findings = list(findings)
+    by_sheet: dict[tuple, list] = {}
+    for f in findings:
+        for leg in getattr(f, "also_on", None) or []:
+            by_sheet.setdefault((leg.source_name, leg.page_index), []).append(leg)
+    for key, legs in by_sheet.items():
+        geometry = geom_by_key.get(key)
+        if geometry is not None:
+            resolve_anchors(legs, geometry)
+    return findings

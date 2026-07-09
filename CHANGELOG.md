@@ -29,6 +29,19 @@ review, not the digest's incidental noticing.
 - **`Finding` gains `anchor_hint` and `reproduced`** (both optional, backward-
   compatible — read tolerantly from cache, no cache invalidation) and the critique
   is cached under its own key (a distinct namespace from the digest).
+- **Cross-sheet QC pass (`cross_qc=True`).** A deliberate whole-set conflict
+  hunt — one text-only reasoning call over all the digests + text layers (no
+  images; large sets shard by discipline) that finds conflicts *between* sheets:
+  the same tag valued two ways, twin notes diverged, a note contradicted
+  elsewhere, a cross-reference whose target disclaims the pointer's claim.
+  Distinct from the prose synthesis (untouched); `combined_text` never sees it
+  (I-2). Findings carry **dual anchors** — a primary plus `also_on` legs resolved
+  to their own sheets via the set's title-block ids — so the markup writer clouds
+  **both** sheets of a conflict, each popup cross-referencing the other. `Finding`
+  gains a backward-compatible `also_on`; the anchor resolver, markup writer, and
+  pipeline gained additive dual-leg support (a finding with no legs is unchanged).
+  (Cross-sheet findings verify `UNCERTAIN` on a single crop today; a dual-crop
+  verifier is a planned refinement.)
 - **Review profiles (`profiles=[…]`).** The owner's QC knowledge as versioned,
   injectable Markdown checklists: each profile's items are appended to the
   critique prompt ("APPLY THIS REVIEW CHECKLIST EXPLICITLY, ITEM BY ITEM"), so the

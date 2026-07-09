@@ -127,6 +127,7 @@ ctx = extract_drawing_context(
     verify_findings=True,        # run the per-finding verification pass
     critique=True,               # second "reviewer" read/sheet, self-consistent (pricier)
     profiles=["fire-protection"],# review-profile checklists to apply (needs critique=True)
+    cross_qc=True,               # hunt cross-sheet conflicts; cloud both sheets
     qc_work_dir=Path("run-out"), # where evidence crops + reviewed PDFs land
 )
 print(ctx.combined_text)
@@ -375,6 +376,34 @@ so you can tune the shipped checklist without editing the install. Bump `version
 (or just edit — the content hash changes either way) to re-run the critique
 against the new checklist.
 
+## Cross-sheet QC
+
+The digest and critique read each sheet on its own. A whole class of real errors
+is only visible *between* sheets: the same tag valued two ways, a standard note
+that diverged on a sibling sheet, a note on one sheet contradicted by another, a
+cross-reference sending you to a sheet that disclaims what the pointer promised.
+Turned on with `cross_qc=True`, the **cross-sheet QC pass** hunts exactly those.
+
+It is a *text-reasoning* task — one Opus call over all the per-sheet **digests +
+verbatim text layers**, with **no images** (large sets shard by discipline). It is
+distinct from the prose [synthesis](#how-it-works), which stays as-is, and like
+the critique it never touches `combined_text` (the conflicts live only in the
+findings artifacts).
+
+Its findings carry **dual anchors**: a primary anchor on one sheet plus one or
+more `also_on` legs on the other sheets in the conflict, each resolved to its own
+sheet (via the set's title-block sheet-ids). The markup writer then clouds
+**both** sheets — each cloud's popup cross-references the other (*"Conflicts with
+F-A-01-1: 'COLO 1'"*) — so a reviewer opening either drawing sees the conflict and
+where its counterpart lives. The model defaults to Opus 4.8
+(`DRAWING_ANALYZER_CROSS_QC_MODEL`).
+
+> A cross-sheet conflict can't be confirmed from a single sheet's crop, so these
+> findings verify to `UNCERTAIN` in the standard [verification pass](#verification-pass)
+> and are clouded when **include-unverified** is on (`markup_verified_only=False`).
+> A dual-crop verifier that sees both sheets at once — so a cross-sheet conflict
+> can verify `VERIFIED`/`REJECTED` — is a planned refinement.
+
 ## Anchoring findings
 
 A finding is only useful on a marked-up drawing if it sits **on the thing it's
@@ -521,6 +550,7 @@ runs.
 | `DRAWING_ANALYZER_FOCUS_MODEL` | Opus 4.8 | Focus-report model (text-only). |
 | `DRAWING_ANALYZER_VERIFY_MODEL` | Opus 4.8 | Per-finding verification model (crop + short prompt). |
 | `DRAWING_ANALYZER_CRITIQUE_MODEL` | Opus 4.8 | Critique-pass vision model (`critique=True`). |
+| `DRAWING_ANALYZER_CROSS_QC_MODEL` | Opus 4.8 | Cross-sheet QC model, text-only (`cross_qc=True`). |
 | `DRAWING_ANALYZER_CRITIQUE_RUNS` | `2` | Critique self-consistency reads to merge (`1` disables it). |
 | `DRAWING_ANALYZER_PROFILES_DIR` | `~/.drawing_analyzer/profiles` | User review-profile directory (wins over built-ins on name). |
 | `DRAWING_ANALYZER_MAX_WORKERS` | `4` | Real-time digest concurrency (`1` = sequential). |

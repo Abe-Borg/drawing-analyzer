@@ -583,6 +583,7 @@ def _run_qc_stages(
     total: int,
     errors: list[str],
     critique_findings: list[Finding] | None = None,
+    cross_findings: list[Finding] | None = None,
 ) -> _QCResult:
     """Run the QC pipeline after the digests: audit → anchor → verify → markups.
 
@@ -597,6 +598,11 @@ def _run_qc_stages(
     deduplicates the two sources per sheet (``_is_duplicate`` is same-sheet-gated,
     so passing the whole set as two groups only ever merges within a sheet) and
     marks an issue both the digest and the critique raised as ``reproduced``.
+
+    ``cross_findings`` (Phase 13) are the dual-anchored cross-sheet conflicts. They
+    are appended (not merged — merging is same-sheet, and a conflict spans sheets),
+    and after the per-sheet primary anchoring their ``also_on`` legs are anchored
+    on their own sheets so the markup writer can cloud both sides.
     """
     digest_findings = [f for sd in sheets for f in getattr(sd, "findings", None) or []]
     if critique_findings:
@@ -605,6 +611,8 @@ def _run_qc_stages(
         findings = merge_finding_groups([digest_findings, critique_findings])
     else:
         findings = digest_findings
+    if cross_findings:
+        findings = findings + list(cross_findings)
     reference_findings: list[Finding] = []
     work_dir = qc_work_dir
 
@@ -621,10 +629,12 @@ def _run_qc_stages(
             _log.warning("reference audit failed: %s", exc)
 
     # Anchor model findings (reference findings arrive already anchored).
-    if findings and geometries and (qc_markups or reference_audit_enabled or critique_findings):
+    if findings and geometries and (
+        qc_markups or reference_audit_enabled or critique_findings or cross_findings
+    ):
         if progress is not None:
             progress(total, total, "Anchoring findings")
-        from .anchor import resolve_anchors
+        from .anchor import resolve_anchors, resolve_conflict_legs
 
         geom_by_key = {(g.ref.source_name, g.ref.page_index): g for g in geometries}
         by_sheet: dict[tuple, list[Finding]] = {}
@@ -638,6 +648,11 @@ def _run_qc_stages(
                 resolve_anchors(sheet_findings, geometry)
             except Exception as exc:  # noqa: BLE001 - never fatal
                 _log.warning("anchoring failed for %s: %s", key, exc)
+        # Anchor the cross-sheet findings' also_on legs, each on its own sheet.
+        try:
+            resolve_conflict_legs(findings, geom_by_key)
+        except Exception as exc:  # noqa: BLE001 - never fatal
+            _log.warning("cross-sheet leg anchoring failed: %s", exc)
 
     all_findings = findings + reference_findings
     v_in = v_out = 0
@@ -729,6 +744,7 @@ def extract_drawing_context(
     verify_findings: bool = True,
     critique: bool = False,
     profiles: list | None = None,
+    cross_qc: bool = False,
     qc_work_dir: Path | None = None,
 ) -> DrawingContext:
     """Render and digest every sheet in ``pdf_paths`` into one text context.
@@ -804,6 +820,16 @@ def extract_drawing_context(
     knowledge item by item. Unknown names are skipped (non-fatal). The selected
     profiles' fingerprint folds into the critique cache key, so choosing or editing
     a profile re-critiques. Ignored unless ``critique=True``.
+
+    ``cross_qc=True`` (Phase 13) adds a **cross-sheet QC pass**: one text-only
+    reasoning call over all the digests + text layers (no images) that hunts
+    conflicts *between* sheets — the same tag valued two ways, twin notes diverged,
+    a note contradicted elsewhere, a reference whose target disclaims what the
+    pointer claims. Its findings carry **dual anchors** (``also_on`` legs), so the
+    markup writer clouds **both** sheets of a conflict, each popup cross-referencing
+    the other. Distinct from the prose ``synthesize`` (which is untouched); additive
+    and non-fatal, and — like the critique — the prose ``combined_text`` never sees
+    it (I-2). Large sets shard by discipline.
     """
     if cache is None and use_cache:
         from .digest_cache import get_default_digest_cache
@@ -840,7 +866,7 @@ def extract_drawing_context(
     # each sheet's text/geometry after the digests, so capture that lightweight
     # record as sheets render (the batch path discards the rendered sheets after
     # upload). Only captured when a QC stage will actually use it.
-    need_geometry = reference_audit or qc_markups or critique
+    need_geometry = reference_audit or qc_markups or critique or cross_qc
     sheet_geometries: list[SheetGeometry] = []
     geometry_sink = sheet_geometries if need_geometry else None
 
@@ -954,11 +980,33 @@ def extract_drawing_context(
             errors.append(f"Critique: {exc}")
             _log.warning("critique stage failed: %s", exc)
 
+    # Cross-sheet QC pass (Phase 13): a deliberate whole-set conflict hunt over the
+    # digests + text layers (text only), producing dual-anchored findings that
+    # cloud both sheets. Distinct from the prose synthesis (which stays as-is).
+    # Additive and non-fatal.
+    cross_findings: list[Finding] = []
+    if cross_qc:
+        if progress is not None:
+            progress(total, total, "Cross-sheet QC")
+        try:
+            from .cross_qc import cross_sheet_qc
+
+            cross_res = cross_sheet_qc(sheets, sheet_geometries, client=client)
+            cross_findings = cross_res.findings
+            in_tok += cross_res.input_tokens
+            out_tok += cross_res.output_tokens
+            if cross_res.error:
+                errors.append(f"Cross-sheet QC: {cross_res.error}")
+                _log.warning("cross-sheet QC: %s", cross_res.error)
+        except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
+            errors.append(f"Cross-sheet QC: {exc}")
+            _log.warning("cross-sheet QC stage failed: %s", exc)
+
     # QC pipeline (audit → anchor → verify → markups). Additive and non-fatal;
     # runs before synthesis/focus so those are untouched. Only the reference
     # audit and the markups are gated by their flags; findings are always parsed
-    # off the digests (and pooled with any critique findings), but they are only
-    # anchored/verified when a QC stage needs them (``need_geometry``).
+    # off the digests (and pooled with any critique/cross-sheet findings), but they
+    # are only anchored/verified when a QC stage needs them (``need_geometry``).
     qc = _QCResult()
     if need_geometry:
         qc = _run_qc_stages(
@@ -967,6 +1015,7 @@ def extract_drawing_context(
             markup_verified_only=markup_verified_only, verify_enabled=verify_findings,
             client=client, qc_work_dir=qc_work_dir, progress=progress,
             total=total, errors=errors, critique_findings=critique_findings,
+            cross_findings=cross_findings,
         )
         in_tok += qc.input_tokens
         out_tok += qc.output_tokens

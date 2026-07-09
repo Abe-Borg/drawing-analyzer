@@ -230,6 +230,49 @@ class Verification:
 
 
 @dataclass
+class ConflictLeg:
+    """One *additional* sheet a cross-sheet finding touches (Phase 13).
+
+    A cross-sheet conflict's primary anchor sits on one sheet; each
+    ``ConflictLeg`` is the same issue's counterpart on another sheet — the tag
+    that differs, the note it contradicts. ``sheet_id`` is model-reported;
+    ``source_name`` / ``page_index`` are resolved from the set's sheet-id map so
+    the leg can be anchored and clouded on its own sheet. ``source_quote`` /
+    ``tile`` / ``anchor`` mirror a finding's, so the anchor resolver places a leg
+    exactly as it places a finding.
+    """
+
+    sheet_id: str
+    source_name: str = ""
+    page_index: int = 0
+    source_quote: str = ""
+    tile: list[int] | None = None
+    anchor: Anchor = field(default_factory=Anchor)
+
+    def to_dict(self) -> dict:
+        return {
+            "sheet_id": self.sheet_id,
+            "source_name": self.source_name,
+            "page_index": self.page_index,
+            "source_quote": self.source_quote,
+            "tile": list(self.tile) if self.tile is not None else None,
+            "anchor": self.anchor.to_dict(),
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ConflictLeg":
+        tile = d.get("tile")
+        return cls(
+            sheet_id=d.get("sheet_id", ""),
+            source_name=d.get("source_name", ""),
+            page_index=int(d.get("page_index", 0) or 0),
+            source_quote=d.get("source_quote", ""),
+            tile=[int(v) for v in tile] if tile else None,
+            anchor=Anchor.from_dict(d.get("anchor") or {}),
+        )
+
+
+@dataclass
 class Finding:
     """One QC finding: a single reviewable issue anchored to a sheet.
 
@@ -262,6 +305,7 @@ class Finding:
     refs: list[str] = field(default_factory=list)
     anchor_hint: str = ""               # "SHEET" for a sheet-level / absence finding
     reproduced: bool = True             # corroborated by a second read (self-consistency)
+    also_on: list["ConflictLeg"] = field(default_factory=list)  # cross-sheet legs (Phase 13)
     anchor: Anchor = field(default_factory=Anchor)
     verification: Verification = field(default_factory=Verification)
     id: str = ""
@@ -286,6 +330,7 @@ class Finding:
             "refs": list(self.refs),
             "anchor_hint": self.anchor_hint,
             "reproduced": self.reproduced,
+            "also_on": [leg.to_dict() for leg in self.also_on],
             "anchor": self.anchor.to_dict(),
             "verification": self.verification.to_dict(),
         }
@@ -310,6 +355,7 @@ class Finding:
             refs=list(d.get("refs", []) or []),
             anchor_hint=d.get("anchor_hint", "") or "",
             reproduced=bool(d.get("reproduced", True)),
+            also_on=[ConflictLeg.from_dict(leg) for leg in (d.get("also_on") or []) if isinstance(leg, dict)],
             anchor=Anchor.from_dict(d.get("anchor") or {}),
             verification=Verification.from_dict(d.get("verification") or {}),
             id=d.get("id", ""),
