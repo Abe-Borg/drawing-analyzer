@@ -555,8 +555,15 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             return ""
 
     def _refresh_summary(self) -> None:
+        # Defensive: _on_qc_toggle() fires this during _build_ui before the
+        # summary label exists (mirrors _current_focus's early-refresh guard on
+        # focus_box). __init__ calls _refresh_summary() again once the UI is
+        # fully built, which sets the initial text.
+        label = getattr(self, "summary_label", None)
+        if label is None:
+            return
         if not self._pdfs:
-            self.summary_label.configure(text="No drawings selected.")
+            label.configure(text="No drawings selected.")
             return
         refs = list_sheets(self._pdfs)
         sheets = len(refs)
@@ -571,7 +578,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             else "cost n/a"
         )
         qc_note = "  ·  + QC verify (~$0.01–0.03/finding)" if self._qc_markups_var.get() else ""
-        self.summary_label.configure(
+        label.configure(
             text=(
                 f"{files} file(s), {sheets} sheet(s)  ·  "
                 f"~{est.image_tokens:,} image tokens  ·  {cost}{qc_note}"
