@@ -482,25 +482,41 @@ def _report_findings(ctx: Any) -> list[Any]:
     )
 
 
+def _sheet_key(ref: Any) -> tuple[str, int]:
+    """Full sheet identity — the PDF's *path* + page — so two sheets that share a
+    basename but live in different directories never collide (``SheetRef`` carries
+    ``pdf_path``; a fake without one falls back to ``source_name``). Used for the
+    geometry↔sheet mapping, where both sides carry the path."""
+    pdf_path = getattr(ref, "pdf_path", None)
+    ident = str(pdf_path) if pdf_path else (getattr(ref, "source_name", "") or "")
+    return (ident, int(getattr(ref, "page_index", 0) or 0))
+
+
+def _finding_sheet_key(ref_or_name: Any, page_index: int) -> tuple[str, int]:
+    """The basename-only key findings anchor to. A :class:`Finding` carries only
+    ``source_name`` (no path), so finding→sheet-card links are matched on basename;
+    two same-basename sheets can only share a link target, but never each other's
+    (path-keyed) text layer."""
+    name = getattr(ref_or_name, "source_name", ref_or_name) or ""
+    return (name, int(page_index))
+
+
 def _sheet_card_index(sheets: list[Any]) -> dict[tuple[str, int], int]:
-    """Map ``(source_name, page_index)`` → 1-based sheet-card index for links."""
+    """Map basename identity → 1-based sheet-card index (for finding links)."""
     out: dict[tuple[str, int], int] = {}
     for i, sheet in enumerate(sheets, start=1):
         ref = _ref_of(sheet)
-        key = (getattr(ref, "source_name", "") or "",
-               int(getattr(ref, "page_index", 0) or 0))
-        out.setdefault(key, i)
+        out.setdefault(
+            _finding_sheet_key(ref, int(getattr(ref, "page_index", 0) or 0)), i
+        )
     return out
 
 
 def _geometry_index(ctx: Any) -> dict[tuple[str, int], Any]:
-    """Map ``(source_name, page_index)`` → the sheet's captured geometry."""
+    """Map full sheet identity → the sheet's captured geometry."""
     out: dict[tuple[str, int], Any] = {}
     for geom in getattr(ctx, "sheet_geometries", None) or []:
-        ref = _ref_of(geom)
-        key = (getattr(ref, "source_name", "") or "",
-               int(getattr(ref, "page_index", 0) or 0))
-        out.setdefault(key, geom)
+        out.setdefault(_sheet_key(_ref_of(geom)), geom)
     return out
 
 
@@ -566,8 +582,7 @@ def _findings_card(ctx: Any, sheets: list[Any], *, link_evidence: bool = False) 
 
     rows = []
     for f in sorted(findings, key=_key):
-        ref_key = (getattr(f, "source_name", "") or "",
-                   int(getattr(f, "page_index", 0) or 0))
+        ref_key = _finding_sheet_key(f, int(getattr(f, "page_index", 0) or 0))
         rows.append(_finding_row_html(f, index.get(ref_key), link_evidence=link_evidence))
 
     table = (
@@ -933,11 +948,7 @@ def build_html_report(
         cards.append(findings_card)
     cards.append(_overview_card(ctx))
     cards += [
-        _sheet_card(
-            i, total, s,
-            geoms.get((getattr(_ref_of(s), "source_name", "") or "",
-                       int(getattr(_ref_of(s), "page_index", 0) or 0))),
-        )
+        _sheet_card(i, total, s, geoms.get(_sheet_key(_ref_of(s))))
         for i, s in enumerate(sheets, start=1)
     ]
 

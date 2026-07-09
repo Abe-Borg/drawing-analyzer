@@ -479,3 +479,25 @@ def test_rawtext_block_feeds_search_and_flags_raster():
     # Sheet 2 (empty text layer) is badged as raster with an explanatory note.
     assert 'class="badge badge-raster"' in doc
     assert "Raster sheet" in doc
+
+
+def test_same_basename_sheets_keep_their_own_text_layer():
+    # Two PDFs share the basename "M-101.pdf" but live in different directories.
+    # The geometry index keys on the full path, so each sheet card must show its
+    # OWN raw text layer — not the first sheet's (regression for the basename
+    # collision).
+    name = "M-101.pdf"
+    sheets = [
+        _Sheet(_Ref(name, 0, 1, pdf_path="/rev_a/M-101.pdf"), text="rev A digest"),
+        _Sheet(_Ref(name, 0, 1, pdf_path="/rev_b/M-101.pdf"), text="rev B digest"),
+    ]
+    geoms = [
+        _Geom(_Ref(name, 0, 1, pdf_path="/rev_a/M-101.pdf"), sheet_text="ALPHA_ONLY_TEXT"),
+        _Geom(_Ref(name, 0, 1, pdf_path="/rev_b/M-101.pdf"), sheet_text="BRAVO_ONLY_TEXT"),
+    ]
+    ctx = _Ctx(sheets=sheets, combined_text="x", sheet_geometries=geoms)
+    doc = hr.build_html_report(ctx, source_names=[name], now=NOW)
+    # Both distinct text layers survive; before the fix the second sheet reused
+    # the first geometry, so BRAVO_ONLY_TEXT would be missing entirely.
+    assert "ALPHA_ONLY_TEXT" in doc
+    assert "BRAVO_ONLY_TEXT" in doc

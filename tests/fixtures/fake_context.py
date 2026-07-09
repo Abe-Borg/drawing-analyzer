@@ -16,11 +16,17 @@ from dataclasses import dataclass, field
 
 @dataclass
 class FakeRef:
-    """Stand-in for :class:`drawing_analyzer.models.SheetRef`."""
+    """Stand-in for :class:`drawing_analyzer.models.SheetRef`.
+
+    ``pdf_path`` mirrors the real ref's full-identity field (optional here so the
+    common ``FakeRef(name, page, count)`` positional call is unchanged); the
+    report uses it to disambiguate two sheets that share a basename.
+    """
 
     source_name: str
     page_index: int
     page_count: int
+    pdf_path: str | None = None
 
     @property
     def display_label(self) -> str:
