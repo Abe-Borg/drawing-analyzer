@@ -256,14 +256,19 @@ def suggest_profiles(
 def profiles_cache_fragment(profiles: list[Profile]) -> str | None:
     """The critique-cache-key component for a set of profiles (``None`` if empty).
 
-    Sorted ``name@version@hash`` triples, so the key is order-independent, and any
-    profile edit (new ``content_hash``) or version bump re-critiques. ``None`` (no
-    profiles) leaves the critique key byte-identical to a pre-profiles key, so
-    existing cache entries stay valid.
+    A hash of the **exact checklist text that will be injected** (the same string
+    :func:`build_checklist_prompt` builds), so the key can never collide across
+    *different* checklists — reordered profiles (whose prompt item-order differs),
+    or caller-built :class:`Profile` objects whose ``content_hash`` was left at its
+    default empty value while their ``items`` differ, both change the text and thus
+    the key. Any item edit re-critiques. ``None`` when there is no checklist to
+    inject (no profiles, or profiles with no items) — so the critique key stays
+    byte-identical to a pre-profiles one and existing cache entries remain valid.
     """
-    if not profiles:
+    text = build_checklist_prompt(flatten_items(profiles or []))
+    if not text:
         return None
-    return "|".join(sorted(f"{p.name}@{p.version}@{p.content_hash}" for p in profiles))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
 _CHECKLIST_HEADER = (

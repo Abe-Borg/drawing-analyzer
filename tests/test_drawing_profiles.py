@@ -171,18 +171,21 @@ def test_suggest_profiles_by_discipline():
 # --------------------------------------------------------------------------- #
 
 
-def test_cache_fragment_is_order_independent_and_edit_sensitive():
-    a = P.parse_profile(_SAMPLE, fallback_name="a")
-    b = P.parse_profile(_SAMPLE.replace("name: demo", "name: other"), fallback_name="b")
+def test_cache_fragment_fingerprints_the_actual_checklist():
     assert P.profiles_cache_fragment([]) is None
-    # order-independent
-    assert P.profiles_cache_fragment([a, b]) == P.profiles_cache_fragment([b, a])
-    # sensitive to an edit (content_hash) ...
+    # A profile that injects nothing (no items) has no key effect.
+    assert P.profiles_cache_fragment([P.Profile(name="empty", title="e", version="1")]) is None
+    # Different items collide-proof even when content_hash is left empty (the
+    # power-user path of hand-built Profile objects) — the fragment is derived
+    # from the items, not the possibly-blank hash.
+    p1 = P.Profile(name="x", title="x", version="1", items=("check A",))
+    p2 = P.Profile(name="x", title="x", version="1", items=("check B",))
+    assert p1.content_hash == "" and p2.content_hash == ""
+    assert P.profiles_cache_fragment([p1]) != P.profiles_cache_fragment([p2])
+    # Editing an item re-keys.
+    a = P.parse_profile(_SAMPLE, fallback_name="a")
     a2 = P.parse_profile(_SAMPLE.replace("First check", "First CHECK"), fallback_name="a")
     assert P.profiles_cache_fragment([a]) != P.profiles_cache_fragment([a2])
-    # ... and includes name + version + hash
-    frag = P.profiles_cache_fragment([a])
-    assert a.name in frag and a.version in frag and a.content_hash in frag
 
 
 def test_build_checklist_prompt():
