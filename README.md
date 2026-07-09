@@ -526,11 +526,12 @@ The conservative mode is the opt-in: `markup_verified_only=True` (GUI:
 **Verified & deterministic only**, default **off**) suppresses everything but
 `VERIFIED` + `DETERMINISTIC`; suppressed entries are tallied as *gated*.
 
-At run end the pipeline asserts **every ledger entry is accounted for** —
-clouded, margin callout, or rejected-indexed — and logs the tally
-(`Ledger 47: 39 clouded, 6 margin, 2 rejected (indexed)`), which also appears in
-the GUI completion summary, the report's findings card, and
-`ctx.ledger_tally` / `ctx.ledger_tally_line`.
+At the end of a markup run the pipeline asserts **every ledger entry is
+accounted for** — clouded, margin callout, or rejected-indexed — and logs the
+tally (`Ledger 47: 39 clouded, 6 margin, 2 rejected (indexed)`), which also
+appears in the GUI completion summary, the report's findings card, and
+`ctx.ledger_tally` / `ctx.ledger_tally_line`. The tally describes PDF ink, so
+runs without markups (reference audit only) leave it empty.
 
 The writer opens the original read-only and saves a *new* file (the source is
 never touched), then reopens it and checks the annotation count as a self-test.

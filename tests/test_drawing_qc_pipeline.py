@@ -157,6 +157,10 @@ def test_reference_audit_only_no_markups_no_verify(tmp_path):
     assert ctx.findings[0].verification.status == "SKIPPED"   # not verified
     assert client.verify_calls == 0
     assert ctx.reviewed_pdf_paths == []
+    # The §18 tally describes PDF ink; with markups off it must not report
+    # clouds that were never written to any PDF.
+    assert ctx.ledger_tally == {}
+    assert ctx.ledger_tally_line == ""
 
 
 def test_qc_markups_include_unverified(tmp_path):

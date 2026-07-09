@@ -6,6 +6,25 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed (post-Phase-16 review)
+
+- **Synthesis sheet-id matching is boundary-aware.** A set holding both `A-1`
+  and `A-10` no longer reads a synthesis mention of `A-10` as also naming
+  `A-1` (which could make the never-named prefix sheet the conflict's primary
+  anchor and add a bogus `also_on` leg): ids match only with non-alphanumeric
+  neighbours, and a shorter id never counts inside a longer in-set id's
+  mention (`A-1` inside `A-1.1`).
+- **A `DETERMINISTIC` verdict survives ledger merges without a rectangle.** A
+  rect-less auditor duplicate (an arithmetic mismatch whose quote didn't
+  resolve) no longer loses its host-computed verdict when merged into an
+  earlier model entry — previously it would be treated as unverified and gated
+  in verified-only mode; the anchored-member merge path also can no longer
+  downgrade an existing deterministic verdict.
+- **The §18 coverage tally only runs on markup runs.** A reference-audit-only
+  run (`qc_markups=False`) no longer logs/reports `Ledger N: X clouded, …` for
+  clouds that were never written to any PDF; `ctx.ledger_tally` stays empty and
+  `ctx.ledger_tally_line` is `""` for such runs.
+
 ### The findings ledger — guaranteed carry-through of ALL QC items (Part III / Phase 16)
 
 Nothing QC-flavored may live only in prose: every item from every channel lands

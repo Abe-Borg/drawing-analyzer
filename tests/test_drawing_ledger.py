@@ -79,6 +79,27 @@ def test_ledger_merge_adopts_auditor_anchor_and_verification():
     assert set(entry.sources) == {"digest_json", "auditor_reference"}
 
 
+def test_ledger_merge_preserves_deterministic_verdict_without_rect():
+    # A rect-less auditor duplicate (say an arithmetic mismatch whose quote
+    # didn't resolve) must not lose its host-computed verdict to the model
+    # member it merges into.
+    ledger = Ledger()
+    ledger.add([_f("column loads sum to 480 kips, schedule says 470",
+                   quote="480 KIPS")], "digest_json")
+    ledger.add([_f("column loads sum to 480 kips, schedule says 470",
+                   status="DETERMINISTIC", sources=["auditor_arithmetic"])])
+    assert len(ledger) == 1
+    assert ledger.entries[0].verification.status == "DETERMINISTIC"
+    # And the reverse: a later anchored model member contributes its rect but
+    # cannot downgrade the deterministic verdict.
+    ledger.add([_f("column loads sum to 480 kips, schedule says 470",
+                   rect=[10, 10, 60, 24], sources=["critique_1"])])
+    assert len(ledger) == 1
+    entry = ledger.entries[0]
+    assert entry.anchor.rect_pdf == [10, 10, 60, 24]
+    assert entry.verification.status == "DETERMINISTIC"
+
+
 def test_ledger_keeps_distinct_findings_and_cross_sheet_apart():
     ledger = Ledger()
     ledger.add([_f("relief valve set at 165 psi, should be 175")], "digest_json")
@@ -320,3 +341,25 @@ def test_extract_helpers_filter_trivia():
     assert extract_synthesis_conflicts(
         "There is a mismatch somewhere in the set.", ["F-D-01-1"]
     ) == []
+
+
+def test_synthesis_sheet_id_matching_is_boundary_aware():
+    ids = ["A-1", "A-10"]
+    # A mention of A-10 is NOT a mention of its prefix A-1 — the old substring
+    # check made A-1 the primary sheet and A-10 a bogus also_on leg.
+    assert extract_synthesis_conflicts(
+        "The grid on A-10 conflicts with the foundation plan.", ids
+    ) == [("The grid on A-10 conflicts with the foundation plan.", ["A-10"])]
+    # When both are genuinely named, order still follows first mention.
+    assert extract_synthesis_conflicts(
+        "The door on A-1 conflicts with the frame type on A-10.", ids
+    ) == [("The door on A-1 conflicts with the frame type on A-10.", ["A-1", "A-10"])]
+    # An out-of-set longer id (a detail reference, not a sheet) is not a
+    # boundary match for the in-set prefix either.
+    assert extract_synthesis_conflicts(
+        "Detail A-101 conflicts with the finish schedule.", ["A-1"]
+    ) == []
+    # Sentence punctuation is still a boundary — the id itself matches.
+    assert extract_synthesis_conflicts(
+        "There is a conflict on A-1.", ["A-1"]
+    ) == [("There is a conflict on A-1.", ["A-1"])]

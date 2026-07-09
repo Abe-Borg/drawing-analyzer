@@ -14,9 +14,12 @@ Ingest-time merge uses Phase 11's dedupe rule (same sheet AND anchor-rect
 IoU > 0.5, same reported tile, OR normalized text overlap > 0.7): merging
 **unions ``sources``**, keeps the most severe severity, prefers the longest
 ``source_quote`` (the best anchoring hook), and preserves the best anchor /
-verification either member carries — so an auditor's DETERMINISTIC, pre-anchored
-duplicate upgrades a model entry rather than being lost. Multi-source provenance
-doubles as a confidence signal, surfaced as chips (``prose+json+critique×2``).
+verification either member carries — an auditor's pre-anchored duplicate
+upgrades a model entry rather than being lost, and a DETERMINISTIC verdict
+survives the merge even when the auditor member has no rectangle (a rect-less
+arithmetic mismatch is still host-computed ground truth). Multi-source
+provenance doubles as a confidence signal, surfaced as chips
+(``prose+json+critique×2``).
 
 ``freeze()`` assigns the run's sequential ``QC-###`` numbers (Phase 15's
 numbering now lives here) ordered sheet → position. The ledger is append-only;
@@ -172,7 +175,10 @@ def _merge_into(existing: Finding, incoming: Finding) -> Finding:
     ``anchor_hint`` / ``also_on`` / ``citation``; and preserve the **best**
     anchor + verification — an entry that already carries a rectangle (an
     auditor's EXACT anchor and DETERMINISTIC verdict) upgrades an unanchored
-    model entry, never the reverse. ``reproduced`` upgrades when the merged
+    model entry, never the reverse, and a ``DETERMINISTIC`` verdict is kept
+    regardless of rectangles (a rect-less auditor duplicate — say an arithmetic
+    mismatch whose quote didn't resolve — must not lose its host-computed
+    verdict to a model member). ``reproduced`` upgrades when the merged
     provenance spans two source *families* (cross-channel corroboration) or
     either member already was. The existing entry's ``id`` and ``text`` are kept
     (first-seen wins), so merged entries stay stable across runs.
@@ -201,6 +207,11 @@ def _merge_into(existing: Finding, incoming: Finding) -> Finding:
     incoming_anchored = incoming.anchor is not None and incoming.anchor.rect_pdf is not None
     if incoming_anchored and not existing_anchored:
         existing.anchor = incoming.anchor
+        if not _deterministic(existing):
+            existing.verification = incoming.verification
+    # A DETERMINISTIC verdict is host-computed ground truth: it survives the
+    # merge no matter which member carries the rectangle.
+    if _deterministic(incoming) and not _deterministic(existing):
         existing.verification = incoming.verification
 
     existing.reproduced = (
@@ -209,3 +220,10 @@ def _merge_into(existing: Finding, incoming: Finding) -> Finding:
         or len(_families(existing.sources)) >= 2
     )
     return existing
+
+
+def _deterministic(finding: Finding) -> bool:
+    return (
+        finding.verification is not None
+        and finding.verification.status == "DETERMINISTIC"
+    )

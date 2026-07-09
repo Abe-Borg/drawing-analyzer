@@ -158,7 +158,7 @@ def extract_synthesis_conflicts(
     naming no resolvable sheet are skipped (logged by the caller) — a synthesis
     conflict with no sheet has nowhere on the PDF to live.
     """
-    ids = sorted({s.upper() for s in sheet_ids if s}, key=len, reverse=True)
+    ids = sorted({s.upper() for s in sheet_ids if s}, key=lambda s: (-len(s), s))
     if not ids or not (synthesis_text or "").strip():
         return []
     out: list[tuple[str, list[str]]] = []
@@ -166,16 +166,50 @@ def extract_synthesis_conflicts(
         low = item.lower()
         if not any(sig in low for sig in _CONFLICT_SIGNALS):
             continue
-        upper = item.upper()
-        mentioned = [(upper.find(sid), sid) for sid in ids if sid in upper]
+        mentioned = _id_mentions(item.upper(), ids)
         if not mentioned:
             continue
-        ordered: list[str] = []
-        for _pos, sid in sorted(mentioned):
-            if sid not in ordered:
-                ordered.append(sid)
-        out.append((item, ordered))
+        out.append((item, [sid for _pos, sid in sorted(mentioned)]))
     return out
+
+
+def _bounded_occurrences(text: str, sid: str) -> list[int]:
+    """Start offsets where ``sid`` occurs with non-alphanumeric neighbours —
+    ``A-1`` matches in ``"SEE A-1."`` but not inside ``A-10`` or ``2A-15``."""
+    out: list[int] = []
+    start = 0
+    while (pos := text.find(sid, start)) >= 0:
+        end = pos + len(sid)
+        before = text[pos - 1] if pos else ""
+        after = text[end] if end < len(text) else ""
+        if not before.isalnum() and not after.isalnum():
+            out.append(pos)
+        start = pos + 1
+    return out
+
+
+def _id_mentions(text: str, ids: list[str]) -> list[tuple[int, str]]:
+    """First genuine mention of each in-set sheet id, as ``(offset, id)``.
+
+    Boundary-aware, and a shorter id never counts inside a longer in-set id's
+    mention (``A-1`` inside ``A-1.1`` passes the boundary check on the ``.``,
+    so longer ids — ``ids`` arrives longest-first — claim their spans and
+    shorter ids only match outside them). Without this, a set holding both
+    ``A-1`` and ``A-10`` would read a mention of ``A-10`` as naming ``A-1``
+    too and cloud a sheet the prose never named.
+    """
+    claimed: list[tuple[int, int]] = []
+    mentioned: list[tuple[int, str]] = []
+    for sid in ids:
+        occurrences = _bounded_occurrences(text, sid)
+        free = [
+            p for p in occurrences
+            if not any(c0 <= p and p + len(sid) <= c1 for c0, c1 in claimed)
+        ]
+        if free:
+            mentioned.append((free[0], sid))
+        claimed.extend((p, p + len(sid)) for p in occurrences)
+    return mentioned
 
 
 # --------------------------------------------------------------------------- #
