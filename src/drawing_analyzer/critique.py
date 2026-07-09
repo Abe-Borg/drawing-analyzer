@@ -366,6 +366,9 @@ def _representative(cluster: list[Finding], *, reproduced: bool) -> Finding:
     quote = max((f.source_quote or "" for f in cluster), key=len)
     tile = next((f.tile for f in cluster if f.tile is not None), None)
     anchor_hint = next((f.anchor_hint for f in cluster if f.anchor_hint), "")
+    # Preserve a cross-sheet finding's dual-anchor legs (the first non-empty), so
+    # merging a conflict finding never silently drops its ``also_on``.
+    also_on = next((list(f.also_on) for f in cluster if f.also_on), [])
     return Finding(
         sheet_id=base.sheet_id,
         source_name=base.source_name,
@@ -377,6 +380,7 @@ def _representative(cluster: list[Finding], *, reproduced: bool) -> Finding:
         tile=tile,
         refs=_union_refs(cluster),
         anchor_hint=anchor_hint,
+        also_on=also_on,
         reproduced=reproduced,
         id=base.id,
     )

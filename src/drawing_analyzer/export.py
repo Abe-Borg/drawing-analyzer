@@ -305,10 +305,21 @@ def _unique_dir(path: Path) -> Path:
 
 FINDINGS_CSV_HEADER = [
     "id", "sheet_id", "source_name", "page", "category", "severity",
-    "text", "source_quote", "tile", "refs",
+    "text", "source_quote", "tile", "refs", "also_on",
     "anchor_status", "anchor_method", "rect_pdf",
     "verification_status", "verification_note", "evidence_png",
 ]
+
+
+def _fmt_also_on(legs: Any) -> str:
+    """Flatten a cross-sheet finding's ``also_on`` legs for the CSV, so a conflict's
+    other sheet(s) aren't hidden inside the free-text column."""
+    out = []
+    for leg in legs or []:
+        sid = str(getattr(leg, "sheet_id", "")).strip()
+        quote = str(getattr(leg, "source_quote", "")).strip()
+        out.append(f'{sid}: "{quote}"' if quote else sid)
+    return "; ".join(p for p in out if p)
 
 
 def _fmt_tile(tile: Any) -> str:
@@ -339,6 +350,7 @@ def _finding_row(finding: Any) -> list[str]:
         str(getattr(finding, "source_quote", "")),
         _fmt_tile(getattr(finding, "tile", None)),
         "; ".join(str(r) for r in refs),
+        _fmt_also_on(getattr(finding, "also_on", None)),
         str(getattr(anchor, "status", "")) if anchor is not None else "",
         str(getattr(anchor, "method", "")) if anchor is not None else "",
         _fmt_rect(getattr(anchor, "rect_pdf", None)) if anchor is not None else "",

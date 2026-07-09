@@ -38,7 +38,7 @@ from typing import Iterable
 import pymupdf  # AGPL-3.0 — see module docstring; the 2nd of two blessed importers.
 
 from .diagnostics import get_logger
-from .models import Finding
+from .models import ConflictLeg, Finding
 
 _log = get_logger()
 
@@ -91,11 +91,15 @@ def _is_unverified(finding: Finding) -> bool:
 
 
 def _annot_content(finding: Finding, *, unverified: bool) -> str:
-    """The popup comment: the finding plus its quote / verification / refs."""
+    """The popup comment: the finding plus its quote / verification / refs, and —
+    for a cross-sheet finding — a cross-reference to the other sheet(s)."""
     lines = [finding.text.strip()]
     quote = finding.source_quote.strip()
     if quote:
         lines.append(f'Quote: "{quote}"')
+    for leg in getattr(finding, "also_on", None) or []:
+        lq = f': "{leg.source_quote.strip()}"' if leg.source_quote.strip() else ""
+        lines.append(f"Conflicts with {leg.sheet_id}{lq}")
     v = getattr(finding, "verification", None)
     if v is not None:
         lines.append(f"Verification: {v.status}" + (f" — {v.note}" if v.note else ""))
@@ -194,6 +198,39 @@ def annotate_pdf(
     return written
 
 
+def _expand_for_markup(findings: Iterable[Finding]) -> list[Finding]:
+    """Explode a cross-sheet finding into one cloud request per sheet it touches.
+
+    A cross-sheet conflict must be clouded on **both** sheets (Phase 13). The
+    primary finding clouds on its own sheet (its ``also_on`` drives the popup's
+    cross-reference); each ``also_on`` leg becomes a synthetic finding placed on
+    *its* sheet, inheriting the parent's category/severity/verification (so gating
+    is identical) and carrying its own ``also_on`` pointing back at the primary
+    and the sibling legs, so its popup cross-references them too. A finding with
+    no legs passes through unchanged. Synthetic legs live only here — never in the
+    findings record — so counts/exports stay one-entry-per-conflict.
+    """
+    out: list[Finding] = []
+    for f in findings:
+        out.append(f)
+        legs = getattr(f, "also_on", None) or []
+        if not legs:
+            continue
+        primary_as_leg = ConflictLeg(
+            sheet_id=f.sheet_id, source_name=f.source_name, page_index=f.page_index,
+            source_quote=f.source_quote, tile=f.tile, anchor=f.anchor,
+        )
+        for i, leg in enumerate(legs):
+            others = [primary_as_leg] + [l for j, l in enumerate(legs) if j != i]
+            out.append(Finding(
+                sheet_id=leg.sheet_id, source_name=leg.source_name,
+                page_index=leg.page_index, category=f.category, severity=f.severity,
+                text=f.text, source_quote=leg.source_quote, refs=list(f.refs),
+                also_on=others, anchor=leg.anchor, verification=f.verification,
+            ))
+    return out
+
+
 def write_reviewed_pdfs(
     findings: Iterable[Finding],
     pdf_paths: Iterable[Path | str],
@@ -205,13 +242,15 @@ def write_reviewed_pdfs(
     """Write one ``<stem>_reviewed.pdf`` per source PDF that has cloudable findings.
 
     Findings are matched to a source PDF by ``source_name`` (the file basename);
-    a source with no cloudable finding gets no reviewed copy. Output filenames are
-    de-duplicated (``_reviewed`` / ``_reviewed_2`` / …) so two inputs sharing a
-    stem don't clobber each other. Returns the reviewed-PDF paths, in input order.
+    a source with no cloudable finding gets no reviewed copy. A cross-sheet finding
+    is clouded on **every** sheet it touches (see :func:`_expand_for_markup`).
+    Output filenames are de-duplicated (``_reviewed`` / ``_reviewed_2`` / …) so two
+    inputs sharing a stem don't clobber each other. Returns the reviewed-PDF paths,
+    in input order.
     """
     output_dir = Path(output_dir)
     by_source: dict[str, list[Finding]] = {}
-    for finding in findings:
+    for finding in _expand_for_markup(findings):
         by_source.setdefault(finding.source_name, []).append(finding)
 
     out_paths: list[Path] = []
