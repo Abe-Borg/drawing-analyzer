@@ -236,11 +236,12 @@ def test_acceptance_fresh_run_produces_full_qc_deliverable(tmp_path):
     # 2. Appearance-stream proxy for the Revu/Acrobat/Chromium spot-check: each
     # cloudable finding was inked, and every annotation carries an /AP appearance
     # stream (annot.update() built it) so it renders non-blank in third-party
-    # viewers. Two sources, one cloudable finding each → two reviewed PDFs.
+    # viewers. Two sources, one cloudable finding each → two reviewed PDFs, each
+    # carrying a cloud + its QC-number tag (Phase 15).
     assert ctx.clouded_finding_count == 2
     assert len(ctx.reviewed_pdf_paths) == 2
     objs = [o for pdf in ctx.reviewed_pdf_paths for o in _annot_xref_objects(pdf)]
-    assert len(objs) == 2
+    assert len(objs) == 4
     assert all("/AP" in o for o in objs)
     # The originals are never touched.
     assert _annot_xref_objects(demand) == []

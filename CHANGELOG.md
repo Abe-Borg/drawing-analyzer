@@ -6,6 +6,44 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Markup richness, citation check & index pages (Phase 15)
+
+The reviewed PDF now reads like a numbered, navigable, senior plan-review set.
+
+#### Added
+
+- **QC numbering.** Every finding gets a sequential review number (`QC-001` …,
+  ordered sheet → position; `assign_qc_ids`, stable within a run). Inked findings
+  carry the number as a small FreeText tag beside the markup in the severity
+  color; the same id appears in `findings.csv` (new leading `qc_id` column),
+  `findings.json`, the HTML report (new sortable ID column), and the index page.
+- **Severity styling & annotation types.** high = red, medium = orange, low /
+  question = blue. DETERMINISTIC findings draw a **solid** border, model findings
+  a revision **cloud**, opted-in unverified findings **dashed** + `[UNVERIFIED]`.
+  Sheet-level / absence findings (`anchor_hint="SHEET"`) are now inked as FreeText
+  **callout boxes stacked in a computed clear margin band** (largest text-free
+  horizontal band, found from the word rectangles — `find_clear_band`), with a
+  **leader-line arrow** to the reported tile's centroid when known.
+- **Findings index pages** at the front of each reviewed PDF ("AI DRAFT REVIEW -
+  FINDINGS INDEX"): a table of ID / sheet / severity / status / one-line text
+  where every row carries a GOTO link to the finding's page + rectangle
+  (link targets account for the inserted pages). Multi-page as needed.
+- **Citation check (`citation_check=True`).** One web-search-backed call per
+  unique cited code ref (server-side `web_search_20260209` tool — verified
+  current, env-overridable), judged against the editions the set adopts
+  (harvested offline from the general-notes text) and the current edition.
+  Verdict (`CHECKED_SUPPORTS` / `CHECKED_MISMATCH` / `UNCHECKED`) attaches to the
+  citing findings and shows in the popup, CSV, and report; a MISMATCH downgrades
+  nothing — sometimes the stale citation *is* the finding. Handles `pause_turn`
+  resumption; real-time only; new `Citation` model.
+- **Exhaustive popups**: finding text, verbatim quote, cross-sheet pointer (legs
+  cite each other by QC number), verification status/note, refs + citation
+  verdict, the reproduced flag when uncorroborated, evidence filename, both ids.
+- **Optional appendix page** (`DRAWING_ANALYZER_MARKUP_APPENDIX=1`, off by
+  default): "checked and consistent" — arithmetic relationships that checked out
+  and references that resolved (the references auditor now counts its resolved
+  pointers into `audit_stats`).
+
 ### Deterministic auditor expansion (Phase 14)
 
 More high-precision, zero-API markups for free — the class of defect a vision

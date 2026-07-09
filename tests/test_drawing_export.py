@@ -253,10 +253,22 @@ def test_findings_csv_header_and_row_flattening():
     assert '"2,3"' in row                          # tile as row,col
     assert "CMC 310; NFPA 90A" in row              # refs joined
     assert "10.2, 20.0, 88.5, 33.0" in row         # rect flattened + rounded
-    assert row.startswith(_finding().id + ",")     # id first
+    # qc_id first (empty until assigned), then the content id
+    assert row.startswith("," + _finding().id + ",")
     # page is 1-based (page_index 2 -> page 3)
     assert ",3,code,high," in row
     assert "VERIFIED" in row and "evidence/x.png" in row
+
+
+def test_findings_csv_carries_qc_id_and_citation():
+    from drawing_analyzer.models import Citation, assign_qc_ids
+
+    f = _finding()
+    f.citation = Citation(status="CHECKED_MISMATCH", note="renumbered in 2019")
+    assign_qc_ids([f])
+    row = dx.build_findings_csv([f]).split("\r\n")[1]
+    assert row.startswith("QC-001,")
+    assert "CHECKED_MISMATCH" in row and "renumbered in 2019" in row
 
 
 def test_findings_csv_is_crlf_terminated():
@@ -277,7 +289,7 @@ def test_write_findings_csv_has_bom_and_crlf(tmp_path):
     assert b"\r\n" in raw
     # decodes cleanly with the BOM stripped
     text = raw.decode("utf-8-sig")
-    assert text.startswith("id,sheet_id,source_name,page,")
+    assert text.startswith("qc_id,id,sheet_id,source_name,page,")
 
 
 def test_findings_csv_tolerates_sparse_finding():
@@ -286,7 +298,7 @@ def test_findings_csv_tolerates_sparse_finding():
                 severity="low", text="x")
     csv = dx.build_findings_csv([f])
     row = csv.split("\r\n")[1]
-    assert row.startswith(f.id + ",F,s.pdf,1,conflict,low,x,")
+    assert row.startswith("," + f.id + ",F,s.pdf,1,conflict,low,x,")
 
 
 # --------------------------------------------------------------------------- #

@@ -362,7 +362,10 @@ def _make_finding(
     )
 
 
-def _audit_sheet(sheet: Any, display_id: str, inventory: SheetInventory) -> list[Finding]:
+def _audit_sheet(
+    sheet: Any, display_id: str, inventory: SheetInventory,
+    stats: dict | None = None,
+) -> list[Finding]:
     words = list(getattr(sheet, "words", []) or [])
     if not words:
         return []
@@ -383,7 +386,13 @@ def _audit_sheet(sheet: Any, display_id: str, inventory: SheetInventory) -> list
                 continue
             target = _normalize_id(raw)
             status, closest, dist = _resolve(target, inventory)
-            if status in (RESOLVED_IN_SET, _SKIP):
+            if status == RESOLVED_IN_SET:
+                # No finding — but the plan says count it: resolved references are
+                # the review's balance column ("N references resolved in set").
+                if stats is not None:
+                    stats["references_resolved"] = stats.get("references_resolved", 0) + 1
+                continue
+            if status == _SKIP:
                 continue
             quote = m.group(0)
             # Dedup on the verbatim quote — which, with the (constant) sheet_id
@@ -467,19 +476,23 @@ def _two_digit(token: str) -> bool:
     return len(token) == 2 and token.isdigit()
 
 
-def audit_references(rendered_sheets: Iterable[Any]) -> list[Finding]:
+def audit_references(
+    rendered_sheets: Iterable[Any], *, stats: dict | None = None
+) -> list[Finding]:
     """Audit cross-references across a rendered set; return reference findings.
 
     Standalone and side-effect-free (wired into the pipeline in a later phase).
     Every returned :class:`~drawing_analyzer.models.Finding` has
     ``category="reference"``, an ``EXACT`` anchor on the reference's own words,
     and ``verification.status="DETERMINISTIC"`` — it never calls the API. A
-    raster sheet (no text layer) contributes nothing.
+    raster sheet (no text layer) contributes nothing. ``stats``, when given, is
+    incremented with ``references_resolved`` — the pointers that *did* resolve in
+    the set (no finding, but counted for the review's balance column).
     """
     sheets = list(rendered_sheets)
     inventory = build_inventory(sheets)
     findings: list[Finding] = []
     for sheet in sheets:
         display_id = detect_sheet_id(sheet) or _fallback_sheet_id(sheet)
-        findings.extend(_audit_sheet(sheet, display_id, inventory))
+        findings.extend(_audit_sheet(sheet, display_id, inventory, stats))
     return findings

@@ -304,10 +304,11 @@ def _unique_dir(path: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 FINDINGS_CSV_HEADER = [
-    "id", "sheet_id", "source_name", "page", "category", "severity",
+    "qc_id", "id", "sheet_id", "source_name", "page", "category", "severity",
     "text", "source_quote", "tile", "refs", "also_on",
     "anchor_status", "anchor_method", "rect_pdf",
     "verification_status", "verification_note", "evidence_png",
+    "citation_status", "citation_note",
 ]
 
 
@@ -337,9 +338,11 @@ def _fmt_rect(rect: Any) -> str:
 def _finding_row(finding: Any) -> list[str]:
     anchor = getattr(finding, "anchor", None)
     verification = getattr(finding, "verification", None)
+    citation = getattr(finding, "citation", None)
     refs = list(getattr(finding, "refs", None) or [])
     page_index = int(getattr(finding, "page_index", 0) or 0)
     return [
+        str(getattr(finding, "qc_id", "") or ""),
         str(getattr(finding, "id", "")),
         str(getattr(finding, "sheet_id", "")),
         str(getattr(finding, "source_name", "")),
@@ -357,6 +360,8 @@ def _finding_row(finding: Any) -> list[str]:
         str(getattr(verification, "status", "")) if verification is not None else "",
         str(getattr(verification, "note", "")) if verification is not None else "",
         str(getattr(verification, "evidence_png", "")) if verification is not None else "",
+        str(getattr(citation, "status", "")) if citation is not None else "",
+        str(getattr(citation, "note", "")) if citation is not None else "",
     ]
 
 

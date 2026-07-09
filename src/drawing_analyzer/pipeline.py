@@ -85,6 +85,14 @@ def _resolve_workers(max_workers: int | None, total: int) -> int:
     return min(max(1, int(max_workers)), max(1, total))
 
 
+def _markup_appendix_enabled() -> bool:
+    """Whether the reviewed PDFs get the optional "checked and consistent"
+    appendix page (``DRAWING_ANALYZER_MARKUP_APPENDIX=1``; off by default)."""
+    return (os.environ.get("DRAWING_ANALYZER_MARKUP_APPENDIX") or "").strip() in (
+        "1", "true", "yes", "on",
+    )
+
+
 @dataclass
 class DrawingContext:
     """The combined result of digesting a drawing set."""
@@ -596,6 +604,7 @@ def _run_qc_stages(
     critique_findings: list[Finding] | None = None,
     cross_findings: list[Finding] | None = None,
     claims: list[NumericClaim] | None = None,
+    citation_check_enabled: bool = False,
 ) -> _QCResult:
     """Run the QC pipeline after the digests: audit → anchor → verify → markups.
 
@@ -678,6 +687,12 @@ def _run_qc_stages(
             _log.warning("cross-sheet leg anchoring failed: %s", exc)
 
     all_findings = findings + reference_findings
+    # Sequential review numbers (Phase 15): assigned once, ordered sheet →
+    # position, shared by the markup tags, index page, CSV/JSON, and report.
+    if all_findings:
+        from .models import assign_qc_ids
+
+        assign_qc_ids(all_findings)
     v_in = v_out = 0
 
     # Verify model findings (deterministic reference findings are skipped by the
@@ -731,6 +746,29 @@ def _run_qc_stages(
             errors.append(f"Cross-sheet verification: {exc}")
             _log.warning("cross-sheet verification failed: %s", exc)
 
+    # Citation check (Phase 15): one web-search-backed call per unique code ref,
+    # judged against the editions the set adopts (harvested from the text
+    # layers). Verdicts attach to the findings and ride the popup/CSV/report; a
+    # MISMATCH downgrades nothing. Additive and non-fatal (I-3).
+    if citation_check_enabled and any(getattr(f, "refs", None) for f in all_findings):
+        from .citation_check import check_citations
+
+        def _citation_progress(done: int, tot: int, label: str) -> None:
+            if progress is not None:
+                progress(total, total, label)
+
+        try:
+            cires = check_citations(
+                all_findings, geometries, client=client, progress=_citation_progress,
+            )
+            v_in += cires.input_tokens
+            v_out += cires.output_tokens
+            if cires.error:
+                errors.append(f"Citation check: {cires.error}")
+        except Exception as exc:  # noqa: BLE001 - never fatal
+            errors.append(f"Citation check: {exc}")
+            _log.warning("citation check failed: %s", exc)
+
     reviewed_pdf_paths: list[Path] = []
     if qc_markups:
         from .annotate import write_reviewed_pdfs
@@ -745,6 +783,9 @@ def _run_qc_stages(
             reviewed_pdf_paths = write_reviewed_pdfs(
                 all_findings, pdf_paths, work_dir,
                 include_unverified=not markup_verified_only,
+                geometries=geometries,
+                audit_stats=audit_stats,
+                include_appendix=_markup_appendix_enabled(),
             )
             _log.info("markups: %d reviewed PDF(s) written", len(reviewed_pdf_paths))
         except Exception as exc:  # noqa: BLE001 - never fatal
@@ -791,6 +832,7 @@ def extract_drawing_context(
     critique: bool = False,
     profiles: list | None = None,
     cross_qc: bool = False,
+    citation_check: bool = False,
     qc_work_dir: Path | None = None,
 ) -> DrawingContext:
     """Render and digest every sheet in ``pdf_paths`` into one text context.
@@ -876,6 +918,15 @@ def extract_drawing_context(
     the other. Distinct from the prose ``synthesize`` (which is untouched); additive
     and non-fatal, and — like the critique — the prose ``combined_text`` never sees
     it (I-2). Large sets shard by discipline.
+
+    ``citation_check=True`` (Phase 15) adds a **citation check**: one web-search-
+    backed call per unique code ref the findings cite, judged against the editions
+    the set adopts (harvested from the general-notes text) and the current
+    edition. The verdict (``CHECKED_SUPPORTS`` / ``CHECKED_MISMATCH`` /
+    ``UNCHECKED``) attaches to each citing finding and appears in the markup
+    popup, the CSV, and the report; a MISMATCH downgrades nothing automatically —
+    sometimes the stale citation *is* the finding. Real-time only; additive and
+    non-fatal.
     """
     if cache is None and use_cache:
         from .digest_cache import get_default_digest_cache
@@ -912,7 +963,7 @@ def extract_drawing_context(
     # each sheet's text/geometry after the digests, so capture that lightweight
     # record as sheets render (the batch path discards the rendered sheets after
     # upload). Only captured when a QC stage will actually use it.
-    need_geometry = reference_audit or qc_markups or critique or cross_qc
+    need_geometry = reference_audit or qc_markups or critique or cross_qc or citation_check
     sheet_geometries: list[SheetGeometry] = []
     geometry_sink = sheet_geometries if need_geometry else None
 
@@ -1067,6 +1118,7 @@ def extract_drawing_context(
             client=client, qc_work_dir=qc_work_dir, progress=progress,
             total=total, errors=errors, critique_findings=critique_findings,
             cross_findings=cross_findings, claims=numeric_claims,
+            citation_check_enabled=citation_check,
         )
         in_tok += qc.input_tokens
         out_tok += qc.output_tokens
