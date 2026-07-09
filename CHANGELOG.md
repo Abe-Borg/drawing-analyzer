@@ -29,6 +29,17 @@ review, not the digest's incidental noticing.
 - **`Finding` gains `anchor_hint` and `reproduced`** (both optional, backward-
   compatible — read tolerantly from cache, no cache invalidation) and the critique
   is cached under its own key (a distinct namespace from the digest).
+- **Review profiles (`profiles=[…]`).** The owner's QC knowledge as versioned,
+  injectable Markdown checklists: each profile's items are appended to the
+  critique prompt ("APPLY THIS REVIEW CHECKLIST EXPLICITLY, ITEM BY ITEM"), so the
+  reviewer applies encoded checks deliberately, not incidentally. Profiles load
+  from the package's built-in set and from `~/.drawing_analyzer/profiles/`
+  (override `DRAWING_ANALYZER_PROFILES_DIR`; a user file wins over a built-in by
+  reusing its `name`). The selected profiles' fingerprint (name + version +
+  content hash) folds into the critique cache key, so editing a checklist
+  re-critiques; a very long checklist is split across the self-consistency runs
+  rather than truncated. A starter **fire-protection** (NFPA 13) profile ships,
+  and `profiles.suggest_profiles(sheet_ids)` proposes profiles by discipline.
 
 ### QC findings, verification & markup integration
 

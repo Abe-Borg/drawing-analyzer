@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from drawing_analyzer import profiles as P
 from drawing_analyzer.critique import (
     CRITIQUE_PROMPT_VERSION,
     CRITIQUE_SYSTEM_PROMPT,
@@ -21,6 +22,7 @@ from drawing_analyzer.critique import (
     _CRITIQUE_TASK_INSTRUCTION,
     _is_duplicate,
     _rect_iou,
+    _run_checklists,
     _token_overlap,
     build_critique_request_params,
     critique_runs,
@@ -398,6 +400,55 @@ def test_partial_run_is_returned_but_not_cached():
     assert cache.stats()["size"] == 0
 
 
+# --- Review profiles (Phase 12): injection, cache key, chunking -------------- #
+
+
+def test_checklist_injected_before_findings_instruction():
+    fp = P.get_profile("fire-protection")
+    checklist = _run_checklists([fp], 1)[0]
+    client = _CritiqueClient([[]])
+    critique_sheet(_rendered(), client=client, max_retries=0, sleep=_NOOP, checklist=checklist)
+    sysp = client.captured[0]["system"]
+    assert "APPLY THIS REVIEW CHECKLIST" in sysp
+    assert "K-8.0" in sysp                                     # a profile item rode in
+    # The findings instruction stays LAST (the parser's last-fenced-block rule).
+    assert sysp.index("APPLY THIS REVIEW") < sysp.index("FINDINGS (machine-read")
+
+
+def test_no_profiles_reproduces_plain_prompt():
+    client = _CritiqueClient([[]])
+    critique_sheet(_rendered(), client=client, max_retries=0, sleep=_NOOP)   # no checklist
+    assert client.captured[0]["system"] == critique_system_prompt()
+    assert "APPLY THIS REVIEW CHECKLIST" not in client.captured[0]["system"]
+
+
+def test_profiles_change_the_critique_cache_key():
+    fp = P.get_profile("fire-protection")
+    a = {"sheet_id": "F", "category": "code", "severity": "low", "text": "t"}
+    c_plain = DigestCache(None, persist=False)
+    c_prof = DigestCache(None, persist=False)
+    critique_sheet_self_consistent(_rendered(), client=_CritiqueClient([[a]]),
+                                   cache=c_plain, runs=1, max_retries=0, sleep=_NOOP)
+    critique_sheet_self_consistent(_rendered(), client=_CritiqueClient([[a]]),
+                                   cache=c_prof, runs=1, max_retries=0, sleep=_NOOP,
+                                   profiles=[fp])
+    assert next(iter(c_plain._entries)) != next(iter(c_prof._entries))
+
+
+def test_long_profile_chunks_across_runs_short_does_not():
+    fp = P.get_profile("fire-protection")
+    short = _run_checklists([fp], 2)               # shipped profile is short
+    assert short[0] == short[1] and "APPLY" in short[0]
+    big = P.Profile(
+        name="big", title="big", version="1", content_hash="h",
+        items=tuple(f"lengthy checklist item {i} describing a distinct check" for i in range(400)),
+    )
+    full_len = len(P.build_checklist_prompt(P.flatten_items([big])))
+    chunked = _run_checklists([big], 2)
+    assert len(chunked) == 2 and chunked[0] != chunked[1]
+    assert all(len(c) < full_len for c in chunked)   # each run a slice, not the whole
+
+
 # --------------------------------------------------------------------------- #
 # Pipeline integration (needs PyMuPDF — the critique stage re-renders)
 # --------------------------------------------------------------------------- #
@@ -434,6 +485,7 @@ class _PipelineClient:
         self.digest_calls = 0
         self.critique_calls = 0
         self.verify_calls = 0
+        self.critique_had_checklist = False
         outer = self
 
         class _Msgs:
@@ -446,6 +498,8 @@ class _PipelineClient:
                         usage=FakeUsage(input_tokens=40, output_tokens=8))
                 if system.startswith(CRITIQUE_SYSTEM_PROMPT):
                     outer.critique_calls += 1
+                    if "APPLY THIS REVIEW CHECKLIST" in system:
+                        outer.critique_had_checklist = True
                     if critique_raises:
                         raise _StatusError(400)   # permanent → degrades to empty
                     findings = [_D, _C2] if outer.critique_calls == 1 else [_D]
@@ -522,3 +576,25 @@ def test_pipeline_cached_critique_rerun_adds_no_tokens(tmp_path):
     )
     assert client2.digest_calls == 0 and client2.critique_calls == 0   # all cached
     assert ctx2.total_input_tokens == 0 and ctx2.total_output_tokens == 0
+
+
+def test_pipeline_critique_applies_selected_profile(tmp_path, monkeypatch):
+    monkeypatch.setenv("DRAWING_ANALYZER_PROFILES_DIR", str(tmp_path / "no_user"))  # builtins only
+    src = _make_pdf(tmp_path / "F-D-01-1.pdf")
+    client = _PipelineClient()
+    extract_drawing_context(
+        [src], client=client, rows=2, cols=2, critique=True, qc_markups=True,
+        profiles=["fire-protection"], qc_work_dir=tmp_path / "qc",
+    )
+    assert client.critique_calls == 2                 # self-consistency still runs twice
+    assert client.critique_had_checklist is True       # the FP checklist rode into the prompt
+
+
+def test_pipeline_profiles_ignored_without_critique(tmp_path):
+    src = _make_pdf(tmp_path / "F-D-01-1.pdf")
+    client = _PipelineClient()
+    extract_drawing_context(
+        [src], client=client, rows=2, cols=2, critique=False, qc_markups=True,
+        profiles=["fire-protection"], qc_work_dir=tmp_path / "qc",
+    )
+    assert client.critique_calls == 0 and client.critique_had_checklist is False
