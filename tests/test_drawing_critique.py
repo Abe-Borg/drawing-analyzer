@@ -327,6 +327,77 @@ def test_one_failed_run_still_merges_the_other():
     assert res.runs == 1 and len(res.findings) == 1 and res.error is None
 
 
+# --- Review fixes: distinct absences, empty bodies, partial-run caching ------ #
+
+
+def test_distinct_absences_do_not_over_merge_on_boilerplate():
+    # Absences carry no tile and no quote, so they can only dedupe on text. Two
+    # different missing items share only the mandated "…; not found on this sheet"
+    # boilerplate — they must NOT collapse (which would drop one and falsely mark
+    # the survivor reproduced).
+    a1 = _finding("expected cleanout; not found on this sheet", hint="SHEET")
+    a2 = _finding("expected backflow preventer; not found on this sheet", hint="SHEET")
+    merged = merge_self_consistency([[a1], [a2]])
+    assert len(merged) == 2
+    assert all(f.reproduced is False for f in merged)
+    # A genuine repeat of the SAME absence still merges and reproduces.
+    b1 = _finding("expected cleanout; not found on this sheet", hint="SHEET")
+    b2 = _finding("expected cleanout; not found on this sheet", hint="SHEET")
+    dup = merge_self_consistency([[b1], [b2]])
+    assert len(dup) == 1 and dup[0].reproduced is True
+
+
+class _EmptyBodyClient:
+    """Every critique call returns an empty body (e.g. thinking ate the budget)."""
+
+    def __init__(self):
+        self.calls = 0
+        outer = self
+
+        class _Msgs:
+            def create(self, **kw):  # noqa: ANN001, ANN202
+                outer.calls += 1
+                return FakeMessage(
+                    content=[FakeTextBlock(text="")],
+                    usage=FakeUsage(input_tokens=500, output_tokens=0),
+                    stop_reason="max_tokens",
+                )
+
+        self.messages = _Msgs()
+
+
+def test_empty_body_is_error_not_a_clean_sheet():
+    # An empty response is a failed read, not "reviewed, nothing found".
+    findings, _in, _out, err = critique_sheet(
+        _rendered(), client=_EmptyBodyClient(), max_retries=0, sleep=_NOOP
+    )
+    assert findings == [] and err is not None and "empty" in err.lower()
+
+
+def test_empty_runs_are_not_frozen_as_clean_in_cache():
+    cache = DigestCache(None, persist=False)
+    res = critique_sheet_self_consistent(
+        _rendered(), client=_EmptyBodyClient(), cache=cache, runs=2,
+        max_retries=0, sleep=_NOOP,
+    )
+    assert res.runs == 0 and res.error and res.findings == []
+    assert cache.stats()["size"] == 0     # nothing cached → a re-run re-attempts
+
+
+def test_partial_run_is_returned_but_not_cached():
+    # runs=2 but one run fails → the surviving run's findings are returned, but
+    # the (1-of-2, all-reproduced) result is NOT frozen under the runs=2 key.
+    cache = DigestCache(None, persist=False)
+    ok = {"sheet_id": "F", "category": "code", "severity": "low",
+          "text": "found this", "tile": [0, 0]}
+    client = _CritiqueClient([_StatusError(400), [ok]])
+    res = critique_sheet_self_consistent(
+        _rendered(), client=client, cache=cache, runs=2, max_retries=0, sleep=_NOOP
+    )
+    assert res.runs == 1 and len(res.findings) == 1
+    assert cache.stats()["size"] == 0
+
+
 # --------------------------------------------------------------------------- #
 # Pipeline integration (needs PyMuPDF — the critique stage re-renders)
 # --------------------------------------------------------------------------- #
@@ -432,3 +503,22 @@ def test_pipeline_critique_failure_is_non_fatal(tmp_path):
     # Critique degraded to nothing; the digest finding still ships, run completes.
     assert len(ctx.findings) == 1
     assert ctx.findings[0].source_quote == "VAV-3"
+
+
+def test_pipeline_cached_critique_rerun_adds_no_tokens(tmp_path):
+    # A fully-cached re-run must report ~0 new tokens — the cached critique's
+    # original cost is not re-counted. (verify off so the only possible tokens
+    # would be the cached digest + critique.)
+    src = _make_pdf(tmp_path / "F-D-01-1.pdf")
+    cache = DigestCache(None, persist=False)
+    extract_drawing_context(
+        [src], client=_PipelineClient(), rows=2, cols=2, critique=True,
+        qc_markups=True, verify_findings=False, cache=cache, qc_work_dir=tmp_path / "q1",
+    )
+    client2 = _PipelineClient()
+    ctx2 = extract_drawing_context(
+        [src], client=client2, rows=2, cols=2, critique=True,
+        qc_markups=True, verify_findings=False, cache=cache, qc_work_dir=tmp_path / "q2",
+    )
+    assert client2.digest_calls == 0 and client2.critique_calls == 0   # all cached
+    assert ctx2.total_input_tokens == 0 and ctx2.total_output_tokens == 0

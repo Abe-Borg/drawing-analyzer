@@ -539,8 +539,12 @@ def _run_critique_stage(
                 if res.error:
                     _log.warning("critique degraded for a sheet: %s", res.error)
                 findings.extend(res.findings)
-                in_tok += res.input_tokens
-                out_tok += res.output_tokens
+                # A cache hit made no API call this run, so exclude its (original)
+                # token cost — keeping run totals honest, as the digest path does
+                # for cached sheets.
+                if not res.cached:
+                    in_tok += res.input_tokens
+                    out_tok += res.output_tokens
                 if progress is not None:
                     progress(total, total, f"Critiquing sheet {done}/{total}")
 

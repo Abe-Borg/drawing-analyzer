@@ -51,6 +51,7 @@ from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
     DEFAULT_DIGEST_MAX_TOKENS,
     _clean_error,
+    _get,
     _is_transient_error,
     _message_text,
     _message_usage,
@@ -216,6 +217,23 @@ _TEXT_DUP_THRESHOLD = 0.7
 _SEVERITY_RANK = {"high": 3, "medium": 2, "low": 1}
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
+# Common function words carry no discriminating signal, so they are dropped
+# before the text-overlap comparison. Without this, two findings that share only
+# mandated boilerplate score a spuriously high Jaccard on the boilerplate alone
+# and wrongly merge. The sharp case is *absences* — which have no quote and no
+# tile, so they can only dedupe on text — phrased per the prompt as "expected X;
+# not found on this sheet": two distinct absences ("expected cleanout…" vs
+# "expected backflow…") would otherwise overlap >0.7 on the seven boilerplate
+# tokens and collapse into one, silently dropping a real finding. Filtering to
+# content tokens fixes that while leaving genuine duplicates (which share the
+# *content* words) well above the threshold.
+_STOPWORDS = frozenset({
+    "a", "an", "and", "any", "are", "as", "at", "be", "been", "but", "by",
+    "for", "found", "from", "has", "have", "in", "into", "is", "it", "its",
+    "no", "not", "of", "on", "or", "shown", "so", "that", "the", "then",
+    "there", "this", "to", "was", "were", "with",
+})
+
 
 def _severity_rank(sev: str) -> int:
     return _SEVERITY_RANK.get((sev or "").lower(), 0)
@@ -226,7 +244,7 @@ def _most_severe(findings: list[Finding]) -> str:
 
 
 def _norm_tokens(text: str) -> set[str]:
-    return set(_TOKEN_RE.findall((text or "").lower()))
+    return {t for t in _TOKEN_RE.findall((text or "").lower()) if t not in _STOPWORDS}
 
 
 def _token_overlap(a: str, b: str) -> float:
@@ -291,6 +309,12 @@ def _representative(cluster: list[Finding], *, reproduced: bool) -> Finding:
     ``anchor_hint`` / non-null ``tile``. The base finding (its text and id) is the
     one with the longest quote, so a collapsed finding keeps a stable, content-
     derived id.
+
+    Deliberately resets ``anchor`` / ``verification`` to their defaults: all
+    current callers merge **before** anchoring, so every input carries the default
+    anyway. A future caller that pools already-anchored/verified findings (the
+    ledger) must re-anchor/re-verify the collapsed result rather than assume this
+    preserved them.
     """
     base = max(
         cluster,
@@ -439,6 +463,13 @@ def critique_sheet(
 
     raw = _message_text(resp)
     in_tok, out_tok = _message_usage(resp)
+    if not raw:
+        # An empty body (e.g. adaptive thinking consumed the whole token budget)
+        # is a *failed* read, not a clean sheet — mirror digest_sheet's guard, so
+        # the run counts as failed (not merged, not cached) and is re-attempted
+        # next time rather than being frozen in cache as "reviewed, nothing found".
+        stop = _get(resp, "stop_reason")
+        return [], in_tok, out_tok, f"empty critique (stop_reason={stop!r})"
     # The critique emits only the findings block; parse_findings returns the
     # findings (the empty "prose" before the block is discarded).
     _, findings, note = parse_findings(raw, rendered.ref)
@@ -529,7 +560,14 @@ def critique_sheet_self_consistent(
         len(run_groups), len(merged), rendered.ref.display_label,
     )
 
-    if cache is not None and cache_key is not None:
+    # Cache only a *complete* self-consistency result — every requested run
+    # succeeded. A partial result (a transient failure dropped a run) is returned
+    # to the caller (so this run still produces findings) but never cached: the
+    # key was computed for ``runs`` reads, and a 1-of-2 result marks everything
+    # ``reproduced=True`` (there was no second read to disagree). Freezing that
+    # under the full-runs key would permanently deny the requested self-consistency.
+    # Mirrors digest_sheet refusing to cache transient/degraded reads.
+    if cache is not None and cache_key is not None and len(run_groups) == runs:
         cache.put(
             cache_key,
             {
