@@ -397,6 +397,62 @@ def test_appendix_page_off_by_default_and_on_when_asked(tmp_path):
         doc.close()
 
 
+def test_callouts_never_leave_the_page_when_band_is_at_the_bottom(tmp_path):
+    # Regression (Codex review): with the clear band near the page bottom, rows
+    # that wrap past it used to extend BELOW the page — the annot count passed
+    # but the reviewer couldn't see the ink. Overflow rows must stack upward and
+    # every callout must stay within the page rect.
+    src = _pdf(tmp_path)                       # 792 x 612
+    # Words cover the sheet down to y=540, leaving only a shallow bottom band.
+    words = [_w(30 + 150 * i, 20 + 24 * j, width=100, height=12)
+             for i in range(5) for j in range(22)]
+    absences = [
+        _f(f"expected item {i}; not found on this sheet", source="M-101.pdf",
+           hint="SHEET", quote="")
+        for i in range(7)                      # 3 per row -> forces 3 rows
+    ]
+    assign_qc_ids(absences)
+    out = tmp_path / "M-101_reviewed.pdf"
+    annotate_pdf(src, absences, out, sheet_meta=_meta(words))
+    doc = pymupdf.open(str(out))
+    try:
+        page = doc[1]                          # after the index page
+        boxes = [pymupdf.Rect(a.rect) for a in page.annots() if a.type[1] == "FreeText"]
+        assert len(boxes) == 7
+        for box in boxes:
+            assert box.y0 >= 0 and box.y1 <= page.rect.height + 0.5, f"off-page: {box}"
+            assert box.x0 >= 0 and box.x1 <= page.rect.width + 0.5
+    finally:
+        doc.close()
+
+
+def test_multi_page_index_links_work_on_every_index_page(tmp_path):
+    # Regression (Codex review): rows used to be drawn while later index pages
+    # were still missing, so the first page's link targets failed the bounds
+    # guard and were silently dropped. Every index page must carry its links.
+    src = _pdf(tmp_path)
+    findings = [
+        _f(f"finding number {i}", source="M-101.pdf", rect=[10, 10 + 5 * i, 60, 22 + 5 * i])
+        for i in range(50)                     # > one index page of rows
+    ]
+    assign_qc_ids(findings)
+    out = tmp_path / "M-101_reviewed.pdf"
+    annotate_pdf(src, findings, out)
+    doc = pymupdf.open(str(out))
+    try:
+        assert doc.page_count == 3             # 2 index pages + 1 source page
+        assert "(page 1/2)" in doc[0].get_text()
+        assert "(page 2/2)" in doc[1].get_text()
+        links0 = doc[0].get_links()
+        links1 = doc[1].get_links()
+        assert len(links0) > 0 and len(links1) > 0
+        assert len(links0) + len(links1) == 50
+        # Every link targets the (shifted) source page.
+        assert all(l["page"] == 2 for l in links0 + links1)
+    finally:
+        doc.close()
+
+
 def test_rejected_never_inked_even_with_qc_id(tmp_path):
     src = _pdf(tmp_path)
     rejected = _f("wrong", source="M-101.pdf", rect=[10, 10, 60, 30], status="REJECTED")

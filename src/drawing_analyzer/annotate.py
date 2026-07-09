@@ -372,17 +372,35 @@ def _add_margin_callouts(
         return 0
     words = list((meta or {}).get("words") or [])
     page_w, page_h = page.rect.width, page.rect.height
-    bx0, by0, bx1, by1 = find_clear_band(words, page_w, page_h)
+    bx0, by0, bx1, _by1 = find_clear_band(words, page_w, page_h)
 
     written = 0
-    x, y = bx0, by0
+    page_bottom = page_h - 2.0
+    x = bx0
+    # First row: the band top, pulled up if the band is shallower than a box.
+    first_row_y = min(by0, max(2.0, page_bottom - _CALLOUT_H))
+    y = first_row_y
+    stacking_up = False
     for finding in findings:
         if x + _CALLOUT_W > bx1:                      # wrap to the next row
             x = bx0
-            y += _CALLOUT_H + _CALLOUT_GAP
-        if y + _CALLOUT_H > by1:                      # band full — keep stacking below,
-            _log.info("margin band full on %s; callouts continue below it", page)
-            by1 = y + _CALLOUT_H                      # honest: never silently drop ink
+            if not stacking_up:
+                nxt = y + _CALLOUT_H + _CALLOUT_GAP
+                if nxt + _CALLOUT_H <= page_bottom:
+                    y = nxt
+                else:
+                    # No room below the band: stack upward from the band top so
+                    # every box stays on the visible page. Off-page ink would
+                    # pass the annot count but be invisible to the reviewer —
+                    # the one failure this feature exists to avoid. Upward rows
+                    # may overlap sheet content (visible beats hidden); log it.
+                    stacking_up = True
+                    y = first_row_y
+                    _log.info(
+                        "margin band full; stacking callouts upward on the page"
+                    )
+            if stacking_up:
+                y = max(2.0, y - (_CALLOUT_H + _CALLOUT_GAP))
         box = pymupdf.Rect(x, y, x + _CALLOUT_W, y + _CALLOUT_H)
         unverified = _is_unverified(finding)
         color = _color(finding)
@@ -454,8 +472,15 @@ def _insert_index_pages(
         return 0
     n_pages = (len(entries) + _INDEX_ROWS_PER_PAGE - 1) // _INDEX_ROWS_PER_PAGE
 
+    # Insert EVERY index page before drawing any rows: link targets are numbered
+    # for the final document, so drawing while later index pages are still
+    # missing would make those targets fail the bounds guard and silently drop
+    # the first page's links on a multi-page index. Pages are re-fetched by
+    # index below — inserting a page invalidates previously-held Page objects.
     for i in range(n_pages):
-        page = doc.new_page(pno=i, width=_INDEX_PAGE_W, height=_INDEX_PAGE_H)
+        doc.new_page(pno=i, width=_INDEX_PAGE_W, height=_INDEX_PAGE_H)
+    for i in range(n_pages):
+        page = doc[i]
         title = INDEX_PAGE_LABEL + (f"  (page {i + 1}/{n_pages})" if n_pages > 1 else "")
         page.insert_text((36, 42), title, fontsize=13, fontname="hebo", color=(0.1, 0.1, 0.1))
         page.insert_text(
