@@ -796,6 +796,16 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 + " with the buttons below.",
                 level="accent",
             )
+        # Deterministic auditors' balance column: relationships that checked out.
+        stats = getattr(ctx, "audit_stats", None) or {}
+        arith_checked = int(stats.get("arithmetic_checked", 0) or 0)
+        if arith_checked:
+            arith_ok = int(stats.get("arithmetic_matched", 0) or 0)
+            self._log(
+                f"Deterministic checks: {arith_ok} of {arith_checked} numeric "
+                "relationship(s) checked out ✓.",
+                level="muted",
+            )
         if has_text:
             self._log(
                 "Digest ready — click “Save HTML Report…” for a navigable, "

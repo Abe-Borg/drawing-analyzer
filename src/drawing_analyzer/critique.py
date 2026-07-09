@@ -57,11 +57,13 @@ from .digest import (
     _message_usage,
     _retry_backoff_seconds,
     build_user_content,
+    claims_from_cache,
     findings_from_cache,
     parse_findings,
+    parse_numeric_claims,
 )
 from .digest_cache import critique_cache_key
-from .models import Finding, RenderedSheet
+from .models import Finding, NumericClaim, RenderedSheet
 from .profiles import (
     Profile,
     build_checklist_prompt,
@@ -180,17 +182,31 @@ _CRITIQUE_FINDINGS_INSTRUCTION = """\
 
 FINDINGS (machine-read — the ONLY thing you output):
 Output a SINGLE fenced code block labeled json and nothing else — no prose \
-before or after it — containing {"findings": [ ... ]}. Each finding is an object \
-with: sheet_id; category (one of code, conflict, coordination, question); \
-severity (one of high, medium, low); text (the finding, at most two sentences); \
-source_quote (COPY VERBATIM from the SHEET TEXT LAYER — exact characters — or "" \
-for a purely graphical finding or an absence); anchor_hint (set to "SHEET" for a \
-sheet-level finding or an absence — something that should be on the sheet but is \
-not — otherwise omit it); tile ([row, col] of the tile where you saw it, or omit \
-for a whole-sheet finding); refs (an array of any code or spec references you \
-believe apply — cite conservatively). Emit at most 40 findings, most important \
-first; emit {"findings": []} only if the sheet is genuinely clean. Put nothing \
-but the JSON object inside the block."""
+before or after it — containing {"findings": [ ... ], "claims": [ ... ]}. Each \
+finding is an object with: sheet_id; category (one of code, conflict, \
+coordination, question); severity (one of high, medium, low); text (the finding, \
+at most two sentences); source_quote (COPY VERBATIM from the SHEET TEXT LAYER — \
+exact characters — or "" for a purely graphical finding or an absence); \
+anchor_hint (set to "SHEET" for a sheet-level finding or an absence — something \
+that should be on the sheet but is not — otherwise omit it); tile ([row, col] of \
+the tile where you saw it, or omit for a whole-sheet finding); refs (an array of \
+any code or spec references you believe apply — cite conservatively). Emit at \
+most 40 findings, most important first; emit "findings": [] only if the sheet is \
+genuinely clean.
+
+Also include a "claims" array in the SAME object. A claim is a numeric \
+relationship shown on the sheet that a reviewer should check by CALCULATION — you \
+do NOT do the arithmetic, you only transcribe the numbers exactly as printed and \
+say how they should relate. Each claim: sheet_id; quote (COPY VERBATIM the \
+on-sheet text the numbers come from); kind (one of sum, product, factor); terms \
+(the numbers themselves — the addends of a column that should total, or a base \
+value and its multiplier — as they appear on the sheet); expected (the stated \
+result those terms should combine to — the printed total, or the stated design \
+value); note (a short phrase naming the relationship). Emit claims only for \
+relationships actually on the sheet (a column/row total, density × area = demand, \
+base area × 1.3 = design area); emit "claims": [] if there are none. Never \
+compute or "fix" the numbers — report them as printed and let the reviewer's \
+calculation catch any error. Put nothing but the JSON object inside the block."""
 
 # Folded into the critique cache key so any edit to the persona, the task line,
 # or the findings instruction re-critiques rather than serving a stale read.
@@ -454,9 +470,15 @@ def merge_finding_groups(groups: list[list[Finding]]) -> list[Finding]:
 
 @dataclass
 class CritiqueResult:
-    """The outcome of critiquing one sheet (findings + token cost + provenance)."""
+    """The outcome of critiquing one sheet (findings + token cost + provenance).
+
+    ``claims`` are the numeric relationships the reviewer transcribed (Phase 14);
+    the deterministic arithmetic auditor checks them downstream. They ride the
+    same cache entry as the merged findings.
+    """
 
     findings: list[Finding] = field(default_factory=list)
+    claims: list[NumericClaim] = field(default_factory=list)
     input_tokens: int = 0
     output_tokens: int = 0
     runs: int = 0            # runs that returned findings (0 = all failed)
@@ -475,14 +497,14 @@ def critique_sheet(
     max_retries: int = DEFAULT_CRITIQUE_MAX_RETRIES,
     sleep: Any = time.sleep,
     checklist: str = "",
-) -> tuple[list[Finding], int, int, str | None]:
-    """One critique read of a rendered sheet → ``(findings, in_tok, out_tok, err)``.
+) -> tuple[list[Finding], list[NumericClaim], int, int, str | None]:
+    """One critique read → ``(findings, claims, in_tok, out_tok, err)``.
 
     Mirrors :func:`drawing_analyzer.digest.digest_sheet`'s call loop (transient
     retry + backoff reused verbatim; a permanent failure returns immediately). On
-    any failure ``findings`` is empty and ``err`` is a sanitized message — the
-    caller degrades, the run never dies (I-3). ``checklist`` is the review-profile
-    block to inject into the prompt (empty for a plain critique).
+    any failure ``findings`` / ``claims`` are empty and ``err`` is a sanitized
+    message — the caller degrades, the run never dies (I-3). ``checklist`` is the
+    review-profile block to inject into the prompt (empty for a plain critique).
     """
     model = model or critique_model()
     if client is None:
@@ -509,7 +531,7 @@ def critique_sheet(
                 sleep(_retry_backoff_seconds(attempt))
                 attempt += 1
                 continue
-            return [], 0, 0, _clean_error(exc)
+            return [], [], 0, 0, _clean_error(exc)
 
     raw = _message_text(resp)
     in_tok, out_tok = _message_usage(resp)
@@ -519,13 +541,15 @@ def critique_sheet(
         # the run counts as failed (not merged, not cached) and is re-attempted
         # next time rather than being frozen in cache as "reviewed, nothing found".
         stop = _get(resp, "stop_reason")
-        return [], in_tok, out_tok, f"empty critique (stop_reason={stop!r})"
+        return [], [], in_tok, out_tok, f"empty critique (stop_reason={stop!r})"
     # The critique emits only the findings block; parse_findings returns the
-    # findings (the empty "prose" before the block is discarded).
+    # findings (the empty "prose" before the block is discarded) and
+    # parse_numeric_claims lifts the "claims" array from the same block.
     _, findings, note = parse_findings(raw, rendered.ref)
+    claims = parse_numeric_claims(raw, rendered.ref)
     if note:
         _log.info("critique parse: %s (%s)", note, rendered.ref.display_label)
-    return findings, in_tok, out_tok, None
+    return findings, claims, in_tok, out_tok, None
 
 
 def critique_sheet_self_consistent(
@@ -574,6 +598,7 @@ def critique_sheet_self_consistent(
         if hit is not None:
             return CritiqueResult(
                 findings=findings_from_cache(hit, rendered.ref),
+                claims=claims_from_cache(hit),
                 input_tokens=int(hit.get("input_tokens", 0) or 0),
                 output_tokens=int(hit.get("output_tokens", 0) or 0),
                 runs=int(hit.get("runs", runs) or runs),
@@ -582,10 +607,11 @@ def critique_sheet_self_consistent(
             )
 
     run_groups: list[list[Finding]] = []
+    all_claims: list[NumericClaim] = []
     total_in = total_out = 0
     errors: list[str] = []
     for i in range(runs):
-        findings, in_tok, out_tok, err = critique_sheet(
+        findings, claims, in_tok, out_tok, err = critique_sheet(
             rendered,
             client=client,
             model=model,
@@ -602,6 +628,7 @@ def critique_sheet_self_consistent(
             errors.append(err)
             continue
         run_groups.append(findings)
+        all_claims.extend(claims)
 
     if not run_groups:
         return CritiqueResult(
@@ -613,6 +640,7 @@ def critique_sheet_self_consistent(
         )
 
     merged = merge_self_consistency(run_groups)
+    claims = _dedup_claims(all_claims)
     _log.info(
         "critique: %d run(s), %d merged finding(s) (%s)",
         len(run_groups), len(merged), rendered.ref.display_label,
@@ -630,6 +658,7 @@ def critique_sheet_self_consistent(
             cache_key,
             {
                 "findings": [f.to_dict() for f in merged],
+                "claims": [c.to_dict() for c in claims],
                 "input_tokens": total_in,
                 "output_tokens": total_out,
                 "runs": len(run_groups),
@@ -639,8 +668,32 @@ def critique_sheet_self_consistent(
 
     return CritiqueResult(
         findings=merged,
+        claims=claims,
         input_tokens=total_in,
         output_tokens=total_out,
         runs=len(run_groups),
         error=None,
     )
+
+
+def _dedup_claims(claims: list[NumericClaim]) -> list[NumericClaim]:
+    """Collapse identical claims (the self-consistency runs transcribe the same
+    relationship twice) so the arithmetic tally isn't double-counted. Order-stable.
+    """
+    seen: set[tuple] = set()
+    out: list[NumericClaim] = []
+    for c in claims:
+        key = (
+            (c.source_name or "").strip().lower(),
+            int(c.page_index or 0),
+            (c.sheet_id or "").strip().upper(),
+            (c.kind or "").strip().lower(),
+            (c.quote or "").strip(),
+            tuple(str(t) for t in c.terms),
+            str(c.expected),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(c)
+    return out

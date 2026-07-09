@@ -36,7 +36,7 @@ from .digest import (
     sheet_digest_from_cache_entry,
 )
 from .digest_cache import digest_cache_key_level1
-from .models import Finding, SheetGeometry
+from .models import Finding, NumericClaim, SheetGeometry
 from .render import iter_rendered_sheets, iter_sheet_prescan, list_sheets
 
 # ``progress(done, total, label)`` — called once as each sheet *finishes*
@@ -110,16 +110,20 @@ class DrawingContext:
     focus_report_text: str = ""
     # --- QC findings (populated when reference_audit / qc_markups are on) ------
     # Model findings parsed from the digests, anchored and (when qc_markups)
-    # verified. ``reference_findings`` are the deterministic reference-audit
-    # findings (already anchored, DETERMINISTIC). ``reviewed_pdf_paths`` are the
+    # verified. ``reference_findings`` are the deterministic-auditor findings
+    # (Phase 14: references + arithmetic + naming + title-block + sheet-index; all
+    # already anchored, DETERMINISTIC). ``reviewed_pdf_paths`` are the
     # ``*_reviewed.pdf`` files written when qc_markups is on; ``sheet_geometries``
     # carries each sheet's text/geometry for the findings exports; ``qc_work_dir``
     # holds the run's evidence crops + reviewed PDFs until they are exported.
+    # ``audit_stats`` is the deterministic battery's checks-run/passed tally (e.g.
+    # the "N numeric relationships checked ✓" line).
     findings: list[Finding] = field(default_factory=list)
     reference_findings: list[Finding] = field(default_factory=list)
     reviewed_pdf_paths: list[Path] = field(default_factory=list)
     sheet_geometries: list[Any] = field(default_factory=list)
     qc_work_dir: Path | None = None
+    audit_stats: dict = field(default_factory=dict)
 
     @property
     def ok_sheet_count(self) -> int:
@@ -486,6 +490,7 @@ class _QCResult:
     work_dir: Path | None = None
     input_tokens: int = 0
     output_tokens: int = 0
+    audit_stats: dict = field(default_factory=dict)
 
 
 def _run_critique_stage(
@@ -500,7 +505,7 @@ def _run_critique_stage(
     total: int,
     max_workers: int | None,
     profiles: list | None = None,
-) -> tuple[list[Finding], int, int]:
+) -> tuple[list[Finding], list[NumericClaim], int, int]:
     """Critique every sheet (Phase 11): re-render, then self-consistent critique.
 
     Path-agnostic — it re-renders from the PDFs because none of the digest paths
@@ -512,14 +517,16 @@ def _run_critique_stage(
     optimization). Additive and non-fatal: a per-sheet failure is logged and
     contributes no findings; the run continues.
 
-    Returns ``(critique_findings, input_tokens, output_tokens)``; the findings are
-    sorted deterministically so the pooled result is independent of completion
-    order (I-7).
+    Returns ``(critique_findings, claims, input_tokens, output_tokens)``; the
+    findings are sorted deterministically so the pooled result is independent of
+    completion order (I-7). ``claims`` are the numeric relationships the critique
+    transcribed (Phase 14), fed to the deterministic arithmetic auditor.
     """
     from .critique import critique_sheet_self_consistent
 
     workers = _resolve_workers(max_workers, total)
     findings: list[Finding] = []
+    claims: list[NumericClaim] = []
     in_tok = out_tok = 0
     done = 0
 
@@ -540,6 +547,7 @@ def _run_critique_stage(
                 if res.error:
                     _log.warning("critique degraded for a sheet: %s", res.error)
                 findings.extend(res.findings)
+                claims.extend(res.claims)
                 # A cache hit made no API call this run, so exclude its (original)
                 # token cost — keeping run totals honest, as the digest path does
                 # for cached sheets.
@@ -564,8 +572,11 @@ def _run_critique_stage(
             _collect_one()
 
     findings.sort(key=lambda f: (f.source_name, f.page_index, f.id))
-    _log.info("critique: %d finding(s) across %d sheet(s)", len(findings), total)
-    return findings, in_tok, out_tok
+    _log.info(
+        "critique: %d finding(s), %d numeric claim(s) across %d sheet(s)",
+        len(findings), len(claims), total,
+    )
+    return findings, claims, in_tok, out_tok
 
 
 def _run_qc_stages(
@@ -584,6 +595,7 @@ def _run_qc_stages(
     errors: list[str],
     critique_findings: list[Finding] | None = None,
     cross_findings: list[Finding] | None = None,
+    claims: list[NumericClaim] | None = None,
 ) -> _QCResult:
     """Run the QC pipeline after the digests: audit → anchor → verify → markups.
 
@@ -614,19 +626,30 @@ def _run_qc_stages(
     if cross_findings:
         findings = findings + list(cross_findings)
     reference_findings: list[Finding] = []
+    audit_stats: dict = {}
     work_dir = qc_work_dir
 
     if reference_audit_enabled and geometries:
         if progress is not None:
             progress(total, total, "Auditing references")
         try:
-            from .reference_audit import audit_references
+            from .auditors import run_auditors
 
-            reference_findings = audit_references(geometries)
-            _log.info("reference audit: %d finding(s)", len(reference_findings))
+            # The whole deterministic battery (Phase 14): references, arithmetic
+            # (over the claims the critique / cross-QC transcribed), naming,
+            # title-block, and sheet-index. All findings are DETERMINISTIC and
+            # (where a quote exists) already anchored, so they bypass verification
+            # and land in the reference/deterministic bucket.
+            audit_res = run_auditors(geometries, claims=claims or [])
+            reference_findings = audit_res.findings
+            audit_stats = audit_res.stats
+            _log.info(
+                "auditors: %d deterministic finding(s); %s",
+                len(reference_findings), audit_stats,
+            )
         except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
-            errors.append(f"Reference audit: {exc}")
-            _log.warning("reference audit failed: %s", exc)
+            errors.append(f"Deterministic auditors: {exc}")
+            _log.warning("deterministic auditors failed: %s", exc)
 
     # Anchor model findings (reference findings arrive already anchored).
     if findings and geometries and (
@@ -735,6 +758,7 @@ def _run_qc_stages(
         work_dir=work_dir,
         input_tokens=v_in,
         output_tokens=v_out,
+        audit_stats=audit_stats,
     )
 
 
@@ -978,6 +1002,9 @@ def extract_drawing_context(
     # stage below. Re-renders each sheet (the digest images are gone by now), so
     # it runs before the QC stages that consume the pooled findings.
     critique_findings: list[Finding] = []
+    # Numeric claims (Phase 14) transcribed by the critique / cross-sheet QC passes,
+    # pooled and handed to the deterministic arithmetic auditor below.
+    numeric_claims: list[NumericClaim] = []
     if critique:
         if progress is not None:
             progress(total, total, "Critiquing sheets")
@@ -991,11 +1018,12 @@ def extract_drawing_context(
                     len(resolved_profiles),
                     ", ".join(p.name for p in resolved_profiles),
                 )
-            critique_findings, c_in, c_out = _run_critique_stage(
+            critique_findings, c_claims, c_in, c_out = _run_critique_stage(
                 paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
                 client=client, cache=cache, progress=progress, total=total,
                 max_workers=max_workers, profiles=resolved_profiles,
             )
+            numeric_claims.extend(c_claims)
             in_tok += c_in
             out_tok += c_out
         except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
@@ -1015,6 +1043,7 @@ def extract_drawing_context(
 
             cross_res = cross_sheet_qc(sheets, sheet_geometries, client=client)
             cross_findings = cross_res.findings
+            numeric_claims.extend(cross_res.claims)
             in_tok += cross_res.input_tokens
             out_tok += cross_res.output_tokens
             if cross_res.error:
@@ -1037,7 +1066,7 @@ def extract_drawing_context(
             markup_verified_only=markup_verified_only, verify_enabled=verify_findings,
             client=client, qc_work_dir=qc_work_dir, progress=progress,
             total=total, errors=errors, critique_findings=critique_findings,
-            cross_findings=cross_findings,
+            cross_findings=cross_findings, claims=numeric_claims,
         )
         in_tok += qc.input_tokens
         out_tok += qc.output_tokens
@@ -1135,6 +1164,7 @@ def extract_drawing_context(
         reviewed_pdf_paths=qc.reviewed_pdf_paths,
         sheet_geometries=sheet_geometries,
         qc_work_dir=qc.work_dir,
+        audit_stats=qc.audit_stats,
     )
 
 

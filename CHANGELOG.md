@@ -6,6 +6,49 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Deterministic auditor expansion (Phase 14)
+
+More high-precision, zero-API markups for free — the class of defect a vision
+model is unreliable at but code is exact at.
+
+#### Added
+
+- **`auditors/` package.** The single reference auditor grew into a battery;
+  `run_auditors(rendered_sheets, claims=…)` runs the whole set and returns the
+  combined `DETERMINISTIC` findings plus a `stats` tally. Each auditor is isolated
+  so one failing never loses the others (I-3), and the package imports no PDF
+  engine (I-5). `reference_audit=True` (the GUI **Reference audit** checkbox) now
+  runs the whole battery, and its checks-passed tally lands on `ctx.audit_stats`.
+- **Arithmetic auditor.** The critique and cross-sheet QC passes now additionally
+  emit a `claims` array — numeric relationships they *transcribed* off a sheet
+  (`{sheet_id, quote, kind: sum|product|factor, terms, expected, note}`). The host
+  does the arithmetic itself (exact `Decimal`, tolerant of commas / units /
+  fractions like `2 1/2`), **never `eval`, never the model's math**, and flags only
+  relationships that genuinely don't add up (a flow-test total, a DIPA row missing
+  its +30%). Matches are counted and surfaced as *"N numeric relationships checked
+  ✓"*. New `NumericClaim` model; `parse_numeric_claims()` lifts claims from the same
+  fenced block the findings come from; the critique caches claims alongside findings.
+- **Naming-consistency auditor.** Harvests the set's tag lexicon, clusters tags
+  sharing an alphabet shape within a small edit distance, and flags a rare spelling
+  that drifts from the established one (`C1R` vs `C1-R`; a one-off `A1-2` against an
+  `A2` vocabulary) — without flagging a legitimately distinct vocabulary
+  (`A1`/`A2`/`A3`). Low-severity questions, every flagged occurrence anchored.
+- **Title-block auditor.** Learns each sheet's title-block x-band from its sheet-ID
+  location and flags a field value (project number, date) that drifts to a close
+  variant of the set-wide norm on one sheet. Conservative: fires only on a variant
+  of a value most of the set agrees on, never on mere absence.
+- **Sheet-index auditor.** Detects a drawing index and diffs it against the set
+  inventory both ways — an entry listed but not present ("in the provided set"), or
+  a set sheet the index omits.
+- **`reference_audit.py` is now a backward-compatibility shim** re-exporting the
+  auditor from its canonical home `drawing_analyzer.auditors.references`.
+
+#### Changed
+
+- The critique and cross-sheet QC findings instructions gained the `claims` array
+  (the critique prompt version bumps, re-critiquing rather than serving a stale
+  read). The reviewed-PDF gating, prose digest, and `combined_text` are untouched.
+
 ### Exhaustive QC — the critique pass
 
 Part II of the QC work: make the markup read like an experienced engineer's

@@ -71,8 +71,9 @@ digest; a focus adds the Focus Report on top (see [Per-run focus](#per-run-focus
 
 Two **QC review** checkboxes sit beside the focus:
 
-- **Reference audit** — a free, zero-API pass that flags stale/missing
-  cross-references (see [Reference audit](#reference-audit)).
+- **Reference audit** — a free, zero-API pass that runs the whole deterministic
+  auditor battery: references, arithmetic, naming, title-block, and sheet-index
+  (see [Deterministic auditors](#deterministic-auditors)).
 - **QC Markups** — runs the anchor → verify → cloud chain and produces a
   **marked-up PDF + findings CSV** (see [Reviewed PDFs & findings CSV](#reviewed-pdfs--findings-csv)).
   The sub-toggle **Verified findings only** (on by default) keeps only
@@ -121,7 +122,7 @@ ctx = extract_drawing_context(
     synthesize=True,    # add a cross-sheet overview
     focus="the rooms, and what types of plumbing fixtures each has",  # optional
     # QC review (all optional, off by default):
-    reference_audit=True,        # free, zero-API stale/missing-reference audit
+    reference_audit=True,        # free, zero-API deterministic auditor battery
     qc_markups=True,             # anchor → verify → cloud; write reviewed PDFs
     markup_verified_only=True,   # cloud only verified/deterministic findings
     verify_findings=True,        # run the per-finding verification pass
@@ -147,9 +148,10 @@ for pdf in ctx.reviewed_pdf_paths:   # the *_reviewed.pdf files (qc_markups only
 `SheetDigest`s, token totals, errors, optional `synthesis_text`, and — when a
 focus was given — `focus` / `focus_report_text`). When a QC flag is on it also
 carries the QC record: `findings` (the model's, anchored + verified),
-`reference_findings` (the deterministic auditor's), the `all_findings` /
-`finding_count` / `clouded_finding_count` conveniences, `reviewed_pdf_paths`, the
-lightweight `sheet_geometries`, and `qc_work_dir` (holding `evidence/` crops and
+`reference_findings` (the deterministic auditors', anchored + `DETERMINISTIC`),
+the `all_findings` / `finding_count` / `clouded_finding_count` conveniences,
+`reviewed_pdf_paths`, the lightweight `sheet_geometries`, `audit_stats` (the
+auditors' checks-passed tally), and `qc_work_dir` (holding `evidence/` crops and
 the reviewed PDFs). `write_drawing_export(ctx, parent_dir, ...)` folds all of it
 into the export folder — `findings.json`, `findings.csv`, `sheet_text/<sheet>.txt`
 per sheet, the `*_reviewed.pdf` copies, and the `evidence/` crops — alongside the
@@ -161,7 +163,7 @@ prose digest and HTML report.
 PDFs → list sheets → render (overview + 6×6 tiles) + extract vector text layer
      → per-sheet vision digest (images + verbatim text layer)
      → optional cross-sheet synthesis → optional focus report → combined Markdown
-     → optional QC: reference audit + anchor → verify → cloud (reviewed PDFs, CSV)
+     → optional QC: deterministic auditors + anchor → verify → cloud (reviewed PDFs, CSV)
 ```
 
 - **Text-layer grounding.** Before rasterizing, each sheet's vector text layer is
@@ -426,9 +428,9 @@ call, using a tiered strategy that records which tier fired:
   **hallucination signal**: the finding is kept and flagged, but never clouded by
   default (a wrong cloud on an issued drawing is worse than a missing one).
 
-Findings the deterministic auditors already placed (the reference audit) arrive
-pre-anchored and are left untouched. Like the tile geometry, the resolver imports
-no PDF engine — it works on the extracted word rectangles alone.
+Findings the [deterministic auditors](#deterministic-auditors) already placed
+arrive pre-anchored and are left untouched. Like the tile geometry, the resolver
+imports no PDF engine — it works on the extracted word rectangles alone.
 
 ## Verification pass
 
@@ -448,7 +450,7 @@ finding status:
 | `VERIFIED` | verifier `CONFIRMED` | the crop shows the finding is correct |
 | `REJECTED` | verifier `CONTRADICTED` | the crop shows the finding is wrong — kept in the record but never clouded |
 | `UNCERTAIN` | verifier `NOT_VISIBLE` (or a garbled reply) | can't be decided from this crop (e.g. it depends on another sheet) — a perfectly fine outcome |
-| `DETERMINISTIC` | the offline auditors | trusted without a model re-check (reference audit, etc.) |
+| `DETERMINISTIC` | the offline auditors | trusted without a model re-check (references, arithmetic, naming, title-block, sheet-index) |
 | `SKIPPED` | — | nothing to look at (unanchored), no crop, or the pass was unavailable (no key) |
 
 The pass is additive and non-fatal: crops render sequentially (PyMuPDF is not
@@ -484,39 +486,68 @@ Every finding — clouded or not — is also written to **`findings.csv`**, one 
 per finding with every field flattened, UTF-8 with a BOM and CRLF line endings so
 Excel on Windows opens it cleanly.
 
-## Reference audit
+## Deterministic auditors
 
-Construction sheets constantly point at each other — *"SEE DRAWING F-D-01-1"*,
-detail bubbles like `04/F-G-02-0`, spec citations like `23 21 13`. When a sheet
-is revised those pointers go stale (a note still says `F-D-01-0` after the sheet
-reissued as `F-D-01-1`) or send the reader to a sheet that isn't in the package.
+Alongside the model reads, the analyzer runs a **battery of deterministic,
+zero-API auditors** over the extracted vector text layers — no model call,
+milliseconds of CPU. They catch the class of defect a vision model is *unreliable*
+at but code is *exact* at: a stale cross-reference, a column that doesn't add up, a
+tag spelled two ways, a title-block field that drifted, an index that disagrees
+with the set. Every finding they emit is anchored to its own word rectangle and
+marked **`DETERMINISTIC`** — trusted without a model re-check — so it is clouded
+onto the reviewed PDFs by default when QC Markups is on.
 
-The analyzer includes a **deterministic, zero-API reference auditor** that reads
-only the extracted vector text layers — no model call, milliseconds of CPU — and
-flags broken cross-references. It:
+They live in the `drawing_analyzer.auditors` package; `run_auditors(rendered_sheets,
+claims=…)` runs the whole battery and returns the combined findings plus a small
+`stats` tally. Each auditor is isolated, so one failing never loses the others
+(I-3). The battery wires into a run through `reference_audit=True` (or the GUI's
+**Reference audit** checkbox); its findings arrive on `ctx.reference_findings`,
+join `ctx.all_findings`, and the checks-passed tally lands on `ctx.audit_stats`.
 
-- **learns the set's own sheet-ID convention** by detecting each sheet's ID from
-  its title block (bottom-right) and generalizing the grammar from that harvest,
-  so it works across offices without a hardcoded numbering scheme;
-- **harvests references** — trigger phrases (`SEE DRAWING/SHEET X`, `SEE X FOR`,
-  `REFER TO X`, `PER X`, `ON DRAWING X`), detail bubbles (`NN/<sheet-id>`), and
-  CSI spec sections (collected as informational, since the drawing set can't
-  confirm a spec reference);
-- **resolves** each against the set: present → no finding; well-formed but
-  **not present in the provided set** → a finding at the reference's exact
-  location, with the closest in-set ID suggested by edit distance; a malformed
-  pointer → flagged as a likely typo.
+| Auditor | Module | What it catches | Anchoring | Severity |
+|---|---|---|---|---|
+| **References** | `auditors.references` | Stale / missing cross-references (`SEE DRAWING X`, detail bubbles `NN/X`, CSI spec sections) resolved against the set inventory | the reference's own words | medium (miss), low (spec/malformed) |
+| **Arithmetic** | `auditors.arithmetic` | Numbers that don't add up — column totals, density × area = demand, base area × 1.3 = design area — **computed by the host, never the model** | the claim's verbatim quote | graded by magnitude |
+| **Naming** | `auditors.naming` | The same thing tagged two ways across the set (`C1R` vs `C1-R`; a one-off `A1-2` drifting from the `A2` vocabulary) | each drifting occurrence | low (question) |
+| **Title-block** | `auditors.titleblock` | A project-number / date / field value that drifts on one sheet from the set-wide norm | the drifting token | low (coordination) |
+| **Sheet-index** | `auditors.sheet_index` | A drawing index that lists a sheet not in the set, or omits one that is | the index entry / header | medium / low |
 
-It never claims a referenced sheet *doesn't exist* — only that it *isn't in the
-set you provided* — because a partial set legitimately omits sheets. Every
-reference finding is anchored to its own word rectangle and marked
-`DETERMINISTIC` (trusted without a model re-check). On a real 8-sheet
-fire-protection set this caught three genuine coordination errors. The auditor is
-exposed as `drawing_analyzer.reference_audit.audit_references(rendered_sheets)`,
-and wires into a run through `reference_audit=True` (or the GUI's **Reference
-audit** checkbox): its findings arrive on `ctx.reference_findings`, join
-`ctx.all_findings`, and — since they are already anchored and `DETERMINISTIC` —
-are clouded onto the reviewed PDFs by default when QC Markups is also on.
+The **references** auditor learns the set's own sheet-ID grammar from each sheet's
+title-block ID (so it works across offices without a hardcoded numbering scheme),
+harvests trigger phrases and detail bubbles, and resolves each pointer: present →
+no finding; well-formed but **not present in the provided set** → a finding with
+the closest in-set ID suggested by edit distance; malformed → a likely typo. It
+never claims a sheet *doesn't exist* — only that it *isn't in the set you
+provided* — because a partial set legitimately omits sheets. On a real 8-sheet
+fire-protection set this alone caught three genuine coordination errors.
+
+### The numeric-claims contract (arithmetic auditor)
+
+The arithmetic auditor embodies the tool's core principle — *coverage proposes,
+precision disposes* — for the one thing a vision model is worst at: mental
+arithmetic on a table it just transcribed (the prototype watched one misread a
+flow-test total, `540` → `660`). So the model never calculates. The critique and
+cross-sheet QC passes emit, alongside their findings, a **`claims`** array — the
+numbers they read and how those should relate:
+
+```json
+{
+  "sheet_id": "F-D-01-1",
+  "quote": "20  20  20   TOTAL  540",
+  "kind": "sum",                  // "sum" | "product" | "factor"
+  "terms": [20, 20, 20],
+  "expected": 540,
+  "note": "flow-test column total"
+}
+```
+
+The host then **does the arithmetic itself** — parsing every term to an exact
+decimal (tolerant of commas, units, and fractions like `2 1/2`), adding or
+multiplying with the standard library, **never `eval`, never the model's answer**
+— and raises a finding only when the numbers genuinely don't add up (`base area ×
+1.3 = 1950`, but the DIPA row still states `1500`). Relationships that check out
+are counted, not flagged, and surfaced in the report as *"N numeric relationships
+checked ✓"* — the balance column of a real review.
 
 ## Per-run focus
 
@@ -552,6 +583,9 @@ runs.
 | `DRAWING_ANALYZER_CRITIQUE_MODEL` | Opus 4.8 | Critique-pass vision model (`critique=True`). |
 | `DRAWING_ANALYZER_CROSS_QC_MODEL` | Opus 4.8 | Cross-sheet QC model, text-only (`cross_qc=True`). |
 | `DRAWING_ANALYZER_CRITIQUE_RUNS` | `2` | Critique self-consistency reads to merge (`1` disables it). |
+| `DRAWING_ANALYZER_ARITHMETIC_REL_TOL` | `0.01` | Arithmetic auditor's relative match tolerance (drawings round). |
+| `DRAWING_ANALYZER_NAMING_DOMINANT_MIN_FREQ` | `2` | Naming auditor: occurrences that make a tag "established" vocabulary. |
+| `DRAWING_ANALYZER_NAMING_DRIFT_MAX_FREQ` | `2` | Naming auditor: a tag is only flagged as drift when this rare. |
 | `DRAWING_ANALYZER_PROFILES_DIR` | `~/.drawing_analyzer/profiles` | User review-profile directory (wins over built-ins on name). |
 | `DRAWING_ANALYZER_MAX_WORKERS` | `4` | Real-time digest concurrency (`1` = sequential). |
 | `DRAWING_ANALYZER_UPLOAD_WORKERS` | `6` | Files-API image-upload concurrency per sheet (`1` = sequential). |

@@ -26,7 +26,7 @@ from .core.api_config import (
 from .core.tokenizer import estimate_image_tokens_total
 from .diagnostics import get_logger
 from .digest_cache import digest_cache_key
-from .models import Finding, ImageTile, RenderedSheet, SheetRef
+from .models import CLAIM_KINDS, Finding, ImageTile, NumericClaim, RenderedSheet, SheetRef
 
 _log = get_logger()
 
@@ -567,6 +567,11 @@ def _message_usage(resp: Any) -> tuple[int, int]:
 # for the same cap; anything beyond is truncated, most-important-first).
 MAX_FINDINGS_PER_SHEET = 40
 
+# At most this many numeric claims (Phase 14) parsed from one response — the same
+# tolerant "last fenced json block" the findings come from also carries a "claims"
+# array the arithmetic auditor checks. Capped, most-important-first, like findings.
+MAX_CLAIMS_PER_SHEET = 40
+
 # Categories the *model* may emit. "reference" is intentionally excluded — that
 # category belongs to the deterministic reference auditor, not the vision read.
 _MODEL_FINDING_CATEGORIES = frozenset({"code", "conflict", "coordination", "question"})
@@ -773,6 +778,93 @@ def findings_from_cache(hit: dict, ref: SheetRef) -> list[Finding]:
         if isinstance(item, dict):
             try:
                 out.append(Finding.from_dict(item))
+            except Exception:  # noqa: BLE001 - a bad cached row must never sink a run
+                continue
+    return out
+
+
+def _scalar(value: Any) -> bool:
+    """A claim term/expected is a JSON scalar (number or string), not a container.
+
+    ``bool`` is a JSON-``true``/``false``, not a number the arithmetic auditor
+    should treat as ``1``/``0`` — reject it so a stray boolean never becomes a term.
+    """
+    return isinstance(value, (int, float, str)) and not isinstance(value, bool)
+
+
+def _validate_claim_item(item: Any, ref: SheetRef | None) -> NumericClaim | None:
+    """Build a validated :class:`NumericClaim` from one model item, or drop it.
+
+    Requires a recognized ``kind``, a non-empty ``terms`` list of scalars, and a
+    scalar ``expected``. Numbers are kept **raw** (the auditor parses them); the
+    emitting sheet's ``ref`` (when known — a per-sheet critique) fills in
+    ``source_name`` / ``page_index`` so the claim anchors on that exact sheet.
+    """
+    if not isinstance(item, dict):
+        return None
+    kind = str(item.get("kind", "")).strip().lower()
+    if kind not in CLAIM_KINDS:
+        return None
+    terms = item.get("terms")
+    if not isinstance(terms, list) or not terms or not all(_scalar(t) for t in terms):
+        return None
+    if "expected" not in item or not _scalar(item.get("expected")):
+        return None
+    quote = item.get("quote", "")
+    if not isinstance(quote, str):
+        quote = ""
+    sheet_id = str(item.get("sheet_id", "")).strip()
+    if not sheet_id and ref is not None:
+        sheet_id = _fallback_sheet_id(ref)
+    return NumericClaim(
+        sheet_id=sheet_id,
+        quote=quote,
+        kind=kind,
+        terms=list(terms),
+        expected=item.get("expected"),
+        note=str(item.get("note", "")).strip(),
+        source_name=ref.source_name if ref is not None else "",
+        page_index=ref.page_index if ref is not None else 0,
+    )
+
+
+def parse_numeric_claims(raw_text: str, ref: SheetRef | None = None) -> list[NumericClaim]:
+    """Extract the numeric ``claims`` array from a model response (Phase 14).
+
+    Reads the same **last** fenced json block the findings come from (models emit
+    ``{"findings": [...], "claims": [...]}``), so it is transport-agnostic and
+    tolerant of the block drift :func:`parse_findings` already handles. Invalid
+    items are dropped and the list is capped at :data:`MAX_CLAIMS_PER_SHEET`. A
+    response with no claims array yields ``[]``. Never raises — claims are additive
+    telemetry for the deterministic auditor, never load-bearing for the digest.
+    """
+    last_obj: dict | None = None
+    for m in _FENCE_RE.finditer(raw_text):
+        obj = _tolerant_json_object(m.group(2))
+        if isinstance(obj, dict) and isinstance(obj.get("claims"), list):
+            last_obj = obj
+    if last_obj is None:
+        return []
+    claims: list[NumericClaim] = []
+    for item in last_obj.get("claims") or []:
+        if len(claims) >= MAX_CLAIMS_PER_SHEET:
+            break
+        claim = _validate_claim_item(item, ref)
+        if claim is not None:
+            claims.append(claim)
+    return claims
+
+
+def claims_from_cache(hit: dict) -> list[NumericClaim]:
+    """Reconstruct cached numeric claims for a critique cache hit (defensive)."""
+    raw = hit.get("claims")
+    if not isinstance(raw, list):
+        return []
+    out: list[NumericClaim] = []
+    for item in raw:
+        if isinstance(item, dict):
+            try:
+                out.append(NumericClaim.from_dict(item))
             except Exception:  # noqa: BLE001 - a bad cached row must never sink a run
                 continue
     return out

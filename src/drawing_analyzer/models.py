@@ -149,6 +149,11 @@ ANCHOR_STATUSES = frozenset({"EXACT", "FUZZY", "TILE", "UNANCHORED"})
 VERIFICATION_STATUSES = frozenset(
     {"VERIFIED", "REJECTED", "UNCERTAIN", "DETERMINISTIC", "SKIPPED"}
 )
+# ``NumericClaim.kind`` — how a claim's terms combine into its expected value.
+# ``sum`` → terms add up; ``product``/``factor`` → terms multiply (a "factor" is a
+# product where one term is a multiplier, e.g. base-area × 1.3). The host does the
+# arithmetic; the model only transcribes the numbers (Phase 14).
+CLAIM_KINDS = frozenset({"sum", "product", "factor"})
 
 
 def compute_finding_id(sheet_id: str, category: str, quote_or_text: str) -> str:
@@ -359,4 +364,61 @@ class Finding:
             anchor=Anchor.from_dict(d.get("anchor") or {}),
             verification=Verification.from_dict(d.get("verification") or {}),
             id=d.get("id", ""),
+        )
+
+
+@dataclass
+class NumericClaim:
+    """A numeric relationship the model *transcribed* off a sheet (Phase 14).
+
+    The reviewer (critique / cross-sheet QC) does not do arithmetic — it only
+    reports the numbers it read and how they are supposed to relate: "these terms
+    should ``sum``/``product``/``factor`` to this expected value". The deterministic
+    arithmetic auditor then *computes* the relationship itself (no ``eval``, no
+    trust in the model's math) and raises a finding only when the numbers don't
+    add up. This keeps the one class of error a vision model is worst at — mental
+    arithmetic on a table it just read — out of the trusted path.
+
+    ``terms`` / ``expected`` are kept **raw** (JSON numbers, or strings that may
+    carry commas, units, or fractions like ``"2 1/2"``); the auditor parses them
+    to exact decimals. ``quote`` is the verbatim on-sheet string the claim came
+    from — the anchor hook, exactly like a :class:`Finding`'s ``source_quote``.
+    ``source_name`` / ``page_index`` identify the emitting sheet when it is known
+    (a per-sheet critique fills them in); otherwise the auditor resolves the
+    claim's ``sheet_id`` against the set's sheet-id map.
+    """
+
+    sheet_id: str
+    quote: str
+    kind: str                           # one of CLAIM_KINDS
+    terms: list[Any] = field(default_factory=list)
+    expected: Any = None
+    note: str = ""
+    source_name: str = ""
+    page_index: int = 0
+
+    def to_dict(self) -> dict:
+        return {
+            "sheet_id": self.sheet_id,
+            "quote": self.quote,
+            "kind": self.kind,
+            "terms": list(self.terms),
+            "expected": self.expected,
+            "note": self.note,
+            "source_name": self.source_name,
+            "page_index": self.page_index,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "NumericClaim":
+        terms = d.get("terms")
+        return cls(
+            sheet_id=str(d.get("sheet_id", "") or ""),
+            quote=str(d.get("quote", "") or ""),
+            kind=str(d.get("kind", "") or "").strip().lower(),
+            terms=list(terms) if isinstance(terms, list) else [],
+            expected=d.get("expected"),
+            note=str(d.get("note", "") or ""),
+            source_name=str(d.get("source_name", "") or ""),
+            page_index=int(d.get("page_index", 0) or 0),
         )
