@@ -62,6 +62,24 @@ def test_parse_profile_without_frontmatter_falls_back():
     assert p.disciplines == () and p.items == ("only an item", "and another")
 
 
+def test_numbered_and_plus_bullets_parse_as_items():
+    p = P.parse_profile(
+        "---\nname: n\n---\n1. first\n2) second\n+ third\n- fourth\n", fallback_name="n"
+    )
+    assert p.items == ("first", "second", "third", "fourth")
+    # a decimal in prose is not a list item
+    q = P.parse_profile("---\nname: n\n---\n3.5 gpm density note\n", fallback_name="n")
+    assert q.items == ()
+
+
+def test_unclosed_frontmatter_still_parses_items():
+    # A missing closing '---' must not swallow the checklist into a zero-item
+    # profile; the bullets are still parsed (name falls back to the stem).
+    p = P.parse_profile("---\nname: n\ndisciplines: f\n- real item\n", fallback_name="stem")
+    assert p.items == ("real item",)
+    assert p.name == "stem"
+
+
 def test_content_hash_changes_on_any_edit():
     a = P.parse_profile(_SAMPLE, fallback_name="demo")
     b = P.parse_profile(_SAMPLE.replace("First check", "First CHECK"), fallback_name="demo")
@@ -107,20 +125,43 @@ def test_get_and_resolve_profiles():
     assert P.resolve_profiles(None) == [] and P.resolve_profiles([]) == []
 
 
+def test_bad_encoding_file_does_not_sink_discovery(_empty_user_dir):
+    # A non-UTF-8 .md (UnicodeDecodeError is a ValueError, not OSError) must not
+    # crash discovery or lose the valid profiles alongside it.
+    (_empty_user_dir / "good.md").write_text(
+        "---\nname: good\n---\n- a check\n", encoding="utf-8"
+    )
+    (_empty_user_dir / "bad.md").write_bytes("---\nname: bad\n- x\n".encode("utf-16"))
+    profs = P.load_profiles()          # must not raise
+    assert "good" in profs and "fire-protection" in profs
+    assert "bad" not in profs
+    assert P.list_profiles()           # must not raise
+    # resolving only Profile objects must not even read the (poisoned) dir.
+    assert P.resolve_profiles([profs["good"]]) == [profs["good"]]
+
+
 # --------------------------------------------------------------------------- #
 # Discipline auto-suggest
 # --------------------------------------------------------------------------- #
 
 
 def test_discipline_hint():
+    # hyphenated (NCS) form
     assert P.discipline_hint("F-D-01-1") == "f"
     assert P.discipline_hint("FP-101") == "fp"
     assert P.discipline_hint("M-101") == "m"
-    assert P.discipline_hint("") == ""
+    # concatenated form (letters run straight into digits — no word boundary)
+    assert P.discipline_hint("F101") == "f"
+    assert P.discipline_hint("FP201") == "fp"
+    assert P.discipline_hint("M1") == "m"
+    assert P.discipline_hint("E1.01") == "e"
+    # no leading letters / empty
+    assert P.discipline_hint("101") == "" and P.discipline_hint("") == ""
 
 
 def test_suggest_profiles_by_discipline():
     assert [p.name for p in P.suggest_profiles(["F-D-01-1", "F-G-02-0"])] == ["fire-protection"]
+    assert [p.name for p in P.suggest_profiles(["F101", "FP201"])] == ["fire-protection"]
     assert P.suggest_profiles(["M-101", "E-201"]) == []       # no mechanical/electrical profile
     assert P.suggest_profiles([]) == []
 

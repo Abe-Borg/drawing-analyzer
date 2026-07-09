@@ -36,9 +36,14 @@ from .diagnostics import get_logger
 
 _log = get_logger()
 
-_ITEM_RE = re.compile(r"^\s*[-*]\s+(.+?)\s*$")
-# Leading 1-3 letter run of a sheet id → discipline hint ("F-D-01-1" → "f").
-_ID_DISCIPLINE_RE = re.compile(r"^\s*([A-Za-z]{1,3})\b")
+# A checklist item is any Markdown list bullet — ``-``, ``*``, ``+`` — or a
+# numbered-list marker (``1.`` / ``1)``); the marker is stripped, the text kept.
+_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(.+?)\s*$")
+# Leading 1-3 letters of a sheet id → discipline hint. No trailing ``\b``: there
+# is no word boundary between a letter and a digit, so a *concatenated* id like
+# ``F101`` / ``FP201`` (as common as the hyphenated ``F-101``) would otherwise
+# yield "" and silently defeat auto-suggest.
+_ID_DISCIPLINE_RE = re.compile(r"^\s*([A-Za-z]{1,3})")
 
 
 @dataclass(frozen=True)
@@ -77,14 +82,19 @@ def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
         return {}, text
+    # Only treat the head as frontmatter when there is a *closing* ``---``.
+    # Otherwise the file is malformed (an unclosed header); fall back to "no
+    # frontmatter" so its checklist items are still parsed from the body rather
+    # than the whole file being swallowed as a header (a silent zero-item profile).
+    close = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
+    if close is None:
+        return {}, text
     meta: dict[str, str] = {}
-    i = 1
-    while i < len(lines) and lines[i].strip() != "---":
-        key, sep, value = lines[i].partition(":")
+    for line in lines[1:close]:
+        key, sep, value = line.partition(":")
         if sep:
             meta[key.strip().lower()] = value.strip()
-        i += 1
-    body = "\n".join(lines[i + 1:]) if i < len(lines) else ""
+    body = "\n".join(lines[close + 1:])
     return meta, body
 
 
@@ -156,11 +166,14 @@ def _load_dir(directory: Path) -> dict[str, Profile]:
         return out
     for path in paths:
         try:
+            # A bad file — unreadable, or not UTF-8 (``UnicodeDecodeError`` is a
+            # ``ValueError``, not an ``OSError``) — must never sink discovery of
+            # the *other* profiles, so the whole per-file read+parse is guarded.
             text = path.read_text(encoding="utf-8")
-        except OSError as exc:  # a bad file must never sink discovery
-            _log.warning("could not read profile %s: %s", path, exc)
+            prof = parse_profile(text, source_path=path, fallback_name=path.stem)
+        except Exception as exc:  # noqa: BLE001 - one bad file can't sink the set
+            _log.warning("skipping unreadable/invalid profile %s: %s", path, exc)
             continue
-        prof = parse_profile(text, source_path=path, fallback_name=path.stem)
         out[prof.name] = prof
     return out
 
@@ -195,12 +208,14 @@ def resolve_profiles(
     """
     if not names:
         return []
-    table = available if available is not None else load_profiles()
+    table = available
     out: list[Profile] = []
     for n in names:
         if isinstance(n, Profile):
             out.append(n)
             continue
+        if table is None:                 # only touch the filesystem if a name needs it
+            table = load_profiles()
         prof = table.get(str(n))
         if prof is None:
             _log.warning("unknown review profile requested: %r (skipped)", n)
