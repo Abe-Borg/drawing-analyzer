@@ -25,9 +25,13 @@ from pathlib import Path
 from typing import Any
 
 # Bumped to 2 when the cache entry gained a serialized ``findings`` list (Phase
-# 3): the entry shape changed, so every v1 entry is discarded on load and the
-# key (which folds in the schema version) changes, forcing a clean re-digest.
-_SCHEMA_VERSION = 2
+# 3); to 3 for the two-level key (Phase 9) — a digest is now also stored under a
+# cheap *pre-render* key (``digest_cache_key_level1``) so an unchanged sheet is
+# recognized before rendering and skips rasterization entirely. Blank-tile
+# suppression also changed the rendered image set, so the old PNG-bytes (level-2)
+# keys shift too. The version folds into every key, so every pre-v3 entry is
+# discarded on load and re-digested once.
+_SCHEMA_VERSION = 3
 
 _FALSEY = {"0", "false", "no", "off", ""}
 
@@ -111,6 +115,54 @@ def digest_cache_key(
     h.update(sheet.overview.png_bytes)
     for tile in sheet.tiles:
         h.update(tile.png_bytes)
+    return h.hexdigest()
+
+
+def digest_cache_key_level1(
+    render_identity: str,
+    *,
+    model: str,
+    prompt_version: str,
+    max_tokens: int,
+    effort: str | None,
+    use_thinking: bool,
+    focus: str | None = None,
+) -> str:
+    """Content-address one sheet's digest **before rendering** (Phase 9, level-1).
+
+    The dominant cost of a re-run is rasterization (~4.5 s/sheet, ~2.5 min for a
+    33-sheet set). A digest is deterministic given the rendered images, so if the
+    images *would* be byte-identical we can serve the cached digest without ever
+    rendering. ``render_identity`` is exactly that "would the images match"
+    fingerprint, produced from cheap page access alone
+    (:func:`drawing_analyzer.render.sheet_render_identity`): the PyMuPDF version,
+    grid + overlap + render target, the blank-suppression mode, and a hash of the
+    page's content streams + referenced image bytes + rect.
+
+    This folds the *same* request/model params as :func:`digest_cache_key` around
+    that identity, plus a ``level=1`` namespace tag so a level-1 key can never
+    collide with a level-2 (PNG-bytes) key. On a hit the pipeline skips rendering;
+    on a miss it renders, computes the level-2 key for continuity, and stores the
+    fresh digest under **both**.
+    """
+    h = hashlib.sha256()
+    for part in (
+        f"schema={_SCHEMA_VERSION}",
+        "level=1",
+        f"model={model or ''}",
+        f"prompt={prompt_version or ''}",
+        f"max_tokens={int(max_tokens)}",
+        f"effort={effort or ''}",
+        f"thinking={'1' if use_thinking else '0'}",
+    ):
+        h.update(part.encode("utf-8"))
+        h.update(b"\x00")
+    if focus:
+        h.update(f"focus={focus}".encode("utf-8"))
+        h.update(b"\x00")
+    h.update(b"render_identity=")
+    h.update(render_identity.encode("utf-8"))
+    h.update(b"\x00")
     return h.hexdigest()
 
 

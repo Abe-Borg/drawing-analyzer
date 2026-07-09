@@ -183,10 +183,53 @@ PDFs → list sheets → render (overview + 6×6 tiles) + extract vector text la
 - **Real-time mode** (`use_batch=False`) digests sheets concurrently on a bounded
   thread pool while rendering stays sequential (PyMuPDF is not thread-safe).
 - **Caching** is content-keyed per sheet, so re-running a set after editing one
-  sheet only re-pays vision for the changed sheet. Note: the new render target
-  changes the rendered PNG bytes (and the digest prompt now carries the text
-  layer), so **every pre-existing cache entry is naturally invalidated** — the
-  first run after this change re-digests each sheet once, then caches as before.
+  sheet only re-pays vision for the changed sheet. It is now **two-level** — a
+  cheap *pre-render* key recognizes an unchanged sheet before rasterizing, so a
+  cached re-run skips rendering entirely (see [Performance](#performance)).
+
+## Performance
+
+Two headline savings, both measured on real dense sets, plus a deliberate
+non-goal:
+
+- **Skip-render on a cache hit (two-level key).** Rasterizing a sheet's overview
+  + 36 tiles is the dominant re-run cost (~4.5 s/sheet; ~2.5 min for a 33-sheet
+  set). A digest is deterministic given the rendered images, so before rendering
+  the pipeline computes a **level-1 key** from cheap page access alone — the
+  PyMuPDF version, grid/overlap/render-target, and a hash of the page's content
+  streams + referenced image bytes + rect — and, on a hit, serves the cached
+  digest **without rendering**. A fully-cached 33-sheet re-run drops ~2.5 min of
+  render to ~0. On a miss the sheet renders, the digest is computed, and it is
+  stored under **both** the level-1 key and the existing rendered-bytes (level-2)
+  key, so the *next* run skips it. Any change that would alter the pixels — the
+  page content, the render target, the grid, the PyMuPDF version — re-keys and
+  re-renders, so the cache stays correct, not just fast.
+- **Parallel Files-API uploads.** A sheet's ~37 images upload on a small pool
+  (default 6, `DRAWING_ANALYZER_UPLOAD_WORKERS`) instead of one at a time — the
+  dominant batch-path latency after rendering. Parallelism changes only
+  *scheduling*: each image keeps the same retry taxonomy (transient `503`s
+  re-issued with backoff; ambiguous connection/timeout errors left to the SDK's
+  idempotent retries), so a lost response still can't orphan a stored file, and
+  the first hard failure stops the sheet's remaining uploads.
+- **Blank-tile suppression.** A tile whose pixmap is **pixel-uniform** (a truly
+  empty crop of a sparse sheet) carries no information, so it is dropped before
+  upload and disclosed to the model (*"Tiles omitted as completely blank: …"*).
+  The strict, uniform-only check is always on and can never drop a tile with any
+  mark on it. An opt-in **near-blank** heuristic (`DRAWING_ANALYZER_SUPPRESS_NEAR_BLANK=1`,
+  a PNG-byte threshold) is far more aggressive — it dropped ~9 % of tiles on a
+  dense fire-protection set and up to a third on schedule sheets — but *can* drop
+  a tile bearing a few faint marks, so it is **off by default**: data over
+  savings.
+- **Non-goal — render-once-then-crop.** Benchmarked against the current per-tile
+  clip rendering on a real dense set (34.4 s vs 35.7 s — a wash: the ~75-megapixel
+  full-page raster on sparse sheets eats the display-list savings on dense ones),
+  so the current render path is left as-is. Process-parallel rendering across
+  sheets remains a legitimate future option for 100+-sheet sets.
+
+Note: the two-level key and blank-tile suppression both change what is stored/sent,
+so the digest cache's schema version is bumped — **every pre-existing cache entry
+is invalidated once**; the first run after upgrading re-digests each sheet, then
+caches as before.
 
 ## Structured findings
 
@@ -363,6 +406,9 @@ runs.
 | `DRAWING_ANALYZER_FOCUS_MODEL` | Opus 4.8 | Focus-report model (text-only). |
 | `DRAWING_ANALYZER_VERIFY_MODEL` | Opus 4.8 | Per-finding verification model (crop + short prompt). |
 | `DRAWING_ANALYZER_MAX_WORKERS` | `4` | Real-time digest concurrency (`1` = sequential). |
+| `DRAWING_ANALYZER_UPLOAD_WORKERS` | `6` | Files-API image-upload concurrency per sheet (`1` = sequential). |
+| `DRAWING_ANALYZER_SUPPRESS_NEAR_BLANK` | off | Also drop near-blank tiles (PNG-byte threshold), not just pixel-uniform ones. |
+| `DRAWING_ANALYZER_NEAR_BLANK_MAX_BYTES` | `3072` | Near-blank PNG-byte threshold (only when the above is on). |
 | `DRAWING_ANALYZER_CACHE_PATH` | `~/.drawing_analyzer/drawing_digest_cache.json` | On-disk digest cache. |
 | `DRAWING_ANALYZER_CACHE_PERSIST` | on | Disable to keep the cache in-memory only. |
 

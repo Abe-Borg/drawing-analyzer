@@ -157,6 +157,23 @@ def test_build_user_content_raster_sheet_gets_disclosure_placeholder():
     assert "raster-only; rely on the images" in text_layer
 
 
+def test_build_user_content_discloses_omitted_blank_tiles():
+    sheet = _make_sheet(rows=6, cols=6)
+    sheet.omitted_tiles = [(0, 5), (3, 2)]      # two blank tiles were suppressed
+    blocks = build_user_content(sheet)
+
+    framing = blocks[0]["text"]
+    # The framing tells the model which grid positions are absent (1-based, so
+    # it reads a missing tile as "nothing there", not "withheld").
+    assert "omitted as completely blank" in framing
+    assert "(r1c6)" in framing and "(r4c3)" in framing
+
+
+def test_build_user_content_no_disclosure_when_nothing_omitted():
+    blocks = build_user_content(_make_sheet(rows=2, cols=2))  # omitted_tiles empty
+    assert "omitted as completely blank" not in blocks[0]["text"]
+
+
 # --------------------------------------------------------------------------- #
 # digest_sheet (fake client)
 # --------------------------------------------------------------------------- #
@@ -425,6 +442,51 @@ def test_pipeline_serves_second_run_from_injected_cache(tmp_path):
     assert ctx2.total_input_tokens == 0 and ctx2.total_output_tokens == 0
     assert ctx2.total_image_token_estimate == 0
     assert "digest body" in ctx2.combined_text
+
+
+def test_pipeline_level1_cache_skips_render_on_second_run(tmp_path, monkeypatch):
+    # The headline Phase-9 win: an unchanged sheet is recognized *before*
+    # rendering, so a fully-cached re-run rasterizes nothing.
+    pymupdf = pytest.importorskip("pymupdf")
+    from drawing_analyzer import render as render_mod
+    from drawing_analyzer.digest_cache import DigestCache
+    from drawing_analyzer.pipeline import extract_drawing_context
+
+    path = _make_pdf(pymupdf, tmp_path / "set.pdf", pages=2)
+    client = _FakeClient(
+        lambda _kw: FakeMessage(
+            content=[FakeTextBlock(text="digest body")],
+            usage=FakeUsage(input_tokens=100, output_tokens=20),
+        )
+    )
+    cache = DigestCache(None, persist=False)
+
+    real_render = render_mod.render_sheet
+    renders = {"n": 0}
+
+    def _counting_render(*a, **k):
+        renders["n"] += 1
+        return real_render(*a, **k)
+
+    monkeypatch.setattr(render_mod, "render_sheet", _counting_render)
+
+    extract_drawing_context([path], client=client, rows=2, cols=2, cache=cache)
+    assert renders["n"] == 2                      # both sheets rendered on run 1
+
+    # Run 2 — every sheet is a level-1 hit, so NOTHING is rasterized.
+    renders["n"] = 0
+    ctx2 = extract_drawing_context([path], client=client, rows=2, cols=2, cache=cache)
+    assert ctx2.cached_sheet_count == 2
+    assert renders["n"] == 0                      # skip-render: the payoff
+    assert "digest body" in ctx2.combined_text
+
+    # A request-param change re-keys level-1 (the images would be read anew), so
+    # the sheets render again — the cache stays correct, not just fast.
+    renders["n"] = 0
+    extract_drawing_context(
+        [path], client=client, rows=2, cols=2, cache=cache, model="claude-sonnet-4-6"
+    )
+    assert renders["n"] == 2
 
 
 # --------------------------------------------------------------------------- #
