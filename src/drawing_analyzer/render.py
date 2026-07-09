@@ -170,6 +170,24 @@ def _page_content_fingerprint(page: "pymupdf.Page") -> str:
         except Exception:  # noqa: BLE001 - a missing stream just contributes nothing
             pass
         h.update(b"\x00")
+    # Form XObjects — a page whose content stream merely *invokes* a form (the
+    # real vector drawing / title block lives in the form, not the page stream)
+    # would otherwise fingerprint identically after that form is regenerated,
+    # since get_contents() / get_images() cover neither the form's stream. A
+    # stale level-1 hit would then serve the wrong digest without rendering.
+    # get_xobjects() returns every form reachable from the page (recursively,
+    # including nested forms), so hashing each form's raw stream closes the hole.
+    # Deduped + sorted by xref for a stable, order-independent digest.
+    form_xrefs = sorted({entry[0] for entry in page.get_xobjects()})
+    for xref in form_xrefs:
+        h.update(f"form={xref}".encode("utf-8"))
+        try:
+            h.update(doc.xref_stream_raw(xref) or b"")
+        except Exception:  # noqa: BLE001
+            pass
+        h.update(b"\x00")
+    # Image XObjects — get_images(full=True) DOES recurse into forms, so a raster
+    # nested inside a form is captured here even though its form is hashed above.
     for img in page.get_images(full=True):
         xref = img[0]
         h.update(f"img={xref}".encode("utf-8"))

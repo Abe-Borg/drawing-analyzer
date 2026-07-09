@@ -196,3 +196,32 @@ def test_sheet_render_identity_stable_and_content_sensitive():
     assert id_a != id_b                       # different page content
     assert id_a != id_a_grid                  # grid/target is part of the identity
     assert pymupdf.__version__ in id_a        # engine version folded in
+
+
+def test_sheet_render_identity_covers_form_xobjects():
+    # A page whose content stream only *invokes* a Form XObject (the real drawing
+    # lives in the form) must still re-key when that form changes — otherwise a
+    # regenerated sheet would hit a stale level-1 cache entry and skip rendering.
+    pymupdf = pytest.importorskip("pymupdf")
+    from drawing_analyzer.render import sheet_render_identity
+
+    def _wrapped(text):
+        src = pymupdf.open()
+        sp = src.new_page(width=200, height=200)
+        sp.insert_text((30, 100), text)               # content lives in the form
+        tgt = pymupdf.open()
+        tp = tgt.new_page(width=400, height=400)
+        tp.show_pdf_page(pymupdf.Rect(0, 0, 400, 400), src, 0)  # invoke as a form
+        return tgt, tp
+
+    d1, p1 = _wrapped("TITLE BLOCK V1")
+    d2, p2 = _wrapped("TITLE BLOCK V2 CHANGED")
+    try:
+        id1 = sheet_render_identity(p1, rows=2, cols=2)
+        id2 = sheet_render_identity(p2, rows=2, cols=2)
+    finally:
+        d1.close()
+        d2.close()
+    # The wrapper page content is identical; only the invoked form's stream
+    # differs — the identity must reflect it (the P1 review fix).
+    assert id1 != id2
