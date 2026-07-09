@@ -192,6 +192,34 @@ Findings the deterministic auditors already placed (the reference audit) arrive
 pre-anchored and are left untouched. Like the tile geometry, the resolver imports
 no PDF engine — it works on the extracted word rectangles alone.
 
+## Verification pass
+
+Coverage proposes; precision disposes. Before any finding is clouded onto an
+issued drawing, the verification pass takes a **surgical second look**: for each
+*anchored* finding the model itself produced, it renders a high-DPI crop around
+the anchor and asks **one small model call** whether the finding actually holds
+**in that crop** — instructed to judge *only* what's visible, not re-argue the
+whole issue. The crop the verifier saw is written to `evidence/<finding_id>.png`
+regardless of the verdict; the audit trail is the point.
+
+The model answers `CONFIRMED` / `CONTRADICTED` / `NOT_VISIBLE`, mapped to a
+finding status:
+
+| Status | Source | Meaning |
+|---|---|---|
+| `VERIFIED` | verifier `CONFIRMED` | the crop shows the finding is correct |
+| `REJECTED` | verifier `CONTRADICTED` | the crop shows the finding is wrong — kept in the record but never clouded |
+| `UNCERTAIN` | verifier `NOT_VISIBLE` (or a garbled reply) | can't be decided from this crop (e.g. it depends on another sheet) — a perfectly fine outcome |
+| `DETERMINISTIC` | the offline auditors | trusted without a model re-check (reference audit, etc.) |
+| `SKIPPED` | — | nothing to look at (unanchored), no crop, or the pass was unavailable (no key) |
+
+The pass is additive and non-fatal: crops render sequentially (PyMuPDF is not
+thread-safe) while the small verify calls run on a bounded pool; a per-finding
+failure degrades that finding to `UNCERTAIN`, and a fatal auth failure marks the
+rest `SKIPPED` — the run always completes. Each call is tiny (one ~1–2k-token
+crop image + a short prompt), on the order of $0.01–0.03 per finding. The model
+defaults to Opus 4.8, overridable with `DRAWING_ANALYZER_VERIFY_MODEL`.
+
 ## Reference audit
 
 Construction sheets constantly point at each other — *"SEE DRAWING F-D-01-1"*,
@@ -253,6 +281,7 @@ runs.
 | `DRAWING_ANALYZER_MODEL` | Opus 4.8 | Vision model for per-sheet digests. |
 | `DRAWING_ANALYZER_SYNTHESIS_MODEL` | Opus 4.8 | Cross-sheet synthesis model (text-only). |
 | `DRAWING_ANALYZER_FOCUS_MODEL` | Opus 4.8 | Focus-report model (text-only). |
+| `DRAWING_ANALYZER_VERIFY_MODEL` | Opus 4.8 | Per-finding verification model (crop + short prompt). |
 | `DRAWING_ANALYZER_MAX_WORKERS` | `4` | Real-time digest concurrency (`1` = sequential). |
 | `DRAWING_ANALYZER_CACHE_PATH` | `~/.drawing_analyzer/drawing_digest_cache.json` | On-disk digest cache. |
 | `DRAWING_ANALYZER_CACHE_PERSIST` | on | Disable to keep the cache in-memory only. |
