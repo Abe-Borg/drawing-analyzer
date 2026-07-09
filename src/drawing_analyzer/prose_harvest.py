@@ -173,16 +173,38 @@ def extract_synthesis_conflicts(
     return out
 
 
+# Characters that can continue a drawing id past a candidate match: "A-1"
+# followed by ".1" is detail id A-1.1, not sheet A-1. A slash is deliberately
+# NOT here — "P-1/P-2" names both sheets and detail-style "5/A-3" genuinely
+# lives on sheet A-3.
+_ID_CONNECTORS = ".-"
+
+
+def _extends_id(text: str, index: int, step: int) -> bool:
+    """Whether ``text[index]`` continues a larger id in direction ``step`` —
+    alphanumeric, or a ``.``/``-`` connector with an alphanumeric beyond it
+    (``A-1.1``, ``A-1-1``). A connector with nothing alphanumeric past it is
+    sentence punctuation, not a continuation (``"… conflict on A-1."``)."""
+    if index < 0 or index >= len(text):
+        return False
+    ch = text[index]
+    if ch.isalnum():
+        return True
+    if ch in _ID_CONNECTORS:
+        far = index + step
+        return 0 <= far < len(text) and text[far].isalnum()
+    return False
+
+
 def _bounded_occurrences(text: str, sid: str) -> list[int]:
-    """Start offsets where ``sid`` occurs with non-alphanumeric neighbours —
-    ``A-1`` matches in ``"SEE A-1."`` but not inside ``A-10`` or ``2A-15``."""
+    """Start offsets where ``sid`` occurs as a whole id — ``A-1`` matches in
+    ``"SEE A-1."`` but not inside ``A-10``, ``A-1.1``, or ``2A-15``."""
     out: list[int] = []
     start = 0
     while (pos := text.find(sid, start)) >= 0:
-        end = pos + len(sid)
-        before = text[pos - 1] if pos else ""
-        after = text[end] if end < len(text) else ""
-        if not before.isalnum() and not after.isalnum():
+        if not _extends_id(text, pos - 1, -1) and not _extends_id(
+            text, pos + len(sid), 1
+        ):
             out.append(pos)
         start = pos + 1
     return out
@@ -191,12 +213,14 @@ def _bounded_occurrences(text: str, sid: str) -> list[int]:
 def _id_mentions(text: str, ids: list[str]) -> list[tuple[int, str]]:
     """First genuine mention of each in-set sheet id, as ``(offset, id)``.
 
-    Boundary-aware, and a shorter id never counts inside a longer in-set id's
-    mention (``A-1`` inside ``A-1.1`` passes the boundary check on the ``.``,
-    so longer ids — ``ids`` arrives longest-first — claim their spans and
-    shorter ids only match outside them). Without this, a set holding both
-    ``A-1`` and ``A-10`` would read a mention of ``A-10`` as naming ``A-1``
-    too and cloud a sheet the prose never named.
+    Boundary-aware (``_extends_id``), and a shorter id additionally never
+    counts inside a longer in-set id's mention: longer ids — ``ids`` arrives
+    longest-first — claim their spans and shorter ids only match outside
+    them. The claim pass backs up the boundary check for id alphabets the
+    connector list doesn't cover (say a set holding both ``A-1`` and
+    ``A-1 EAST``). Without all this, a set holding both ``A-1`` and ``A-10``
+    would read a mention of ``A-10`` as naming ``A-1`` too and cloud a sheet
+    the prose never named.
     """
     claimed: list[tuple[int, int]] = []
     mentioned: list[tuple[int, str]] = []

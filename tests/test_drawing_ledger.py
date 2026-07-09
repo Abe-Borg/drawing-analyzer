@@ -359,7 +359,20 @@ def test_synthesis_sheet_id_matching_is_boundary_aware():
     assert extract_synthesis_conflicts(
         "Detail A-101 conflicts with the finish schedule.", ["A-1"]
     ) == []
+    # Nor is a dotted continuation: naming detail A-1.1 does not name sheet
+    # A-1, even when A-1.1 itself is not in the set.
+    assert extract_synthesis_conflicts(
+        "Section A-1.1 conflicts with the enlarged plan.", ["A-1"]
+    ) == []
     # Sentence punctuation is still a boundary — the id itself matches.
     assert extract_synthesis_conflicts(
         "There is a conflict on A-1.", ["A-1"]
     ) == [("There is a conflict on A-1.", ["A-1"])]
+    # A slash is a boundary too: "P-1/P-2" names both sheets.
+    assert extract_synthesis_conflicts(
+        "The riser diagram on P-1/P-2 is inconsistent with the plan.",
+        ["P-1", "P-2"],
+    ) == [(
+        "The riser diagram on P-1/P-2 is inconsistent with the plan.",
+        ["P-1", "P-2"],
+    )]

@@ -11,9 +11,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Synthesis sheet-id matching is boundary-aware.** A set holding both `A-1`
   and `A-10` no longer reads a synthesis mention of `A-10` as also naming
   `A-1` (which could make the never-named prefix sheet the conflict's primary
-  anchor and add a bogus `also_on` leg): ids match only with non-alphanumeric
-  neighbours, and a shorter id never counts inside a longer in-set id's
-  mention (`A-1` inside `A-1.1`).
+  anchor and add a bogus `also_on` leg): a neighbour that is alphanumeric —
+  or a `.`/`-` connector with an alphanumeric beyond it, so naming detail
+  `A-1.1` never names sheet `A-1` — rejects the match, while sentence
+  punctuation (`"… on A-1."`) and slashes (`P-1/P-2`) stay valid boundaries;
+  a shorter id additionally never counts inside a longer in-set id's mention.
 - **A `DETERMINISTIC` verdict survives ledger merges without a rectangle.** A
   rect-less auditor duplicate (an arithmetic mismatch whose quote didn't
   resolve) no longer loses its host-computed verdict when merged into an
