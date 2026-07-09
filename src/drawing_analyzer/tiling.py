@@ -20,8 +20,9 @@ long-edge in pixels (Opus 4.8: 4784 tokens / 2576 px; other models: 1568 /
 **exceeds** that cap is **rejected** (HTTP 400 ``invalid_request_error``), not
 downscaled — unlike the <=20-image case, where an oversized image is silently
 resized. A 6x6 sheet is 36 tiles + 1 overview = 37 images, so the 2000 px hard
-cap applies to every drawing-digest request (Anthropic vision docs, "General
-limits").
+cap applies to every drawing-digest request (Anthropic vision docs, "Request
+limits"; every constant in this module was re-verified against the current docs
+at ``platform.claude.com`` in 2026-07 and is unchanged).
 
 We therefore render the long edge *under* the cap, not to it. The rasterizer
 (PyMuPDF) sizes a clipped pixmap by rounding the transformed clip to a
