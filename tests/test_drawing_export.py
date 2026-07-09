@@ -213,3 +213,69 @@ def test_focus_with_failed_report_still_writes_the_file():
     body = docs["00_focus.md"]
     assert FOCUS in body
     assert "No focus report was produced" in body
+
+
+# --------------------------------------------------------------------------- #
+# Findings CSV (Phase 6)
+# --------------------------------------------------------------------------- #
+
+from drawing_analyzer.models import Anchor, Finding, Verification  # noqa: E402
+
+
+def _finding(**over):
+    base = dict(
+        sheet_id="M-101", source_name="M-101.pdf", page_index=2, category="code",
+        severity="high", text="Missing, clearance", source_quote='VAV-3 "typ"',
+        tile=[2, 3], refs=["CMC 310", "NFPA 90A"],
+        anchor=Anchor(status="EXACT", rect_pdf=[10.25, 20.0, 88.5, 33.0], method="exact"),
+    )
+    base.update(over)
+    f = Finding(**base)
+    f.verification = Verification(status="VERIFIED", note="ok", evidence_png="evidence/x.png")
+    return f
+
+
+def test_findings_csv_header_and_row_flattening():
+    csv = dx.build_findings_csv([_finding()])
+    lines = csv.split("\r\n")
+    assert lines[0] == ",".join(dx.FINDINGS_CSV_HEADER)
+    row = lines[1]
+    assert '"Missing, clearance"' in row          # comma-bearing field quoted
+    assert '"VAV-3 ""typ"""' in row               # embedded quotes doubled
+    assert '"2,3"' in row                          # tile as row,col
+    assert "CMC 310; NFPA 90A" in row              # refs joined
+    assert "10.2, 20.0, 88.5, 33.0" in row         # rect flattened + rounded
+    assert row.startswith(_finding().id + ",")     # id first
+    # page is 1-based (page_index 2 -> page 3)
+    assert ",3,code,high," in row
+    assert "VERIFIED" in row and "evidence/x.png" in row
+
+
+def test_findings_csv_is_crlf_terminated():
+    csv = dx.build_findings_csv([_finding(), _finding(text="another")])
+    assert csv.count("\r\n") == 3                   # header + 2 rows
+    assert "\n" not in csv.replace("\r\n", "")      # no bare LFs
+
+
+def test_findings_csv_empty_is_just_the_header():
+    csv = dx.build_findings_csv([])
+    assert csv == ",".join(dx.FINDINGS_CSV_HEADER) + "\r\n"
+
+
+def test_write_findings_csv_has_bom_and_crlf(tmp_path):
+    path = dx.write_findings_csv([_finding()], tmp_path / "findings.csv")
+    raw = path.read_bytes()
+    assert raw[:3] == b"\xef\xbb\xbf"               # UTF-8 BOM for Excel
+    assert b"\r\n" in raw
+    # decodes cleanly with the BOM stripped
+    text = raw.decode("utf-8-sig")
+    assert text.startswith("id,sheet_id,source_name,page,")
+
+
+def test_findings_csv_tolerates_sparse_finding():
+    # A finding with no tile / refs / evidence still produces a clean row.
+    f = Finding(sheet_id="F", source_name="s.pdf", page_index=0, category="conflict",
+                severity="low", text="x")
+    csv = dx.build_findings_csv([f])
+    row = csv.split("\r\n")[1]
+    assert row.startswith(f.id + ",F,s.pdf,1,conflict,low,x,")
