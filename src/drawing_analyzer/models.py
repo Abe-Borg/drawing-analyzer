@@ -154,6 +154,23 @@ VERIFICATION_STATUSES = frozenset(
 # product where one term is a multiplier, e.g. base-area × 1.3). The host does the
 # arithmetic; the model only transcribes the numbers (Phase 14).
 CLAIM_KINDS = frozenset({"sum", "product", "factor"})
+# ``Finding.sources`` — the provenance tags a ledger entry may carry (Part III,
+# §16). Every QC channel stamps its entries; the ledger unions tags on merge.
+SOURCE_TAGS = frozenset({
+    "digest_json",
+    "digest_prose_coordination",
+    "digest_prose_conflict",
+    "critique_1",
+    "critique_2",
+    "cross_qc",
+    "synthesis_prose",
+    "auditor_reference",
+    "auditor_arithmetic",
+    "auditor_naming",
+    "auditor_titleblock",
+    "auditor_sheet_index",
+    "focus_prose",
+})
 
 
 def compute_finding_id(sheet_id: str, category: str, quote_or_text: str) -> str:
@@ -334,6 +351,11 @@ class Finding:
     once per run by :func:`assign_qc_ids` (ordered sheet → position) and shown on
     the markup tag, the index page, the CSV, and the report. ``citation`` is the
     optional web-search citation-check verdict for the finding's ``refs``.
+
+    ``sources`` is the finding's **provenance** (Part III): every channel that
+    produced or corroborated it, from :data:`SOURCE_TAGS`. The ledger unions
+    sources when it merges duplicate findings, so multi-source provenance doubles
+    as a confidence signal (report/popup chips like ``prose+json+critique×2``).
     """
 
     sheet_id: str
@@ -352,6 +374,7 @@ class Finding:
     verification: Verification = field(default_factory=Verification)
     qc_id: str = ""                     # "QC-001" … (assigned by assign_qc_ids)
     citation: Citation | None = None    # web-search citation check (Phase 15)
+    sources: list[str] = field(default_factory=list)  # provenance tags (Part III)
     id: str = ""
 
     def __post_init__(self) -> None:
@@ -376,6 +399,7 @@ class Finding:
             "anchor_hint": self.anchor_hint,
             "reproduced": self.reproduced,
             "also_on": [leg.to_dict() for leg in self.also_on],
+            "sources": list(self.sources),
             "anchor": self.anchor.to_dict(),
             "verification": self.verification.to_dict(),
         }
@@ -404,6 +428,7 @@ class Finding:
             anchor_hint=d.get("anchor_hint", "") or "",
             reproduced=bool(d.get("reproduced", True)),
             also_on=[ConflictLeg.from_dict(leg) for leg in (d.get("also_on") or []) if isinstance(leg, dict)],
+            sources=[str(s) for s in (d.get("sources") or [])],
             anchor=Anchor.from_dict(d.get("anchor") or {}),
             verification=Verification.from_dict(d.get("verification") or {}),
             qc_id=d.get("qc_id", "") or "",

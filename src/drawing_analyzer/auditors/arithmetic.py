@@ -312,6 +312,7 @@ def audit_arithmetic(
                 status="DETERMINISTIC",
                 note=f"computed {op} terms = {_fmt(actual)}; stated = {_fmt(expected)}",
             ),
+            sources=["auditor_arithmetic"],
         )
         result.findings.append(finding)
         if geom is not None and (claim.quote or "").strip():

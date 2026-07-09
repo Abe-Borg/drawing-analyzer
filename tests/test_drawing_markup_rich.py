@@ -453,13 +453,67 @@ def test_multi_page_index_links_work_on_every_index_page(tmp_path):
         doc.close()
 
 
-def test_rejected_never_inked_even_with_qc_id(tmp_path):
+def test_rejected_not_inked_by_default_but_indexed(tmp_path):
+    # §18: a REJECTED finding carries no ink by default, but is never invisible —
+    # the index page lists it under "Rejected by verification (n)" with a link.
     src = _pdf(tmp_path)
     rejected = _f("wrong", source="M-101.pdf", rect=[10, 10, 60, 30], status="REJECTED")
     assign_qc_ids([rejected])
     out = tmp_path / "r.pdf"
     written = annotate_pdf(src, [rejected], out, include_unverified=True)
-    assert written == 0
+    assert written == 0                        # no annots drawn
     doc = pymupdf.open(str(out))
-    assert doc.page_count == 1                 # nothing inked -> no index either
-    doc.close()
+    try:
+        assert doc.page_count == 2             # index page + source
+        text = doc[0].get_text()
+        assert "Rejected by verification (1)" in text and "wrong" in text
+        links = doc[0].get_links()
+        assert len(links) == 1 and links[0]["page"] == 1
+    finally:
+        doc.close()
+
+
+def test_ink_rejected_draws_grey_struck_markup(tmp_path):
+    src = _pdf(tmp_path)
+    rejected = _f("wrong", source="M-101.pdf", rect=[10, 10, 60, 30], status="REJECTED")
+    assign_qc_ids([rejected])
+    out = tmp_path / "r.pdf"
+    written = annotate_pdf(src, [rejected], out, include_unverified=True, ink_rejected=True)
+    assert written == 2                        # grey cloud + its QC tag
+    doc = pymupdf.open(str(out))
+    try:
+        # Snapshot properties during iteration — PyMuPDF unbinds annot objects
+        # once the generator that produced them is released.
+        squares = [
+            (a.info.get("content", ""), dict(a.colors), dict(a.border))
+            for a in doc[1].annots() if a.type[1] == "Square"
+        ]
+        assert len(squares) == 1
+        content, colors, border = squares[0]
+        assert content.startswith("[REJECTED]")
+        stroke = colors["stroke"]
+        assert abs(stroke[0] - 0.45) < 0.01 and abs(stroke[1] - 0.45) < 0.01
+        assert tuple(border.get("dashes") or ()) == (4, 3)
+    finally:
+        doc.close()
+
+
+def test_unanchored_finding_gets_margin_callout_with_prefix(tmp_path):
+    # §18: a quote that matched nothing (the hallucination signal) is flagged on
+    # the page as an [UNANCHORED] margin callout — never silently dropped.
+    src = _pdf(tmp_path)
+    f = _f("quote matched nothing", source="M-101.pdf", status="UNCERTAIN")
+    f.anchor = Anchor(status="UNANCHORED", method="quote_not_found")
+    assign_qc_ids([f])
+    out = tmp_path / "r.pdf"
+    written = annotate_pdf(src, [f], out, include_unverified=True)
+    assert written == 1
+    doc = pymupdf.open(str(out))
+    try:
+        box = next(a for a in doc[1].annots() if a.type[1] == "FreeText")
+        # For FreeText annots /Contents IS the displayed text — the placement
+        # and trust prefixes must both be there.
+        content = box.info.get("content", "")
+        assert content.startswith("[UNVERIFIED] [UNANCHORED]")
+    finally:
+        doc.close()

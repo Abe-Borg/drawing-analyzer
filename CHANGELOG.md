@@ -6,6 +6,59 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### The findings ledger — guaranteed carry-through of ALL QC items (Part III / Phase 16)
+
+Nothing QC-flavored may live only in prose: every item from every channel lands
+in one ledger and, from there, on the reviewed PDF.
+
+#### Added
+
+- **`ledger.py`** — the append-only per-run findings collection. Every channel
+  ingests into it (the digest's JSON findings, the critique reads, cross-sheet
+  conflicts, the deterministic auditors, harvested prose); duplicates merge at
+  ingest (Phase 11's rules), **unioning provenance** (`Finding.sources`, new),
+  keeping the most severe severity and the longest quote, and preserving the best
+  anchor/verification either member carries (an auditor's pre-anchored
+  DETERMINISTIC duplicate upgrades a model entry). `freeze()` assigns the run's
+  `QC-###` numbers. Anchoring, verification, the citation check, the markup
+  writer, the exports, the report table, and the index page now consume the
+  ledger and nothing else. Provenance renders as chips
+  (`prose+json+critique×2`) in the report rows and markup popups, and as a
+  `sources` CSV column.
+- **`prose_harvest.py`** — the legacy channel's guarantee (§17). The digest's
+  prose Coordination/Conflict sections are split into items (the same section
+  grammar as the report's "⚠ Issues only" filter — the prose is mirrored, never
+  modified, I-2) and fuzzy-matched against same-sheet ledger entries; each
+  unmatched straggler gets one small structuring call (item + text layer → one
+  finding with a verbatim quote); a failure ingests a **degraded sheet-level
+  entry** — the invariant is that no prose QC item fails to produce a ledger
+  entry. Synthesis conflict statements are harvested per referenced sheet,
+  dual-anchored when two sheets are named (synthesis now runs *before* the QC
+  stages so its text exists to harvest). Per-sheet Focus sections harvest only
+  behind `focus_findings_to_markups` (default OFF). The digest prompt gained the
+  coupling sentence (prose Coordination/Conflict items must also appear in the
+  JSON block), bumping the digest prompt version.
+
+#### Changed
+
+- **Gating amendment (§18) — all findings get ink.** The exhaustive default inks
+  everything except REJECTED: anchored entries cloud (UNCERTAIN/SKIPPED dashed),
+  rect-less entries become margin callouts (`[SHEET]` / `[UNANCHORED]`
+  prefixes — the unanchored hallucination signal is flagged on the page, never
+  dropped). REJECTED findings carry no ink by default but are always listed on
+  the index page under **"Rejected by verification (n)"** with page links; the
+  new `ink_rejected=True` (GUI: **Include rejected (grey)**) draws them grey and
+  dashed. The GUI's "Verified findings only" sub-toggle became **"Verified &
+  deterministic only"**, defaulting **OFF** (`markup_verified_only` default
+  flipped False); suppressed entries tally as *gated*.
+- **Coverage assertion.** At run end every ledger entry must be exactly one of
+  clouded / margin-callout / rejected-indexed (gated only under the opt-in
+  conservative mode); the tally is logged
+  (`Ledger 47: 39 clouded, 6 margin, 2 rejected (indexed)`) and surfaced on
+  `ctx.ledger_tally` / `ledger_tally_line`, in the GUI completion summary, and
+  on the report's findings card. An unaccounted entry is recorded as a run error
+  and fails the hermetic end-to-end test.
+
 ### Markup richness, citation check & index pages (Phase 15)
 
 The reviewed PDF now reads like a numbered, navigable, senior plan-review set.

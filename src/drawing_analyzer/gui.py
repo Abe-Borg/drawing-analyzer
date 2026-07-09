@@ -66,10 +66,14 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._busy = False
         self._last_log_msg: str | None = None
         # QC review options (see _build_ui). Reference audit is free; QC markups
-        # add the verification pass + a marked-up PDF; the sub-toggle keeps only
-        # verified/deterministic findings clouded (the safe default).
+        # add the verification pass + a marked-up PDF. Under the Part III gating
+        # amendment (§18) the exhaustive default inks everything except REJECTED;
+        # the "Verified & deterministic only" sub-toggle is the conservative
+        # opt-in (default OFF), and "Include rejected (grey)" opts rejected
+        # findings back onto the paper in a struck style.
         self._qc_markups_var = BooleanVar(value=False)
-        self._qc_verified_only_var = BooleanVar(value=True)
+        self._qc_verified_only_var = BooleanVar(value=False)
+        self._ink_rejected_var = BooleanVar(value=False)
         self._reference_audit_var = BooleanVar(value=False)
         # HTML report: off by default the key is NOT written into the file (the
         # Ask-AI panel prompts for one at runtime). On restores the old embedded
@@ -235,12 +239,19 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         )
         self._qc_markups_check.pack(anchor="w", pady=(4, 0))
         self._qc_verified_only_check = ctk.CTkCheckBox(
-            qc_row, text="Verified findings only (cloud only checked findings)",
+            qc_row, text="Verified & deterministic only (conservative — suppress unverified ink)",
             variable=self._qc_verified_only_var,
             font=ctk.CTkFont(family="Segoe UI", size=11),
             text_color=COLORS["text_muted"],
         )
         self._qc_verified_only_check.pack(anchor="w", padx=(28, 0), pady=(2, 0))
+        self._ink_rejected_check = ctk.CTkCheckBox(
+            qc_row, text="Include rejected (grey) — ink verifier-rejected findings struck",
+            variable=self._ink_rejected_var,
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=COLORS["text_muted"],
+        )
+        self._ink_rejected_check.pack(anchor="w", padx=(28, 0), pady=(2, 0))
         self._reference_audit_check = ctk.CTkCheckBox(
             qc_row, text="Reference audit — flag stale/missing cross-references (free)",
             variable=self._reference_audit_var, command=self._refresh_summary,
@@ -521,11 +532,12 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._refresh_summary()
 
     def _on_qc_toggle(self) -> None:
-        """Enable the 'verified only' sub-toggle only when QC Markups is on."""
+        """Enable the markup sub-toggles only when QC Markups is on."""
         on = self._qc_markups_var.get()
-        check = getattr(self, "_qc_verified_only_check", None)
-        if check is not None:
-            check.configure(state="normal" if on else "disabled")
+        for name in ("_qc_verified_only_check", "_ink_rejected_check"):
+            check = getattr(self, name, None)
+            if check is not None:
+                check.configure(state="normal" if on else "disabled")
         self._refresh_summary()
 
     def _current_focus(self) -> str:
@@ -587,6 +599,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         focus = self._current_focus()
         qc_markups = self._qc_markups_var.get()
         markup_verified_only = self._qc_verified_only_var.get()
+        ink_rejected = self._ink_rejected_var.get()
         reference_audit = self._reference_audit_var.get()
 
         # Cost-confirm gate — show the estimated (batch-rate) spend before the
@@ -632,7 +645,8 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         pdfs = list(self._pdfs)
         threading.Thread(
             target=self._worker,
-            args=(pdfs, focus, qc_markups, markup_verified_only, reference_audit),
+            args=(pdfs, focus, qc_markups, markup_verified_only, reference_audit,
+                  ink_rejected),
             daemon=True,
         ).start()
 
@@ -641,8 +655,9 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         pdfs: list[Path],
         focus: str,
         qc_markups: bool = False,
-        markup_verified_only: bool = True,
+        markup_verified_only: bool = False,
         reference_audit: bool = False,
+        ink_rejected: bool = False,
     ) -> None:
         try:
             ctx = extract_drawing_context(
@@ -658,6 +673,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 reference_audit=reference_audit,
                 qc_markups=qc_markups,
                 markup_verified_only=markup_verified_only,
+                ink_rejected=ink_rejected,
             )
         except Exception as exc:  # noqa: BLE001 - surface any unexpected failure
             self.after(0, lambda e=exc: self._on_error(str(e)))
@@ -796,6 +812,10 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 + " with the buttons below.",
                 level="accent",
             )
+        # Part III coverage tally — every ledger entry accounted for (§18).
+        tally_line = getattr(ctx, "ledger_tally_line", "") or ""
+        if tally_line:
+            self._log(tally_line + ".", level="muted")
         # Deterministic auditors' balance column: relationships that checked out.
         stats = getattr(ctx, "audit_stats", None) or {}
         arith_checked = int(stats.get("arithmetic_checked", 0) or 0)

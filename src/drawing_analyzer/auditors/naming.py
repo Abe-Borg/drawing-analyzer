@@ -236,6 +236,7 @@ def audit_naming(rendered_sheets: Iterable[Any]) -> list[Finding]:
                         status="DETERMINISTIC",
                         note=f"naming drift: '{drift}' vs established '{canonical}'",
                     ),
+                    sources=["auditor_naming"],
                 ))
             if truncated:
                 break

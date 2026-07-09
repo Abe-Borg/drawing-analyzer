@@ -160,6 +160,7 @@ def audit_sheet_index(rendered_sheets: Iterable[Any]) -> list[Finding]:
                     status="DETERMINISTIC",
                     note="index entry not present in the provided set",
                 ),
+                sources=["auditor_sheet_index"],
             ))
 
     # Direction 2: set sheets listed in NO index page (union across all of them),
@@ -193,5 +194,6 @@ def audit_sheet_index(rendered_sheets: Iterable[Any]) -> list[Finding]:
                 status="DETERMINISTIC",
                 note="set sheet missing from the drawing index",
             ),
+            sources=["auditor_sheet_index"],
         ))
     return findings

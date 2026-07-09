@@ -132,6 +132,17 @@ class DrawingContext:
     sheet_geometries: list[Any] = field(default_factory=list)
     qc_work_dir: Path | None = None
     audit_stats: dict = field(default_factory=dict)
+    # Part III (§18): the run's coverage tally over the findings ledger —
+    # {"cloud": n, "margin": n, "rejected": n, ("gated": n)}. Empty when no QC
+    # stage ran. Surfaced in the GUI completion summary and the report header.
+    ledger_tally: dict = field(default_factory=dict)
+
+    @property
+    def ledger_tally_line(self) -> str:
+        """The §18 run-summary line, or ``""`` when no QC stage ran."""
+        if not self.ledger_tally:
+            return ""
+        return _tally_line(self.finding_count, self.ledger_tally)
 
     @property
     def ok_sheet_count(self) -> int:
@@ -153,7 +164,9 @@ class DrawingContext:
 
     @property
     def clouded_finding_count(self) -> int:
-        """Findings that would be inked under default (verified-only) gating."""
+        """Findings clouded by this run (from the ledger tally when QC ran)."""
+        if self.ledger_tally:
+            return int(self.ledger_tally.get("cloud", 0))
         from .annotate import is_cloudable
 
         return sum(
@@ -499,6 +512,7 @@ class _QCResult:
     input_tokens: int = 0
     output_tokens: int = 0
     audit_stats: dict = field(default_factory=dict)
+    ledger_tally: dict = field(default_factory=dict)
 
 
 def _run_critique_stage(
@@ -605,38 +619,46 @@ def _run_qc_stages(
     cross_findings: list[Finding] | None = None,
     claims: list[NumericClaim] | None = None,
     citation_check_enabled: bool = False,
+    synthesis_text: str = "",
+    ink_rejected: bool = False,
+    focus_findings_to_markups: bool = False,
 ) -> _QCResult:
-    """Run the QC pipeline after the digests: audit → anchor → verify → markups.
+    """Run the QC pipeline: ingest → harvest → freeze → anchor → verify → markups.
+
+    Part III (§16): every QC item from every channel is ingested into **the
+    findings ledger** — the digest's JSON findings, the critique reads, the
+    cross-sheet conflicts, the deterministic auditors, and the harvested prose
+    (digest Coordination/Conflict items, synthesis conflicts, opted-in focus
+    items). Ingest merges duplicates (unioning provenance); ``freeze()`` assigns
+    the run's ``QC-###`` numbers; anchoring, verification, the citation check,
+    and the markup writer then consume the ledger and nothing else. At the end,
+    every entry is accounted for — clouded, margin callout, or listed in the
+    rejected index — and the tally is logged and surfaced (§18).
 
     Every stage is additive and non-fatal (I-3): a failure is recorded in
-    ``errors`` and the standard deliverable still ships. Model findings come from
-    the parsed digests; reference findings from the deterministic audit (already
-    anchored). Reviewed PDFs and evidence crops are written under ``work_dir`` (a
-    fresh temp dir when none is given), to be exported later.
-
-    ``critique_findings`` (Phase 11), when present, are pooled with the digest
-    findings before anchoring: :func:`drawing_analyzer.critique.merge_finding_groups`
-    deduplicates the two sources per sheet (``_is_duplicate`` is same-sheet-gated,
-    so passing the whole set as two groups only ever merges within a sheet) and
-    marks an issue both the digest and the critique raised as ``reproduced``.
-
-    ``cross_findings`` (Phase 13) are the dual-anchored cross-sheet conflicts. They
-    are appended (not merged — merging is same-sheet, and a conflict spans sheets),
-    and after the per-sheet primary anchoring their ``also_on`` legs are anchored
-    on their own sheets so the markup writer can cloud both sides.
+    ``errors`` and the standard deliverable still ships. Reviewed PDFs and
+    evidence crops are written under ``work_dir`` (a fresh temp dir when none is
+    given), to be exported later.
     """
-    digest_findings = [f for sd in sheets for f in getattr(sd, "findings", None) or []]
-    if critique_findings:
-        from .critique import merge_finding_groups
+    from .ledger import Ledger
 
-        findings = merge_finding_groups([digest_findings, critique_findings])
-    else:
-        findings = digest_findings
-    if cross_findings:
-        findings = findings + list(cross_findings)
-    reference_findings: list[Finding] = []
-    audit_stats: dict = {}
+    ledger = Ledger()
     work_dir = qc_work_dir
+    audit_stats: dict = {}
+    harvest_in = harvest_out = 0
+
+    # --- ingest: every channel lands in the ledger ---------------------------
+    digest_findings = [f for sd in sheets for f in getattr(sd, "findings", None) or []]
+    ledger.add(digest_findings, "digest_json")
+
+    # The critique merges its self-consistency reads internally, so the two-read
+    # provenance is reconstructed from ``reproduced``: corroborated findings carry
+    # both read tags (the report's ``critique×2`` chip), singletons one.
+    for f in critique_findings or []:
+        if not f.sources:
+            f.sources = ["critique_1", "critique_2"] if f.reproduced else ["critique_1"]
+    ledger.add(critique_findings or [])
+    ledger.add(cross_findings or [], "cross_qc")
 
     if reference_audit_enabled and geometries:
         if progress is not None:
@@ -647,30 +669,48 @@ def _run_qc_stages(
             # The whole deterministic battery (Phase 14): references, arithmetic
             # (over the claims the critique / cross-QC transcribed), naming,
             # title-block, and sheet-index. All findings are DETERMINISTIC and
-            # (where a quote exists) already anchored, so they bypass verification
-            # and land in the reference/deterministic bucket.
+            # (where a quote exists) already anchored; each stamps its own
+            # provenance tag at creation.
             audit_res = run_auditors(geometries, claims=claims or [])
-            reference_findings = audit_res.findings
             audit_stats = audit_res.stats
+            ledger.add(audit_res.findings)
             _log.info(
                 "auditors: %d deterministic finding(s); %s",
-                len(reference_findings), audit_stats,
+                len(audit_res.findings), audit_stats,
             )
         except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
             errors.append(f"Deterministic auditors: {exc}")
             _log.warning("deterministic auditors failed: %s", exc)
 
-    # Anchor model findings (reference findings arrive already anchored).
-    if findings and geometries and (
-        qc_markups or reference_audit_enabled or critique_findings or cross_findings
-    ):
+    # --- prose harvest (§17): the legacy channel's carry-through guarantee ----
+    if sheets:
+        if progress is not None:
+            progress(total, total, "Harvesting prose findings")
+        try:
+            from .prose_harvest import harvest_prose
+
+            hres = harvest_prose(
+                ledger, sheets, geometries, client=client,
+                synthesis_text=synthesis_text,
+                focus_findings_to_markups=focus_findings_to_markups,
+            )
+            harvest_in, harvest_out = hres.input_tokens, hres.output_tokens
+        except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
+            errors.append(f"Prose harvest: {exc}")
+            _log.warning("prose harvest failed: %s", exc)
+
+    # --- freeze: the run's QC-### numbers (sheet → position; stable — I-7) ----
+    entries = ledger.freeze()
+
+    # Anchor the entries that don't already carry a rectangle (auditor entries do).
+    if entries and geometries:
         if progress is not None:
             progress(total, total, "Anchoring findings")
         from .anchor import resolve_anchors, resolve_conflict_legs
 
         geom_by_key = {(g.ref.source_name, g.ref.page_index): g for g in geometries}
         by_sheet: dict[tuple, list[Finding]] = {}
-        for finding in findings:
+        for finding in entries:
             by_sheet.setdefault((finding.source_name, finding.page_index), []).append(finding)
         for key, sheet_findings in by_sheet.items():
             geometry = geom_by_key.get(key)
@@ -682,22 +722,16 @@ def _run_qc_stages(
                 _log.warning("anchoring failed for %s: %s", key, exc)
         # Anchor the cross-sheet findings' also_on legs, each on its own sheet.
         try:
-            resolve_conflict_legs(findings, geom_by_key)
+            resolve_conflict_legs(entries, geom_by_key)
         except Exception as exc:  # noqa: BLE001 - never fatal
             _log.warning("cross-sheet leg anchoring failed: %s", exc)
 
-    all_findings = findings + reference_findings
-    # Sequential review numbers (Phase 15): assigned once, ordered sheet →
-    # position, shared by the markup tags, index page, CSV/JSON, and report.
-    if all_findings:
-        from .models import assign_qc_ids
+    all_findings = entries
+    v_in, v_out = harvest_in, harvest_out
 
-        assign_qc_ids(all_findings)
-    v_in = v_out = 0
-
-    # Verify model findings (deterministic reference findings are skipped by the
+    # Verify the model entries (deterministic auditor entries are skipped by the
     # verifier). Only when markups are requested — clouds are what demand trust.
-    if qc_markups and verify_enabled and findings:
+    if qc_markups and verify_enabled and entries:
         from .verify import verify_findings as _run_verify
 
         if work_dir is None:
@@ -783,6 +817,7 @@ def _run_qc_stages(
             reviewed_pdf_paths = write_reviewed_pdfs(
                 all_findings, pdf_paths, work_dir,
                 include_unverified=not markup_verified_only,
+                ink_rejected=ink_rejected,
                 geometries=geometries,
                 audit_stats=audit_stats,
                 include_appendix=_markup_appendix_enabled(),
@@ -792,6 +827,36 @@ def _run_qc_stages(
             errors.append(f"Markup writing: {exc}")
             _log.warning("markup writing failed: %s", exc)
 
+    # --- coverage accounting (§18): every ledger entry gets a disposition ------
+    ledger_tally: dict[str, int] = {}
+    if entries:
+        from .annotate import ink_disposition
+
+        for entry in entries:
+            disposition = ink_disposition(
+                entry, include_unverified=not markup_verified_only,
+                ink_rejected=ink_rejected,
+            )
+            ledger_tally[disposition] = ledger_tally.get(disposition, 0) + 1
+        if sum(ledger_tally.values()) != len(entries):
+            # Structurally impossible (the classifier is total) — kept as the
+            # regression tripwire the plan mandates. Recorded, never fatal (I-3).
+            errors.append("Ledger coverage: unaccounted entries (bug)")
+            _log.error("ledger coverage mismatch: %s vs %d entries", ledger_tally, len(entries))
+        _log.info("%s", _tally_line(len(entries), ledger_tally))
+
+    # The context's two buckets are a *view* of the one ledger: entries produced
+    # only by the deterministic auditors keep their historical
+    # ``reference_findings`` home; everything else (model, prose, merged) is
+    # ``findings``. Concatenated they are exactly ``ledger.entries`` — every
+    # consumer downstream reads the ledger and nothing else (§16).
+    reference_findings = [
+        e for e in entries
+        if e.sources and all(s.startswith("auditor_") for s in e.sources)
+    ]
+    _ref_ids = {id(e) for e in reference_findings}
+    findings = [e for e in entries if id(e) not in _ref_ids]
+
     return _QCResult(
         findings=findings,
         reference_findings=reference_findings,
@@ -800,7 +865,17 @@ def _run_qc_stages(
         input_tokens=v_in,
         output_tokens=v_out,
         audit_stats=audit_stats,
+        ledger_tally=ledger_tally,
     )
+
+
+def _tally_line(total_entries: int, tally: dict[str, int]) -> str:
+    """The §18 run-summary line: ``Ledger 47: 39 clouded, 6 margin, 2 rejected (indexed)``."""
+    parts = [f"{tally.get('cloud', 0)} clouded", f"{tally.get('margin', 0)} margin"]
+    parts.append(f"{tally.get('rejected', 0)} rejected (indexed)")
+    if tally.get("gated"):
+        parts.append(f"{tally['gated']} gated (verified-only mode)")
+    return f"Ledger {total_entries}: " + ", ".join(parts)
 
 
 def extract_drawing_context(
@@ -827,12 +902,14 @@ def extract_drawing_context(
     focus_model: str | None = None,
     reference_audit: bool = False,
     qc_markups: bool = False,
-    markup_verified_only: bool = True,
+    markup_verified_only: bool = False,
     verify_findings: bool = True,
     critique: bool = False,
     profiles: list | None = None,
     cross_qc: bool = False,
     citation_check: bool = False,
+    ink_rejected: bool = False,
+    focus_findings_to_markups: bool = False,
     qc_work_dir: Path | None = None,
 ) -> DrawingContext:
     """Render and digest every sheet in ``pdf_paths`` into one text context.
@@ -927,6 +1004,22 @@ def extract_drawing_context(
     popup, the CSV, and the report; a MISMATCH downgrades nothing automatically —
     sometimes the stale citation *is* the finding. Real-time only; additive and
     non-fatal.
+
+    **Part III — the findings ledger and the gating amendment (§16–18).** When
+    any QC stage runs, every QC item from every channel is ingested into one
+    per-run ledger (the digest's JSON findings, its harvested prose
+    Coordination/Conflict items, the critique reads, cross-sheet conflicts, the
+    deterministic auditors, harvested synthesis conflicts, and — behind
+    ``focus_findings_to_markups`` — the per-sheet Focus sections). Duplicates
+    merge with unioned provenance (``Finding.sources``); the exhaustive default
+    inks **everything except REJECTED**: anchored entries cloud (UNCERTAIN
+    dashed), rect-less entries become margin callouts (``[SHEET]`` /
+    ``[UNANCHORED]`` prefixes), and REJECTED entries are listed on the index
+    page's "Rejected by verification" section (inked grey only with
+    ``ink_rejected=True``). ``markup_verified_only=True`` is the conservative
+    opt-in that restricts ink to VERIFIED + DETERMINISTIC (it now defaults
+    **off** — §18 supersedes the old default). The run-end coverage tally lands
+    on ``ctx.ledger_tally`` / ``ctx.ledger_tally_line``.
     """
     if cache is None and use_cache:
         from .digest_cache import get_default_digest_cache
@@ -1104,28 +1197,12 @@ def extract_drawing_context(
             errors.append(f"Cross-sheet QC: {exc}")
             _log.warning("cross-sheet QC stage failed: %s", exc)
 
-    # QC pipeline (audit → anchor → verify → markups). Additive and non-fatal;
-    # runs before synthesis/focus so those are untouched. Only the reference
-    # audit and the markups are gated by their flags; findings are always parsed
-    # off the digests (and pooled with any critique/cross-sheet findings), but they
-    # are only anchored/verified when a QC stage needs them (``need_geometry``).
-    qc = _QCResult()
-    if need_geometry:
-        qc = _run_qc_stages(
-            sheets=sheets, geometries=sheet_geometries, pdf_paths=paths,
-            reference_audit_enabled=reference_audit, qc_markups=qc_markups,
-            markup_verified_only=markup_verified_only, verify_enabled=verify_findings,
-            client=client, qc_work_dir=qc_work_dir, progress=progress,
-            total=total, errors=errors, critique_findings=critique_findings,
-            cross_findings=cross_findings, claims=numeric_claims,
-            citation_check_enabled=citation_check,
-        )
-        in_tok += qc.input_tokens
-        out_tok += qc.output_tokens
-
     # Cross-sheet synthesis (one text-only call after all digests). Skipped for
     # <2 readable sheets; on failure we keep the per-sheet digests and record
-    # the error rather than losing the whole run.
+    # the error rather than losing the whole run. Runs BEFORE the QC stages
+    # (Part III): the prose harvester mirrors the synthesis's conflict
+    # statements into the findings ledger, so the text must exist by then — the
+    # prose itself is untouched either way (I-2).
     synthesis_text = ""
     if synthesize:
         if progress is not None:
@@ -1180,6 +1257,26 @@ def extract_drawing_context(
                 "focus report: skipped (<%d readable sheet(s))", MIN_SHEETS_FOR_FOCUS
             )
 
+    # QC pipeline (Part III): ingest every channel into the findings ledger,
+    # harvest the prose, freeze the QC numbers, then anchor → verify → citation
+    # → markups — all consuming the ledger and nothing else. Additive and
+    # non-fatal; the prose deliverables above are never modified (I-2).
+    qc = _QCResult()
+    if need_geometry:
+        qc = _run_qc_stages(
+            sheets=sheets, geometries=sheet_geometries, pdf_paths=paths,
+            reference_audit_enabled=reference_audit, qc_markups=qc_markups,
+            markup_verified_only=markup_verified_only, verify_enabled=verify_findings,
+            client=client, qc_work_dir=qc_work_dir, progress=progress,
+            total=total, errors=errors, critique_findings=critique_findings,
+            cross_findings=cross_findings, claims=numeric_claims,
+            citation_check_enabled=citation_check,
+            synthesis_text=synthesis_text, ink_rejected=ink_rejected,
+            focus_findings_to_markups=focus_findings_to_markups,
+        )
+        in_tok += qc.input_tokens
+        out_tok += qc.output_tokens
+
     if progress is not None:
         progress(total, total, "Done")
 
@@ -1217,6 +1314,7 @@ def extract_drawing_context(
         sheet_geometries=sheet_geometries,
         qc_work_dir=qc.work_dir,
         audit_stats=qc.audit_stats,
+        ledger_tally=qc.ledger_tally,
     )
 
 

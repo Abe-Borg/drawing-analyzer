@@ -540,6 +540,13 @@ def _finding_row_html(f: Any, card_index: int | None, *, link_evidence: bool) ->
         else '<span class="muted">—</span>'
     )
     text_cell = _render_inline(text)
+    sources = getattr(f, "sources", None) or []
+    if sources:
+        from .ledger import provenance_label
+
+        text_cell += (
+            f' <span class="muted provenance-chip">[{html.escape(provenance_label(sources))}]</span>'
+        )
     citation = getattr(f, "citation", None)
     if citation is not None and getattr(citation, "status", "UNCHECKED") != "UNCHECKED":
         cite_label = "supports" if citation.status == "CHECKED_SUPPORTS" else "mismatch"
@@ -613,13 +620,22 @@ def _findings_card(ctx: Any, sheets: list[Any], *, link_evidence: bool = False) 
         "sheet to jump to it · use the filter chips and search on the left.</p>"
     )
     checks = _audit_checks_line(ctx)
+    tally = _ledger_tally_line(ctx)
     return _card(
         card_id="findings",
         title_html='<span class="seq">⚑</span> QC Findings',
         badges_html=f'<span class="badge badge-findings">{len(findings)} finding(s)</span>',
         status="findings",
-        body_html=f'<div class="findings-body">{hint}{checks}{table}</div>',
+        body_html=f'<div class="findings-body">{hint}{tally}{checks}{table}</div>',
     )
+
+
+def _ledger_tally_line(ctx: Any) -> str:
+    """The Part III coverage line — every ledger entry accounted for (§18)."""
+    line = (getattr(ctx, "ledger_tally_line", "") or "").strip()
+    if not line:
+        return ""
+    return f'<p class="findings-hint muted ledger-tally">{html.escape(line)}.</p>'
 
 
 def _audit_checks_line(ctx: Any) -> str:

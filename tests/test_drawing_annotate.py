@@ -159,11 +159,36 @@ def test_finding_on_out_of_range_page_is_skipped(tmp_path):
     assert n == 1
 
 
-def test_no_reviewed_pdf_when_nothing_cloudable(tmp_path):
+def test_no_reviewed_pdf_when_no_qc_content(tmp_path):
+    # Under §18's exhaustive default an UNCERTAIN finding is inked (dashed) and a
+    # REJECTED one keeps a rejected-index entry — so only the conservative
+    # verified-only mode with no rejected findings yields no reviewed copy.
     src = _make_pdf(tmp_path)
-    findings = [_finding("wrong", status="REJECTED"), _finding("maybe", status="UNCERTAIN")]
-    out = write_reviewed_pdfs(findings, [src], tmp_path / "out")   # default gating
-    assert out == []   # no ink -> no reviewed copy
+    findings = [_finding("maybe", status="UNCERTAIN")]
+    out = write_reviewed_pdfs(
+        findings, [src], tmp_path / "out", include_unverified=False
+    )
+    assert out == []   # gated, nothing rejected -> no reviewed copy
+
+    # The same UNCERTAIN finding IS inked under the exhaustive default.
+    out2 = write_reviewed_pdfs(
+        findings, [src], tmp_path / "out2", include_unverified=True
+    )
+    assert len(out2) == 1
+
+    # A rejected-only source still gets a reviewed copy: the index's rejected
+    # section keeps it visible even though it carries no ink (§18).
+    rejected_only = [_finding("wrong", status="REJECTED")]
+    out3 = write_reviewed_pdfs(
+        rejected_only, [src], tmp_path / "out3", include_unverified=False
+    )
+    assert len(out3) == 1
+    doc = pymupdf.open(str(out3[0]))
+    try:
+        assert "Rejected by verification (1)" in doc[0].get_text()
+        assert sum(1 for page in doc for _ in page.annots()) == 0
+    finally:
+        doc.close()
 
 
 def test_duplicate_stems_get_unique_output_names(tmp_path):
