@@ -28,7 +28,9 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import re
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -218,6 +220,22 @@ def _index_document(
     for _, _, fname in sheet_files:
         lines.append(f"- `{fname}` — one sheet")
     lines.append("- `combined.md` — every sheet + the synthesis in one document")
+    if has_qc_outputs(ctx):
+        findings = _qc_findings(ctx)
+        reviewed = list(getattr(ctx, "reviewed_pdf_paths", None) or [])
+        lines += [
+            "",
+            "### QC review",
+            "",
+            f"- **Findings:** {len(findings)}"
+            + (f" · **reviewed PDF(s):** {len(reviewed)}" if reviewed else ""),
+            "- `findings.json` / `findings.csv` — every finding, all fields",
+        ]
+        for pdf in reviewed:
+            lines.append(f"- `{Path(pdf).name}` — the marked-up drawing")
+        lines.append("- `sheet_text/` — each sheet's extracted text layer")
+        if getattr(ctx, "qc_work_dir", None) is not None:
+            lines.append("- `evidence/` — the crop the verifier saw for each finding")
     lines.append("")
     return "\n".join(lines)
 
@@ -352,6 +370,90 @@ def write_findings_csv(findings: list[Any], path: Any) -> Path:
     return path
 
 
+# ---------------------------------------------------------------------------
+# QC review inventory (§4.5): findings.json / findings.csv, the per-sheet text
+# layers, the reviewed PDFs, and the verifier's evidence crops. All duck-typed
+# on the context so this stays PyMuPDF-free — the binaries were produced upstream
+# (annotate.py / verify.py) and are only *copied* here.
+# ---------------------------------------------------------------------------
+
+
+def _qc_findings(ctx: Any) -> list[Any]:
+    return list(getattr(ctx, "findings", None) or []) + list(
+        getattr(ctx, "reference_findings", None) or []
+    )
+
+
+def has_qc_outputs(ctx: Any) -> bool:
+    return bool(
+        _qc_findings(ctx)
+        or getattr(ctx, "reviewed_pdf_paths", None)
+        or getattr(ctx, "sheet_geometries", None)
+    )
+
+
+def _sheet_text_name(ref: Any, used: set[str]) -> str:
+    stem = _slug(Path(getattr(ref, "source_name", "sheet")).stem, max_len=40)
+    page = int(getattr(ref, "page_index", 0) or 0) + 1
+    name = f"{stem}_p{page}.txt"
+    n = 1
+    while name in used:
+        n += 1
+        name = f"{stem}_p{page}_{n}.txt"
+    used.add(name)
+    return name
+
+
+def write_qc_outputs(ctx: Any, folder: Path) -> list[str]:
+    """Write the QC inventory into ``folder``; return the relative names written.
+
+    Idempotent and defensive: a missing reviewed PDF / evidence file is skipped
+    rather than sinking the export. Writes nothing when the run had no QC stage.
+    """
+    findings = _qc_findings(ctx)
+    geometries = list(getattr(ctx, "sheet_geometries", None) or [])
+    reviewed = list(getattr(ctx, "reviewed_pdf_paths", None) or [])
+    work_dir = getattr(ctx, "qc_work_dir", None)
+    written: list[str] = []
+
+    if findings:
+        (folder / "findings.json").write_text(
+            json.dumps({"findings": [f.to_dict() for f in findings]}, indent=2),
+            encoding="utf-8",
+        )
+        write_findings_csv(findings, folder / "findings.csv")
+        written += ["findings.json", "findings.csv"]
+
+    if geometries:
+        st_dir = folder / "sheet_text"
+        st_dir.mkdir(parents=True, exist_ok=True)
+        used: set[str] = set()
+        for geometry in geometries:
+            name = _sheet_text_name(getattr(geometry, "ref", None), used)
+            (st_dir / name).write_text(getattr(geometry, "sheet_text", "") or "", encoding="utf-8")
+        written.append("sheet_text/")
+
+    for pdf in reviewed:
+        pdf = Path(pdf)
+        if pdf.exists():
+            shutil.copy2(pdf, folder / pdf.name)
+            written.append(pdf.name)
+
+    if work_dir is not None:
+        evidence = Path(work_dir) / "evidence"
+        if evidence.is_dir():
+            dest = folder / "evidence"
+            dest.mkdir(parents=True, exist_ok=True)
+            copied = 0
+            for png in sorted(evidence.glob("*.png")):
+                shutil.copy2(png, dest / png.name)
+                copied += 1
+            if copied:
+                written.append("evidence/")
+
+    return written
+
+
 def write_drawing_export(
     ctx: Any,
     parent_dir: Any,
@@ -374,4 +476,7 @@ def write_drawing_export(
         ctx, source_names=source_names, now=now, api_key=api_key
     ):
         (folder / name).write_text(content, encoding="utf-8")
+    # QC review inventory (findings.json/csv, sheet_text/, reviewed PDFs,
+    # evidence/) — only written when the run ran a QC stage.
+    write_qc_outputs(ctx, folder)
     return folder

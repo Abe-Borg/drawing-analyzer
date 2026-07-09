@@ -31,6 +31,7 @@ from .digest import (
     digest_sheet,
     normalize_focus,
 )
+from .models import Finding, SheetGeometry
 from .render import iter_rendered_sheets, list_sheets
 
 # ``progress(done, total, label)`` — called once as each sheet *finishes*
@@ -102,6 +103,18 @@ class DrawingContext:
     # deliverable is never displaced by these — they are additive.
     focus: str = ""
     focus_report_text: str = ""
+    # --- QC findings (populated when reference_audit / qc_markups are on) ------
+    # Model findings parsed from the digests, anchored and (when qc_markups)
+    # verified. ``reference_findings`` are the deterministic reference-audit
+    # findings (already anchored, DETERMINISTIC). ``reviewed_pdf_paths`` are the
+    # ``*_reviewed.pdf`` files written when qc_markups is on; ``sheet_geometries``
+    # carries each sheet's text/geometry for the findings exports; ``qc_work_dir``
+    # holds the run's evidence crops + reviewed PDFs until they are exported.
+    findings: list[Finding] = field(default_factory=list)
+    reference_findings: list[Finding] = field(default_factory=list)
+    reviewed_pdf_paths: list[Path] = field(default_factory=list)
+    sheet_geometries: list[Any] = field(default_factory=list)
+    qc_work_dir: Path | None = None
 
     @property
     def ok_sheet_count(self) -> int:
@@ -111,6 +124,24 @@ class DrawingContext:
     def cached_sheet_count(self) -> int:
         """Sheets served from the digest cache (no API call / token cost)."""
         return sum(1 for s in self.sheets if getattr(s, "cached", False))
+
+    @property
+    def all_findings(self) -> list["Finding"]:
+        """Model findings + deterministic reference findings (the full record)."""
+        return list(self.findings) + list(self.reference_findings)
+
+    @property
+    def finding_count(self) -> int:
+        return len(self.findings) + len(self.reference_findings)
+
+    @property
+    def clouded_finding_count(self) -> int:
+        """Findings that would be inked under default (verified-only) gating."""
+        from .annotate import is_cloudable
+
+        return sum(
+            1 for f in self.all_findings if is_cloudable(f, include_unverified=False)
+        )
 
 
 def _sheet_header(index: int, total: int, ref) -> str:
@@ -175,6 +206,29 @@ def _combine(
     return "\n".join(lines).strip() + "\n"
 
 
+def _rendered_stream(
+    paths: list[Path],
+    *,
+    rows: int,
+    cols: int,
+    overlap_frac: float,
+    geometry_sink: list | None,
+) -> "Any":
+    """Stream :class:`RenderedSheet`, capturing each sheet's lightweight geometry.
+
+    When ``geometry_sink`` is given, a :class:`SheetGeometry` (text + geometry,
+    **no PNG bytes**) is appended per sheet as it renders, so the QC stages can
+    anchor / verify / export after the images are gone — the batch path streams
+    and discards each rendered sheet after upload, so this is the only place the
+    per-sheet geometry survives. ``None`` disables capture (a plain digest run
+    keeps no findings state and holds nothing extra).
+    """
+    for rendered in iter_rendered_sheets(paths, rows=rows, cols=cols, overlap_frac=overlap_frac):
+        if geometry_sink is not None:
+            geometry_sink.append(SheetGeometry.from_rendered(rendered))
+        yield rendered
+
+
 def _digest_sheets_concurrent(
     paths: list[Path],
     *,
@@ -191,6 +245,7 @@ def _digest_sheets_concurrent(
     total: int,
     max_workers: int | None,
     focus: str | None = None,
+    geometry_sink: list | None = None,
 ) -> list[SheetDigest]:
     """Real-time path: render sequentially, digest on a bounded thread pool.
 
@@ -230,7 +285,10 @@ def _digest_sheets_concurrent(
                     progress(completed, total, f"Analyzed {sd.ref.display_label}")
 
         for index, rendered in enumerate(
-            iter_rendered_sheets(paths, rows=rows, cols=cols, overlap_frac=overlap_frac)
+            _rendered_stream(
+                paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
+                geometry_sink=geometry_sink,
+            )
         ):
             in_flight.add(executor.submit(_run, index, rendered))
             while len(in_flight) >= workers:
@@ -259,13 +317,16 @@ def _digest_sheets_via_batch(
     on_log: LogCallback | None = None,
     on_status: StatusCallback | None = None,
     focus: str | None = None,
+    geometry_sink: list | None = None,
 ) -> list[SheetDigest]:
     """Batch path: render-stream → Files-API upload → one Message Batch.
 
     Imported lazily so the real-time path (and a test that never touches batch)
     doesn't pull in the batch module. The client is resolved here when not
     injected, since the upload happens at submit time (the real-time path defers
-    client creation to ``digest_sheet``).
+    client creation to ``digest_sheet``). ``geometry_sink`` captures each sheet's
+    lightweight geometry as it renders (before the batch discards the rendered
+    sheet), so the QC stages survive the upload.
     """
     from .batch_digest import collect_drawing_batch, submit_drawing_batch
 
@@ -282,7 +343,10 @@ def _digest_sheets_via_batch(
             progress(total, total, msg)
 
     batch = submit_drawing_batch(
-        iter_rendered_sheets(paths, rows=rows, cols=cols, overlap_frac=overlap_frac),
+        _rendered_stream(
+            paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
+            geometry_sink=geometry_sink,
+        ),
         client=client,
         model=model,
         max_tokens=max_tokens,
@@ -339,6 +403,136 @@ def _api_environment_fingerprint() -> str:
     return f"sdk=anthropic-{sdk_version} base_url={base_url}"
 
 
+@dataclass
+class _QCResult:
+    findings: list[Finding] = field(default_factory=list)
+    reference_findings: list[Finding] = field(default_factory=list)
+    reviewed_pdf_paths: list[Path] = field(default_factory=list)
+    work_dir: Path | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
+def _run_qc_stages(
+    *,
+    sheets: list[SheetDigest],
+    geometries: list[SheetGeometry],
+    pdf_paths: list[Path],
+    reference_audit_enabled: bool,
+    qc_markups: bool,
+    markup_verified_only: bool,
+    verify_enabled: bool,
+    client: Any,
+    qc_work_dir: Path | None,
+    progress: ProgressCallback | None,
+    total: int,
+    errors: list[str],
+) -> _QCResult:
+    """Run the QC pipeline after the digests: audit → anchor → verify → markups.
+
+    Every stage is additive and non-fatal (I-3): a failure is recorded in
+    ``errors`` and the standard deliverable still ships. Model findings come from
+    the parsed digests; reference findings from the deterministic audit (already
+    anchored). Reviewed PDFs and evidence crops are written under ``work_dir`` (a
+    fresh temp dir when none is given), to be exported later.
+    """
+    findings = [f for sd in sheets for f in getattr(sd, "findings", None) or []]
+    reference_findings: list[Finding] = []
+    work_dir = qc_work_dir
+
+    if reference_audit_enabled and geometries:
+        if progress is not None:
+            progress(total, total, "Auditing references")
+        try:
+            from .reference_audit import audit_references
+
+            reference_findings = audit_references(geometries)
+            _log.info("reference audit: %d finding(s)", len(reference_findings))
+        except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
+            errors.append(f"Reference audit: {exc}")
+            _log.warning("reference audit failed: %s", exc)
+
+    # Anchor model findings (reference findings arrive already anchored).
+    if findings and geometries and (qc_markups or reference_audit_enabled):
+        if progress is not None:
+            progress(total, total, "Anchoring findings")
+        from .anchor import resolve_anchors
+
+        geom_by_key = {(g.ref.source_name, g.ref.page_index): g for g in geometries}
+        by_sheet: dict[tuple, list[Finding]] = {}
+        for finding in findings:
+            by_sheet.setdefault((finding.source_name, finding.page_index), []).append(finding)
+        for key, sheet_findings in by_sheet.items():
+            geometry = geom_by_key.get(key)
+            if geometry is None:
+                continue
+            try:
+                resolve_anchors(sheet_findings, geometry)
+            except Exception as exc:  # noqa: BLE001 - never fatal
+                _log.warning("anchoring failed for %s: %s", key, exc)
+
+    all_findings = findings + reference_findings
+    v_in = v_out = 0
+
+    # Verify model findings (deterministic reference findings are skipped by the
+    # verifier). Only when markups are requested — clouds are what demand trust.
+    if qc_markups and verify_enabled and findings:
+        from .verify import verify_findings as _run_verify
+
+        if work_dir is None:
+            import tempfile
+
+            work_dir = Path(tempfile.mkdtemp(prefix="drawing_qc_"))
+        evidence_dir = work_dir / "evidence"
+
+        def _verify_progress(done: int, tot: int, label: str) -> None:
+            if progress is not None:
+                progress(total, total, label)   # keep the sheet bar full; label = "Verifying finding k/n"
+
+        try:
+            vres = _run_verify(
+                all_findings, geometries, client=client,
+                evidence_dir=evidence_dir, progress=_verify_progress,
+            )
+            v_in, v_out = vres.input_tokens, vres.output_tokens
+            _log.info(
+                "verification: %d verified, %d rejected, %d uncertain, %d skipped",
+                vres.verified, vres.rejected, vres.uncertain, vres.skipped,
+            )
+        except Exception as exc:  # noqa: BLE001 - never fatal
+            errors.append(f"Verification: {exc}")
+            _log.warning("verification failed: %s", exc)
+
+    reviewed_pdf_paths: list[Path] = []
+    if qc_markups:
+        from .annotate import write_reviewed_pdfs
+
+        if work_dir is None:
+            import tempfile
+
+            work_dir = Path(tempfile.mkdtemp(prefix="drawing_qc_"))
+        if progress is not None:
+            progress(total, total, "Writing markups")
+        try:
+            reviewed_pdf_paths = write_reviewed_pdfs(
+                all_findings, pdf_paths, work_dir,
+                include_unverified=not markup_verified_only,
+            )
+            _log.info("markups: %d reviewed PDF(s) written", len(reviewed_pdf_paths))
+        except Exception as exc:  # noqa: BLE001 - never fatal
+            errors.append(f"Markup writing: {exc}")
+            _log.warning("markup writing failed: %s", exc)
+
+    return _QCResult(
+        findings=findings,
+        reference_findings=reference_findings,
+        reviewed_pdf_paths=reviewed_pdf_paths,
+        work_dir=work_dir,
+        input_tokens=v_in,
+        output_tokens=v_out,
+    )
+
+
 def extract_drawing_context(
     pdf_paths: list[Path],
     *,
@@ -361,6 +555,11 @@ def extract_drawing_context(
     on_status: StatusCallback | None = None,
     focus: str | None = None,
     focus_model: str | None = None,
+    reference_audit: bool = False,
+    qc_markups: bool = False,
+    markup_verified_only: bool = True,
+    verify_findings: bool = True,
+    qc_work_dir: Path | None = None,
 ) -> DrawingContext:
     """Render and digest every sheet in ``pdf_paths`` into one text context.
 
@@ -449,13 +648,21 @@ def extract_drawing_context(
             errors=["No readable PDF pages found in the selected files."],
         )
 
+    # The QC stages (reference audit, anchoring, verification, markups) run over
+    # each sheet's text/geometry after the digests, so capture that lightweight
+    # record as sheets render (the batch path discards the rendered sheets after
+    # upload). Only captured when a QC stage will actually use it.
+    need_geometry = reference_audit or qc_markups
+    sheet_geometries: list[SheetGeometry] = []
+    geometry_sink = sheet_geometries if need_geometry else None
+
     if use_batch:
         sheets = _digest_sheets_via_batch(
             paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
             client=client, model=model, max_tokens=max_tokens,
             use_thinking=use_thinking, effort=effort, cache=cache,
             progress=progress, total=total, on_log=on_log, on_status=on_status,
-            focus=focus or None,
+            focus=focus or None, geometry_sink=geometry_sink,
         )
     else:
         sheets = _digest_sheets_concurrent(
@@ -463,7 +670,7 @@ def extract_drawing_context(
             client=client, model=model, max_tokens=max_tokens,
             use_thinking=use_thinking, effort=effort, cache=cache,
             progress=progress, total=total, max_workers=max_workers,
-            focus=focus or None,
+            focus=focus or None, geometry_sink=geometry_sink,
         )
 
     errors: list[str] = []
@@ -479,6 +686,23 @@ def extract_drawing_context(
             img_tok += sd.image_token_estimate
         if sd.error:
             errors.append(f"{sd.ref.display_label}: {sd.error}")
+
+    # QC pipeline (audit → anchor → verify → markups). Additive and non-fatal;
+    # runs before synthesis/focus so those are untouched. Only the reference
+    # audit and the markups are gated by their flags; findings are always parsed
+    # off the digests, but they are only anchored/verified when a QC stage needs
+    # them (``need_geometry``).
+    qc = _QCResult()
+    if need_geometry:
+        qc = _run_qc_stages(
+            sheets=sheets, geometries=sheet_geometries, pdf_paths=paths,
+            reference_audit_enabled=reference_audit, qc_markups=qc_markups,
+            markup_verified_only=markup_verified_only, verify_enabled=verify_findings,
+            client=client, qc_work_dir=qc_work_dir, progress=progress,
+            total=total, errors=errors,
+        )
+        in_tok += qc.input_tokens
+        out_tok += qc.output_tokens
 
     # Cross-sheet synthesis (one text-only call after all digests). Skipped for
     # <2 readable sheets; on failure we keep the per-sheet digests and record
@@ -568,6 +792,11 @@ def extract_drawing_context(
         synthesis_text=synthesis_text,
         focus=focus,
         focus_report_text=focus_report_text,
+        findings=qc.findings,
+        reference_findings=qc.reference_findings,
+        reviewed_pdf_paths=qc.reviewed_pdf_paths,
+        sheet_geometries=sheet_geometries,
+        qc_work_dir=qc.work_dir,
     )
 
 
