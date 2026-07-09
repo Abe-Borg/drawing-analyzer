@@ -133,13 +133,14 @@ class DrawingContext:
     qc_work_dir: Path | None = None
     audit_stats: dict = field(default_factory=dict)
     # Part III (§18): the run's coverage tally over the findings ledger —
-    # {"cloud": n, "margin": n, "rejected": n, ("gated": n)}. Empty when no QC
-    # stage ran. Surfaced in the GUI completion summary and the report header.
+    # {"cloud": n, "margin": n, "rejected": n, ("gated": n)}. It accounts for
+    # PDF ink, so it is empty when no QC stage ran OR markups were disabled.
+    # Surfaced in the GUI completion summary and the report header.
     ledger_tally: dict = field(default_factory=dict)
 
     @property
     def ledger_tally_line(self) -> str:
-        """The §18 run-summary line, or ``""`` when no QC stage ran."""
+        """The §18 run-summary line, or ``""`` when no markups were written."""
         if not self.ledger_tally:
             return ""
         return _tally_line(self.finding_count, self.ledger_tally)
@@ -631,9 +632,11 @@ def _run_qc_stages(
     (digest Coordination/Conflict items, synthesis conflicts, opted-in focus
     items). Ingest merges duplicates (unioning provenance); ``freeze()`` assigns
     the run's ``QC-###`` numbers; anchoring, verification, the citation check,
-    and the markup writer then consume the ledger and nothing else. At the end,
-    every entry is accounted for — clouded, margin callout, or listed in the
-    rejected index — and the tally is logged and surfaced (§18).
+    and the markup writer then consume the ledger and nothing else. At the end
+    of a markup run, every entry is accounted for — clouded, margin callout, or
+    listed in the rejected index — and the tally is logged and surfaced (§18);
+    without ``qc_markups`` there is no PDF ink to account for and the tally
+    stays empty.
 
     Every stage is additive and non-fatal (I-3): a failure is recorded in
     ``errors`` and the standard deliverable still ships. Reviewed PDFs and
@@ -828,8 +831,10 @@ def _run_qc_stages(
             _log.warning("markup writing failed: %s", exc)
 
     # --- coverage accounting (§18): every ledger entry gets a disposition ------
+    # The tally describes PDF ink, so it only runs when markups were requested —
+    # a reference-audit-only run must not report clouds no PDF ever received.
     ledger_tally: dict[str, int] = {}
-    if entries:
+    if entries and qc_markups:
         from .annotate import ink_disposition
 
         for entry in entries:
@@ -1019,7 +1024,8 @@ def extract_drawing_context(
     ``ink_rejected=True``). ``markup_verified_only=True`` is the conservative
     opt-in that restricts ink to VERIFIED + DETERMINISTIC (it now defaults
     **off** — §18 supersedes the old default). The run-end coverage tally lands
-    on ``ctx.ledger_tally`` / ``ctx.ledger_tally_line``.
+    on ``ctx.ledger_tally`` / ``ctx.ledger_tally_line`` (markup runs only —
+    without ``qc_markups`` there is no PDF ink to account for).
     """
     if cache is None and use_cache:
         from .digest_cache import get_default_digest_cache

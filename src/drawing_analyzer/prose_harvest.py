@@ -158,7 +158,7 @@ def extract_synthesis_conflicts(
     naming no resolvable sheet are skipped (logged by the caller) — a synthesis
     conflict with no sheet has nowhere on the PDF to live.
     """
-    ids = sorted({s.upper() for s in sheet_ids if s}, key=len, reverse=True)
+    ids = sorted({s.upper() for s in sheet_ids if s}, key=lambda s: (-len(s), s))
     if not ids or not (synthesis_text or "").strip():
         return []
     out: list[tuple[str, list[str]]] = []
@@ -166,16 +166,74 @@ def extract_synthesis_conflicts(
         low = item.lower()
         if not any(sig in low for sig in _CONFLICT_SIGNALS):
             continue
-        upper = item.upper()
-        mentioned = [(upper.find(sid), sid) for sid in ids if sid in upper]
+        mentioned = _id_mentions(item.upper(), ids)
         if not mentioned:
             continue
-        ordered: list[str] = []
-        for _pos, sid in sorted(mentioned):
-            if sid not in ordered:
-                ordered.append(sid)
-        out.append((item, ordered))
+        out.append((item, [sid for _pos, sid in sorted(mentioned)]))
     return out
+
+
+# Characters that can continue a drawing id past a candidate match: "A-1"
+# followed by ".1" is detail id A-1.1, not sheet A-1. A slash is deliberately
+# NOT here — "P-1/P-2" names both sheets and detail-style "5/A-3" genuinely
+# lives on sheet A-3.
+_ID_CONNECTORS = ".-"
+
+
+def _extends_id(text: str, index: int, step: int) -> bool:
+    """Whether ``text[index]`` continues a larger id in direction ``step`` —
+    alphanumeric, or a ``.``/``-`` connector with an alphanumeric beyond it
+    (``A-1.1``, ``A-1-1``). A connector with nothing alphanumeric past it is
+    sentence punctuation, not a continuation (``"… conflict on A-1."``)."""
+    if index < 0 or index >= len(text):
+        return False
+    ch = text[index]
+    if ch.isalnum():
+        return True
+    if ch in _ID_CONNECTORS:
+        far = index + step
+        return 0 <= far < len(text) and text[far].isalnum()
+    return False
+
+
+def _bounded_occurrences(text: str, sid: str) -> list[int]:
+    """Start offsets where ``sid`` occurs as a whole id — ``A-1`` matches in
+    ``"SEE A-1."`` but not inside ``A-10``, ``A-1.1``, or ``2A-15``."""
+    out: list[int] = []
+    start = 0
+    while (pos := text.find(sid, start)) >= 0:
+        if not _extends_id(text, pos - 1, -1) and not _extends_id(
+            text, pos + len(sid), 1
+        ):
+            out.append(pos)
+        start = pos + 1
+    return out
+
+
+def _id_mentions(text: str, ids: list[str]) -> list[tuple[int, str]]:
+    """First genuine mention of each in-set sheet id, as ``(offset, id)``.
+
+    Boundary-aware (``_extends_id``), and a shorter id additionally never
+    counts inside a longer in-set id's mention: longer ids — ``ids`` arrives
+    longest-first — claim their spans and shorter ids only match outside
+    them. The claim pass backs up the boundary check for id alphabets the
+    connector list doesn't cover (say a set holding both ``A-1`` and
+    ``A-1 EAST``). Without all this, a set holding both ``A-1`` and ``A-10``
+    would read a mention of ``A-10`` as naming ``A-1`` too and cloud a sheet
+    the prose never named.
+    """
+    claimed: list[tuple[int, int]] = []
+    mentioned: list[tuple[int, str]] = []
+    for sid in ids:
+        occurrences = _bounded_occurrences(text, sid)
+        free = [
+            p for p in occurrences
+            if not any(c0 <= p and p + len(sid) <= c1 for c0, c1 in claimed)
+        ]
+        if free:
+            mentioned.append((free[0], sid))
+        claimed.extend((p, p + len(sid)) for p in occurrences)
+    return mentioned
 
 
 # --------------------------------------------------------------------------- #
