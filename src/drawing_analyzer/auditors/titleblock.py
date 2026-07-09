@@ -159,6 +159,7 @@ def audit_titleblock(rendered_sheets: Iterable[Any]) -> list[Finding]:
                     status="DETERMINISTIC",
                     note=f"title-block field '{tok}' vs set norm '{match}'",
                 ),
+                sources=["auditor_titleblock"],
             ))
     return findings
 

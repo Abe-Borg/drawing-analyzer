@@ -123,13 +123,15 @@ ctx = extract_drawing_context(
     focus="the rooms, and what types of plumbing fixtures each has",  # optional
     # QC review (all optional, off by default):
     reference_audit=True,        # free, zero-API deterministic auditor battery
-    qc_markups=True,             # anchor → verify → cloud; write reviewed PDFs
-    markup_verified_only=True,   # cloud only verified/deterministic findings
+    qc_markups=True,             # anchor → verify → ink; write reviewed PDFs
+    markup_verified_only=False,  # opt-in conservative mode (§18 default: ink all but REJECTED)
     verify_findings=True,        # run the per-finding verification pass
     critique=True,               # second "reviewer" read/sheet, self-consistent (pricier)
     profiles=["fire-protection"],# review-profile checklists to apply (needs critique=True)
     cross_qc=True,               # hunt cross-sheet conflicts; cloud both sheets
     citation_check=True,         # web-search check of cited code sections
+    ink_rejected=False,          # also draw verifier-rejected findings (grey/struck)
+    focus_findings_to_markups=False,  # harvest Focus sections into markups too
     qc_work_dir=Path("run-out"), # where evidence crops + reviewed PDFs land
 )
 print(ctx.combined_text)
@@ -152,9 +154,11 @@ carries the QC record: `findings` (the model's, anchored + verified),
 `reference_findings` (the deterministic auditors', anchored + `DETERMINISTIC`),
 the `all_findings` / `finding_count` / `clouded_finding_count` conveniences,
 `reviewed_pdf_paths`, the lightweight `sheet_geometries`, `audit_stats` (the
-auditors' checks-passed tally), and `qc_work_dir` (holding `evidence/` crops and
-the reviewed PDFs). Every finding carries its sequential `qc_id` review number
-(`QC-001` …) and, when the citation check ran, a `citation` verdict. `write_drawing_export(ctx, parent_dir, ...)` folds all of it
+auditors' checks-passed tally), `ledger_tally` / `ledger_tally_line` (the §18
+coverage tally), and `qc_work_dir` (holding `evidence/` crops and the reviewed
+PDFs). Every finding carries its sequential `qc_id` review number (`QC-001` …),
+its provenance tags (`sources` — see the [findings ledger](#the-findings-ledger-part-iii)),
+and, when the citation check ran, a `citation` verdict. `write_drawing_export(ctx, parent_dir, ...)` folds all of it
 into the export folder — `findings.json`, `findings.csv`, `sheet_text/<sheet>.txt`
 per sheet, the `*_reviewed.pdf` copies, and the `evidence/` crops — alongside the
 prose digest and HTML report.
@@ -505,19 +509,35 @@ is unmistakable: opened in **Bluebeam Revu** they populate the Markups List
   auditors verified *clean* — numeric relationships that checked out, references
   that resolved — the balance column of a real review.
 
-Which findings get inked (the cardinal sin is a wrong cloud on an issued
-drawing, so the default is conservative):
+### Gating — all findings get ink (Part III, §18)
 
-- `VERIFIED` and `DETERMINISTIC` → inked by default.
-- `UNCERTAIN` / unverified → inked only with **include-unverified** on, in the
-  dashed style with an `[UNVERIFIED]` prefix.
-- `REJECTED` → **never** inked, but kept in `findings.csv` for the record.
+The exhaustive default puts **every ledger entry on the paper except the ones
+the verifier proved wrong**:
+
+| Entry | Default ink |
+|---|---|
+| Anchored, `VERIFIED` / `DETERMINISTIC` | cloud (or solid border for deterministic) |
+| Anchored, `UNCERTAIN` / `SKIPPED` | **dashed** cloud, `[UNVERIFIED]` prefix |
+| Rect-less: sheet-level / absence | margin callout, `[SHEET]` prefix |
+| Rect-less: quote matched nothing | margin callout, `[UNANCHORED]` prefix — the hallucination signal, flagged loudly, never dropped |
+| `REJECTED` (verifier contradicted it) | **no ink** — but listed on the index page under *"Rejected by verification (n)"* with page links, so nothing is invisible. `ink_rejected=True` (GUI: **Include rejected (grey)**) additionally draws them grey and dashed with a `[REJECTED]` prefix. |
+
+The conservative mode is the opt-in: `markup_verified_only=True` (GUI:
+**Verified & deterministic only**, default **off**) suppresses everything but
+`VERIFIED` + `DETERMINISTIC`; suppressed entries are tallied as *gated*.
+
+At run end the pipeline asserts **every ledger entry is accounted for** —
+clouded, margin callout, or rejected-indexed — and logs the tally
+(`Ledger 47: 39 clouded, 6 margin, 2 rejected (indexed)`), which also appears in
+the GUI completion summary, the report's findings card, and
+`ctx.ledger_tally` / `ctx.ledger_tally_line`.
 
 The writer opens the original read-only and saves a *new* file (the source is
 never touched), then reopens it and checks the annotation count as a self-test.
 Every finding — inked or not — is also written to **`findings.csv`**, one row per
-finding with every field flattened (`qc_id` first; citation columns at the end),
-UTF-8 with a BOM and CRLF line endings so Excel on Windows opens it cleanly.
+finding with every field flattened (`qc_id` first; provenance in the `sources`
+column; citation columns at the end), UTF-8 with a BOM and CRLF line endings so
+Excel on Windows opens it cleanly.
 
 ## Citation check
 
@@ -538,6 +558,53 @@ report. **A MISMATCH downgrades nothing automatically** — it is surfaced for t
 engineer, because sometimes the stale citation *is* the finding. Real-time only
 (a handful of interactive calls; ~$0.03–0.08 per unique ref), additive, and
 non-fatal: any failure degrades that ref to `UNCHECKED`.
+
+## The findings ledger (Part III)
+
+Every QC item from **every** channel becomes an entry in one append-only
+per-run **findings ledger** — and everything downstream (anchoring,
+verification, the citation check, the markup writer, the CSV/JSON exports, the
+report's findings table, the index page) consumes the ledger and nothing else.
+If an item is not in the ledger it does not exist; if it is, the coverage
+assertion guarantees it is accounted for on the PDF.
+
+Duplicates **merge at ingest** (same sheet + rect overlap, same tile, or strong
+text overlap): merging unions the provenance, keeps the most severe severity,
+prefers the longest verbatim quote, and preserves the best anchor/verification
+either member carries — so an auditor's pre-anchored `DETERMINISTIC` duplicate
+*upgrades* a model entry. Multi-source provenance doubles as a confidence
+signal, shown as chips in the report rows and the markup popups
+(`prose+json+critique×2`). The `QC-###` numbers are assigned when the ledger
+freezes.
+
+**Source-tag glossary** (`Finding.sources`):
+
+| Tag | Channel |
+|---|---|
+| `digest_json` | the digest's machine-read findings block |
+| `digest_prose_coordination` / `digest_prose_conflict` | harvested digest prose sections |
+| `critique_1` / `critique_2` | the critique's self-consistency reads (both = corroborated) |
+| `cross_qc` | the cross-sheet conflict hunt |
+| `synthesis_prose` | harvested synthesis conflict statements |
+| `auditor_reference` / `auditor_arithmetic` / `auditor_naming` / `auditor_titleblock` / `auditor_sheet_index` | the deterministic auditors |
+| `focus_prose` | per-sheet Focus sections (only with `focus_findings_to_markups=True`) |
+
+### Prose harvest — the legacy channel's guarantee
+
+The prose digest predates the structured findings and feeds a downstream
+consumer, so it is never modified — it is **mirrored**. Three layered
+mechanisms make the mirror a guarantee: (1) the digest prompt requires every
+prose Coordination/Conflict item to also appear in the JSON block; (2) the
+harvester splits those prose sections into items (using the same section
+grammar as the report's "⚠ Issues only" filter) and fuzzy-matches each against
+the same-sheet ledger entries — a match just tags provenance, free; (3) each
+unmatched straggler gets **one small structuring call** (item + the sheet's
+text layer → one finding with a verbatim quote), and if even that fails a
+**degraded entry** is ingested — the prose item verbatim, sheet-level — which
+still reaches the PDF as a margin callout. **No prose QC item can fail to
+produce a ledger entry.** Synthesis prose contributes its conflict statements
+the same way, anchored on the first sheet each names and dual-anchored when a
+second sheet is named.
 
 ## Deterministic auditors
 
@@ -636,6 +703,7 @@ runs.
 | `DRAWING_ANALYZER_CRITIQUE_MODEL` | Opus 4.8 | Critique-pass vision model (`critique=True`). |
 | `DRAWING_ANALYZER_CROSS_QC_MODEL` | Opus 4.8 | Cross-sheet QC model, text-only (`cross_qc=True`). |
 | `DRAWING_ANALYZER_CITATION_MODEL` | Opus 4.8 | Citation-check model, with web search (`citation_check=True`). |
+| `DRAWING_ANALYZER_HARVEST_MODEL` | Opus 4.8 | Prose-harvest structuring model (one small call per straggler). |
 | `DRAWING_ANALYZER_WEB_SEARCH_TOOL_TYPE` | `web_search_20260209` | Server-side web-search tool type string (survives an API rename). |
 | `DRAWING_ANALYZER_MARKUP_APPENDIX` | off | Append the "checked and consistent" page to reviewed PDFs. |
 | `DRAWING_ANALYZER_CRITIQUE_RUNS` | `2` | Critique self-consistency reads to merge (`1` disables it). |

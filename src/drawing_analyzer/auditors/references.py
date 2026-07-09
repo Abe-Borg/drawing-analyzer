@@ -359,6 +359,7 @@ def _make_finding(
         refs=[],
         anchor=anchor,
         verification=Verification(status="DETERMINISTIC", note=note),
+        sources=["auditor_reference"],
     )
 
 

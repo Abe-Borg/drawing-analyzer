@@ -305,7 +305,7 @@ def _unique_dir(path: Path) -> Path:
 
 FINDINGS_CSV_HEADER = [
     "qc_id", "id", "sheet_id", "source_name", "page", "category", "severity",
-    "text", "source_quote", "tile", "refs", "also_on",
+    "text", "source_quote", "tile", "refs", "also_on", "sources",
     "anchor_status", "anchor_method", "rect_pdf",
     "verification_status", "verification_note", "evidence_png",
     "citation_status", "citation_note",
@@ -354,6 +354,7 @@ def _finding_row(finding: Any) -> list[str]:
         _fmt_tile(getattr(finding, "tile", None)),
         "; ".join(str(r) for r in refs),
         _fmt_also_on(getattr(finding, "also_on", None)),
+        "; ".join(str(s) for s in (getattr(finding, "sources", None) or [])),
         str(getattr(anchor, "status", "")) if anchor is not None else "",
         str(getattr(anchor, "method", "")) if anchor is not None else "",
         _fmt_rect(getattr(anchor, "rect_pdf", None)) if anchor is not None else "",

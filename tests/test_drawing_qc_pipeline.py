@@ -229,6 +229,100 @@ def test_combined_text_has_no_findings_block(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# Part III — the findings ledger: prose carry-through + coverage assertion
+# --------------------------------------------------------------------------- #
+
+
+class _ProseRoutingClient:
+    """Digest with a prose Coordination item beyond its JSON block; the harvest's
+    structuring call gets garbage (forcing the degraded path); verify confirms."""
+
+    def __init__(self):
+        self.harvest_calls = 0
+        prose = (
+            "Sheet M-101 - Mechanical - Plan\n"
+            "VAV-3 serves Room 120.\n\n"
+            "**Coordination / cross-discipline items**\n"
+            "- VAV-3 has no clearance.\n"
+            "- Fire-smoke damper at the corridor wall is furnished by another discipline.\n"
+        )
+        digest_text = prose + "\n" + _digest_block([_VAV_FINDING])
+        verdict_text = '{"verdict":"CONFIRMED","note":"seen"}'
+
+        from drawing_analyzer.prose_harvest import HARVEST_SYSTEM_PROMPT
+
+        class _Msgs:
+            def create(_self, **kw):
+                system = kw.get("system", "")
+                if system == HARVEST_SYSTEM_PROMPT:
+                    self.harvest_calls += 1
+                    return FakeMessage(content=[FakeTextBlock(text="not json")],
+                                       usage=FakeUsage(input_tokens=50, output_tokens=10))
+                if system == VERIFY_SYSTEM_PROMPT:
+                    return FakeMessage(content=[FakeTextBlock(text=verdict_text)],
+                                       usage=FakeUsage(input_tokens=40, output_tokens=8))
+                if system.startswith(DIGEST_SYSTEM_PROMPT):
+                    return FakeMessage(content=[FakeTextBlock(text=digest_text)],
+                                       usage=FakeUsage(input_tokens=500, output_tokens=80))
+                return FakeMessage(content=[FakeTextBlock(text="ok")])
+
+        self.messages = _Msgs()
+
+
+def test_ledger_coverage_every_entry_accounted_on_the_pdf(tmp_path):
+    src = _make_pdf(tmp_path / "M-101.pdf")
+    client = _ProseRoutingClient()
+    ctx = extract_drawing_context(
+        [src], client=client, rows=2, cols=2,
+        reference_audit=True, qc_markups=True, qc_work_dir=tmp_path / "qc",
+    )
+
+    # The prose section had two items: one restates the JSON finding (matched —
+    # its entry gains prose provenance), one is a straggler whose structuring
+    # call was forced to fail → a degraded SHEET entry (the §17 invariant).
+    assert client.harvest_calls == 1
+    matched = next(f for f in ctx.findings if "digest_json" in f.sources)
+    assert "digest_prose_coordination" in matched.sources
+    degraded = next(f for f in ctx.findings if f.sources == ["digest_prose_coordination"])
+    assert degraded.anchor_hint == "SHEET"
+    assert "another discipline" in degraded.text
+
+    # Coverage (§18): every ledger entry is exactly one of cloud/margin/rejected.
+    # 3 entries: the VERIFIED model finding (cloud), the degraded prose item
+    # (margin callout), and the DETERMINISTIC reference finding (cloud).
+    assert ctx.finding_count == 3
+    assert ctx.ledger_tally == {"cloud": 2, "margin": 1}
+    assert sum(ctx.ledger_tally.values()) == ctx.finding_count
+    assert ctx.ledger_tally_line == "Ledger 3: 2 clouded, 1 margin, 0 rejected (indexed)"
+    assert not any(e.startswith("Ledger coverage") for e in ctx.errors)
+
+    # The ink matches the tally: 2 clouds + 2 QC tags + 1 margin callout.
+    assert _annot_count(ctx.reviewed_pdf_paths[0]) == 5
+
+    # Provenance reaches the CSV (source-tag column).
+    from drawing_analyzer.export import build_findings_csv
+
+    csv_text = build_findings_csv(ctx.all_findings)
+    assert "digest_json; digest_prose_coordination" in csv_text
+    assert "auditor_reference" in csv_text
+
+
+def test_verified_only_mode_gates_and_tallies_gated(tmp_path):
+    src = _make_pdf(tmp_path / "M-101.pdf")
+    client = _ProseRoutingClient()
+    ctx = extract_drawing_context(
+        [src], client=client, rows=2, cols=2,
+        reference_audit=True, qc_markups=True, markup_verified_only=True,
+        qc_work_dir=tmp_path / "qc",
+    )
+    # The degraded SKIPPED prose entry is suppressed by the conservative mode and
+    # accounted as gated — the tally still covers every entry.
+    assert ctx.ledger_tally == {"cloud": 2, "gated": 1}
+    assert "1 gated (verified-only mode)" in ctx.ledger_tally_line
+    assert sum(ctx.ledger_tally.values()) == ctx.finding_count
+
+
+# --------------------------------------------------------------------------- #
 # Arithmetic auditor via critique-transcribed claims (Phase 14)
 # --------------------------------------------------------------------------- #
 

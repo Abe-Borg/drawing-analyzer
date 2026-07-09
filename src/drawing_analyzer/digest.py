@@ -246,9 +246,11 @@ low); text (the finding, at most two sentences); source_quote (COPY VERBATIM \
 from the SHEET TEXT LAYER above — exact characters — or "" ONLY if the issue is \
 purely graphical with no supporting text); tile ([row, col] of the tile where \
 you saw it); refs (an array of any code or spec references you believe apply — \
-cite conservatively). Emit at most 40 findings, most important first; emit \
-{"findings": []} if there are none. Put nothing but the JSON object inside the \
-block, and write no prose after it."""
+cite conservatively). Every item you report under a Coordination or Conflict \
+prose section MUST also appear as an entry in this findings block — the block is \
+the machine-read mirror of those sections. Emit at most 40 findings, most \
+important first; emit {"findings": []} if there are none. Put nothing but the \
+JSON object inside the block, and write no prose after it."""
 
 # Folded into the digest cache key so any edit to the prompt, the task
 # instruction, the text-layer framing, or the findings instruction re-digests

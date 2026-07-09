@@ -73,11 +73,13 @@ DEFAULT_AUTHOR = "Drawing Analyzer (AI review)"
 INDEX_PAGE_LABEL = "AI DRAFT REVIEW - FINDINGS INDEX"
 APPENDIX_PAGE_LABEL = "AI DRAFT REVIEW - CHECKED AND CONSISTENT"
 
-# Verification statuses trusted enough to ink by default. Everything else
-# (UNCERTAIN / SKIPPED) is "unverified" and only inked when opted in; REJECTED is
-# never inked. (Part III later flips the default to ink-everything-but-rejected;
-# that lands with the ledger phase, not here.)
+# Verification statuses trusted unconditionally. Under the Part III gating
+# amendment (§18) the exhaustive default inks EVERYTHING except REJECTED —
+# UNCERTAIN / SKIPPED render in the dashed "unverified" style; the conservative
+# "verified & deterministic only" mode (opt-in) restricts ink to this set.
 _TRUSTED = frozenset({"VERIFIED", "DETERMINISTIC"})
+# Rejected findings render grey/struck when explicitly opted in (--ink-rejected).
+_REJECTED_COLOR = (0.45, 0.45, 0.45)
 
 # Stroke color by severity (RGB 0–1): red / orange / blue, grey fallback. A
 # "question"-category finding is blue regardless of its severity (Phase 15 spec:
@@ -125,9 +127,11 @@ def _trust_gate(finding: Finding, *, include_unverified: bool) -> bool:
 def is_cloudable(finding: Finding, *, include_unverified: bool) -> bool:
     """Whether this finding gets a Square cloud (needs an anchor rectangle).
 
-    A ``REJECTED`` finding is never inked (a known-wrong cloud on an issued
-    drawing is the one failure worse than a missing one); ``VERIFIED`` /
-    ``DETERMINISTIC`` always are; the rest only when ``include_unverified``.
+    A ``REJECTED`` finding is never default-inked (a known-wrong cloud on an
+    issued drawing is the one failure worse than a missing one); ``VERIFIED`` /
+    ``DETERMINISTIC`` always are; the rest only when ``include_unverified`` —
+    the exhaustive default under §18, where the conservative
+    verified-&-deterministic-only mode is the opt-in.
     """
     anchor = getattr(finding, "anchor", None)
     if anchor is None or anchor.rect_pdf is None:
@@ -136,17 +140,17 @@ def is_cloudable(finding: Finding, *, include_unverified: bool) -> bool:
 
 
 def is_margin_callout(finding: Finding, *, include_unverified: bool) -> bool:
-    """Whether this finding gets a margin callout box (Phase 15).
+    """Whether this finding gets a margin callout box.
 
-    Sheet-level / absence findings (``anchor_hint="SHEET"``) have no rectangle to
-    cloud — they are drawn as FreeText boxes stacked in the sheet's clear margin
-    band instead, under the same trust gating as clouds.
+    Under the Part III gating amendment (§18) **every rect-less finding** gets a
+    callout — sheet-level / absence findings (``anchor_hint="SHEET"``) *and*
+    ``UNANCHORED`` ones (the quote-matched-nothing hallucination signals, drawn
+    with an ``[UNANCHORED]`` prefix so they read as flagged, never dropped) —
+    subject to the same trust gating as clouds.
     """
     anchor = getattr(finding, "anchor", None)
     if anchor is not None and anchor.rect_pdf is not None:
         return False                      # anchored → it clouds instead
-    if (getattr(finding, "anchor_hint", "") or "").upper() != "SHEET":
-        return False
     return _trust_gate(finding, include_unverified=include_unverified)
 
 
@@ -155,6 +159,27 @@ def is_inked(finding: Finding, *, include_unverified: bool) -> bool:
     return is_cloudable(finding, include_unverified=include_unverified) or (
         is_margin_callout(finding, include_unverified=include_unverified)
     )
+
+
+def ink_disposition(
+    finding: Finding, *, include_unverified: bool, ink_rejected: bool = False
+) -> str:
+    """How the run accounts for one ledger entry (Part III's coverage tally).
+
+    ``"cloud"`` — anchored, drawn as a Square; ``"margin"`` — rect-less, drawn
+    as a margin callout; ``"rejected"`` — verifier-contradicted, listed in the
+    index's rejected section (and inked grey when ``ink_rejected``); ``"gated"``
+    — suppressed by the opt-in verified-&-deterministic-only mode. Under the
+    exhaustive default (``include_unverified=True``) every entry is exactly one
+    of cloud / margin / rejected — the §18 coverage assertion.
+    """
+    if _status(finding) == "REJECTED":
+        return "rejected"
+    if is_cloudable(finding, include_unverified=include_unverified):
+        return "cloud"
+    if is_margin_callout(finding, include_unverified=include_unverified):
+        return "margin"
+    return "gated"
 
 
 def _is_unverified(finding: Finding) -> bool:
@@ -167,13 +192,18 @@ def _color(finding: Finding) -> tuple[float, float, float]:
     return _SEVERITY_COLORS.get((finding.severity or "").lower(), _DEFAULT_COLOR)
 
 
-def _annot_content(finding: Finding, *, unverified: bool) -> str:
+def _annot_content(
+    finding: Finding, *, unverified: bool, rejected: bool = False, place: str = ""
+) -> str:
     """The popup comment — exhaustive and descriptive (Phase 15 template).
 
     Order: the finding itself first (Revu's Markups List previews the first
     line), then the verbatim quote, cross-sheet pointers, verification, refs +
-    citation-check verdict, the reproduced flag (only when it carries signal),
-    the evidence filename, and the ids.
+    citation-check verdict, provenance, the reproduced flag (only when it
+    carries signal), the evidence filename, and the ids. ``place`` is the §18
+    placement prefix for margin callouts (``[SHEET]`` / ``[UNANCHORED]``) — for a
+    FreeText annot ``/Contents`` *is* the displayed text, so the prefix must live
+    here to be visible on the box.
     """
     head = f"{finding.qc_id}: " if finding.qc_id else ""
     lines = [f"{head}{finding.text.strip()}"]
@@ -199,13 +229,20 @@ def _annot_content(finding: Finding, *, unverified: bool) -> str:
         if citation.edition_notes:
             cite += f" (editions: {citation.edition_notes})"
         lines.append(cite)
+    sources = getattr(finding, "sources", None) or []
+    if sources:
+        from .ledger import provenance_label
+
+        lines.append(f"Sources: {provenance_label(sources)}")
     if not getattr(finding, "reproduced", True):
         lines.append("Reproduced: no (seen in a single read)")
     if v is not None and v.evidence_png:
         lines.append(f"Evidence: {v.evidence_png}")
     lines.append(f"Finding ID: {finding.id}")
     content = "\n".join(lines)
-    return f"[UNVERIFIED] {content}" if unverified else content
+    trust = "[REJECTED] " if rejected else ("[UNVERIFIED] " if unverified else "")
+    placement = f"{place} " if place else ""
+    return f"{trust}{placement}{content}"
 
 
 # --------------------------------------------------------------------------- #
@@ -324,20 +361,24 @@ def _add_qc_tag(
 
 
 def _add_cloud(
-    page: "pymupdf.Page", finding: Finding, *, unverified: bool, author: str
+    page: "pymupdf.Page", finding: Finding, *, unverified: bool, author: str,
+    rejected: bool = False,
 ) -> int:
     """The finding's Square annot + its QC tag; returns annots written.
 
     Style (Phase 15): DETERMINISTIC findings draw a **solid** border (the host
     computed them — no cloud theatrics), model findings a revision cloud, and
-    opted-in unverified findings a dashed border.
+    opted-in unverified findings a dashed border. An opted-in **rejected**
+    finding (§18's ``--ink-rejected``) draws grey and dashed with a
+    ``[REJECTED]`` popup prefix — visibly struck, never mistaken for a live
+    finding.
     """
     rect = pymupdf.Rect(*finding.anchor.rect_pdf)
     annot = page.add_rect_annot(rect)
-    annot.set_colors(stroke=_color(finding))
+    annot.set_colors(stroke=_REJECTED_COLOR if rejected else _color(finding))
     try:
-        if unverified:
-            annot.set_border(width=_BORDER_WIDTH, dashes=[4, 3])   # dashed = tentative
+        if rejected or unverified:
+            annot.set_border(width=_BORDER_WIDTH, dashes=[4, 3])   # dashed = tentative/struck
         elif _status(finding) == "DETERMINISTIC":
             annot.set_border(width=_BORDER_WIDTH)                   # solid = computed
         else:
@@ -347,7 +388,7 @@ def _add_cloud(
     annot.set_info(
         title=author,
         subject=finding.category,
-        content=_annot_content(finding, unverified=unverified),
+        content=_annot_content(finding, unverified=unverified, rejected=rejected),
     )
     # `update()` builds the appearance stream (/AP); without it some viewers draw
     # nothing. This is the whole reason PyMuPDF is used here (see module docstring).
@@ -402,25 +443,30 @@ def _add_margin_callouts(
             if stacking_up:
                 y = max(2.0, y - (_CALLOUT_H + _CALLOUT_GAP))
         box = pymupdf.Rect(x, y, x + _CALLOUT_W, y + _CALLOUT_H)
-        unverified = _is_unverified(finding)
-        color = _color(finding)
-        prefix = "[UNVERIFIED] [SHEET] " if unverified else "[SHEET] "
-        text = f"{prefix}{finding.qc_id + ': ' if finding.qc_id else ''}{finding.text.strip()}"
+        rejected = _status(finding) == "REJECTED"
+        unverified = _is_unverified(finding) and not rejected
+        color = _REJECTED_COLOR if rejected else _color(finding)
+        # Placement prefix (§18): sheet-level absences read [SHEET]; a quote that
+        # matched nothing reads [UNANCHORED] — the flagged-loudly hallucination
+        # signal, on the page but never dressed as a placed finding. For FreeText
+        # /Contents IS the displayed text, so the prefixed content set below is
+        # exactly what the box shows.
+        place = "[SHEET]" if (finding.anchor_hint or "").upper() == "SHEET" else "[UNANCHORED]"
+        content = _annot_content(
+            finding, unverified=unverified, rejected=rejected, place=place
+        )
         # Severity-colored text carries the legend (PyMuPDF rejects border_color
-        # on plain FreeText annots); unverified callouts also dash their border.
+        # on plain FreeText annots); unverified/rejected callouts dash the border.
         annot = page.add_freetext_annot(
-            box, text[:220],
+            box, content[:220],
             fontsize=7.5, text_color=color, fill_color=(1.0, 1.0, 0.92),
         )
         try:
-            if unverified:
+            if unverified or rejected:
                 annot.set_border(width=1.0, dashes=[4, 3])
         except Exception:  # noqa: BLE001
             pass
-        annot.set_info(
-            title=author, subject=finding.category,
-            content=_annot_content(finding, unverified=unverified),
-        )
+        annot.set_info(title=author, subject=finding.category, content=content)
         annot.update()
         written += 1
 
@@ -453,24 +499,47 @@ def _status_label(finding: Finding) -> str:
     return _status(finding)
 
 
-def _index_entries(findings: list[Finding], *, include_unverified: bool) -> list[Finding]:
-    """The inked findings, in QC-number order (the index lists what's on paper)."""
+def _index_entries(
+    findings: list[Finding], *, include_unverified: bool
+) -> tuple[list[Finding], list[Finding]]:
+    """``(inked, rejected)`` in QC-number order.
+
+    The main table lists what's on paper; the rejected list (§18) makes the
+    verifier-contradicted findings *visible* on the index — nothing is ever
+    silently absent from the record — even though they carry no ink by default.
+    """
+    def _order(fs: list[Finding]) -> list[Finding]:
+        return sorted(fs, key=lambda f: (f.qc_id or "~", f.id))
+
     inked = [f for f in findings if is_inked(f, include_unverified=include_unverified)]
-    return sorted(inked, key=lambda f: (f.qc_id or "~", f.id))
+    rejected = [f for f in findings if _status(f) == "REJECTED"]
+    return _order(inked), _order(rejected)
 
 
 def _insert_index_pages(
-    doc: "pymupdf.Document", entries: list[Finding], *, author: str
+    doc: "pymupdf.Document",
+    entries: list[Finding],
+    rejected: list[Finding],
+    *,
+    author: str,
 ) -> int:
     """Insert the findings index at the front of ``doc``; return pages inserted.
 
-    Every row carries a GOTO link to its finding's page + rectangle. Link targets
-    are offset by the number of index pages, which is computed **before** any
-    page is inserted (inserting at the front shifts every original page down).
+    Every finding row carries a GOTO link to its finding's page + rectangle.
+    ``rejected`` entries follow the main table under a "Rejected by verification
+    (n)" heading, with the same page links. Link targets are offset by the
+    number of index pages, which is computed **before** any page is inserted
+    (inserting at the front shifts every original page down).
     """
-    if not entries:
+    # A uniform row stream ("heading" rows carry no link) paginates the main
+    # table and the rejected section together.
+    rows: list[tuple[str, Any]] = [("entry", f) for f in entries]
+    if rejected:
+        rows.append(("heading", f"Rejected by verification ({len(rejected)})"))
+        rows.extend(("rejected", f) for f in rejected)
+    if not rows:
         return 0
-    n_pages = (len(entries) + _INDEX_ROWS_PER_PAGE - 1) // _INDEX_ROWS_PER_PAGE
+    n_pages = (len(rows) + _INDEX_ROWS_PER_PAGE - 1) // _INDEX_ROWS_PER_PAGE
 
     # Insert EVERY index page before drawing any rows: link targets are numbered
     # for the final document, so drawing while later index pages are still
@@ -493,18 +562,26 @@ def _insert_index_pages(
         for x, label in ((36, "ID"), (95, "Sheet"), (210, "Sev"), (258, "Status"), (340, "Finding")):
             page.insert_text((x, y), label, fontsize=8, fontname="hebo", color=(0.25, 0.25, 0.25))
 
-        batch = entries[i * _INDEX_ROWS_PER_PAGE:(i + 1) * _INDEX_ROWS_PER_PAGE]
+        batch = rows[i * _INDEX_ROWS_PER_PAGE:(i + 1) * _INDEX_ROWS_PER_PAGE]
         y = _INDEX_TOP + 4
-        for finding in batch:
-            color = _color(finding)
+        for kind, payload in batch:
+            if kind == "heading":
+                page.insert_text((36, y), str(payload), fontsize=9, fontname="hebo",
+                                 color=(0.3, 0.3, 0.3))
+                y += _INDEX_ROW_H
+                continue
+            finding = payload
+            struck = kind == "rejected"
+            color = _REJECTED_COLOR if struck else _color(finding)
+            text_color = _REJECTED_COLOR if struck else (0, 0, 0)
             page.insert_text((36, y), finding.qc_id or "—", fontsize=8, fontname="hebo", color=color)
-            page.insert_text((95, y), (finding.sheet_id or "")[:20], fontsize=8, color=(0, 0, 0))
+            page.insert_text((95, y), (finding.sheet_id or "")[:20], fontsize=8, color=text_color)
             page.insert_text((210, y), (finding.severity or "")[:6], fontsize=8, color=color)
-            page.insert_text((258, y), _status_label(finding)[:13], fontsize=8, color=(0, 0, 0))
+            page.insert_text((258, y), _status_label(finding)[:13], fontsize=8, color=text_color)
             text = finding.text.strip().replace("\n", " ")
             if len(text) > 62:
                 text = text[:59] + "..."
-            page.insert_text((340, y), text, fontsize=8, color=(0, 0, 0))
+            page.insert_text((340, y), text, fontsize=8, color=text_color)
 
             target_page = int(finding.page_index) + n_pages
             rect = getattr(finding.anchor, "rect_pdf", None) if finding.anchor else None
@@ -584,6 +661,7 @@ def annotate_pdf(
     out_path: Path | str,
     *,
     include_unverified: bool = False,
+    ink_rejected: bool = False,
     author: str = DEFAULT_AUTHOR,
     sheet_meta: dict[int, dict] | None = None,
     index_pages: bool = True,
@@ -597,9 +675,11 @@ def annotate_pdf(
     is never modified. ``sheet_meta`` maps page index → the sheet's retained
     geometry (``words`` / ``rows`` / ``cols`` / page size) for margin-band and
     leader placement; without it callouts fall back to a bottom strip and skip
-    leaders. Per-finding failures are logged and skipped (I-3); after saving, the
-    file is reopened and its annot count compared to what was written (a mismatch
-    is logged, not raised).
+    leaders. ``ink_rejected`` (§18) additionally draws verifier-REJECTED findings
+    grey and dashed; by default they carry no ink but are listed on the index
+    page's rejected section. Per-finding failures are logged and skipped (I-3);
+    after saving, the file is reopened and its annot count compared to what was
+    written (a mismatch is logged, not raised).
     """
     src = Path(pdf_path)
     out = Path(out_path)
@@ -613,23 +693,30 @@ def annotate_pdf(
         page_count = doc.page_count
         callouts_by_page: dict[int, list[Finding]] = {}
         for finding in findings:
+            disposition = ink_disposition(
+                finding, include_unverified=include_unverified, ink_rejected=ink_rejected
+            )
+            if disposition == "gated" or (disposition == "rejected" and not ink_rejected):
+                continue
             page_index = finding.page_index
             if not (0 <= page_index < page_count):
-                if is_inked(finding, include_unverified=include_unverified):
-                    _log.warning(
-                        "finding %s page_index %d out of range for %s",
-                        finding.id, page_index, src.name,
-                    )
+                _log.warning(
+                    "finding %s page_index %d out of range for %s",
+                    finding.id, page_index, src.name,
+                )
                 continue
-            if is_cloudable(finding, include_unverified=include_unverified):
+            rejected = disposition == "rejected"
+            anchored = finding.anchor is not None and finding.anchor.rect_pdf is not None
+            if disposition == "cloud" or (rejected and anchored):
                 try:
                     written += _add_cloud(
                         doc[page_index], finding,
-                        unverified=_is_unverified(finding), author=author,
+                        unverified=_is_unverified(finding) and not rejected,
+                        author=author, rejected=rejected,
                     )
                 except Exception:  # noqa: BLE001 - one bad annot must not sink the file
                     _log.warning("could not add markup for finding %s", finding.id)
-            elif is_margin_callout(finding, include_unverified=include_unverified):
+            else:                                   # margin (or rect-less rejected)
                 callouts_by_page.setdefault(page_index, []).append(finding)
 
         for page_index, group in sorted(callouts_by_page.items()):
@@ -644,11 +731,10 @@ def annotate_pdf(
 
         if index_pages:
             try:
-                _insert_index_pages(
-                    doc,
-                    _index_entries(findings, include_unverified=include_unverified),
-                    author=author,
+                entries, rejected_entries = _index_entries(
+                    findings, include_unverified=include_unverified
                 )
+                _insert_index_pages(doc, entries, rejected_entries, author=author)
             except Exception:  # noqa: BLE001 - the index must not sink the file
                 _log.warning("could not build the findings index for %s", src.name)
         if include_appendix:
@@ -701,7 +787,7 @@ def _expand_for_markup(findings: Iterable[Finding]) -> list[Finding]:
                 page_index=leg.page_index, category=f.category, severity=f.severity,
                 text=f.text, source_quote=leg.source_quote, refs=list(f.refs),
                 also_on=others, anchor=leg.anchor, verification=f.verification,
-                qc_id=f.qc_id, citation=f.citation,
+                qc_id=f.qc_id, citation=f.citation, sources=list(f.sources),
             ))
     return out
 
@@ -712,16 +798,19 @@ def write_reviewed_pdfs(
     output_dir: Path | str,
     *,
     include_unverified: bool = False,
+    ink_rejected: bool = False,
     author: str = DEFAULT_AUTHOR,
     geometries: Iterable[Any] | None = None,
     audit_stats: dict | None = None,
     include_appendix: bool = False,
 ) -> list[Path]:
-    """Write one ``<stem>_reviewed.pdf`` per source PDF that has inked findings.
+    """Write one ``<stem>_reviewed.pdf`` per source PDF that has QC content.
 
     Findings are matched to a source PDF by ``source_name`` (the file basename);
-    a source with no inked finding gets no reviewed copy. A cross-sheet finding
-    is inked on **every** sheet it touches (see :func:`_expand_for_markup`).
+    a source with neither an inked finding nor a rejected one gets no reviewed
+    copy (rejected-only sources still get one, so their index's rejected section
+    keeps them visible — §18: nothing is invisible). A cross-sheet finding is
+    inked on **every** sheet it touches (see :func:`_expand_for_markup`).
     ``geometries`` (the run's :class:`~drawing_analyzer.models.SheetGeometry`
     records) supply the word rectangles and grid used for margin-band placement
     and leader lines; ``audit_stats`` feeds the optional appendix page. Output
@@ -753,9 +842,11 @@ def write_reviewed_pdfs(
     for pdf_path in pdf_paths:
         pdf_path = Path(pdf_path)
         sheet_findings = by_source.get(pdf_path.name, [])
-        if not any(
+        has_ink = any(
             is_inked(f, include_unverified=include_unverified) for f in sheet_findings
-        ):
+        )
+        has_rejected = any(_status(f) == "REJECTED" for f in sheet_findings)
+        if not has_ink and not has_rejected:
             continue
         name = f"{pdf_path.stem}_reviewed.pdf"
         n = 1
@@ -766,7 +857,8 @@ def write_reviewed_pdfs(
         out = output_dir / name
         annotate_pdf(
             pdf_path, sheet_findings, out,
-            include_unverified=include_unverified, author=author,
+            include_unverified=include_unverified, ink_rejected=ink_rejected,
+            author=author,
             sheet_meta=meta_by_source.get(pdf_path.name),
             audit_stats=audit_stats, include_appendix=include_appendix,
         )
