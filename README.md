@@ -429,7 +429,8 @@ instead of idling at `UNCERTAIN`.
 
 A finding is only useful on a marked-up drawing if it sits **on the thing it's
 about**. The anchor resolver maps each finding's verbatim `source_quote` back to
-a rectangle on its page (in the PDF's own points), offline and with no model
+a rectangle on its page — in the canonical **`PAGE_VIEW_V2`** coordinate space
+(see [Rotation & page boxes](#rotation--page-boxes)), offline and with no model
 call, using a tiered strategy that records which tier fired:
 
 - **EXACT** — the normalized quote matches a run of words verbatim. When the
@@ -452,6 +453,29 @@ call, using a tiered strategy that records which tier fired:
 Findings the [deterministic auditors](#deterministic-auditors) already placed
 arrive pre-anchored and are left untouched. Like the tile geometry, the resolver
 imports no PDF engine — it works on the extracted word rectangles alone.
+
+### Rotation & page boxes
+
+A drawing sheet can be **rotated** (a portrait page displayed landscape via
+`/Rotate 90`) or **cropped** (a `CropBox` smaller than, or offset from, the
+`MediaBox`). PyMuPDF reports and accepts coordinates in *two different* spaces
+that diverge on such a page — text extraction and annotation writing use an
+un-rotated, CropBox-relative space, while the rasterizer clips in the rotated
+page-view space the model actually sees. Using one where the other is meant
+mis-places findings on rotated pages (the class of bug this release closes).
+
+The pipeline settles on **one canonical space, `PAGE_VIEW_V2`**: top-left origin,
+post-CropBox, post-rotation — exactly the frame of the overview + tile images the
+model reads. Every word rectangle, anchor, verification crop, and persisted
+finding rectangle lives in it. The two PyMuPDF-touching modules convert only at
+their own boundaries: `render.py` transforms extracted words into view space once
+(via the page's rotation matrix), and `annotate.py` transforms each rectangle back
+to page space (via the derotation matrix) just before it draws — with callout text
+rotated so it reads upright on a rotated sheet. Everything in between works on
+plain view-space numbers with no PDF engine. On an ordinary un-rotated page with a
+default CropBox both transforms are the identity, so nothing changes. Each page's
+frame and the two transforms are captured in a `PageGeometry` record (matrices as
+plain floats, so no PyMuPDF type leaks past `render.py`).
 
 ## Verification pass
 

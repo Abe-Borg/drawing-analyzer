@@ -6,6 +6,40 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed (Phase 19A — canonical page geometry, DA-003)
+
+- **Findings are now placed correctly on rotated and cropped drawing pages.** A
+  sheet with `/Rotate 90|180|270`, or a `CropBox` smaller than / offset from the
+  `MediaBox`, previously mis-placed its findings: the anchor rectangle came from
+  PyMuPDF's un-rotated, CropBox-relative text-extraction space, but the
+  verification crop clips in the *rotated* page-view space — so on a rotated page
+  the crop the verifier saw was blank, tile disambiguation chose the wrong
+  occurrence of a repeated quote, and margin callouts drifted. The two spaces were
+  characterized empirically against the pinned `pymupdf==1.28.0` (rendering real
+  pixels, preserved as fixtures in `tests/test_drawing_geometry.py`), not assumed.
+- **One canonical coordinate space, `PAGE_VIEW_V2`** (top-left origin, post-CropBox,
+  post-rotation — the frame of the images the model reads) now carries every word
+  rectangle, anchor, verification crop, and persisted finding rectangle.
+  `render.py` transforms extracted words into view space once (via the page's
+  rotation matrix) and captures a new `PageGeometry` (view dims, MediaBox/CropBox,
+  rotation, and both affine matrices as plain floats) on `RenderedSheet` /
+  `SheetGeometry`. `annotate.py` transforms each rectangle/point back to page space
+  (via the derotation matrix) at the write boundary and draws FreeText callouts with
+  `rotate=page.rotation` so they read upright on a rotated sheet. `anchor.py`,
+  `tiling.py`, and `verify.py` are unchanged in logic — they now operate on
+  view-space coordinates consistently and remain PyMuPDF-free.
+- **New pure helpers** `models.normalize_rect` / `models.transform_rect` (finite +
+  positive-area validation; a rect that inverts under a transform is *sorted*, never
+  clamped — so the previously reproducible inverted rectangle is impossible by
+  construction). `models.PageGeometry` round-trips to/from `dict` additively.
+- **No coordinate flip on an ordinary page:** rotation 0 with a default CropBox
+  yields identity transforms, so the common case is byte-for-byte unchanged. The
+  digest cache is intentionally untouched here — anchors are recomputed every run
+  from freshly-extracted view-space words, so no stale-space rectangle can be
+  served; the level-1 fingerprint's coverage of rotation/CropBox/annotations is
+  Phase 19B. I-5 is preserved (the new geometry math is pure Python; the PyMuPDF
+  transforms live only in `render.py` / `annotate.py`).
+
 ### Added (Phase 18C — mid-run source mutation detection, DA-001 §10.6)
 
 - **A source PDF that changes on disk between analysis and markup can no longer

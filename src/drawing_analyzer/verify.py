@@ -21,7 +21,10 @@ per-finding failure degrades that finding to ``UNCERTAIN``; a fatal failure
 (no key / auth) marks the remaining findings ``SKIPPED`` and the run continues.
 
 This module imports **no PDF engine** — crops are rendered through
-:func:`render.iter_region_crops` (I-5).
+:func:`render.iter_region_crops` (I-5). Anchor rectangles are in the canonical
+**PAGE_VIEW_V2** space, which is exactly the space ``get_pixmap(clip=...)`` wants,
+so a crop lands on the anchored region at every page rotation (Phase 19, DA-003)
+without any transform in this module.
 """
 from __future__ import annotations
 

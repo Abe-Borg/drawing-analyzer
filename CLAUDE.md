@@ -106,3 +106,13 @@ store, pricing, tokenizer). `reference_audit.py` is a back-compat shim over
   text.
 - PyMuPDF is not thread-safe: rendering stays sequential; concurrency lives in
   the API calls.
+- **Rotation/CropBox use two coordinate spaces (Phase 19).** `get_text("words")`
+  and `add_*_annot()` work in an *un-rotated, CropBox-relative* space; but
+  `get_pixmap(clip=...)` clips in the *rotated page-view* space (`page.rect` dims).
+  They diverge on a rotated/cropped page. The codebase's canonical space is
+  `PAGE_VIEW_V2` (post-CropBox, post-rotation — what the model sees): `render.py`
+  moves words into it via `page.rotation_matrix`, `annotate.py` moves rects back
+  via `page.derotation_matrix` before drawing (and draws FreeText with
+  `rotate=page.rotation` for upright text). Identity on an un-rotated page. Never
+  feed a raw `get_text` rect to `get_pixmap(clip=...)`, or a raw view-space rect to
+  `add_*_annot()`.

@@ -29,7 +29,15 @@ import pymupdf  # AGPL-3.0 — see module docstring.
 
 from . import tiling
 from .diagnostics import get_logger
-from .models import ImageTile, RenderedSheet, SheetGeometry, SheetRef
+from .models import (
+    COORDINATE_SPACE_VERSION,
+    ImageTile,
+    PageGeometry,
+    RenderedSheet,
+    SheetGeometry,
+    SheetRef,
+    transform_rect,
+)
 from .source_registry import (
     ACCEPTED,
     DUPLICATE,
@@ -438,6 +446,60 @@ def iter_region_crops(
         doc.close()
 
 
+def page_geometry(page: "pymupdf.Page") -> PageGeometry:
+    """Capture ``page``'s canonical geometry + the page↔view transforms (Phase 19).
+
+    The one place the PyMuPDF matrices are read: ``page.rotation_matrix`` maps the
+    un-rotated, CropBox-relative page space that ``get_text`` / annotations use into
+    the post-CropBox, post-rotation **page-view** space the rendered images live in;
+    ``page.derotation_matrix`` is its inverse (used by the markup writer). Stored as
+    plain floats so no PyMuPDF type escapes this module (I-5).
+    """
+    r = page.rect
+    return PageGeometry(
+        coordinate_space=COORDINATE_SPACE_VERSION,
+        view_width_pt=float(r.width),
+        view_height_pt=float(r.height),
+        media_box=[float(v) for v in page.mediabox],
+        crop_box=[float(v) for v in page.cropbox],
+        rotation=int(page.rotation or 0),
+        page_to_view=[float(v) for v in page.rotation_matrix],
+        view_to_page=[float(v) for v in page.derotation_matrix],
+    )
+
+
+def _words_to_view(words: list, geometry: PageGeometry) -> list:
+    """Transform ``get_text('words')`` rects into canonical PAGE_VIEW_V2 space.
+
+    ``get_text`` reports un-rotated, CropBox-relative coordinates; the anchor
+    resolver, verifier, and tile grid all work in page-view space, so the word
+    rects are transformed **once** here (in a blessed PyMuPDF module) to match the
+    images the model saw. On an un-rotated page the transform is the identity, so
+    the words pass through untouched — the common case pays nothing. Each word tuple
+    keeps its non-geometry tail (``word, block, line, word_no``) verbatim.
+    """
+    if geometry.has_identity_transform:
+        return list(words)
+    m = geometry.page_to_view
+    out: list = []
+    for w in words:
+        try:
+            # ``require_area=False``: a degenerate (zero-area) word — possible in an
+            # OCR/text layer — still has a valid POSITION, so it is transformed into
+            # view space like every other word rather than kept in the wrong (page)
+            # space, which would mix coordinate spaces in the anchor union.
+            vx0, vy0, vx1, vy1 = transform_rect(
+                (w[0], w[1], w[2], w[3]), m, require_area=False
+            )
+            out.append((vx0, vy0, vx1, vy1, *tuple(w[4:])))
+        except (ValueError, TypeError, IndexError):
+            # Only truly-unusable (non-finite / non-numeric) coordinates reach here;
+            # such a word can never anchor, so drop it rather than pollute the
+            # stream with mixed-space coordinates.
+            continue
+    return out
+
+
 def render_sheet(
     page: "pymupdf.Page",
     ref: SheetRef,
@@ -458,12 +520,15 @@ def render_sheet(
     page_rect = page.rect
     w_pt = float(page_rect.width)
     h_pt = float(page_rect.height)
+    geometry = page_geometry(page)
 
     # Text layer first — negligible cost (measured 0.32 s / 8 sheets / 6,636
     # words) and it decides the render target. ``words`` are plain tuples, so no
-    # PyMuPDF type escapes this module (I-5 isolation).
+    # PyMuPDF type escapes this module (I-5 isolation). They are transformed into
+    # canonical PAGE_VIEW_V2 space (Phase 19) so anchoring/verification/tiling all
+    # share the frame the model saw — a no-op on an un-rotated page.
     raw_text = page.get_text() or ""
-    words = list(page.get_text("words"))
+    words = _words_to_view(list(page.get_text("words")), geometry)
     is_raster = len(words) == 0
     sheet_text = _cap_sheet_text(raw_text)
     if len(sheet_text) != len(raw_text):
@@ -529,6 +594,7 @@ def render_sheet(
         is_raster=is_raster,
         omitted_tiles=omitted_tiles,
         overlap_frac=overlap_frac,
+        geometry=geometry,
     )
 
 
@@ -617,18 +683,20 @@ def _sheet_geometry_no_render(
     stages have each sheet's geometry even for a sheet that skipped rendering on a
     level-1 cache hit.
     """
+    geometry = page_geometry(page)
     raw_text = page.get_text() or ""
-    words = list(page.get_text("words"))
+    words = _words_to_view(list(page.get_text("words")), geometry)
     return SheetGeometry(
         ref=ref,
-        page_width_pt=float(page.rect.width),
-        page_height_pt=float(page.rect.height),
+        page_width_pt=geometry.view_width_pt,
+        page_height_pt=geometry.view_height_pt,
         rows=rows,
         cols=cols,
         overlap_frac=overlap_frac,
         words=words,
         sheet_text=_cap_sheet_text(raw_text),
         is_raster=len(words) == 0,
+        geometry=geometry,
     )
 
 
