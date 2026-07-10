@@ -1,0 +1,80 @@
+# Continuous integration for Drawing Analyzer (Phase 17B).
+#
+# Two jobs:
+#   * test            — hermetic suite on the Windows + Linux / Py 3.11 + 3.12
+#                       matrix (no API key, no network).
+#   * browser-security — the mandatory headless-Chromium report exploit suite,
+#                       Linux only (a DOM emulator cannot prove CSP / file:// /
+#                       real event execution). Windows keeps the unit tests;
+#                       manual Edge acceptance is Phase 27.
+#
+# Supply-chain notes (plan §9.8): actions are pinned to immutable commit SHAs
+# (the trailing comment is the human-readable version), permissions are minimal
+# and read-only, and the workflow triggers on `pull_request` — never
+# `pull_request_target`, so untrusted PR code is never run with repo secrets.
+#
+# NOTE TO MAINTAINER: the two action SHAs below were pinned from their known
+# release tags but could not be re-verified against the GitHub API from the
+# build sandbox. Please confirm them (or let Dependabot manage them) before
+# marking these checks as required in branch protection. A stale/incorrect SHA
+# fails loudly at the checkout step — it is never a silent security gap.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Least privilege: read-only, and only what checkout needs.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: tests (${{ matrix.os }}, py${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, python: "3.11" }
+          - { os: ubuntu-latest, python: "3.12" }
+          - { os: windows-latest, python: "3.11" }
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install (engine + dev)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Byte-compile sources
+        run: python -m compileall -q src
+      - name: PyMuPDF import isolation (I-5)
+        run: python -m pytest -q tests/test_import_isolation.py
+      - name: Hermetic test suite
+        run: python -m pytest -q
+
+  browser-security:
+    name: headless-chromium report security (linux)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+      - name: Install (engine + dev + browser test)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,browsertest]"
+      - name: Install Chromium (pinned by the Playwright version)
+        run: python -m playwright install --with-deps chromium
+      - name: Report exploit suite
+        run: python -m pytest -q -m browser

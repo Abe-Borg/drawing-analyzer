@@ -2169,7 +2169,7 @@ _CHAT_JS = r"""
       }
       var st = {
         buf: '', blocks: [], partial: {}, stopReason: null,
-        els: {}, think: null, mdDirty: {}, toolChips: {}, citeUrls: {}, citeCount: 0
+        els: {}, think: null, mdDirty: {}, mdTimers: {}, toolChips: {}, citeUrls: {}, citeCount: 0
       };
       var reader = resp.body.getReader();
       var decoder = new TextDecoder();
@@ -2259,8 +2259,9 @@ _CHAT_JS = r"""
   function touchText(st, index){
     if(st.mdDirty[index]) return;
     st.mdDirty[index] = true;
-    setTimeout(function(){
+    st.mdTimers[index] = setTimeout(function(){
       st.mdDirty[index] = false;
+      delete st.mdTimers[index];
       var b = st.blocks[index], el = st.els[index];
       if(b && el){ renderMdReplace(el, b.text || ''); scrollDown(); }
     }, 90);
@@ -2273,6 +2274,11 @@ _CHAT_JS = r"""
       try { b.input = JSON.parse(st.partial[index] || '{}'); } catch(e){ b.input = {}; }
       delete st.partial[index];
     }
+    // Cancel any pending debounced render for this block: finishBlock's render
+    // is authoritative, and a trailing touchText would otherwise wipe the
+    // citation chips appended just below (a real streamed-answer race).
+    if(st.mdTimers[index]){ clearTimeout(st.mdTimers[index]); delete st.mdTimers[index]; }
+    st.mdDirty[index] = false;
     var el = st.els[index];
     if(b.type === 'text' && el){
       renderMdReplace(el, b.text || '');

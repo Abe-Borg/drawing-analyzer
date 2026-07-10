@@ -751,6 +751,36 @@ appearance streams, the stale-reference suggestion, a zero-digest-API cached
 re-run, and the raster fallback) against fake clients, so the whole findings →
 verify → cloud chain is exercised without a key.
 
+### Browser security tests
+
+The report's security boundary (see [SECURITY.md](SECURITY.md)) is proven
+end to end in real headless Chromium — a DOM emulator can't verify CSP
+enforcement, `file://` behavior, browser URL normalization, or event execution.
+These tests carry the `browser` marker and **skip automatically** when Playwright
+or its browser binary is absent, so the default `python -m pytest` is unaffected.
+To run them locally:
+
+```bash
+pip install -e ".[dev,browsertest]"
+python -m playwright install chromium   # one-time browser download
+python -m pytest -m browser
+```
+
+The tests are still hermetic: the report is loaded over `file://` and the
+Anthropic `fetch` is stubbed with a canned (malicious) stream, so there is no
+network and no key. A global execution sentinel must stay unset while a hostile
+payload streams through the assistant and while hostile filenames / findings /
+errors sit in the report body.
+
+### Continuous integration
+
+`.github/workflows/ci.yml` runs the hermetic suite on Windows + Ubuntu across
+Python 3.11 and 3.12 (byte-compile, the PyMuPDF import-isolation check, then the
+full suite), plus the headless-Chromium report-security suite on Linux. Actions
+are pinned to immutable commit SHAs, permissions are read-only, and the workflow
+never uses `pull_request_target`. Making these checks *required* is a one-time
+branch-protection setting an owner/admin configures in repository settings.
+
 ## Changelog
 
 See [`CHANGELOG.md`](CHANGELOG.md) for a consolidated record of changes,
