@@ -42,12 +42,19 @@ findings for free).
   one small structuring call for stragglers, degraded sheet-level entry on
   failure).
 - ***`ledger.py` is the exclusive findings container*** (Part III §16): every
-  channel ingests into it with source tags; duplicates merge at ingest (union
-  `sources`, most-severe severity, longest quote; auditor anchors and
-  `DETERMINISTIC` verdicts survive merges in both directions); `freeze()`
-  assigns the `QC-###` ids. Anchoring, verification, the citation check, the
-  markup writer, the exports, and the report consume ledger entries and
-  nothing else.
+  channel ingests into it with source tags. Dedup is conservative and lossless
+  (Phase 20 §12): a tile/rect overlap is never sufficient — merges need semantic
+  sameness with **compatible critical signatures** (`_signatures_compatible`:
+  tags, measurements, absence polarity, cross-sheet legs); merging keeps
+  **coherent grounding** (the text/quote/tile bundle is atomic, from one
+  representative chosen by a total quality order; the loser's quote → the new
+  `supporting_quotes`), unions `sources`, keeps most-severe severity, and
+  preserves auditor anchors + `DETERMINISTIC` verdicts. Explicit lifecycle:
+  `seal()` (OPEN→SEALED) → anchor → `reconcile_post_anchor` (Pass B) →
+  `number()` (SEALED→NUMBERED assigns positional `QC-###` **after** anchoring).
+  A post-seal add marks the run incomplete (no `QC-XTRA` masquerade).
+  Anchoring, verification, the citation check, the markup writer, the exports,
+  and the report consume ledger entries and nothing else.
 - *Disposition:* `anchor.py` (quote → PDF rect, tiered
   EXACT/FUZZY/TILE/UNANCHORED — UNANCHORED is the hallucination signal) →
   `verify.py` (high-DPI crop re-check → VERIFIED/REJECTED/UNCERTAIN) →

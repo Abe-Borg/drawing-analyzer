@@ -822,32 +822,59 @@ def _run_qc_stages(
             errors.append(f"Prose harvest: {exc}")
             _log.warning("prose harvest failed: %s", exc)
 
-    # --- freeze: the run's QC-### numbers (sheet → position; stable — I-7) ----
-    entries = ledger.freeze()
+    # --- seal ingestion, then anchor, reconcile, and number (§12.4) -----------
+    # QC ids must be POSITIONAL, so numbering happens *after* anchoring — the
+    # freeze-before-anchor ordering is gone (Phase 20). Seal first (no more
+    # entries), anchor every primary + leg, fold any duplicate the ingest pass
+    # could not see without geometry, and only then assign QC-### in visual order.
+    entries = ledger.seal()
 
     # Anchor the entries that don't already carry a rectangle (auditor entries do).
+    # The WHOLE block is wrapped (not just the per-sheet resolves): a throw in the
+    # setup (imports, key-building) must not skip numbering below and ship entries
+    # with empty QC ids — pre-Phase-20 freeze() ran before anchoring, so numbering
+    # always survived; number() now runs after, so anchoring must stay non-fatal (I-3).
     if entries and geometries:
         if progress is not None:
             progress(total, total, "Anchoring findings")
-        from .anchor import resolve_anchors, resolve_conflict_legs
-
-        geom_by_key = {source_page_key(g.ref): g for g in geometries}
-        by_sheet: dict[tuple, list[Finding]] = {}
-        for finding in entries:
-            by_sheet.setdefault(source_page_key(finding), []).append(finding)
-        for key, sheet_findings in by_sheet.items():
-            geometry = geom_by_key.get(key)
-            if geometry is None:
-                continue
-            try:
-                resolve_anchors(sheet_findings, geometry)
-            except Exception as exc:  # noqa: BLE001 - never fatal
-                _log.warning("anchoring failed for %s: %s", key, exc)
-        # Anchor the cross-sheet findings' also_on legs, each on its own sheet.
         try:
+            from .anchor import resolve_anchors, resolve_conflict_legs
+
+            geom_by_key = {source_page_key(g.ref): g for g in geometries}
+            by_sheet: dict[tuple, list[Finding]] = {}
+            for finding in entries:
+                by_sheet.setdefault(source_page_key(finding), []).append(finding)
+            for key, sheet_findings in by_sheet.items():
+                geometry = geom_by_key.get(key)
+                if geometry is None:
+                    continue
+                try:
+                    resolve_anchors(sheet_findings, geometry)
+                except Exception as exc:  # noqa: BLE001 - never fatal
+                    _log.warning("anchoring failed for %s: %s", key, exc)
+            # Anchor the cross-sheet findings' also_on legs, each on its own sheet.
             resolve_conflict_legs(entries, geom_by_key)
-        except Exception as exc:  # noqa: BLE001 - never fatal
-            _log.warning("cross-sheet leg anchoring failed: %s", exc)
+        except Exception as exc:  # noqa: BLE001 - anchoring must never sink numbering
+            _log.warning("anchoring stage failed: %s", exc)
+
+    # Cautious post-anchor reconciliation (Pass B, §12.1): geometry is now available.
+    try:
+        from .ledger import reconcile_post_anchor
+
+        reconcile_post_anchor(ledger)
+    except Exception as exc:  # noqa: BLE001 - reconciliation must never sink the run
+        _log.warning("post-anchor reconciliation failed: %s", exc)
+
+    # Assign the run's positional QC-### numbers now that anchors exist (§12.4).
+    entries = ledger.number()
+    if ledger.post_seal_adds:
+        # An entry landed after the seal — an orchestration invariant failure. The
+        # entries still ship (I-3), but the run is flagged incomplete rather than
+        # presented as ordinary, fully-numbered output (§12.3).
+        errors.append(
+            f"Ledger: {ledger.post_seal_adds} finding(s) ingested after seal — "
+            "exhaustive QC is incomplete (a stage produced findings too late)."
+        )
 
     all_findings = entries
     v_in, v_out = harvest_in, harvest_out

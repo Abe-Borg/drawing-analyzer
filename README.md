@@ -324,10 +324,11 @@ prose digest (and `combined_text`) is untouched (I-2).
 same sheet disagree at the margins, and that disagreement is signal: a finding
 both runs surface is **corroborated** (`reproduced = true`); a singleton one run
 raised is *kept* (more markups is better) but flagged `reproduced = false`. The
-merge deduplicates by position (anchor-rect overlap once anchored, else the same
-reported tile) and normalized-text overlap. The digest's findings and the merged
-critique's then pool into one per-sheet set before anchoring — an issue the digest
-*and* the critique independently raised is also marked reproduced. `reproduced`
+merge deduplicates on semantic sameness with compatible critical signatures (a
+shared tile or overlapping rectangle alone never merges — see [the ledger](#the-findings-ledger-part-iii)).
+The digest's findings and the merged critique's then pool into one per-sheet set
+before anchoring — an issue the digest *and* the critique independently raised is
+also marked reproduced. `reproduced`
 is a soft confidence signal surfaced in the report and markup; it **never**
 suppresses a finding.
 
@@ -626,14 +627,25 @@ report's findings table, the index page) consumes the ledger and nothing else.
 If an item is not in the ledger it does not exist; if it is, the coverage
 assertion guarantees it is accounted for on the PDF.
 
-Duplicates **merge at ingest** (same sheet + rect overlap, same tile, or strong
-text overlap): merging unions the provenance, keeps the most severe severity,
-prefers the longest verbatim quote, and preserves the best anchor/verification
-either member carries — so an auditor's pre-anchored `DETERMINISTIC` duplicate
-*upgrades* a model entry. Multi-source provenance doubles as a confidence
-signal, shown as chips in the report rows and the markup popups
-(`prose+json+critique×2`). The `QC-###` numbers are assigned when the ledger
-freezes.
+Duplicates merge **conservatively and losslessly**. Two findings merge only when
+they are semantically the same *and* their critical signatures agree: a shared
+**tile is a search hint, never identity**, and geometric rectangle overlap alone is
+never enough — two unrelated issues can share a table cell. A conflicting signature
+blocks the merge even when the prose is similar (`500 gpm` vs `550 gpm`, `M-101` vs
+`M-102`, `shown` vs `not shown`, or a different cross-sheet leg). A merge keeps
+**coherent grounding**: the survivor's text and quote come from one member as an
+atomic bundle — never one finding's text paired with another's quote — while the
+loser's quote is kept as a supporting quote. It unions the provenance, keeps the
+most severe severity, and preserves the best anchor/verification either member
+carries (an auditor's pre-anchored `DETERMINISTIC` duplicate *upgrades* a model
+entry). Multi-source provenance doubles as a confidence signal, shown as chips in
+the report rows and the markup popups (`prose+json+critique×2`).
+
+The ledger runs an explicit lifecycle: it **ingests** while open, **seals**, then
+**anchors** every finding, folds any duplicate the ingest pass couldn't see without
+geometry, and only then assigns the sequential **`QC-###`** numbers — so they follow
+visual order (source input order → page → top-to-bottom). Numbering strictly after
+anchoring is what makes the numbers positional.
 
 **Source-tag glossary** (`Finding.sources`):
 
