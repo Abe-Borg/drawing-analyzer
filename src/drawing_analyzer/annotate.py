@@ -56,19 +56,40 @@ links jump in all three.
    working on plain PAGE_VIEW_V2 numbers.
 
 The writer never touches the source file: it opens the original, adds annots in
-memory, and saves a *new* ``_reviewed.pdf``. It self-checks by reopening and
-counting annots (a mismatch is logged, never fatal — I-3).
+memory, and saves a *new* ``_reviewed.pdf``. It proves its work (Phase 21,
+DA-007): every mark is stamped with its logical placement id, and after saving
+the file is reopened and reconciled against the plan — a placement counts only
+when its stamped component is found again in the saved artifact. Stamps embed a
+per-run id, so a re-review of a PDF that already carries analyzer annotations
+reconciles against *this* run's marks, and unrelated pre-existing source
+annotations (which carry no stamp) are ignored (DA-029). The writer returns a
+:class:`~drawing_analyzer.models.MarkupRunResult` — the receipts, the
+receipt-derived coverage status/tally, and the reviewed-PDF paths.
 """
 from __future__ import annotations
 
+import itertools
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 import pymupdf  # AGPL-3.0 — see module docstring; the 2nd of two blessed importers.
 
 from . import tiling
 from .diagnostics import get_logger
-from .models import ConflictLeg, Finding
+from .models import (
+    ANNOTATION_COMPONENTS,
+    PRIMARY_LEG_ID,
+    REQUIRED_COMPONENTS,
+    SET_LEG_ID,
+    ConflictLeg,
+    Finding,
+    MarkupPlacement,
+    MarkupReceipt,
+    MarkupRunResult,
+    leg_identity,
+)
 from .source_registry import assign_source_ids
 
 _log = get_logger()
@@ -114,6 +135,209 @@ _INDEX_TOP = 90.0
 _INDEX_ROW_H = 14.0
 _INDEX_BOTTOM_MARGIN = 40.0
 _INDEX_ROWS_PER_PAGE = int((_INDEX_PAGE_H - _INDEX_TOP - _INDEX_BOTTOM_MARGIN) / _INDEX_ROW_H)
+
+# --------------------------------------------------------------------------- #
+# Artifact-backed markup coverage (Phase 21, DA-007) — the writer-and-reopen
+# receipt protocol that replaces the old intention tally.
+#
+# Every analyzer-owned annotation and every generated index row is stamped with a
+# **private PDF object key** carrying its logical placement id + component kind +
+# the page it lands on. On reopen the writer scans for these stamps and
+# reconciles them against the plan: a mark counts only if it is found again in
+# the saved file. Because the placement id embeds a per-run ``artifact_run_id``,
+# stamps left by an *earlier* review of the same source PDF never satisfy this
+# run's plan (§13.3), and annotations the analyzer never wrote carry no stamp at
+# all — so unrelated pre-existing source annotations are transparently ignored
+# (DA-029). The stamp lives on the PDF object dict (``xref_set_key``), not in the
+# displayed text, so it never pollutes the popup and never adds an annotation.
+# --------------------------------------------------------------------------- #
+_PLACEMENT_KEY = "DAPlacement"       # per-annot / per-index-link: "pid|component|page"
+_INDEX_PAGE_KEY = "DAIndexPage"      # per generated index page: the run id
+_INDEX_ROWS_KEY = "DAIndexRows"      # per index page: "pid@target;pid@target;…" (index-only rows)
+_STAMP_SEP = "|"
+
+
+def new_artifact_run_id() -> str:
+    """A fresh per-run nonce distinguishing THIS run's marks from a prior run's.
+
+    Injectable into :func:`annotate_pdf` / :func:`write_reviewed_pdfs` (tests pin
+    it); a random default otherwise. It never affects finding ordering, numbering,
+    or content (I-7) — it exists only so a re-review of a PDF that already carries
+    analyzer annotations reconciles against *this* run's stamps, not the old ones.
+    """
+    return "run-" + uuid.uuid4().hex[:12]
+
+
+def _safe_pdf_string(value: str) -> str:
+    """Strip the three PDF string-literal metacharacters so ``xref_set_key`` is safe.
+
+    Placement ids are built from run nonces, sha1 hex, ``QC-``/``SRC-`` labels and
+    the ``|``/``@`` separators — none of which contain ``()\\`` — but we defend in
+    depth so a future id shape can never corrupt the object stream.
+    """
+    return value.replace("(", "").replace(")", "").replace("\\", "")
+
+
+def _stamp_component(
+    doc: "pymupdf.Document", xref: int, placement_id: str, component: str, page: int
+) -> None:
+    """Stamp one drawn component (annotation) with its placement identity."""
+    val = _safe_pdf_string(f"{placement_id}{_STAMP_SEP}{component}{_STAMP_SEP}{int(page)}")
+    doc.xref_set_key(xref, _PLACEMENT_KEY, f"({val})")
+
+
+def _read_stamp(doc: "pymupdf.Document", xref: int) -> "tuple[str, str, int] | None":
+    """Read a component stamp back → ``(placement_id, component, page)`` or ``None``."""
+    try:
+        kind, value = doc.xref_get_key(xref, _PLACEMENT_KEY)
+    except Exception:  # noqa: BLE001 - a malformed object never sinks reconciliation
+        return None
+    if kind != "string" or not value:
+        return None
+    parts = value.split(_STAMP_SEP)
+    if len(parts) != 3:
+        return None
+    try:
+        return parts[0], parts[1], int(parts[2])
+    except (TypeError, ValueError):
+        return None
+
+
+@dataclass
+class _DrawUnit:
+    """One thing to actually draw: a finding (or a synthetic cross-sheet leg) plus
+    the :class:`MarkupPlacement` that accounts for it."""
+
+    finding: Finding
+    placement: MarkupPlacement
+
+
+def _scope_of(finding: Finding, leg_id: str) -> str:
+    if leg_id == SET_LEG_ID:
+        return "SET"
+    if (finding.anchor_hint or "").upper() in {"SET", "SET_INDEX"} and not finding.source_id:
+        return "SET"
+    return "SOURCE"
+
+
+def _expected_kind(
+    finding: Finding, *, include_unverified: bool, ink_rejected: bool
+) -> str:
+    """The placement kind this finding will become — mirrors the drawing branches.
+
+    Built on the same :func:`ink_disposition` classifier the writer draws from, so
+    the plan can never disagree with the ink: ``cloud`` → CLOUD, ``margin`` →
+    MARGIN, ``gated`` → GATED_INDEX (a real "not inked by operator gate" index
+    row, §6.4), and a REJECTED finding → its grey CLOUD/MARGIN when
+    ``ink_rejected`` else a REJECTED_INDEX row.
+    """
+    disposition = ink_disposition(
+        finding, include_unverified=include_unverified, ink_rejected=ink_rejected
+    )
+    if disposition == "cloud":
+        return "CLOUD"
+    if disposition == "margin":
+        return "MARGIN"
+    if disposition == "gated":
+        return "GATED_INDEX"
+    # disposition == "rejected"
+    if ink_rejected:
+        anchored = finding.anchor is not None and finding.anchor.rect_pdf is not None
+        return "CLOUD" if anchored else "MARGIN"
+    return "REJECTED_INDEX"
+
+
+def _make_placement(
+    finding: Finding,
+    *,
+    parent_id: str,
+    leg_id: str,
+    run_id: str,
+    ordinal: int,
+    include_unverified: bool,
+    ink_rejected: bool,
+) -> MarkupPlacement:
+    kind = _expected_kind(
+        finding, include_unverified=include_unverified, ink_rejected=ink_rejected
+    )
+    # The ordinal is a deterministic per-run tiebreaker so the placement id stays
+    # unique even if two distinct findings happen to share a content id (same
+    # sheet / category / quote — hand-built or pre-dedup). The finding id + leg id
+    # remain in the placement fields for traceability (§13.1).
+    return MarkupPlacement(
+        run_id=run_id,
+        placement_id=f"{run_id}#{parent_id}#{leg_id}#{ordinal:05d}",
+        finding_id=parent_id,
+        qc_id=finding.qc_id,
+        scope=_scope_of(finding, leg_id),
+        source_id=finding.source_id,
+        page_index=int(finding.page_index),
+        leg_id=leg_id,
+        expected=kind,
+        required_components=list(REQUIRED_COMPONENTS[kind]),
+        severity=finding.severity,
+        source_name=finding.source_name,
+    )
+
+
+def _units_for_finding(
+    finding: Finding,
+    *,
+    run_id: str,
+    ordinals: "Iterator[int]",
+    include_unverified: bool,
+    ink_rejected: bool,
+) -> list[_DrawUnit]:
+    """A finding's own placement plus one placement per cross-sheet leg.
+
+    The primary unit draws the finding on its own sheet (``leg_id="primary"``);
+    each ``also_on`` leg becomes a synthetic finding drawn on *its* sheet, its
+    placement tagged ``finding_id=<parent id>`` / ``leg_id=<stable leg id>`` so the
+    manifest ties every leg back to one logical conflict and no two placements
+    collide. ``ordinals`` yields the run-wide unique tiebreakers. Synthetic legs
+    live only here (never in the findings record), exactly as before Phase 21.
+    """
+
+    def _plan(f: Finding, leg_id: str) -> MarkupPlacement:
+        return _make_placement(
+            f, parent_id=finding.id, leg_id=leg_id, run_id=run_id,
+            ordinal=next(ordinals),
+            include_unverified=include_unverified, ink_rejected=ink_rejected,
+        )
+
+    units = [_DrawUnit(finding, _plan(finding, PRIMARY_LEG_ID))]
+    legs = getattr(finding, "also_on", None) or []
+    if not legs:
+        return units
+    primary_as_leg = ConflictLeg(
+        sheet_id=finding.sheet_id, source_name=finding.source_name,
+        source_id=finding.source_id, page_index=finding.page_index,
+        source_quote=finding.source_quote, tile=finding.tile, anchor=finding.anchor,
+    )
+    for i, leg in enumerate(legs):
+        others = [primary_as_leg] + [l for j, l in enumerate(legs) if j != i]
+        leg_finding = Finding(
+            sheet_id=leg.sheet_id, source_name=leg.source_name, source_id=leg.source_id,
+            page_index=leg.page_index, category=finding.category, severity=finding.severity,
+            text=finding.text, source_quote=leg.source_quote, refs=list(finding.refs),
+            also_on=others, anchor=leg.anchor, verification=finding.verification,
+            qc_id=finding.qc_id, citation=finding.citation, sources=list(finding.sources),
+        )
+        lid = leg_identity(
+            leg.source_id, leg.source_name, leg.page_index, leg.source_quote, i
+        )
+        units.append(_DrawUnit(leg_finding, _plan(leg_finding, lid)))
+    return units
+
+
+def _finding_touches(finding: Finding, source_ids: "set[str]") -> bool:
+    """True when the finding's own source or any of its legs sits on a listed source."""
+    if getattr(finding, "source_id", "") in source_ids:
+        return True
+    for leg in getattr(finding, "also_on", None) or []:
+        if getattr(leg, "source_id", "") in source_ids:
+            return True
+    return False
 
 
 def _status(finding: Finding) -> str:
@@ -368,15 +592,17 @@ def _derotate_point(page: "pymupdf.Page", x: float, y: float) -> "pymupdf.Point"
 
 def _add_qc_tag(
     page: "pymupdf.Page", view_rect: "pymupdf.Rect", finding: Finding, *, author: str
-) -> int:
+) -> "int | None":
     """A small FreeText tag with the finding's QC number beside its markup.
 
     ``view_rect`` is the finding's cloud rectangle in PAGE_VIEW_V2 space; the tag is
     laid out relative to it in view space (``page.rect`` dims are view dims), then
     transformed to page space for drawing so it lands correctly on a rotated sheet.
+    Returns the tag annot's xref (for stamping), or ``None`` when the finding has
+    no QC number and therefore no tag.
     """
     if not finding.qc_id:
-        return 0
+        return None
     color = _color(finding)
     tag_w = 6.0 * len(finding.qc_id) + 8.0
     x0 = max(2.0, min(view_rect.x0, page.rect.width - tag_w - 2.0))
@@ -393,21 +619,22 @@ def _add_qc_tag(
     # No border_color: PyMuPDF rejects it on plain (non-rich) FreeText annots —
     # the severity-colored text itself is the tag's legend.
     annot.update()
-    return 1
+    return annot.xref
 
 
 def _add_cloud(
     page: "pymupdf.Page", finding: Finding, *, unverified: bool, author: str,
     rejected: bool = False,
-) -> int:
-    """The finding's Square annot + its QC tag; returns annots written.
+) -> "list[tuple[str, int]]":
+    """The finding's Square annot + its QC tag; returns ``[(component, xref), …]``.
 
     Style (Phase 15): DETERMINISTIC findings draw a **solid** border (the host
     computed them — no cloud theatrics), model findings a revision cloud, and
     opted-in unverified findings a dashed border. An opted-in **rejected**
     finding (§18's ``--ink-rejected``) draws grey and dashed with a
     ``[REJECTED]`` popup prefix — visibly struck, never mistaken for a live
-    finding.
+    finding. The ``cloud`` component is mandatory; the ``tag`` is optional (only
+    when the finding carries a QC number).
     """
     view_rect = pymupdf.Rect(*finding.anchor.rect_pdf)
     annot = page.add_rect_annot(_derotate_rect(page, view_rect))
@@ -429,36 +656,42 @@ def _add_cloud(
     # `update()` builds the appearance stream (/AP); without it some viewers draw
     # nothing. This is the whole reason PyMuPDF is used here (see module docstring).
     annot.update()
-    return 1 + _add_qc_tag(page, view_rect, finding, author=author)
+    components: list[tuple[str, int]] = [("cloud", annot.xref)]
+    tag_xref = _add_qc_tag(page, view_rect, finding, author=author)
+    if tag_xref is not None:
+        components.append(("tag", tag_xref))
+    return components
 
 
 def _add_margin_callouts(
     page: "pymupdf.Page",
-    findings: list[Finding],
+    pairs: "list[tuple[Finding, MarkupPlacement]]",
     *,
     meta: dict | None,
     author: str,
-) -> int:
+) -> "dict[str, list[tuple[str, int]]]":
     """Sheet-level / absence findings as FreeText boxes stacked in the clear band.
 
     Boxes fill the band left→right, wrapping rows; each carries the full popup
     content and, when the finding reported a tile, a leader Line annot with an
-    arrow from the box to that tile's centroid. Returns annots written.
+    arrow from the box to that tile's centroid. Returns ``{placement_id:
+    [(component, xref), …]}`` — the ``callout`` component is mandatory; the
+    ``leader`` is optional.
     """
-    if not findings:
-        return 0
+    drawn: dict[str, list[tuple[str, int]]] = {}
+    if not pairs:
+        return drawn
     words = list((meta or {}).get("words") or [])
     page_w, page_h = page.rect.width, page.rect.height
     bx0, by0, bx1, _by1 = find_clear_band(words, page_w, page_h)
 
-    written = 0
     page_bottom = page_h - 2.0
     x = bx0
     # First row: the band top, pulled up if the band is shallower than a box.
     first_row_y = min(by0, max(2.0, page_bottom - _CALLOUT_H))
     y = first_row_y
     stacking_up = False
-    for finding in findings:
+    for finding, placement in pairs:
         if x + _CALLOUT_W > bx1:                      # wrap to the next row
             x = bx0
             if not stacking_up:
@@ -491,6 +724,7 @@ def _add_margin_callouts(
         content = _annot_content(
             finding, unverified=unverified, rejected=rejected, place=place
         )
+        components = drawn.setdefault(placement.placement_id, [])
         # Severity-colored text carries the legend (PyMuPDF rejects border_color
         # on plain FreeText annots); unverified/rejected callouts dash the border.
         # ``rotate=page.rotation`` keeps the text upright on a rotated sheet; the
@@ -507,7 +741,7 @@ def _add_margin_callouts(
             pass
         annot.set_info(title=author, subject=finding.category, content=content)
         annot.update()
-        written += 1
+        components.append(("callout", annot.xref))
 
         centroid = _tile_centroid(finding.tile, meta)
         if centroid is not None:
@@ -522,12 +756,12 @@ def _add_margin_callouts(
                     pass
                 line.set_info(title=author, subject="QC leader", content=finding.qc_id or "")
                 line.update()
-                written += 1
+                components.append(("leader", line.xref))
             except Exception:  # noqa: BLE001 - a failed leader never drops the box
                 _log.warning("could not draw leader line for %s", finding.id)
 
         x += _CALLOUT_W + _CALLOUT_GAP
-    return written
+    return drawn
 
 
 # --------------------------------------------------------------------------- #
@@ -539,44 +773,68 @@ def _status_label(finding: Finding) -> str:
     return _status(finding)
 
 
-def _index_entries(
-    findings: list[Finding], *, include_unverified: bool
-) -> tuple[list[Finding], list[Finding]]:
-    """``(inked, rejected)`` in QC-number order.
+def _index_groups(
+    pairs: "list[tuple[Finding, MarkupPlacement]]",
+) -> "tuple[list, list, list]":
+    """``(inked, rejected, gated)`` (finding, placement) rows in QC-number order.
 
-    The main table lists what's on paper; the rejected list (§18) makes the
-    verifier-contradicted findings *visible* on the index — nothing is ever
-    silently absent from the record — even though they carry no ink by default.
+    The main table lists what's on paper; the rejected section (§18) and the
+    "Not inked by operator gate" section (§6.4) make the verifier-contradicted and
+    the conservatively-gated findings *visible* on the index — nothing is ever
+    silently absent from the record. A gated finding's index row is its **sole
+    artifact**, so it must exist and be reconciled (a bare no-ink status is
+    insufficient).
     """
-    def _order(fs: list[Finding]) -> list[Finding]:
-        return sorted(fs, key=lambda f: (f.qc_id or "~", f.id))
+    def _order(items: list) -> list:
+        return sorted(items, key=lambda fp: (fp[0].qc_id or "~", fp[0].id))
 
-    inked = [f for f in findings if is_inked(f, include_unverified=include_unverified)]
-    rejected = [f for f in findings if _status(f) == "REJECTED"]
-    return _order(inked), _order(rejected)
+    inked, rejected, gated = [], [], []
+    for finding, placement in pairs:
+        if placement.expected == "GATED_INDEX":
+            gated.append((finding, placement))
+        elif _status(finding) == "REJECTED":
+            rejected.append((finding, placement))
+        elif placement.expected in ("CLOUD", "MARGIN", "REVIEW_NOTES"):
+            inked.append((finding, placement))
+    return _order(inked), _order(rejected), _order(gated)
 
 
 def _insert_index_pages(
     doc: "pymupdf.Document",
-    entries: list[Finding],
-    rejected: list[Finding],
+    inked: list,
+    rejected: list,
+    gated: list,
     *,
+    run_id: str,
     author: str,
 ) -> int:
     """Insert the findings index at the front of ``doc``; return pages inserted.
 
     Every finding row carries a GOTO link to its finding's page + rectangle.
-    ``rejected`` entries follow the main table under a "Rejected by verification
-    (n)" heading, with the same page links. Link targets are offset by the
-    number of index pages, which is computed **before** any page is inserted
-    (inserting at the front shifts every original page down).
+    ``rejected`` entries follow the main table under a "Rejected by verification"
+    heading, and ``gated`` entries under "Not inked by operator gate"; both carry
+    the same page links. Link targets are offset by the number of index pages,
+    which is computed **before** any page is inserted (inserting at the front
+    shifts every original page down).
+
+    Each generated index page is stamped analyzer-owned (:data:`_INDEX_PAGE_KEY`
+    == ``run_id``), and the **index-only** placements it hosts (REJECTED_INDEX /
+    GATED_INDEX rows — the ones whose only artifact is the index) are recorded in
+    :data:`_INDEX_ROWS_KEY` as ``pid@target`` so reconciliation can prove each
+    row exists and links to the right page.
     """
     # A uniform row stream ("heading" rows carry no link) paginates the main
-    # table and the rejected section together.
-    rows: list[tuple[str, Any]] = [("entry", f) for f in entries]
+    # table and the two trailing sections together. ``index_only`` marks the rows
+    # whose sole artifact is this index row (so reconciliation must find them).
+    rows: list[tuple[str, Any, bool]] = [("entry", fp, False) for fp in inked]
     if rejected:
-        rows.append(("heading", f"Rejected by verification ({len(rejected)})"))
-        rows.extend(("rejected", f) for f in rejected)
+        rows.append(("heading", f"Rejected by verification ({len(rejected)})", False))
+        rows.extend(
+            ("rejected", fp, fp[1].expected == "REJECTED_INDEX") for fp in rejected
+        )
+    if gated:
+        rows.append(("heading", f"Not inked by operator gate ({len(gated)})", False))
+        rows.extend(("gated", fp, True) for fp in gated)
     if not rows:
         return 0
     n_pages = (len(rows) + _INDEX_ROWS_PER_PAGE - 1) // _INDEX_ROWS_PER_PAGE
@@ -603,15 +861,16 @@ def _insert_index_pages(
             page.insert_text((x, y), label, fontsize=8, fontname="hebo", color=(0.25, 0.25, 0.25))
 
         batch = rows[i * _INDEX_ROWS_PER_PAGE:(i + 1) * _INDEX_ROWS_PER_PAGE]
+        index_only_rows: list[str] = []      # "pid@target" for index-only placements here
         y = _INDEX_TOP + 4
-        for kind, payload in batch:
+        for kind, payload, index_only in batch:
             if kind == "heading":
                 page.insert_text((36, y), str(payload), fontsize=9, fontname="hebo",
                                  color=(0.3, 0.3, 0.3))
                 y += _INDEX_ROW_H
                 continue
-            finding = payload
-            struck = kind == "rejected"
+            finding, placement = payload
+            struck = kind in ("rejected", "gated")
             color = _REJECTED_COLOR if struck else _color(finding)
             text_color = _REJECTED_COLOR if struck else (0, 0, 0)
             page.insert_text((36, y), finding.qc_id or "—", fontsize=8, fontname="hebo", color=color)
@@ -639,7 +898,18 @@ def _insert_index_pages(
                     "to": to,
                     "zoom": 0,
                 })
+                if index_only:
+                    index_only_rows.append(f"{placement.placement_id}@{target_page}")
             y += _INDEX_ROW_H
+
+        # Stamp this page analyzer-owned and record its index-only rows so
+        # reconciliation matches them by placement id (not by scanning text).
+        doc.xref_set_key(page.xref, _INDEX_PAGE_KEY, f"({_safe_pdf_string(run_id)})")
+        if index_only_rows:
+            doc.xref_set_key(
+                page.xref, _INDEX_ROWS_KEY,
+                f"({_safe_pdf_string(';'.join(index_only_rows))})",
+            )
     return n_pages
 
 
@@ -700,6 +970,314 @@ def count_annotations_by_type(pdf_path: Path | str) -> dict[str, int]:
         doc.close()
 
 
+# --------------------------------------------------------------------------- #
+# Reopen-and-reconcile: prove every planned placement in the saved artifact.
+# --------------------------------------------------------------------------- #
+
+_BUCKET_BY_KIND = {
+    "CLOUD": "cloud",
+    "MARGIN": "margin",
+    "REVIEW_NOTES": "review_notes",
+    "REJECTED_INDEX": "rejected",
+    "GATED_INDEX": "gated",
+}
+# A placement skipped because its source changed mid-run (§10.6) is a distinct,
+# operator-actionable failure — kept out of the generic ``failed`` bucket so the
+# tally can say "N skipped (source changed)" and the operator knows to re-run.
+_MUTATED_ERROR_PREFIX = "source changed"
+
+
+def _receipt_for(
+    placement: MarkupPlacement,
+    out_name: str,
+    found: "dict[str, dict[str, list[tuple[int, int]]]]",
+    index_rows: "dict[str, tuple[int, int]]",
+    index_link_targets: "dict[int, set[int]]",
+) -> MarkupReceipt:
+    """Turn one placement + what was found in the reopened file into a receipt."""
+    pid = placement.placement_id
+    if placement.expected in ("REJECTED_INDEX", "GATED_INDEX"):
+        if pid not in index_rows:
+            return MarkupReceipt(
+                placement, "FAILED", output_pdf=out_name,
+                error="expected index row not found in the saved PDF",
+            )
+        idx_pno, target = index_rows[pid]
+        if target not in index_link_targets.get(idx_pno, set()):
+            return MarkupReceipt(
+                placement, "FAILED", output_pdf=out_name, output_page_index=idx_pno,
+                error="index row present but its GOTO link is missing/mis-targeted",
+            )
+        return MarkupReceipt(
+            placement, "INDEXED", output_pdf=out_name, output_page_index=idx_pno,
+            index_entry_ref=f"index_p{idx_pno}#{pid}",
+            annotation_refs=[f"index_row:{target}"],
+        )
+
+    comps = found.get(pid, {})
+    missing = [c for c in placement.required_components if not comps.get(c)]
+    if missing:
+        return MarkupReceipt(
+            placement, "FAILED", output_pdf=out_name,
+            error=f"missing mandatory component(s): {', '.join(missing)}",
+        )
+    dup = [c for c in placement.required_components if len(comps.get(c, [])) > 1]
+    if dup:
+        return MarkupReceipt(
+            placement, "FAILED", output_pdf=out_name,
+            error=f"duplicate mandatory component(s): {', '.join(dup)}",
+        )
+    refs = [f"{c}:{x}" for c, entries in comps.items() for (x, _pno) in entries]
+    page_found = None
+    for c in placement.required_components:
+        if comps.get(c):
+            page_found = comps[c][0][1]
+            break
+    return MarkupReceipt(
+        placement, "WRITTEN", output_pdf=out_name, output_page_index=page_found,
+        annotation_refs=refs,
+    )
+
+
+def _reconcile_pdf(
+    out_path: Path, placements: list[MarkupPlacement], run_id: str
+) -> list[MarkupReceipt]:
+    """Reopen the saved PDF and reconcile it against the plan → one receipt each.
+
+    Only marks stamped with **this** ``run_id`` count — a stamp left by an earlier
+    review of the same source PDF (a different run id) and any annotation the
+    analyzer never wrote (no stamp) are transparently ignored. Index-only rows are
+    proven from the index page's stamped rows key plus a real GOTO link to the
+    right page — never by scanning for a QC id in the page text (§13.4).
+    """
+    out_name = out_path.name
+    prefix = run_id + "#"
+    try:
+        doc = pymupdf.open(str(out_path))
+    except Exception as exc:  # noqa: BLE001 - an unreadable save proves nothing
+        _log.warning("could not reopen %s to reconcile markups: %s", out_name, exc)
+        return [
+            MarkupReceipt(pl, "FAILED", output_pdf=out_name,
+                          error=f"could not reopen saved PDF: {exc}")
+            for pl in placements
+        ]
+    try:
+        # Annotation-object component stamps: pid -> component -> [(xref, page)].
+        found: dict[str, dict[str, list[tuple[int, int]]]] = {}
+        for pno in range(doc.page_count):
+            for annot in doc[pno].annots():
+                stamp = _read_stamp(doc, annot.xref)
+                if stamp is None:
+                    continue
+                pid, comp, _stamped_page = stamp
+                if not pid.startswith(prefix):
+                    continue                         # prior-run / unrelated ink
+                found.setdefault(pid, {}).setdefault(comp, []).append((annot.xref, pno))
+
+        # Index-only rows: pid -> (index_page, target_page); GOTO targets per page.
+        index_rows: dict[str, tuple[int, int]] = {}
+        index_link_targets: dict[int, set[int]] = {}
+        for pno in range(doc.page_count):
+            page = doc[pno]
+            kt, kv = doc.xref_get_key(page.xref, _INDEX_PAGE_KEY)
+            if kt != "string" or kv != run_id:
+                continue
+            index_link_targets[pno] = {
+                int(lk.get("page", -1))
+                for lk in page.get_links()
+                if lk.get("kind") == pymupdf.LINK_GOTO
+            }
+            rt, rv = doc.xref_get_key(page.xref, _INDEX_ROWS_KEY)
+            if rt == "string" and rv:
+                for entry in rv.split(";"):
+                    row_pid, _, tgt = entry.partition("@")
+                    if row_pid.startswith(prefix):
+                        try:
+                            index_rows[row_pid] = (pno, int(tgt))
+                        except ValueError:
+                            pass
+
+        expected_ids = {pl.placement_id for pl in placements}
+        receipts = [
+            _receipt_for(pl, out_name, found, index_rows, index_link_targets)
+            for pl in placements
+        ]
+        # Marks stamped with THIS run but absent from the plan — an orchestration
+        # bug, not pre-existing ink; each becomes a FAILED receipt so coverage
+        # cannot report clean (§13.4/§13.5).
+        for pid in sorted((set(found) | set(index_rows)) - expected_ids):
+            receipts.append(MarkupReceipt(
+                MarkupPlacement(
+                    run_id=run_id, placement_id=pid, finding_id="", qc_id="",
+                    scope="SOURCE", source_id="", page_index=-1, leg_id="", expected="",
+                ),
+                "FAILED", output_pdf=out_name,
+                error="unexpected analyzer mark not in the placement plan",
+            ))
+        return receipts
+    finally:
+        doc.close()
+
+
+def _coverage_status(
+    placements: list[MarkupPlacement], receipts: list[MarkupReceipt]
+) -> str:
+    """COMPLETE only when every placement has exactly one successful receipt and
+    there are no missing / unexpected / duplicate / failed receipts (§13.5)."""
+    expected_ids = {pl.placement_id for pl in placements}
+    per_id: dict[str, list[MarkupReceipt]] = {}
+    for r in receipts:
+        per_id.setdefault(r.placement.placement_id, []).append(r)
+    missing = expected_ids - set(per_id)
+    unexpected = set(per_id) - expected_ids
+    duplicates = [pid for pid in expected_ids if len(per_id.get(pid, [])) > 1]
+    failed = any(r.status == "FAILED" for r in receipts)
+    if missing or unexpected or duplicates or failed:
+        return "INCOMPLETE"
+    return "COMPLETE"
+
+
+def _tally_from_receipts(receipts: list[MarkupReceipt]) -> dict[str, int]:
+    """Receipt-derived run tally (never from intention): successes bucket by
+    placement kind, failures into ``failed`` (§13.5)."""
+    tally: dict[str, int] = {}
+    for r in receipts:
+        if r.status == "FAILED":
+            bucket = "mutated" if r.error.startswith(_MUTATED_ERROR_PREFIX) else "failed"
+        else:
+            bucket = _BUCKET_BY_KIND.get(r.placement.expected)
+        if bucket:
+            tally[bucket] = tally.get(bucket, 0) + 1
+    return tally
+
+
+def _result_from_receipts(
+    receipts: list[MarkupReceipt],
+    placements: list[MarkupPlacement],
+    reviewed_pdfs: list[Path],
+) -> MarkupRunResult:
+    return MarkupRunResult(
+        reviewed_pdfs=list(reviewed_pdfs),
+        placements=list(placements),
+        receipts=list(receipts),
+        coverage_status=_coverage_status(placements, receipts),
+        tally=_tally_from_receipts(receipts),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Whole-file writer (draw → stamp → save → reopen → reconcile)
+# --------------------------------------------------------------------------- #
+
+
+def _annotate_units(
+    pdf_path: Path | str,
+    pairs: "list[tuple[Finding, MarkupPlacement]]",
+    out_path: Path | str,
+    *,
+    run_id: str,
+    author: str = DEFAULT_AUTHOR,
+    sheet_meta: dict[int, dict] | None = None,
+    index_pages: bool = True,
+    audit_stats: dict | None = None,
+    include_appendix: bool = False,
+) -> list[MarkupReceipt]:
+    """Draw every ``(finding, placement)`` pair onto a copy of ``pdf_path``, stamp
+    each component, save, then reopen and reconcile → one receipt per placement.
+
+    Opens the *original* read-only and saves a **new** file (``out_path`` must
+    differ from the source), so the source is never modified. Every drawn
+    component is stamped with its placement id + component kind + final page, so
+    the reopen step proves it exists (not merely that we intended it). Per-finding
+    draw failures are caught and left un-stamped, so reconciliation reports them as
+    FAILED (I-3: the file still ships for diagnosis).
+    """
+    src = Path(pdf_path)
+    out = Path(out_path)
+    if out.resolve() == src.resolve():
+        raise ValueError("reviewed PDF path must differ from the source PDF")
+
+    placements = [pl for _, pl in pairs]
+    doc = pymupdf.open(str(src))
+    # collected[placement_id] = [(component, xref, original_page_index), …]
+    collected: dict[str, list[tuple[str, int, int]]] = {}
+    try:
+        page_count = doc.page_count
+        callouts_by_page: dict[int, list[tuple[Finding, MarkupPlacement]]] = {}
+        for finding, placement in pairs:
+            kind = placement.expected
+            if kind in ("REJECTED_INDEX", "GATED_INDEX"):
+                continue                              # index-only; drawn by the index
+            page_index = int(finding.page_index)
+            if not (0 <= page_index < page_count):
+                _log.warning(
+                    "finding %s page_index %d out of range for %s — placement will fail",
+                    finding.id, page_index, src.name,
+                )
+                continue                              # no components → FAILED at reconcile
+            rejected = _status(finding) == "REJECTED"
+            if kind == "CLOUD":
+                try:
+                    comps = _add_cloud(
+                        doc[page_index], finding,
+                        unverified=_is_unverified(finding) and not rejected,
+                        author=author, rejected=rejected,
+                    )
+                    collected.setdefault(placement.placement_id, []).extend(
+                        (c, x, page_index) for c, x in comps
+                    )
+                except Exception:  # noqa: BLE001 - one bad annot must not sink the file
+                    _log.warning("could not add markup for finding %s", finding.id)
+            else:                                     # MARGIN / REVIEW_NOTES
+                callouts_by_page.setdefault(page_index, []).append((finding, placement))
+
+        for page_index, group in sorted(callouts_by_page.items()):
+            group.sort(key=lambda fp: (fp[0].qc_id or "~", fp[0].id))
+            try:
+                drawn = _add_margin_callouts(
+                    doc[page_index], group,
+                    meta=(sheet_meta or {}).get(page_index), author=author,
+                )
+                for pid, comps in drawn.items():
+                    collected.setdefault(pid, []).extend(
+                        (c, x, page_index) for c, x in comps
+                    )
+            except Exception:  # noqa: BLE001 - callouts must not sink the file
+                _log.warning("could not add margin callouts on page %d", page_index)
+
+        n_index = 0
+        if index_pages:
+            try:
+                inked, rejected_rows, gated_rows = _index_groups(pairs)
+                n_index = _insert_index_pages(
+                    doc, inked, rejected_rows, gated_rows, run_id=run_id, author=author,
+                )
+            except Exception:  # noqa: BLE001 - the index must not sink the file
+                _log.warning("could not build the findings index for %s", src.name)
+        if include_appendix:
+            try:
+                _insert_appendix_page(doc, audit_stats, author=author)
+            except Exception:  # noqa: BLE001
+                _log.warning("could not build the appendix for %s", src.name)
+
+        # Stamp each drawn component with its FINAL page — inserting the index at
+        # the front shifted the originals down by ``n_index``. Xref numbers are
+        # stable across page insertion, so stamping by xref is safe here.
+        for pid, comps in collected.items():
+            for component, xref, orig_page in comps:
+                try:
+                    _stamp_component(doc, xref, pid, component, orig_page + n_index)
+                except Exception:  # noqa: BLE001 - a failed stamp → that placement fails
+                    _log.warning("could not stamp %s for %s", component, pid)
+
+        out.parent.mkdir(parents=True, exist_ok=True)
+        doc.save(str(out), garbage=3, deflate=True)
+    finally:
+        doc.close()
+
+    return _reconcile_pdf(out, placements, run_id)
+
+
 def annotate_pdf(
     pdf_path: Path | str,
     findings: Iterable[Finding],
@@ -712,130 +1290,62 @@ def annotate_pdf(
     index_pages: bool = True,
     audit_stats: dict | None = None,
     include_appendix: bool = False,
-) -> int:
-    """Write a ``_reviewed`` copy of ``pdf_path`` with each inked finding drawn.
+    artifact_run_id: str | None = None,
+) -> MarkupRunResult:
+    """Write a ``_reviewed`` copy of ``pdf_path`` with each finding drawn + proven.
 
-    Returns the number of annots written. Opens the *original* read-only and
-    saves a **new** file (``out_path`` must differ from the source), so the source
-    is never modified. ``sheet_meta`` maps page index → the sheet's retained
-    geometry (``words`` / ``rows`` / ``cols`` / page size) for margin-band and
-    leader placement; without it callouts fall back to a bottom strip and skip
-    leaders. ``ink_rejected`` (§18) additionally draws verifier-REJECTED findings
-    grey and dashed; by default they carry no ink but are listed on the index
-    page's rejected section. Per-finding failures are logged and skipped (I-3);
-    after saving, the file is reopened and its annot count compared to what was
-    written (a mismatch is logged, not raised).
+    Each given finding becomes exactly one placement (no cross-sheet leg
+    expansion — that is :func:`write_reviewed_pdfs`'s job, since legs land on other
+    files). The copy is drawn, every mark stamped, saved, then reopened and
+    reconciled; the returned :class:`MarkupRunResult` carries the per-placement
+    receipts, the receipt-derived coverage status/tally, and (for the old int
+    contract) ``.annots_written``. Opens the original read-only and saves a new
+    file (``out_path`` must differ from the source). ``sheet_meta`` maps page
+    index → the sheet's retained geometry for margin-band / leader placement.
+    ``ink_rejected`` (§18) draws verifier-REJECTED findings grey and dashed;
+    otherwise they carry no ink but get a reconciled index row. Additive and
+    non-fatal (I-3): a per-finding failure becomes a FAILED receipt, not a raise.
     """
-    src = Path(pdf_path)
-    out = Path(out_path)
-    if out.resolve() == src.resolve():
-        raise ValueError("reviewed PDF path must differ from the source PDF")
-
-    findings = list(findings)
-    doc = pymupdf.open(str(src))
-    written = 0
-    try:
-        page_count = doc.page_count
-        callouts_by_page: dict[int, list[Finding]] = {}
-        for finding in findings:
-            disposition = ink_disposition(
-                finding, include_unverified=include_unverified, ink_rejected=ink_rejected
-            )
-            if disposition == "gated" or (disposition == "rejected" and not ink_rejected):
-                continue
-            page_index = finding.page_index
-            if not (0 <= page_index < page_count):
-                _log.warning(
-                    "finding %s page_index %d out of range for %s",
-                    finding.id, page_index, src.name,
-                )
-                continue
-            rejected = disposition == "rejected"
-            anchored = finding.anchor is not None and finding.anchor.rect_pdf is not None
-            if disposition == "cloud" or (rejected and anchored):
-                try:
-                    written += _add_cloud(
-                        doc[page_index], finding,
-                        unverified=_is_unverified(finding) and not rejected,
-                        author=author, rejected=rejected,
-                    )
-                except Exception:  # noqa: BLE001 - one bad annot must not sink the file
-                    _log.warning("could not add markup for finding %s", finding.id)
-            else:                                   # margin (or rect-less rejected)
-                callouts_by_page.setdefault(page_index, []).append(finding)
-
-        for page_index, group in sorted(callouts_by_page.items()):
-            group.sort(key=lambda f: (f.qc_id or "~", f.id))
-            try:
-                written += _add_margin_callouts(
-                    doc[page_index], group,
-                    meta=(sheet_meta or {}).get(page_index), author=author,
-                )
-            except Exception:  # noqa: BLE001 - callouts must not sink the file
-                _log.warning("could not add margin callouts on page %d", page_index)
-
-        if index_pages:
-            try:
-                entries, rejected_entries = _index_entries(
-                    findings, include_unverified=include_unverified
-                )
-                _insert_index_pages(doc, entries, rejected_entries, author=author)
-            except Exception:  # noqa: BLE001 - the index must not sink the file
-                _log.warning("could not build the findings index for %s", src.name)
-        if include_appendix:
-            try:
-                _insert_appendix_page(doc, audit_stats, author=author)
-            except Exception:  # noqa: BLE001
-                _log.warning("could not build the appendix for %s", src.name)
-
-        out.parent.mkdir(parents=True, exist_ok=True)
-        doc.save(str(out), garbage=3, deflate=True)
-    finally:
-        doc.close()
-
-    reopened = count_annotations(out)
-    if reopened != written:
-        _log.warning(
-            "markup round-trip mismatch for %s: wrote %d, reopened %d",
-            out.name, written, reopened,
+    run_id = artifact_run_id or new_artifact_run_id()
+    ordinals = itertools.count()
+    pairs = [
+        (
+            f,
+            _make_placement(
+                f, parent_id=f.id, leg_id=PRIMARY_LEG_ID, run_id=run_id,
+                ordinal=next(ordinals),
+                include_unverified=include_unverified, ink_rejected=ink_rejected,
+            ),
         )
-    return written
+        for f in findings
+    ]
+    receipts = _annotate_units(
+        pdf_path, pairs, out_path, run_id=run_id, author=author,
+        sheet_meta=sheet_meta, index_pages=index_pages, audit_stats=audit_stats,
+        include_appendix=include_appendix,
+    )
+    return _result_from_receipts(receipts, [pl for _, pl in pairs], [Path(out_path)])
 
 
 def _expand_for_markup(findings: Iterable[Finding]) -> list[Finding]:
-    """Explode a cross-sheet finding into one cloud request per sheet it touches.
+    """Explode a cross-sheet finding into one drawable finding per sheet it touches.
 
-    A cross-sheet conflict must be clouded on **both** sheets (Phase 13). The
-    primary finding clouds on its own sheet (its ``also_on`` drives the popup's
-    cross-reference); each ``also_on`` leg becomes a synthetic finding placed on
-    *its* sheet, inheriting the parent's category/severity/verification/**qc_id**
-    (so gating is identical and both popups show the same review number, each
-    cross-referencing the other) and carrying its own ``also_on`` pointing back at
-    the primary and the sibling legs. A finding with no legs passes through
-    unchanged. Synthetic legs live only here — never in the findings record — so
-    counts/exports stay one-entry-per-conflict.
+    Back-compat helper: returns the flat list of findings-to-draw (the primary
+    plus one synthetic finding per ``also_on`` leg, each on its own sheet). The
+    placement identity now lives on :class:`MarkupPlacement` (see
+    :func:`_units_for_finding`); this flat view is preserved for callers/tests
+    that only need the exploded findings. Synthetic legs live only here — never in
+    the findings record.
     """
+    run_id = new_artifact_run_id()
+    ordinals = itertools.count()
     out: list[Finding] = []
     for f in findings:
-        out.append(f)
-        legs = getattr(f, "also_on", None) or []
-        if not legs:
-            continue
-        primary_as_leg = ConflictLeg(
-            sheet_id=f.sheet_id, source_name=f.source_name, source_id=f.source_id,
-            page_index=f.page_index,
-            source_quote=f.source_quote, tile=f.tile, anchor=f.anchor,
-        )
-        for i, leg in enumerate(legs):
-            others = [primary_as_leg] + [l for j, l in enumerate(legs) if j != i]
-            out.append(Finding(
-                sheet_id=leg.sheet_id, source_name=leg.source_name,
-                source_id=leg.source_id,
-                page_index=leg.page_index, category=f.category, severity=f.severity,
-                text=f.text, source_quote=leg.source_quote, refs=list(f.refs),
-                also_on=others, anchor=leg.anchor, verification=f.verification,
-                qc_id=f.qc_id, citation=f.citation, sources=list(f.sources),
-            ))
+        for unit in _units_for_finding(
+            f, run_id=run_id, ordinals=ordinals,
+            include_unverified=True, ink_rejected=False,
+        ):
+            out.append(unit.finding)
     return out
 
 
@@ -850,39 +1360,71 @@ def write_reviewed_pdfs(
     geometries: Iterable[Any] | None = None,
     audit_stats: dict | None = None,
     include_appendix: bool = False,
-) -> list[Path]:
-    """Write one ``<stem>_reviewed.pdf`` per source PDF that has QC content.
+    artifact_run_id: str | None = None,
+    skip_source_ids: "set[str] | None" = None,
+) -> MarkupRunResult:
+    """Write one ``<stem>_reviewed.pdf`` per source with QC content, receipt-backed.
 
     Findings are matched to a source PDF by the host-owned ``source_id``
     (DA-001), so two inputs that share a basename each receive **only their own**
     findings — the reviewed copies are never cross-contaminated. (A finding that
     predates source ids — e.g. a hand-built test finding — falls back to matching
-    by ``source_name``.) A source with neither an inked finding nor a rejected
-    one gets no reviewed copy (rejected-only sources still get one, so their
-    index's rejected section keeps them visible — §18: nothing is invisible). A
-    cross-sheet finding is inked on **every** sheet it touches (see
-    :func:`_expand_for_markup`). ``geometries`` supply the word rectangles/grid
-    for margin-band placement; ``audit_stats`` feeds the optional appendix.
+    by ``source_name``.) A source with no placement at all gets no reviewed copy;
+    a source whose only findings are rejected / gated still gets one (their index
+    rows keep them visible — §18: nothing is invisible). A cross-sheet finding is
+    placed on **every** sheet it touches, each leg its own reconciled placement.
+
+    Every planned placement is reconciled against the reopened output. The
+    returned :class:`MarkupRunResult` carries the receipts, the receipt-derived
+    coverage status/tally, and the reviewed-PDF paths. A source whose placements
+    did not all succeed is written under an explicit ``…_reviewed_INCOMPLETE.pdf``
+    name so it can never be mistaken for a complete reviewed set (§13.6). A source
+    in ``skip_source_ids`` (its bytes changed mid-run, §10.6) is **not** reopened —
+    every placement it touches gets a FAILED receipt and no ink is drawn on stale
+    bytes.
 
     Output filenames stay friendly (``<stem>_reviewed.pdf``) when stems are
     unique; when two inputs share a stem, the colliding ones are disambiguated by
     their ``source_id`` (``<stem>__SRC-0002_reviewed.pdf``) — a deterministic,
-    source-identifying suffix, not an order-dependent ``_2`` (§10.4). Returns the
-    reviewed-PDF paths, in input order.
+    source-identifying suffix, not an order-dependent ``_2`` (§10.4).
     """
+    run_id = artifact_run_id or new_artifact_run_id()
+    skip = set(skip_source_ids or [])
     output_dir = Path(output_dir)
     pdf_paths = [Path(p) for p in pdf_paths]
     # Recompute the same host-owned ids list_sheets assigned (pure function of
     # the ordered path list), so a finding's source_id maps back to its file.
     path_to_sid = assign_source_ids(pdf_paths)
 
-    by_source_id: dict[str, list[Finding]] = {}
-    by_name: dict[str, list[Finding]] = {}   # fallback pool for source_id-less findings
-    for finding in _expand_for_markup(findings):
-        if finding.source_id:
-            by_source_id.setdefault(finding.source_id, []).append(finding)
-        else:
-            by_name.setdefault(finding.source_name, []).append(finding)
+    all_placements: list[MarkupPlacement] = []
+    all_receipts: list[MarkupReceipt] = []
+    reviewed_pdfs: list[Path] = []
+
+    # Split logical findings: a finding touching a changed source (primary or any
+    # leg) is skipped entirely — every placement it plans gets a FAILED receipt
+    # (source changed), and no stale ink is drawn (§10.6).
+    units_by_sid: dict[str, list[_DrawUnit]] = {}
+    units_by_name: dict[str, list[_DrawUnit]] = {}
+    ordinals = itertools.count()
+    for finding in findings:
+        units = _units_for_finding(
+            finding, run_id=run_id, ordinals=ordinals,
+            include_unverified=include_unverified, ink_rejected=ink_rejected,
+        )
+        if skip and _finding_touches(finding, skip):
+            for unit in units:
+                all_placements.append(unit.placement)
+                all_receipts.append(MarkupReceipt(
+                    unit.placement, "FAILED", output_pdf="",
+                    error="source changed after analysis; markup skipped — "
+                          "re-run to mark up the current revision",
+                ))
+            continue
+        for unit in units:
+            if unit.finding.source_id:
+                units_by_sid.setdefault(unit.finding.source_id, []).append(unit)
+            else:
+                units_by_name.setdefault(unit.finding.source_name, []).append(unit)
 
     def _meta_of(geom: Any) -> dict:
         return {
@@ -910,17 +1452,18 @@ def write_reviewed_pdfs(
     for p in pdf_paths:
         stem_counts[p.stem] = stem_counts.get(p.stem, 0) + 1
 
-    out_paths: list[Path] = []
     used_names: set[str] = set()
+    done_keys: set[str] = set()          # a source's units are written exactly once
     for pdf_path in pdf_paths:
         sid = path_to_sid.get(str(pdf_path), "")
-        sheet_findings = list(by_source_id.get(sid, [])) + list(by_name.get(pdf_path.name, []))
-        has_ink = any(
-            is_inked(f, include_unverified=include_unverified) for f in sheet_findings
-        )
-        has_rejected = any(_status(f) == "REJECTED" for f in sheet_findings)
-        if not has_ink and not has_rejected:
+        key = sid or f"name::{pdf_path.name}"
+        if key in done_keys:
             continue
+        done_keys.add(key)
+        units = list(units_by_sid.get(sid, [])) + list(units_by_name.get(pdf_path.name, []))
+        if not units:
+            continue
+        pairs = [(u.finding, u.placement) for u in units]
         if stem_counts.get(pdf_path.stem, 0) > 1 and sid:
             name = f"{pdf_path.stem}__{sid}_reviewed.pdf"
         else:
@@ -935,12 +1478,40 @@ def write_reviewed_pdfs(
             **meta_by_name.get(pdf_path.name, {}),
             **meta_by_source_id.get(sid, {}),   # source-id meta wins per page
         }
-        annotate_pdf(
-            pdf_path, sheet_findings, out,
-            include_unverified=include_unverified, ink_rejected=ink_rejected,
-            author=author,
-            sheet_meta=sheet_meta or None,
-            audit_stats=audit_stats, include_appendix=include_appendix,
-        )
-        out_paths.append(out)
-    return out_paths
+        try:
+            receipts = _annotate_units(
+                pdf_path, pairs, out, run_id=run_id, author=author,
+                sheet_meta=sheet_meta or None,
+                audit_stats=audit_stats, include_appendix=include_appendix,
+            )
+        except Exception as exc:  # noqa: BLE001 - a source-level failure is non-fatal
+            _log.warning("could not write reviewed PDF for %s: %s", pdf_path.name, exc)
+            receipts = [
+                MarkupReceipt(u.placement, "FAILED", output_pdf=name,
+                              error=f"reviewed-PDF write failed: {exc}")
+                for u in units
+            ]
+            all_placements.extend(u.placement for u in units)
+            all_receipts.extend(receipts)
+            continue
+
+        # A source whose placements did not all succeed is labeled INCOMPLETE so it
+        # is never mistaken for a complete reviewed set (§13.6).
+        incomplete = any(not r.ok for r in receipts)
+        final_out = out
+        if incomplete and out.exists():
+            inc_name = name[:-4] + "_INCOMPLETE.pdf" if name.lower().endswith(".pdf") else name + "_INCOMPLETE"
+            final_out = output_dir / inc_name
+            try:
+                out.replace(final_out)
+                for r in receipts:
+                    if r.output_pdf == name:
+                        r.output_pdf = inc_name
+            except OSError as exc:
+                _log.warning("could not label incomplete reviewed PDF %s: %s", name, exc)
+                final_out = out
+        all_placements.extend(u.placement for u in units)
+        all_receipts.extend(receipts)
+        reviewed_pdfs.append(final_out)
+
+    return _result_from_receipts(all_receipts, all_placements, reviewed_pdfs)

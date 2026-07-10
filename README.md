@@ -93,10 +93,24 @@ Two **QC review** checkboxes sit beside the focus:
   (~$0.01–0.03 each) while markups are on.
 
 After a QC run, the completion summary reports the finding count, how many were
-clouded, and the ledger coverage tally
-(`Ledger 47: 39 clouded, 6 margin, 2 rejected (indexed)`), and two extra
-buttons light up: **Save Findings CSV…** and **Save Reviewed PDF(s)…** (the
-latter copies every `*_reviewed.pdf` into a folder you pick).
+clouded, and the **receipt-derived** coverage tally
+(`Ledger 47: 39 clouded, 5 margin, 2 rejected (indexed), 1 gated (verified-only
+mode), 0 failed; coverage COMPLETE`), and two extra buttons light up: **Save
+Findings CSV…** and **Save Reviewed PDF(s)…** (the latter copies every
+`*_reviewed.pdf` into a folder you pick).
+
+That tally is **artifact-backed**, not aspirational (Phase 21): after each
+reviewed PDF is saved it is **reopened and reconciled** against the plan — every
+cloud, callout, and index row is stamped with a private placement id, and a
+placement counts only when its stamp is found again in the saved file. If a
+planned markup is missing, failed, or a source changed mid-run, the run's
+coverage is **INCOMPLETE**: the completion line reads **QC incomplete** (distinct
+from *Completed* and *Completed with QC warnings*), the affected reviewed PDF is
+named `…_reviewed_INCOMPLETE.pdf`, the HTML report shows a red **Markup coverage:
+INCOMPLETE** banner, and the exported `markup_manifest.json` records every planned
+placement and its terminal receipt. Pre-existing annotations on the source (or
+markups from an earlier review run) never distort this accounting — they carry no
+stamp from *this* run and are ignored.
 
 ### Browsing the result
 
@@ -166,14 +180,18 @@ carries the QC record: `findings` (the model's, anchored + verified),
 `reference_findings` (the deterministic auditors', anchored + `DETERMINISTIC`),
 the `all_findings` / `finding_count` / `clouded_finding_count` conveniences,
 `reviewed_pdf_paths`, the lightweight `sheet_geometries`, `audit_stats` (the
-auditors' checks-passed tally), `ledger_tally` / `ledger_tally_line` (the §18
-coverage tally), and `qc_work_dir` (holding `evidence/` crops and the reviewed
-PDFs). Every finding carries its sequential `qc_id` review number (`QC-001` …),
+auditors' checks-passed tally), `ledger_tally` / `ledger_tally_line` (the
+receipt-derived coverage tally), `coverage_status` + `markup_run` (the Phase 21
+placement receipts, `COMPLETE` / `INCOMPLETE` / `NOT_REQUESTED`), and
+`qc_work_dir` (holding `evidence/` crops and the reviewed PDFs). Every finding
+carries its sequential `qc_id` review number (`QC-001` …),
 its provenance tags (`sources` — see the [findings ledger](#the-findings-ledger-part-iii)),
 and, when the citation check ran, a `citation` verdict. `write_drawing_export(ctx, parent_dir, ...)` folds all of it
 into the export folder — `findings.json`, `findings.csv`, `sheet_text/<sheet>.txt`
-per sheet, the `*_reviewed.pdf` copies, and the `evidence/` crops — alongside the
-prose digest and HTML report.
+per sheet, the `*_reviewed.pdf` copies (incomplete ones named
+`*_reviewed_INCOMPLETE.pdf`), the `evidence/` crops, and `markup_manifest.json`
+(the placement receipts + coverage proof) — alongside the prose digest and HTML
+report.
 
 ## How it works
 
@@ -578,21 +596,46 @@ the verifier proved wrong**:
 | Anchored, `UNCERTAIN` / `SKIPPED` | **dashed** cloud, `[UNVERIFIED]` prefix |
 | Rect-less: sheet-level / absence | margin callout, `[SHEET]` prefix |
 | Rect-less: quote matched nothing | margin callout, `[UNANCHORED]` prefix — the hallucination signal, flagged loudly, never dropped |
-| `REJECTED` (verifier contradicted it) | **no ink** — but listed on the index page under *"Rejected by verification (n)"* with page links, so nothing is invisible. `ink_rejected=True` (GUI: **Include rejected (grey)**) additionally draws them grey and dashed with a `[REJECTED]` prefix. |
+| `REJECTED` (verifier contradicted it) | **no ink** — but a reconciled index row under *"Rejected by verification (n)"* with page links, so nothing is invisible. `ink_rejected=True` (GUI: **Include rejected (grey)**) additionally draws them grey and dashed with a `[REJECTED]` prefix. |
+| **Gated** (verified-only mode suppressed the ink) | **no ink** — but a reconciled index row under *"Not inked by operator gate (n)"*, so a deliberately-gated finding is accounted, never silently dropped. |
 
 The conservative mode is the opt-in: `markup_verified_only=True` (GUI:
 **Verified & deterministic only**, default **off**) suppresses everything but
-`VERIFIED` + `DETERMINISTIC`; suppressed entries are tallied as *gated*.
+`VERIFIED` + `DETERMINISTIC`; suppressed entries are tallied as *gated* and get a
+real **"Not inked by operator gate"** index row (a proven placement, not a bare
+status), so nothing is invisible.
 
-At the end of a markup run the pipeline asserts **every ledger entry is
-accounted for** — clouded, margin callout, or rejected-indexed — and logs the
-tally (`Ledger 47: 39 clouded, 6 margin, 2 rejected (indexed)`), which also
-appears in the GUI completion summary, the report's findings card, and
-`ctx.ledger_tally` / `ctx.ledger_tally_line`. The tally describes PDF ink, so
-runs without markups (reference audit only) leave it empty.
+### Coverage is artifact-backed (Phase 21, DA-007)
 
-The writer opens the original read-only and saves a *new* file (the source is
-never touched), then reopens it and checks the annotation count as a self-test.
+At the end of a markup run the coverage tally is **derived from receipts, not
+intention**. The writer follows a **plan → draw → stamp → save → reopen →
+reconcile** protocol: it plans one *placement* per finding (and one per
+cross-sheet leg), draws each mark, stamps every annotation and index row with a
+private PDF object key carrying its **placement id**, saves a *new* file (the
+source is never touched), then **reopens the saved file and reconciles** — a
+placement counts only when its stamped, mandatory component is found again in the
+artifact. The result is a
+[`MarkupRunResult`](src/drawing_analyzer/models.py): per-placement
+`MarkupReceipt`s (`WRITTEN` / `INDEXED` / `FAILED`), the receipt-derived tally,
+and a `coverage_status`.
+
+- The tally (`Ledger 47: 39 clouded, 5 margin, 2 rejected (indexed), 1 gated
+  (verified-only mode), 0 failed; coverage COMPLETE`) appears in the GUI
+  completion summary, the report's findings card + a coverage banner, and
+  `ctx.ledger_tally` / `ctx.ledger_tally_line`. It describes PDF ink, so runs
+  without markups (reference audit only) leave it empty.
+- If any planned markup is **missing, failed, duplicated, or a source changed
+  mid-run**, coverage is **`INCOMPLETE`**: the completion line reads **QC
+  incomplete**, the affected reviewed PDF is renamed `…_reviewed_INCOMPLETE.pdf`,
+  the report shows a red banner, and the run is never presented as a clean
+  success.
+- Because each stamp embeds a per-run id, **pre-existing annotations on the
+  source and markups from an earlier review run carry no stamp from *this* run and
+  are ignored** — they can neither satisfy nor break a placement.
+- Every placement + receipt + the coverage status + the sha256 of each reviewed
+  PDF are written to **`markup_manifest.json`** (portable — no key, no absolute
+  path).
+
 Every finding — inked or not — is also written to **`findings.csv`**, one row per
 finding with every field flattened (`qc_id` first; provenance in the `sources`
 column; citation columns at the end), UTF-8 with a BOM and CRLF line endings so

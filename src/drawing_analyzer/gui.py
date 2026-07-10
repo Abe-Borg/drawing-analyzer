@@ -828,15 +828,23 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
 
         cached_note = f", {cached} from cache" if cached else ""
         failed_note = f", {failed} failed" if failed else ""
+        # Three completion states (§3.3 / §13.6): a receipt-derived INCOMPLETE
+        # markup coverage is called out honestly as "QC incomplete" (never
+        # presented as a clean success); other run issues are "QC warnings"; an
+        # all-clear run is "Completed".
+        if getattr(ctx, "markup_incomplete", False):
+            state, level = "QC incomplete", "error"
+        elif ctx.errors:
+            state, level = "Completed with QC warnings", "warning"
+        else:
+            state, level = "Completed", "success"
         summary = (
-            f"Done — {ok}/{ctx.sheet_count} sheet(s) analyzed{cached_note}"
+            f"{state} — {ok}/{ctx.sheet_count} sheet(s) analyzed{cached_note}"
             f"{failed_note} · input {ctx.total_input_tokens:,} tok, "
             f"output {ctx.total_output_tokens:,} tok"
         )
-        self._log(summary, level="success" if not ctx.errors else "warning")
-        self._set_progress_text(
-            summary, color=COLORS["success"] if not ctx.errors else COLORS["warning"]
-        )
+        self._log(summary, level=level)
+        self._set_progress_text(summary, color=COLORS[level])
         if ctx.focus:
             if ctx.focus_report_text.strip():
                 self._log(
@@ -866,6 +874,14 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 + " with the buttons below.",
                 level="accent",
             )
+            if getattr(ctx, "markup_incomplete", False):
+                self._log(
+                    "Markup coverage is INCOMPLETE — some planned markups are "
+                    "missing/failed, or a source changed mid-run. Reviewed PDF(s) "
+                    "with unaccounted markups are named …_reviewed_INCOMPLETE.pdf; "
+                    "see markup_manifest.json in the export and re-run to complete.",
+                    level="warning",
+                )
         # Part III coverage tally — every ledger entry accounted for (§18).
         tally_line = getattr(ctx, "ledger_tally_line", "") or ""
         if tally_line:

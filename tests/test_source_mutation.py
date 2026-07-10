@@ -147,8 +147,11 @@ def test_pipeline_skips_markup_for_mutated_source(tmp_path, monkeypatch):
     assert any("E-201.pdf" in e and "re-run" in e for e in ctx.errors)
     names = sorted(p.name for p in ctx.reviewed_pdf_paths)
     assert names == ["M-101_reviewed.pdf"]       # only the unchanged source
-    # The tally accounts the skipped entry honestly (not as clouded ink).
+    # The tally accounts the skipped entry honestly (not as clouded ink), and the
+    # run's markup coverage is INCOMPLETE (Phase 21): a skipped source is a FAILED
+    # placement receipt, never presented as a clean success.
     assert ctx.ledger_tally.get("mutated", 0) >= 1
+    assert ctx.coverage_status == "INCOMPLETE"
 
 
 def test_mutated_middle_source_does_not_misassign_ink(tmp_path, monkeypatch):

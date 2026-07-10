@@ -714,6 +714,190 @@ def assign_qc_ids(findings: list["Finding"]) -> list["Finding"]:
     return findings
 
 
+# --------------------------------------------------------------------------- #
+# Markup coverage receipts (Phase 21, DA-007) — the artifact-backed accounting
+# that supersedes the old intention classifier (``ink_disposition``). Plain data
+# (no PyMuPDF import here — the writer in :mod:`annotate` produces these): the
+# writer plans one placement per finding/leg, draws stamped components, reopens
+# the saved PDF, and reconciles the plan against what it actually finds, emitting
+# one terminal receipt per placement. The pipeline rolls the receipts into the
+# run's coverage status; :mod:`export` serializes them into
+# ``markup_manifest.json``. Nothing is ever counted from intention — a tally
+# entry exists only because a mark was found again in the saved file.
+# --------------------------------------------------------------------------- #
+
+# What a planned placement is expected to become in the saved artifact.
+PLACEMENT_KINDS = ("CLOUD", "MARGIN", "REVIEW_NOTES", "REJECTED_INDEX", "GATED_INDEX")
+# The terminal outcome of one placement, read back from the saved artifact.
+RECEIPT_STATUSES = ("WRITTEN", "INDEXED", "FAILED")
+# A whole run's placement coverage over the ledger.
+COVERAGE_STATUSES = ("NOT_REQUESTED", "COMPLETE", "INCOMPLETE")
+
+# The mandatory component kind(s) each placement must carry, exactly once, in the
+# saved PDF. A placement may also carry optional components (a QC tag beside a
+# cloud, a leader line from a callout); those are recorded but never gate
+# coverage — the plan's "reject missing or duplicate components" rule applies to
+# the mandatory kinds only.
+REQUIRED_COMPONENTS = {
+    "CLOUD": ("cloud",),
+    "MARGIN": ("callout",),
+    "REVIEW_NOTES": ("callout",),
+    "REJECTED_INDEX": ("index_row",),
+    "GATED_INDEX": ("index_row",),
+}
+# Component kinds that are real annotation objects (i.e. "ink"); ``index_row`` is
+# a stamped GOTO link on a generated index page — visible navigation, not ink.
+ANNOTATION_COMPONENTS = frozenset({"cloud", "tag", "callout", "leader"})
+
+PRIMARY_LEG_ID = "primary"
+SET_LEG_ID = "set_level"
+
+
+def leg_identity(
+    source_id: str, source_name: str, page_index: int, source_quote: str, index: int
+) -> str:
+    """A stable id for one cross-sheet leg's placement within an artifact run.
+
+    Distinguishes each ``also_on`` leg of a conflict from the primary and from
+    its siblings so their placements never collide — the leg ``index`` guarantees
+    uniqueness even when two legs share a sheet id and quote, while the content
+    hash keeps it recognizable. :data:`PRIMARY_LEG_ID` is reserved for a
+    finding's own anchor and :data:`SET_LEG_ID` for a set-scoped finding.
+    """
+    h = hashlib.sha1()
+    for part in (source_id, source_name, str(int(page_index)), source_quote):
+        h.update(part.encode("utf-8"))
+        h.update(b"\x00")
+    return f"leg-{index:02d}-{h.hexdigest()[:8]}"
+
+
+@dataclass
+class MarkupPlacement:
+    """One logical mark the run intends to write for a finding or a leg (§6.4).
+
+    ``placement_id`` is the machine key — ``"{run_id}#{finding_id}#{leg_id}"`` —
+    unique within one artifact run and **embedding the run id** so a prior run's
+    stamped annotations (a re-review of the same source PDF) never satisfy this
+    run's plan. ``qc_id`` is a display aid, never the key (§13.1). ``leg_id`` is
+    :data:`PRIMARY_LEG_ID` for the finding's own anchor, a :func:`leg_identity`
+    value for a cross-sheet leg, or :data:`SET_LEG_ID` for a set-scoped finding.
+    ``page_index`` is the *source* page (``-1`` for a set-level placement).
+    """
+
+    run_id: str
+    placement_id: str
+    finding_id: str
+    qc_id: str
+    scope: str                          # SOURCE | SET
+    source_id: str                      # "" for set-level
+    page_index: int                     # source page (-1 for set-level)
+    leg_id: str                         # primary | leg-.. | set_level
+    expected: str                       # one of PLACEMENT_KINDS
+    required_components: list[str] = field(default_factory=list)
+    severity: str = ""
+    source_name: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "run_id": self.run_id,
+            "placement_id": self.placement_id,
+            "finding_id": self.finding_id,
+            "qc_id": self.qc_id,
+            "scope": self.scope,
+            "source_id": self.source_id,
+            "page_index": self.page_index,
+            "leg_id": self.leg_id,
+            "expected": self.expected,
+            "required_components": list(self.required_components),
+            "severity": self.severity,
+            "source_name": self.source_name,
+        }
+
+
+@dataclass
+class MarkupReceipt:
+    """The proven outcome of one placement, read back from the saved artifact (§6.4).
+
+    ``WRITTEN`` (ink) / ``INDEXED`` (a generated index/review-notes row) are the
+    two success states; ``FAILED`` carries a sanitized ``error``. ``output_pdf``
+    is a **basename only** (no absolute path — the manifest is portable).
+    ``annotation_refs`` list the concrete components found again in the reopened
+    file as ``"{component}:{xref}"``; ``index_entry_ref`` names the index row's
+    marker when the placement is index-backed.
+    """
+
+    placement: MarkupPlacement
+    status: str                          # WRITTEN | INDEXED | FAILED
+    output_pdf: str = ""
+    output_page_index: int | None = None
+    annotation_refs: list[str] = field(default_factory=list)
+    index_entry_ref: str = ""
+    error: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.status in ("WRITTEN", "INDEXED")
+
+    def to_dict(self) -> dict:
+        return {
+            "placement": self.placement.to_dict(),
+            "status": self.status,
+            "output_pdf": self.output_pdf,
+            "output_page_index": self.output_page_index,
+            "annotation_refs": list(self.annotation_refs),
+            "index_entry_ref": self.index_entry_ref,
+            "error": self.error,
+        }
+
+
+@dataclass
+class MarkupRunResult:
+    """The whole markup run's artifact-backed accounting (§6.4).
+
+    ``reviewed_pdfs`` are the written files (incomplete ones carry an explicit
+    ``_INCOMPLETE`` name). ``coverage_status`` is derived from the receipts, never
+    from intention: ``COMPLETE`` only when every expected placement — including
+    every cross-sheet leg — has a successful receipt with its unique mandatory
+    components and there are no missing / unexpected / duplicate / failed
+    receipts. ``tally`` is the receipt-derived run summary.
+    """
+
+    reviewed_pdfs: list[Path] = field(default_factory=list)
+    placements: list[MarkupPlacement] = field(default_factory=list)
+    receipts: list[MarkupReceipt] = field(default_factory=list)
+    coverage_status: str = "NOT_REQUESTED"
+    tally: dict = field(default_factory=dict)
+
+    @property
+    def annots_written(self) -> int:
+        """Total annotation objects (ink) proven in the saved files.
+
+        Derived from the reconciled receipts — the artifact-backed replacement
+        for the old ``annotate_pdf`` integer return. Index-row (GOTO link)
+        components are navigation, not ink, so they are excluded.
+        """
+        return sum(
+            1
+            for r in self.receipts
+            if r.ok
+            for ref in r.annotation_refs
+            if ref.split(":", 1)[0] in ANNOTATION_COMPONENTS
+        )
+
+    @property
+    def failed_receipts(self) -> list["MarkupReceipt"]:
+        return [r for r in self.receipts if r.status == "FAILED"]
+
+    def to_dict(self) -> dict:
+        return {
+            "coverage_status": self.coverage_status,
+            "tally": dict(self.tally),
+            "reviewed_pdfs": [Path(p).name for p in self.reviewed_pdfs],
+            "placements": [p.to_dict() for p in self.placements],
+            "receipts": [r.to_dict() for r in self.receipts],
+        }
+
+
 @dataclass
 class NumericClaim:
     """A numeric relationship the model *transcribed* off a sheet (Phase 14).

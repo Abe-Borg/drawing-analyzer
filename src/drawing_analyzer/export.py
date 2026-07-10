@@ -27,6 +27,7 @@ Read surface (duck-typed):
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import re
@@ -223,17 +224,39 @@ def _index_document(
     if has_qc_outputs(ctx):
         findings = _qc_findings(ctx)
         reviewed = list(getattr(ctx, "reviewed_pdf_paths", None) or [])
+        coverage = getattr(ctx, "coverage_status", "NOT_REQUESTED") or "NOT_REQUESTED"
         lines += [
             "",
             "### QC review",
             "",
             f"- **Findings:** {len(findings)}"
             + (f" · **reviewed PDF(s):** {len(reviewed)}" if reviewed else ""),
-            "- `findings.json` / `findings.csv` — every finding, all fields",
         ]
+        if coverage in ("COMPLETE", "INCOMPLETE"):
+            tally = getattr(ctx, "ledger_tally_line", "") or ""
+            note = (
+                "every planned markup was found again in the saved PDFs"
+                if coverage == "COMPLETE"
+                else "**some planned markups are missing or failed — see the "
+                "`_INCOMPLETE` PDF(s), `run` errors, and `markup_manifest.json`**"
+            )
+            lines.append(f"- **Markup coverage:** {coverage} — {note}")
+            if tally:
+                lines.append(f"  - {tally}")
+        lines.append("- `findings.json` / `findings.csv` — every finding, all fields")
         for pdf in reviewed:
-            lines.append(f"- `{Path(pdf).name}` — the marked-up drawing")
+            label = (
+                " — **incomplete markup** (labeled)"
+                if "_INCOMPLETE" in Path(pdf).name
+                else " — the marked-up drawing"
+            )
+            lines.append(f"- `{Path(pdf).name}`{label}")
         lines.append("- `sheet_text/` — each sheet's extracted text layer")
+        if has_markup_manifest(ctx):
+            lines.append(
+                "- `markup_manifest.json` — every planned placement + its "
+                "artifact-backed receipt (coverage proof)"
+            )
         if getattr(ctx, "qc_work_dir", None) is not None:
             lines.append("- `evidence/` — the crop the verifier saw for each finding")
     lines.append("")
@@ -430,6 +453,65 @@ def _sheet_text_name(ref: Any, used: set[str]) -> str:
     return name
 
 
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fp:
+        for chunk in iter(lambda: fp.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def has_markup_manifest(ctx: Any) -> bool:
+    """True when a markup run happened (so a coverage manifest should be written)."""
+    return getattr(ctx, "markup_run", None) is not None or bool(
+        getattr(ctx, "reviewed_pdf_paths", None)
+    )
+
+
+def build_markup_manifest(ctx: Any, *, folder: Path | None = None) -> dict:
+    """The machine-readable markup-coverage manifest (§13.7).
+
+    Carries the run's coverage status, the receipt-derived tally, every planned
+    placement, every terminal receipt, and — when ``folder`` is given — the
+    sha256 of each reviewed PDF as it actually landed on disk. It contains **no
+    API key and no absolute path** (receipts reference basenames only), so it is
+    portable. The receipts are the artifact-backed proof that each expected
+    placement exists in the saved PDF (or an explicit failure).
+    """
+    run = getattr(ctx, "markup_run", None)
+    manifest: dict = {
+        "schema_version": 1,
+        "coverage_status": getattr(ctx, "coverage_status", "NOT_REQUESTED") or "NOT_REQUESTED",
+        "tally": dict(getattr(ctx, "ledger_tally", None) or {}),
+        "mutated_sources": list(getattr(ctx, "mutated_sources", None) or []),
+        "placements": [],
+        "receipts": [],
+        "outputs": [],
+    }
+    if run is not None and hasattr(run, "to_dict"):
+        run_dict = run.to_dict()
+        manifest["placements"] = run_dict.get("placements", [])
+        manifest["receipts"] = run_dict.get("receipts", [])
+    # Hash the reviewed PDFs as they actually exist in the export folder — the
+    # concrete artifacts the receipts describe.
+    if folder is not None:
+        names = sorted(
+            {
+                str(r.get("output_pdf") or "")
+                for r in manifest["receipts"]
+                if r.get("output_pdf")
+            }
+            | {Path(p).name for p in (getattr(ctx, "reviewed_pdf_paths", None) or [])}
+        )
+        for name in names:
+            out = Path(folder) / name
+            if out.exists():
+                manifest["outputs"].append(
+                    {"name": name, "sha256": _sha256(out), "bytes": out.stat().st_size}
+                )
+    return manifest
+
+
 def write_qc_outputs(ctx: Any, folder: Path) -> list[str]:
     """Write the QC inventory into ``folder``; return the relative names written.
 
@@ -481,6 +563,16 @@ def write_qc_outputs(ctx: Any, folder: Path) -> list[str]:
                 copied += 1
             if copied:
                 written.append("evidence/")
+
+    # Markup coverage manifest (§13.7) — written after the reviewed PDFs are on
+    # disk so its output hashes describe the concrete files. Only when a markup
+    # run happened (a reference-audit-only run has no placements to account).
+    if has_markup_manifest(ctx):
+        (folder / "markup_manifest.json").write_text(
+            json.dumps(build_markup_manifest(ctx, folder=folder), indent=2),
+            encoding="utf-8",
+        )
+        written.append("markup_manifest.json")
 
     return written
 

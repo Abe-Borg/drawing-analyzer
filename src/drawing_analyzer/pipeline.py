@@ -143,13 +143,27 @@ class DrawingContext:
     # NOT marked up (stale anchors are never written onto changed bytes), a
     # rerun is required, and the change is also recorded in ``errors``.
     mutated_sources: list[str] = field(default_factory=list)
+    # Phase 21 (DA-007): the run's receipt-derived markup coverage.
+    # ``coverage_status`` is NOT_REQUESTED (no markups), COMPLETE (every planned
+    # placement proven in the saved PDF), or INCOMPLETE (a placement is missing /
+    # failed / a source changed mid-run). ``markup_run`` is the full
+    # :class:`~drawing_analyzer.models.MarkupRunResult` (placements + receipts)
+    # that backs ``markup_manifest.json``. Surfaced as a banner in the report and
+    # a three-state completion in the GUI.
+    coverage_status: str = "NOT_REQUESTED"
+    markup_run: Any = None
 
     @property
     def ledger_tally_line(self) -> str:
-        """The §18 run-summary line, or ``""`` when no markups were written."""
+        """The Phase 21 run-summary line, or ``""`` when no markups were written."""
         if not self.ledger_tally:
             return ""
-        return _tally_line(self.finding_count, self.ledger_tally)
+        return _tally_line(self.finding_count, self.ledger_tally, self.coverage_status)
+
+    @property
+    def markup_incomplete(self) -> bool:
+        """True when markups were requested but coverage came back INCOMPLETE."""
+        return self.coverage_status == "INCOMPLETE"
 
     @property
     def ok_sheet_count(self) -> int:
@@ -525,6 +539,11 @@ class _QCResult:
     audit_stats: dict = field(default_factory=dict)
     ledger_tally: dict = field(default_factory=dict)
     mutated_sources: list[str] = field(default_factory=list)
+    # Phase 21 (DA-007): the artifact-backed markup accounting. ``coverage_status``
+    # is receipt-derived (COMPLETE / INCOMPLETE / NOT_REQUESTED); ``markup_run`` is
+    # the full :class:`MarkupRunResult` (placements + receipts) for the manifest.
+    coverage_status: str = "NOT_REQUESTED"
+    markup_run: Any = None
 
 
 def _critique_level1_partition(
@@ -706,19 +725,6 @@ def _run_critique_stage(
         len(findings), len(claims), total,
     )
     return findings, claims, in_tok, out_tok
-
-
-def _finding_touches_only_unchanged(finding: Finding, mutated_ids: set[str]) -> bool:
-    """True when neither the finding's own source nor any of its cross-sheet legs
-    sits on a mutated source — i.e. it is safe to ink. A finding that touches a
-    changed source (primary anchor or an ``also_on`` leg) is excluded from markup
-    so no stale anchor is drawn onto changed bytes (§10.6)."""
-    if getattr(finding, "source_id", "") in mutated_ids:
-        return False
-    for leg in getattr(finding, "also_on", None) or []:
-        if getattr(leg, "source_id", "") in mutated_ids:
-            return False
-    return True
 
 
 def _run_qc_stages(
@@ -956,31 +962,24 @@ def _run_qc_stages(
     reviewed_pdf_paths: list[Path] = []
     mutated_sources: list[str] = []
     mutated_ids: set[str] = set()
+    ledger_tally: dict[str, int] = {}
+    coverage_status = "NOT_REQUESTED"
+    markup_run: Any = None
     if qc_markups:
         from .annotate import write_reviewed_pdfs
         from .source_registry import detect_mutations
 
         # §10.6: re-verify each source hasn't changed since the inventory
         # snapshot before we reopen it to write ink. A source whose bytes
-        # changed has its FINDINGS excluded from markup (anchors computed from
-        # the earlier revision would land on the wrong content), is recorded,
-        # and is flagged so the operator re-runs. The standard artifacts already
-        # produced (findings, exports) are retained.
-        markup_findings = list(all_findings)
+        # changed is passed to the writer as a *skipped* source: its findings'
+        # placements get FAILED receipts (source changed) instead of stale ink,
+        # and the change is recorded so the operator re-runs. The standard
+        # artifacts already produced (findings, exports) are retained.
         if accepted_documents:
             mutated = detect_mutations(accepted_documents)
             if mutated:
                 mutated_ids = set(mutated)
                 by_id = {d.source_id: d for d in accepted_documents}
-                # Filter only the FINDINGS, never the path list: write_reviewed_pdfs
-                # recomputes SRC-#### from the paths it receives, so dropping a
-                # middle path would renumber (and mis-place) the survivors. A
-                # mutated source ends up with no findings and is simply not
-                # written (annotate skips a finding-less source).
-                markup_findings = [
-                    f for f in markup_findings
-                    if _finding_touches_only_unchanged(f, mutated_ids)
-                ]
                 for sid, reason in mutated.items():
                     name = by_id[sid].display_name
                     mutated_sources.append(name)
@@ -997,44 +996,43 @@ def _run_qc_stages(
         if progress is not None:
             progress(total, total, "Writing markups")
         try:
-            reviewed_pdf_paths = write_reviewed_pdfs(
-                markup_findings, pdf_paths, work_dir,
+            # Artifact-backed markup (Phase 21, DA-007): every planned placement —
+            # each finding and each cross-sheet leg — is written, stamped, and
+            # reconciled against the reopened PDF, so the tally and coverage below
+            # come from proven receipts, never from an intention classifier.
+            markup_run = write_reviewed_pdfs(
+                all_findings, pdf_paths, work_dir,
                 include_unverified=not markup_verified_only,
                 ink_rejected=ink_rejected,
                 geometries=geometries,
                 audit_stats=audit_stats,
                 include_appendix=_markup_appendix_enabled(),
+                skip_source_ids=mutated_ids,
             )
-            _log.info("markups: %d reviewed PDF(s) written", len(reviewed_pdf_paths))
+            reviewed_pdf_paths = list(markup_run.reviewed_pdfs)
+            ledger_tally = dict(markup_run.tally)
+            coverage_status = markup_run.coverage_status
+            _log.info(
+                "markups: %d reviewed PDF(s) written, coverage %s",
+                len(reviewed_pdf_paths), coverage_status,
+            )
         except Exception as exc:  # noqa: BLE001 - never fatal
             errors.append(f"Markup writing: {exc}")
             _log.warning("markup writing failed: %s", exc)
+            coverage_status = "INCOMPLETE"
 
-    # --- coverage accounting (§18): every ledger entry gets a disposition ------
-    # The tally describes PDF ink, so it only runs when markups were requested —
-    # a reference-audit-only run must not report clouds no PDF ever received.
-    ledger_tally: dict[str, int] = {}
-    if entries and qc_markups:
-        from .annotate import ink_disposition
-
-        for entry in entries:
-            if mutated_ids and not _finding_touches_only_unchanged(entry, mutated_ids):
-                # This entry's source changed mid-run, so it got no ink — account
-                # it honestly as skipped, not as clouded/margin/rejected (the
-                # tally is PDF-ink accounting and no PDF contains it).
-                disposition = "mutated"
-            else:
-                disposition = ink_disposition(
-                    entry, include_unverified=not markup_verified_only,
-                    ink_rejected=ink_rejected,
-                )
-            ledger_tally[disposition] = ledger_tally.get(disposition, 0) + 1
-        if sum(ledger_tally.values()) != len(entries):
-            # Structurally impossible (the classifier is total) — kept as the
-            # regression tripwire the plan mandates. Recorded, never fatal (I-3).
-            errors.append("Ledger coverage: unaccounted entries (bug)")
-            _log.error("ledger coverage mismatch: %s vs %d entries", ledger_tally, len(entries))
-        _log.info("%s", _tally_line(len(entries), ledger_tally))
+        # A post-seal add (an orchestration invariant failure, §12.3) already
+        # marks the run incomplete via ``errors``; reflect it in coverage too so
+        # the report/GUI never present such a run as fully successful.
+        if ledger.post_seal_adds:
+            coverage_status = "INCOMPLETE"
+        if coverage_status == "INCOMPLETE":
+            failed = ledger_tally.get("failed", 0)
+            _log.warning(
+                "markup coverage INCOMPLETE: %d failed, %d skipped (source changed)",
+                failed, ledger_tally.get("mutated", 0),
+            )
+        _log.info("%s", _tally_line(len(entries), ledger_tally, coverage_status))
 
     # The context's two buckets are a *view* of the one ledger: entries produced
     # only by the deterministic auditors keep their historical
@@ -1058,18 +1056,33 @@ def _run_qc_stages(
         audit_stats=audit_stats,
         ledger_tally=ledger_tally,
         mutated_sources=mutated_sources,
+        coverage_status=coverage_status,
+        markup_run=markup_run,
     )
 
 
-def _tally_line(total_entries: int, tally: dict[str, int]) -> str:
-    """The §18 run-summary line: ``Ledger 47: 39 clouded, 6 margin, 2 rejected (indexed)``."""
+def _tally_line(
+    total_entries: int, tally: dict[str, int], coverage_status: str = ""
+) -> str:
+    """The Phase 21 run-summary line, derived from receipts.
+
+    e.g. ``Ledger 47: 39 clouded, 5 margin, 2 rejected (indexed), 1 gated
+    (verified-only mode), 0 failed; coverage COMPLETE``. The core three buckets
+    are always shown; the optional gated / failed / skipped buckets appear when
+    non-zero, and the coverage verdict is appended when known.
+    """
     parts = [f"{tally.get('cloud', 0)} clouded", f"{tally.get('margin', 0)} margin"]
     parts.append(f"{tally.get('rejected', 0)} rejected (indexed)")
     if tally.get("gated"):
         parts.append(f"{tally['gated']} gated (verified-only mode)")
+    if tally.get("failed"):
+        parts.append(f"{tally['failed']} failed")
     if tally.get("mutated"):
         parts.append(f"{tally['mutated']} skipped (source changed)")
-    return f"Ledger {total_entries}: " + ", ".join(parts)
+    line = f"Ledger {total_entries}: " + ", ".join(parts)
+    if coverage_status in ("COMPLETE", "INCOMPLETE"):
+        line += f"; coverage {coverage_status}"
+    return line
 
 
 def extract_drawing_context(
@@ -1570,6 +1583,8 @@ def extract_drawing_context(
         audit_stats=qc.audit_stats,
         ledger_tally=qc.ledger_tally,
         mutated_sources=qc.mutated_sources,
+        coverage_status=qc.coverage_status,
+        markup_run=qc.markup_run,
     )
 
 

@@ -59,9 +59,12 @@ findings for free).
   EXACT/FUZZY/TILE/UNANCHORED — UNANCHORED is the hallucination signal) →
   `verify.py` (high-DPI crop re-check → VERIFIED/REJECTED/UNCERTAIN) →
   `citation_check.py` (server-side web-search per unique code ref) →
-  `annotate.py` (§18 gating: every entry gets ink except REJECTED, which is
-  index-listed; margin callouts for rect-less entries) → `export.py` /
-  `html_report.py`.
+  `annotate.py` (§18 gating + Phase 21 receipts: every entry gets ink except
+  REJECTED/gated, which get reconciled index rows; margin callouts for rect-less
+  entries; the writer stamps every mark, reopens the saved PDF, and reconciles
+  each **placement** against what it finds — returning a `MarkupRunResult` with
+  per-placement `WRITTEN`/`INDEXED`/`FAILED` receipts and a receipt-derived
+  `coverage_status`) → `export.py` (`markup_manifest.json`) / `html_report.py`.
 
 `core/` is a shared kernel (model ids + env overrides in `api_config.py`, key
 store, pricing, tokenizer). `reference_audit.py` is a back-compat shim over
@@ -93,9 +96,17 @@ store, pricing, tokenizer). `reference_audit.py` is a back-compat shim over
   the model's own arithmetic.
 - **Additive serialization:** `Finding.to_dict`/`from_dict` must default new
   fields cleanly so cached payloads from older runs still load.
-- **Ledger coverage:** on markup runs every ledger entry must classify to
-  exactly one `ink_disposition` (cloud / margin / rejected / gated); the
-  pipeline logs the tally and records any mismatch as a bug.
+- **Ledger coverage is artifact-backed (Phase 21, DA-007):** on markup runs every
+  ledger entry (and every cross-sheet leg) becomes a planned `MarkupPlacement`;
+  the writer stamps each drawn mark with a private PDF key, reopens the saved PDF,
+  and reconciles → one `MarkupReceipt` (`WRITTEN`/`INDEXED`/`FAILED`) per
+  placement. The tally and `coverage_status` are derived from those receipts,
+  **never** from intention (`ink_disposition` remains only a planning helper). A
+  placement counts only when its stamped, mandatory component is found again in
+  the artifact; missing/failed/duplicate/unexpected → `INCOMPLETE`. Stamps embed a
+  per-run id, so prior-run/pre-existing annotations are ignored (DA-029). An
+  INCOMPLETE reviewed PDF is renamed `…_reviewed_INCOMPLETE.pdf`; the plan +
+  receipts are exported to `markup_manifest.json` (no key, no absolute path).
 
 ## PyMuPDF gotchas (hard-won; they crash or render blank)
 
