@@ -22,6 +22,11 @@ dependencies = [
 # the user explicitly consents to a plaintext file (DA-032).
 gui = ["customtkinter", "tkinterdnd2", "keyring"]
 dev = ["pytest>=9.0"]
+# The headless-Chromium report-security suite (tests marked `browser`).
+# Pinned for reproducible CI: the Playwright version fixes the Chromium build
+# that `playwright install chromium` fetches. Not needed for the default suite,
+# which skips the browser tests when Playwright/its browser is absent.
+browsertest = ["playwright==1.61.0"]
 
 # Launch the standalone GUI with `drawing-analyzer` (or `python -m drawing_analyzer`).
 [project.gui-scripts]
@@ -41,4 +46,5 @@ addopts = "-ra --strict-markers"
 pythonpath = ["src"]
 markers = [
     "network: tests that require real Anthropic API access",
+    "browser: headless-Chromium security tests (need Playwright + a browser; run on Linux CI)",
 ]

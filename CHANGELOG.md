@@ -6,6 +6,38 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security / CI (Phase 17B — headless-browser exploit tests + CI foundation)
+
+- **Real headless-Chromium exploit suite for the report (DA-011/DA-027),**
+  `tests/test_report_browser_security.py` (marker `browser`). It builds the
+  actual report, loads it over `file://`, and proves the trust boundary end to
+  end where a DOM emulator can't: an execution sentinel must stay unset while a
+  malicious answer streams through the assistant's **incremental and final**
+  render paths, while a hostile corpus (filenames, sheet IDs, quotes,
+  categories, findings, focus, errors, evidence paths) sits in the report body,
+  and after real hover/focus/click/image-error events. It also asserts the
+  https-only URL policy on streamed markdown links and citations, that the
+  no-key report prompts on first use and **Forget key** clears sessionStorage,
+  and that the CSP actually blocks an injected inline `<script>`. Hermetic: the
+  Anthropic `fetch` is stubbed with a canned stream — no network, no key — and
+  the suite skips cleanly when Playwright/its browser is absent.
+- **Fixed a streamed-answer render race in the assistant:** a trailing debounced
+  markdown re-render could fire after the final block render and wipe the
+  citation chips it had just appended. `finishBlock` now cancels any pending
+  debounced render so the final render (with citations) is authoritative. The
+  browser citation test surfaced this.
+- **PyMuPDF import-isolation test (I-5),** `tests/test_import_isolation.py`: a
+  static AST scan asserting only `render.py` and `annotate.py` import PyMuPDF,
+  so the AGPL-confinement invariant fails loudly the moment a stray import
+  appears.
+- **Continuous integration,** `.github/workflows/ci.yml`: the hermetic suite on
+  Windows + Ubuntu across Python 3.11/3.12 (byte-compile → import-isolation →
+  full suite) plus the headless-Chromium security suite on Linux. Actions are
+  pinned to immutable commit SHAs, permissions are read-only, and it triggers on
+  `pull_request` (never `pull_request_target`). New `browsertest` extra pins
+  Playwright for reproducible browser CI. (Marking the checks *required* is a
+  one-time branch-protection step for an owner/admin.)
+
 ### Security (Phase 17A — report trust boundary, key store, log redaction)
 
 - **The HTML report can no longer execute model-controlled HTML (DA-011).** The
