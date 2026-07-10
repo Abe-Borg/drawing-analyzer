@@ -745,6 +745,21 @@ runs.
 | `DRAWING_ANALYZER_DIAGNOSTICS` | on | Set `0`/`false` to disable the rotating `drawing_analyzer.log` diagnostics file the GUI writes. |
 | `DRAWING_ANALYZER_DEBUG` | off | Also route the Anthropic SDK / httpx wire-level logs (status codes, request-ids, retries) into the diagnostics file. |
 | `DRAWING_ANALYZER_CACHE_DIAGNOSTICS` | off | Request the prompt-cache diagnostics beta on API calls (operator debugging only). |
+| `DRAWING_ANALYZER_MAX_SHEETS` | `2000` | Sheet count above which a run needs explicit confirmation (`confirm_large_set=True`) rather than silent truncation. |
+| `DRAWING_ANALYZER_MAX_FILES` | `500` | Input-file count above which a run needs explicit confirmation. |
+| `DRAWING_ANALYZER_MAX_PAGE_PT` | `20000` | Largest sane page dimension (points); a larger/NaN/infinite box is treated as pathological and its page is skipped before rendering. |
+| `DRAWING_ANALYZER_EST_BYTES_PER_SHEET` | `3145728` | Per-sheet temp/output estimate for the QC-run disk preflight (evidence crops, reviewed PDFs). |
+
+## Resilient inputs
+
+Every selected PDF is classified up front (Phase 18B): a corrupt, missing,
+password-protected, or zero-page file is **recorded and skipped** — it never
+aborts the rest of the set — and the same file selected twice is processed once.
+The run's report and error list name exactly what was dropped and why (without
+leaking absolute paths), so a mixed good/bad drop still produces a partial
+deliverable for the good files. A single unreadable *page* inside an otherwise
+good PDF is likewise skipped rather than failing the whole file, and a
+pathological (oversized/NaN) page box is caught before it can exhaust memory.
 
 ## Testing
 

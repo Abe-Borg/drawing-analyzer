@@ -6,6 +6,38 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (Phase 18B — resilient input inventory, DA-002 / DA-035)
+
+- **A corrupt, encrypted, or duplicate input no longer aborts an otherwise
+  valid drawing set — or vanishes silently.** A new inventory step
+  (`render.inspect_inputs`) classifies every selected path once as `ACCEPTED` /
+  `DUPLICATE` / `UNREADABLE` (missing, permission-denied, corrupt, not a PDF) /
+  `ENCRYPTED` (password-required) / `EMPTY` (zero pages), each with a sanitized,
+  path-free reason. The pipeline processes only accepted documents and records
+  every rejection on `ctx.errors`, so a mixed good/bad run ships a partial
+  standard deliverable that names what it dropped. `source_id` is assigned over
+  the **accepted** inputs in order, so a rejected file never consumes an id.
+- **`SourceDocument` inventory records** (`source_registry`) carry the revision
+  identity — a stat-guarded `content_sha256` (re-reads if the file changes
+  mid-hash rather than register a mixed-revision hash), `byte_size`,
+  `initial_mtime_ns`, and `page_count` — the foundation Phase 18C's mid-run
+  mutation detection builds on.
+- **Page-level resilience (§10.5):** if a single page fails to load or render,
+  the remaining pages of that PDF — and every other file — still process; the
+  failed page is recorded on `ctx.errors` and excluded, never a whole-run abort.
+- **Preflight bounds (§10.7):** each page is dimension-checked *before*
+  rasterization, so a pathological/NaN/oversized box fails visibly instead of
+  allocating a ruinous pixmap; a large *legitimate* set above a configurable
+  threshold (`DRAWING_ANALYZER_MAX_SHEETS` / `_MAX_FILES`) requires explicit
+  confirmation (`extract_drawing_context(..., confirm_large_set=True)`) rather
+  than being silently truncated; and a work/export-disk capacity check runs
+  before a QC run begins (`qc_work_dir` set), blocking early rather than failing
+  after paid API work. Inventory error reasons are scrubbed of any absolute-path
+  token, and the `DRAWING_ANALYZER_MAX_*` overrides parse defensively (a config
+  typo degrades to the default instead of crashing at import). PyMuPDF stays
+  confined to `render.py` (I-5) — the inventory data model, hashing, and bounds
+  are PyMuPDF-free in `source_registry`.
+
 ### Fixed (Phase 18A — host-owned source identity, DA-001)
 
 - **A finding can no longer be attributed to the wrong source PDF when two

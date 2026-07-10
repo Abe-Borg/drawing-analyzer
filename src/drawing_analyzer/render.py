@@ -21,15 +21,29 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 import pymupdf  # AGPL-3.0 — see module docstring.
 
 from . import tiling
 from .diagnostics import get_logger
 from .models import ImageTile, RenderedSheet, SheetGeometry, SheetRef
-from .source_registry import assign_source_ids
+from .source_registry import (
+    ACCEPTED,
+    DUPLICATE,
+    EMPTY,
+    ENCRYPTED,
+    UNREADABLE,
+    InputInventory,
+    SourceDocument,
+    assign_source_ids,
+    canonical_path,
+    content_sha256,
+    format_source_id,
+    page_dimensions_ok,
+)
 
 _log = get_logger()
 
@@ -103,11 +117,22 @@ def list_sheets(pdf_paths: list[Path]) -> list[SheetRef]:
     Cheap: opens each PDF only to read its page count. A PDF that cannot be
     opened is skipped (its error surfaces when rendering is attempted), so a
     bad file in a drop never blocks listing the rest.
+
+    Back-compat wrapper: the Phase 18B pipeline classifies inputs up front with
+    :func:`inspect_inputs` and enumerates only accepted documents; this keeps
+    the old ``paths → refs`` shape for existing callers/tests. The ``paths`` are
+    treated as the accepted, deduped set (source ids are assigned over them in
+    order), so pass an already-filtered list to keep ids aligned with the
+    inventory.
     """
     source_ids = assign_source_ids(pdf_paths)
+    seen_canon: set[str] = set()
     refs: list[SheetRef] = []
     for path in pdf_paths:
         path = Path(path)
+        canon = canonical_path(path)
+        if canon in seen_canon:      # a duplicate selection enumerates once
+            continue
         try:
             doc = pymupdf.open(str(path))
         except Exception:
@@ -127,7 +152,117 @@ def list_sheets(pdf_paths: list[Path]) -> list[SheetRef]:
                 )
         finally:
             doc.close()
+        seen_canon.add(canon)
     return refs
+
+
+def _classify_input(path: Path) -> tuple[str, int, str]:
+    """Open one PDF and classify it: ``(status, page_count, sanitized_error)``.
+
+    The single PyMuPDF-touching step of the inventory (I-5), and deliberately
+    **file-level**: it distinguishes encrypted (password-required) from
+    plain-corrupt from zero-page, and reports the page count. A *single* bad or
+    pathological page does **not** reject the whole file — that is handled
+    per-page in :func:`iter_rendered_sheets` (§10.5), which also dimension-checks
+    each page *before* rasterizing it so a pathological box fails visibly
+    without exhausting memory (§10.7).
+    """
+    try:
+        doc = pymupdf.open(str(path))
+    except Exception as exc:  # noqa: BLE001 - a bad file is data, not a crash
+        return UNREADABLE, 0, _sanitize_open_error(exc)
+    try:
+        # PyMuPDF exposes password state as needs_pass / needsPass; a doc that
+        # still needs a password after a blank authenticate is encrypted.
+        needs_pass = bool(getattr(doc, "needs_pass", False) or getattr(doc, "needsPass", False))
+        if needs_pass:
+            return ENCRYPTED, 0, "password-protected (no password supplied)"
+        try:
+            count = int(doc.page_count)
+        except Exception as exc:  # noqa: BLE001
+            return UNREADABLE, 0, _sanitize_open_error(exc)
+        if count <= 0:
+            return EMPTY, 0, "the PDF has zero pages"
+        return ACCEPTED, count, ""
+    finally:
+        doc.close()
+
+
+_ABS_PATH_RE = re.compile(r"(?:[A-Za-z]:\\|\\\\|/)[^\s'\"]*[/\\][^\s'\"]*")
+
+
+def _sanitize_open_error(exc: BaseException) -> str:
+    """A short, **path-free** reason string for a rejected input.
+
+    A PyMuPDF / OSError message routinely echoes the offending absolute path
+    (``[Errno 2] No such file or directory: '/home/alice/secret/M-101.pdf'``),
+    and this string flows into ``ctx.errors`` and the report — so any
+    absolute-path token is replaced with ``<path>`` before it can leak the
+    user's directory structure. Then whitespace-collapse and truncate.
+    """
+    msg = str(exc).strip() or type(exc).__name__
+    msg = _ABS_PATH_RE.sub("<path>", msg)
+    return " ".join(msg.split())[:160]
+
+
+def inspect_inputs(pdf_paths: list[Path]) -> InputInventory:
+    """Classify every selected input path once (Phase 18B, DA-002).
+
+    Returns an :class:`~drawing_analyzer.source_registry.InputInventory` whose
+    documents are in input order. Each path is classified ``ACCEPTED`` /
+    ``DUPLICATE`` (same canonical path already accepted) / ``UNREADABLE``
+    (missing, permission-denied, corrupt, not a PDF, or a page that won't load)
+    / ``ENCRYPTED`` (password-required) / ``EMPTY`` (zero pages). ``source_id``
+    is assigned ``SRC-####`` over the **accepted** stream only, so a rejected
+    input never consumes an id and the accepted ids match what
+    :func:`list_sheets` derives from :attr:`InputInventory.accepted_paths`.
+
+    Accepted docs carry a stat-guarded ``content_sha256`` (the revision identity
+    Phase 18C checks) plus page count and size. This is the one inventory pass;
+    downstream stages consume accepted documents and never re-open a rejected
+    file with a lower-level iterator.
+    """
+    documents: list[SourceDocument] = []
+    accepted_canon: dict[str, str] = {}   # canonical path → accepted source_id
+    order = 0
+    for path in pdf_paths:
+        path = Path(path)
+        canon = canonical_path(path)
+        display = path.name
+        if canon in accepted_canon:
+            documents.append(SourceDocument(
+                source_id="", pdf_path=path, display_name=display, input_order=0,
+                status=DUPLICATE,
+                error="the same file was selected more than once (processed once)",
+                duplicate_of=accepted_canon[canon],
+            ))
+            continue
+        status, count, err = _classify_input(path)
+        if status != ACCEPTED:
+            documents.append(SourceDocument(
+                source_id="", pdf_path=path, display_name=display, input_order=0,
+                status=status, page_count=count, error=err,
+            ))
+            continue
+        # Accepted — assign the next id and capture the revision identity.
+        try:
+            sha, size, mtime = content_sha256(path)
+        except OSError as exc:
+            documents.append(SourceDocument(
+                source_id="", pdf_path=path, display_name=display, input_order=0,
+                status=UNREADABLE, page_count=count,
+                error=f"could not read stable file contents: {_sanitize_open_error(exc)}",
+            ))
+            continue
+        order += 1
+        sid = format_source_id(order)
+        accepted_canon[canon] = sid
+        documents.append(SourceDocument(
+            source_id=sid, pdf_path=path, display_name=display, input_order=order,
+            status=ACCEPTED, page_count=count,
+            content_sha256=sha, byte_size=size, initial_mtime_ns=mtime,
+        ))
+    return InputInventory(documents=documents)
 
 
 def _render_clip_pix(
@@ -404,14 +539,21 @@ def iter_rendered_sheets(
     cols: int = tiling.DEFAULT_GRID_COLS,
     overlap_frac: float = tiling.DEFAULT_OVERLAP_FRAC,
     only: "set[tuple[str, int]] | None" = None,
+    on_page_error: "Callable[[SheetRef, Exception], None] | None" = None,
 ) -> Iterator[RenderedSheet]:
     """Yield a :class:`RenderedSheet` for every page across all ``pdf_paths``.
 
     Each PDF is opened once and its pages rendered in order, so the dominant
     cost (rasterization) streams sheet-by-sheet — the caller can digest each
     sheet as it arrives and report progress without holding the whole set in
-    memory. A PDF that fails to open raises; callers that want best-effort
-    behavior should pre-filter via :func:`list_sheets`.
+    memory. Pass the inventory's accepted paths (see :func:`inspect_inputs`);
+    a PDF that fails to open still raises, since a rejected file should never
+    reach here.
+
+    Page-level resilience (§10.5): if a single page fails to load/render, the
+    remaining pages of that PDF — and every other PDF — still stream. The failed
+    page is reported via ``on_page_error(ref, exc)`` (so the caller can record a
+    failed sheet and count it) and skipped, rather than aborting the run.
 
     ``only`` — when given, a set of ``(str(pdf_path), page_index)`` identities;
     pages not in it are skipped **without rendering**. The pipeline's level-1
@@ -435,9 +577,27 @@ def iter_rendered_sheets(
                     page_count=count,
                     source_id=source_id,
                 )
-                yield render_sheet(
-                    doc[i], ref, rows=rows, cols=cols, overlap_frac=overlap_frac
-                )
+                try:
+                    page = doc[i]
+                    rect = page.rect
+                    # Dimension preflight BEFORE get_pixmap: a pathological box
+                    # would otherwise allocate a ruinous pixmap (§10.7). Failing
+                    # here skips just this page, not the file (§10.5).
+                    if not page_dimensions_ok(float(rect.width), float(rect.height)):
+                        raise ValueError(
+                            f"pathological page size {rect.width:.0f}×{rect.height:.0f} pt"
+                        )
+                    sheet = render_sheet(
+                        page, ref, rows=rows, cols=cols, overlap_frac=overlap_frac
+                    )
+                except Exception as exc:  # noqa: BLE001 - one bad page never aborts the set
+                    _log.warning(
+                        "render failed for %s: %s", ref.display_label, exc
+                    )
+                    if on_page_error is not None:
+                        on_page_error(ref, exc)
+                    continue
+                yield sheet
         finally:
             doc.close()
 

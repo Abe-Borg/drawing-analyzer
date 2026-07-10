@@ -37,7 +37,8 @@ from .digest import (
 )
 from .digest_cache import digest_cache_key_level1
 from .models import Finding, NumericClaim, SheetGeometry, source_page_key
-from .render import iter_rendered_sheets, iter_sheet_prescan, list_sheets
+from .render import inspect_inputs, iter_rendered_sheets, iter_sheet_prescan, list_sheets
+from .source_registry import EST_BYTES_PER_SHEET, check_set_limits, check_work_disk
 
 # ``progress(done, total, label)`` — called once as each sheet *finishes*
 # (done = number completed so far, in completion order) and once at the end
@@ -245,6 +246,7 @@ def _rendered_stream(
     overlap_frac: float,
     geometry_sink: list | None,
     only: "set[tuple[str, int]] | None" = None,
+    on_page_error: "Any" = None,
 ) -> "Any":
     """Stream :class:`RenderedSheet`, capturing each sheet's lightweight geometry.
 
@@ -261,7 +263,8 @@ def _rendered_stream(
     is in play the caller passes ``geometry_sink=None`` here.
     """
     for rendered in iter_rendered_sheets(
-        paths, rows=rows, cols=cols, overlap_frac=overlap_frac, only=only
+        paths, rows=rows, cols=cols, overlap_frac=overlap_frac, only=only,
+        on_page_error=on_page_error,
     ):
         if geometry_sink is not None:
             geometry_sink.append(SheetGeometry.from_rendered(rendered))
@@ -286,6 +289,7 @@ def _digest_sheets_concurrent(
     focus: str | None = None,
     geometry_sink: list | None = None,
     only: "set[tuple[str, int]] | None" = None,
+    on_page_error: "Any" = None,
 ) -> list[SheetDigest]:
     """Real-time path: render sequentially, digest on a bounded thread pool.
 
@@ -327,7 +331,7 @@ def _digest_sheets_concurrent(
         for index, rendered in enumerate(
             _rendered_stream(
                 paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
-                geometry_sink=geometry_sink, only=only,
+                geometry_sink=geometry_sink, only=only, on_page_error=on_page_error,
             )
         ):
             in_flight.add(executor.submit(_run, index, rendered))
@@ -916,6 +920,7 @@ def extract_drawing_context(
     ink_rejected: bool = False,
     focus_findings_to_markups: bool = False,
     qc_work_dir: Path | None = None,
+    confirm_large_set: bool = False,
 ) -> DrawingContext:
     """Render and digest every sheet in ``pdf_paths`` into one text context.
 
@@ -1034,10 +1039,51 @@ def extract_drawing_context(
 
     focus = normalize_focus(focus) or ""
 
-    paths = [Path(p) for p in pdf_paths]
+    # Inventory (Phase 18B): classify every selected input once, so a corrupt /
+    # encrypted / zero-page / duplicate file degrades individually and *visibly*
+    # instead of vanishing. Downstream stages process only accepted documents.
+    all_paths = [Path(p) for p in pdf_paths]
+    inventory = inspect_inputs(all_paths)
+    inventory_errors = inventory.error_lines()
+    for line in inventory_errors:
+        _log.info("input inventory: %s", line)
+
+    # Preflight (§10.7, DA-035): a large legitimate set requires explicit
+    # confirmation rather than being silently truncated; a QC run that would
+    # write evidence crops / reviewed PDFs into ``qc_work_dir`` is blocked early
+    # if that location lacks room, rather than failing late after paid API work.
+    # A pathological file was already rejected by the inventory.
+    block_reason = check_set_limits(
+        inventory.accepted_documents, confirmed=confirm_large_set
+    )
+    if block_reason is None and qc_work_dir is not None:
+        est_sheets = sum(d.page_count for d in inventory.accepted_documents)
+        block_reason = check_work_disk(
+            est_sheets * EST_BYTES_PER_SHEET, qc_work_dir
+        )
+    if block_reason is not None:
+        if progress is not None:
+            progress(0, 0, "Cannot start run")
+        return DrawingContext(
+            combined_text="",
+            file_count=len(all_paths),
+            sheet_count=0,
+            errors=inventory_errors + [block_reason],
+        )
+
+    paths = inventory.accepted_paths
     refs = list_sheets(paths)
     total = len(refs)
-    file_count = len({r.pdf_path for r in refs})
+    file_count = len(inventory.accepted_documents)
+
+    # Page-level render failures (§10.5) are recorded and the page is excluded,
+    # but the rest of the set still processes — never a whole-run abort.
+    page_error_lines: list[str] = []
+
+    def _on_page_error(ref: Any, exc: Exception) -> None:
+        page_error_lines.append(
+            f"{ref.display_label}: page could not be rendered ({type(exc).__name__})"
+        )
 
     _log.info(
         "===== run start: %d file(s), %d sheet(s) | model=%s path=%s cache=%s "
@@ -1053,9 +1099,10 @@ def extract_drawing_context(
             progress(0, 0, "No sheets found")
         return DrawingContext(
             combined_text="",
-            file_count=len(paths),
+            file_count=len(all_paths),
             sheet_count=0,
-            errors=["No readable PDF pages found in the selected files."],
+            errors=inventory_errors
+            + ["No readable PDF pages found in the selected files."],
         )
 
     # The QC stages (reference audit, anchoring, verification, markups) run over
@@ -1114,6 +1161,7 @@ def extract_drawing_context(
                 use_thinking=use_thinking, effort=effort, cache=cache,
                 progress=progress, total=miss_total, max_workers=max_workers,
                 focus=focus or None, geometry_sink=geometry_sink, only=only,
+                on_page_error=_on_page_error,
             )
 
     # Store each miss's result under its level-1 key too (store-under-both), so a
@@ -1132,7 +1180,9 @@ def extract_drawing_context(
         by_ref[_refkey(sd.ref)] = sd
     sheets = [by_ref[_refkey(r)] for r in refs if _refkey(r) in by_ref]
 
-    errors: list[str] = []
+    # Seed the run errors with the inventory rejections and any page-level
+    # render failures (§10.5 / §10.7) so a partial run explains what it dropped.
+    errors: list[str] = list(inventory_errors) + list(page_error_lines)
     in_tok = out_tok = img_tok = 0
     for sd in sheets:
         # A cached sheet made no API call, so it costs zero tokens *this run*.
