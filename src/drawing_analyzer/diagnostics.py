@@ -23,6 +23,17 @@ Design (standard "library" logging pattern):
 Nothing here ever raises into the pipeline: diagnostics are advisory, so a
 logging-setup failure (read-only disk, etc.) is swallowed and can never turn a
 working run into a failed one.
+
+Secret redaction (Phase 17)
+---------------------------
+Every line the file handler writes — including the optional SDK wire capture
+and formatted tracebacks — passes through :func:`redact_secrets` via
+:class:`RedactingFormatter` *before* it is serialized to disk. Anthropic key
+material (``sk-ant-…``), ``Authorization``/``Bearer`` values, and named
+secret-ish fields (``x-api-key``, ``api_key``, ``token``, ``secret``,
+``password``, …) are replaced with ``[REDACTED]`` wherever they appear: in the
+message, in ``%``-args, in nested dict reprs, and in exception text. The same
+filter is the shared boundary the Phase 26 run journal will reuse.
 """
 from __future__ import annotations
 
@@ -53,6 +64,69 @@ _MAX_BYTES = 2_000_000
 _BACKUP_COUNT = 5
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+# --------------------------------------------------------------------------- #
+# Secret redaction — the shared minimum filter (Phase 17). Applied by
+# RedactingFormatter after full formatting (message + args + traceback), i.e.
+# before anything is serialized to disk, so a secret embedded in an exception
+# string or a nested headers dict cannot bypass it.
+# --------------------------------------------------------------------------- #
+
+_REDACTED = "[REDACTED]"
+
+# Field names whose *values* are secrets wherever they appear in `name: value`
+# / `name=value` / quoted-dict-repr shapes. `token` is word-bounded, so
+# `input_tokens=123` (a count, not a credential) is untouched.
+_NAMED_SECRET_FIELDS = (
+    r"x-api-key|api[-_]?key|apikey|authorization|proxy-authorization|"
+    r"auth[-_]?token|access[-_]?token|refresh[-_]?token|session[-_]?token|"
+    r"token|secret|client[-_]?secret|password|passwd"
+)
+
+_SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    # Anthropic key material anywhere in the line, whatever surrounds it.
+    (re.compile(r"sk-ant-[A-Za-z0-9_\-]+"), "sk-ant-" + _REDACTED),
+    # Bearer credentials (must run before the named-field pass so the token
+    # after "Authorization: Bearer" is caught even once the field pass has
+    # consumed the word "Bearer" as the field value).
+    (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/\-]+=*"), "Bearer " + _REDACTED),
+    # `name: value` / `name=value` / `'name': 'value'` for the field list
+    # above — covers headers, query parameters, JSON, and dict reprs.
+    (
+        re.compile(
+            r"(?i)\b(" + _NAMED_SECRET_FIELDS + r")\b"
+            r"([\"']?\s*[:=]\s*[\"']?)"
+            r"([^\s\"',;&)\]}]+)"
+        ),
+        r"\1\2" + _REDACTED,
+    ),
+)
+
+
+def redact_secrets(text: str) -> str:
+    """Replace key/credential material in ``text`` with ``[REDACTED]``.
+
+    The shared pre-serialization boundary for diagnostics, the SDK wire
+    capture, and (Phase 26) the run journal. Deliberately aggressive: a false
+    positive costs one obscured log value, a false negative leaks a
+    credential.
+    """
+    for pattern, replacement in _SECRET_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+class RedactingFormatter(logging.Formatter):
+    """A formatter that redacts secrets *after* full formatting.
+
+    Running on the final formatted string (message with args interpolated,
+    plus any traceback text) means no code path — our loggers, the SDK's
+    debug loggers, or an exception repr — can write un-redacted secret
+    material through a handler using this formatter.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:  # noqa: A003
+        return redact_secrets(super().format(record))
 
 _logger = logging.getLogger(LOGGER_NAME)
 _logger.addHandler(logging.NullHandler())  # silent until the app configures a file
@@ -131,8 +205,11 @@ def configure_file_logging(
         handler = RotatingFileHandler(
             target, maxBytes=_MAX_BYTES, backupCount=_BACKUP_COUNT, encoding="utf-8"
         )
+        # RedactingFormatter is the mandatory secret boundary: everything the
+        # file receives — including SDK wire logs and tracebacks — is redacted
+        # before it is written (Phase 17). Never swap in a plain Formatter.
         handler.setFormatter(
-            logging.Formatter(
+            RedactingFormatter(
                 "%(asctime)s %(levelname)-7s %(name)s: %(message)s",
                 "%Y-%m-%d %H:%M:%S",
             )

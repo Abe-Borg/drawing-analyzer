@@ -6,6 +6,59 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security (Phase 17A — report trust boundary, key store, log redaction)
+
+- **The HTML report can no longer execute model-controlled HTML (DA-011).** The
+  in-report Ask-AI assistant previously rendered streamed Markdown by assigning
+  model output to `innerHTML` — drawing text feeds the prompts, so that output
+  is attacker-influenceable. The renderer is rebuilt as a **safe DOM builder**
+  (`createElement` + `textContent` only; no `innerHTML`/`outerHTML`/
+  `insertAdjacentHTML`/`document.write` with model data anywhere in the report
+  scripts). Every link — Markdown links **and** streamed citations — passes
+  through a single URL validator that accepts only absolute `https:` URLs and
+  rejects `javascript:`/`data:`/`file:`/`blob:`, protocol-relative, credential-
+  bearing, and control-character URLs; a rejected URL degrades to inert text.
+- **The whole report is now a hardened trust boundary, not just the chat.**
+  Every untrusted value (source filenames, sheet IDs, titles, findings, quotes,
+  errors, focus text, configuration) is escaped into element content or
+  attributes on the Python side. The chat config is emitted as an inert
+  `type="application/json"` island serialized so every `<` (and U+2028/U+2029)
+  becomes a JSON string escape — no value can close the script element or form
+  markup, and `JSON.parse` still round-trips it exactly.
+- **Defense in depth: a hash-pinned Content-Security-Policy.** Reports carry a
+  CSP `<meta>` that allows only the exact inline scripts by SHA-256 hash (no
+  `'unsafe-inline'` for scripts; there are no inline event handlers), restricts
+  `connect-src` to the Anthropic API (or `'none'` when the assistant is
+  omitted), and forbids objects, `<base>` rewriting, and form submission.
+- **Ask AI is present by default and prompts for a key on first use (DA-026).**
+  A report built with no key previously omitted the assistant entirely; it now
+  ships the assistant and asks the reader for a key at first use (kept only in
+  the browser tab's `sessionStorage`), with a **Forget key** control that
+  clears memory + `sessionStorage`. Embedded-key mode states truthfully that a
+  runtime "forget" cannot remove the key from the file. New `include_chat`
+  parameter (`build_html_report` / export builders) opts the assistant out.
+- **Credential-safe API-key persistence (DA-032).** `save_api_key` now stores
+  the key only in an OS credential store (Windows Credential Manager / macOS
+  Keychain / Secret Service via `keyring`), trusted **only** after a verified
+  round-trip. With no secure backend it raises `SecureKeyStorageUnavailable`
+  instead of silently writing a plaintext file; the GUI turns that into an
+  explicit consent prompt (declining keeps the key session-only). Legacy
+  plaintext key files are migrated into the keyring on load/save and removed.
+  `keyring` added to the `gui` extra.
+- **Shared secret-redaction filter for diagnostics logs.** A
+  `RedactingFormatter` masks `sk-ant-…` key material, `Authorization`/`Bearer`
+  values, and named secret fields (`x-api-key`, `api_key`, `token`, `secret`,
+  `password`, …) in every line the diagnostics file handler writes — including
+  the optional SDK wire capture and formatted tracebacks — before serialization.
+  Token *counts* (`input_tokens=…`) are preserved. This is the shared boundary
+  the Phase 26 run journal will reuse.
+- Added **SECURITY.md** documenting the report trust boundary, URL policy, CSP,
+  API-key handling, log redaction, and the project data each artifact contains.
+
+*Note:* the mandatory headless-Chromium exploit test and the Windows/Linux CI
+matrix are Phase 17B (pre-authorized split); this change lands the safe
+renderer, redaction, key-store hardening, and their hermetic tests.
+
 ### Documentation
 
 - **README brought fully in line with the §18 gating amendment.** The GUI

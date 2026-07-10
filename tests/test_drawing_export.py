@@ -141,9 +141,16 @@ def test_build_export_documents_forwards_api_key_to_html_report_only():
     for name, content in embedded.items():
         if name != "report.html":
             assert key not in content
-    # Default (no key) keeps the report key-free (no assistant at all).
+    # Default (no key) still ships the assistant (DA-026: it prompts on first
+    # use), but writes no key material into any deliverable.
     plain = dict(dx.build_export_documents(_make_ctx(), source_names=[SRC], now=NOW))
-    assert "da-chat-config" not in plain["report.html"]
+    assert 'id="da-chat-config"' in plain["report.html"]
+    assert '"apiKey"' not in plain["report.html"]
+    # include_chat=False is the explicit opt-out for an assistant-free report.
+    nochat = dict(dx.build_export_documents(
+        _make_ctx(), source_names=[SRC], now=NOW, include_chat=False
+    ))
+    assert "da-chat-config" not in nochat["report.html"]
 
 
 # --------------------------------------------------------------------------- #

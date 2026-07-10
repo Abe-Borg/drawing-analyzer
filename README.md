@@ -23,15 +23,22 @@ grounded in the report's own text, so you can ask things like *"what are the big
 conflicts?"* or *"which sheets mention VAV-3?"* right inside the file. It streams
 answers, shows its reasoning, and can search / read the web (codes, standards,
 product data) — all by calling the Anthropic API **directly from your browser**;
-there is no server. **By default the report does not contain your API key**: the
-assistant asks for one the first time you use it and keeps it only in that browser
-tab (`sessionStorage`), so the file is safe to share and the key never touches
-disk. If you'd rather have a zero-friction, double-click-and-ask file, tick **Embed
-API key in HTML report** (GUI) or pass `embed_api_key=True` — the key is then baked
-into the HTML, the report shows a red *"don't share this file"* warning, and you
-should treat the file like a credential. Reports generated without a key omit the
-assistant entirely. The chat model defaults to Opus 4.8 and can be overridden with
+there is no server. The assistant is present **by default**, whether or not the
+report was built with a key. **By default the report does not contain your API
+key**: the assistant asks for one the first time you use it and keeps it only in
+that browser tab (`sessionStorage`), so the file is safe to share and the key never
+touches disk (a **Forget key** control clears it). If you'd rather have a
+zero-friction, double-click-and-ask file, tick **Embed API key in HTML report**
+(GUI) or pass `embed_api_key=True` — the key is then baked into the HTML, the report
+shows a red *"don't share this file"* warning, and you should treat the file like a
+credential (a runtime "forget" cannot remove an embedded key — only regenerating or
+deleting the file can). Pass `include_chat=False` to omit the assistant entirely.
+The chat model defaults to Opus 4.8 and can be overridden with
 `DRAWING_ANALYZER_CHAT_MODEL`.
+
+See [SECURITY.md](SECURITY.md) for the report's trust boundary (all model output is
+treated as hostile and can never execute), API-key handling, secret redaction in
+logs, and what project data each artifact and the Ask-AI assistant contains.
 
 ## Install
 

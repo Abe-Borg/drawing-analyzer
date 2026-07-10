@@ -25,10 +25,9 @@ Design constraints, mirroring :mod:`drawing_analyzer.export`:
   ``.html`` file the operator can double-click, search, filter, print, or email
   with no server, build step, or internet access.
 
-Optional in-report Q&A assistant
+In-report Q&A assistant (Ask AI)
 --------------------------------
-When :func:`build_html_report` is given an ``api_key`` (or ``embed_api_key`` is
-set), the report additionally embeds a chat widget ("Ask AI") that answers
+The report embeds a chat widget ("Ask AI") **by default** that answers
 questions about the results. It calls the Anthropic Messages API **directly from
 the reader's browser** (no server), grounded in the very report text already
 embedded in the page (the ``#raw-md`` block), with streaming, adaptive thinking,
@@ -36,15 +35,23 @@ and the server-side web search / web fetch tools enabled. The report block is
 sent with a prompt-cache breakpoint so follow-up questions re-read the (large)
 report at cache prices.
 
-**Key handling.** By default the key is **not** written into the file: the
-widget asks the reader for a key on first use and keeps it only in the browser
-tab's ``sessionStorage`` — so the file is safe to share and the key never
-touches disk. Pass ``embed_api_key=True`` to bake the key into the HTML instead
-(the old zero-friction behavior: double-click and ask, no key to paste) — the
-file must then never be shared, and the report carries a **red warning** saying
-so. With no key and no ``embed_api_key`` the widget is omitted entirely, and the
-document is byte-identical to the key-free output from before this feature
-existed. The *Python* module still performs no network I/O.
+**Key handling.** By default the key is **not** written into the file — even
+when the caller has one: the widget asks the reader for a key on first use and
+keeps it only in the browser tab's ``sessionStorage`` (the **Forget key**
+control clears both the in-memory copy and sessionStorage) — so the file is
+safe to share and the key never touches disk. Pass ``embed_api_key=True`` (with
+a key) to bake the key into the HTML instead (zero-friction: double-click and
+ask) — the file must then never be shared, and the report carries a **red
+warning** saying so; a runtime "forget" cannot remove an embedded key, and the
+widget says exactly that. Pass ``include_chat=False`` to omit the widget (and
+every network reference) entirely. The *Python* module still performs no
+network I/O.
+
+**Security boundary.** All model output and every run-derived value (filenames,
+titles, errors, quotes…) is treated as hostile — see the trust-boundary note
+above the imports: escaped-into-content on the Python side, safe-DOM-built on
+the browser side, one https-only URL policy for all links/citations, an inert
+JSON config island, and a hash-pinned Content-Security-Policy.
 
 The Markdown→HTML conversion is a small, deliberately-scoped renderer
 (:func:`markdown_to_html`) covering exactly the constructs the digests use —
@@ -55,6 +62,8 @@ escaped paragraph, so nothing is ever lost.
 """
 from __future__ import annotations
 
+import base64
+import hashlib
 import html
 import json
 import re
@@ -63,6 +72,29 @@ from pathlib import Path
 from typing import Any
 
 from .core.api_config import CHAT_MODEL_DEFAULT
+
+# --------------------------------------------------------------------------- #
+# Report trust boundary (Phase 17, DA-011).
+#
+# Everything that reaches this document is untrusted: drawing text feeds the
+# prompts, so *model output* (digests, findings, assistant answers) can be
+# attacker-influenced, and filenames/errors/config values can carry hostile
+# markup. The rules, enforced here and in the widget JS:
+#
+#   - Python side: every untrusted value is html.escape()d into element
+#     content, or _esc_attr()'d into attributes; dynamic values never form
+#     tag/attribute syntax.
+#   - The only dynamic <script> payload is the chat config, emitted as inert
+#     type="application/json" through _json_for_script(), which escapes "<"
+#     (and the U+2028/U+2029 line separators) so no value — however hostile a
+#     filename — can close the script element or form markup.
+#   - Browser side: the widget builds DOM via createElement/textContent only
+#     (no innerHTML/insertAdjacentHTML/document.write with model data), and
+#     every link goes through one URL validator (absolute https only).
+#   - Defense in depth: a Content-Security-Policy <meta> allows exactly the
+#     two inline scripts by SHA-256 hash, connects only to the Anthropic API
+#     (when the assistant is enabled), and forbids objects/base/forms.
+# --------------------------------------------------------------------------- #
 
 # --------------------------------------------------------------------------- #
 # Section categories — the spine of the "isolate what I care about" feature.
@@ -431,6 +463,63 @@ def _esc_attr(text: str) -> str:
     return html.escape(text, quote=True)
 
 
+def _json_for_script(value: Any) -> str:
+    """Serialize ``value`` as JSON that is inert inside a ``<script>`` element.
+
+    HTML escaping and JavaScript-string escaping are different requirements:
+    inside a script element the parser only cares about ``</script`` (and
+    ``<!--``), which HTML-entity escaping would corrupt. So every ``<`` is
+    emitted as the JSON string escape ``\\u003c`` — a byte-level no-op for
+    ``JSON.parse`` — making it impossible for any value to close the script
+    element or open a comment/tag. ``json.dumps``'s default ``ensure_ascii``
+    already escapes the U+2028/U+2029 line separators; the explicit replaces
+    keep that guarantee even if ``ensure_ascii`` is ever turned off.
+    """
+    return (
+        json.dumps(value)
+        .replace("<", "\\u003c")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
+
+
+def _script_hash(script_source: str) -> str:
+    """The CSP hash-source (``sha256-…``) for one inline ``<script>`` body."""
+    digest = hashlib.sha256(script_source.encode("utf-8")).digest()
+    return "sha256-" + base64.b64encode(digest).decode("ascii")
+
+
+def _csp_meta(*, script_sources: list[str], chat_enabled: bool) -> str:
+    """The report's Content-Security-Policy ``<meta>`` tag (defense in depth).
+
+    Scripts are allowed strictly by SHA-256 hash of the exact inline bodies
+    this build emits — there are no inline event handlers, so ``script-src``
+    is never weakened to make them work. ``connect-src`` admits only the
+    Anthropic Messages endpoint the assistant calls (or nothing at all when
+    the assistant is omitted). Objects, ``<base>`` rewriting, and form
+    submission are forbidden outright. ``img-src`` admits the report's own
+    relative evidence crops (``'self'`` when served, ``file:`` when
+    double-clicked) and nothing remote, so an injected image can't beacon.
+    ``style-src 'unsafe-inline'`` covers the single inline stylesheet and the
+    fixed set of generated ``style=`` attributes (table alignment); CSS
+    carries no script here. The exact policy is exercised against ``file://``
+    in the Phase 17B headless-Chromium suite.
+    """
+    hashes = " ".join(f"'{_script_hash(source)}'" for source in script_sources)
+    connect = "https://api.anthropic.com" if chat_enabled else "'none'"
+    policy = (
+        "default-src 'none'; "
+        f"script-src {hashes}; "
+        "style-src 'unsafe-inline'; "
+        "img-src 'self' file: data:; "
+        f"connect-src {connect}; "
+        "base-uri 'none'; "
+        "form-action 'none'; "
+        "object-src 'none'"
+    )
+    return f'<meta http-equiv="Content-Security-Policy" content="{policy}">'
+
+
 # --------------------------------------------------------------------------- #
 # Findings — the QC record, surfaced as a pinned, sortable, filterable table.
 # Each finding collapses its anchor + verification outcomes into ONE "display
@@ -562,7 +651,7 @@ def _finding_row_html(f: Any, card_index: int | None, *, link_evidence: bool) ->
             src = _esc_attr(evidence)
             text_cell += (
                 f' <a class="evidence-link" href="{src}" target="_blank" '
-                f'rel="noopener"><img class="evidence-thumb" src="{src}" '
+                f'rel="noopener noreferrer"><img class="evidence-thumb" src="{src}" '
                 f'alt="verification evidence crop" loading="lazy"></a>'
             )
     return (
@@ -959,6 +1048,7 @@ def build_html_report(
     api_key: str | None = None,
     embed_api_key: bool = False,
     link_evidence: bool = False,
+    include_chat: bool = True,
 ) -> str:
     """Render a :class:`DrawingContext` to one self-contained HTML document.
 
@@ -967,15 +1057,17 @@ def build_html_report(
     string. ``source_names`` is listed in the run summary; ``now`` stamps the
     report (defaults to :func:`datetime.now`).
 
-    ``api_key`` — when a non-blank Anthropic API key is given, the report includes
-    the in-page Q&A assistant (see the module docstring). **By default the key is
-    NOT written into the file**: the assistant asks the reader for a key on first
-    use and keeps it only in the browser tab's ``sessionStorage``. Pass
-    ``embed_api_key=True`` to bake the key into the file instead (the old
-    behavior — convenient, but the file must then never be shared; the report
-    carries a red warning saying so). With no key and no ``embed_api_key`` the
-    assistant is omitted entirely and the document is byte-identical to the
-    key-free output from before this feature existed.
+    ``include_chat`` — the in-page Q&A assistant (Ask AI) is included **by
+    default**, whether or not a key is available at build time (Phase 17,
+    DA-026): with no embedded key it prompts the reader on first use and keeps
+    the key only in the browser tab's ``sessionStorage`` — never in the file.
+    Pass ``include_chat=False`` for a report with no assistant and no network
+    references at all.
+
+    ``api_key`` / ``embed_api_key`` — **by default no key is ever written into
+    the file**, even when ``api_key`` is provided. Pass ``embed_api_key=True``
+    (with a key) to bake it in — convenient, but the file must then never be
+    shared, and the report carries a red warning saying so.
 
     ``link_evidence`` — when ``True`` (folder exports, where the evidence crops
     are copied alongside), each finding row links a thumbnail of the crop the
@@ -1028,14 +1120,14 @@ def build_html_report(
   verbatim model digest, reorganized for navigation.</footer>
 </main>"""
 
-    # The assistant is included when a key is available to embed *or* the caller
-    # explicitly opts into it; with neither, the output stays chat-free (and
-    # byte-identical to the pre-assistant report). The key is embedded only when
-    # embed_api_key is set — otherwise the widget prompts for it at runtime.
+    # The assistant is included by default (DA-026) and prompts the reader for
+    # a key on first use; the key is embedded only when embed_api_key is set.
+    # include_chat=False yields a report with no assistant and no network
+    # references at all.
     key_clean = (api_key or "").strip()
-    chat_enabled = embed_api_key or bool(key_clean)
     chat_css = chat_markup = chat_script = ""
-    if chat_enabled:
+    script_sources = [_JS]
+    if include_chat:
         chat_css = _CHAT_CSS
         chat_markup = "\n" + _chat_bootstrap_html(
             api_key=key_clean,
@@ -1045,10 +1137,17 @@ def build_html_report(
             source_names=source_names,
         )
         chat_script = f"<script>{_CHAT_JS}</script>\n"
+        script_sources.append(_CHAT_JS)
+
+    # CSP hashes are computed over the *exact* inline script bodies emitted
+    # below — the config block is inert (type="application/json") and needs no
+    # execution allowance.
+    csp = _csp_meta(script_sources=script_sources, chat_enabled=include_chat)
 
     return (
         "<!DOCTYPE html>\n"
         '<html lang="en">\n<head>\n<meta charset="utf-8">\n'
+        f"{csp}\n"
         '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
         f"<title>{html.escape(title)}</title>\n"
         f"<style>{_CSS}{chat_css}</style>\n"
@@ -1485,16 +1584,16 @@ _JS = r"""
 
 
 # --------------------------------------------------------------------------- #
-# Optional in-report Q&A assistant ("Ask AI").
+# In-report Q&A assistant ("Ask AI").
 #
-# Everything below is emitted only when the Q&A assistant is enabled (an API key
-# is available to embed, or embed_api_key is set). The widget is deliberately
-# self-sufficient: it reads its grounding context out of the page's own #raw-md
-# block (the verbatim combined digest) so the large report text is never
-# duplicated into the file, resolves its key at runtime (embedded, or prompted
-# and cached in sessionStorage), and it talks to the
-# Anthropic Messages API straight from the browser (the API's CORS opt-in
-# header `anthropic-dangerous-direct-browser-access` makes that possible).
+# Everything below is emitted by default (omit with include_chat=False). The
+# widget is deliberately self-sufficient: it reads its grounding context out of
+# the page's own #raw-md block (the verbatim combined digest) so the large
+# report text is never duplicated into the file, resolves its key at runtime
+# (prompted on first use and cached in sessionStorage, or embedded via the
+# explicit opt-in), and it talks to the Anthropic Messages API straight from
+# the browser (the API's CORS opt-in header
+# `anthropic-dangerous-direct-browser-access` makes that possible).
 # Request shape: streaming, adaptive thinking with summarized display, the
 # server-side web_search/web_fetch tools, and a prompt-cache breakpoint on the
 # report block so every question after the first re-reads the report at cache
@@ -1508,15 +1607,20 @@ def _chat_bootstrap_html(
 ) -> str:
     """The chat widget's markup + its JSON config block (model, run info, key).
 
-    The config is embedded as a ``type="application/json"`` script and parsed
-    by the widget at startup. ``</`` is escaped to ``<\\/`` (a JSON no-op) so no
-    value — however adversarial a source filename — can close the script tag
-    and inject markup.
+    The config is embedded as an inert ``type="application/json"`` script and
+    parsed by the widget at startup. It is serialized through
+    :func:`_json_for_script`, which escapes every ``<`` (and U+2028/U+2029) as
+    a JSON string escape, so no value — however adversarial a source filename
+    or title — can close the script element or form markup.
 
     The key is written into the config **only** when ``embed_key`` is set and a
     key is present; otherwise it is left out and the widget asks the reader for
     one at first use (kept in ``sessionStorage``, never in the file). The footer
-    reflects which mode is active — a red warning when the key is embedded.
+    reflects which mode is active — a red warning when the key is embedded —
+    and carries the **Forget key** control (clears the tab's stored key in
+    prompt mode; in embedded mode it truthfully explains that the credential
+    lives in the file itself and only regenerating/deleting the file removes
+    it).
     """
     embedding = bool(embed_key and api_key)
     config: dict[str, Any] = {
@@ -1527,12 +1631,13 @@ def _chat_bootstrap_html(
     }
     if embedding:
         config["apiKey"] = api_key
-    config_json = json.dumps(config).replace("</", "<\\/")
+    config_json = _json_for_script(config)
     if embedding:
         foot = (
             "AI-generated answers — verify against the drawings. "
             '<span class="da-key-warn">This file embeds your API key in clear '
-            "text; don't share it.</span>"
+            "text; don't share it. Removing the key requires regenerating (or "
+            "deleting) the file.</span>"
         )
     else:
         foot = (
@@ -1566,7 +1671,8 @@ _CHAT_HTML = """
     <button id="da-chat-send" type="button">Send</button>
     <button id="da-chat-stop" type="button" hidden>Stop</button>
   </div>
-  <div class="da-chat-foot" id="da-chat-foot">__CHAT_FOOT__</div>
+  <div class="da-chat-foot" id="da-chat-foot"><span>__CHAT_FOOT__</span>
+    <button id="da-chat-forget" type="button" title="Remove the API key stored in this browser tab">Forget key</button></div>
 </section>
 """
 
@@ -1661,6 +1767,12 @@ _CHAT_CSS = """
   border-top:1px solid var(--line);
 }
 .da-key-warn{color:var(--conflict); font-weight:700}
+#da-chat-forget{
+  border:1px solid var(--line); background:#fff; color:var(--muted);
+  font-size:10px; border-radius:6px; padding:2px 7px; margin-left:6px;
+  cursor:pointer; vertical-align:baseline; white-space:nowrap;
+}
+#da-chat-forget:hover{color:var(--conflict); border-color:var(--conflict)}
 @media (max-width:600px){
   #da-chat-panel{right:0; bottom:0; width:100vw; max-width:100vw; height:92vh; border-radius:14px 14px 0 0}
 }
@@ -1709,35 +1821,124 @@ _CHAT_JS = r"""
     try { sessionStorage.removeItem(KEY_STORE); } catch(e){}
   }
 
+  // ----------------------------------------------------------- secret hygiene
+  // Displayed errors can echo request/response fragments; make sure key
+  // material never lands in the DOM even then.
+  function scrubSecrets(s){
+    return String(s == null ? '' : s).replace(/sk-ant-[\w-]+/g, 'sk-ant-[redacted]');
+  }
+
   // ---------------------------------------------------------------- markdown
-  // Small renderer mirroring the Python subset the digests use: headings, hr,
-  // blockquotes, pipe tables, fenced code, nested lists, bold/italic/code
-  // spans, plus [text](url) links (answers cite web sources). All input is
-  // escaped first; unknown lines degrade to plain paragraphs.
-  function esc(s){
-    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  // Safe-DOM renderer (Phase 17, DA-011). The assistant's output is untrusted:
+  // drawing content feeds the prompts, so model text can be attacker-
+  // influenced. Nothing model-controlled is ever parsed as HTML — every node
+  // is built with createElement and filled through textContent, and the ONLY
+  // way a link is created is the single URL validator below. Covers the same
+  // small subset as before: headings, hr, blockquotes, pipe tables, fenced
+  // code, nested lists, bold/italic/code spans, and [text](url) links.
+
+  // Sole URL policy (markdown links AND citation chips): absolute https only;
+  // rejects credentials, control chars / whitespace (raw or %-encoded), and any
+  // relative/protocol-relative (URL() throws without a base). javascript:,
+  // data:, file:, and blob: all fail the protocol check.
+  function safeUrl(candidate){
+    if(typeof candidate !== 'string' || /[\u0000-\u0020\u007f]/.test(candidate)) return null;
+    var u;
+    try { u = new URL(candidate); } catch(e){ return null; }
+    if(u.protocol !== 'https:') return null;
+    if(u.username || u.password) return null;
+    if(/%(0[0-9a-fA-F]|1[0-9a-fA-F]|7[fF])/.test(u.href)) return null;
+    return u.href;
   }
-  function inline(s){
-    s = esc(s);
-    var codes = [];
-    s = s.replace(/`([^`]+)`/g, function(_, c){
-      codes.push('<code>' + c + '</code>');
-      return '\x00' + (codes.length - 1) + '\x00';
-    });
-    s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
-      '<a href="$2" target="_blank" rel="noopener">$1</a>');
-    s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-    s = s.replace(/(^|[^\w*])\*([^\s*](?:[^*]*[^\s*])?)\*(?![\w*])/g, '$1<em>$2</em>');
-    return s.replace(/\x00(\d+)\x00/g, function(_, i){ return codes[+i]; });
+  // The only anchor factory: DOM-property assignment (never attribute
+  // strings), label as textContent, rel=noopener noreferrer. Returns null for
+  // any URL the policy rejects so callers degrade to inert text.
+  function linkEl(url, label, title){
+    var safe = safeUrl(url);
+    if(!safe) return null;
+    var a = document.createElement('a');
+    a.href = safe;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.textContent = label;
+    if(title) a.title = title;
+    return a;
   }
+
+  var CODE_RE = /`([^`]+)`/;
+  var LINK_RE = /\[([^\]]+)\]\(([^\s)]+)\)/;
+  var BOLD_RE = /\*\*(.+?)\*\*/;
+  var EM_RE = /(^|[^\w*])\*([^\s*](?:[^*]*[^\s*])?)\*(?![\w*])/;
+
+  function appendText(parent, s){
+    if(s) parent.appendChild(document.createTextNode(s));
+  }
+  function appendEm(parent, s){
+    var m;
+    while((m = s.match(EM_RE))){
+      appendText(parent, s.slice(0, m.index) + m[1]);
+      var em = document.createElement('em');
+      em.textContent = m[2];
+      parent.appendChild(em);
+      s = s.slice(m.index + m[0].length);
+    }
+    appendText(parent, s);
+  }
+  function appendBold(parent, s){
+    var m;
+    while((m = s.match(BOLD_RE))){
+      appendEm(parent, s.slice(0, m.index));
+      var b = document.createElement('strong');
+      appendEm(b, m[1]);
+      parent.appendChild(b);
+      s = s.slice(m.index + m[0].length);
+    }
+    appendEm(parent, s);
+  }
+  function appendLinks(parent, s){
+    var m;
+    while((m = s.match(LINK_RE))){
+      appendBold(parent, s.slice(0, m.index));
+      var a = linkEl(m[2], m[1]);
+      // A rejected URL (non-https, credentials, controls) degrades to the raw
+      // markdown as visible inert text — never a live link, never markup.
+      if(a) parent.appendChild(a);
+      else appendText(parent, m[0]);
+      s = s.slice(m.index + m[0].length);
+    }
+    appendBold(parent, s);
+  }
+  function appendInline(parent, s){
+    var m;
+    while((m = s.match(CODE_RE))){
+      appendLinks(parent, s.slice(0, m.index));
+      var code = document.createElement('code');
+      code.textContent = m[1];   // attack strings inside backticks stay inert
+      parent.appendChild(code);
+      s = s.slice(m.index + m[0].length);
+    }
+    appendLinks(parent, s);
+  }
+
   var HR_RE = /^\s*([-*_])(?:\s*\1){2,}\s*$/;
   var LIST_RE = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/;
   var TABLE_SEP_RE = /^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)+\|?\s*$/;
-  function renderMd(md, depth){
+  function isBlockStart(lines, i){
+    var line = lines[i], st = line.trim();
+    if(st.indexOf('```') === 0 || st.charAt(0) === '>') return true;
+    if(HR_RE.test(line) || /^#{1,6}\s+/.test(st) || LIST_RE.test(line)) return true;
+    return line.indexOf('|') !== -1 && i + 1 < lines.length && TABLE_SEP_RE.test(lines[i + 1]);
+  }
+  function child(parent, tag){
+    var node = document.createElement(tag);
+    parent.appendChild(node);
+    return node;
+  }
+  function renderMdInto(container, md, depth){
     depth = depth || 0;
-    if(!md || !md.trim()) return '';
+    if(!md || !md.trim()) return;
     var lines = md.replace(/\r\n?/g, '\n').split('\n');
-    var out = [], i = 0, n = lines.length;
+    var i = 0, n = lines.length;
     while(i < n){
       var line = lines[i], st = line.trim();
       if(!st){ i++; continue; }
@@ -1745,14 +1946,14 @@ _CHAT_JS = r"""
         var body = []; i++;
         while(i < n && lines[i].trim().indexOf('```') !== 0){ body.push(lines[i]); i++; }
         if(i < n) i++;
-        out.push('<pre><code>' + esc(body.join('\n')) + '</code></pre>');
+        child(child(container, 'pre'), 'code').textContent = body.join('\n');
         continue;
       }
-      if(HR_RE.test(line)){ out.push('<hr>'); i++; continue; }
+      if(HR_RE.test(line)){ child(container, 'hr'); i++; continue; }
       var h = st.match(/^(#{1,6})\s+(.*)$/);
       if(h){
         var lvl = Math.min(h[1].length + 2, 6); // demote: h1 -> h3 inside a bubble
-        out.push('<h' + lvl + '>' + inline(h[2].trim()) + '</h' + lvl + '>');
+        appendInline(child(container, 'h' + lvl), h[2].trim());
         i++; continue;
       }
       if(st.charAt(0) === '>' && depth < 3){
@@ -1760,64 +1961,65 @@ _CHAT_JS = r"""
         while(i < n && lines[i].trim().charAt(0) === '>'){
           quote.push(lines[i].replace(/^\s*>\s?/, '')); i++;
         }
-        out.push('<blockquote>' + renderMd(quote.join('\n'), depth + 1) + '</blockquote>');
+        renderMdInto(child(container, 'blockquote'), quote.join('\n'), depth + 1);
         continue;
       }
       if(line.indexOf('|') !== -1 && i + 1 < n && TABLE_SEP_RE.test(lines[i + 1])){
         var cells = function(row){
           return row.trim().replace(/^\||\|$/g, '').split('|').map(function(c){ return c.trim(); });
         };
-        var head = cells(line);
+        var table = child(container, 'table');
+        var headRow = child(child(table, 'thead'), 'tr');
+        cells(line).forEach(function(c){ appendInline(child(headRow, 'th'), c); });
+        var tbody = child(table, 'tbody');
         i += 2;
-        var t = ['<table><thead><tr>'];
-        head.forEach(function(c){ t.push('<th>' + inline(c) + '</th>'); });
-        t.push('</tr></thead><tbody>');
         while(i < n && lines[i].indexOf('|') !== -1 && lines[i].trim()){
-          t.push('<tr>');
-          cells(lines[i]).forEach(function(c){ t.push('<td>' + inline(c) + '</td>'); });
-          t.push('</tr>'); i++;
+          var tr = child(tbody, 'tr');
+          cells(lines[i]).forEach(function(c){ appendInline(child(tr, 'td'), c); });
+          i++;
         }
-        t.push('</tbody></table>');
-        out.push(t.join(''));
         continue;
       }
       if(LIST_RE.test(line)){
-        // Stack-based nesting (port of the Python renderer's loss-proof list builder).
-        var parts = [], stack = [];
+        // Stack-based nesting (port of the Python renderer's loss-proof list
+        // builder): a between-levels dedent attaches to the nearest enclosing
+        // list rather than dropping the item.
+        var stack = [];   // {indent, listEl} of each currently-open list
         while(i < n){
           var m = lines[i].match(LIST_RE);
           if(!m) break;
           var indent = m[1].replace(/\t/g, '    ').length;
           var tag = (m[2] === '-' || m[2] === '*' || m[2] === '+') ? 'ul' : 'ol';
-          while(stack.length && indent < stack[stack.length - 1].indent){
-            parts.push('</li></' + stack.pop().tag + '>');
-          }
+          while(stack.length && indent < stack[stack.length - 1].indent) stack.pop();
           if(!stack.length || indent > stack[stack.length - 1].indent){
-            parts.push('<' + tag + '>');
-            stack.push({indent: indent, tag: tag});
-          } else {
-            parts.push('</li>');
+            var host = container;
+            if(stack.length){
+              var parentList = stack[stack.length - 1].listEl;
+              host = parentList.lastElementChild || parentList;
+            }
+            stack.push({indent: indent, listEl: child(host, tag)});
           }
-          parts.push('<li>' + inline(m[3]));
+          appendInline(child(stack[stack.length - 1].listEl, 'li'), m[3]);
           i++;
         }
-        while(stack.length){ parts.push('</li></' + stack.pop().tag + '>'); }
-        out.push(parts.join(''));
         continue;
       }
       var para = [];
       while(i < n && lines[i].trim() && !isBlockStart(lines, i)){
         para.push(lines[i].trim()); i++;
       }
-      out.push('<p>' + para.map(inline).join('<br>') + '</p>');
+      var p = child(container, 'p');
+      para.forEach(function(text, k){
+        if(k) child(p, 'br');
+        appendInline(p, text);
+      });
     }
-    return out.join('');
   }
-  function isBlockStart(lines, i){
-    var line = lines[i], st = line.trim();
-    if(st.indexOf('```') === 0 || st.charAt(0) === '>') return true;
-    if(HR_RE.test(line) || /^#{1,6}\s+/.test(st) || LIST_RE.test(line)) return true;
-    return line.indexOf('|') !== -1 && i + 1 < lines.length && TABLE_SEP_RE.test(lines[i + 1]);
+  // Re-render `md` into `target`, replacing previous content. The streaming
+  // path calls this repeatedly; the final render happens at block stop.
+  function renderMdReplace(target, md){
+    while(target.firstChild) target.removeChild(target.firstChild);
+    renderMdInto(target, md, 0);
   }
 
   // ------------------------------------------------------------------ request
@@ -1871,6 +2073,7 @@ _CHAT_JS = r"""
   var stopBtn = document.getElementById('da-chat-stop');
   var closeBtn = document.getElementById('da-chat-close');
   var clearBtn = document.getElementById('da-chat-clear');
+  var forgetBtn = document.getElementById('da-chat-forget');
   document.getElementById('da-chat-model').textContent = CFG.model + ' · web search · thinking';
 
   fab.addEventListener('click', function(){ panel.hidden = false; fab.hidden = true; input.focus(); });
@@ -1879,6 +2082,23 @@ _CHAT_JS = r"""
     if(aborter) aborter.abort();
     history = [];
     while(msgs.children.length > 1) msgs.removeChild(msgs.lastChild); // keep the hint
+  });
+  // "Forget key": in prompt mode this clears BOTH the in-memory copy and the
+  // tab's sessionStorage. In embedded mode there is nothing a runtime action
+  // can truthfully delete — the credential is part of the HTML file — so say
+  // exactly that instead of pretending.
+  if(forgetBtn) forgetBtn.addEventListener('click', function(){
+    if(CFG.apiKey){
+      addMsg('da-err',
+        'This report was generated with the API key embedded in the HTML file itself. ' +
+        'A runtime clear cannot remove it from the file — regenerate the report without ' +
+        'the embed option (or delete this file) to withdraw the credential.');
+      return;
+    }
+    apiKey = null;
+    try { sessionStorage.removeItem(KEY_STORE); } catch(e){}
+    addMsg('da-hint', 'API key forgotten — removed from this tab (memory and sessionStorage). ' +
+      'You will be asked for a key the next time you send a question.');
   });
 
   function nearBottom(){ return msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight < 60; }
@@ -2023,7 +2243,9 @@ _CHAT_JS = r"""
     if(!el){
       var wrap = document.createElement('details');
       wrap.className = 'da-think';
-      wrap.innerHTML = '<summary>Thinking…</summary>';
+      var summary = document.createElement('summary');
+      summary.textContent = 'Thinking…';
+      wrap.appendChild(summary);
       var body = document.createElement('div');
       body.className = 'da-think-body';
       wrap.appendChild(body);
@@ -2040,7 +2262,7 @@ _CHAT_JS = r"""
     setTimeout(function(){
       st.mdDirty[index] = false;
       var b = st.blocks[index], el = st.els[index];
-      if(b && el){ el.innerHTML = renderMd(b.text || ''); scrollDown(); }
+      if(b && el){ renderMdReplace(el, b.text || ''); scrollDown(); }
     }, 90);
   }
 
@@ -2053,17 +2275,18 @@ _CHAT_JS = r"""
     }
     var el = st.els[index];
     if(b.type === 'text' && el){
-      el.innerHTML = renderMd(b.text || '');
+      renderMdReplace(el, b.text || '');
       if(b.citations && b.citations.length){
         var span = document.createElement('span');
         span.className = 'da-cites';
         b.citations.forEach(function(c){
           if(!c || !c.url || st.citeUrls[c.url]) return;
+          // Citations go through the SAME URL policy as markdown links; a
+          // rejected URL gets no chip (and no number) at all.
+          var a = linkEl(c.url, '', c.title || c.url);
+          if(!a) return;
           st.citeUrls[c.url] = ++st.citeCount;
-          var a = document.createElement('a');
-          a.href = c.url; a.target = '_blank'; a.rel = 'noopener';
           a.textContent = '[' + st.citeUrls[c.url] + ']';
-          a.title = c.title || c.url;
           span.appendChild(a);
         });
         if(span.children.length) el.appendChild(span);
@@ -2130,7 +2353,7 @@ _CHAT_JS = r"""
       } else {
         var msg = (err && err.message) || 'Request failed.';
         if(err instanceof TypeError) msg = 'Could not reach api.anthropic.com — the assistant needs an internet connection.';
-        addMsg('da-err', msg);
+        addMsg('da-err', scrubSecrets(msg));
       }
     }).then(function(){
       if(!bubble.childNodes.length) bubble.remove(); // nothing ever rendered
