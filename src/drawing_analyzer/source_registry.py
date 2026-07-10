@@ -212,6 +212,56 @@ def content_sha256(path: os.PathLike[str] | str) -> tuple[str, int, int]:
 
 
 # --------------------------------------------------------------------------- #
+# Mid-run mutation detection (Phase 18C, DA-001 §10.6) — a source's bytes can
+# change between the inventory snapshot and a later reopen (render, crop,
+# annotation). Applying anchors computed from the earlier revision onto the new
+# bytes would place ink on the wrong content, so re-verify before that write.
+# Pure (no PyMuPDF): it re-hashes the file and compares to the snapshot.
+# --------------------------------------------------------------------------- #
+
+
+def content_changed(doc: "SourceDocument") -> str:
+    """Return a reason if ``doc``'s file no longer matches its inventory snapshot.
+
+    A fast ``stat`` gate (size + mtime) short-circuits the common unchanged case;
+    only a stat difference (or a missing snapshot hash) triggers a full re-hash,
+    which is the authority. Returns ``""`` when the file is byte-identical to the
+    revision captured at inventory time, else a short, path-free reason
+    (unreadable now, or content changed). Never raises.
+    """
+    p = str(doc.pdf_path)
+    if not doc.content_sha256:
+        return ""   # nothing to compare against (e.g. a hand-built test doc)
+    try:
+        size, mtime = _stat_tuple(p)
+    except OSError:
+        return "the source file is no longer readable"
+    if size == doc.byte_size and mtime == doc.initial_mtime_ns:
+        return ""   # fast gate: stat unchanged → content unchanged
+    try:
+        fresh_hash, _, _ = content_sha256(p)
+    except OSError:
+        return "the source file changed and could not be re-read"
+    if fresh_hash != doc.content_sha256:
+        return "the source file changed after it was analyzed"
+    return ""       # stat drifted (e.g. touch) but bytes are identical → fine
+
+
+def detect_mutations(accepted_documents: list["SourceDocument"]) -> dict[str, str]:
+    """Map ``source_id`` → reason for every accepted source that has mutated.
+
+    Empty when nothing changed. Callers use it to skip stale markup for the
+    affected sources and surface the change so the operator can re-run.
+    """
+    changed: dict[str, str] = {}
+    for doc in accepted_documents:
+        reason = content_changed(doc)
+        if reason:
+            changed[doc.source_id] = reason
+    return changed
+
+
+# --------------------------------------------------------------------------- #
 # Preflight bounds (Phase 18B, DA-035) — fail visibly on pathological or
 # oversized inputs before they exhaust memory or disk. Injectable seams so tests
 # drive limit/disk failures without real giant files.
