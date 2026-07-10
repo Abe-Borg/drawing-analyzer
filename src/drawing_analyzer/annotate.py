@@ -42,12 +42,18 @@ links jump in all three.
    why PyMuPDF is used here.
 
 .. note::
-   Coordinates are **PyMuPDF top-left-origin points** — the exact space
-   ``anchor.rect_pdf`` is already in (it came from ``get_text("words")`` via the
-   resolver), so **no coordinate flip is needed** as long as everything stays in
-   PyMuPDF. If anyone ever swaps to a bottom-left-origin PDF library, convert:
-   ``y_pdf = page_height - y_mupdf`` (top/bottom swap), and account for a
-   non-zero ``CropBox`` origin.
+   Finding rectangles arrive in the canonical **PAGE_VIEW_V2** space (Phase 19) —
+   post-CropBox, post-rotation, matching the images the model saw. PyMuPDF's
+   ``add_*_annot`` / link APIs, however, place ink in the page's *un-rotated,
+   CropBox-relative* space (characterized empirically — see
+   ``tests/test_drawing_geometry.py``). So every rect/point is transformed
+   view→page via the live page's ``derotation_matrix`` (== ``PageGeometry.
+   view_to_page``) right before it is drawn (:func:`_derotate_rect` /
+   :func:`_derotate_point`), and FreeText text is drawn with ``rotate=
+   page.rotation`` so callouts read upright on a rotated sheet. On an un-rotated
+   page the transform is the identity, so the common case is unchanged. The
+   transform lives here (a blessed PyMuPDF module), keeping every other module
+   working on plain PAGE_VIEW_V2 numbers.
 
 The writer never touches the source file: it opens the original, adds annots in
 memory, and saves a *new* ``_reviewed.pdf``. It self-checks by reopening and
@@ -333,26 +339,55 @@ def _tile_centroid(
 
 
 # --------------------------------------------------------------------------- #
+# View→page transform (Phase 19): finding rects are in PAGE_VIEW_V2 space; the
+# PyMuPDF annotation/link APIs place ink in the page's un-rotated, CropBox-relative
+# space. All layout math below is done in view space (natural — it matches the
+# model's frame and reading order), then each final rect/point is transformed here,
+# once, right before it is drawn. Identity on an un-rotated page.
+# --------------------------------------------------------------------------- #
+
+
+def _derotate_rect(page: "pymupdf.Page", view_rect: Any) -> "pymupdf.Rect":
+    """A PAGE_VIEW_V2 rect → this page's un-rotated (annotation) space, normalized."""
+    r = pymupdf.Rect(
+        float(view_rect[0]), float(view_rect[1]), float(view_rect[2]), float(view_rect[3])
+    ) * page.derotation_matrix
+    r.normalize()
+    return r
+
+
+def _derotate_point(page: "pymupdf.Page", x: float, y: float) -> "pymupdf.Point":
+    """A PAGE_VIEW_V2 point → this page's un-rotated (annotation) space."""
+    return pymupdf.Point(float(x), float(y)) * page.derotation_matrix
+
+
+# --------------------------------------------------------------------------- #
 # Drawing (each helper returns how many annots it added)
 # --------------------------------------------------------------------------- #
 
 
 def _add_qc_tag(
-    page: "pymupdf.Page", rect: "pymupdf.Rect", finding: Finding, *, author: str
+    page: "pymupdf.Page", view_rect: "pymupdf.Rect", finding: Finding, *, author: str
 ) -> int:
-    """A small FreeText tag with the finding's QC number beside its markup."""
+    """A small FreeText tag with the finding's QC number beside its markup.
+
+    ``view_rect`` is the finding's cloud rectangle in PAGE_VIEW_V2 space; the tag is
+    laid out relative to it in view space (``page.rect`` dims are view dims), then
+    transformed to page space for drawing so it lands correctly on a rotated sheet.
+    """
     if not finding.qc_id:
         return 0
     color = _color(finding)
     tag_w = 6.0 * len(finding.qc_id) + 8.0
-    x0 = max(2.0, min(rect.x0, page.rect.width - tag_w - 2.0))
-    y0 = rect.y0 - _TAG_HEIGHT - 2.0
+    x0 = max(2.0, min(view_rect.x0, page.rect.width - tag_w - 2.0))
+    y0 = view_rect.y0 - _TAG_HEIGHT - 2.0
     if y0 < 2.0:
-        y0 = min(rect.y1 + 2.0, page.rect.height - _TAG_HEIGHT - 2.0)
-    tag_rect = pymupdf.Rect(x0, y0, x0 + tag_w, y0 + _TAG_HEIGHT)
+        y0 = min(view_rect.y1 + 2.0, page.rect.height - _TAG_HEIGHT - 2.0)
+    tag_rect = _derotate_rect(page, (x0, y0, x0 + tag_w, y0 + _TAG_HEIGHT))
     annot = page.add_freetext_annot(
         tag_rect, finding.qc_id,
         fontsize=_TAG_FONTSIZE, text_color=color, fill_color=(1, 1, 1),
+        rotate=int(page.rotation or 0),
     )
     annot.set_info(title=author, subject="QC tag", content=finding.qc_id)
     # No border_color: PyMuPDF rejects it on plain (non-rich) FreeText annots —
@@ -374,8 +409,8 @@ def _add_cloud(
     ``[REJECTED]`` popup prefix — visibly struck, never mistaken for a live
     finding.
     """
-    rect = pymupdf.Rect(*finding.anchor.rect_pdf)
-    annot = page.add_rect_annot(rect)
+    view_rect = pymupdf.Rect(*finding.anchor.rect_pdf)
+    annot = page.add_rect_annot(_derotate_rect(page, view_rect))
     annot.set_colors(stroke=_REJECTED_COLOR if rejected else _color(finding))
     try:
         if rejected or unverified:
@@ -394,7 +429,7 @@ def _add_cloud(
     # `update()` builds the appearance stream (/AP); without it some viewers draw
     # nothing. This is the whole reason PyMuPDF is used here (see module docstring).
     annot.update()
-    return 1 + _add_qc_tag(page, rect, finding, author=author)
+    return 1 + _add_qc_tag(page, view_rect, finding, author=author)
 
 
 def _add_margin_callouts(
@@ -443,7 +478,7 @@ def _add_margin_callouts(
                     )
             if stacking_up:
                 y = max(2.0, y - (_CALLOUT_H + _CALLOUT_GAP))
-        box = pymupdf.Rect(x, y, x + _CALLOUT_W, y + _CALLOUT_H)
+        box = pymupdf.Rect(x, y, x + _CALLOUT_W, y + _CALLOUT_H)   # PAGE_VIEW_V2 space
         rejected = _status(finding) == "REJECTED"
         unverified = _is_unverified(finding) and not rejected
         color = _REJECTED_COLOR if rejected else _color(finding)
@@ -458,9 +493,12 @@ def _add_margin_callouts(
         )
         # Severity-colored text carries the legend (PyMuPDF rejects border_color
         # on plain FreeText annots); unverified/rejected callouts dash the border.
+        # ``rotate=page.rotation`` keeps the text upright on a rotated sheet; the
+        # box is transformed view→page so it lands in the computed clear band.
         annot = page.add_freetext_annot(
-            box, content[:220],
+            _derotate_rect(page, box), content[:220],
             fontsize=7.5, text_color=color, fill_color=(1.0, 1.0, 0.92),
+            rotate=int(page.rotation or 0),
         )
         try:
             if unverified or rejected:
@@ -474,8 +512,9 @@ def _add_margin_callouts(
         centroid = _tile_centroid(finding.tile, meta)
         if centroid is not None:
             try:
-                start = pymupdf.Point((box.x0 + box.x1) / 2.0, box.y0 if centroid[1] < box.y0 else box.y1)
-                line = page.add_line_annot(start, pymupdf.Point(*centroid))
+                start_v = ((box.x0 + box.x1) / 2.0, box.y0 if centroid[1] < box.y0 else box.y1)
+                start = _derotate_point(page, start_v[0], start_v[1])
+                line = page.add_line_annot(start, _derotate_point(page, centroid[0], centroid[1]))
                 line.set_colors(stroke=color)
                 try:
                     line.set_line_ends(pymupdf.PDF_ANNOT_LE_NONE, pymupdf.PDF_ANNOT_LE_OPEN_ARROW)
@@ -586,8 +625,13 @@ def _insert_index_pages(
 
             target_page = int(finding.page_index) + n_pages
             rect = getattr(finding.anchor, "rect_pdf", None) if finding.anchor else None
-            to = pymupdf.Point(rect[0], rect[1]) if rect else pymupdf.Point(36, 36)
             if 0 <= target_page < doc.page_count:
+                # The destination rect is in PAGE_VIEW_V2 space; a GOTO target lands
+                # in the target page's un-rotated space, so derotate the corner with
+                # that page's own matrix (identity on an un-rotated page).
+                to = pymupdf.Point(36, 36)
+                if rect:
+                    to = _derotate_point(doc[target_page], rect[0], rect[1])
                 page.insert_link({
                     "kind": pymupdf.LINK_GOTO,
                     "from": pymupdf.Rect(34, y - 9, _INDEX_PAGE_W - 34, y + 3),

@@ -7,6 +7,7 @@ Only :mod:`render` produces these; everything else just consumes them.
 from __future__ import annotations
 
 import hashlib
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -62,6 +63,178 @@ def source_page_key(obj: Any) -> tuple[str, int]:
     return (sid or name, page)
 
 
+# ---------------------------------------------------------------------------
+# Canonical page geometry (Phase 19, DA-003)
+#
+# One coordinate space carries a finding from extraction through anchoring,
+# verification, and annotation: **PAGE_VIEW_V2** — top-left origin, *post-CropBox*
+# and *post-rotation*, whose width/height match the overview + tile grid the model
+# actually saw. It is the only space anchors / tiles / persisted finding rects use.
+#
+# It exists because PyMuPDF (characterized empirically under the pinned build, not
+# assumed — see ``tests/test_drawing_geometry.py``) reports and accepts coordinates
+# in *two different* spaces that diverge on a rotated or cropped page:
+#
+#   - ``page.get_text("words")`` and ``page.add_*_annot(rect)`` use an
+#     **un-rotated, CropBox-relative** "page space" (identical rects at every
+#     rotation);
+#   - ``page.get_pixmap(clip=rect)`` — what rasterizes the tiles the model sees —
+#     uses the **rotated page-view** space (``page.rect`` dims).
+#
+# So a word rect used verbatim as a pixmap clip renders the *wrong* (usually blank)
+# region on a rotated page — the DA-003 defect. The fix: transform words into
+# page-view space **once** at extraction (in :mod:`render`, a blessed PyMuPDF
+# module) via ``page_to_view``; everything downstream then works in one space, and
+# only the annotation writer (:mod:`annotate`, the other blessed module) transforms
+# back to page space via ``view_to_page`` to place ink. At rotation 0 with a
+# default CropBox both matrices are the identity, so the common case is unchanged.
+# ---------------------------------------------------------------------------
+
+COORDINATE_SPACE_VERSION = "PAGE_VIEW_V2"
+
+# A 6-float affine matrix in PDF/PyMuPDF convention ``(a, b, c, d, e, f)``:
+# a point ``(x, y)`` maps to ``(a*x + c*y + e, b*x + d*y + f)``.
+IDENTITY_MATRIX: list[float] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
+
+
+def is_identity_matrix(matrix: Any, *, tol: float = 1e-6) -> bool:
+    """True when ``matrix`` is (within ``tol``) the identity — the no-op transform.
+
+    The rotation/derotation matrices are the identity for an un-rotated page, so a
+    caller can skip transforming word rects entirely in the common case.
+    """
+    try:
+        vals = [float(v) for v in matrix]
+    except (TypeError, ValueError):
+        return False
+    if len(vals) != 6:
+        return False
+    return all(abs(a - b) <= tol for a, b in zip(vals, IDENTITY_MATRIX))
+
+
+def normalize_rect(rect: Any, *, require_area: bool = True) -> list[float]:
+    """Return ``rect`` as a validated ``[x0, y0, x1, y1]`` — finite, corners sorted.
+
+    Sorts the corners (``x0 <= x1``, ``y0 <= y1``) rather than clamping an inverted
+    rect: a flip is a *transform* artifact to fold, not a coordinate to truncate.
+    Always raises :class:`ValueError` for a non-finite / non-numeric rect. With
+    ``require_area`` (the default, for a rect that must become ink) it *also* rejects
+    an empty (zero/negative-area) rect, so the caller records a placement error
+    instead of drawing a bogus rectangle (Phase 19 §11.2). Pass ``require_area=
+    False`` to keep a valid zero-area *position* (a degenerate word's bbox), which
+    still transforms to a correct point but carries no area. Never silently repairs
+    an impossible rect.
+    """
+    try:
+        x0, y0, x1, y1 = (float(v) for v in rect)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"rect is not four numbers: {rect!r}") from exc
+    for v in (x0, y0, x1, y1):
+        if not math.isfinite(v):
+            raise ValueError(f"non-finite rect coordinate in {rect!r}")
+    lo_x, hi_x = (x0, x1) if x0 <= x1 else (x1, x0)
+    lo_y, hi_y = (y0, y1) if y0 <= y1 else (y1, y0)
+    if require_area and (hi_x <= lo_x or hi_y <= lo_y):
+        raise ValueError(f"rect has non-positive area: {rect!r}")
+    return [lo_x, lo_y, hi_x, hi_y]
+
+
+def transform_rect(rect: Any, matrix: Any, *, require_area: bool = True) -> list[float]:
+    """Affine-transform ``rect`` by ``matrix`` and return the normalized bounds.
+
+    Transforms all four corners (a rotation moves each to a different place) and
+    takes their min/max bounding box, then :func:`normalize_rect` validates it.
+    Pure numeric — no PyMuPDF — so anchoring, tests, and any boundary crossing use
+    one transform implementation. Matches ``pymupdf.Rect(*rect) * pymupdf.Matrix``
+    exactly for the rotation/derotation matrices this codebase uses. ``require_area``
+    is forwarded to :func:`normalize_rect`: a boundary rect that must ink keeps the
+    default (rejects a degenerate result), while a word-position transform passes
+    ``False`` so a zero-area word still lands — correctly — in the target space
+    rather than being kept in the wrong one.
+    """
+    a, b, c, d, e, f = (float(v) for v in matrix)
+    x0, y0, x1, y1 = (float(v) for v in rect)
+    xs, ys = [], []
+    for x, y in ((x0, y0), (x1, y0), (x0, y1), (x1, y1)):
+        xs.append(a * x + c * y + e)
+        ys.append(b * x + d * y + f)
+    return normalize_rect([min(xs), min(ys), max(xs), max(ys)], require_area=require_area)
+
+
+@dataclass(frozen=True)
+class PageGeometry:
+    """A page's coordinate frame + the transforms between page space and view space.
+
+    ``coordinate_space`` names the version (:data:`COORDINATE_SPACE_VERSION`).
+    ``view_width_pt`` / ``view_height_pt`` are the post-CropBox, post-rotation
+    dimensions (``page.rect``) — the frame the rendered images live in. ``media_box``
+    / ``crop_box`` / ``rotation`` are the raw page attributes (informational /
+    cache-identity inputs). ``page_to_view`` maps an un-rotated CropBox-relative rect
+    (``get_text`` / annotation space) into page-view space; ``view_to_page`` is its
+    inverse. Both are plain 6-float lists so no PyMuPDF type escapes :mod:`render`
+    (I-5): the writer re-derives the live matrix from the reopened page, and this
+    record is the portable data-contract copy for exports, tests, and manifests.
+    """
+
+    coordinate_space: str = COORDINATE_SPACE_VERSION
+    view_width_pt: float = 0.0
+    view_height_pt: float = 0.0
+    media_box: list[float] = field(default_factory=list)
+    crop_box: list[float] = field(default_factory=list)
+    rotation: int = 0
+    page_to_view: list[float] = field(default_factory=lambda: list(IDENTITY_MATRIX))
+    view_to_page: list[float] = field(default_factory=lambda: list(IDENTITY_MATRIX))
+
+    @property
+    def has_identity_transform(self) -> bool:
+        """True when page space and view space coincide (un-rotated page)."""
+        return is_identity_matrix(self.page_to_view)
+
+    def to_view(self, rect: Any) -> list[float]:
+        """Map a page-space (``get_text``) rect into canonical page-view space."""
+        if self.has_identity_transform:
+            return normalize_rect(rect)
+        return transform_rect(rect, self.page_to_view)
+
+    def to_page(self, rect: Any) -> list[float]:
+        """Map a canonical page-view rect back into page space (annotation writing)."""
+        if is_identity_matrix(self.view_to_page):
+            return normalize_rect(rect)
+        return transform_rect(rect, self.view_to_page)
+
+    def to_dict(self) -> dict:
+        return {
+            "coordinate_space": self.coordinate_space,
+            "view_width_pt": self.view_width_pt,
+            "view_height_pt": self.view_height_pt,
+            "media_box": list(self.media_box),
+            "crop_box": list(self.crop_box),
+            "rotation": self.rotation,
+            "page_to_view": list(self.page_to_view),
+            "view_to_page": list(self.view_to_page),
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "PageGeometry":
+        def _mat(v: Any) -> list[float]:
+            try:
+                out = [float(x) for x in v]
+            except (TypeError, ValueError):
+                return list(IDENTITY_MATRIX)
+            return out if len(out) == 6 else list(IDENTITY_MATRIX)
+
+        return cls(
+            coordinate_space=str(d.get("coordinate_space") or COORDINATE_SPACE_VERSION),
+            view_width_pt=float(d.get("view_width_pt", 0.0) or 0.0),
+            view_height_pt=float(d.get("view_height_pt", 0.0) or 0.0),
+            media_box=[float(x) for x in (d.get("media_box") or [])],
+            crop_box=[float(x) for x in (d.get("crop_box") or [])],
+            rotation=int(d.get("rotation", 0) or 0),
+            page_to_view=_mat(d.get("page_to_view")),
+            view_to_page=_mat(d.get("view_to_page")),
+        )
+
+
 @dataclass
 class ImageTile:
     """A rendered PNG image: either the whole-sheet overview or one grid tile."""
@@ -111,6 +284,13 @@ class RenderedSheet:
     is_raster: bool = False
     omitted_tiles: list[tuple[int, int]] = field(default_factory=list)
     overlap_frac: float = 0.08  # mirrors tiling.DEFAULT_OVERLAP_FRAC
+    # Canonical geometry + transforms (Phase 19). ``page_width_pt`` /
+    # ``page_height_pt`` above equal ``geometry.view_width_pt`` /
+    # ``view_height_pt`` and ``words`` are already in PAGE_VIEW_V2 space; the
+    # geometry additionally carries the view↔page transforms the markup writer
+    # needs. Defaults to ``None`` so hand-built sheets (older callers, tests) keep
+    # working — a ``None`` geometry means an identity transform (un-rotated page).
+    geometry: "PageGeometry | None" = None
 
     @property
     def image_sizes(self) -> list[tuple[int, int]]:
@@ -144,6 +324,8 @@ class SheetGeometry:
     words: list[Any] = field(default_factory=list)
     sheet_text: str = ""
     is_raster: bool = False
+    # PAGE_VIEW_V2 geometry + transforms (Phase 19); see :class:`RenderedSheet`.
+    geometry: "PageGeometry | None" = None
 
     @classmethod
     def from_rendered(cls, rendered: "RenderedSheet") -> "SheetGeometry":
@@ -157,6 +339,7 @@ class SheetGeometry:
             words=rendered.words,
             sheet_text=rendered.sheet_text,
             is_raster=rendered.is_raster,
+            geometry=rendered.geometry,
         )
 
 
@@ -241,9 +424,12 @@ def compute_finding_id(
 class Anchor:
     """Where a finding sits on its page (filled by the anchor resolver).
 
-    ``rect_pdf`` is ``[x0, y0, x1, y1]`` in **PyMuPDF top-left-origin points**
-    (the same coordinate space ``get_text("words")`` reports and the markup
-    writer draws in — no flip needed as long as both stay in PyMuPDF). ``None``
+    ``rect_pdf`` is ``[x0, y0, x1, y1]`` in the canonical **PAGE_VIEW_V2** space
+    (:data:`COORDINATE_SPACE_VERSION`) — top-left origin, post-CropBox,
+    post-rotation, matching the overview + tile grid the model saw. The anchor
+    resolver builds it from PAGE_VIEW_V2 word rects; the verifier clips it
+    directly (``get_pixmap`` wants view space); the markup writer transforms it to
+    page space via :attr:`PageGeometry.view_to_page` before drawing. ``None``
     until/unless the finding is anchored.
     """
 

@@ -2,8 +2,10 @@
 
 A finding parsed from the digest carries a ``source_quote`` copied verbatim from
 the sheet's text layer, plus the ``tile`` the model saw it in. This module maps
-that quote back to a **rectangle on the page** (in PyMuPDF top-left-origin
-points) so the markup writer can cloud it, using a tiered strategy and recording
+that quote back to a **rectangle on the page** — in the canonical **PAGE_VIEW_V2**
+space (top-left origin, post-CropBox, post-rotation), the frame the model saw and
+the frame :mod:`render` transforms its word rects into, so anchoring, the tile
+grid, and verification crops all agree — using a tiered strategy and recording
 which tier fired:
 
 1. **EXACT** — the (normalized) quote matches a run of words verbatim. When the
@@ -21,8 +23,8 @@ which tier fired:
    clouded by default.
 
 Like :mod:`tiling`, this module imports **no PDF engine** — it works purely on
-the plain word tuples ``render.py`` extracted and the dependency-free tile
-geometry, so it is unit-testable without PyMuPDF.
+the plain (already view-space) word tuples ``render.py`` extracted and the
+dependency-free tile geometry, so it is unit-testable without PyMuPDF.
 """
 from __future__ import annotations
 
