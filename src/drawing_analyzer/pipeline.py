@@ -451,7 +451,7 @@ def _level1_partition(
     use_thinking: bool,
     effort: str | None,
     focus: str | None,
-    sha_by_path: "dict[str, str] | None" = None,
+    snapshot_by_path: "dict[str, tuple[str, int, int]] | None" = None,
 ) -> "tuple[dict, set, dict, list]":
     """Pre-render level-1 cache scan (Phase 9).
 
@@ -473,7 +473,7 @@ def _level1_partition(
     geometries: list[SheetGeometry] = []
     focus_frag = focus_cache_fragment(focus)
     for ref, identity, geometry in iter_sheet_prescan(
-        paths, rows=rows, cols=cols, overlap_frac=overlap_frac, sha_by_path=sha_by_path
+        paths, rows=rows, cols=cols, overlap_frac=overlap_frac, snapshot_by_path=snapshot_by_path
     ):
         geometries.append(geometry)
         key = digest_cache_key_level1(
@@ -537,7 +537,7 @@ def _critique_level1_partition(
     model: str,
     runs: int,
     profiles_key: str | None,
-    sha_by_path: "dict[str, str] | None" = None,
+    snapshot_by_path: "dict[str, tuple[str, int, int]] | None" = None,
 ) -> "tuple[dict, set, dict]":
     """Pre-render level-1 cache scan for the critique stage (Phase 19B, §11.5).
 
@@ -561,7 +561,7 @@ def _critique_level1_partition(
     miss_only: set[tuple[str, int]] = set()
     level1_keys: dict[tuple[str, int], str] = {}
     for ref, identity, _geom in iter_sheet_prescan(
-        paths, rows=rows, cols=cols, overlap_frac=overlap_frac, sha_by_path=sha_by_path
+        paths, rows=rows, cols=cols, overlap_frac=overlap_frac, snapshot_by_path=snapshot_by_path
     ):
         key = critique_cache_key_level1(
             identity,
@@ -595,7 +595,7 @@ def _run_critique_stage(
     total: int,
     max_workers: int | None,
     profiles: list | None = None,
-    sha_by_path: "dict[str, str] | None" = None,
+    snapshot_by_path: "dict[str, tuple[str, int, int]] | None" = None,
 ) -> tuple[list[Finding], list[NumericClaim], int, int]:
     """Critique every sheet (Phase 11): self-consistent critique, cached two ways.
 
@@ -631,7 +631,7 @@ def _run_critique_stage(
     if cache is not None:
         cached_by_ref, only, level1_keys = _critique_level1_partition(
             paths, rows=rows, cols=cols, overlap_frac=overlap_frac, cache=cache,
-            model=model, runs=runs, profiles_key=profiles_key, sha_by_path=sha_by_path,
+            model=model, runs=runs, profiles_key=profiles_key, snapshot_by_path=snapshot_by_path,
         )
         if cached_by_ref:
             _log.info(
@@ -1234,12 +1234,13 @@ def extract_drawing_context(
     total = len(refs)
     file_count = len(inventory.accepted_documents)
 
-    # The inventory already hashed every accepted source once (§10.1); reuse those
-    # for the level-1 render identity (DA-004) so the file is never re-read per
-    # page. ``str(path) -> content_sha256``; a source with no hash falls back to a
-    # fresh single hash inside the prescan.
-    sha_by_path = {
-        str(d.pdf_path): d.content_sha256
+    # The inventory already hashed every accepted source once (§10.1); the prescan
+    # reuses that for the level-1 render identity (DA-004) via a stat fast-gate, and
+    # re-hashes only a source whose bytes drifted since — so a file rewritten between
+    # the inventory and the prescan keys on its *current* revision, never a stale
+    # hit (§10.6). ``str(path) -> (content_sha256, byte_size, mtime_ns)``.
+    snapshot_by_path = {
+        str(d.pdf_path): (d.content_sha256, d.byte_size, d.initial_mtime_ns)
         for d in inventory.accepted_documents
         if d.content_sha256
     }
@@ -1292,7 +1293,7 @@ def extract_drawing_context(
         cached_by_ref, only, level1_keys, prescan_geoms = _level1_partition(
             paths, rows=rows, cols=cols, overlap_frac=overlap_frac, cache=cache,
             model=model, max_tokens=max_tokens, use_thinking=use_thinking,
-            effort=effort, focus=focus or None, sha_by_path=sha_by_path,
+            effort=effort, focus=focus or None, snapshot_by_path=snapshot_by_path,
         )
         if need_geometry:
             sheet_geometries.extend(prescan_geoms)
@@ -1390,7 +1391,7 @@ def extract_drawing_context(
                 paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
                 client=client, cache=cache, progress=progress, total=total,
                 max_workers=max_workers, profiles=resolved_profiles,
-                sha_by_path=sha_by_path,
+                snapshot_by_path=snapshot_by_path,
             )
             numeric_claims.extend(c_claims)
             in_tok += c_in

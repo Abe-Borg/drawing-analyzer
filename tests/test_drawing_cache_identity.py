@@ -191,6 +191,66 @@ def test_page_index_and_count_distinguish_pages(tmp_path):
     assert _identity(a, page_index=0) != _identity(a, page_index=1)
 
 
+def test_unhashable_sources_do_not_collide(tmp_path, monkeypatch):
+    # If the content genuinely can't be hashed, two DIFFERENT (but geometry-identical)
+    # sources must not share a level-1 identity — a stale sentinel would otherwise
+    # serve one file's digest for another. The prescan falls back to the source's
+    # canonical path so the identities stay distinct. (Unreachable via the pipeline,
+    # which only prescans accepted sources that always carry a real hash — this
+    # guards direct/future callers of iter_sheet_prescan.)
+    import shutil
+
+    import drawing_analyzer.render as render_mod
+
+    # Two byte-identical, geometry-identical, openable PDFs at different paths.
+    d = _base_doc()
+    a, b = tmp_path / "a.pdf", tmp_path / "b.pdf"
+    d.save(str(a))
+    d.close()
+    shutil.copyfile(a, b)
+
+    # The prescan asks source_registry.current_content_sha256 for the on-disk hash;
+    # simulate an unhashable (mid-rewrite) source so the canonical-path fallback fires.
+    monkeypatch.setattr(render_mod, "current_content_sha256", lambda *_a, **_k: "")
+
+    ids = {
+        ref.pdf_path.name: identity
+        for ref, identity, _geom in render_mod.iter_sheet_prescan([a, b], rows=2, cols=2)
+    }
+    assert ids["a.pdf"] != ids["b.pdf"]        # no cross-source collision
+    assert "unhashed:" in ids["a.pdf"]
+
+
+def test_prescan_rehashes_a_source_changed_since_the_snapshot(tmp_path):
+    # DA-004 §10.6 / Codex P1: a source rewritten AFTER the inventory captured its
+    # hash but BEFORE the prescan must key on its CURRENT revision, not the stale
+    # snapshot — otherwise a level-1 hit serves the previous revision's digest with
+    # no render. The prescan stat-gates the snapshot and re-hashes on drift.
+    from drawing_analyzer.render import iter_sheet_prescan
+
+    d0 = _base_doc()
+    a = tmp_path / "a.pdf"
+    d0.save(str(a))
+    d0.close()
+    sha0, size0, mtime0 = content_sha256(a)
+    stale_snapshot = {str(a): (sha0, size0, mtime0)}
+    id_before = next(iter_sheet_prescan([a], rows=2, cols=2,
+                                        snapshot_by_path=stale_snapshot))[1]
+
+    # Rewrite the file in place (new content) — the snapshot is now stale.
+    d1 = pymupdf.open()
+    d1.new_page(width=612, height=792).insert_text((80, 120), "SHEET M-999 REVISED", fontsize=14)
+    d1.save(str(a))
+    d1.close()
+
+    # The SAME (now stale) snapshot is passed, exactly as the pipeline would after
+    # its inventory. The prescan must detect the stat drift, re-hash, and re-key.
+    id_after = next(iter_sheet_prescan([a], rows=2, cols=2,
+                                       snapshot_by_path=stale_snapshot))[1]
+    assert id_after != id_before                 # re-keyed to the current revision
+    assert sha0 not in id_after                  # the stale hash is not reused
+
+
 # --------------------------------------------------------------------------- #
 # Schema migration: a pre-v5 cache entry is discarded on load
 # --------------------------------------------------------------------------- #

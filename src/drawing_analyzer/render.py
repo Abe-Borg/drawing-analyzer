@@ -49,6 +49,7 @@ from .source_registry import (
     assign_source_ids,
     canonical_path,
     content_sha256,
+    current_content_sha256,
     format_source_id,
     page_dimensions_ok,
 )
@@ -697,7 +698,7 @@ def iter_sheet_prescan(
     rows: int = tiling.DEFAULT_GRID_ROWS,
     cols: int = tiling.DEFAULT_GRID_COLS,
     overlap_frac: float = tiling.DEFAULT_OVERLAP_FRAC,
-    sha_by_path: "dict[str, str] | None" = None,
+    snapshot_by_path: "dict[str, tuple[str, int, int]] | None" = None,
 ) -> "Iterator[tuple[SheetRef, str, SheetGeometry]]":
     """Yield ``(ref, render_identity, geometry)`` per page **without rendering**.
 
@@ -707,29 +708,27 @@ def iter_sheet_prescan(
     pipeline uses the identities to decide which sheets can skip rasterization and
     only feeds the misses to :func:`iter_rendered_sheets`.
 
-    The render identity now keys on the **whole source file's** ``content_sha256``
-    (DA-004), hashed **once per source** here. ``sha_by_path`` lets the caller pass
-    the inventory's already-computed hashes (``str(path) -> sha``) so the file is
-    not re-read; a path absent from the map (or a hash failure) falls back to a
-    fresh single hash. If the content genuinely can't be hashed, the identity falls
-    back to the source's **canonical path** so two different unhashable sources can
-    never collide on one cache entry (the pipeline only ever passes accepted sources,
-    which always carry a real hash, so this fallback is belt-and-suspenders).
+    The render identity keys on the **whole source file's** ``content_sha256``
+    (DA-004), computed **once per source** here — and, crucially, for the bytes on
+    disk *at prescan time*. ``snapshot_by_path`` carries the inventory's captured
+    ``str(path) -> (sha, byte_size, mtime_ns)`` so the common (unchanged) case
+    reuses the hash via a ``stat`` fast-gate without re-reading; a source whose
+    ``stat`` drifted since the inventory is **re-hashed now**
+    (:func:`~drawing_analyzer.source_registry.current_content_sha256`), so a file
+    rewritten between the inventory and this prescan keys on its *current* revision
+    and a stale level-1 hit is impossible (§10.6). If the content genuinely can't be
+    hashed (unreadable / mid-rewrite), the identity falls back to the source's
+    **canonical path** — so two different unhashable sources can never collide on one
+    cache entry, and the sheet simply always renders.
     """
     source_ids = assign_source_ids(pdf_paths)
-    sha_by_path = sha_by_path or {}
+    snapshot_by_path = snapshot_by_path or {}
     for path in pdf_paths:
         path = Path(path)
-        sha = sha_by_path.get(str(path))
+        sha = current_content_sha256(path, snapshot_by_path.get(str(path)))
         if not sha:
-            try:
-                sha, _size, _mtime = content_sha256(path)
-            except OSError:
-                sha = ""
-        if not sha:
-            # No content hash: disambiguate by source so a false cross-source hit
-            # is impossible (an identical-geometry sheet from another file would
-            # otherwise share the key).
+            # No usable content hash: disambiguate by source so a false cross-source
+            # hit is impossible, and (not being a real content hash) it always misses.
             sha = f"unhashed:{canonical_path(path)}"
         doc = pymupdf.open(str(path))
         try:

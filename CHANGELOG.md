@@ -25,7 +25,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   serving pixels this one wouldn't reproduce), the annotation-render policy, the
   page index/count, the grid/overlap/target, the blank-suppression mode, and the
   text-extraction cap. The per-page object-graph fingerprint is retired (the
-  whole-source hash subsumes its form-XObject special case).
+  whole-source hash subsumes its form-XObject special case). The prescan hashes the
+  bytes **on disk at prescan time**: it reuses the inventory hash through a `stat`
+  fast-gate but **re-hashes on any drift** (`current_content_sha256`), so a source
+  rewritten between the inventory and the prescan keys on its *current* revision —
+  a stale level-1 hit that served the previous revision's digest is impossible
+  (§10.6), including in a non-markup run the mid-run mutation check doesn't cover.
 - **Critique level-1 cache added** (`critique_cache_key_level1`): the critique reads
   the same images as the digest, so an unchanged exhaustive re-run previously had to
   rasterize every sheet merely to compute the PNG-bytes critique key and discover
