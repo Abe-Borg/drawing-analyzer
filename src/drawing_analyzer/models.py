@@ -14,16 +14,52 @@ from typing import Any
 
 @dataclass(frozen=True)
 class SheetRef:
-    """Identifies one sheet: a single page within a source PDF."""
+    """Identifies one sheet: a single page within a source PDF.
+
+    ``source_id`` is the **host-owned** identity of the input this page belongs
+    to (``"SRC-0001"`` …), assigned once per accepted input by
+    :func:`render.list_sheets` (DA-001). It is what disambiguates two inputs
+    that share a basename: ``source_name`` is display-only and *not* authority.
+    It defaults to ``""`` so hand-built refs (older callers, tests that don't
+    care about isolation) keep working; every collision-safe lookup falls back
+    to ``source_name`` when ``source_id`` is blank (see :func:`source_page_key`).
+    """
 
     pdf_path: Path
     page_index: int          # zero-based
     source_name: str         # pdf_path.name, for display / provenance
     page_count: int          # pages in the source PDF
+    source_id: str = ""      # host-owned input identity ("SRC-0001"); "" → source_name
 
     @property
     def display_label(self) -> str:
         return f"{self.source_name} (page {self.page_index + 1}/{self.page_count})"
+
+    @property
+    def key(self) -> tuple[str, int]:
+        """Collision-safe ``(source, page)`` key — see :func:`source_page_key`."""
+        return (self.source_id or self.source_name, self.page_index)
+
+
+def source_page_key(obj: Any) -> tuple[str, int]:
+    """The collision-safe ``(source, page_index)`` key for any source-scoped object.
+
+    Duck-typed over :class:`SheetRef`, :class:`Finding`, :class:`ConflictLeg`,
+    :class:`NumericClaim`, and the geometry records — anything carrying
+    ``source_id`` / ``source_name`` / ``page_index`` (or a ``.ref`` that does).
+    Uses the host-owned ``source_id`` when populated, so two inputs sharing a
+    basename never collide; falls back to ``source_name`` only when no
+    ``source_id`` was assigned (hand-built objects, legacy cache). This is the
+    one key every internal map/group/lookup must use instead of a bare
+    ``(source_name, page_index)`` (DA-001).
+    """
+    ref = getattr(obj, "ref", None)
+    if ref is not None and getattr(ref, "source_name", None) is not None:
+        obj = ref
+    sid = (getattr(obj, "source_id", "") or "").strip()
+    name = getattr(obj, "source_name", "") or ""
+    page = int(getattr(obj, "page_index", 0) or 0)
+    return (sid or name, page)
 
 
 @dataclass
@@ -173,13 +209,21 @@ SOURCE_TAGS = frozenset({
 })
 
 
-def compute_finding_id(sheet_id: str, category: str, quote_or_text: str) -> str:
+def compute_finding_id(
+    sheet_id: str, category: str, quote_or_text: str, source_id: str = ""
+) -> str:
     """Stable short id for a finding: ``sha1(sheet_id + category + quote/text)``.
 
     Deterministic and content-derived so the *same* finding gets the *same* id
     across runs (and so two harvests of one issue collapse to one id, which the
     later dedup/ledger stages rely on). ``quote_or_text`` should be the verbatim
     ``source_quote`` when present, else the finding ``text``.
+
+    ``source_id`` — when the host has assigned one (DA-001), it is folded into
+    the hash so two *different* inputs that happen to share a sheet id, category,
+    and quote can never collide on one artifact/evidence id. It is appended (not
+    interleaved) and only when non-empty, so a legacy/single-source finding with
+    no ``source_id`` keeps its historical id exactly.
     """
     h = hashlib.sha1()
     h.update(sheet_id.encode("utf-8"))
@@ -187,6 +231,9 @@ def compute_finding_id(sheet_id: str, category: str, quote_or_text: str) -> str:
     h.update(category.encode("utf-8"))
     h.update(b"\x00")
     h.update(quote_or_text.encode("utf-8"))
+    if source_id:
+        h.update(b"\x00")
+        h.update(source_id.encode("utf-8"))
     return h.hexdigest()[:12]
 
 
@@ -270,11 +317,13 @@ class ConflictLeg:
     source_quote: str = ""
     tile: list[int] | None = None
     anchor: Anchor = field(default_factory=Anchor)
+    source_id: str = ""       # host-owned identity of the leg's sheet (DA-001)
 
     def to_dict(self) -> dict:
         return {
             "sheet_id": self.sheet_id,
             "source_name": self.source_name,
+            "source_id": self.source_id,
             "page_index": self.page_index,
             "source_quote": self.source_quote,
             "tile": list(self.tile) if self.tile is not None else None,
@@ -291,6 +340,7 @@ class ConflictLeg:
             source_quote=d.get("source_quote", ""),
             tile=[int(v) for v in tile] if tile else None,
             anchor=Anchor.from_dict(d.get("anchor") or {}),
+            source_id=str(d.get("source_id", "") or ""),
         )
 
 
@@ -364,6 +414,7 @@ class Finding:
     category: str                       # one of FINDING_CATEGORIES
     severity: str                       # one of FINDING_SEVERITIES
     text: str
+    source_id: str = ""                 # host-owned identity of the source (DA-001)
     source_quote: str = ""
     tile: list[int] | None = None
     refs: list[str] = field(default_factory=list)
@@ -380,7 +431,8 @@ class Finding:
     def __post_init__(self) -> None:
         if not self.id:
             self.id = compute_finding_id(
-                self.sheet_id, self.category, self.source_quote or self.text
+                self.sheet_id, self.category, self.source_quote or self.text,
+                self.source_id,
             )
 
     def to_dict(self) -> dict:
@@ -389,6 +441,7 @@ class Finding:
             "qc_id": self.qc_id,
             "sheet_id": self.sheet_id,
             "source_name": self.source_name,
+            "source_id": self.source_id,
             "page_index": self.page_index,
             "category": self.category,
             "severity": self.severity,
@@ -418,6 +471,7 @@ class Finding:
         return cls(
             sheet_id=d.get("sheet_id", ""),
             source_name=d.get("source_name", ""),
+            source_id=str(d.get("source_id", "") or ""),
             page_index=int(d.get("page_index", 0) or 0),
             category=d.get("category", ""),
             severity=d.get("severity", ""),
@@ -458,7 +512,7 @@ def assign_qc_ids(findings: list["Finding"]) -> list["Finding"]:
 
     ordered = sorted(
         findings,
-        key=lambda f: (f.source_name, int(f.page_index or 0), _pos(f), f.id),
+        key=lambda f: (source_page_key(f), _pos(f), f.id),
     )
     width = max(3, len(str(len(ordered))))
     for n, finding in enumerate(ordered, start=1):
@@ -495,6 +549,7 @@ class NumericClaim:
     note: str = ""
     source_name: str = ""
     page_index: int = 0
+    source_id: str = ""       # host-owned identity of the emitting sheet (DA-001)
 
     def to_dict(self) -> dict:
         return {
@@ -505,6 +560,7 @@ class NumericClaim:
             "expected": self.expected,
             "note": self.note,
             "source_name": self.source_name,
+            "source_id": self.source_id,
             "page_index": self.page_index,
         }
 
@@ -520,4 +576,5 @@ class NumericClaim:
             note=str(d.get("note", "") or ""),
             source_name=str(d.get("source_name", "") or ""),
             page_index=int(d.get("page_index", 0) or 0),
+            source_id=str(d.get("source_id", "") or ""),
         )

@@ -36,7 +36,7 @@ from .digest import (
     sheet_digest_from_cache_entry,
 )
 from .digest_cache import digest_cache_key_level1
-from .models import Finding, NumericClaim, SheetGeometry
+from .models import Finding, NumericClaim, SheetGeometry, source_page_key
 from .render import iter_rendered_sheets, iter_sheet_prescan, list_sheets
 
 # ``progress(done, total, label)`` — called once as each sheet *finishes*
@@ -594,7 +594,7 @@ def _run_critique_stage(
         while in_flight:
             _collect_one()
 
-    findings.sort(key=lambda f: (f.source_name, f.page_index, f.id))
+    findings.sort(key=lambda f: (source_page_key(f), f.id))
     _log.info(
         "critique: %d finding(s), %d numeric claim(s) across %d sheet(s)",
         len(findings), len(claims), total,
@@ -711,10 +711,10 @@ def _run_qc_stages(
             progress(total, total, "Anchoring findings")
         from .anchor import resolve_anchors, resolve_conflict_legs
 
-        geom_by_key = {(g.ref.source_name, g.ref.page_index): g for g in geometries}
+        geom_by_key = {source_page_key(g.ref): g for g in geometries}
         by_sheet: dict[tuple, list[Finding]] = {}
         for finding in entries:
-            by_sheet.setdefault((finding.source_name, finding.page_index), []).append(finding)
+            by_sheet.setdefault(source_page_key(finding), []).append(finding)
         for key, sheet_findings in by_sheet.items():
             geometry = geom_by_key.get(key)
             if geometry is None:

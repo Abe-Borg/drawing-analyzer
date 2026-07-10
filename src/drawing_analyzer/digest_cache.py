@@ -30,8 +30,11 @@ from typing import Any
 # recognized before rendering and skips rasterization entirely. Blank-tile
 # suppression also changed the rendered image set, so the old PNG-bytes (level-2)
 # keys shift too. The version folds into every key, so every pre-v3 entry is
-# discarded on load and re-digested once.
-_SCHEMA_VERSION = 3
+# discarded on load and re-digested once. Bumped to 4 (Phase 18A, DA-001): a
+# cached ``Finding``/``NumericClaim`` now carries a ``source_id`` and its content
+# ``id`` folds source identity in, so pre-v4 entries (which lack it and would be
+# rebound to a mismatched id) are discarded on load and re-digested once.
+_SCHEMA_VERSION = 4
 
 _FALSEY = {"0", "false", "no", "off", ""}
 

@@ -24,7 +24,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-from ..models import Anchor, Finding, Verification
+from ..models import Anchor, Finding, Verification, source_page_key
 from .references import (
     SheetInventory,
     _levenshtein,
@@ -93,7 +93,7 @@ def _looks_like_tag(token: str) -> bool:
 @dataclass
 class _TagOccurrences:
     total: int = 0
-    # (source_name, page_index) -> (geom, first_rect, count_on_sheet)
+    # source_page_key(ref) -> (geom, first_rect, count_on_sheet)
     by_sheet: dict = field(default_factory=dict)
 
 
@@ -104,7 +104,7 @@ def _harvest(sheets: list[Any], inventory: SheetInventory) -> dict[str, _TagOccu
         ref = getattr(geom, "ref", None)
         if ref is None:
             continue
-        key = (ref.source_name, ref.page_index)
+        key = source_page_key(ref)
         for w in getattr(geom, "words", []) or []:
             raw = _wtext(w)
             if not _looks_like_tag(raw):
@@ -209,7 +209,7 @@ def audit_naming(rendered_sheets: Iterable[Any]) -> list[Finding]:
     for cluster in _cluster_tags(list(lexicon.keys())):
         for drift, canonical in _drift_pairs(cluster, counts):
             occ = lexicon[drift]
-            for (source_name, page_index), (geom, rect, count_on_sheet) in sorted(
+            for _key, (geom, rect, count_on_sheet) in sorted(
                 occ.by_sheet.items()
             ):
                 if len(findings) >= _MAX_FINDINGS:
@@ -220,8 +220,9 @@ def audit_naming(rendered_sheets: Iterable[Any]) -> list[Finding]:
                 here = f" (used {count_on_sheet}× here)" if count_on_sheet > 1 else ""
                 findings.append(Finding(
                     sheet_id=sheet_id_disp,
-                    source_name=source_name,
-                    page_index=page_index,
+                    source_name=ref.source_name,
+                    source_id=ref.source_id,
+                    page_index=ref.page_index,
                     category="question",
                     severity="low",
                     text=(

@@ -296,7 +296,8 @@ def test_write_findings_csv_has_bom_and_crlf(tmp_path):
     assert b"\r\n" in raw
     # decodes cleanly with the BOM stripped
     text = raw.decode("utf-8-sig")
-    assert text.startswith("qc_id,id,sheet_id,source_name,page,")
+    # source_id (DA-001) sits between sheet_id and the display source_name.
+    assert text.startswith("qc_id,id,sheet_id,source_id,source_name,page,")
 
 
 def test_findings_csv_tolerates_sparse_finding():
@@ -305,7 +306,9 @@ def test_findings_csv_tolerates_sparse_finding():
                 severity="low", text="x")
     csv = dx.build_findings_csv([f])
     row = csv.split("\r\n")[1]
-    assert row.startswith("," + f.id + ",F,s.pdf,1,conflict,low,x,")
+    # Empty source_id (no host id on a hand-built finding) → an empty cell
+    # between sheet_id and source_name.
+    assert row.startswith("," + f.id + ",F,,s.pdf,1,conflict,low,x,")
 
 
 # --------------------------------------------------------------------------- #

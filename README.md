@@ -491,6 +491,14 @@ is unmistakable: opened in **Bluebeam Revu** they populate the Markups List
 (filter, sort, reply, export all work), and Acrobat and Chromium render them too
 (the appearance stream is built explicitly, so nothing shows up blank).
 
+Each input is tracked by a host-owned **source id** (`SRC-0001` …), so two PDFs
+that share a filename (`M-101.pdf` from two folders) are never confused: a
+finding is anchored, verified, and clouded only onto the drawing it actually
+came from, and the reviewed copies of duplicate-stem inputs are named
+`<stem>__SRC-0002_reviewed.pdf` (source-identifying) rather than a bare `_2`.
+The `source_id` is also a column in `findings.csv` / `findings.json`; absolute
+paths never appear in any exported artifact.
+
 ### Markup anatomy (the legend)
 
 - **QC numbers.** Every finding in the run gets a sequential review number

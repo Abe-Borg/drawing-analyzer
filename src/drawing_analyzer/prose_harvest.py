@@ -52,7 +52,7 @@ from .digest import (
 )
 from .html_report import classify_section, split_into_sections
 from .ledger import Ledger
-from .models import ConflictLeg, Finding, SheetRef, Verification
+from .models import ConflictLeg, Finding, SheetRef, Verification, source_page_key
 
 _log = get_logger()
 
@@ -335,6 +335,7 @@ def _degraded_entry(
     return Finding(
         sheet_id=sheet_id,
         source_name=ref.source_name,
+        source_id=ref.source_id,
         page_index=ref.page_index,
         category=category_hint if category_hint in ("conflict", "coordination", "question") else "coordination",
         severity="medium",
@@ -393,7 +394,7 @@ def _ingest_item(
 ) -> None:
     """Mechanisms 2 → 3 → degraded for one prose item (the §17 invariant)."""
     result.items += 1
-    match = _match_entry(item, ledger.entries_for(ref.source_name, ref.page_index))
+    match = _match_entry(item, ledger.entries_for(ref))
     if match is not None:
         if tag not in match.sources:
             match.sources.append(tag)
@@ -449,7 +450,7 @@ def harvest_prose(
     client = _client_or_none(client)
 
     geom_by_key = {
-        (g.ref.source_name, g.ref.page_index): g
+        source_page_key(g.ref): g
         for g in geometries or []
         if getattr(g, "ref", None) is not None
     }
@@ -463,11 +464,11 @@ def harvest_prose(
             id_map[sid] = geom
 
     def _sheet_text(ref: SheetRef) -> str:
-        geom = geom_by_key.get((ref.source_name, ref.page_index))
+        geom = geom_by_key.get(source_page_key(ref))
         return getattr(geom, "sheet_text", "") or "" if geom is not None else ""
 
     def _display_id(ref: SheetRef) -> str:
-        geom = geom_by_key.get((ref.source_name, ref.page_index))
+        geom = geom_by_key.get(source_page_key(ref))
         return (detect_sheet_id(geom) if geom is not None else None) or ref.source_name
 
     # --- per-sheet digest prose (Coordination / Conflict; Focus when opted in) --
@@ -503,6 +504,7 @@ def harvest_prose(
                 legs.append(ConflictLeg(
                     sheet_id=other,
                     source_name=geom.ref.source_name,
+                    source_id=geom.ref.source_id,
                     page_index=geom.ref.page_index,
                 ))
         _ingest_item(

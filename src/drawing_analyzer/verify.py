@@ -45,7 +45,7 @@ from .digest import (
     _retry_backoff_seconds,
     _tolerant_json_object,
 )
-from .models import Finding, Verification
+from .models import Finding, Verification, source_page_key
 
 _log = get_logger()
 
@@ -213,15 +213,15 @@ def _default_crop_renderer(items: list) -> Iterator[tuple]:
 
 
 def _sheet_lookup(sheets: Iterable[Any]) -> tuple[dict[tuple, Any], set[tuple]]:
-    """Map ``(source_name, page_index) -> sheet``, plus the *ambiguous* keys.
+    """Map ``source_page_key(ref) -> sheet``, plus any residual *ambiguous* keys.
 
-    ``source_name`` is a file **basename**, so two input PDFs that share a
-    basename (e.g. ``M-101.pdf`` from two folders) collide on the same key. A
-    finding carries only that basename, so it can't be told which PDF it came
-    from — verifying it against the wrong drawing would reject a valid finding or
-    save evidence from another sheet. We therefore flag those keys as ambiguous
-    and skip their findings rather than guess. (Phase 7 wiring associates each
-    finding with its originating sheet directly, avoiding the lookup entirely.)
+    With the host-owned ``source_id`` (DA-001) two input PDFs that share a
+    basename get distinct keys, so a finding is always cropped against the drawing
+    it actually came from. The ``ambiguous`` set is now only a *fallback* safety
+    net: it still fires for legacy/hand-built refs that carry no ``source_id``
+    (the key falls back to the basename), where guessing the wrong PDF would
+    reject a valid finding or save evidence from another sheet — those are skipped
+    rather than verified wrongly.
     """
     out: dict[tuple, Any] = {}
     ambiguous: set[tuple] = set()
@@ -229,12 +229,12 @@ def _sheet_lookup(sheets: Iterable[Any]) -> tuple[dict[tuple, Any], set[tuple]]:
         ref = getattr(s, "ref", None)
         if ref is None:
             continue
-        key = (ref.source_name, ref.page_index)
+        key = source_page_key(ref)
         prev = out.get(key)
         if prev is not None:
             prev_path = getattr(getattr(prev, "ref", None), "pdf_path", None)
             if prev_path != getattr(ref, "pdf_path", None):
-                ambiguous.add(key)   # same basename+page, different file
+                ambiguous.add(key)   # same key, different file → no source_id to split them
         out[key] = s
     return out, ambiguous
 
@@ -382,7 +382,7 @@ def verify_findings(
     # against the right drawing, so it is skipped rather than verified wrongly.
     items: list = []
     for f in verifiable:
-        key = (f.source_name, f.page_index)
+        key = source_page_key(f)
         if key in ambiguous:
             f.verification = Verification(
                 status="SKIPPED", note="ambiguous sheet (duplicate file basename)"
@@ -548,17 +548,16 @@ def _verify_cross_one(
     max_retries: int, sleep: Any, used: set,
 ) -> tuple[Verification, int, int]:
     """Render the primary + each anchored leg's crop and ask one verdict. Never raises."""
-    legs = [(finding.source_name, finding.page_index, finding.anchor.rect_pdf,
+    legs = [(source_page_key(finding), finding.page_index, finding.anchor.rect_pdf,
              finding.sheet_id, finding.source_quote)]
     for leg in finding.also_on:
         if leg.anchor is not None and leg.anchor.rect_pdf is not None:
-            legs.append((leg.source_name, leg.page_index, leg.anchor.rect_pdf,
+            legs.append((source_page_key(leg), leg.page_index, leg.anchor.rect_pdf,
                          leg.sheet_id, leg.source_quote))
 
     reqs: list = []
     labels: list = []
-    for source_name, page_index, rect, sid, quote in legs:
-        key = (source_name, page_index)
+    for key, page_index, rect, sid, quote in legs:
         if key in ambiguous:
             continue
         sheet = lookup.get(key)

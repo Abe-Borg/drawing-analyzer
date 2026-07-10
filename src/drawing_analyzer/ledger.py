@@ -30,11 +30,11 @@ PDF-engine-free (I-5): pure over :class:`~drawing_analyzer.models.Finding`.
 """
 from __future__ import annotations
 
-from typing import Iterable
+from typing import Any, Iterable
 
 from .critique import _is_duplicate, _most_severe
 from .diagnostics import get_logger
-from .models import Finding, assign_qc_ids
+from .models import Finding, assign_qc_ids, source_page_key
 
 _log = get_logger()
 
@@ -109,9 +109,15 @@ class Ledger:
     def entries(self) -> list[Finding]:
         return list(self._entries)
 
-    def entries_for(self, source_name: str, page_index: int) -> list[Finding]:
-        """The ledger's entries for one sheet (the prose harvester's match pool)."""
-        return list(self._by_sheet.get((source_name, int(page_index or 0)), []))
+    def entries_for(self, sheet: Any) -> list[Finding]:
+        """The ledger's entries for one sheet (the prose harvester's match pool).
+
+        Keyed collision-safely on ``source_page_key`` — pass any source-scoped
+        object (a ``SheetRef``, a geometry with ``.ref``, or a ``Finding``); two
+        same-basename sheets from different inputs never share a match pool
+        (DA-001).
+        """
+        return list(self._by_sheet.get(source_page_key(sheet), []))
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -131,7 +137,7 @@ class Ledger:
         for finding in findings:
             if not finding.sources and source:
                 finding.sources = [source]
-            key = (finding.source_name, int(finding.page_index or 0))
+            key = source_page_key(finding)
             bucket = self._by_sheet.setdefault(key, [])
             existing = next(
                 (e for e in bucket if _is_duplicate(finding, e)), None

@@ -6,6 +6,54 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed (Phase 18A — host-owned source identity, DA-001)
+
+- **A finding can no longer be attributed to the wrong source PDF when two
+  inputs share a basename.** Previously every internal `(source, page)` lookup
+  keyed on the file *basename*, so two `M-101.pdf` files from different folders
+  collided: a finding from one could be anchored, verified, or **clouded onto
+  the other**, and the reviewed copies received the union of both files'
+  findings. Each accepted input now gets an opaque, host-generated `source_id`
+  (`SRC-0001` …, assigned in input order by the new `source_registry`), which the
+  model never sees and which does not depend on the filename.
+- **`source_id` threaded end to end.** Added to `SheetRef`, `Finding`,
+  `ConflictLeg`, and `NumericClaim` (additive, defaults to `""`), stamped at
+  every production site (digest, critique, cross-QC, prose harvest, and all five
+  deterministic auditors) and carried through serialization. A new
+  `source_page_key()` helper replaces every collision-prone
+  `(source_name, page_index)` key across the pipeline, ledger, anchor, verify,
+  cross-QC, prose-harvest, auditor, and report lookups. `source_name` remains
+  display-only.
+- **`verify.py` no longer skips same-basename sheets.** Its ambiguity guard —
+  which used to mark a duplicate-basename finding `SKIPPED` rather than crop the
+  wrong drawing — is now a fallback that only fires when no `source_id` was
+  assigned; real runs verify every sheet against its own source.
+- **Reviewed-PDF names are source-disambiguated, not order-dependent.** When two
+  inputs share a stem, the reviewed copies are named
+  `<stem>__SRC-0002_reviewed.pdf` (deterministic, source-identifying) instead of
+  a bare `_2`; unique stems keep their friendly `<stem>_reviewed.pdf` name.
+- **Content ids fold in source identity.** `compute_finding_id` now includes
+  `source_id`, so two different inputs sharing a sheet id, category, and quote
+  can never collide in the evidence directory or the ledger. When no `source_id`
+  is present the historical (source-independent) id is preserved exactly.
+- **Cache hits are rebound to the current source (§10.3).** A content-keyed
+  digest/critique cache entry can carry a former run's identity; on a hit,
+  restored findings/claims are re-stamped with the current `SheetRef`, a
+  source-derived fallback `sheet_id` is rebuilt (a real model id like `M-101` is
+  preserved), and the content id is recomputed. Digest cache
+  `_SCHEMA_VERSION` 3 → 4, so pre-existing entries miss once and re-digest.
+- **`NumericClaim` carries `source_id` through its whole path.** Fresh critique
+  claims are stamped at production, the arithmetic auditor's geometry resolution
+  and claim-dedup key are `source_page_key`-based (so a duplicate-basename claim
+  resolves to — and is never merged across — the right source), and the
+  critique-cache rebind rebuilds a source-derived fallback claim `sheet_id`.
+- **CSV/JSON exports gain a `source_id` column/field**; no absolute path leaks
+  into any public artifact. New tests cover same-basename isolation through
+  anchor / verify / annotate / ledger / export / report, the registry's
+  dedup/ordering (identical canonical path, relative-vs-absolute), the cache
+  rebind, and the source-aware id. This is Phase 18A of the split; input
+  resilience (18B) and mid-run mutation detection (18C) follow.
+
 ### Security / CI (Phase 17B — headless-browser exploit tests + CI foundation)
 
 - **Real headless-Chromium exploit suite for the report (DA-011/DA-027),**

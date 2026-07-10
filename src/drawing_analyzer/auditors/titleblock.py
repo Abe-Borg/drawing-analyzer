@@ -145,6 +145,7 @@ def audit_titleblock(rendered_sheets: Iterable[Any]) -> list[Finding]:
             findings.append(Finding(
                 sheet_id=band.own_id or f"{_stem(ref.source_name)}-p{ref.page_index + 1}",
                 source_name=ref.source_name,
+                source_id=ref.source_id,
                 page_index=ref.page_index,
                 category="coordination",
                 severity="low",

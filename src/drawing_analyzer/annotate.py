@@ -63,6 +63,7 @@ import pymupdf  # AGPL-3.0 — see module docstring; the 2nd of two blessed impo
 from . import tiling
 from .diagnostics import get_logger
 from .models import ConflictLeg, Finding
+from .source_registry import assign_source_ids
 
 _log = get_logger()
 
@@ -777,13 +778,15 @@ def _expand_for_markup(findings: Iterable[Finding]) -> list[Finding]:
         if not legs:
             continue
         primary_as_leg = ConflictLeg(
-            sheet_id=f.sheet_id, source_name=f.source_name, page_index=f.page_index,
+            sheet_id=f.sheet_id, source_name=f.source_name, source_id=f.source_id,
+            page_index=f.page_index,
             source_quote=f.source_quote, tile=f.tile, anchor=f.anchor,
         )
         for i, leg in enumerate(legs):
             others = [primary_as_leg] + [l for j, l in enumerate(legs) if j != i]
             out.append(Finding(
                 sheet_id=leg.sheet_id, source_name=leg.source_name,
+                source_id=leg.source_id,
                 page_index=leg.page_index, category=f.category, severity=f.severity,
                 text=f.text, source_quote=leg.source_quote, refs=list(f.refs),
                 also_on=others, anchor=leg.anchor, verification=f.verification,
@@ -806,29 +809,39 @@ def write_reviewed_pdfs(
 ) -> list[Path]:
     """Write one ``<stem>_reviewed.pdf`` per source PDF that has QC content.
 
-    Findings are matched to a source PDF by ``source_name`` (the file basename);
-    a source with neither an inked finding nor a rejected one gets no reviewed
-    copy (rejected-only sources still get one, so their index's rejected section
-    keeps them visible — §18: nothing is invisible). A cross-sheet finding is
-    inked on **every** sheet it touches (see :func:`_expand_for_markup`).
-    ``geometries`` (the run's :class:`~drawing_analyzer.models.SheetGeometry`
-    records) supply the word rectangles and grid used for margin-band placement
-    and leader lines; ``audit_stats`` feeds the optional appendix page. Output
-    filenames are de-duplicated (``_reviewed`` / ``_reviewed_2`` / …) so two
-    inputs sharing a stem don't clobber each other. Returns the reviewed-PDF
-    paths, in input order.
+    Findings are matched to a source PDF by the host-owned ``source_id``
+    (DA-001), so two inputs that share a basename each receive **only their own**
+    findings — the reviewed copies are never cross-contaminated. (A finding that
+    predates source ids — e.g. a hand-built test finding — falls back to matching
+    by ``source_name``.) A source with neither an inked finding nor a rejected
+    one gets no reviewed copy (rejected-only sources still get one, so their
+    index's rejected section keeps them visible — §18: nothing is invisible). A
+    cross-sheet finding is inked on **every** sheet it touches (see
+    :func:`_expand_for_markup`). ``geometries`` supply the word rectangles/grid
+    for margin-band placement; ``audit_stats`` feeds the optional appendix.
+
+    Output filenames stay friendly (``<stem>_reviewed.pdf``) when stems are
+    unique; when two inputs share a stem, the colliding ones are disambiguated by
+    their ``source_id`` (``<stem>__SRC-0002_reviewed.pdf``) — a deterministic,
+    source-identifying suffix, not an order-dependent ``_2`` (§10.4). Returns the
+    reviewed-PDF paths, in input order.
     """
     output_dir = Path(output_dir)
-    by_source: dict[str, list[Finding]] = {}
-    for finding in _expand_for_markup(findings):
-        by_source.setdefault(finding.source_name, []).append(finding)
+    pdf_paths = [Path(p) for p in pdf_paths]
+    # Recompute the same host-owned ids list_sheets assigned (pure function of
+    # the ordered path list), so a finding's source_id maps back to its file.
+    path_to_sid = assign_source_ids(pdf_paths)
 
-    meta_by_source: dict[str, dict[int, dict]] = {}
-    for geom in geometries or []:
-        ref = getattr(geom, "ref", None)
-        if ref is None:
-            continue
-        meta_by_source.setdefault(ref.source_name, {})[int(ref.page_index)] = {
+    by_source_id: dict[str, list[Finding]] = {}
+    by_name: dict[str, list[Finding]] = {}   # fallback pool for source_id-less findings
+    for finding in _expand_for_markup(findings):
+        if finding.source_id:
+            by_source_id.setdefault(finding.source_id, []).append(finding)
+        else:
+            by_name.setdefault(finding.source_name, []).append(finding)
+
+    def _meta_of(geom: Any) -> dict:
+        return {
             "words": getattr(geom, "words", None) or [],
             "rows": getattr(geom, "rows", 0),
             "cols": getattr(geom, "cols", 0),
@@ -837,29 +850,52 @@ def write_reviewed_pdfs(
             "page_height_pt": getattr(geom, "page_height_pt", 0.0),
         }
 
+    meta_by_source_id: dict[str, dict[int, dict]] = {}
+    meta_by_name: dict[str, dict[int, dict]] = {}
+    for geom in geometries or []:
+        ref = getattr(geom, "ref", None)
+        if ref is None:
+            continue
+        if getattr(ref, "source_id", ""):
+            meta_by_source_id.setdefault(ref.source_id, {})[int(ref.page_index)] = _meta_of(geom)
+        else:
+            meta_by_name.setdefault(ref.source_name, {})[int(ref.page_index)] = _meta_of(geom)
+
+    # Which stems collide, so only those get the source-id-disambiguated name.
+    stem_counts: dict[str, int] = {}
+    for p in pdf_paths:
+        stem_counts[p.stem] = stem_counts.get(p.stem, 0) + 1
+
     out_paths: list[Path] = []
     used_names: set[str] = set()
     for pdf_path in pdf_paths:
-        pdf_path = Path(pdf_path)
-        sheet_findings = by_source.get(pdf_path.name, [])
+        sid = path_to_sid.get(str(pdf_path), "")
+        sheet_findings = list(by_source_id.get(sid, [])) + list(by_name.get(pdf_path.name, []))
         has_ink = any(
             is_inked(f, include_unverified=include_unverified) for f in sheet_findings
         )
         has_rejected = any(_status(f) == "REJECTED" for f in sheet_findings)
         if not has_ink and not has_rejected:
             continue
-        name = f"{pdf_path.stem}_reviewed.pdf"
+        if stem_counts.get(pdf_path.stem, 0) > 1 and sid:
+            name = f"{pdf_path.stem}__{sid}_reviewed.pdf"
+        else:
+            name = f"{pdf_path.stem}_reviewed.pdf"
         n = 1
-        while name in used_names:
+        while name in used_names:   # last-resort guard (e.g. no source_id to split them)
             n += 1
             name = f"{pdf_path.stem}_reviewed_{n}.pdf"
         used_names.add(name)
         out = output_dir / name
+        sheet_meta = {
+            **meta_by_name.get(pdf_path.name, {}),
+            **meta_by_source_id.get(sid, {}),   # source-id meta wins per page
+        }
         annotate_pdf(
             pdf_path, sheet_findings, out,
             include_unverified=include_unverified, ink_rejected=ink_rejected,
             author=author,
-            sheet_meta=meta_by_source.get(pdf_path.name),
+            sheet_meta=sheet_meta or None,
             audit_stats=audit_stats, include_appendix=include_appendix,
         )
         out_paths.append(out)

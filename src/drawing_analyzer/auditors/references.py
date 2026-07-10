@@ -350,6 +350,7 @@ def _make_finding(
     return Finding(
         sheet_id=display_id,
         source_name=sheet.ref.source_name,
+        source_id=sheet.ref.source_id,
         page_index=sheet.ref.page_index,
         category="reference",
         severity=severity,

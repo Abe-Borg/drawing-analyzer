@@ -582,16 +582,20 @@ def _sheet_key(ref: Any) -> tuple[str, int]:
 
 
 def _finding_sheet_key(ref_or_name: Any, page_index: int) -> tuple[str, int]:
-    """The basename-only key findings anchor to. A :class:`Finding` carries only
-    ``source_name`` (no path), so finding→sheet-card links are matched on basename;
-    two same-basename sheets can only share a link target, but never each other's
-    (path-keyed) text layer."""
+    """Collision-safe finding→sheet-card key (DA-001).
+
+    Uses the host-owned ``source_id`` when present, so a finding from one input
+    links to *its* sheet card even when another input shares the basename; falls
+    back to the ``source_name`` basename only when no ``source_id`` was assigned.
+    Mirrors :func:`models.source_page_key` inline so this module stays
+    engine-free / duck-typed."""
+    sid = (getattr(ref_or_name, "source_id", "") or "").strip()
     name = getattr(ref_or_name, "source_name", ref_or_name) or ""
-    return (name, int(page_index))
+    return (sid or name, int(page_index))
 
 
 def _sheet_card_index(sheets: list[Any]) -> dict[tuple[str, int], int]:
-    """Map basename identity → 1-based sheet-card index (for finding links)."""
+    """Map source identity → 1-based sheet-card index (for finding links)."""
     out: dict[tuple[str, int], int] = {}
     for i, sheet in enumerate(sheets, start=1):
         ref = _ref_of(sheet)
