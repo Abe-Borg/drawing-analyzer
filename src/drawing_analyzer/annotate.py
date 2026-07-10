@@ -861,7 +861,12 @@ def _insert_index_pages(
             page.insert_text((x, y), label, fontsize=8, fontname="hebo", color=(0.25, 0.25, 0.25))
 
         batch = rows[i * _INDEX_ROWS_PER_PAGE:(i + 1) * _INDEX_ROWS_PER_PAGE]
-        index_only_rows: list[str] = []      # "pid@target" for index-only placements here
+        # "pid@target@rowY" for index-only placements here. rowY is the row's link
+        # ``from``-rect top — unique per row on the page (rows are one line apart),
+        # so reconciliation matches each placement to *its own* row/link, never to
+        # any link that merely happens to share the target page (link custom keys
+        # do not survive save, but the link's /Rect does).
+        index_only_rows: list[str] = []
         y = _INDEX_TOP + 4
         for kind, payload, index_only in batch:
             if kind == "heading":
@@ -891,15 +896,18 @@ def _insert_index_pages(
                 to = pymupdf.Point(36, 36)
                 if rect:
                     to = _derotate_point(doc[target_page], rect[0], rect[1])
+                row_top = y - 9
                 page.insert_link({
                     "kind": pymupdf.LINK_GOTO,
-                    "from": pymupdf.Rect(34, y - 9, _INDEX_PAGE_W - 34, y + 3),
+                    "from": pymupdf.Rect(34, row_top, _INDEX_PAGE_W - 34, y + 3),
                     "page": target_page,
                     "to": to,
                     "zoom": 0,
                 })
                 if index_only:
-                    index_only_rows.append(f"{placement.placement_id}@{target_page}")
+                    index_only_rows.append(
+                        f"{placement.placement_id}@{target_page}@{int(round(row_top))}"
+                    )
             y += _INDEX_ROW_H
 
         # Stamp this page analyzer-owned and record its index-only rows so
@@ -991,8 +999,8 @@ def _receipt_for(
     placement: MarkupPlacement,
     out_name: str,
     found: "dict[str, dict[str, list[tuple[int, int]]]]",
-    index_rows: "dict[str, tuple[int, int]]",
-    index_link_targets: "dict[int, set[int]]",
+    index_rows: "dict[str, tuple[int, int, int]]",
+    index_page_links: "dict[int, list[tuple[int, int]]]",
 ) -> MarkupReceipt:
     """Turn one placement + what was found in the reopened file into a receipt."""
     pid = placement.placement_id
@@ -1002,16 +1010,20 @@ def _receipt_for(
                 placement, "FAILED", output_pdf=out_name,
                 error="expected index row not found in the saved PDF",
             )
-        idx_pno, target = index_rows[pid]
-        if target not in index_link_targets.get(idx_pno, set()):
+        idx_pno, target, row_top = index_rows[pid]
+        # This placement's OWN row must carry a GOTO link to the right page — a
+        # link at this row's unique top position, not merely *some* link on the
+        # page to the same target (which a sibling row could supply).
+        links = index_page_links.get(idx_pno, [])
+        if not any(abs(ly - row_top) <= 1 and lt == target for ly, lt in links):
             return MarkupReceipt(
                 placement, "FAILED", output_pdf=out_name, output_page_index=idx_pno,
-                error="index row present but its GOTO link is missing/mis-targeted",
+                error="index row present but its own GOTO link is missing/mis-targeted",
             )
         return MarkupReceipt(
             placement, "INDEXED", output_pdf=out_name, output_page_index=idx_pno,
             index_entry_ref=f"index_p{idx_pno}#{pid}",
-            annotation_refs=[f"index_row:{target}"],
+            annotation_refs=[f"index_row:{target}@{row_top}"],
         )
 
     comps = found.get(pid, {})
@@ -1074,32 +1086,34 @@ def _reconcile_pdf(
                     continue                         # prior-run / unrelated ink
                 found.setdefault(pid, {}).setdefault(comp, []).append((annot.xref, pno))
 
-        # Index-only rows: pid -> (index_page, target_page); GOTO targets per page.
-        index_rows: dict[str, tuple[int, int]] = {}
-        index_link_targets: dict[int, set[int]] = {}
+        # Index-only rows: pid -> (index_page, target_page, row_top); and every
+        # GOTO link on each analyzer index page as (row_top, target) so each row is
+        # matched to its OWN link by position, not to any link sharing the target.
+        index_rows: dict[str, tuple[int, int, int]] = {}
+        index_page_links: dict[int, list[tuple[int, int]]] = {}
         for pno in range(doc.page_count):
             page = doc[pno]
             kt, kv = doc.xref_get_key(page.xref, _INDEX_PAGE_KEY)
             if kt != "string" or kv != run_id:
                 continue
-            index_link_targets[pno] = {
-                int(lk.get("page", -1))
+            index_page_links[pno] = [
+                (int(round(lk["from"].y0)), int(lk.get("page", -1)))
                 for lk in page.get_links()
-                if lk.get("kind") == pymupdf.LINK_GOTO
-            }
+                if lk.get("kind") == pymupdf.LINK_GOTO and lk.get("from") is not None
+            ]
             rt, rv = doc.xref_get_key(page.xref, _INDEX_ROWS_KEY)
             if rt == "string" and rv:
                 for entry in rv.split(";"):
-                    row_pid, _, tgt = entry.partition("@")
-                    if row_pid.startswith(prefix):
+                    parts = entry.split("@")
+                    if len(parts) == 3 and parts[0].startswith(prefix):
                         try:
-                            index_rows[row_pid] = (pno, int(tgt))
+                            index_rows[parts[0]] = (pno, int(parts[1]), int(parts[2]))
                         except ValueError:
                             pass
 
         expected_ids = {pl.placement_id for pl in placements}
         receipts = [
-            _receipt_for(pl, out_name, found, index_rows, index_link_targets)
+            _receipt_for(pl, out_name, found, index_rows, index_page_links)
             for pl in placements
         ]
         # Marks stamped with THIS run but absent from the plan — an orchestration

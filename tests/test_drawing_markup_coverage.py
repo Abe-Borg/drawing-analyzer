@@ -447,6 +447,55 @@ def test_reconcile_detects_missing_unexpected_and_duplicate(tmp_path):
     assert unexpected[0].placement.placement_id == f"{run_id}#f9#primary#00099"
 
 
+def test_same_page_index_rows_are_matched_to_their_own_link(tmp_path):
+    # Codex review (annotate.py index reconciliation): two index-only rows that
+    # target the SAME drawing page must each be matched to their OWN row's GOTO
+    # link — not to any link that merely shares the target. Here only row A's link
+    # is present; row B (same target) must FAIL even though a link to that page
+    # exists on the page.
+    run_id = "run-idx"
+    out = tmp_path / "idx.pdf"
+    doc = pymupdf.open()
+    doc.new_page(width=_INDEX_PW(), height=_INDEX_PH())          # page 0: the index
+    doc.new_page(width=300, height=300)                          # page 1: the drawing
+    index = doc[0]   # re-fetch after the page tree changed (PyMuPDF unbinds pages)
+
+    pid_a = f"{run_id}#fa#primary#00000"
+    pid_b = f"{run_id}#fb#primary#00001"
+    # Row A at top 100, row B at top 120 — both GOTO page 1, but only A gets a link.
+    index.insert_link({
+        "kind": pymupdf.LINK_GOTO, "from": pymupdf.Rect(34, 100, 200, 112),
+        "page": 1, "to": pymupdf.Point(5, 5), "zoom": 0,
+    })
+    doc.xref_set_key(index.xref, "DAIndexPage", f"({run_id})")
+    doc.xref_set_key(index.xref, "DAIndexRows", f"({pid_a}@1@100;{pid_b}@1@120)")
+    doc.save(str(out))
+    doc.close()
+
+    def _pl(pid, expected):
+        return MarkupPlacement(
+            run_id=run_id, placement_id=pid, finding_id=pid.split("#")[1], qc_id="",
+            scope="SOURCE", source_id="SRC-0001", page_index=0, leg_id="primary",
+            expected=expected, required_components=["index_row"],
+        )
+
+    receipts = _reconcile_pdf(out, [_pl(pid_a, "REJECTED_INDEX"), _pl(pid_b, "GATED_INDEX")], run_id)
+    by_id = {r.placement.placement_id: r for r in receipts}
+    assert by_id[pid_a].status == "INDEXED"       # its own link is present
+    assert by_id[pid_b].status == "FAILED"        # no link at row B's position
+    assert "own GOTO link" in by_id[pid_b].error
+
+
+def _INDEX_PW():
+    from drawing_analyzer.annotate import _INDEX_PAGE_W
+    return _INDEX_PAGE_W
+
+
+def _INDEX_PH():
+    from drawing_analyzer.annotate import _INDEX_PAGE_H
+    return _INDEX_PAGE_H
+
+
 # --------------------------------------------------------------------------- #
 # markup_manifest.json — portable, receipt-backed (§13.7)
 # --------------------------------------------------------------------------- #
