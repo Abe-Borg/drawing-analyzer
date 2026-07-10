@@ -761,6 +761,13 @@ deliverable for the good files. A single unreadable *page* inside an otherwise
 good PDF is likewise skipped rather than failing the whole file, and a
 pathological (oversized/NaN) page box is caught before it can exhaust memory.
 
+Each source is also fingerprinted at the start of the run, and re-checked just
+before its reviewed PDF is written. If a source file **changes on disk mid-run**
+(e.g. it's re-exported while a long QC pass is running), it is left un-marked —
+its anchors were computed from the earlier revision and would land on the wrong
+content — and the run tells you which file changed and that a re-run is needed.
+The other files are marked up normally.
+
 ## Testing
 
 ```bash

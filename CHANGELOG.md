@@ -6,6 +6,26 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (Phase 18C — mid-run source mutation detection, DA-001 §10.6)
+
+- **A source PDF that changes on disk between analysis and markup can no longer
+  get stale ink.** Every input is snapshotted (`content_sha256`) at inventory
+  time; immediately before the markup writer reopens a file, the pipeline
+  re-verifies each source against its snapshot (a `stat` fast-gate, then a full
+  re-hash on any drift). A source whose bytes changed is **excluded from
+  markup** — its findings, and any cross-sheet leg landing on it, are not inked
+  (anchors computed from the earlier revision would land on the wrong content) —
+  recorded on `ctx.errors` with a "re-run to mark up the current revision"
+  message, and surfaced on the new `DrawingContext.mutated_sources`. Only the
+  *findings* are filtered — the full accepted path list is preserved so the
+  markup writer's `SRC-####` assignment does not renumber (dropping a middle
+  path would misplace the survivors' ink); a mutated source ends up with no
+  findings and is simply not written. The coverage tally accounts those skipped
+  entries under a distinct `mutated` disposition ("N skipped (source changed)")
+  rather than reporting ink no reviewed PDF contains. The good files still get
+  their reviewed PDFs, and the standard artifacts already produced are retained.
+  The check is pure (no PyMuPDF), so it stays outside the I-5 boundary.
+
 ### Added (Phase 18B — resilient input inventory, DA-002 / DA-035)
 
 - **A corrupt, encrypted, or duplicate input no longer aborts an otherwise

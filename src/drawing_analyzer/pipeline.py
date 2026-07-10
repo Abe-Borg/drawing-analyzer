@@ -138,6 +138,11 @@ class DrawingContext:
     # PDF ink, so it is empty when no QC stage ran OR markups were disabled.
     # Surfaced in the GUI completion summary and the report header.
     ledger_tally: dict = field(default_factory=dict)
+    # Display names of sources whose bytes changed between analysis and markup
+    # (Phase 18C §10.6). Non-empty means QC is incomplete: those sources were
+    # NOT marked up (stale anchors are never written onto changed bytes), a
+    # rerun is required, and the change is also recorded in ``errors``.
+    mutated_sources: list[str] = field(default_factory=list)
 
     @property
     def ledger_tally_line(self) -> str:
@@ -518,6 +523,7 @@ class _QCResult:
     output_tokens: int = 0
     audit_stats: dict = field(default_factory=dict)
     ledger_tally: dict = field(default_factory=dict)
+    mutated_sources: list[str] = field(default_factory=list)
 
 
 def _run_critique_stage(
@@ -606,6 +612,19 @@ def _run_critique_stage(
     return findings, claims, in_tok, out_tok
 
 
+def _finding_touches_only_unchanged(finding: Finding, mutated_ids: set[str]) -> bool:
+    """True when neither the finding's own source nor any of its cross-sheet legs
+    sits on a mutated source — i.e. it is safe to ink. A finding that touches a
+    changed source (primary anchor or an ``also_on`` leg) is excluded from markup
+    so no stale anchor is drawn onto changed bytes (§10.6)."""
+    if getattr(finding, "source_id", "") in mutated_ids:
+        return False
+    for leg in getattr(finding, "also_on", None) or []:
+        if getattr(leg, "source_id", "") in mutated_ids:
+            return False
+    return True
+
+
 def _run_qc_stages(
     *,
     sheets: list[SheetDigest],
@@ -627,6 +646,7 @@ def _run_qc_stages(
     synthesis_text: str = "",
     ink_rejected: bool = False,
     focus_findings_to_markups: bool = False,
+    accepted_documents: list | None = None,
 ) -> _QCResult:
     """Run the QC pipeline: ingest → harvest → freeze → anchor → verify → markups.
 
@@ -811,8 +831,41 @@ def _run_qc_stages(
             _log.warning("citation check failed: %s", exc)
 
     reviewed_pdf_paths: list[Path] = []
+    mutated_sources: list[str] = []
+    mutated_ids: set[str] = set()
     if qc_markups:
         from .annotate import write_reviewed_pdfs
+        from .source_registry import detect_mutations
+
+        # §10.6: re-verify each source hasn't changed since the inventory
+        # snapshot before we reopen it to write ink. A source whose bytes
+        # changed has its FINDINGS excluded from markup (anchors computed from
+        # the earlier revision would land on the wrong content), is recorded,
+        # and is flagged so the operator re-runs. The standard artifacts already
+        # produced (findings, exports) are retained.
+        markup_findings = list(all_findings)
+        if accepted_documents:
+            mutated = detect_mutations(accepted_documents)
+            if mutated:
+                mutated_ids = set(mutated)
+                by_id = {d.source_id: d for d in accepted_documents}
+                # Filter only the FINDINGS, never the path list: write_reviewed_pdfs
+                # recomputes SRC-#### from the paths it receives, so dropping a
+                # middle path would renumber (and mis-place) the survivors. A
+                # mutated source ends up with no findings and is simply not
+                # written (annotate skips a finding-less source).
+                markup_findings = [
+                    f for f in markup_findings
+                    if _finding_touches_only_unchanged(f, mutated_ids)
+                ]
+                for sid, reason in mutated.items():
+                    name = by_id[sid].display_name
+                    mutated_sources.append(name)
+                    errors.append(
+                        f"{name}: {reason} — reviewed markup was skipped for it; "
+                        "re-run to mark up the current revision."
+                    )
+                    _log.warning("source mutated mid-run: %s (%s)", name, reason)
 
         if work_dir is None:
             import tempfile
@@ -822,7 +875,7 @@ def _run_qc_stages(
             progress(total, total, "Writing markups")
         try:
             reviewed_pdf_paths = write_reviewed_pdfs(
-                all_findings, pdf_paths, work_dir,
+                markup_findings, pdf_paths, work_dir,
                 include_unverified=not markup_verified_only,
                 ink_rejected=ink_rejected,
                 geometries=geometries,
@@ -842,10 +895,16 @@ def _run_qc_stages(
         from .annotate import ink_disposition
 
         for entry in entries:
-            disposition = ink_disposition(
-                entry, include_unverified=not markup_verified_only,
-                ink_rejected=ink_rejected,
-            )
+            if mutated_ids and not _finding_touches_only_unchanged(entry, mutated_ids):
+                # This entry's source changed mid-run, so it got no ink — account
+                # it honestly as skipped, not as clouded/margin/rejected (the
+                # tally is PDF-ink accounting and no PDF contains it).
+                disposition = "mutated"
+            else:
+                disposition = ink_disposition(
+                    entry, include_unverified=not markup_verified_only,
+                    ink_rejected=ink_rejected,
+                )
             ledger_tally[disposition] = ledger_tally.get(disposition, 0) + 1
         if sum(ledger_tally.values()) != len(entries):
             # Structurally impossible (the classifier is total) — kept as the
@@ -875,6 +934,7 @@ def _run_qc_stages(
         output_tokens=v_out,
         audit_stats=audit_stats,
         ledger_tally=ledger_tally,
+        mutated_sources=mutated_sources,
     )
 
 
@@ -884,6 +944,8 @@ def _tally_line(total_entries: int, tally: dict[str, int]) -> str:
     parts.append(f"{tally.get('rejected', 0)} rejected (indexed)")
     if tally.get("gated"):
         parts.append(f"{tally['gated']} gated (verified-only mode)")
+    if tally.get("mutated"):
+        parts.append(f"{tally['mutated']} skipped (source changed)")
     return f"Ledger {total_entries}: " + ", ".join(parts)
 
 
@@ -1329,6 +1391,7 @@ def extract_drawing_context(
             citation_check_enabled=citation_check,
             synthesis_text=synthesis_text, ink_rejected=ink_rejected,
             focus_findings_to_markups=focus_findings_to_markups,
+            accepted_documents=inventory.accepted_documents,
         )
         in_tok += qc.input_tokens
         out_tok += qc.output_tokens
@@ -1371,6 +1434,7 @@ def extract_drawing_context(
         qc_work_dir=qc.work_dir,
         audit_stats=qc.audit_stats,
         ledger_tally=qc.ledger_tally,
+        mutated_sources=qc.mutated_sources,
     )
 
 
