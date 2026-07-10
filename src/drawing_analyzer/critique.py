@@ -356,40 +356,64 @@ def _same_sheet(a: Finding, b: Finding) -> bool:
 
 # Equipment tags / drawing-detail references: letters + (compact | -/. separated)
 # digits — VAV-3, M-101, FP101, RV-3, AHU-2, M1.01, E2.1. A space is *not* a
-# separator, so "SET 165" is a measurement, not a tag.
-_TAG_RE = re.compile(r"\b([A-Za-z]{1,4})(?:-|\.)?(\d{1,4}(?:[.-]\d{1,3})?[A-Za-z]?)\b")
+# separator, so "SET 165" is a measurement, not a tag. A hyphen is normalized away
+# (M-101 == M101) but a DOT is kept (M1.01 != M10.1 — different sheets).
+_TAG_RE = re.compile(r"\b([A-Za-z]{1,4})-?(\d{1,4}(?:[.-]\d{1,3})?[A-Za-z]?)\b")
 # A number (signed / decimal / fraction) immediately followed by a unit — a
-# measurement whose value discriminates the finding.
-_UNIT = (
-    r"(?:gpm|gpd|gph|psig|psi|cfm|fpm|inch(?:es)?|in|ft|feet|mm|cm|kva|kw|hp|hz|"
-    r"amps?|volts?|va|kv|gal|deg|°[fc]?|%|\"|')"
+# measurement whose value AND unit discriminate the finding. Alpha units require a
+# trailing word boundary (so "voltage" isn't read as "volt", "into" as "in"); the
+# number can't start mid-token (so the "-1" in "P-1" or the "101" in "M-101" is not
+# a measurement).
+_ALPHA_UNIT = (
+    r"gpm|gpd|gph|psig|psi|cfm|fpm|inch(?:es)?|in|ft|feet|mm|cm|kva|kw|hp|hz|"
+    r"amps?|volts?|kv|va|gal|deg"
 )
+_SYM_UNIT = r"°[fc]?|%|\"|'"
 _MEAS_RE = re.compile(
-    r"([-+]?\d+(?:\.\d+)?(?:\s*\d+\s*/\s*\d+)?)\s*" + _UNIT, re.IGNORECASE
+    r"(?<![A-Za-z0-9.\-])([-+]?\d+(?:\.\d+)?(?:[-\s]*\d+\s*/\s*\d+)?)\s*"
+    r"((?:" + _ALPHA_UNIT + r")\b|(?:" + _SYM_UNIT + r"))",
+    re.IGNORECASE,
 )
-# Strong "absence / not-present" phrasing — an absence finding contradicts a
-# finding about the same thing being present.
+_UNIT_SYNONYM = {"inches": "in", "inch": "in", "feet": "ft", '"': "in", "'": "ft"}
+# Strong "absence / not-present" phrasing — an absence finding contradicts a finding
+# about the same thing being present. Symmetric across channels: the digest's
+# "should be provided" and the critique's "not found" both read as an absence.
 _ABSENCE_RE = re.compile(
     r"\b(?:not\s+(?:shown|provided|indicated|dimensioned|specified|scheduled|"
-    r"noted|labell?ed|called|located|found|present|on)|missing|omitted|absent|"
-    r"no\s+\w+\s+(?:shown|provided|indicated|is\s+shown))\b",
+    r"noted|labell?ed|called|located|found|present)"
+    r"|should\s+be\s+(?:shown|provided|indicated|dimensioned|added|included|scheduled|noted)"
+    r"|(?:is\s+)?required\s+but|missing|omitted|absent"
+    r"|no\s+\w+(?:\s+\w+)?\s+(?:shown|provided|indicated|dimensioned))\b",
     re.IGNORECASE,
 )
 
 
 def _sig_text(f: Finding) -> str:
-    return f"{f.text or ''} {f.source_quote or ''}"
+    # Include ``supporting_quotes`` so a merge that switches the representative
+    # bundle can't hide a folded member's discriminating tag/measurement: the
+    # survivor's signature retains every member's critical tokens, so a later
+    # conflicting finding ("550 gpm" after "500 gpm" folded in) is still blocked.
+    extra = " ".join(getattr(f, "supporting_quotes", None) or [])
+    return f"{f.text or ''} {f.source_quote or ''} {extra}"
 
 
 def _tags(f: Finding) -> set[str]:
+    # Strip a hyphen separator (M-101 == M101) but keep a dot (M1.01 != M10.1).
     return {
-        f"{m.group(1)}{m.group(2)}".upper().replace("-", "").replace(".", "")
+        f"{m.group(1)}{m.group(2)}".upper().replace("-", "")
         for m in _TAG_RE.finditer(_sig_text(f))
     }
 
 
 def _measurements(f: Finding) -> set[str]:
-    return {re.sub(r"\s+", "", m.group(1)) for m in _MEAS_RE.finditer(_sig_text(f))}
+    out: set[str] = set()
+    for m in _MEAS_RE.finditer(_sig_text(f)):
+        # Collapse internal digit separators so "2 1/2" == "2-1/2" (but keep a
+        # leading sign); the UNIT is part of the signature so "6 in" != "6 ft".
+        num = re.sub(r"(?<=\d)[-\s]+(?=\d)", "", m.group(1)).replace(" ", "")
+        unit = re.sub(r"\s+", "", m.group(2)).lower()
+        out.add(num + _UNIT_SYNONYM.get(unit, unit))
+    return out
 
 
 def _is_absence(f: Finding) -> bool:
@@ -442,13 +466,6 @@ def _quotes_equal(a: Finding, b: Finding) -> bool:
     return bool(qa) and qa == qb
 
 
-def _quote_overlap(a: Finding, b: Finding) -> bool:
-    qa, qb = _normalize(a.source_quote or ""), _normalize(b.source_quote or "")
-    if not qa or not qb:
-        return False
-    return qa in qb or qb in qa
-
-
 def _is_duplicate(a: Finding, b: Finding) -> bool:
     """Whether two findings describe the same issue (Phase 20, §12.1).
 
@@ -463,18 +480,25 @@ def _is_duplicate(a: Finding, b: Finding) -> bool:
         return False
     if not _signatures_compatible(a, b):
         return False
-    # Exact same on-sheet quote, same category → the same grounded issue.
-    if _quotes_equal(a, b) and _categories_compatible(a, b):
-        return True
+    if not _categories_compatible(a, b):
+        return False
+    tov = _token_overlap(a.text, b.text)
     # Strong topical overlap → the same issue restated.
-    if _token_overlap(a.text, b.text) >= _TEXT_DUP_THRESHOLD:
+    if tov >= _TEXT_DUP_THRESHOLD:
         return True
-    # Geometry (post-anchor) is only *supporting* evidence, never sufficient alone.
+    # Same verbatim on-sheet quote AND at least moderate text agreement → the same
+    # grounded issue. The quote alone is NOT enough: quoting a tag / schedule title
+    # verbatim ("PUMP P-1") is the norm, so two *different* issues about one
+    # component share a quote — a text check keeps them apart (§12.1, no data loss).
+    if _quotes_equal(a, b) and tov >= _MODERATE_TEXT_THRESHOLD:
+        return True
+    # Geometry (post-anchor) is only *supporting* evidence: heavily-overlapping
+    # rectangles merge only when the two also share the same verbatim quote — two
+    # unrelated issues can share a table cell, so IoU + weak text is not enough.
     ra = a.anchor.rect_pdf if a.anchor else None
     rb = b.anchor.rect_pdf if b.anchor else None
-    if ra and rb and _rect_iou(ra, rb) > _IOU_DUP_THRESHOLD and _categories_compatible(a, b):
-        if _token_overlap(a.text, b.text) >= _MODERATE_TEXT_THRESHOLD or _quote_overlap(a, b):
-            return True
+    if ra and rb and _rect_iou(ra, rb) > _IOU_DUP_THRESHOLD and _quotes_equal(a, b):
+        return True
     return False
 
 

@@ -38,6 +38,7 @@ PDF-engine-free (I-5): pure over :class:`~drawing_analyzer.models.Finding`.
 """
 from __future__ import annotations
 
+import copy
 from typing import Any, Iterable
 
 from .critique import _is_duplicate, _most_severe, _normalize, _severity_rank
@@ -124,7 +125,10 @@ class Ledger:
         # Folded members per surviving entry (keyed by object identity), so a new
         # candidate must be a duplicate of EVERY member — complete-link (§12.1) —
         # not just the representative, blocking an A+B+C collapse where A conflicts
-        # with C. Runtime-only; never serialized.
+        # with C. Stored as **immutable snapshots** (deep copies) taken at ingest,
+        # because ``_merge_into`` mutates the live survivor when a higher-quality
+        # member wins — the live object would otherwise erase the earlier member's
+        # signature from this history. Runtime-only; never serialized.
         self._members: dict[int, list[Finding]] = {}
         self._state = OPEN
         self.post_seal_adds = 0
@@ -182,8 +186,10 @@ class Ledger:
                 None,
             )
             if existing is not None:
+                # Snapshot the incoming member BEFORE the merge mutates the survivor,
+                # so the complete-link history keeps every member's original signature.
+                self._members.setdefault(id(existing), []).append(copy.deepcopy(finding))
                 _merge_into(existing, finding, self.merge_trace)
-                self._members.setdefault(id(existing), [existing]).append(finding)
                 continue
             if self.sealed:
                 # Orchestration invariant failure (§12.3): everything must be
@@ -197,7 +203,7 @@ class Ledger:
                 )
             self._entries.append(finding)
             bucket.append(finding)
-            self._members[id(finding)] = [finding]
+            self._members[id(finding)] = [copy.deepcopy(finding)]
 
     # --------------------------------------------------------- seal / number
 
@@ -252,8 +258,20 @@ def _grounding_quality(f: Finding) -> tuple:
     selection: a longer quote anchors better; more severe wins ties; then the stable
     id and finally the text — a **total** order even when two duplicates share a
     quote-derived id, so the same cluster picks the same representative regardless of
-    ingest order (§12.4 test 6)."""
+    ingest order for a *fixed* set of members (§12.4)."""
     return (len((f.source_quote or "").strip()), _severity_rank(f.severity), f.id, f.text or "")
+
+
+def _placement_compatible(a: Finding, b: Finding) -> bool:
+    """Whether ``b``'s rectangle may place ``a`` without cross-grounding (§12.2).
+
+    A rect is resolved from its finding's quote, so adopting ``b``'s rect onto ``a``
+    is coherent only when they anchor the *same* string — equal quotes, or one side
+    has no quote to contradict. Two *different* quotes must never share a rectangle.
+    """
+    qa = _normalize(a.source_quote or "")
+    qb = _normalize(b.source_quote or "")
+    return not qa or not qb or qa == qb
 
 
 def _add_supporting(existing: Finding, quote: str) -> None:
@@ -304,7 +322,11 @@ def _merge_into(existing: Finding, incoming: Finding, trace: list | None = None)
         _add_supporting(existing, q)
 
     # Coherent grounding: if ``incoming`` is the better representative, adopt its
-    # WHOLE bundle atomically; either way the loser's quote becomes support.
+    # WHOLE bundle atomically — text, category, quote, tile, anchor_hint, id, AND
+    # the **anchor** (the rect belongs to the quote it was resolved from; keeping
+    # one member's quote with another's rectangle is the cross-grounding §12.2
+    # forbids). A deterministic auditor sorts first in _grounding_quality, so its
+    # authoritative quote+rect wins the representative and its exact anchor is kept.
     if _grounding_quality(incoming) > _grounding_quality(existing):
         loser_quote = existing.source_quote
         existing.sheet_id = incoming.sheet_id
@@ -313,6 +335,7 @@ def _merge_into(existing: Finding, incoming: Finding, trace: list | None = None)
         existing.source_quote = incoming.source_quote
         existing.tile = incoming.tile
         existing.anchor_hint = incoming.anchor_hint
+        existing.anchor = incoming.anchor
         existing.id = incoming.id
         _add_supporting(existing, loser_quote)
     else:
@@ -323,14 +346,17 @@ def _merge_into(existing: Finding, incoming: Finding, trace: list | None = None)
     if existing.citation is None and incoming.citation is not None:
         existing.citation = incoming.citation
 
+    # Anchor upgrade: an incoming member that carries a rectangle can place an
+    # unanchored survivor (e.g. an anchored model member placing a rect-less
+    # deterministic auditor entry) — but ONLY when their quotes are placement-
+    # compatible, so a different quote's rect is never grafted on (§12.2 / C-2).
     existing_anchored = existing.anchor is not None and existing.anchor.rect_pdf is not None
     incoming_anchored = incoming.anchor is not None and incoming.anchor.rect_pdf is not None
-    if incoming_anchored and not existing_anchored:
+    if incoming_anchored and not existing_anchored and _placement_compatible(existing, incoming):
         existing.anchor = incoming.anchor
-        if not _deterministic(existing):
-            existing.verification = incoming.verification
-    # A DETERMINISTIC verdict is host-computed ground truth: it survives the
-    # merge no matter which member carries the rectangle.
+
+    # A DETERMINISTIC verdict is host-computed ground truth: it survives the merge
+    # regardless of which member became the representative bundle.
     if _deterministic(incoming) and not _deterministic(existing):
         existing.verification = incoming.verification
 
@@ -361,7 +387,7 @@ def reconcile_post_anchor(ledger: "Ledger") -> int:
     merged into the survivor and dropped; deterministic (best-quality survivor,
     fixed order). Returns the number of entries folded. Only runs while SEALED.
     """
-    if not ledger.sealed:
+    if ledger.state != SEALED:          # SEALED only — never re-dedup a NUMBERED ledger
         return 0
     by_sheet: dict[tuple, list[Finding]] = {}
     for e in ledger.entries:
@@ -373,14 +399,25 @@ def reconcile_post_anchor(ledger: "Ledger") -> int:
         # merge keeps its (better) grounding bundle.
         group.sort(key=_grounding_quality, reverse=True)
         survivors: list[Finding] = []
+        members: dict[int, list[Finding]] = {}
         for e in group:
-            match = next((s for s in survivors if _is_duplicate(e, s)), None)
+            # Complete-link, like the ingest pass (§12.1): fold only into a survivor
+            # whose EVERY already-folded member duplicates ``e``, so a signature-less
+            # bridge can't collapse a conflicting A+B+C chain (e.g. M-101 + generic +
+            # M-102). ``e`` is worse-or-equal (best-first sort), so ``_merge_into``
+            # keeps the survivor's bundle and never mutates its recorded members.
+            match = next(
+                (s for s in survivors if all(_is_duplicate(e, m) for m in members[id(s)])),
+                None,
+            )
             if match is not None:
+                members[id(match)].append(e)
                 _merge_into(match, e, ledger.merge_trace)
                 ledger.drop_entry(e)
                 folded += 1
             else:
                 survivors.append(e)
+                members[id(e)] = [e]
     if folded:
         _log.info("post-anchor reconciliation folded %d duplicate finding(s)", folded)
     return folded

@@ -22,8 +22,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   category, quote, tile, anchor — comes from **one** representative atomically; the
   loser's distinct quote is preserved in a new `supporting_quotes` field rather than
   spliced onto the survivor's text (the reproduced K-factor/relief-valve mixed-finding
-  trap is closed). The representative is chosen by a **total** quality order, so the
-  final entry and its id are identical regardless of ingest order.
+  trap is closed). The representative of a cluster is chosen by a **total** quality
+  order, so a given set of duplicates always collapses to the same entry and id; the
+  pipeline ingests channels in a fixed order, so the run is reproducible (I-7).
 - **QC ids are now positional (DA-006/§12.4):** the ledger gained an explicit
   `OPEN → seal() → SEALED → number() → NUMBERED` lifecycle. Numbering happens
   **after** anchoring (the freeze-before-anchor ordering is gone), so `QC-001…`

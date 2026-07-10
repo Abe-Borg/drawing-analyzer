@@ -226,15 +226,53 @@ def test_duplicate_matrix():
     assert _is_duplicate(a, other) is False
 
 
+def test_signature_measurements_carry_the_unit():
+    from drawing_analyzer.critique import _measurements, _signatures_compatible
+    # The unit is part of the signature: "6 in" and "6 ft" are different quantities.
+    a = _finding("clearance is 6 in at the panel", quote="6 IN", tile=[0, 0])
+    b = _finding("clearance is 6 ft at the panel", quote="6 FT", tile=[0, 0])
+    assert _measurements(a) == {"6in"} and _measurements(b) == {"6ft"}
+    assert _signatures_compatible(a, b) is False       # 6 in != 6 ft
+    assert _is_duplicate(a, b) is False
+    # "500 gpm" vs "500 psi" also differ despite the same number.
+    g = _finding("design 500 gpm at the pump", tile=[0, 0])
+    p = _finding("design 500 psi at the pump", tile=[0, 0])
+    assert _signatures_compatible(g, p) is False
+
+
+def test_signature_regexes_avoid_false_positives():
+    from drawing_analyzer.critique import _measurements, _tags
+    # The hyphen in a tag "P-1" is not a numeric sign, and "voltage" isn't "volt".
+    assert _measurements(_finding("pump P-1 voltage rating is 480 at panel")) == set()
+    # A real measurement adjacent to a tag reads (only the real one, no spurious -1).
+    assert _measurements(_finding("pump P-1 draws 6 amps")) == {"6amps"}
+    # Dotted refs stay distinct (M1.01 != M10.1); a hyphen folds (M-101 == M101).
+    assert _tags(_finding("see M1.01")) != _tags(_finding("see M10.1"))
+    assert _tags(_finding("see M-101")) == _tags(_finding("see M101"))
+
+
+def test_text_merge_requires_compatible_category():
+    # Same words, different category → different reviewable items, not a merge.
+    code = _finding("rated wall assembly UL U419 penetration issue", cat="code", tile=[0, 0])
+    coord = _finding("rated wall assembly UL U419 penetration issue", cat="coordination", tile=[0, 0])
+    assert _is_duplicate(code, coord) is False
+
+
 def test_true_duplicates_still_merge():
-    # The complement of the matrix: genuine duplicates DO merge — same quote (same
-    # category), or strong topical overlap — even across different tiles.
-    q1 = _finding("relief valve setting is too high", quote="RV-3 SET 125 PSI", tile=[0, 0])
-    q2 = _finding("RV-3 pressure exceeds the vessel MAWP", quote="RV-3 SET 125 PSI", tile=[3, 3])
-    assert _is_duplicate(q1, q2) is True         # identical quote, same category
+    # The complement of the matrix: genuine duplicates DO merge — strong topical
+    # overlap, or the SAME quote backed by at least moderate text agreement — even
+    # across different tiles.
+    q1 = _finding("relief valve RV-3 setting is too high", quote="RV-3 SET 125 PSI", tile=[0, 0])
+    q2 = _finding("relief valve RV-3 setting exceeds the maximum", quote="RV-3 SET 125 PSI", tile=[3, 3])
+    assert _is_duplicate(q1, q2) is True          # same quote + moderate text overlap
     t1 = _finding("missing cleanout at the base of the soil stack", tile=[0, 0])
     t2 = _finding("missing cleanout at base of the soil stack riser", tile=[5, 5])
-    assert _is_duplicate(t1, t2) is True         # strong topical overlap
+    assert _is_duplicate(t1, t2) is True          # strong topical overlap alone
+    # Same quote but UNRELATED text is NOT a duplicate — two different issues about
+    # one component both quote its tag verbatim (§12.1, no data loss).
+    d1 = _finding("pump P-1 voltage listed as 480 should be 208", quote="PUMP P-1", tile=[0, 0])
+    d2 = _finding("pump P-1 impeller diameter conflicts with the curve", quote="PUMP P-1", tile=[0, 0])
+    assert _is_duplicate(d1, d2) is False
 
 
 # --------------------------------------------------------------------------- #

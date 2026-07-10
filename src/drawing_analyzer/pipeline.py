@@ -830,28 +830,32 @@ def _run_qc_stages(
     entries = ledger.seal()
 
     # Anchor the entries that don't already carry a rectangle (auditor entries do).
+    # The WHOLE block is wrapped (not just the per-sheet resolves): a throw in the
+    # setup (imports, key-building) must not skip numbering below and ship entries
+    # with empty QC ids — pre-Phase-20 freeze() ran before anchoring, so numbering
+    # always survived; number() now runs after, so anchoring must stay non-fatal (I-3).
     if entries and geometries:
         if progress is not None:
             progress(total, total, "Anchoring findings")
-        from .anchor import resolve_anchors, resolve_conflict_legs
-
-        geom_by_key = {source_page_key(g.ref): g for g in geometries}
-        by_sheet: dict[tuple, list[Finding]] = {}
-        for finding in entries:
-            by_sheet.setdefault(source_page_key(finding), []).append(finding)
-        for key, sheet_findings in by_sheet.items():
-            geometry = geom_by_key.get(key)
-            if geometry is None:
-                continue
-            try:
-                resolve_anchors(sheet_findings, geometry)
-            except Exception as exc:  # noqa: BLE001 - never fatal
-                _log.warning("anchoring failed for %s: %s", key, exc)
-        # Anchor the cross-sheet findings' also_on legs, each on its own sheet.
         try:
+            from .anchor import resolve_anchors, resolve_conflict_legs
+
+            geom_by_key = {source_page_key(g.ref): g for g in geometries}
+            by_sheet: dict[tuple, list[Finding]] = {}
+            for finding in entries:
+                by_sheet.setdefault(source_page_key(finding), []).append(finding)
+            for key, sheet_findings in by_sheet.items():
+                geometry = geom_by_key.get(key)
+                if geometry is None:
+                    continue
+                try:
+                    resolve_anchors(sheet_findings, geometry)
+                except Exception as exc:  # noqa: BLE001 - never fatal
+                    _log.warning("anchoring failed for %s: %s", key, exc)
+            # Anchor the cross-sheet findings' also_on legs, each on its own sheet.
             resolve_conflict_legs(entries, geom_by_key)
-        except Exception as exc:  # noqa: BLE001 - never fatal
-            _log.warning("cross-sheet leg anchoring failed: %s", exc)
+        except Exception as exc:  # noqa: BLE001 - anchoring must never sink numbering
+            _log.warning("anchoring stage failed: %s", exc)
 
     # Cautious post-anchor reconciliation (Pass B, §12.1): geometry is now available.
     try:
