@@ -176,52 +176,72 @@ def test_render_sheet_near_blank_is_off_by_default(monkeypatch):
 
 
 def test_sheet_render_identity_stable_and_content_sensitive():
+    # Phase 19B: the render identity keys on the WHOLE-SOURCE content_sha256 (the
+    # revision identity), the page position within it, and the render config +
+    # coordinate space + renderer environment.
     pymupdf = pytest.importorskip("pymupdf")
+    from drawing_analyzer.models import COORDINATE_SPACE_VERSION
     from drawing_analyzer.render import sheet_render_identity
 
     doc = pymupdf.open()
     p0 = doc.new_page(width=792, height=612)
     p0.insert_text((72, 72), "SHEET A")
-    p1 = doc.new_page(width=792, height=612)
-    p1.insert_text((72, 72), "SHEET B DIFFERENT")
     try:
-        id_a = sheet_render_identity(doc[0], rows=6, cols=6)
-        id_a2 = sheet_render_identity(doc[0], rows=6, cols=6)
-        id_b = sheet_render_identity(doc[1], rows=6, cols=6)
-        id_a_grid = sheet_render_identity(doc[0], rows=2, cols=2)
+        def ident(sha="sha-A", page_index=0, page_count=1, rows=6, cols=6):
+            return sheet_render_identity(
+                doc[0], content_sha256=sha, page_index=page_index,
+                page_count=page_count, rows=rows, cols=cols,
+            )
+
+        id_a = ident()
+        id_a2 = ident()
+        id_b = ident(sha="sha-B")                 # a different source revision
+        id_a_grid = ident(rows=2, cols=2)         # grid/target is part of identity
+        id_a_p1 = ident(page_index=1, page_count=2)   # page position matters
     finally:
         doc.close()
 
-    assert id_a == id_a2                      # deterministic for the same page+params
-    assert id_a != id_b                       # different page content
-    assert id_a != id_a_grid                  # grid/target is part of the identity
-    assert pymupdf.__version__ in id_a        # engine version folded in
+    assert id_a == id_a2                       # deterministic for same sha+page+config
+    assert id_a != id_b                        # a byte change to the source re-keys
+    assert id_a != id_a_grid
+    assert id_a != id_a_p1
+    assert pymupdf.__version__ in id_a         # renderer environment folded in
+    assert "sha-A" in id_a                     # the source revision identity
+    assert COORDINATE_SPACE_VERSION in id_a    # canonical coordinate space folded in
 
 
-def test_sheet_render_identity_covers_form_xobjects():
-    # A page whose content stream only *invokes* a Form XObject (the real drawing
-    # lives in the form) must still re-key when that form changes — otherwise a
-    # regenerated sheet would hit a stale level-1 cache entry and skip rendering.
+def test_sheet_render_identity_covers_form_xobjects(tmp_path):
+    # A change inside an invoked Form XObject (the real drawing / title block) must
+    # still re-key. Under Phase 19B the whole-source content_sha256 subsumes this:
+    # any byte change — content stream, form, image, rotation, CropBox, annotation —
+    # changes the file hash, so a regenerated form cannot hit a stale level-1 entry.
     pymupdf = pytest.importorskip("pymupdf")
     from drawing_analyzer.render import sheet_render_identity
+    from drawing_analyzer.source_registry import content_sha256
 
-    def _wrapped(text):
+    def _wrapped_file(path, text):
         src = pymupdf.open()
         sp = src.new_page(width=200, height=200)
         sp.insert_text((30, 100), text)               # content lives in the form
         tgt = pymupdf.open()
         tp = tgt.new_page(width=400, height=400)
         tp.show_pdf_page(pymupdf.Rect(0, 0, 400, 400), src, 0)  # invoke as a form
-        return tgt, tp
+        tgt.save(str(path))
+        tgt.close()
+        src.close()
 
-    d1, p1 = _wrapped("TITLE BLOCK V1")
-    d2, p2 = _wrapped("TITLE BLOCK V2 CHANGED")
+    f1, f2 = tmp_path / "v1.pdf", tmp_path / "v2.pdf"
+    _wrapped_file(f1, "TITLE BLOCK V1")
+    _wrapped_file(f2, "TITLE BLOCK V2 CHANGED")
+    sha1, _s1, _m1 = content_sha256(f1)
+    sha2, _s2, _m2 = content_sha256(f2)
+    assert sha1 != sha2                        # different form content -> different file hash
+
+    d1, d2 = pymupdf.open(str(f1)), pymupdf.open(str(f2))
     try:
-        id1 = sheet_render_identity(p1, rows=2, cols=2)
-        id2 = sheet_render_identity(p2, rows=2, cols=2)
+        id1 = sheet_render_identity(d1[0], content_sha256=sha1, page_index=0, page_count=1, rows=2, cols=2)
+        id2 = sheet_render_identity(d2[0], content_sha256=sha2, page_index=0, page_count=1, rows=2, cols=2)
     finally:
         d1.close()
         d2.close()
-    # The wrapper page content is identical; only the invoked form's stream
-    # differs — the identity must reflect it (the P1 review fix).
     assert id1 != id2

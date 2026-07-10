@@ -489,6 +489,43 @@ class CritiqueResult:
     cached: bool = False
 
 
+def critique_result_from_entry(entry: dict, ref: Any) -> CritiqueResult:
+    """Rebuild a merged :class:`CritiqueResult` from a cache entry (any tier).
+
+    A cache hit is content-keyed, sheet-local model data, so its findings/claims are
+    rebound to the current ``ref``'s source identity (§10.3). Shared by the level-2
+    (image-bytes) hit inside :func:`critique_sheet_self_consistent` and the level-1
+    (pre-render) hit the pipeline serves without rasterizing (Phase 19B) — one
+    place, so the two tiers can never drift in how a hit is materialized.
+    """
+    return CritiqueResult(
+        findings=findings_from_cache(entry, ref),
+        claims=claims_from_cache(entry, ref),
+        input_tokens=int(entry.get("input_tokens", 0) or 0),
+        output_tokens=int(entry.get("output_tokens", 0) or 0),
+        runs=int(entry.get("runs", 0) or 0),
+        error=None,
+        cached=True,
+    )
+
+
+def critique_cache_entry_from_result(res: CritiqueResult) -> dict:
+    """The cache-entry dict for a **complete** critique result (every tier shares it).
+
+    Only ever called for a full self-consistency result (all requested reads
+    succeeded); a partial result is returned to the caller but never cached (a
+    1-of-2 read has nothing to disagree with it). Mirrors ``cache_entry_from_digest``.
+    """
+    return {
+        "findings": [f.to_dict() for f in res.findings],
+        "claims": [c.to_dict() for c in res.claims],
+        "input_tokens": res.input_tokens,
+        "output_tokens": res.output_tokens,
+        "runs": res.runs,
+        "created_ts": time.time(),
+    }
+
+
 def critique_sheet(
     rendered: RenderedSheet,
     *,
@@ -599,15 +636,7 @@ def critique_sheet_self_consistent(
         )
         hit = cache.get(cache_key)
         if hit is not None:
-            return CritiqueResult(
-                findings=findings_from_cache(hit, rendered.ref),
-                claims=claims_from_cache(hit, rendered.ref),
-                input_tokens=int(hit.get("input_tokens", 0) or 0),
-                output_tokens=int(hit.get("output_tokens", 0) or 0),
-                runs=int(hit.get("runs", runs) or runs),
-                error=None,
-                cached=True,
-            )
+            return critique_result_from_entry(hit, rendered.ref)
 
     run_groups: list[list[Finding]] = []
     all_claims: list[NumericClaim] = []
@@ -649,6 +678,15 @@ def critique_sheet_self_consistent(
         len(run_groups), len(merged), rendered.ref.display_label,
     )
 
+    result = CritiqueResult(
+        findings=merged,
+        claims=claims,
+        input_tokens=total_in,
+        output_tokens=total_out,
+        runs=len(run_groups),
+        error=None,
+    )
+
     # Cache only a *complete* self-consistency result — every requested run
     # succeeded. A partial result (a transient failure dropped a run) is returned
     # to the caller (so this run still produces findings) but never cached: the
@@ -657,26 +695,9 @@ def critique_sheet_self_consistent(
     # under the full-runs key would permanently deny the requested self-consistency.
     # Mirrors digest_sheet refusing to cache transient/degraded reads.
     if cache is not None and cache_key is not None and len(run_groups) == runs:
-        cache.put(
-            cache_key,
-            {
-                "findings": [f.to_dict() for f in merged],
-                "claims": [c.to_dict() for c in claims],
-                "input_tokens": total_in,
-                "output_tokens": total_out,
-                "runs": len(run_groups),
-                "created_ts": time.time(),
-            },
-        )
+        cache.put(cache_key, critique_cache_entry_from_result(result))
 
-    return CritiqueResult(
-        findings=merged,
-        claims=claims,
-        input_tokens=total_in,
-        output_tokens=total_out,
-        runs=len(run_groups),
-        error=None,
-    )
+    return result
 
 
 def _dedup_claims(claims: list[NumericClaim]) -> list[NumericClaim]:

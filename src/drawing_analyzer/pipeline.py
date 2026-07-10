@@ -451,6 +451,7 @@ def _level1_partition(
     use_thinking: bool,
     effort: str | None,
     focus: str | None,
+    sha_by_path: "dict[str, str] | None" = None,
 ) -> "tuple[dict, set, dict, list]":
     """Pre-render level-1 cache scan (Phase 9).
 
@@ -472,7 +473,7 @@ def _level1_partition(
     geometries: list[SheetGeometry] = []
     focus_frag = focus_cache_fragment(focus)
     for ref, identity, geometry in iter_sheet_prescan(
-        paths, rows=rows, cols=cols, overlap_frac=overlap_frac
+        paths, rows=rows, cols=cols, overlap_frac=overlap_frac, sha_by_path=sha_by_path
     ):
         geometries.append(geometry)
         key = digest_cache_key_level1(
@@ -526,6 +527,62 @@ class _QCResult:
     mutated_sources: list[str] = field(default_factory=list)
 
 
+def _critique_level1_partition(
+    paths: list[Path],
+    *,
+    rows: int,
+    cols: int,
+    overlap_frac: float,
+    cache: Any,
+    model: str,
+    runs: int,
+    profiles_key: str | None,
+    sha_by_path: "dict[str, str] | None" = None,
+) -> "tuple[dict, set, dict]":
+    """Pre-render level-1 cache scan for the critique stage (Phase 19B, §11.5).
+
+    Mirrors :func:`_level1_partition` for the digest: walks every sheet via
+    :func:`iter_sheet_prescan` (page access only, no rasterization), computes the
+    critique level-1 key over the *same* render identity the digest keys on, and
+    probes the critique cache. Returns ``(cached_by_ref, miss_only, level1_keys)``
+    — a hit is served as a merged :class:`~drawing_analyzer.critique.CritiqueResult`
+    with neither a render nor an API call; a miss renders and critiques and its
+    result is stored under its level-1 key (store-under-both).
+    """
+    from .critique import (
+        CRITIQUE_PROMPT_VERSION,
+        DEFAULT_CRITIQUE_EFFORT,
+        DEFAULT_CRITIQUE_MAX_TOKENS,
+        critique_result_from_entry,
+    )
+    from .digest_cache import critique_cache_key_level1
+
+    cached_by_ref: dict[tuple[str, int], Any] = {}
+    miss_only: set[tuple[str, int]] = set()
+    level1_keys: dict[tuple[str, int], str] = {}
+    for ref, identity, _geom in iter_sheet_prescan(
+        paths, rows=rows, cols=cols, overlap_frac=overlap_frac, sha_by_path=sha_by_path
+    ):
+        key = critique_cache_key_level1(
+            identity,
+            model=model,
+            prompt_version=CRITIQUE_PROMPT_VERSION,
+            max_tokens=DEFAULT_CRITIQUE_MAX_TOKENS,
+            effort=DEFAULT_CRITIQUE_EFFORT,
+            use_thinking=True,
+            runs=runs,
+            profiles_key=profiles_key,
+        )
+        rk = _refkey(ref)
+        level1_keys[rk] = key
+        entry = cache.get(key)
+        if entry is not None:
+            cached_by_ref[rk] = critique_result_from_entry(entry, ref)
+        else:
+            miss_only.add(rk)
+    return cached_by_ref, miss_only, level1_keys
+
+
 def _run_critique_stage(
     paths: list[Path],
     *,
@@ -538,71 +595,110 @@ def _run_critique_stage(
     total: int,
     max_workers: int | None,
     profiles: list | None = None,
+    sha_by_path: "dict[str, str] | None" = None,
 ) -> tuple[list[Finding], list[NumericClaim], int, int]:
-    """Critique every sheet (Phase 11): re-render, then self-consistent critique.
+    """Critique every sheet (Phase 11): self-consistent critique, cached two ways.
 
-    Path-agnostic — it re-renders from the PDFs because none of the digest paths
-    (batch, real time, or a cache hit) retain the images the critique needs — so
-    it streams renders on the calling thread while the per-sheet self-consistent
-    critiques run on the same bounded pool the digests use. Each sheet's *merged*
-    critique is cached under its own key, so a re-run skips the model calls (the
-    render still runs; a level-1 render-skip for the critique is a later
-    optimization). Additive and non-fatal: a per-sheet failure is logged and
-    contributes no findings; the run continues.
+    A **level-1** pre-render cache scan (Phase 19B) recognizes unchanged sheets
+    before rasterizing, so a warm exhaustive re-run skips **both** the render and
+    the critique API calls for a cached sheet — the level-2 (PNG-bytes) cache alone
+    still had to rasterize to discover the hit. Only the sheets that miss level-1
+    are re-rendered (streamed on the calling thread) and critiqued on the same
+    bounded pool the digests use; each complete result is then stored under its
+    level-1 key too (store-under-both). Additive and non-fatal: a per-sheet failure
+    is logged and contributes no findings; the run continues.
 
     Returns ``(critique_findings, claims, input_tokens, output_tokens)``; the
     findings are sorted deterministically so the pooled result is independent of
     completion order (I-7). ``claims`` are the numeric relationships the critique
     transcribed (Phase 14), fed to the deterministic arithmetic auditor.
     """
-    from .critique import critique_sheet_self_consistent
+    from .critique import (
+        critique_cache_entry_from_result,
+        critique_model,
+        critique_runs,
+        critique_sheet_self_consistent,
+    )
+    from .profiles import profiles_cache_fragment
 
-    workers = _resolve_workers(max_workers, total)
+    model = critique_model()
+    runs = critique_runs()
+    profiles_key = profiles_cache_fragment(profiles or [])
+
+    cached_by_ref: dict[tuple[str, int], Any] = {}
+    level1_keys: dict[tuple[str, int], str] = {}
+    only: set[tuple[str, int]] | None = None
+    if cache is not None:
+        cached_by_ref, only, level1_keys = _critique_level1_partition(
+            paths, rows=rows, cols=cols, overlap_frac=overlap_frac, cache=cache,
+            model=model, runs=runs, profiles_key=profiles_key, sha_by_path=sha_by_path,
+        )
+        if cached_by_ref:
+            _log.info(
+                "level-1 critique cache: %d/%d sheet(s) hit — skipping render",
+                len(cached_by_ref), total,
+            )
+
+    workers = _resolve_workers(max_workers, max(1, total))
     findings: list[Finding] = []
     claims: list[NumericClaim] = []
     in_tok = out_tok = 0
     done = 0
 
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        in_flight: set = set()
+    # Cached hits contribute findings/claims with no render and no token cost.
+    for res in cached_by_ref.values():
+        findings.extend(res.findings)
+        claims.extend(res.claims)
+        done += 1
+        if progress is not None:
+            progress(total, total, f"Critiquing sheet {done}/{total}")
 
-        def _collect_one() -> None:
-            nonlocal done, in_tok, out_tok
-            finished, _ = wait(in_flight, return_when=FIRST_COMPLETED)
-            for fut in finished:
-                in_flight.discard(fut)
-                done += 1
-                try:
-                    res = fut.result()
-                except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
-                    _log.warning("critique failed for a sheet: %s", exc)
-                    continue
-                if res.error:
-                    _log.warning("critique degraded for a sheet: %s", res.error)
-                findings.extend(res.findings)
-                claims.extend(res.claims)
-                # A cache hit made no API call this run, so exclude its (original)
-                # token cost — keeping run totals honest, as the digest path does
-                # for cached sheets.
-                if not res.cached:
-                    in_tok += res.input_tokens
-                    out_tok += res.output_tokens
-                if progress is not None:
-                    progress(total, total, f"Critiquing sheet {done}/{total}")
+    miss_total = total if only is None else len(only)
+    if miss_total > 0:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            in_flight: dict = {}
 
-        for rendered in iter_rendered_sheets(
-            paths, rows=rows, cols=cols, overlap_frac=overlap_frac
-        ):
-            in_flight.add(
-                executor.submit(
+            def _collect_one() -> None:
+                nonlocal done, in_tok, out_tok
+                finished, _ = wait(in_flight, return_when=FIRST_COMPLETED)
+                for fut in finished:
+                    ref = in_flight.pop(fut)
+                    done += 1
+                    try:
+                        res = fut.result()
+                    except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
+                        _log.warning("critique failed for a sheet: %s", exc)
+                        continue
+                    if res.error:
+                        _log.warning("critique degraded for a sheet: %s", res.error)
+                    findings.extend(res.findings)
+                    claims.extend(res.claims)
+                    # A cache hit made no API call this run, so exclude its (original)
+                    # token cost — keeping run totals honest, as the digest path does.
+                    if not res.cached:
+                        in_tok += res.input_tokens
+                        out_tok += res.output_tokens
+                    # Store-under-both: promote a *complete* result to its level-1
+                    # key so the next run skips rendering this sheet entirely. A
+                    # partial (a dropped run) is never cached — mirrors the level-2
+                    # guard inside critique_sheet_self_consistent.
+                    key = level1_keys.get(_refkey(ref)) if cache is not None else None
+                    if key is not None and res.error is None and res.runs == runs:
+                        cache.put(key, critique_cache_entry_from_result(res))
+                    if progress is not None:
+                        progress(total, total, f"Critiquing sheet {done}/{total}")
+
+            for rendered in iter_rendered_sheets(
+                paths, rows=rows, cols=cols, overlap_frac=overlap_frac, only=only
+            ):
+                in_flight[executor.submit(
                     critique_sheet_self_consistent,
                     rendered, client=client, cache=cache, profiles=profiles,
-                )
-            )
-            while len(in_flight) >= workers:
+                )] = rendered.ref
+                while len(in_flight) >= workers:
+                    _collect_one()
+            while in_flight:
                 _collect_one()
-        while in_flight:
-            _collect_one()
 
     findings.sort(key=lambda f: (source_page_key(f), f.id))
     _log.info(
@@ -1138,6 +1234,16 @@ def extract_drawing_context(
     total = len(refs)
     file_count = len(inventory.accepted_documents)
 
+    # The inventory already hashed every accepted source once (§10.1); reuse those
+    # for the level-1 render identity (DA-004) so the file is never re-read per
+    # page. ``str(path) -> content_sha256``; a source with no hash falls back to a
+    # fresh single hash inside the prescan.
+    sha_by_path = {
+        str(d.pdf_path): d.content_sha256
+        for d in inventory.accepted_documents
+        if d.content_sha256
+    }
+
     # Page-level render failures (§10.5) are recorded and the page is excluded,
     # but the rest of the set still processes — never a whole-run abort.
     page_error_lines: list[str] = []
@@ -1186,7 +1292,7 @@ def extract_drawing_context(
         cached_by_ref, only, level1_keys, prescan_geoms = _level1_partition(
             paths, rows=rows, cols=cols, overlap_frac=overlap_frac, cache=cache,
             model=model, max_tokens=max_tokens, use_thinking=use_thinking,
-            effort=effort, focus=focus or None,
+            effort=effort, focus=focus or None, sha_by_path=sha_by_path,
         )
         if need_geometry:
             sheet_geometries.extend(prescan_geoms)
@@ -1284,6 +1390,7 @@ def extract_drawing_context(
                 paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
                 client=client, cache=cache, progress=progress, total=total,
                 max_workers=max_workers, profiles=resolved_profiles,
+                sha_by_path=sha_by_path,
             )
             numeric_claims.extend(c_claims)
             in_tok += c_in

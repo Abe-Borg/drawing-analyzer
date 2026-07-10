@@ -33,8 +33,14 @@ from typing import Any
 # discarded on load and re-digested once. Bumped to 4 (Phase 18A, DA-001): a
 # cached ``Finding``/``NumericClaim`` now carries a ``source_id`` and its content
 # ``id`` folds source identity in, so pre-v4 entries (which lack it and would be
-# rebound to a mismatched id) are discarded on load and re-digested once.
-_SCHEMA_VERSION = 4
+# rebound to a mismatched id) are discarded on load and re-digested once. Bumped to
+# 5 (Phase 19B, DA-004): the level-1 render identity was rebased on the whole
+# source's ``content_sha256`` + the canonical coordinate space + the renderer
+# environment (the old per-page object-graph fingerprint missed page rotation,
+# CropBox origin, and rendered annotation appearance streams), and a critique
+# level-1 key was added — so every pre-v5 level-1 / critique entry must miss once
+# rather than serve a stale, possibly wrong-space digest.
+_SCHEMA_VERSION = 5
 
 _FALSEY = {"0", "false", "no", "off", ""}
 
@@ -162,6 +168,60 @@ def digest_cache_key_level1(
         h.update(b"\x00")
     if focus:
         h.update(f"focus={focus}".encode("utf-8"))
+        h.update(b"\x00")
+    h.update(b"render_identity=")
+    h.update(render_identity.encode("utf-8"))
+    h.update(b"\x00")
+    return h.hexdigest()
+
+
+def critique_cache_key_level1(
+    render_identity: str,
+    *,
+    model: str,
+    prompt_version: str,
+    max_tokens: int,
+    effort: str | None,
+    use_thinking: bool,
+    runs: int,
+    profiles_key: str | None = None,
+) -> str:
+    """Content-address one sheet's *critique* **before rendering** (Phase 19B, §11.5).
+
+    The critique reads the same rendered images the digest does, so an unchanged
+    exhaustive re-run would otherwise have to rasterize every sheet merely to
+    compute the level-2 (PNG-bytes) :func:`critique_cache_key` and discover the
+    critique was already cached — contradicting the warm-run fast path. This keys
+    the critique on the *same* pre-render ``render_identity``
+    (:func:`drawing_analyzer.render.sheet_render_identity`) the digest level-1 key
+    uses, plus the critique's own request params — the critique prompt version, the
+    self-consistency ``runs`` count (a one-read and a two-read merge differ), and the
+    profile fingerprint (Phase 12; selecting or editing a profile re-critiques). The
+    ``stage=critique level=1`` namespace tags keep it from ever colliding with the
+    digest level-1 key or the level-2 critique key. On a hit the pipeline serves the
+    merged critique with neither a render nor an API call; on a miss it renders,
+    critiques, and stores under this key too (store-under-both).
+
+    ``profiles_key`` is folded **only when non-empty**, so a no-profiles critique
+    level-1 key stays byte-identical to a run that never selected one.
+    """
+    h = hashlib.sha256()
+    for part in (
+        f"schema={_SCHEMA_VERSION}",
+        "stage=critique",
+        "level=1",
+        f"model={model or ''}",
+        f"prompt={prompt_version or ''}",
+        f"max_tokens={int(max_tokens)}",
+        f"effort={effort or ''}",
+        f"thinking={'1' if use_thinking else '0'}",
+        f"runs={int(runs)}",
+    ):
+        h.update(part.encode("utf-8"))
+        h.update(b"\x00")
+    if profiles_key:
+        h.update(b"profiles=")
+        h.update(profiles_key.encode("utf-8"))
         h.update(b"\x00")
     h.update(b"render_identity=")
     h.update(render_identity.encode("utf-8"))

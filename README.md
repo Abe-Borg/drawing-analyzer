@@ -218,15 +218,23 @@ non-goal:
 - **Skip-render on a cache hit (two-level key).** Rasterizing a sheet's overview
   + 36 tiles is the dominant re-run cost (~4.5 s/sheet; ~2.5 min for a 33-sheet
   set). A digest is deterministic given the rendered images, so before rendering
-  the pipeline computes a **level-1 key** from cheap page access alone — the
-  PyMuPDF version, grid/overlap/render-target, and a hash of the page's content
-  streams + referenced image bytes + rect — and, on a hit, serves the cached
-  digest **without rendering**. A fully-cached 33-sheet re-run drops ~2.5 min of
+  the pipeline computes a **level-1 key** from cheap page access alone and, on a
+  hit, serves the cached digest **without rendering**. The level-1 identity keys on
+  the **whole source file's content hash** (`content_sha256`, computed once per
+  source) — so *any* byte change re-keys, including page **rotation**, the
+  **CropBox**, and a rendered **annotation** (the earlier per-page fingerprint
+  hashed only content streams + page dimensions and could serve a stale digest
+  after a 180° flip, a same-size re-crop, or an added markup) — plus the render
+  config (grid / overlap / target / blank-suppression), the canonical
+  **coordinate-space version**, and the **renderer environment** (OS + PyMuPDF/MuPDF
+  build, so a cache copied between installations misses rather than serving pixels
+  this one wouldn't reproduce). A fully-cached 33-sheet re-run drops ~2.5 min of
   render to ~0. On a miss the sheet renders, the digest is computed, and it is
   stored under **both** the level-1 key and the existing rendered-bytes (level-2)
-  key, so the *next* run skips it. Any change that would alter the pixels — the
-  page content, the render target, the grid, the PyMuPDF version — re-keys and
-  re-renders, so the cache stays correct, not just fast.
+  key, so the *next* run skips it. The **critique** has its own level-1 key too, so
+  an unchanged exhaustive re-run skips both its API calls *and* rasterization —
+  previously the critique had to re-render every sheet just to discover its result
+  was already cached.
 - **Parallel Files-API uploads.** A sheet's ~37 images upload on a small pool
   (default 6, `DRAWING_ANALYZER_UPLOAD_WORKERS`) instead of one at a time — the
   dominant batch-path latency after rendering. Parallelism changes only
@@ -249,10 +257,12 @@ non-goal:
   so the current render path is left as-is. Process-parallel rendering across
   sheets remains a legitimate future option for 100+-sheet sets.
 
-Note: the two-level key and blank-tile suppression both change what is stored/sent,
-so the digest cache's schema version is bumped — **every pre-existing cache entry
-is invalidated once**; the first run after upgrading re-digests each sheet, then
-caches as before.
+Note: the digest cache's schema version folds into every key, so a change to what
+is stored or how a sheet is identified **invalidates every pre-existing entry
+once**; the first run after upgrading re-digests each sheet, then caches as before.
+It was bumped for the two-level key and blank-tile suppression, and again when the
+level-1 identity moved to the whole-source content hash (so a previously-served
+stale digest after a rotation / re-crop / added annotation is no longer possible).
 
 **Cost of the exhaustive critique.** A plain digest is roughly $0.4–0.6/sheet
 real-time (~half that via Batches). Turning on the [critique pass](#critique-pass-the-reviewer)

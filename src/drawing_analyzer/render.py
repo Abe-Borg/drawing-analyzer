@@ -19,8 +19,8 @@ sheets, and several PDFs flatten into one ordered sheet list.
 """
 from __future__ import annotations
 
-import hashlib
 import os
+import platform
 import re
 from pathlib import Path
 from typing import Callable, Iterator
@@ -299,58 +299,37 @@ def _render_clip(
     return pix.tobytes("png"), pix.width, pix.height
 
 
-def _page_content_fingerprint(page: "pymupdf.Page") -> str:
-    """Fingerprint a page's content **without rendering** — the cheap gate that
-    lets a cache hit skip rasterization entirely (Phase 9, level-1 key).
+def _renderer_environment_fingerprint() -> str:
+    """OS/arch + rasterizer versions — the environment that decides pixels (§11.5).
 
-    Hashes everything that determines the rasterized output: the page's raw
-    content-stream bytes (vector ops, text, image-placement operators), the raw
-    bytes of every image XObject it references (so a swapped-in image at the same
-    xref is caught), and the page rectangle. All from page-object access only —
-    no ``get_pixmap`` — so it is orders of magnitude cheaper than a render.
+    A level-1 cache moved between installations with different font substitution or
+    raster behaviour must not produce a hit, so the platform and the PyMuPDF/MuPDF
+    build are folded into the render identity: a cross-environment entry then misses
+    safely rather than serving pixels this install would not reproduce.
     """
-    h = hashlib.sha256()
-    doc = page.parent
-    for xref in page.get_contents() or []:
-        try:
-            h.update(doc.xref_stream_raw(xref) or b"")
-        except Exception:  # noqa: BLE001 - a missing stream just contributes nothing
-            pass
-        h.update(b"\x00")
-    # Form XObjects — a page whose content stream merely *invokes* a form (the
-    # real vector drawing / title block lives in the form, not the page stream)
-    # would otherwise fingerprint identically after that form is regenerated,
-    # since get_contents() / get_images() cover neither the form's stream. A
-    # stale level-1 hit would then serve the wrong digest without rendering.
-    # get_xobjects() returns every form reachable from the page (recursively,
-    # including nested forms), so hashing each form's raw stream closes the hole.
-    # Deduped + sorted by xref for a stable, order-independent digest.
-    form_xrefs = sorted({entry[0] for entry in page.get_xobjects()})
-    for xref in form_xrefs:
-        h.update(f"form={xref}".encode("utf-8"))
-        try:
-            h.update(doc.xref_stream_raw(xref) or b"")
-        except Exception:  # noqa: BLE001
-            pass
-        h.update(b"\x00")
-    # Image XObjects — get_images(full=True) DOES recurse into forms, so a raster
-    # nested inside a form is captured here even though its form is hashed above.
-    for img in page.get_images(full=True):
-        xref = img[0]
-        h.update(f"img={xref}".encode("utf-8"))
-        try:
-            h.update(doc.xref_stream_raw(xref) or b"")
-        except Exception:  # noqa: BLE001
-            pass
-        h.update(b"\x00")
-    r = page.rect
-    h.update(f"rect={r.width:.3f}x{r.height:.3f}".encode("utf-8"))
-    return h.hexdigest()
+    mupdf = getattr(pymupdf, "mupdf_version", None) or getattr(pymupdf, "MUPDF_VERSION", "?")
+    return (
+        f"{platform.system()}/{platform.machine()}"
+        f"|pymupdf={pymupdf.__version__}|mupdf={mupdf}"
+    )
+
+
+# Bumped when the render-identity SCHEME changes (a new term / a changed meaning),
+# so every pre-change level-1 entry misses once and re-renders. Phase 19B (DA-004)
+# replaced the per-page object-graph fingerprint — which missed page rotation,
+# CropBox origin, and rendered annotation appearance streams — with the whole
+# **source** content hash (``SourceDocument.content_sha256``), which covers every
+# byte of the file (so rotation, CropBox, and annotations are all captured), plus
+# the canonical coordinate-space version and the renderer-environment fingerprint.
+_RENDER_IDENTITY_SCHEME = "render-identity-v2"
 
 
 def sheet_render_identity(
     page: "pymupdf.Page",
     *,
+    content_sha256: str,
+    page_index: int,
+    page_count: int,
     rows: int = tiling.DEFAULT_GRID_ROWS,
     cols: int = tiling.DEFAULT_GRID_COLS,
     overlap_frac: float = tiling.DEFAULT_OVERLAP_FRAC,
@@ -358,26 +337,38 @@ def sheet_render_identity(
     """A stable digest of everything that determines this sheet's rendered images
     **except** the model/request params — computed without rasterizing.
 
-    Folds in the PyMuPDF version (the rasterizer can change pixels across
-    releases), the grid + overlap, the resolved render target (which flips on the
-    raster/vector distinction), the near-blank suppression mode (which changes
-    *which* tiles are emitted), and the page-content fingerprint. A cache keyed on
-    this (see :func:`digest_cache.digest_cache_key_level1`) can therefore serve an
-    unchanged sheet's digest without ever rendering it.
+    The content identity is the **whole source file's** ``content_sha256`` (DA-004),
+    which covers every byte — content streams, forms, images, page rotation, the
+    CropBox, and every rendered annotation's appearance stream — so any visible
+    change to a multi-page source invalidates all of its pages (the safe,
+    correctness-first behaviour §11.5 prescribes; hash the source once, never once
+    per page). ``page_index`` / ``page_count`` name the page within it. The rest
+    fingerprints the render *configuration*: the coordinate-space version, the
+    renderer environment (§11.5), the annotation-render policy, the grid + overlap,
+    the resolved target (which flips on the raster/vector split), the near-blank
+    suppression mode, and the text-extraction cap. A cache keyed on this (see
+    :func:`digest_cache.digest_cache_key_level1`) serves an unchanged sheet's digest
+    without ever rendering it.
     """
     is_raster = len(page.get_text("words")) == 0
     total_images = tiling.total_images_for_grid(rows, cols)
     target_px = tiling.target_long_edge_px(total_images, is_raster=is_raster)
     near_blank, near_blank_bytes = _near_blank_config()
     parts = [
-        f"pymupdf={pymupdf.__version__}",
+        _RENDER_IDENTITY_SCHEME,
+        f"content_sha256={content_sha256}",
+        f"page_index={int(page_index)}",
+        f"page_count={int(page_count)}",
+        f"coord_space={COORDINATE_SPACE_VERSION}",
+        f"env={_renderer_environment_fingerprint()}",
+        "render_annots=1",                 # current policy: annotations ARE rendered
         f"rows={rows}",
         f"cols={cols}",
         f"overlap={overlap_frac:.4f}",
         f"target={target_px}",
         f"raster={int(is_raster)}",
         f"nearblank={int(near_blank)}:{near_blank_bytes if near_blank else 0}",
-        f"page={_page_content_fingerprint(page)}",
+        f"textcap={SHEET_TEXT_MAX_CHARS}",
     ]
     return "|".join(parts)
 
@@ -706,6 +697,7 @@ def iter_sheet_prescan(
     rows: int = tiling.DEFAULT_GRID_ROWS,
     cols: int = tiling.DEFAULT_GRID_COLS,
     overlap_frac: float = tiling.DEFAULT_OVERLAP_FRAC,
+    sha_by_path: "dict[str, str] | None" = None,
 ) -> "Iterator[tuple[SheetRef, str, SheetGeometry]]":
     """Yield ``(ref, render_identity, geometry)`` per page **without rendering**.
 
@@ -714,10 +706,31 @@ def iter_sheet_prescan(
     lightweight geometry the QC stages need, from page-object access alone. The
     pipeline uses the identities to decide which sheets can skip rasterization and
     only feeds the misses to :func:`iter_rendered_sheets`.
+
+    The render identity now keys on the **whole source file's** ``content_sha256``
+    (DA-004), hashed **once per source** here. ``sha_by_path`` lets the caller pass
+    the inventory's already-computed hashes (``str(path) -> sha``) so the file is
+    not re-read; a path absent from the map (or a hash failure) falls back to a
+    fresh single hash. If the content genuinely can't be hashed, the identity falls
+    back to the source's **canonical path** so two different unhashable sources can
+    never collide on one cache entry (the pipeline only ever passes accepted sources,
+    which always carry a real hash, so this fallback is belt-and-suspenders).
     """
     source_ids = assign_source_ids(pdf_paths)
+    sha_by_path = sha_by_path or {}
     for path in pdf_paths:
         path = Path(path)
+        sha = sha_by_path.get(str(path))
+        if not sha:
+            try:
+                sha, _size, _mtime = content_sha256(path)
+            except OSError:
+                sha = ""
+        if not sha:
+            # No content hash: disambiguate by source so a false cross-source hit
+            # is impossible (an identical-geometry sheet from another file would
+            # otherwise share the key).
+            sha = f"unhashed:{canonical_path(path)}"
         doc = pymupdf.open(str(path))
         try:
             count = doc.page_count
@@ -732,7 +745,8 @@ def iter_sheet_prescan(
                 )
                 page = doc[i]
                 identity = sheet_render_identity(
-                    page, rows=rows, cols=cols, overlap_frac=overlap_frac
+                    page, content_sha256=sha, page_index=i, page_count=count,
+                    rows=rows, cols=cols, overlap_frac=overlap_frac,
                 )
                 geometry = _sheet_geometry_no_render(
                     page, ref, rows=rows, cols=cols, overlap_frac=overlap_frac

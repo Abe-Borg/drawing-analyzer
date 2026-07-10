@@ -6,6 +6,38 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed (Phase 19B — cache identity & schema migration, DA-004)
+
+- **A stale cached digest can no longer be served after a visible PDF change.** The
+  level-1 (pre-render) cache key hashed only a page's content streams + referenced
+  images + `page.rect` *dimensions*, which missed page **rotation** (a 180° flip
+  changes neither), a same-size **CropBox** re-crop, and any rendered
+  **annotation** — so an edited sheet could hit a stale entry and skip rendering,
+  serving the wrong (and, after Phase 19A, wrong-coordinate-space) digest. The
+  premise was confirmed empirically against the old fingerprint (180° rotation,
+  same-dims CropBox offset, and an added markup all hashed identically).
+- **Level-1 identity rebased on the whole source file's `content_sha256`** (§11.5):
+  hashed **once per source** (reusing the inventory's value), it covers every byte —
+  content, forms, images, rotation, CropBox, and annotation appearance streams — so
+  any visible change re-keys. Folded in alongside it: the canonical coordinate-space
+  version (`PAGE_VIEW_V2`), a **renderer-environment fingerprint** (OS/arch +
+  PyMuPDF/MuPDF build, so a cache moved between installations misses rather than
+  serving pixels this one wouldn't reproduce), the annotation-render policy, the
+  page index/count, the grid/overlap/target, the blank-suppression mode, and the
+  text-extraction cap. The per-page object-graph fingerprint is retired (the
+  whole-source hash subsumes its form-XObject special case).
+- **Critique level-1 cache added** (`critique_cache_key_level1`): the critique reads
+  the same images as the digest, so an unchanged exhaustive re-run previously had to
+  rasterize every sheet merely to compute the PNG-bytes critique key and discover
+  the result was already cached. A pre-render level-1 scan now serves a cached
+  critique with **neither a render nor an API call**; misses render, critique, and
+  store under the level-1 key too (store-under-both). A warm exhaustive re-run now
+  skips **both** the critique API calls and rasterization.
+- **Cache schema bumped to 5**, so every pre-existing level-1 / critique entry
+  misses once and is recomputed (a concise expectation, not a run error). Two
+  critique cache-serving/storing helpers were extracted so the level-1 and level-2
+  tiers materialize a hit and a stored entry through one code path.
+
 ### Fixed (Phase 19A — canonical page geometry, DA-003)
 
 - **Findings are now placed correctly on rotated and cropped drawing pages.** A

@@ -632,6 +632,44 @@ def test_pipeline_cached_critique_rerun_adds_no_tokens(tmp_path):
     assert ctx2.total_input_tokens == 0 and ctx2.total_output_tokens == 0
 
 
+def test_pipeline_warm_rerun_skips_rasterization(tmp_path, monkeypatch):
+    """Phase 19B (§11 test 13): a fully-cached exhaustive re-run skips BOTH the API
+    calls AND rasterization. The critique level-1 cache means an unchanged sheet is
+    never re-rendered merely to discover the critique was already cached — the gap
+    the level-2 (PNG-bytes) critique key alone left open."""
+    import drawing_analyzer.render as render_mod
+
+    src = _make_pdf(tmp_path / "F-D-01-1.pdf")
+    cache = DigestCache(None, persist=False)
+
+    calls = {"render": 0}
+    real_render_sheet = render_mod.render_sheet
+
+    def _counting_render(*a, **k):
+        calls["render"] += 1
+        return real_render_sheet(*a, **k)
+
+    monkeypatch.setattr(render_mod, "render_sheet", _counting_render)
+
+    ctx1 = extract_drawing_context(
+        [src], client=_PipelineClient(), rows=2, cols=2, critique=True,
+        qc_markups=True, verify_findings=False, cache=cache, qc_work_dir=tmp_path / "q1",
+    )
+    assert calls["render"] > 0                          # first run rasterized
+
+    calls["render"] = 0
+    client2 = _PipelineClient()
+    ctx2 = extract_drawing_context(
+        [src], client=client2, rows=2, cols=2, critique=True,
+        qc_markups=True, verify_findings=False, cache=cache, qc_work_dir=tmp_path / "q2",
+    )
+    assert calls["render"] == 0                         # skipped rasterization entirely
+    assert client2.digest_calls == 0 and client2.critique_calls == 0
+    # The cached critique findings are still served, rebound to the current source.
+    assert len(ctx2.findings) == len(ctx1.findings) >= 1
+    assert all(f.source_id for f in ctx2.findings)
+
+
 def test_pipeline_critique_applies_selected_profile(tmp_path, monkeypatch):
     monkeypatch.setenv("DRAWING_ANALYZER_PROFILES_DIR", str(tmp_path / "no_user"))  # builtins only
     src = _make_pdf(tmp_path / "F-D-01-1.pdf")
