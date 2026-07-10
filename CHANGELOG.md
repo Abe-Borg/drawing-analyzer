@@ -51,13 +51,22 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Ledger 3: 2 clouded, 1 margin, 0 rejected (indexed); coverage COMPLETE` — with
   `failed` / skipped buckets and a coverage verdict; nothing is counted from
   intention.
+- Review hardening: each index row is reconciled against **its own** GOTO link (by
+  the row's unique position), so two same-page rejected/gated rows can't cover for
+  each other's missing link; **every** planned placement gets exactly one terminal
+  receipt — an unroutable finding (source id/name matching no supplied PDF) is an
+  explicit `FAILED`, never silently dropped into a false `COMPLETE`; a mutated
+  source forces `INCOMPLETE` even when it produced no findings; and `FAILED`
+  receipt errors carry only the exception *type*, so no absolute path can reach the
+  portable manifest.
 - Tests: reversed every markup test that asserted an intention-based count or the
   old return types; added `tests/test_drawing_markup_coverage.py`, a
   failure-injection suite that forces clouds, callouts, index pages, saves, and
   reopens to fail and proves the receipts report it (coverage `INCOMPLETE`, no false
   ink), plus prior-run-stamp isolation, pre-existing-annotation isolation (DA-029),
   dual-leg partial coverage, rotated-page receipts, duplicate-basename isolation,
-  and the portable manifest.
+  same-page index-row link matching, unroutable-finding accounting, and the
+  portable manifest.
 
 ### Fixed (Phase 20 — lossless ledger reconciliation & QC-ID lifecycle, DA-005/DA-006)
 

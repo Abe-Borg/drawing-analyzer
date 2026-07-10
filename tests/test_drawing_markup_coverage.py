@@ -220,6 +220,47 @@ def test_save_failure_is_non_fatal_and_fails_receipts(tmp_path):
     assert res.reviewed_pdfs == []
     assert res.coverage_status == "INCOMPLETE"
     assert all(r.status == "FAILED" for r in res.receipts)
+    # The FAILED receipt error carries only the exception TYPE — no absolute path
+    # can leak into the portable manifest (which serializes receipt errors).
+    for r in res.receipts:
+        assert str(tmp_path) not in r.error
+
+
+def test_unroutable_finding_fails_coverage_not_silently_dropped(tmp_path):
+    # A finding whose source_id matches no supplied PDF (and whose name matches no
+    # basename) must get an explicit FAILED receipt — never be silently dropped,
+    # which would leave coverage COMPLETE while its mark is absent (a hidden
+    # failure, the dangerous direction).
+    src = _pdf(tmp_path, "M-101.pdf")
+    good = _f("routable", quote="q1", source="M-101.pdf", source_id="SRC-0001")
+    orphan = _f("orphan", quote="q2", source="GHOST.pdf", source_id="SRC-9999")
+    assign_qc_ids([good, orphan])
+    res = write_reviewed_pdfs([good, orphan], [src], tmp_path / "out", include_unverified=True)
+
+    assert res.coverage_status == "INCOMPLETE"
+    by_fid = {r.placement.finding_id: r for r in res.receipts}
+    assert by_fid[good.id].status == "WRITTEN"
+    assert by_fid[orphan.id].status == "FAILED"
+    assert "could not be routed" in by_fid[orphan.id].error
+    # Every planned placement is accounted for exactly once (no drop, no dup).
+    assert len(res.receipts) == len(res.placements) == 2
+
+
+def test_name_fallback_no_double_draw_on_duplicate_basenames(tmp_path):
+    # A finding WITHOUT a host source_id routes by source_name. Two inputs that
+    # share a basename must not both receive that one finding (which would double-
+    # count the placement and falsely report the run INCOMPLETE). It lands on the
+    # first source only; coverage stays COMPLETE.
+    a = _pdf(tmp_path / "a", "M-101.pdf")
+    b = _pdf(tmp_path / "b", "M-101.pdf")
+    f = _f("no-source-id", quote="q", source="M-101.pdf", source_id="")
+    assign_qc_ids([f])
+    res = write_reviewed_pdfs([f], [a, b], tmp_path / "out", include_unverified=True)
+    assert res.coverage_status == "COMPLETE"
+    assert len(res.reviewed_pdfs) == 1
+    # exactly one placement, one WRITTEN receipt — never a duplicate.
+    assert len(res.placements) == 1
+    assert [r.status for r in res.receipts] == ["WRITTEN"]
 
 
 # --------------------------------------------------------------------------- #

@@ -1067,10 +1067,13 @@ def _reconcile_pdf(
     try:
         doc = pymupdf.open(str(out_path))
     except Exception as exc:  # noqa: BLE001 - an unreadable save proves nothing
+        # Keep the raw exception (which may embed an absolute path) out of the
+        # portable manifest — the receipt carries only the exception TYPE; the
+        # full detail goes to the private diagnostics log.
         _log.warning("could not reopen %s to reconcile markups: %s", out_name, exc)
         return [
             MarkupReceipt(pl, "FAILED", output_pdf=out_name,
-                          error=f"could not reopen saved PDF: {exc}")
+                          error=f"could not reopen saved PDF ({type(exc).__name__})")
             for pl in placements
         ]
     try:
@@ -1416,9 +1419,12 @@ def write_reviewed_pdfs(
 
     # Split logical findings: a finding touching a changed source (primary or any
     # leg) is skipped entirely — every placement it plans gets a FAILED receipt
-    # (source changed), and no stale ink is drawn (§10.6).
+    # (source changed), and no stale ink is drawn (§10.6). Every writable unit is
+    # also tracked flat, so a placement that routes to no input still gets a
+    # terminal receipt below (never silently dropped — §13.5).
     units_by_sid: dict[str, list[_DrawUnit]] = {}
     units_by_name: dict[str, list[_DrawUnit]] = {}
+    writable_units: list[_DrawUnit] = []
     ordinals = itertools.count()
     for finding in findings:
         units = _units_for_finding(
@@ -1435,6 +1441,7 @@ def write_reviewed_pdfs(
                 ))
             continue
         for unit in units:
+            writable_units.append(unit)
             if unit.finding.source_id:
                 units_by_sid.setdefault(unit.finding.source_id, []).append(unit)
             else:
@@ -1474,7 +1481,12 @@ def write_reviewed_pdfs(
         if key in done_keys:
             continue
         done_keys.add(key)
-        units = list(units_by_sid.get(sid, [])) + list(units_by_name.get(pdf_path.name, []))
+        # Source-id units route unambiguously. Name-fallback units (findings with
+        # no host source_id) are *consumed once* via pop, so a finding is drawn on
+        # exactly one source — never duplicated onto every input that happens to
+        # share a basename (which would double-count the placement and falsely
+        # report the run INCOMPLETE).
+        units = list(units_by_sid.get(sid, [])) + units_by_name.pop(pdf_path.name, [])
         if not units:
             continue
         pairs = [(u.finding, u.placement) for u in units]
@@ -1499,13 +1511,14 @@ def write_reviewed_pdfs(
                 audit_stats=audit_stats, include_appendix=include_appendix,
             )
         except Exception as exc:  # noqa: BLE001 - a source-level failure is non-fatal
+            # Receipt error carries only the exception TYPE (the raw message may
+            # embed an absolute source/temp path); full detail → private log.
             _log.warning("could not write reviewed PDF for %s: %s", pdf_path.name, exc)
             receipts = [
                 MarkupReceipt(u.placement, "FAILED", output_pdf=name,
-                              error=f"reviewed-PDF write failed: {exc}")
+                              error=f"reviewed-PDF write failed ({type(exc).__name__})")
                 for u in units
             ]
-            all_placements.extend(u.placement for u in units)
             all_receipts.extend(receipts)
             continue
 
@@ -1524,8 +1537,20 @@ def write_reviewed_pdfs(
             except OSError as exc:
                 _log.warning("could not label incomplete reviewed PDF %s: %s", name, exc)
                 final_out = out
-        all_placements.extend(u.placement for u in units)
         all_receipts.extend(receipts)
         reviewed_pdfs.append(final_out)
+
+    # Every writable placement is expected; any that reached no input (a finding
+    # or leg whose source_id/name matched no supplied PDF) gets an explicit FAILED
+    # receipt, so an unroutable mark can never leave coverage reporting COMPLETE
+    # (§13.5 — every expected placement has exactly one terminal outcome).
+    all_placements.extend(u.placement for u in writable_units)
+    receipted = {r.placement.placement_id for r in all_receipts}
+    for unit in writable_units:
+        if unit.placement.placement_id not in receipted:
+            all_receipts.append(MarkupReceipt(
+                unit.placement, "FAILED", output_pdf="",
+                error="finding could not be routed to any supplied source PDF",
+            ))
 
     return _result_from_receipts(all_receipts, all_placements, reviewed_pdfs)

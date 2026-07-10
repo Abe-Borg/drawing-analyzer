@@ -1021,10 +1021,13 @@ def _run_qc_stages(
             _log.warning("markup writing failed: %s", exc)
             coverage_status = "INCOMPLETE"
 
-        # A post-seal add (an orchestration invariant failure, §12.3) already
-        # marks the run incomplete via ``errors``; reflect it in coverage too so
-        # the report/GUI never present such a run as fully successful.
-        if ledger.post_seal_adds:
+        # A mutated source means QC is incomplete (§10.6) even when that source
+        # produced no findings — it contributes no FAILED receipt in that case, so
+        # force INCOMPLETE here rather than rely on receipts alone. A post-seal add
+        # (an orchestration invariant failure, §12.3) likewise marks the run
+        # incomplete; reflect both in coverage so the report/GUI never present such
+        # a run as fully successful.
+        if mutated_ids or ledger.post_seal_adds:
             coverage_status = "INCOMPLETE"
         if coverage_status == "INCOMPLETE":
             failed = ledger_tally.get("failed", 0)
