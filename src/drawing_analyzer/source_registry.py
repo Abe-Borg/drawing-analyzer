@@ -247,6 +247,39 @@ def content_changed(doc: "SourceDocument") -> str:
     return ""       # stat drifted (e.g. touch) but bytes are identical → fine
 
 
+def current_content_sha256(
+    path: "os.PathLike[str] | str",
+    snapshot: "tuple[str, int, int] | None" = None,
+) -> str:
+    """The **current** content hash of ``path``, stat-gated against a ``snapshot``.
+
+    ``snapshot`` is the ``(content_sha256, byte_size, mtime_ns)`` captured earlier
+    (the inventory revision). When the file's ``stat`` still matches the snapshot the
+    snapshot hash is returned **without re-reading** the file — the "hash once" fast
+    path. On any stat drift (or with no usable snapshot) the file is re-hashed now,
+    so the returned hash is authoritative for the bytes on disk *at this moment*:
+    a source rewritten between the inventory and a later reopen (a prescan keying the
+    level-1 cache, DA-004 §10.6) must key on its **current** revision, never the
+    stale snapshot, or a cache hit would serve the previous revision's analysis
+    without rendering. Returns ``""`` if the file is unreadable or is being rewritten
+    mid-hash (the caller then treats it as uncacheable and renders). Never raises.
+    """
+    if snapshot:
+        sha0, size0, mtime0 = snapshot
+        if sha0:
+            try:
+                size, mtime = _stat_tuple(str(path))
+            except OSError:
+                return ""
+            if size == size0 and mtime == mtime0:
+                return sha0                 # fast gate: stat unchanged → reuse hash
+    try:
+        sha, _size, _mtime = content_sha256(path)
+        return sha                          # authority: re-hash the current bytes
+    except OSError:
+        return ""                           # unreadable / mid-rewrite → uncacheable
+
+
 def detect_mutations(accepted_documents: list["SourceDocument"]) -> dict[str, str]:
     """Map ``source_id`` → reason for every accepted source that has mutated.
 
