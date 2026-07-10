@@ -134,14 +134,21 @@ def test_ledger_freeze_assigns_stable_qc_ids():
     assert {e.text: e.qc_id for e in ledger.entries} == by_text
 
 
-def test_ledger_post_freeze_add_is_loud_but_non_fatal():
+def test_ledger_post_seal_add_marks_incomplete_not_fatal():
+    # A post-seal add is an orchestration invariant failure (§12.3): the entry is
+    # kept (I-3) but the run is flagged incomplete — never fabricated a QC-XTRA
+    # number that reads like ordinary output.
     ledger = Ledger()
     ledger.add([_f("first", rect=[10, 20, 60, 40])], "digest_json")
-    ledger.freeze()
-    ledger.add([_f("straggler after freeze")], "digest_json")
-    assert len(ledger) == 2
-    late = next(e for e in ledger.entries if e.text == "straggler after freeze")
-    assert late.qc_id.startswith("QC-XTRA-")     # visibly numbered as a bug signal
+    ledger.seal()
+    assert ledger.sealed
+    ledger.add([_f("straggler after seal")], "digest_json")
+    assert len(ledger) == 2                       # the entry is kept
+    assert ledger.post_seal_adds == 1             # ...but the invariant failure is recorded
+    late = next(e for e in ledger.entries if e.text == "straggler after seal")
+    assert not late.qc_id.startswith("QC-XTRA-")  # no fabricated masquerade number
+    ledger.number()
+    assert ledger.state == "NUMBERED"
 
 
 def test_provenance_label_compresses_chips():

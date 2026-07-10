@@ -186,26 +186,55 @@ def test_token_overlap_and_iou():
 
 
 def test_duplicate_matrix():
+    # Phase 20 §12.1: a tile is a search hint, never identity; geometric overlap
+    # alone is never sufficient; and a conflicting critical signature blocks a merge
+    # even when the prose is similar.
     a = _finding("VAV-3 has no shown clearance to the wall", quote="VAV-3", tile=[0, 0])
-    # text-only: same text, different tile
+    # text-only: same text, different tile → duplicate (strong topical overlap)
     b_text = _finding("VAV-3 has no shown clearance to the wall", tile=[2, 2])
-    # tile-only: same tile, unrelated text
+    # tile-only: SAME tile, unrelated text → NOT a duplicate (reversed from Phase 11)
     b_tile = _finding("Completely unrelated note about piping", tile=[0, 0])
     # neither
     b_none = _finding("Completely unrelated note about piping", tile=[3, 3])
-    assert _is_duplicate(a, b_text) is True     # text overlap > 0.7
-    assert _is_duplicate(a, b_tile) is True      # same tile
+    assert _is_duplicate(a, b_text) is True      # text overlap > 0.7
+    assert _is_duplicate(a, b_tile) is False     # same tile alone is NOT enough
     assert _is_duplicate(a, b_none) is False
-    # IoU path: two anchored findings whose rects overlap heavily
-    r1 = _finding("x", rect=[0, 0, 10, 10], tile=None)
-    r2 = _finding("y", rect=[1, 1, 10, 10], tile=None)
-    r3 = _finding("z", rect=[0, 0, 4, 4], tile=None)     # IoU with r1 = 16/100 < 0.5
-    assert _is_duplicate(r1, r2) is True
-    assert _is_duplicate(r1, r3) is False
+
+    # Geometry alone is NOT enough: two anchored findings whose rects overlap
+    # heavily but whose text is unrelated remain separate (§12.1 test 2).
+    r1 = _finding("cleanout required at base of stack", rect=[0, 0, 10, 10], tile=None)
+    r2 = _finding("backflow preventer size mismatch", rect=[1, 1, 10, 10], tile=None)
+    assert _is_duplicate(r1, r2) is False
+    # Overlap heavily AND agree on text → duplicate (geometry only *supports*).
+    r3 = _finding("cleanout required at base of the stack", rect=[1, 1, 10, 10], tile=None)
+    assert _is_duplicate(r1, r3) is True
+
+    # A conflicting critical signature blocks a merge despite similar prose.
+    g500 = _finding("pump flow rate is 500 gpm at design", quote="500 GPM", tile=[0, 0])
+    g550 = _finding("pump flow rate is 550 gpm at design", quote="550 GPM", tile=[0, 0])
+    assert _is_duplicate(g500, g550) is False    # 500 vs 550 → different quantity
+    m101 = _finding("coordinate with M-101 riser diagram", tile=[0, 0])
+    m102 = _finding("coordinate with M-102 riser diagram", tile=[0, 0])
+    assert _is_duplicate(m101, m102) is False    # M-101 vs M-102 → different ref
+    shown = _finding("detail 5 is shown on this sheet", quote="DETAIL 5", tile=[0, 0])
+    notshown = _finding("detail 5 is not shown on this sheet", quote="DETAIL 5", tile=[0, 0])
+    assert _is_duplicate(shown, notshown) is False  # shown vs not shown → polarity
+
     # different sheet is never a duplicate
     other = _finding("VAV-3 has no shown clearance to the wall", quote="VAV-3",
                      tile=[0, 0], source="other.pdf")
     assert _is_duplicate(a, other) is False
+
+
+def test_true_duplicates_still_merge():
+    # The complement of the matrix: genuine duplicates DO merge — same quote (same
+    # category), or strong topical overlap — even across different tiles.
+    q1 = _finding("relief valve setting is too high", quote="RV-3 SET 125 PSI", tile=[0, 0])
+    q2 = _finding("RV-3 pressure exceeds the vessel MAWP", quote="RV-3 SET 125 PSI", tile=[3, 3])
+    assert _is_duplicate(q1, q2) is True         # identical quote, same category
+    t1 = _finding("missing cleanout at the base of the soil stack", tile=[0, 0])
+    t2 = _finding("missing cleanout at base of the soil stack riser", tile=[5, 5])
+    assert _is_duplicate(t1, t2) is True         # strong topical overlap
 
 
 # --------------------------------------------------------------------------- #
@@ -229,17 +258,25 @@ def test_single_run_leaves_everything_reproduced():
     assert all(f.reproduced for f in merged)       # no second read to disagree
 
 
-def test_merge_keeps_most_severe_and_longest_quote_and_union_refs():
-    a = _finding("Same issue", quote="VAV", tile=[0, 0], sev="low")
+def test_merge_keeps_most_severe_longest_quote_unions_refs_and_coherent_grounding():
+    # Genuine duplicates (strong topical overlap). The merge keeps the most severe
+    # severity, unions refs, and — the §12.2 point — the representative's text and
+    # quote come from ONE member as an atomic bundle; the loser's DISTINCT quote is
+    # preserved as support, never spliced onto the survivor's text.
+    a = _finding("VAV-3 has no clearance shown to the wall", quote="VAV-3",
+                 tile=[0, 0], sev="low")
     a.refs = ["NFPA 13"]
-    b = _finding("Same issue phrased alike", quote="VAV-3 SCHEDULE", tile=[0, 0], sev="high")
+    b = _finding("VAV-3 has no clearance shown to the wall nearby",
+                 quote="VAV-3 SCHEDULE ROOM 120", tile=[0, 0], sev="high")
     b.refs = ["CMC 310"]
     merged = merge_self_consistency([[a], [b]])
     assert len(merged) == 1
     m = merged[0]
-    assert m.severity == "high"                    # most severe wins
-    assert m.source_quote == "VAV-3 SCHEDULE"       # longest quote wins
-    assert set(m.refs) == {"NFPA 13", "CMC 310"}    # refs unioned
+    assert m.severity == "high"                             # most severe wins
+    assert m.source_quote == "VAV-3 SCHEDULE ROOM 120"      # representative = longest quote
+    assert m.text == "VAV-3 has no clearance shown to the wall nearby"  # ...its OWN text
+    assert set(m.refs) == {"NFPA 13", "CMC 310"}            # refs unioned
+    assert "VAV-3" in m.supporting_quotes                   # loser's quote preserved, not merged in
 
 
 def test_pool_upgrades_reproduced_on_cross_source_agreement():

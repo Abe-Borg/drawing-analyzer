@@ -822,8 +822,12 @@ def _run_qc_stages(
             errors.append(f"Prose harvest: {exc}")
             _log.warning("prose harvest failed: %s", exc)
 
-    # --- freeze: the run's QC-### numbers (sheet → position; stable — I-7) ----
-    entries = ledger.freeze()
+    # --- seal ingestion, then anchor, reconcile, and number (§12.4) -----------
+    # QC ids must be POSITIONAL, so numbering happens *after* anchoring — the
+    # freeze-before-anchor ordering is gone (Phase 20). Seal first (no more
+    # entries), anchor every primary + leg, fold any duplicate the ingest pass
+    # could not see without geometry, and only then assign QC-### in visual order.
+    entries = ledger.seal()
 
     # Anchor the entries that don't already carry a rectangle (auditor entries do).
     if entries and geometries:
@@ -848,6 +852,25 @@ def _run_qc_stages(
             resolve_conflict_legs(entries, geom_by_key)
         except Exception as exc:  # noqa: BLE001 - never fatal
             _log.warning("cross-sheet leg anchoring failed: %s", exc)
+
+    # Cautious post-anchor reconciliation (Pass B, §12.1): geometry is now available.
+    try:
+        from .ledger import reconcile_post_anchor
+
+        reconcile_post_anchor(ledger)
+    except Exception as exc:  # noqa: BLE001 - reconciliation must never sink the run
+        _log.warning("post-anchor reconciliation failed: %s", exc)
+
+    # Assign the run's positional QC-### numbers now that anchors exist (§12.4).
+    entries = ledger.number()
+    if ledger.post_seal_adds:
+        # An entry landed after the seal — an orchestration invariant failure. The
+        # entries still ship (I-3), but the run is flagged incomplete rather than
+        # presented as ordinary, fully-numbered output (§12.3).
+        errors.append(
+            f"Ledger: {ledger.post_seal_adds} finding(s) ingested after seal — "
+            "exhaustive QC is incomplete (a stage produced findings too late)."
+        )
 
     all_findings = entries
     v_in, v_out = harvest_in, harvest_out

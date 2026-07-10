@@ -612,6 +612,12 @@ class Finding:
     qc_id: str = ""                     # "QC-001" … (assigned by assign_qc_ids)
     citation: Citation | None = None    # web-search citation check (Phase 15)
     sources: list[str] = field(default_factory=list)  # provenance tags (Part III)
+    # Verbatim quotes from *other* members merged into this entry (Phase 20 §12.2).
+    # The grounded fields (``text`` / ``category`` / ``source_quote`` / ``tile`` /
+    # ``anchor``) always come from ONE representative as an atomic bundle — a
+    # duplicate's alternate quote is preserved here, never spliced onto this entry's
+    # text (which would fabricate a text/quote pair that never appeared together).
+    supporting_quotes: list[str] = field(default_factory=list)
     id: str = ""
 
     def __post_init__(self) -> None:
@@ -639,6 +645,7 @@ class Finding:
             "reproduced": self.reproduced,
             "also_on": [leg.to_dict() for leg in self.also_on],
             "sources": list(self.sources),
+            "supporting_quotes": list(self.supporting_quotes),
             "anchor": self.anchor.to_dict(),
             "verification": self.verification.to_dict(),
         }
@@ -669,6 +676,7 @@ class Finding:
             reproduced=bool(d.get("reproduced", True)),
             also_on=[ConflictLeg.from_dict(leg) for leg in (d.get("also_on") or []) if isinstance(leg, dict)],
             sources=[str(s) for s in (d.get("sources") or [])],
+            supporting_quotes=[str(q) for q in (d.get("supporting_quotes") or [])],
             anchor=Anchor.from_dict(d.get("anchor") or {}),
             verification=Verification.from_dict(d.get("verification") or {}),
             qc_id=d.get("qc_id", "") or "",

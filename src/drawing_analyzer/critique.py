@@ -267,11 +267,14 @@ def build_critique_request_params(
 # Deduplication / merge (pure — no I/O, no PDF engine)
 # --------------------------------------------------------------------------- #
 
-# Two findings on the same sheet are duplicates when they overlap geometrically
-# (anchor-rect IoU once anchored, else the same reported tile) OR their normalized
-# text overlaps strongly. Thresholds per the plan (§ Phase 11).
-_IOU_DUP_THRESHOLD = 0.5
-_TEXT_DUP_THRESHOLD = 0.7
+# Two findings on the same sheet are duplicates only when they are *semantically*
+# the same issue and their **critical signatures are compatible** (Phase 20, §12.1).
+# A tile is a search hint, never identity — same-tile alone never merges — and
+# geometric overlap alone is not enough either: two unrelated issues can share a
+# table cell or a note. Thresholds:
+_IOU_DUP_THRESHOLD = 0.5          # rect overlap needed for the geometry branch
+_TEXT_DUP_THRESHOLD = 0.7         # strong topical overlap → duplicate
+_MODERATE_TEXT_THRESHOLD = 0.4    # moderate overlap that only *supports* geometry
 
 _SEVERITY_RANK = {"high": 3, "medium": 2, "low": 1}
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
@@ -306,6 +309,16 @@ def _norm_tokens(text: str) -> set[str]:
     return {t for t in _TOKEN_RE.findall((text or "").lower()) if t not in _STOPWORDS}
 
 
+def _normalize(text: str) -> str:
+    """Light normalization for quote comparison: lowercase + whitespace-collapse.
+
+    Two findings that quote the *same* on-sheet string carry byte-identical quotes
+    (both copied verbatim from one text layer), so a case/whitespace fold is enough
+    to recognize them without the anchor resolver's full Unicode machinery.
+    """
+    return " ".join((text or "").lower().split())
+
+
 def _token_overlap(a: str, b: str) -> float:
     """Jaccard overlap of two texts' normalized token sets (0..1)."""
     ta, tb = _norm_tokens(a), _norm_tokens(b)
@@ -336,21 +349,133 @@ def _same_sheet(a: Finding, b: Finding) -> bool:
     return source_page_key(a) == source_page_key(b)
 
 
+# --- Critical signatures (§12.1): engineering tokens that BLOCK an automatic merge
+# when they conflict, even if the surrounding prose is similar. "500 gpm" vs
+# "550 gpm", "M-101" vs "M-102", and "shown" vs "not shown" are all different
+# findings that happen to read alike.
+
+# Equipment tags / drawing-detail references: letters + (compact | -/. separated)
+# digits — VAV-3, M-101, FP101, RV-3, AHU-2, M1.01, E2.1. A space is *not* a
+# separator, so "SET 165" is a measurement, not a tag.
+_TAG_RE = re.compile(r"\b([A-Za-z]{1,4})(?:-|\.)?(\d{1,4}(?:[.-]\d{1,3})?[A-Za-z]?)\b")
+# A number (signed / decimal / fraction) immediately followed by a unit — a
+# measurement whose value discriminates the finding.
+_UNIT = (
+    r"(?:gpm|gpd|gph|psig|psi|cfm|fpm|inch(?:es)?|in|ft|feet|mm|cm|kva|kw|hp|hz|"
+    r"amps?|volts?|va|kv|gal|deg|°[fc]?|%|\"|')"
+)
+_MEAS_RE = re.compile(
+    r"([-+]?\d+(?:\.\d+)?(?:\s*\d+\s*/\s*\d+)?)\s*" + _UNIT, re.IGNORECASE
+)
+# Strong "absence / not-present" phrasing — an absence finding contradicts a
+# finding about the same thing being present.
+_ABSENCE_RE = re.compile(
+    r"\b(?:not\s+(?:shown|provided|indicated|dimensioned|specified|scheduled|"
+    r"noted|labell?ed|called|located|found|present|on)|missing|omitted|absent|"
+    r"no\s+\w+\s+(?:shown|provided|indicated|is\s+shown))\b",
+    re.IGNORECASE,
+)
+
+
+def _sig_text(f: Finding) -> str:
+    return f"{f.text or ''} {f.source_quote or ''}"
+
+
+def _tags(f: Finding) -> set[str]:
+    return {
+        f"{m.group(1)}{m.group(2)}".upper().replace("-", "").replace(".", "")
+        for m in _TAG_RE.finditer(_sig_text(f))
+    }
+
+
+def _measurements(f: Finding) -> set[str]:
+    return {re.sub(r"\s+", "", m.group(1)) for m in _MEAS_RE.finditer(_sig_text(f))}
+
+
+def _is_absence(f: Finding) -> bool:
+    if (f.anchor_hint or "").upper() == "SHEET":
+        return True
+    return bool(_ABSENCE_RE.search(_sig_text(f)))
+
+
+def _leg_targets(f: Finding) -> frozenset:
+    """The set of sheets a cross-sheet finding also touches (its ``also_on`` legs)."""
+    return frozenset(
+        (leg.sheet_id or "").strip().upper()
+        for leg in (getattr(f, "also_on", None) or [])
+        if (leg.sheet_id or "").strip()
+    )
+
+
+def _signatures_compatible(a: Finding, b: Finding) -> bool:
+    """False when a critical signature conflicts — the merge is then blocked (§12.1).
+
+    Conservative: a conflict needs both findings to carry the signal and disagree
+    on it (disjoint tag sets, disjoint measurement sets, or opposite absence
+    polarity). A signal present in only one finding never blocks — "keep both" is
+    the safe error, but so is "don't over-block a real duplicate".
+    """
+    ta, tb = _tags(a), _tags(b)
+    if ta and tb and ta.isdisjoint(tb):
+        return False                       # different equipment / drawing refs
+    ma, mb = _measurements(a), _measurements(b)
+    if ma and mb and ma.isdisjoint(mb):
+        return False                       # different quantities
+    if _is_absence(a) != _is_absence(b):
+        return False                       # "shown" vs "not shown"
+    la, lb = _leg_targets(a), _leg_targets(b)
+    if la and lb and la != lb:
+        return False                       # same quote, different cross-sheet legs
+    return True
+
+
+def _categories_compatible(a: Finding, b: Finding) -> bool:
+    """Two findings can merge only if their categories are the same (or one is the
+    catch-all ``question``). A ``code`` violation and a ``coordination`` note about
+    the same words are different reviewable items."""
+    ca, cb = (a.category or "").lower(), (b.category or "").lower()
+    return ca == cb or "question" in (ca, cb)
+
+
+def _quotes_equal(a: Finding, b: Finding) -> bool:
+    qa, qb = _normalize(a.source_quote or ""), _normalize(b.source_quote or "")
+    return bool(qa) and qa == qb
+
+
+def _quote_overlap(a: Finding, b: Finding) -> bool:
+    qa, qb = _normalize(a.source_quote or ""), _normalize(b.source_quote or "")
+    if not qa or not qb:
+        return False
+    return qa in qb or qb in qa
+
+
 def _is_duplicate(a: Finding, b: Finding) -> bool:
-    """Whether two findings describe the same issue (same sheet + overlap)."""
+    """Whether two findings describe the same issue (Phase 20, §12.1).
+
+    Requires the same source+page and **compatible critical signatures** — a tile
+    is never sufficient, and geometric overlap alone is never sufficient. A merge
+    fires only when the two are semantically the same: identical non-empty quote
+    (same category), strong topical overlap, or — once both are anchored —
+    heavily-overlapping rectangles *backed by* at least moderate text/quote
+    agreement. When uncertain, keep both (more separate findings is the safe error).
+    """
     if not _same_sheet(a, b):
         return False
+    if not _signatures_compatible(a, b):
+        return False
+    # Exact same on-sheet quote, same category → the same grounded issue.
+    if _quotes_equal(a, b) and _categories_compatible(a, b):
+        return True
+    # Strong topical overlap → the same issue restated.
+    if _token_overlap(a.text, b.text) >= _TEXT_DUP_THRESHOLD:
+        return True
+    # Geometry (post-anchor) is only *supporting* evidence, never sufficient alone.
     ra = a.anchor.rect_pdf if a.anchor else None
     rb = b.anchor.rect_pdf if b.anchor else None
-    if ra and rb:
-        geo = _rect_iou(ra, rb) > _IOU_DUP_THRESHOLD
-    elif a.tile is not None and b.tile is not None:
-        # Pre-anchor (the critique merge runs before anchoring): the reported
-        # tile is the coarse position proxy for the IoU rule.
-        geo = list(a.tile) == list(b.tile)
-    else:
-        geo = False
-    return geo or _token_overlap(a.text, b.text) > _TEXT_DUP_THRESHOLD
+    if ra and rb and _rect_iou(ra, rb) > _IOU_DUP_THRESHOLD and _categories_compatible(a, b):
+        if _token_overlap(a.text, b.text) >= _MODERATE_TEXT_THRESHOLD or _quote_overlap(a, b):
+            return True
+    return False
 
 
 def _union_refs(findings: list[Finding]) -> list[str]:
@@ -363,27 +488,33 @@ def _union_refs(findings: list[Finding]) -> list[str]:
 
 
 def _representative(cluster: list[Finding], *, reproduced: bool) -> Finding:
-    """Collapse a cluster of duplicate findings into one.
+    """Collapse a cluster of duplicate findings into one, preserving **coherent
+    grounding** (Phase 20 §12.2).
 
-    Keeps the most severe severity, the longest ``source_quote`` (the best
-    anchoring hook), the union of ``refs``, and the first non-empty
-    ``anchor_hint`` / non-null ``tile``. The base finding (its text and id) is the
-    one with the longest quote, so a collapsed finding keeps a stable, content-
-    derived id.
+    One member is the representative and its grounded fields — ``text``,
+    ``category``, ``source_quote``, ``tile``, ``anchor_hint`` — are taken together
+    as an **atomic bundle**: a merged entry never pairs one finding's text with a
+    *different* finding's quote (which would fabricate a text/quote combination that
+    never appeared on the sheet). The representative is the member with the longest
+    quote (the best anchoring hook), tie-broken by severity then the stable id. The
+    other members' distinct quotes are preserved in ``supporting_quotes``; ``refs``
+    union; severity is the most severe.
 
-    Deliberately resets ``anchor`` / ``verification`` to their defaults: all
-    current callers merge **before** anchoring, so every input carries the default
-    anyway. A future caller that pools already-anchored/verified findings (the
-    ledger) must re-anchor/re-verify the collapsed result rather than assume this
-    preserved them.
+    Deliberately resets ``anchor`` / ``verification`` to their defaults: all current
+    callers merge **before** anchoring, so every input carries the default anyway. A
+    future caller that pools already-anchored/verified findings (the ledger) must
+    re-anchor/re-verify the collapsed result rather than assume this preserved them.
     """
     base = max(
         cluster,
-        key=lambda f: (len(f.source_quote or ""), _severity_rank(f.severity)),
+        key=lambda f: (len(f.source_quote or ""), _severity_rank(f.severity), f.id, f.text or ""),
     )
-    quote = max((f.source_quote or "" for f in cluster), key=len)
-    tile = next((f.tile for f in cluster if f.tile is not None), None)
-    anchor_hint = next((f.anchor_hint for f in cluster if f.anchor_hint), "")
+    base_q = _normalize(base.source_quote or "")
+    supporting: list[str] = []
+    for f in cluster:
+        q = (f.source_quote or "").strip()
+        if q and _normalize(q) != base_q and q not in supporting:
+            supporting.append(q)
     # Preserve a cross-sheet finding's dual-anchor legs (the first non-empty), so
     # merging a conflict finding never silently drops its ``also_on``.
     also_on = next((list(f.also_on) for f in cluster if f.also_on), [])
@@ -395,11 +526,12 @@ def _representative(cluster: list[Finding], *, reproduced: bool) -> Finding:
         category=base.category,
         severity=_most_severe(cluster),
         text=base.text,
-        source_quote=quote,
-        tile=tile,
+        source_quote=base.source_quote,     # atomic with text/category/tile below
+        tile=base.tile,
         refs=_union_refs(cluster),
-        anchor_hint=anchor_hint,
+        anchor_hint=base.anchor_hint,
         also_on=also_on,
+        supporting_quotes=supporting,
         reproduced=reproduced,
         id=base.id,
     )
@@ -416,7 +548,9 @@ def _cluster(groups: list[list[Finding]]) -> list[list[tuple[int, Finding]]]:
     for gi, group in enumerate(groups):
         for f in group:
             for cluster in clusters:
-                if any(_is_duplicate(f, cf) for _, cf in cluster):
+                # Complete-link (§12.1): join only a cluster whose EVERY member is a
+                # duplicate of ``f`` — never collapse A+B+C when A and C conflict.
+                if all(_is_duplicate(f, cf) for _, cf in cluster):
                     cluster.append((gi, f))
                     break
             else:

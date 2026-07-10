@@ -6,6 +6,33 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed (Phase 20 — lossless ledger reconciliation & QC-ID lifecycle, DA-005/DA-006)
+
+- **Deduplication no longer deletes unrelated findings, and no longer fabricates a
+  finding by mixing one issue's text with another's quote.** Two findings merge only
+  when they are semantically the same *and* their **critical signatures** agree:
+  a shared **tile is a search hint, never identity** (same-tile-alone merging is
+  gone, DA-005), geometric rectangle overlap alone is never sufficient, and a
+  conflicting signature blocks the merge even when the prose is similar —
+  `500 gpm` vs `550 gpm`, `M-101` vs `M-102`, `shown` vs `not shown`, or different
+  cross-sheet legs. Clustering is now complete-link (compatible with *every* member,
+  not just the representative), so an `A+B+C` chain where `A` conflicts with `C`
+  never collapses.
+- **Coherent grounding (DA-006/§12.2):** a merged entry's grounded bundle — text,
+  category, quote, tile, anchor — comes from **one** representative atomically; the
+  loser's distinct quote is preserved in a new `supporting_quotes` field rather than
+  spliced onto the survivor's text (the reproduced K-factor/relief-valve mixed-finding
+  trap is closed). The representative is chosen by a **total** quality order, so the
+  final entry and its id are identical regardless of ingest order.
+- **QC ids are now positional (DA-006/§12.4):** the ledger gained an explicit
+  `OPEN → seal() → SEALED → number() → NUMBERED` lifecycle. Numbering happens
+  **after** anchoring (the freeze-before-anchor ordering is gone), so `QC-001…`
+  follow source input order → page → anchored-before-unanchored → top → left. A
+  cautious post-anchor **Pass B** (`reconcile_post_anchor`) folds a duplicate the
+  ingest pass couldn't see without geometry. A post-seal add is now an
+  invariant failure that marks the run incomplete instead of inventing a `QC-XTRA`
+  number that reads like ordinary output.
+
 ### Fixed (Phase 19B — cache identity & schema migration, DA-004)
 
 - **A stale cached digest can no longer be served after a visible PDF change.** The
