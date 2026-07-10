@@ -63,7 +63,7 @@ from .digest import (
     parse_numeric_claims,
 )
 from .digest_cache import critique_cache_key
-from .models import Finding, NumericClaim, RenderedSheet
+from .models import Finding, NumericClaim, RenderedSheet, source_page_key
 from .profiles import (
     Profile,
     build_checklist_prompt,
@@ -331,7 +331,9 @@ def _rect_iou(a: list[float], b: list[float]) -> float:
 
 
 def _same_sheet(a: Finding, b: Finding) -> bool:
-    return (a.source_name, a.page_index) == (b.source_name, b.page_index)
+    # Collision-safe: two same-basename sheets from different inputs are NOT the
+    # same sheet, so their findings are never merged (DA-001).
+    return source_page_key(a) == source_page_key(b)
 
 
 def _is_duplicate(a: Finding, b: Finding) -> bool:
@@ -388,6 +390,7 @@ def _representative(cluster: list[Finding], *, reproduced: bool) -> Finding:
     return Finding(
         sheet_id=base.sheet_id,
         source_name=base.source_name,
+        source_id=base.source_id,
         page_index=base.page_index,
         category=base.category,
         severity=_most_severe(cluster),
@@ -598,7 +601,7 @@ def critique_sheet_self_consistent(
         if hit is not None:
             return CritiqueResult(
                 findings=findings_from_cache(hit, rendered.ref),
-                claims=claims_from_cache(hit),
+                claims=claims_from_cache(hit, rendered.ref),
                 input_tokens=int(hit.get("input_tokens", 0) or 0),
                 output_tokens=int(hit.get("output_tokens", 0) or 0),
                 runs=int(hit.get("runs", runs) or runs),

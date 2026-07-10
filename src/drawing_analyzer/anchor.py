@@ -32,7 +32,7 @@ from collections import Counter
 from typing import Any, Iterable
 
 from . import tiling
-from .models import Anchor, Finding
+from .models import Anchor, Finding, source_page_key
 
 # A hyphen to fold to a space: only one sitting *between* two word characters
 # (``2-1/2"`` → ``2 1/2"``, ``VAV-3`` → ``VAV 3``). A leading/sign hyphen is
@@ -364,16 +364,16 @@ def resolve_conflict_legs(findings: Iterable[Finding], geom_by_key: dict) -> lis
 
     A :class:`~drawing_analyzer.models.ConflictLeg` duck-types as a finding for the
     resolver (it has ``source_quote`` / ``tile`` / ``anchor``), so legs are grouped
-    by their sheet ``(source_name, page_index)`` and run through
+    by their sheet's :func:`source_page_key` and run through
     :func:`resolve_anchors` against that sheet's geometry. ``geom_by_key`` maps
-    ``(source_name, page_index)`` → geometry; a leg whose sheet is absent is left
+    ``source_page_key`` → geometry; a leg whose sheet is absent is left
     ``UNANCHORED`` (it simply won't be clouded). Returns ``findings`` for chaining.
     """
     findings = list(findings)
     by_sheet: dict[tuple, list] = {}
     for f in findings:
         for leg in getattr(f, "also_on", None) or []:
-            by_sheet.setdefault((leg.source_name, leg.page_index), []).append(leg)
+            by_sheet.setdefault(source_page_key(leg), []).append(leg)
     for key, legs in by_sheet.items():
         geometry = geom_by_key.get(key)
         if geometry is not None:

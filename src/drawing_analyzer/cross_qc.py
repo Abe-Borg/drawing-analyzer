@@ -44,7 +44,7 @@ from .digest import (
     _tolerant_json_object,
     parse_numeric_claims,
 )
-from .models import ConflictLeg, Finding, NumericClaim
+from .models import ConflictLeg, Finding, NumericClaim, source_page_key
 from .auditors.references import detect_sheet_id
 
 _log = get_logger()
@@ -204,7 +204,7 @@ def _validate_cross_item(item: Any, sheet_map: dict[str, Any]) -> Finding | None
         geom = sheet_map.get(_norm_id(r["sheet_id"]))
         if geom is None:
             continue
-        sheet_key = (geom.ref.source_name, geom.ref.page_index)
+        sheet_key = source_page_key(geom.ref)
         if sheet_key in seen_sheets:
             continue
         seen_sheets.add(sheet_key)
@@ -216,6 +216,7 @@ def _validate_cross_item(item: Any, sheet_map: dict[str, Any]) -> Finding | None
     return Finding(
         sheet_id=pr["sheet_id"],
         source_name=pgeom.ref.source_name,
+        source_id=pgeom.ref.source_id,
         page_index=pgeom.ref.page_index,
         category=category,
         severity=severity,
@@ -227,6 +228,7 @@ def _validate_cross_item(item: Any, sheet_map: dict[str, Any]) -> Finding | None
             ConflictLeg(
                 sheet_id=r["sheet_id"],
                 source_name=g.ref.source_name,
+                source_id=g.ref.source_id,
                 page_index=g.ref.page_index,
                 source_quote=r["source_quote"],
                 tile=r["tile"],
@@ -357,11 +359,11 @@ def cross_sheet_qc(
     ``skipped`` for fewer than two readable sheets. Never raises.
     """
     model = model or cross_qc_model()
-    geom_by_key = {(g.ref.source_name, g.ref.page_index): g for g in geometries}
+    geom_by_key = {source_page_key(g.ref): g for g in geometries}
 
     entries: list[tuple] = []          # (sheet_id, digest_text, text_layer, geom)
     for sd in sheets:
-        geom = geom_by_key.get((sd.ref.source_name, sd.ref.page_index))
+        geom = geom_by_key.get(source_page_key(sd.ref))
         if geom is None:
             continue
         if getattr(sd, "error", None) or not (sd.text or "").strip():

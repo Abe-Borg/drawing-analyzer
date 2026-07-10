@@ -19,6 +19,7 @@ Design:
 Module layout::
 
     tiling.py         dependency-free tile geometry (clip rects + render zoom)
+    source_registry.py host-owned source identity (SRC-#### per input; DA-001)
     render.py         PyMuPDF rasterization (PyMuPDF importer 1 of exactly 2)
     digest.py         per-sheet vision request -> structured text + findings block
     batch_digest.py   Message Batches / Files API digest path

@@ -29,6 +29,7 @@ import pymupdf  # AGPL-3.0 — see module docstring.
 from . import tiling
 from .diagnostics import get_logger
 from .models import ImageTile, RenderedSheet, SheetGeometry, SheetRef
+from .source_registry import assign_source_ids
 
 _log = get_logger()
 
@@ -103,6 +104,7 @@ def list_sheets(pdf_paths: list[Path]) -> list[SheetRef]:
     opened is skipped (its error surfaces when rendering is attempted), so a
     bad file in a drop never blocks listing the rest.
     """
+    source_ids = assign_source_ids(pdf_paths)
     refs: list[SheetRef] = []
     for path in pdf_paths:
         path = Path(path)
@@ -112,6 +114,7 @@ def list_sheets(pdf_paths: list[Path]) -> list[SheetRef]:
             continue
         try:
             count = doc.page_count
+            source_id = source_ids.get(str(path), "")
             for i in range(count):
                 refs.append(
                     SheetRef(
@@ -119,6 +122,7 @@ def list_sheets(pdf_paths: list[Path]) -> list[SheetRef]:
                         page_index=i,
                         source_name=path.name,
                         page_count=count,
+                        source_id=source_id,
                     )
                 )
         finally:
@@ -414,11 +418,13 @@ def iter_rendered_sheets(
     cache uses this to render only the sheets that actually missed the cache, so
     a fully-cached re-run rasterizes nothing.
     """
+    source_ids = assign_source_ids(pdf_paths)
     for path in pdf_paths:
         path = Path(path)
         doc = pymupdf.open(str(path))
         try:
             count = doc.page_count
+            source_id = source_ids.get(str(path), "")
             for i in range(count):
                 if only is not None and (str(path), i) not in only:
                     continue
@@ -427,6 +433,7 @@ def iter_rendered_sheets(
                     page_index=i,
                     source_name=path.name,
                     page_count=count,
+                    source_id=source_id,
                 )
                 yield render_sheet(
                     doc[i], ref, rows=rows, cols=cols, overlap_frac=overlap_frac
@@ -480,17 +487,20 @@ def iter_sheet_prescan(
     pipeline uses the identities to decide which sheets can skip rasterization and
     only feeds the misses to :func:`iter_rendered_sheets`.
     """
+    source_ids = assign_source_ids(pdf_paths)
     for path in pdf_paths:
         path = Path(path)
         doc = pymupdf.open(str(path))
         try:
             count = doc.page_count
+            source_id = source_ids.get(str(path), "")
             for i in range(count):
                 ref = SheetRef(
                     pdf_path=path,
                     page_index=i,
                     source_name=path.name,
                     page_count=count,
+                    source_id=source_id,
                 )
                 page = doc[i]
                 identity = sheet_render_identity(

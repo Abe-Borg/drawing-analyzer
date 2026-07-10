@@ -307,8 +307,8 @@ def _unique_dir(path: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 FINDINGS_CSV_HEADER = [
-    "qc_id", "id", "sheet_id", "source_name", "page", "category", "severity",
-    "text", "source_quote", "tile", "refs", "also_on", "sources",
+    "qc_id", "id", "sheet_id", "source_id", "source_name", "page", "category",
+    "severity", "text", "source_quote", "tile", "refs", "also_on", "sources",
     "anchor_status", "anchor_method", "rect_pdf",
     "verification_status", "verification_note", "evidence_png",
     "citation_status", "citation_note",
@@ -348,6 +348,7 @@ def _finding_row(finding: Any) -> list[str]:
         str(getattr(finding, "qc_id", "") or ""),
         str(getattr(finding, "id", "")),
         str(getattr(finding, "sheet_id", "")),
+        str(getattr(finding, "source_id", "") or ""),
         str(getattr(finding, "source_name", "")),
         str(page_index + 1),                       # 1-based page, for the reader
         str(getattr(finding, "category", "")),

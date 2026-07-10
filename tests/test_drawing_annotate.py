@@ -15,6 +15,7 @@ from drawing_analyzer.annotate import (
     write_reviewed_pdfs,
 )
 from drawing_analyzer.models import Anchor, Finding, Verification
+from drawing_analyzer.source_registry import assign_source_ids
 
 pymupdf = pytest.importorskip("pymupdf")
 
@@ -22,10 +23,12 @@ from drawing_analyzer.annotate import annotate_pdf, count_annotations  # noqa: E
 
 
 def _finding(text="Issue", *, severity="high", status="VERIFIED", rect=(100.0, 100.0, 220.0, 140.0),
-             page=0, category="code", source="M-101.pdf", quote="VAV-3", refs=None):
+             page=0, category="code", source="M-101.pdf", quote="VAV-3", refs=None,
+             source_id=""):
     f = Finding(
-        sheet_id="M-101", source_name=source, page_index=page, category=category,
-        severity=severity, text=text, source_quote=quote, refs=list(refs or []),
+        sheet_id="M-101", source_name=source, source_id=source_id, page_index=page,
+        category=category, severity=severity, text=text, source_quote=quote,
+        refs=list(refs or []),
         anchor=Anchor(status="EXACT", rect_pdf=list(rect) if rect else None, method="exact"),
     )
     f.verification = Verification(status=status, note="looks right" if status == "VERIFIED" else "")
@@ -191,14 +194,67 @@ def test_no_reviewed_pdf_when_no_qc_content(tmp_path):
         doc.close()
 
 
-def test_duplicate_stems_get_unique_output_names(tmp_path):
-    # Two source PDFs sharing a stem must not clobber each other's reviewed copy.
+def test_list_sheets_assigns_distinct_source_ids_to_same_basename(tmp_path):
+    # The render-side wiring: two M-101.pdf in different folders get distinct
+    # host ids, and every page of a source shares its id.
+    from drawing_analyzer.render import list_sheets
+
+    a = _make_pdf(tmp_path / "a", "M-101.pdf", pages=2)
+    b = _make_pdf(tmp_path / "b", "M-101.pdf", pages=1)
+    refs = list_sheets([a, b])
+    by_path = {}
+    for r in refs:
+        by_path.setdefault(str(r.pdf_path), set()).add(r.source_id)
+    assert by_path[str(a)] == {"SRC-0001"}    # both pages of A share one id
+    assert by_path[str(b)] == {"SRC-0002"}
+    assert len(refs) == 3
+
+
+def test_duplicate_stems_isolate_findings_by_source_id(tmp_path):
+    # Product invariant (DA-001): two inputs sharing a basename are DISTINCT
+    # sources. A finding bound to one source is written ONLY to that source's
+    # reviewed PDF — never the other's. (The pre-migration behavior, where both
+    # same-named PDFs received the union of findings, was the defect.)
     a = _make_pdf(tmp_path / "a", "M-101.pdf")
     b = _make_pdf(tmp_path / "b", "M-101.pdf")
+    # list_sheets / write_reviewed_pdfs assign SRC ids in input order: a→SRC-0001.
+    ids = assign_source_ids([a, b])
+    sid_a = ids[str(a)]
+    findings = [_finding("only-on-A", status="VERIFIED", source="M-101.pdf", source_id=sid_a)]
+
+    out = write_reviewed_pdfs(findings, [a, b], tmp_path / "out")
+
+    # Only source A is written (B has no finding of its own), and its name is
+    # disambiguated by source id, not an order-dependent _2.
+    assert [p.name for p in out] == [f"M-101__{sid_a}_reviewed.pdf"]
+    doc = pymupdf.open(str(out[0]))
+    try:
+        n_annots = sum(1 for page in doc for _ in page.annots())
+        assert n_annots > 0, "source A's finding should be inked on A"
+    finally:
+        doc.close()
+
+
+def test_duplicate_stems_each_source_keeps_its_own_finding(tmp_path):
+    # Each same-basename source carries a different finding; neither reviewed PDF
+    # receives the other's ink, and both names are source-disambiguated.
+    a = _make_pdf(tmp_path / "a", "M-101.pdf")
+    b = _make_pdf(tmp_path / "b", "M-101.pdf")
+    ids = assign_source_ids([a, b])
     findings = [
-        _finding("a1", status="VERIFIED", source="M-101.pdf"),
+        _finding("A-issue", source="M-101.pdf", source_id=ids[str(a)], quote="AAA"),
+        _finding("B-issue", source="M-101.pdf", source_id=ids[str(b)], quote="BBB"),
     ]
-    # both PDFs share basename M-101.pdf, so both receive the finding
     out = write_reviewed_pdfs(findings, [a, b], tmp_path / "out")
     names = sorted(p.name for p in out)
-    assert names == ["M-101_reviewed.pdf", "M-101_reviewed_2.pdf"]
+    assert names == [
+        f"M-101__{ids[str(a)]}_reviewed.pdf",
+        f"M-101__{ids[str(b)]}_reviewed.pdf",
+    ]
+    # Each reviewed PDF has exactly its own one finding's ink (1 cloud each).
+    for p in out:
+        doc = pymupdf.open(str(p))
+        try:
+            assert sum(1 for page in doc for _ in page.annots()) >= 1
+        finally:
+            doc.close()

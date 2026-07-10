@@ -26,7 +26,15 @@ from .core.api_config import (
 from .core.tokenizer import estimate_image_tokens_total
 from .diagnostics import get_logger
 from .digest_cache import digest_cache_key
-from .models import CLAIM_KINDS, Finding, ImageTile, NumericClaim, RenderedSheet, SheetRef
+from .models import (
+    CLAIM_KINDS,
+    Finding,
+    ImageTile,
+    NumericClaim,
+    RenderedSheet,
+    SheetRef,
+    compute_finding_id,
+)
 
 _log = get_logger()
 
@@ -694,6 +702,7 @@ def _validate_finding_item(item: Any, ref: SheetRef) -> Finding | None:
     return Finding(
         sheet_id=sheet_id,
         source_name=ref.source_name,
+        source_id=ref.source_id,
         page_index=ref.page_index,
         category=category,
         severity=severity,
@@ -770,8 +779,34 @@ def parse_findings(raw_text: str, ref: SheetRef) -> tuple[str, list[Finding], st
     return prose, findings, note
 
 
+def _rebind_cached_finding(f: Finding, ref: SheetRef) -> Finding:
+    """Rebind a cache-loaded finding to the CURRENT run's source identity (§10.3).
+
+    A cache entry is sheet-local model data, not run provenance: its key is
+    content-only, so a hit can carry a *former* run's source identity (e.g. a
+    different input whose rendered pixels happened to match). We overwrite
+    ``source_name`` / ``source_id`` / ``page_index`` with the current ref,
+    recompute a *source-derived* fallback ``sheet_id`` (a real model id like
+    ``"M-101"`` is preserved — only the ``"{stem}-p{n}"`` fallback is rebuilt),
+    and recompute the content ``id`` so two different sources can never share one
+    artifact/evidence id (DA-001). ``also_on`` legs are left untouched — they
+    intentionally point at *other* sheets and are empty for digest findings.
+    """
+    old_fallback = f"{Path(f.source_name).stem}-p{int(f.page_index or 0) + 1}"
+    was_fallback = f.sheet_id == old_fallback
+    f.source_name = ref.source_name
+    f.source_id = ref.source_id
+    f.page_index = ref.page_index
+    if was_fallback:
+        f.sheet_id = _fallback_sheet_id(ref)
+    f.id = compute_finding_id(
+        f.sheet_id, f.category, f.source_quote or f.text, f.source_id
+    )
+    return f
+
+
 def findings_from_cache(hit: dict, ref: SheetRef) -> list[Finding]:
-    """Reconstruct cached findings for a digest cache hit (defensive)."""
+    """Reconstruct cached findings for a cache hit, rebound to ``ref`` (§10.3)."""
     raw = hit.get("findings")
     if not isinstance(raw, list):
         return []
@@ -779,7 +814,7 @@ def findings_from_cache(hit: dict, ref: SheetRef) -> list[Finding]:
     for item in raw:
         if isinstance(item, dict):
             try:
-                out.append(Finding.from_dict(item))
+                out.append(_rebind_cached_finding(Finding.from_dict(item), ref))
             except Exception:  # noqa: BLE001 - a bad cached row must never sink a run
                 continue
     return out
@@ -826,6 +861,7 @@ def _validate_claim_item(item: Any, ref: SheetRef | None) -> NumericClaim | None
         expected=item.get("expected"),
         note=str(item.get("note", "")).strip(),
         source_name=ref.source_name if ref is not None else "",
+        source_id=ref.source_id if ref is not None else "",
         page_index=ref.page_index if ref is not None else 0,
     )
 
@@ -857,8 +893,14 @@ def parse_numeric_claims(raw_text: str, ref: SheetRef | None = None) -> list[Num
     return claims
 
 
-def claims_from_cache(hit: dict) -> list[NumericClaim]:
-    """Reconstruct cached numeric claims for a critique cache hit (defensive)."""
+def claims_from_cache(hit: dict, ref: SheetRef | None = None) -> list[NumericClaim]:
+    """Reconstruct cached numeric claims, rebound to ``ref`` when given (§10.3).
+
+    Like :func:`findings_from_cache`, a critique cache hit is content-keyed, so
+    its claims may carry a former run's source identity; when the current
+    ``ref`` is supplied the emitting-sheet fields are rebound to it so the
+    arithmetic auditor resolves the claim against the right sheet.
+    """
     raw = hit.get("claims")
     if not isinstance(raw, list):
         return []
@@ -866,9 +908,22 @@ def claims_from_cache(hit: dict) -> list[NumericClaim]:
     for item in raw:
         if isinstance(item, dict):
             try:
-                out.append(NumericClaim.from_dict(item))
+                claim = NumericClaim.from_dict(item)
             except Exception:  # noqa: BLE001 - a bad cached row must never sink a run
                 continue
+            if ref is not None:
+                # Rebuild a source-derived fallback sheet_id before overwriting
+                # the source fields (mirrors _rebind_cached_finding): a claim
+                # whose sheet_id was "{old_stem}-pN" would otherwise show the old
+                # source's label in the CSV/report/markup, since audit_arithmetic
+                # prefers claim.sheet_id. A real model id is preserved.
+                old_fallback = f"{Path(claim.source_name).stem}-p{int(claim.page_index or 0) + 1}"
+                if claim.sheet_id == old_fallback:
+                    claim.sheet_id = _fallback_sheet_id(ref)
+                claim.source_name = ref.source_name
+                claim.source_id = ref.source_id
+                claim.page_index = ref.page_index
+            out.append(claim)
     return out
 
 

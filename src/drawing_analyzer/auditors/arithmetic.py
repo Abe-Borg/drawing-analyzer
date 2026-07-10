@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal, DivisionByZero, InvalidOperation
 from typing import Any, Iterable
 
-from ..models import Finding, NumericClaim, Verification
+from ..models import Finding, NumericClaim, Verification, source_page_key
 from .references import detect_sheet_id
 
 # --------------------------------------------------------------------------- #
@@ -206,9 +206,10 @@ class ArithmeticResult:
 
 
 def _claim_dedup_key(claim: NumericClaim) -> tuple:
+    # source_page_key (not bare source_name) so two identical claims from
+    # different same-basename inputs are NOT merged into one (DA-001).
     return (
-        (claim.source_name or "").strip().lower(),
-        int(claim.page_index or 0),
+        source_page_key(claim),
         (claim.sheet_id or "").strip().upper(),
         (claim.kind or "").strip().lower(),
         (claim.quote or "").strip(),
@@ -218,13 +219,13 @@ def _claim_dedup_key(claim: NumericClaim) -> tuple:
 
 
 def _build_maps(rendered_sheets: list[Any]) -> tuple[dict, dict]:
-    """``(by_key, by_id)`` maps: ``(source_name, page)`` → geom and id → geom."""
+    """``(by_key, by_id)`` maps: ``source_page_key`` → geom and id → geom."""
     by_key: dict[tuple, Any] = {}
     by_id: dict[str, Any] = {}
     for geom in rendered_sheets:
         ref = getattr(geom, "ref", None)
         if ref is not None:
-            by_key[(ref.source_name, ref.page_index)] = geom
+            by_key[source_page_key(ref)] = geom
         sid = detect_sheet_id(geom)
         if sid and sid not in by_id:
             by_id[sid] = geom
@@ -233,8 +234,8 @@ def _build_maps(rendered_sheets: list[Any]) -> tuple[dict, dict]:
 
 def _resolve_geometry(claim: NumericClaim, by_key: dict, by_id: dict) -> Any:
     """The sheet a claim belongs to: the emitting sheet when known, else by id."""
-    if claim.source_name:
-        geom = by_key.get((claim.source_name, int(claim.page_index or 0)))
+    if claim.source_id or claim.source_name:
+        geom = by_key.get(source_page_key(claim))
         if geom is not None:
             return geom
     return by_id.get((claim.sheet_id or "").strip().upper())
@@ -290,6 +291,7 @@ def audit_arithmetic(
         geom = _resolve_geometry(claim, by_key, by_id)
         ref = getattr(geom, "ref", None)
         source_name = ref.source_name if ref is not None else (claim.source_name or "")
+        source_id = ref.source_id if ref is not None else (claim.source_id or "")
         page_index = ref.page_index if ref is not None else int(claim.page_index or 0)
         sheet_id = claim.sheet_id or (detect_sheet_id(geom) if geom is not None else "") or source_name
 
@@ -299,6 +301,7 @@ def audit_arithmetic(
         finding = Finding(
             sheet_id=sheet_id,
             source_name=source_name,
+            source_id=source_id,
             page_index=page_index,
             category="conflict",
             severity=_severity_for(actual, expected),
@@ -316,14 +319,14 @@ def audit_arithmetic(
         )
         result.findings.append(finding)
         if geom is not None and (claim.quote or "").strip():
-            to_anchor.setdefault((source_name, page_index), []).append(finding)
+            to_anchor.setdefault(source_page_key(finding), []).append(finding)
 
     # Anchor the mismatch findings via their quotes, grouped per sheet. Reuses the
     # pure resolver (EXACT/FUZZY/TILE/UNANCHORED) exactly like model findings.
     if to_anchor:
         from ..anchor import resolve_anchors
 
-        geom_by_key = {(g.ref.source_name, g.ref.page_index): g for g in sheets if getattr(g, "ref", None)}
+        geom_by_key = {source_page_key(g.ref): g for g in sheets if getattr(g, "ref", None)}
         for key, group in to_anchor.items():
             geom = geom_by_key.get(key)
             if geom is not None:

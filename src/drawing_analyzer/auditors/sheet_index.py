@@ -146,6 +146,7 @@ def audit_sheet_index(rendered_sheets: Iterable[Any]) -> list[Finding]:
             findings.append(Finding(
                 sheet_id=index.display_id,
                 source_name=ref.source_name,
+                source_id=ref.source_id,
                 page_index=ref.page_index,
                 category="reference",
                 severity="medium",
@@ -181,6 +182,7 @@ def audit_sheet_index(rendered_sheets: Iterable[Any]) -> list[Finding]:
         findings.append(Finding(
             sheet_id=primary.display_id,
             source_name=pref.source_name,
+            source_id=pref.source_id,
             page_index=pref.page_index,
             category="reference",
             severity="low",
