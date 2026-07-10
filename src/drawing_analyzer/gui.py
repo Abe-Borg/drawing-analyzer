@@ -35,7 +35,12 @@ else:  # pragma: no cover - exercised only without tkinterdnd2
 
 from . import diagnostics
 from .core.api_config import REVIEW_MODEL_DEFAULT
-from .core.api_key_store import load_api_key_from_file, save_api_key
+from .core.api_key_store import (
+    SecureKeyStorageUnavailable,
+    load_api_key_from_file,
+    save_api_key,
+)
+from .core.app_paths import api_key_paths
 from .colors import COLORS
 from .cost import estimate_drawing_set_cost, format_drawing_cost_prompt
 from .html_report import build_html_report
@@ -456,12 +461,54 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         field never rewrites an unchanged (or env-supplied) key. Persistence is
         best-effort: a failure leaves the key working for this session (already
         applied by :meth:`_on_key_changed`) and is surfaced, not raised.
+
+        Credential safety (Phase 17, DA-032): persistence goes to the OS
+        credential store. When no secure backend exists the key is **not**
+        silently written to a plaintext file — the user is asked for explicit
+        informed consent; declining keeps the key session-only.
         """
         key = self._key_var.get().strip()
         if not key or key == self._persisted_key:
             return
         try:
             location = save_api_key(key)
+        except SecureKeyStorageUnavailable:
+            if not messagebox.askyesno(
+                "No secure key storage available",
+                "No OS-secured credential store (Windows Credential Manager / "
+                "macOS Keychain / Secret Service) is available on this "
+                "machine, so the key cannot be saved securely.\n\n"
+                "Save it as a PLAIN-TEXT file instead?\n\n"
+                f"It would be written to:\n{api_key_paths()[0]}\n\n"
+                "Anyone who can read that file can use your key. Choose No "
+                "to keep the key for this session only (you'll re-enter it "
+                "next launch).",
+                icon="warning",
+            ):
+                self._log(
+                    "API key kept for this session only — not saved "
+                    "(no secure credential store; plaintext declined).",
+                    level="warning",
+                )
+                self._set_key_status("session only", COLORS["warning"])
+                return
+            try:
+                location = save_api_key(key, allow_plaintext_fallback=True)
+            except Exception as exc:  # noqa: BLE001 - persistence is best-effort
+                self._log(
+                    f"API key set for this session, but could not be saved: {exc}",
+                    level="warning",
+                )
+                self._set_key_status("not saved", COLORS["warning"])
+                return
+            self._persisted_key = key
+            self._log(
+                f"API key saved as plain text ({location}) with your consent — "
+                "treat that file as a credential.",
+                level="warning",
+            )
+            self._set_key_status("saved (plaintext)", COLORS["warning"])
+            return
         except Exception as exc:  # noqa: BLE001 - persistence is best-effort
             self._log(
                 f"API key set for this session, but could not be saved: {exc}",
@@ -928,7 +975,9 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 "embedded in the file — don't share it.",
                 level="warning",
             )
-        elif api_key:
+        else:
+            # The assistant is included by default (DA-026); it prompts for a
+            # key on first use and never writes one into the file.
             self._log(
                 "The report includes the Ask-AI assistant; it will ask for an "
                 "API key on first use (kept only in the browser, not in the file).",

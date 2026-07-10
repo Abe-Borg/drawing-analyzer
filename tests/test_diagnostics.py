@@ -113,3 +113,74 @@ def test_logging_failure_is_swallowed(tmp_path):
     blocker.write_text("x", encoding="utf-8")
     assert diagnostics.configure_file_logging(blocker / "diag.log") is None
     assert diagnostics.configured_log_path() is None
+
+
+# --------------------------------------------------------------------------- #
+# Secret redaction (Phase 17) — the shared pre-serialization boundary.
+# --------------------------------------------------------------------------- #
+
+
+# These fixtures assemble their secret-SHAPED values at runtime from fragments
+# so the SOURCE never contains a contiguous token that pattern-matches a live
+# credential (keeps secret scanners quiet). Nothing here is a real key; the
+# whole point is to prove the redactor masks such shapes in logs.
+_ANT = "sk-" + "ant-"            # the Anthropic key prefix, never a whole token
+
+
+def _fake_key(tag: str) -> str:
+    return _ANT + tag
+
+
+def test_redact_secrets_masks_anthropic_key_anywhere():
+    key = _fake_key("api03-AbC_12-xyz")
+    out = diagnostics.redact_secrets(f"using key {key} now")
+    assert key not in out
+    assert "sk-ant-[REDACTED]" in out
+
+
+def test_redact_secrets_masks_named_fields_and_bearer():
+    secret = _fake_key("secret")
+    assert secret not in diagnostics.redact_secrets("x-api-key: " + secret)
+    bearer = "abc" + ".def.ghi"
+    assert diagnostics.redact_secrets("Authorization: Bearer " + bearer).endswith(
+        "[REDACTED]"
+    )
+    top = "top" + "secret"
+    assert top not in diagnostics.redact_secrets('{"api_key": "' + top + '"}')
+    pw = "hunter" + "2"
+    assert pw not in diagnostics.redact_secrets("password=" + pw + "&next=1")
+
+
+def test_redact_secrets_preserves_token_counts():
+    # `token` is word-bounded, so a token COUNT is never mistaken for a secret.
+    text = "usage input_tokens=1234 output_tokens=56"
+    assert diagnostics.redact_secrets(text) == text
+
+
+def test_redacting_formatter_masks_message_args_and_exceptions(tmp_path):
+    path = tmp_path / "diag.log"
+    assert diagnostics.configure_file_logging(path) == path
+    log = diagnostics.get_logger()
+
+    arg_key = _fake_key("arg-3xampl3")
+    exc_key = _fake_key("in-exc-9")
+    log.info("key via arg: %s", arg_key)
+    try:
+        raise RuntimeError("boom with x-api-key: " + exc_key)
+    except RuntimeError:
+        log.exception("request failed")
+
+    text = path.read_text(encoding="utf-8")
+    assert arg_key not in text
+    assert exc_key not in text
+    assert "sk-ant-[REDACTED]" in text
+    # Non-secret content still lands so the log stays useful.
+    assert "request failed" in text
+
+
+def test_nested_dict_repr_secrets_are_redacted():
+    nested = _fake_key("nested-key")
+    payload = {"headers": {"x-api-key": nested, "accept": "json"}}
+    out = diagnostics.redact_secrets(str(payload))
+    assert nested not in out
+    assert "accept" in out            # unrelated fields survive

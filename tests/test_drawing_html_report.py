@@ -165,12 +165,32 @@ def test_prose_with_two_bold_spans_is_not_a_header():
 
 
 def test_report_is_self_contained_html():
+    # Product invariant: one portable file — no external assets (stylesheets,
+    # script files, images). The default report DOES name the Anthropic API
+    # endpoint (the Ask-AI assistant's runtime target + its CSP allowance);
+    # that is a runtime opt-in network feature, not a page asset.
     doc = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW)
     assert doc.startswith("<!DOCTYPE html>")
-    # Styling and behavior are inlined — one portable file, no external assets.
     assert "<style>" in doc and "<script>" in doc
+    assert "<link" not in doc
+    assert 'src="http' not in doc and "src='http" not in doc
+    # The only https reference is the Anthropic Messages endpoint.
+    for prefix in ("http://", "https://"):
+        rest = doc
+        while prefix in rest:
+            i = rest.index(prefix)
+            assert rest[i:].startswith("https://api.anthropic.com"), rest[i : i + 60]
+            rest = rest[i + len("https://api.anthropic.com"):]
+
+
+def test_report_without_chat_has_no_network_references_at_all():
+    # include_chat=False restores the strict zero-network document.
+    doc = hr.build_html_report(
+        _make_ctx(), source_names=[SRC], now=NOW, include_chat=False
+    )
+    assert "da-chat" not in doc
     assert "http://" not in doc and "https://" not in doc
-    assert "src=" not in doc and "<link" not in doc
+    assert "<link" not in doc
 
 
 def test_report_contains_every_sheet_and_the_overview():
@@ -299,14 +319,21 @@ def test_focus_card_body_survives_the_focus_filter():
 
 
 # --------------------------------------------------------------------------- #
-# in-report Q&A assistant (opt-in via api_key)
+# in-report Q&A assistant (present by default; key prompted at first use)
 # --------------------------------------------------------------------------- #
 
 
-def test_report_without_key_has_no_chat_and_no_network_references():
+def test_report_without_key_still_shows_ask_ai_and_prompts_first_use():
+    # Product invariant (Phase 17, DA-026): the assistant is available even
+    # when the report was built with NO key — it prompts the reader on first
+    # use and keeps the key in sessionStorage only. (The old assertion that a
+    # key-less report omits the widget encoded the defect.)
     doc = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW)
-    assert "da-chat" not in doc
-    assert "api.anthropic.com" not in doc
+    assert 'id="da-chat-config"' in doc
+    assert "api.anthropic.com/v1/messages" in doc
+    assert '"apiKey"' not in doc                  # no key material in the file
+    assert "sessionStorage" in doc
+    assert "never saved into this file" in doc
     # Blank / whitespace keys behave exactly like no key.
     blank = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW, api_key="  ")
     assert blank == doc
@@ -361,18 +388,23 @@ def test_embed_api_key_without_a_key_stays_in_prompt_mode():
 
 
 def test_chat_config_cannot_break_out_of_its_script_tag():
-    # `</` in any config value (e.g. a hostile source filename) must be escaped
-    # to `<\/` so it can never close the JSON <script> block early.
+    # Every `<` in any config value (e.g. a hostile source filename) is emitted
+    # as the JSON string escape `\u003c`, so no value can close the JSON
+    # <script> block early or form markup — and JSON.parse round-trips it.
+    import json
+
+    hostile = 'evil</script><script>alert(1)//x.pdf'
     doc = hr.build_html_report(
         _make_ctx(),
-        source_names=['evil</script><script>alert(1)//x.pdf'],
+        source_names=[hostile],
         now=NOW,
         api_key="sk-ant-test-123",
     )
     start = doc.index('id="da-chat-config"')
-    config = doc[start: doc.index("</script>", start)]
-    assert "</" not in config[config.index(">"):]
-    assert "<\\/script" in config
+    body = doc[doc.index(">", start) + 1: doc.index("</script>", start)]
+    assert "<" not in body
+    assert "\\u003c" in body
+    assert json.loads(body)["sources"] == [hostile]
 
 
 # --------------------------------------------------------------------------- #
@@ -501,3 +533,180 @@ def test_same_basename_sheets_keep_their_own_text_layer():
     # the first geometry, so BRAVO_ONLY_TEXT would be missing entirely.
     assert "ALPHA_ONLY_TEXT" in doc
     assert "BRAVO_ONLY_TEXT" in doc
+
+
+# --------------------------------------------------------------------------- #
+# Phase 17A — report security trust boundary (DA-011).
+#
+# The browser-side execution proof (CSP + file:// + real event dispatch) lands
+# in Phase 17B's headless-Chromium suite. These hermetic tests pin the two
+# static halves of the boundary: (1) the Python side never emits a
+# model/run-controlled string into live markup, and (2) the emitted JS keeps
+# the safe-DOM discipline (no HTML sinks, one URL validator).
+# --------------------------------------------------------------------------- #
+
+# A corpus of payloads that must never produce executable markup or handlers.
+_ATTACK_STRINGS = [
+    '</script><script>sentinel()</script>',
+    '<img src=x onerror=sentinel()>',
+    '<svg onload=sentinel()></svg>',
+    '" autofocus onfocus="sentinel()',
+    "javascript:sentinel()",
+    "<iframe src=javascript:sentinel()>",
+    "<script>sentinel()</script>",
+]
+
+
+def _assert_inert(doc: str) -> None:
+    """No attack payload survives as live markup/handlers.
+
+    The executable surface is an *unescaped* dangerous tag opener or a script
+    body — never an escaped fragment. ``&lt;img … onerror=sentinel()&gt;`` is
+    safe (the ``<`` was neutralized to ``&lt;``); the handler substring only
+    matters when it sits on a real element, which the tag-opener bans catch.
+    The report itself never emits svg/iframe/object/embed, and its one
+    legitimate ``<img`` uses ``class=`` (never the attack's ``src=x``).
+    """
+    low = doc.lower()
+    assert "<script>sentinel" not in low          # no injected script element
+    assert "sentinel()</script>" not in low       # nor a closing-half break-out
+    for opener in ("<svg", "<iframe", "<object", "<embed", "<img src=x"):
+        assert opener not in low, opener
+    # A broken-out attribute needs a real quote before the handler; every model
+    # quote is escaped to &quot;, so the raw-quote handler form must be absent.
+    for handler in ('onerror="sentinel', 'onfocus="sentinel', 'onload="sentinel'):
+        assert handler not in low, handler
+
+
+def test_hostile_filenames_are_inert_in_the_report():
+    for payload in _ATTACK_STRINGS:
+        doc = hr.build_html_report(
+            _make_ctx(), source_names=[payload + ".pdf"], now=NOW
+        )
+        _assert_inert(doc)
+        # The literal still round-trips through the inert JSON config island.
+        import json
+        start = doc.index('id="da-chat-config"')
+        body = doc[doc.index(">", start) + 1: doc.index("</script>", start)]
+        assert payload + ".pdf" in json.loads(body)["sources"]
+
+
+def test_hostile_sheet_text_and_synthesis_are_escaped():
+    ctx = _make_ctx()
+    ctx.sheets[0].text = "**Scope**\n- " + "</script><script>sentinel()</script>"
+    ctx.synthesis_text = "**Conflicts**\n- <img src=x onerror=sentinel()>"
+    ctx.combined_text = '<svg onload=sentinel()></svg>'
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
+    _assert_inert(doc)
+    assert "&lt;img src=x" in doc  # rendered as visible text, escaped
+
+
+def test_hostile_finding_fields_are_escaped():
+    f = _finding(
+        sheet_id='</script><script>sentinel()</script>',
+        text='<img src=x onerror=sentinel()>',
+        quote='" autofocus onfocus="sentinel()',
+        category='<svg onload=sentinel()>',
+    )
+    doc = hr.build_html_report(_findings_ctx(findings=[f]), source_names=[SRC], now=NOW)
+    _assert_inert(doc)
+
+
+def test_hostile_run_errors_are_escaped():
+    ctx = _make_ctx()
+    ctx.errors = ['boom </script><script>sentinel()</script>']
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
+    _assert_inert(doc)
+
+
+def test_hostile_focus_text_is_escaped():
+    ctx = _make_ctx()
+    ctx.focus = '<img src=x onerror=sentinel()>'
+    ctx.focus_report_text = "**Rooms**\n- </script><script>sentinel()</script>"
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
+    _assert_inert(doc)
+
+
+def test_evidence_links_use_noopener_noreferrer():
+    f = _finding(verify_status="VERIFIED", evidence="evidence/QC-001/leg-01.png")
+    doc = hr.build_html_report(
+        _findings_ctx(findings=[f]), source_names=[SRC], now=NOW, link_evidence=True
+    )
+    assert 'rel="noopener noreferrer"' in doc
+
+
+# --------------------------------------------------------------------------- #
+# Static DOM-safety discipline of the emitted JavaScript.
+# --------------------------------------------------------------------------- #
+
+
+def test_report_scripts_have_no_html_injection_sinks():
+    for src in (hr._JS, hr._CHAT_JS):
+        for sink in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write"):
+            assert sink not in src, f"{sink} present in report script"
+
+
+def test_chat_js_builds_dom_and_validates_urls():
+    js = hr._CHAT_JS
+    # The safe-DOM renderer and single URL validator are present...
+    assert "renderMdInto" in js and "renderMdReplace" in js
+    assert "function safeUrl" in js and "function linkEl" in js
+    # ...and https-only is enforced with credential + control/whitespace
+    # rejection (0x00–0x20 covers all raw whitespace incl. space, tab, newline).
+    assert "u.protocol !== 'https:'" in js
+    assert "u.username || u.password" in js
+    assert "\\u0000-\\u0020" in js
+    # Citations must go through the same link factory, not raw href assembly.
+    assert "linkEl(c.url" in js
+    # Displayed errors are scrubbed of key material.
+    assert "scrubSecrets" in js
+
+
+# --------------------------------------------------------------------------- #
+# Content-Security-Policy (defense in depth).
+# --------------------------------------------------------------------------- #
+
+
+def test_csp_present_pins_script_hashes_and_restricts_connect():
+    import base64
+    import hashlib
+
+    doc = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW)
+    assert "Content-Security-Policy" in doc
+
+    def _hash(source: str) -> str:
+        return "sha256-" + base64.b64encode(
+            hashlib.sha256(source.encode("utf-8")).digest()
+        ).decode("ascii")
+
+    assert _hash(hr._JS) in doc
+    assert _hash(hr._CHAT_JS) in doc          # chat on by default
+    assert "connect-src https://api.anthropic.com" in doc
+    assert "object-src 'none'" in doc
+    assert "base-uri 'none'" in doc
+    assert "form-action 'none'" in doc
+    # No inline event handlers anywhere, so 'unsafe-inline' script is never used.
+    assert "script-src 'unsafe-inline'" not in doc
+
+
+def test_csp_connect_src_is_none_without_chat():
+    doc = hr.build_html_report(
+        _make_ctx(), source_names=[SRC], now=NOW, include_chat=False
+    )
+    assert "connect-src 'none'" in doc
+    import base64
+    import hashlib
+    chat_hash = "sha256-" + base64.b64encode(
+        hashlib.sha256(hr._CHAT_JS.encode("utf-8")).digest()
+    ).decode("ascii")
+    assert chat_hash not in doc  # only the JS actually emitted is allowlisted
+
+
+def test_embedded_key_forget_control_is_truthful():
+    # Forget-key exists; embedded mode admits the key stays in the file.
+    doc = hr.build_html_report(
+        _make_ctx(), source_names=[SRC], now=NOW,
+        api_key="sk-ant-test-123", embed_api_key=True,
+    )
+    assert 'id="da-chat-forget"' in doc
+    assert "Removing the key requires regenerating" in doc
