@@ -210,129 +210,157 @@ def submit_critique_batch(
         if progress is not None:
             progress(slot.index + 1, total or 0, f"Critiqued {sheet.ref.display_label} (inline)")
 
-    for index, sheet in enumerate(rendered_sheets):
-        slot = _CSlot(index=index, ref=sheet.ref)
-
-        cache_key: str | None = None
-        if cache is not None:
-            cache_key = critique_cache_key(
-                sheet,
-                model=model,
-                prompt_version=CRITIQUE_PROMPT_VERSION,
-                max_tokens=max_tokens,
-                effort=effort,
-                use_thinking=use_thinking,
-                runs=runs,
-                sheet_text=sheet.sheet_text,
-                profiles_key=profiles_key,
-            )
-            hit = cache.get(cache_key)
-            if hit is not None:
-                slot.result = critique_result_from_entry(hit, sheet.ref)
-                slots.append(slot)
-                _log.debug("critique sheet %d cache hit: %s", index, sheet.ref.display_label)
-                if progress is not None:
-                    progress(index + 1, total or 0, f"Cached critique {sheet.ref.display_label}")
-                continue
-        slot.cache_key = cache_key
-
-        # The Files API is already known dead this run (consecutive 401/403/404s):
-        # skip the doomed upload and critique this sheet real-time. Cache hits are
-        # still served above, so only the upload round-trips stop.
-        if uploads_dead:
-            _serve_realtime(slot, sheet)
-            continue
-
-        on_image = None
-        if on_status is not None:
-            def on_image(pos, n, retrying, *, _k=index + 1, _label=sheet.ref.display_label):
-                verb = "Retrying" if retrying else "Uploading"
-                tail = " after overload" if retrying else ""
-                on_status(f"[{_k}/{total}] critique {verb} image {pos}/{n}{tail} — {_label}")
-
-        try:
-            upload = upload_sheet_images(
-                client, sheet,
-                task_instruction=_CRITIQUE_TASK_INSTRUCTION,
-                on_image=on_image,
-            )
-        except Exception as exc:  # noqa: BLE001 - one sheet's upload failing is captured, not fatal
-            # The Files-API upload failed for this sheet (route down, credential,
-            # or transient exhausted). Rather than lose the sheet's critique, fall
-            # back to a synchronous real-time self-consistency read that reuses the
-            # render already in hand — no re-render, no batch discount for it.
-            _log.warning(
-                "critique sheet %d upload failed; falling back to real-time: %s (%s)",
-                index, sheet.ref.display_label, summarize_exc(exc),
-            )
-            _serve_realtime(slot, sheet)
-            # Breaker accounting: only an unbroken run of the SAME
-            # credential/route-level status (401/403/404) trips it — those hit
-            # every remaining sheet identically. Any other failure (transient
-            # retries exhausted, a payload-shaped 4xx) resets the streak because it
-            # says nothing about the next sheet's fate.
-            status = run_fatal_upload_status(exc)
-            if status is None:
-                fatal_streak = 0
-                last_fatal_status = None
-                continue
-            fatal_streak = fatal_streak + 1 if status == last_fatal_status else 1
-            last_fatal_status = status
-            if fatal_streak >= MAX_CONSECUTIVE_FATAL_UPLOAD_FAILURES:
-                uploads_dead = True
-                hint = upload_failure_hint(exc)
-                _log.warning(
-                    "Files API unreachable after %d consecutive HTTP %d critique "
-                    "upload failure(s); critiquing the remaining sheets real-time%s",
-                    fatal_streak, status, f" — {hint}" if hint else "",
-                )
-            continue
-
-        # A successful upload proves the Files API is reachable — reset the streak.
-        fatal_streak = 0
-        last_fatal_status = None
-        slot.file_ids = upload.file_ids
-        uploaded_all.extend(upload.file_ids)
-        for i in range(runs):
-            custom_id = f"sheet__{index}__r{i + 1}"
-            params = build_critique_request_params(
-                upload.content,
-                model=model,
-                max_tokens=max_tokens,
-                use_thinking=use_thinking,
-                effort=effort,
-                checklist=checklists[i],
-            )
-            reqs.append({"custom_id": custom_id, "params": params})
-            slot.custom_ids.append(custom_id)
-            by_custom_id[custom_id] = (slot, f"critique_{i + 1}")
-        slots.append(slot)
-        _log.debug(
-            "critique sheet %d uploaded %d image(s) as %d read(s): %s",
-            index, len(upload.file_ids), runs, sheet.ref.display_label,
-        )
-        if progress is not None:
-            progress(index + 1, total or 0, f"Uploaded critique {sheet.ref.display_label}")
-
     batch_id: str | None = None
-    if reqs:
-        try:
-            mb = client.beta.messages.batches.create(requests=reqs, betas=[FILES_API_BETA])
-        except Exception:
-            # DA-034: the uploads are already remote but no batch will ever
-            # reference them — delete every one before re-raising so a submit
-            # failure never leaks files.
-            _log.warning(
-                "critique batch submit failed; deleting %d uploaded file(s)",
-                len(uploaded_all),
+    try:
+        for index, sheet in enumerate(rendered_sheets):
+            slot = _CSlot(index=index, ref=sheet.ref)
+
+            cache_key: str | None = None
+            if cache is not None:
+                cache_key = critique_cache_key(
+                    sheet,
+                    model=model,
+                    prompt_version=CRITIQUE_PROMPT_VERSION,
+                    max_tokens=max_tokens,
+                    effort=effort,
+                    use_thinking=use_thinking,
+                    runs=runs,
+                    sheet_text=sheet.sheet_text,
+                    profiles_key=profiles_key,
+                )
+                hit = cache.get(cache_key)
+                if hit is not None:
+                    slot.result = critique_result_from_entry(hit, sheet.ref)
+                    slots.append(slot)
+                    _log.debug("critique sheet %d cache hit: %s", index, sheet.ref.display_label)
+                    if progress is not None:
+                        progress(index + 1, total or 0, f"Cached critique {sheet.ref.display_label}")
+                    continue
+            slot.cache_key = cache_key
+
+            # The Files API is already known dead this run (consecutive 401/403/404s):
+            # skip the doomed upload and critique this sheet real-time. Cache hits are
+            # still served above, so only the upload round-trips stop.
+            if uploads_dead:
+                _serve_realtime(slot, sheet)
+                continue
+
+            on_image = None
+            if on_status is not None:
+                def on_image(pos, n, retrying, *, _k=index + 1, _label=sheet.ref.display_label):
+                    verb = "Retrying" if retrying else "Uploading"
+                    tail = " after overload" if retrying else ""
+                    on_status(f"[{_k}/{total}] critique {verb} image {pos}/{n}{tail} — {_label}")
+
+            try:
+                upload = upload_sheet_images(
+                    client, sheet,
+                    task_instruction=_CRITIQUE_TASK_INSTRUCTION,
+                    on_image=on_image,
+                )
+            except Exception as exc:  # noqa: BLE001 - one sheet's upload failing is captured, not fatal
+                # The Files-API upload failed for this sheet (route down, credential,
+                # or transient exhausted). Rather than lose the sheet's critique, fall
+                # back to a synchronous real-time self-consistency read that reuses the
+                # render already in hand — no re-render, no batch discount for it.
+                _log.warning(
+                    "critique sheet %d upload failed; falling back to real-time: %s (%s)",
+                    index, sheet.ref.display_label, summarize_exc(exc),
+                )
+                _serve_realtime(slot, sheet)
+                # Breaker accounting: only an unbroken run of the SAME
+                # credential/route-level status (401/403/404) trips it — those hit
+                # every remaining sheet identically. Any other failure (transient
+                # retries exhausted, a payload-shaped 4xx) resets the streak because it
+                # says nothing about the next sheet's fate.
+                status = run_fatal_upload_status(exc)
+                if status is None:
+                    fatal_streak = 0
+                    last_fatal_status = None
+                    continue
+                fatal_streak = fatal_streak + 1 if status == last_fatal_status else 1
+                last_fatal_status = status
+                if fatal_streak >= MAX_CONSECUTIVE_FATAL_UPLOAD_FAILURES:
+                    uploads_dead = True
+                    hint = upload_failure_hint(exc)
+                    _log.warning(
+                        "Files API unreachable after %d consecutive HTTP %d critique "
+                        "upload failure(s); critiquing the remaining sheets real-time%s",
+                        fatal_streak, status, f" — {hint}" if hint else "",
+                    )
+                continue
+
+            # A successful upload proves the Files API is reachable — reset the streak.
+            fatal_streak = 0
+            last_fatal_status = None
+            slot.file_ids = upload.file_ids
+            uploaded_all.extend(upload.file_ids)
+            for i in range(runs):
+                custom_id = f"sheet__{index}__r{i + 1}"
+                params = build_critique_request_params(
+                    upload.content,
+                    model=model,
+                    max_tokens=max_tokens,
+                    use_thinking=use_thinking,
+                    effort=effort,
+                    checklist=checklists[i],
+                )
+                reqs.append({"custom_id": custom_id, "params": params})
+                slot.custom_ids.append(custom_id)
+                by_custom_id[custom_id] = (slot, f"critique_{i + 1}")
+            slots.append(slot)
+            _log.debug(
+                "critique sheet %d uploaded %d image(s) as %d read(s): %s",
+                index, len(upload.file_ids), runs, sheet.ref.display_label,
             )
-            delete_files(client, uploaded_all)
-            raise
-        batch_id = _get(mb, "id")
-        _log.info(
-            "critique batch submitted: id=%s items=%d (%d sheet(s) x %d read(s))",
-            batch_id, len(reqs), len(reqs) // max(1, runs), runs,
-        )
+            if progress is not None:
+                progress(index + 1, total or 0, f"Uploaded critique {sheet.ref.display_label}")
+
+        if reqs:
+            try:
+                mb = client.beta.messages.batches.create(requests=reqs, betas=[FILES_API_BETA])
+            except Exception as exc:  # noqa: BLE001 - additive/non-fatal (I-3), see below
+                # DA-034: the uploads are already remote but no batch will ever
+                # reference them — delete every one so a submit failure never leaks
+                # files. Then DEGRADE ONLY the would-be-batched sheets rather than
+                # re-raise: the critique is additive and per-sheet non-fatal (I-3), and
+                # re-raising here would propagate to the stage-level guard and discard
+                # the results ALREADY resolved on the other slots — free cache hits and,
+                # worse, the paid-for real-time fallbacks whose reads have already run.
+                # Only the sheets whose reads never happened (custom_ids set, no result)
+                # lose their critique; every resolved slot is preserved.
+                batched = [s for s in slots if s.custom_ids and s.result is None]
+                _log.warning(
+                    "critique batch submit failed (%s); deleting %d uploaded file(s) "
+                    "and degrading %d batched sheet(s) to no-critique",
+                    summarize_exc(exc), len(uploaded_all), len(batched),
+                )
+                delete_files(client, uploaded_all)
+                for s in batched:
+                    s.result = CritiqueResult(
+                        findings=[], input_tokens=0, output_tokens=0,
+                        runs=0, requested_runs=runs, completed_runs=0,
+                        error=f"critique batch submit failed: {summarize_exc(exc)}",
+                    )
+                    s.custom_ids = []   # nothing to collect for it
+                    s.file_ids = []     # already deleted
+                return CritiqueBatch(
+                    batch_id=None, slots=slots, total=total or len(slots),
+                    runs=runs, by_custom_id={},
+                )
+            batch_id = _get(mb, "id")
+            _log.info(
+                "critique batch submitted: id=%s items=%d (%d sheet(s) x %d read(s))",
+                batch_id, len(reqs), len(reqs) // max(1, runs), runs,
+            )
+    except Exception:  # noqa: BLE001 - clean up before propagating (DA-034)
+        # An unexpected error escaped the submit loop before any batch owns the
+        # already-uploaded files (a cache-backend error, a fallback blowing up, …).
+        # Delete them so they never leak, then propagate. The expected
+        # ``batches.create`` failure is handled non-fatally above and returns, so it
+        # never reaches here.
+        delete_files(client, uploaded_all)
+        raise
 
     return CritiqueBatch(
         batch_id=batch_id,
@@ -431,12 +459,20 @@ def collect_critique_batch(
                 slot.result = res
                 # Cache only a *complete* result — every requested read parsed. A
                 # partial (a read failed) is returned but never frozen under the
-                # full-runs key (DA-008), mirroring the real-time path.
+                # full-runs key (DA-008), mirroring the real-time path. The write is
+                # best-effort: a cache I/O failure must never discard this (or any
+                # not-yet-merged) already-collected result by unwinding the loop.
                 if (
                     cache is not None and slot.cache_key
                     and res.error is None and res.completed_runs == batch.runs
                 ):
-                    cache.put(slot.cache_key, critique_cache_entry_from_result(res))
+                    try:
+                        cache.put(slot.cache_key, critique_cache_entry_from_result(res))
+                    except Exception as exc:  # noqa: BLE001 - cache write is advisory
+                        _log.warning(
+                            "critique cache write failed for %s: %s",
+                            slot.ref.display_label, summarize_exc(exc),
+                        )
         else:
             # Non-terminal (detached / failed / poll_failed): the batch is abandoned
             # for collection. Best-effort cancel it (leaving it running only burns

@@ -362,17 +362,84 @@ def test_cleanup_releases_all_files_after_terminal_collect():
     assert len(client.files.deleted) == 2 * IMAGES_PER_SHEET
 
 
-def test_submit_failure_deletes_every_uploaded_file():
-    # batches.create raises AFTER the uploads landed -> every file is deleted
-    # before the exception propagates (no leak).
+def test_submit_create_failure_is_nonfatal_deletes_files_and_degrades_batched():
+    # DA-034 + I-3: batches.create raising AFTER the uploads landed must delete
+    # every uploaded file (no leak) AND degrade only the would-be-batched sheets —
+    # NOT re-raise (which would fail the whole critique stage).
     client = _FakeClient(_succeed, create_raises=RuntimeError("batch backend down"))
-    with pytest.raises(RuntimeError, match="batch backend down"):
-        submit_critique_batch(
-            iter([_make_sheet(1), _make_sheet(2)]), client=client, model=OPUS,
-            runs=2, total=2,
-        )
+    batch = submit_critique_batch(
+        iter([_make_sheet(1), _make_sheet(2)]), client=client, model=OPUS,
+        runs=2, total=2,
+    )
+    assert batch.batch_id is None
     assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids)
     assert len(client.files.deleted) == 2 * IMAGES_PER_SHEET
+    results = collect_critique_batch(batch, client=client, sleep=NOSLEEP)
+    assert len(results) == 2
+    for _ref, res in results:
+        assert res.findings == [] and res.error and "submit failed" in res.error
+
+
+def test_submit_create_failure_preserves_cache_hit_and_rescued_results():
+    # I-3: a create failure degrades ONLY the would-be-batched sheet; the free
+    # cache-hit findings and the already-PAID real-time fallback findings on the
+    # other slots survive.
+    cache = DigestCache(None, persist=False)
+    _run(_FakeClient(_succeed), [_make_sheet(1)], cache=cache, runs=2)  # warm sheet 1
+
+    class _Sheet2BadUpload(_FakeFiles):
+        def upload(self, *, file):
+            _n, data, _c = file
+            if data.startswith(b"OV-2") or data.startswith(b"T2-"):
+                raise RuntimeError("sheet 2 upload down")
+            return super().upload(file=file)
+
+    client = _FakeClient(_succeed, create_raises=RuntimeError("create 500"))
+    client.files = _Sheet2BadUpload()
+    client.beta.files = client.files
+    batch = submit_critique_batch(
+        iter([_make_sheet(1), _make_sheet(2), _make_sheet(3)]),
+        client=client, cache=cache, model=OPUS, runs=2, total=3,
+    )
+    by_name = {ref.source_name: res for ref, res in
+               collect_critique_batch(batch, client=client, cache=cache, sleep=NOSLEEP)}
+    assert by_name["M-101.pdf"].cached and by_name["M-101.pdf"].findings      # free hit kept
+    assert by_name["M-102.pdf"].rescued and by_name["M-102.pdf"].findings     # paid fallback kept
+    assert by_name["M-103.pdf"].findings == []                                # only C degraded
+    assert "submit failed" in by_name["M-103.pdf"].error
+    assert client.files.deleted                                               # C's uploads freed
+
+
+class _GetBoomCache:
+    """Cache whose ``get`` raises on the Nth call — an unexpected mid-submit error."""
+
+    def __init__(self, boom_on_call):
+        self.calls = 0
+        self.boom_on_call = boom_on_call
+
+    def get(self, key):
+        self.calls += 1
+        if self.calls == self.boom_on_call:
+            raise RuntimeError("cache read exploded")
+        return None
+
+    def put(self, key, value):
+        pass
+
+
+def test_unexpected_loop_error_frees_orphaned_uploads_before_propagating():
+    # DA-034: an unexpected error in the submit loop (here a cache-read failure on
+    # sheet 2) AFTER sheet 1 already uploaded must delete sheet 1's orphaned uploads
+    # — no batch will ever reference them — then propagate.
+    client = _FakeClient(_succeed)
+    cache = _GetBoomCache(boom_on_call=2)  # sheet 1 miss→uploads; sheet 2 get raises
+    with pytest.raises(RuntimeError, match="cache read exploded"):
+        submit_critique_batch(
+            iter([_make_sheet(1), _make_sheet(2)]), client=client, cache=cache,
+            model=OPUS, runs=2, total=2,
+        )
+    assert client.files.deleted == client.files.uploaded_ids
+    assert len(client.files.deleted) == IMAGES_PER_SHEET
 
 
 def test_collect_results_error_releases_files_without_leaking():
