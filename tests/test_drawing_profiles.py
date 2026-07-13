@@ -230,6 +230,23 @@ def test_resolve_profile_selection_manual_choice_wins():
     ) == ["fire-protection"]
 
 
+def test_resolve_profile_selection_does_not_leak_a_stale_suggestion():
+    # The GUI applies this to decide which checkboxes are on. A profile suggested
+    # for one file set must NOT stay on when a different set is loaded (it is no
+    # longer suggested and was never forced on).
+    assert P.resolve_profile_selection(["fire-protection"]) == ["fire-protection"]
+    # New file set suggests 'electrical' only; 'fire-protection' drops out.
+    assert P.resolve_profile_selection(["electrical"]) == ["electrical"]
+    # A forced-on profile persists across a suggestion change; a forced-off one is
+    # suppressed even while suggested.
+    assert P.resolve_profile_selection(
+        ["electrical"], user_selected=["fire-protection"]
+    ) == ["electrical", "fire-protection"]
+    assert P.resolve_profile_selection(
+        ["fire-protection"], user_deselected=["fire-protection"]
+    ) == []
+
+
 def test_snapshot_profiles_captures_version_hash_and_source():
     fp = P.get_profile("fire-protection")
     (snap,) = P.snapshot_profiles([fp])

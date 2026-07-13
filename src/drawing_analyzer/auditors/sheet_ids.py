@@ -94,15 +94,18 @@ def _leading_letters(segment: str) -> str:
 def _looks_like_project_prefix(segment: str) -> bool:
     """True when a leading segment is a *project code* to skip, not a discipline.
 
-    A discipline designator is a short **pure-alpha** field (``F``, ``FP``,
-    ``M``). A project code — the thing that must be skipped so ``AVC10-F-...``
-    detects fire protection — is a longer alpha run **followed by digits within
-    the same segment** (``AVC10``, ``PROJ2``). The ``>= 2`` leading-letters guard
-    keeps a compact/dotted discipline+number field like ``M1`` / ``E2`` (one
-    discipline letter then digits) from being mistaken for a project code.
+    A discipline designator is a short **1-2 letter** field (``F``, ``M``, ``FP``,
+    ``FA``, ``CE``). A project code — the thing that must be skipped so
+    ``AVC10-F-...`` detects fire protection — is a **3+ letter** alpha run followed
+    by digits within the same segment (``AVC10``, ``PROJ2``). The ``>= 3``
+    leading-letters guard is what distinguishes the two: it keeps a *compact*
+    discipline+number field like ``M1`` / ``E2`` **and** a two-letter compact
+    discipline like ``FP101`` / ``FA101`` / ``CE201`` (whose discipline is the
+    leading ``FP`` / ``FA`` / ``CE``, not a following suffix segment) from being
+    misread as a project code — the regression the earlier ``>= 2`` guard caused.
     """
     lead = _leading_letters(segment)
-    if len(lead) < 2:
+    if len(lead) < 3:
         return False
     return any(ch.isdigit() for ch in segment)
 

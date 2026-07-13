@@ -1276,7 +1276,13 @@ def _run_qc_stages(
                     run_usage, family="citation", instance="citation",
                     model=citation_model(),
                     input_tokens=cires.input_tokens, output_tokens=cires.output_tokens,
-                    billable_tool_uses={"web_search": int(getattr(cires, "checked", 0) or 0)},
+                    # Bill one web search per REQUEST issued (each runs >=1 search),
+                    # not per unique reference — a reference with many claims is now
+                    # split into several claim-complete requests (DA-017), so the
+                    # per-reference count would under-bill the search fee.
+                    billable_tool_uses={"web_search": int(
+                        getattr(cires, "requests", 0) or getattr(cires, "checked", 0) or 0
+                    )},
                     terminal_status="PARTIAL" if partial else "COMPLETE",
                 )
                 citation_stage.items_out = len(getattr(cires, "assessments", []) or [])

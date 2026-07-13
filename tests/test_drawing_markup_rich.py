@@ -151,17 +151,31 @@ def test_web_search_tool_type_is_current_and_overridable(monkeypatch):
 
 
 class _CitationClient:
-    """Scripted per-call responses; captures request kwargs."""
+    """Scripted responses; captures request kwargs.
 
-    def __init__(self, texts):
-        self._texts = list(texts)
+    ``routes`` (an ordered list of ``(substring, text)``) routes by REQUEST BODY —
+    deterministic regardless of worker-thread arrival order; the first route whose
+    substring is in the body wins. Without routes it cycles ``texts`` by call count
+    (fine only for single-request tests).
+    """
+
+    def __init__(self, texts=None, *, routes=None):
+        self._texts = list(texts or [])
+        self._routes = list(routes or [])
         self.captured = []
         outer = self
 
         class _Msgs:
             def create(self, **kw):  # noqa: ANN001, ANN202
                 outer.captured.append(kw)
-                text = outer._texts[min(len(outer.captured) - 1, len(outer._texts) - 1)]
+                body = kw["messages"][0]["content"]
+                text = None
+                for sub, route_text in outer._routes:
+                    if sub in body:
+                        text = route_text
+                        break
+                if text is None:
+                    text = outer._texts[min(len(outer.captured) - 1, len(outer._texts) - 1)]
                 return FakeMessage(
                     content=[FakeTextBlock(text=text)],
                     usage=FakeUsage(input_tokens=200, output_tokens=40),
@@ -180,9 +194,10 @@ def test_check_citations_attaches_verdicts_per_unique_ref():
     f1 = _f("cites table", refs=["NFPA 13 Table 13.2.1"])
     f2 = _f("cites same table", refs=["NFPA 13 Table 13.2.1"])
     f3 = _f("cites relief", refs=["NFPA 13 §8.1.2"])
-    client = _CitationClient([
-        _verdict_block("CHECKED_MISMATCH", note="2016 numbering", editions="4.3.1.7 in 2019+"),
-        _verdict_block("CHECKED_SUPPORTS", note="supports"),
+    # Route by reference (deterministic): the table mismatches, the relief supports.
+    client = _CitationClient(routes=[
+        ("Table 13.2.1", _verdict_block("CHECKED_MISMATCH", note="2016 numbering", editions="4.3.1.7 in 2019+")),
+        ("§8.1.2", _verdict_block("CHECKED_SUPPORTS", note="supports")),
     ])
     res = check_citations(
         [f1, f2, f3], [_Geom("PER NFPA 13, 2016 EDITION")],
@@ -225,8 +240,10 @@ import re as _re  # noqa: E402
 class _PerClaimClient:
     """A content-aware fake: echoes each claim handle in the request with a status.
 
-    ``status_for(handle, request_index)`` decides the per-claim verdict, so a test
-    can return mixed SUPPORTS/MISMATCH within one request or vary by request.
+    ``status_for(handle, body)`` decides the per-claim verdict from the REQUEST BODY
+    (which carries the reference and each claim's text), so routing is deterministic
+    and independent of worker-thread arrival order — a test can return mixed
+    SUPPORTS/MISMATCH keyed by the claim text or the reference, not the call index.
     """
 
     def __init__(self, status_for):
@@ -236,12 +253,11 @@ class _PerClaimClient:
 
         class _Msgs:
             def create(self, **kw):  # noqa: ANN001, ANN202
-                idx = len(outer.captured)
                 outer.captured.append(kw)
                 body = kw["messages"][0]["content"]
                 handles = _re.findall(r"\[(C\d+)\]", body)
                 entries = [
-                    {"claim": h, "status": outer._status_for(h, idx), "note": "n"}
+                    {"claim": h, "status": outer._status_for(h, body), "note": "n"}
                     for h in handles
                 ]
                 text = "searched...\n```json\n" + json.dumps(
@@ -255,12 +271,18 @@ class _PerClaimClient:
         self.messages = _Msgs()
 
 
+def _claim_text_for(handle: str, body: str) -> str:
+    """The claim text paired with ``handle`` in a citation request body ([C1] text)."""
+    m = _re.search(rf"\[{handle}\] (.+)", body)
+    return m.group(1) if m else ""
+
+
 def test_check_citations_checks_every_claim_no_truncation():
     # DA-017: five distinct claims sharing one reference are ALL sent (no
     # finding_texts[:3] drop) and every finding gets a verdict.
     ref = "NFPA 13 §8.1.2"
     fs = [_f(f"claim number {i}", refs=[ref]) for i in range(5)]
-    client = _PerClaimClient(lambda h, i: "CHECKED_SUPPORTS")
+    client = _PerClaimClient(lambda h, body: "CHECKED_SUPPORTS")
     res = check_citations(fs, [], client=client, sleep=lambda *_: None)
     assert len(client.captured) == 1          # five claims fit in one request
     body = client.captured[0]["messages"][0]["content"]
@@ -275,8 +297,11 @@ def test_check_citations_mixed_verdicts_are_claim_specific():
     ref = "NFPA 13 Table 13.2.1"
     f_ok = _f("sprinkler count is fine", refs=[ref])
     f_bad = _f("density is wrong", refs=[ref])
+    # Route by the CLAIM TEXT (deterministic), not by handle position: 'density'
+    # mismatches, everything else supports.
     client = _PerClaimClient(
-        lambda h, i: "CHECKED_SUPPORTS" if h == "C1" else "CHECKED_MISMATCH"
+        lambda h, body: "CHECKED_MISMATCH" if "density" in _claim_text_for(h, body)
+        else "CHECKED_SUPPORTS"
     )
     res = check_citations([f_ok, f_bad], [], client=client, sleep=lambda *_: None)
     assert f_ok.citation.status == "CHECKED_SUPPORTS"
@@ -288,28 +313,36 @@ def test_check_citations_mixed_verdicts_are_claim_specific():
 
 def test_check_citations_verdict_only_covers_the_request_that_included_the_claim(monkeypatch):
     # DA-017 core: a finding's verdict comes from the request that actually
-    # contained its claim — never one that omitted it. Force a chunk boundary.
+    # contained its claim — never one that omitted it. Force a chunk boundary so
+    # the two chunks return DIFFERENT verdicts, keyed by claim text (deterministic,
+    # thread-order-independent). The old defect (one verdict fanned out to every
+    # finding citing the ref) would give the second-chunk finding the first chunk's
+    # verdict; here it must get its own.
     import drawing_analyzer.citation_check as C
     monkeypatch.setattr(C, "_MAX_CLAIMS_PER_REQUEST", 2)
     ref = "NFPA 13 §19.2"
-    fs = [_f(f"distinct claim {i}", refs=[ref]) for i in range(3)]
-    client = _PerClaimClient(lambda h, i: "CHECKED_SUPPORTS")
-    res = C.check_citations(fs, [], client=client, sleep=lambda *_: None)
+    f_alpha = _f("alpha claim", refs=[ref])
+    f_beta = _f("beta claim", refs=[ref])
+    f_gamma = _f("gamma claim", refs=[ref])   # falls in the SECOND chunk
+    # First chunk's claims (alpha/beta) mismatch; the second chunk's (gamma) supports.
+    client = _PerClaimClient(
+        lambda h, body: "CHECKED_SUPPORTS" if "gamma" in _claim_text_for(h, body)
+        else "CHECKED_MISMATCH"
+    )
+    res = C.check_citations([f_alpha, f_beta, f_gamma], [], client=client, sleep=lambda *_: None)
     assert len(client.captured) == 2          # 3 claims / 2 per request → 2 requests
     assert res.partial is False
-    # Each finding's assessment names the request that carried its own claim, and
-    # that request's captured body contains the finding's text.
-    bodies = [kw["messages"][0]["content"] for kw in client.captured]
-    for f in fs:
-        a = f.citations[0]
-        which = int(a.request_id.split("-")[-1])
-        assert f.text in bodies[which]
+    assert f_alpha.citation.status == "CHECKED_MISMATCH"
+    assert f_beta.citation.status == "CHECKED_MISMATCH"
+    # gamma's verdict comes from ITS request (the 2nd chunk), not the 1st chunk's.
+    assert f_gamma.citation.status == "CHECKED_SUPPORTS"
 
 
 def test_check_citations_multi_reference_finding_keeps_each_assessment():
     f = _f("cites two codes", refs=["NFPA 13 §8.1", "IBC 903.3"])
+    # Route by REFERENCE (each request is for one ref): IBC mismatches, NFPA supports.
     client = _PerClaimClient(
-        lambda h, i: "CHECKED_MISMATCH" if i == 1 else "CHECKED_SUPPORTS"
+        lambda h, body: "CHECKED_MISMATCH" if "IBC 903.3" in body else "CHECKED_SUPPORTS"
     )
     check_citations([f], [], client=client, sleep=lambda *_: None)
     # DA-017: per-reference assessments are retained, not collapsed into one status.

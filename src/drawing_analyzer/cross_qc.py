@@ -164,8 +164,8 @@ elsewhere (equipment tags and capacities, shared/general notes, schedule values,
 code editions, phasing) so a reconciler can compare them across shards. Emit at \
 most 40 facts.
 - Each claim (numeric relationship to verify by calculation — you only transcribe): \
-sheet_handle; quote (VERBATIM); kind (sum, product, factor); terms; expected; note. \
-Emit [] if none."""
+sheet_id (set this to the sheet's HANDLE, e.g. S001); quote (VERBATIM); kind (sum, \
+product, factor); terms; expected; note. Emit [] if none."""
 
 CROSS_QC_RECONCILE_SYSTEM_PROMPT = """\
 You are reconciling a large construction drawing set that was reviewed in shards. \
@@ -391,7 +391,7 @@ def _finding_from_handles(item: Any, entry_by_handle: dict[str, tuple]) -> Findi
     resolved = []
     seen_sheets: set[tuple] = set()
     for handle, quote in refs_raw:
-        entry = entry_by_handle.get(handle)
+        entry = entry_by_handle.get(_norm_id(handle))   # case/whitespace-insensitive
         if entry is None:                    # unknown handle → unbound
             continue
         sheet_id, geom = entry
@@ -451,7 +451,7 @@ def _resolve_claim_handles(
     rebound to the real sheet id / source identity.
     """
     for c in claims:
-        entry = entry_by_handle.get(_norm_id(c.sheet_id)) or entry_by_handle.get(c.sheet_id.strip() if c.sheet_id else "")
+        entry = entry_by_handle.get(_norm_id(c.sheet_id))
         if entry is not None:
             sheet_id, geom = entry
             c.sheet_id = sheet_id
@@ -652,7 +652,7 @@ def _parse_facts(
         if not isinstance(item, dict) or len(out) >= DEFAULT_MAP_MAX_FACTS:
             continue
         handle = str(item.get("sheet_handle", "") or "").strip()
-        entry = entry_by_handle.get(handle)
+        entry = entry_by_handle.get(_norm_id(handle))   # case/whitespace-insensitive
         if entry is None:
             continue
         sheet_id, geom = entry
@@ -693,17 +693,25 @@ def _reconcile_call(
     return findings, claims, in_tok, out_tok, None
 
 
+# Cap the all-pairs reconcile fan-out (a runaway backstop far above any real set —
+# 11 groups → 55 pair-calls covers ~2200 facts / hundreds of sheets).
+_MAX_RECONCILE_PAIR_CALLS = 64
+
+
 def _reconcile_facts(
     manifest: list[tuple], facts: list[CrossQCFact], entry_by_handle: dict, *,
     client: Any, model: str, max_retries: int, sleep: Any,
 ) -> tuple[list[Finding], list[NumericClaim], int, int, bool]:
-    """Reconcile all facts, using a balanced reduction tree when they overflow.
+    """Reconcile all facts, comparing across groups when they overflow one call.
 
     Returns ``(findings, claims, in, out, completed)``. When the facts fit in one
     call it is a single reconciliation. Otherwise the facts are split into
-    balanced groups and reduced pairwise up a tree — every reducer compares its two
-    children and carries the (capped) union forward, so every sheet stays connected
-    to the final comparison (§16.1). ``completed`` is False if any reducer failed.
+    **half-cap** groups and reconciled over **every pair** of groups — each pair's
+    union is ≤ the cap (no truncation), and every pair of facts is co-present in at
+    least one call, so a cross-group conflict is never missed (a plain "compare each
+    group to itself" tree would silently drop cross-group pairs). Findings are
+    deduped by the caller. ``completed`` is False if any reconcile call failed or
+    the pair fan-out had to be capped.
     """
     if not facts:
         return [], [], 0, 0, True
@@ -714,40 +722,38 @@ def _reconcile_facts(
         )
         return f, c, i, o, err is None
 
-    # Balanced reduction: split into groups of the reconcile cap, then pair up.
-    groups = [facts[i:i + MAX_FACTS_PER_RECONCILE] for i in range(0, len(facts), MAX_FACTS_PER_RECONCILE)]
+    half = max(1, MAX_FACTS_PER_RECONCILE // 2)
+    groups = [facts[i:i + half] for i in range(0, len(facts), half)]
     all_f: list[Finding] = []
     all_c: list[NumericClaim] = []
     tot_in = tot_out = 0
     completed = True
-    while len(groups) > 1:
-        next_groups: list[list[CrossQCFact]] = []
-        for i in range(0, len(groups), 2):
-            pair = groups[i:i + 2]
-            merged = [f for g in pair for f in g]
-            capped = merged[:MAX_FACTS_PER_RECONCILE]
-            if len(capped) < len(merged):
-                # A node had to drop facts to fit — the comparison at (and above)
-                # this node is no longer exhaustive, so the reconciliation is not
-                # complete (honest degradation, not a silent loss).
+    calls = 0
+    for i in range(len(groups)):
+        for j in range(i + 1, len(groups)):
+            if calls >= _MAX_RECONCILE_PAIR_CALLS:
                 completed = False
                 _log.warning(
-                    "cross-qc reduction: dropped %d fact(s) at a tree node "
-                    "(over the %d-fact reconcile cap)",
-                    len(merged) - len(capped), MAX_FACTS_PER_RECONCILE,
+                    "cross-qc reconcile: %d group(s) exceed the %d pair-call cap; "
+                    "some cross-group pairs were not compared",
+                    len(groups), _MAX_RECONCILE_PAIR_CALLS,
                 )
+                break
+            union = groups[i] + groups[j]          # ≤ MAX_FACTS_PER_RECONCILE
             f, c, in_t, out_t, err = _reconcile_call(
-                manifest, capped, entry_by_handle,
+                manifest, union, entry_by_handle,
                 client=client, model=model, max_retries=max_retries, sleep=sleep,
             )
+            calls += 1
             tot_in += in_t
             tot_out += out_t
             if err is not None:
                 completed = False
             all_f.extend(f)
             all_c.extend(c)
-            next_groups.append(capped)
-        groups = next_groups
+        else:
+            continue
+        break
     return all_f, all_c, tot_in, tot_out, completed
 
 

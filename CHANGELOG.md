@@ -6,6 +6,41 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed (Phase 24 review remediation — 16 adversarial-review findings)
+
+A multi-agent adversarial review of the Phase 24 diff surfaced 16 confirmed
+issues, now all fixed with regression tests:
+
+- **`discipline_token` regression** — a compact two-letter discipline with a suffix
+  segment (`FP101-A`, `FA101-N`, `CE201-X`) was misread as a project code and
+  returned the wrong discipline. The project-prefix guard now requires **3+** leading
+  letters (disciplines are 1-2; project codes are 3+), so `FP101-A` → `fp` again
+  while `AVC10-F-D-01-1` → `f` still holds.
+- **Sharded cross-QC numeric claims were orphaned** — the map/reconcile prompt keyed
+  claims by `sheet_handle`, but the shared claim parser only reads `sheet_id`, so
+  those claims never reached the arithmetic auditor. The prompt now emits the handle
+  in `sheet_id`, and it is rebound to the real sheet host-side.
+- **Cross-QC reduction tree missed cross-group conflicts** — when facts overflowed
+  one reconcile call, the old tree kept only the first child (`merged[:cap]`). It now
+  splits facts into half-cap groups and reconciles **every pair**, so a conflict whose
+  two sheets land in different fact groups is still found (fan-out capped, honest
+  degradation past the cap).
+- **GUI profile leak & mislabel** — auto-suggested profiles now reset when the file
+  set changes / on Clear (a fire-protection suggestion no longer carries into an
+  unrelated electrical run), and a profile in the default user dir is labeled `user`,
+  not `built-in`. The apply logic reuses the tested `resolve_profile_selection`.
+- **GUI preflight PyMuPDF thread-safety** — overlapping preflights now serialize their
+  PyMuPDF access under a lock (I-5) and only the most recent result is applied.
+- **Citation cost, tally & handle tolerance** — the web-search fee is billed per
+  *request* (a reference with many claims issues several), `CitationCheckResult.by_ref`
+  is populated again, the no-client fallback records its assessments (so `items_out`
+  is right), and claim/sheet handles are matched case/bracket-tolerantly.
+- **Test-quality fixes** — the citation fake clients now route by request *content*
+  instead of worker-thread arrival order (removing flakiness), the DA-017
+  "verdict-never-covers-an-omitted-claim" guard now forces the cross-chunk scenario
+  deterministically, and the dual-crop evidence test proves the two legs are
+  byte-distinct crops from distinct sources.
+
 ### Added (Phase 24 — cross-sheet, profile, citation & evidence completion, DA-015/016/017/018/028)
 
 - **Cross-sheet QC is now whole-set at every size (DA-015).** Above 40 sheets the

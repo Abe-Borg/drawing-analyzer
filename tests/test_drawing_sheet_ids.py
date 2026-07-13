@@ -47,7 +47,7 @@ def test_discipline_token_plain_forms():
 
 def test_discipline_token_is_project_prefix_aware():
     # The core DA-018 fix: a project-coded id must yield the discipline segment,
-    # not the leading project code.
+    # not the leading project code (3+ leading letters + digits = project code).
     assert S.discipline_token("AVC10-F-D-01-1") == "f"
     assert S.discipline_token("PROJ2-M-101") == "m"
     assert S.discipline_token("AVC10.F.D.01.1") == "f"
@@ -56,6 +56,18 @@ def test_discipline_token_is_project_prefix_aware():
     # A single discipline letter followed by digits in one segment is compact,
     # not a project prefix.
     assert S.discipline_token("M1-01") == "m"
+
+
+def test_discipline_token_two_letter_compact_with_suffix_is_not_a_project_code():
+    # Regression: a compact TWO-letter discipline followed by a suffix segment
+    # (matchline/revision/phase letters) must keep its discipline, not read the
+    # suffix. The earlier >=2 guard misread FP101-A as a project code -> "a".
+    assert S.discipline_token("FP101-A") == "fp"
+    assert S.discipline_token("FA101-N") == "fa"
+    assert S.discipline_token("CE201-X") == "ce"
+    assert S.discipline_token("AD101-B") == "ad"
+    assert S.discipline_token("FP101-DEMO") == "fp"
+    assert S.discipline_token("M101-2") == "m"
 
 
 def test_discipline_tokens_collects_distinct():

@@ -181,6 +181,15 @@ def _norm_status(raw: Any) -> str | None:
     return s if s in _VALID_VERDICTS else None
 
 
+def _norm_handle(raw: Any) -> str:
+    """Fold a claim handle for tolerant matching: strip brackets/punctuation, upper.
+
+    So a model that echoes ``C1`` as ``[C1]`` / ``c1`` / ``C1.`` still matches the
+    request-local handle instead of being silently dropped to UNCHECKED.
+    """
+    return str(raw or "").strip().strip("[](){}. ").upper()
+
+
 def _parse_assessments(
     raw_text: str, handles: list[str]
 ) -> tuple[dict[str, tuple[str, str]], str, bool]:
@@ -204,17 +213,19 @@ def _parse_assessments(
     per: dict[str, tuple[str, str]] = {}
     assessments = verdict.get("assessments")
     if isinstance(assessments, list):
-        valid = set(handles)
+        # Validate every returned handle against the request manifest, tolerant of
+        # bracket/case reformatting (§16.1): unknown handles are ignored, never trusted.
+        norm_to_orig = {_norm_handle(h): h for h in handles}
         for a in assessments:
             if not isinstance(a, dict):
                 continue
-            handle = str(a.get("claim", "") or "").strip()
-            if handle not in valid:           # opaque-handle validation (§16.1)
+            orig = norm_to_orig.get(_norm_handle(a.get("claim", "")))
+            if orig is None:                  # opaque-handle validation
                 continue
             status = _norm_status(a.get("status"))
             if status is None:
                 continue
-            per[handle] = (status, str(a.get("note", "") or "").strip()[:300])
+            per[orig] = (status, str(a.get("note", "") or "").strip()[:300])
         return per, edition_notes, True
 
     # Back-compat: one verdict for the whole request → applies to every claim in it.
@@ -318,6 +329,7 @@ class CitationCheckResult:
     """
 
     checked: int = 0                 # unique references a request was sent for
+    requests: int = 0                # claim-complete requests actually issued
     supports: int = 0
     mismatches: int = 0
     unchecked: int = 0
@@ -480,13 +492,16 @@ def check_citations(
 
     result.assessments = list(claim_assessments.values())
     result.checked = len(ref_order)
+    result.requests = len(requests)          # claim-complete requests actually issued
 
-    # Count unique references by dominant verdict (mismatch dominates).
-    statuses_by_ref: dict[str, set[str]] = {}
+    # Count unique references by dominant verdict (mismatch dominates) and populate
+    # the compat ``by_ref`` map (one dominant Citation per reference).
+    assessments_by_ref: dict[str, list[CitationAssessment]] = {}
     for a in result.assessments:
-        statuses_by_ref.setdefault(a.reference, set()).add(a.status)
+        assessments_by_ref.setdefault(a.reference, []).append(a)
     for ref in ref_order:
-        statuses = statuses_by_ref.get(ref, {"UNCHECKED"})
+        group = assessments_by_ref.get(ref, [])
+        statuses = {a.status for a in group} or {"UNCHECKED"}
         if "CHECKED_MISMATCH" in statuses:
             result.mismatches += 1
         elif "CHECKED_SUPPORTS" in statuses:
@@ -495,6 +510,9 @@ def check_citations(
             result.unresolvable += 1
         else:
             result.unchecked += 1
+        combined = _combine_finding_citation(group)
+        if combined is not None:
+            result.by_ref[ref] = combined
 
     # Attach per-reference assessments to each finding, then derive its summary.
     for f in findings:
@@ -526,7 +544,22 @@ def _attach_unchecked(
     findings: list[Finding], ref_claims: dict, result: CitationCheckResult, *, note: str
 ) -> None:
     """Attach an UNCHECKED assessment to every finding when the pass could not run
-    at all (no client), so the report still shows the reference was not verified."""
+    at all (no client), so the report still shows the reference was not verified.
+
+    Builds one assessment per ``(reference, claim)`` group — with the *full* set of
+    finding ids sharing that claim — and records them on ``result.assessments`` so
+    the stage's ``items_out`` tally reflects the annotations actually made.
+    """
+    # (ref, normalized claim text) -> UNCHECKED assessment (shared across findings).
+    claim_assessments: dict[tuple[str, str], CitationAssessment] = {}
+    for ref, claims in ref_claims.items():
+        for claim in claims.values():
+            claim_assessments[(ref, _normalize_claim(claim["text"]))] = CitationAssessment(
+                reference=ref, status="UNCHECKED",
+                claim_finding_ids=list(claim["finding_ids"]), note=note,
+            )
+    result.assessments = list(claim_assessments.values())
+
     for f in findings:
         attached: list[CitationAssessment] = []
         seen: set[str] = set()
@@ -535,10 +568,9 @@ def _attach_unchecked(
             if not ref or ref in seen:
                 continue
             seen.add(ref)
-            attached.append(CitationAssessment(
-                reference=ref, status="UNCHECKED",
-                claim_finding_ids=[f.id], note=note,
-            ))
+            a = claim_assessments.get((ref, _normalize_claim(f.text)))
+            if a is not None:
+                attached.append(a)
         f.citations = attached
         combined = _combine_finding_citation(attached)
         if combined is not None:
