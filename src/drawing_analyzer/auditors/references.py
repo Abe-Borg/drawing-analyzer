@@ -72,6 +72,12 @@ _SKIP = "SKIP"
 _SUGGEST_MAX_DIST = _S.SUGGEST_MAX_DIST
 _MALFORMED_MAX_DIST = 2
 
+# Max gap (as a fraction of glyph height) between two words for them to be read as
+# fragments of ONE split id rather than two words. A genuine id break has ~no gap;
+# a normal inter-word space is ~0.2× the height, so this ceiling sits below it — a
+# normal-spaced "A-101 OF 24" is never merged into one bogus token (§17.3).
+_SPLIT_MAX_GAP_FRAC = 0.12
+
 # A looser capture used *inside* trigger phrases / detail bubbles: a token that
 # may be hyphenated (M-101, F-D-01-1), compact (FP101), or dotted (M1.01).
 # Captured tokens are validated with the shared lexer + learned grammar before
@@ -222,10 +228,25 @@ def _merge_adjacent_id_words(words: list[Any]) -> list[tuple[str, tuple[float, f
     :func:`_looks_like_sheet_id`, together with its union rectangle. Single words
     are handled by the caller; this returns only the **multi-word** merges, so a
     split title-block ID is still detected and a split reference still resolves.
+
+    Two guards keep it from *absorbing* a real id into a longer bogus token (the
+    ``A-101 OF 24`` trap — a normal-spaced "sheet N of M" line whose merge would
+    outscore the true ``A-101``):
+
+    - **Tight abutment only.** A genuine id break has ~no gap between the fragments
+      (they were one visual token the extractor split); a normal inter-word space
+      is ~0.2× the glyph height. The gap ceiling here (``_SPLIT_MAX_GAP_FRAC``) is
+      *below* a word space, so ``A-101`` and ``OF`` are never joined.
+    - **No fragment is already an id.** A run is merged only when **none** of its
+      constituent words is itself a sheet id — so a complete ``A-101`` is never
+      swallowed, and only genuinely-split fragments (``M-`` + ``101``, neither an
+      id alone) are rejoined.
     """
     merges: list[tuple[str, tuple[float, float, float, float]]] = []
     n = len(words)
     for i in range(n):
+        if _looks_like_sheet_id(_wtext(words[i])):
+            continue                              # a complete id — never a fragment
         xi0, yi0, xi1, yi1 = _wrect(words[i])
         h = max(1.0, yi1 - yi0)
         text = _wtext(words[i])
@@ -236,10 +257,11 @@ def _merge_adjacent_id_words(words: list[Any]) -> list[tuple[str, tuple[float, f
             xj0, yj0, xj1, yj1 = _wrect(words[j])
             yc = (yj0 + yj1) / 2.0
             gap = xj0 - prev_x1
-            # Same line (center within half a line height) and a tight gap (an
-            # ID break, not a word space) — 0.6× the token height is generous
-            # enough for kerned splits yet well under a real inter-word space.
-            if abs(yc - prev_yc) > 0.5 * h or gap < -1.0 or gap > 0.6 * h:
+            # Same text line, and a gap far tighter than a word space; a word that
+            # is itself a complete id is not a fragment, so it stops the run.
+            if abs(yc - prev_yc) > 0.5 * h or gap < -1.0 or gap > _SPLIT_MAX_GAP_FRAC * h:
+                break
+            if _looks_like_sheet_id(_wtext(words[j])):
                 break
             text += _wtext(words[j])
             rects.append(_wrect(words[j]))

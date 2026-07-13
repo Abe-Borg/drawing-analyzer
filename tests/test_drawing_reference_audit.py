@@ -405,10 +405,11 @@ def test_audit_negative_corpus_never_becomes_a_finding():
 
 
 def test_audit_reconstructs_split_title_block_id():
-    # A CAD export can break the title-block sheet number into two words
-    # ("M-" "101"); detection must rejoin them so the sheet enters the inventory
-    # and an ASCII reference to it resolves rather than being flagged missing.
-    split = [_w(W - 300, H - 160, "M-", width=30), _w(W - 268, H - 160, "101", width=40)]
+    # A CAD export can break the title-block sheet number into two tightly-abutting
+    # words ("M-" "101" — a split visual token, ~no gap); detection must rejoin them
+    # so the sheet enters the inventory and an ASCII reference to it resolves rather
+    # than being flagged missing.
+    split = [_w(W - 300, H - 160, "M-", width=30), _w(W - 270, H - 160, "101", width=40)]
     sheets = [
         _sheet("e.pdf", 0, split),
         _sheet("e.pdf", 1, [
@@ -421,3 +422,18 @@ def test_audit_reconstructs_split_title_block_id():
     assert not any(
         "M-101" in f.text and "not present" in f.text for f in audit_references(sheets)
     )
+
+
+def test_split_word_merge_does_not_absorb_a_complete_id():
+    # Regression: a normal-spaced "A-101 OF 24" ("sheet A-101 of 24") must NOT be
+    # merged into a bogus token that outscores and shadows the real A-101 in the
+    # title block. The complete A-101 is detected; no fabricated inventory id.
+    # Gaps here (~13 pt at width 64) are normal word spaces, not an id break.
+    sheet = _sheet("d.pdf", 0, [
+        _w(W - 320, H - 160, "A-101", width=60),
+        _w(W - 250, H - 160, "OF", width=30),
+        _w(W - 210, H - 160, "24", width=30),
+    ])
+    assert detect_sheet_id(sheet) == "A-101"
+    inv = build_inventory([sheet])
+    assert inv.ids == frozenset({"A-101"})       # no "A-101OF" / "OF24" phantom

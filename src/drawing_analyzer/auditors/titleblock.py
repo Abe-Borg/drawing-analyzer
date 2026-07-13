@@ -126,7 +126,18 @@ def _extract_labeled_fields(lines: list[list[Any]]) -> dict[str, tuple[str, list
     """
     out: dict[str, tuple[str, list[float]]] = {}
     for line in lines:
-        text = " ".join(_wtext(w) for w in line).upper()
+        # Per-word upper text + the char span each word occupies in the joined line,
+        # so a label match's end offset maps back to exact value WORDS (not a fuzzy
+        # substring test that would drag the anchor rect across label/other tokens).
+        texts = [_wtext(w).upper() for w in line]
+        spans: list[tuple[int, int]] = []
+        pos = 0
+        for i, t in enumerate(texts):
+            if i:
+                pos += 1  # the joining space
+            spans.append((pos, pos + len(t)))
+            pos += len(t)
+        text = " ".join(texts)
         for pattern, field_class, multiword in _FIELD_LABELS:
             m = pattern.match(text)
             if m is None:
@@ -139,9 +150,13 @@ def _extract_labeled_fields(lines: list[list[Any]]) -> dict[str, tuple[str, list
                 break
             if field_class == "project_number" and not _NUMBER_VALUE_RE.match(value):
                 break
-            # Rect: the value words on this line (those whose text is in the tail).
-            val_words = [w for w in line if _wtext(w).upper() and _wtext(w).upper() in tail]
-            rect = list(_rect_union([_wrect(w) for w in val_words])) if val_words else list(_wrect(line[-1]))
+            # Value words = those whose span starts at/after the label match end;
+            # for a single-token value keep only the first such word.
+            val_idxs = [i for i, (s, _e) in enumerate(spans) if s >= m.end()]
+            if not multiword and val_idxs:
+                val_idxs = val_idxs[:1]
+            val_words = [line[i] for i in val_idxs] or [line[-1]]
+            rect = list(_rect_union([_wrect(w) for w in val_words]))
             out.setdefault(field_class, (value, rect))
             break
     return out
