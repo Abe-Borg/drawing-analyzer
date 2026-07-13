@@ -730,7 +730,13 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             var.set(name in on)      # non-suggested, non-forced → unchecked (no leak)
 
     def _reset_profile_selection(self) -> None:
-        """Clear all profile state (called on Clear) so nothing carries into a new set."""
+        """Clear all profile state (called on Clear) so nothing carries into a new set.
+
+        Bumps the preflight generation so a preflight still running from the previous
+        file set can't re-apply its (now stale) suggestions after the list is cleared
+        — its ``_apply_profile_suggestions`` callback fails the generation check.
+        """
+        self._preflight_gen += 1
         self._profile_forced_on.clear()
         self._profile_forced_off.clear()
         self._profile_suggested.clear()
