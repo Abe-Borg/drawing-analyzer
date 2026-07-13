@@ -232,6 +232,10 @@ def test_audit_missing_without_close_match_omits_suggestion():
 
 
 def test_audit_various_trigger_phrases():
+    # Invariant: every trigger family (SEE SHEET, ON DRAWING, SEE X FOR) harvests
+    # a reference. Uses a MULTI-sheet set so the grammar is confident (§17.3): a
+    # one-sheet set is deliberately low-confidence now — only strong triggers run
+    # and only exact matches resolve, so it can't fabricate missing-sheet findings.
     sheets = [
         _sheet("s.pdf", 0, [
             _w(100, 100, "SEE"), _w(160, 100, "SHEET"), _w(240, 100, "M-999"),
@@ -239,11 +243,30 @@ def test_audit_various_trigger_phrases():
             _w(100, 300, "SEE"), _w(160, 300, "M-997"), _w(240, 300, "FOR"), _w(300, 300, "DETAILS"),
             _titleblock("M-101"),
         ]),
+        _sheet("s.pdf", 1, [_titleblock("M-102")]),
     ]
     quotes = _refs(audit_references(sheets))
     assert "SEE SHEET M-999" in quotes
     assert "ON DRAWING M-998" in quotes
     assert "SEE M-997 FOR" in quotes
+
+
+def test_audit_one_sheet_set_low_confidence_strong_only_with_note():
+    # §17.3: on a one-sheet set only STRONG triggers run, and a genuine miss is
+    # still reported but carries the confidence-limitation note. A MEDIUM trigger
+    # ("ON DRAWING") is not evaluated at all on a thin grammar.
+    sheets = [
+        _sheet("s.pdf", 0, [
+            _w(100, 100, "SEE"), _w(160, 100, "SHEET"), _w(240, 100, "M-999"),   # strong
+            _w(100, 200, "ON"), _w(140, 200, "DRAWING"), _w(240, 200, "M-998"),  # medium
+            _titleblock("M-101"),
+        ]),
+    ]
+    findings = audit_references(sheets)
+    strong = [f for f in findings if "M-999" in f.text]
+    assert len(strong) == 1
+    assert "single-sheet set" in strong[0].text        # confidence limitation reported
+    assert not any("M-998" in f.text for f in findings)  # medium trigger not run
 
 
 def test_audit_empty_inventory_flags_nothing():
@@ -322,3 +345,79 @@ def test_audit_csi_two_isolated_citations_both_found():
     specs = {f.source_quote for f in audit_references(sheets)
              if f.anchor.method == "spec_section"}
     assert specs == {"23 21 13", "26 05 00"}
+
+
+# --------------------------------------------------------------------------- #
+# Phase 25 §17.2/17.3 — broadened families, negative corpus, split-word ids
+# --------------------------------------------------------------------------- #
+
+
+def test_audit_resolves_compact_numbered_set():
+    # Regression: a compact-numbered set (FP101, no hyphen) previously produced an
+    # EMPTY inventory (the old lexer required a hyphen), so no reference could
+    # resolve. The shared lexer now recognizes the compact family.
+    sheets = [
+        _sheet("a.pdf", 0, [
+            _w(120, 400, "SEE"), _w(190, 400, "SHEET"), _w(280, 400, "FP109"),  # missing
+            _w(120, 500, "REFER"), _w(190, 500, "TO"), _w(260, 500, "FP102"),   # resolves
+            _titleblock("FP101"),
+        ]),
+        _sheet("a.pdf", 1, [_titleblock("FP102")]),
+    ]
+    assert build_inventory(sheets).ids == frozenset({"FP101", "FP102"})
+    findings = audit_references(sheets)
+    miss = [f for f in findings if "FP109" in f.text]
+    assert len(miss) == 1 and "not present" in miss[0].text
+    assert not any(f.source_quote == "REFER TO FP102" for f in findings)
+
+
+def test_audit_resolves_dotted_numbered_set():
+    sheets = [
+        _sheet("b.pdf", 0, [
+            _w(120, 400, "REFER"), _w(190, 400, "TO"), _w(260, 400, "M1.09"),
+            _titleblock("M1.01"),
+        ]),
+        _sheet("b.pdf", 1, [_titleblock("M1.02")]),
+    ]
+    miss = [f for f in audit_references(sheets) if "M1.09" in f.text]
+    assert len(miss) == 1
+    assert miss[0].source_quote == "REFER TO M1.09"
+
+
+def test_audit_negative_corpus_never_becomes_a_finding():
+    # Equipment tags, code/standard citations, voltages, RFI numbers, and room
+    # numbers that follow a trigger word must NEVER be flagged as sheet
+    # references — even in a confident (multi-sheet) set (§17.3 negative corpus).
+    sheets = [
+        _sheet("d.pdf", 0, [
+            _w(120, 400, "PER"), _w(180, 400, "NFPA-13"),
+            _w(120, 450, "SEE"), _w(160, 450, "SHEET"), _w(240, 450, "RFI-102"),
+            _w(120, 500, "REFER"), _w(180, 500, "TO"), _w(240, 500, "480V"),
+            _w(120, 550, "SEE"), _w(160, 550, "DRAWING"), _w(240, 550, "IBC-202"),
+            _titleblock("M-101"),
+        ]),
+        _sheet("d.pdf", 1, [_titleblock("M-102")]),
+    ]
+    findings = audit_references(sheets)
+    for token in ("NFPA-13", "RFI-102", "480V", "IBC-202"):
+        assert not any(token in f.text for f in findings), token
+        assert not any(token in f.source_quote for f in findings), token
+
+
+def test_audit_reconstructs_split_title_block_id():
+    # A CAD export can break the title-block sheet number into two words
+    # ("M-" "101"); detection must rejoin them so the sheet enters the inventory
+    # and an ASCII reference to it resolves rather than being flagged missing.
+    split = [_w(W - 300, H - 160, "M-", width=30), _w(W - 268, H - 160, "101", width=40)]
+    sheets = [
+        _sheet("e.pdf", 0, split),
+        _sheet("e.pdf", 1, [
+            _w(120, 400, "SEE"), _w(190, 400, "SHEET"), _w(280, 400, "M-101"),
+            _titleblock("M-102"),
+        ]),
+    ]
+    assert detect_sheet_id(sheets[0]) == "M-101"
+    assert "M-101" in build_inventory(sheets).ids
+    assert not any(
+        "M-101" in f.text and "not present" in f.text for f in audit_references(sheets)
+    )

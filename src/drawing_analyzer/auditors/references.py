@@ -41,71 +41,58 @@ substrate the sibling auditors (``arithmetic``, ``naming``, ``titleblock``,
 from __future__ import annotations
 
 import re
-import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
 from ..models import Anchor, Finding, Verification
+from . import sheet_ids as _S
 
-# Text normalization applied to every extracted word before matching. PDF/CAD
-# exports routinely render a sheet-ID hyphen as a *non-ASCII* dash (non-breaking
-# hyphen U+2011, en/em dash, fullwidth or minus sign); left as-is, an ID with a
-# Unicode hyphen never matches the ASCII-hyphen regexes, so its sheet drops out
-# of the inventory and any ASCII-hyphen reference to it is falsely flagged
-# MISSING — the "don't fabricate a missing sheet" cardinal sin. NFKC folds
-# compatibility forms; the table then maps the remaining dash variants to a plain
-# ASCII "-" and strips zero-width / soft-hyphen artifacts that split tokens.
-_DASHES = "‐‑‒–—―−﹘﹣－"
-_STRIP = "­​‌‍﻿"  # soft hyphen, ZWSP/ZWNJ/ZWJ, BOM
-_TEXT_TRANSLATION = {ord(c): "-" for c in _DASHES}
-_TEXT_TRANSLATION.update({ord(c): "" for c in _STRIP})
+# The reference auditor's grammar, normalization, and resolution now delegate to
+# the shared :mod:`.sheet_ids` foundation (Phase 25 §17.2) — the single host-owned
+# module every auditor (reference / sheet-index / naming / title-block) and the
+# profile / cross-sheet resolvers share. These module-level aliases keep the
+# historical private names working for the sibling auditors and the back-compat
+# ``reference_audit`` shim that import them from here.
 
+# Text folding (NFKC + Unicode-dash / zero-width normalization) — the same fold
+# the shared module applies, so a title-block ID drawn with a non-breaking hyphen
+# still matches an ASCII-hyphen reference to it (the "don't fabricate a missing
+# sheet" cardinal sin). Applied to every extracted word before matching.
+_normalize_text = _S.fold_text
 
-def _normalize_text(text: str) -> str:
-    """NFKC-normalize and fold Unicode dashes/invisibles for robust matching."""
-    return unicodedata.normalize("NFKC", text).translate(_TEXT_TRANSLATION)
+# Resolution outcomes for one harvested reference (re-exported from the shared
+# foundation). ``_SKIP`` is the historical spelling of the shared ``IGNORE`` —
+# kept so older call sites / tests comparing against ``"SKIP"`` still read.
+RESOLVED_IN_SET = _S.RESOLVED_IN_SET
+MISSING_FROM_SET = _S.MISSING_FROM_SET
+MALFORMED = _S.MALFORMED
+_SKIP = "SKIP"
 
-# Resolution outcomes for one harvested reference.
-RESOLVED_IN_SET = "RESOLVED_IN_SET"
-MISSING_FROM_SET = "MISSING_FROM_SET"
-MALFORMED = "MALFORMED"
-_SKIP = "SKIP"  # captured token that isn't a sheet reference in this set's grammar
-
-# A referenced ID is suggested as the "closest in set" only within this edit
-# distance (sheet IDs are short; a stale-revision pointer like F-D-01-0 vs
-# F-D-01-1 is distance 1). Beyond it, we report the miss without a misleading
-# suggestion.
-_SUGGEST_MAX_DIST = 3
-# A trigger-captured token that fails the set's grammar but sits this close to a
-# real sheet ID is treated as a malformed reference (a likely typo of a real
-# sheet) rather than silently skipped.
+_SUGGEST_MAX_DIST = _S.SUGGEST_MAX_DIST
 _MALFORMED_MAX_DIST = 2
 
-# A single sheet-ID *token*: a discipline-letter prefix, then hyphen-joined
-# alphanumeric groups (e.g. M-101, F-D-01-1, AVC10-F-D-01-1). Requires at least
-# one hyphen group and — enforced separately — at least one digit, so plain
-# words never qualify.
-_SHEET_ID_TOKEN = re.compile(r"^[A-Za-z]{1,6}[0-9]{0,3}(?:-[A-Za-z0-9]{1,5}){1,6}$")
+# A looser capture used *inside* trigger phrases / detail bubbles: a token that
+# may be hyphenated (M-101, F-D-01-1), compact (FP101), or dotted (M1.01).
+# Captured tokens are validated with the shared lexer + learned grammar before
+# being adjudicated, so the looseness here never produces a finding on its own.
+_ID_CAPTURE = r"[A-Za-z0-9]+(?:[.\-][A-Za-z0-9]+)*"
 
-# A looser capture used *inside* trigger phrases / detail bubbles: any
-# hyphen-joined alphanumeric run. Captured tokens are validated with
-# :func:`_looks_like_sheet_id` and the learned grammar before being adjudicated,
-# so the looseness here never produces a finding on its own.
-_ID_CAPTURE = r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+){1,6}"
-
-# Reference trigger phrases. Each rule is (compiled regex, id-group index,
-# anchor method). The whole match (group 0) becomes the finding's verbatim
+# Reference trigger phrases. Each rule is (compiled regex, id-group index, anchor
+# method, strength). The whole match (group 0) becomes the finding's verbatim
 # source_quote and its anchored rectangle; the id group is the referenced sheet.
-_PHRASE_RULES: list[tuple[re.Pattern[str], int, str]] = [
-    (re.compile(r"\bSEE\s+DRAWINGS?\s+(" + _ID_CAPTURE + r")", re.I), 1, "reference_phrase"),
-    (re.compile(r"\bSEE\s+SHEETS?\s+(" + _ID_CAPTURE + r")", re.I), 1, "reference_phrase"),
-    (re.compile(r"\bSEE\s+(" + _ID_CAPTURE + r")\s+FOR\b", re.I), 1, "reference_phrase"),
-    (re.compile(r"\bREFER\s+TO\s+(" + _ID_CAPTURE + r")", re.I), 1, "reference_phrase"),
-    (re.compile(r"\bPER\s+(" + _ID_CAPTURE + r")", re.I), 1, "reference_phrase"),
-    (re.compile(r"\bON\s+DRAWINGS?\s+(" + _ID_CAPTURE + r")", re.I), 1, "reference_phrase"),
+# ``strength`` gates a low-confidence set (one sheet, or no learned grammar) to
+# only the STRONG triggers (§17.3) so a thin grammar can't fabricate references.
+STRONG, MEDIUM = "strong", "medium"
+_PHRASE_RULES: list[tuple[re.Pattern[str], int, str, str]] = [
+    (re.compile(r"\bSEE\s+DRAWINGS?\s+(" + _ID_CAPTURE + r")", re.I), 1, "reference_phrase", STRONG),
+    (re.compile(r"\bSEE\s+SHEETS?\s+(" + _ID_CAPTURE + r")", re.I), 1, "reference_phrase", STRONG),
+    (re.compile(r"\bREFER\s+TO\s+(" + _ID_CAPTURE + r")", re.I), 1, "reference_phrase", STRONG),
+    (re.compile(r"\bSEE\s+(" + _ID_CAPTURE + r")\s+FOR\b", re.I), 1, "reference_phrase", MEDIUM),
+    (re.compile(r"\bON\s+DRAWINGS?\s+(" + _ID_CAPTURE + r")", re.I), 1, "reference_phrase", MEDIUM),
+    (re.compile(r"\bPER\s+(" + _ID_CAPTURE + r")", re.I), 1, "reference_phrase", MEDIUM),
     # Detail bubble: NN / <sheet-id>, e.g. "04/F-G-02-0" (detail 04 on that sheet).
-    (re.compile(r"(?<![A-Za-z0-9])\d{1,3}\s*/\s*(" + _ID_CAPTURE + r")"), 1, "detail_bubble"),
+    (re.compile(r"(?<![A-Za-z0-9])\d{1,3}\s*/\s*(" + _ID_CAPTURE + r")"), 1, "detail_bubble", STRONG),
 ]
 
 
@@ -165,92 +152,102 @@ def _words_in_span(spans: list[tuple[int, int]], start: int, end: int) -> list[i
 
 
 def _looks_like_sheet_id(token: str) -> bool:
-    t = token.strip()
-    return bool(_SHEET_ID_TOKEN.match(t)) and any(ch.isdigit() for ch in t)
+    """Broad shape screen — hyphenated / compact / dotted (shared lexer, §17.2)."""
+    return _S.looks_like_sheet_id(token)
 
 
 def _normalize_id(token: str) -> str:
-    return token.strip().upper()
+    """Canonicalize an ID for comparison / indexing (shared normalization)."""
+    return _S.normalize_sheet_id(token)
 
 
 def _segment_shape(sheet_id: str) -> tuple | None:
-    """A sheet ID's structural shape, or ``None`` if it can't be a clean ID.
+    """A sheet ID's structural signature, or ``None`` (shared foundation, §17.3).
 
-    Each hyphen-separated segment is classified: alpha → ``("A", len)``, mixed →
-    ``("X", len)``, pure digit → ``("D",)`` (length-agnostic, since sheet numbers
-    vary 1-3 digits within one convention). So ``F-D-01-1`` and ``F-D-01-0`` and
-    ``F-D-02-0`` share a shape (revision/number differences don't change it),
-    while ``NFPA-13`` (``("A", 4), ("D",)``) doesn't match an ``M-101``-style set
-    (``("A", 1), ("D",)``).
+    Delegates to :func:`sheet_ids.id_signature`: alpha runs → ``("A", len)``,
+    digit runs → ``("D",)`` (length-agnostic), and the literal ``-`` / ``.``
+    separators between them. So ``F-D-01-1`` and ``F-D-02-0`` share a signature,
+    ``NFPA-13`` never matches an ``M-101`` set, and compact/dotted families
+    (``FP101``, ``M1.01``) each get their own grammar.
     """
-    segs = sheet_id.split("-")
-    shape: list[tuple] = []
-    for s in segs:
-        if not s:
-            return None  # leading / trailing / doubled hyphen — not a clean ID
-        if s.isdigit():
-            shape.append(("D",))
-        elif s.isalpha():
-            shape.append(("A", len(s)))
-        else:
-            shape.append(("X", len(s)))
-    return tuple(shape)
+    return _S.id_signature(sheet_id)
 
 
 def _learn_grammar(ids: Iterable[str]) -> frozenset:
-    """The set of ID shapes present in the set (its learned ID grammar)."""
-    return frozenset(
-        shape for shape in (_segment_shape(i) for i in ids) if shape is not None
-    )
+    """The set of ID signatures present in the set (its learned ID grammar)."""
+    return _S.learn_grammar(ids)
 
 
-def _levenshtein(a: str, b: str) -> int:
-    """Plain iterative edit distance (no deps); short strings, so O(len^2) is fine."""
-    if a == b:
-        return 0
-    if not a:
-        return len(b)
-    if not b:
-        return len(a)
-    prev = list(range(len(b) + 1))
-    for i, ca in enumerate(a, start=1):
-        cur = [i]
-        for j, cb in enumerate(b, start=1):
-            cur.append(
-                min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb))
-            )
-        prev = cur
-    return prev[-1]
+# Edit distance (shared foundation) — re-exported private name for the sibling
+# auditors (naming / title-block) that import it from here.
+_levenshtein = _S.levenshtein
 
 
 @dataclass
 class SheetInventory:
-    """The set's known sheet IDs and their learned ID grammar."""
+    """The set's known sheet IDs and their learned ID grammar (shared, §17.2)."""
 
     ids: frozenset[str] = field(default_factory=frozenset)
     grammar: frozenset = field(default_factory=frozenset)
 
     def matches_grammar(self, target: str) -> bool:
-        shape = _segment_shape(target)
-        return shape is not None and shape in self.grammar
+        return _S.matches_grammar(target, self.grammar)
 
     def closest(self, target: str) -> tuple[str | None, int | None]:
         """Nearest in-set ID by edit distance (``(None, None)`` if empty).
 
-        Iterates in sorted order so a tie (the common case for short sheet IDs —
-        e.g. both ``M-101`` and ``M-102`` are distance 1 from ``M-103``) resolves
-        deterministically to the lexicographically smallest, not to whatever
-        ``frozenset`` iteration order a given ``PYTHONHASHSEED`` happens to
-        produce. Determinism here is what keeps the finding text (and so
-        :func:`audit_references`) reproducible run to run (I-7).
+        Deterministic tie-break to the lexicographically smallest so finding text
+        (and so :func:`audit_references`) is reproducible run to run (I-7).
         """
-        best: str | None = None
-        best_d: int | None = None
-        for sid in sorted(self.ids):
-            d = _levenshtein(target, sid)
-            if best_d is None or d < best_d:
-                best, best_d = sid, d
-        return best, best_d
+        return _S.closest_in_set(target, self.ids)
+
+    @property
+    def low_confidence(self) -> bool:
+        """A grammar too thin to trust MISSING/MALFORMED (§17.3).
+
+        A one-sheet set — or one whose title-block IDs never resolved to a learned
+        grammar — restricts adjudication to exact in-set matches under strong
+        triggers only, so a thin convention can't fabricate references.
+        """
+        return len(self.ids) < 2 or not self.grammar
+
+
+def _merge_adjacent_id_words(words: list[Any]) -> list[tuple[str, tuple[float, float, float, float]]]:
+    """Reconstruct sheet IDs split across adjacent same-line words (§17.3).
+
+    A CAD export can break a sheet number into two or three words — ``"F-D-"``
+    ``"01-1"`` or ``"M-"`` ``"101"`` — that only read as one ID when rejoined.
+    Scans runs of words on the same text line (close ``y`` centers) with a small
+    horizontal gap and yields each *maximal* rejoined run whose combined text
+    :func:`_looks_like_sheet_id`, together with its union rectangle. Single words
+    are handled by the caller; this returns only the **multi-word** merges, so a
+    split title-block ID is still detected and a split reference still resolves.
+    """
+    merges: list[tuple[str, tuple[float, float, float, float]]] = []
+    n = len(words)
+    for i in range(n):
+        xi0, yi0, xi1, yi1 = _wrect(words[i])
+        h = max(1.0, yi1 - yi0)
+        text = _wtext(words[i])
+        rects = [_wrect(words[i])]
+        prev_x1, prev_yc = xi1, (yi0 + yi1) / 2.0
+        j = i + 1
+        while j < n:
+            xj0, yj0, xj1, yj1 = _wrect(words[j])
+            yc = (yj0 + yj1) / 2.0
+            gap = xj0 - prev_x1
+            # Same line (center within half a line height) and a tight gap (an
+            # ID break, not a word space) — 0.6× the token height is generous
+            # enough for kerned splits yet well under a real inter-word space.
+            if abs(yc - prev_yc) > 0.5 * h or gap < -1.0 or gap > 0.6 * h:
+                break
+            text += _wtext(words[j])
+            rects.append(_wrect(words[j]))
+            prev_x1, prev_yc = xj1, yc
+            if len(text) > 1 and _looks_like_sheet_id(text):
+                merges.append((text, tuple(_rect_union(rects))))  # maximal run so far
+            j += 1
+    return merges
 
 
 def detect_sheet_id_word(sheet: Any) -> Any | None:
@@ -258,12 +255,17 @@ def detect_sheet_id_word(sheet: Any) -> Any | None:
 
     Scans the ID-shaped word tokens and prefers the one nearest the **bottom-
     right** of the sheet — where the title-block sheet number lives — over stray
-    ID-shaped tokens elsewhere (e.g. an ``NFPA-13`` in the general notes). A
-    raster sheet (no words) yields ``None``. The title-block auditor uses the
-    returned word's rectangle to learn each sheet's title-block x-band.
+    ID-shaped tokens elsewhere (e.g. an ``NFPA-13`` in the general notes). Also
+    considers IDs **split across adjacent words** (§17.3): a rejoined ``"M-"``
+    ``"101"`` competes as a synthetic word so a split sheet number is not missed.
+    A raster sheet (no words) yields ``None``.
     """
     words = list(getattr(sheet, "words", []) or [])
-    candidates = [w for w in words if _looks_like_sheet_id(_wtext(w))]
+    candidates: list[Any] = [w for w in words if _looks_like_sheet_id(_wtext(w))]
+    # Synthetic word tuples for split-across-words IDs — shaped like a get_text
+    # word (x0,y0,x1,y1,text,…) so _wtext/_wrect read them uniformly.
+    for text, (x0, y0, x1, y1) in _merge_adjacent_id_words(words):
+        candidates.append((x0, y0, x1, y1, text, -1, -1, -1))
     if not candidates:
         return None
     w_pt = float(getattr(sheet, "page_width_pt", 0.0) or 0.0)
@@ -283,7 +285,7 @@ def detect_sheet_id(sheet: Any) -> str | None:
     """The sheet's own ID string, harvested from its title block, or ``None``.
 
     Thin wrapper over :func:`detect_sheet_id_word` that normalizes the winning
-    word's text (upper-cased). A raster sheet (no words) yields ``None``.
+    word's text. A raster sheet (no words) yields ``None``.
     """
     best = detect_sheet_id_word(sheet)
     return _normalize_id(_wtext(best)) if best is not None else None
@@ -301,23 +303,22 @@ def build_inventory(rendered_sheets: Iterable[Any]) -> SheetInventory:
 
 
 def _resolve(target: str, inventory: SheetInventory) -> tuple[str, str | None, int | None]:
-    """Classify a referenced ID against the inventory.
+    """Classify a referenced ID against the inventory (shared policy, §17.3).
 
     Returns ``(status, closest_id, distance)``. A target present in the set
-    resolves; one that matches the set's grammar but is absent is ``MISSING``; a
-    grammar-mismatching token that is nonetheless a near-typo of a real sheet is
-    ``MALFORMED``; anything else (a code/standard token that merely followed a
-    trigger word) is skipped — not flagged.
+    resolves; one that matches the learned grammar but is absent is ``MISSING``;
+    a grammar-mismatching token that is a near-typo of a real sheet is
+    ``MALFORMED``; a known non-sheet token (code/tag/voltage/RFI/dimension —
+    §17.3 negative corpus) or any other out-of-grammar token is ``_SKIP`` (the
+    historical spelling of the shared ``IGNORE``). Under a low-confidence
+    inventory only exact matches resolve.
     """
-    t = _normalize_id(target)
-    if t in inventory.ids:
-        return RESOLVED_IN_SET, None, None
-    closest, dist = inventory.closest(t)
-    if inventory.matches_grammar(t):
-        return MISSING_FROM_SET, closest, dist
-    if closest is not None and dist is not None and dist <= _MALFORMED_MAX_DIST:
-        return MALFORMED, closest, dist
-    return _SKIP, None, None
+    r = _S.classify_reference(
+        target, inventory.ids, inventory.grammar,
+        low_confidence=inventory.low_confidence,
+    )
+    status = _SKIP if r.status == _S.IGNORE else r.status
+    return status, r.closest, r.distance
 
 
 def _suggestion(closest: str | None, dist: int | None) -> str:
@@ -380,8 +381,13 @@ def _audit_sheet(
             return None
         return _rect_union([_wrect(words[i]) for i in idxs])
 
-    # Trigger phrases + detail bubbles.
-    for pattern, id_group, method in _PHRASE_RULES:
+    # Trigger phrases + detail bubbles. Under a low-confidence inventory (one
+    # sheet, or no learned grammar) only the STRONG triggers run (§17.3), so a
+    # thin grammar can't turn a stray token into a fabricated reference.
+    low_conf = inventory.low_confidence
+    for pattern, id_group, method, strength in _PHRASE_RULES:
+        if low_conf and strength != STRONG:
+            continue
         for m in pattern.finditer(joined):
             raw = m.group(id_group)
             if not _looks_like_sheet_id(raw):
@@ -407,13 +413,22 @@ def _audit_sheet(
                 continue
             seen.add(quote)
             rect = anchor_rect(_words_in_span(spans, *m.span(0)))
+            # On a low-confidence set the convention was learned from very few
+            # (often one) sheet ids; report that limitation on the finding so the
+            # reviewer weighs it accordingly (§17.3), rather than silently dropping
+            # a genuine strong-trigger miss.
+            conf_note = (
+                " (single-sheet set — sheet-ID convention learned from limited data)"
+                if low_conf else ""
+            )
             if status == MISSING_FROM_SET:
                 findings.append(_make_finding(
                     sheet, display_id, quote=quote, rect=rect, severity="medium",
                     text=f"References {target}; not present in the provided set"
-                         f"{_suggestion(closest, dist)}.",
+                         f"{_suggestion(closest, dist)}.{conf_note}",
                     method=method,
-                    note="referenced sheet not present in the provided set",
+                    note="referenced sheet not present in the provided set"
+                         + (" (low-confidence grammar)" if low_conf else ""),
                 ))
             else:  # MALFORMED
                 sug = _suggestion(closest, dist).strip()
