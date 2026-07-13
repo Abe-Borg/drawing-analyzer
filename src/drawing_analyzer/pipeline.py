@@ -1264,17 +1264,27 @@ def _run_qc_stages(
                 # the exact server ``web_search_requests`` count, so bill one search
                 # per unique citation checked (a lower bound — each ref runs ≥1
                 # search). Tokens are exact; the search micro-fee is approximate.
+                # A run is PARTIAL when any claim was left UNCHECKED/UNRESOLVABLE
+                # (DA-017 §16.5) — not only on a hard error — so a request/parser/
+                # tool failure for a cited claim can never masquerade as COMPLETE.
+                partial = bool(cires.error) or bool(getattr(cires, "partial", False))
                 _record_usage(
                     run_usage, family="citation", instance="citation",
                     model=citation_model(),
                     input_tokens=cires.input_tokens, output_tokens=cires.output_tokens,
                     billable_tool_uses={"web_search": int(getattr(cires, "checked", 0) or 0)},
-                    terminal_status="PARTIAL" if cires.error else "COMPLETE",
+                    terminal_status="PARTIAL" if partial else "COMPLETE",
                 )
-                if cires.error:
-                    errors.append(f"Citation check: {cires.error}")
+                citation_stage.items_out = len(getattr(cires, "assessments", []) or [])
+                if partial:
+                    if cires.error:
+                        errors.append(f"Citation check: {cires.error}")
+                        citation_stage.errors.append(str(cires.error))
+                    else:
+                        citation_stage.warnings.append(
+                            "some cited claims left unchecked (request/parser/tool failure)"
+                        )
                     citation_stage.status = "PARTIAL"
-                    citation_stage.errors.append(str(cires.error))
                 else:
                     citation_stage.status = "COMPLETE"
             except Exception as exc:  # noqa: BLE001 - never fatal

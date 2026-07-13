@@ -698,6 +698,66 @@ class Citation:
         )
 
 
+# Per-claim citation verdict statuses. ``UNRESOLVABLE`` marks a reference the
+# checker could not evaluate at all; ``UNCHECKED`` a claim whose request/parser
+# failed. Both make the citation stage PARTIAL but never downgrade the finding.
+CITATION_ASSESSMENT_STATUSES = (
+    "CHECKED_SUPPORTS", "CHECKED_MISMATCH", "UNCHECKED", "UNRESOLVABLE",
+)
+
+
+@dataclass
+class CitationAssessment:
+    """One reference's verdict for the exact claim(s) it was checked against (§6.5).
+
+    DA-017: a citation verdict may attach to a finding ONLY if that finding's claim
+    was included in the request that produced it. ``claim_finding_ids`` is the set
+    of findings whose claim (their ``text``) was sent in ``request_id``; the verdict
+    therefore covers those findings and no others. A finding with several references
+    keeps one assessment *per reference* rather than collapsing them into one
+    ambiguous status. ``adopted_edition`` is the set's stated basis (harvested
+    offline); ``current_edition`` / ``edition_notes`` carry the model's renumbering
+    findings; ``sources`` are the web-search citations backing the verdict.
+    """
+
+    reference: str
+    status: str = "UNCHECKED"           # one of CITATION_ASSESSMENT_STATUSES
+    claim_finding_ids: list[str] = field(default_factory=list)
+    note: str = ""
+    edition_notes: str = ""
+    adopted_edition: str = ""
+    current_edition: str = ""
+    sources: list[str] = field(default_factory=list)
+    request_id: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "reference": self.reference,
+            "status": self.status,
+            "claim_finding_ids": list(self.claim_finding_ids),
+            "note": self.note,
+            "edition_notes": self.edition_notes,
+            "adopted_edition": self.adopted_edition,
+            "current_edition": self.current_edition,
+            "sources": list(self.sources),
+            "request_id": self.request_id,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "CitationAssessment":
+        return cls(
+            reference=str(d.get("reference", "") or ""),
+            status=str(d.get("status", "UNCHECKED") or "UNCHECKED"),
+            claim_finding_ids=[str(x) for x in (d.get("claim_finding_ids") or [])],
+            note=str(d.get("note", "") or ""),
+            edition_notes=str(d.get("edition_notes", "") or ""),
+            adopted_edition=str(d.get("adopted_edition", "") or ""),
+            current_edition=str(d.get("current_edition", "") or ""),
+            sources=[str(x) for x in (d.get("sources") or [])],
+            request_id=str(d.get("request_id", "") or ""),
+        )
+
+
 @dataclass
 class Finding:
     """One QC finding: a single reviewable issue anchored to a sheet.
@@ -756,6 +816,10 @@ class Finding:
     verification: Verification = field(default_factory=Verification)
     qc_id: str = ""                     # "QC-001" … (assigned by assign_qc_ids)
     citation: Citation | None = None    # web-search citation check (Phase 15)
+    # Per-reference, claim-complete citation assessments (Phase 24 §16.5, DA-017).
+    # Each entry is one reference's verdict for the exact claim it was checked
+    # against; ``citation`` above is the derived back-compat summary over these.
+    citations: list["CitationAssessment"] = field(default_factory=list)
     sources: list[str] = field(default_factory=list)  # provenance tags (Part III)
     # Verbatim quotes from *other* members merged into this entry (Phase 20 §12.2).
     # The grounded fields (``text`` / ``category`` / ``source_quote`` / ``tile`` /
@@ -800,6 +864,7 @@ class Finding:
             "prose_item_ids": list(self.prose_item_ids),
             "anchor": self.anchor.to_dict(),
             "verification": self.verification.to_dict(),
+            "citations": [a.to_dict() for a in self.citations],
         }
         if self.citation is not None:
             out["citation"] = self.citation.to_dict()
@@ -835,6 +900,11 @@ class Finding:
             verification=Verification.from_dict(d.get("verification") or {}),
             qc_id=d.get("qc_id", "") or "",
             citation=Citation.from_dict(d["citation"]) if isinstance(d.get("citation"), dict) else None,
+            citations=[
+                CitationAssessment.from_dict(a)
+                for a in (d.get("citations") or [])
+                if isinstance(a, dict)
+            ],
             id=d.get("id", ""),
         )
 
