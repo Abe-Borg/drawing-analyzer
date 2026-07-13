@@ -1038,6 +1038,12 @@ def _run_qc_stages(
             )
             # The set-level review-notes artifact — its own receipts, folded into the
             # one MarkupRunResult so coverage/tally cover the whole run (§14.8).
+            # NB: the ``markup_verified_only`` gate is deliberately NOT applied here.
+            # That gate suppresses unverified *ink on the drawings*; a set-level
+            # synthesis conflict has no sheet to cloud and cannot be crop-verified, so
+            # Drawing_Set_Review_Notes.pdf IS its index entry (a review-notes artifact,
+            # not authoritative drawing ink). Gating it would hide the very conflicts
+            # the notes exist to surface, so a verified-only run still lists them.
             if set_level_findings:
                 set_run = write_set_review_notes_pdf(
                     set_level_findings, work_dir, artifact_run_id=artifact_run_id,

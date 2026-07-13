@@ -817,6 +817,11 @@ class FindingsParse:
     findings: list[Finding]
     status: str
     note: str
+    # How many items the parsed ``findings`` array held *before* validation. A
+    # ``PARSED_*`` read with ``raw_item_count > 0`` but ``findings == []`` means the
+    # model reported issues that all failed validation (e.g. a category outside the
+    # enum) — content-bearing, NOT a clean empty result (§14.2 INVALID_ITEMS_DROPPED).
+    raw_item_count: int = 0
 
 
 def parse_findings_detailed(raw_text: str, ref: SheetRef) -> FindingsParse:
@@ -868,6 +873,7 @@ def parse_findings_detailed(raw_text: str, ref: SheetRef) -> FindingsParse:
     obj, block = findings_blocks[-1]
     status = FINDINGS_PARSED_CLOSED if block.closed else FINDINGS_PARSED_UNCLOSED
     raw_items = obj.get("findings") or []
+    raw_item_count = len(raw_items) if isinstance(raw_items, list) else 0
 
     findings: list[Finding] = []
     dropped = 0
@@ -894,7 +900,7 @@ def parse_findings_detailed(raw_text: str, ref: SheetRef) -> FindingsParse:
     note = "; ".join(notes)
     if note:
         _log.info("findings parse: %s (%s)", note, ref.display_label)
-    return FindingsParse(prose, findings, status, note)
+    return FindingsParse(prose, findings, status, note, raw_item_count=raw_item_count)
 
 
 def parse_findings(raw_text: str, ref: SheetRef) -> tuple[str, list[Finding], str]:

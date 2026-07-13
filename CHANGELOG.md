@@ -57,6 +57,15 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   entry records the read counts, and the parser was rebuilt — so every pre-v6 entry
   misses once and is re-derived rather than served as current. Prompt versions are
   unchanged (the prompts did not change in this phase).
+- Review hardening: a critique read whose findings array was **non-empty but every
+  item failed validation** (e.g. a category outside the enum) is now a *failed* read,
+  not a clean empty success — a content-bearing body can never be frozen clean
+  (`FindingsParse.raw_item_count` exposes the pre-validation count). And a partial
+  critique that produced **no** merged findings (a valid-but-empty read paired with a
+  failed one) is surfaced on `CritiqueResult.error` instead of reading as a genuinely
+  clean sheet. The set-level `Drawing_Set_Review_Notes.pdf` is intentionally exempt
+  from the `markup_verified_only` gate (it is a review-notes artifact, not drawing
+  ink) — documented at both call and writer sites.
 
 ### Fixed (Phase 21 — artifact-backed markup coverage, DA-007/DA-029)
 

@@ -576,6 +576,37 @@ def test_malformed_or_prose_critique_read_is_a_failure(body):
     assert in_tok == 100                         # billed usage still counted (§14.4)
 
 
+def test_critique_read_with_all_items_dropped_is_a_failure():
+    # §14.2 (INVALID_ITEMS_DROPPED): the model reported findings but every one failed
+    # validation (a category outside the enum), so the array was non-empty yet zero
+    # survived. That is a content-bearing response, NOT a clean sheet — a failed read,
+    # never an empty success that could be frozen clean in the cache (DA-008).
+    body = ('```json\n{"findings": ['
+            '{"category":"error","severity":"high","text":"riser undersized"},'
+            '{"category":"ambiguity","severity":"medium","text":"missing dim"}]}\n```')
+    findings, _claims, in_tok, _out, err = critique_sheet(
+        _rendered(), client=_RawCritiqueClient([body]), max_retries=0, sleep=_NOOP
+    )
+    assert findings == [] and err is not None and "none valid" in err
+    assert in_tok == 100                          # billed usage still counted
+
+    # A genuinely empty schema (no items at all) stays a clean success.
+    f2, _c2, _i2, _o2, err2 = critique_sheet(
+        _rendered(), client=_RawCritiqueClient(['```json\n{"findings": []}\n```']),
+        max_retries=0, sleep=_NOOP,
+    )
+    assert f2 == [] and err2 is None
+
+    # A mix (one valid + one dropped) is still a success carrying the valid finding.
+    mixed = ('```json\n{"findings": ['
+             '{"sheet_id":"F","category":"code","severity":"low","text":"ok one"},'
+             '{"category":"error","severity":"high","text":"dropped"}]}\n```')
+    f3, _c3, _i3, _o3, err3 = critique_sheet(
+        _rendered(), client=_RawCritiqueClient([mixed]), max_retries=0, sleep=_NOOP
+    )
+    assert len(f3) == 1 and err3 is None
+
+
 def test_explicit_empty_schema_is_a_clean_success():
     # An explicit {"findings": []} is a valid schema → a genuine clean read (err None).
     findings, _claims, _in, _out, err = critique_sheet(
@@ -628,6 +659,22 @@ def test_two_valid_reads_stamp_real_per_read_provenance():
     single = by_text["a note names the wrong room"]
     assert single.sources == ["critique_2"]
     assert single.reproduced is False and single.confidence == CONFIDENCE_SINGLETON
+
+
+def test_partial_empty_critique_is_surfaced_not_a_clean_sheet():
+    # §14.4/§4.4: one valid-but-empty read + one malformed read produces NO merged
+    # findings — so there is no finding to carry NOT_ASSESSED_PARTIAL. It must NOT
+    # read as a clean sheet: the degradation is surfaced on `error` (the pipeline
+    # only propagates critique degradation through `res.error`), and it is not cached.
+    cache = DigestCache(None, persist=False)
+    client = _RawCritiqueClient(['```json\n{"findings": []}\n```',      # valid, empty
+                                 '```json\n{"findings": trunc'])         # malformed
+    res = critique_sheet_self_consistent(
+        _rendered(), client=client, cache=cache, runs=2, max_retries=0, sleep=_NOOP
+    )
+    assert res.findings == [] and res.completed_runs == 1 and res.requested_runs == 2
+    assert res.error is not None                  # NOT presented as a clean sheet
+    assert cache.stats()["size"] == 0
 
 
 def test_both_reads_valid_empty_is_a_complete_clean_critique():

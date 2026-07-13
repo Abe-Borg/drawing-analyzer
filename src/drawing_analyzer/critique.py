@@ -857,6 +857,17 @@ def _critique_read(
             parse_status=parsed.status, parse_note=parsed.note,
             error=f"critique produced no valid findings schema ({parsed.status})",
         )
+    if not parsed.findings and parsed.raw_item_count > 0:
+        # The model DID report findings, but every one failed validation (e.g. a
+        # category outside the enum). That is a content-bearing response, NOT a clean
+        # sheet — so it is a failed read (never an empty success), and is re-attempted
+        # next run rather than frozen clean in the cache (DA-008 / §14.2).
+        return CritiqueRunOutcome(
+            run_id=run_id, status="FAILED", input_tokens=in_tok, output_tokens=out_tok,
+            parse_status=parsed.status, parse_note=parsed.note,
+            error=f"critique emitted {parsed.raw_item_count} finding(s), none valid "
+                  f"({parsed.note})",
+        )
     findings = parsed.findings
     for f in findings:                 # stamp provenance at production (§14.3)
         if run_id not in f.sources:
@@ -992,10 +1003,16 @@ def critique_sheet_self_consistent(
         len(outcomes), runs, len(merged), rendered.ref.display_label,
     )
 
-    # A productive result keeps ``error=None`` — the run still ships findings (I-3).
-    # Its partial-ness is carried honestly by ``completed_runs < requested_runs`` and
-    # by each finding's ``confidence == NOT_ASSESSED_PARTIAL``; it is simply not
-    # cached below (a later phase rolls partial reads into the overall QC status).
+    # A productive result that shipped findings keeps ``error=None`` — the run still
+    # ships them (I-3); its partial-ness is carried honestly by each finding's
+    # ``confidence == NOT_ASSESSED_PARTIAL``. But a partial run that produced NO
+    # merged findings has no finding to carry that signal, so an empty result from
+    # fewer-than-requested valid reads would be indistinguishable from a genuinely
+    # clean sheet (both reads valid + empty). That is exactly the masquerade §14.4 /
+    # §4.4 forbid ("no failed read is represented as a clean empty result"), so it is
+    # surfaced as a stage degradation. A truly clean sheet (every requested read
+    # returned a valid schema) still reports ``error=None`` and is cached below.
+    partial_empty = not merged and len(outcomes) < runs
     result = CritiqueResult(
         findings=merged,
         claims=claims,
@@ -1004,7 +1021,10 @@ def critique_sheet_self_consistent(
         runs=len(outcomes),
         requested_runs=runs,
         completed_runs=len(outcomes),
-        error=None,
+        error=(
+            "; ".join(errors)
+            or f"critique partial: only {len(outcomes)}/{runs} read(s) valid, no findings"
+        ) if partial_empty else None,
     )
 
     # Cache only a *complete* self-consistency result — every requested read

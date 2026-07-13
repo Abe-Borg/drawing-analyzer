@@ -1596,6 +1596,11 @@ def write_set_review_notes_pdf(
     the caller lists the artifact only when it exists. A file whose placements did
     not all succeed is labeled ``…_INCOMPLETE.pdf`` (§13.6). Additive / non-fatal:
     a per-note draw failure becomes a FAILED receipt, never a raise.
+
+    This artifact is not subject to the ``markup_verified_only`` gate: that gate
+    suppresses unverified ink *on the drawings*, but a set-level conflict has no
+    sheet to cloud and cannot be crop-verified, so these rows are the finding's index
+    entry — a review-notes artifact, not authoritative drawing ink.
     """
     items = [f for f in findings if _is_set_level_finding(f)]
     if not items:
