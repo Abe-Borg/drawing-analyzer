@@ -237,7 +237,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             text_color=COLORS["text_secondary"],
         ).pack(anchor="w")
         self._qc_markups_check = ctk.CTkCheckBox(
-            qc_row, text="QC Markups — produce a marked-up PDF + findings CSV",
+            qc_row, text="QC Markups — exhaustive engineering review + marked-up PDFs",
             variable=self._qc_markups_var, command=self._on_qc_toggle,
             font=ctk.CTkFont(family="Segoe UI", size=12),
             text_color=COLORS["text_primary"],
@@ -258,12 +258,19 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         )
         self._ink_rejected_check.pack(anchor="w", padx=(28, 0), pady=(2, 0))
         self._reference_audit_check = ctk.CTkCheckBox(
-            qc_row, text="Reference audit — flag stale/missing cross-references (free)",
+            qc_row, text="Deterministic audit only — no additional API calls",
             variable=self._reference_audit_var, command=self._refresh_summary,
             font=ctk.CTkFont(family="Segoe UI", size=12),
             text_color=COLORS["text_primary"],
         )
         self._reference_audit_check.pack(anchor="w", pady=(2, 0))
+        # A muted hint that turns visible when QC Markups makes the audit redundant.
+        self._reference_audit_hint = ctk.CTkLabel(
+            qc_row, text="",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=COLORS["text_muted"],
+        )
+        self._reference_audit_hint.pack(anchor="w", padx=(28, 0))
         self._on_qc_toggle()   # set the sub-toggle's initial enabled state
 
         # Summary + actions row
@@ -579,12 +586,25 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._refresh_summary()
 
     def _on_qc_toggle(self) -> None:
-        """Enable the markup sub-toggles only when QC Markups is on."""
+        """Enable the markup sub-toggles only when QC Markups is on.
+
+        QC Markups runs the full exhaustive stack — the deterministic auditors are
+        already included (§15.3), so the standalone audit checkbox is disabled and
+        marked redundant while QC Markups is checked.
+        """
         on = self._qc_markups_var.get()
         for name in ("_qc_verified_only_check", "_ink_rejected_check"):
             check = getattr(self, name, None)
             if check is not None:
                 check.configure(state="normal" if on else "disabled")
+        audit = getattr(self, "_reference_audit_check", None)
+        if audit is not None:
+            audit.configure(state="disabled" if on else "normal")
+        hint = getattr(self, "_reference_audit_hint", None)
+        if hint is not None:
+            hint.configure(
+                text="Already included in QC Markups' exhaustive stack." if on else ""
+            )
         self._refresh_summary()
 
     def _current_focus(self) -> str:
@@ -665,9 +685,17 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         )
         prompt = format_drawing_cost_prompt(estimate)
         if qc_markups:
+            # QC Markups is the full exhaustive stack (DA-010): two critique reads
+            # per sheet, cross-sheet QC, the deterministic auditors, verification,
+            # and citation checks — meaningfully more than the digest above. The
+            # per-stage estimate lands in a later phase; be honest here that this is
+            # a much larger run whose exact cost isn't yet previewed.
             prompt += (
-                "\n\nQC verification adds ~$0.01–0.03 per finding "
-                "(count unknown until digests complete)."
+                "\n\nQC Markups runs an exhaustive review — two critique reads per "
+                "sheet, cross-sheet QC, deterministic auditors, verification, and "
+                "citation checks — so it costs substantially more than the digest "
+                "above (a precise per-stage estimate is not yet shown). Verification "
+                "alone adds ~$0.01–0.03 per finding."
             )
         if not messagebox.askyesno("Confirm drawing analysis", prompt):
             return
@@ -828,12 +856,19 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
 
         cached_note = f", {cached} from cache" if cached else ""
         failed_note = f", {failed} failed" if failed else ""
-        # Three completion states (§3.3 / §13.6): a receipt-derived INCOMPLETE
-        # markup coverage is called out honestly as "QC incomplete" (never
-        # presented as a clean success); other run issues are "QC warnings"; an
-        # all-clear run is "Completed".
-        if getattr(ctx, "markup_incomplete", False):
+        # Completion states (§3.3 / §15.5): when exhaustive QC ran, the state leads
+        # with its normalized ``qc_status`` — FAILED / a receipt-derived INCOMPLETE
+        # coverage is "QC incomplete"; PARTIAL is "Completed with QC warnings"
+        # (during Phases 23–25 a clean exhaustive run is deliberately PARTIAL, gated
+        # from claiming COMPLETE); COMPLETE is "Exhaustive QC complete". A run that
+        # did not request exhaustive QC keeps the simple errors-based states.
+        qc_status = getattr(ctx, "qc_status", "NOT_REQUESTED")
+        if getattr(ctx, "markup_incomplete", False) or qc_status == "FAILED":
             state, level = "QC incomplete", "error"
+        elif qc_status == "PARTIAL":
+            state, level = "Completed with QC warnings", "warning"
+        elif qc_status == "COMPLETE":
+            state, level = "Exhaustive QC complete", "success"
         elif ctx.errors:
             state, level = "Completed with QC warnings", "warning"
         else:
@@ -845,6 +880,27 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         )
         self._log(summary, level=level)
         self._set_progress_text(summary, color=COLORS[level])
+        # When exhaustive QC ran, surface the per-stage status so the operator can
+        # see which stages are COMPLETE/PARTIAL/FAILED/SKIPPED_VALID (§15.5), and be
+        # honest that a clean run is gated from a "complete" claim during Phase 23.
+        cfg = getattr(ctx, "run_configuration", None)
+        if cfg is not None and getattr(cfg, "exhaustive_qc", False):
+            stages = getattr(ctx, "stage_results", None) or []
+            incomplete = [s for s in stages if s.status in ("PARTIAL", "FAILED")]
+            if incomplete:
+                self._log(
+                    "QC stages needing attention: "
+                    + ", ".join(f"{s.stage} ({s.status})" for s in incomplete),
+                    level="warning",
+                )
+            elif qc_status == "PARTIAL":
+                self._log(
+                    "Every exhaustive-QC stage completed, but a full \"complete\" "
+                    "status is intentionally withheld pending later remediation "
+                    "phases (cross-set reconciliation, claim-complete citations, "
+                    "evidence and callout completeness).",
+                    level="muted",
+                )
         if ctx.focus:
             if ctx.focus_report_text.strip():
                 self._log(

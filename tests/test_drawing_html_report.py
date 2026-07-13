@@ -227,6 +227,46 @@ def test_report_embeds_verbatim_raw_markdown_losslessly():
     assert "VAV-3 serves Rm 120 &lt;unique-marker&gt;" in doc
 
 
+# --------------------------------------------------------------------------- #
+# Phase 23A — the run-level QC status banner (§3.3 / §15.5)
+# --------------------------------------------------------------------------- #
+
+
+def test_report_has_no_qc_status_banner_for_a_standard_run():
+    # A standard run (qc_status NOT_REQUESTED) emits no QC status banner *element*
+    # (the CSS rule is always in the <style> block; the div is what's conditional).
+    doc = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW)
+    assert '<div class="qc-status-banner"' not in doc
+
+
+def test_report_qc_status_banner_partial_is_honest_about_the_gate():
+    from drawing_analyzer.models import StageResult
+
+    ctx = _make_ctx()
+    ctx.qc_status = "PARTIAL"
+    ctx.stage_results = [
+        StageResult(stage="critique", expected=True, status="COMPLETE"),
+        StageResult(stage="citation", expected=True, status="SKIPPED_VALID"),
+    ]
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
+    assert 'class="qc-status-banner" data-status="PARTIAL"' in doc
+    assert "QC status: PARTIAL" in doc
+    # A clean-but-gated run explains the gate rather than implying failure.
+    assert "withheld pending later remediation" in doc
+
+
+def test_report_qc_status_banner_names_degraded_stages_and_debug_override():
+    from drawing_analyzer.models import StageResult, resolve_run_configuration
+
+    ctx = _make_ctx()
+    ctx.qc_status = "PARTIAL"
+    ctx.run_configuration = resolve_run_configuration(qc_markups=True, critique=False)
+    ctx.stage_results = [StageResult(stage="cross_qc", expected=True, status="FAILED")]
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
+    assert "cross_qc (FAILED)" in doc
+    assert "DEBUG_OVERRIDE" in doc
+
+
 def test_report_escapes_content_in_structured_view():
     ctx = _make_ctx()
     ctx.sheets[1].text = "danger <img src=x onerror=alert(1)>"

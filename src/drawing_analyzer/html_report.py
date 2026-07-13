@@ -1021,11 +1021,54 @@ def _summary_html(ctx: Any, source_names: list[str], now: datetime) -> str:
 
     return (
         f'<div class="summary">'
+        f"{_qc_status_banner_html(ctx)}"
         f"{_coverage_banner_html(ctx)}"
         f'<div class="stats">{cards}</div>'
         f'<details class="sources"><summary>Source files</summary>'
         f"<ul>{sources}</ul></details>"
         f"{errors_html}"
+        f"</div>"
+    )
+
+
+def _qc_status_banner_html(ctx: Any) -> str:
+    """The run-level QC status banner (Phase 23A, §3.3 / §15.5).
+
+    Only shown when exhaustive QC ran (``qc_status`` other than NOT_REQUESTED). It
+    leads with the normalized status so the report header shows the same state as
+    the GUI and run log; a ``DEBUG_OVERRIDE`` configuration and any PARTIAL/FAILED
+    stages are named. During Phases 23–25 a clean exhaustive run is deliberately
+    ``PARTIAL`` (the completeness gate), so the detail says so rather than implying
+    a failure. The rich per-stage table lands in Phase 26 (§18.6).
+    """
+    status = (getattr(ctx, "qc_status", "") or "NOT_REQUESTED").upper()
+    if status not in ("COMPLETE", "PARTIAL", "FAILED"):
+        return ""
+    label = html.escape(getattr(ctx, "qc_status_label", status))
+    stages = list(getattr(ctx, "stage_results", None) or [])
+    degraded = [s for s in stages if getattr(s, "status", "") in ("PARTIAL", "FAILED")]
+    kind = getattr(ctx, "configuration_kind", "NORMAL")
+
+    if degraded:
+        names = ", ".join(
+            f"{html.escape(str(s.stage))} ({html.escape(str(s.status))})" for s in degraded
+        )
+        detail = f"Stages needing attention: {names}."
+    elif status == "PARTIAL":
+        detail = (
+            "Every exhaustive-QC stage completed; a full &ldquo;complete&rdquo; "
+            "status is intentionally withheld pending later remediation phases "
+            "(cross-set reconciliation, claim-complete citations, evidence and "
+            "callout completeness)."
+        )
+    else:
+        detail = "Every required exhaustive-QC stage completed."
+    if kind == "DEBUG_OVERRIDE":
+        detail += " Configuration: DEBUG_OVERRIDE (an explicit flag disabled a normally-required stage)."
+    return (
+        f'<div class="qc-status-banner" data-status="{_esc_attr(status)}">'
+        f'<div class="cb-title">QC status: {html.escape(status)} — {label}</div>'
+        f'<div class="cb-detail">{detail}</div>'
         f"</div>"
     )
 
@@ -1289,6 +1332,16 @@ a{color:var(--accent); text-decoration:none}
 .coverage-banner[data-coverage="COMPLETE"] .cb-title{color:var(--ok)}
 .coverage-banner[data-coverage="INCOMPLETE"]{border-color:var(--failed); background:var(--conflict-soft)}
 .coverage-banner[data-coverage="INCOMPLETE"] .cb-title{color:var(--failed)}
+.qc-status-banner{margin:0 0 14px; padding:10px 14px; border-radius:8px; font-size:13.5px;
+  border:1px solid var(--line)}
+.qc-status-banner .cb-title{font-weight:700}
+.qc-status-banner .cb-detail{color:var(--muted); margin-top:2px}
+.qc-status-banner[data-status="COMPLETE"]{border-color:var(--ok); background:#e7f6ee}
+.qc-status-banner[data-status="COMPLETE"] .cb-title{color:var(--ok)}
+.qc-status-banner[data-status="PARTIAL"]{border-color:var(--coord); background:var(--coord-soft)}
+.qc-status-banner[data-status="PARTIAL"] .cb-title{color:var(--coord)}
+.qc-status-banner[data-status="FAILED"]{border-color:var(--failed); background:var(--conflict-soft)}
+.qc-status-banner[data-status="FAILED"] .cb-title{color:var(--failed)}
 
 /* Cards */
 .card{

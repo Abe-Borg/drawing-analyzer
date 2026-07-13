@@ -36,7 +36,16 @@ from .digest import (
     sheet_digest_from_cache_entry,
 )
 from .digest_cache import digest_cache_key_level1
-from .models import Finding, NumericClaim, SheetGeometry, source_page_key
+from .models import (
+    Finding,
+    NumericClaim,
+    RunConfiguration,
+    SheetGeometry,
+    StageResult,
+    resolve_run_configuration,
+    roll_up_qc_status,
+    source_page_key,
+)
 from .render import inspect_inputs, iter_rendered_sheets, iter_sheet_prescan, list_sheets
 from .source_registry import EST_BYTES_PER_SHEET, check_set_limits, check_work_disk
 
@@ -63,6 +72,14 @@ StatusCallback = Callable[[str], None]
 # Override per-call via ``max_workers=`` or globally via
 # ``DRAWING_ANALYZER_MAX_WORKERS``.
 DEFAULT_DIGEST_WORKERS = 4
+
+# Phase 23 temporary completeness gate (§8, §15.5). While this is closed, a fully
+# successful exhaustive QC run is capped at ``QCStatus.PARTIAL`` rather than
+# ``COMPLETE`` — Phases 24–25 have not yet landed the cross-shard reconciliation,
+# claim-complete citations, complete evidence, and callout-overflow guarantees a
+# COMPLETE exhaustive review must prove. Phase 26 opens the gate once those close.
+# It is deliberately a module constant so a single edit removes the gate.
+EXHAUSTIVE_QC_COMPLETENESS_GATE_OPEN = False
 
 _log = get_logger()
 
@@ -152,6 +169,30 @@ class DrawingContext:
     # a three-state completion in the GUI.
     coverage_status: str = "NOT_REQUESTED"
     markup_run: Any = None
+    # Phase 23A (§15.1 / §15.4): the resolved run configuration, the typed
+    # per-stage outcomes, and the overall QC status the completion dialog / report
+    # header lead with. ``qc_status`` is NOT_REQUESTED unless exhaustive QC ran;
+    # otherwise COMPLETE / PARTIAL / FAILED per the §3.3 roll-up (capped at PARTIAL
+    # by the Phase 23 temporary completeness gate).
+    run_configuration: Any = None
+    stage_results: list = field(default_factory=list)
+    qc_status: str = "NOT_REQUESTED"
+
+    @property
+    def configuration_kind(self) -> str:
+        """NORMAL, or DEBUG_OVERRIDE when an explicit flag weakened exhaustive QC."""
+        cfg = self.run_configuration
+        return getattr(cfg, "configuration_kind", "NORMAL") if cfg is not None else "NORMAL"
+
+    @property
+    def qc_status_label(self) -> str:
+        """A human three-state label for the GUI completion dialog / report (§3.3)."""
+        return {
+            "NOT_REQUESTED": "Completed",
+            "COMPLETE": "Exhaustive QC complete",
+            "PARTIAL": "Completed with QC warnings",
+            "FAILED": "QC incomplete",
+        }.get(self.qc_status, "Completed")
 
     @property
     def ledger_tally_line(self) -> str:
@@ -544,6 +585,10 @@ class _QCResult:
     # the full :class:`MarkupRunResult` (placements + receipts) for the manifest.
     coverage_status: str = "NOT_REQUESTED"
     markup_run: Any = None
+    # Phase 23A (§15.4): the QC-stage outcomes the overall status rolls up from —
+    # auditors, prose harvest, verification, citation, and markup/coverage. The
+    # pre-ledger stages (synthesis, critique, cross-QC) are recorded by the caller.
+    stage_results: list[StageResult] = field(default_factory=list)
 
 
 def _critique_level1_partition(
@@ -732,10 +777,7 @@ def _run_qc_stages(
     sheets: list[SheetDigest],
     geometries: list[SheetGeometry],
     pdf_paths: list[Path],
-    reference_audit_enabled: bool,
-    qc_markups: bool,
-    markup_verified_only: bool,
-    verify_enabled: bool,
+    config: RunConfiguration,
     client: Any,
     qc_work_dir: Path | None,
     progress: ProgressCallback | None,
@@ -744,32 +786,47 @@ def _run_qc_stages(
     critique_findings: list[Finding] | None = None,
     cross_findings: list[Finding] | None = None,
     claims: list[NumericClaim] | None = None,
-    citation_check_enabled: bool = False,
     synthesis_text: str = "",
-    ink_rejected: bool = False,
-    focus_findings_to_markups: bool = False,
     accepted_documents: list | None = None,
 ) -> _QCResult:
-    """Run the QC pipeline: ingest → harvest → freeze → anchor → verify → markups.
+    """Run the ledger pipeline: ingest → harvest → anchor → number → verify → markups.
 
     Part III (§16): every QC item from every channel is ingested into **the
     findings ledger** — the digest's JSON findings, the critique reads, the
     cross-sheet conflicts, the deterministic auditors, and the harvested prose
     (digest Coordination/Conflict items, synthesis conflicts, opted-in focus
-    items). Ingest merges duplicates (unioning provenance); ``freeze()`` assigns
-    the run's ``QC-###`` numbers; anchoring, verification, the citation check,
-    and the markup writer then consume the ledger and nothing else. At the end
-    of a markup run, every entry is accounted for — clouded, margin callout, or
-    listed in the rejected index — and the tally is logged and surfaced (§18);
-    without ``qc_markups`` there is no PDF ink to account for and the tally
-    stays empty.
+    items). Ingest merges duplicates (unioning provenance); anchoring runs, then
+    ``number()`` assigns the run's positional ``QC-###`` numbers; verification, the
+    citation check, and the markup writer then consume the ledger and nothing else.
+    At the end of a markup run every entry is accounted for — clouded, margin
+    callout, or listed in the rejected index — and the tally is logged (§18).
+
+    Which stages actually run is read entirely from the resolved
+    :class:`RunConfiguration` (§15.1), so this one function serves every product
+    mode: a **standard** run only ingests the digest findings and anchors them for
+    free (DA-012); the **deterministic-audit-only** run adds the auditors but no
+    model call, and in particular no prose structuring (DA-013); the **exhaustive**
+    run turns on auditors, prose harvest, verification, citation, and markup.
 
     Every stage is additive and non-fatal (I-3): a failure is recorded in
-    ``errors`` and the standard deliverable still ships. Reviewed PDFs and
-    evidence crops are written under ``work_dir`` (a fresh temp dir when none is
-    given), to be exported later.
+    ``errors`` (and its typed :class:`StageResult`) and the standard deliverable
+    still ships. Reviewed PDFs and evidence crops are written under ``work_dir`` (a
+    fresh temp dir when none is given), to be exported later.
     """
     from .ledger import Ledger
+
+    # Resolved switches — the body reads these, never the raw run kwargs (§15.1).
+    reference_audit_enabled = config.run_auditors
+    qc_markups = config.run_markup
+    markup_verified_only = config.markup_verified_only
+    verify_enabled = config.run_verification
+    citation_check_enabled = config.run_citation
+    ink_rejected = config.ink_rejected
+    focus_findings_to_markups = config.focus_findings_to_markups
+    run_prose_harvest = config.run_prose_harvest
+
+    # Typed per-stage outcomes (§15.4) rolled up into the overall QC status.
+    stage_results: list[StageResult] = []
 
     ledger = Ledger()
     work_dir = qc_work_dir
@@ -791,6 +848,7 @@ def _run_qc_stages(
     ledger.add(critique_findings or [])
     ledger.add(cross_findings or [], "cross_qc")
 
+    audit_stage = StageResult(stage="auditors", expected=reference_audit_enabled)
     if reference_audit_enabled and geometries:
         if progress is not None:
             progress(total, total, "Auditing references")
@@ -805,16 +863,27 @@ def _run_qc_stages(
             audit_res = run_auditors(geometries, claims=claims or [])
             audit_stats = audit_res.stats
             ledger.add(audit_res.findings)
+            audit_stage.status = "COMPLETE"
+            audit_stage.items_out = len(audit_res.findings)
             _log.info(
                 "auditors: %d deterministic finding(s); %s",
                 len(audit_res.findings), audit_stats,
             )
         except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
             errors.append(f"Deterministic auditors: {exc}")
+            audit_stage.status = "FAILED"
+            audit_stage.errors.append(str(exc))
             _log.warning("deterministic auditors failed: %s", exc)
+    elif reference_audit_enabled:
+        # Requested but no geometry to audit — a valid (empty) skip, not a failure.
+        audit_stage.status = "SKIPPED_VALID"
+    stage_results.append(audit_stage)
 
     # --- prose harvest (§17): the legacy channel's carry-through guarantee ----
-    if sheets:
+    # Exhaustive QC only (§14.7 / §15.3): standard and audit-only runs keep any
+    # unmatched prose in the prose and incur no straggler-structuring model call.
+    harvest_stage = StageResult(stage="prose_harvest", expected=run_prose_harvest)
+    if run_prose_harvest and sheets:
         if progress is not None:
             progress(total, total, "Harvesting prose findings")
         try:
@@ -826,6 +895,7 @@ def _run_qc_stages(
                 focus_findings_to_markups=focus_findings_to_markups,
             )
             harvest_in, harvest_out = hres.input_tokens, hres.output_tokens
+            harvest_stage.items_in = getattr(hres, "items", 0)
             # §14.9: every enumerated prose item must reach a ledger entry. Any that
             # could not be recovered even by the final degraded attempt is an
             # invariant failure — surface it so the run is never presented as a
@@ -835,10 +905,20 @@ def _run_qc_stages(
                     f"Prose harvest: {hres.missing} enumerated prose item(s) could not "
                     "be accounted for in the ledger — exhaustive QC is incomplete."
                 )
+                harvest_stage.status = "PARTIAL"
+                harvest_stage.errors.append(f"{hres.missing} prose item(s) unaccounted")
                 _log.error("prose harvest: %d item(s) unaccounted (§14.9)", hres.missing)
+            elif harvest_stage.items_in == 0:
+                # No enumerated prose to carry through — an applicable, valid skip.
+                harvest_stage.status = "SKIPPED_VALID"
+            else:
+                harvest_stage.status = "COMPLETE"
         except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
             errors.append(f"Prose harvest: {exc}")
+            harvest_stage.status = "FAILED"
+            harvest_stage.errors.append(str(exc))
             _log.warning("prose harvest failed: %s", exc)
+    stage_results.append(harvest_stage)
 
     # --- seal ingestion, then anchor, reconcile, and number (§12.4) -----------
     # QC ids must be POSITIONAL, so numbering happens *after* anchoring — the
@@ -899,6 +979,9 @@ def _run_qc_stages(
 
     # Verify the model entries (deterministic auditor entries are skipped by the
     # verifier). Only when markups are requested — clouds are what demand trust.
+    verify_stage = StageResult(
+        stage="verification", expected=bool(qc_markups and verify_enabled)
+    )
     if qc_markups and verify_enabled and entries:
         from .verify import verify_findings as _run_verify
 
@@ -912,6 +995,10 @@ def _run_qc_stages(
             if progress is not None:
                 progress(total, total, label)   # keep the sheet bar full; label = "Verifying finding k/n"
 
+        vres = None
+        cres = None
+        primary_failed = False
+        cross_failed = False
         try:
             vres = _run_verify(
                 all_findings, geometries, client=client,
@@ -924,6 +1011,8 @@ def _run_qc_stages(
             )
         except Exception as exc:  # noqa: BLE001 - never fatal
             errors.append(f"Verification: {exc}")
+            primary_failed = True
+            verify_stage.errors.append(str(exc))
             _log.warning("verification failed: %s", exc)
 
         # Cross-sheet (dual-anchored) findings verify with one crop per leg in a
@@ -946,30 +1035,79 @@ def _run_qc_stages(
                 )
         except Exception as exc:  # noqa: BLE001 - never fatal
             errors.append(f"Cross-sheet verification: {exc}")
+            cross_failed = True
+            verify_stage.errors.append(str(exc))
             _log.warning("cross-sheet verification failed: %s", exc)
+
+        # The verifier returns *normally* with everything SKIPPED when the client is
+        # unavailable or no crop could be built — it does not raise. So the stage
+        # status is derived from the actual verdicts, not merely from "no exception":
+        # findings actually judged (VERIFIED/REJECTED/UNCERTAIN) make it COMPLETE;
+        # eligible findings that were *all* skipped make it PARTIAL (verification was
+        # required but could not run); zero eligible/counted findings is a valid skip.
+        def _counts(r: "Any") -> "tuple[int, int]":
+            if r is None:
+                return 0, 0
+            judged = r.verified + r.rejected + r.uncertain
+            return judged, judged + r.skipped
+        p_judged, p_counted = _counts(vres)
+        c_judged, c_counted = _counts(cres)
+        judged, counted = p_judged + c_judged, p_counted + c_counted
+        verify_stage.items_out = judged
+        if primary_failed:
+            verify_stage.status = "FAILED"
+        elif counted == 0:
+            verify_stage.status = "SKIPPED_VALID"   # no eligible model findings
+        elif judged == 0:
+            # Eligible findings existed but every one was skipped (client down /
+            # crops failed) — the required stage did not actually verify anything.
+            verify_stage.status = "PARTIAL"
+            verify_stage.warnings.append(
+                "all eligible findings were skipped (client unavailable or crops failed)"
+            )
+        elif cross_failed:
+            verify_stage.status = "PARTIAL"
+        else:
+            verify_stage.status = "COMPLETE"
+    elif qc_markups and verify_enabled:
+        # Requested, but no model entries were eligible to verify (§3.3).
+        verify_stage.status = "SKIPPED_VALID"
+    stage_results.append(verify_stage)
 
     # Citation check (Phase 15): one web-search-backed call per unique code ref,
     # judged against the editions the set adopts (harvested from the text
     # layers). Verdicts attach to the findings and ride the popup/CSV/report; a
     # MISMATCH downgrades nothing. Additive and non-fatal (I-3).
-    if citation_check_enabled and any(getattr(f, "refs", None) for f in all_findings):
-        from .citation_check import check_citations
+    citation_stage = StageResult(stage="citation", expected=citation_check_enabled)
+    if citation_check_enabled:
+        if not any(getattr(f, "refs", None) for f in all_findings):
+            # No cited claims to check — a valid skip, not a failure (§3.3).
+            citation_stage.status = "SKIPPED_VALID"
+        else:
+            from .citation_check import check_citations
 
-        def _citation_progress(done: int, tot: int, label: str) -> None:
-            if progress is not None:
-                progress(total, total, label)
+            def _citation_progress(done: int, tot: int, label: str) -> None:
+                if progress is not None:
+                    progress(total, total, label)
 
-        try:
-            cires = check_citations(
-                all_findings, geometries, client=client, progress=_citation_progress,
-            )
-            v_in += cires.input_tokens
-            v_out += cires.output_tokens
-            if cires.error:
-                errors.append(f"Citation check: {cires.error}")
-        except Exception as exc:  # noqa: BLE001 - never fatal
-            errors.append(f"Citation check: {exc}")
-            _log.warning("citation check failed: %s", exc)
+            try:
+                cires = check_citations(
+                    all_findings, geometries, client=client, progress=_citation_progress,
+                )
+                v_in += cires.input_tokens
+                v_out += cires.output_tokens
+                if cires.error:
+                    errors.append(f"Citation check: {cires.error}")
+                    citation_stage.status = "PARTIAL"
+                    citation_stage.errors.append(str(cires.error))
+                else:
+                    citation_stage.status = "COMPLETE"
+            except Exception as exc:  # noqa: BLE001 - never fatal
+                errors.append(f"Citation check: {exc}")
+                citation_stage.status = "FAILED"
+                citation_stage.errors.append(str(exc))
+                _log.warning("citation check failed: %s", exc)
+    stage_results.append(citation_stage)
 
     reviewed_pdf_paths: list[Path] = []
     mutated_sources: list[str] = []
@@ -1093,6 +1231,18 @@ def _run_qc_stages(
             )
         _log.info("%s", _tally_line(len(entries), ledger_tally, coverage_status))
 
+    # Markup/coverage as a typed stage: COMPLETE only when every planned placement
+    # was proven in the reopened PDF (receipt-derived, DA-007); an INCOMPLETE
+    # coverage (a failed write, a mutated source, a post-seal add) is PARTIAL.
+    markup_stage = StageResult(stage="markup", expected=qc_markups)
+    if qc_markups:
+        if coverage_status == "COMPLETE":
+            markup_stage.status = "COMPLETE"
+        else:
+            markup_stage.status = "PARTIAL"
+            markup_stage.errors.append(f"coverage {coverage_status}")
+    stage_results.append(markup_stage)
+
     # The context's two buckets are a *view* of the one ledger: entries produced
     # only by the deterministic auditors keep their historical
     # ``reference_findings`` home; everything else (model, prose, merged) is
@@ -1117,6 +1267,7 @@ def _run_qc_stages(
         mutated_sources=mutated_sources,
         coverage_status=coverage_status,
         markup_run=markup_run,
+        stage_results=stage_results,
     )
 
 
@@ -1159,7 +1310,7 @@ def extract_drawing_context(
     cache: Any = None,
     use_cache: bool = False,
     max_workers: int | None = None,
-    synthesize: bool = False,
+    synthesize: bool | None = None,
     synthesis_model: str | None = None,
     use_batch: bool = False,
     on_log: LogCallback | None = None,
@@ -1169,11 +1320,11 @@ def extract_drawing_context(
     reference_audit: bool = False,
     qc_markups: bool = False,
     markup_verified_only: bool = False,
-    verify_findings: bool = True,
-    critique: bool = False,
+    verify_findings: bool | None = None,
+    critique: bool | None = None,
     profiles: list | None = None,
-    cross_qc: bool = False,
-    citation_check: bool = False,
+    cross_qc: bool | None = None,
+    citation_check: bool | None = None,
     ink_rejected: bool = False,
     focus_findings_to_markups: bool = False,
     qc_work_dir: Path | None = None,
@@ -1296,6 +1447,26 @@ def extract_drawing_context(
 
     focus = normalize_focus(focus) or ""
 
+    # Normalize the run options into one immutable configuration (§15.1): the
+    # single place ``qc_markups=True`` becomes the exhaustive stack, ``reference_audit``
+    # (alone) becomes the free offline battery, and a per-stage ``bool | None`` flag
+    # is resolved to a product default (None) or honored as an explicit expert
+    # override (True/False). Every stage below reads ``config``; the raw kwargs are
+    # not consulted again, so the meaning cannot drift across call sites.
+    config = resolve_run_configuration(
+        qc_markups=qc_markups,
+        reference_audit=reference_audit,
+        synthesize=synthesize,
+        critique=critique,
+        cross_qc=cross_qc,
+        citation_check=citation_check,
+        verify_findings=verify_findings,
+        markup_verified_only=markup_verified_only,
+        ink_rejected=ink_rejected,
+        focus_findings_to_markups=focus_findings_to_markups,
+        use_batch=use_batch,
+    )
+
     # Inventory (Phase 18B): classify every selected input once, so a corrupt /
     # encrypted / zero-page / duplicate file degrades individually and *visibly*
     # instead of vanishing. Downstream stages process only accepted documents.
@@ -1373,13 +1544,15 @@ def extract_drawing_context(
             + ["No readable PDF pages found in the selected files."],
         )
 
-    # The QC stages (reference audit, anchoring, verification, markups) run over
-    # each sheet's text/geometry after the digests, so capture that lightweight
-    # record as sheets render (the batch path discards the rendered sheets after
-    # upload). Only captured when a QC stage will actually use it.
-    need_geometry = reference_audit or qc_markups or critique or cross_qc or citation_check
+    # Capture each sheet's lightweight text/geometry record (words + text layer,
+    # **no PNG bytes**) as it renders — the batch path discards the rendered sheet
+    # after upload, so this is the only place the per-sheet geometry survives.
+    # DA-012 (§15.2): this is captured on *every* run, not just QC ones — a
+    # standard run retains its sheet text and anchors its digest findings offline
+    # for free, and exports ``findings.json`` / ``findings.csv`` / ``sheet_text/``.
+    need_geometry = True
     sheet_geometries: list[SheetGeometry] = []
-    geometry_sink = sheet_geometries if need_geometry else None
+    geometry_sink = sheet_geometries
 
     # Level-1 cache pre-scan (Phase 9): recognize unchanged sheets *before*
     # rendering and skip rasterization for them (the dominant re-run cost). Only
@@ -1451,6 +1624,9 @@ def extract_drawing_context(
     # Seed the run errors with the inventory rejections and any page-level
     # render failures (§10.5 / §10.7) so a partial run explains what it dropped.
     errors: list[str] = list(inventory_errors) + list(page_error_lines)
+    # Typed per-stage outcomes for the pre-ledger stages (synthesis, critique,
+    # cross-QC); the ledger stages append theirs inside ``_run_qc_stages`` (§15.4).
+    stage_results: list[StageResult] = []
     in_tok = out_tok = img_tok = 0
     for sd in sheets:
         # A cached sheet made no API call, so it costs zero tokens *this run*.
@@ -1473,7 +1649,8 @@ def extract_drawing_context(
     # Numeric claims (Phase 14) transcribed by the critique / cross-sheet QC passes,
     # pooled and handed to the deterministic arithmetic auditor below.
     numeric_claims: list[NumericClaim] = []
-    if critique:
+    critique_stage = StageResult(stage="critique", expected=config.run_critique)
+    if config.run_critique:
         if progress is not None:
             progress(total, total, "Critiquing sheets")
         try:
@@ -1495,16 +1672,22 @@ def extract_drawing_context(
             numeric_claims.extend(c_claims)
             in_tok += c_in
             out_tok += c_out
+            critique_stage.status = "COMPLETE"
+            critique_stage.items_out = len(critique_findings)
         except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
             errors.append(f"Critique: {exc}")
+            critique_stage.status = "FAILED"
+            critique_stage.errors.append(str(exc))
             _log.warning("critique stage failed: %s", exc)
+    stage_results.append(critique_stage)
 
     # Cross-sheet QC pass (Phase 13): a deliberate whole-set conflict hunt over the
     # digests + text layers (text only), producing dual-anchored findings that
     # cloud both sheets. Distinct from the prose synthesis (which stays as-is).
     # Additive and non-fatal.
     cross_findings: list[Finding] = []
-    if cross_qc:
+    cross_stage = StageResult(stage="cross_qc", expected=config.run_cross_qc)
+    if config.run_cross_qc:
         if progress is not None:
             progress(total, total, "Cross-sheet QC")
         try:
@@ -1515,12 +1698,20 @@ def extract_drawing_context(
             numeric_claims.extend(cross_res.claims)
             in_tok += cross_res.input_tokens
             out_tok += cross_res.output_tokens
+            cross_stage.items_out = len(cross_findings)
             if cross_res.error:
                 errors.append(f"Cross-sheet QC: {cross_res.error}")
+                cross_stage.status = "PARTIAL"
+                cross_stage.errors.append(str(cross_res.error))
                 _log.warning("cross-sheet QC: %s", cross_res.error)
+            else:
+                cross_stage.status = "COMPLETE"
         except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
             errors.append(f"Cross-sheet QC: {exc}")
+            cross_stage.status = "FAILED"
+            cross_stage.errors.append(str(exc))
             _log.warning("cross-sheet QC stage failed: %s", exc)
+    stage_results.append(cross_stage)
 
     # Cross-sheet synthesis (one text-only call after all digests). Skipped for
     # <2 readable sheets; on failure we keep the per-sheet digests and record
@@ -1529,7 +1720,8 @@ def extract_drawing_context(
     # statements into the findings ledger, so the text must exist by then — the
     # prose itself is untouched either way (I-2).
     synthesis_text = ""
-    if synthesize:
+    synthesis_stage = StageResult(stage="synthesis", expected=config.run_synthesis)
+    if config.run_synthesis:
         if progress is not None:
             progress(total, total, "Synthesizing set overview")
         from .synthesis import MIN_SHEETS_FOR_SYNTHESIS, synthesize_drawing_set
@@ -1538,6 +1730,7 @@ def extract_drawing_context(
         result = synthesize_drawing_set(sheets, client=client, model=synthesis_model)
         if result.ok:
             synthesis_text = result.text
+            synthesis_stage.status = "COMPLETE"
             # The synthesis call is billed, so its tokens belong in the run total.
             in_tok += result.input_tokens
             out_tok += result.output_tokens
@@ -1548,9 +1741,14 @@ def extract_drawing_context(
         elif result.error and len([s for s in sheets if s.ok]) >= MIN_SHEETS_FOR_SYNTHESIS:
             # A genuine failure (not the "too few sheets" skip) is worth surfacing.
             errors.append(f"Cross-sheet synthesis: {result.error}")
+            synthesis_stage.status = "FAILED"
+            synthesis_stage.errors.append(str(result.error))
             _log.warning("synthesis: failed: %s", result.error)
         else:
+            # Fewer than two readable sheets — an applicable, valid skip (§3.3).
+            synthesis_stage.status = "SKIPPED_VALID"
             _log.info("synthesis: skipped (<%d readable sheet(s))", MIN_SHEETS_FOR_SYNTHESIS)
+    stage_results.append(synthesis_stage)
 
     # Set-level focus report (one text-only call; independent of synthesis).
     # Additive: a failure here is recorded and the standard deliverable —
@@ -1582,26 +1780,31 @@ def extract_drawing_context(
                 "focus report: skipped (<%d readable sheet(s))", MIN_SHEETS_FOR_FOCUS
             )
 
-    # QC pipeline (Part III): ingest every channel into the findings ledger,
-    # harvest the prose, freeze the QC numbers, then anchor → verify → citation
-    # → markups — all consuming the ledger and nothing else. Additive and
-    # non-fatal; the prose deliverables above are never modified (I-2).
-    qc = _QCResult()
-    if need_geometry:
-        qc = _run_qc_stages(
-            sheets=sheets, geometries=sheet_geometries, pdf_paths=paths,
-            reference_audit_enabled=reference_audit, qc_markups=qc_markups,
-            markup_verified_only=markup_verified_only, verify_enabled=verify_findings,
-            client=client, qc_work_dir=qc_work_dir, progress=progress,
-            total=total, errors=errors, critique_findings=critique_findings,
-            cross_findings=cross_findings, claims=numeric_claims,
-            citation_check_enabled=citation_check,
-            synthesis_text=synthesis_text, ink_rejected=ink_rejected,
-            focus_findings_to_markups=focus_findings_to_markups,
-            accepted_documents=inventory.accepted_documents,
-        )
-        in_tok += qc.input_tokens
-        out_tok += qc.output_tokens
+    # Ledger pipeline (Part III): ingest every channel into the findings ledger,
+    # harvest the prose (exhaustive only), anchor, number, then verify → citation
+    # → markups — all consuming the ledger and nothing else. Runs on *every* mode
+    # (§15.2): a standard run only ingests + anchors the digest findings for free;
+    # what else runs is read from ``config``. Additive and non-fatal; the prose
+    # deliverables above are never modified (I-2).
+    qc = _run_qc_stages(
+        sheets=sheets, geometries=sheet_geometries, pdf_paths=paths,
+        config=config,
+        client=client, qc_work_dir=qc_work_dir, progress=progress,
+        total=total, errors=errors, critique_findings=critique_findings,
+        cross_findings=cross_findings, claims=numeric_claims,
+        synthesis_text=synthesis_text,
+        accepted_documents=inventory.accepted_documents,
+    )
+    in_tok += qc.input_tokens
+    out_tok += qc.output_tokens
+    stage_results.extend(qc.stage_results)
+
+    # Roll the per-stage outcomes into one overall QC status (§3.3). The temporary
+    # completeness gate keeps an exhaustive run at PARTIAL until Phases 24–26 land.
+    qc_status = roll_up_qc_status(
+        config, stage_results, qc.coverage_status,
+        completeness_gate_open=EXHAUSTIVE_QC_COMPLETENESS_GATE_OPEN,
+    )
 
     if progress is not None:
         progress(total, total, "Done")
@@ -1644,6 +1847,9 @@ def extract_drawing_context(
         mutated_sources=qc.mutated_sources,
         coverage_status=qc.coverage_status,
         markup_run=qc.markup_run,
+        run_configuration=config,
+        stage_results=stage_results,
+        qc_status=qc_status,
     )
 
 

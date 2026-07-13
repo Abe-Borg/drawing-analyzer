@@ -6,6 +6,56 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed (Phase 23A — run configuration, status & persistence, DA-010/DA-012/DA-013)
+
+- **`qc_markups=True` now resolves to — and runs — the full exhaustive stack
+  (DA-010).** The GUI's *QC Markups* checkbox and the public API used to run only
+  digest → anchor → verify → markup on the digest's own findings; critique,
+  cross-sheet QC, the deterministic auditors, and citation checks never ran unless
+  each was passed separately. A single normalization point,
+  `resolve_run_configuration(...)` → an immutable `RunConfiguration`, is now the one
+  place the option matrix is interpreted (§15.1): `qc_markups=True` turns on
+  synthesis (≥2 sheets), two critique reads per sheet, cross-sheet QC, the
+  auditors, prose harvest, anchoring, verification, citation checks, markup, and
+  coverage reconciliation. The GUI *QC Markups* label now reads "exhaustive
+  engineering review + marked-up PDFs" and inherits this behavior. Every stage
+  reads the resolved config; no call site re-derives the boolean combination.
+- **Per-stage flags are now `bool | None` (a tri-state).** `synthesize`, `critique`,
+  `cross_qc`, `citation_check`, and `verify_findings` default to `None` — "use the
+  product default." An explicit `True`/`False` is honored as an expert override;
+  disabling a normally-required exhaustive stage (e.g. `qc_markups=True,
+  critique=False`) records a `DEBUG_OVERRIDE` configuration and forces
+  `qc_status=PARTIAL`, never a clean `COMPLETE`. Every legacy keyword still works.
+- **One canonical run-status vocabulary (§3.3).** `DrawingContext` gains
+  `qc_status` (`NOT_REQUESTED`/`COMPLETE`/`PARTIAL`/`FAILED`), a typed
+  `stage_results` list (`StageResult`, one per QC stage with
+  `NOT_REQUESTED`/`COMPLETE`/`PARTIAL`/`FAILED`/`SKIPPED_VALID`), and the resolved
+  `run_configuration`. `roll_up_qc_status` derives the overall status
+  deterministically; the GUI completion dialog and a new HTML report banner lead
+  with it. A **temporary completeness gate**
+  (`EXHAUSTIVE_QC_COMPLETENESS_GATE_OPEN = False`) keeps a clean exhaustive run at
+  `PARTIAL` — Phase 23 must not advertise a completeness that Phases 24–25 have not
+  yet delivered (cross-shard reconciliation, claim-complete citations, evidence and
+  callout completeness). Phase 26 opens the gate.
+
+### Fixed (Phase 23A — run configuration, status & persistence, DA-010/DA-012/DA-013)
+
+- **A standard run now retains and exports its findings and sheet text (DA-012).**
+  With neither QC checkbox, the pipeline used to discard geometry and leave
+  `ctx.findings` empty. It now always captures each sheet's lightweight text/geometry
+  record, ingests the digest's JSON findings into the ledger, binds them to source
+  identity, and anchors them offline **for free** (no verify/critique/citation/
+  prose-structuring/markup). The folder export always writes `findings.json`,
+  `findings.csv`, and `sheet_text/`, the HTML findings card renders, and the export
+  index is labeled "Findings & sheet text" (not "QC review") for a run that did no QC.
+- **The deterministic-audit-only path is now truly zero incremental API cost
+  (DA-013).** The prose harvester's straggler-structuring model call is gated to
+  exhaustive QC only; the *Deterministic audit only* selection runs the auditors over
+  the already-extracted text/geometry and makes **no** model calls beyond the digest.
+  Its GUI label now reads "Deterministic audit only — no additional API calls", and
+  the checkbox is disabled/marked redundant while *QC Markups* is checked (the
+  battery is already included).
+
 ### Fixed (Phase 22 — structured-output, critique & prose-harvest correctness, DA-008/DA-009/DA-023)
 
 - **A truncated / unclosed findings block can no longer leak into the sacred prose
