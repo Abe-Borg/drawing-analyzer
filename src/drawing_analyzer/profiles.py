@@ -251,6 +251,95 @@ def suggest_profiles(
     )
 
 
+def preflight_sheet_ids(paths: Iterable[Any]) -> list[str]:
+    """Cheaply extract each page's likely sheet id from a set of PDFs.
+
+    A lightweight, text-only preflight for GUI profile auto-suggest (§16.4): it
+    reads each page's word list and detects the title-block sheet id via the shared
+    detector — **without** rasterizing the full overview + tile grid. PyMuPDF-isolated
+    (it defers to :mod:`render`); any unreadable file is skipped silently (this is a
+    best-effort hint, never authoritative). Returns the detected ids in page order.
+    """
+    from pathlib import Path
+
+    from .auditors.references import detect_sheet_id
+
+    out: list[str] = []
+    for path in paths or []:
+        try:
+            from . import render
+
+            # A cheap, text-only prescan (no overview/tile rasterization): it lifts
+            # each page's word list + geometry, which is all detect_sheet_id needs.
+            for _ref, _identity, geometry in render.iter_sheet_prescan([Path(path)]):
+                sid = detect_sheet_id(geometry)
+                if sid:
+                    out.append(sid)
+        except Exception as exc:  # noqa: BLE001 - a bad file must not sink preflight
+            _log.info("profile preflight skipped %s: %s", path, exc)
+    return out
+
+
+def suggest_profiles_for_paths(
+    paths: Iterable[Any], *, available: dict[str, Profile] | None = None
+) -> list[Profile]:
+    """Auto-suggest profiles for a set of input PDFs (preflight + discipline match)."""
+    return suggest_profiles(preflight_sheet_ids(paths), available=available)
+
+
+def resolve_profile_selection(
+    suggested: Iterable[str],
+    *,
+    user_selected: Iterable[str] | None = None,
+    user_deselected: Iterable[str] | None = None,
+) -> list[str]:
+    """The effective selected profile names given auto-suggestions + user overrides.
+
+    Applicable suggestions are on by default; an explicit user selection adds a
+    profile and an explicit deselection removes it — **manual choice always wins**,
+    including across a later preflight refresh (a name the user deselected stays off
+    even if it is re-suggested). Deterministic order: suggested first (in order),
+    then any extra user selections. (§16.4)
+    """
+    deselected = {str(n) for n in (user_deselected or [])}
+    selected = [str(n) for n in (user_selected or [])]
+    out: list[str] = []
+    seen: set[str] = set()
+    for name in list(suggested) + selected:
+        name = str(name)
+        if name in deselected or name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+    return out
+
+
+def snapshot_profiles(profiles: Iterable[Profile]) -> list:
+    """Immutable :class:`~drawing_analyzer.models.ProfileSnapshot` for each profile.
+
+    Captured at Analyze time (§16.4) so the run manifest / report can show exactly
+    which profile version + content hash was injected. ``source`` is coarse
+    (builtin / user) — never an absolute path.
+    """
+    from .models import ProfileSnapshot
+
+    builtin_dir = builtin_profiles_dir()
+    snaps = []
+    for p in profiles:
+        source = ""
+        if p.source_path is not None:
+            try:
+                source = "builtin" if p.source_path.resolve().parent == builtin_dir.resolve() else "user"
+            except OSError:
+                source = "user"
+        snaps.append(ProfileSnapshot(
+            name=p.name, title=p.title, version=p.version,
+            content_hash=p.content_hash, source=source,
+            disciplines=tuple(p.disciplines),
+        ))
+    return snaps
+
+
 # --------------------------------------------------------------------------- #
 # Cache fragment + prompt assembly
 # --------------------------------------------------------------------------- #

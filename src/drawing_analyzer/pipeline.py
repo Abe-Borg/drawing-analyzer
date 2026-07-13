@@ -255,6 +255,10 @@ class DrawingContext:
     run_configuration: Any = None
     stage_results: list = field(default_factory=list)
     qc_status: str = "NOT_REQUESTED"
+    # Phase 24 (§16.4): the review profiles as they were at Analyze time
+    # (name + version + content hash + source) — recorded for the report / run
+    # manifest and so a profile that disappeared/changed after selection is visible.
+    profile_snapshots: list = field(default_factory=list)
     # Phase 23B (§15.6): the run's append-only usage ledger. ``total_input_tokens`` /
     # ``total_output_tokens`` above are derived sums over it; ``total_estimated_cost``
     # and the per-stage-family breakdown come from it too.
@@ -1852,14 +1856,37 @@ def extract_drawing_context(
     # Numeric claims (Phase 14) transcribed by the critique / cross-sheet QC passes,
     # pooled and handed to the deterministic arithmetic auditor below.
     numeric_claims: list[NumericClaim] = []
+    # Resolve + snapshot the review profiles ONCE, at Analyze time (§16.4): the
+    # exact name/version/content-hash/source that will be injected is captured for
+    # the report / run manifest, and a requested profile that could not be resolved
+    # (a name that vanished / is unreadable after selection) is surfaced as a
+    # PARTIAL profile-application stage rather than silently dropped.
+    from .profiles import resolve_profiles, snapshot_profiles
+
+    resolved_profiles = resolve_profiles(profiles)
+    profile_snapshots = snapshot_profiles(resolved_profiles)
+    requested_count = len(list(profiles or []))
+    profile_stage = StageResult(stage="profiles", expected=config.run_critique)
+    if config.run_critique:
+        profile_stage.items_in = requested_count
+        profile_stage.items_out = len(resolved_profiles)
+        if not resolved_profiles:
+            # No applicable/selected profile — generic critique still runs (§3.3).
+            profile_stage.status = "SKIPPED_VALID"
+        elif len(resolved_profiles) < requested_count:
+            profile_stage.status = "PARTIAL"
+            profile_stage.warnings.append(
+                "a selected review profile could not be resolved (missing/unreadable)"
+            )
+        else:
+            profile_stage.status = "COMPLETE"
+    stage_results.append(profile_stage)
+
     critique_stage = StageResult(stage="critique", expected=config.run_critique)
     if config.run_critique:
         if progress is not None:
             progress(total, total, "Critiquing sheets")
         try:
-            from .profiles import resolve_profiles
-
-            resolved_profiles = resolve_profiles(profiles)
             if resolved_profiles:
                 _log.info(
                     "critique: applying %d review profile(s): %s",
@@ -2085,6 +2112,7 @@ def extract_drawing_context(
         stage_results=stage_results,
         qc_status=qc_status,
         run_usage=run_usage,
+        profile_snapshots=profile_snapshots,
     )
 
 

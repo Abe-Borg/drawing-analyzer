@@ -1315,6 +1315,34 @@ class StageResult:
 
 
 @dataclass(frozen=True)
+class ProfileSnapshot:
+    """An immutable record of a review profile as it was at Analyze time (§16.4).
+
+    Captured once when the run starts so the run manifest and the report can show
+    exactly which profile (name + version + content hash + source) was injected,
+    and so a later edit / disappearance of the on-disk profile can be detected. No
+    absolute path leaves here — ``source`` is ``"builtin"`` / ``"user"`` only.
+    """
+
+    name: str
+    title: str = ""
+    version: str = "0"
+    content_hash: str = ""
+    source: str = ""                    # "builtin" | "user" | ""
+    disciplines: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "title": self.title,
+            "version": self.version,
+            "content_hash": self.content_hash,
+            "source": self.source,
+            "disciplines": list(self.disciplines),
+        }
+
+
+@dataclass(frozen=True)
 class RunConfiguration:
     """One immutable, normalized description of what a run will do (§15.1).
 
