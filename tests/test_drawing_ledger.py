@@ -444,6 +444,31 @@ def test_extract_set_level_synthesis_conflicts_are_the_complement():
     assert extract_set_level_synthesis_conflicts(named, ["F-D-01-1"]) == []
 
 
+def test_set_level_recovered_in_reconciliation_is_tallied_set_level(monkeypatch):
+    # Review finding: a set-level item recovered by the final §14.9 reconciliation
+    # (its main-loop processing raised) must be tallied as `set_level`, not `degraded`
+    # — the recovery path mirrors the main-loop branch on `p.ref is None`.
+    import drawing_analyzer.prose_harvest as PH
+
+    real = PH._process_pending
+
+    def _boom(ledger, p, result, **kw):
+        if p.ref is None:                 # only the set-level item's first pass fails
+            raise RuntimeError("transient")
+        return real(ledger, p, result, **kw)
+
+    monkeypatch.setattr(PH, "_process_pending", _boom)
+    ledger = Ledger()
+    synthesis = (
+        "The specified fire pump conflicts with the schedule, and no single sheet "
+        "in the set resolves which governs."
+    )
+    res = harvest_prose(ledger, [], [_Geom()], client=None,
+                        synthesis_text=synthesis, sleep=lambda *_: None)
+    assert res.missing == 0 and len(ledger) == 1
+    assert res.set_level == 1 and res.degraded == 0        # counted as set-level, not degraded
+
+
 def test_harvest_unresolvable_synthesis_conflict_becomes_set_level():
     # §14.8: a synthesis conflict naming no in-set sheet is no longer dropped — it
     # becomes a set-level ledger entry (source-less, anchor_hint SET_INDEX) bound
@@ -470,3 +495,27 @@ def test_focus_off_counts_intentional_exclusion():
     )
     res = harvest_prose(Ledger(), [digest], [_Geom()], client=None, sleep=lambda *_: None)
     assert res.excluded_focus == 1 and res.items == 0
+
+
+def test_identical_note_on_two_pages_of_one_source_stays_two_items():
+    # Review finding: prose_item_id must fold page_index, or an identical boilerplate
+    # note (same source_id, same per-page ordinal, same text) on two pages of ONE
+    # multi-page PDF collides to one id and defeats the §14.9 no-drop reconciliation.
+    from drawing_analyzer.prose_harvest import _enumerate_pending, HarvestResult
+
+    note = "**Coordination items**\n- Coordinate all penetrations with the structural drawings."
+    p0 = _Digest(note, source="M.pdf", page=0)
+    p1 = _Digest(note, source="M.pdf", page=1)     # same source file, different page
+    pending = _enumerate_pending(
+        [p0, p1], "", {}, focus_findings_to_markups=False,
+        sheet_text_of=lambda ref: "", display_id_of=lambda ref: "M-1",
+        result=HarvestResult(),
+    )
+    ids = [p.pid for p in pending]
+    assert len(pending) == 2 and len(set(ids)) == 2      # two DISTINCT ids, no collision
+
+    # End-to-end: both pages' items reach the ledger and reconcile with 0 missing.
+    ledger = Ledger()
+    res = harvest_prose(ledger, [p0, p1], [_Geom("M.pdf", 0), _Geom("M.pdf", 1)],
+                        client=None, sleep=lambda *_: None)
+    assert res.items == 2 and res.missing == 0 and len(ledger) == 2

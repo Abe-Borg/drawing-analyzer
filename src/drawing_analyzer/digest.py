@@ -610,6 +610,11 @@ _OPEN_FENCE_RE = re.compile(r"```[ \t]*([A-Za-z0-9_+-]*)[ \t]*\r?\n")
 # merely contains the English word "findings" (§14.1).
 _FINDINGS_KEY_RE = re.compile(r'"findings"\s*:')
 _CLAIMS_KEY_RE = re.compile(r'"claims"\s*:')
+# A fence line that was itself truncated — ``` + an optional language label and
+# nothing else to end-of-string (the model was cut off *on the opener line*, before
+# its newline). Recognised so a dangling machine-block opener is still stripped from
+# the sacred prose (DA-009), not misread as ordinary text.
+_DANGLING_FENCE_RE = re.compile(r"[ \t]*([A-Za-z0-9_+-]*)[ \t]*\Z")
 
 
 @dataclass
@@ -651,8 +656,25 @@ def scan_structured_blocks(raw_text: str) -> list[StructuredBlockCandidate]:
             break
         m = _OPEN_FENCE_RE.match(raw_text, open_idx)
         if m is None:
-            # A ``` not followed by an optional label + newline is not a valid
-            # opening fence (matches the old regex, which required the newline).
+            # No trailing newline after the fence. If the REST of the string is only
+            # an (optional) language label, the fence line was itself truncated
+            # (max_tokens cut before the newline) — a dangling machine-block opener
+            # that must still be stripped from the prose (DA-009). Emit it as an
+            # unclosed, empty-body block. Otherwise it's an inline ``` — skip it.
+            dangling = _DANGLING_FENCE_RE.match(raw_text, open_idx + 3)
+            if dangling is not None and dangling.end() == n:
+                # A fence line at EOF with nothing after it but a (possibly partial)
+                # label is unambiguously a truncated machine-block opener — the label
+                # may itself be cut mid-word ("```jso"), so it is stripped regardless
+                # of whether it spells "json" yet (DA-009).
+                language = (dangling.group(1) or "").strip().lower()
+                out.append(StructuredBlockCandidate(
+                    opening_offset=open_idx, body_offset=n, ending_offset=n,
+                    language=language, body="", closed=False,
+                    looks_like_findings=True,
+                    looks_like_claims=False,
+                ))
+                break
             i = open_idx + 3
             continue
         language = (m.group(1) or "").strip().lower()
@@ -665,6 +687,10 @@ def scan_structured_blocks(raw_text: str) -> list[StructuredBlockCandidate]:
             body = raw_text[body_start:close_idx]
             ending, closed = close_idx + 3, True
         is_json = language in ("json", "")
+        # An UNCLOSED json/empty fence is a truncated machine-block fragment — the
+        # findings block being cut off (the model emits it last). Treat it as a
+        # findings *attempt* even before the ``"findings":`` key was emitted, so a
+        # cut *before the colon* (or before any key) is still stripped, not leaked.
         out.append(StructuredBlockCandidate(
             opening_offset=open_idx,
             body_offset=body_start,
@@ -672,7 +698,7 @@ def scan_structured_blocks(raw_text: str) -> list[StructuredBlockCandidate]:
             language=language,
             body=body,
             closed=closed,
-            looks_like_findings=bool(is_json and _FINDINGS_KEY_RE.search(body)),
+            looks_like_findings=bool(is_json and (_FINDINGS_KEY_RE.search(body) or not closed)),
             looks_like_claims=bool(is_json and _CLAIMS_KEY_RE.search(body)),
         ))
         i = ending if closed else n

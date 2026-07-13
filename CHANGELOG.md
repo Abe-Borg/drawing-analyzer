@@ -66,6 +66,18 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   clean sheet. The set-level `Drawing_Set_Review_Notes.pdf` is intentionally exempt
   from the `markup_verified_only` gate (it is a review-notes artifact, not drawing
   ink) — documented at both call and writer sites.
+- Adversarial-review hardening (5 confirmed findings fixed): (1) a `max_tokens`
+  truncation that cut **before the `"findings":` colon** — or before any key — now
+  strips the fragment instead of leaking the `\`\`\`json` fence into the prose;
+  (2) a fence line **truncated before its newline** (`\`\`\`json` at EOF, even a
+  partial `\`\`\`jso`) is likewise recognised and stripped; (3) `compute_prose_item_id`
+  now folds `page_index`, so an identical boilerplate note on two pages of one
+  multi-page PDF no longer collides to one id and silently drops a distinct item
+  (§14.9); (4) a set-level item recovered by the final reconciliation is tallied as
+  `set_level`, not `degraded`; (5) a failure inside the set-level notes writer no
+  longer discards the per-source reviewed PDFs already written to disk (the source
+  result is committed before the notes writer runs; a notes failure only rolls
+  coverage to `INCOMPLETE`).
 
 ### Fixed (Phase 21 — artifact-backed markup coverage, DA-007/DA-029)
 

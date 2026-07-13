@@ -757,19 +757,32 @@ class Finding:
 
 
 def compute_prose_item_id(
-    channel: str, source_id: str | None, section: str, ordinal: int, verbatim_text: str
+    channel: str,
+    source_id: str | None,
+    section: str,
+    ordinal: int,
+    verbatim_text: str,
+    page_index: int = 0,
 ) -> str:
     """Stable identity for one enumerated prose item (Phase 22 §14.6).
 
     Derived from the channel, the emitting source identity (``""`` for a set-level
-    item), the prose section, the item's ordinal within that section, and its
-    verbatim text — so the same sentence gets the same id across runs, two identical
-    sentences at *different* ordinals stay distinct, and the harvest can prove — id
-    by id — that every enumerated item reached a ledger entry.
+    item), the **page index** within that source, the prose section, the item's
+    ordinal within that section, and its verbatim text — so the same sentence gets
+    the same id across runs, two identical sentences at *different* ordinals or on
+    *different pages of one multi-page source* stay distinct, and the harvest can
+    prove — id by id — that every enumerated item reached a ledger entry.
+
+    ``page_index`` matters because a source id identifies the input file, not the
+    page: without it, an identical boilerplate note (e.g. a general coordination
+    note repeated on every sheet) on two pages of one PDF — both enumerated at the
+    same per-page ordinal — would collide to one id and defeat the §14.9 id-based
+    reconciliation (a distinct item could be silently dropped).
     """
     payload = "\x00".join([
         channel or "",
         source_id or "",
+        str(int(page_index)),
         section or "",
         str(int(ordinal)),
         verbatim_text or "",

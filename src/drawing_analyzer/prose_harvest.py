@@ -562,7 +562,8 @@ def _enumerate_pending(
             counters[tag] = ordinal + 1
             hint = "conflict" if tag.endswith("conflict") else "coordination"
             pi = ProseItem(
-                prose_item_id=compute_prose_item_id(tag, ref.source_id, tag, ordinal, item),
+                prose_item_id=compute_prose_item_id(
+                    tag, ref.source_id, tag, ordinal, item, page_index=ref.page_index),
                 channel=tag, scope="SOURCE", source_id=ref.source_id,
                 section=tag, ordinal=ordinal, verbatim_text=item,
             )
@@ -572,7 +573,8 @@ def _enumerate_pending(
             for ordinal, item in enumerate(focus_items):
                 pi = ProseItem(
                     prose_item_id=compute_prose_item_id(
-                        "focus_prose", ref.source_id, "focus", ordinal, item),
+                        "focus_prose", ref.source_id, "focus", ordinal, item,
+                        page_index=ref.page_index),
                     channel="focus_prose", scope="SOURCE", source_id=ref.source_id,
                     section="focus", ordinal=ordinal, verbatim_text=item,
                 )
@@ -608,7 +610,8 @@ def _enumerate_pending(
                 ))
         pi = ProseItem(
             prose_item_id=compute_prose_item_id(
-                "synthesis_prose", primary.ref.source_id, "synthesis", ordinal, item),
+                "synthesis_prose", primary.ref.source_id, "synthesis", ordinal, item,
+                page_index=primary.ref.page_index),
             channel="synthesis_prose", scope="SOURCE", source_id=primary.ref.source_id,
             section="synthesis", ordinal=ordinal, verbatim_text=item,
             mentioned_sheet_ids=list(sids),
@@ -717,13 +720,16 @@ def harvest_prose(
         for pid in sorted(missing):
             p = by_id[pid]
             try:
-                finding = (
-                    _set_level_entry(p.item.verbatim_text) if p.ref is None
-                    else _degraded_entry(p.item.verbatim_text, p.hint, p.ref, p.sheet_id)
-                )
-                finding.prose_item_ids = [pid]
-                ledger.add([finding], p.tag)
-                result.degraded += 1
+                if p.ref is None:
+                    finding = _set_level_entry(p.item.verbatim_text)
+                    finding.prose_item_ids = [pid]
+                    ledger.add([finding], p.tag)
+                    result.set_level += 1        # mirror the main-loop set-level tally
+                else:
+                    finding = _degraded_entry(p.item.verbatim_text, p.hint, p.ref, p.sheet_id)
+                    finding.prose_item_ids = [pid]
+                    ledger.add([finding], p.tag)
+                    result.degraded += 1
             except Exception as exc:  # noqa: BLE001 - genuinely unrecoverable → reported
                 _log.warning("prose harvest: could not recover item %s: %s", pid, _clean_error(exc))
         accounted = _accounted_ids(ledger)

@@ -460,3 +460,62 @@ def test_set_level_synthesis_conflict_routes_to_review_notes_pdf(tmp_path):
     assert ctx.ledger_tally.get("review_notes") == 1
     # The set-level statement never leaked onto a source reviewed PDF.
     assert not any(e.startswith("Prose harvest:") for e in ctx.errors)
+
+
+class _SourceAndSetLevelClient:
+    """Two sheets: the digest reports a real finding on each sheet (→ a source
+    reviewed PDF), and the synthesis reports a conflict naming no in-set sheet
+    (→ a set-level note)."""
+
+    def __init__(self):
+        prose = "Sheet - Mechanical - Plan\nEquipment schedule shown."
+        digest_text = prose + "\n\n" + _digest_block([{
+            "sheet_id": "M-1", "category": "code", "severity": "high",
+            "text": "Schedule value is wrong.", "source_quote": "EQUIPMENT SCHEDULE",
+        }])
+        critique_text = "```json\n" + json.dumps({"findings": [], "claims": []}) + "\n```"
+        synth_text = ("Overview.\n\nThe specified fire pump conflicts with the schedule "
+                      "and no single sheet in the set resolves which governs.")
+
+        class _Msgs:
+            def create(_self, **kw):
+                system = kw.get("system", "")
+                if system == SYNTHESIS_SYSTEM_PROMPT:
+                    return FakeMessage(content=[FakeTextBlock(text=synth_text)], usage=FakeUsage())
+                if system == VERIFY_SYSTEM_PROMPT:
+                    return FakeMessage(content=[FakeTextBlock(text='{"verdict":"CONFIRMED","note":"x"}')],
+                                       usage=FakeUsage())
+                if system.startswith(CRITIQUE_SYSTEM_PROMPT):
+                    return FakeMessage(content=[FakeTextBlock(text=critique_text)], usage=FakeUsage())
+                if system.startswith(DIGEST_SYSTEM_PROMPT):
+                    return FakeMessage(content=[FakeTextBlock(text=digest_text)], usage=FakeUsage())
+                return FakeMessage(content=[FakeTextBlock(text="ok")])
+
+        self.messages = _Msgs()
+
+
+def test_set_notes_writer_failure_keeps_source_reviewed_pdfs(tmp_path, monkeypatch):
+    # Review finding: a set-notes writer exception must NOT discard the per-source
+    # reviewed PDFs already written to disk. The source result is committed before
+    # the notes writer runs; a notes failure only rolls coverage to INCOMPLETE.
+    import drawing_analyzer.annotate as A
+
+    srcs = [_make_clean_pdf(tmp_path / "M-101.pdf", "M-101"),
+            _make_clean_pdf(tmp_path / "M-102.pdf", "M-102")]
+
+    def _boom(*a, **k):
+        raise RuntimeError("notes save failed")
+
+    # The pipeline does `from .annotate import write_set_review_notes_pdf` at call
+    # time, so patching the annotate module's attribute is what the local import sees.
+    monkeypatch.setattr(A, "write_set_review_notes_pdf", _boom, raising=True)
+    ctx = extract_drawing_context(
+        srcs, client=_SourceAndSetLevelClient(), rows=2, cols=2,
+        reference_audit=True, qc_markups=True, markup_verified_only=False,
+        synthesize=True, qc_work_dir=tmp_path / "qc",
+    )
+    # The notes writer failed → recorded + INCOMPLETE, but the source reviewed PDFs
+    # (written before the notes call) are still listed, not discarded.
+    assert any("Set-level review notes" in e for e in ctx.errors)
+    assert ctx.coverage_status == "INCOMPLETE"
+    assert any(p.name.endswith("_reviewed.pdf") for p in ctx.reviewed_pdf_paths)

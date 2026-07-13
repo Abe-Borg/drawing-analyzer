@@ -149,6 +149,34 @@ def test_parse_unclosed_but_complete_json_is_recovered():
     assert r.status == FINDINGS_PARSED_UNCLOSED and "unclosed" in r.note.lower()
 
 
+def test_parse_truncated_before_findings_colon_does_not_leak():
+    # Review finding: a max_tokens cut *before* the `"findings":` colon (or before
+    # any key) must still be stripped — the old key-regex needed the colon, so an
+    # earlier cut leaked the ```json fragment into prose.
+    from drawing_analyzer.digest import parse_findings_detailed
+    from drawing_analyzer.models import FINDINGS_TRUNCATED
+
+    prose = "Good prose digest of the sheet."
+    for tail in ['\n\n```json\n{"findings"', '\n\n```json\n{"find', '\n\n```json\n{']:
+        r = parse_findings_detailed(prose + tail, _ref())
+        assert r.prose == prose, (tail, r.prose)
+        assert "```" not in r.prose and "findings" not in r.prose
+        assert r.status == FINDINGS_TRUNCATED
+
+
+def test_parse_dangling_fence_line_without_newline_does_not_leak():
+    # Review finding: the opener line itself truncated (```json with no newline yet)
+    # created no candidate at all, so the fence leaked into prose.
+    from drawing_analyzer.digest import parse_findings_detailed
+    from drawing_analyzer.models import FINDINGS_TRUNCATED
+
+    prose = "Good prose digest of the sheet."
+    for tail in ["\n\n```json", "\n\n```", "\n\n```jso"]:
+        r = parse_findings_detailed(prose + tail, _ref())
+        assert r.prose == prose and "```" not in r.prose, (tail, r.prose)
+        assert r.status == FINDINGS_TRUNCATED
+
+
 def test_parse_prose_with_word_findings_is_not_stripped():
     # §14.1: ordinary prose that merely contains the English word "findings" (no
     # json-labeled block) is returned byte-identical — never mistaken for a block.

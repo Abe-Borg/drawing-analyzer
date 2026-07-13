@@ -1036,6 +1036,13 @@ def _run_qc_stages(
                 skip_source_ids=mutated_ids,
                 artifact_run_id=artifact_run_id,
             )
+            # Commit the per-source result *before* the set-level writer runs, so a
+            # failure inside the notes writer can never discard the reviewed PDFs
+            # already written to disk (they stay listed; coverage just rolls to
+            # INCOMPLETE). Only the set-notes call + merge is separately guarded.
+            reviewed_pdf_paths = list(markup_run.reviewed_pdfs)
+            ledger_tally = dict(markup_run.tally)
+            coverage_status = markup_run.coverage_status
             # The set-level review-notes artifact — its own receipts, folded into the
             # one MarkupRunResult so coverage/tally cover the whole run (§14.8).
             # NB: the ``markup_verified_only`` gate is deliberately NOT applied here.
@@ -1045,17 +1052,22 @@ def _run_qc_stages(
             # not authoritative drawing ink). Gating it would hide the very conflicts
             # the notes exist to surface, so a verified-only run still lists them.
             if set_level_findings:
-                set_run = write_set_review_notes_pdf(
-                    set_level_findings, work_dir, artifact_run_id=artifact_run_id,
-                )
-                markup_run = _result_from_receipts(
-                    markup_run.receipts + set_run.receipts,
-                    markup_run.placements + set_run.placements,
-                    markup_run.reviewed_pdfs + set_run.reviewed_pdfs,
-                )
-            reviewed_pdf_paths = list(markup_run.reviewed_pdfs)
-            ledger_tally = dict(markup_run.tally)
-            coverage_status = markup_run.coverage_status
+                try:
+                    set_run = write_set_review_notes_pdf(
+                        set_level_findings, work_dir, artifact_run_id=artifact_run_id,
+                    )
+                    markup_run = _result_from_receipts(
+                        markup_run.receipts + set_run.receipts,
+                        markup_run.placements + set_run.placements,
+                        markup_run.reviewed_pdfs + set_run.reviewed_pdfs,
+                    )
+                    reviewed_pdf_paths = list(markup_run.reviewed_pdfs)
+                    ledger_tally = dict(markup_run.tally)
+                    coverage_status = markup_run.coverage_status
+                except Exception as exc:  # noqa: BLE001 - never drop the source PDFs
+                    errors.append(f"Set-level review notes: {exc}")
+                    _log.warning("set-level notes writing failed: %s", exc)
+                    coverage_status = "INCOMPLETE"   # notes failed → incomplete, source kept
             _log.info(
                 "markups: %d reviewed PDF(s) written, coverage %s",
                 len(reviewed_pdf_paths), coverage_status,
