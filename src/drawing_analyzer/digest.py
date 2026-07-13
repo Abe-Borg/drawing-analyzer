@@ -522,6 +522,11 @@ class SheetDigest:
     # token counts on a cache hit are the originally-recorded usage; no new
     # tokens were billed.
     cached: bool = False
+    # True when this sheet was digested via a synchronous real-time *rescue* call
+    # after failing inside a Message Batch (:func:`batch_digest._rescue_failed_items_sync`)
+    # — it did NOT ride the Batches API, so it is billed at the full real-time rate,
+    # not the 50% batch discount. The usage ledger prices it REAL_TIME (Phase 23B).
+    rescued: bool = False
     # Structured findings parsed out of the raw response (empty when the model
     # emitted none or the block failed to parse). ``text`` is the prose with the
     # findings block already stripped (I-2), so ``findings`` and ``text`` never

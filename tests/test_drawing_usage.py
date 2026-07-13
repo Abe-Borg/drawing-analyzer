@@ -100,6 +100,39 @@ def test_run_usage_to_dict_round_trips_totals():
     assert "digest" in d["by_family"] and len(d["records"]) == 1
 
 
+def test_total_is_none_when_a_billable_record_is_unpriced():
+    # A run that mixes a priced record (Opus) with a billable record whose model
+    # is not in the pricing table must NOT show a concrete total that silently
+    # omits the unpriced usage — the aggregate is unknowable, so None.
+    ru = RunUsage()
+    ru.add(_rec("digest", "digest_1", 500, 80))                 # priced (Opus)
+    ru.add(UsageRecord(
+        stage_family="critique", stage_instance="critique_1",
+        model="some-new-unpriced-model", input_tokens=300, output_tokens=20,
+        estimated_cost=None,                                    # unknown model → unpriced
+    ))
+    assert ru.total_estimated_cost is None
+    # The affected family's cost is None too; the priced family keeps its cost.
+    fam = ru.by_family()
+    assert fam["critique"]["estimated_cost"] is None
+    assert fam["digest"]["estimated_cost"] is not None
+    # Tokens still tally exactly regardless of pricing.
+    assert ru.total_input_tokens == 800
+
+
+def test_zero_token_unpriced_cache_hit_does_not_poison_the_total():
+    # A cache hit under an unknown model has zero billed tokens — it is not
+    # billable, so it must not turn the whole total unavailable.
+    ru = RunUsage()
+    ru.add(_rec("digest", "digest_1", 500, 80))                 # priced
+    ru.add(UsageRecord(
+        stage_family="digest", stage_instance="digest_2",
+        model="some-new-unpriced-model", transport="CACHE", cache_hit=True,
+        input_tokens=0, output_tokens=0, estimated_cost=None,
+    ))
+    assert ru.total_estimated_cost is not None                  # still priceable
+
+
 # --------------------------------------------------------------------------- #
 # Per-record pricing (§15.7)
 # --------------------------------------------------------------------------- #
@@ -129,6 +162,18 @@ def test_unknown_model_returns_none_but_keeps_tool_charge():
 
 def test_effective_date_is_stamped():
     assert PRICING_EFFECTIVE_DATE  # a non-empty verified-effective-date string
+
+
+def test_rescued_batch_digest_is_priced_real_time():
+    # A sheet rescued/inlined out of a batch is a full-rate real-time call, not the
+    # 50% batch rate — even on a use_batch run (the transport helper enforces this).
+    from drawing_analyzer.pipeline import _digest_transport
+
+    assert _digest_transport(cached=False, rescued=True, use_batch=True) == "REAL_TIME"
+    assert _digest_transport(cached=False, rescued=False, use_batch=True) == "BATCH"
+    assert _digest_transport(cached=False, rescued=False, use_batch=False) == "REAL_TIME"
+    # A cache hit always wins (zero billed tokens) regardless of the other flags.
+    assert _digest_transport(cached=True, rescued=True, use_batch=True) == "CACHE"
 
 
 # --------------------------------------------------------------------------- #

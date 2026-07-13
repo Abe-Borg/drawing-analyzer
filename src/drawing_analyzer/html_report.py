@@ -1036,8 +1036,9 @@ def _usage_html(ctx: Any) -> str:
     """A collapsible per-stage token/cost table from the usage ledger (§15.7).
 
     Actuals, not an estimate — the same append-only records the run totals are
-    derived from, so the grand total here always equals the sum of the rows.
-    Absent when no usage was recorded (e.g. a fully-cached run made no calls).
+    derived from, so the grand total here always equals the sum of the rows. A
+    fully-cached run still shows its CACHE rows (zero billed tokens, $0.00); the
+    table is absent only when no records were produced at all.
     """
     by_family = getattr(ctx, "usage_by_family", None) or {}
     if not by_family:

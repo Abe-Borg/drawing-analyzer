@@ -833,6 +833,9 @@ def test_submit_inlines_sheets_after_consecutive_404_failures():
     # Every sheet still produced a digest — inline, via the real-time path.
     assert len(digests) == 6 and all(d.ok for d in digests)
     assert len(client.messages_create_calls) == 6
+    # Each inline digest is a full-rate real-time call, so it is flagged rescued —
+    # the usage ledger must not give it the 50% batch discount (Phase 23B).
+    assert all(d.rescued for d in digests)
     # No batch was submitted and nothing was uploaded/left behind.
     assert client.submitted == [] and client.create_calls == []
     assert client.files.uploaded_ids == [] and client.files.deleted == []
@@ -1174,6 +1177,9 @@ def test_collect_rescues_batch_backend_outage_via_direct_calls():
     # The rescued digests carry the direct calls' usage, and the files were
     # still released exactly once, after the rescue.
     assert all(d.input_tokens == 90 and d.output_tokens == 25 for d in digests)
+    # Rescued via synchronous real-time calls — flagged so the usage ledger bills
+    # them at full rate, not the 50% batch discount (Phase 23B).
+    assert all(d.rescued for d in digests)
     assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids)
 
 

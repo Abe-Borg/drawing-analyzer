@@ -472,6 +472,10 @@ def _rescue_failed_items_sync(
         if message is None:
             continue  # the sheet keeps its batch-round error
         digest = _digest_from_message(slot, message, cache=cache)
+        # This sheet was digested by a synchronous real-time call, not the Batches
+        # API, so it is billed at the full rate — mark it so the usage ledger does
+        # not apply the 50% batch discount to it (Phase 23B pricing correctness).
+        digest.rescued = True
         # Even an empty-digest result is fresher provenance than the batch
         # error it replaces, and its stop_reason names what happened.
         results[slot.index] = digest
@@ -790,6 +794,11 @@ def submit_drawing_batch(
             cache=cache,
             focus=focus,
         )
+        # A fresh inline digest was a synchronous real-time call (no batch
+        # discount); a cache hit stays a cache hit. Mark it so the usage ledger
+        # prices it real-time, not at the batch rate (Phase 23B).
+        if not slot.digest.cached:
+            slot.digest.rescued = True
         slots.append(slot)
         verb = "Inlined" if slot.digest.ok else "Inline digest failed for"
         _log.debug(

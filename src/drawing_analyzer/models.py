@@ -1481,14 +1481,37 @@ class RunUsage:
     def cache_hits(self) -> int:
         return sum(1 for r in self.records if r.cache_hit)
 
+    @staticmethod
+    def _billable_but_unpriced(r: "UsageRecord") -> bool:
+        """A record that consumed billable usage but the model couldn't be priced.
+
+        Its cost is genuinely *unknown*, not zero — so summing the priced records
+        around it would understate the total and present it as authoritative. A
+        zero-token cache hit under an unknown model is NOT billable and does not
+        poison the total.
+        """
+        return r.estimated_cost is None and bool(
+            r.input_tokens or r.output_tokens or r.billable_tool_uses
+        )
+
     @property
     def total_estimated_cost(self) -> "Decimal | None":
+        # If ANY billable record could not be priced, the aggregate is unknowable —
+        # return None rather than a partial sum that silently omits real cost.
+        if any(self._billable_but_unpriced(r) for r in self.records):
+            return None
         priced = [r.estimated_cost for r in self.records if r.estimated_cost is not None]
         return sum(priced, Decimal("0")) if priced else None
 
     def by_family(self) -> "dict[str, dict]":
-        """Per-``stage_family`` rollup: input/output tokens, cost, call + cache-hit counts."""
+        """Per-``stage_family`` rollup: input/output tokens, cost, call + cache-hit counts.
+
+        A family's ``estimated_cost`` is ``None`` when any of its records is billable
+        but unpriced (same rule as the grand total) so a partial figure is never
+        shown as if it were the family's full cost.
+        """
         out: dict[str, dict] = {}
+        unpriced: set[str] = set()
         for r in self.records:
             g = out.setdefault(
                 r.stage_family,
@@ -1500,8 +1523,12 @@ class RunUsage:
             g["calls"] += 1
             if r.cache_hit:
                 g["cache_hits"] += 1
-            if r.estimated_cost is not None:
+            if self._billable_but_unpriced(r):
+                unpriced.add(r.stage_family)
+            elif r.estimated_cost is not None:
                 g["estimated_cost"] = (g["estimated_cost"] or Decimal("0")) + r.estimated_cost
+        for fam in unpriced:
+            out[fam]["estimated_cost"] = None
         return out
 
     def to_dict(self) -> dict:

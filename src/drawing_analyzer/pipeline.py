@@ -86,6 +86,22 @@ EXHAUSTIVE_QC_COMPLETENESS_GATE_OPEN = False
 _log = get_logger()
 
 
+def _digest_transport(*, cached: bool, rescued: bool, use_batch: bool) -> str:
+    """The billing transport for one digest record (§15.6).
+
+    A cache hit bills nothing (``CACHE``). A sheet that failed inside a Message
+    Batch and was rescued by a synchronous real-time call — or inlined when the
+    Files API 404'd — did NOT ride the Batches API, so it is billed at the full
+    real-time rate even on a ``use_batch`` run. Everything else follows the run's
+    transport: ``BATCH`` when batched, else ``REAL_TIME``.
+    """
+    if cached:
+        return "CACHE"
+    if rescued:
+        return "REAL_TIME"
+    return "BATCH" if use_batch else "REAL_TIME"
+
+
 def _record_usage(
     run_usage: RunUsage,
     *,
@@ -1755,7 +1771,6 @@ def extract_drawing_context(
     # estimate of the image portion (already folded into each digest's input tokens).
     run_usage = RunUsage()
     img_tok = 0
-    digest_transport = "BATCH" if use_batch else "REAL_TIME"
     for sd in sheets:
         # A cached sheet made no API call, so it costs zero tokens *this run* — its
         # record carries the cache-hit metadata but zero billed tokens. A fresh
@@ -1763,11 +1778,15 @@ def extract_drawing_context(
         cached = bool(getattr(sd, "cached", False))
         if not cached:
             img_tok += sd.image_token_estimate
+        sheet_transport = _digest_transport(
+            cached=cached, rescued=bool(getattr(sd, "rescued", False)),
+            use_batch=use_batch,
+        )
         _record_usage(
             run_usage, family="digest",
             instance=f"digest:{_refkey(sd.ref)[0]}:p{_refkey(sd.ref)[1]}",
             model=model,
-            transport="CACHE" if cached else digest_transport,
+            transport=sheet_transport,
             input_tokens=0 if cached else sd.input_tokens,
             output_tokens=0 if cached else sd.output_tokens,
             cache_hit=cached,
