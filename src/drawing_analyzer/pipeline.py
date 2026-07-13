@@ -1898,20 +1898,33 @@ def extract_drawing_context(
             cross_res = cross_sheet_qc(sheets, sheet_geometries, client=client)
             cross_findings = cross_res.findings
             numeric_claims.extend(cross_res.claims)
+            # DA-015/DA-028: a sharded run is COMPLETE only when every shard and the
+            # cross-shard reconciliation completed and the text budget was not
+            # degraded — a failed shard/reconciliation or a silent truncation holds
+            # the stage at PARTIAL while its findings stay usable.
+            cross_complete = bool(getattr(cross_res, "complete", not cross_res.error))
             _record_usage(
                 run_usage, family="cross_qc", instance="cross_qc",
                 model=cross_qc_model(),
                 input_tokens=cross_res.input_tokens, output_tokens=cross_res.output_tokens,
-                terminal_status="PARTIAL" if cross_res.error else "COMPLETE",
+                terminal_status="COMPLETE" if cross_complete else "PARTIAL",
             )
             cross_stage.items_out = len(cross_findings)
+            cross_stage.calls_planned = getattr(cross_res, "shards_planned", 0)
+            cross_stage.calls_succeeded = getattr(cross_res, "shards_completed", 0)
             if cross_res.error:
                 errors.append(f"Cross-sheet QC: {cross_res.error}")
-                cross_stage.status = "PARTIAL"
                 cross_stage.errors.append(str(cross_res.error))
                 _log.warning("cross-sheet QC: %s", cross_res.error)
-            else:
-                cross_stage.status = "COMPLETE"
+            if getattr(cross_res, "budget_degraded", False):
+                cross_stage.warnings.append(
+                    f"text budget degraded: {cross_res.text_chars_omitted} char(s) omitted"
+                )
+            if getattr(cross_res, "reconciliation_required", False) and not getattr(
+                cross_res, "reconciliation_completed", True
+            ):
+                cross_stage.warnings.append("cross-shard reconciliation incomplete")
+            cross_stage.status = "COMPLETE" if cross_complete else "PARTIAL"
         except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
             errors.append(f"Cross-sheet QC: {exc}")
             cross_stage.status = "FAILED"
