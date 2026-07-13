@@ -119,6 +119,69 @@ def test_parse_non_findings_fenced_block_is_left_in_prose():
     assert out_prose == raw and findings == [] and note == ""
 
 
+# --- DA-009: a truncated / unclosed findings block must NEVER leak into prose --
+
+
+def test_parse_truncated_unclosed_block_does_not_leak_into_prose():
+    # Phase 22 §14.2 (DA-009): the model's output was cut off (max_tokens) mid-JSON
+    # so there is NO closing ``` fence. The old scanner required one, so the whole
+    # partial machine block leaked verbatim into the sacred prose. It must not.
+    from drawing_analyzer.digest import parse_findings_detailed
+    from drawing_analyzer.models import FINDINGS_TRUNCATED
+
+    prose = "Sheet M-101 - Mechanical - Plan.\nVAV-3 serves Rm 120."
+    raw = prose + '\n\n```json\n{"findings": [ {"category": "code", "severity":'
+    r = parse_findings_detailed(raw, _ref())
+    assert r.prose == prose                       # cut at the opener, byte-clean
+    assert "```" not in r.prose and '"findings"' not in r.prose
+    assert r.findings == [] and r.status == FINDINGS_TRUNCATED
+
+
+def test_parse_unclosed_but_complete_json_is_recovered():
+    # §14.2: an unclosed fence whose JSON object is nonetheless complete and valid
+    # → parse it, record the drift, and still keep the prose clean.
+    from drawing_analyzer.digest import parse_findings_detailed
+    from drawing_analyzer.models import FINDINGS_PARSED_UNCLOSED
+
+    raw = 'Prose.\n```json\n{"findings": [' + json.dumps(_item(source_quote="VAV-3"))[0:] + "]}"
+    r = parse_findings_detailed(raw, _ref())
+    assert r.prose == "Prose." and len(r.findings) == 1
+    assert r.status == FINDINGS_PARSED_UNCLOSED and "unclosed" in r.note.lower()
+
+
+def test_parse_prose_with_word_findings_is_not_stripped():
+    # §14.1: ordinary prose that merely contains the English word "findings" (no
+    # json-labeled block) is returned byte-identical — never mistaken for a block.
+    raw = "My findings: the sheet is coherent and ready to issue."
+    out_prose, findings, note = parse_findings(raw, _ref())
+    assert out_prose == raw and findings == [] and note == ""
+
+
+def test_parse_unclosed_malformed_block_is_stripped_not_leaked():
+    # §14.2: an unclosed fence whose body is garbage (not a recoverable object) is
+    # still a findings attempt — stripped from prose, yields no findings.
+    from drawing_analyzer.digest import parse_findings_detailed
+
+    prose = "Prose digest."
+    raw = prose + '\n```json\n{"findings": [ garbage } not-json {'
+    r = parse_findings_detailed(raw, _ref())
+    assert r.prose == prose and r.findings == []
+    assert "```" not in r.prose and "findings" not in r.prose
+
+
+def test_digest_sheet_truncated_block_keeps_prose_clean_and_ships():
+    # End-to-end (DA-009): a truncated findings block must not fail the sheet (I-3)
+    # and must not contaminate the shipped prose digest.
+    raw = "Good prose digest of the sheet.\n```json\n{\"findings\": [ {\"category\":"
+    client = _FakeClient(lambda kw: FakeMessage(
+        content=[FakeTextBlock(text=raw)], stop_reason="max_tokens"))
+    sd = digest_sheet(_sheet(), client=client, model=OPUS)
+    assert sd.ok and sd.error is None
+    assert sd.text == "Good prose digest of the sheet."
+    assert "```" not in sd.text and '"findings"' not in sd.text
+    assert sd.findings == []
+
+
 def test_parse_caps_at_max():
     raw = "prose\n" + _block([_item(text=f"f{i}") for i in range(MAX_FINDINGS_PER_SHEET + 12)])
     _, findings, note = parse_findings(raw, _ref())

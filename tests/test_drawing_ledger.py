@@ -22,6 +22,7 @@ from drawing_analyzer.prose_harvest import (
     HarvestResult,
     extract_focus_items,
     extract_prose_items,
+    extract_set_level_synthesis_conflicts,
     extract_synthesis_conflicts,
     harvest_prose,
 )
@@ -383,3 +384,89 @@ def test_synthesis_sheet_id_matching_is_boundary_aware():
         "The riser diagram on P-1/P-2 is inconsistent with the plan.",
         ["P-1", "P-2"],
     )]
+
+
+# --------------------------------------------------------------------------- #
+# Phase 22 — prose-item id reconciliation (§14.6/§14.9) and set-level (§14.8)
+# --------------------------------------------------------------------------- #
+
+
+def test_harvest_reconciles_every_enumerated_item():
+    # §14.9: every enumerated prose item must reach a ledger entry — the expected
+    # id set equals the accounted id set and nothing is missing.
+    ledger = Ledger()
+    ledger.add([
+        _f("Penetration at grid C-4 must be sleeved by structural", cat="coordination"),
+        _f("FP riser shares a chase with the plumbing vent; verify the access panel",
+           cat="coordination"),
+        _f("Note 7 says relief at 175 psi but the schedule row shows 165 psi", cat="conflict"),
+    ], "digest_json")
+    client = _structuring_client([
+        _finding_block("Fire pump equipment pad is shown by another discipline."),
+        _finding_block("Riser diagram shows a check valve the plan never draws."),
+    ])
+    res = harvest_prose(
+        ledger, [_Digest(_FIVE_ITEM_DIGEST)],
+        [_Geom(sheet_text="CHECK VALVE AT RISER", words=[_titleblock_word("F-D-01-1")])],
+        client=client, sleep=lambda *_: None,
+    )
+    assert res.items == 5 and res.missing == 0 and res.complete is True
+    assert set(res.expected_ids) == set(res.accounted_ids)
+    # Every enumerated id is attached to exactly one ledger entry.
+    attached = [pid for e in ledger.entries for pid in e.prose_item_ids]
+    assert sorted(attached) == sorted(res.expected_ids)
+
+
+def test_harvest_per_item_failure_is_isolated_and_recovered():
+    # A failure inside processing one item must not abandon the others, and the
+    # reconciliation's final degraded attempt recovers the straggler (§14.7/§14.9).
+    ledger = Ledger()
+    digest = _Digest(
+        "**Conflicts / discrepancies**\n"
+        "- The schedule flow total disagrees with the riser demand values shown.\n"
+        "- Note 4 calls out a device the legend never defines on this sheet."
+    )
+    # No client → both stragglers degrade; both must still be accounted.
+    res = harvest_prose(ledger, [digest], [_Geom()], client=None, sleep=lambda *_: None)
+    assert res.items == 2 and res.missing == 0
+    assert len(ledger) == 2
+    assert all(e.prose_item_ids for e in ledger.entries)
+
+
+def test_extract_set_level_synthesis_conflicts_are_the_complement():
+    # §14.8: a conflict statement naming NO in-set sheet is the complement of
+    # extract_synthesis_conflicts (which keeps only the resolvable ones).
+    text = "There is a mismatch between the pump spec and the schedule across the set."
+    assert extract_synthesis_conflicts(text, ["F-D-01-1"]) == []
+    assert extract_set_level_synthesis_conflicts(text, ["F-D-01-1"]) == [text]
+    # A statement that DOES name an in-set sheet is not set-level.
+    named = "The note on F-D-01-1 contradicts the schedule."
+    assert extract_set_level_synthesis_conflicts(named, ["F-D-01-1"]) == []
+
+
+def test_harvest_unresolvable_synthesis_conflict_becomes_set_level():
+    # §14.8: a synthesis conflict naming no in-set sheet is no longer dropped — it
+    # becomes a set-level ledger entry (source-less, anchor_hint SET_INDEX) bound
+    # for Drawing_Set_Review_Notes.pdf.
+    ledger = Ledger()
+    synthesis = (
+        "The specified fire pump conflicts with the schedule, and no single sheet "
+        "in the set resolves which governs."
+    )
+    res = harvest_prose(
+        ledger, [], [_Geom()], client=None, synthesis_text=synthesis, sleep=lambda *_: None,
+    )
+    assert res.set_level == 1 and res.missing == 0 and len(ledger) == 1
+    e = ledger.entries[0]
+    assert e.anchor_hint == "SET_INDEX" and e.source_id == "" and e.page_index == -1
+    assert e.prose_item_ids and "conflicts with the schedule" in e.text
+
+
+def test_focus_off_counts_intentional_exclusion():
+    # §14.9: focus items present but not harvested (toggle off) are counted as an
+    # explicit intentional exclusion, not silently ignored.
+    digest = _Digest(
+        "**Focus findings**\n- Room 120 has two floor sinks near the east wall area."
+    )
+    res = harvest_prose(Ledger(), [digest], [_Geom()], client=None, sleep=lambda *_: None)
+    assert res.excluded_focus == 1 and res.items == 0

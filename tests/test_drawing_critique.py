@@ -529,6 +529,121 @@ def test_partial_run_is_returned_but_not_cached():
     assert cache.stats()["size"] == 0
 
 
+# --------------------------------------------------------------------------- #
+# DA-008 — a malformed / partial critique read never looks clean or corroborated
+# --------------------------------------------------------------------------- #
+
+
+class _RawCritiqueClient:
+    """Scripted critique client returning RAW response bodies (str) or Exceptions,
+    so a test can drive a malformed / truncated / prose-only reply the well-formed
+    ``_CritiqueClient`` never produces."""
+
+    def __init__(self, script):
+        self._script = list(script)
+        self.attempts = 0
+        outer = self
+
+        class _Msgs:
+            def create(self, **kw):  # noqa: ANN001, ANN202
+                idx = outer.attempts
+                outer.attempts += 1
+                item = outer._script[idx] if idx < len(outer._script) else ""
+                if isinstance(item, Exception):
+                    raise item
+                return FakeMessage(
+                    content=[FakeTextBlock(text=item)],
+                    usage=FakeUsage(input_tokens=100, output_tokens=20),
+                    stop_reason="end_turn",
+                )
+
+        self.messages = _Msgs()
+
+
+@pytest.mark.parametrize("body", [
+    "I reviewed the sheet and it looks fine to me.",     # prose only, no block
+    '```json\n{"findings": [ {"category":',               # truncated / unclosed
+    '```json\n{"findings": broken json here }\n```',      # closed but malformed
+])
+def test_malformed_or_prose_critique_read_is_a_failure(body):
+    # §14.3: a read is a success ONLY if it parsed a valid findings schema. A
+    # prose-only / truncated / malformed body billed tokens but produced no schema
+    # → it is a FAILED read, never an empty-success masquerading as a clean sheet.
+    findings, _claims, in_tok, _out, err = critique_sheet(
+        _rendered(), client=_RawCritiqueClient([body]), max_retries=0, sleep=_NOOP
+    )
+    assert findings == [] and err is not None
+    assert in_tok == 100                         # billed usage still counted (§14.4)
+
+
+def test_explicit_empty_schema_is_a_clean_success():
+    # An explicit {"findings": []} is a valid schema → a genuine clean read (err None).
+    findings, _claims, _in, _out, err = critique_sheet(
+        _rendered(), client=_RawCritiqueClient(['```json\n{"findings": []}\n```']),
+        max_retries=0, sleep=_NOOP,
+    )
+    assert findings == [] and err is None
+
+
+def test_malformed_read_is_not_cached_or_corroborated():
+    # §14.4: two reads, the second malformed → only one VALID read, so nothing is
+    # cached as complete and the surviving finding is NOT_ASSESSED_PARTIAL (never
+    # silently reproduced=True because a malformed read "agreed").
+    from drawing_analyzer.models import CONFIDENCE_NOT_ASSESSED_PARTIAL
+
+    cache = DigestCache(None, persist=False)
+    good = _block([{"sheet_id": "F", "category": "code", "severity": "low",
+                    "text": "riser is undersized", "tile": [0, 0]}])
+    client = _RawCritiqueClient([good, '```json\n{"findings": trunc'])
+    res = critique_sheet_self_consistent(
+        _rendered(), client=client, cache=cache, runs=2, max_retries=0, sleep=_NOOP
+    )
+    assert res.completed_runs == 1 and res.requested_runs == 2
+    assert len(res.findings) == 1
+    assert res.findings[0].reproduced is False
+    assert res.findings[0].confidence == CONFIDENCE_NOT_ASSESSED_PARTIAL
+    assert cache.stats()["size"] == 0            # a malformed read is never frozen clean
+
+
+def test_two_valid_reads_stamp_real_per_read_provenance():
+    # §14.3: each read stamps critique_1 / critique_2 at production; a finding both
+    # reads raised carries BOTH tags and reproduced=True — provenance is real, not
+    # re-inferred from a boolean.
+    from drawing_analyzer.ledger import provenance_label
+    from drawing_analyzer.models import CONFIDENCE_REPRODUCED, CONFIDENCE_SINGLETON
+
+    both = {"sheet_id": "F", "category": "code", "severity": "low",
+            "text": "relief valve missing", "tile": [0, 0]}
+    only2 = {"sheet_id": "F", "category": "code", "severity": "low",
+             "text": "a note names the wrong room", "tile": [2, 2]}
+    client = _RawCritiqueClient([_block([both]), _block([both, only2])])
+    res = critique_sheet_self_consistent(
+        _rendered(), client=client, runs=2, max_retries=0, sleep=_NOOP
+    )
+    by_text = {f.text: f for f in res.findings}
+    repro = by_text["relief valve missing"]
+    assert set(repro.sources) == {"critique_1", "critique_2"}
+    assert repro.reproduced is True and repro.confidence == CONFIDENCE_REPRODUCED
+    assert provenance_label(repro.sources) == "critique×2"
+    single = by_text["a note names the wrong room"]
+    assert single.sources == ["critique_2"]
+    assert single.reproduced is False and single.confidence == CONFIDENCE_SINGLETON
+
+
+def test_both_reads_valid_empty_is_a_complete_clean_critique():
+    # §14.4: explicit-empty + explicit-empty → a complete zero-finding critique that
+    # CAN be cached (both requested reads returned a valid schema).
+    cache = DigestCache(None, persist=False)
+    res = critique_sheet_self_consistent(
+        _rendered(),
+        client=_RawCritiqueClient(['```json\n{"findings": []}\n```',
+                                   '```json\n{"findings": []}\n```']),
+        cache=cache, runs=2, max_retries=0, sleep=_NOOP,
+    )
+    assert res.error is None and res.completed_runs == 2 and res.findings == []
+    assert cache.stats()["size"] == 1            # a genuine clean sheet is cached
+
+
 # --- Review profiles (Phase 12): injection, cache key, chunking -------------- #
 
 
@@ -564,7 +679,11 @@ def test_profiles_change_the_critique_cache_key():
     assert next(iter(c_plain._entries)) != next(iter(c_prof._entries))
 
 
-def test_long_profile_chunks_across_runs_short_does_not():
+def test_every_read_gets_the_full_checklist_even_when_long():
+    # Phase 22 §14.5: the reads are compared for self-consistency, so they must be
+    # prompted IDENTICALLY. A long checklist is no longer split into disjoint slices
+    # across reads (which would make a finding prompted only in read 1 impossible to
+    # corroborate in read 2 and then falsely stamp it an uncorroborated singleton).
     fp = P.get_profile("fire-protection")
     short = _run_checklists([fp], 2)               # shipped profile is short
     assert short[0] == short[1] and "APPLY" in short[0]
@@ -572,10 +691,9 @@ def test_long_profile_chunks_across_runs_short_does_not():
         name="big", title="big", version="1", content_hash="h",
         items=tuple(f"lengthy checklist item {i} describing a distinct check" for i in range(400)),
     )
-    full_len = len(P.build_checklist_prompt(P.flatten_items([big])))
-    chunked = _run_checklists([big], 2)
-    assert len(chunked) == 2 and chunked[0] != chunked[1]
-    assert all(len(c) < full_len for c in chunked)   # each run a slice, not the whole
+    full = P.build_checklist_prompt(P.flatten_items([big]))
+    both = _run_checklists([big], 2)
+    assert len(both) == 2 and both[0] == both[1] == full   # identical + complete, not sliced
 
 
 # --------------------------------------------------------------------------- #

@@ -43,9 +43,28 @@ from typing import Any, Iterable
 
 from .critique import _is_duplicate, _most_severe, _normalize, _severity_rank
 from .diagnostics import get_logger
-from .models import Finding, assign_qc_ids, source_page_key
+from .models import (
+    CONFIDENCE_NOT_APPLICABLE,
+    CONFIDENCE_NOT_ASSESSED_PARTIAL,
+    CONFIDENCE_REPRODUCED,
+    CONFIDENCE_SINGLETON,
+    Finding,
+    assign_qc_ids,
+    source_page_key,
+)
 
 _log = get_logger()
+
+# Strength order for merging two findings' self-consistency verdicts — the merged
+# entry keeps the strongest corroboration either member carried (§14.4). "" (unset,
+# non-critique channels) is weakest.
+_CONFIDENCE_RANK = {
+    "": 0,
+    CONFIDENCE_NOT_APPLICABLE: 1,
+    CONFIDENCE_NOT_ASSESSED_PARTIAL: 2,
+    CONFIDENCE_SINGLETON: 3,
+    CONFIDENCE_REPRODUCED: 4,
+}
 
 # The ledger's lifecycle (§12.3). Ingestion happens while OPEN; SEALED permits
 # anchoring + post-anchor reconciliation but no new entries; NUMBERED means the
@@ -320,6 +339,15 @@ def _merge_into(existing: Finding, incoming: Finding, trace: list | None = None)
             existing.refs.append(r)
     for q in incoming.supporting_quotes:
         _add_supporting(existing, q)
+    # Union the enumerated prose-item ids (§14.6/§14.9): a merge must never drop an
+    # item's provenance, or the harvest's expected-vs-accounted reconciliation would
+    # think it was lost and re-degrade it into a duplicate.
+    for pid in incoming.prose_item_ids:
+        if pid not in existing.prose_item_ids:
+            existing.prose_item_ids.append(pid)
+    # Keep the strongest self-consistency verdict either member carried (§14.4).
+    if _CONFIDENCE_RANK.get(incoming.confidence, 0) > _CONFIDENCE_RANK.get(existing.confidence, 0):
+        existing.confidence = incoming.confidence
 
     # Coherent grounding: if ``incoming`` is the better representative, adopt its
     # WHOLE bundle atomically — text, category, quote, tile, anchor_hint, id, AND
