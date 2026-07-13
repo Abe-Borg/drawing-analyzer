@@ -165,8 +165,13 @@ def submit_critique_batch(
       the pipeline prices it REAL_TIME — the critique is additive/non-fatal (I-3).
 
     All reads across all sheets go in ONE ``batches.create``. If that call raises,
-    every already-uploaded file is deleted before the exception propagates so a
-    submit failure never leaks remote files (DA-034).
+    every already-uploaded file is deleted and only the would-be-batched sheets
+    (``custom_ids`` set, no result yet) are degraded to an errored, empty critique;
+    the function still **returns** a ``CritiqueBatch(batch_id=None)`` so the slots
+    already resolved (cache hits and real-time fallbacks) are preserved — the submit
+    failure is additive/non-fatal (I-3) and does not propagate. Any *other*
+    unexpected error escaping the submit loop deletes the uploaded files before
+    propagating, so a submit failure never leaks remote files (DA-034).
     """
     model = model or critique_model()
     runs = critique_runs() if runs is None else max(1, int(runs))
@@ -430,12 +435,19 @@ def collect_critique_batch(
     terminal = False
     canceled = False
     try:
+        # The poll counts batch ITEMS (reads = sheets x runs), but the critique
+        # stage's progress contract is per-SHEET (pipeline.py) — the submit and
+        # ingest phases already emit ``(done, total)`` in sheets. Routing the
+        # sheet-progress callback through the read-counting poll would label a
+        # read count "sheet(s)" and rescale a determinate bar mid-stage, so the
+        # poll reports only to ``on_log`` (its diagnostics still flow); the bar
+        # advances per sheet as results are ingested.
         status = _poll_until_terminal(
             client,
             batch.batch_id,
             total=len(submitted) * batch.runs,
             cached_done=0,
-            progress=progress,
+            progress=None,
             on_log=on_log,
             sleep=sleep,
             max_elapsed_seconds=max_elapsed_seconds,
