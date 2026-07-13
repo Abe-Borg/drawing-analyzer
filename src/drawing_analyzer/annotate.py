@@ -696,13 +696,15 @@ def _pack_callouts(
 ) -> "tuple[list[tuple[Finding, MarkupPlacement, tuple]], list[tuple[Finding, MarkupPlacement]]]":
     """Pack callout boxes into the clear bands; return ``(placed, overflow)``.
 
-    Each box is validated against the retained word rects, the occupancy mask, and
-    every already-placed sibling before it is accepted, so a placed callout never
-    overlaps drawing content or another callout (§17.6 step 5). A finding that
-    cannot be placed in any visually-clear band is returned as overflow — routed to
-    the review-notes page rather than stamped over the drawing.
+    Each box is validated against the occupancy mask and every already-placed
+    sibling before it is accepted, so a placed callout never overlaps drawing
+    content or another callout (§17.6 step 5). Word rects need not be re-checked
+    here: :func:`_clear_bands` builds each band as a **word-free** y-range (padded
+    off the nearest word), so a box wholly inside a band cannot overlap a word —
+    dropping a per-candidate O(words) scan that was pure waste on a dense sheet. A
+    finding that cannot be placed in any visually-clear band is returned as
+    overflow — routed to the review-notes page rather than stamped over the drawing.
     """
-    word_rects = [(float(w[0]), float(w[1]), float(w[2]), float(w[3])) for w in (words or [])]
     bands = _clear_bands(words, page_w, page_h)
     placed: list[tuple[Finding, MarkupPlacement, tuple]] = []
     placed_boxes: list[tuple[float, float, float, float]] = []
@@ -713,15 +715,16 @@ def _pack_callouts(
             x = bx0
             while x + _CALLOUT_W <= bx1 + 0.5 and remaining:
                 box = (x, y, x + _CALLOUT_W, y + _CALLOUT_H)
-                if (not _rect_overlaps_any(box, word_rects)
-                        and not _rect_overlaps_any(box, placed_boxes)
-                        and not occupied(box)):
+                if not _rect_overlaps_any(box, placed_boxes) and not occupied(box):
                     f, pl = remaining.pop(0)
                     placed.append((f, pl, box))
                     placed_boxes.append(box)
                     x += _CALLOUT_W + _CALLOUT_GAP
                 else:
-                    x += _CALLOUT_GAP            # slide right past the obstacle
+                    # Slide past the obstacle by a coarse step (a quarter box), so a
+                    # heavily-inked band is scanned in a bounded number of probes
+                    # rather than an 8-pt-at-a-time crawl.
+                    x += max(_CALLOUT_GAP, _CALLOUT_W / 4.0)
             y += _CALLOUT_H + _CALLOUT_GAP
     return placed, remaining
 
