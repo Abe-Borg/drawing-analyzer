@@ -100,6 +100,10 @@ DEFAULT_AUTHOR = "Drawing Analyzer (AI review)"
 # em-dash: insert_text's Base-14 fonts have no U+2014 glyph.
 INDEX_PAGE_LABEL = "AI DRAFT REVIEW - FINDINGS INDEX"
 APPENDIX_PAGE_LABEL = "AI DRAFT REVIEW - CHECKED AND CONSISTENT"
+# Per-source overflow page (§17.6): rect-less findings that could not be placed in
+# a clear band without obscuring drawing content land here, each linking back to
+# its source page — distinct from the set-level ``Drawing_Set_Review_Notes.pdf``.
+REVIEW_NOTES_PAGE_LABEL = "AI DRAFT REVIEW - AI REVIEW NOTES"
 
 # Verification statuses trusted unconditionally. Under the Part III gating
 # amendment (§18) the exhaustive default inks EVERYTHING except REJECTED —
@@ -557,6 +561,165 @@ def find_clear_band(
     return (inset_x, y0, page_w - inset_x, y1)
 
 
+# --------------------------------------------------------------------------- #
+# Occupancy-aware callout packing (Phase 25 §17.6) — never obscure drawing ink.
+# --------------------------------------------------------------------------- #
+
+
+def _clear_bands(
+    words: list[Any], page_w: float, page_h: float,
+    *, max_height: float = 170.0, min_height: float = _CALLOUT_H + 4.0,
+) -> list[tuple[float, float, float, float]]:
+    """Every text-free horizontal band inside the sheet border, tallest first.
+
+    The plural generalization of :func:`find_clear_band`: a band is a y-range that
+    no word occupies at any x (so packing inside one can never overlap a word),
+    each at least one callout tall. Occupancy of *non-text* ink (piping, symbols,
+    raster) is checked separately at pack time — a text-free band is not
+    automatically visually clear (§17.6).
+    """
+    inset_x = 0.03 * page_w
+    inset_y = 0.02 * page_h
+    top, bottom = inset_y, page_h - inset_y
+    intervals: list[tuple[float, float]] = []
+    for w in words or []:
+        y0, y1 = float(w[1]), float(w[3])
+        if y1 <= top or y0 >= bottom:
+            continue
+        intervals.append((max(y0, top), min(y1, bottom)))
+    intervals.sort()
+    merged: list[list[float]] = []
+    for y0, y1 in intervals:
+        if merged and y0 <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], y1)
+        else:
+            merged.append([y0, y1])
+    gaps: list[tuple[float, float]] = []
+    prev = top
+    for y0, y1 in merged:
+        if y0 > prev:
+            gaps.append((prev, y0))
+        prev = max(prev, y1)
+    if bottom > prev:
+        gaps.append((prev, bottom))
+    bands: list[tuple[float, float, float, float]] = []
+    for g0, g1 in gaps:
+        if g1 - g0 < min_height:
+            continue
+        pad = min(4.0, (g1 - g0) / 10.0)
+        y0 = g0 + pad
+        y1 = min(g1 - pad, y0 + max_height)
+        bands.append((inset_x, y0, page_w - inset_x, y1))
+    bands.sort(key=lambda b: b[3] - b[1], reverse=True)
+    return bands
+
+
+def _rect_overlaps_any(
+    box: tuple[float, float, float, float],
+    rects: list[tuple[float, float, float, float]],
+) -> bool:
+    for r in rects:
+        if box[0] < r[2] and box[2] > r[0] and box[1] < r[3] and box[3] > r[1]:
+            return True
+    return False
+
+
+def _page_occupancy(page: "pymupdf.Page", *, scale: float = 0.12):
+    """A ``occupied(view_rect) -> bool`` sampler over a low-res render of the page.
+
+    A candidate callout box is "occupied" when a meaningful fraction of its area
+    is non-white ink — catching the piping/symbols/vector-schedule/raster content
+    a text-free band can still sit on (§17.6). The pixmap is rendered once, in the
+    page's rotated **view** space (``page.rect`` dims == PAGE_VIEW_V2), so a
+    view-space box maps to pixels by ``* scale`` with no derotation. If rendering
+    fails the sampler degrades to *never occupied* (callouts still avoid words),
+    so occupancy analysis is additive and non-fatal (I-3).
+    """
+    try:
+        pix = page.get_pixmap(
+            matrix=pymupdf.Matrix(scale, scale), colorspace=pymupdf.csGRAY, alpha=False
+        )
+    except Exception:  # noqa: BLE001 - occupancy is a refinement, never fatal
+        _log.debug("occupancy render failed; callouts fall back to word-avoidance only")
+        return lambda _rect: False
+    w, h, samples = pix.width, pix.height, pix.samples
+
+    def occupied(view_rect, *, dark_frac: float = 0.02, dark_level: int = 210) -> bool:
+        x0 = max(0, int(view_rect[0] * scale)); y0 = max(0, int(view_rect[1] * scale))
+        x1 = min(w, int(view_rect[2] * scale)); y1 = min(h, int(view_rect[3] * scale))
+        if x1 <= x0 or y1 <= y0:
+            return True                          # off-render / degenerate → unsafe
+        total = 0
+        dark = 0
+        for yy in range(y0, y1):
+            base = yy * w
+            for xx in range(x0, x1):
+                total += 1
+                if samples[base + xx] < dark_level:
+                    dark += 1
+        return total > 0 and dark / total >= dark_frac
+
+    return occupied
+
+
+def _segment_hits_box(
+    p0: tuple[float, float], p1: tuple[float, float],
+    box: tuple[float, float, float, float],
+) -> bool:
+    """True when the segment ``p0→p1`` passes through ``box`` (leader-crossing test)."""
+    (x0, y0), (x1, y1) = p0, p1
+    bx0, by0, bx1, by1 = box
+    # Trivial reject: both endpoints on one outside side of the box.
+    if (x0 < bx0 and x1 < bx0) or (x0 > bx1 and x1 > bx1):
+        return False
+    if (y0 < by0 and y1 < by0) or (y0 > by1 and y1 > by1):
+        return False
+    # Sample a few points along the segment; cheap and sufficient for a callout
+    # leader (we only need "crosses / doesn't").
+    for t in (0.15, 0.3, 0.45, 0.6, 0.75, 0.9):
+        px = x0 + (x1 - x0) * t
+        py = y0 + (y1 - y0) * t
+        if bx0 <= px <= bx1 and by0 <= py <= by1:
+            return True
+    return False
+
+
+def _pack_callouts(
+    pairs: "list[tuple[Finding, MarkupPlacement]]",
+    words: list[Any], page_w: float, page_h: float, occupied,
+) -> "tuple[list[tuple[Finding, MarkupPlacement, tuple]], list[tuple[Finding, MarkupPlacement]]]":
+    """Pack callout boxes into the clear bands; return ``(placed, overflow)``.
+
+    Each box is validated against the retained word rects, the occupancy mask, and
+    every already-placed sibling before it is accepted, so a placed callout never
+    overlaps drawing content or another callout (§17.6 step 5). A finding that
+    cannot be placed in any visually-clear band is returned as overflow — routed to
+    the review-notes page rather than stamped over the drawing.
+    """
+    word_rects = [(float(w[0]), float(w[1]), float(w[2]), float(w[3])) for w in (words or [])]
+    bands = _clear_bands(words, page_w, page_h)
+    placed: list[tuple[Finding, MarkupPlacement, tuple]] = []
+    placed_boxes: list[tuple[float, float, float, float]] = []
+    remaining = list(pairs)
+    for bx0, by0, bx1, by1 in bands:
+        y = by0
+        while y + _CALLOUT_H <= by1 + 0.5 and remaining:
+            x = bx0
+            while x + _CALLOUT_W <= bx1 + 0.5 and remaining:
+                box = (x, y, x + _CALLOUT_W, y + _CALLOUT_H)
+                if (not _rect_overlaps_any(box, word_rects)
+                        and not _rect_overlaps_any(box, placed_boxes)
+                        and not occupied(box)):
+                    f, pl = remaining.pop(0)
+                    placed.append((f, pl, box))
+                    placed_boxes.append(box)
+                    x += _CALLOUT_W + _CALLOUT_GAP
+                else:
+                    x += _CALLOUT_GAP            # slide right past the obstacle
+            y += _CALLOUT_H + _CALLOUT_GAP
+    return placed, remaining
+
+
 def _tile_centroid(
     tile: list[int] | None, meta: dict | None
 ) -> tuple[float, float] | None:
@@ -687,49 +850,29 @@ def _add_margin_callouts(
     *,
     meta: dict | None,
     author: str,
-) -> "dict[str, list[tuple[str, int]]]":
-    """Sheet-level / absence findings as FreeText boxes stacked in the clear band.
+) -> "tuple[dict[str, list[tuple[str, int]]], list[tuple[Finding, MarkupPlacement]]]":
+    """Rect-less findings as FreeText boxes packed into visually-clear bands.
 
-    Boxes fill the band left→right, wrapping rows; each carries the full popup
-    content and, when the finding reported a tile, a leader Line annot with an
-    arrow from the box to that tile's centroid. Returns ``{placement_id:
-    [(component, xref), …]}`` — the ``callout`` component is mandatory; the
-    ``leader`` is optional.
+    Boxes are packed by :func:`_pack_callouts` so every one is validated clear of
+    the retained words, the occupancy mask (piping/symbols/raster), and its
+    siblings before it is drawn — a callout never obscures drawing content
+    (§17.6). Any finding that will not fit is returned as **overflow** for the
+    review-notes page rather than stamped over the sheet. A leader Line is added
+    only when the finding reported a tile *and* the leader would not cross another
+    callout box. Returns ``({placement_id: [(component, xref), …]}, overflow)`` —
+    the ``callout`` component is mandatory; the ``leader`` is optional.
     """
     drawn: dict[str, list[tuple[str, int]]] = {}
     if not pairs:
-        return drawn
+        return drawn, []
     words = list((meta or {}).get("words") or [])
     page_w, page_h = page.rect.width, page.rect.height
-    bx0, by0, bx1, _by1 = find_clear_band(words, page_w, page_h)
+    occupied = _page_occupancy(page)
+    placed, overflow = _pack_callouts(pairs, words, page_w, page_h, occupied)
+    placed_boxes = [box for _f, _pl, box in placed]
 
-    page_bottom = page_h - 2.0
-    x = bx0
-    # First row: the band top, pulled up if the band is shallower than a box.
-    first_row_y = min(by0, max(2.0, page_bottom - _CALLOUT_H))
-    y = first_row_y
-    stacking_up = False
-    for finding, placement in pairs:
-        if x + _CALLOUT_W > bx1:                      # wrap to the next row
-            x = bx0
-            if not stacking_up:
-                nxt = y + _CALLOUT_H + _CALLOUT_GAP
-                if nxt + _CALLOUT_H <= page_bottom:
-                    y = nxt
-                else:
-                    # No room below the band: stack upward from the band top so
-                    # every box stays on the visible page. Off-page ink would
-                    # pass the annot count but be invisible to the reviewer —
-                    # the one failure this feature exists to avoid. Upward rows
-                    # may overlap sheet content (visible beats hidden); log it.
-                    stacking_up = True
-                    y = first_row_y
-                    _log.info(
-                        "margin band full; stacking callouts upward on the page"
-                    )
-            if stacking_up:
-                y = max(2.0, y - (_CALLOUT_H + _CALLOUT_GAP))
-        box = pymupdf.Rect(x, y, x + _CALLOUT_W, y + _CALLOUT_H)   # PAGE_VIEW_V2 space
+    for finding, placement, box_t in placed:
+        box = pymupdf.Rect(*box_t)                    # PAGE_VIEW_V2 space
         rejected = _status(finding) == "REJECTED"
         unverified = _is_unverified(finding) and not rejected
         color = _REJECTED_COLOR if rejected else _color(finding)
@@ -762,9 +905,16 @@ def _add_margin_callouts(
         components.append(("callout", annot.xref))
 
         centroid = _tile_centroid(finding.tile, meta)
-        if centroid is not None:
+        start_v = ((box.x0 + box.x1) / 2.0, box.y0 if centroid and centroid[1] < box.y0 else box.y1)
+        # Only draw the leader when it does not cross another callout box excessively
+        # (§17.6 step 4) — a leader raked across neighbouring callout text is worse
+        # than none.
+        crosses = centroid is not None and any(
+            _segment_hits_box(start_v, centroid, other)
+            for other in placed_boxes if other != box_t
+        )
+        if centroid is not None and not crosses:
             try:
-                start_v = ((box.x0 + box.x1) / 2.0, box.y0 if centroid[1] < box.y0 else box.y1)
                 start = _derotate_point(page, start_v[0], start_v[1])
                 line = page.add_line_annot(start, _derotate_point(page, centroid[0], centroid[1]))
                 line.set_colors(stroke=color)
@@ -778,8 +928,12 @@ def _add_margin_callouts(
             except Exception:  # noqa: BLE001 - a failed leader never drops the box
                 _log.warning("could not draw leader line for %s", finding.id)
 
-        x += _CALLOUT_W + _CALLOUT_GAP
-    return drawn
+    if overflow:
+        _log.info(
+            "%d callout(s) did not fit a clear band; routing to the review-notes page",
+            len(overflow),
+        )
+    return drawn, overflow
 
 
 # --------------------------------------------------------------------------- #
@@ -966,6 +1120,89 @@ def _insert_appendix_page(
         # "[OK]" not "✓" — the Base-14 fonts insert_text uses have no U+2713 glyph.
         page.insert_text((36, y), "[OK]  " + line, fontsize=10, color=(0.1, 0.45, 0.2))
         y += 18
+
+
+def _insert_review_notes_page(
+    doc: "pymupdf.Document",
+    overflow: "list[tuple[Finding, MarkupPlacement]]",
+    *,
+    n_index: int,
+    run_id: str,
+    author: str,
+) -> "dict[str, list[tuple[str, int, int]]]":
+    """Append an 'AI Review Notes' page carrying the callouts that did not fit.
+
+    A rect-less finding whose callout could not be placed in a visually-clear band
+    (§17.6) is written here — visible ink in the reviewed PDF — instead of stamped
+    over the drawing. Each row is a ``callout`` FreeText carrying the full popup,
+    plus a GOTO link back to its source page (offset by ``n_index`` index pages),
+    and its placement is **rerouted** to ``REVIEW_NOTES`` so the tally counts it as
+    an overflow note, not a margin callout. Returns
+    ``{placement_id: [(component, xref, final_page), …]}`` for stamping. The
+    ``callout`` component is reconciled exactly like a margin callout — one logical
+    placement, one mandatory component — keeping this per-source overflow page
+    distinct from the set-level ``Drawing_Set_Review_Notes.pdf``.
+    """
+    collected: dict[str, list[tuple[str, int, int]]] = {}
+    if not overflow:
+        return collected
+    ordered = sorted(overflow, key=lambda fp: (fp[0].qc_id or "~", fp[0].id))
+    per_page = _NOTES_PER_PAGE
+    n_pages = (len(ordered) + per_page - 1) // per_page
+    first_pno = doc.page_count
+    for _ in range(n_pages):
+        doc.new_page(width=_INDEX_PAGE_W, height=_INDEX_PAGE_H)
+    for i in range(n_pages):
+        pno = first_pno + i
+        page = doc[pno]
+        title = REVIEW_NOTES_PAGE_LABEL + (f"  (page {i + 1}/{n_pages})" if n_pages > 1 else "")
+        page.insert_text((_NOTE_LEFT, 42), title, fontsize=12, fontname="hebo", color=(0.1, 0.1, 0.1))
+        page.insert_text(
+            (_NOTE_LEFT, 62),
+            f"Author: {author} - findings that did not fit a clear band on their sheet; "
+            f"each row links to its source page.",
+            fontsize=8, color=(0.35, 0.35, 0.35),
+        )
+        batch = ordered[i * per_page:(i + 1) * per_page]
+        y = _NOTE_TOP
+        for finding, placement in batch:
+            rejected = _status(finding) == "REJECTED"
+            unverified = _is_unverified(finding) and not rejected
+            place = "[SHEET]" if (finding.anchor_hint or "").upper() == "SHEET" else "[UNANCHORED]"
+            content = (
+                f"{finding.qc_id or '-'}  [{finding.sheet_id} / {finding.severity}]\n"
+                + _annot_content(finding, unverified=unverified, rejected=rejected, place=place)
+            )
+            box = pymupdf.Rect(_NOTE_LEFT, y, _INDEX_PAGE_W - _NOTE_LEFT, y + _NOTE_BOX_H)
+            try:
+                annot = page.add_freetext_annot(
+                    box, content[:400], fontsize=8,
+                    text_color=(_REJECTED_COLOR if rejected else _color(finding)),
+                    fill_color=(1.0, 1.0, 0.92),
+                )
+                annot.set_info(title=author, subject="AI review note", content=content)
+                annot.update()
+                collected.setdefault(placement.placement_id, []).append(
+                    ("callout", annot.xref, pno)
+                )
+                # GOTO back to the source page (shifted by the front index) — the
+                # finding's rect if it had one, else the sheet top.
+                target = int(finding.page_index) + n_index
+                if 0 <= target < doc.page_count:
+                    rect = getattr(finding.anchor, "rect_pdf", None) if finding.anchor else None
+                    to = _derotate_point(doc[target], rect[0], rect[1]) if rect else pymupdf.Point(36, 36)
+                    page.insert_link({
+                        "kind": pymupdf.LINK_GOTO,
+                        "from": pymupdf.Rect(box.x0, box.y0, box.x1, box.y1),
+                        "page": target, "to": to, "zoom": 0,
+                    })
+            except Exception:  # noqa: BLE001 - one bad note never sinks the file
+                _log.warning("could not draw review note for %s", finding.id)
+            # Reroute the placement so the receipt/tally reflect where it went.
+            placement.expected = "REVIEW_NOTES"
+            placement.required_components = list(REQUIRED_COMPONENTS["REVIEW_NOTES"])
+            y += _NOTE_BOX_H + _NOTE_GAP
+    return collected
 
 
 # --------------------------------------------------------------------------- #
@@ -1266,10 +1503,11 @@ def _annotate_units(
             else:                                     # MARGIN / REVIEW_NOTES
                 callouts_by_page.setdefault(page_index, []).append((finding, placement))
 
+        overflow: list[tuple[Finding, MarkupPlacement]] = []
         for page_index, group in sorted(callouts_by_page.items()):
             group.sort(key=lambda fp: (fp[0].qc_id or "~", fp[0].id))
             try:
-                drawn = _add_margin_callouts(
+                drawn, page_overflow = _add_margin_callouts(
                     doc[page_index], group,
                     meta=(sheet_meta or {}).get(page_index), author=author,
                 )
@@ -1277,6 +1515,7 @@ def _annotate_units(
                     collected.setdefault(pid, []).extend(
                         (c, x, page_index) for c, x in comps
                     )
+                overflow.extend(page_overflow)
             except Exception:  # noqa: BLE001 - callouts must not sink the file
                 _log.warning("could not add margin callouts on page %d", page_index)
 
@@ -1295,8 +1534,21 @@ def _annotate_units(
             except Exception:  # noqa: BLE001
                 _log.warning("could not build the appendix for %s", src.name)
 
-        # Stamp each drawn component with its FINAL page — inserting the index at
-        # the front shifted the originals down by ``n_index``. Xref numbers are
+        # Callouts that did not fit a clear band overflow to an appended
+        # 'AI Review Notes' page (§17.6) rather than obscuring the drawing. Its
+        # components are already on their FINAL page (appended after the index), so
+        # they are stamped as-is below — not shifted by ``n_index``.
+        notes_collected: dict[str, list[tuple[str, int, int]]] = {}
+        if overflow:
+            try:
+                notes_collected = _insert_review_notes_page(
+                    doc, overflow, n_index=n_index, run_id=run_id, author=author,
+                )
+            except Exception:  # noqa: BLE001 - the notes page must not sink the file
+                _log.warning("could not build the review-notes page for %s", src.name)
+
+        # Stamp each source-page component with its FINAL page — inserting the index
+        # at the front shifted the originals down by ``n_index``. Xref numbers are
         # stable across page insertion, so stamping by xref is safe here.
         for pid, comps in collected.items():
             for component, xref, orig_page in comps:
@@ -1304,6 +1556,13 @@ def _annotate_units(
                     _stamp_component(doc, xref, pid, component, orig_page + n_index)
                 except Exception:  # noqa: BLE001 - a failed stamp → that placement fails
                     _log.warning("could not stamp %s for %s", component, pid)
+        # Review-notes components already carry their final page.
+        for pid, comps in notes_collected.items():
+            for component, xref, final_page in comps:
+                try:
+                    _stamp_component(doc, xref, pid, component, final_page)
+                except Exception:  # noqa: BLE001
+                    _log.warning("could not stamp review note %s for %s", component, pid)
 
         out.parent.mkdir(parents=True, exist_ok=True)
         doc.save(str(out), garbage=3, deflate=True)
