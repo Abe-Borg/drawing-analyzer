@@ -114,14 +114,38 @@ def test_arithmetic_sum_match_is_counted_not_flagged():
 
 
 def test_arithmetic_sum_mismatch_flags_the_540_660_lesson():
-    # A flow-test column that should total 540 but is printed as 660.
+    # A flow-test column that should total 540 but is printed as 660. The terms
+    # are model-transcribed (the quote "Q" doesn't carry them), so §17.5 keeps the
+    # mismatch UNCERTAIN — it must be crop-verified, not trusted as ground truth.
     res = audit_arithmetic([_claim("sum", [180, 180, 180], 660)], [])
     assert res.mismatched == 1 and len(res.findings) == 1
     f = res.findings[0]
-    assert f.verification.status == "DETERMINISTIC"
+    assert f.verification.status == "UNCERTAIN"
+    assert f.verification.computation_method == "HOST_DETERMINISTIC"
+    assert f.verification.operand_origin == "MODEL_TRANSCRIBED"
     assert f.category == "conflict"
     assert "540" in f.text and "660" in f.text  # computed vs stated
     assert f.severity == "high"                  # 22% off
+
+
+def test_arithmetic_text_extracted_operands_stay_deterministic():
+    # When the quote itself carries every operand, the operands are independently
+    # validated — a mismatch is trusted DETERMINISTIC and auto-inks (§17.5).
+    res = audit_arithmetic(
+        [_claim("factor", [1500, "1.3"], 1560, quote="AREA 1500 X 1.3 = 1560")], []
+    )
+    assert res.mismatched == 1
+    f = res.findings[0]
+    assert f.verification.status == "DETERMINISTIC"
+    assert f.verification.operand_origin == "TEXT_EXTRACTED"
+    assert "1950" in f.text                        # host computed 1500*1.3
+
+
+def test_arithmetic_relative_tolerance_catches_small_value_error():
+    # §17.5: the old blanket abs-0.5 tolerance falsely matched 0.2+0.2 printed as
+    # 0.5 (actual 0.4, a 20% error). The magnitude-aware relative rule flags it.
+    res = audit_arithmetic([_claim("sum", ["0.20", "0.20"], "0.5")], [])
+    assert res.mismatched == 1 and res.matched == 0
 
 
 def test_arithmetic_factor_catches_missing_dipa_increase():
@@ -473,8 +497,16 @@ def test_run_auditors_combines_findings_and_stats():
     assert res.stats["arithmetic_matched"] == 1
     assert res.stats["arithmetic_mismatched"] == 1
     assert res.stats["naming_findings"] >= 1
-    # Every deterministic finding is trusted without a model re-check.
-    assert all(f.verification.status == "DETERMINISTIC" for f in res.findings)
+    # Reference / naming / title-block / index findings are text-extracted and
+    # trusted DETERMINISTIC. The arithmetic mismatch was computed from
+    # model-transcribed terms (its quote "Z" carries no operand), so it stays
+    # UNCERTAIN and will be crop-verified (§17.5) — never blanket-trusted.
+    for f in res.findings:
+        if "auditor_arithmetic" in f.sources:
+            assert f.verification.status == "UNCERTAIN"
+            assert f.verification.operand_origin == "MODEL_TRANSCRIBED"
+        else:
+            assert f.verification.status == "DETERMINISTIC"
     # No two findings share an id (dedup by content).
     ids = [f.id for f in res.findings]
     assert len(ids) == len(set(ids))

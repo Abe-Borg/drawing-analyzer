@@ -617,7 +617,8 @@ def test_arithmetic_auditor_flags_bad_claim_end_to_end(tmp_path):
     src = _make_pdf(tmp_path / "M-101.pdf")
     # The reviewer transcribes a column that should total 540 but is printed 200;
     # the deterministic auditor — not the model — catches the bad arithmetic. The
-    # quote ("VAV-3") is on the sheet, so the finding anchors EXACT.
+    # quote ("VAV-3") is on the sheet (so the finding anchors EXACT) but does not
+    # carry the operands, so §17.5 keeps the mismatch UNCERTAIN (model-transcribed).
     claim = {"sheet_id": "M-101", "quote": "VAV-3", "kind": "sum",
              "terms": [100, 100], "expected": 540, "note": "column total"}
     client = _ClaimsRoutingClient([claim])
@@ -627,8 +628,10 @@ def test_arithmetic_auditor_flags_bad_claim_end_to_end(tmp_path):
     )
     assert client.critique_calls >= 1
     arith = [f for f in ctx.reference_findings
-             if f.category == "conflict" and f.verification.status == "DETERMINISTIC"]
+             if f.category == "conflict" and "auditor_arithmetic" in f.sources]
     assert len(arith) == 1
+    assert arith[0].verification.status == "UNCERTAIN"
+    assert arith[0].verification.operand_origin == "MODEL_TRANSCRIBED"
     assert "540" in arith[0].text and "200" in arith[0].text   # computed vs stated
     assert arith[0].anchor.status == "EXACT"
     # The report tally counts the relationship that was checked.

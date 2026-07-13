@@ -450,6 +450,14 @@ def _annot_content(
     v = getattr(finding, "verification", None)
     if v is not None:
         lines.append(f"Verification: {v.status}" + (f" — {v.note}" if v.note else ""))
+        # Arithmetic provenance (§17.5): a host computation over model-transcribed
+        # terms must not read as ground truth just because the multiplication ran
+        # in Python — say so on the mark so the reviewer weighs it correctly.
+        origin = getattr(v, "operand_origin", "")
+        if origin == "MODEL_TRANSCRIBED":
+            lines.append("Provenance: host-computed from model-transcribed terms")
+        elif origin == "TEXT_EXTRACTED":
+            lines.append("Provenance: host-computed from text-extracted operands")
     if finding.refs:
         lines.append("Refs: " + ", ".join(str(r) for r in finding.refs))
     citation = getattr(finding, "citation", None)

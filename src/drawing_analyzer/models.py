@@ -369,6 +369,18 @@ ANCHOR_STATUSES = frozenset({"EXACT", "FUZZY", "TILE", "UNANCHORED"})
 VERIFICATION_STATUSES = frozenset(
     {"VERIFIED", "REJECTED", "UNCERTAIN", "DETERMINISTIC", "SKIPPED"}
 )
+# Arithmetic-provenance vocabulary (Phase 25 §17.5). ``computation_method`` records
+# that the *operation* was done by the host (never the model's own arithmetic);
+# ``operand_origin`` records whether the numbers it operated on were independently
+# validated against the sheet's quoted text (``TEXT_EXTRACTED`` — trusted, may
+# earn the DETERMINISTIC verdict + the deterministic-only ink gate) or only
+# transcribed by the model (``MODEL_TRANSCRIBED`` — the mismatch stays UNCERTAIN
+# and must be crop-verified, since a misread term can't be trusted).
+HOST_DETERMINISTIC = "HOST_DETERMINISTIC"
+TEXT_EXTRACTED = "TEXT_EXTRACTED"
+MODEL_TRANSCRIBED = "MODEL_TRANSCRIBED"
+COMPUTATION_METHODS = frozenset({"", HOST_DETERMINISTIC})
+OPERAND_ORIGINS = frozenset({"", TEXT_EXTRACTED, MODEL_TRANSCRIBED})
 # ``NumericClaim.kind`` — how a claim's terms combine into its expected value.
 # ``sum`` → terms add up; ``product``/``factor`` → terms multiply (a "factor" is a
 # product where one term is a multiplier, e.g. base-area × 1.3). The host does the
@@ -589,6 +601,9 @@ class Verification:
     note: str = ""
     evidence_png: str = ""
     evidence: list["EvidenceArtifact"] = field(default_factory=list)
+    # Arithmetic provenance (Phase 25 §17.5) — empty for non-arithmetic findings.
+    computation_method: str = ""        # "" | HOST_DETERMINISTIC
+    operand_origin: str = ""            # "" | TEXT_EXTRACTED | MODEL_TRANSCRIBED
 
     def __post_init__(self) -> None:
         # Keep the legacy scalar alias in sync with the artifact list: it always
@@ -603,6 +618,8 @@ class Verification:
             "note": self.note,
             "evidence_png": self.evidence_png,
             "evidence": [a.to_dict() for a in self.evidence],
+            "computation_method": self.computation_method,
+            "operand_origin": self.operand_origin,
         }
 
     @classmethod
@@ -617,6 +634,8 @@ class Verification:
             note=d.get("note", ""),
             evidence_png=d.get("evidence_png", ""),
             evidence=evidence,
+            computation_method=str(d.get("computation_method", "") or ""),
+            operand_origin=str(d.get("operand_origin", "") or ""),
         )
 
 

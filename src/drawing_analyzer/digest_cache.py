@@ -44,8 +44,13 @@ from typing import Any
 # cache entry now records ``requested_runs`` / ``completed_runs``; and the parser
 # was rebuilt (a truncated/unclosed findings block is now recognised and stripped),
 # so a pre-v6 entry — parsed under the old rules or lacking the new fields — must
-# miss once and be re-derived rather than served as current.
-_SCHEMA_VERSION = 6
+# miss once and be re-derived rather than served as current. Bumped to 7 (Phase 25):
+# the tile contract changed (the model now returns ``tile_label`` and a legacy
+# ``tile`` array is read as explicit zero-based, §17.1) and a stored
+# ``Verification`` gained ``computation_method`` / ``operand_origin`` (§17.5), so a
+# pre-v7 entry — cached under the old tile parse or lacking the provenance fields —
+# must miss once and be re-derived rather than served as current.
+_SCHEMA_VERSION = 7
 
 _FALSEY = {"0", "false", "no", "off", ""}
 
