@@ -6,6 +6,71 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (Phase 24 — cross-sheet, profile, citation & evidence completion, DA-015/016/017/018/028)
+
+- **Cross-sheet QC is now whole-set at every size (DA-015).** Above 40 sheets the
+  pass no longer "shards and unions" (which silently missed any conflict whose two
+  sheets fell in different shards — it made **no** reconciliation call at all).
+  It now uses a **map → reconcile** architecture: it shards by discipline; each
+  shard call returns its local conflicts *and* a set of compact, grounded
+  `CrossQCFact`s (the comparable data points another shard might contradict); then a
+  final **reconciliation** call compares those facts across *all* shards and emits
+  the cross-shard conflicts, so a coordination error spanning a mechanical and a
+  fire-protection sheet is found. Facts that overflow one call reduce through a
+  balanced tree. The model never sees source identity — in the sharded path it works
+  with **request-local opaque handles** (`S001` …) that are validated against the
+  request manifest and translated to real sources on the host (an unknown handle
+  leaves the item unbound); and every fact's `exact_quote` (and every reconciliation
+  quote) is validated against the retained source text before it is trusted, so an
+  ungrounded quote never becomes a trusted dual-anchor finding. `CrossQCResult` now
+  reports shard/reconciliation completeness and a failed shard or reconciliation
+  holds the stage at `PARTIAL` while its findings stay usable.
+- **Cross-QC text budgeting is loss-aware (DA-028).** An over-long sheet text layer
+  is still capped, but the omission is now **counted and surfaced**
+  (`text_chars_omitted` / `budget_degraded`, a stage warning, and the run log),
+  never a silent slice — and a degraded budget holds the pass at `PARTIAL`.
+- **Citation verdicts are claim-complete (DA-017).** A citation verdict now attaches
+  to a finding **only if that finding's claim was in the request that produced it**.
+  Every distinct claim for a reference is checked (chunked into claim-complete
+  requests when there are many — the old path sent only the first three finding
+  texts and pinned that single verdict onto *every* citing finding), the model
+  returns a **per-claim** verdict keyed by a request-local opaque handle validated
+  against the request, and each `CitationAssessment` (`reference`,
+  `claim_finding_ids`, `status`, `request_id`, editions, sources) is bound to exactly
+  the findings whose claim it covered. A finding that cites several references keeps
+  one assessment **per reference** (`finding.citations`); the legacy
+  `finding.citation` is derived as a summary. A request/parser/tool failure leaves
+  the claim `UNCHECKED` and marks the stage `PARTIAL` — and never downgrades the
+  engineering finding.
+- **The verifier's evidence trail is complete and byte-exact (DA-016).** Every crop
+  a verify call saw is now saved **and hashed before it is sent**, and only saved
+  crops are sent — a verdict may never rest on an image absent from the trail. Each
+  finding gets an `evidence/<QC-ID>/` directory with one `leg-NN__<sheet>_pN.png` per
+  leg (a cross-sheet conflict saves every sheet's crop, in request order) and a
+  `request.json` recording the ordered artifact metadata + verdict (no key, no
+  unrelated drawing text). Each `EvidenceArtifact` carries the crop's `sha256` (the
+  hash of the bytes on disk, which are the bytes the model judged), rects, dpi, and
+  request order. A cross-sheet conflict is **never** decided from a single crop —
+  fewer than two saved legs degrades to `SKIPPED` with a precise missing-leg reason.
+  The folder export copies the **complete nested** evidence tree, and the HTML report
+  and PDF popup list **every** artifact. `Verification.evidence_png` is retained as a
+  back-compat alias to the first artifact.
+- **Profile auto-suggest, snapshot, and selection (DA-018, §16.0/§16.4).** A new
+  shared, host-owned sheet-id foundation (`auditors/sheet_ids.py`) provides
+  normalization, a candidate lexer, an ambiguity-safe inventory resolver
+  (`RESOLVED` / `UNBOUND` / `AMBIGUOUS`, never a silent first-wins), and
+  **project-prefix-aware** discipline detection — so a project-coded id like
+  `AVC10-F-D-01-1` now detects the fire-protection segment (`F`) instead of the
+  project code (`AVC`), while plain forms (`FP-101`, `M1`, `E1.01`) are unchanged.
+  A cheap **text-only preflight** (`preflight_sheet_ids`, no rasterization) detects
+  each sheet id and auto-suggests profiles; `resolve_profile_selection` makes manual
+  choice win (a deselection survives a later suggest refresh); and the selected
+  profiles are **snapshotted** (name + version + content hash + source) at Analyze
+  time onto `DrawingContext.profile_snapshots`, with a typed `profiles` stage
+  (`SKIPPED_VALID` with no applicable profile, `PARTIAL` when a requested profile
+  can't be resolved). The GUI grows a review-profile multi-select panel that
+  auto-suggests off the loaded files and passes the selection into the exhaustive run.
+
 ### Added (Phase 23C — batch critique & upload lifecycle, DA-030/DA-034)
 
 - **The critique now rides the Message Batches path in a `use_batch` run, at the

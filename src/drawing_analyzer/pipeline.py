@@ -255,6 +255,10 @@ class DrawingContext:
     run_configuration: Any = None
     stage_results: list = field(default_factory=list)
     qc_status: str = "NOT_REQUESTED"
+    # Phase 24 (§16.4): the review profiles as they were at Analyze time
+    # (name + version + content hash + source) — recorded for the report / run
+    # manifest and so a profile that disappeared/changed after selection is visible.
+    profile_snapshots: list = field(default_factory=list)
     # Phase 23B (§15.6): the run's append-only usage ledger. ``total_input_tokens`` /
     # ``total_output_tokens`` above are derived sums over it; ``total_estimated_cost``
     # and the per-stage-family breakdown come from it too.
@@ -1264,17 +1268,27 @@ def _run_qc_stages(
                 # the exact server ``web_search_requests`` count, so bill one search
                 # per unique citation checked (a lower bound — each ref runs ≥1
                 # search). Tokens are exact; the search micro-fee is approximate.
+                # A run is PARTIAL when any claim was left UNCHECKED/UNRESOLVABLE
+                # (DA-017 §16.5) — not only on a hard error — so a request/parser/
+                # tool failure for a cited claim can never masquerade as COMPLETE.
+                partial = bool(cires.error) or bool(getattr(cires, "partial", False))
                 _record_usage(
                     run_usage, family="citation", instance="citation",
                     model=citation_model(),
                     input_tokens=cires.input_tokens, output_tokens=cires.output_tokens,
                     billable_tool_uses={"web_search": int(getattr(cires, "checked", 0) or 0)},
-                    terminal_status="PARTIAL" if cires.error else "COMPLETE",
+                    terminal_status="PARTIAL" if partial else "COMPLETE",
                 )
-                if cires.error:
-                    errors.append(f"Citation check: {cires.error}")
+                citation_stage.items_out = len(getattr(cires, "assessments", []) or [])
+                if partial:
+                    if cires.error:
+                        errors.append(f"Citation check: {cires.error}")
+                        citation_stage.errors.append(str(cires.error))
+                    else:
+                        citation_stage.warnings.append(
+                            "some cited claims left unchecked (request/parser/tool failure)"
+                        )
                     citation_stage.status = "PARTIAL"
-                    citation_stage.errors.append(str(cires.error))
                 else:
                     citation_stage.status = "COMPLETE"
             except Exception as exc:  # noqa: BLE001 - never fatal
@@ -1842,14 +1856,37 @@ def extract_drawing_context(
     # Numeric claims (Phase 14) transcribed by the critique / cross-sheet QC passes,
     # pooled and handed to the deterministic arithmetic auditor below.
     numeric_claims: list[NumericClaim] = []
+    # Resolve + snapshot the review profiles ONCE, at Analyze time (§16.4): the
+    # exact name/version/content-hash/source that will be injected is captured for
+    # the report / run manifest, and a requested profile that could not be resolved
+    # (a name that vanished / is unreadable after selection) is surfaced as a
+    # PARTIAL profile-application stage rather than silently dropped.
+    from .profiles import resolve_profiles, snapshot_profiles
+
+    resolved_profiles = resolve_profiles(profiles)
+    profile_snapshots = snapshot_profiles(resolved_profiles)
+    requested_count = len(list(profiles or []))
+    profile_stage = StageResult(stage="profiles", expected=config.run_critique)
+    if config.run_critique:
+        profile_stage.items_in = requested_count
+        profile_stage.items_out = len(resolved_profiles)
+        if not resolved_profiles:
+            # No applicable/selected profile — generic critique still runs (§3.3).
+            profile_stage.status = "SKIPPED_VALID"
+        elif len(resolved_profiles) < requested_count:
+            profile_stage.status = "PARTIAL"
+            profile_stage.warnings.append(
+                "a selected review profile could not be resolved (missing/unreadable)"
+            )
+        else:
+            profile_stage.status = "COMPLETE"
+    stage_results.append(profile_stage)
+
     critique_stage = StageResult(stage="critique", expected=config.run_critique)
     if config.run_critique:
         if progress is not None:
             progress(total, total, "Critiquing sheets")
         try:
-            from .profiles import resolve_profiles
-
-            resolved_profiles = resolve_profiles(profiles)
             if resolved_profiles:
                 _log.info(
                     "critique: applying %d review profile(s): %s",
@@ -1888,20 +1925,33 @@ def extract_drawing_context(
             cross_res = cross_sheet_qc(sheets, sheet_geometries, client=client)
             cross_findings = cross_res.findings
             numeric_claims.extend(cross_res.claims)
+            # DA-015/DA-028: a sharded run is COMPLETE only when every shard and the
+            # cross-shard reconciliation completed and the text budget was not
+            # degraded — a failed shard/reconciliation or a silent truncation holds
+            # the stage at PARTIAL while its findings stay usable.
+            cross_complete = bool(getattr(cross_res, "complete", not cross_res.error))
             _record_usage(
                 run_usage, family="cross_qc", instance="cross_qc",
                 model=cross_qc_model(),
                 input_tokens=cross_res.input_tokens, output_tokens=cross_res.output_tokens,
-                terminal_status="PARTIAL" if cross_res.error else "COMPLETE",
+                terminal_status="COMPLETE" if cross_complete else "PARTIAL",
             )
             cross_stage.items_out = len(cross_findings)
+            cross_stage.calls_planned = getattr(cross_res, "shards_planned", 0)
+            cross_stage.calls_succeeded = getattr(cross_res, "shards_completed", 0)
             if cross_res.error:
                 errors.append(f"Cross-sheet QC: {cross_res.error}")
-                cross_stage.status = "PARTIAL"
                 cross_stage.errors.append(str(cross_res.error))
                 _log.warning("cross-sheet QC: %s", cross_res.error)
-            else:
-                cross_stage.status = "COMPLETE"
+            if getattr(cross_res, "budget_degraded", False):
+                cross_stage.warnings.append(
+                    f"text budget degraded: {cross_res.text_chars_omitted} char(s) omitted"
+                )
+            if getattr(cross_res, "reconciliation_required", False) and not getattr(
+                cross_res, "reconciliation_completed", True
+            ):
+                cross_stage.warnings.append("cross-shard reconciliation incomplete")
+            cross_stage.status = "COMPLETE" if cross_complete else "PARTIAL"
         except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
             errors.append(f"Cross-sheet QC: {exc}")
             cross_stage.status = "FAILED"
@@ -2062,6 +2112,7 @@ def extract_drawing_context(
         stage_results=stage_results,
         qc_status=qc_status,
         run_usage=run_usage,
+        profile_snapshots=profile_snapshots,
     )
 
 

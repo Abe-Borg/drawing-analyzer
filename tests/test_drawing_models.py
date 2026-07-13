@@ -65,7 +65,7 @@ def test_finding_to_dict_round_trips_the_contract():
     assert d["refs"] == []
     assert d["anchor"] == {"status": "EXACT", "rect_pdf": [1.0, 2.0, 3.0, 4.0], "method": "ref"}
     assert d["verification"] == {
-        "status": "DETERMINISTIC", "note": "audit", "evidence_png": ""
+        "status": "DETERMINISTIC", "note": "audit", "evidence_png": "", "evidence": []
     }
 
 

@@ -54,6 +54,8 @@ from .render import list_sheets
 
 _PDF_FILETYPES = [("PDF drawings", "*.pdf"), ("All files", "*.*")]
 
+_log = diagnostics.get_logger()
+
 
 class DrawingAnalyzerApp(_CTkDnDRoot):
     """Minimal standalone window driving the drawing-digest pipeline."""
@@ -85,6 +87,12 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._qc_verified_only_var = BooleanVar(value=False)
         self._ink_rejected_var = BooleanVar(value=False)
         self._reference_audit_var = BooleanVar(value=False)
+        # Review-profile selection (Phase 24 §16.4): name -> checkbox var, plus the
+        # set of profiles the user manually turned off — a deselection survives a
+        # later preflight auto-suggest refresh (manual choice always wins).
+        self._profile_vars: dict[str, BooleanVar] = {}
+        self._profile_deselected: set[str] = set()
+        self._profile_suggested: set[str] = set()
         # HTML report: off by default the key is NOT written into the file (the
         # Ask-AI panel prompts for one at runtime). On restores the old embedded
         # -key convenience — with a red warning in the report; don't share it.
@@ -277,6 +285,11 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         )
         self._reference_audit_hint.pack(anchor="w", padx=(28, 0))
         self._on_qc_toggle()   # set the sub-toggle's initial enabled state
+
+        # Review-profile selector (Phase 24 §16.4): a checkbox per available
+        # profile, showing its title/version/discipline/source. Applicable profiles
+        # are auto-suggested (pre-checked) once files are loaded; manual choice wins.
+        self._build_profile_panel(qc_row)
 
         # Summary + actions row
         row = ctk.CTkFrame(outer, fg_color="transparent")
@@ -576,6 +589,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 added = True
         if added:
             self._refresh_summary()
+            self._refresh_profile_suggestions()
 
     def _on_clear(self) -> None:
         if self._busy:
@@ -611,6 +625,88 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 text="Already included in QC Markups' exhaustive stack." if on else ""
             )
         self._refresh_summary()
+
+    # --------------------------------------------------------------------- #
+    # Review profiles (Phase 24 §16.4)
+    # --------------------------------------------------------------------- #
+
+    def _build_profile_panel(self, parent) -> None:
+        """A checkbox per available review profile (title · version · source).
+
+        Best-effort and non-fatal: a discovery/parse failure must never break the
+        QC panel, so the whole build is guarded.
+        """
+        try:
+            from .profiles import list_profiles
+
+            profiles = list_profiles()
+        except Exception as exc:  # noqa: BLE001 - a bad profile dir can't sink the UI
+            _log.warning("profile discovery failed: %s", exc)
+            return
+        self._profiles_by_name = {p.name: p for p in profiles}
+        if not profiles:
+            return
+        ctk.CTkLabel(
+            parent, text="Review profiles (auto-suggested from sheet ids)",
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            text_color=COLORS["text_muted"],
+        ).pack(anchor="w", padx=(28, 0), pady=(6, 0))
+        for p in profiles:
+            var = BooleanVar(value=False)
+            self._profile_vars[p.name] = var
+            src = str(getattr(p.source_path, "parent", "")).replace("\\", "/")
+            source = "built-in" if "drawing_analyzer/profiles" in src else "user"
+            label = f"{p.title} · v{p.version} · {source}"
+            ctk.CTkCheckBox(
+                parent, text=label, variable=var,
+                command=lambda n=p.name: self._on_profile_toggle(n),
+                font=ctk.CTkFont(family="Segoe UI", size=11),
+                text_color=COLORS["text_muted"],
+            ).pack(anchor="w", padx=(40, 0), pady=(1, 0))
+
+    def _on_profile_toggle(self, name: str) -> None:
+        """Record a manual selection/deselection so it survives a preflight refresh."""
+        var = self._profile_vars.get(name)
+        if var is None:
+            return
+        if var.get():
+            self._profile_deselected.discard(name)
+        else:
+            self._profile_deselected.add(name)
+
+    def _refresh_profile_suggestions(self) -> None:
+        """Auto-suggest applicable profiles for the loaded files (off the UI thread).
+
+        Runs the cheap text-only preflight in a worker thread and marshals the
+        checkbox updates back via ``after`` so the UI stays responsive (§16.4). A
+        profile the user manually turned off stays off even if re-suggested.
+        """
+        if not self._profile_vars or self._busy:
+            return
+        pdfs = list(self._pdfs)
+
+        def _work() -> None:
+            try:
+                from .profiles import suggest_profiles_for_paths
+
+                names = [p.name for p in suggest_profiles_for_paths(pdfs)]
+            except Exception as exc:  # noqa: BLE001 - preflight is a hint, never fatal
+                _log.info("profile preflight failed: %s", exc)
+                names = []
+            self.after(0, lambda: self._apply_profile_suggestions(names))
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _apply_profile_suggestions(self, names: list[str]) -> None:
+        self._profile_suggested = set(names)
+        for name in names:
+            var = self._profile_vars.get(name)
+            if var is not None and name not in self._profile_deselected:
+                var.set(True)
+
+    def _selected_profiles(self) -> list[str]:
+        """The profile names currently checked, in discovery order."""
+        return [n for n, var in self._profile_vars.items() if var.get()]
 
     def _current_focus(self) -> str:
         """The per-run focus currently in the box (stripped; "" when empty).
@@ -680,6 +776,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         markup_verified_only = self._qc_verified_only_var.get()
         ink_rejected = self._ink_rejected_var.get()
         reference_audit = self._reference_audit_var.get()
+        profiles = self._selected_profiles()
 
         # Cost-confirm gate — show the estimated spend before anything is sent.
         # For an exhaustive QC run (DA-010) show the full per-stage estimate with a
@@ -731,7 +828,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         threading.Thread(
             target=self._worker,
             args=(pdfs, focus, qc_markups, markup_verified_only, reference_audit,
-                  ink_rejected),
+                  ink_rejected, profiles),
             daemon=True,
         ).start()
 
@@ -743,6 +840,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         markup_verified_only: bool = False,
         reference_audit: bool = False,
         ink_rejected: bool = False,
+        profiles: list[str] | None = None,
     ) -> None:
         try:
             ctx = extract_drawing_context(
@@ -759,6 +857,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 qc_markups=qc_markups,
                 markup_verified_only=markup_verified_only,
                 ink_rejected=ink_rejected,
+                profiles=profiles or None,
             )
         except Exception as exc:  # noqa: BLE001 - surface any unexpected failure
             self.after(0, lambda e=exc: self._on_error(str(e)))

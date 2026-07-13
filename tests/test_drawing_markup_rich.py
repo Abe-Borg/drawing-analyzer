@@ -216,6 +216,120 @@ def test_check_citations_no_refs_is_a_noop():
 
 
 # --------------------------------------------------------------------------- #
+# Claim-completeness (Phase 24 §16.5, DA-017)
+# --------------------------------------------------------------------------- #
+
+import re as _re  # noqa: E402
+
+
+class _PerClaimClient:
+    """A content-aware fake: echoes each claim handle in the request with a status.
+
+    ``status_for(handle, request_index)`` decides the per-claim verdict, so a test
+    can return mixed SUPPORTS/MISMATCH within one request or vary by request.
+    """
+
+    def __init__(self, status_for):
+        self._status_for = status_for
+        self.captured: list[dict] = []
+        outer = self
+
+        class _Msgs:
+            def create(self, **kw):  # noqa: ANN001, ANN202
+                idx = len(outer.captured)
+                outer.captured.append(kw)
+                body = kw["messages"][0]["content"]
+                handles = _re.findall(r"\[(C\d+)\]", body)
+                entries = [
+                    {"claim": h, "status": outer._status_for(h, idx), "note": "n"}
+                    for h in handles
+                ]
+                text = "searched...\n```json\n" + json.dumps(
+                    {"assessments": entries, "edition_notes": "e"}
+                ) + "\n```"
+                return FakeMessage(
+                    content=[FakeTextBlock(text=text)],
+                    usage=FakeUsage(input_tokens=200, output_tokens=40),
+                )
+
+        self.messages = _Msgs()
+
+
+def test_check_citations_checks_every_claim_no_truncation():
+    # DA-017: five distinct claims sharing one reference are ALL sent (no
+    # finding_texts[:3] drop) and every finding gets a verdict.
+    ref = "NFPA 13 §8.1.2"
+    fs = [_f(f"claim number {i}", refs=[ref]) for i in range(5)]
+    client = _PerClaimClient(lambda h, i: "CHECKED_SUPPORTS")
+    res = check_citations(fs, [], client=client, sleep=lambda *_: None)
+    assert len(client.captured) == 1          # five claims fit in one request
+    body = client.captured[0]["messages"][0]["content"]
+    for i in range(5):
+        assert f"claim number {i}" in body     # none truncated away
+    assert all(f.citation.status == "CHECKED_SUPPORTS" for f in fs)
+    assert res.partial is False
+
+
+def test_check_citations_mixed_verdicts_are_claim_specific():
+    # DA-017: two different claims under one reference keep their own verdicts.
+    ref = "NFPA 13 Table 13.2.1"
+    f_ok = _f("sprinkler count is fine", refs=[ref])
+    f_bad = _f("density is wrong", refs=[ref])
+    client = _PerClaimClient(
+        lambda h, i: "CHECKED_SUPPORTS" if h == "C1" else "CHECKED_MISMATCH"
+    )
+    res = check_citations([f_ok, f_bad], [], client=client, sleep=lambda *_: None)
+    assert f_ok.citation.status == "CHECKED_SUPPORTS"
+    assert f_bad.citation.status == "CHECKED_MISMATCH"
+    assert len(f_ok.citations) == 1 and f_ok.citations[0].reference == ref
+    # The reference's dominant verdict counts as one mismatch (mismatch dominates).
+    assert res.mismatches == 1 and res.supports == 0
+
+
+def test_check_citations_verdict_only_covers_the_request_that_included_the_claim(monkeypatch):
+    # DA-017 core: a finding's verdict comes from the request that actually
+    # contained its claim — never one that omitted it. Force a chunk boundary.
+    import drawing_analyzer.citation_check as C
+    monkeypatch.setattr(C, "_MAX_CLAIMS_PER_REQUEST", 2)
+    ref = "NFPA 13 §19.2"
+    fs = [_f(f"distinct claim {i}", refs=[ref]) for i in range(3)]
+    client = _PerClaimClient(lambda h, i: "CHECKED_SUPPORTS")
+    res = C.check_citations(fs, [], client=client, sleep=lambda *_: None)
+    assert len(client.captured) == 2          # 3 claims / 2 per request → 2 requests
+    assert res.partial is False
+    # Each finding's assessment names the request that carried its own claim, and
+    # that request's captured body contains the finding's text.
+    bodies = [kw["messages"][0]["content"] for kw in client.captured]
+    for f in fs:
+        a = f.citations[0]
+        which = int(a.request_id.split("-")[-1])
+        assert f.text in bodies[which]
+
+
+def test_check_citations_multi_reference_finding_keeps_each_assessment():
+    f = _f("cites two codes", refs=["NFPA 13 §8.1", "IBC 903.3"])
+    client = _PerClaimClient(
+        lambda h, i: "CHECKED_MISMATCH" if i == 1 else "CHECKED_SUPPORTS"
+    )
+    check_citations([f], [], client=client, sleep=lambda *_: None)
+    # DA-017: per-reference assessments are retained, not collapsed into one status.
+    assert len(f.citations) == 2
+    refs = {a.reference: a.status for a in f.citations}
+    assert refs == {"NFPA 13 §8.1": "CHECKED_SUPPORTS", "IBC 903.3": "CHECKED_MISMATCH"}
+    # The combined summary reports the dominant (mismatch) reference, attributed.
+    assert f.citation.status == "CHECKED_MISMATCH"
+    assert "IBC 903.3" in f.citation.note
+
+
+def test_check_citations_garbled_reply_marks_partial():
+    f = _f("cites", refs=["CMC 310"])
+    client = _CitationClient(["no json here at all"])
+    res = check_citations([f], [], client=client, sleep=lambda *_: None)
+    assert res.unchecked == 1 and res.partial is True
+    assert f.citation.status == "UNCHECKED"
+
+
+# --------------------------------------------------------------------------- #
 # PDF-writing pieces (need PyMuPDF)
 # --------------------------------------------------------------------------- #
 

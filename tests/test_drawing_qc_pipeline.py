@@ -105,8 +105,12 @@ def test_full_qc_chain(tmp_path):
     f = ctx.findings[0]
     assert f.anchor.status == "EXACT" and f.anchor.rect_pdf is not None
     assert f.verification.status == "VERIFIED"
-    assert f.verification.evidence_png.startswith("evidence/")
-    assert (tmp_path / "qc" / "evidence" / f"{f.id}.png").exists()
+    # DA-016: evidence lives in a per-QC-ID directory with a full artifact record
+    # and a request.json trail (byte-exact, hashed) — not a flat <id>.png.
+    assert f.verification.evidence_png.startswith(f"evidence/{f.qc_id}/")
+    assert len(f.verification.evidence) == 1
+    assert (tmp_path / "qc" / f.verification.evidence_png).exists()
+    assert (tmp_path / "qc" / "evidence" / f.qc_id / "request.json").exists()
     assert client.verify_calls == 1
 
     # Reference finding: the stale M-999 pointer, deterministic (never verified).

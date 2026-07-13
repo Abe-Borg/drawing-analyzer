@@ -467,8 +467,18 @@ def _annot_content(
         lines.append(f"Sources: {provenance_label(sources)}")
     if not getattr(finding, "reproduced", True):
         lines.append("Reproduced: no (seen in a single read)")
-    if v is not None and v.evidence_png:
-        lines.append(f"Evidence: {v.evidence_png}")
+    if v is not None:
+        # DA-016: list every saved crop (one per leg of a cross-sheet conflict),
+        # not only the first — the popup's evidence references must be complete.
+        rels = [
+            (getattr(a, "relative_path", "") or "").strip()
+            for a in (getattr(v, "evidence", None) or [])
+        ]
+        rels = [r for r in rels if r] or ([v.evidence_png] if v.evidence_png else [])
+        if len(rels) == 1:
+            lines.append(f"Evidence: {rels[0]}")
+        elif rels:
+            lines.append("Evidence: " + "; ".join(rels))
     lines.append(f"Finding ID: {finding.id}")
     content = "\n".join(lines)
     trust = "[REJECTED] " if rejected else ("[UNVERIFIED] " if unverified else "")

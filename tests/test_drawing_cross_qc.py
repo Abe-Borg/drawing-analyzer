@@ -6,7 +6,9 @@ PyMuPDF and are gated at the bottom.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -15,7 +17,7 @@ from drawing_analyzer import cross_qc as X
 from drawing_analyzer.anchor import resolve_conflict_legs
 from drawing_analyzer.cross_qc import cross_sheet_qc, cross_qc_system_prompt
 from drawing_analyzer.digest import SheetDigest
-from drawing_analyzer.models import ConflictLeg, Finding, SheetGeometry, SheetRef
+from drawing_analyzer.models import ConflictLeg, Finding, SheetGeometry, SheetRef, source_page_key
 from tests.fixtures.fake_anthropic import FakeMessage, FakeTextBlock, FakeUsage
 
 _NOOP = lambda *_a, **_k: None  # noqa: E731
@@ -183,7 +185,124 @@ def test_promotes_first_resolvable_leg_when_primary_unknown():
     assert [l.source_name for l in f.also_on] == ["b.pdf"]
 
 
+def _geom_txt(source, sid, text):
+    """A geometry whose text layer is set explicitly (so a quote can be grounded)."""
+    ref = SheetRef(pdf_path=Path(source), page_index=0, source_name=source, page_count=1)
+    return SheetGeometry(
+        ref=ref, page_width_pt=W, page_height_pt=H, rows=2, cols=2,
+        words=[_w(W - 300, H - 160, sid)],
+        sheet_text=f"{sid} title. {text} sheet text layer",
+    )
+
+
+class _MapReconcileClient:
+    """Content-aware fake for the sharded map→reconcile path.
+
+    Map calls (handle-labeled shard prompts) emit one grounded fact per sheet handle
+    present; the reconcile call (its own system prompt) returns a seeded conflict
+    between two sheets that live in DIFFERENT shards — the exact case the old
+    shard-and-union path silently missed.
+    """
+
+    def __init__(self, reconcile_finding):
+        self.map_calls = 0
+        self.reconcile_calls = 0
+        self._reconcile_finding = reconcile_finding
+        outer = self
+
+        class _Msgs:
+            def create(self, **kw):  # noqa: ANN001, ANN202
+                system = kw.get("system", "")
+                body = kw["messages"][0]["content"][0]["text"]
+                if system.startswith(X.CROSS_QC_RECONCILE_SYSTEM_PROMPT[:60]):
+                    outer.reconcile_calls += 1
+                    obj = {"findings": [outer._reconcile_finding], "claims": []}
+                else:
+                    outer.map_calls += 1
+                    handles = re.findall(r"SHEET (S\d+)", body)
+                    facts = [{
+                        "sheet_handle": h, "entity_or_tag": "COLO", "attribute": "serves",
+                        "value": "area", "exact_quote": "sheet text layer", "context": "note",
+                    } for h in handles]
+                    obj = {"findings": [], "claims": [], "facts": facts}
+                return FakeMessage(
+                    content=[FakeTextBlock(text="```json\n" + json.dumps(obj) + "\n```")],
+                    usage=FakeUsage(input_tokens=800, output_tokens=60),
+                )
+
+        self.messages = _Msgs()
+
+
+def test_large_set_maps_then_reconciles_across_shards():
+    # DA-015: a >40-sheet set shards by discipline (2 shards), and a conflict whose
+    # two sheets fall in DIFFERENT shards is found by the reconciliation call — the
+    # old shard-and-union path made no reconciliation call and missed it entirely.
+    sheets, geoms = [], []
+    sheets.append(_digest("f0.pdf"))
+    geoms.append(_geom_txt("f0.pdf", "F-D-00-1", "COLO 5 SERVES AREA A."))
+    for i in range(1, 21):                                # 20 more F sheets → shard "f" (21)
+        sheets.append(_digest(f"f{i}.pdf"))
+        geoms.append(_geom(f"f{i}.pdf", f"F-D-{i:02d}-1"))
+    sheets.append(_digest("m0.pdf"))
+    geoms.append(_geom_txt("m0.pdf", "M-D-00-1", "COLO 1 SERVES AREA A."))
+    for i in range(1, 21):                                # 20 more M sheets → shard "m" (21)
+        sheets.append(_digest(f"m{i}.pdf"))
+        geoms.append(_geom(f"m{i}.pdf", f"M-D-{i:02d}-1"))
+    assert len(sheets) == 42                              # > 40 → sharded path
+
+    # The reconciler names sheets by opaque handle: S001 = F-D-00-1 (first entry),
+    # S022 = M-D-00-1 (22nd entry). The seeded conflict crosses the two shards.
+    reconcile_finding = {
+        "sheet_handle": "S001", "category": "conflict", "severity": "high",
+        "text": "COLO 5 on F-D-00-1 conflicts with COLO 1 on M-D-00-1.",
+        "source_quote": "COLO 5 SERVES AREA A",
+        "also_on": [{"sheet_handle": "S022", "source_quote": "COLO 1 SERVES AREA A"}],
+    }
+    client = _MapReconcileClient(reconcile_finding)
+    res = cross_sheet_qc(sheets, geoms, client=client, max_retries=0, sleep=_NOOP)
+
+    assert client.map_calls == 2 and client.reconcile_calls == 1   # 2 shards + reconcile
+    assert res.shards_planned == 2 and res.shards_completed == 2
+    assert res.reconciliation_required and res.reconciliation_completed
+    assert res.complete is True and res.error is None
+    # The cross-shard conflict resolves BOTH legs to their real, distinct sources.
+    conflicts = [f for f in res.findings if f.also_on]
+    assert len(conflicts) == 1
+    c = conflicts[0]
+    # Both legs resolve to their real, distinct sources (via opaque handle → host).
+    assert c.source_name == "f0.pdf" and c.also_on[0].source_name == "m0.pdf"
+    assert source_page_key(c) != source_page_key(c.also_on[0])
+
+
+def test_reconcile_drops_ungrounded_cross_shard_quote():
+    # §16.1: an ungrounded quote (not in the referenced sheet's text) never becomes
+    # a trusted dual-anchor finding, even if the model asserts the handle.
+    sheets, geoms = [], []
+    sheets.append(_digest("f0.pdf"))
+    geoms.append(_geom_txt("f0.pdf", "F-D-00-1", "REAL NOTE ON F0."))
+    for i in range(1, 21):
+        sheets.append(_digest(f"f{i}.pdf"))
+        geoms.append(_geom(f"f{i}.pdf", f"F-D-{i:02d}-1"))
+    sheets.append(_digest("m0.pdf"))
+    geoms.append(_geom_txt("m0.pdf", "M-D-00-1", "REAL NOTE ON M0."))
+    for i in range(1, 21):
+        sheets.append(_digest(f"m{i}.pdf"))
+        geoms.append(_geom(f"m{i}.pdf", f"M-D-{i:02d}-1"))
+
+    hallucinated = {
+        "sheet_handle": "S001", "category": "conflict", "severity": "high",
+        "text": "fabricated conflict",
+        "source_quote": "THIS QUOTE IS NOT ON F0 AT ALL",
+        "also_on": [{"sheet_handle": "S022", "source_quote": "NOR IS THIS ON M0"}],
+    }
+    client = _MapReconcileClient(hallucinated)
+    res = cross_sheet_qc(sheets, geoms, client=client, max_retries=0, sleep=_NOOP)
+    assert [f for f in res.findings if f.also_on] == []     # ungrounded → dropped
+
+
 def test_large_set_shards_by_discipline():
+    # No facts emitted → nothing to reconcile (vacuously complete); the two shards
+    # still each get one map call.
     sheets, geoms = [], []
     for i in range(45):                                  # one discipline, over the 40 cap
         src = f"f{i}.pdf"
@@ -191,7 +310,23 @@ def test_large_set_shards_by_discipline():
         geoms.append(_geom(src, f"F-D-{i:02d}-1"))
     client = _CrossClient([[]])
     res = cross_sheet_qc(sheets, geoms, client=client, max_retries=0, sleep=_NOOP)
-    assert client.calls == 2 and res.skipped is False    # 45 → chunks of 40 → 2 calls
+    assert client.calls == 2 and res.skipped is False    # 45 → chunks of 40 → 2 map calls
+    assert res.shards_planned == 2 and res.shards_completed == 2
+
+
+def test_text_budget_is_loss_aware_not_silent():
+    # DA-028: an over-long text layer is capped, but the omission is COUNTED and
+    # surfaced (budget_degraded / text_chars_omitted) — never a silent slice.
+    big = "X" * 9000
+    res = cross_sheet_qc(
+        [_digest("a.pdf"), _digest("b.pdf")],
+        [_geom_txt("a.pdf", "F-D-01-1", big), _geom("b.pdf", "F-A-01-1")],
+        client=_CrossClient([[]]), max_retries=0, sleep=_NOOP,
+    )
+    assert res.budget_degraded is True
+    assert res.text_chars_omitted > 0
+    assert res.text_chars_included + res.text_chars_omitted == res.text_chars_total
+    assert res.complete is False           # a degraded budget holds the pass at PARTIAL
 
 
 def test_dedup_keeps_distinct_conflicts_sharing_a_primary_quote():
@@ -414,6 +549,20 @@ def test_pipeline_dual_crop_verify_clouds_under_default_gating(tmp_path):
     assert conflict.verification.evidence_png.startswith("evidence/")
     # The verify call carried a crop for EACH sheet (dual crop), not just one.
     assert client.verify_calls == 1 and client.verify_image_counts == [2]
+    # DA-016: the evidence trail preserves EVERY leg crop, in request order, byte
+    # for byte (each recorded sha256 = the hash of the file actually on disk), plus
+    # a request.json — not just the primary crop.
+    ev = conflict.verification.evidence
+    assert len(ev) == 2 and [a.leg_index for a in ev] == [0, 1]
+    assert [a.request_order for a in ev] == [1, 2]
+    qc_root = tmp_path / "qc"
+    for a in ev:
+        saved = qc_root / a.relative_path
+        assert saved.exists()
+        assert hashlib.sha256(saved.read_bytes()).hexdigest() == a.sha256
+    assert (qc_root / "evidence" / conflict.qc_id / "request.json").exists()
+    # Distinct source ids on the two legs so evidence never cross-contaminates.
+    assert ev[0].source_id and ev[1].source_id and ev[0].source_id != ev[1].source_id
     # Clouded on BOTH sheets under the default (verified-only) gate — a cloud
     # plus its QC tag on each sheet (Phase 15).
     assert {p.name for p in ctx.reviewed_pdf_paths} == {"F-D-01-1_reviewed.pdf", "F-A-01-1_reviewed.pdf"}

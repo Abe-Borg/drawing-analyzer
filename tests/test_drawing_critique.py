@@ -914,12 +914,33 @@ def test_pipeline_critique_applies_selected_profile(tmp_path, monkeypatch):
     monkeypatch.setenv("DRAWING_ANALYZER_PROFILES_DIR", str(tmp_path / "no_user"))  # builtins only
     src = _make_pdf(tmp_path / "F-D-01-1.pdf")
     client = _PipelineClient()
-    extract_drawing_context(
+    ctx = extract_drawing_context(
         [src], client=client, rows=2, cols=2, critique=True, qc_markups=True,
         profiles=["fire-protection"], qc_work_dir=tmp_path / "qc",
     )
     assert client.critique_calls == 2                 # self-consistency still runs twice
     assert client.critique_had_checklist is True       # the FP checklist rode into the prompt
+    # §16.4: the selected profile is snapshotted at Analyze time (name/version/hash)
+    # and the profile-application stage is COMPLETE.
+    assert [s.name for s in ctx.profile_snapshots] == ["fire-protection"]
+    assert ctx.profile_snapshots[0].content_hash and ctx.profile_snapshots[0].source == "builtin"
+    stages = {s.stage: s.status for s in ctx.stage_results}
+    assert stages.get("profiles") == "COMPLETE"
+
+
+def test_pipeline_unresolved_profile_is_partial(tmp_path, monkeypatch):
+    # §16.4 / §3.3: a selected profile that cannot be resolved (missing/unreadable)
+    # makes the profile-application stage PARTIAL — not a silent drop.
+    monkeypatch.setenv("DRAWING_ANALYZER_PROFILES_DIR", str(tmp_path / "no_user"))
+    src = _make_pdf(tmp_path / "F-D-01-1.pdf")
+    client = _PipelineClient()
+    ctx = extract_drawing_context(
+        [src], client=client, rows=2, cols=2, critique=True, qc_markups=True,
+        profiles=["fire-protection", "does-not-exist"], qc_work_dir=tmp_path / "qc",
+    )
+    stages = {s.stage: s.status for s in ctx.stage_results}
+    assert stages.get("profiles") == "PARTIAL"
+    assert [s.name for s in ctx.profile_snapshots] == ["fire-protection"]
 
 
 def test_pipeline_profiles_ignored_without_critique(tmp_path):

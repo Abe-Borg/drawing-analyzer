@@ -509,32 +509,114 @@ class Anchor:
 
 
 @dataclass
+class EvidenceArtifact:
+    """One crop the verifier actually saw, preserved byte-for-byte (Phase 24 §6.6).
+
+    The evidence trail must contain *every* crop sent to a verify call, in send
+    order, exactly as sent (DA-016): the pass renders a crop once, saves those
+    bytes, hashes those bytes, and sends those same bytes — so ``sha256`` is the
+    hash of the file on disk *and* of the image the model judged. ``leg_index`` is
+    ``0`` for a single-crop finding / a conflict's primary and ``1..`` for each
+    ``also_on`` leg; ``request_order`` is the crop's position in the request.
+    ``relative_path`` is run-relative (e.g. ``evidence/QC-041/leg-01__M-101_p1.png``)
+    so the manifest/report stay portable — no absolute path.
+    """
+
+    evidence_id: str = ""
+    qc_id: str = ""
+    leg_index: int = 0
+    source_id: str = ""
+    source_name: str = ""
+    page_index: int = 0
+    canonical_anchor_rect: list[float] | None = None
+    crop_rect: list[float] | None = None
+    dpi: int = 0
+    request_order: int = 0
+    relative_path: str = ""
+    sha256: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "evidence_id": self.evidence_id,
+            "qc_id": self.qc_id,
+            "leg_index": self.leg_index,
+            "source_id": self.source_id,
+            "source_name": self.source_name,
+            "page_index": self.page_index,
+            "canonical_anchor_rect": list(self.canonical_anchor_rect)
+            if self.canonical_anchor_rect is not None else None,
+            "crop_rect": list(self.crop_rect) if self.crop_rect is not None else None,
+            "dpi": self.dpi,
+            "request_order": self.request_order,
+            "relative_path": self.relative_path,
+            "sha256": self.sha256,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "EvidenceArtifact":
+        car = d.get("canonical_anchor_rect")
+        cr = d.get("crop_rect")
+        return cls(
+            evidence_id=str(d.get("evidence_id", "") or ""),
+            qc_id=str(d.get("qc_id", "") or ""),
+            leg_index=int(d.get("leg_index", 0) or 0),
+            source_id=str(d.get("source_id", "") or ""),
+            source_name=str(d.get("source_name", "") or ""),
+            page_index=int(d.get("page_index", 0) or 0),
+            canonical_anchor_rect=[float(v) for v in car] if car else None,
+            crop_rect=[float(v) for v in cr] if cr else None,
+            dpi=int(d.get("dpi", 0) or 0),
+            request_order=int(d.get("request_order", 0) or 0),
+            relative_path=str(d.get("relative_path", "") or ""),
+            sha256=str(d.get("sha256", "") or ""),
+        )
+
+
+@dataclass
 class Verification:
     """The verification verdict for a finding (filled by the verify pass).
 
     ``DETERMINISTIC`` marks a finding produced by an offline auditor that never
     hit the API (a reference/arithmetic/naming check); such findings are trusted
-    without a model re-check. ``evidence_png`` is a run-relative path to the crop
-    the verifier saw (empty for deterministic findings, which have none).
+    without a model re-check. ``evidence`` is the full ordered list of
+    :class:`EvidenceArtifact` crops the verifier saw — one for a single-crop
+    finding, one per included leg for a cross-sheet conflict (DA-016).
+    ``evidence_png`` is retained as a back-compat alias to the **first**
+    artifact's run-relative path (§21.5 migration; new consumers read ``evidence``).
     """
 
     status: str = "SKIPPED"             # one of VERIFICATION_STATUSES
     note: str = ""
     evidence_png: str = ""
+    evidence: list["EvidenceArtifact"] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        # Keep the legacy scalar alias in sync with the artifact list: it always
+        # points at the first saved crop, so existing popup/report/CSV consumers
+        # that read ``evidence_png`` keep working unchanged.
+        if self.evidence and not self.evidence_png:
+            self.evidence_png = self.evidence[0].relative_path
 
     def to_dict(self) -> dict:
         return {
             "status": self.status,
             "note": self.note,
             "evidence_png": self.evidence_png,
+            "evidence": [a.to_dict() for a in self.evidence],
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "Verification":
+        evidence = [
+            EvidenceArtifact.from_dict(a)
+            for a in (d.get("evidence") or [])
+            if isinstance(a, dict)
+        ]
         return cls(
             status=d.get("status", "SKIPPED"),
             note=d.get("note", ""),
             evidence_png=d.get("evidence_png", ""),
+            evidence=evidence,
         )
 
 
@@ -616,6 +698,66 @@ class Citation:
         )
 
 
+# Per-claim citation verdict statuses. ``UNRESOLVABLE`` marks a reference the
+# checker could not evaluate at all; ``UNCHECKED`` a claim whose request/parser
+# failed. Both make the citation stage PARTIAL but never downgrade the finding.
+CITATION_ASSESSMENT_STATUSES = (
+    "CHECKED_SUPPORTS", "CHECKED_MISMATCH", "UNCHECKED", "UNRESOLVABLE",
+)
+
+
+@dataclass
+class CitationAssessment:
+    """One reference's verdict for the exact claim(s) it was checked against (§6.5).
+
+    DA-017: a citation verdict may attach to a finding ONLY if that finding's claim
+    was included in the request that produced it. ``claim_finding_ids`` is the set
+    of findings whose claim (their ``text``) was sent in ``request_id``; the verdict
+    therefore covers those findings and no others. A finding with several references
+    keeps one assessment *per reference* rather than collapsing them into one
+    ambiguous status. ``adopted_edition`` is the set's stated basis (harvested
+    offline); ``current_edition`` / ``edition_notes`` carry the model's renumbering
+    findings; ``sources`` are the web-search citations backing the verdict.
+    """
+
+    reference: str
+    status: str = "UNCHECKED"           # one of CITATION_ASSESSMENT_STATUSES
+    claim_finding_ids: list[str] = field(default_factory=list)
+    note: str = ""
+    edition_notes: str = ""
+    adopted_edition: str = ""
+    current_edition: str = ""
+    sources: list[str] = field(default_factory=list)
+    request_id: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "reference": self.reference,
+            "status": self.status,
+            "claim_finding_ids": list(self.claim_finding_ids),
+            "note": self.note,
+            "edition_notes": self.edition_notes,
+            "adopted_edition": self.adopted_edition,
+            "current_edition": self.current_edition,
+            "sources": list(self.sources),
+            "request_id": self.request_id,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "CitationAssessment":
+        return cls(
+            reference=str(d.get("reference", "") or ""),
+            status=str(d.get("status", "UNCHECKED") or "UNCHECKED"),
+            claim_finding_ids=[str(x) for x in (d.get("claim_finding_ids") or [])],
+            note=str(d.get("note", "") or ""),
+            edition_notes=str(d.get("edition_notes", "") or ""),
+            adopted_edition=str(d.get("adopted_edition", "") or ""),
+            current_edition=str(d.get("current_edition", "") or ""),
+            sources=[str(x) for x in (d.get("sources") or [])],
+            request_id=str(d.get("request_id", "") or ""),
+        )
+
+
 @dataclass
 class Finding:
     """One QC finding: a single reviewable issue anchored to a sheet.
@@ -674,6 +816,10 @@ class Finding:
     verification: Verification = field(default_factory=Verification)
     qc_id: str = ""                     # "QC-001" … (assigned by assign_qc_ids)
     citation: Citation | None = None    # web-search citation check (Phase 15)
+    # Per-reference, claim-complete citation assessments (Phase 24 §16.5, DA-017).
+    # Each entry is one reference's verdict for the exact claim it was checked
+    # against; ``citation`` above is the derived back-compat summary over these.
+    citations: list["CitationAssessment"] = field(default_factory=list)
     sources: list[str] = field(default_factory=list)  # provenance tags (Part III)
     # Verbatim quotes from *other* members merged into this entry (Phase 20 §12.2).
     # The grounded fields (``text`` / ``category`` / ``source_quote`` / ``tile`` /
@@ -718,6 +864,7 @@ class Finding:
             "prose_item_ids": list(self.prose_item_ids),
             "anchor": self.anchor.to_dict(),
             "verification": self.verification.to_dict(),
+            "citations": [a.to_dict() for a in self.citations],
         }
         if self.citation is not None:
             out["citation"] = self.citation.to_dict()
@@ -753,6 +900,11 @@ class Finding:
             verification=Verification.from_dict(d.get("verification") or {}),
             qc_id=d.get("qc_id", "") or "",
             citation=Citation.from_dict(d["citation"]) if isinstance(d.get("citation"), dict) else None,
+            citations=[
+                CitationAssessment.from_dict(a)
+                for a in (d.get("citations") or [])
+                if isinstance(a, dict)
+            ],
             id=d.get("id", ""),
         )
 
@@ -1159,6 +1311,34 @@ class StageResult:
             "items_out": self.items_out,
             "errors": list(self.errors),
             "warnings": list(self.warnings),
+        }
+
+
+@dataclass(frozen=True)
+class ProfileSnapshot:
+    """An immutable record of a review profile as it was at Analyze time (§16.4).
+
+    Captured once when the run starts so the run manifest and the report can show
+    exactly which profile (name + version + content hash + source) was injected,
+    and so a later edit / disappearance of the on-disk profile can be detected. No
+    absolute path leaves here — ``source`` is ``"builtin"`` / ``"user"`` only.
+    """
+
+    name: str
+    title: str = ""
+    version: str = "0"
+    content_hash: str = ""
+    source: str = ""                    # "builtin" | "user" | ""
+    disciplines: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "title": self.title,
+            "version": self.version,
+            "content_hash": self.content_hash,
+            "source": self.source,
+            "disciplines": list(self.disciplines),
         }
 
 

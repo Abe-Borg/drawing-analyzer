@@ -159,9 +159,19 @@ def test_discipline_hint():
     assert P.discipline_hint("101") == "" and P.discipline_hint("") == ""
 
 
+def test_discipline_hint_is_project_prefix_aware():
+    # DA-018: a project-coded id must yield the discipline segment (F), not the
+    # leading project code (AVC). Regression for the exact defect.
+    assert P.discipline_hint("AVC10-F-D-01-1") == "f"
+    assert P.discipline_hint("FP101") == "fp"
+
+
 def test_suggest_profiles_by_discipline():
     assert [p.name for p in P.suggest_profiles(["F-D-01-1", "F-G-02-0"])] == ["fire-protection"]
     assert [p.name for p in P.suggest_profiles(["F101", "FP201"])] == ["fire-protection"]
+    # DA-018: FP101, F-D-01-1, and AVC10-F-D-01-1 all suggest fire protection.
+    assert [p.name for p in P.suggest_profiles(["FP101"])] == ["fire-protection"]
+    assert [p.name for p in P.suggest_profiles(["AVC10-F-D-01-1"])] == ["fire-protection"]
     assert P.suggest_profiles(["M-101", "E-201"]) == []       # no mechanical/electrical profile
     assert P.suggest_profiles([]) == []
 
@@ -196,6 +206,61 @@ def test_build_checklist_prompt():
     assert all(f"- {it}" in block for it in items)
     assert P.build_checklist_prompt([]) == ""
     assert P.build_checklist_prompt(["  ", ""]) == ""       # blank items → empty
+
+
+# --------------------------------------------------------------------------- #
+# Selection resolution + snapshots (Phase 24 §16.4)
+# --------------------------------------------------------------------------- #
+
+
+def test_resolve_profile_selection_manual_choice_wins():
+    # Applicable suggestions are on by default...
+    assert P.resolve_profile_selection(["fire-protection"]) == ["fire-protection"]
+    # ...a deselected suggestion stays off even when re-suggested (survives refresh)...
+    assert P.resolve_profile_selection(
+        ["fire-protection"], user_deselected=["fire-protection"]
+    ) == []
+    # ...and an explicit selection adds a profile the preflight did not suggest.
+    assert P.resolve_profile_selection(
+        ["fire-protection"], user_selected=["mechanical"]
+    ) == ["fire-protection", "mechanical"]
+    # No duplicates when a name is both suggested and selected.
+    assert P.resolve_profile_selection(
+        ["fire-protection"], user_selected=["fire-protection"]
+    ) == ["fire-protection"]
+
+
+def test_snapshot_profiles_captures_version_hash_and_source():
+    fp = P.get_profile("fire-protection")
+    (snap,) = P.snapshot_profiles([fp])
+    assert snap.name == "fire-protection" and snap.version == fp.version
+    assert snap.content_hash == fp.content_hash and len(snap.content_hash) == 16
+    assert snap.source == "builtin"          # ships inside the package
+    assert "f" in snap.disciplines
+
+
+def test_snapshot_marks_user_profiles(_empty_user_dir):
+    (_empty_user_dir / "mine.md").write_text(
+        "---\nname: my-mech\nversion: 2\ndisciplines: M\n---\n- check\n", encoding="utf-8"
+    )
+    prof = P.get_profile("my-mech")
+    (snap,) = P.snapshot_profiles([prof])
+    assert snap.source == "user" and snap.version == "2"
+
+
+def test_preflight_suggests_profiles_without_rasterizing(tmp_path):
+    # §16.4: a cheap text-only preflight detects the title-block sheet id and
+    # auto-suggests a profile — no overview/tile rasterization needed.
+    pymupdf = pytest.importorskip("pymupdf")
+    path = tmp_path / "F-D-01-1.pdf"
+    doc = pymupdf.open()
+    page = doc.new_page(width=792, height=612)
+    page.insert_text((80, 120), "SPRINKLER PLAN")
+    page.insert_text((650, 560), "F-D-01-1")          # title-block sheet id (bottom-right)
+    doc.save(str(path))
+    doc.close()
+    assert P.preflight_sheet_ids([path]) == ["F-D-01-1"]
+    assert [p.name for p in P.suggest_profiles_for_paths([path])] == ["fire-protection"]
 
 
 def test_chunk_items_splits_evenly_and_losslessly():

@@ -190,14 +190,30 @@ def test_verify_maps_verdicts_and_tallies(tmp_path):
     assert res.input_tokens == 200 and res.output_tokens == 40   # 4 * (50, 10)
 
 
-def test_verify_writes_evidence_png_per_finding(tmp_path):
+def test_verify_writes_evidence_artifact_per_finding(tmp_path):
+    # DA-016: each finding's crop is saved under evidence/<key>/leg-NN__<sheet>_pN.png,
+    # hashed, exposed as a full EvidenceArtifact, and accompanied by a request.json.
+    import hashlib
+    import json
+
     ev = tmp_path / "evidence"
     findings = [_finding("conf"), _finding("contra")]
     _run(findings, client=_FakeClient({"conf": '{"verdict":"CONFIRMED"}'}), evidence_dir=ev)
+    want_sha = hashlib.sha256(b"\x89PNG-crop").hexdigest()
     for f in findings:
-        assert f.verification.evidence_png == f"evidence/{f.id}.png"
-        assert (ev / f"{f.id}.png").exists()
-        assert (ev / f"{f.id}.png").read_bytes() == b"\x89PNG-crop"
+        rel = f"evidence/{f.id}/leg-00__M-101_p1.png"
+        assert f.verification.evidence_png == rel          # back-compat alias = first artifact
+        assert len(f.verification.evidence) == 1
+        art = f.verification.evidence[0]
+        assert art.relative_path == rel and art.leg_index == 0
+        assert art.sha256 == want_sha and art.page_index == 0
+        assert art.canonical_anchor_rect == [100.0, 100.0, 160.0, 114.0]
+        assert (ev / f.id / "leg-00__M-101_p1.png").read_bytes() == b"\x89PNG-crop"
+        # request.json trail names the artifact and the verdict, never a key.
+        req = json.loads((ev / f.id / "request.json").read_text())
+        assert req["artifacts"][0]["sha256"] == want_sha
+        assert req["verdict"] == f.verification.status
+        assert req["prompt_version"]
 
 
 def test_verify_no_evidence_dir_leaves_path_empty():
@@ -205,6 +221,20 @@ def test_verify_no_evidence_dir_leaves_path_empty():
     _run(findings, client=_FakeClient({"conf": '{"verdict":"CONFIRMED"}'}), evidence_dir=None)
     assert findings[0].verification.status == "VERIFIED"
     assert findings[0].verification.evidence_png == ""
+    assert findings[0].verification.evidence == []
+
+
+def test_verify_unsavable_evidence_is_not_verified(tmp_path):
+    # §16.6: a verdict may not rest on an image absent from the evidence trail —
+    # if the crop cannot be saved, the finding is SKIPPED and the model is not called.
+    ev = tmp_path / "evidence"
+    ev.write_text("not a dir")          # a FILE named 'evidence' — mkdir under it fails
+    findings = [_finding("conf")]
+    client = _FakeClient({"conf": '{"verdict":"CONFIRMED"}'})
+    res = _run(findings, client=client, evidence_dir=ev)
+    assert findings[0].verification.status == "SKIPPED"
+    assert "evidence" in findings[0].verification.note.lower()
+    assert res.skipped == 1 and client.calls == []      # never sent
 
 
 def test_verify_skips_deterministic_and_unanchored():
@@ -375,10 +405,10 @@ def test_verify_colliding_ids_get_distinct_evidence_files(tmp_path):
         evidence_dir=ev, crop_renderer=distinct_renderer, sleep=lambda _s: None,
     )
     p1, p2 = f1.verification.evidence_png, f2.verification.evidence_png
-    assert p1 == f"evidence/{f1.id}.png"
-    assert p2 == f"evidence/{f1.id}-2.png"       # disambiguated
-    assert (ev / Path(p1).name).read_bytes() == b"crop-0"
-    assert (ev / Path(p2).name).read_bytes() == b"crop-1"   # not overwritten
+    assert p1 == f"evidence/{f1.id}/leg-00__M-101_p1.png"
+    assert p2 == f"evidence/{f1.id}-2/leg-00__M-101_p1.png"       # disambiguated dir
+    assert (tmp_path / p1).read_bytes() == b"crop-0"
+    assert (tmp_path / p2).read_bytes() == b"crop-1"             # not overwritten
 
 
 def test_verify_skips_ambiguous_duplicate_basename_sheets():

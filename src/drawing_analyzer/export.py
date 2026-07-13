@@ -582,10 +582,16 @@ def write_qc_outputs(ctx: Any, folder: Path) -> list[str]:
         evidence = Path(work_dir) / "evidence"
         if evidence.is_dir():
             dest = folder / "evidence"
-            dest.mkdir(parents=True, exist_ok=True)
+            # Copy the COMPLETE nested tree (DA-016): per-QC-ID subdirs, every leg
+            # crop, and each request.json — not just the top-level PNGs. A shallow
+            # ``glob("*.png")`` silently dropped the per-leg subdirectories.
             copied = 0
-            for png in sorted(evidence.glob("*.png")):
-                shutil.copy2(png, dest / png.name)
+            for src in sorted(evidence.rglob("*")):
+                if src.is_dir():
+                    continue
+                target = dest / src.relative_to(evidence)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, target)
                 copied += 1
             if copied:
                 written.append("evidence/")
