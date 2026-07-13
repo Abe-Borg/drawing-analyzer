@@ -71,14 +71,22 @@ def _env_int(name: str, default: int) -> int:
     return default
 
 
-def _alphabet_shape(tag: str) -> tuple[str, ...]:
-    """The tag's letters, in order, uppercased — its 'alphabet shape'.
+def _cluster_key(tag: str) -> tuple[tuple[str, ...], str]:
+    """The tag's (letters, digits) identity — its meaning-preserving cluster key.
 
-    ``C1R`` and ``C1-R`` share ``("C", "R")``; ``A1-2`` and ``A2`` share ``("A",)``.
-    Two tags only cluster when their letters match, so ``C1R`` never merges with
-    ``D1R`` (a genuinely different zone) however close the edit distance.
+    Two tags cluster only when BOTH their letters (in order) AND their digit
+    content match, so a cluster contains spellings of *one* thing that differ
+    only in separators / formatting: ``C1R`` and ``C1-R`` share
+    ``(("C", "R"), "1")`` and cluster, while ``A1-2`` (``(("A",), "12")``) and
+    ``A2`` (``(("A",), "2")``) differ in digit content and do NOT merge — a
+    changed number is meaning-bearing, not a spelling drift (§17.4). ``C1R``
+    never merges with ``D1R`` (different letters) either. Digits are compared as a
+    single concatenated sequence so ``A1-2`` still matches ``A12`` (same digits,
+    a real formatting drift) but never ``A2``.
     """
-    return tuple(ch.upper() for ch in tag if ch.isalpha())
+    letters = tuple(ch.upper() for ch in tag if ch.isalpha())
+    digits = "".join(ch for ch in tag if ch.isdigit())
+    return (letters, digits)
 
 
 def _looks_like_tag(token: str) -> bool:
@@ -122,32 +130,19 @@ def _harvest(sheets: list[Any], inventory: SheetInventory) -> dict[str, _TagOccu
 
 
 def _cluster_tags(tags: list[str]) -> list[list[str]]:
-    """Connected components of same-alphabet-shape tags within edit distance ≤ 2."""
-    by_shape: dict[tuple, list[str]] = defaultdict(list)
+    """Group tags that share a (letters, digits) key — i.e. one thing spelled
+    several ways, differing only in separators / formatting (§17.4).
+
+    Same key means identical letters AND identical digit content, so no
+    edit-distance clustering is needed (or wanted): a difference in the digits
+    themselves — ``A1-2`` vs ``A2`` — lands in *different* keys and is never
+    merged. Groups are returned sorted for deterministic assembly (I-7).
+    """
+    by_key: dict[tuple, list[str]] = defaultdict(list)
     for t in tags:
-        by_shape[_alphabet_shape(t)].append(t)
-
-    clusters: list[list[str]] = []
-    for shape_tags in by_shape.values():
-        shape_tags = sorted(shape_tags)     # deterministic component building (I-7)
-        parent = {t: t for t in shape_tags}
-
-        def find(x: str) -> str:
-            while parent[x] != x:
-                parent[x] = parent[parent[x]]
-                x = parent[x]
-            return x
-
-        for i in range(len(shape_tags)):
-            for j in range(i + 1, len(shape_tags)):
-                a, b = shape_tags[i], shape_tags[j]
-                if _levenshtein(a, b) <= _EDIT_DISTANCE_MAX:
-                    parent[find(a)] = find(b)
-        comps: dict[str, list[str]] = defaultdict(list)
-        for t in shape_tags:
-            comps[find(t)].append(t)
-        clusters.extend(sorted(comps.values(), key=lambda c: c[0]))
-    return clusters
+        by_key[_cluster_key(t)].append(t)
+    clusters = [sorted(members) for members in by_key.values() if len(members) > 1]
+    return sorted(clusters, key=lambda c: c[0])
 
 
 def _drift_pairs(

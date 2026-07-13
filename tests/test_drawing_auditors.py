@@ -217,15 +217,28 @@ def test_naming_does_not_flag_a_legitimate_vocabulary():
     assert findings == []
 
 
-def test_naming_flags_odd_variant_against_established_zone():
-    # A2 is used many times; a single "A1-2" drifts from it.
+def test_naming_does_not_merge_meaningful_digit_difference():
+    # REVERSED (§17.4): A1-2 vs A2 differ in DIGIT CONTENT ("12" vs "2") — a
+    # changed number is meaning-bearing (a different zone/circuit), not a
+    # spelling drift, so the auditor must NOT flag A1-2 as a variant of A2.
     words = [_titleblock("F-D-01-1")]
     for _ in range(4):
         words.append(_w(200, 200 + 20 * len(words), "A2"))
     words.append(_w(800, 800, "A1-2"))
     findings = audit_naming([_sheet("s.pdf", 0, words)])
+    assert not any(f.source_quote == "A1-2" for f in findings)
+
+
+def test_naming_still_flags_pure_format_drift_same_digits():
+    # A tag with the SAME letters and SAME digits but different separators (A1-2
+    # vs A12) is a real formatting drift and is still flagged.
+    words = [_titleblock("F-D-01-1")]
+    for _ in range(4):
+        words.append(_w(200, 200 + 20 * len(words), "A12"))
+    words.append(_w(800, 800, "A1-2"))
+    findings = audit_naming([_sheet("s.pdf", 0, words)])
     drift = [f for f in findings if f.source_quote == "A1-2"]
-    assert len(drift) == 1 and "A2" in drift[0].text
+    assert len(drift) == 1 and "A12" in drift[0].text
 
 
 def test_naming_ignores_sheet_ids_and_bare_words():
@@ -281,6 +294,67 @@ def test_titleblock_quiet_when_no_field_is_shared():
     assert audit_titleblock(sheets) == []
 
 
+# Phase 25 §17.4 — high-confidence label→value field-class path.
+
+def _tb_labeled(source, page, sheet_id, lines):
+    """A title-block band with labelled fields. ``lines`` is a list of word lists,
+    each placed on its own y-line inside the right-edge band (x >= ~2300)."""
+    words = [_titleblock(sheet_id)]
+    y = 300
+    for line_words in lines:
+        x = 2320
+        for tok in line_words:
+            words.append(_w(x, y, tok, width=90))
+            x += 110
+        y += 40
+    return _sheet(source, page, words)
+
+
+def test_titleblock_flags_multiword_package_name_mismatch():
+    # §17.4: a multiword PACKAGE NAME that differs on one sheet is caught by the
+    # label→value path — the recurrence path (single digit-bearing tokens) can't
+    # see a bare-word name at all.
+    sheets = [
+        _tb_labeled("s.pdf", i, f"F-D-0{i}-1", [["PACKAGE", "CENTRAL", "PLANT", "UPGRADE"]])
+        for i in range(3)
+    ]
+    sheets.append(_tb_labeled("s.pdf", 3, "F-D-03-1", [["PACKAGE", "NORTH", "TOWER", "FITOUT"]]))
+    findings = audit_titleblock(sheets)
+    odd = [f for f in findings if f.page_index == 3]
+    assert len(odd) == 1
+    assert "NORTH TOWER FITOUT" in odd[0].source_quote
+    assert "CENTRAL PLANT UPGRADE" in odd[0].text
+    assert odd[0].category == "coordination" and odd[0].verification.status == "DETERMINISTIC"
+
+
+def test_titleblock_flags_substantially_different_value():
+    # §17.4: a wholly different project number (not a one-char neighbor) is caught
+    # via its label — the recurrence path only fires on edit-distance ≤2 variants.
+    sheets = [
+        _tb_labeled("s.pdf", i, f"F-D-0{i}-1", [["PROJECT", "NO.", "2021-045"]])
+        for i in range(3)
+    ]
+    sheets.append(_tb_labeled("s.pdf", 3, "F-D-03-1", [["PROJECT", "NO.", "2099-999"]]))
+    findings = audit_titleblock(sheets)
+    odd = [f for f in findings if f.page_index == 3]
+    assert len(odd) == 1 and odd[0].source_quote == "2099-999"
+    assert "2021-045" in odd[0].text
+
+
+def test_titleblock_low_confidence_labeled_field_is_telemetry_not_a_finding():
+    # §17.4: a labelled field present on too few sheets to form a consensus is
+    # telemetry, not a false deterministic markup.
+    sheets = [
+        _tb_labeled("s.pdf", 0, "F-D-01-1", [["PROJECT", "NO.", "2021-045"]]),
+        _tb_labeled("s.pdf", 1, "F-D-02-1", [["PROJECT", "NO.", "2099-999"]]),
+        _tb_sheet("s.pdf", 2, "F-D-03-1", "9999-000"),   # no label at all
+        _tb_sheet("s.pdf", 3, "F-D-04-1", "8888-000"),
+    ]
+    # Only 2 sheets carry the labelled PROJECT NO. — below the consensus floor,
+    # and the remaining project numbers neither share a value nor carry a label.
+    assert audit_titleblock(sheets) == []
+
+
 # --------------------------------------------------------------------------- #
 # Sheet-index auditor
 # --------------------------------------------------------------------------- #
@@ -317,6 +391,29 @@ def test_sheet_index_diffs_both_directions():
     assert "F-D-02-0" in texts
     missing = next(f for f in findings if "F-D-02-0" in f.text)
     assert missing.severity == "low" and missing.anchor.status == "EXACT"
+
+
+def test_sheet_index_distinguishes_malformed_entry_from_absent(monkeypatch):
+    # §17.4: an index entry that is a near-typo of a real sheet (does not match
+    # the set's convention) is surfaced as a LOW malformed-entry finding — not
+    # silently dropped, and distinct from the MEDIUM "not in the provided set".
+    words = [
+        _w(300, 200, "DRAWING"), _w(500, 200, "INDEX"),
+        _w(300, 300, "F-D-00-0"), _w(300, 340, "F-D-01-1"), _w(300, 380, "F-D-01-2"),
+        _w(300, 420, "F-D-99-9"),   # grammar-valid, absent -> "not in set" (medium)
+        _w(300, 460, "F-D-O1-1"),   # letter-O typo of F-D-01-1 -> malformed (low)
+        _titleblock("F-D-00-0"),
+    ]
+    sheets = [
+        _sheet("idx.pdf", 0, words),
+        _sheet("a.pdf", 0, [_titleblock("F-D-01-1")]),
+        _sheet("b.pdf", 0, [_titleblock("F-D-01-2")]),
+    ]
+    findings = audit_sheet_index(sheets)
+    absent = next(f for f in findings if f.source_quote == "F-D-99-9")
+    assert absent.severity == "medium" and "not present" in absent.text
+    malformed = next(f for f in findings if f.source_quote == "F-D-O1-1")
+    assert malformed.severity == "low" and "does not match" in malformed.text
 
 
 def test_sheet_index_ignored_without_a_header():
