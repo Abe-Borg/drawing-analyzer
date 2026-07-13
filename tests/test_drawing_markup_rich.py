@@ -255,9 +255,11 @@ def test_reviewed_pdf_has_tag_index_and_correct_link_targets(tmp_path):
     ]
     assign_qc_ids(findings)
     out = tmp_path / "M-101_reviewed.pdf"
-    written = annotate_pdf(src, findings, out)
+    res = annotate_pdf(src, findings, out)
+    written = res.annots_written
     assert written == 4                      # 2 clouds + 2 QC tags
     assert count_annotations(out) == written  # round-trip intact
+    assert res.coverage_status == "COMPLETE"
 
     doc = pymupdf.open(str(out))
     try:
@@ -289,7 +291,7 @@ def test_margin_callouts_stack_in_band_and_never_overlap_words(tmp_path):
     ]
     assign_qc_ids(absences)
     out = tmp_path / "M-101_reviewed.pdf"
-    written = annotate_pdf(src, absences, out, sheet_meta=_meta(words))
+    written = annotate_pdf(src, absences, out, sheet_meta=_meta(words)).annots_written
     # 3 callout boxes + 3 leader lines (tile known).
     types = count_annotations_by_type(out)
     assert types.get("FreeText") == 3 and types.get("Line") == 3
@@ -460,8 +462,11 @@ def test_rejected_not_inked_by_default_but_indexed(tmp_path):
     rejected = _f("wrong", source="M-101.pdf", rect=[10, 10, 60, 30], status="REJECTED")
     assign_qc_ids([rejected])
     out = tmp_path / "r.pdf"
-    written = annotate_pdf(src, [rejected], out, include_unverified=True)
-    assert written == 0                        # no annots drawn
+    res = annotate_pdf(src, [rejected], out, include_unverified=True)
+    assert res.annots_written == 0             # no ink drawn
+    # The rejected-index row is a proven placement — coverage is COMPLETE.
+    assert res.coverage_status == "COMPLETE"
+    assert [r.status for r in res.receipts] == ["INDEXED"]
     doc = pymupdf.open(str(out))
     try:
         assert doc.page_count == 2             # index page + source
@@ -478,7 +483,9 @@ def test_ink_rejected_draws_grey_struck_markup(tmp_path):
     rejected = _f("wrong", source="M-101.pdf", rect=[10, 10, 60, 30], status="REJECTED")
     assign_qc_ids([rejected])
     out = tmp_path / "r.pdf"
-    written = annotate_pdf(src, [rejected], out, include_unverified=True, ink_rejected=True)
+    written = annotate_pdf(
+        src, [rejected], out, include_unverified=True, ink_rejected=True
+    ).annots_written
     assert written == 2                        # grey cloud + its QC tag
     doc = pymupdf.open(str(out))
     try:
@@ -506,7 +513,7 @@ def test_unanchored_finding_gets_margin_callout_with_prefix(tmp_path):
     f.anchor = Anchor(status="UNANCHORED", method="quote_not_found")
     assign_qc_ids([f])
     out = tmp_path / "r.pdf"
-    written = annotate_pdf(src, [f], out, include_unverified=True)
+    written = annotate_pdf(src, [f], out, include_unverified=True).annots_written
     assert written == 1
     doc = pymupdf.open(str(out))
     try:

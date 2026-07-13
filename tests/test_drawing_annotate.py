@@ -87,10 +87,14 @@ def test_write_reviewed_pdf_default_gating(tmp_path):
         _finding("maybe", status="UNCERTAIN", rect=(400, 300, 520, 340)),
         _finding("page 2", status="VERIFIED", page=1),
     ]
-    out = write_reviewed_pdfs(findings, [src], tmp_path / "out")
+    res = write_reviewed_pdfs(findings, [src], tmp_path / "out")
+    out = res.reviewed_pdfs
     assert [p.name for p in out] == ["M-101_reviewed.pdf"]
-    # 2 VERIFIED + 1 DETERMINISTIC; REJECTED and UNCERTAIN excluded.
+    # 2 VERIFIED + 1 DETERMINISTIC; REJECTED (index-only) and UNCERTAIN (gated)
+    # carry no ink under the default gating. Coverage is COMPLETE because the
+    # rejected finding's index row is a proven placement (§13.5).
     assert count_annotations(out[0]) == 3
+    assert res.coverage_status == "COMPLETE"
     # The source is never modified.
     assert count_annotations(src) == 0
 
@@ -102,8 +106,9 @@ def test_include_unverified_adds_the_uncertain(tmp_path):
         _finding("maybe", status="UNCERTAIN", rect=(400, 300, 520, 340)),
         _finding("wrong", status="REJECTED", rect=(100, 300, 220, 340)),   # still excluded
     ]
-    out = write_reviewed_pdfs(findings, [src], tmp_path / "out", include_unverified=True)
-    assert count_annotations(out[0]) == 2   # verified + uncertain, not rejected
+    res = write_reviewed_pdfs(findings, [src], tmp_path / "out", include_unverified=True)
+    assert count_annotations(res.reviewed_pdfs[0]) == 2   # verified + uncertain, not rejected
+    assert res.coverage_status == "COMPLETE"
 
 
 def test_annot_info_fields_populated(tmp_path):
@@ -140,12 +145,15 @@ def test_unverified_annot_is_prefixed(tmp_path):
         doc.close()
 
 
-def test_annotate_returns_count_and_round_trips(tmp_path):
+def test_annotate_returns_result_and_round_trips(tmp_path):
     src = _make_pdf(tmp_path)
     findings = [_finding(status="VERIFIED"), _finding(status="VERIFIED", rect=(300, 200, 420, 240))]
-    n = annotate_pdf(src, findings, tmp_path / "r.pdf")
-    assert n == 2
-    assert count_annotations(tmp_path / "r.pdf") == n   # round-trip
+    res = annotate_pdf(src, findings, tmp_path / "r.pdf")
+    # ``annots_written`` is derived from the reopened receipts, not intention.
+    assert res.annots_written == 2
+    assert count_annotations(tmp_path / "r.pdf") == res.annots_written   # round-trip
+    assert res.coverage_status == "COMPLETE"
+    assert all(r.status == "WRITTEN" for r in res.receipts)
 
 
 def test_out_path_must_differ_from_source(tmp_path):
@@ -154,39 +162,52 @@ def test_out_path_must_differ_from_source(tmp_path):
         annotate_pdf(src, [_finding()], src)   # would clobber the source
 
 
-def test_finding_on_out_of_range_page_is_skipped(tmp_path):
+def test_finding_on_out_of_range_page_gets_a_failed_receipt(tmp_path):
+    # Failure-injection (§13, test 3): a placement on a non-existent page is never
+    # drawn, so reconciliation reports it FAILED — never counted as ink — and
+    # coverage is INCOMPLETE. The valid finding is still WRITTEN.
     src = _make_pdf(tmp_path, pages=1)
-    findings = [_finding("ok", status="VERIFIED", page=0),
-                _finding("nope", status="VERIFIED", page=9)]   # page 9 doesn't exist
-    n = annotate_pdf(src, findings, tmp_path / "r.pdf")
-    assert n == 1
+    findings = [_finding("ok", status="VERIFIED", page=0, quote="ok-q"),
+                _finding("nope", status="VERIFIED", page=9, quote="nope-q")]  # page 9 doesn't exist
+    res = annotate_pdf(src, findings, tmp_path / "r.pdf")
+    assert res.annots_written == 1
+    assert res.coverage_status == "INCOMPLETE"
+    failed = [r for r in res.receipts if r.status == "FAILED"]
+    assert len(failed) == 1 and failed[0].placement.page_index == 9
 
 
-def test_no_reviewed_pdf_when_no_qc_content(tmp_path):
-    # Under §18's exhaustive default an UNCERTAIN finding is inked (dashed) and a
-    # REJECTED one keeps a rejected-index entry — so only the conservative
-    # verified-only mode with no rejected findings yields no reviewed copy.
+def test_gated_and_rejected_only_sources_still_get_reviewed_copies(tmp_path):
+    # Under §18/§6.4 every ledger entry ends with a proven placement: a gated
+    # (verified-only mode) finding earns a "Not inked by operator gate" index row
+    # and a REJECTED one a rejected-index row — so each source is still written
+    # (nothing is invisible), and coverage stays COMPLETE because those index
+    # rows are reconciled placements, not intentions.
     src = _make_pdf(tmp_path)
     findings = [_finding("maybe", status="UNCERTAIN")]
-    out = write_reviewed_pdfs(
+    res = write_reviewed_pdfs(
         findings, [src], tmp_path / "out", include_unverified=False
     )
-    assert out == []   # gated, nothing rejected -> no reviewed copy
+    # Gated: the UNCERTAIN finding gets a "Not inked by operator gate" index row
+    # (a proven placement), so the source IS written — coverage COMPLETE.
+    assert len(res.reviewed_pdfs) == 1
+    assert res.coverage_status == "COMPLETE"
+    assert res.tally == {"gated": 1}
 
     # The same UNCERTAIN finding IS inked under the exhaustive default.
-    out2 = write_reviewed_pdfs(
+    res2 = write_reviewed_pdfs(
         findings, [src], tmp_path / "out2", include_unverified=True
     )
-    assert len(out2) == 1
+    assert len(res2.reviewed_pdfs) == 1
 
     # A rejected-only source still gets a reviewed copy: the index's rejected
     # section keeps it visible even though it carries no ink (§18).
     rejected_only = [_finding("wrong", status="REJECTED")]
-    out3 = write_reviewed_pdfs(
+    res3 = write_reviewed_pdfs(
         rejected_only, [src], tmp_path / "out3", include_unverified=False
     )
-    assert len(out3) == 1
-    doc = pymupdf.open(str(out3[0]))
+    assert len(res3.reviewed_pdfs) == 1
+    assert res3.coverage_status == "COMPLETE"
+    doc = pymupdf.open(str(res3.reviewed_pdfs[0]))
     try:
         assert "Rejected by verification (1)" in doc[0].get_text()
         assert sum(1 for page in doc for _ in page.annots()) == 0
@@ -222,7 +243,8 @@ def test_duplicate_stems_isolate_findings_by_source_id(tmp_path):
     sid_a = ids[str(a)]
     findings = [_finding("only-on-A", status="VERIFIED", source="M-101.pdf", source_id=sid_a)]
 
-    out = write_reviewed_pdfs(findings, [a, b], tmp_path / "out")
+    res = write_reviewed_pdfs(findings, [a, b], tmp_path / "out")
+    out = res.reviewed_pdfs
 
     # Only source A is written (B has no finding of its own), and its name is
     # disambiguated by source id, not an order-dependent _2.
@@ -245,12 +267,14 @@ def test_duplicate_stems_each_source_keeps_its_own_finding(tmp_path):
         _finding("A-issue", source="M-101.pdf", source_id=ids[str(a)], quote="AAA"),
         _finding("B-issue", source="M-101.pdf", source_id=ids[str(b)], quote="BBB"),
     ]
-    out = write_reviewed_pdfs(findings, [a, b], tmp_path / "out")
+    res = write_reviewed_pdfs(findings, [a, b], tmp_path / "out")
+    out = res.reviewed_pdfs
     names = sorted(p.name for p in out)
     assert names == [
         f"M-101__{ids[str(a)]}_reviewed.pdf",
         f"M-101__{ids[str(b)]}_reviewed.pdf",
     ]
+    assert res.coverage_status == "COMPLETE"
     # Each reviewed PDF has exactly its own one finding's ink (1 cloud each).
     for p in out:
         doc = pymupdf.open(str(p))

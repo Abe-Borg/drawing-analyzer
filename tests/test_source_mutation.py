@@ -147,8 +147,11 @@ def test_pipeline_skips_markup_for_mutated_source(tmp_path, monkeypatch):
     assert any("E-201.pdf" in e and "re-run" in e for e in ctx.errors)
     names = sorted(p.name for p in ctx.reviewed_pdf_paths)
     assert names == ["M-101_reviewed.pdf"]       # only the unchanged source
-    # The tally accounts the skipped entry honestly (not as clouded ink).
+    # The tally accounts the skipped entry honestly (not as clouded ink), and the
+    # run's markup coverage is INCOMPLETE (Phase 21): a skipped source is a FAILED
+    # placement receipt, never presented as a clean success.
     assert ctx.ledger_tally.get("mutated", 0) >= 1
+    assert ctx.coverage_status == "INCOMPLETE"
 
 
 def test_mutated_middle_source_does_not_misassign_ink(tmp_path, monkeypatch):
@@ -200,3 +203,43 @@ def test_mutated_middle_source_does_not_misassign_ink(tmp_path, monkeypatch):
     names = sorted(p.name for p in ctx.reviewed_pdf_paths)
     assert names == ["B-2_reviewed.pdf", "C-3_reviewed.pdf"]
     assert "A-1.pdf" in ctx.mutated_sources
+
+
+def test_mutated_source_with_zero_findings_is_incomplete(tmp_path, monkeypatch):
+    # A mutated source forces coverage INCOMPLETE even when the run produced NO
+    # findings (§10.6): with no finding, it emits no FAILED receipt, so coverage
+    # must be forced INCOMPLETE from mutated_sources directly — never left COMPLETE
+    # while a changed source is flagged and a re-run is required.
+    import drawing_analyzer.pipeline as pl
+    from drawing_analyzer.pipeline import extract_drawing_context
+    from drawing_analyzer.render import inspect_inputs as _real_inspect
+    from tests.fixtures.fake_anthropic import FakeMessage, FakeTextBlock, FakeUsage
+
+    good = _pdf(tmp_path / "good" / "M-101.pdf", "VAV-3 SERVES ROOM 120")
+    victim = _pdf(tmp_path / "victim" / "E-201.pdf", "PANEL LP-1 FEEDS ROOM 200")
+
+    class _EmptyClient:      # a digest that finds nothing on any sheet
+        class messages:
+            @staticmethod
+            def create(**kw):
+                return FakeMessage(
+                    content=[FakeTextBlock(text="Sheet\nprose only.\n\n```json\n{\"findings\": []}\n```")],
+                    usage=FakeUsage(input_tokens=10, output_tokens=5),
+                )
+
+    def _tampered_inspect(paths):
+        inv = _real_inspect(paths)
+        for d in inv.accepted_documents:
+            if d.display_name == "E-201.pdf":
+                d.content_sha256 = "0" * 64
+                d.byte_size = 0
+        return inv
+
+    monkeypatch.setattr(pl, "inspect_inputs", _tampered_inspect)
+    ctx = extract_drawing_context(
+        [good, victim], client=_EmptyClient(), rows=2, cols=2,
+        qc_markups=True, verify_findings=False, qc_work_dir=tmp_path / "work",
+    )
+    assert ctx.finding_count == 0
+    assert "E-201.pdf" in ctx.mutated_sources
+    assert ctx.coverage_status == "INCOMPLETE"

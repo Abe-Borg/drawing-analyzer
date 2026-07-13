@@ -6,6 +6,68 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed (Phase 21 — artifact-backed markup coverage, DA-007/DA-029)
+
+- **A finding can no longer be reported as clouded when no annotation was written.**
+  The old coverage tally was computed from an *intention* classifier
+  (`ink_disposition`) — it described what the writer *meant* to draw, never what
+  landed in the saved PDF. The writer now follows a **plan → draw → stamp → save →
+  reopen → reconcile** protocol (DA-007): every analyzer annotation and every
+  generated index row is stamped with a private PDF object key carrying its logical
+  **placement id**, and after saving the file is reopened and each placement is
+  reconciled against what is actually found. A placement counts only when its
+  stamped, mandatory component is found again in the saved artifact; anything
+  missing, failed, duplicated, or unexpected is reported honestly.
+- **`annotate_pdf` / `write_reviewed_pdfs` now return a
+  [`MarkupRunResult`](src/drawing_analyzer/models.py)** — the per-placement
+  `MarkupReceipt`s (`WRITTEN` / `INDEXED` / `FAILED`), a **receipt-derived** tally,
+  the reviewed-PDF paths, and a `coverage_status` (`COMPLETE` / `INCOMPLETE`). The
+  old integer/`list[Path]` returns are available as `result.annots_written` /
+  `result.reviewed_pdfs`. A per-finding draw failure becomes a `FAILED` receipt, not
+  a silent skip counted as a success (I-3 still holds — the file ships for
+  diagnosis).
+- **Pre-existing / prior-run annotations can no longer distort reconciliation
+  (DA-029).** Stamps embed a per-run `artifact_run_id`, so a stamp left by an
+  *earlier* review of the same PDF (a different run id) never satisfies this run's
+  plan, and an annotation the analyzer never wrote carries no stamp at all — both
+  are transparently ignored. Coverage counts only *this run's* proven marks.
+- **Gated and rejected findings now carry a real, reconciled index row.** A
+  conservatively **gated** finding (verified-only mode) earns a "Not inked by
+  operator gate" index row and a **rejected** finding a "Rejected by verification"
+  row — each a proven `INDEXED` placement, never a bare no-artifact status (§6.4).
+- **Incomplete markup output is labeled, never presented as complete (§13.6).** A
+  reviewed PDF whose planned placements did not all succeed is written under an
+  explicit `…_reviewed_INCOMPLETE.pdf` name; the run's `coverage_status` rolls to
+  `INCOMPLETE`; the HTML report shows a red **Markup coverage: INCOMPLETE** banner;
+  and the GUI's completion line reads **QC incomplete** (distinct from *Completed*
+  and *Completed with QC warnings*). A source that changed mid-run (§10.6) is a
+  `FAILED` (source-changed) placement, so it forces `INCOMPLETE` too.
+- **New `markup_manifest.json` export (§13.7):** every planned placement, its
+  terminal receipt, the coverage status, the receipt-derived tally, and the sha256
+  of each reviewed PDF. It contains no API key and no absolute path (receipts
+  reference basenames only), so it is portable. `00_index.md` and the report list it
+  and describe the coverage state.
+- **The run summary line is now receipt-derived** — e.g.
+  `Ledger 3: 2 clouded, 1 margin, 0 rejected (indexed); coverage COMPLETE` — with
+  `failed` / skipped buckets and a coverage verdict; nothing is counted from
+  intention.
+- Review hardening: each index row is reconciled against **its own** GOTO link (by
+  the row's unique position), so two same-page rejected/gated rows can't cover for
+  each other's missing link; **every** planned placement gets exactly one terminal
+  receipt — an unroutable finding (source id/name matching no supplied PDF) is an
+  explicit `FAILED`, never silently dropped into a false `COMPLETE`; a mutated
+  source forces `INCOMPLETE` even when it produced no findings; and `FAILED`
+  receipt errors carry only the exception *type*, so no absolute path can reach the
+  portable manifest.
+- Tests: reversed every markup test that asserted an intention-based count or the
+  old return types; added `tests/test_drawing_markup_coverage.py`, a
+  failure-injection suite that forces clouds, callouts, index pages, saves, and
+  reopens to fail and proves the receipts report it (coverage `INCOMPLETE`, no false
+  ink), plus prior-run-stamp isolation, pre-existing-annotation isolation (DA-029),
+  dual-leg partial coverage, rotated-page receipts, duplicate-basename isolation,
+  same-page index-row link matching, unroutable-finding accounting, and the
+  portable manifest.
+
 ### Fixed (Phase 20 — lossless ledger reconciliation & QC-ID lifecycle, DA-005/DA-006)
 
 - **Deduplication no longer deletes unrelated findings, and no longer fabricates a

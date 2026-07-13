@@ -291,13 +291,17 @@ def test_ledger_coverage_every_entry_accounted_on_the_pdf(tmp_path):
     assert degraded.anchor_hint == "SHEET"
     assert "another discipline" in degraded.text
 
-    # Coverage (§18): every ledger entry is exactly one of cloud/margin/rejected.
-    # 3 entries: the VERIFIED model finding (cloud), the degraded prose item
-    # (margin callout), and the DETERMINISTIC reference finding (cloud).
+    # Coverage (Phase 21, DA-007): the tally is derived from artifact-backed
+    # receipts, not intention. 3 entries: the VERIFIED model finding (cloud), the
+    # degraded prose item (margin callout), and the DETERMINISTIC reference
+    # finding (cloud) — every one proven in the reopened PDF, so coverage COMPLETE.
     assert ctx.finding_count == 3
+    assert ctx.coverage_status == "COMPLETE"
     assert ctx.ledger_tally == {"cloud": 2, "margin": 1}
     assert sum(ctx.ledger_tally.values()) == ctx.finding_count
-    assert ctx.ledger_tally_line == "Ledger 3: 2 clouded, 1 margin, 0 rejected (indexed)"
+    assert ctx.ledger_tally_line == (
+        "Ledger 3: 2 clouded, 1 margin, 0 rejected (indexed); coverage COMPLETE"
+    )
     assert not any(e.startswith("Ledger coverage") for e in ctx.errors)
 
     # The ink matches the tally: 2 clouds + 2 QC tags + 1 margin callout.

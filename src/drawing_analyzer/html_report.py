@@ -1021,10 +1021,49 @@ def _summary_html(ctx: Any, source_names: list[str], now: datetime) -> str:
 
     return (
         f'<div class="summary">'
+        f"{_coverage_banner_html(ctx)}"
         f'<div class="stats">{cards}</div>'
         f'<details class="sources"><summary>Source files</summary>'
         f"<ul>{sources}</ul></details>"
         f"{errors_html}"
+        f"</div>"
+    )
+
+
+def _coverage_banner_html(ctx: Any) -> str:
+    """The run-level markup-coverage banner (Phase 21, §13.6).
+
+    ``COMPLETE`` (green) states every planned markup was found again in the saved
+    PDFs; ``INCOMPLETE`` (red) names the honest degradation — some markups are
+    missing or failed, or a source changed mid-run — so a partial reviewed set is
+    never presented as fully successful. Absent when no markups were requested.
+    """
+    coverage = (getattr(ctx, "coverage_status", "") or "").upper()
+    if coverage not in ("COMPLETE", "INCOMPLETE"):
+        return ""
+    tally = html.escape((getattr(ctx, "ledger_tally_line", "") or "").strip())
+    if coverage == "COMPLETE":
+        title = "Markup coverage: COMPLETE"
+        detail = "Every planned markup was found again in the saved reviewed PDF(s)."
+    else:
+        title = "Markup coverage: INCOMPLETE"
+        mutated = list(getattr(ctx, "mutated_sources", None) or [])
+        detail = (
+            "Some planned markups are missing or failed"
+            + (
+                f" — {len(mutated)} source(s) changed mid-run and were skipped"
+                if mutated
+                else ""
+            )
+            + ". See the issues below, the <code>_INCOMPLETE</code> reviewed PDF(s), "
+            "and <code>markup_manifest.json</code>. A re-run is recommended."
+        )
+    tally_html = f'<div class="cb-detail">{tally}.</div>' if tally else ""
+    return (
+        f'<div class="coverage-banner" data-coverage="{_esc_attr(coverage)}">'
+        f'<div class="cb-title">{html.escape(title)}</div>'
+        f'<div class="cb-detail">{detail}</div>'
+        f"{tally_html}"
         f"</div>"
     )
 
@@ -1242,6 +1281,14 @@ a{color:var(--accent); text-decoration:none}
 .errors{border:1px solid var(--conflict); background:var(--conflict-soft); border-radius:8px; padding:8px 12px}
 .errors summary{color:var(--conflict); font-weight:600}
 .errors ul,.sources ul{margin:8px 0 4px; padding-left:20px}
+.coverage-banner{margin:0 0 14px; padding:10px 14px; border-radius:8px; font-size:13.5px;
+  border:1px solid var(--line)}
+.coverage-banner .cb-title{font-weight:700}
+.coverage-banner .cb-detail{color:var(--muted); margin-top:2px}
+.coverage-banner[data-coverage="COMPLETE"]{border-color:var(--ok); background:#e7f6ee}
+.coverage-banner[data-coverage="COMPLETE"] .cb-title{color:var(--ok)}
+.coverage-banner[data-coverage="INCOMPLETE"]{border-color:var(--failed); background:var(--conflict-soft)}
+.coverage-banner[data-coverage="INCOMPLETE"] .cb-title{color:var(--failed)}
 
 /* Cards */
 .card{

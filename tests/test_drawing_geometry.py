@@ -490,7 +490,7 @@ def test_margin_callout_and_leader_on_rotated_page(rot, tmp_path):
                 "page_width_pt": rs.page_width_pt, "page_height_pt": rs.page_height_pt}}
     out = tmp_path / "S_reviewed.pdf"
     written = annotate_pdf(path, [f], out, include_unverified=True,
-                           sheet_meta=meta, index_pages=False)
+                           sheet_meta=meta, index_pages=False).annots_written
     assert written >= 1
     by = count_annotations_by_type(out)
     assert by.get("FreeText", 0) == 1        # the callout box

@@ -323,9 +323,12 @@ def test_cross_finding_clouds_both_sheets_with_cross_reference(tmp_path):
     )
     resolve_anchors([f], ga)
     resolve_conflict_legs([f], geom_by_key)
-    outs = write_reviewed_pdfs([f], [a, b], tmp_path / "out", include_unverified=True)
+    res = write_reviewed_pdfs([f], [a, b], tmp_path / "out", include_unverified=True)
+    outs = res.reviewed_pdfs
     assert {p.name for p in outs} == {"F-D-01-1_reviewed.pdf", "F-A-01-1_reviewed.pdf"}
     assert all(count_annotations(p) == 1 for p in outs)
+    # Both legs of the conflict were proven on their own sheet → coverage COMPLETE.
+    assert res.coverage_status == "COMPLETE"
     # each popup names the other sheet
     contents = []
     for p in outs:

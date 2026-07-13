@@ -36,8 +36,10 @@ Module layout::
     anchor.py         finding quote -> PDF rectangle resolution (offline)
     verify.py         per-finding crop verification pass
     citation_check.py web-search check of cited code sections
-    annotate.py       reviewed-PDF markup writer (PyMuPDF importer 2 of exactly 2)
-    export.py         folder export: findings.csv/json, sheet text, evidence crops
+    annotate.py       reviewed-PDF markup writer + reopen/reconcile receipts
+                      (artifact-backed coverage, DA-007; PyMuPDF importer 2 of 2)
+    export.py         folder export: findings.csv/json, sheet text, evidence,
+                      markup_manifest.json (placement receipts + coverage proof)
     html_report.py    self-contained HTML report (+ in-browser Ask AI assistant)
     gui.py            standalone CustomTkinter window
     __main__.py       ``python -m drawing_analyzer`` launches the GUI
