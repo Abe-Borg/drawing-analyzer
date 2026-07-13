@@ -148,6 +148,20 @@ def test_arithmetic_relative_tolerance_catches_small_value_error():
     assert res.mismatched == 1 and res.matched == 0
 
 
+def test_arithmetic_mixed_fraction_operand_is_text_extracted():
+    # §17.5: the quote scanner must tokenize a mixed fraction the same way the
+    # operand parser does ("2 1/2" -> 2.5, not 2 and 1/2), so a text-extracted
+    # mixed-fraction operand is recognised as TEXT_EXTRACTED, not falsely marked
+    # model-transcribed. 2.5 + 2.5 = 5, but the sheet states 6 -> DETERMINISTIC.
+    res = audit_arithmetic(
+        [_claim("sum", ["2 1/2", "2 1/2"], 6, quote="2 1/2 + 2 1/2 = 6")], []
+    )
+    assert res.mismatched == 1
+    f = res.findings[0]
+    assert f.verification.status == "DETERMINISTIC"
+    assert f.verification.operand_origin == "TEXT_EXTRACTED"
+
+
 def test_arithmetic_factor_catches_missing_dipa_increase():
     # Base area 1500 × 1.3 = 1950, but the DIPA row still states 1500.
     res = audit_arithmetic([_claim("factor", [1500, "1.3"], 1500, note="DIPA +30%")], [])

@@ -174,9 +174,17 @@ def _is_match(actual: Decimal, expected: Decimal) -> bool:
 # Operand provenance (§17.5) — did the numbers come off the sheet, or the model?
 # --------------------------------------------------------------------------- #
 
-# Number-shaped substrings in a quote: integers/decimals (with optional thousands
-# commas) and fractions. Parsed with :func:`parse_number` for an exact compare.
-_NUM_IN_TEXT_RE = re.compile(r"[-+]?\d[\d,]*(?:\.\d+)?(?:\s*/\s*\d+)?")
+# Number-shaped substrings in a quote, tokenized the SAME way :func:`parse_number`
+# reads an operand so the two never disagree (§17.5): a **mixed** number
+# (``2 1/2`` / ``2-1/2``) first, then a **simple** fraction (``1/2``), then a plain
+# integer/decimal with optional thousands commas. Alternation is longest-first so
+# ``2 1/2`` is one token (2.5), not ``2`` and ``1/2``. Each match is handed to
+# :func:`parse_number` for the exact-decimal compare.
+_NUM_IN_TEXT_RE = re.compile(
+    r"[-+]?\d+[\s-]+\d+\s*/\s*\d+"      # mixed number: 2 1/2, 2-1/2
+    r"|[-+]?\d+\s*/\s*\d+"             # simple fraction: 1/2
+    r"|[-+]?\d[\d,]*(?:\.\d+)?"        # plain / decimal / thousands: 1,200  0.20
+)
 
 
 def _numbers_in_text(text: str) -> list[Decimal]:
