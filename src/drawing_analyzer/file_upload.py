@@ -209,6 +209,7 @@ def upload_sheet_images(
     max_workers: int | None = None,
     sleep: Any = time.sleep,
     on_image: ImageProgress | None = None,
+    task_instruction: str | None = None,
 ) -> SheetUpload:
     """Upload a sheet's overview + tiles via the Files API; build file-id content.
 
@@ -217,6 +218,13 @@ def upload_sheet_images(
     plus the uploaded ``file_id``s for cleanup. Raises on an upload failure; the
     caller treats the sheet as failed and deletes any ids already uploaded, so a
     partial upload never leaks files.
+
+    ``task_instruction`` overrides the closing instruction of the assembled
+    content (default: the digest task). The critique batch path (Phase 23C) passes
+    its own closing instruction so one shared per-sheet upload can feed BOTH the
+    critique's self-consistency reads by ``file_id`` — the reviewer sees the exact
+    same imagery/text framing the digest saw and differs only in what it is asked
+    to produce.
 
     The images upload concurrently on a small pool (:data:`DEFAULT_UPLOAD_WORKERS`,
     env-overridable; ``max_workers=1`` forces the old sequential order). This
@@ -349,7 +357,12 @@ def upload_sheet_images(
     # cleanup logs; the content assembly maps each image to its own id directly.
     mapping = {id(image): by_position[pos] for pos, image, _name in jobs}
     file_ids = [by_position[pos] for pos, _image, _name in jobs]
-    content = build_user_content_blocks(sheet, lambda t: _file_image_block(mapping[id(t)]))
+    block = lambda t: _file_image_block(mapping[id(t)])  # noqa: E731
+    content = (
+        build_user_content_blocks(sheet, block)
+        if task_instruction is None
+        else build_user_content_blocks(sheet, block, task_instruction=task_instruction)
+    )
     return SheetUpload(content=content, file_ids=file_ids)
 
 

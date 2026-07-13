@@ -997,7 +997,20 @@ def submit_drawing_batch(
 
     batch_id: str | None = None
     if reqs:
-        mb = client.beta.messages.batches.create(requests=reqs, betas=[FILES_API_BETA])
+        try:
+            mb = client.beta.messages.batches.create(requests=reqs, betas=[FILES_API_BETA])
+        except Exception:  # noqa: BLE001 - clean up before propagating (DA-034)
+            # The images are already uploaded but no batch will ever reference
+            # them — delete every one before re-raising so a submit failure never
+            # leaks remote files (DA-034). Mirrors the critique batch's submit
+            # guard; ``delete_files`` is best-effort and never itself raises.
+            leaked = [fid for s in slots for fid in s.file_ids]
+            _log.warning(
+                "drawing batch submit failed; deleting %d uploaded file(s)",
+                len(leaked),
+            )
+            delete_files(client, leaked)
+            raise
         batch_id = _get(mb, "id")
         # Record the batch id + the custom_id → sheet map up front. This is the
         # rosetta stone for reading the rest of the run: a later "item sheet__3
@@ -1294,32 +1307,48 @@ def collect_drawing_batch(
             stall_timeout_seconds=stall_timeout,
         )
         if status in ("ended", "failed", "expired", "canceled"):
-            raw = {}
-            for result in client.messages.batches.results(batch.batch_id):
-                raw[_get(result, "custom_id")] = result
-            for slot in submitted:
-                results[slot.index] = _parse_item(
-                    slot, raw.get(slot.custom_id), cache=cache
-                )
-            files_released = True
-            if retry_failed_items:
-                # The follow-up round spends what's LEFT of this call's
-                # collection budget — the bound the caller gave applies to
-                # the whole collect, not per batch round.
-                remaining = max_elapsed_seconds - (time.monotonic() - collect_started)
-                files_released = _resubmit_failed_items(
-                    batch, results, raw,
-                    client=client, cache=cache, progress=progress,
-                    on_log=on_log, sleep=sleep,
-                    max_elapsed_seconds=remaining,
-                )
-            if files_released:
+            try:
+                raw = {}
+                for result in client.messages.batches.results(batch.batch_id):
+                    raw[_get(result, "custom_id")] = result
+                for slot in submitted:
+                    results[slot.index] = _parse_item(
+                        slot, raw.get(slot.custom_id), cache=cache
+                    )
+                files_released = True
+                if retry_failed_items:
+                    # The follow-up round spends what's LEFT of this call's
+                    # collection budget — the bound the caller gave applies to
+                    # the whole collect, not per batch round.
+                    remaining = max_elapsed_seconds - (time.monotonic() - collect_started)
+                    files_released = _resubmit_failed_items(
+                        batch, results, raw,
+                        client=client, cache=cache, progress=progress,
+                        on_log=on_log, sleep=sleep,
+                        max_elapsed_seconds=remaining,
+                    )
+                if files_released:
+                    _release_uploaded_files(
+                        client,
+                        batch.all_file_ids,
+                        in_background=cleanup_in_background,
+                        on_log=on_log,
+                    )
+            except Exception:  # noqa: BLE001 - clean up before propagating (DA-034)
+                # An unexpected error while collecting a *terminal* batch —
+                # ``results()`` or the follow-up round raising, a parse blowing
+                # up — must not leak the uploaded files (DA-034). The batch is
+                # terminal (no longer processing), so its files are safe to delete
+                # unconditionally; do so best-effort, then re-raise (unchanged
+                # control flow — collect raised here before this guard too, just
+                # leakily).
                 _release_uploaded_files(
                     client,
                     batch.all_file_ids,
                     in_background=cleanup_in_background,
                     on_log=on_log,
                 )
+                raise
         else:
             # The batch never reached a terminal state: request counts frozen
             # past the stall window ("stalled"), the poll bound hit

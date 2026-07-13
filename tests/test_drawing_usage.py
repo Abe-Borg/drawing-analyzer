@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+import pytest
+
 from drawing_analyzer.core.pricing import (
     BATCH_DISCOUNT,
     PRICING_EFFECTIVE_DATE,
@@ -191,10 +193,25 @@ def test_exhaustive_estimate_exceeds_digest_only_and_lists_all_paid_stages():
     stages = " ".join(c.stage for c in est.components)
     for needle in ("Digest", "Critique", "Cross-sheet QC", "Verification", "Citation"):
         assert needle in stages, needle
-    # Critique/cross/verify/citation are real-time; the digest rides batch.
+    # Phase 23C: the digest AND the two critique reads ride batch; cross/verify/
+    # citation are still real-time.
     by_stage = {c.stage: c for c in est.components}
-    assert by_stage["Critique ×2 (per sheet)"].transport == "real-time"
+    assert by_stage["Critique ×2 (per sheet)"].transport == "batch"
+    assert by_stage["Cross-sheet QC"].transport == "real-time"
     assert est.verified_effective_date == PRICING_EFFECTIVE_DATE
+
+
+def test_exhaustive_estimate_critique_batch_halves_vs_realtime():
+    """Phase 23C: the critique component is batch-priced when ``batch=True`` (the
+    ~50% discount is now real for the reviewer), real-time when it is not."""
+    batched = estimate_exhaustive_run_cost(10, file_count=2, batch=True)
+    realtime = estimate_exhaustive_run_cost(10, file_count=2, batch=False)
+    b = {c.stage: c for c in batched.components}["Critique ×2 (per sheet)"]
+    r = {c.stage: c for c in realtime.components}["Critique ×2 (per sheet)"]
+    assert b.transport == "batch" and r.transport == "real-time"
+    assert b.input_tokens == r.input_tokens and b.output_tokens == r.output_tokens
+    assert b.cost is not None and r.cost is not None
+    assert b.cost == pytest.approx(r.cost * BATCH_DISCOUNT)
 
 
 def test_exhaustive_prompt_is_labeled_an_estimate_and_names_stages():

@@ -84,7 +84,7 @@ from .profiles import (
 _log = get_logger()
 
 
-def _run_checklists(profiles: list[Profile] | None, runs: int) -> list[str]:
+def run_checklists(profiles: list[Profile] | None, runs: int) -> list[str]:
     """The checklist block to inject into each of ``runs`` critique reads (§14.5).
 
     Every read gets the **same full checklist**. The reads are compared for
@@ -95,9 +95,16 @@ def _run_checklists(profiles: list[Profile] | None, runs: int) -> list[str]:
     unless both reads received the applicable checklist item, so every read
     receives all of them (the whole checklist is a few thousand chars — trivially
     within the input budget; correctness beats the old chunking optimization).
+
+    Public so the batch-critique transport (Phase 23C) builds the identical
+    per-read checklists the real-time path does.
     """
     full = build_checklist_prompt(flatten_items(profiles or []))
     return [full] * runs
+
+
+# Back-compat alias for the private spelling used before Phase 23C made it public.
+_run_checklists = run_checklists
 
 # Critique shares the digest's output-shaping defaults: Opus 4.8, adaptive
 # thinking, effort high, 16k max_tokens (full coverage, deliberate reasoning).
@@ -736,6 +743,11 @@ class CritiqueResult:
     completed_runs: int = 0
     error: str | None = None
     cached: bool = False
+    # Set when this sheet's critique was produced via a synchronous real-time
+    # fallback inside a ``use_batch`` run (e.g. its Files-API upload failed), so
+    # the usage ledger prices it REAL_TIME rather than at the batch rate — the
+    # critique analogue of ``SheetDigest.rescued`` (Phase 23C).
+    rescued: bool = False
 
 
 def critique_result_from_entry(entry: dict, ref: Any) -> CritiqueResult:
@@ -784,6 +796,69 @@ def critique_cache_entry_from_result(res: CritiqueResult) -> dict:
     }
 
 
+def outcome_from_message(
+    message: Any, *, run_id: str, ref: Any
+) -> CritiqueRunOutcome:
+    """Parse one critique Messages response into a :class:`CritiqueRunOutcome` (DA-008).
+
+    The transport-agnostic heart of a critique read, shared by the real-time
+    :func:`_critique_read` and the Message-Batches collector
+    (:mod:`drawing_analyzer.batch_critique`, Phase 23C) so a batched read is judged,
+    provenance-stamped, and billed **identically** to a real-time one. A read is a
+    **success** only when the response carried a valid findings schema (an explicit
+    ``{"findings": []}`` counts). An empty body, nonempty prose with no block, a
+    missing findings object, a truncated body, or malformed JSON is a **failure** —
+    never an empty success (so it is neither merged as a clean read nor cached as
+    corroborated). Every success stamps its findings ``sources=[run_id]`` at
+    production; billed tokens are recorded even on a parse failure (§14.4).
+    """
+    raw = _message_text(message)
+    in_tok, out_tok = _message_usage(message)
+    if not raw:
+        # An empty body (e.g. adaptive thinking consumed the whole token budget)
+        # is a *failed* read, not a clean sheet — so the run counts as failed (not
+        # merged, not cached) and is re-attempted next time.
+        stop = _get(message, "stop_reason")
+        return CritiqueRunOutcome(
+            run_id=run_id, status="FAILED", input_tokens=in_tok, output_tokens=out_tok,
+            error=f"empty critique (stop_reason={stop!r})",
+        )
+    # A critique read is successful ONLY if it parsed a valid findings schema. A
+    # nonempty-prose / missing-object / truncated / malformed response is a failure,
+    # NOT an empty success — this is the DA-008 correction. The billed tokens are
+    # kept regardless (the response cost money even though it did not parse).
+    parsed = parse_findings_detailed(raw, ref)
+    if parsed.status not in FINDINGS_PARSE_OK:
+        return CritiqueRunOutcome(
+            run_id=run_id, status="FAILED", input_tokens=in_tok, output_tokens=out_tok,
+            parse_status=parsed.status, parse_note=parsed.note,
+            error=f"critique produced no valid findings schema ({parsed.status})",
+        )
+    if not parsed.findings and parsed.raw_item_count > 0:
+        # The model DID report findings, but every one failed validation (e.g. a
+        # category outside the enum). That is a content-bearing response, NOT a clean
+        # sheet — so it is a failed read (never an empty success), and is re-attempted
+        # next run rather than frozen clean in the cache (DA-008 / §14.2).
+        return CritiqueRunOutcome(
+            run_id=run_id, status="FAILED", input_tokens=in_tok, output_tokens=out_tok,
+            parse_status=parsed.status, parse_note=parsed.note,
+            error=f"critique emitted {parsed.raw_item_count} finding(s), none valid "
+                  f"({parsed.note})",
+        )
+    findings = parsed.findings
+    for f in findings:                 # stamp provenance at production (§14.3)
+        if run_id not in f.sources:
+            f.sources = [run_id, *f.sources]
+    claims = parse_numeric_claims(raw, ref)
+    if parsed.note:
+        _log.info("critique parse: %s (%s)", parsed.note, getattr(ref, "display_label", ref))
+    return CritiqueRunOutcome(
+        run_id=run_id, status="COMPLETE", findings=findings, claims=claims,
+        input_tokens=in_tok, output_tokens=out_tok,
+        parse_status=parsed.status, parse_note=parsed.note,
+    )
+
+
 def _critique_read(
     rendered: RenderedSheet,
     *,
@@ -797,16 +872,11 @@ def _critique_read(
     sleep: Any = time.sleep,
     checklist: str = "",
 ) -> CritiqueRunOutcome:
-    """One critique read → a provenance-stamped :class:`CritiqueRunOutcome` (DA-008).
+    """One real-time critique read → a provenance-stamped :class:`CritiqueRunOutcome`.
 
     Mirrors :func:`drawing_analyzer.digest.digest_sheet`'s call loop (transient
-    retry + backoff; a permanent failure returns immediately). A read is a
-    **success** only when the response carried a valid findings schema (an explicit
-    ``{"findings": []}`` counts). An empty body, nonempty prose with no block, a
-    missing findings object, a truncated body, or malformed JSON is a **failure** —
-    never an empty success (so it is neither merged as a clean read nor cached as
-    corroborated). Every success stamps its findings ``sources=[run_id]`` at
-    production; billed tokens are recorded even on a parse failure (§14.4).
+    retry + backoff; a permanent failure returns immediately), then hands the
+    response to the shared :func:`outcome_from_message` parser (DA-008).
     """
     model = model or critique_model()
     if client is None:
@@ -835,51 +905,7 @@ def _critique_read(
                 continue
             return CritiqueRunOutcome(run_id=run_id, status="FAILED", error=_clean_error(exc))
 
-    raw = _message_text(resp)
-    in_tok, out_tok = _message_usage(resp)
-    if not raw:
-        # An empty body (e.g. adaptive thinking consumed the whole token budget)
-        # is a *failed* read, not a clean sheet — so the run counts as failed (not
-        # merged, not cached) and is re-attempted next time.
-        stop = _get(resp, "stop_reason")
-        return CritiqueRunOutcome(
-            run_id=run_id, status="FAILED", input_tokens=in_tok, output_tokens=out_tok,
-            error=f"empty critique (stop_reason={stop!r})",
-        )
-    # A critique read is successful ONLY if it parsed a valid findings schema. A
-    # nonempty-prose / missing-object / truncated / malformed response is a failure,
-    # NOT an empty success — this is the DA-008 correction. The billed tokens are
-    # kept regardless (the response cost money even though it did not parse).
-    parsed = parse_findings_detailed(raw, rendered.ref)
-    if parsed.status not in FINDINGS_PARSE_OK:
-        return CritiqueRunOutcome(
-            run_id=run_id, status="FAILED", input_tokens=in_tok, output_tokens=out_tok,
-            parse_status=parsed.status, parse_note=parsed.note,
-            error=f"critique produced no valid findings schema ({parsed.status})",
-        )
-    if not parsed.findings and parsed.raw_item_count > 0:
-        # The model DID report findings, but every one failed validation (e.g. a
-        # category outside the enum). That is a content-bearing response, NOT a clean
-        # sheet — so it is a failed read (never an empty success), and is re-attempted
-        # next run rather than frozen clean in the cache (DA-008 / §14.2).
-        return CritiqueRunOutcome(
-            run_id=run_id, status="FAILED", input_tokens=in_tok, output_tokens=out_tok,
-            parse_status=parsed.status, parse_note=parsed.note,
-            error=f"critique emitted {parsed.raw_item_count} finding(s), none valid "
-                  f"({parsed.note})",
-        )
-    findings = parsed.findings
-    for f in findings:                 # stamp provenance at production (§14.3)
-        if run_id not in f.sources:
-            f.sources = [run_id, *f.sources]
-    claims = parse_numeric_claims(raw, rendered.ref)
-    if parsed.note:
-        _log.info("critique parse: %s (%s)", parsed.note, rendered.ref.display_label)
-    return CritiqueRunOutcome(
-        run_id=run_id, status="COMPLETE", findings=findings, claims=claims,
-        input_tokens=in_tok, output_tokens=out_tok,
-        parse_status=parsed.status, parse_note=parsed.note,
-    )
+    return outcome_from_message(resp, run_id=run_id, ref=rendered.ref)
 
 
 def critique_sheet(
@@ -907,6 +933,74 @@ def critique_sheet(
         sleep=sleep, checklist=checklist,
     )
     return oc.findings, oc.claims, oc.input_tokens, oc.output_tokens, oc.error
+
+
+def result_from_outcomes(
+    all_outcomes: list[CritiqueRunOutcome],
+    *,
+    requested_runs: int,
+    label: str = "",
+) -> CritiqueResult:
+    """Fold every read's :class:`CritiqueRunOutcome` into one merged :class:`CritiqueResult`.
+
+    ``all_outcomes`` is **every** requested read's outcome — successes and failures
+    alike — so billed tokens are summed across all of them (a response that billed
+    tokens but failed to parse still counts, §14.4) while only the successful reads
+    are merged. Shared by the real-time :func:`critique_sheet_self_consistent` and
+    the Message-Batches collector (Phase 23C) so a batched sheet is merged, billed,
+    and marked partial byte-for-byte the same way. Caching is left to the caller
+    (it owns the cache key); a result is complete only when every requested read
+    parsed (``completed_runs == requested_runs``).
+    """
+    total_in = sum(oc.input_tokens for oc in all_outcomes)
+    total_out = sum(oc.output_tokens for oc in all_outcomes)
+    ok = [oc for oc in all_outcomes if oc.ok]
+    errors = [oc.error for oc in all_outcomes if not oc.ok and oc.error]
+
+    if not ok:
+        # Every read failed → the critique stage failed. Never report a clean sheet.
+        return CritiqueResult(
+            findings=[],
+            input_tokens=total_in,
+            output_tokens=total_out,
+            runs=0,
+            requested_runs=requested_runs,
+            completed_runs=0,
+            error="; ".join(errors) or "critique produced no result",
+        )
+
+    # The findings of the SUCCESSFUL reads (each already stamped sources=[run_id]).
+    # Confidence follows the §14.4 truth table via ``requested_runs``: a single
+    # surviving read of two requested is NOT_ASSESSED_PARTIAL, never REPRODUCED.
+    merged = merge_self_consistency([oc.findings for oc in ok], requested_runs=requested_runs)
+    claims = _dedup_claims([c for oc in ok for c in oc.claims])
+    if label:
+        _log.info(
+            "critique: %d/%d read(s) valid, %d merged finding(s) (%s)",
+            len(ok), requested_runs, len(merged), label,
+        )
+
+    # A productive result that shipped findings keeps ``error=None`` — the run still
+    # ships them (I-3); its partial-ness is carried honestly by each finding's
+    # ``confidence == NOT_ASSESSED_PARTIAL``. But a partial run that produced NO
+    # merged findings has no finding to carry that signal, so an empty result from
+    # fewer-than-requested valid reads would be indistinguishable from a genuinely
+    # clean sheet (both reads valid + empty). That is exactly the masquerade §14.4 /
+    # §4.4 forbid, so it is surfaced as a stage degradation.
+    partial_empty = not merged and len(ok) < requested_runs
+    return CritiqueResult(
+        findings=merged,
+        claims=claims,
+        input_tokens=total_in,
+        output_tokens=total_out,
+        runs=len(ok),
+        requested_runs=requested_runs,
+        completed_runs=len(ok),
+        error=(
+            "; ".join(errors)
+            or f"critique partial: only {len(ok)}/{requested_runs} read(s) valid, no findings"
+        ) if partial_empty else None,
+    )
 
 
 def critique_sheet_self_consistent(
@@ -956,11 +1050,8 @@ def critique_sheet_self_consistent(
         if hit is not None:
             return critique_result_from_entry(hit, rendered.ref)
 
-    outcomes: list[CritiqueRunOutcome] = []
-    total_in = total_out = 0
-    errors: list[str] = []
-    for i in range(runs):
-        oc = _critique_read(
+    all_outcomes: list[CritiqueRunOutcome] = [
+        _critique_read(
             rendered,
             run_id=f"critique_{i + 1}",
             client=client,
@@ -972,60 +1063,13 @@ def critique_sheet_self_consistent(
             sleep=sleep,
             checklist=run_checklists[i],
         )
-        total_in += oc.input_tokens          # billed usage counts even on a failed parse
-        total_out += oc.output_tokens
-        if oc.ok:
-            outcomes.append(oc)
-        elif oc.error:
-            errors.append(oc.error)
-
-    if not outcomes:
-        # Every read failed → the critique stage failed. Never report a clean sheet.
-        return CritiqueResult(
-            findings=[],
-            input_tokens=total_in,
-            output_tokens=total_out,
-            runs=0,
-            requested_runs=runs,
-            completed_runs=0,
-            error="; ".join(errors) or "critique produced no result",
-        )
-
-    # The findings of the SUCCESSFUL reads (each already stamped sources=[run_id]).
-    # Confidence follows the §14.4 truth table via ``requested_runs``: a single
-    # surviving read of two requested is NOT_ASSESSED_PARTIAL, never REPRODUCED.
-    merged = merge_self_consistency(
-        [oc.findings for oc in outcomes], requested_runs=runs
+        for i in range(runs)
+    ]
+    result = result_from_outcomes(
+        all_outcomes, requested_runs=runs, label=rendered.ref.display_label
     )
-    claims = _dedup_claims([c for oc in outcomes for c in oc.claims])
-    _log.info(
-        "critique: %d/%d read(s) valid, %d merged finding(s) (%s)",
-        len(outcomes), runs, len(merged), rendered.ref.display_label,
-    )
-
-    # A productive result that shipped findings keeps ``error=None`` — the run still
-    # ships them (I-3); its partial-ness is carried honestly by each finding's
-    # ``confidence == NOT_ASSESSED_PARTIAL``. But a partial run that produced NO
-    # merged findings has no finding to carry that signal, so an empty result from
-    # fewer-than-requested valid reads would be indistinguishable from a genuinely
-    # clean sheet (both reads valid + empty). That is exactly the masquerade §14.4 /
-    # §4.4 forbid ("no failed read is represented as a clean empty result"), so it is
-    # surfaced as a stage degradation. A truly clean sheet (every requested read
-    # returned a valid schema) still reports ``error=None`` and is cached below.
-    partial_empty = not merged and len(outcomes) < runs
-    result = CritiqueResult(
-        findings=merged,
-        claims=claims,
-        input_tokens=total_in,
-        output_tokens=total_out,
-        runs=len(outcomes),
-        requested_runs=runs,
-        completed_runs=len(outcomes),
-        error=(
-            "; ".join(errors)
-            or f"critique partial: only {len(outcomes)}/{runs} read(s) valid, no findings"
-        ) if partial_empty else None,
-    )
+    if result.completed_runs == 0:
+        return result
 
     # Cache only a *complete* self-consistency result — every requested read
     # returned a VALID parse. A partial result (a read failed or produced a
@@ -1034,7 +1078,7 @@ def critique_sheet_self_consistent(
     # permanently deny the requested self-consistency, or cache a malformed read as
     # a clean/corroborated sheet (DA-008). Mirrors digest_sheet refusing to cache
     # transient/degraded reads.
-    if cache is not None and cache_key is not None and len(outcomes) == runs:
+    if cache is not None and cache_key is not None and result.completed_runs == runs:
         cache.put(cache_key, critique_cache_entry_from_result(result))
 
     return result

@@ -755,6 +755,9 @@ def _run_critique_stage(
     run_usage: RunUsage,
     profiles: list | None = None,
     snapshot_by_path: "dict[str, tuple[str, int, int]] | None" = None,
+    use_batch: bool = False,
+    on_log: LogCallback | None = None,
+    on_status: StatusCallback | None = None,
 ) -> tuple[list[Finding], list[NumericClaim]]:
     """Critique every sheet (Phase 11): self-consistent critique, cached two ways.
 
@@ -807,11 +810,19 @@ def _run_critique_stage(
 
     def _record_critique(res: Any, key: "tuple[str, int]") -> None:
         cached = bool(getattr(res, "cached", False))
+        # A batched sheet bills at the batch rate; a cache hit bills nothing; a
+        # rescued (real-time fallback) sheet — or any real-time run — bills the
+        # full rate (§15.6). Same transport rule as the digest path so the ledger's
+        # BATCH/REAL_TIME/CACHE classes mean the same thing across stages.
+        transport = _digest_transport(
+            cached=cached, rescued=bool(getattr(res, "rescued", False)),
+            use_batch=use_batch,
+        )
         _record_usage(
             run_usage, family="critique",
             instance=f"critique:{key[0]}:p{key[1]}",
             model=model,
-            transport="CACHE" if cached else "REAL_TIME",
+            transport=transport,
             # A cache hit made no API call this run — zero billed tokens (as the
             # digest path does); the record still carries the cache-hit metadata.
             input_tokens=0 if cached else res.input_tokens,
@@ -832,8 +843,47 @@ def _run_critique_stage(
         if progress is not None:
             progress(total, total, f"Critiquing sheet {done}/{total}")
 
+    def _ingest_miss(res: Any, ref: Any) -> None:
+        """Pool one freshly-critiqued sheet's result (shared by both transports)."""
+        nonlocal done
+        done += 1
+        if res.error:
+            _log.warning("critique degraded for a sheet: %s", res.error)
+        findings.extend(res.findings)
+        claims.extend(res.claims)
+        _record_critique(res, _refkey(ref))
+        # Store-under-both: promote a *complete* result to its level-1 key so the
+        # next run skips rendering this sheet entirely. A partial (a dropped run) is
+        # never cached — mirrors the level-2 guard inside
+        # critique_sheet_self_consistent.
+        key = level1_keys.get(_refkey(ref)) if cache is not None else None
+        if key is not None and res.error is None and res.runs == runs:
+            cache.put(key, critique_cache_entry_from_result(res))
+        if progress is not None:
+            progress(total, total, f"Critiquing sheet {done}/{total}")
+
     miss_total = total if only is None else len(only)
-    if miss_total > 0:
+    if miss_total > 0 and use_batch:
+        # Batch path (Phase 23C): each uncached sheet uploads once and both
+        # self-consistency reads ride ONE Message Batch referencing the shared
+        # file_ids — the ~50% batch rate plus within-stage image reuse, with the
+        # uploaded files released on every exit (DA-034). Additive/non-fatal: a
+        # stuck batch degrades those sheets' critique, never the standard digest.
+        from .batch_critique import collect_critique_batch, submit_critique_batch
+
+        batch = submit_critique_batch(
+            iter_rendered_sheets(
+                paths, rows=rows, cols=cols, overlap_frac=overlap_frac, only=only
+            ),
+            client=client, cache=cache, model=model, runs=runs, profiles=profiles,
+            progress=progress, total=miss_total, on_status=on_status,
+        )
+        for ref, res in collect_critique_batch(
+            batch, client=client, cache=cache, progress=progress, on_log=on_log,
+            cleanup_in_background=True,
+        ):
+            _ingest_miss(res, ref)
+    elif miss_total > 0:
         with ThreadPoolExecutor(max_workers=workers) as executor:
             in_flight: dict = {}
 
@@ -842,26 +892,13 @@ def _run_critique_stage(
                 finished, _ = wait(in_flight, return_when=FIRST_COMPLETED)
                 for fut in finished:
                     ref = in_flight.pop(fut)
-                    done += 1
                     try:
                         res = fut.result()
                     except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
+                        done += 1
                         _log.warning("critique failed for a sheet: %s", exc)
                         continue
-                    if res.error:
-                        _log.warning("critique degraded for a sheet: %s", res.error)
-                    findings.extend(res.findings)
-                    claims.extend(res.claims)
-                    _record_critique(res, _refkey(ref))
-                    # Store-under-both: promote a *complete* result to its level-1
-                    # key so the next run skips rendering this sheet entirely. A
-                    # partial (a dropped run) is never cached — mirrors the level-2
-                    # guard inside critique_sheet_self_consistent.
-                    key = level1_keys.get(_refkey(ref)) if cache is not None else None
-                    if key is not None and res.error is None and res.runs == runs:
-                        cache.put(key, critique_cache_entry_from_result(res))
-                    if progress is not None:
-                        progress(total, total, f"Critiquing sheet {done}/{total}")
+                    _ingest_miss(res, ref)
 
             for rendered in iter_rendered_sheets(
                 paths, rows=rows, cols=cols, overlap_frac=overlap_frac, only=only
@@ -1824,6 +1861,7 @@ def extract_drawing_context(
                 client=client, cache=cache, progress=progress, total=total,
                 max_workers=max_workers, run_usage=run_usage,
                 profiles=resolved_profiles, snapshot_by_path=snapshot_by_path,
+                use_batch=use_batch, on_log=on_log, on_status=on_status,
             )
             numeric_claims.extend(c_claims)
             critique_stage.status = "COMPLETE"
