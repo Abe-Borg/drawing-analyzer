@@ -159,9 +159,19 @@ def test_discipline_hint():
     assert P.discipline_hint("101") == "" and P.discipline_hint("") == ""
 
 
+def test_discipline_hint_is_project_prefix_aware():
+    # DA-018: a project-coded id must yield the discipline segment (F), not the
+    # leading project code (AVC). Regression for the exact defect.
+    assert P.discipline_hint("AVC10-F-D-01-1") == "f"
+    assert P.discipline_hint("FP101") == "fp"
+
+
 def test_suggest_profiles_by_discipline():
     assert [p.name for p in P.suggest_profiles(["F-D-01-1", "F-G-02-0"])] == ["fire-protection"]
     assert [p.name for p in P.suggest_profiles(["F101", "FP201"])] == ["fire-protection"]
+    # DA-018: FP101, F-D-01-1, and AVC10-F-D-01-1 all suggest fire protection.
+    assert [p.name for p in P.suggest_profiles(["FP101"])] == ["fire-protection"]
+    assert [p.name for p in P.suggest_profiles(["AVC10-F-D-01-1"])] == ["fire-protection"]
     assert P.suggest_profiles(["M-101", "E-201"]) == []       # no mechanical/electrical profile
     assert P.suggest_profiles([]) == []
 

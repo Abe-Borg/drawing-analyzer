@@ -39,11 +39,6 @@ _log = get_logger()
 # A checklist item is any Markdown list bullet — ``-``, ``*``, ``+`` — or a
 # numbered-list marker (``1.`` / ``1)``); the marker is stripped, the text kept.
 _ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(.+?)\s*$")
-# Leading 1-3 letters of a sheet id → discipline hint. No trailing ``\b``: there
-# is no word boundary between a letter and a digit, so a *concatenated* id like
-# ``F101`` / ``FP201`` (as common as the hyphenated ``F-101``) would otherwise
-# yield "" and silently defeat auto-suggest.
-_ID_DISCIPLINE_RE = re.compile(r"^\s*([A-Za-z]{1,3})")
 
 
 @dataclass(frozen=True)
@@ -230,9 +225,17 @@ def resolve_profiles(
 
 
 def discipline_hint(sheet_id: str) -> str:
-    """The leading discipline token of a sheet id (``"F-D-01-1"`` → ``"f"``)."""
-    m = _ID_DISCIPLINE_RE.match(sheet_id or "")
-    return m.group(1).lower() if m else ""
+    """The discipline token of a sheet id (``"F-D-01-1"`` → ``"f"``).
+
+    Delegates to the shared, host-owned :func:`sheet_ids.discipline_token`
+    (Phase 24 §16.0), which is **project-prefix aware** — a project-coded id like
+    ``AVC10-F-D-01-1`` yields the meaningful discipline segment ``"f"`` rather
+    than the project code ``"avc"`` (DA-018). Plain hyphenated/compact/dotted
+    forms are unchanged (``FP-101``/``FP101`` → ``"fp"``, ``E1.01`` → ``"e"``).
+    """
+    from .auditors.sheet_ids import discipline_token
+
+    return discipline_token(sheet_id)
 
 
 def suggest_profiles(
