@@ -14,7 +14,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .core.api_config import REVIEW_MODEL_DEFAULT
-from .core.pricing import estimate_request_cost, friendly_model_name
+from .core.pricing import (
+    PRICING_EFFECTIVE_DATE,
+    estimate_request_cost,
+    friendly_model_name,
+)
 from . import tiling
 from .pipeline import estimate_image_tokens_for_set
 
@@ -133,4 +137,193 @@ def format_drawing_cost_prompt(est: DrawingCostEstimate) -> str:
             "(occasionally longer) before the digest is ready to attach.",
         ]
     lines += ["", "Proceed with the analysis?"]
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+# Exhaustive-QC cost preview (Phase 23B, §15.7)
+# --------------------------------------------------------------------------- #
+#
+# When QC Markups is on the run is the full exhaustive stack (DA-010), so the
+# digest-only figure above badly under-states it. This preview adds a component
+# per paid QC stage and a total **range** — verification and citation scale with
+# the finding / unique-claim count, which isn't known until the digests complete,
+# so they are quoted as a per-sheet low–high band rather than a single number.
+
+# Per-read critique output; each read re-renders the sheet (its input ≈ the digest
+# images again) — the dominant critique cost.
+_ASSUMED_CRITIQUE_OUTPUT_TOKENS_PER_READ = 1_500
+_ASSUMED_CROSS_QC_OUTPUT_TOKENS = 2_000
+_ASSUMED_PROSE_STRAGGLER_INPUT_TOKENS = 1_500     # one small structuring allowance
+_ASSUMED_PROSE_STRAGGLER_OUTPUT_TOKENS = 500
+_ASSUMED_VERIFY_INPUT_TOKENS_PER_FINDING = 1_500  # a high-DPI crop + prompt
+_ASSUMED_VERIFY_OUTPUT_TOKENS_PER_FINDING = 150
+_ASSUMED_CITATION_INPUT_TOKENS_PER_CLAIM = 2_000  # web-search prompt + tool results
+_ASSUMED_CITATION_OUTPUT_TOKENS_PER_CLAIM = 400
+_ASSUMED_WEB_SEARCHES_PER_CLAIM = 2
+# Finding / unique-claim counts are unknown pre-run — a per-sheet low–high band.
+_FINDINGS_PER_SHEET_LOW = 0.5
+_FINDINGS_PER_SHEET_HIGH = 3.0
+_CLAIMS_PER_SHEET_LOW = 0.1
+_CLAIMS_PER_SHEET_HIGH = 1.0
+
+
+@dataclass(frozen=True)
+class CostComponent:
+    """One paid stage's contribution to the exhaustive-run estimate."""
+
+    stage: str
+    input_tokens: int
+    output_tokens: int
+    cost: float | None       # None when the model's price is unknown
+    transport: str           # "batch" | "real-time"
+    note: str = ""
+
+
+@dataclass(frozen=True)
+class ExhaustiveCostEstimate:
+    sheet_count: int
+    file_count: int
+    model: str
+    components: list[CostComponent]
+    low_cost: float | None
+    high_cost: float | None
+    verified_effective_date: str = PRICING_EFFECTIVE_DATE
+
+
+def _component(
+    stage: str, input_tokens: int, output_tokens: int, *, model: str, batch: bool,
+    extra_cost: float = 0.0, note: str = "",
+) -> CostComponent:
+    base = estimate_request_cost(input_tokens, output_tokens, model=model, batch=batch)
+    cost = None if base is None else base + extra_cost
+    return CostComponent(
+        stage=stage, input_tokens=input_tokens, output_tokens=output_tokens,
+        cost=cost, transport="batch" if batch else "real-time", note=note,
+    )
+
+
+def estimate_exhaustive_run_cost(
+    sheet_count: int,
+    *,
+    file_count: int = 0,
+    model: str = REVIEW_MODEL_DEFAULT,
+    rows: int = tiling.DEFAULT_GRID_ROWS,
+    cols: int = tiling.DEFAULT_GRID_COLS,
+    batch: bool = True,
+    focus: bool = False,
+) -> ExhaustiveCostEstimate:
+    """Estimate an **exhaustive QC** run's cost, component by component (§15.7).
+
+    The digest (and synthesis / focus) ride the Batch path when ``batch`` is set;
+    critique, cross-QC, verification, and citation run real-time (until Phase 23C
+    routes critique through Batches). Verification and citation are quoted as a
+    low–high band because their volume tracks the finding / unique-claim count.
+    A component whose model price is unknown contributes ``None`` and drops out of
+    the numeric total (the caller shows scale without a dollar figure).
+    """
+    per_sheet_images = estimate_image_tokens_for_set(1, rows=rows, cols=cols, model=model)
+    components: list[CostComponent] = []
+
+    # Digest (+ synthesis + focus) — the existing digest-path estimate, batch-priced.
+    digest_est = estimate_drawing_set_cost(
+        sheet_count, file_count=file_count, model=model, rows=rows, cols=cols,
+        synthesize=True, batch=batch, focus=focus,
+    )
+    components.append(CostComponent(
+        stage="Digest + synthesis" + (" + focus" if focus else ""),
+        input_tokens=digest_est.input_tokens, output_tokens=digest_est.output_tokens,
+        cost=digest_est.total_cost, transport="batch" if batch else "real-time",
+        note="one vision call per sheet" + (" + text passes" if sheet_count >= 2 else ""),
+    ))
+
+    # Critique — two adversarial reads per sheet, each re-rendering the sheet.
+    crit_in = 2 * sheet_count * (per_sheet_images + _ASSUMED_PROMPT_TOKENS_PER_SHEET)
+    crit_out = 2 * sheet_count * _ASSUMED_CRITIQUE_OUTPUT_TOKENS_PER_READ
+    components.append(_component(
+        "Critique ×2 (per sheet)", crit_in, crit_out, model=model, batch=False,
+        note="two full re-reads per sheet — real-time",
+    ))
+
+    # Cross-sheet QC — one (or a few sharded) text passes over all the digests.
+    if sheet_count >= 2:
+        cross_in = sheet_count * _ASSUMED_OUTPUT_TOKENS_PER_SHEET + _ASSUMED_PROMPT_TOKENS_PER_SHEET
+        components.append(_component(
+            "Cross-sheet QC", cross_in, _ASSUMED_CROSS_QC_OUTPUT_TOKENS,
+            model=model, batch=False, note="text-only whole-set pass",
+        ))
+
+    # Prose harvest — a small straggler-structuring allowance.
+    components.append(_component(
+        "Prose harvest", _ASSUMED_PROSE_STRAGGLER_INPUT_TOKENS,
+        _ASSUMED_PROSE_STRAGGLER_OUTPUT_TOKENS, model=model, batch=False,
+        note="occasional straggler structuring",
+    ))
+
+    # Verification & citation scale with volume — quoted as a low–high band below.
+    def _verify(findings: float) -> CostComponent:
+        n = max(0, round(findings))
+        return _component(
+            "Verification", n * _ASSUMED_VERIFY_INPUT_TOKENS_PER_FINDING,
+            n * _ASSUMED_VERIFY_OUTPUT_TOKENS_PER_FINDING, model=model, batch=False,
+            note=f"~{n} finding(s) × one crop re-check",
+        )
+
+    def _citation(claims: float) -> CostComponent:
+        n = max(0, round(claims))
+        from .core.pricing import WEB_SEARCH_COST_PER_USE
+        search_cost = float(WEB_SEARCH_COST_PER_USE) * n * _ASSUMED_WEB_SEARCHES_PER_CLAIM
+        return _component(
+            "Citation checks", n * _ASSUMED_CITATION_INPUT_TOKENS_PER_CLAIM,
+            n * _ASSUMED_CITATION_OUTPUT_TOKENS_PER_CLAIM, model=model, batch=False,
+            extra_cost=search_cost, note=f"~{n} unique claim(s) × web search",
+        )
+
+    low_verify = _verify(sheet_count * _FINDINGS_PER_SHEET_LOW)
+    high_verify = _verify(sheet_count * _FINDINGS_PER_SHEET_HIGH)
+    low_citation = _citation(sheet_count * _CLAIMS_PER_SHEET_LOW)
+    high_citation = _citation(sheet_count * _CLAIMS_PER_SHEET_HIGH)
+
+    # ``components`` (for display) so far holds the fixed stages; the high band is
+    # shown as the representative verification/citation rows. The low/high totals
+    # sum the *fixed* stages once and swap in the low vs high volume variants — so
+    # the band is exactly the finding/citation-count spread and low_cost <= high_cost.
+    def _total(variants: list[CostComponent]) -> float | None:
+        known = [c.cost for c in components + variants if c.cost is not None]
+        return sum(known) if known else None
+
+    low_cost = _total([low_verify, low_citation])
+    high_cost = _total([high_verify, high_citation])
+    components = components + [high_verify, high_citation]
+    return ExhaustiveCostEstimate(
+        sheet_count=sheet_count, file_count=file_count, model=model,
+        components=components, low_cost=low_cost, high_cost=high_cost,
+    )
+
+
+def format_exhaustive_cost_prompt(est: ExhaustiveCostEstimate) -> str:
+    """Human-readable confirmation for an exhaustive QC run (§15.7)."""
+    where = f" from {est.file_count} file(s)" if est.file_count else ""
+    lines = [
+        f"About to run the FULL exhaustive QC review on {est.sheet_count} sheet(s)"
+        f"{where} with {friendly_model_name(est.model)} — digest, two critique reads "
+        "per sheet, cross-sheet QC, deterministic auditors, prose harvest, "
+        "verification, and citation checks.",
+        "",
+        "Estimated cost by stage:",
+    ]
+    for c in est.components:
+        money = f"~${c.cost:,.2f}" if c.cost is not None else "n/a"
+        lines.append(f"  • {c.stage}: {money} ({c.transport}) — {c.note}")
+    if est.low_cost is not None and est.high_cost is not None:
+        lines += [
+            "",
+            f"Estimated total: ${est.low_cost:,.2f} – ${est.high_cost:,.2f} — a rough "
+            "range (verification and citation scale with how many findings and code "
+            f"citations turn up). Pricing verified {est.verified_effective_date}; "
+            "cached sheets cost nothing.",
+        ]
+    else:
+        lines += ["", "Estimated total: unavailable for this model."]
+    lines += ["", "Proceed with the exhaustive review?"]
     return "\n".join(lines)

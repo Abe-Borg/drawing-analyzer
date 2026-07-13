@@ -37,6 +37,15 @@ them (+ Phase 21 `coverage_status`) into one `qc_status` (`NOT_REQUESTED` / `COM
 (`pipeline.EXHAUSTIVE_QC_COMPLETENESS_GATE_OPEN = False`) caps a clean exhaustive run
 at `PARTIAL` until Phases 24–26 land; Phase 26 opens it.
 
+**Usage & cost (Phase 23B, §15.6).** Token/cost accounting is an **append-only**
+`RunUsage` ledger (`ctx.run_usage`): every API call/attempt appends a priced
+`UsageRecord` (family, `transport` REAL_TIME/BATCH/CACHE, model, tokens, tool uses,
+cache-hit, `estimated_cost`), and the run's `total_*` are *derived* sums — no stage
+can overwrite another's counters (the old `v_in, v_out = vres…` overwrite is gone).
+`core.pricing.usage_record_cost` prices one record by its rate class; costs carry a
+`PRICING_EFFECTIVE_DATE`. `cost.estimate_exhaustive_run_cost` is the pre-run
+per-stage estimate (verification/citation quoted as a low–high band).
+
 **Digest path:** `tiling.py` (pure geometry) → `render.py` (rasterization) →
 `digest.py` (prompt + tolerant findings-block parser), or `batch_digest.py`
 (Message Batches + Files APIs, ~50% cheaper) → `digest_cache.py` (two-level

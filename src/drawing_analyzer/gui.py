@@ -42,7 +42,12 @@ from .core.api_key_store import (
 )
 from .core.app_paths import api_key_paths
 from .colors import COLORS
-from .cost import estimate_drawing_set_cost, format_drawing_cost_prompt
+from .cost import (
+    estimate_drawing_set_cost,
+    estimate_exhaustive_run_cost,
+    format_drawing_cost_prompt,
+    format_exhaustive_cost_prompt,
+)
 from .html_report import build_html_report
 from .pipeline import DrawingContext, extract_drawing_context
 from .render import list_sheets
@@ -676,28 +681,26 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         ink_rejected = self._ink_rejected_var.get()
         reference_audit = self._reference_audit_var.get()
 
-        # Cost-confirm gate — show the estimated (batch-rate) spend before the
-        # batch is submitted. Nothing is sent until this is confirmed.
+        # Cost-confirm gate — show the estimated spend before anything is sent.
+        # For an exhaustive QC run (DA-010) show the full per-stage estimate with a
+        # low–high band (§15.7); otherwise the digest-only figure. Nothing is sent
+        # until this is confirmed.
         refs = list_sheets(self._pdfs)
-        estimate = estimate_drawing_set_cost(
-            len(refs), file_count=len(self._pdfs), model=REVIEW_MODEL_DEFAULT,
-            batch=True, focus=bool(focus),
-        )
-        prompt = format_drawing_cost_prompt(estimate)
         if qc_markups:
-            # QC Markups is the full exhaustive stack (DA-010): two critique reads
-            # per sheet, cross-sheet QC, the deterministic auditors, verification,
-            # and citation checks — meaningfully more than the digest above. The
-            # per-stage estimate lands in a later phase; be honest here that this is
-            # a much larger run whose exact cost isn't yet previewed.
-            prompt += (
-                "\n\nQC Markups runs an exhaustive review — two critique reads per "
-                "sheet, cross-sheet QC, deterministic auditors, verification, and "
-                "citation checks — so it costs substantially more than the digest "
-                "above (a precise per-stage estimate is not yet shown). Verification "
-                "alone adds ~$0.01–0.03 per finding."
+            exh = estimate_exhaustive_run_cost(
+                len(refs), file_count=len(self._pdfs), model=REVIEW_MODEL_DEFAULT,
+                batch=True, focus=bool(focus),
             )
-        if not messagebox.askyesno("Confirm drawing analysis", prompt):
+            prompt = format_exhaustive_cost_prompt(exh)
+            dialog_title = "Confirm exhaustive QC review"
+        else:
+            estimate = estimate_drawing_set_cost(
+                len(refs), file_count=len(self._pdfs), model=REVIEW_MODEL_DEFAULT,
+                batch=True, focus=bool(focus),
+            )
+            prompt = format_drawing_cost_prompt(estimate)
+            dialog_title = "Confirm drawing analysis"
+        if not messagebox.askyesno(dialog_title, prompt):
             return
 
         self._busy = True
@@ -873,13 +876,29 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             state, level = "Completed with QC warnings", "warning"
         else:
             state, level = "Completed", "success"
+        est_cost = getattr(ctx, "total_estimated_cost", None)
+        cost_note = f" · est. ${float(est_cost):,.2f}" if est_cost is not None else ""
         summary = (
             f"{state} — {ok}/{ctx.sheet_count} sheet(s) analyzed{cached_note}"
             f"{failed_note} · input {ctx.total_input_tokens:,} tok, "
-            f"output {ctx.total_output_tokens:,} tok"
+            f"output {ctx.total_output_tokens:,} tok{cost_note}"
         )
         self._log(summary, level=level)
         self._set_progress_text(summary, color=COLORS[level])
+        # Post-run actuals: per-stage token/cost breakdown from the usage ledger
+        # (§15.7). Derived from the same records the total above sums, so they agree.
+        by_family = getattr(ctx, "usage_by_family", None) or {}
+        if by_family:
+            for fam in sorted(by_family):
+                g = by_family[fam]
+                fam_cost = g.get("estimated_cost")
+                money = f" · ${float(fam_cost):,.2f}" if fam_cost is not None else ""
+                hits = f", {g['cache_hits']} cached" if g.get("cache_hits") else ""
+                self._log(
+                    f"  {fam}: {g['calls']} call(s){hits} · "
+                    f"in {g['input_tokens']:,} / out {g['output_tokens']:,} tok{money}",
+                    level="muted",
+                )
         # When exhaustive QC ran, surface the per-stage status so the operator can
         # see which stages are COMPLETE/PARTIAL/FAILED/SKIPPED_VALID (§15.5), and be
         # honest that a clean run is gated from a "complete" claim during Phase 23.
