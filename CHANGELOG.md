@@ -6,6 +6,41 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (Phase 23C — batch critique & upload lifecycle, DA-030/DA-034)
+
+- **The critique now rides the Message Batches path in a `use_batch` run, at the
+  ~50% batch rate (DA-030).** Previously the reviewer's two self-consistency reads
+  ran real-time and inlined each sheet's ~37 images as base64 *twice* (once per
+  read), making the exhaustive QC pass the dominant cost and leaving the documented
+  "roughly half via Batches" economics untrue for the critique. A new
+  `batch_critique` module uploads each uncached sheet's images to the Files API
+  **once** and submits both reads as batch items (distinct `custom_id`s
+  `sheet__{i}__r1` / `…__r2`) referencing that single shared upload — so the
+  imagery is neither re-rendered per read nor re-uploaded, and both reads are
+  batch-priced. The usage ledger records the reads with `transport=BATCH`, so the
+  cost preview's critique component is now batch-priced and the discount is real.
+  The self-consistency merge, provenance stamping, caching, and partial/failed-read
+  semantics are the *identical* code the real-time path uses (a shared
+  `outcome_from_message` / `result_from_outcomes`), so a batched sheet's verdict is
+  byte-for-byte what a real-time one would be. Additive and non-fatal (I-3): an
+  upload failure degrades **only that sheet** to a real-time fallback reusing the
+  in-hand render, and a batch that can't be collected degrades those sheets'
+  critique while the standard digest deliverable ships untouched. A whole-run
+  Files-API outage trips the same run-fatal upload circuit breaker the digest path
+  uses (after a few consecutive 401/403/404s the remaining sheets skip the doomed
+  upload and go straight to the real-time read). *Scope note:*
+  the reuse is **within** the critique's two reads; sharing one upload across the
+  digest **and** the critique (§15.8's ideal) is a deliberately deferred follow-up.
+- **Uploaded Files-API images are released on every exit path (DA-034).** Cleanup
+  is no longer reached only on specific branches. In the new critique batch it runs
+  in a `try/finally`; in the digest batch, `submit_drawing_batch` now deletes every
+  already-uploaded file if `batches.create` raises (a submit failure used to leak
+  the whole batch's uploads), and `collect_drawing_batch` releases the files if an
+  unexpected error escapes the terminal-collection path (`results()`/parse/the
+  follow-up round raising) before re-raising. A batch that is neither collected nor
+  cancelable keeps its files to expire server-side ("detach safely"), and that
+  retention is logged.
+
 ### Fixed (Phase 23B — usage & cost accounting, DA-014)
 
 - **Token accounting is now an append-only usage ledger; no stage can overwrite

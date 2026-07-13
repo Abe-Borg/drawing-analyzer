@@ -150,8 +150,10 @@ def format_drawing_cost_prompt(est: DrawingCostEstimate) -> str:
 # the finding / unique-claim count, which isn't known until the digests complete,
 # so they are quoted as a per-sheet low–high band rather than a single number.
 
-# Per-read critique output; each read re-renders the sheet (its input ≈ the digest
-# images again) — the dominant critique cost.
+# Per-read critique output. Each of the two reads bills the sheet's image input
+# again (its input ≈ the digest images) — but in a ``use_batch`` run both reads
+# ride one Message Batch referencing a single shared upload (Phase 23C), so the
+# rate is halved and the sheet is uploaded once, not re-rendered per read.
 _ASSUMED_CRITIQUE_OUTPUT_TOKENS_PER_READ = 1_500
 _ASSUMED_CROSS_QC_OUTPUT_TOKENS = 2_000
 _ASSUMED_PROSE_STRAGGLER_INPUT_TOKENS = 1_500     # one small structuring allowance
@@ -215,10 +217,11 @@ def estimate_exhaustive_run_cost(
 ) -> ExhaustiveCostEstimate:
     """Estimate an **exhaustive QC** run's cost, component by component (§15.7).
 
-    The digest (and synthesis / focus) ride the Batch path when ``batch`` is set;
-    critique, cross-QC, verification, and citation run real-time (until Phase 23C
-    routes critique through Batches). Verification and citation are quoted as a
-    low–high band because their volume tracks the finding / unique-claim count.
+    The digest (and synthesis / focus) and the two critique reads ride the Batch
+    path when ``batch`` is set (Phase 23C routed critique through Batches); cross-QC,
+    verification, and citation still run real-time. Verification and citation are
+    quoted as a low–high band because their volume tracks the finding / unique-claim
+    count.
     A component whose model price is unknown contributes ``None`` and drops out of
     the numeric total (the caller shows scale without a dollar figure).
     """
@@ -237,12 +240,15 @@ def estimate_exhaustive_run_cost(
         note="one vision call per sheet" + (" + text passes" if sheet_count >= 2 else ""),
     ))
 
-    # Critique — two adversarial reads per sheet, each re-rendering the sheet.
+    # Critique — two adversarial reads per sheet. In a ``use_batch`` run both reads
+    # ride one Message Batch referencing a single shared per-sheet upload (Phase
+    # 23C), so they are batch-priced; otherwise real-time.
     crit_in = 2 * sheet_count * (per_sheet_images + _ASSUMED_PROMPT_TOKENS_PER_SHEET)
     crit_out = 2 * sheet_count * _ASSUMED_CRITIQUE_OUTPUT_TOKENS_PER_READ
     components.append(_component(
-        "Critique ×2 (per sheet)", crit_in, crit_out, model=model, batch=False,
-        note="two full re-reads per sheet — real-time",
+        "Critique ×2 (per sheet)", crit_in, crit_out, model=model, batch=batch,
+        note="two full reads per sheet"
+        + (" — one shared upload, Batch rate" if batch else " — real-time"),
     ))
 
     # Cross-sheet QC — one (or a few sharded) text passes over all the digests.

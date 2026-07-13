@@ -257,7 +257,13 @@ PDFs → list sheets → render (overview + 6×6 tiles) + extract vector text la
   body approaches the 32 MB limit. ~50% cheaper than real time. If the Files API is
   unavailable for your key/workspace (uploads return `404`), each affected sheet
   falls back to an inline real-time digest so the run still completes instead of
-  producing nothing.
+  producing nothing. In exhaustive QC the **critique** also rides the Batches path:
+  each uncached sheet's images upload once and *both* self-consistency reads
+  reference that one shared upload (distinct `custom_id`s), so the reviewer earns
+  the same batch rate and the sheet is neither re-rendered nor re-uploaded per read.
+  The uploaded files are released on every exit — a fully-collected batch, a
+  confirmed cancel, or an unexpected collection error (best-effort cancel, then
+  release); a batch this run can't cancel keeps its files to expire server-side.
 - **Real-time mode** (`use_batch=False`) digests sheets concurrently on a bounded
   thread pool while rendering stays sequential (PyMuPDF is not thread-safe).
 - **Caching** is content-keyed per sheet, so re-running a set after editing one
@@ -321,9 +327,10 @@ stale digest after a rotation / re-crop / added annotation is no longer possible
 
 **Cost of the exhaustive critique.** A plain digest is roughly $0.4–0.6/sheet
 real-time (~half that via Batches). Turning on the [critique pass](#critique-pass-the-reviewer)
-adds a second full-coverage read run twice — on the order of **$1–1.5/sheet** at
-Opus pricing, plus its re-render — so an exhaustive `critique=True` run lands
-around **$2–3.5/sheet** once verification is included. The offline stages
+adds a second full-coverage read run twice — but in a `use_batch` run those two
+reads ride the Message Batches path at the ~50% batch rate (Phase 23C), so the
+reviewer is no longer double-priced at real time. An exhaustive `critique=True`
+run lands around **$2–3.5/sheet** once verification (real-time) is included. The offline stages
 (reference audit, anchoring, markup, text extraction) stay $0. Every stage is
 individually cached, so a re-run of an unchanged set skips the model calls.
 
@@ -417,11 +424,17 @@ also marked reproduced. A long review-profile checklist is sent **identically** 
 both reads (never split across them), so the two stay directly comparable.
 
 The merged critique is cached under its own key, so a re-run skips the extra
-calls. Because the digest's images are gone by the time the critique runs (the
-batch path streams and discards them), the critique **re-renders** each sheet —
-so `critique=True` is meaningfully more expensive than a plain digest (see
-[Performance](#performance)). It is additive and non-fatal: a failure is recorded
-and the standard deliverable ships. The model defaults to Opus 4.8
+calls. The digest's images are gone by the time the critique runs (the batch path
+streams and discards them), so the critique renders each uncached sheet once more —
+but in a `use_batch` run it uploads that render **once** and runs *both* reads off
+the shared upload through the Message Batches API (the ~50% batch rate), rather than
+inlining the images twice at real-time price. (Sharing a *single* upload across the
+digest **and** the critique — so the sheet is neither rendered nor uploaded a second
+time — is a deferred follow-up; today the reuse is within the critique's two reads.)
+`critique=True` is still more expensive than a plain digest (see
+[Performance](#performance)), just no longer double-priced. It is additive and
+non-fatal: a failure is recorded and the standard deliverable ships — a critique
+batch that can't be collected degrades those sheets' critique, never the digest. The model defaults to Opus 4.8
 (`DRAWING_ANALYZER_CRITIQUE_MODEL`); the run count is `DRAWING_ANALYZER_CRITIQUE_RUNS`
 (default 2; set 1 to disable self-consistency).
 

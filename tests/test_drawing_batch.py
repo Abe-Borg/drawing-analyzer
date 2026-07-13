@@ -105,6 +105,8 @@ class _FakeBatches:
         self._c = client
 
     def create(self, *, requests, betas=None):
+        if getattr(self._c, "create_raises", None) is not None:
+            raise self._c.create_raises
         self._c.create_calls.append({"requests": list(requests), "betas": betas})
         self._c.submitted = list(requests)
         return _Obj(id="batch_abc")
@@ -124,6 +126,8 @@ class _FakeBatches:
         return _Obj(id=batch_id, processing_status="canceling")
 
     def results(self, batch_id):
+        if getattr(self._c, "results_raises", None) is not None:
+            raise self._c.results_raises
         order = self._c.submitted
         if self._c.reverse_results:
             order = list(reversed(order))
@@ -322,6 +326,35 @@ def test_upload_failure_cleans_up_partial_upload():
         upload_sheet_images(client, _make_sheet(1), max_workers=1)
     # The two images uploaded before the failure are deleted — no leak.
     assert client.files.deleted == ["file_0", "file_1"]
+
+
+def test_submit_create_failure_deletes_every_uploaded_file():
+    # DA-034: batches.create raising AFTER the sheets uploaded must delete every
+    # uploaded file before propagating — a submit failure used to leak the whole
+    # batch's uploads.
+    client = _FakeClient(_succeed)
+    client.create_raises = RuntimeError("batch backend down")
+    with pytest.raises(RuntimeError, match="batch backend down"):
+        submit_drawing_batch(
+            iter([_make_sheet(1), _make_sheet(2)]), client=client, model=OPUS, total=2,
+        )
+    assert client.files.uploaded_ids  # sheets did upload
+    assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids)
+
+
+def test_collect_results_error_releases_files_before_propagating():
+    # DA-034: an unexpected error collecting a *terminal* batch (results() raising)
+    # must release the uploaded files before the exception propagates — the batch
+    # is ended, so its files are safe to delete.
+    client = _FakeClient(_succeed)  # status defaults to "ended" (terminal)
+    batch = submit_drawing_batch(
+        iter([_make_sheet(1), _make_sheet(2)]), client=client, model=OPUS, total=2,
+    )
+    client.results_raises = RuntimeError("results exploded")
+    with pytest.raises(RuntimeError, match="results exploded"):
+        collect_drawing_batch(batch, client=client, sleep=NOSLEEP)
+    assert sorted(client.files.deleted) == sorted(batch.all_file_ids)
+    assert client.files.deleted  # there were files to release
 
 
 def test_upload_retries_transient_503_then_succeeds():

@@ -31,6 +31,8 @@ Module layout::
     auditors/         deterministic zero-API auditors (references, arithmetic,
                       naming, title-block, sheet-index)
     critique.py       second full-coverage "reviewer" vision read (self-consistent)
+    batch_critique.py Message Batches / Files API critique path (one shared upload
+                      feeds both self-consistency reads; DA-030/DA-034)
     cross_qc.py       cross-sheet conflict hunt (text-only, dual anchors)
     prose_harvest.py  prose Coordination/Conflict/synthesis items -> ledger entries
     anchor.py         finding quote -> PDF rectangle resolution (offline)
