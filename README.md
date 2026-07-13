@@ -464,8 +464,15 @@ skipped without failing the run.
 
 A starter **fire-protection** profile (NFPA 13 sprinkler QC) ships with the tool.
 `drawing_analyzer.profiles.suggest_profiles(sheet_ids)` proposes profiles whose
-disciplines match a set's sheet numbering (e.g. `F-…` sheets → the
-fire-protection profile).
+disciplines match a set's sheet numbering — via a shared, **project-prefix-aware**
+discipline detector (`auditors/sheet_ids.py`), so a project-coded id like
+`AVC10-F-D-01-1` is matched on its fire-protection segment (`F`), not the project
+code, and compact forms like `FP101` work too. `suggest_profiles_for_paths(paths)`
+runs a cheap **text-only preflight** (no rasterization) to read each sheet id and
+auto-suggest for a whole set; the GUI uses it to pre-check applicable profiles once
+files are loaded (manual choice always wins). The profiles actually applied are
+**snapshotted** (name + version + content hash + source) at Analyze time onto
+`ctx.profile_snapshots`.
 
 ### Writing a profile
 
@@ -512,11 +519,24 @@ that diverged on a sibling sheet, a note on one sheet contradicted by another, a
 cross-reference sending you to a sheet that disclaims what the pointer promised.
 Turned on with `cross_qc=True`, the **cross-sheet QC pass** hunts exactly those.
 
-It is a *text-reasoning* task — one Opus call over all the per-sheet **digests +
-verbatim text layers**, with **no images** (large sets shard by discipline). It is
+It is a *text-reasoning* task — for a set up to 40 sheets, one Opus call over all
+the per-sheet **digests + verbatim text layers**, with **no images**. It is
 distinct from the prose [synthesis](#how-it-works), which stays as-is, and like
 the critique it never touches `combined_text` (the conflicts live only in the
 findings artifacts).
+
+**Whole-set above 40 sheets.** A larger set shards by discipline and uses a
+**map → reconcile** pass: each shard call returns its local conflicts *and* a set
+of compact, grounded facts (the comparable values another shard might contradict),
+then a final reconciliation call compares those facts across *all* shards — so a
+conflict whose two sheets fell in different shards is still found (a plain
+shard-and-union would miss it). The model sees only request-local **opaque
+handles** in the sharded path — never source identity — and every fact/leg quote is
+validated against the retained source text before it is trusted, so an ungrounded
+quote never becomes a dual-anchor finding. Each sheet's text layer is budgeted with
+the omission **counted and surfaced** (never a silent truncation); a failed shard,
+a failed reconciliation, or a degraded budget holds the stage at `PARTIAL` while
+its findings stay usable.
 
 Its findings carry **dual anchors**: a primary anchor on one sheet plus one or
 more `also_on` legs on the other sheets in the conflict, each resolved to its own
@@ -592,8 +612,17 @@ issued drawing, the verification pass takes a **surgical second look**: for each
 *anchored* finding the model itself produced, it renders a high-DPI crop around
 the anchor and asks **one small model call** whether the finding actually holds
 **in that crop** — instructed to judge *only* what's visible, not re-argue the
-whole issue. The crop the verifier saw is written to `evidence/<finding_id>.png`
-regardless of the verdict; the audit trail is the point.
+whole issue.
+
+Every crop the verifier saw is preserved **byte-for-byte**: it is saved and hashed
+*before* it is sent, and only saved crops are sent — a verdict may never rest on an
+image absent from the trail. Each finding gets an `evidence/<QC-ID>/` directory with
+one `leg-NN__<sheet>_pN.png` per leg (a cross-sheet conflict saves *every* sheet's
+crop, in request order) plus a `request.json` recording the ordered artifact
+metadata and the verdict. A cross-sheet conflict is never decided from a single
+crop — fewer than two saved legs degrades it to `SKIPPED` with a precise missing-leg
+reason. (The report/popup still surface `verification.evidence_png`, now an alias to
+the first saved crop.)
 
 The model answers `CONFIRMED` / `CONTRADICTED` / `NOT_VISIBLE`, mapped to a
 finding status:
@@ -726,19 +755,26 @@ Findings often cite code sections (`refs`), and citations have a failure mode of
 their own: a drawing citing **2016-era numbering under a 2019 basis** (the
 prototype found exactly that — NFPA 13's Table 13.2.1 became §4.3.1.7 in the 2019
 renumbering). The drawing set can't validate its own citations, so
-`citation_check=True` adds one **web-search-backed model call per unique
-citation** (the API's server-side `web_search` tool): does this section — in the
-edition the set adopts *and* in the current edition — actually support the
-finding citing it?
+`citation_check=True` adds **web-search-backed model calls** (the API's server-side
+`web_search` tool): does this section — in the edition the set adopts *and* in the
+current edition — actually support the finding citing it?
+
+The check is **claim-complete**: a verdict attaches to a finding only if that
+finding's claim was in the request that produced it. Every distinct claim for a
+reference is checked (chunked into claim-complete requests when there are many —
+so no claim is silently dropped), the model returns a **per-claim** verdict, and
+each `CitationAssessment` is bound to exactly the findings whose claim it covered.
+A finding that cites several references keeps one assessment **per reference**
+(`finding.citations`), and `finding.citation` is a derived summary
+(`CHECKED_SUPPORTS` / `CHECKED_MISMATCH` / `UNCHECKED`) shown in the markup popup,
+the CSV, and the report.
 
 The **adopted editions** are harvested offline from the sheet text layers (the
-general-notes "NFPA 13, 2016 EDITION" claims) and included in the prompt. Each
-verdict — `CHECKED_SUPPORTS` / `CHECKED_MISMATCH` / `UNCHECKED` — attaches to
-every finding citing that ref and appears in the markup popup, the CSV, and the
-report. **A MISMATCH downgrades nothing automatically** — it is surfaced for the
-engineer, because sometimes the stale citation *is* the finding. Real-time only
-(a handful of interactive calls; ~$0.03–0.08 per unique ref), additive, and
-non-fatal: any failure degrades that ref to `UNCHECKED`.
+general-notes "NFPA 13, 2016 EDITION" claims) and included in the prompt. **A
+MISMATCH downgrades nothing automatically** — it is surfaced for the engineer,
+because sometimes the stale citation *is* the finding. Real-time only (a handful of
+interactive calls; ~$0.03–0.08 per unique ref), additive, and non-fatal: any
+failure leaves the affected claim `UNCHECKED` and holds the stage at `PARTIAL`.
 
 ## The findings ledger (Part III)
 
