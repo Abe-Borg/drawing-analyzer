@@ -204,10 +204,11 @@ class _MapReconcileClient:
     shard-and-union path silently missed.
     """
 
-    def __init__(self, reconcile_finding):
+    def __init__(self, reconcile_finding, map_claim=None):
         self.map_calls = 0
         self.reconcile_calls = 0
         self._reconcile_finding = reconcile_finding
+        self._map_claim = map_claim
         outer = self
 
         class _Msgs:
@@ -216,7 +217,16 @@ class _MapReconcileClient:
                 body = kw["messages"][0]["content"][0]["text"]
                 if system.startswith(X.CROSS_QC_RECONCILE_SYSTEM_PROMPT[:60]):
                     outer.reconcile_calls += 1
-                    obj = {"findings": [outer._reconcile_finding], "claims": []}
+                    # Only report the conflict when BOTH its sheets' handles are
+                    # actually present in this reconcile call — so a test proves the
+                    # cross-group comparison really happened, not that the client
+                    # echoes a finding regardless of what it was given.
+                    fin = outer._reconcile_finding
+                    needed = [fin["sheet_handle"]] + [
+                        l["sheet_handle"] for l in fin.get("also_on", [])
+                    ]
+                    present = all(re.search(rf"\b{h}\b", body) for h in needed)
+                    obj = {"findings": [fin] if present else [], "claims": []}
                 else:
                     outer.map_calls += 1
                     handles = re.findall(r"SHEET (S\d+)", body)
@@ -224,7 +234,8 @@ class _MapReconcileClient:
                         "sheet_handle": h, "entity_or_tag": "COLO", "attribute": "serves",
                         "value": "area", "exact_quote": "sheet text layer", "context": "note",
                     } for h in handles]
-                    obj = {"findings": [], "claims": [], "facts": facts}
+                    claims = [outer._map_claim] if outer._map_claim else []
+                    obj = {"findings": [], "claims": claims, "facts": facts}
                 return FakeMessage(
                     content=[FakeTextBlock(text="```json\n" + json.dumps(obj) + "\n```")],
                     usage=FakeUsage(input_tokens=800, output_tokens=60),
@@ -272,6 +283,65 @@ def test_large_set_maps_then_reconciles_across_shards():
     # Both legs resolve to their real, distinct sources (via opaque handle → host).
     assert c.source_name == "f0.pdf" and c.also_on[0].source_name == "m0.pdf"
     assert source_page_key(c) != source_page_key(c.also_on[0])
+
+
+def _mk_two_shard_set():
+    sheets, geoms = [], []
+    sheets.append(_digest("f0.pdf"))
+    geoms.append(_geom_txt("f0.pdf", "F-D-00-1", "COLO 5 SERVES AREA A."))
+    for i in range(1, 21):
+        sheets.append(_digest(f"f{i}.pdf"))
+        geoms.append(_geom(f"f{i}.pdf", f"F-D-{i:02d}-1"))
+    sheets.append(_digest("m0.pdf"))
+    geoms.append(_geom_txt("m0.pdf", "M-D-00-1", "COLO 1 SERVES AREA A."))
+    for i in range(1, 21):
+        sheets.append(_digest(f"m{i}.pdf"))
+        geoms.append(_geom(f"m{i}.pdf", f"M-D-{i:02d}-1"))
+    return sheets, geoms
+
+
+def test_sharded_claims_are_rebound_to_real_sheets():
+    # DA-015 fix: a map/reconcile claim keyed by the opaque HANDLE (as the map
+    # prompt instructs) is rebound to the real sheet id + source so the arithmetic
+    # auditor can use it — it is not orphaned with an empty sheet id.
+    sheets, geoms = _mk_two_shard_set()
+    reconcile_finding = {
+        "sheet_handle": "S001", "category": "conflict", "severity": "high",
+        "text": "cross conflict", "source_quote": "COLO 5 SERVES AREA A",
+        "also_on": [{"sheet_handle": "S022", "source_quote": "COLO 1 SERVES AREA A"}],
+    }
+    map_claim = {"sheet_id": "S001", "quote": "TOTAL 540", "kind": "sum",
+                 "terms": [180, 180, 180], "expected": 540}
+    client = _MapReconcileClient(reconcile_finding, map_claim=map_claim)
+    res = cross_sheet_qc(sheets, geoms, client=client, max_retries=0, sleep=_NOOP)
+    assert len(res.claims) == 1                        # deduped across the shards
+    c = res.claims[0]
+    assert c.sheet_id == "F-D-00-1"                    # handle → real sheet id
+    assert c.source_name == "f0.pdf" and c.kind == "sum"
+
+
+def test_reconcile_all_pairs_finds_conflict_across_fact_groups(monkeypatch):
+    # DA-015 fix [4]: when facts overflow one reconcile call, the facts are split
+    # into half-cap groups and reconciled over EVERY pair of groups — so a conflict
+    # whose two sheets land in different fact groups is still found (the earlier
+    # merged[:cap] tree kept only the first group and missed them).
+    monkeypatch.setattr(X, "MAX_FACTS_PER_RECONCILE", 10)   # half=5 → 9 groups over 42 facts
+    sheets, geoms = _mk_two_shard_set()                     # S001 (fact 0), S022 (fact 21)
+    reconcile_finding = {
+        "sheet_handle": "S001", "category": "conflict", "severity": "high",
+        "text": "cross conflict found only when both groups meet",
+        "source_quote": "COLO 5 SERVES AREA A",
+        "also_on": [{"sheet_handle": "S022", "source_quote": "COLO 1 SERVES AREA A"}],
+    }
+    client = _MapReconcileClient(reconcile_finding)
+    res = cross_sheet_qc(sheets, geoms, client=client, max_retries=0, sleep=_NOOP)
+    # S001 and S022 sit in different half-cap groups, so only the pair-call that
+    # unites those two groups can surface the conflict — and it does.
+    assert client.reconcile_calls == 36                     # C(9,2)
+    conflicts = [f for f in res.findings if f.also_on]
+    assert len(conflicts) == 1
+    assert conflicts[0].also_on[0].source_name == "m0.pdf"
+    assert res.reconciliation_completed is True
 
 
 def test_reconcile_drops_ungrounded_cross_shard_quote():
@@ -561,8 +631,12 @@ def test_pipeline_dual_crop_verify_clouds_under_default_gating(tmp_path):
         assert saved.exists()
         assert hashlib.sha256(saved.read_bytes()).hexdigest() == a.sha256
     assert (qc_root / "evidence" / conflict.qc_id / "request.json").exists()
-    # Distinct source ids on the two legs so evidence never cross-contaminates.
-    assert ev[0].source_id and ev[1].source_id and ev[0].source_id != ev[1].source_id
+    # The two legs are DISTINCT crops from DISTINCT sources — proving a per-leg crop
+    # was saved for each, not the primary crop duplicated (the crops of two different
+    # sheets differ, so their hashes and on-disk bytes must differ).
+    assert ev[0].source_name != ev[1].source_name
+    assert ev[0].sha256 != ev[1].sha256
+    assert (qc_root / ev[0].relative_path).read_bytes() != (qc_root / ev[1].relative_path).read_bytes()
     # Clouded on BOTH sheets under the default (verified-only) gate — a cloud
     # plus its QC tag on each sheet (Phase 15).
     assert {p.name for p in ctx.reviewed_pdf_paths} == {"F-D-01-1_reviewed.pdf", "F-A-01-1_reviewed.pdf"}

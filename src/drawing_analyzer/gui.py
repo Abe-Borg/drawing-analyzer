@@ -88,11 +88,15 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._ink_rejected_var = BooleanVar(value=False)
         self._reference_audit_var = BooleanVar(value=False)
         # Review-profile selection (Phase 24 §16.4): name -> checkbox var, plus the
-        # set of profiles the user manually turned off — a deselection survives a
-        # later preflight auto-suggest refresh (manual choice always wins).
+        # sets of profiles the user manually forced on/off — a manual override always
+        # wins and survives a later preflight auto-suggest refresh. Preflight PyMuPDF
+        # access is serialized (not thread-safe) and generation-guarded (latest wins).
         self._profile_vars: dict[str, BooleanVar] = {}
-        self._profile_deselected: set[str] = set()
+        self._profile_forced_on: set[str] = set()
+        self._profile_forced_off: set[str] = set()
         self._profile_suggested: set[str] = set()
+        self._preflight_lock = threading.Lock()
+        self._preflight_gen = 0
         # HTML report: off by default the key is NOT written into the file (the
         # Ask-AI panel prompts for one at runtime). On restores the old embedded
         # -key convenience — with a red warning in the report; don't share it.
@@ -596,6 +600,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             return
         self._pdfs = []
         self._ctx = None
+        self._reset_profile_selection()
         self._clear_log()
         self.save_btn.configure(state="disabled")
         self.html_btn.configure(state="disabled")
@@ -646,6 +651,8 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._profiles_by_name = {p.name: p for p in profiles}
         if not profiles:
             return
+        from .profiles import snapshot_profiles
+
         ctk.CTkLabel(
             parent, text="Review profiles (auto-suggested from sheet ids)",
             font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
@@ -654,8 +661,10 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         for p in profiles:
             var = BooleanVar(value=False)
             self._profile_vars[p.name] = var
-            src = str(getattr(p.source_path, "parent", "")).replace("\\", "/")
-            source = "built-in" if "drawing_analyzer/profiles" in src else "user"
+            # Provenance from the authoritative snapshot (exact parent-dir match),
+            # not a loose substring — the default user dir ~/.drawing_analyzer/
+            # profiles must read as 'user', not 'built-in'.
+            source = snapshot_profiles([p])[0].source or "user"
             label = f"{p.title} · v{p.version} · {source}"
             ctk.CTkCheckBox(
                 parent, text=label, variable=var,
@@ -665,44 +674,68 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             ).pack(anchor="w", padx=(40, 0), pady=(1, 0))
 
     def _on_profile_toggle(self, name: str) -> None:
-        """Record a manual selection/deselection so it survives a preflight refresh."""
+        """Record a manual override (on/off) so it survives a preflight refresh."""
         var = self._profile_vars.get(name)
         if var is None:
             return
         if var.get():
-            self._profile_deselected.discard(name)
+            self._profile_forced_on.add(name)
+            self._profile_forced_off.discard(name)
         else:
-            self._profile_deselected.add(name)
+            self._profile_forced_off.add(name)
+            self._profile_forced_on.discard(name)
 
     def _refresh_profile_suggestions(self) -> None:
         """Auto-suggest applicable profiles for the loaded files (off the UI thread).
 
         Runs the cheap text-only preflight in a worker thread and marshals the
-        checkbox updates back via ``after`` so the UI stays responsive (§16.4). A
-        profile the user manually turned off stays off even if re-suggested.
+        checkbox updates back via ``after`` so the UI stays responsive (§16.4). The
+        PyMuPDF access is serialized under a lock (PyMuPDF is not thread-safe), and
+        a generation counter means only the most recent preflight's result is applied.
         """
         if not self._profile_vars or self._busy:
             return
         pdfs = list(self._pdfs)
+        self._preflight_gen += 1
+        gen = self._preflight_gen
 
         def _work() -> None:
             try:
                 from .profiles import suggest_profiles_for_paths
 
-                names = [p.name for p in suggest_profiles_for_paths(pdfs)]
+                # Serialize PyMuPDF access across overlapping preflights (I-5).
+                with self._preflight_lock:
+                    names = [p.name for p in suggest_profiles_for_paths(pdfs)]
             except Exception as exc:  # noqa: BLE001 - preflight is a hint, never fatal
                 _log.info("profile preflight failed: %s", exc)
                 names = []
-            self.after(0, lambda: self._apply_profile_suggestions(names))
+            self.after(0, lambda: self._apply_profile_suggestions(names, gen))
 
         threading.Thread(target=_work, daemon=True).start()
 
-    def _apply_profile_suggestions(self, names: list[str]) -> None:
+    def _apply_profile_suggestions(self, names: list[str], gen: int = 0) -> None:
+        """Apply a preflight result: suggested-and-not-forced-off OR forced-on are
+        checked; everything else is unchecked (so a suggestion for one file set does
+        not leak into the next). A stale result (superseded generation) is ignored."""
+        if gen and gen != self._preflight_gen:
+            return
+        from .profiles import resolve_profile_selection
+
         self._profile_suggested = set(names)
-        for name in names:
-            var = self._profile_vars.get(name)
-            if var is not None and name not in self._profile_deselected:
-                var.set(True)
+        on = set(resolve_profile_selection(
+            names, user_selected=self._profile_forced_on,
+            user_deselected=self._profile_forced_off,
+        ))
+        for name, var in self._profile_vars.items():
+            var.set(name in on)      # non-suggested, non-forced → unchecked (no leak)
+
+    def _reset_profile_selection(self) -> None:
+        """Clear all profile state (called on Clear) so nothing carries into a new set."""
+        self._profile_forced_on.clear()
+        self._profile_forced_off.clear()
+        self._profile_suggested.clear()
+        for var in self._profile_vars.values():
+            var.set(False)
 
     def _selected_profiles(self) -> list[str]:
         """The profile names currently checked, in discovery order."""

@@ -716,8 +716,10 @@ class CitationAssessment:
     therefore covers those findings and no others. A finding with several references
     keeps one assessment *per reference* rather than collapsing them into one
     ambiguous status. ``adopted_edition`` is the set's stated basis (harvested
-    offline); ``current_edition`` / ``edition_notes`` carry the model's renumbering
-    findings; ``sources`` are the web-search citations backing the verdict.
+    offline); ``edition_notes`` carries the model's free-text renumbering finding;
+    ``current_edition`` is a reserved structured field (populated only when a
+    caller can supply it — the web-search verdict reports its finding in
+    ``edition_notes``); ``sources`` are the web-search citations backing the verdict.
     """
 
     reference: str
