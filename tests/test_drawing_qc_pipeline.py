@@ -13,7 +13,9 @@ import pytest
 
 pymupdf = pytest.importorskip("pymupdf")
 
+from drawing_analyzer.citation_check import CITATION_SYSTEM_PROMPT  # noqa: E402
 from drawing_analyzer.critique import CRITIQUE_SYSTEM_PROMPT  # noqa: E402
+from drawing_analyzer.cross_qc import CROSS_QC_SYSTEM_PROMPT  # noqa: E402
 from drawing_analyzer.digest import DIGEST_SYSTEM_PROMPT  # noqa: E402
 from drawing_analyzer.pipeline import extract_drawing_context  # noqa: E402
 from drawing_analyzer.synthesis import SYNTHESIS_SYSTEM_PROMPT  # noqa: E402
@@ -128,6 +130,11 @@ def test_full_qc_chain(tmp_path):
     assert _annot_count(src) == 0
     # Findings surface on the context.
     assert ctx.finding_count == 2 and ctx.clouded_finding_count == 2
+    # §15.5 temporary completeness gate: a clean exhaustive run is deliberately
+    # PARTIAL — never COMPLETE — until Phases 24–26 land. NORMAL config (no
+    # explicit stage was disabled).
+    assert ctx.qc_status == "PARTIAL"
+    assert ctx.configuration_kind == "NORMAL"
 
 
 # --------------------------------------------------------------------------- #
@@ -135,13 +142,35 @@ def test_full_qc_chain(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-def test_no_qc_flags_leaves_findings_empty(tmp_path):
+def test_standard_run_persists_findings_and_text(tmp_path):
+    # Product invariant (DA-012 §15.2): a standard run — neither QC checkbox — still
+    # retains the parsed digest findings and each sheet's extracted text, binds them
+    # to source identity, and anchors them offline *for free*, so they show in the
+    # report and export. It must NOT run any paid QC stage (no verify/critique/
+    # citation/prose-structuring/markup). Reverses the old "leaves findings empty"
+    # assertion, which encoded the discard defect rather than the requirement.
     src = _make_pdf(tmp_path / "M-101.pdf")
     client = _RoutingClient([_VAV_FINDING])
     ctx = extract_drawing_context([src], client=client, rows=2, cols=2)   # no QC flags
-    assert ctx.findings == [] and ctx.reference_findings == []
-    assert ctx.reviewed_pdf_paths == [] and ctx.sheet_geometries == []
+
+    # The digest's finding is retained and offline-anchored (its quote is on-sheet).
+    assert len(ctx.findings) == 1
+    f = ctx.findings[0]
+    assert f.anchor.status == "EXACT" and f.anchor.rect_pdf is not None
+    assert f.qc_id == "QC-001"                       # positional id assigned, still free
+    assert f.source_id                               # bound to host source identity
+    # No paid QC stage ran: not verified, no deterministic auditors, no markups.
+    assert f.verification.status == "SKIPPED"
+    assert ctx.reference_findings == []
+    assert ctx.reviewed_pdf_paths == []
     assert client.verify_calls == 0
+    # Sheet text/geometry retained for the findings + sheet_text exports.
+    assert len(ctx.sheet_geometries) == 1
+    assert ctx.sheet_geometries[0].sheet_text != ""
+    # Standard mode is not a QC mode: overall status is NOT_REQUESTED, no ink tally.
+    assert ctx.qc_status == "NOT_REQUESTED"
+    assert ctx.coverage_status == "NOT_REQUESTED"
+    assert ctx.ledger_tally == {}
 
 
 def test_reference_audit_only_no_markups_no_verify(tmp_path):
@@ -162,6 +191,12 @@ def test_reference_audit_only_no_markups_no_verify(tmp_path):
     # clouds that were never written to any PDF.
     assert ctx.ledger_tally == {}
     assert ctx.ledger_tally_line == ""
+    # Deterministic audit is an additive offline diagnostic, not a QC effort mode
+    # (§3.1): the overall status stays NOT_REQUESTED, and it made no model calls
+    # beyond the digest the user already asked for (DA-013).
+    assert ctx.qc_status == "NOT_REQUESTED"
+    assert ctx.run_configuration.deterministic_audit_only is True
+    assert ctx.run_configuration.run_prose_harvest is False
 
 
 def test_qc_markups_include_unverified(tmp_path):
@@ -183,6 +218,9 @@ def test_qc_markups_include_unverified(tmp_path):
 def test_verify_disabled_still_anchors_and_marks(tmp_path):
     src = _make_pdf(tmp_path / "M-101.pdf")
     client = _RoutingClient([_VAV_FINDING])
+    # verify_findings=False is an explicit expert override that disables only the
+    # verification stage; the rest of the exhaustive stack still runs (DA-010), so
+    # the deterministic auditors also fire (the M-999 stale ref).
     ctx = extract_drawing_context(
         [src], client=client, rows=2, cols=2,
         qc_markups=True, verify_findings=False, markup_verified_only=False,
@@ -191,8 +229,139 @@ def test_verify_disabled_still_anchors_and_marks(tmp_path):
     assert client.verify_calls == 0
     assert ctx.findings[0].anchor.status == "EXACT"
     assert ctx.findings[0].verification.status == "SKIPPED"
-    # include-unverified inks the SKIPPED model finding (cloud + QC tag).
-    assert _annot_count(ctx.reviewed_pdf_paths[0]) == 2
+    # include-unverified inks the SKIPPED model finding *and* the DETERMINISTIC
+    # auditor finding, each a cloud + QC tag: 2 clouds + 2 tags = 4.
+    assert _annot_count(ctx.reviewed_pdf_paths[0]) == 4
+    # Disabling a normally-required exhaustive stage is a debug override (§15.1).
+    assert ctx.configuration_kind == "DEBUG_OVERRIDE"
+    assert ctx.qc_status == "PARTIAL"
+
+
+# --------------------------------------------------------------------------- #
+# §15.1 — qc_markups=True resolves to (and runs) the full exhaustive stack
+# --------------------------------------------------------------------------- #
+
+
+class _CountingClient:
+    """Fake client that counts calls per stage and answers each with valid output."""
+
+    def __init__(self, findings: list[dict]):
+        self.calls = {
+            "digest": 0, "critique": 0, "cross": 0, "synth": 0,
+            "verify": 0, "citation": 0, "other": 0,
+        }
+        prose = "Sheet M-101 - Mechanical - Plan\nVAV-3 serves Room 120."
+        digest_text = prose + "\n\n" + _digest_block(findings)
+        calls = self.calls
+
+        class _Msgs:
+            def create(_self, **kw):
+                s = kw.get("system", "")
+                if s == VERIFY_SYSTEM_PROMPT:
+                    calls["verify"] += 1
+                    return FakeMessage(content=[FakeTextBlock(text='{"verdict":"CONFIRMED","note":"x"}')],
+                                       usage=FakeUsage(input_tokens=1, output_tokens=1))
+                if s.startswith(DIGEST_SYSTEM_PROMPT):
+                    calls["digest"] += 1
+                    return FakeMessage(content=[FakeTextBlock(text=digest_text)],
+                                       usage=FakeUsage(input_tokens=1, output_tokens=1))
+                if s.startswith(CRITIQUE_SYSTEM_PROMPT):
+                    calls["critique"] += 1
+                    return FakeMessage(content=[FakeTextBlock(text='```json\n{"findings":[]}\n```')],
+                                       usage=FakeUsage(input_tokens=1, output_tokens=1))
+                if s.startswith(CROSS_QC_SYSTEM_PROMPT):
+                    calls["cross"] += 1
+                    return FakeMessage(content=[FakeTextBlock(text='{"findings":[],"claims":[]}')],
+                                       usage=FakeUsage(input_tokens=1, output_tokens=1))
+                if s.startswith(SYNTHESIS_SYSTEM_PROMPT):
+                    calls["synth"] += 1
+                    return FakeMessage(content=[FakeTextBlock(text="Overview")],
+                                       usage=FakeUsage(input_tokens=1, output_tokens=1))
+                if s.startswith(CITATION_SYSTEM_PROMPT):
+                    calls["citation"] += 1
+                    return FakeMessage(content=[FakeTextBlock(text='{"assessments":[]}')],
+                                       usage=FakeUsage(input_tokens=1, output_tokens=1))
+                calls["other"] += 1
+                return FakeMessage(content=[FakeTextBlock(text="ok")],
+                                   usage=FakeUsage(input_tokens=1, output_tokens=1))
+
+        self.messages = _Msgs()
+
+
+def test_qc_markups_resolves_and_runs_exhaustive_stack(tmp_path):
+    # DA-010 / §15.1: the ordinary ``qc_markups=True`` contract must resolve to the
+    # exhaustive configuration AND actually run every required stage — not just the
+    # digest → markup path the GUI's checkbox used to invoke.
+    a = _make_pdf(tmp_path / "M-101.pdf")
+    b = _make_pdf(tmp_path / "M-102.pdf")
+    client = _CountingClient([_VAV_FINDING])
+    ctx = extract_drawing_context(
+        [a, b], client=client, rows=2, cols=2,
+        qc_markups=True, qc_work_dir=tmp_path / "qc",
+    )
+    cfg = ctx.run_configuration
+    assert cfg.exhaustive_qc and cfg.run_critique and cfg.critique_reads == 2
+    assert cfg.run_cross_qc and cfg.run_auditors and cfg.run_citation and cfg.run_markup
+
+    # The stages actually executed (not just resolved on): two critique reads per
+    # sheet, one cross-sheet call, one synthesis (>=2 sheets), verification, citation.
+    assert client.calls["digest"] == 2
+    assert client.calls["critique"] == 4            # 2 sheets x 2 reads
+    assert client.calls["cross"] >= 1
+    assert client.calls["synth"] == 1
+    assert client.calls["verify"] >= 1
+    assert client.calls["citation"] >= 1
+
+    # Every stage is recorded, and the clean exhaustive run is gated to PARTIAL.
+    stages = {s.stage: s.status for s in ctx.stage_results}
+    for name in ("synthesis", "critique", "cross_qc", "auditors", "prose_harvest",
+                 "verification", "citation", "markup"):
+        assert name in stages, name
+    assert ctx.qc_status == "PARTIAL"
+    assert ctx.configuration_kind == "NORMAL"
+
+
+def test_audit_only_makes_no_incremental_api_calls(tmp_path):
+    # DA-013 / §15.3: the deterministic-audit-only path runs the auditors over the
+    # already-extracted text/geometry and makes ZERO model calls beyond the digest —
+    # in particular it never structures prose.
+    src = _make_pdf(tmp_path / "M-101.pdf")
+    client = _CountingClient([_VAV_FINDING])
+    ctx = extract_drawing_context([src], client=client, rows=2, cols=2, reference_audit=True)
+    assert client.calls["digest"] == 1
+    for stage in ("critique", "cross", "synth", "verify", "citation", "other"):
+        assert client.calls[stage] == 0, (stage, client.calls)
+    # Auditors still fired off the retained geometry (the stale M-999 pointer).
+    assert len(ctx.reference_findings) == 1
+    assert ctx.qc_status == "NOT_REQUESTED"
+
+
+def test_standard_run_exports_findings_and_sheet_text(tmp_path):
+    # DA-012 / §15.2: a standard run's folder export always ships findings.json,
+    # findings.csv, and sheet_text/ — and the index is NOT mislabeled "QC review"
+    # (that block used to only render for QC runs; geometry is now always retained).
+    import json
+
+    from drawing_analyzer.export import write_drawing_export
+
+    src = _make_pdf(tmp_path / "M-101.pdf")
+    client = _RoutingClient([_VAV_FINDING])
+    ctx = extract_drawing_context([src], client=client, rows=2, cols=2)   # no QC flags
+    folder = write_drawing_export(ctx, tmp_path / "out", source_names=["M-101.pdf"])
+
+    assert (folder / "findings.json").exists()
+    data = json.loads((folder / "findings.json").read_text())
+    assert len(data["findings"]) == 1                      # the retained digest finding
+    assert (folder / "findings.csv").read_bytes()[:3] == b"\xef\xbb\xbf"
+    assert (folder / "sheet_text").is_dir()
+    assert any((folder / "sheet_text").iterdir())
+
+    index = (folder / "00_index.md").read_text()
+    assert "### Findings & sheet text" in index            # honest standard-run label
+    assert "### QC review" not in index                    # not a QC run
+    assert "QC status" not in index                        # only shown for exhaustive
+    # A standard run wrote no reviewed PDFs and no QC status.
+    assert not any(folder.glob("*_reviewed*.pdf"))
 
 
 # --------------------------------------------------------------------------- #

@@ -76,6 +76,12 @@ class FakeContext:
     findings: list = field(default_factory=list)
     reference_findings: list = field(default_factory=list)
     sheet_geometries: list = field(default_factory=list)
+    # Run status (Phase 23A) — mirrors the DrawingContext fields the report/export
+    # read to surface the normalized QC status (§3.3 / §15.5).
+    coverage_status: str = "NOT_REQUESTED"
+    qc_status: str = "NOT_REQUESTED"
+    run_configuration: object | None = None
+    stage_results: list = field(default_factory=list)
 
     @property
     def sheet_count(self) -> int:
@@ -88,3 +94,17 @@ class FakeContext:
     @property
     def cached_sheet_count(self) -> int:
         return sum(1 for s in self.sheets if s.cached)
+
+    @property
+    def configuration_kind(self) -> str:
+        cfg = self.run_configuration
+        return getattr(cfg, "configuration_kind", "NORMAL") if cfg is not None else "NORMAL"
+
+    @property
+    def qc_status_label(self) -> str:
+        return {
+            "NOT_REQUESTED": "Completed",
+            "COMPLETE": "Exhaustive QC complete",
+            "PARTIAL": "Completed with QC warnings",
+            "FAILED": "QC incomplete",
+        }.get(self.qc_status, "Completed")

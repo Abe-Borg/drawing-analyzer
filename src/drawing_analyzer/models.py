@@ -1094,3 +1094,272 @@ class NumericClaim:
             page_index=int(d.get("page_index", 0) or 0),
             source_id=str(d.get("source_id", "") or ""),
         )
+
+
+# --------------------------------------------------------------------------- #
+# Run configuration & QC status (Phase 23A — §15.1 / §15.4 / §3.3)
+# --------------------------------------------------------------------------- #
+#
+# The GUI presents checkboxes, and the public API keeps its per-stage keyword
+# arguments, but their *meaning* is resolved exactly once into a single immutable
+# ``RunConfiguration`` so the same boolean combination can never drift across call
+# sites (§15.1). Every stage consults the resolved object; the pipeline and GUI
+# must not independently reconstruct the switch matrix. The status vocabulary is
+# the one canonical set used throughout the code, manifests, GUI, and docs (§3.3).
+
+# Overall roll-up over an exhaustive QC run.
+QC_STATUSES = ("NOT_REQUESTED", "COMPLETE", "PARTIAL", "FAILED")
+# Per-stage outcome. ``SKIPPED_VALID`` is an applicable-but-not-needed skip (e.g.
+# synthesis with <2 sheets, citation with no cited claims) — never a failure.
+STAGE_STATUSES = ("NOT_REQUESTED", "COMPLETE", "PARTIAL", "FAILED", "SKIPPED_VALID")
+# ``DEBUG_OVERRIDE`` marks a run whose exhaustive configuration was deliberately
+# weakened by an explicit expert flag (e.g. ``qc_markups=True, critique=False``).
+CONFIGURATION_KINDS = ("NORMAL", "DEBUG_OVERRIDE")
+
+# The exhaustive stages that ``qc_markups=True`` turns on by default and that an
+# explicit ``False`` may override (recording a DEBUG_OVERRIDE). Anchoring, the
+# deterministic auditors, prose harvest, markup, and coverage are structural to
+# exhaustive QC and are not individually overridable here.
+_OVERRIDABLE_EXHAUSTIVE_STAGES = ("synthesis", "critique", "cross_qc", "verification", "citation")
+
+
+@dataclass
+class StageResult:
+    """One QC stage's normalized outcome (§15.4). Additive telemetry.
+
+    Sits alongside the run's flat ``errors`` list (which stays the human-readable
+    record every existing consumer reads); a :class:`StageResult` adds the typed
+    per-stage accounting the overall :data:`QC_STATUSES` roll-up is computed from.
+    ``expected`` records whether the resolved configuration asked for this stage —
+    an unexpected stage that ran anyway, or an expected stage that did not, is
+    exactly what the roll-up must notice. Usage records attach in Phase 23B.
+    """
+
+    stage: str
+    expected: bool = False
+    status: str = "NOT_REQUESTED"
+    calls_planned: int = 0
+    calls_succeeded: int = 0
+    calls_failed: int = 0
+    items_in: int = 0
+    items_out: int = 0
+    errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "stage": self.stage,
+            "expected": self.expected,
+            "status": self.status,
+            "calls_planned": self.calls_planned,
+            "calls_succeeded": self.calls_succeeded,
+            "calls_failed": self.calls_failed,
+            "items_in": self.items_in,
+            "items_out": self.items_out,
+            "errors": list(self.errors),
+            "warnings": list(self.warnings),
+        }
+
+
+@dataclass(frozen=True)
+class RunConfiguration:
+    """One immutable, normalized description of what a run will do (§15.1).
+
+    Resolved once by :func:`resolve_run_configuration` from the user/API options.
+    The user-facing QC mode is binary — OFF or exhaustive — plus an additive,
+    offline deterministic-diagnostics option; the per-stage switches below are the
+    *resolved* consequence, read by the pipeline and never re-derived elsewhere.
+
+    ``deterministic_audit_only`` is the free offline battery: it runs the
+    deterministic auditors over already-extracted text/geometry and adds **zero**
+    incremental API calls (DA-013) — in particular it never structures prose.
+    ``exhaustive_qc`` is the full stack. ``standard_analysis`` is always true: even
+    with no QC requested a run retains sheet text and parsed digest findings, binds
+    them to source identity, and anchors them offline for free (DA-012).
+    """
+
+    standard_analysis: bool = True
+    exhaustive_qc: bool = False
+    deterministic_audit_only: bool = False
+    # Resolved stage switches (the pipeline reads these, never the raw kwargs).
+    run_synthesis: bool = False
+    run_critique: bool = False
+    critique_reads: int = 0
+    run_cross_qc: bool = False
+    run_auditors: bool = False
+    run_prose_harvest: bool = False
+    run_anchoring: bool = True          # free offline anchoring runs in every mode
+    run_verification: bool = False
+    run_citation: bool = False
+    run_markup: bool = False
+    run_coverage_check: bool = False
+    # Markup gating / transport, carried through verbatim (not product-derived).
+    markup_verified_only: bool = False
+    ink_rejected: bool = False
+    focus_findings_to_markups: bool = False
+    use_batch: bool = False
+    # Names of normally-required exhaustive stages an explicit flag disabled. A
+    # non-empty tuple makes this a DEBUG_OVERRIDE configuration (§3.3 / §15.1).
+    debug_overrides: tuple[str, ...] = ()
+
+    @property
+    def configuration_kind(self) -> str:
+        return "DEBUG_OVERRIDE" if self.debug_overrides else "NORMAL"
+
+    @property
+    def qc_requested(self) -> bool:
+        """True only for exhaustive QC — the mode the roll-up scores (§3.1).
+
+        The deterministic-audit-only checkbox is an additive offline diagnostic,
+        not a second QC effort mode, so it does not by itself make ``qc_status``
+        anything other than ``NOT_REQUESTED``.
+        """
+        return self.exhaustive_qc
+
+    def to_dict(self) -> dict:
+        return {
+            "standard_analysis": self.standard_analysis,
+            "exhaustive_qc": self.exhaustive_qc,
+            "deterministic_audit_only": self.deterministic_audit_only,
+            "configuration_kind": self.configuration_kind,
+            "run_synthesis": self.run_synthesis,
+            "run_critique": self.run_critique,
+            "critique_reads": self.critique_reads,
+            "run_cross_qc": self.run_cross_qc,
+            "run_auditors": self.run_auditors,
+            "run_prose_harvest": self.run_prose_harvest,
+            "run_anchoring": self.run_anchoring,
+            "run_verification": self.run_verification,
+            "run_citation": self.run_citation,
+            "run_markup": self.run_markup,
+            "run_coverage_check": self.run_coverage_check,
+            "markup_verified_only": self.markup_verified_only,
+            "ink_rejected": self.ink_rejected,
+            "focus_findings_to_markups": self.focus_findings_to_markups,
+            "use_batch": self.use_batch,
+            "debug_overrides": list(self.debug_overrides),
+        }
+
+
+def resolve_run_configuration(
+    *,
+    qc_markups: bool = False,
+    reference_audit: bool = False,
+    synthesize: "bool | None" = None,
+    critique: "bool | None" = None,
+    cross_qc: "bool | None" = None,
+    citation_check: "bool | None" = None,
+    verify_findings: "bool | None" = None,
+    markup_verified_only: bool = False,
+    ink_rejected: bool = False,
+    focus_findings_to_markups: bool = False,
+    use_batch: bool = False,
+) -> RunConfiguration:
+    """Resolve the raw run options into one normalized :class:`RunConfiguration`.
+
+    The single source of truth for what ``qc_markups=True`` means (§15.1): it
+    turns on the full exhaustive stack — synthesis (for ≥2 readable sheets, gated
+    downstream), two critique reads, cross-sheet QC, the deterministic auditors,
+    prose harvest, anchoring, verification, citation checks, markup, and coverage
+    reconciliation. The overridable stages default on but may be disabled by an
+    explicit ``False`` (an expert/debug override that records itself so the run is
+    scored ``PARTIAL``, never a clean ``COMPLETE``).
+
+    ``reference_audit=True`` **without** ``qc_markups`` is the free offline
+    battery: deterministic auditors + offline anchoring, no model calls. Neither
+    box is the standard path: digest findings retained + anchored offline, nothing
+    billed. The per-stage keyword arguments are ``bool | None`` — ``None`` means
+    "not specified, use the product default"; an explicit ``True``/``False`` is an
+    override honored verbatim.
+    """
+    exhaustive = bool(qc_markups)
+    audit_only = bool(reference_audit) and not exhaustive
+
+    overrides: list[str] = []
+
+    def _exhaustive_switch(flag: "bool | None", name: str) -> bool:
+        # A normally-required exhaustive stage: default on; an explicit False is a
+        # debug override; an explicit True is redundant but harmless.
+        if not exhaustive:
+            # Outside exhaustive QC these stages run only when explicitly asked
+            # for (an expert/diagnostic invocation), and never structure prose.
+            return bool(flag) if flag is not None else False
+        if flag is False:
+            overrides.append(name)
+            return False
+        return True
+
+    run_synthesis = _exhaustive_switch(synthesize, "synthesis")
+    run_critique = _exhaustive_switch(critique, "critique")
+    run_cross_qc = _exhaustive_switch(cross_qc, "cross_qc")
+    run_verification = _exhaustive_switch(verify_findings, "verification")
+    run_citation = _exhaustive_switch(citation_check, "citation")
+
+    return RunConfiguration(
+        standard_analysis=True,
+        exhaustive_qc=exhaustive,
+        deterministic_audit_only=audit_only,
+        run_synthesis=run_synthesis,
+        run_critique=run_critique,
+        critique_reads=2 if run_critique else 0,
+        run_cross_qc=run_cross_qc,
+        # Auditors run in exhaustive QC *and* in the free offline battery.
+        run_auditors=exhaustive or audit_only,
+        # Prose harvest (with its straggler-structuring model call) is exhaustive
+        # only — standard and audit-only runs keep unmatched prose in the prose
+        # (§14.7 / §15.3), incurring no structuring calls.
+        run_prose_harvest=exhaustive,
+        run_anchoring=True,
+        run_verification=run_verification,
+        run_citation=run_citation,
+        run_markup=exhaustive,
+        run_coverage_check=exhaustive,
+        markup_verified_only=bool(markup_verified_only),
+        ink_rejected=bool(ink_rejected),
+        focus_findings_to_markups=bool(focus_findings_to_markups),
+        use_batch=bool(use_batch),
+        debug_overrides=tuple(overrides),
+    )
+
+
+def roll_up_qc_status(
+    config: RunConfiguration,
+    stage_results: "list[StageResult]",
+    coverage_status: str,
+    *,
+    completeness_gate_open: bool = False,
+) -> str:
+    """Deterministically roll per-stage outcomes into an overall QC status (§3.3).
+
+    ``NOT_REQUESTED`` unless exhaustive QC ran. Otherwise ``COMPLETE`` only for a
+    ``NORMAL`` configuration whose every *expected* required stage is ``COMPLETE``
+    or ``SKIPPED_VALID`` and whose placement coverage is ``COMPLETE``; ``PARTIAL``
+    when useful QC output exists but a required stage is ``PARTIAL``/``FAILED``,
+    coverage is ``INCOMPLETE``, or the configuration is a debug override; else
+    ``FAILED``.
+
+    ``completeness_gate_open`` is the Phase 23 temporary gate; it defaults to
+    ``False`` (the conservative direction — never claim ``COMPLETE`` unless a caller
+    explicitly opens the gate). While it is closed (Phases 24–25 have not landed the
+    cross-shard reconciliation, claim-complete citations, evidence, and
+    callout-overflow guarantees) a would-be ``COMPLETE`` exhaustive run is capped at
+    ``PARTIAL`` so the product never advertises a completeness it cannot yet back
+    (§8, §15.5). Phase 26 opens the gate.
+    """
+    if not config.qc_requested:
+        return "NOT_REQUESTED"
+
+    required = [s for s in stage_results if s.expected]
+    any_failed = any(s.status in ("PARTIAL", "FAILED") for s in required)
+    any_useful = any(s.status in ("COMPLETE", "PARTIAL") for s in stage_results)
+    all_ok = all(s.status in ("COMPLETE", "SKIPPED_VALID") for s in required)
+
+    coverage_ok = coverage_status in ("COMPLETE", "NOT_REQUESTED")
+    coverage_incomplete = coverage_status == "INCOMPLETE"
+    is_normal = config.configuration_kind == "NORMAL"
+
+    if is_normal and all_ok and coverage_ok:
+        return "PARTIAL" if not completeness_gate_open else "COMPLETE"
+    if any_useful and (any_failed or coverage_incomplete or not is_normal):
+        return "PARTIAL"
+    return "FAILED"

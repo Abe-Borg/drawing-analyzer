@@ -225,13 +225,24 @@ def _index_document(
         findings = _qc_findings(ctx)
         reviewed = list(getattr(ctx, "reviewed_pdf_paths", None) or [])
         coverage = getattr(ctx, "coverage_status", "NOT_REQUESTED") or "NOT_REQUESTED"
-        lines += [
-            "",
-            "### QC review",
-            "",
+        # DA-012 (§15.2): a standard run now retains + exports its digest findings
+        # and sheet text, so this block renders for *every* run — but a plain
+        # standard run did no QC, so it must not be mislabeled "QC review". The
+        # heading (and the status line) are mode-aware off the run's QC status.
+        exhaustive = getattr(
+            getattr(ctx, "run_configuration", None), "exhaustive_qc", False
+        )
+        qc_ran = exhaustive or bool(getattr(ctx, "reference_findings", None)) or bool(reviewed)
+        heading = "QC review" if qc_ran else "Findings & sheet text"
+        lines += ["", f"### {heading}", ""]
+        qc_status = getattr(ctx, "qc_status", "NOT_REQUESTED") or "NOT_REQUESTED"
+        if exhaustive:
+            label = getattr(ctx, "qc_status_label", qc_status)
+            lines.append(f"- **QC status:** {qc_status} — {label}")
+        lines.append(
             f"- **Findings:** {len(findings)}"
-            + (f" · **reviewed PDF(s):** {len(reviewed)}" if reviewed else ""),
-        ]
+            + (f" · **reviewed PDF(s):** {len(reviewed)}" if reviewed else "")
+        )
         if coverage in ("COMPLETE", "INCOMPLETE"):
             tally = getattr(ctx, "ledger_tally_line", "") or ""
             note = (

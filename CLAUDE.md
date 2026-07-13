@@ -25,6 +25,18 @@ structured Markdown digest plus a machine-readable findings block.
 `pipeline.extract_drawing_context()` orchestrates everything and returns a
 `DrawingContext`. The per-module map lives in `src/drawing_analyzer/__init__.py`.
 
+**Run configuration & status (Phase 23A, models.py).** The GUI checkboxes and the
+public API keyword args are resolved **once** by `resolve_run_configuration()` into
+an immutable `RunConfiguration` (§15.1) — the single place `qc_markups=True` becomes
+the exhaustive stack, `reference_audit` (alone) the free zero-API auditor battery,
+and neither the standard path (findings + text retained and offline-anchored for
+free, DA-012). Every stage reads the resolved config; no call site re-derives the
+booleans. Each QC stage records a typed `StageResult`; `roll_up_qc_status()` folds
+them (+ Phase 21 `coverage_status`) into one `qc_status` (`NOT_REQUESTED` / `COMPLETE`
+/ `PARTIAL` / `FAILED`, §3.3). A **temporary completeness gate**
+(`pipeline.EXHAUSTIVE_QC_COMPLETENESS_GATE_OPEN = False`) caps a clean exhaustive run
+at `PARTIAL` until Phases 24–26 land; Phase 26 opens it.
+
 **Digest path:** `tiling.py` (pure geometry) → `render.py` (rasterization) →
 `digest.py` (prompt + tolerant findings-block parser), or `batch_digest.py`
 (Message Batches + Files APIs, ~50% cheaper) → `digest_cache.py` (two-level

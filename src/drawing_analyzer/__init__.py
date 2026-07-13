@@ -50,6 +50,12 @@ see the README's Licensing section before adding an import elsewhere.
 from __future__ import annotations
 
 from .digest import SheetDigest
+from .models import (
+    RunConfiguration,
+    StageResult,
+    resolve_run_configuration,
+    roll_up_qc_status,
+)
 from .pipeline import (
     DrawingContext,
     estimate_image_tokens_for_set,
@@ -61,6 +67,10 @@ __version__ = "0.1.0"
 __all__ = [
     "DrawingContext",
     "SheetDigest",
+    "RunConfiguration",
+    "StageResult",
+    "resolve_run_configuration",
+    "roll_up_qc_status",
     "extract_drawing_context",
     "estimate_image_tokens_for_set",
     "__version__",

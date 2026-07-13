@@ -76,21 +76,31 @@ Optionally, type a **per-run focus** before pressing Analyze — e.g. *"the room
 and what types of plumbing fixtures each has"*. You always get the standard
 digest; a focus adds the Focus Report on top (see [Per-run focus](#per-run-focus)).
 
+Even with **neither** box checked, a run is not throwaway: it retains each sheet's
+extracted text and the digest's parsed findings, anchors them offline **for free**,
+shows them in the report, and exports `findings.json` / `findings.csv` / `sheet_text/`
+(DA-012). No paid QC stage runs.
+
 Two **QC review** checkboxes sit beside the focus:
 
-- **Reference audit** — a free, zero-API pass that runs the whole deterministic
-  auditor battery: references, arithmetic, naming, title-block, and sheet-index
-  (see [Deterministic auditors](#deterministic-auditors)).
-- **QC Markups** — runs the anchor → verify → ink chain and produces a
-  **marked-up PDF + findings CSV** (see [Reviewed PDFs & findings CSV](#reviewed-pdfs--findings-csv)).
-  By default **every ledger entry gets ink except the ones the verifier proved
-  wrong** ([§18 gating](#gating--all-findings-get-ink-part-iii-18)): unverified
-  findings draw dashed with an `[UNVERIFIED]` prefix, rect-less ones become
-  margin callouts. Two sub-toggles adjust that — **Verified & deterministic
-  only** (off by default; the conservative opt-in that suppresses unverified
-  ink) and **Include rejected (grey)** (also inks verifier-rejected findings,
-  struck grey). The cost line notes the extra per-finding verification spend
-  (~$0.01–0.03 each) while markups are on.
+- **QC Markups** — the **full exhaustive review** (DA-010). Checking it runs the
+  entire stack: synthesis, **two critique reads per sheet**, cross-sheet QC, the
+  deterministic auditors, prose harvest, anchoring, verification, citation checks,
+  markup, and coverage reconciliation — then produces a **marked-up PDF + findings
+  CSV** (see [Reviewed PDFs & findings CSV](#reviewed-pdfs--findings-csv)). By
+  default **every ledger entry gets ink except the ones the verifier proved wrong**
+  ([§18 gating](#gating--all-findings-get-ink-part-iii-18)): unverified findings
+  draw dashed with an `[UNVERIFIED]` prefix, rect-less ones become margin callouts.
+  Two sub-toggles adjust that — **Verified & deterministic only** (off by default;
+  the conservative opt-in that suppresses unverified ink) and **Include rejected
+  (grey)** (also inks verifier-rejected findings, struck grey). Because it runs the
+  whole stack, it costs substantially more than a plain digest; the cost line says so.
+- **Deterministic audit only** — a free, zero-API pass that adds the whole
+  deterministic auditor battery (references, arithmetic, naming, title-block, and
+  sheet-index — see [Deterministic auditors](#deterministic-auditors)) on top of the
+  standard analysis, with **no additional API calls**. It is already included in QC
+  Markups' exhaustive stack, so the checkbox is disabled/redundant while QC Markups
+  is checked.
 
 After a QC run, the completion summary reports the finding count, how many were
 clouded, and the **receipt-derived** coverage tally
@@ -111,6 +121,19 @@ INCOMPLETE** banner, and the exported `markup_manifest.json` records every plann
 placement and its terminal receipt. Pre-existing annotations on the source (or
 markups from an earlier review run) never distort this accounting — they carry no
 stamp from *this* run and are ignored.
+
+An exhaustive run also carries one normalized **QC status** — `NOT_REQUESTED`,
+`COMPLETE`, `PARTIAL`, or `FAILED` (`ctx.qc_status`) — rolled up deterministically
+from a typed `StageResult` per stage (`ctx.stage_results`). The GUI completion
+dialog, the export index, and an HTML report banner all lead with it. A stage that
+failed or a coverage that came back `INCOMPLETE` makes the run `PARTIAL`/`FAILED`;
+disabling a normally-required stage from the advanced API (e.g. `qc_markups=True,
+critique=False`) marks the configuration `DEBUG_OVERRIDE` and likewise caps it at
+`PARTIAL`. **Note (Phases 23–25):** a completeness gate deliberately keeps even a
+clean exhaustive run at `PARTIAL` — the product does not yet advertise a fully
+`COMPLETE` exhaustive review until the remaining remediation phases (cross-set
+reconciliation, claim-complete citations, complete evidence, callout overflow)
+land. Phase 26 opens the gate.
 
 ### Browsing the result
 
@@ -145,27 +168,32 @@ ctx = extract_drawing_context(
     [Path("M-101.pdf"), Path("P-201.pdf")],
     use_batch=True,     # Message Batches API (≈50% cheaper)
     use_cache=True,     # skip re-paying for unchanged sheets
-    synthesize=True,    # add a cross-sheet overview
     focus="the rooms, and what types of plumbing fixtures each has",  # optional
-    # QC review (all optional, off by default):
-    reference_audit=True,        # free, zero-API deterministic auditor battery
-    qc_markups=True,             # anchor → verify → ink; write reviewed PDFs
-    markup_verified_only=False,  # opt-in conservative mode (§18 default: ink all but REJECTED)
-    verify_findings=True,        # run the per-finding verification pass
-    critique=True,               # second "reviewer" read/sheet, self-consistent (pricier)
-    profiles=["fire-protection"],# review-profile checklists to apply (needs critique=True)
-    cross_qc=True,               # hunt cross-sheet conflicts; cloud both sheets
-    citation_check=True,         # web-search check of cited code sections
-    ink_rejected=False,          # also draw verifier-rejected findings (grey/struck)
+    # One product switch turns on the exhaustive stack (DA-010): synthesis, two
+    # critique reads/sheet, cross-sheet QC, the deterministic auditors, prose
+    # harvest, anchoring, verification, citation checks, markup, and coverage.
+    qc_markups=True,
+    profiles=["fire-protection"],     # review-profile checklists to apply
+    markup_verified_only=False,       # opt-in conservative ink gate (§18 default: ink all but REJECTED)
+    ink_rejected=False,               # also draw verifier-rejected findings (grey/struck)
     focus_findings_to_markups=False,  # harvest Focus sections into markups too
-    qc_work_dir=Path("run-out"), # where evidence crops + reviewed PDFs land
+    qc_work_dir=Path("run-out"),      # where evidence crops + reviewed PDFs land
+    # Expert overrides (bool | None): leave a stage None to take the product default;
+    # an explicit True/False overrides it. Disabling a required exhaustive stage
+    # marks the run DEBUG_OVERRIDE and caps qc_status at PARTIAL:
+    #   critique=False, cross_qc=False, citation_check=False, verify_findings=False,
+    #   synthesize=False,
+    # reference_audit=True alone (without qc_markups) is the free, zero-API battery.
 )
 print(ctx.combined_text)
-print(ctx.focus_report_text)   # the set-level answer to the focus ("" if none)
+print(ctx.qc_status)            # NOT_REQUESTED | COMPLETE | PARTIAL | FAILED (§3.3)
+for s in ctx.stage_results:     # one typed outcome per QC stage
+    print(s.stage, s.status)
+print(ctx.focus_report_text)    # the set-level answer to the focus ("" if none)
 for sheet in ctx.sheets:
     print(sheet.ref.display_label, "->", "ok" if sheet.ok else sheet.error)
 
-# QC results (empty unless a QC flag was on):
+# QC results — findings/text are retained even in a standard run (DA-012):
 for f in ctx.all_findings:      # model findings + deterministic reference findings
     print(f.sheet_id, f.category, f.anchor.status, f.verification.status, "-", f.text)
 print(ctx.finding_count, "findings,", ctx.clouded_finding_count, "clouded")
@@ -175,8 +203,12 @@ for pdf in ctx.reviewed_pdf_paths:   # the *_reviewed.pdf files (qc_markups only
 
 `extract_drawing_context` returns a `DrawingContext` (combined text, per-sheet
 `SheetDigest`s, token totals, errors, optional `synthesis_text`, and — when a
-focus was given — `focus` / `focus_report_text`). When a QC flag is on it also
-carries the QC record: `findings` (the model's, anchored + verified),
+focus was given — `focus` / `focus_report_text`). It always carries the normalized
+run status: `qc_status` (`NOT_REQUESTED` / `COMPLETE` / `PARTIAL` / `FAILED`), the
+typed `stage_results`, and the resolved `run_configuration` (§3.3 / §15.1). Even a
+standard run carries the QC record — `findings` are retained and offline-anchored
+(DA-012). When exhaustive QC or the free audit ran it fills the rest:
+`findings` (the model's, anchored + verified),
 `reference_findings` (the deterministic auditors', anchored + `DETERMINISTIC`),
 the `all_findings` / `finding_count` / `clouded_finding_count` conveniences,
 `reviewed_pdf_paths`, the lightweight `sheet_geometries`, `audit_stats` (the
