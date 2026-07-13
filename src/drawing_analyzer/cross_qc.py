@@ -726,6 +726,16 @@ def _reconcile_facts(
             pair = groups[i:i + 2]
             merged = [f for g in pair for f in g]
             capped = merged[:MAX_FACTS_PER_RECONCILE]
+            if len(capped) < len(merged):
+                # A node had to drop facts to fit — the comparison at (and above)
+                # this node is no longer exhaustive, so the reconciliation is not
+                # complete (honest degradation, not a silent loss).
+                completed = False
+                _log.warning(
+                    "cross-qc reduction: dropped %d fact(s) at a tree node "
+                    "(over the %d-fact reconcile cap)",
+                    len(merged) - len(capped), MAX_FACTS_PER_RECONCILE,
+                )
             f, c, in_t, out_t, err = _reconcile_call(
                 manifest, capped, entry_by_handle,
                 client=client, model=model, max_retries=max_retries, sleep=sleep,
