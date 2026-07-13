@@ -82,6 +82,18 @@ class FakeContext:
     qc_status: str = "NOT_REQUESTED"
     run_configuration: object | None = None
     stage_results: list = field(default_factory=list)
+    # Phase 23B: the append-only usage ledger (a real RunUsage, or None).
+    run_usage: object | None = None
+
+    @property
+    def total_estimated_cost(self) -> object | None:
+        ru = self.run_usage
+        return ru.total_estimated_cost if ru is not None else None
+
+    @property
+    def usage_by_family(self) -> dict:
+        ru = self.run_usage
+        return ru.by_family() if ru is not None else {}
 
     @property
     def sheet_count(self) -> int:

@@ -40,8 +40,10 @@ from .models import (
     Finding,
     NumericClaim,
     RunConfiguration,
+    RunUsage,
     SheetGeometry,
     StageResult,
+    UsageRecord,
     resolve_run_configuration,
     roll_up_qc_status,
     source_page_key,
@@ -82,6 +84,66 @@ DEFAULT_DIGEST_WORKERS = 4
 EXHAUSTIVE_QC_COMPLETENESS_GATE_OPEN = False
 
 _log = get_logger()
+
+
+def _record_usage(
+    run_usage: RunUsage,
+    *,
+    family: str,
+    instance: str,
+    model: str,
+    transport: str = "REAL_TIME",
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
+    billable_tool_uses: "dict | None" = None,
+    cache_hit: bool = False,
+    parse_success: bool = True,
+    terminal_status: str = "COMPLETE",
+    parent: "str | None" = None,
+    attempt: int = 1,
+    request_id: str = "",
+) -> UsageRecord:
+    """Build a priced :class:`UsageRecord` and append it to the run's usage ledger.
+
+    The one place a stage's reported usage becomes a record (§15.6) — append-only,
+    so no stage can overwrite another's counters. ``estimated_cost`` is priced at
+    the record's own rate class (batch vs real-time, cache read/write, tool uses);
+    a ``CACHE`` transport passes zero token counts, so its token cost is zero.
+    """
+    from .core.pricing import usage_record_cost
+
+    cost = usage_record_cost(
+        model=model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read_tokens=cache_read_tokens,
+        cache_write_tokens=cache_write_tokens,
+        billable_tool_uses=billable_tool_uses,
+        batch=(transport == "BATCH"),
+    )
+    return run_usage.add(
+        UsageRecord(
+            stage_family=family,
+            stage_instance=instance,
+            model=model,
+            transport=transport,
+            input_tokens=int(input_tokens),
+            output_tokens=int(output_tokens),
+            cache_read_tokens=int(cache_read_tokens),
+            cache_write_tokens=int(cache_write_tokens),
+            billable_tool_uses=dict(billable_tool_uses or {}),
+            cache_hit=cache_hit,
+            parse_success=parse_success,
+            terminal_status=terminal_status,
+            parent_stage_instance=parent,
+            attempt_number=attempt,
+            billing_rate_class=transport.lower(),
+            request_or_custom_id=request_id,
+            estimated_cost=cost,
+        )
+    )
 
 
 def _resolve_workers(max_workers: int | None, total: int) -> int:
@@ -177,6 +239,22 @@ class DrawingContext:
     run_configuration: Any = None
     stage_results: list = field(default_factory=list)
     qc_status: str = "NOT_REQUESTED"
+    # Phase 23B (§15.6): the run's append-only usage ledger. ``total_input_tokens`` /
+    # ``total_output_tokens`` above are derived sums over it; ``total_estimated_cost``
+    # and the per-stage-family breakdown come from it too.
+    run_usage: Any = None
+
+    @property
+    def total_estimated_cost(self) -> Any:
+        """The run's estimated USD cost (``Decimal``), or ``None`` if unpriceable."""
+        ru = self.run_usage
+        return ru.total_estimated_cost if ru is not None else None
+
+    @property
+    def usage_by_family(self) -> dict:
+        """Per-stage-family token/cost/call rollup (empty when no usage recorded)."""
+        ru = self.run_usage
+        return ru.by_family() if ru is not None else {}
 
     @property
     def configuration_kind(self) -> str:
@@ -658,9 +736,10 @@ def _run_critique_stage(
     progress: ProgressCallback | None,
     total: int,
     max_workers: int | None,
+    run_usage: RunUsage,
     profiles: list | None = None,
     snapshot_by_path: "dict[str, tuple[str, int, int]] | None" = None,
-) -> tuple[list[Finding], list[NumericClaim], int, int]:
+) -> tuple[list[Finding], list[NumericClaim]]:
     """Critique every sheet (Phase 11): self-consistent critique, cached two ways.
 
     A **level-1** pre-render cache scan (Phase 19B) recognizes unchanged sheets
@@ -672,10 +751,12 @@ def _run_critique_stage(
     level-1 key too (store-under-both). Additive and non-fatal: a per-sheet failure
     is logged and contributes no findings; the run continues.
 
-    Returns ``(critique_findings, claims, input_tokens, output_tokens)``; the
-    findings are sorted deterministically so the pooled result is independent of
-    completion order (I-7). ``claims`` are the numeric relationships the critique
-    transcribed (Phase 14), fed to the deterministic arithmetic auditor.
+    Returns ``(critique_findings, claims)``; the findings are sorted deterministically
+    so the pooled result is independent of completion order (I-7). ``claims`` are the
+    numeric relationships the critique transcribed (Phase 14), fed to the deterministic
+    arithmetic auditor. Per-sheet usage is appended to ``run_usage`` (§15.6): a
+    ``critique`` record per sheet (``CACHE`` for a hit — zero billed tokens — else
+    ``REAL_TIME``); each record aggregates the sheet's two self-consistency reads.
     """
     from .critique import (
         critique_cache_entry_from_result,
@@ -706,13 +787,31 @@ def _run_critique_stage(
     workers = _resolve_workers(max_workers, max(1, total))
     findings: list[Finding] = []
     claims: list[NumericClaim] = []
-    in_tok = out_tok = 0
     done = 0
 
+    def _record_critique(res: Any, key: "tuple[str, int]") -> None:
+        cached = bool(getattr(res, "cached", False))
+        _record_usage(
+            run_usage, family="critique",
+            instance=f"critique:{key[0]}:p{key[1]}",
+            model=model,
+            transport="CACHE" if cached else "REAL_TIME",
+            # A cache hit made no API call this run — zero billed tokens (as the
+            # digest path does); the record still carries the cache-hit metadata.
+            input_tokens=0 if cached else res.input_tokens,
+            output_tokens=0 if cached else res.output_tokens,
+            cache_hit=cached,
+            parse_success=(getattr(res, "error", None) is None),
+            terminal_status=(
+                "COMPLETE" if getattr(res, "error", None) is None else "PARTIAL"
+            ),
+        )
+
     # Cached hits contribute findings/claims with no render and no token cost.
-    for res in cached_by_ref.values():
+    for rk, res in cached_by_ref.items():
         findings.extend(res.findings)
         claims.extend(res.claims)
+        _record_critique(res, rk)
         done += 1
         if progress is not None:
             progress(total, total, f"Critiquing sheet {done}/{total}")
@@ -723,7 +822,7 @@ def _run_critique_stage(
             in_flight: dict = {}
 
             def _collect_one() -> None:
-                nonlocal done, in_tok, out_tok
+                nonlocal done
                 finished, _ = wait(in_flight, return_when=FIRST_COMPLETED)
                 for fut in finished:
                     ref = in_flight.pop(fut)
@@ -737,11 +836,7 @@ def _run_critique_stage(
                         _log.warning("critique degraded for a sheet: %s", res.error)
                     findings.extend(res.findings)
                     claims.extend(res.claims)
-                    # A cache hit made no API call this run, so exclude its (original)
-                    # token cost — keeping run totals honest, as the digest path does.
-                    if not res.cached:
-                        in_tok += res.input_tokens
-                        out_tok += res.output_tokens
+                    _record_critique(res, _refkey(ref))
                     # Store-under-both: promote a *complete* result to its level-1
                     # key so the next run skips rendering this sheet entirely. A
                     # partial (a dropped run) is never cached — mirrors the level-2
@@ -769,7 +864,7 @@ def _run_critique_stage(
         "critique: %d finding(s), %d numeric claim(s) across %d sheet(s)",
         len(findings), len(claims), total,
     )
-    return findings, claims, in_tok, out_tok
+    return findings, claims
 
 
 def _run_qc_stages(
@@ -778,6 +873,7 @@ def _run_qc_stages(
     geometries: list[SheetGeometry],
     pdf_paths: list[Path],
     config: RunConfiguration,
+    run_usage: RunUsage,
     client: Any,
     qc_work_dir: Path | None,
     progress: ProgressCallback | None,
@@ -831,7 +927,6 @@ def _run_qc_stages(
     ledger = Ledger()
     work_dir = qc_work_dir
     audit_stats: dict = {}
-    harvest_in = harvest_out = 0
 
     # --- ingest: every channel lands in the ledger ---------------------------
     digest_findings = [f for sd in sheets for f in getattr(sd, "findings", None) or []]
@@ -889,12 +984,21 @@ def _run_qc_stages(
         try:
             from .prose_harvest import harvest_prose
 
+            from .prose_harvest import harvest_model
+
             hres = harvest_prose(
                 ledger, sheets, geometries, client=client,
                 synthesis_text=synthesis_text,
                 focus_findings_to_markups=focus_findings_to_markups,
             )
-            harvest_in, harvest_out = hres.input_tokens, hres.output_tokens
+            # The straggler-structuring call's usage — an independent record, never
+            # folded into (and overwritten by) the verification counters (§15.6).
+            _record_usage(
+                run_usage, family="harvest", instance="prose_harvest",
+                model=harvest_model(),
+                input_tokens=hres.input_tokens, output_tokens=hres.output_tokens,
+                terminal_status="PARTIAL" if hres.missing else "COMPLETE",
+            )
             harvest_stage.items_in = getattr(hres, "items", 0)
             # §14.9: every enumerated prose item must reach a ledger entry. Any that
             # could not be recovered even by the final degraded attempt is an
@@ -975,7 +1079,6 @@ def _run_qc_stages(
         )
 
     all_findings = entries
-    v_in, v_out = harvest_in, harvest_out
 
     # Verify the model entries (deterministic auditor entries are skipped by the
     # verifier). Only when markups are requested — clouds are what demand trust.
@@ -983,7 +1086,10 @@ def _run_qc_stages(
         stage="verification", expected=bool(qc_markups and verify_enabled)
     )
     if qc_markups and verify_enabled and entries:
+        from .verify import default_verify_model
         from .verify import verify_findings as _run_verify
+
+        verify_model = default_verify_model()
 
         if work_dir is None:
             import tempfile
@@ -1004,7 +1110,11 @@ def _run_qc_stages(
                 all_findings, geometries, client=client,
                 evidence_dir=evidence_dir, progress=_verify_progress,
             )
-            v_in, v_out = vres.input_tokens, vres.output_tokens
+            _record_usage(
+                run_usage, family="verify", instance="verify",
+                model=verify_model,
+                input_tokens=vres.input_tokens, output_tokens=vres.output_tokens,
+            )
             _log.info(
                 "verification: %d verified, %d rejected, %d uncertain, %d skipped",
                 vres.verified, vres.rejected, vres.uncertain, vres.skipped,
@@ -1026,8 +1136,11 @@ def _run_qc_stages(
                 all_findings, geometries, client=client,
                 evidence_dir=evidence_dir, progress=_verify_progress,
             )
-            v_in += cres.input_tokens
-            v_out += cres.output_tokens
+            _record_usage(
+                run_usage, family="verify", instance="verify_cross",
+                model=verify_model, parent="verify",
+                input_tokens=cres.input_tokens, output_tokens=cres.output_tokens,
+            )
             if cres.verified or cres.rejected or cres.uncertain or cres.skipped:
                 _log.info(
                     "cross-verification: %d verified, %d rejected, %d uncertain, %d skipped",
@@ -1084,7 +1197,7 @@ def _run_qc_stages(
             # No cited claims to check — a valid skip, not a failure (§3.3).
             citation_stage.status = "SKIPPED_VALID"
         else:
-            from .citation_check import check_citations
+            from .citation_check import check_citations, citation_model
 
             def _citation_progress(done: int, tot: int, label: str) -> None:
                 if progress is not None:
@@ -1094,8 +1207,17 @@ def _run_qc_stages(
                 cires = check_citations(
                     all_findings, geometries, client=client, progress=_citation_progress,
                 )
-                v_in += cires.input_tokens
-                v_out += cires.output_tokens
+                # Best-effort web-search fee: the citation stage does not yet surface
+                # the exact server ``web_search_requests`` count, so bill one search
+                # per unique citation checked (a lower bound — each ref runs ≥1
+                # search). Tokens are exact; the search micro-fee is approximate.
+                _record_usage(
+                    run_usage, family="citation", instance="citation",
+                    model=citation_model(),
+                    input_tokens=cires.input_tokens, output_tokens=cires.output_tokens,
+                    billable_tool_uses={"web_search": int(getattr(cires, "checked", 0) or 0)},
+                    terminal_status="PARTIAL" if cires.error else "COMPLETE",
+                )
                 if cires.error:
                     errors.append(f"Citation check: {cires.error}")
                     citation_stage.status = "PARTIAL"
@@ -1260,8 +1382,8 @@ def _run_qc_stages(
         reference_findings=reference_findings,
         reviewed_pdf_paths=reviewed_pdf_paths,
         work_dir=work_dir,
-        input_tokens=v_in,
-        output_tokens=v_out,
+        # QC-stage usage is recorded directly on the shared ``run_usage`` ledger now,
+        # so the aggregate token fields are unused (kept at 0 for back-compat).
         audit_stats=audit_stats,
         ledger_tally=ledger_tally,
         mutated_sources=mutated_sources,
@@ -1627,16 +1749,31 @@ def extract_drawing_context(
     # Typed per-stage outcomes for the pre-ledger stages (synthesis, critique,
     # cross-QC); the ledger stages append theirs inside ``_run_qc_stages`` (§15.4).
     stage_results: list[StageResult] = []
-    in_tok = out_tok = img_tok = 0
+    # Append-only usage ledger (§15.6): every API call/attempt below appends a
+    # priced record; the run's token/cost totals are *derived* sums over it, so no
+    # stage can overwrite another's counters. ``img_tok`` is a separate informational
+    # estimate of the image portion (already folded into each digest's input tokens).
+    run_usage = RunUsage()
+    img_tok = 0
+    digest_transport = "BATCH" if use_batch else "REAL_TIME"
     for sd in sheets:
-        # A cached sheet made no API call, so it costs zero tokens *this run*.
-        # Excluding it keeps the run totals honest — a fully-cached re-run
-        # reports ~0 tokens rather than the original (already-paid) usage that
-        # ``SheetDigest`` still carries as provenance.
-        if not sd.cached:
-            in_tok += sd.input_tokens
-            out_tok += sd.output_tokens
+        # A cached sheet made no API call, so it costs zero tokens *this run* — its
+        # record carries the cache-hit metadata but zero billed tokens. A fresh
+        # digest records its actual reported usage (billable even if it errored).
+        cached = bool(getattr(sd, "cached", False))
+        if not cached:
             img_tok += sd.image_token_estimate
+        _record_usage(
+            run_usage, family="digest",
+            instance=f"digest:{_refkey(sd.ref)[0]}:p{_refkey(sd.ref)[1]}",
+            model=model,
+            transport="CACHE" if cached else digest_transport,
+            input_tokens=0 if cached else sd.input_tokens,
+            output_tokens=0 if cached else sd.output_tokens,
+            cache_hit=cached,
+            parse_success=(sd.error is None),
+            terminal_status="FAILED" if sd.error else "COMPLETE",
+        )
         if sd.error:
             errors.append(f"{sd.ref.display_label}: {sd.error}")
 
@@ -1663,15 +1800,13 @@ def extract_drawing_context(
                     len(resolved_profiles),
                     ", ".join(p.name for p in resolved_profiles),
                 )
-            critique_findings, c_claims, c_in, c_out = _run_critique_stage(
+            critique_findings, c_claims = _run_critique_stage(
                 paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
                 client=client, cache=cache, progress=progress, total=total,
-                max_workers=max_workers, profiles=resolved_profiles,
-                snapshot_by_path=snapshot_by_path,
+                max_workers=max_workers, run_usage=run_usage,
+                profiles=resolved_profiles, snapshot_by_path=snapshot_by_path,
             )
             numeric_claims.extend(c_claims)
-            in_tok += c_in
-            out_tok += c_out
             critique_stage.status = "COMPLETE"
             critique_stage.items_out = len(critique_findings)
         except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
@@ -1691,13 +1826,17 @@ def extract_drawing_context(
         if progress is not None:
             progress(total, total, "Cross-sheet QC")
         try:
-            from .cross_qc import cross_sheet_qc
+            from .cross_qc import cross_qc_model, cross_sheet_qc
 
             cross_res = cross_sheet_qc(sheets, sheet_geometries, client=client)
             cross_findings = cross_res.findings
             numeric_claims.extend(cross_res.claims)
-            in_tok += cross_res.input_tokens
-            out_tok += cross_res.output_tokens
+            _record_usage(
+                run_usage, family="cross_qc", instance="cross_qc",
+                model=cross_qc_model(),
+                input_tokens=cross_res.input_tokens, output_tokens=cross_res.output_tokens,
+                terminal_status="PARTIAL" if cross_res.error else "COMPLETE",
+            )
             cross_stage.items_out = len(cross_findings)
             if cross_res.error:
                 errors.append(f"Cross-sheet QC: {cross_res.error}")
@@ -1724,16 +1863,23 @@ def extract_drawing_context(
     if config.run_synthesis:
         if progress is not None:
             progress(total, total, "Synthesizing set overview")
-        from .synthesis import MIN_SHEETS_FOR_SYNTHESIS, synthesize_drawing_set
+        from .synthesis import (
+            MIN_SHEETS_FOR_SYNTHESIS,
+            default_synthesis_model,
+            synthesize_drawing_set,
+        )
 
         _log.info("synthesis: starting cross-sheet overview")
         result = synthesize_drawing_set(sheets, client=client, model=synthesis_model)
         if result.ok:
             synthesis_text = result.text
             synthesis_stage.status = "COMPLETE"
-            # The synthesis call is billed, so its tokens belong in the run total.
-            in_tok += result.input_tokens
-            out_tok += result.output_tokens
+            # The synthesis call is billed, so its usage is recorded (§15.6).
+            _record_usage(
+                run_usage, family="synthesis", instance="synthesis",
+                model=synthesis_model or default_synthesis_model(),
+                input_tokens=result.input_tokens, output_tokens=result.output_tokens,
+            )
             _log.info(
                 "synthesis: ok (input=%d output=%d tok)",
                 result.input_tokens, result.output_tokens,
@@ -1757,7 +1903,11 @@ def extract_drawing_context(
     if focus:
         if progress is not None:
             progress(total, total, "Generating focus report")
-        from .focus import MIN_SHEETS_FOR_FOCUS, generate_focus_report
+        from .focus import (
+            MIN_SHEETS_FOR_FOCUS,
+            default_focus_model,
+            generate_focus_report,
+        )
 
         _log.info("focus report: starting set-level pass")
         fresult = generate_focus_report(
@@ -1765,9 +1915,12 @@ def extract_drawing_context(
         )
         if fresult.ok:
             focus_report_text = fresult.text
-            # The focus call is billed, so its tokens belong in the run total.
-            in_tok += fresult.input_tokens
-            out_tok += fresult.output_tokens
+            # The focus call is billed, so its usage is recorded (§15.6).
+            _record_usage(
+                run_usage, family="focus", instance="focus",
+                model=focus_model or default_focus_model(),
+                input_tokens=fresult.input_tokens, output_tokens=fresult.output_tokens,
+            )
             _log.info(
                 "focus report: ok (input=%d output=%d tok)",
                 fresult.input_tokens, fresult.output_tokens,
@@ -1788,15 +1941,13 @@ def extract_drawing_context(
     # deliverables above are never modified (I-2).
     qc = _run_qc_stages(
         sheets=sheets, geometries=sheet_geometries, pdf_paths=paths,
-        config=config,
+        config=config, run_usage=run_usage,
         client=client, qc_work_dir=qc_work_dir, progress=progress,
         total=total, errors=errors, critique_findings=critique_findings,
         cross_findings=cross_findings, claims=numeric_claims,
         synthesis_text=synthesis_text,
         accepted_documents=inventory.accepted_documents,
     )
-    in_tok += qc.input_tokens
-    out_tok += qc.output_tokens
     stage_results.extend(qc.stage_results)
 
     # Roll the per-stage outcomes into one overall QC status (§3.3). The temporary
@@ -1809,6 +1960,9 @@ def extract_drawing_context(
     if progress is not None:
         progress(total, total, "Done")
 
+    # Run token totals are derived from the append-only usage ledger (§15.6).
+    in_tok = run_usage.total_input_tokens
+    out_tok = run_usage.total_output_tokens
     ok_count = sum(1 for s in sheets if s.ok)
     cached_count = sum(1 for s in sheets if s.cached)
     _log.info(
@@ -1850,6 +2004,7 @@ def extract_drawing_context(
         run_configuration=config,
         stage_results=stage_results,
         qc_status=qc_status,
+        run_usage=run_usage,
     )
 
 

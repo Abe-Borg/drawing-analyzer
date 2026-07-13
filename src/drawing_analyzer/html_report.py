@@ -1024,10 +1024,52 @@ def _summary_html(ctx: Any, source_names: list[str], now: datetime) -> str:
         f"{_qc_status_banner_html(ctx)}"
         f"{_coverage_banner_html(ctx)}"
         f'<div class="stats">{cards}</div>'
+        f"{_usage_html(ctx)}"
         f'<details class="sources"><summary>Source files</summary>'
         f"<ul>{sources}</ul></details>"
         f"{errors_html}"
         f"</div>"
+    )
+
+
+def _usage_html(ctx: Any) -> str:
+    """A collapsible per-stage token/cost table from the usage ledger (§15.7).
+
+    Actuals, not an estimate — the same append-only records the run totals are
+    derived from, so the grand total here always equals the sum of the rows.
+    Absent when no usage was recorded (e.g. a fully-cached run made no calls).
+    """
+    by_family = getattr(ctx, "usage_by_family", None) or {}
+    if not by_family:
+        return ""
+    total_cost = getattr(ctx, "total_estimated_cost", None)
+    total_line = (
+        f" — est. ${float(total_cost):,.2f}" if total_cost is not None else ""
+    )
+    rows = []
+    for fam in sorted(by_family):
+        g = by_family[fam]
+        cost = g.get("estimated_cost")
+        money = f"${float(cost):,.4f}" if cost is not None else "—"
+        hits = f"{g['cache_hits']}" if g.get("cache_hits") else "0"
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(fam)}</td>"
+            f"<td class='num'>{g['calls']}</td>"
+            f"<td class='num'>{hits}</td>"
+            f"<td class='num'>{g['input_tokens']:,}</td>"
+            f"<td class='num'>{g['output_tokens']:,}</td>"
+            f"<td class='num'>{money}</td>"
+            "</tr>"
+        )
+    return (
+        f'<details class="usage"><summary>Token usage &amp; estimated cost by '
+        f"stage{total_line}</summary>"
+        '<div class="usage-scroll"><table class="usage-table">'
+        "<thead><tr><th>Stage</th><th class='num'>Calls</th>"
+        "<th class='num'>Cached</th><th class='num'>Input</th>"
+        "<th class='num'>Output</th><th class='num'>Est. cost</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table></div></details>"
     )
 
 
@@ -1342,6 +1384,13 @@ a{color:var(--accent); text-decoration:none}
 .qc-status-banner[data-status="PARTIAL"] .cb-title{color:var(--coord)}
 .qc-status-banner[data-status="FAILED"]{border-color:var(--failed); background:var(--conflict-soft)}
 .qc-status-banner[data-status="FAILED"] .cb-title{color:var(--failed)}
+.usage{margin-top:12px; font-size:13px}
+.usage summary{cursor:pointer; color:var(--muted)}
+.usage-scroll{overflow-x:auto; margin-top:8px}
+.usage-table{border-collapse:collapse; width:100%; font-size:12.5px}
+.usage-table th,.usage-table td{border-bottom:1px solid var(--line); padding:4px 10px; text-align:left}
+.usage-table th.num,.usage-table td.num{text-align:right; font-variant-numeric:tabular-nums}
+.usage-table thead th{color:var(--muted); font-weight:600}
 
 /* Cards */
 .card{

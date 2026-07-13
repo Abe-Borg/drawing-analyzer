@@ -14,9 +14,22 @@ rather than guessing a wrong number).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
+
+# The date the rates below were last verified against Anthropic's published
+# pricing (§15.7). Rates drift — re-verify against the official pricing page and
+# bump this date before a release; the GUI/report surface it so a stale figure is
+# never presented as authoritative.
+PRICING_EFFECTIVE_DATE = "2026-06"
 
 # Batch API bills at half of standard, per Anthropic's published pricing.
 BATCH_DISCOUNT = 0.5
+# Prompt-caching multipliers on the base *input* rate (Anthropic standard 5-min
+# TTL): a cache write costs 1.25x input, a cache read 0.1x input.
+CACHE_WRITE_MULTIPLIER = 1.25
+CACHE_READ_MULTIPLIER = 0.10
+# Server-side web-search tool: USD per billable search (Anthropic: $10 / 1,000).
+WEB_SEARCH_COST_PER_USE = Decimal("0.01")
 
 
 @dataclass(frozen=True)
@@ -89,3 +102,42 @@ def estimate_request_cost(
         + (output_tokens / 1_000_000) * price.output_per_mtok
     )
     return cost * factor
+
+
+def usage_record_cost(
+    *,
+    model: str,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
+    billable_tool_uses: "dict | None" = None,
+    batch: bool = False,
+) -> "Decimal | None":
+    """USD cost of one usage record, priced by its own rate class (§6.3 / §15.7).
+
+    Returns ``None`` when the model's price is unknown (the caller shows tokens
+    without a dollar figure rather than guessing). Token cost — ordinary input,
+    output, and cache read/write (each a multiplier on the base input rate) —
+    takes the batch discount when ``batch`` is set; server-side tool uses (web
+    search) are billed per use and are **not** batch-discounted. A ``CACHE``-served
+    record passes all-zero token counts, so its token cost is zero; only its
+    (rare) tool uses, if any, would carry a charge.
+    """
+    price = price_for(model)
+    tool_uses = billable_tool_uses or {}
+    tool_cost = Decimal(int(tool_uses.get("web_search", 0))) * WEB_SEARCH_COST_PER_USE
+    if price is None:
+        # No token price for this model — but a known tool charge is still real.
+        return tool_cost if tool_cost > 0 else None
+    factor = Decimal(str(BATCH_DISCOUNT)) if batch else Decimal("1")
+    inp = Decimal(str(price.input_per_mtok))
+    out = Decimal(str(price.output_per_mtok))
+    million = Decimal("1000000")
+    token_cost = (
+        (Decimal(int(input_tokens)) / million) * inp
+        + (Decimal(int(output_tokens)) / million) * out
+        + (Decimal(int(cache_read_tokens)) / million) * inp * Decimal(str(CACHE_READ_MULTIPLIER))
+        + (Decimal(int(cache_write_tokens)) / million) * inp * Decimal(str(CACHE_WRITE_MULTIPLIER))
+    ) * factor
+    return token_cost + tool_cost

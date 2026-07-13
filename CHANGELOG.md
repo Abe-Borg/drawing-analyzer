@@ -6,6 +6,40 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed (Phase 23B — usage & cost accounting, DA-014)
+
+- **Token accounting is now an append-only usage ledger; no stage can overwrite
+  another's counters (DA-014).** The QC pipeline used to fold the prose-harvest
+  tokens into `v_in, v_out` and then **overwrite** them with `v_in, v_out =
+  vres.…` (`=`, not `+=`) when verification ran — silently dropping the harvest
+  tokens from the run total. Every API call/attempt now appends a priced
+  `UsageRecord` (`stage_family`, `stage_instance`, `transport`
+  REAL_TIME/BATCH/CACHE, model, input/output/cache tokens, tool uses, `cache_hit`,
+  `parse_success`, `terminal_status`, `estimated_cost`) to a `RunUsage` ledger on
+  `DrawingContext.run_usage`; `total_input_tokens` / `total_output_tokens` /
+  `total_estimated_cost` are **derived** sums over it, so the grand total always
+  equals the exact sum of the records. A cache hit records zero billed tokens with
+  its cache-hit metadata; a response that consumed tokens but failed to parse stays
+  billable; a batch call is priced at the batch rate and a real-time call at the
+  standard rate — per record, so a mixed run prices each stage correctly.
+- **Per-record pricing with a verified effective date (§15.7).**
+  `core.pricing.usage_record_cost` prices one record by its own rate class —
+  ordinary input/output, cache read (0.1×) / write (1.25×), and per-use web-search
+  tool fee, with the batch discount applied only to token cost. `PRICING_EFFECTIVE_DATE`
+  stamps when the rates were last verified (surfaced in the GUI/report so a stale
+  figure is never presented as authoritative).
+
+### Added (Phase 23B — honest exhaustive cost preview + post-run actuals, §15.7)
+
+- **The GUI cost dialog previews the *exhaustive* run when QC Markups is on** —
+  `estimate_exhaustive_run_cost` breaks the spend down per stage (digest+synthesis
+  on the batch path; two critique reads/sheet, cross-sheet QC, prose harvest,
+  verification, and citation real-time) and quotes a low–high **range** because
+  verification and citation scale with the finding / unique-claim count. The
+  completion summary and a collapsible **Token usage & estimated cost by stage**
+  table in the HTML report show the *actuals* from the ledger — the same records
+  the totals derive from, so GUI, report, and context always agree.
+
 ### Changed (Phase 23A — run configuration, status & persistence, DA-010/DA-012/DA-013)
 
 - **`qc_markups=True` now resolves to — and runs — the full exhaustive stack

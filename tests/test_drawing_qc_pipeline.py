@@ -336,6 +336,66 @@ def test_audit_only_makes_no_incremental_api_calls(tmp_path):
     assert ctx.qc_status == "NOT_REQUESTED"
 
 
+def test_exhaustive_run_usage_is_derived_and_per_stage(tmp_path):
+    # §15.6: the run's token totals are DERIVED from an append-only usage ledger —
+    # every stage records independently, so harvest and verify both appear (the old
+    # ``v_in, v_out = vres…`` overwrite dropped harvest) and the grand total equals
+    # the exact sum of the records.
+    a = _make_pdf(tmp_path / "M-101.pdf")
+    b = _make_pdf(tmp_path / "M-102.pdf")
+    client = _CountingClient([_VAV_FINDING])
+    ctx = extract_drawing_context(
+        [a, b], client=client, rows=2, cols=2, qc_markups=True, qc_work_dir=tmp_path / "qc",
+    )
+    ru = ctx.run_usage
+    assert ru is not None
+    # Totals are the exact sum of the records — never a mutable running counter.
+    assert ctx.total_input_tokens == sum(r.input_tokens for r in ru.records)
+    assert ctx.total_output_tokens == sum(r.output_tokens for r in ru.records)
+    fams = set(ru.by_family())
+    for needle in ("digest", "critique", "cross_qc", "synthesis", "verify", "citation"):
+        assert needle in fams, needle
+    # harvest and verify are BOTH present as independent records (no overwrite).
+    assert "harvest" in fams and "verify" in fams
+    assert ctx.total_estimated_cost is not None       # Opus is priced
+
+
+def test_cached_digest_records_zero_billed_tokens(tmp_path):
+    # A cache hit contributes zero current-run billed tokens but records the
+    # cache-hit metadata (§6.3): the second run's digest is a CACHE record.
+    from drawing_analyzer.digest_cache import DigestCache
+
+    src = _make_pdf(tmp_path / "M-101.pdf")
+    cache = DigestCache(None, persist=False)
+    c1 = _RoutingClient([_VAV_FINDING])
+    ctx1 = extract_drawing_context([src], client=c1, rows=2, cols=2, cache=cache)
+    assert ctx1.total_input_tokens > 0                 # first run paid for the digest
+
+    c2 = _RoutingClient([_VAV_FINDING])
+    ctx2 = extract_drawing_context([src], client=c2, rows=2, cols=2, cache=cache)
+    assert c2.digest_calls == 0                        # served from cache, no API call
+    digest_recs = [r for r in ctx2.run_usage.records if r.stage_family == "digest"]
+    assert digest_recs and all(r.transport == "CACHE" for r in digest_recs)
+    assert all(r.cache_hit and r.input_tokens == 0 for r in digest_recs)
+    assert ctx2.run_usage.cache_hits >= 1
+    assert ctx2.total_input_tokens == 0                # a fully-cached re-run bills nothing
+
+
+def test_report_and_context_usage_totals_agree(tmp_path):
+    # GUI/report/context totals all derive from the one ledger, so they agree (§15.7).
+    from drawing_analyzer.html_report import build_html_report
+
+    src = _make_pdf(tmp_path / "M-101.pdf")
+    client = _CountingClient([_VAV_FINDING])
+    ctx = extract_drawing_context(
+        [src], client=client, rows=2, cols=2, qc_markups=True, qc_work_dir=tmp_path / "qc",
+    )
+    html = build_html_report(ctx, source_names=["M-101.pdf"])
+    assert "Token usage &amp; estimated cost by stage" in html
+    # The report's per-family rows sum to the context's derived total.
+    assert sum(g["input_tokens"] for g in ctx.usage_by_family.values()) == ctx.total_input_tokens
+
+
 def test_verification_stage_skipped_valid_when_no_eligible_findings(tmp_path):
     # The verifier returns normally with everything SKIPPED (it does not raise) when
     # nothing is eligible. An exhaustive run whose only finding is the DETERMINISTIC

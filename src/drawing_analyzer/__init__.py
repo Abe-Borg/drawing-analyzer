@@ -52,7 +52,9 @@ from __future__ import annotations
 from .digest import SheetDigest
 from .models import (
     RunConfiguration,
+    RunUsage,
     StageResult,
+    UsageRecord,
     resolve_run_configuration,
     roll_up_qc_status,
 )
@@ -68,7 +70,9 @@ __all__ = [
     "DrawingContext",
     "SheetDigest",
     "RunConfiguration",
+    "RunUsage",
     "StageResult",
+    "UsageRecord",
     "resolve_run_configuration",
     "roll_up_qc_status",
     "extract_drawing_context",

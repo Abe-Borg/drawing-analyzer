@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import math
 from dataclasses import dataclass, field
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -1372,3 +1373,150 @@ def roll_up_qc_status(
     if any_useful and (any_failed or coverage_incomplete or not is_normal):
         return "PARTIAL"
     return "FAILED"
+
+
+# --------------------------------------------------------------------------- #
+# Usage accounting (Phase 23B — §6.3 / §15.6)
+# --------------------------------------------------------------------------- #
+#
+# Token/cost accounting is an **append-only** ledger of per-call records, never a
+# mutable "current total" a stage can overwrite (the old ``v_in, v_out = …`` in the
+# QC pipeline silently dropped the prose-harvest tokens when verification ran). The
+# run totals are *derived* sums over the records, so two critique reads, many
+# cross-QC shards, a retry, and a citation chunk each contribute their own record
+# and none can clobber another's. ``estimated_cost`` is priced by the pipeline at
+# record time (``core.pricing``) and stored, so this module stays dependency-free.
+
+USAGE_TRANSPORTS = ("REAL_TIME", "BATCH", "CACHE")
+USAGE_STAGE_FAMILIES = (
+    "digest", "critique", "synthesis", "focus", "harvest", "cross_qc", "verify", "citation",
+)
+USAGE_TERMINAL_STATUSES = ("COMPLETE", "PARTIAL", "FAILED")
+
+
+@dataclass
+class UsageRecord:
+    """One API call/attempt's reported usage (§6.3). Append-only; never mutated in place.
+
+    ``transport`` is ``CACHE`` for a served cache hit (which bills **zero** current-run
+    tokens — its token fields are 0 and ``cache_hit`` is set), ``BATCH`` for a Message
+    Batches call (billed at the batch rate), else ``REAL_TIME``. ``parse_success`` is
+    ``False`` for a response that consumed tokens but failed to parse — it still counts
+    as billable. ``estimated_cost`` is the record's USD cost priced at its own rate
+    class (``None`` when the model's price is unknown).
+    """
+
+    stage_family: str
+    stage_instance: str
+    model: str = ""
+    transport: str = "REAL_TIME"
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    billable_tool_uses: dict = field(default_factory=dict)
+    cache_hit: bool = False
+    parse_success: bool = True
+    terminal_status: str = "COMPLETE"
+    parent_stage_instance: "str | None" = None
+    attempt_number: int = 1
+    billing_rate_class: str = ""
+    request_or_custom_id: str = ""
+    estimated_cost: "Decimal | None" = None
+
+    def to_dict(self) -> dict:
+        return {
+            "stage_family": self.stage_family,
+            "stage_instance": self.stage_instance,
+            "model": self.model,
+            "transport": self.transport,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "cache_read_tokens": self.cache_read_tokens,
+            "cache_write_tokens": self.cache_write_tokens,
+            "billable_tool_uses": dict(self.billable_tool_uses),
+            "cache_hit": self.cache_hit,
+            "parse_success": self.parse_success,
+            "terminal_status": self.terminal_status,
+            "parent_stage_instance": self.parent_stage_instance,
+            "attempt_number": self.attempt_number,
+            "billing_rate_class": self.billing_rate_class,
+            "request_or_custom_id": self.request_or_custom_id,
+            "estimated_cost": None if self.estimated_cost is None else str(self.estimated_cost),
+        }
+
+
+@dataclass
+class RunUsage:
+    """The run's append-only usage ledger (§6.3). Totals are derived, never stored.
+
+    Add a :class:`UsageRecord` per call with :meth:`add`; the ``total_*`` properties
+    and :meth:`by_family` are computed on read, so no stage can overwrite another's
+    counters and the grand totals always equal the exact sum of the records.
+    """
+
+    records: list = field(default_factory=list)
+
+    def add(self, record: "UsageRecord") -> "UsageRecord":
+        self.records.append(record)
+        return record
+
+    @property
+    def total_input_tokens(self) -> int:
+        return sum(r.input_tokens for r in self.records)
+
+    @property
+    def total_output_tokens(self) -> int:
+        return sum(r.output_tokens for r in self.records)
+
+    @property
+    def total_cache_read_tokens(self) -> int:
+        return sum(r.cache_read_tokens for r in self.records)
+
+    @property
+    def total_cache_write_tokens(self) -> int:
+        return sum(r.cache_write_tokens for r in self.records)
+
+    @property
+    def cache_hits(self) -> int:
+        return sum(1 for r in self.records if r.cache_hit)
+
+    @property
+    def total_estimated_cost(self) -> "Decimal | None":
+        priced = [r.estimated_cost for r in self.records if r.estimated_cost is not None]
+        return sum(priced, Decimal("0")) if priced else None
+
+    def by_family(self) -> "dict[str, dict]":
+        """Per-``stage_family`` rollup: input/output tokens, cost, call + cache-hit counts."""
+        out: dict[str, dict] = {}
+        for r in self.records:
+            g = out.setdefault(
+                r.stage_family,
+                {"input_tokens": 0, "output_tokens": 0, "calls": 0, "cache_hits": 0,
+                 "estimated_cost": None},
+            )
+            g["input_tokens"] += r.input_tokens
+            g["output_tokens"] += r.output_tokens
+            g["calls"] += 1
+            if r.cache_hit:
+                g["cache_hits"] += 1
+            if r.estimated_cost is not None:
+                g["estimated_cost"] = (g["estimated_cost"] or Decimal("0")) + r.estimated_cost
+        return out
+
+    def to_dict(self) -> dict:
+        cost = self.total_estimated_cost
+        return {
+            "total_input_tokens": self.total_input_tokens,
+            "total_output_tokens": self.total_output_tokens,
+            "total_cache_read_tokens": self.total_cache_read_tokens,
+            "total_cache_write_tokens": self.total_cache_write_tokens,
+            "cache_hits": self.cache_hits,
+            "total_estimated_cost": None if cost is None else str(cost),
+            "by_family": {
+                fam: {**g, "estimated_cost": None if g["estimated_cost"] is None
+                      else str(g["estimated_cost"])}
+                for fam, g in self.by_family().items()
+            },
+            "records": [r.to_dict() for r in self.records],
+        }

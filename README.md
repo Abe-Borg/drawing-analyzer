@@ -205,9 +205,11 @@ for pdf in ctx.reviewed_pdf_paths:   # the *_reviewed.pdf files (qc_markups only
 `SheetDigest`s, token totals, errors, optional `synthesis_text`, and — when a
 focus was given — `focus` / `focus_report_text`). It always carries the normalized
 run status: `qc_status` (`NOT_REQUESTED` / `COMPLETE` / `PARTIAL` / `FAILED`), the
-typed `stage_results`, and the resolved `run_configuration` (§3.3 / §15.1). Even a
-standard run carries the QC record — `findings` are retained and offline-anchored
-(DA-012). When exhaustive QC or the free audit ran it fills the rest:
+typed `stage_results`, and the resolved `run_configuration` (§3.3 / §15.1); the
+append-only usage ledger `run_usage` backs the derived `total_input_tokens` /
+`total_output_tokens` / `total_estimated_cost` and the `usage_by_family` breakdown
+(§15.6). Even a standard run carries the QC record — `findings` are retained and
+offline-anchored (DA-012). When exhaustive QC or the free audit ran it fills the rest:
 `findings` (the model's, anchored + verified),
 `reference_findings` (the deterministic auditors', anchored + `DETERMINISTIC`),
 the `all_findings` / `finding_count` / `clouded_finding_count` conveniences,
@@ -324,6 +326,21 @@ Opus pricing, plus its re-render — so an exhaustive `critique=True` run lands
 around **$2–3.5/sheet** once verification is included. The offline stages
 (reference audit, anchoring, markup, text extraction) stay $0. Every stage is
 individually cached, so a re-run of an unchanged set skips the model calls.
+
+**Usage & cost accounting.** Every API call/attempt appends a priced
+`UsageRecord` to an **append-only** ledger on `DrawingContext.run_usage`
+(`stage_family`, `transport` real-time / batch / cache, model, input/output/cache
+tokens, tool uses, cache-hit, parse-success, and `estimated_cost`); the run's
+`total_input_tokens` / `total_output_tokens` / `total_estimated_cost` are
+**derived** sums, so no stage can overwrite another's counters and the totals
+always equal the exact sum of the records. A cache hit records zero billed tokens;
+a batch call is priced at the batch rate, a real-time call at the standard rate —
+per record. Before an exhaustive run the GUI shows a per-stage estimate with a
+low–high range (verification and citation scale with how many findings/citations
+turn up); after the run the completion summary and a collapsible **Token usage &
+estimated cost by stage** table in the report show the actuals. Pricing constants
+carry a verified effective date (`core.pricing.PRICING_EFFECTIVE_DATE`) —
+re-verify against the published rates before relying on a dollar figure.
 
 ## Structured findings
 
