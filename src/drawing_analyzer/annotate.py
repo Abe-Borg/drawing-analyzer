@@ -1554,3 +1554,132 @@ def write_reviewed_pdfs(
             ))
 
     return _result_from_receipts(all_receipts, all_placements, reviewed_pdfs)
+
+
+# --------------------------------------------------------------------------- #
+# Set-level review notes (Drawing_Set_Review_Notes.pdf) — Phase 22 §14.8.
+# A synthesis conflict that names no in-set sheet belongs to no source PDF and so
+# can never be clouded on a drawing. Instead each becomes one REVIEW_NOTES row on
+# an analyzer-owned page of a dedicated, deterministic PDF: visible ink with its
+# own artifact hash, placement ids, and reopened-and-reconciled receipts.
+# --------------------------------------------------------------------------- #
+
+SET_REVIEW_NOTES_FILENAME = "Drawing_Set_Review_Notes.pdf"
+SET_REVIEW_NOTES_LABEL = "AI DRAFT REVIEW - SET-LEVEL / SHEET NOT IDENTIFIED"
+_NOTE_LEFT = 36.0
+_NOTE_TOP = 96.0
+_NOTE_BOX_H = 60.0
+_NOTE_GAP = 10.0
+_NOTES_PER_PAGE = max(
+    1, int((_INDEX_PAGE_H - _NOTE_TOP - _INDEX_BOTTOM_MARGIN) / (_NOTE_BOX_H + _NOTE_GAP))
+)
+
+
+def _is_set_level_finding(finding: Finding) -> bool:
+    """A set-level finding: a SET-scoped item that belongs to no source sheet."""
+    return (finding.anchor_hint or "").upper() in {"SET", "SET_INDEX"} and not finding.source_id
+
+
+def write_set_review_notes_pdf(
+    findings: Iterable[Finding],
+    output_dir: Path | str,
+    *,
+    author: str = DEFAULT_AUTHOR,
+    artifact_run_id: str | None = None,
+) -> MarkupRunResult:
+    """Write ``Drawing_Set_Review_Notes.pdf`` for the set-level findings (§14.8).
+
+    Only set-level findings are written (anything else is ignored). Each becomes one
+    stamped ``REVIEW_NOTES`` callout on an analyzer-owned page; the file is then
+    reopened and every planned placement reconciled against what is actually found
+    (Phase 21). An empty input yields an empty :class:`MarkupRunResult` (no file), so
+    the caller lists the artifact only when it exists. A file whose placements did
+    not all succeed is labeled ``…_INCOMPLETE.pdf`` (§13.6). Additive / non-fatal:
+    a per-note draw failure becomes a FAILED receipt, never a raise.
+
+    This artifact is not subject to the ``markup_verified_only`` gate: that gate
+    suppresses unverified ink *on the drawings*, but a set-level conflict has no
+    sheet to cloud and cannot be crop-verified, so these rows are the finding's index
+    entry — a review-notes artifact, not authoritative drawing ink.
+    """
+    items = [f for f in findings if _is_set_level_finding(f)]
+    if not items:
+        return _result_from_receipts([], [], [])
+
+    run_id = artifact_run_id or new_artifact_run_id()
+    output_dir = Path(output_dir)
+    items.sort(key=lambda f: (f.qc_id or "~", f.id))     # deterministic order (I-7)
+    ordinals = itertools.count()
+    pairs: list[tuple[Finding, MarkupPlacement]] = []
+    for f in items:
+        pairs.append((f, MarkupPlacement(
+            run_id=run_id,
+            placement_id=f"{run_id}#{f.id}#{SET_LEG_ID}#{next(ordinals):05d}",
+            finding_id=f.id, qc_id=f.qc_id, scope="SET", source_id="",
+            page_index=-1, leg_id=SET_LEG_ID, expected="REVIEW_NOTES",
+            required_components=list(REQUIRED_COMPONENTS["REVIEW_NOTES"]),
+            severity=f.severity, source_name="",
+        )))
+    placements = [pl for _, pl in pairs]
+
+    out = output_dir / SET_REVIEW_NOTES_FILENAME
+    collected: dict[str, list[tuple[str, int, int]]] = {}
+    doc = pymupdf.open()                                  # a fresh, analyzer-owned doc
+    try:
+        n_pages = (len(pairs) + _NOTES_PER_PAGE - 1) // _NOTES_PER_PAGE
+        for pno in range(n_pages):
+            page = doc.new_page(width=_INDEX_PAGE_W, height=_INDEX_PAGE_H)
+            title = SET_REVIEW_NOTES_LABEL + (f"  (page {pno + 1}/{n_pages})" if n_pages > 1 else "")
+            page.insert_text((_NOTE_LEFT, 42), title, fontsize=12, fontname="hebo", color=(0.1, 0.1, 0.1))
+            page.insert_text(
+                (_NOTE_LEFT, 62),
+                f"Author: {author} - findings that belong to no single sheet in the set.",
+                fontsize=8, color=(0.35, 0.35, 0.35),
+            )
+            batch = pairs[pno * _NOTES_PER_PAGE:(pno + 1) * _NOTES_PER_PAGE]
+            y = _NOTE_TOP
+            for finding, placement in batch:
+                box = pymupdf.Rect(_NOTE_LEFT, y, _INDEX_PAGE_W - _NOTE_LEFT, y + _NOTE_BOX_H)
+                content = (
+                    f"{finding.qc_id or '-'}  [set-level / {finding.severity}]\n"
+                    f"{finding.text.strip()}"
+                )
+                try:
+                    annot = page.add_freetext_annot(
+                        box, content[:400], fontsize=8,
+                        text_color=_color(finding), fill_color=(1.0, 1.0, 0.92),
+                    )
+                    annot.set_info(title=author, subject="set-level review note", content=content)
+                    annot.update()
+                    collected.setdefault(placement.placement_id, []).append(
+                        ("callout", annot.xref, pno)
+                    )
+                except Exception:  # noqa: BLE001 - one bad note must not sink the file
+                    _log.warning("could not draw set-level note for %s", finding.id)
+                y += _NOTE_BOX_H + _NOTE_GAP
+
+        for pid, comps in collected.items():
+            for component, xref, pno in comps:
+                try:
+                    _stamp_component(doc, xref, pid, component, pno)
+                except Exception:  # noqa: BLE001 - a failed stamp → that placement fails
+                    _log.warning("could not stamp set-level note %s", pid)
+
+        out.parent.mkdir(parents=True, exist_ok=True)
+        doc.save(str(out), garbage=3, deflate=True)
+    finally:
+        doc.close()
+
+    receipts = _reconcile_pdf(out, placements, run_id)
+    final_out = out
+    if any(not r.ok for r in receipts) and out.exists():
+        inc = output_dir / (SET_REVIEW_NOTES_FILENAME[:-4] + "_INCOMPLETE.pdf")
+        try:
+            out.replace(inc)
+            for r in receipts:
+                if r.output_pdf == out.name:
+                    r.output_pdf = inc.name
+            final_out = inc
+        except OSError as exc:
+            _log.warning("could not label incomplete set-level notes PDF: %s", exc)
+    return _result_from_receipts(receipts, placements, [final_out])

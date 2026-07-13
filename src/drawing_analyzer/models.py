@@ -391,6 +391,59 @@ SOURCE_TAGS = frozenset({
     "focus_prose",
 })
 
+# ``Finding.confidence`` — the self-consistency verdict for a critique finding
+# (Phase 22 §14.4). ``reproduced`` (a bool) is kept as a derived compatibility
+# property; ``confidence`` is the richer signal the report surfaces:
+#   REPRODUCED           — two independent successful reads both raised it.
+#   SINGLETON            — two successful reads; only one raised it.
+#   NOT_ASSESSED_PARTIAL — a second read was requested but failed, so corroboration
+#                          could not be assessed (never silently "reproduced").
+#   NOT_APPLICABLE       — self-consistency did not apply (single-read mode, or a
+#                          non-critique channel: digest / auditors / prose).
+CONFIDENCE_REPRODUCED = "REPRODUCED"
+CONFIDENCE_SINGLETON = "SINGLETON"
+CONFIDENCE_NOT_ASSESSED_PARTIAL = "NOT_ASSESSED_PARTIAL"
+CONFIDENCE_NOT_APPLICABLE = "NOT_APPLICABLE"
+CONFIDENCE_LEVELS = frozenset({
+    CONFIDENCE_REPRODUCED,
+    CONFIDENCE_SINGLETON,
+    CONFIDENCE_NOT_ASSESSED_PARTIAL,
+    CONFIDENCE_NOT_APPLICABLE,
+})
+
+# Structured-block parser status (Phase 22 §14.2). The line-aware scanner in
+# ``digest.py`` classifies the model's findings attempt so a digest never leaks a
+# truncated/unclosed machine block into the sacred prose (DA-009), and the
+# critique can tell a genuine ``{"findings": []}`` from a parse failure (DA-008).
+#   ABSENT            — no findings attempt (plain prose; prose returned verbatim).
+#   PARSED_CLOSED     — a closed fenced block whose ``{"findings": …}`` parsed.
+#   PARSED_UNCLOSED   — an unclosed (truncated) fence whose JSON was nonetheless
+#                       complete and valid; findings extracted, drift recorded.
+#   MALFORMED_CLOSED  — a closed findings attempt whose body would not parse.
+#   MALFORMED_UNCLOSED— an unclosed findings attempt whose body would not parse.
+#   TRUNCATED         — a findings attempt cut off immediately after the opener or
+#                       mid-JSON (no recoverable object).
+# ``PARSED_*`` are the only success states; every other state yields no findings.
+# In every non-ABSENT state the prose is cut at the opener, so the machine block
+# can never reach ``combined_text`` regardless of how the response ended.
+FINDINGS_ABSENT = "ABSENT"
+FINDINGS_PARSED_CLOSED = "PARSED_CLOSED"
+FINDINGS_PARSED_UNCLOSED = "PARSED_UNCLOSED"
+FINDINGS_MALFORMED_CLOSED = "MALFORMED_CLOSED"
+FINDINGS_MALFORMED_UNCLOSED = "MALFORMED_UNCLOSED"
+FINDINGS_TRUNCATED = "TRUNCATED"
+FINDINGS_PARSE_STATUSES = frozenset({
+    FINDINGS_ABSENT,
+    FINDINGS_PARSED_CLOSED,
+    FINDINGS_PARSED_UNCLOSED,
+    FINDINGS_MALFORMED_CLOSED,
+    FINDINGS_MALFORMED_UNCLOSED,
+    FINDINGS_TRUNCATED,
+})
+# The parse states that carry a valid findings schema (an explicit empty list is
+# a valid schema). A critique read is a success only in one of these states.
+FINDINGS_PARSE_OK = frozenset({FINDINGS_PARSED_CLOSED, FINDINGS_PARSED_UNCLOSED})
+
 
 def compute_finding_id(
     sheet_id: str, category: str, quote_or_text: str, source_id: str = ""
@@ -573,15 +626,23 @@ class Finding:
     deterministic findings, which carry exact anchors instead). ``id`` is derived
     from the content when not supplied, so callers normally omit it.
 
-    ``anchor_hint`` is an optional coarse placement hint from the model — currently
-    ``"SHEET"`` for a sheet-level / *absence* finding (something the reviewer
-    expected but did not find), which has no ``source_quote`` to anchor and is
-    placed against the whole sheet rather than a rectangle. ``reproduced`` is a
-    soft confidence signal: ``True`` unless a self-consistency pass saw the finding
-    in only one of several independent reads (an uncorroborated singleton). It
-    never suppresses a finding — the report and the markup writer only *surface*
-    it — so it defaults ``True`` for every finding that never went through that
-    pass (digest findings, the deterministic auditors).
+    ``anchor_hint`` is an optional coarse placement hint from the model — ``"SHEET"``
+    for a sheet-level / *absence* finding (something the reviewer expected but did
+    not find), which has no ``source_quote`` to anchor and is placed against the
+    whole sheet rather than a rectangle; ``"SET_INDEX"`` for a **set-level** finding
+    (a cross-sheet synthesis conflict that names no resolvable in-set sheet, Phase 22
+    §14.8) which — together with an empty ``source_id`` — belongs to no single source
+    and is written to the deterministic ``Drawing_Set_Review_Notes.pdf`` artifact.
+    ``reproduced`` is a soft confidence signal: ``True`` unless a self-consistency
+    pass saw the finding in only one of several independent reads (an uncorroborated
+    singleton). It never suppresses a finding — the report and the markup writer only
+    *surface* it — so it defaults ``True`` for every finding that never went through
+    that pass (digest findings, the deterministic auditors). ``confidence`` is the
+    richer Phase-22 form of the same signal (one of :data:`CONFIDENCE_LEVELS`);
+    ``reproduced`` is derived from it (``REPRODUCED`` ⇒ ``True``, everything else the
+    read's own outcome). ``prose_item_ids`` records every enumerated prose item this
+    entry accounts for (Phase 22 §14.6), so the harvest can prove — item by item —
+    that nothing was dropped.
 
     ``qc_id`` is the human-facing sequential review number (``QC-001`` …), assigned
     once per run by :func:`assign_qc_ids` (ordered sheet → position) and shown on
@@ -604,8 +665,9 @@ class Finding:
     source_quote: str = ""
     tile: list[int] | None = None
     refs: list[str] = field(default_factory=list)
-    anchor_hint: str = ""               # "SHEET" for a sheet-level / absence finding
+    anchor_hint: str = ""               # "SHEET"/"SET_INDEX" placement hint
     reproduced: bool = True             # corroborated by a second read (self-consistency)
+    confidence: str = ""                # one of CONFIDENCE_LEVELS ("" = not set → NOT_APPLICABLE)
     also_on: list["ConflictLeg"] = field(default_factory=list)  # cross-sheet legs (Phase 13)
     anchor: Anchor = field(default_factory=Anchor)
     verification: Verification = field(default_factory=Verification)
@@ -618,6 +680,11 @@ class Finding:
     # duplicate's alternate quote is preserved here, never spliced onto this entry's
     # text (which would fabricate a text/quote pair that never appeared together).
     supporting_quotes: list[str] = field(default_factory=list)
+    # Enumerated prose items (Phase 22 §14.6) this entry accounts for. A harvested
+    # prose sentence attaches its ``prose_item_id`` here; the ledger unions these on
+    # merge so the harvest's expected-vs-accounted reconciliation can prove every
+    # item survived. Empty for non-prose findings.
+    prose_item_ids: list[str] = field(default_factory=list)
     id: str = ""
 
     def __post_init__(self) -> None:
@@ -643,9 +710,11 @@ class Finding:
             "refs": list(self.refs),
             "anchor_hint": self.anchor_hint,
             "reproduced": self.reproduced,
+            "confidence": self.confidence,
             "also_on": [leg.to_dict() for leg in self.also_on],
             "sources": list(self.sources),
             "supporting_quotes": list(self.supporting_quotes),
+            "prose_item_ids": list(self.prose_item_ids),
             "anchor": self.anchor.to_dict(),
             "verification": self.verification.to_dict(),
         }
@@ -674,9 +743,11 @@ class Finding:
             refs=list(d.get("refs", []) or []),
             anchor_hint=d.get("anchor_hint", "") or "",
             reproduced=bool(d.get("reproduced", True)),
+            confidence=str(d.get("confidence", "") or ""),
             also_on=[ConflictLeg.from_dict(leg) for leg in (d.get("also_on") or []) if isinstance(leg, dict)],
             sources=[str(s) for s in (d.get("sources") or [])],
             supporting_quotes=[str(q) for q in (d.get("supporting_quotes") or [])],
+            prose_item_ids=[str(p) for p in (d.get("prose_item_ids") or [])],
             anchor=Anchor.from_dict(d.get("anchor") or {}),
             verification=Verification.from_dict(d.get("verification") or {}),
             qc_id=d.get("qc_id", "") or "",
@@ -685,18 +756,83 @@ class Finding:
         )
 
 
+def compute_prose_item_id(
+    channel: str,
+    source_id: str | None,
+    section: str,
+    ordinal: int,
+    verbatim_text: str,
+    page_index: int = 0,
+) -> str:
+    """Stable identity for one enumerated prose item (Phase 22 §14.6).
+
+    Derived from the channel, the emitting source identity (``""`` for a set-level
+    item), the **page index** within that source, the prose section, the item's
+    ordinal within that section, and its verbatim text — so the same sentence gets
+    the same id across runs, two identical sentences at *different* ordinals or on
+    *different pages of one multi-page source* stay distinct, and the harvest can
+    prove — id by id — that every enumerated item reached a ledger entry.
+
+    ``page_index`` matters because a source id identifies the input file, not the
+    page: without it, an identical boilerplate note (e.g. a general coordination
+    note repeated on every sheet) on two pages of one PDF — both enumerated at the
+    same per-page ordinal — would collide to one id and defeat the §14.9 id-based
+    reconciliation (a distinct item could be silently dropped).
+    """
+    payload = "\x00".join([
+        channel or "",
+        source_id or "",
+        str(int(page_index)),
+        section or "",
+        str(int(ordinal)),
+        verbatim_text or "",
+    ])
+    return "PI-" + hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+
+
+@dataclass
+class ProseItem:
+    """One enumerated prose QC item (a Coordination/Conflict/synthesis/Focus line).
+
+    The prose-harvest carry-through guarantee (§14.6/§14.9) works over these
+    records: every candidate sentence becomes a ``ProseItem`` with a stable
+    :func:`compute_prose_item_id` *before* processing, so the harvest can reconcile
+    the set of enumerated ids against the set actually attached to ledger entries
+    and degrade — never silently drop — any straggler.
+
+    ``scope`` is ``SOURCE`` for an item that names a resolvable in-set sheet and
+    ``SET`` for a synthesis conflict that names none (it lives in the set-level
+    review-notes artifact, not on an arbitrary sheet). ``source_id`` is the emitting
+    source for a SOURCE item and ``None`` for a SET item.
+    """
+
+    prose_item_id: str
+    channel: str                       # a prose SOURCE_TAG (digest_prose_* / synthesis_prose / focus_prose)
+    scope: str                         # "SOURCE" | "SET"
+    source_id: str | None
+    section: str
+    ordinal: int
+    verbatim_text: str
+    mentioned_sheet_ids: list[str] = field(default_factory=list)
+
+
 def assign_qc_ids(findings: list["Finding"]) -> list["Finding"]:
     """Assign sequential review numbers (``QC-001`` …) across a run's findings.
 
     Ordered **sheet then position** (Phase 15): source file, page, then the
     anchor rectangle's top-left in reading order (top-to-bottom, left-to-right).
     Findings with no rectangle (sheet-level / unanchored) sort after the anchored
-    ones on their sheet. The sort is deterministic — tie-broken by the stable
+    ones on their sheet. **Set-level** findings (a synthesis conflict belonging to no
+    source sheet, §12.4/§14.8) sort after *every* source-scoped finding, in a final
+    section of their own. The sort is deterministic — tie-broken by the stable
     content ``id`` — so the same findings get the same numbers regardless of the
     order they arrive in (I-7). Assigns in place and returns the same list; ids
     are assigned exactly once per run (numbering everything, not only the inked
     findings, so the CSV/report/index all share one namespace).
     """
+
+    def _is_set_level(f: "Finding") -> bool:
+        return (f.anchor_hint or "").upper() in {"SET", "SET_INDEX"} and not f.source_id
 
     def _pos(f: "Finding") -> tuple:
         rect = f.anchor.rect_pdf if f.anchor is not None else None
@@ -706,7 +842,9 @@ def assign_qc_ids(findings: list["Finding"]) -> list["Finding"]:
 
     ordered = sorted(
         findings,
-        key=lambda f: (source_page_key(f), _pos(f), f.id),
+        # Set-level findings sort last (a separate final section); within each group
+        # the usual source → page → position → id order holds.
+        key=lambda f: (1 if _is_set_level(f) else 0, source_page_key(f), _pos(f), f.id),
     )
     width = max(3, len(str(len(ordered))))
     for n, finding in enumerate(ordered, start=1):

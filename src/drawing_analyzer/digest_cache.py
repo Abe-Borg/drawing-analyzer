@@ -39,8 +39,13 @@ from typing import Any
 # environment (the old per-page object-graph fingerprint missed page rotation,
 # CropBox origin, and rendered annotation appearance streams), and a critique
 # level-1 key was added — so every pre-v5 level-1 / critique entry must miss once
-# rather than serve a stale, possibly wrong-space digest.
-_SCHEMA_VERSION = 5
+# rather than serve a stale, possibly wrong-space digest. Bumped to 6 (Phase 22):
+# a stored ``Finding`` gained ``confidence`` and ``prose_item_ids``; the critique
+# cache entry now records ``requested_runs`` / ``completed_runs``; and the parser
+# was rebuilt (a truncated/unclosed findings block is now recognised and stripped),
+# so a pre-v6 entry — parsed under the old rules or lacking the new fields — must
+# miss once and be re-derived rather than served as current.
+_SCHEMA_VERSION = 6
 
 _FALSEY = {"0", "false", "no", "off", ""}
 

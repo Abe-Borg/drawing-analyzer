@@ -30,7 +30,6 @@ from .core.api_config import REVIEW_MODEL_DEFAULT, model_supports_adaptive_think
 from .diagnostics import get_logger
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
-    _FENCE_RE,
     _FINDING_SEVERITIES,
     _MODEL_FINDING_CATEGORIES,
     _clean_error,
@@ -43,6 +42,7 @@ from .digest import (
     _retry_backoff_seconds,
     _tolerant_json_object,
     parse_numeric_claims,
+    scan_structured_blocks,
 )
 from .models import ConflictLeg, Finding, NumericClaim, source_page_key
 from .auditors.references import detect_sheet_id
@@ -243,8 +243,8 @@ def _parse_cross_findings(raw_text: str, sheet_map: dict[str, Any]) -> list[Find
     each finding via ``sheet_map``. Tolerant — a bad item is dropped, not fatal."""
     blocks = [
         obj
-        for m in _FENCE_RE.finditer(raw_text)
-        if isinstance((obj := _tolerant_json_object(m.group(2))), dict)
+        for c in scan_structured_blocks(raw_text)
+        if isinstance((obj := _tolerant_json_object(c.body)), dict)
         and isinstance(obj.get("findings"), list)
     ]
     if not blocks:

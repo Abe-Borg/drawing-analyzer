@@ -780,12 +780,14 @@ def _run_qc_stages(
     digest_findings = [f for sd in sheets for f in getattr(sd, "findings", None) or []]
     ledger.add(digest_findings, "digest_json")
 
-    # The critique merges its self-consistency reads internally, so the two-read
-    # provenance is reconstructed from ``reproduced``: corroborated findings carry
-    # both read tags (the report's ``critique×2`` chip), singletons one.
+    # Critique findings already carry real per-read provenance (``critique_1`` /
+    # ``critique_2``), stamped at production and unioned through the self-consistency
+    # merge (Phase 22 §14.3) — the report's ``critique×N`` chip reads from it. The
+    # old reconstruct-from-``reproduced`` heuristic is gone; a stray legacy finding
+    # with no sources still falls back to a single-read tag.
     for f in critique_findings or []:
         if not f.sources:
-            f.sources = ["critique_1", "critique_2"] if f.reproduced else ["critique_1"]
+            f.sources = ["critique_1"]
     ledger.add(critique_findings or [])
     ledger.add(cross_findings or [], "cross_qc")
 
@@ -824,6 +826,16 @@ def _run_qc_stages(
                 focus_findings_to_markups=focus_findings_to_markups,
             )
             harvest_in, harvest_out = hres.input_tokens, hres.output_tokens
+            # §14.9: every enumerated prose item must reach a ledger entry. Any that
+            # could not be recovered even by the final degraded attempt is an
+            # invariant failure — surface it so the run is never presented as a
+            # complete carry-through.
+            if hres.missing:
+                errors.append(
+                    f"Prose harvest: {hres.missing} enumerated prose item(s) could not "
+                    "be accounted for in the ledger — exhaustive QC is incomplete."
+                )
+                _log.error("prose harvest: %d item(s) unaccounted (§14.9)", hres.missing)
         except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
             errors.append(f"Prose harvest: {exc}")
             _log.warning("prose harvest failed: %s", exc)
@@ -966,7 +978,13 @@ def _run_qc_stages(
     coverage_status = "NOT_REQUESTED"
     markup_run: Any = None
     if qc_markups:
-        from .annotate import write_reviewed_pdfs
+        from .annotate import (
+            _is_set_level_finding,
+            _result_from_receipts,
+            new_artifact_run_id,
+            write_reviewed_pdfs,
+            write_set_review_notes_pdf,
+        )
         from .source_registry import detect_mutations
 
         # §10.6: re-verify each source hasn't changed since the inventory
@@ -996,22 +1014,60 @@ def _run_qc_stages(
         if progress is not None:
             progress(total, total, "Writing markups")
         try:
+            # Set-level findings (a synthesis conflict naming no in-set sheet, §14.8)
+            # belong to no source PDF — route them to the dedicated
+            # Drawing_Set_Review_Notes.pdf, and everything else to the per-source
+            # reviewed PDFs. One shared artifact run id ties both to this run.
+            artifact_run_id = new_artifact_run_id()
+            source_findings = [f for f in all_findings if not _is_set_level_finding(f)]
+            set_level_findings = [f for f in all_findings if _is_set_level_finding(f)]
+
             # Artifact-backed markup (Phase 21, DA-007): every planned placement —
             # each finding and each cross-sheet leg — is written, stamped, and
             # reconciled against the reopened PDF, so the tally and coverage below
             # come from proven receipts, never from an intention classifier.
             markup_run = write_reviewed_pdfs(
-                all_findings, pdf_paths, work_dir,
+                source_findings, pdf_paths, work_dir,
                 include_unverified=not markup_verified_only,
                 ink_rejected=ink_rejected,
                 geometries=geometries,
                 audit_stats=audit_stats,
                 include_appendix=_markup_appendix_enabled(),
                 skip_source_ids=mutated_ids,
+                artifact_run_id=artifact_run_id,
             )
+            # Commit the per-source result *before* the set-level writer runs, so a
+            # failure inside the notes writer can never discard the reviewed PDFs
+            # already written to disk (they stay listed; coverage just rolls to
+            # INCOMPLETE). Only the set-notes call + merge is separately guarded.
             reviewed_pdf_paths = list(markup_run.reviewed_pdfs)
             ledger_tally = dict(markup_run.tally)
             coverage_status = markup_run.coverage_status
+            # The set-level review-notes artifact — its own receipts, folded into the
+            # one MarkupRunResult so coverage/tally cover the whole run (§14.8).
+            # NB: the ``markup_verified_only`` gate is deliberately NOT applied here.
+            # That gate suppresses unverified *ink on the drawings*; a set-level
+            # synthesis conflict has no sheet to cloud and cannot be crop-verified, so
+            # Drawing_Set_Review_Notes.pdf IS its index entry (a review-notes artifact,
+            # not authoritative drawing ink). Gating it would hide the very conflicts
+            # the notes exist to surface, so a verified-only run still lists them.
+            if set_level_findings:
+                try:
+                    set_run = write_set_review_notes_pdf(
+                        set_level_findings, work_dir, artifact_run_id=artifact_run_id,
+                    )
+                    markup_run = _result_from_receipts(
+                        markup_run.receipts + set_run.receipts,
+                        markup_run.placements + set_run.placements,
+                        markup_run.reviewed_pdfs + set_run.reviewed_pdfs,
+                    )
+                    reviewed_pdf_paths = list(markup_run.reviewed_pdfs)
+                    ledger_tally = dict(markup_run.tally)
+                    coverage_status = markup_run.coverage_status
+                except Exception as exc:  # noqa: BLE001 - never drop the source PDFs
+                    errors.append(f"Set-level review notes: {exc}")
+                    _log.warning("set-level notes writing failed: %s", exc)
+                    coverage_status = "INCOMPLETE"   # notes failed → incomplete, source kept
             _log.info(
                 "markups: %d reviewed PDF(s) written, coverage %s",
                 len(reviewed_pdf_paths), coverage_status,

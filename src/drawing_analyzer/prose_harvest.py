@@ -34,14 +34,13 @@ from __future__ import annotations
 import os
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 from .core.api_config import REVIEW_MODEL_DEFAULT
 from .critique import _token_overlap
 from .diagnostics import get_logger
 from .digest import (
-    _FENCE_RE,
     _clean_error,
     _is_transient_error,
     _message_text,
@@ -49,10 +48,23 @@ from .digest import (
     _retry_backoff_seconds,
     _tolerant_json_object,
     _validate_finding_item,
+    scan_structured_blocks,
 )
 from .html_report import classify_section, split_into_sections
 from .ledger import Ledger
-from .models import ConflictLeg, Finding, SheetRef, Verification, source_page_key
+from .models import (
+    ConflictLeg,
+    Finding,
+    ProseItem,
+    SheetRef,
+    Verification,
+    compute_prose_item_id,
+    source_page_key,
+)
+
+# The sheet_id label a set-level synthesis conflict carries (it belongs to no
+# single source sheet). Kept short for the review-notes row / report section.
+SET_LEVEL_SHEET_LABEL = "(set-level)"
 
 _log = get_logger()
 
@@ -170,6 +182,31 @@ def extract_synthesis_conflicts(
         if not mentioned:
             continue
         out.append((item, [sid for _pos, sid in sorted(mentioned)]))
+    return out
+
+
+def extract_set_level_synthesis_conflicts(
+    synthesis_text: str, sheet_ids: Iterable[str]
+) -> list[str]:
+    """Synthesis conflict statements that name **no** resolvable in-set sheet (§14.8).
+
+    The complement of :func:`extract_synthesis_conflicts`: same conflict-signal
+    filter, but these items reference no sheet the set contains, so they belong to
+    no single source. Instead of being dropped (the old behavior — a real conflict
+    silently lost), they become **set-level** findings written to the deterministic
+    ``Drawing_Set_Review_Notes.pdf``. Returns the verbatim items.
+    """
+    ids = sorted({s.upper() for s in sheet_ids if s}, key=lambda s: (-len(s), s))
+    if not (synthesis_text or "").strip():
+        return []
+    out: list[str] = []
+    for item in _split_items(synthesis_text):
+        low = item.lower()
+        if not any(sig in low for sig in _CONFLICT_SIGNALS):
+            continue
+        if ids and _id_mentions(item.upper(), ids):
+            continue                 # names an in-set sheet → handled as SOURCE-scoped
+        out.append(item)
     return out
 
 
@@ -312,8 +349,8 @@ def _structure_item(
     in_tok, out_tok = _message_usage(resp)
     raw = _message_text(resp)
     obj: dict | None = None
-    for m in _FENCE_RE.finditer(raw or ""):
-        candidate = _tolerant_json_object(m.group(2))
+    for c in scan_structured_blocks(raw or ""):
+        candidate = _tolerant_json_object(c.body)
         if isinstance(candidate, dict):
             obj = candidate
     if obj is None:
@@ -346,6 +383,28 @@ def _degraded_entry(
     )
 
 
+def _set_level_entry(item: str) -> Finding:
+    """A **set-level** finding for a synthesis conflict naming no in-set sheet (§14.8).
+
+    ``source_id`` is empty and ``anchor_hint`` is ``"SET_INDEX"`` (so ``_scope_of``
+    treats it as SET), ``page_index`` is ``-1``. It belongs to no source sheet and is
+    written to the dedicated ``Drawing_Set_Review_Notes.pdf`` — never pinned onto an
+    arbitrary drawing. The verbatim statement stays intact (I-2 — mirrored, not moved).
+    """
+    return Finding(
+        sheet_id=SET_LEVEL_SHEET_LABEL,
+        source_name="",
+        source_id="",
+        page_index=-1,
+        category="conflict",
+        severity="medium",
+        text=item.strip(),
+        source_quote="",
+        anchor_hint="SET_INDEX",
+        verification=Verification(status="SKIPPED", note="set-level synthesis conflict"),
+    )
+
+
 # --------------------------------------------------------------------------- #
 # The harvest pass
 # --------------------------------------------------------------------------- #
@@ -353,15 +412,49 @@ def _degraded_entry(
 
 @dataclass
 class HarvestResult:
-    """Telemetry for one run's prose harvest."""
+    """Telemetry + carry-through accounting for one run's prose harvest (§14.9).
+
+    Every enumerated prose item has a stable ``prose_item_id``; the harvest
+    reconciles the ``expected_ids`` (all enumerated) against the ``accounted_ids``
+    (attached to a ledger entry) and degrades — never silently drops — any
+    straggler. ``missing`` is the count still unaccounted after the final degraded
+    attempt: it must be ``0`` for a complete exhaustive harvest.
+    """
 
     items: int = 0            # prose items considered
     matched: int = 0          # mechanism 2 — tagged an existing entry
     structured: int = 0       # mechanism 3 — model structured a straggler
     degraded: int = 0         # last resort — verbatim SHEET entry
-    skipped: int = 0          # synthesis items with no resolvable sheet
+    set_level: int = 0        # synthesis conflicts placed in the set-level artifact
+    excluded_focus: int = 0   # focus items present but intentionally not harvested
+    skipped: int = 0          # retained for back-compat (nothing is dropped now)
+    missing: int = 0          # enumerated items with NO ledger entry after reconcile
     input_tokens: int = 0
     output_tokens: int = 0
+    expected_ids: list[str] = field(default_factory=list)
+    accounted_ids: list[str] = field(default_factory=list)
+
+    @property
+    def complete(self) -> bool:
+        """True when every enumerated prose item reached a ledger entry."""
+        return self.missing == 0
+
+
+@dataclass
+class _Pending:
+    """One enumerated prose item plus everything needed to ingest it."""
+
+    item: ProseItem
+    ref: SheetRef | None            # None for a set-level item
+    sheet_id: str
+    sheet_text: str
+    tag: str
+    hint: str
+    also_on: list[ConflictLeg]
+
+    @property
+    def pid(self) -> str:
+        return self.item.prose_item_id
 
 
 def _client_or_none(client: Any) -> Any:
@@ -376,37 +469,44 @@ def _client_or_none(client: Any) -> Any:
         return None
 
 
-def _ingest_item(
+def _process_pending(
     ledger: Ledger,
-    item: str,
-    tag: str,
-    category_hint: str,
-    ref: SheetRef,
-    sheet_id: str,
-    sheet_text: str,
+    p: _Pending,
     result: HarvestResult,
     *,
     client: Any,
     model: str,
     max_retries: int,
     sleep: Any,
-    also_on: list[ConflictLeg] | None = None,
 ) -> None:
-    """Mechanisms 2 → 3 → degraded for one prose item (the §17 invariant)."""
-    result.items += 1
-    match = _match_entry(item, ledger.entries_for(ref))
+    """Mechanisms 2 → 3 → degraded for one prose item; attach its ``prose_item_id``.
+
+    A set-level item (a synthesis conflict naming no in-set sheet) has no sheet to
+    match or structure against, so it degrades directly to a set-level ledger entry.
+    """
+    pid = p.pid
+    if p.ref is None:                       # set-level: nowhere to match/structure
+        finding = _set_level_entry(p.item.verbatim_text)
+        finding.prose_item_ids = [pid]
+        ledger.add([finding], p.tag)
+        result.set_level += 1
+        return
+
+    match = _match_entry(p.item.verbatim_text, ledger.entries_for(p.ref))
     if match is not None:
-        if tag not in match.sources:
-            match.sources.append(tag)
-        if also_on and not match.also_on:
-            match.also_on = list(also_on)
+        if p.tag not in match.sources:
+            match.sources.append(p.tag)
+        if p.also_on and not match.also_on:
+            match.also_on = list(p.also_on)
+        if pid not in match.prose_item_ids:
+            match.prose_item_ids.append(pid)
         result.matched += 1
         return
 
     finding: Finding | None = None
     if client is not None:
         finding, in_tok, out_tok = _structure_item(
-            item, category_hint, sheet_text, ref, sheet_id,
+            p.item.verbatim_text, p.hint, p.sheet_text, p.ref, p.sheet_id,
             client=client, model=model, max_retries=max_retries, sleep=sleep,
         )
         result.input_tokens += in_tok
@@ -416,11 +516,123 @@ def _ingest_item(
             finding.anchor_hint = "SHEET"      # nothing to anchor on → margin callout
         result.structured += 1
     else:
-        finding = _degraded_entry(item, category_hint, ref, sheet_id)
+        finding = _degraded_entry(p.item.verbatim_text, p.hint, p.ref, p.sheet_id)
         result.degraded += 1
-    if also_on:
-        finding.also_on = list(also_on)
-    ledger.add([finding], tag)
+    if p.also_on:
+        finding.also_on = list(p.also_on)
+    finding.prose_item_ids = [pid]
+    ledger.add([finding], p.tag)
+
+
+def _accounted_ids(ledger: Ledger) -> set[str]:
+    """The set of prose-item ids currently attached to any ledger entry."""
+    acc: set[str] = set()
+    for e in ledger.entries:
+        acc.update(e.prose_item_ids)
+    return acc
+
+
+def _enumerate_pending(
+    sheets: list[Any],
+    synthesis_text: str,
+    id_map: dict[str, Any],
+    *,
+    focus_findings_to_markups: bool,
+    sheet_text_of: Any,
+    display_id_of: Any,
+    result: HarvestResult,
+) -> list[_Pending]:
+    """Enumerate every candidate prose item into a stable-id ``_Pending`` (§14.6).
+
+    Nothing is dropped here: a synthesis conflict naming no resolvable in-set sheet
+    becomes a **set-level** pending item rather than being discarded.
+    """
+    pending: list[_Pending] = []
+
+    # --- per-sheet digest prose (Coordination / Conflict; Focus when opted in) --
+    for sd in sheets or []:
+        if getattr(sd, "error", None) or not (getattr(sd, "text", "") or "").strip():
+            continue
+        ref = sd.ref
+        sid_label = display_id_of(ref)
+        sheet_text = sheet_text_of(ref)
+        counters: dict[str, int] = {}
+        for tag, item in extract_prose_items(sd.text):
+            ordinal = counters.get(tag, 0)
+            counters[tag] = ordinal + 1
+            hint = "conflict" if tag.endswith("conflict") else "coordination"
+            pi = ProseItem(
+                prose_item_id=compute_prose_item_id(
+                    tag, ref.source_id, tag, ordinal, item, page_index=ref.page_index),
+                channel=tag, scope="SOURCE", source_id=ref.source_id,
+                section=tag, ordinal=ordinal, verbatim_text=item,
+            )
+            pending.append(_Pending(pi, ref, sid_label, sheet_text, tag, hint, []))
+        focus_items = extract_focus_items(sd.text)
+        if focus_findings_to_markups:
+            for ordinal, item in enumerate(focus_items):
+                pi = ProseItem(
+                    prose_item_id=compute_prose_item_id(
+                        "focus_prose", ref.source_id, "focus", ordinal, item,
+                        page_index=ref.page_index),
+                    channel="focus_prose", scope="SOURCE", source_id=ref.source_id,
+                    section="focus", ordinal=ordinal, verbatim_text=item,
+                )
+                pending.append(_Pending(pi, ref, sid_label, sheet_text, "focus_prose", "question", []))
+        else:
+            result.excluded_focus += len(focus_items)   # present, intentionally not harvested
+
+    # --- synthesis conflicts naming an in-set sheet (SOURCE-scoped; dual-anchored) --
+    for ordinal, (item, sids) in enumerate(
+        extract_synthesis_conflicts(synthesis_text, id_map.keys())
+    ):
+        primary = id_map.get(sids[0])
+        if primary is None:
+            # Named an in-set id we cannot map to a geometry — a detect/normalize
+            # disagreement. Don't drop it: keep it as set-level (§14.8).
+            pi = ProseItem(
+                prose_item_id=compute_prose_item_id("synthesis_prose", "", "synthesis", ordinal, item),
+                channel="synthesis_prose", scope="SET", source_id=None,
+                section="synthesis", ordinal=ordinal, verbatim_text=item,
+                mentioned_sheet_ids=list(sids),
+            )
+            pending.append(_Pending(pi, None, SET_LEVEL_SHEET_LABEL, "", "synthesis_prose", "conflict", []))
+            continue
+        legs: list[ConflictLeg] = []
+        for other in sids[1:2]:                 # dual-anchor: the second named sheet
+            geom = id_map.get(other)
+            if geom is not None:
+                legs.append(ConflictLeg(
+                    sheet_id=other,
+                    source_name=geom.ref.source_name,
+                    source_id=geom.ref.source_id,
+                    page_index=geom.ref.page_index,
+                ))
+        pi = ProseItem(
+            prose_item_id=compute_prose_item_id(
+                "synthesis_prose", primary.ref.source_id, "synthesis", ordinal, item,
+                page_index=primary.ref.page_index),
+            channel="synthesis_prose", scope="SOURCE", source_id=primary.ref.source_id,
+            section="synthesis", ordinal=ordinal, verbatim_text=item,
+            mentioned_sheet_ids=list(sids),
+        )
+        pending.append(_Pending(
+            pi, primary.ref, sids[0], getattr(primary, "sheet_text", "") or "",
+            "synthesis_prose", "conflict", legs,
+        ))
+
+    # --- synthesis conflicts naming NO in-set sheet at all → set-level (§14.8) ---
+    for ordinal, item in enumerate(
+        extract_set_level_synthesis_conflicts(synthesis_text, id_map.keys())
+    ):
+        pi = ProseItem(
+            prose_item_id=compute_prose_item_id("synthesis_prose", "", "synthesis_set", ordinal, item),
+            channel="synthesis_prose", scope="SET", source_id=None,
+            section="synthesis_set", ordinal=ordinal, verbatim_text=item,
+        )
+        pending.append(_Pending(pi, None, SET_LEVEL_SHEET_LABEL, "", "synthesis_prose", "conflict", []))
+
+    return pending
 
 
 def harvest_prose(
@@ -436,14 +648,20 @@ def harvest_prose(
     sleep: Any = time.sleep,
     progress: Any = None,
 ) -> HarvestResult:
-    """Mirror every prose QC item into the ledger (§17). Never raises.
+    """Mirror every prose QC item into the ledger (§17/§14). Never raises.
 
-    Runs after the digest/critique/cross/auditor ingest and **before** the
-    ledger freezes: matched items tag existing entries; stragglers are
-    structured by one small model call each; failures ingest degraded
-    sheet-level entries. ``synthesis_text`` contributes its conflict statements
-    (dual-anchored when two sheets are named); per-sheet Focus sections are
-    harvested only when ``focus_findings_to_markups`` is on.
+    Runs after the digest/critique/cross/auditor ingest and **before** the ledger
+    seals. Every candidate item is first enumerated into a stable ``prose_item_id``
+    (§14.6); each is then processed under its own try/except (a failure in one item
+    can never abandon the rest) — matched items tag an existing entry, stragglers are
+    structured by one small model call, and anything else degrades to a verbatim
+    entry. A synthesis conflict naming no resolvable in-set sheet becomes a
+    **set-level** finding rather than being dropped (§14.8). Finally the harvest
+    reconciles the enumerated ids against the ledger and makes one last degraded
+    attempt for any straggler, so nothing enumerated is silently lost (§14.9).
+    ``synthesis_text`` contributes its conflict statements (dual-anchored when two
+    sheets are named); per-sheet Focus sections are harvested only when
+    ``focus_findings_to_markups`` is on.
     """
     result = HarvestResult()
     model = model or harvest_model()
@@ -471,59 +689,59 @@ def harvest_prose(
         geom = geom_by_key.get(source_page_key(ref))
         return (detect_sheet_id(geom) if geom is not None else None) or ref.source_name
 
-    # --- per-sheet digest prose (Coordination / Conflict; Focus when opted in) --
-    for done, sd in enumerate(sheets or [], start=1):
-        if getattr(sd, "error", None) or not (getattr(sd, "text", "") or "").strip():
-            continue
-        ref = sd.ref
-        pairs = extract_prose_items(sd.text)
-        if focus_findings_to_markups:
-            pairs += [("focus_prose", item) for item in extract_focus_items(sd.text)]
-        for tag, item in pairs:
-            hint = "conflict" if tag.endswith("conflict") else (
-                "question" if tag == "focus_prose" else "coordination"
+    pending = _enumerate_pending(
+        sheets, synthesis_text, id_map,
+        focus_findings_to_markups=focus_findings_to_markups,
+        sheet_text_of=_sheet_text, display_id_of=_display_id, result=result,
+    )
+    result.items = len(pending)
+
+    # --- process each item under its own guard (a raise can't abandon the rest) --
+    for done, p in enumerate(pending, start=1):
+        try:
+            _process_pending(
+                ledger, p, result,
+                client=client, model=model, max_retries=max_retries, sleep=sleep,
             )
-            _ingest_item(
-                ledger, item, tag, hint, ref, _display_id(ref), _sheet_text(ref),
-                result, client=client, model=model, max_retries=max_retries, sleep=sleep,
+        except Exception as exc:  # noqa: BLE001 - one item's failure is reconciled below
+            _log.warning(
+                "prose harvest: item %s failed (%s); will reconcile",
+                p.pid, _clean_error(exc),
             )
         if progress is not None:
-            progress(done, len(sheets), "Harvesting prose findings")
+            progress(done, len(pending), "Harvesting prose findings")
 
-    # --- synthesis conflicts (anchored per referenced sheet; dual when two) ----
-    skipped_unresolvable = 0
-    for item, sids in extract_synthesis_conflicts(synthesis_text, id_map.keys()):
-        primary = id_map.get(sids[0])
-        if primary is None:
-            skipped_unresolvable += 1
-            continue
-        legs: list[ConflictLeg] = []
-        for other in sids[1:2]:                 # dual-anchor: the second named sheet
-            geom = id_map.get(other)
-            if geom is not None:
-                legs.append(ConflictLeg(
-                    sheet_id=other,
-                    source_name=geom.ref.source_name,
-                    source_id=geom.ref.source_id,
-                    page_index=geom.ref.page_index,
-                ))
-        _ingest_item(
-            ledger, item, "synthesis_prose", "conflict", primary.ref, sids[0],
-            getattr(primary, "sheet_text", "") or "", result,
-            client=client, model=model, max_retries=max_retries, sleep=sleep,
-            also_on=legs,
-        )
-    # Statements with no in-set sheet never enter extract_synthesis_conflicts's
-    # output, so only id-map misses land here (a detect/normalize disagreement).
-    if skipped_unresolvable:
-        result.skipped += skipped_unresolvable
-        _log.info(
-            "prose harvest: %d synthesis conflict(s) named no resolvable sheet — skipped",
-            skipped_unresolvable,
-        )
+    # --- reconcile: every enumerated id must have reached a ledger entry (§14.9) --
+    expected = {p.pid for p in pending}
+    accounted = _accounted_ids(ledger)
+    missing = expected - accounted
+    if missing:
+        by_id = {p.pid: p for p in pending}
+        for pid in sorted(missing):
+            p = by_id[pid]
+            try:
+                if p.ref is None:
+                    finding = _set_level_entry(p.item.verbatim_text)
+                    finding.prose_item_ids = [pid]
+                    ledger.add([finding], p.tag)
+                    result.set_level += 1        # mirror the main-loop set-level tally
+                else:
+                    finding = _degraded_entry(p.item.verbatim_text, p.hint, p.ref, p.sheet_id)
+                    finding.prose_item_ids = [pid]
+                    ledger.add([finding], p.tag)
+                    result.degraded += 1
+            except Exception as exc:  # noqa: BLE001 - genuinely unrecoverable → reported
+                _log.warning("prose harvest: could not recover item %s: %s", pid, _clean_error(exc))
+        accounted = _accounted_ids(ledger)
+
+    result.expected_ids = sorted(expected)
+    result.accounted_ids = sorted(accounted & expected)
+    result.missing = len(expected - accounted)
 
     _log.info(
-        "prose harvest: %d item(s) — %d matched, %d structured, %d degraded, %d skipped",
-        result.items, result.matched, result.structured, result.degraded, result.skipped,
+        "prose harvest: %d item(s) — %d matched, %d structured, %d degraded, "
+        "%d set-level, %d excluded-focus, %d MISSING",
+        result.items, result.matched, result.structured, result.degraded,
+        result.set_level, result.excluded_focus, result.missing,
     )
     return result

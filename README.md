@@ -191,7 +191,10 @@ into the export folder — `findings.json`, `findings.csv`, `sheet_text/<sheet>.
 per sheet, the `*_reviewed.pdf` copies (incomplete ones named
 `*_reviewed_INCOMPLETE.pdf`), the `evidence/` crops, and `markup_manifest.json`
 (the placement receipts + coverage proof) — alongside the prose digest and HTML
-report.
+report. When the set has **set-level** findings — a cross-sheet synthesis conflict
+that names no single sheet — they are written to a dedicated
+`Drawing_Set_Review_Notes.pdf` (its own analyzer-owned pages and reconciled
+receipts) rather than being pinned onto an arbitrary drawing.
 
 ## How it works
 
@@ -315,9 +318,13 @@ digest text — and the `combined_text` a downstream spec reviewer consumes — 
 byte-for-byte what it was before the block existed (the prose digest is sacred).
 The parser absorbs the small ways models drift: it takes the last fenced block,
 trims to the outermost `{…}`, tolerates a trailing comma, and drops any item
-that fails validation (logging the count). A malformed or missing block is never
-fatal — the prose digest still ships; the findings simply come back empty. Parsed
-findings are cached with the digest, so a cached re-run restores them for free.
+that fails validation (logging the count). It is **line-aware**, so even an
+*unclosed* block — output cut off mid-JSON by `max_tokens`, with no closing fence —
+is recognised and stripped from the prose (and, when the JSON object it holds is
+nonetheless complete, still parsed); a truncated machine block can never contaminate
+`combined_text` (DA-009). A malformed or missing block is never fatal — the prose
+digest still ships; the findings simply come back empty. Parsed findings are cached
+with the digest, so a cached re-run restores them for free.
 
 ## Critique pass (the reviewer)
 
@@ -336,19 +343,29 @@ doesn't (a required test, drain, sign, clearance, note, or detail), each phrased
 against the whole sheet.
 
 The critique emits only the machine-readable findings block — no prose — so the
-prose digest (and `combined_text`) is untouched (I-2).
+prose digest (and `combined_text`) is untouched (I-2). The shared block parser is
+line-aware: even a response cut off mid-JSON (a `max_tokens` truncation with **no
+closing fence**) is recognised and stripped, so a partial machine block can never
+leak into the sacred prose (DA-009).
 
-**Self-consistency.** The critique runs **twice**. Two independent reads of the
-same sheet disagree at the margins, and that disagreement is signal: a finding
-both runs surface is **corroborated** (`reproduced = true`); a singleton one run
-raised is *kept* (more markups is better) but flagged `reproduced = false`. The
-merge deduplicates on semantic sameness with compatible critical signatures (a
-shared tile or overlapping rectangle alone never merges — see [the ledger](#the-findings-ledger-part-iii)).
+**Self-consistency.** The critique runs **twice**. A read counts as a real read
+only if it returned a valid findings schema — an explicit `{"findings": []}`
+included; a prose-only, truncated, or malformed body is a *failed* read, never an
+empty success, so it is never merged as a clean sheet or cached as corroborated
+(DA-008). Each read stamps its own provenance (`critique_1` / `critique_2`) at
+production, and the merge follows the honest verdict: a finding both valid reads
+surface is `REPRODUCED` (`reproduced = true`); one only a single read raised is a
+`SINGLETON` (`reproduced = false`) but *kept* (more markups is better); and when a
+requested read *failed*, a surviving finding is `NOT_ASSESSED_PARTIAL` — never
+silently marked reproduced because a broken read "agreed". `Finding.confidence`
+carries this verdict; `reproduced` is derived from it and, like before, is a soft
+signal that **never** suppresses a finding. The merge deduplicates on semantic
+sameness with compatible critical signatures (a shared tile or overlapping
+rectangle alone never merges — see [the ledger](#the-findings-ledger-part-iii)).
 The digest's findings and the merged critique's then pool into one per-sheet set
 before anchoring — an issue the digest *and* the critique independently raised is
-also marked reproduced. `reproduced`
-is a soft confidence signal surfaced in the report and markup; it **never**
-suppresses a finding.
+also marked reproduced. A long review-profile checklist is sent **identically** to
+both reads (never split across them), so the two stay directly comparable.
 
 The merged critique is cached under its own key, so a re-run skips the extra
 calls. Because the digest's images are gone by the time the critique runs (the

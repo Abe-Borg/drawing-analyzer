@@ -28,6 +28,12 @@ from .diagnostics import get_logger
 from .digest_cache import digest_cache_key
 from .models import (
     CLAIM_KINDS,
+    FINDINGS_ABSENT,
+    FINDINGS_MALFORMED_CLOSED,
+    FINDINGS_MALFORMED_UNCLOSED,
+    FINDINGS_PARSED_CLOSED,
+    FINDINGS_PARSED_UNCLOSED,
+    FINDINGS_TRUNCATED,
     Finding,
     ImageTile,
     NumericClaim,
@@ -589,7 +595,114 @@ _FINDING_SEVERITIES = frozenset({"high", "medium", "low"})
 
 # A fenced code block: optional language label, then body up to the closing
 # fence. DOTALL so the body spans lines; non-greedy so blocks don't merge.
+# Retained for back-compat imports; the truncation-safe path uses
+# :func:`scan_structured_blocks` (which also recognises an *unclosed* fence).
 _FENCE_RE = re.compile(r"```[ \t]*([A-Za-z0-9_+-]*)[ \t]*\r?\n(.*?)```", re.DOTALL)
+
+# The opening line of a fenced block anchored at a given offset: ``` + optional
+# language label + optional trailing spaces + newline. An unclosed (truncated)
+# block matches this opener even with no closing ``` — the whole point of the
+# line-aware scanner (DA-009).
+_OPEN_FENCE_RE = re.compile(r"```[ \t]*([A-Za-z0-9_+-]*)[ \t]*\r?\n")
+# A structurally plausible top-level key. Used to decide whether an *unparseable*
+# fenced block was nonetheless a findings/claims *attempt* (so it is stripped from
+# the sacred prose and recorded as drift) — never triggered by ordinary prose that
+# merely contains the English word "findings" (§14.1).
+_FINDINGS_KEY_RE = re.compile(r'"findings"\s*:')
+_CLAIMS_KEY_RE = re.compile(r'"claims"\s*:')
+# A fence line that was itself truncated — ``` + an optional language label and
+# nothing else to end-of-string (the model was cut off *on the opener line*, before
+# its newline). Recognised so a dangling machine-block opener is still stripped from
+# the sacred prose (DA-009), not misread as ordinary text.
+_DANGLING_FENCE_RE = re.compile(r"[ \t]*([A-Za-z0-9_+-]*)[ \t]*\Z")
+
+
+@dataclass
+class StructuredBlockCandidate:
+    """One fenced block the scanner found — closed OR unclosed (§14.1).
+
+    ``opening_offset`` is the index of the opening ``` fence; ``ending_offset`` is
+    just past the closing fence, or ``len(raw)`` when the block was never closed
+    (truncated output). ``closed`` distinguishes the two. ``looks_like_findings`` /
+    ``looks_like_claims`` mark a json-labeled block carrying the corresponding
+    top-level key — a high-confidence *attempt* even if the body will not parse.
+    """
+
+    opening_offset: int
+    body_offset: int
+    ending_offset: int
+    language: str
+    body: str
+    closed: bool
+    looks_like_findings: bool
+    looks_like_claims: bool
+
+
+def scan_structured_blocks(raw_text: str) -> list[StructuredBlockCandidate]:
+    """Line-aware scan for fenced code blocks, including *unclosed* ones (§14.1).
+
+    Unlike :data:`_FENCE_RE` (which requires a closing ```` ``` ````), this
+    recognises an opening fence with no close — the truncated-output case that let
+    a partial machine block leak into the sacred prose (DA-009). Closed-block
+    behaviour is byte-compatible with the old scanner: the body runs to the first
+    subsequent ```` ``` ```` (non-greedy), so adjacent blocks never merge.
+    """
+    out: list[StructuredBlockCandidate] = []
+    i = 0
+    n = len(raw_text)
+    while i < n:
+        open_idx = raw_text.find("```", i)
+        if open_idx == -1:
+            break
+        m = _OPEN_FENCE_RE.match(raw_text, open_idx)
+        if m is None:
+            # No trailing newline after the fence. If the REST of the string is only
+            # an (optional) language label, the fence line was itself truncated
+            # (max_tokens cut before the newline) — a dangling machine-block opener
+            # that must still be stripped from the prose (DA-009). Emit it as an
+            # unclosed, empty-body block. Otherwise it's an inline ``` — skip it.
+            dangling = _DANGLING_FENCE_RE.match(raw_text, open_idx + 3)
+            if dangling is not None and dangling.end() == n:
+                # A fence line at EOF with nothing after it but a (possibly partial)
+                # label is unambiguously a truncated machine-block opener — the label
+                # may itself be cut mid-word ("```jso"), so it is stripped regardless
+                # of whether it spells "json" yet (DA-009).
+                language = (dangling.group(1) or "").strip().lower()
+                out.append(StructuredBlockCandidate(
+                    opening_offset=open_idx, body_offset=n, ending_offset=n,
+                    language=language, body="", closed=False,
+                    looks_like_findings=True,
+                    looks_like_claims=False,
+                ))
+                break
+            i = open_idx + 3
+            continue
+        language = (m.group(1) or "").strip().lower()
+        body_start = m.end()
+        close_idx = raw_text.find("```", body_start)
+        if close_idx == -1:
+            body = raw_text[body_start:]
+            ending, closed = n, False
+        else:
+            body = raw_text[body_start:close_idx]
+            ending, closed = close_idx + 3, True
+        is_json = language in ("json", "")
+        # An UNCLOSED json/empty fence is a truncated machine-block fragment — the
+        # findings block being cut off (the model emits it last). Treat it as a
+        # findings *attempt* even before the ``"findings":`` key was emitted, so a
+        # cut *before the colon* (or before any key) is still stripped, not leaked.
+        out.append(StructuredBlockCandidate(
+            opening_offset=open_idx,
+            body_offset=body_start,
+            ending_offset=ending,
+            language=language,
+            body=body,
+            closed=closed,
+            looks_like_findings=bool(is_json and (_FINDINGS_KEY_RE.search(body) or not closed)),
+            looks_like_claims=bool(is_json and _CLAIMS_KEY_RE.search(body)),
+        ))
+        i = ending if closed else n
+    return out
 
 
 def _strip_trailing_commas(s: str) -> str:
@@ -714,53 +827,86 @@ def _validate_finding_item(item: Any, ref: SheetRef) -> Finding | None:
     )
 
 
-def parse_findings(raw_text: str, ref: SheetRef) -> tuple[str, list[Finding], str]:
-    """Split a raw digest response into ``(prose, findings, telemetry_note)``.
+@dataclass
+class FindingsParse:
+    """The full result of parsing a model response's findings block (§14.2).
+
+    ``prose`` is the sacred prose with any machine block removed — cut at the
+    opener of the first findings *attempt*, so a truncated/unclosed block can never
+    reach ``combined_text`` (DA-009). ``status`` is one of the ``FINDINGS_*`` parse
+    states; only ``PARSED_CLOSED`` / ``PARSED_UNCLOSED`` carry a valid schema (an
+    explicit empty list is a valid schema). ``note`` is human telemetry; it never
+    marks a sheet failed — the prose digest ships regardless.
+    """
+
+    prose: str
+    findings: list[Finding]
+    status: str
+    note: str
+    # How many items the parsed ``findings`` array held *before* validation. A
+    # ``PARSED_*`` read with ``raw_item_count > 0`` but ``findings == []`` means the
+    # model reported issues that all failed validation (e.g. a category outside the
+    # enum) — content-bearing, NOT a clean empty result (§14.2 INVALID_ITEMS_DROPPED).
+    raw_item_count: int = 0
+
+
+def parse_findings_detailed(raw_text: str, ref: SheetRef) -> FindingsParse:
+    """Parse the findings block with a full :class:`FindingsParse` (§14.2).
 
     Extraction uses the **last** fenced block whose body parses to a
     ``{"findings": [...]}`` object (models sometimes emit a corrected second
-    block); prose is cut at the **first** such block's fence so a duplicate block
-    never leaks into the prose. When no findings block is present the prose is
-    returned **byte-for-byte unchanged** — a pre-feature (prose-only) response is
-    untouched (I-2).
-
-    ``note`` is error-adjacent telemetry (dropped-item count, cap hit, malformed
-    block). It is logged and returned for the report but must NEVER mark the
-    sheet failed: the prose digest shipped regardless.
+    block); prose is cut at the **first** findings *presence* (a parseable block
+    or a json-labeled ``"findings":`` attempt), so neither a duplicate block nor a
+    truncated/unclosed one ever leaks into the prose. When there is no findings
+    presence at all the prose is returned **byte-for-byte unchanged** (I-2).
     """
-    matches = list(_FENCE_RE.finditer(raw_text))
+    candidates = scan_structured_blocks(raw_text)
+    parsed = [(_tolerant_json_object(c.body), c) for c in candidates]
     findings_blocks = [
-        (m, obj)
-        for m in matches
-        if isinstance((obj := _tolerant_json_object(m.group(2))), dict)
-        and isinstance(obj.get("findings"), list)
+        (obj, c) for obj, c in parsed
+        if isinstance(obj, dict) and isinstance(obj.get("findings"), list)
     ]
+    attempts = [c for c in candidates if c.looks_like_findings]
+
+    # "Presence" = anything we must cut the prose before: a real findings block or
+    # a json-labeled findings attempt that will not parse.
+    presence_offsets = (
+        [c.opening_offset for _, c in findings_blocks]
+        + [c.opening_offset for c in attempts]
+    )
+    if not presence_offsets:
+        # No findings attempt whatsoever — plain prose, returned untouched (I-2).
+        return FindingsParse(raw_text, [], FINDINGS_ABSENT, "")
+
+    prose = raw_text[: min(presence_offsets)].rstrip()
 
     if not findings_blocks:
-        # No parseable findings block. If the model clearly *tried* (a json-
-        # labeled block mentioning "findings" that we couldn't parse), strip it
-        # from the prose and record the telemetry; otherwise the response is
-        # plain prose and is returned untouched.
-        malformed = [
-            m for m in matches
-            if (m.group(1) or "").lower() == "json" and "findings" in m.group(2).lower()
-        ]
-        if not malformed:
-            return raw_text, [], ""
-        prose = raw_text[: malformed[0].start()].rstrip()
-        note = "findings block present but unparseable"
+        # A findings attempt was made but nothing parsed — classify why, strip it
+        # from the prose, and record typed telemetry. Never contaminates prose.
+        c = attempts[0]
+        if c.closed:
+            status = FINDINGS_MALFORMED_CLOSED
+            note = "findings block present but unparseable"
+        elif "}" not in c.body:
+            status = FINDINGS_TRUNCATED
+            note = "findings block truncated (unclosed fence, no complete object)"
+        else:
+            status = FINDINGS_MALFORMED_UNCLOSED
+            note = "findings block present but unparseable (unclosed fence)"
         _log.warning("findings parse: %s (%s)", note, ref.display_label)
-        return prose, [], note
+        return FindingsParse(prose, [], status, note)
 
-    prose = raw_text[: findings_blocks[0][0].start()].rstrip()
-    raw_items = findings_blocks[-1][1].get("findings") or []
+    obj, block = findings_blocks[-1]
+    status = FINDINGS_PARSED_CLOSED if block.closed else FINDINGS_PARSED_UNCLOSED
+    raw_items = obj.get("findings") or []
+    raw_item_count = len(raw_items) if isinstance(raw_items, list) else 0
 
     findings: list[Finding] = []
     dropped = 0
-    truncated = False
+    capped = False
     for item in raw_items:
         if len(findings) >= MAX_FINDINGS_PER_SHEET:
-            truncated = True
+            capped = True
             break
         finding = _validate_finding_item(item, ref)
         if finding is None:
@@ -769,14 +915,29 @@ def parse_findings(raw_text: str, ref: SheetRef) -> tuple[str, list[Finding], st
         findings.append(finding)
 
     notes: list[str] = []
+    if status == FINDINGS_PARSED_UNCLOSED:
+        notes.append("recovered from an unclosed (truncated) fence")
+    if len(findings_blocks) > 1:
+        notes.append(f"multiple findings blocks ({len(findings_blocks)}) — used the last")
     if dropped:
         notes.append(f"dropped {dropped} invalid finding(s)")
-    if truncated:
+    if capped:
         notes.append(f"capped at {MAX_FINDINGS_PER_SHEET}")
     note = "; ".join(notes)
     if note:
         _log.info("findings parse: %s (%s)", note, ref.display_label)
-    return prose, findings, note
+    return FindingsParse(prose, findings, status, note, raw_item_count=raw_item_count)
+
+
+def parse_findings(raw_text: str, ref: SheetRef) -> tuple[str, list[Finding], str]:
+    """Back-compat wrapper: ``(prose, findings, telemetry_note)`` (§14.2).
+
+    Thin shim over :func:`parse_findings_detailed` for the digest / batch paths
+    that only need the prose + findings + note; the critique inspects the richer
+    ``status`` to tell a valid empty schema from a parse failure (DA-008).
+    """
+    r = parse_findings_detailed(raw_text, ref)
+    return r.prose, r.findings, r.note
 
 
 def _rebind_cached_finding(f: Finding, ref: SheetRef) -> Finding:
@@ -877,8 +1038,8 @@ def parse_numeric_claims(raw_text: str, ref: SheetRef | None = None) -> list[Num
     telemetry for the deterministic auditor, never load-bearing for the digest.
     """
     last_obj: dict | None = None
-    for m in _FENCE_RE.finditer(raw_text):
-        obj = _tolerant_json_object(m.group(2))
+    for c in scan_structured_blocks(raw_text):
+        obj = _tolerant_json_object(c.body)
         if isinstance(obj, dict) and isinstance(obj.get("claims"), list):
             last_obj = obj
     if last_obj is None:

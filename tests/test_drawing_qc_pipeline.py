@@ -16,6 +16,7 @@ pymupdf = pytest.importorskip("pymupdf")
 from drawing_analyzer.critique import CRITIQUE_SYSTEM_PROMPT  # noqa: E402
 from drawing_analyzer.digest import DIGEST_SYSTEM_PROMPT  # noqa: E402
 from drawing_analyzer.pipeline import extract_drawing_context  # noqa: E402
+from drawing_analyzer.synthesis import SYNTHESIS_SYSTEM_PROMPT  # noqa: E402
 from drawing_analyzer.verify import VERIFY_SYSTEM_PROMPT  # noqa: E402
 from tests.fixtures.fake_anthropic import (  # noqa: E402
     FakeMessage,
@@ -382,3 +383,139 @@ def test_arithmetic_auditor_flags_bad_claim_end_to_end(tmp_path):
     # The report tally counts the relationship that was checked.
     assert ctx.audit_stats.get("arithmetic_checked") == 1
     assert ctx.audit_stats.get("arithmetic_mismatched") == 1
+
+
+# --------------------------------------------------------------------------- #
+# Set-level synthesis conflicts → Drawing_Set_Review_Notes.pdf (Phase 22 §14.8)
+# --------------------------------------------------------------------------- #
+
+
+def _make_clean_pdf(path: Path, sheet_id: str) -> Path:
+    doc = pymupdf.open()
+    page = doc.new_page(width=792, height=612)
+    page.insert_text((80, 120), "EQUIPMENT SCHEDULE - SEE PLAN")
+    page.insert_text((650, 560), sheet_id)      # title-block sheet id (bottom-right)
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+class _SetLevelRoutingClient:
+    """Two clean sheets; the cross-sheet synthesis reports a conflict that names no
+    in-set sheet — the §14.8 set-level case. Digest/critique find nothing else."""
+
+    def __init__(self):
+        digest_text = "Sheet - Mechanical - Plan\nEquipment schedule shown.\n\n" + _digest_block([])
+        critique_text = "```json\n" + json.dumps({"findings": [], "claims": []}) + "\n```"
+        synth_text = (
+            "Drawing Set Overview\n\n"
+            "The set is largely coherent. However, the specified fire pump conflicts "
+            "with the schedule and no single sheet in the set resolves which governs."
+        )
+
+        class _Msgs:
+            def create(_self, **kw):
+                system = kw.get("system", "")
+                if system == SYNTHESIS_SYSTEM_PROMPT:
+                    return FakeMessage(content=[FakeTextBlock(text=synth_text)],
+                                       usage=FakeUsage(input_tokens=300, output_tokens=60))
+                if system == VERIFY_SYSTEM_PROMPT:
+                    return FakeMessage(content=[FakeTextBlock(text='{"verdict":"CONFIRMED","note":"x"}')],
+                                       usage=FakeUsage(input_tokens=40, output_tokens=8))
+                if system.startswith(CRITIQUE_SYSTEM_PROMPT):
+                    return FakeMessage(content=[FakeTextBlock(text=critique_text)],
+                                       usage=FakeUsage(input_tokens=500, output_tokens=80))
+                if system.startswith(DIGEST_SYSTEM_PROMPT):
+                    return FakeMessage(content=[FakeTextBlock(text=digest_text)],
+                                       usage=FakeUsage(input_tokens=500, output_tokens=80))
+                return FakeMessage(content=[FakeTextBlock(text="ok")])
+
+        self.messages = _Msgs()
+
+
+def test_set_level_synthesis_conflict_routes_to_review_notes_pdf(tmp_path):
+    # DA-023 end to end: a synthesis conflict that names no in-set sheet is not
+    # dropped — it becomes a set-level finding written to Drawing_Set_Review_Notes.pdf
+    # (its own artifact + reconciled receipts), never pinned onto a source sheet.
+    srcs = [_make_clean_pdf(tmp_path / "M-101.pdf", "M-101"),
+            _make_clean_pdf(tmp_path / "M-102.pdf", "M-102")]
+    client = _SetLevelRoutingClient()
+    ctx = extract_drawing_context(
+        srcs, client=client, rows=2, cols=2,
+        reference_audit=True, qc_markups=True, markup_verified_only=False,
+        synthesize=True, qc_work_dir=tmp_path / "qc",
+    )
+
+    # A set-level finding exists, belongs to no source, and sorts last (§12.4).
+    set_level = [f for f in ctx.all_findings
+                 if (f.anchor_hint or "").upper() == "SET_INDEX" and not f.source_id]
+    assert len(set_level) == 1
+    assert "conflicts with the schedule" in set_level[0].text
+    assert set_level[0].qc_id == max(f.qc_id for f in ctx.all_findings)
+
+    # The dedicated artifact was written and its coverage reconciled COMPLETE.
+    names = [p.name for p in ctx.reviewed_pdf_paths]
+    assert "Drawing_Set_Review_Notes.pdf" in names
+    assert ctx.coverage_status == "COMPLETE"
+    assert ctx.ledger_tally.get("review_notes") == 1
+    # The set-level statement never leaked onto a source reviewed PDF.
+    assert not any(e.startswith("Prose harvest:") for e in ctx.errors)
+
+
+class _SourceAndSetLevelClient:
+    """Two sheets: the digest reports a real finding on each sheet (→ a source
+    reviewed PDF), and the synthesis reports a conflict naming no in-set sheet
+    (→ a set-level note)."""
+
+    def __init__(self):
+        prose = "Sheet - Mechanical - Plan\nEquipment schedule shown."
+        digest_text = prose + "\n\n" + _digest_block([{
+            "sheet_id": "M-1", "category": "code", "severity": "high",
+            "text": "Schedule value is wrong.", "source_quote": "EQUIPMENT SCHEDULE",
+        }])
+        critique_text = "```json\n" + json.dumps({"findings": [], "claims": []}) + "\n```"
+        synth_text = ("Overview.\n\nThe specified fire pump conflicts with the schedule "
+                      "and no single sheet in the set resolves which governs.")
+
+        class _Msgs:
+            def create(_self, **kw):
+                system = kw.get("system", "")
+                if system == SYNTHESIS_SYSTEM_PROMPT:
+                    return FakeMessage(content=[FakeTextBlock(text=synth_text)], usage=FakeUsage())
+                if system == VERIFY_SYSTEM_PROMPT:
+                    return FakeMessage(content=[FakeTextBlock(text='{"verdict":"CONFIRMED","note":"x"}')],
+                                       usage=FakeUsage())
+                if system.startswith(CRITIQUE_SYSTEM_PROMPT):
+                    return FakeMessage(content=[FakeTextBlock(text=critique_text)], usage=FakeUsage())
+                if system.startswith(DIGEST_SYSTEM_PROMPT):
+                    return FakeMessage(content=[FakeTextBlock(text=digest_text)], usage=FakeUsage())
+                return FakeMessage(content=[FakeTextBlock(text="ok")])
+
+        self.messages = _Msgs()
+
+
+def test_set_notes_writer_failure_keeps_source_reviewed_pdfs(tmp_path, monkeypatch):
+    # Review finding: a set-notes writer exception must NOT discard the per-source
+    # reviewed PDFs already written to disk. The source result is committed before
+    # the notes writer runs; a notes failure only rolls coverage to INCOMPLETE.
+    import drawing_analyzer.annotate as A
+
+    srcs = [_make_clean_pdf(tmp_path / "M-101.pdf", "M-101"),
+            _make_clean_pdf(tmp_path / "M-102.pdf", "M-102")]
+
+    def _boom(*a, **k):
+        raise RuntimeError("notes save failed")
+
+    # The pipeline does `from .annotate import write_set_review_notes_pdf` at call
+    # time, so patching the annotate module's attribute is what the local import sees.
+    monkeypatch.setattr(A, "write_set_review_notes_pdf", _boom, raising=True)
+    ctx = extract_drawing_context(
+        srcs, client=_SourceAndSetLevelClient(), rows=2, cols=2,
+        reference_audit=True, qc_markups=True, markup_verified_only=False,
+        synthesize=True, qc_work_dir=tmp_path / "qc",
+    )
+    # The notes writer failed → recorded + INCOMPLETE, but the source reviewed PDFs
+    # (written before the notes call) are still listed, not discarded.
+    assert any("Set-level review notes" in e for e in ctx.errors)
+    assert ctx.coverage_status == "INCOMPLETE"
+    assert any(p.name.endswith("_reviewed.pdf") for p in ctx.reviewed_pdf_paths)

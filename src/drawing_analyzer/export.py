@@ -335,7 +335,19 @@ FINDINGS_CSV_HEADER = [
     "anchor_status", "anchor_method", "rect_pdf",
     "verification_status", "verification_note", "evidence_png",
     "citation_status", "citation_note",
+    # Phase 22 additions (appended so existing column positions are unchanged):
+    # ``scope`` distinguishes a set-level finding (belongs to no source sheet) and
+    # ``confidence`` surfaces the critique self-consistency verdict.
+    "scope", "confidence",
 ]
+
+
+def _finding_scope(finding: Any) -> str:
+    """``SET`` for a set-level finding (no source, ``SET_INDEX`` hint), else ``SOURCE``."""
+    hint = str(getattr(finding, "anchor_hint", "") or "").upper()
+    if hint in {"SET", "SET_INDEX"} and not getattr(finding, "source_id", ""):
+        return "SET"
+    return "SOURCE"
 
 
 def _fmt_also_on(legs: Any) -> str:
@@ -367,13 +379,14 @@ def _finding_row(finding: Any) -> list[str]:
     citation = getattr(finding, "citation", None)
     refs = list(getattr(finding, "refs", None) or [])
     page_index = int(getattr(finding, "page_index", 0) or 0)
+    scope = _finding_scope(finding)
     return [
         str(getattr(finding, "qc_id", "") or ""),
         str(getattr(finding, "id", "")),
         str(getattr(finding, "sheet_id", "")),
         str(getattr(finding, "source_id", "") or ""),
         str(getattr(finding, "source_name", "")),
-        str(page_index + 1),                       # 1-based page, for the reader
+        "" if scope == "SET" else str(page_index + 1),   # 1-based page; blank for set-level
         str(getattr(finding, "category", "")),
         str(getattr(finding, "severity", "")),
         str(getattr(finding, "text", "")),
@@ -390,6 +403,8 @@ def _finding_row(finding: Any) -> list[str]:
         str(getattr(verification, "evidence_png", "")) if verification is not None else "",
         str(getattr(citation, "status", "")) if citation is not None else "",
         str(getattr(citation, "note", "")) if citation is not None else "",
+        scope,
+        str(getattr(finding, "confidence", "") or ""),
     ]
 
 

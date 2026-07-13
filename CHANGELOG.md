@@ -6,6 +6,79 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed (Phase 22 — structured-output, critique & prose-harvest correctness, DA-008/DA-009/DA-023)
+
+- **A truncated / unclosed findings block can no longer leak into the sacred prose
+  (DA-009).** The old fenced-block scanner required a closing ` ``` `, so a response
+  cut off mid-JSON (max_tokens) matched *nothing* and its whole partial machine block
+  was returned verbatim as `combined_text`. A new line-aware scanner
+  (`scan_structured_blocks`) recognises an **unclosed** fence too, and
+  `parse_findings_detailed` classifies every ending (`ABSENT` / `PARSED_CLOSED` /
+  `PARSED_UNCLOSED` / `MALFORMED_CLOSED` / `MALFORMED_UNCLOSED` / `TRUNCATED`): in
+  every non-absent case the prose is cut at the opener, so no machine block reaches
+  the prose regardless of how the response ended. Ordinary prose that merely contains
+  the word "findings" is still returned byte-for-byte (I-2). The one scanner is shared
+  by digest, critique, cross-QC, and prose-harvest, so all four are truncation-safe.
+- **A malformed / partial critique read can no longer look clean or corroborated
+  (DA-008).** A critique read is now a *success* only when it returned a valid findings
+  schema (an explicit `{"findings": []}` counts); a prose-only, missing-object,
+  truncated, or malformed body is a **failure** — never an empty success. So it is
+  neither merged as a clean read nor cached as complete. Each read is a
+  `CritiqueRunOutcome` stamped with its own provenance (`critique_1` / `critique_2`) at
+  production; the report's `critique×2` chip now reads from **real** provenance rather
+  than being re-inferred from the `reproduced` boolean (that pipeline heuristic is
+  gone). Self-consistency follows the truth table: two valid reads → `REPRODUCED` /
+  `SINGLETON`; a requested read that *failed* → `NOT_ASSESSED_PARTIAL` (never silently
+  reproduced); single-read mode → `NOT_APPLICABLE`. `Finding.confidence` carries the
+  verdict and `reproduced` is derived from it. A result is cached only when every
+  requested read parsed validly (the entry records `requested_runs` / `completed_runs`).
+- **A long review checklist is no longer split into different items across the two
+  reads.** The reads are compared for self-consistency, so both now receive the *same*
+  full checklist — a finding prompted only in read 1 can no longer be stamped an
+  uncorroborated singleton merely because read 2 was never asked about it.
+- **A synthesis conflict that names no in-set sheet is no longer dropped (DA-023).**
+  It becomes a **set-level** finding (`scope=SET`, no `source_id`,
+  `anchor_hint="SET_INDEX"`) written to a new deterministic
+  **`Drawing_Set_Review_Notes.pdf`** — analyzer-owned pages with their own artifact,
+  placement ids, and reopened-and-reconciled Phase-21 receipts (`REVIEW_NOTES`). It is
+  never pinned onto an arbitrary drawing, and it sorts into a final section after every
+  source-scoped `QC-###`.
+- **Every enumerated prose item now has an artifact-backed carry-through guarantee
+  (§14.9).** The harvest enumerates each candidate item into a stable
+  `prose_item_id` *before* processing, runs each under its own guard (one item's
+  failure can no longer abandon the rest), and at the end reconciles the enumerated
+  ids against the ledger — degrading any straggler one last time and reporting any that
+  is still unaccounted as an invariant failure (surfaced in `ctx.errors`). The ledger
+  merge unions `prose_item_ids` so an item's provenance survives dedup.
+- **New:** `Finding.confidence` and `Finding.prose_item_ids` (additively serialized);
+  a `ProseItem` data contract; `CritiqueRunOutcome`; parser-status and confidence
+  constants in `models`; `scope` + `confidence` columns appended to `findings.csv`.
+- **Cache schema bumped to 6:** stored findings gained the new fields, the critique
+  entry records the read counts, and the parser was rebuilt — so every pre-v6 entry
+  misses once and is re-derived rather than served as current. Prompt versions are
+  unchanged (the prompts did not change in this phase).
+- Review hardening: a critique read whose findings array was **non-empty but every
+  item failed validation** (e.g. a category outside the enum) is now a *failed* read,
+  not a clean empty success — a content-bearing body can never be frozen clean
+  (`FindingsParse.raw_item_count` exposes the pre-validation count). And a partial
+  critique that produced **no** merged findings (a valid-but-empty read paired with a
+  failed one) is surfaced on `CritiqueResult.error` instead of reading as a genuinely
+  clean sheet. The set-level `Drawing_Set_Review_Notes.pdf` is intentionally exempt
+  from the `markup_verified_only` gate (it is a review-notes artifact, not drawing
+  ink) — documented at both call and writer sites.
+- Adversarial-review hardening (5 confirmed findings fixed): (1) a `max_tokens`
+  truncation that cut **before the `"findings":` colon** — or before any key — now
+  strips the fragment instead of leaking the `\`\`\`json` fence into the prose;
+  (2) a fence line **truncated before its newline** (`\`\`\`json` at EOF, even a
+  partial `\`\`\`jso`) is likewise recognised and stripped; (3) `compute_prose_item_id`
+  now folds `page_index`, so an identical boilerplate note on two pages of one
+  multi-page PDF no longer collides to one id and silently drops a distinct item
+  (§14.9); (4) a set-level item recovered by the final reconciliation is tallied as
+  `set_level`, not `degraded`; (5) a failure inside the set-level notes writer no
+  longer discards the per-source reviewed PDFs already written to disk (the source
+  result is committed before the notes writer runs; a notes failure only rolls
+  coverage to `INCOMPLETE`).
+
 ### Fixed (Phase 21 — artifact-backed markup coverage, DA-007/DA-029)
 
 - **A finding can no longer be reported as clouded when no annotation was written.**
