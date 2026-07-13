@@ -55,6 +55,7 @@ from typing import Any, Callable
 
 from .batch_digest import (
     DEFAULT_BATCH_MAX_ELAPSED_SECONDS,
+    MAX_CONSECUTIVE_FATAL_UPLOAD_FAILURES,
     LogCallback,
     ProgressCallback,
     StatusCallback,
@@ -82,7 +83,13 @@ from .critique import (
 from .diagnostics import get_logger, summarize_exc
 from .digest import _get
 from .digest_cache import critique_cache_key
-from .file_upload import FILES_API_BETA, delete_files, upload_sheet_images
+from .file_upload import (
+    FILES_API_BETA,
+    delete_files,
+    run_fatal_upload_status,
+    upload_failure_hint,
+    upload_sheet_images,
+)
 from .profiles import Profile, profiles_cache_fragment
 
 _log = get_logger()
@@ -171,6 +178,38 @@ def submit_critique_batch(
     by_custom_id: dict[str, tuple[_CSlot, str]] = {}
     uploaded_all: list[str] = []  # every id uploaded so far, for submit-failure cleanup
 
+    # Upload circuit breaker, mirroring the digest batch path (§10.1). A
+    # credential/route-level rejection (401/403/404) will hit every remaining
+    # upload identically, so after MAX_CONSECUTIVE_FATAL_UPLOAD_FAILURES such
+    # failures in a row the remaining sheets skip the (doomed) upload and go
+    # straight to the real-time fallback — otherwise a whole-run Files-API outage
+    # would fire one dead upload round-trip per sheet before each fallback.
+    fatal_streak = 0
+    last_fatal_status: int | None = None
+    uploads_dead = False
+
+    def _serve_realtime(slot: _CSlot, sheet) -> None:
+        """Critique one sheet via a synchronous real-time self-consistency read.
+
+        Reuses the render already in hand (no re-render, no batch discount) and
+        marks the result ``rescued`` so the pipeline prices it REAL_TIME. Used both
+        when a sheet's upload fails and when uploads are already known dead.
+        """
+        slot.result = critique_sheet_self_consistent(
+            sheet, client=client, cache=cache, runs=runs, model=model,
+            max_tokens=max_tokens, use_thinking=use_thinking, effort=effort,
+            sleep=sleep, profiles=profiles,
+        )
+        slot.rescued = True
+        # Carry the rescue marker onto the RESULT itself — the pipeline prices each
+        # sheet off ``res.rescued``. A cache hit inside the fallback keeps CACHE
+        # precedence, so marking it rescued is harmless there.
+        if not slot.result.cached:
+            slot.result.rescued = True
+        slots.append(slot)
+        if progress is not None:
+            progress(slot.index + 1, total or 0, f"Critiqued {sheet.ref.display_label} (inline)")
+
     for index, sheet in enumerate(rendered_sheets):
         slot = _CSlot(index=index, ref=sheet.ref)
 
@@ -197,6 +236,13 @@ def submit_critique_batch(
                 continue
         slot.cache_key = cache_key
 
+        # The Files API is already known dead this run (consecutive 401/403/404s):
+        # skip the doomed upload and critique this sheet real-time. Cache hits are
+        # still served above, so only the upload round-trips stop.
+        if uploads_dead:
+            _serve_realtime(slot, sheet)
+            continue
+
         on_image = None
         if on_status is not None:
             def on_image(pos, n, retrying, *, _k=index + 1, _label=sheet.ref.display_label):
@@ -219,23 +265,32 @@ def submit_critique_batch(
                 "critique sheet %d upload failed; falling back to real-time: %s (%s)",
                 index, sheet.ref.display_label, summarize_exc(exc),
             )
-            slot.result = critique_sheet_self_consistent(
-                sheet, client=client, cache=cache, runs=runs, model=model,
-                max_tokens=max_tokens, use_thinking=use_thinking, effort=effort,
-                sleep=sleep, profiles=profiles,
-            )
-            slot.rescued = True
-            # Carry the rescue marker onto the RESULT itself — the pipeline prices
-            # each sheet off ``res.rescued`` (a real-time fallback bills REAL_TIME,
-            # not the batch rate). A cache hit inside the fallback keeps CACHE
-            # precedence, so marking it rescued is harmless there.
-            if not slot.result.cached:
-                slot.result.rescued = True
-            slots.append(slot)
-            if progress is not None:
-                progress(index + 1, total or 0, f"Critiqued {sheet.ref.display_label} (inline)")
+            _serve_realtime(slot, sheet)
+            # Breaker accounting: only an unbroken run of the SAME
+            # credential/route-level status (401/403/404) trips it — those hit
+            # every remaining sheet identically. Any other failure (transient
+            # retries exhausted, a payload-shaped 4xx) resets the streak because it
+            # says nothing about the next sheet's fate.
+            status = run_fatal_upload_status(exc)
+            if status is None:
+                fatal_streak = 0
+                last_fatal_status = None
+                continue
+            fatal_streak = fatal_streak + 1 if status == last_fatal_status else 1
+            last_fatal_status = status
+            if fatal_streak >= MAX_CONSECUTIVE_FATAL_UPLOAD_FAILURES:
+                uploads_dead = True
+                hint = upload_failure_hint(exc)
+                _log.warning(
+                    "Files API unreachable after %d consecutive HTTP %d critique "
+                    "upload failure(s); critiquing the remaining sheets real-time%s",
+                    fatal_streak, status, f" — {hint}" if hint else "",
+                )
             continue
 
+        # A successful upload proves the Files API is reachable — reset the streak.
+        fatal_streak = 0
+        last_fatal_status = None
         slot.file_ids = upload.file_ids
         uploaded_all.extend(upload.file_ids)
         for i in range(runs):

@@ -25,7 +25,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   byte-for-byte what a real-time one would be. Additive and non-fatal (I-3): an
   upload failure degrades **only that sheet** to a real-time fallback reusing the
   in-hand render, and a batch that can't be collected degrades those sheets'
-  critique while the standard digest deliverable ships untouched. *Scope note:*
+  critique while the standard digest deliverable ships untouched. A whole-run
+  Files-API outage trips the same run-fatal upload circuit breaker the digest path
+  uses (after a few consecutive 401/403/404s the remaining sheets skip the doomed
+  upload and go straight to the real-time read). *Scope note:*
   the reuse is **within** the critique's two reads; sharing one upload across the
   digest **and** the critique (§15.8's ideal) is a deliberately deferred follow-up.
 - **Uploaded Files-API images are released on every exit path (DA-034).** Cleanup

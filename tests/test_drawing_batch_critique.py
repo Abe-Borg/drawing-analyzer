@@ -148,6 +148,24 @@ class _FlakyUploadFiles(_FakeFiles):
         raise RuntimeError("upload exploded")
 
 
+class _Fatal404(Exception):
+    """A run-fatal Files-API rejection (the /v1/files route not resolving)."""
+
+    status_code = 404
+
+
+class _DeadRouteFiles(_FakeFiles):
+    """Every upload 404s (route down); counts how many upload calls were made."""
+
+    def __init__(self):
+        super().__init__()
+        self.attempts = 0
+
+    def upload(self, *, file):
+        self.attempts += 1
+        raise _Fatal404()
+
+
 # --------------------------------------------------------------------------- #
 # Response helpers
 # --------------------------------------------------------------------------- #
@@ -446,6 +464,32 @@ def test_upload_failure_on_one_sheet_still_batches_the_other():
     assert by_name["M-102.pdf"].rescued
     # Both sheets still produce findings; page order is preserved.
     assert [ref.source_name for ref, _ in results] == ["M-101.pdf", "M-102.pdf"]
+
+
+def test_dead_files_route_trips_breaker_and_stops_uploading():
+    # A whole-run Files-API outage (consecutive 404s) must trip the circuit
+    # breaker: after MAX_CONSECUTIVE_FATAL_UPLOAD_FAILURES sheets, the rest skip
+    # the doomed upload and go straight to the real-time fallback — not one dead
+    # upload round-trip per sheet.
+    from drawing_analyzer.batch_digest import MAX_CONSECUTIVE_FATAL_UPLOAD_FAILURES as K
+
+    client = _FakeClient(_succeed)
+    client.files = _DeadRouteFiles()
+    client.beta.files = client.files
+    n_sheets = K + 3
+    batch = submit_critique_batch(
+        iter([_make_sheet(i) for i in range(n_sheets)]),
+        client=client, model=OPUS, runs=2, total=n_sheets,
+    )
+    # Nothing was batched; every sheet was critiqued real-time.
+    assert batch.batch_id is None and client.create_calls == []
+    # Only the first K sheets attempted an upload; the breaker stopped the rest.
+    assert client.files.attempts == K
+    # Every sheet still got a rescued real-time critique (2 reads each).
+    results = collect_critique_batch(batch, client=client, sleep=NOSLEEP)
+    assert len(results) == n_sheets
+    assert all(res.rescued and res.completed_runs == 2 for _ref, res in results)
+    assert len(client.messages_create_calls) == 2 * n_sheets
 
 
 # --------------------------------------------------------------------------- #
