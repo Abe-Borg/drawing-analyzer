@@ -509,32 +509,114 @@ class Anchor:
 
 
 @dataclass
+class EvidenceArtifact:
+    """One crop the verifier actually saw, preserved byte-for-byte (Phase 24 §6.6).
+
+    The evidence trail must contain *every* crop sent to a verify call, in send
+    order, exactly as sent (DA-016): the pass renders a crop once, saves those
+    bytes, hashes those bytes, and sends those same bytes — so ``sha256`` is the
+    hash of the file on disk *and* of the image the model judged. ``leg_index`` is
+    ``0`` for a single-crop finding / a conflict's primary and ``1..`` for each
+    ``also_on`` leg; ``request_order`` is the crop's position in the request.
+    ``relative_path`` is run-relative (e.g. ``evidence/QC-041/leg-01__M-101_p1.png``)
+    so the manifest/report stay portable — no absolute path.
+    """
+
+    evidence_id: str = ""
+    qc_id: str = ""
+    leg_index: int = 0
+    source_id: str = ""
+    source_name: str = ""
+    page_index: int = 0
+    canonical_anchor_rect: list[float] | None = None
+    crop_rect: list[float] | None = None
+    dpi: int = 0
+    request_order: int = 0
+    relative_path: str = ""
+    sha256: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "evidence_id": self.evidence_id,
+            "qc_id": self.qc_id,
+            "leg_index": self.leg_index,
+            "source_id": self.source_id,
+            "source_name": self.source_name,
+            "page_index": self.page_index,
+            "canonical_anchor_rect": list(self.canonical_anchor_rect)
+            if self.canonical_anchor_rect is not None else None,
+            "crop_rect": list(self.crop_rect) if self.crop_rect is not None else None,
+            "dpi": self.dpi,
+            "request_order": self.request_order,
+            "relative_path": self.relative_path,
+            "sha256": self.sha256,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "EvidenceArtifact":
+        car = d.get("canonical_anchor_rect")
+        cr = d.get("crop_rect")
+        return cls(
+            evidence_id=str(d.get("evidence_id", "") or ""),
+            qc_id=str(d.get("qc_id", "") or ""),
+            leg_index=int(d.get("leg_index", 0) or 0),
+            source_id=str(d.get("source_id", "") or ""),
+            source_name=str(d.get("source_name", "") or ""),
+            page_index=int(d.get("page_index", 0) or 0),
+            canonical_anchor_rect=[float(v) for v in car] if car else None,
+            crop_rect=[float(v) for v in cr] if cr else None,
+            dpi=int(d.get("dpi", 0) or 0),
+            request_order=int(d.get("request_order", 0) or 0),
+            relative_path=str(d.get("relative_path", "") or ""),
+            sha256=str(d.get("sha256", "") or ""),
+        )
+
+
+@dataclass
 class Verification:
     """The verification verdict for a finding (filled by the verify pass).
 
     ``DETERMINISTIC`` marks a finding produced by an offline auditor that never
     hit the API (a reference/arithmetic/naming check); such findings are trusted
-    without a model re-check. ``evidence_png`` is a run-relative path to the crop
-    the verifier saw (empty for deterministic findings, which have none).
+    without a model re-check. ``evidence`` is the full ordered list of
+    :class:`EvidenceArtifact` crops the verifier saw — one for a single-crop
+    finding, one per included leg for a cross-sheet conflict (DA-016).
+    ``evidence_png`` is retained as a back-compat alias to the **first**
+    artifact's run-relative path (§21.5 migration; new consumers read ``evidence``).
     """
 
     status: str = "SKIPPED"             # one of VERIFICATION_STATUSES
     note: str = ""
     evidence_png: str = ""
+    evidence: list["EvidenceArtifact"] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        # Keep the legacy scalar alias in sync with the artifact list: it always
+        # points at the first saved crop, so existing popup/report/CSV consumers
+        # that read ``evidence_png`` keep working unchanged.
+        if self.evidence and not self.evidence_png:
+            self.evidence_png = self.evidence[0].relative_path
 
     def to_dict(self) -> dict:
         return {
             "status": self.status,
             "note": self.note,
             "evidence_png": self.evidence_png,
+            "evidence": [a.to_dict() for a in self.evidence],
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "Verification":
+        evidence = [
+            EvidenceArtifact.from_dict(a)
+            for a in (d.get("evidence") or [])
+            if isinstance(a, dict)
+        ]
         return cls(
             status=d.get("status", "SKIPPED"),
             note=d.get("note", ""),
             evidence_png=d.get("evidence_png", ""),
+            evidence=evidence,
         )
 
 

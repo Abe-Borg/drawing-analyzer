@@ -650,13 +650,25 @@ def _finding_row_html(f: Any, card_index: int | None, *, link_evidence: bool) ->
             + "]</span>"
         )
     if link_evidence:
-        evidence = (getattr(getattr(f, "verification", None), "evidence_png", "") or "").strip()
-        if evidence:
-            src = _esc_attr(evidence)
+        verification = getattr(f, "verification", None)
+        # DA-016: list EVERY saved crop (one per leg of a cross-sheet conflict),
+        # not just the first — the report's evidence trail must be complete. Fall
+        # back to the legacy single-path alias for a finding loaded from an older
+        # cache that predates the artifact list.
+        artifacts = list(getattr(verification, "evidence", None) or [])
+        rels: list[str] = [
+            (getattr(a, "relative_path", "") or "").strip() for a in artifacts
+        ]
+        if not any(rels):
+            legacy = (getattr(verification, "evidence_png", "") or "").strip()
+            rels = [legacy] if legacy else []
+        for i, rel in enumerate([r for r in rels if r]):
+            src = _esc_attr(rel)
+            alt = _esc_attr(f"verification evidence crop (leg {i + 1})")
             text_cell += (
                 f' <a class="evidence-link" href="{src}" target="_blank" '
                 f'rel="noopener noreferrer"><img class="evidence-thumb" src="{src}" '
-                f'alt="verification evidence crop" loading="lazy"></a>'
+                f'alt="{alt}" loading="lazy"></a>'
             )
     return (
         f'<tr class="finding-row" data-category="{_esc_attr(category)}" '

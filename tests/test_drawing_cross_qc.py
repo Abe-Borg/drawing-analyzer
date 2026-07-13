@@ -6,6 +6,7 @@ PyMuPDF and are gated at the bottom.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -414,6 +415,20 @@ def test_pipeline_dual_crop_verify_clouds_under_default_gating(tmp_path):
     assert conflict.verification.evidence_png.startswith("evidence/")
     # The verify call carried a crop for EACH sheet (dual crop), not just one.
     assert client.verify_calls == 1 and client.verify_image_counts == [2]
+    # DA-016: the evidence trail preserves EVERY leg crop, in request order, byte
+    # for byte (each recorded sha256 = the hash of the file actually on disk), plus
+    # a request.json — not just the primary crop.
+    ev = conflict.verification.evidence
+    assert len(ev) == 2 and [a.leg_index for a in ev] == [0, 1]
+    assert [a.request_order for a in ev] == [1, 2]
+    qc_root = tmp_path / "qc"
+    for a in ev:
+        saved = qc_root / a.relative_path
+        assert saved.exists()
+        assert hashlib.sha256(saved.read_bytes()).hexdigest() == a.sha256
+    assert (qc_root / "evidence" / conflict.qc_id / "request.json").exists()
+    # Distinct source ids on the two legs so evidence never cross-contaminates.
+    assert ev[0].source_id and ev[1].source_id and ev[0].source_id != ev[1].source_id
     # Clouded on BOTH sheets under the default (verified-only) gate — a cloud
     # plus its QC tag on each sheet (Phase 15).
     assert {p.name for p in ctx.reviewed_pdf_paths} == {"F-D-01-1_reviewed.pdf", "F-A-01-1_reviewed.pdf"}
