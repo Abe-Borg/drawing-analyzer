@@ -200,6 +200,9 @@ class _Slot:
     index: int
     ref: SheetRef
     image_estimate: int
+    # Grid dims, for bounds-checking the model's tile_label at parse (§17.1).
+    rows: int = 0
+    cols: int = 0
     # Set immediately for a cache hit or an upload failure (no batch item).
     digest: SheetDigest | None = None
     # Set when the sheet was uploaded and submitted as a batch item.
@@ -810,7 +813,10 @@ def submit_drawing_batch(
 
     for index, sheet in enumerate(rendered_sheets):
         image_est = estimate_image_tokens_total(sheet.image_sizes, model=model)
-        slot = _Slot(index=index, ref=sheet.ref, image_estimate=image_est)
+        slot = _Slot(
+            index=index, ref=sheet.ref, image_estimate=image_est,
+            rows=getattr(sheet, "rows", 0), cols=getattr(sheet, "cols", 0),
+        )
 
         cache_key: str | None = None
         if cache is not None:
@@ -1149,7 +1155,9 @@ def _digest_from_message(slot: _Slot, message: Any, *, cache: Any) -> SheetDiges
     error = None if raw_text else f"empty digest (stop_reason={stop!r})"
     # Same transport-agnostic split as the real-time path: prose (findings block
     # stripped) becomes ``text``; structured findings ride separately (I-2).
-    text, findings, findings_note = parse_findings(raw_text, slot.ref)
+    text, findings, findings_note = parse_findings(
+        raw_text, slot.ref, getattr(slot, "rows", 0), getattr(slot, "cols", 0)
+    )
     if cache is not None and slot.cache_key and error is None and raw_text:
         cache.put(
             slot.cache_key,

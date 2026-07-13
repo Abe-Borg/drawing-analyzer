@@ -58,14 +58,14 @@ def _finding(text, *, quote="", tile=None, sev="medium", cat="code",
     return f
 
 
-def _rendered(*, source="s.pdf", page=0, sheet_text="VAV-3 SERVES ROOM 120"):
+def _rendered(*, source="s.pdf", page=0, sheet_text="VAV-3 SERVES ROOM 120", rows=1, cols=1):
     ref = SheetRef(pdf_path=Path(source), page_index=page, source_name=source, page_count=1)
     ov = ImageTile(png_bytes=b"OVERVIEW", width_px=100, height_px=80, kind="overview")
     tile = ImageTile(png_bytes=b"TILE00", width_px=50, height_px=40, kind="tile",
                      row=0, col=0, label="top-left")
     return RenderedSheet(
         ref=ref, overview=ov, tiles=[tile], page_width_pt=792, page_height_pt=612,
-        rows=1, cols=1, sheet_text=sheet_text,
+        rows=rows, cols=cols, sheet_text=sheet_text,
     )
 
 
@@ -344,11 +344,13 @@ def test_pool_is_per_sheet_only():
 
 
 def test_self_consistent_runs_twice_and_merges():
-    rendered = _rendered()
+    # New tile_label contract (§17.1): the model returns "r1c1"/"r2c2", parsed to
+    # zero-based [0,0]/[1,1] and bounds-checked against this 2x2 grid.
+    rendered = _rendered(rows=2, cols=2)
     a = {"sheet_id": "F", "category": "code", "severity": "high",
-         "text": "VAV-3 has no shown clearance", "source_quote": "VAV-3", "tile": [0, 0]}
+         "text": "VAV-3 has no shown clearance", "source_quote": "VAV-3", "tile_label": "r1c1"}
     b = {"sheet_id": "F", "category": "code", "severity": "low",
-         "text": "Relief valve set 165 psi too high", "source_quote": "165 PSI", "tile": [1, 1]}
+         "text": "Relief valve set 165 psi too high", "source_quote": "165 PSI", "tile_label": "r2c2"}
     client = _CritiqueClient([[a, b], [a]])   # run1: a,b   run2: a
     res = critique_sheet_self_consistent(rendered, client=client, runs=2,
                                          max_retries=0, sleep=_NOOP)

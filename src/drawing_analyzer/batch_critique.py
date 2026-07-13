@@ -101,6 +101,9 @@ class _CSlot:
 
     index: int
     ref: Any
+    # Grid dims, for bounds-checking the model's tile_label at parse (§17.1).
+    rows: int = 0
+    cols: int = 0
     # Set for a cache hit or a real-time fallback (no batch item for this sheet).
     result: CritiqueResult | None = None
     # One custom_id per requested read; empty when the sheet was served without
@@ -218,7 +221,10 @@ def submit_critique_batch(
     batch_id: str | None = None
     try:
         for index, sheet in enumerate(rendered_sheets):
-            slot = _CSlot(index=index, ref=sheet.ref)
+            slot = _CSlot(
+                index=index, ref=sheet.ref,
+                rows=getattr(sheet, "rows", 0), cols=getattr(sheet, "cols", 0),
+            )
 
             cache_key: str | None = None
             if cache is not None:
@@ -376,7 +382,9 @@ def submit_critique_batch(
     )
 
 
-def _outcome_from_envelope(env: Any, *, run_id: str, ref: Any) -> CritiqueRunOutcome:
+def _outcome_from_envelope(
+    env: Any, *, run_id: str, ref: Any, rows: int = 0, cols: int = 0
+) -> CritiqueRunOutcome:
     """Turn one batch result envelope into a :class:`CritiqueRunOutcome`.
 
     A missing or non-``succeeded`` envelope is a **failed** read (never an empty
@@ -397,7 +405,9 @@ def _outcome_from_envelope(env: Any, *, run_id: str, ref: Any) -> CritiqueRunOut
         inner = _get(error, "error", error) if error is not None else None
         detail = str(_get(inner, "message", "") or "").strip() or f"batch item {rtype}"
         return CritiqueRunOutcome(run_id=run_id, status="FAILED", error=detail)
-    return outcome_from_message(_get(rr, "message"), run_id=run_id, ref=ref)
+    return outcome_from_message(
+        _get(rr, "message"), run_id=run_id, ref=ref, rows=rows, cols=cols
+    )
 
 
 def collect_critique_batch(
@@ -461,7 +471,10 @@ def collect_critique_batch(
             outcomes: dict[int, list[CritiqueRunOutcome]] = {id(s): [] for s in submitted}
             for custom_id, (slot, run_id) in batch.by_custom_id.items():
                 outcomes[id(slot)].append(
-                    _outcome_from_envelope(raw.get(custom_id), run_id=run_id, ref=slot.ref)
+                    _outcome_from_envelope(
+                        raw.get(custom_id), run_id=run_id, ref=slot.ref,
+                        rows=getattr(slot, "rows", 0), cols=getattr(slot, "cols", 0),
+                    )
                 )
             for slot in submitted:
                 res = result_from_outcomes(

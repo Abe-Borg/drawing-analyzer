@@ -70,6 +70,38 @@ def test_parse_extracts_block_and_cleans_prose():
     assert note == ""
 
 
+def test_parse_reads_tile_label_contract():
+    # §17.1: the model returns the visible label; the parser converts it to the
+    # internal zero-based tile and derives the human label back.
+    raw = "p\n" + _block([_item(source_quote="VAV-3", tile_label="r3c4")])
+    _, findings, _ = parse_findings(raw, _ref(), rows=6, cols=6)
+    assert findings[0].tile == [2, 3]              # r3c4 → zero-based [2,3]
+    assert findings[0].tile_label == "r3c4"        # derived human label round-trips
+
+
+def test_parse_tile_label_takes_precedence_over_legacy_array():
+    raw = "p\n" + _block([_item(tile_label="r2c2", tile=[5, 5])])
+    _, findings, _ = parse_findings(raw, _ref(), rows=6, cols=6)
+    assert findings[0].tile == [1, 1]              # tile_label wins
+
+
+def test_parse_legacy_tile_array_accepted_as_zero_based():
+    # A legacy bare array is honored as EXPLICIT zero-based, bounds-checked.
+    raw = "p\n" + _block([_item(tile=[2, 3])])
+    _, findings, _ = parse_findings(raw, _ref(), rows=6, cols=6)
+    assert findings[0].tile == [2, 3]
+
+
+def test_parse_drops_out_of_grid_tile():
+    # An out-of-grid label or legacy array is dropped (no mis-anchor), not guessed.
+    raw = "p\n" + _block([
+        _item(text="a", source_quote="A", tile_label="r9c9"),
+        _item(text="b", source_quote="B", tile=[9, 9]),
+    ])
+    _, findings, _ = parse_findings(raw, _ref(), rows=6, cols=6)
+    assert all(f.tile is None for f in findings)
+
+
 def test_parse_drops_invalid_items_and_notes_count():
     raw = "prose\n" + _block([
         _item(),                                   # valid

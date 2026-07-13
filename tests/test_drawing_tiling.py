@@ -150,3 +150,35 @@ def test_position_label_describes_placement():
     assert "across" in label and "down" in label
     # top-left tile reads as "upper-left"
     assert "upper" in label and "left" in label
+
+
+# --------------------------------------------------------------------------- #
+# Phase 25 §17.1 — the tile_label contract (r<row>c<col>, 1-based ↔ zero-based)
+# --------------------------------------------------------------------------- #
+
+
+def test_parse_tile_label_maps_one_based_to_zero_based():
+    assert tiling.parse_tile_label("r1c1") == [0, 0]
+    assert tiling.parse_tile_label("r6c6") == [5, 5]
+    assert tiling.parse_tile_label("R2C3") == [1, 2]          # case-insensitive
+    assert tiling.parse_tile_label(" r1c1 ") == [0, 0]        # trimmed
+
+
+def test_parse_tile_label_rejects_malformed_and_out_of_range():
+    for bad in ("r0c1", "r1c0", "c1r1", "1,1", "r1", "r1c1x", "rc", "", "r-1c1"):
+        assert tiling.parse_tile_label(bad) is None, bad
+    assert tiling.parse_tile_label([0, 0]) is None            # not a string
+    # Bounds-checked when the grid is known: r7 on a 6x6 grid is out of range.
+    assert tiling.parse_tile_label("r7c1", 6, 6) is None
+    assert tiling.parse_tile_label("r1c7", 6, 6) is None
+    assert tiling.parse_tile_label("r6c6", 6, 6) == [5, 5]
+    # Without a grid the label is still self-describing (only the lower bound).
+    assert tiling.parse_tile_label("r9c9") == [8, 8]
+
+
+def test_tile_label_for_is_the_inverse():
+    assert tiling.tile_label_for(0, 0) == "r1c1"
+    assert tiling.tile_label_for(5, 5) == "r6c6"
+    for r in range(6):
+        for c in range(6):
+            assert tiling.parse_tile_label(tiling.tile_label_for(r, c)) == [r, c]

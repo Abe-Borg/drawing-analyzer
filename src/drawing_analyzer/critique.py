@@ -193,8 +193,9 @@ coordination, question); severity (one of high, medium, low); text (the finding,
 at most two sentences); source_quote (COPY VERBATIM from the SHEET TEXT LAYER — \
 exact characters — or "" for a purely graphical finding or an absence); \
 anchor_hint (set to "SHEET" for a sheet-level finding or an absence — something \
-that should be on the sheet but is not — otherwise omit it); tile ([row, col] of \
-the tile where you saw it, or omit for a whole-sheet finding); refs (an array of \
+that should be on the sheet but is not — otherwise omit it); tile_label (the \
+label printed on the tile where you saw it, exactly as shown — e.g. "r1c1" — or \
+omit for a whole-sheet finding); refs (an array of \
 any code or spec references you believe apply — cite conservatively). Emit at \
 most 40 findings, most important first; emit "findings": [] only if the sheet is \
 genuinely clean.
@@ -797,7 +798,7 @@ def critique_cache_entry_from_result(res: CritiqueResult) -> dict:
 
 
 def outcome_from_message(
-    message: Any, *, run_id: str, ref: Any
+    message: Any, *, run_id: str, ref: Any, rows: int = 0, cols: int = 0
 ) -> CritiqueRunOutcome:
     """Parse one critique Messages response into a :class:`CritiqueRunOutcome` (DA-008).
 
@@ -827,7 +828,7 @@ def outcome_from_message(
     # nonempty-prose / missing-object / truncated / malformed response is a failure,
     # NOT an empty success — this is the DA-008 correction. The billed tokens are
     # kept regardless (the response cost money even though it did not parse).
-    parsed = parse_findings_detailed(raw, ref)
+    parsed = parse_findings_detailed(raw, ref, rows, cols)
     if parsed.status not in FINDINGS_PARSE_OK:
         return CritiqueRunOutcome(
             run_id=run_id, status="FAILED", input_tokens=in_tok, output_tokens=out_tok,
@@ -905,7 +906,10 @@ def _critique_read(
                 continue
             return CritiqueRunOutcome(run_id=run_id, status="FAILED", error=_clean_error(exc))
 
-    return outcome_from_message(resp, run_id=run_id, ref=rendered.ref)
+    return outcome_from_message(
+        resp, run_id=run_id, ref=rendered.ref,
+        rows=getattr(rendered, "rows", 0), cols=getattr(rendered, "cols", 0),
+    )
 
 
 def critique_sheet(

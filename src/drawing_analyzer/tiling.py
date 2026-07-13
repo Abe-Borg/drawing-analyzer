@@ -55,7 +55,9 @@ rasterizes or serializes the pixmap.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+from typing import Any
 
 # Default grid. A 6x6 split of an E-size sheet lands each tile just under the
 # vision cap at ~272 DPI (crisp for 3/32" note text). Overridable per call.
@@ -208,6 +210,42 @@ def tile_rects(
             y1 = min(page_height_pt, base_y1 + oy)
             rects.append(TileRect(row=r, col=c, x0=x0, y0=y0, x1=x1, y1=y1))
     return rects
+
+
+# The model-facing tile label — the exact string printed on each tile crop and
+# in the omitted-tile disclosure, and the value the model echoes back in a
+# finding (Phase 25 §17.1). 1-based ``r<row>c<col>`` so the label is
+# self-describing and never base-ambiguous: ``r1c1`` is unambiguously the
+# top-left tile, whichever base a reader assumes.
+_TILE_LABEL_RE = re.compile(r"^r([1-9][0-9]*)c([1-9][0-9]*)$", re.IGNORECASE)
+
+
+def tile_label_for(row: int, col: int) -> str:
+    """The visible 1-based label for a zero-based ``(row, col)`` tile ("r1c1")."""
+    return f"r{int(row) + 1}c{int(col) + 1}"
+
+
+def parse_tile_label(label: Any, rows: int = 0, cols: int = 0) -> list[int] | None:
+    """Parse a model-returned ``r<row>c<col>`` label to a zero-based ``[row, col]``.
+
+    The label is 1-based and self-describing, so the base is never guessed:
+    ``"r1c1"`` → ``[0, 0]``. Requires the exact ``r<pos-int>c<pos-int>`` form (case-
+    insensitive); anything else — an array, a bare number, ``r0c1``, trailing
+    text — returns ``None`` (the caller drops the tile rather than mis-anchoring).
+    When ``rows`` / ``cols`` are given (> 0) the 1-based indices are bounds-checked
+    against the grid; an out-of-range label returns ``None``.
+    """
+    if not isinstance(label, str):
+        return None
+    m = _TILE_LABEL_RE.match(label.strip())
+    if m is None:
+        return None
+    r, c = int(m.group(1)), int(m.group(2))
+    if rows > 0 and r > rows:
+        return None
+    if cols > 0 and c > cols:
+        return None
+    return [r - 1, c - 1]
 
 
 def position_label(rect: TileRect, page_width_pt: float, page_height_pt: float) -> str:

@@ -665,6 +665,13 @@ class ConflictLeg:
             source_id=str(d.get("source_id", "") or ""),
         )
 
+    @property
+    def tile_label(self) -> str:
+        """The human 1-based tile label (``"r1c1"``) for this leg's zero-based tile."""
+        if not self.tile or len(self.tile) != 2:
+            return ""
+        return f"r{int(self.tile[0]) + 1}c{int(self.tile[1]) + 1}"
+
 
 @dataclass
 class Citation:
@@ -842,6 +849,18 @@ class Finding:
                 self.sheet_id, self.category, self.source_quote or self.text,
                 self.source_id,
             )
+
+    @property
+    def tile_label(self) -> str:
+        """The human 1-based tile label (``"r1c1"``) for the zero-based ``tile``.
+
+        Derived, not stored — the internal ``tile`` stays the canonical zero-based
+        ``[row, col]``; this is the model-facing / export-facing label (Phase 25
+        §17.1). ``""`` when the finding has no tile.
+        """
+        if not self.tile or len(self.tile) != 2:
+            return ""
+        return f"r{int(self.tile[0]) + 1}c{int(self.tile[1]) + 1}"
 
     def to_dict(self) -> dict:
         out = {
