@@ -1273,7 +1273,6 @@ def resolve_run_configuration(
     override honored verbatim.
     """
     exhaustive = bool(qc_markups)
-    audit_only = bool(reference_audit) and not exhaustive
 
     overrides: list[str] = []
 
@@ -1295,6 +1294,15 @@ def resolve_run_configuration(
     run_verification = _exhaustive_switch(verify_findings, "verification")
     run_citation = _exhaustive_switch(citation_check, "citation")
 
+    # ``deterministic_audit_only`` is the "free battery, zero incremental API"
+    # promise (DA-013): true ONLY when reference_audit is on, QC is not exhaustive,
+    # and no expert flag enabled a model-calling stage. An expert who combines
+    # reference_audit with e.g. critique=True still runs the auditors, but the run
+    # is no longer zero-cost, so the flag must not claim it is. (verification does
+    # not run outside markup, so it never breaks the promise.)
+    any_paid_expert = run_synthesis or run_critique or run_cross_qc or run_citation
+    audit_only = bool(reference_audit) and not exhaustive and not any_paid_expert
+
     return RunConfiguration(
         standard_analysis=True,
         exhaustive_qc=exhaustive,
@@ -1303,8 +1311,9 @@ def resolve_run_configuration(
         run_critique=run_critique,
         critique_reads=2 if run_critique else 0,
         run_cross_qc=run_cross_qc,
-        # Auditors run in exhaustive QC *and* in the free offline battery.
-        run_auditors=exhaustive or audit_only,
+        # Auditors run in exhaustive QC *and* whenever the free battery was asked
+        # for (reference_audit) — independent of whether the run is *purely* free.
+        run_auditors=exhaustive or bool(reference_audit),
         # Prose harvest (with its straggler-structuring model call) is exhaustive
         # only — standard and audit-only runs keep unmatched prose in the prose
         # (§14.7 / §15.3), incurring no structuring calls.

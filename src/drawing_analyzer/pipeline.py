@@ -995,7 +995,10 @@ def _run_qc_stages(
             if progress is not None:
                 progress(total, total, label)   # keep the sheet bar full; label = "Verifying finding k/n"
 
-        verify_stage.status = "COMPLETE"
+        vres = None
+        cres = None
+        primary_failed = False
+        cross_failed = False
         try:
             vres = _run_verify(
                 all_findings, geometries, client=client,
@@ -1008,7 +1011,7 @@ def _run_qc_stages(
             )
         except Exception as exc:  # noqa: BLE001 - never fatal
             errors.append(f"Verification: {exc}")
-            verify_stage.status = "FAILED"
+            primary_failed = True
             verify_stage.errors.append(str(exc))
             _log.warning("verification failed: %s", exc)
 
@@ -1032,11 +1035,40 @@ def _run_qc_stages(
                 )
         except Exception as exc:  # noqa: BLE001 - never fatal
             errors.append(f"Cross-sheet verification: {exc}")
-            # The primary crop verification still succeeded — degrade to partial.
-            if verify_stage.status == "COMPLETE":
-                verify_stage.status = "PARTIAL"
+            cross_failed = True
             verify_stage.errors.append(str(exc))
             _log.warning("cross-sheet verification failed: %s", exc)
+
+        # The verifier returns *normally* with everything SKIPPED when the client is
+        # unavailable or no crop could be built — it does not raise. So the stage
+        # status is derived from the actual verdicts, not merely from "no exception":
+        # findings actually judged (VERIFIED/REJECTED/UNCERTAIN) make it COMPLETE;
+        # eligible findings that were *all* skipped make it PARTIAL (verification was
+        # required but could not run); zero eligible/counted findings is a valid skip.
+        def _counts(r: "Any") -> "tuple[int, int]":
+            if r is None:
+                return 0, 0
+            judged = r.verified + r.rejected + r.uncertain
+            return judged, judged + r.skipped
+        p_judged, p_counted = _counts(vres)
+        c_judged, c_counted = _counts(cres)
+        judged, counted = p_judged + c_judged, p_counted + c_counted
+        verify_stage.items_out = judged
+        if primary_failed:
+            verify_stage.status = "FAILED"
+        elif counted == 0:
+            verify_stage.status = "SKIPPED_VALID"   # no eligible model findings
+        elif judged == 0:
+            # Eligible findings existed but every one was skipped (client down /
+            # crops failed) — the required stage did not actually verify anything.
+            verify_stage.status = "PARTIAL"
+            verify_stage.warnings.append(
+                "all eligible findings were skipped (client unavailable or crops failed)"
+            )
+        elif cross_failed:
+            verify_stage.status = "PARTIAL"
+        else:
+            verify_stage.status = "COMPLETE"
     elif qc_markups and verify_enabled:
         # Requested, but no model entries were eligible to verify (§3.3).
         verify_stage.status = "SKIPPED_VALID"

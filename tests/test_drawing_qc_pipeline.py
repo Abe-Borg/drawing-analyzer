@@ -336,6 +336,24 @@ def test_audit_only_makes_no_incremental_api_calls(tmp_path):
     assert ctx.qc_status == "NOT_REQUESTED"
 
 
+def test_verification_stage_skipped_valid_when_no_eligible_findings(tmp_path):
+    # The verifier returns normally with everything SKIPPED (it does not raise) when
+    # nothing is eligible. An exhaustive run whose only finding is the DETERMINISTIC
+    # auditor stale-ref (never crop-verified) leaves the single-crop verifier nothing
+    # to judge, so the verification stage is SKIPPED_VALID — not a false COMPLETE —
+    # and no verify call is made.
+    src = _make_pdf(tmp_path / "M-101.pdf")
+    client = _CountingClient([])                      # no model findings from the digest
+    ctx = extract_drawing_context(
+        [src], client=client, rows=2, cols=2, qc_markups=True, qc_work_dir=tmp_path / "qc",
+    )
+    assert not ctx.findings                            # no model findings
+    assert len(ctx.reference_findings) == 1            # the deterministic M-999 ref
+    stages = {s.stage: s.status for s in ctx.stage_results}
+    assert stages["verification"] == "SKIPPED_VALID"
+    assert client.calls["verify"] == 0
+
+
 def test_standard_run_exports_findings_and_sheet_text(tmp_path):
     # DA-012 / §15.2: a standard run's folder export always ships findings.json,
     # findings.csv, and sheet_text/ — and the index is NOT mislabeled "QC review"

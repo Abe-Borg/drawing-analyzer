@@ -110,6 +110,24 @@ def test_expert_stage_without_qc_markups_runs_but_stays_non_exhaustive():
     assert c.qc_requested is False
 
 
+def test_reference_audit_with_paid_expert_stage_is_not_labeled_audit_only():
+    # Combining reference_audit with an explicit paid stage still runs the auditors,
+    # but the run is no longer zero-API, so it must NOT claim deterministic_audit_only
+    # (the "zero incremental API calls" promise would be false for run accounting).
+    c = resolve_run_configuration(reference_audit=True, critique=True)
+    assert c.run_auditors is True and c.run_critique is True
+    assert c.deterministic_audit_only is False
+    # cross-QC / citation / synthesis as the paid expert stage likewise flip it off.
+    assert resolve_run_configuration(reference_audit=True, citation_check=True).deterministic_audit_only is False
+    assert resolve_run_configuration(reference_audit=True, cross_qc=True).deterministic_audit_only is False
+    assert resolve_run_configuration(reference_audit=True, synthesize=True).deterministic_audit_only is False
+    # A pure free battery stays audit-only and still runs the auditors.
+    pure = resolve_run_configuration(reference_audit=True)
+    assert pure.deterministic_audit_only is True and pure.run_auditors is True
+    # verification alone never runs outside markup, so it does not break the promise.
+    assert resolve_run_configuration(reference_audit=True, verify_findings=True).deterministic_audit_only is True
+
+
 def test_verified_only_toggle_alters_only_ink_gating():
     base = resolve_run_configuration(qc_markups=True)
     gated = resolve_run_configuration(qc_markups=True, markup_verified_only=True)
