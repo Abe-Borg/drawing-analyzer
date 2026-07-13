@@ -629,22 +629,28 @@ def _page_occupancy(page: "pymupdf.Page", *, scale: float = 0.12):
 
     A candidate callout box is "occupied" when a meaningful fraction of its area
     is non-white ink — catching the piping/symbols/vector-schedule/raster content
-    a text-free band can still sit on (§17.6). The pixmap is rendered once, in the
-    page's rotated **view** space (``page.rect`` dims == PAGE_VIEW_V2), so a
+    a text-free band can still sit on (§17.6). The pixmap is rendered **lazily** on
+    the first query (so a page with no clear band to pack into never renders one),
+    in the page's rotated **view** space (``page.rect`` dims == PAGE_VIEW_V2), so a
     view-space box maps to pixels by ``* scale`` with no derotation. If rendering
     fails the sampler degrades to *never occupied* (callouts still avoid words),
     so occupancy analysis is additive and non-fatal (I-3).
     """
-    try:
-        pix = page.get_pixmap(
-            matrix=pymupdf.Matrix(scale, scale), colorspace=pymupdf.csGRAY, alpha=False
-        )
-    except Exception:  # noqa: BLE001 - occupancy is a refinement, never fatal
-        _log.debug("occupancy render failed; callouts fall back to word-avoidance only")
-        return lambda _rect: False
-    w, h, samples = pix.width, pix.height, pix.samples
+    state: dict[str, Any] = {}
 
     def occupied(view_rect, *, dark_frac: float = 0.02, dark_level: int = 210) -> bool:
+        if "pix" not in state:
+            try:
+                state["pix"] = page.get_pixmap(
+                    matrix=pymupdf.Matrix(scale, scale), colorspace=pymupdf.csGRAY, alpha=False
+                )
+            except Exception:  # noqa: BLE001 - occupancy is a refinement, never fatal
+                _log.debug("occupancy render failed; callouts fall back to word-avoidance")
+                state["pix"] = None
+        pix = state["pix"]
+        if pix is None:
+            return False                         # render unavailable → word-avoidance only
+        w, h, samples = pix.width, pix.height, pix.samples
         x0 = max(0, int(view_rect[0] * scale)); y0 = max(0, int(view_rect[1] * scale))
         x1 = min(w, int(view_rect[2] * scale)); y1 = min(h, int(view_rect[3] * scale))
         if x1 <= x0 or y1 <= y0:
