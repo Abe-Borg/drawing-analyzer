@@ -6,6 +6,63 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (Phase 25 — reference grammar, tile semantics, auditors & callout placement, DA-019/020/021/022)
+
+- **Unified sheet-ID grammar & negative corpus (DA-020, §17.2/17.3).**
+  `auditors/sheet_ids.py` is now the single host-owned foundation every auditor
+  (reference / sheet-index / naming / title-block) and the profile / cross-sheet
+  resolvers share. It learns the set's numbering **convention** from the ids it
+  actually contains (alpha/digit/separator *signatures*) and recognizes the
+  hyphenated (`M-101`), **compact** (`FP101`), and **dotted** (`M1.01`) families —
+  the compact/dotted families were previously unrecognized, so a compact-numbered
+  set had an *empty* inventory and no reference could resolve. A **negative
+  corpus** (`is_non_sheet_reference`) keeps code/standard citations (`NFPA 13`,
+  `IBC 202`), transmittal numbers (`RFI-123`), voltages (`480V`), room numbers,
+  and dimensions from ever becoming a sheet finding, even when close to a real id.
+  Strong/medium trigger tiering and a **low-confidence** mode (a one-sheet set runs
+  strong triggers only, suppresses the fuzzy near-typo path, and reports the
+  confidence limitation). Sheet IDs **split across adjacent PDF words** (`"M-"`
+  `"101"`) are rejoined so the sheet still enters the inventory.
+- **Stronger deterministic auditors (DA-021, §17.4).**
+  - *Title-block:* a high-confidence **label→value** field-class path (project
+    number, package/project **name** incl. multiword, date) flags a value that
+    differs from the set consensus at **any** distance — catching substantially
+    different and multiword values the recurrence path (edit-distance-≤2 single
+    tokens) cannot. A labelled field on too few sheets, or a label-less lone token,
+    stays telemetry; mere absence is never flagged.
+  - *Sheet-index:* each entry is classified through the shared resolver, so a
+    malformed / out-of-convention entry (a likely index typo, low) is surfaced —
+    not silently dropped — and kept distinct from a grammar-valid absent entry
+    ("not present in the provided set", medium).
+  - *Naming:* clusters by a `(letters, digits)` key, so a changed **number** is
+    meaning-bearing — `A1-2` no longer merges with `A2` — while `C1R`/`C1-R`
+    (same digits, separator-only drift) still does.
+- **`tile_label` contract removes tile base ambiguity (DA-019, §17.1).** The model
+  now returns the exact visible label it saw (`"tile_label": "r1c1"`) instead of an
+  ambiguous `[row, col]` array; `tiling.parse_tile_label` converts it to the
+  canonical zero-based `[row, col]` with a grid bounds-check. A legacy `tile` array
+  is still accepted, **explicitly** as zero-based and bounds-checked (never guessing
+  `[1,1]` meant `r1c1`). `findings.csv` gains a human `tile_label` column.
+- **Precise arithmetic provenance (§17.5).** A mismatch is trusted `DETERMINISTIC`
+  only when the claim's own quote independently carries every operand
+  (`operand_origin=TEXT_EXTRACTED`); a mismatch computed from model-transcribed
+  terms stays `UNCERTAIN` and is crop-verified before it inks as ground truth. The
+  popup states the provenance. A magnitude-aware relative tolerance replaces the
+  blanket abs-0.5 rule that hid small-value errors (`0.2+0.2` printed `0.5`).
+- **Non-obscuring callout placement + review-notes overflow (DA-022, §17.6).**
+  Rect-less findings are packed into visually-clear bands — each box validated
+  against the words, a rendered **occupancy mask** (piping/symbols/raster), and its
+  siblings — and a leader is drawn only when it would not cross another callout.
+  A callout that will not fit overflows to an appended **AI Review Notes** page
+  (with a GOTO link back to its source), never stacked over the drawing.
+
+### Changed (Phase 25)
+
+- Digest cache schema **6 → 7**: the tile parse changed and `Verification` gained
+  `computation_method` / `operand_origin`, so pre-v7 entries miss once and re-derive.
+- `DIGEST_PROMPT_VERSION` / `CRITIQUE_PROMPT_VERSION` auto-bump (the findings
+  instruction now requests `tile_label`), invalidating stale digest/critique caches.
+
 ### Fixed (Phase 24 review remediation — 16 adversarial-review findings)
 
 A multi-agent adversarial review of the Phase 24 diff surfaced 16 confirmed
