@@ -76,13 +76,16 @@ StatusCallback = Callable[[str], None]
 # ``DRAWING_ANALYZER_MAX_WORKERS``.
 DEFAULT_DIGEST_WORKERS = 4
 
-# Phase 23 temporary completeness gate (§8, §15.5). While this is closed, a fully
-# successful exhaustive QC run is capped at ``QCStatus.PARTIAL`` rather than
-# ``COMPLETE`` — Phases 24–25 have not yet landed the cross-shard reconciliation,
-# claim-complete citations, complete evidence, and callout-overflow guarantees a
-# COMPLETE exhaustive review must prove. Phase 26 opens the gate once those close.
-# It is deliberately a module constant so a single edit removes the gate.
-EXHAUSTIVE_QC_COMPLETENESS_GATE_OPEN = False
+# The Phase 23 temporary completeness gate is OPEN (Phase 26B §18.0, DA-010):
+# Phases 24–25 landed the cross-shard reconciliation, claim-complete citations,
+# complete evidence, and callout-overflow guarantees a COMPLETE exhaustive
+# review must prove, so a clean NORMAL exhaustive run may now roll up to
+# ``QCStatus.COMPLETE``. The §8 phase-gate rules remain PERMANENT regressions —
+# they are enforced by the stage statuses themselves (a failed reconciliation,
+# an unchecked cited claim, a missing evidence leg, unresolved callout overflow,
+# or a mutated source each hold a required stage at PARTIAL/coverage at
+# INCOMPLETE, which the §3.3 roll-up can never call COMPLETE, gate or no gate).
+EXHAUSTIVE_QC_COMPLETENESS_GATE_OPEN = True
 
 _log = get_logger()
 

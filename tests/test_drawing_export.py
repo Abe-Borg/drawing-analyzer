@@ -602,3 +602,156 @@ def test_generated_at_matches_journal_timestamp_dialect(tmp_path):
     m = json.loads((folder / "run_manifest.json").read_text(encoding="utf-8"))
     assert m["generated_at"].endswith("Z")
     assert m["run"]["started_at"].endswith("Z")
+
+
+# --------------------------------------------------------------------------- #
+# CSV formula-injection safety (Phase 26B §18.5.1, DA-031)
+# --------------------------------------------------------------------------- #
+
+import csv as _csv  # noqa: E402
+import io as _io  # noqa: E402
+
+
+def _rows(csv_text: str) -> list[dict]:
+    return list(_csv.DictReader(_io.StringIO(csv_text)))
+
+
+def test_csv_neutralizes_formula_sigils_in_untrusted_cells():
+    # DA-031: model/drawing-controlled text whose first meaningful character is
+    # a formula sigil must not execute when the CSV opens in Excel.
+    f = _finding(
+        text='=HYPERLINK("http://evil.example/x","click")',
+        source_quote="+cmd|' /C calc'!A0",
+    )
+    f.refs = ["@SUM(A1:A9)"]
+    f.verification.note = "\t=1+1"
+    row = _rows(dx.build_findings_csv([f]))[0]
+    assert row["text"].startswith("'=")
+    assert row["source_quote"].startswith("'+")
+    assert row["refs"].startswith("'@")
+    assert row["verification_note"].startswith("'")
+    # findings.json keeps the canonical, un-prefixed values.
+    assert f.text.startswith("=HYPERLINK")
+
+
+def test_csv_guard_sees_through_leading_whitespace_and_controls():
+    # Excel trims leading whitespace before interpreting, so "  =2+5" is still
+    # a formula; the guard must look at the first meaningful character.
+    f = _finding(text="  =2+5", source_quote=" \x00-2+3+cmd")
+    row = _rows(dx.build_findings_csv([f]))[0]
+    assert row["text"] == "'  =2+5"
+    assert row["source_quote"].startswith("'")
+
+
+def test_csv_preserves_host_numeric_and_enum_cells():
+    # §18.5.1: true numeric columns stay numeric text — an anchored rect with a
+    # negative coordinate and the 1-based page are NEVER apostrophe-prefixed,
+    # and ordinary prose is untouched.
+    from drawing_analyzer.models import Anchor
+
+    f = _finding(text="ordinary finding text")
+    f.anchor = Anchor(status="EXACT", method="text", rect_pdf=[-12.5, 4.0, 90.0, 22.0])
+    row = _rows(dx.build_findings_csv([f]))[0]
+    assert row["rect_pdf"].startswith("-12.5")
+    assert row["page"] == "3"                      # helper's page_index=2, 1-based
+    assert row["text"] == "ordinary finding text"
+    assert row["severity"] in ("high", "medium", "low")
+
+
+# --------------------------------------------------------------------------- #
+# Artifact containment + atomic publish (Phase 26B §18.5, DA-033)
+# --------------------------------------------------------------------------- #
+
+
+def test_safe_artifact_name_neutralizes_hostile_components():
+    san = dx.safe_artifact_name
+    assert san("../../../etc/passwd") == "passwd"
+    assert san(r"..\..\evil.pdf") == "evil.pdf"          # POSIX-legal backslash name
+    assert san("C:\\Users\\x\\M-101.pdf") == "M-101.pdf"
+    assert san("report.pdf:hidden:$DATA") == "report.pdf_hidden_$DATA"  # ADS colon gone
+    assert san("trailing. . ") == "trailing"                # Windows drops these
+    assert san("CON") == "_CON" and san("lpt1.txt".upper()) == "_LPT1.TXT"
+    assert san('a<b>c:"d|e?f*g.pdf') == "a_b_c__d_e_f_g.pdf"
+    assert san("..") == "artifact" and san("") == "artifact"
+    long = san("x" * 500 + ".pdf")
+    assert len(long) <= 120 and long.endswith(".pdf")
+
+
+def test_safe_artifact_name_dedupes_deterministically():
+    used: set[str] = set()
+    assert dx.safe_artifact_name("M-101_reviewed.pdf", used=used) == "M-101_reviewed.pdf"
+    assert dx.safe_artifact_name("M-101_reviewed.pdf", used=used) == "M-101_reviewed_2.pdf"
+    assert dx.safe_artifact_name("M-101_reviewed.pdf", used=used) == "M-101_reviewed_3.pdf"
+
+
+def test_contained_target_rejects_escapes(tmp_path):
+    root = tmp_path / "export"
+    root.mkdir()
+    assert dx.contained_target(root, "findings.json") == root / "findings.json"
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError):
+        dx.contained_target(root, "../outside.txt")
+    # A symlinked intermediate directory cannot smuggle a write outside root.
+    (root / "link").symlink_to(tmp_path)
+    with _pytest.raises(ValueError):
+        dx.contained_target(root, "link/owned.txt")
+
+
+def test_evidence_copy_skips_symlinks_and_contains_targets(tmp_path):
+    # DA-033: a tampered work dir with a symlink pointing outside the export
+    # must neither be followed nor break the rest of the copy.
+    secret = tmp_path / "secret.txt"
+    secret.write_text("private")
+    ctx = _qc_ctx(tmp_path, with_reviewed=False)
+    ev = tmp_path / "qc" / "evidence"
+    (ev / "QC-001").mkdir(parents=True, exist_ok=True)
+    (ev / "QC-001" / "leg-01.png").write_bytes(b"\x89PNG")
+    (ev / "QC-001" / "stolen.txt").symlink_to(secret)
+    (ev / "linkdir").symlink_to(tmp_path)
+
+    folder = tmp_path / "out"
+    folder.mkdir()
+    dx.write_qc_outputs(ctx, folder)
+    copied = {p.relative_to(folder).as_posix() for p in folder.rglob("*") if p.is_file()}
+    assert "evidence/QC-001/leg-01.png" in copied
+    assert not any("stolen" in p or "secret" in p for p in copied)
+
+
+def test_reviewed_pdf_with_hostile_name_lands_flat_and_contained(tmp_path):
+    # A POSIX source file legally named with backslashes must not traverse when
+    # its reviewed copy is exported (the export may later be opened on Windows).
+    ctx = _qc_ctx(tmp_path, with_reviewed=False, with_evidence=False)
+    hostile = tmp_path / "qc" / r"..\..\evil_reviewed.pdf"
+    hostile.parent.mkdir(parents=True, exist_ok=True)
+    hostile.write_bytes(b"%PDF-1.7 hostile")
+    ctx.reviewed_pdf_paths = [hostile]
+    folder = tmp_path / "out"
+    folder.mkdir()
+    written = dx.write_qc_outputs(ctx, folder)
+    assert "evil_reviewed.pdf" in written
+    assert (folder / "evil_reviewed.pdf").read_bytes() == b"%PDF-1.7 hostile"
+    assert not (tmp_path / "evil_reviewed.pdf").exists()   # nothing escaped
+
+
+def test_export_publishes_atomically_and_labels_partials(tmp_path, monkeypatch):
+    # §18.5: the final folder name appears only after every required file
+    # succeeded; a mid-export failure leaves an explicit *_INCOMPLETE label,
+    # never a final-looking folder.
+    folder = dx.write_drawing_export(_make_ctx(), tmp_path, source_names=[SRC], now=NOW)
+    assert folder.name.endswith("_070200")                # published under the final name
+    assert not list(tmp_path.glob("*.partial"))
+
+    def _boom(*a, **k):
+        raise OSError("disk full (test)")
+
+    monkeypatch.setattr(dx, "write_run_manifest", _boom)
+    import pytest as _pytest
+
+    with _pytest.raises(OSError):
+        dx.write_drawing_export(_make_ctx(), tmp_path, source_names=[SRC], now=NOW)
+    labels = [p.name for p in tmp_path.iterdir() if "_INCOMPLETE" in p.name]
+    assert len(labels) == 1                                # explicit partial label
+    # The second final name was never published.
+    finals = [p.name for p in tmp_path.iterdir() if p.name.endswith("_070200")]
+    assert finals == [folder.name]

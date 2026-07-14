@@ -129,11 +129,13 @@ dialog, the export index, and an HTML report banner all lead with it. A stage th
 failed or a coverage that came back `INCOMPLETE` makes the run `PARTIAL`/`FAILED`;
 disabling a normally-required stage from the advanced API (e.g. `qc_markups=True,
 critique=False`) marks the configuration `DEBUG_OVERRIDE` and likewise caps it at
-`PARTIAL`. **Note (Phases 23–25):** a completeness gate deliberately keeps even a
-clean exhaustive run at `PARTIAL` — the product does not yet advertise a fully
-`COMPLETE` exhaustive review until the remaining remediation phases (cross-set
-reconciliation, claim-complete citations, complete evidence, callout overflow)
-land. Phase 26 opens the gate.
+`PARTIAL`. A clean NORMAL exhaustive run earns **`COMPLETE` — "Exhaustive QC
+complete"** (the Phase 23 completeness gate opened in Phase 26B once cross-set
+reconciliation, claim-complete citations, complete evidence, and callout-overflow
+handling landed). That claim is guarded, not assumed: a failed reconciliation, an
+unchecked cited claim, a missing verification crop, or a source that changed
+mid-run each hold a required stage at `PARTIAL`, and the roll-up can never call
+such a run `COMPLETE`.
 
 ### Browsing the result
 
@@ -716,6 +718,11 @@ the verifier proved wrong**:
 
 The conservative mode is the opt-in: `markup_verified_only=True` (GUI:
 **Verified & deterministic only**, default **off**) suppresses everything but
+The index pages read as a punch list (Phase 26B §18.7): rows sort **high →
+medium → low** severity, then source input order, page, and position — the
+stable `QC-###` ids never change, only their display order. The rejected and
+operator-gated sections follow the main table as before.
+
 `VERIFIED` + `DETERMINISTIC`; suppressed entries are tallied as *gated* and get a
 real **"Not inked by operator gate"** index row (a proven placement, not a bare
 status), so nothing is invisible.
@@ -754,7 +761,21 @@ and a `coverage_status`.
 Every finding — inked or not — is also written to **`findings.csv`**, one row per
 finding with every field flattened (`qc_id` first; provenance in the `sources`
 column; citation columns at the end), UTF-8 with a BOM and CRLF line endings so
-Excel on Windows opens it cleanly.
+Excel on Windows opens it cleanly. Model/drawing-controlled text cells are
+**formula-injection safe** (Phase 26B, DA-031): a cell starting with `=`, `+`,
+`-`, `@`, a tab, or a carriage return — even behind leading whitespace — is
+apostrophe-prefixed so Excel shows it as text instead of executing it, while
+host-owned numeric columns (pages, rectangles) keep their exact values and
+`findings.json` keeps the canonical, un-prefixed strings.
+
+The folder export itself is hardened (Phase 26B, DA-033): every artifact name
+passes one containment allocator (traversal and drive prefixes dropped, Windows
+reserved names and alternate-data-stream colons neutralized, collisions deduped),
+every write target is proven to stay inside the export folder, evidence copies
+never follow symlinks, and the whole folder is staged and **atomically
+published** — an interrupted export leaves an explicitly `*_INCOMPLETE`-labeled
+directory, never a final-looking one with silently missing files. In the GUI,
+**Export All…** produces this complete folder in one action.
 
 ## Run log & run manifest
 

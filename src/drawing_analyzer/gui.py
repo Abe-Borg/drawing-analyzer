@@ -374,17 +374,28 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             text_color=COLORS["text_secondary"], command=self._on_open_log,
         )
         self.open_log_btn.pack(side="left")
-        # Two save options, enabled together once a run produces text. The HTML
-        # report is the recommended (primary/accent) output — a single
-        # self-contained, navigable, searchable file — while the Markdown digest
-        # stays available (secondary) for downstream/text use.
+        # Export All (primary/accent) writes the complete §18.5 deliverable in
+        # one go — report.html, Markdown, findings.json/csv, sheet_text/,
+        # reviewed PDFs, evidence/, markup_manifest.json, run.log and
+        # run_manifest.json — atomically published into a picked folder
+        # (Phase 26B, DA-024/DA-033). The individual save buttons remain for
+        # one-off artifacts.
+        self.export_btn = ctk.CTkButton(
+            btn_row, text="Export All…", width=140, height=34,
+            font=ctk.CTkFont(family="Segoe UI", size=13),
+            fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
+            command=self._on_export_all, state="disabled",
+        )
+        self.export_btn.pack(side="right")
         self.html_btn = ctk.CTkButton(
             btn_row, text="Save HTML Report…", width=180, height=34,
             font=ctk.CTkFont(family="Segoe UI", size=13),
-            fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
+            fg_color=COLORS["bg_input"], hover_color=COLORS["border"],
+            border_width=1, border_color=COLORS["border"],
+            text_color=COLORS["text_secondary"],
             command=self._on_save_html, state="disabled",
         )
-        self.html_btn.pack(side="right")
+        self.html_btn.pack(side="right", padx=(0, 8))
         self.save_btn = ctk.CTkButton(
             btn_row, text="Save Markdown…", width=150, height=34,
             font=ctk.CTkFont(family="Segoe UI", size=13),
@@ -606,6 +617,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self.html_btn.configure(state="disabled")
         self.reviewed_btn.configure(state="disabled")
         self.csv_btn.configure(state="disabled")
+        self.export_btn.configure(state="disabled")
         self._set_progress_text("")
         self._refresh_summary()
 
@@ -847,6 +859,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self.html_btn.configure(state="disabled")
         self.reviewed_btn.configure(state="disabled")
         self.csv_btn.configure(state="disabled")
+        self.export_btn.configure(state="disabled")
         self.focus_box.configure(state="disabled")
         self._clear_log()
         self._log(
@@ -967,6 +980,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         if has_text:
             self.save_btn.configure(state="normal")
             self.html_btn.configure(state="normal")
+            self.export_btn.configure(state="normal")
         # QC outputs — enable the save actions only when a run produced them.
         if getattr(ctx, "finding_count", 0):
             self.csv_btn.configure(state="normal")
@@ -1038,8 +1052,10 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                     level="muted",
                 )
         # When exhaustive QC ran, surface the per-stage status so the operator can
-        # see which stages are COMPLETE/PARTIAL/FAILED/SKIPPED_VALID (§15.5), and be
-        # honest that a clean run is gated from a "complete" claim during Phase 23.
+        # see which stages are COMPLETE/PARTIAL/FAILED/SKIPPED_VALID (§15.5). With
+        # the Phase 26B completeness gate open, a PARTIAL with no degraded stage
+        # has exactly one remaining cause: an explicit debug override weakened the
+        # exhaustive contract (§3.3 ConfigurationKind) — say so.
         cfg = getattr(ctx, "run_configuration", None)
         if cfg is not None and getattr(cfg, "exhaustive_qc", False):
             stages = getattr(ctx, "stage_results", None) or []
@@ -1052,10 +1068,9 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 )
             elif qc_status == "PARTIAL":
                 self._log(
-                    "Every exhaustive-QC stage completed, but a full \"complete\" "
-                    "status is intentionally withheld pending later remediation "
-                    "phases (cross-set reconciliation, claim-complete citations, "
-                    "evidence and callout completeness).",
+                    "Exhaustive QC ran with an explicit debug override "
+                    "(a normally-required stage was disabled), so the run is "
+                    "PARTIAL by definition — not a production-complete review.",
                     level="muted",
                 )
         if ctx.focus:
@@ -1217,6 +1232,49 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             self._log("Opened the report in your browser.", level="muted")
         except Exception as exc:  # noqa: BLE001 - opener is best-effort
             self._log(f"Saved, but could not auto-open the report: {exc}", level="warning")
+
+    def _on_export_all(self) -> None:
+        """Write the complete export folder (§18.5) into a picked directory.
+
+        One call to :func:`drawing_analyzer.export.write_drawing_export` — the
+        same normalized deliverable the library API produces: the HTML report,
+        every Markdown file, findings.json/csv, sheet_text/, the reviewed PDFs
+        and evidence crops, markup_manifest.json, and the per-run run.log +
+        run_manifest.json, staged and atomically published (DA-033). The key
+        handling matches Save HTML Report: never embedded unless the checkbox
+        opts in.
+        """
+        ctx = self._ctx
+        if not ctx or not ctx.combined_text.strip():
+            return
+        folder = filedialog.askdirectory(title="Export everything to folder")
+        if not folder:
+            return
+        from .export import write_drawing_export
+
+        embed_key = self._embed_key_var.get()
+        try:
+            api_key = os.environ.get("ANTHROPIC_API_KEY") or load_api_key_from_file()
+            out = write_drawing_export(
+                ctx, folder, source_names=[p.name for p in self._pdfs],
+                api_key=api_key or None, embed_api_key=embed_key,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"Export failed: {exc}", level="error")
+            messagebox.showerror("Export failed", str(exc))
+            return
+        self._set_progress_text(f"Exported everything to {out}", color=COLORS["success"])
+        self._log(f"Exported the full run record to {out}", level="success")
+        if getattr(ctx, "markup_incomplete", False):
+            self._log(
+                "Markup coverage is INCOMPLETE — the reviewed PDF(s) are labeled "
+                "and markup_manifest.json / run.log carry the failed placements.",
+                level="warning",
+            )
+        try:
+            self._open_in_os(out)
+        except Exception as exc:  # noqa: BLE001 - opener is best-effort
+            self._log(f"Exported, but could not open the folder: {exc}", level="warning")
 
     def _on_save_csv(self) -> None:
         """Write the findings CSV (Excel-friendly: UTF-8 BOM + CRLF)."""

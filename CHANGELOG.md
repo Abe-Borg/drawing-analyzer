@@ -6,6 +6,62 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (Phase 26B — final exhaustive activation, export hardening & report completion, DA-010/025/026/031/033)
+
+- **The exhaustive completeness gate is OPEN (§18.0, DA-010).** A clean NORMAL
+  `qc_markups=True` run now rolls up to **`COMPLETE` — "Exhaustive QC
+  complete"** end to end (pipeline status, GUI completion line, report banner,
+  run.log/run_manifest). The §8 phase-gates are permanent regressions enforced
+  by stage statuses themselves: a failed cross-shard reconciliation, an
+  unchecked cited claim (DA-017), a missing evidence crop/leg, unresolved
+  callout overflow, or a mid-run source mutation each hold a required stage at
+  PARTIAL / coverage at INCOMPLETE, which the §3.3 roll-up can never call
+  COMPLETE — gate or no gate (regression-tested). The GUI's "complete
+  intentionally withheld" notice is replaced by an explicit DEBUG_OVERRIDE
+  explanation (the one remaining cause of a no-degraded-stage PARTIAL).
+- **Excel-safe `findings.csv` (§18.5.1, DA-031).** Model/drawing-controlled
+  text cells whose first meaningful character is a formula sigil
+  (`=`, `+`, `-`, `@`, tab, CR — even behind leading whitespace/control
+  characters) are apostrophe-prefixed so `=HYPERLINK(...)`/DDE payloads open
+  inert in Excel. Host-owned numeric/enum columns (page, rect, statuses) are
+  untouched — an ordinary negative coordinate survives exactly — and
+  `findings.json` keeps the canonical values.
+- **Export containment + atomic publish (§18.5, DA-033).** Every artifact
+  name/destination passes one allocator boundary (`safe_artifact_name` +
+  `contained_target`): traversal components and absolute/drive prefixes are
+  dropped (a POSIX file legally named `..\\..\\evil.pdf` lands flat), invalid
+  and ADS-colon characters are substituted, Windows reserved device names and
+  trailing dots/spaces neutralized, lengths capped, collisions deduped
+  deterministically — and every resolved target is **proven** beneath the
+  export root before a byte is written. Evidence copies never follow symlinks
+  (`os.walk(followlinks=False)` + per-file checks). The export itself now
+  writes into a temporary sibling directory and publishes with one atomic
+  same-volume rename: an interrupted export leaves an explicit
+  `*_INCOMPLETE`-labeled folder, never a final-looking one missing artifacts.
+- **Severity-first reviewed-PDF index (§18.7, DA-025).** Index rows (and the
+  per-source overflow notes + `Drawing_Set_Review_Notes.pdf`) now sort high →
+  medium → low/question, then source input order → page → anchored position →
+  QC id, so the index reads as a punch list. Section structure (rejected /
+  operator-gated), GOTO links, receipts, and the stable `QC-###` ids are
+  unchanged — display order simply stops tracking numeric id order.
+- **GUI "Export All…" (§18.0/§18.5).** The GUI gains a primary action that
+  writes the complete export folder via `write_drawing_export` — report.html,
+  Markdown set, findings.json/csv, `sheet_text/`, reviewed PDFs, `evidence/`,
+  `markup_manifest.json`, `run.log`, `run_manifest.json` — atomically
+  published to a picked directory (the per-artifact save buttons remain). Key
+  handling matches Save HTML Report: never embedded unless the checkbox opts
+  in.
+- **HTML report §18.6 completion.** Prominent status banners gain a per-stage
+  status table; a **High severity only** toggle joins the existing
+  issues-only/category/search controls (filters never change the underlying
+  totals — a live "showing K of N" counter appears instead); duplicate display
+  names are disambiguated with the opaque source id; citation assessments
+  render per reference; prose carry-through and provenance chips; a "Run
+  record" panel names the run id and the exported `run.log` /
+  `run_manifest.json`; accessibility pass (labels, `aria-pressed`,
+  `aria-sort`, keyboard sorting, live regions). Ask-AI key-on-first-use and
+  the 401 session-key clear were verified already present (DA-026, Phase 17).
+
 ### Added (Phase 26A — run journal, run.log & run manifest, DA-024)
 
 - **Per-run journal (`run_journal.py`, §18.1).** Every `extract_drawing_context`

@@ -282,3 +282,45 @@ def test_duplicate_stems_each_source_keeps_its_own_finding(tmp_path):
             assert sum(1 for page in doc for _ in page.annots()) >= 1
         finally:
             doc.close()
+
+
+def test_index_rows_are_severity_first_then_position(tmp_path):
+    # §18.7 (DA-025): the reviewed-PDF index presents actionable order — high,
+    # then medium, then low — within severity by page/position — while the
+    # stable QC ids themselves are untouched (display order need not be
+    # numeric id order).
+    src = _make_pdf(tmp_path, pages=1)
+    low = _finding("low first by number", severity="low", rect=(100, 100, 220, 140))
+    med = _finding("medium issue", severity="medium", rect=(100, 200, 220, 240))
+    high = _finding("high issue", severity="high", rect=(100, 300, 220, 340))
+    low.qc_id, med.qc_id, high.qc_id = "QC-001", "QC-002", "QC-003"
+
+    res = write_reviewed_pdfs([low, med, high], [src], tmp_path / "out")
+    doc = pymupdf.open(str(res.reviewed_pdfs[0]))
+    try:
+        index_text = doc[0].get_text()
+    finally:
+        doc.close()
+    # All three rows are on the index, ordered by severity, not by QC number.
+    pos = {qc: index_text.find(qc) for qc in ("QC-001", "QC-002", "QC-003")}
+    assert all(v >= 0 for v in pos.values())
+    assert pos["QC-003"] < pos["QC-002"] < pos["QC-001"]
+
+
+def test_index_severity_ties_break_by_source_page_position(tmp_path):
+    # Within one severity tier the order is source input order, page, then
+    # top-to-bottom position — the §18.7 within-severity rule.
+    src = _make_pdf(tmp_path, pages=2)
+    lower = _finding("same page lower", severity="high", rect=(100, 400, 220, 440))
+    upper = _finding("same page upper", severity="high", rect=(100, 100, 220, 140))
+    page2 = _finding("later page", severity="high", page=1, rect=(100, 100, 220, 140))
+    upper.qc_id, lower.qc_id, page2.qc_id = "QC-001", "QC-002", "QC-003"
+
+    res = write_reviewed_pdfs([lower, upper, page2], [src], tmp_path / "out")
+    doc = pymupdf.open(str(res.reviewed_pdfs[0]))
+    try:
+        index_text = doc[0].get_text()
+    finally:
+        doc.close()
+    pos = {qc: index_text.find(qc) for qc in ("QC-001", "QC-002", "QC-003")}
+    assert pos["QC-001"] < pos["QC-002"] < pos["QC-003"]

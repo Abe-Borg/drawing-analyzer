@@ -42,8 +42,18 @@ def _digest_block(findings: list[dict]) -> str:
     return "```json\n" + json.dumps({"findings": findings}) + "\n```"
 
 
+# A parse-valid citation verdict (one cited claim per unique ref in these
+# fixtures): with the §18.0 gate open, a "clean run" fixture must actually be
+# claim-complete or the citation stage honestly holds the run at PARTIAL.
+_CITATION_OK = (
+    "searched...\n```json\n"
+    + json.dumps({"status": "CHECKED_SUPPORTS", "note": "supports", "edition_notes": "e"})
+    + "\n```"
+)
+
+
 class _RoutingClient:
-    """One fake client that answers digest, verify, and synthesis calls."""
+    """One fake client that answers digest, verify, citation, and synthesis calls."""
 
     def __init__(self, digest_findings: list[dict], *, verdict: str = "CONFIRMED"):
         self.digest_calls = 0
@@ -64,7 +74,10 @@ class _RoutingClient:
                     self.digest_calls += 1
                     return FakeMessage(content=[FakeTextBlock(text=digest_text)],
                                        usage=FakeUsage(input_tokens=500, output_tokens=80))
-                # anything else (unused here)
+                if system.startswith(CITATION_SYSTEM_PROMPT):
+                    return FakeMessage(content=[FakeTextBlock(text=_CITATION_OK)],
+                                       usage=FakeUsage(input_tokens=20, output_tokens=8))
+                # anything else (synthesis/critique prose)
                 return FakeMessage(content=[FakeTextBlock(text="ok")])
 
         self.messages = _Msgs()
@@ -134,10 +147,10 @@ def test_full_qc_chain(tmp_path):
     assert _annot_count(src) == 0
     # Findings surface on the context.
     assert ctx.finding_count == 2 and ctx.clouded_finding_count == 2
-    # §15.5 temporary completeness gate: a clean exhaustive run is deliberately
-    # PARTIAL — never COMPLETE — until Phases 24–26 land. NORMAL config (no
-    # explicit stage was disabled).
-    assert ctx.qc_status == "PARTIAL"
+    # §18.0 (Phase 26B, DA-010): the temporary completeness gate is OPEN — a
+    # clean NORMAL exhaustive run now earns COMPLETE ("Exhaustive QC complete").
+    assert ctx.qc_status == "COMPLETE"
+    assert ctx.qc_status_label == "Exhaustive QC complete"
     assert ctx.configuration_kind == "NORMAL"
 
 
@@ -283,7 +296,9 @@ class _CountingClient:
                                        usage=FakeUsage(input_tokens=1, output_tokens=1))
                 if s.startswith(CITATION_SYSTEM_PROMPT):
                     calls["citation"] += 1
-                    return FakeMessage(content=[FakeTextBlock(text='{"assessments":[]}')],
+                    # Claim-complete verdict — an empty assessments list would
+                    # (correctly, DA-017) hold the citation stage at PARTIAL.
+                    return FakeMessage(content=[FakeTextBlock(text=_CITATION_OK)],
                                        usage=FakeUsage(input_tokens=1, output_tokens=1))
                 calls["other"] += 1
                 return FakeMessage(content=[FakeTextBlock(text="ok")],
@@ -316,12 +331,13 @@ def test_qc_markups_resolves_and_runs_exhaustive_stack(tmp_path):
     assert client.calls["verify"] >= 1
     assert client.calls["citation"] >= 1
 
-    # Every stage is recorded, and the clean exhaustive run is gated to PARTIAL.
+    # Every stage is recorded; with the §18.0 gate open a clean NORMAL
+    # exhaustive run earns COMPLETE.
     stages = {s.stage: s.status for s in ctx.stage_results}
     for name in ("synthesis", "critique", "cross_qc", "auditors", "prose_harvest",
                  "verification", "citation", "markup"):
         assert name in stages, name
-    assert ctx.qc_status == "PARTIAL"
+    assert ctx.qc_status == "COMPLETE"
     assert ctx.configuration_kind == "NORMAL"
 
 
@@ -930,3 +946,39 @@ def test_geometry_omission_sink_merges_render_facts_into_prescan(tmp_path):
     assert prescan[0].omitted_tile_count == 3       # miss: render fact merged
     assert prescan[1].omitted_tile_count is None    # hit: honestly unknown
     assert len(prescan) == 2                        # never grows the list
+
+
+def test_gate_open_never_masks_a_degraded_required_stage(tmp_path):
+    # §18.0 permanent phase-gate regression (DA-010): opening the completeness
+    # gate must NOT let a run with a degraded required stage reach COMPLETE.
+    # Here the citation stage leaves the cited claim unchecked (an empty
+    # assessments response — the DA-017 claim-completeness rule holds it at
+    # PARTIAL), so the run stays PARTIAL even though every other stage is clean.
+    src = _make_pdf(tmp_path / "M-101.pdf")
+
+    class _CitationIncomplete(_RoutingClient):
+        def __init__(self):
+            super().__init__([_VAV_FINDING])
+            inner = self.messages
+
+            class _Msgs:
+                def create(_self, **kw):
+                    if str(kw.get("system", "")).startswith(CITATION_SYSTEM_PROMPT):
+                        return FakeMessage(
+                            content=[FakeTextBlock(text='{"assessments":[]}')],
+                            usage=FakeUsage(input_tokens=1, output_tokens=1),
+                        )
+                    return inner.create(**kw)
+
+            self.messages = _Msgs()
+
+    ctx = extract_drawing_context(
+        [src], client=_CitationIncomplete(), rows=2, cols=2,
+        qc_markups=True, qc_work_dir=tmp_path / "qc",
+    )
+    stages = {s.stage: s.status for s in ctx.stage_results}
+    assert stages["citation"] == "PARTIAL"
+    assert ctx.qc_status == "PARTIAL"          # never COMPLETE with a degraded stage
+    assert ctx.qc_status_label == "Completed with QC warnings"
+    # The standard deliverable still shipped (I-3).
+    assert ctx.combined_text.strip()
