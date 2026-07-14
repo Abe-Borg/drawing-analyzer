@@ -693,7 +693,10 @@ def test_contained_target_rejects_escapes(tmp_path):
     with _pytest.raises(ValueError):
         dx.contained_target(root, "../outside.txt")
     # A symlinked intermediate directory cannot smuggle a write outside root.
-    (root / "link").symlink_to(tmp_path)
+    try:
+        (root / "link").symlink_to(tmp_path)
+    except OSError:
+        _pytest.skip("symlink creation not permitted on this platform")
     with _pytest.raises(ValueError):
         dx.contained_target(root, "link/owned.txt")
 
@@ -707,8 +710,12 @@ def test_evidence_copy_skips_symlinks_and_contains_targets(tmp_path):
     ev = tmp_path / "qc" / "evidence"
     (ev / "QC-001").mkdir(parents=True, exist_ok=True)
     (ev / "QC-001" / "leg-01.png").write_bytes(b"\x89PNG")
-    (ev / "QC-001" / "stolen.txt").symlink_to(secret)
-    (ev / "linkdir").symlink_to(tmp_path)
+    try:
+        (ev / "QC-001" / "stolen.txt").symlink_to(secret)
+        (ev / "linkdir").symlink_to(tmp_path)
+    except OSError:
+        import pytest as _p
+        _p.skip("symlink creation not permitted on this platform")
 
     folder = tmp_path / "out"
     folder.mkdir()
@@ -718,6 +725,14 @@ def test_evidence_copy_skips_symlinks_and_contains_targets(tmp_path):
     assert not any("stolen" in p or "secret" in p for p in copied)
 
 
+import os as _os  # noqa: E402
+import pytest as _pytest_mod  # noqa: E402
+
+
+@_pytest_mod.mark.skipif(
+    _os.name == "nt",
+    reason="a backslash FILENAME is only constructible on POSIX (on Windows it is a path)",
+)
 def test_reviewed_pdf_with_hostile_name_lands_flat_and_contained(tmp_path):
     # A POSIX source file legally named with backslashes must not traverse when
     # its reviewed copy is exported (the export may later be opened on Windows).
@@ -757,32 +772,46 @@ def test_export_publishes_atomically_and_labels_partials(tmp_path, monkeypatch):
     assert finals == [folder.name]
 
 
-def test_markup_manifest_aligns_with_sanitized_pdf_names(tmp_path):
-    # Codex P2 / DA-033 follow-up: when the allocator renames a reviewed PDF
-    # (hostile or colliding basename), markup_manifest.json must still hash the
-    # on-disk file and map it back to the verbatim receipt name — receipts are
-    # never rewritten, but the coverage record stays aligned with the folder.
+def test_markup_manifest_aligns_with_deduped_pdf_names(tmp_path):
+    # Codex P2 / DA-033 follow-up: when the allocator renames a reviewed-PDF
+    # copy, markup_manifest.json must still hash the on-disk file and map it
+    # back to the verbatim receipt name — receipts are never rewritten, but the
+    # coverage record stays aligned with the folder. Exercised with the
+    # portable rename cause (two same-basename sources → deterministic dedupe),
+    # which is also the ambiguous case a name-keyed map would get wrong: the
+    # FIRST copy keeps its name; only the second maps to the _2 copy.
     ctx = _qc_ctx(tmp_path, with_reviewed=False, with_evidence=False)
-    hostile = tmp_path / "qc" / r"..\..\evil_reviewed.pdf"
-    hostile.parent.mkdir(parents=True, exist_ok=True)
-    hostile.write_bytes(b"%PDF-1.7 hostile")
-    ctx.reviewed_pdf_paths = [hostile]
+    a = tmp_path / "qc" / "site_a" / "M-101_reviewed.pdf"
+    b = tmp_path / "qc" / "site_b" / "M-101_reviewed.pdf"
+    for pdf, payload in ((a, b"%PDF-1.7 site-a"), (b, b"%PDF-1.7 site-b")):
+        pdf.parent.mkdir(parents=True, exist_ok=True)
+        pdf.write_bytes(payload)
+    ctx.reviewed_pdf_paths = [a, b]
     ctx.markup_run = SimpleNamespace(
         to_dict=lambda: {
             "placements": [],
-            "receipts": [{"status": "WRITTEN", "output_pdf": hostile.name}],
+            "receipts": [
+                {"status": "WRITTEN", "output_pdf": "M-101_reviewed.pdf"},
+                {"status": "WRITTEN", "output_pdf": "M-101_reviewed.pdf"},
+            ],
         },
-        placements=[], receipts=[SimpleNamespace(status="WRITTEN")],
+        placements=[], receipts=[SimpleNamespace(status="WRITTEN")] * 2,
     )
     folder = tmp_path / "out"
     folder.mkdir()
     dx.write_qc_outputs(ctx, folder)
 
     manifest = json.loads((folder / "markup_manifest.json").read_text(encoding="utf-8"))
-    assert manifest["renamed_outputs"] == {hostile.name: "evil_reviewed.pdf"}
+    assert manifest["renamed_outputs"] == [
+        {"receipt_name": "M-101_reviewed.pdf", "name": "M-101_reviewed_2.pdf"}
+    ]
     outputs = {o["name"]: o for o in manifest["outputs"]}
-    assert "evil_reviewed.pdf" in outputs                       # on-disk name hashed
-    assert outputs["evil_reviewed.pdf"]["receipt_name"] == hostile.name
-    assert outputs["evil_reviewed.pdf"]["sha256"]
+    # BOTH copies hashed under their on-disk names; only the renamed one maps back.
+    assert "receipt_name" not in outputs["M-101_reviewed.pdf"]
+    assert outputs["M-101_reviewed_2.pdf"]["receipt_name"] == "M-101_reviewed.pdf"
+    assert (
+        outputs["M-101_reviewed.pdf"]["sha256"]
+        != outputs["M-101_reviewed_2.pdf"]["sha256"]
+    )
     # Receipts stay verbatim — the writer's reconciliation record is untouched.
-    assert manifest["receipts"][0]["output_pdf"] == hostile.name
+    assert all(r["output_pdf"] == "M-101_reviewed.pdf" for r in manifest["receipts"])

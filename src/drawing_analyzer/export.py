@@ -913,7 +913,7 @@ def build_markup_manifest(
     *,
     folder: Path | None = None,
     hash_cache: "dict[str, str] | None" = None,
-    renames: "dict[str, str] | None" = None,
+    copied: "list[tuple[str, str]] | None" = None,
 ) -> dict:
     """The machine-readable markup-coverage manifest (§13.7).
 
@@ -939,16 +939,34 @@ def build_markup_manifest(
         manifest["placements"] = run_dict.get("placements", [])
         manifest["receipts"] = run_dict.get("receipts", [])
     # Hash the reviewed PDFs as they actually exist in the export folder — the
-    # concrete artifacts the receipts describe. ``renames`` maps a receipt's
-    # original basename to the DA-033-sanitized/deduped on-disk name, so a
-    # hostile or colliding name still gets a hashed ``outputs`` entry: ``name``
-    # is what is on disk, ``receipt_name`` (present only when they differ) is
-    # the verbatim name the receipts carry. Receipts are never rewritten — they
-    # are the writer's reconciliation record, not the export copy's.
-    renames = dict(renames or {})
-    if renames:
-        manifest["renamed_outputs"] = dict(sorted(renames.items()))
-    if folder is not None:
+    # concrete artifacts the receipts describe. When the caller copied the PDFs
+    # itself (``write_qc_outputs``) it passes ``copied`` — ordered (original
+    # basename, on-disk name) PAIRS, unambiguous even when dedupe renamed one
+    # of two same-basename sources — and each entry records ``receipt_name``
+    # (the verbatim name the receipts carry) whenever it differs from the
+    # DA-033-sanitized on-disk ``name``. Receipts are never rewritten — they
+    # are the writer's reconciliation record, not the export copy's. Without
+    # ``copied`` (a direct library call), the legacy receipt-name scan applies.
+    if folder is not None and copied is not None:
+        renamed = [
+            {"receipt_name": original, "name": on_disk}
+            for original, on_disk in copied
+            if original != on_disk
+        ]
+        if renamed:
+            manifest["renamed_outputs"] = renamed
+        for original, on_disk in copied:
+            out = Path(folder) / on_disk
+            if out.exists():
+                entry = {
+                    "name": on_disk,
+                    "sha256": _sha256(out, hash_cache),
+                    "bytes": out.stat().st_size,
+                }
+                if on_disk != original:
+                    entry["receipt_name"] = original
+                manifest["outputs"].append(entry)
+    elif folder is not None:
         names = sorted(
             {
                 str(r.get("output_pdf") or "")
@@ -958,17 +976,15 @@ def build_markup_manifest(
             | {Path(p).name for p in (getattr(ctx, "reviewed_pdf_paths", None) or [])}
         )
         for name in names:
-            on_disk = renames.get(name, name)
-            out = Path(folder) / on_disk
+            out = Path(folder) / name
             if out.exists():
-                entry = {
-                    "name": on_disk,
-                    "sha256": _sha256(out, hash_cache),
-                    "bytes": out.stat().st_size,
-                }
-                if on_disk != name:
-                    entry["receipt_name"] = name
-                manifest["outputs"].append(entry)
+                manifest["outputs"].append(
+                    {
+                        "name": name,
+                        "sha256": _sha256(out, hash_cache),
+                        "bytes": out.stat().st_size,
+                    }
+                )
     return manifest
 
 
@@ -1013,17 +1029,18 @@ def write_qc_outputs(
     # Reviewed-PDF names flow through the DA-033 allocator: a hostile source
     # basename (a POSIX file legally named ``..\\..\\evil.pdf``) must land as a
     # flat, contained file — and never clobber a sibling (deterministic dedupe).
-    # Any rename is recorded so the markup manifest can align its receipt names
-    # with what is actually on disk (the receipts themselves stay verbatim —
-    # they describe what the writer reconciled, not the export copy).
+    # Every copy is recorded as an (original basename, on-disk name) PAIR — not
+    # a name-keyed map, which would be ambiguous for the very case dedupe
+    # exists for: two sources sharing one basename. The markup manifest aligns
+    # its outputs with these pairs; the receipts themselves stay verbatim (they
+    # describe what the writer reconciled, not the export copy).
     used_pdf_names: set[str] = set()
-    pdf_renames: dict[str, str] = {}
+    copied_pdfs: list[tuple[str, str]] = []
     for pdf in reviewed:
         pdf = Path(pdf)
         if pdf.exists() and not pdf.is_symlink():
             name = safe_artifact_name(pdf.name, used=used_pdf_names, default="reviewed.pdf")
-            if name != pdf.name:
-                pdf_renames[pdf.name] = name
+            copied_pdfs.append((pdf.name, name))
             shutil.copy2(pdf, contained_target(folder, name))
             written.append(name)
 
@@ -1060,7 +1077,7 @@ def write_qc_outputs(
         (folder / "markup_manifest.json").write_text(
             json.dumps(
                 build_markup_manifest(
-                    ctx, folder=folder, hash_cache=hash_cache, renames=pdf_renames,
+                    ctx, folder=folder, hash_cache=hash_cache, copied=copied_pdfs,
                 ),
                 indent=2,
             ),
