@@ -773,3 +773,125 @@ def test_set_notes_writer_failure_keeps_source_reviewed_pdfs(tmp_path, monkeypat
     assert any("Set-level review notes" in e for e in ctx.errors)
     assert ctx.coverage_status == "INCOMPLETE"
     assert any(p.name.endswith("_reviewed.pdf") for p in ctx.reviewed_pdf_paths)
+
+
+# --------------------------------------------------------------------------- #
+# Run journal + run.log/run_manifest end-to-end (Phase 26A, §18.1–§18.4, DA-024)
+# --------------------------------------------------------------------------- #
+
+
+def test_every_run_carries_a_journal_and_inventory(tmp_path):
+    # §18.1: the journal exists for library/API runs including plain standard
+    # runs (no QC flags), with the inventory attached for the manifest.
+    src = _make_pdf(tmp_path / "M-101.pdf")
+    ctx = extract_drawing_context([src], client=_RoutingClient([]), rows=2, cols=2)
+
+    journal = ctx.run_journal
+    assert journal is not None and journal.run_id.startswith("RUN-")
+    codes = [e.event_code for e in journal.events]
+    assert codes[0] == "RUN_START"
+    assert "INPUT_ACCEPTED" in codes
+    assert "SHEET_DIGESTED" in codes
+    assert codes[-1] == "RUN_END"
+    assert journal.ended_at is not None
+    assert journal.final_status == "NOT_REQUESTED"    # no QC requested
+    # Sequences are contiguous even with the digest worker pool involved.
+    assert [e.sequence for e in journal.events] == list(range(1, len(codes) + 1))
+    # The classified inventory rides the context (manifest source of truth).
+    docs = ctx.input_inventory.documents
+    assert len(docs) == 1 and docs[0].accepted and docs[0].source_id == "SRC-0001"
+    # Environment identity was captured (§18.2).
+    assert journal.environment.get("model")
+    assert journal.environment.get("coordinate_space") == "PAGE_VIEW_V2"
+
+
+def test_all_inputs_rejected_run_still_journals(tmp_path):
+    # §18.1: an all-input-failure run leaves an honest journal — INPUT_REJECTED
+    # per file, a FAILED RUN_END, and a renderable run.log.
+    bad = tmp_path / "not-a-pdf.pdf"
+    bad.write_text("hello")
+    ctx = extract_drawing_context([bad, tmp_path / "missing.pdf"], client=None)
+
+    journal = ctx.run_journal
+    assert journal is not None
+    codes = [e.event_code for e in journal.events]
+    assert codes.count("INPUT_REJECTED") == 2
+    assert codes[-1] == "RUN_END"
+    assert journal.final_status == "FAILED"
+    assert ctx.sheet_count == 0
+    from drawing_analyzer.run_journal import render_run_log
+
+    log = render_run_log(ctx)
+    assert "FAILED — no sheets were analyzed" in log
+    assert "not-a-pdf.pdf" in log
+    # No absolute test path leaks into the rendered log (§18.2).
+    assert str(tmp_path) not in log
+
+
+def test_blocked_run_attaches_journal(tmp_path, monkeypatch):
+    # §10.7 preflight block: the early return still carries journal + inventory.
+    import drawing_analyzer.pipeline as pl
+
+    monkeypatch.setattr(
+        pl, "check_set_limits", lambda docs, confirmed=False: "set too large (test)"
+    )
+    src = _make_pdf(tmp_path / "M-101.pdf")
+    ctx = extract_drawing_context([src], client=_RoutingClient([]))
+
+    assert any(e.event_code == "RUN_BLOCKED" for e in ctx.run_journal.events)
+    assert ctx.run_journal.final_status == "FAILED"
+    assert ctx.input_inventory is not None
+    assert any("set too large" in e for e in ctx.errors)
+
+
+def test_exhaustive_run_journal_receipts_and_exported_run_log(tmp_path):
+    # The §18.2/§18.4 end-to-end: stage events mirror the recorded StageResults,
+    # MARKUP_RECEIPTS mirrors the artifact-backed receipts, and the exported
+    # run.log / run_manifest.json agree with the context.
+    src = _make_pdf(tmp_path / "M-101.pdf")
+    client = _RoutingClient([_VAV_FINDING])
+    ctx = extract_drawing_context(
+        [src], client=client, rows=2, cols=2,
+        qc_markups=True, qc_work_dir=tmp_path / "qc",
+    )
+
+    journal = ctx.run_journal
+    ended = {e.stage for e in journal.events if e.event_code == "STAGE_END"}
+    # Every recorded stage result has a matching STAGE_END event (§18.2)…
+    assert {sr.stage for sr in ctx.stage_results if sr.status != "NOT_REQUESTED"} <= ended
+    # …plus the digest phase itself (which has no StageResult by design).
+    assert "digest" in ended
+
+    receipts = [e for e in journal.events if e.event_code == "MARKUP_RECEIPTS"]
+    assert len(receipts) == 1
+    fields = receipts[0].fields
+    assert int(fields["expected"]) == len(ctx.markup_run.placements)
+    terminal = sum(1 for r in ctx.markup_run.receipts if r.status in ("WRITTEN", "INDEXED", "FAILED"))
+    assert int(fields["written"]) + int(fields["indexed"]) + int(fields["failed"]) == terminal
+    assert fields["coverage"] == ctx.coverage_status
+
+    from drawing_analyzer.export import write_drawing_export
+
+    folder = write_drawing_export(ctx, tmp_path / "out", source_names=["M-101.pdf"])
+    log = (folder / "run.log").read_text(encoding="utf-8")
+    assert journal.run_id in log
+    # Stage table rows and the receipt-derived ledger line (§18.2).
+    for stage in ("critique", "auditors", "verification", "markup"):
+        assert stage in log
+    assert "markup coverage: COMPLETE" in log
+    assert "Ledger " in log
+    # Usage totals in the manifest equal the context's derived sums (§15.6).
+    manifest = json.loads((folder / "run_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["usage"]["total_input_tokens"] == ctx.total_input_tokens
+    assert manifest["usage"]["total_output_tokens"] == ctx.total_output_tokens
+    assert manifest["run"]["run_id"] == journal.run_id
+    assert manifest["status"]["qc_status"] == ctx.qc_status
+    assert manifest["prose_accounting"] == ctx.prose_accounting
+    # Sources come from the real inventory — ids, never paths (§10.4).
+    assert manifest["sources"][0]["source_id"] == "SRC-0001"
+    assert str(tmp_path) not in json.dumps(manifest)
+    # The artifact list covers the reviewed PDF and the evidence tree.
+    paths = {a["path"] for a in manifest["artifacts"]}
+    assert "M-101_reviewed.pdf" in paths
+    assert any(p.startswith("evidence/") for p in paths)
+    assert "run.log" in paths and "run_manifest.json" not in paths

@@ -327,6 +327,11 @@ class SheetGeometry:
     is_raster: bool = False
     # PAGE_VIEW_V2 geometry + transforms (Phase 19); see :class:`RenderedSheet`.
     geometry: "PageGeometry | None" = None
+    # Phase 26A (§18.2): how many blank tiles the render omitted for this sheet
+    # (the documented I-1 exception, disclosed to the model). ``None`` = not
+    # recorded — a level-1 cache hit never re-rendered, so the count is unknown
+    # there, and the run.log must say so rather than claim zero.
+    omitted_tile_count: "int | None" = None
 
     @classmethod
     def from_rendered(cls, rendered: "RenderedSheet") -> "SheetGeometry":
@@ -341,6 +346,7 @@ class SheetGeometry:
             sheet_text=rendered.sheet_text,
             is_raster=rendered.is_raster,
             geometry=rendered.geometry,
+            omitted_tile_count=len(rendered.omitted_tiles or []),
         )
 
 

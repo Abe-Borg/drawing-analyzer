@@ -6,6 +6,74 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (Phase 26A — run journal, run.log & run manifest, DA-024)
+
+- **Per-run journal (`run_journal.py`, §18.1).** Every `extract_drawing_context`
+  call — GUI or library, standard or exhaustive, even an all-inputs-rejected
+  run — now owns a `RunJournal` (`ctx.run_journal`): an append-only event trace
+  with a fresh opaque `RUN-…` id and a **thread-safe monotonic sequence**, so
+  events emitted concurrently from the digest worker pool are totally ordered.
+  The pipeline emits typed events end to end: `RUN_START` (with environment/
+  version identity), per-input `INPUT_ACCEPTED`/`INPUT_REJECTED`, `RUN_BLOCKED`
+  (preflight), `CACHE_PRESCAN`, per-sheet `SHEET_DIGESTED` (ok/failed, cache
+  hit, digest size, raster/vector, text-layer length, omitted blank tiles,
+  findings-parser drift), `STAGE_START`/`STAGE_END` for every stage (mirroring
+  each recorded `StageResult`, giving the run.log stage table its durations),
+  `LEDGER_SEALED`/`LEDGER_NUMBERED` (with post-seal adds), `SOURCE_MUTATED`,
+  `MARKUP_RECEIPTS` (expected vs WRITTEN/INDEXED/FAILED, receipt-derived),
+  `USAGE_TOTALS`, and `RUN_END`.
+- **Sanitize-at-emit boundary (§18.3).** Every journal field value passes the
+  shared Phase 17 secret-redaction filter (`diagnostics.redact_secrets`) plus a
+  new absolute-path scrubber (`/home/user/…/M-101.pdf` → `.../M-101.pdf`;
+  Windows drive/UNC/quoted/`file://` forms handled; https URLs untouched),
+  is flattened to one line, and is length-bounded **before it is stored** — a
+  secret or private directory name can never enter the journal, whatever
+  renders it later. Emission never raises (advisory, I-3 spirit).
+- **`run.log` in every export (§18.2, DA-024).** `write_drawing_export` now
+  writes a per-run, human-readable log: run id + start/end, app/OS/Python/
+  PyMuPDF/SDK versions, model + prompt/cache-schema/coordinate-space versions,
+  the classified input inventory (submitted/accepted/rejected with `SRC-####`
+  ids), normalized configuration + profile snapshots, a per-sheet table, a
+  stage table (status/calls/items/duration), per-family usage + derived totals
+  (sub-cent costs shown as `<$0.01`, never rounded to zero), ledger/receipt/
+  coverage accounting, prose carry-through counts (§14.9), outputs written,
+  sanitized errors, the full event trace, and the final three-state outcome —
+  the same vocabulary as the GUI completion line (§3.3). UTF-8 + CRLF for
+  Notepad. Explicitly excluded: keys, headers, base64/image bytes, prompts,
+  drawing text, long quotes, raw wire logs, absolute paths.
+- **`run_manifest.json` in every export (§18.4, DA-024).** The machine-readable
+  counterpart (`schema_version` 1): run identity + environment, final status
+  (`qc_status`/coverage/configuration kind/counts), `RunConfiguration`,
+  source inventory (**no absolute paths, no content SHAs** — `source_id` +
+  input order are the portable provenance; §6.1/§10.4), profile snapshots,
+  typed stage results, the append-only usage ledger with derived totals +
+  `pricing_effective_date`, findings/prose/evidence summaries, receipt-derived
+  markup coverage, sanitized errors, and the **sha256 + byte size of every
+  artifact in the export**. Non-circular finalization order: ordinary
+  artifacts → `markup_manifest.json` → `run.log` → `run_manifest.json` (hashes
+  everything, `run.log` included, excludes only itself). `00_index.md` lists
+  both new artifacts.
+- **Context additions.** `DrawingContext` gains `run_journal`,
+  `input_inventory` (the §6.1 `SourceDocument` records, previously discarded),
+  and `prose_accounting` (the §14.9 harvest carry-through counts, previously
+  discarded with the `HarvestResult`). `SheetGeometry` gains
+  `omitted_tile_count` (`None` = not recorded, e.g. a level-1 cache hit that
+  never re-rendered — the run.log says so instead of claiming zero).
+
+### Changed (Phase 26A)
+
+- **Usage `stage_instance` labels are now portable (§10.4).** The per-sheet
+  digest/critique usage records previously embedded the raw PDF path
+  (`digest:/abs/path/M-101.pdf:p0`); they now carry the host-owned portable
+  identity (`digest:SRC-0001:p0`), because `run_manifest.json` exports usage
+  records verbatim and an absolute path in a portable artifact would leak the
+  user's directory layout. Rollups were always per-family, so no consumer
+  changes. The manifest additionally passes the whole usage block through the
+  sanitize boundary as defense in depth.
+- `export.write_drawing_export` writes two more files into every export folder
+  (`run.log`, `run_manifest.json`) and returns the same folder path as before;
+  `build_export_documents` (the pure document builder) is unchanged.
+
 ### Added (Phase 25 — reference grammar, tile semantics, auditors & callout placement, DA-019/020/021/022)
 
 - **Unified sheet-ID grammar & negative corpus (DA-020, §17.2/17.3).**

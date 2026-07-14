@@ -225,7 +225,9 @@ into the export folder — `findings.json`, `findings.csv`, `sheet_text/<sheet>.
 per sheet, the `*_reviewed.pdf` copies (incomplete ones named
 `*_reviewed_INCOMPLETE.pdf`), the `evidence/` crops, and `markup_manifest.json`
 (the placement receipts + coverage proof) — alongside the prose digest and HTML
-report. When the set has **set-level** findings — a cross-sheet synthesis conflict
+report, plus (every run, QC or not) **`run.log`** — the sanitized per-run log —
+and **`run_manifest.json`** — the machine-readable run summary that hashes every
+artifact in the folder (see [Run log & run manifest](#run-log--run-manifest)). When the set has **set-level** findings — a cross-sheet synthesis conflict
 that names no single sheet — they are written to a dedicated
 `Drawing_Set_Review_Notes.pdf` (its own analyzer-owned pages and reconciled
 receipts) rather than being pinned onto an arbitrary drawing.
@@ -753,6 +755,40 @@ Every finding — inked or not — is also written to **`findings.csv`**, one ro
 finding with every field flattened (`qc_id` first; provenance in the `sources`
 column; citation columns at the end), UTF-8 with a BOM and CRLF line endings so
 Excel on Windows opens it cleanly.
+
+## Run log & run manifest
+
+Every analysis run — standard, audit-only, exhaustive, even one where every
+input was rejected — owns a **run journal** (`ctx.run_journal`): an append-only,
+thread-safe event trace with a fresh opaque `RUN-…` id. Every export folder then
+carries two artifacts built from it (Phase 26A, DA-024):
+
+- **`run.log`** — the human-readable per-run record: run id, start/end,
+  environment identity (OS / Python / PyMuPDF / SDK versions, model, prompt +
+  cache-schema + coordinate-space versions), the classified input inventory
+  (`SRC-####` per accepted file, an explicit line per rejected one), the
+  normalized configuration + profile snapshots, a per-sheet table (ok/failed,
+  cache hit, raster/vector, text-layer length, omitted blank tiles, parser
+  drift), a stage table (status, calls, items, duration), per-family token/cost
+  usage with derived totals, the ledger/receipt/coverage accounting, prose
+  carry-through counts, the artifacts written, every run error, and the full
+  event trace. UTF-8 + CRLF so Notepad reads it cleanly. This is per-run and
+  ships in the export — distinct from the rotating `drawing_analyzer.log`
+  diagnostics file, which stays on the machine.
+- **`run_manifest.json`** — the machine-readable counterpart (`schema_version`
+  1): final status, configuration, source inventory, typed stage results, the
+  usage ledger with derived totals, prose/evidence/markup-coverage summaries,
+  sanitized errors, and the **sha256 + size of every artifact in the export**
+  (`run.log` and `markup_manifest.json` included). Finalization is non-circular
+  (§18.4): ordinary artifacts are written first, then `run.log`, then the
+  manifest last — it hashes everything and excludes only itself.
+
+Both are **sanitized at the source**: every journal field passes the shared
+Phase 17 secret-redaction filter plus an absolute-path scrubber *at emit time*
+(`/home/user/…/M-101.pdf` → `.../M-101.pdf`), and the log/manifest carry counts
+and identifiers — never prompts, image bytes, drawing text, long quotes, API
+keys, or your directory layout. Set `DRAWING_ANALYZER_BUILD` to stamp a
+build/commit identifier into the header.
 
 ## Citation check
 
