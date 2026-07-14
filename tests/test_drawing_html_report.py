@@ -239,7 +239,10 @@ def test_report_has_no_qc_status_banner_for_a_standard_run():
     assert '<div class="qc-status-banner"' not in doc
 
 
-def test_report_qc_status_banner_partial_is_honest_about_the_gate():
+def test_report_qc_status_banner_partial_names_the_debug_override_cause():
+    # §18.0 (gate open): a PARTIAL with no degraded stage has exactly one
+    # cause — an explicit debug override — and the banner says so instead of
+    # the retired gate-era "intentionally withheld" wording.
     from drawing_analyzer.models import StageResult
 
     ctx = _make_ctx()
@@ -251,8 +254,8 @@ def test_report_qc_status_banner_partial_is_honest_about_the_gate():
     doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
     assert 'class="qc-status-banner" data-status="PARTIAL"' in doc
     assert "QC status: PARTIAL" in doc
-    # A clean-but-gated run explains the gate rather than implying failure.
-    assert "withheld pending later remediation" in doc
+    assert "deliberately weakened the exhaustive contract" in doc
+    assert "withheld pending later remediation" not in doc
 
 
 def test_report_qc_status_banner_names_degraded_stages_and_debug_override():

@@ -1592,13 +1592,13 @@ def roll_up_qc_status(
     coverage is ``INCOMPLETE``, or the configuration is a debug override; else
     ``FAILED``.
 
-    ``completeness_gate_open`` is the Phase 23 temporary gate; it defaults to
-    ``False`` (the conservative direction — never claim ``COMPLETE`` unless a caller
-    explicitly opens the gate). While it is closed (Phases 24–25 have not landed the
-    cross-shard reconciliation, claim-complete citations, evidence, and
-    callout-overflow guarantees) a would-be ``COMPLETE`` exhaustive run is capped at
-    ``PARTIAL`` so the product never advertises a completeness it cannot yet back
-    (§8, §15.5). Phase 26 opens the gate.
+    ``completeness_gate_open`` is the Phase 23 gate; it defaults to ``False``
+    (the conservative direction — never claim ``COMPLETE`` unless the caller
+    explicitly opens it). The pipeline opened it in Phase 26B (§18.0): Phases
+    24–25 landed the cross-shard reconciliation, claim-complete citations,
+    evidence, and callout-overflow guarantees, so a clean NORMAL exhaustive run
+    earns ``COMPLETE``. A closed gate still caps such a run at ``PARTIAL`` for
+    callers that have not made those guarantees (§8, §15.5).
     """
     if not config.qc_requested:
         return "NOT_REQUESTED"

@@ -718,14 +718,14 @@ the verifier proved wrong**:
 
 The conservative mode is the opt-in: `markup_verified_only=True` (GUI:
 **Verified & deterministic only**, default **off**) suppresses everything but
+`VERIFIED` + `DETERMINISTIC`; suppressed entries are tallied as *gated* and get a
+real **"Not inked by operator gate"** index row (a proven placement, not a bare
+status), so nothing is invisible.
+
 The index pages read as a punch list (Phase 26B §18.7): rows sort **high →
 medium → low** severity, then source input order, page, and position — the
 stable `QC-###` ids never change, only their display order. The rejected and
 operator-gated sections follow the main table as before.
-
-`VERIFIED` + `DETERMINISTIC`; suppressed entries are tallied as *gated* and get a
-real **"Not inked by operator gate"** index row (a proven placement, not a bare
-status), so nothing is invisible.
 
 ### Coverage is artifact-backed (Phase 21, DA-007)
 

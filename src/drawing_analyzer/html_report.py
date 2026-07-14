@@ -1283,9 +1283,9 @@ def _qc_status_banner_html(ctx: Any) -> str:
     Only shown when exhaustive QC ran (``qc_status`` other than NOT_REQUESTED). It
     leads with the normalized status so the report header shows the same state as
     the GUI and run log; a ``DEBUG_OVERRIDE`` configuration and any PARTIAL/FAILED
-    stages are named. During Phases 23–25 a clean exhaustive run is deliberately
-    ``PARTIAL`` (the completeness gate), so the detail says so rather than implying
-    a failure. The rich per-stage table lands in Phase 26 (§18.6).
+    stages are named. With the completeness gate open (Phase 26B §18.0), a
+    PARTIAL with no degraded stage has exactly one cause — an explicit debug
+    override — and the detail says so. The per-stage table follows (§18.6).
     """
     status = (getattr(ctx, "qc_status", "") or "NOT_REQUESTED").upper()
     if status not in ("COMPLETE", "PARTIAL", "FAILED"):
@@ -1301,11 +1301,11 @@ def _qc_status_banner_html(ctx: Any) -> str:
         )
         detail = f"Stages needing attention: {names}."
     elif status == "PARTIAL":
+        # Gate open (§18.0): the one no-degraded-stage PARTIAL cause is an
+        # explicit debug override — named below; never a vague withholding.
         detail = (
-            "Every exhaustive-QC stage completed; a full &ldquo;complete&rdquo; "
-            "status is intentionally withheld pending later remediation phases "
-            "(cross-set reconciliation, claim-complete citations, evidence and "
-            "callout completeness)."
+            "Every exhaustive-QC stage completed; the run is PARTIAL because "
+            "the configuration deliberately weakened the exhaustive contract."
         )
     else:
         detail = "Every required exhaustive-QC stage completed."

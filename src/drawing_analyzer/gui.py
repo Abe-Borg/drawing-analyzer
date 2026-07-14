@@ -1016,10 +1016,10 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         failed_note = f", {failed} failed" if failed else ""
         # Completion states (§3.3 / §15.5): when exhaustive QC ran, the state leads
         # with its normalized ``qc_status`` — FAILED / a receipt-derived INCOMPLETE
-        # coverage is "QC incomplete"; PARTIAL is "Completed with QC warnings"
-        # (during Phases 23–25 a clean exhaustive run is deliberately PARTIAL, gated
-        # from claiming COMPLETE); COMPLETE is "Exhaustive QC complete". A run that
-        # did not request exhaustive QC keeps the simple errors-based states.
+        # coverage is "QC incomplete"; PARTIAL is "Completed with QC warnings";
+        # COMPLETE is "Exhaustive QC complete" (reachable since the §18.0 gate
+        # opened). A run that did not request exhaustive QC keeps the simple
+        # errors-based states.
         qc_status = getattr(ctx, "qc_status", "NOT_REQUESTED")
         if getattr(ctx, "markup_incomplete", False) or qc_status == "FAILED":
             state, level = "QC incomplete", "error"

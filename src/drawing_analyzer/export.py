@@ -273,13 +273,19 @@ def _index_document(
             if tally:
                 lines.append(f"  - {tally}")
         lines.append("- `findings.json` / `findings.csv` — every finding, all fields")
+        # Preview the allocator names write_qc_outputs will copy under
+        # (DA-033): a hostile or colliding basename is advertised by its
+        # on-disk name, not a dead reference. (Pure builder — it cannot stat;
+        # if a listed PDF vanished, markup_manifest.json stays authoritative.)
+        _index_used: set[str] = set()
         for pdf in reviewed:
+            name = safe_artifact_name(Path(pdf).name, used=_index_used, default="reviewed.pdf")
             label = (
                 " — **incomplete markup** (labeled)"
-                if "_INCOMPLETE" in Path(pdf).name
+                if "_INCOMPLETE" in name
                 else " — the marked-up drawing"
             )
-            lines.append(f"- `{Path(pdf).name}`{label}")
+            lines.append(f"- `{name}`{label}")
         lines.append("- `sheet_text/` — each sheet's extracted text layer")
         if has_markup_manifest(ctx):
             lines.append(
@@ -1147,5 +1153,22 @@ def write_drawing_export(
         except OSError:
             pass                      # the .partial name itself is the label then
         raise
-    folder.rename(final)              # atomic same-volume publish (§18.5)
+    # Atomic same-volume publish (§18.5). ``final`` was reserved only by
+    # prediction (_unique_dir ran before the export was written), so a sibling
+    # export started in the same second can win the name first — re-derive a
+    # free name at publish time instead of failing a fully-written export.
+    for _ in range(3):
+        try:
+            folder.rename(final)
+            return final
+        except OSError:
+            fresh = _unique_dir(final)
+            if fresh == final:
+                continue              # transient (AV lock, etc.) — retry same name
+            final = fresh
+    try:
+        final = _unique_dir(final.with_name(final.name + "_INCOMPLETE"))
+        folder.rename(final)          # publish failed: label honestly, keep content
+    except OSError:
+        final = folder                # the .partial name itself is the label then
     return final
