@@ -560,6 +560,63 @@ def test_dead_files_route_trips_breaker_and_stops_uploading():
 
 
 # --------------------------------------------------------------------------- #
+# Deferred client creation: the pipeline passes client=None (DA-030 regression)
+# --------------------------------------------------------------------------- #
+
+
+def test_none_client_is_resolved_for_batch_upload(monkeypatch):
+    # Regression: the pipeline defers client creation and passes ``client=None``
+    # (the digest batch path resolves it via get_client() "since the upload happens
+    # at submit time"; the critique path forgot to). Handing None to the Files-API
+    # upload raised ``AttributeError: 'NoneType' object has no attribute 'beta'``,
+    # which the per-sheet guard swallowed — silently degrading EVERY sheet to the
+    # slow, full-price real-time fallback and never using Batches at all.
+    client = _FakeClient(_succeed)
+    monkeypatch.setattr("drawing_analyzer.client.get_client", lambda: client)
+
+    batch = submit_critique_batch(
+        iter([_make_sheet(1), _make_sheet(2)]), client=None, model=OPUS,
+        runs=2, total=2,
+    )
+    # The Files API WAS used — a real batch off shared uploads, not the fallback.
+    assert batch.batch_id == "batch_crit"
+    assert len(client.files.uploaded_ids) == 2 * IMAGES_PER_SHEET
+    assert len(client.create_calls) == 1
+    assert [r["custom_id"] for r in client.submitted] == [
+        "sheet__0__r1", "sheet__0__r2", "sheet__1__r1", "sheet__1__r2",
+    ]
+    # Crucially, NOT one real-time rescue call — the bug's tell was messages.create
+    # firing for every read instead of the batch.
+    assert client.messages_create_calls == []
+
+    results = collect_critique_batch(batch, client=None, sleep=NOSLEEP)
+    assert len(results) == 2
+    for _ref, res in results:
+        assert res.completed_runs == 2 and res.error is None and not res.rescued
+
+
+def test_none_client_all_cache_hits_needs_no_key(monkeypatch):
+    # Offline safety: the None-client resolution must stay LAZY. A fully
+    # cache-served run (every sheet a level-2 hit) makes no API call, so it must
+    # never reach for a client/key even when the pipeline passed ``client=None``.
+    cache = DigestCache(None, persist=False)
+    _run(_FakeClient(_succeed), [_make_sheet(1)], cache=cache, runs=2)  # warm
+
+    def _boom():
+        raise AssertionError("get_client must not be called on a cache-served run")
+
+    monkeypatch.setattr("drawing_analyzer.client.get_client", _boom)
+    batch = submit_critique_batch(
+        iter([_make_sheet(1)]), client=None, cache=cache, model=OPUS,
+        runs=2, total=1,
+    )
+    assert batch.batch_id is None  # all hits: nothing uploaded, nothing batched
+    results = collect_critique_batch(batch, client=None, cache=cache, sleep=NOSLEEP)
+    _ref, res = results[0]
+    assert res.cached and res.completed_runs == 2 and len(res.findings) == 1
+
+
+# --------------------------------------------------------------------------- #
 # Pipeline wiring: the critique stage records BATCH usage in a use_batch run
 # --------------------------------------------------------------------------- #
 

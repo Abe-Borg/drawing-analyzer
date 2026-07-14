@@ -263,6 +263,22 @@ def submit_critique_batch(
                     tail = " after overload" if retrying else ""
                     on_status(f"[{_k}/{total}] critique {verb} image {pos}/{n}{tail} — {_label}")
 
+            # This sheet needs the Files API (the upload here, and the batch/collect
+            # that follow, all talk to it). The pipeline may DEFER client creation
+            # and pass ``None`` — exactly as the digest batch path allows, where
+            # ``_digest_sheets_via_batch`` resolves it "since the upload happens at
+            # submit time". Resolve it here too, at the first sheet that actually
+            # uploads. A fully cache-served pass ``continue``s above and never reaches
+            # this, so a warm offline re-run still needs no key. Without this the
+            # critique path handed ``None`` straight to ``client.beta.files.upload`` —
+            # an ``AttributeError: 'NoneType' object has no attribute 'beta'`` that the
+            # per-sheet guard below swallowed, silently degrading EVERY sheet to the
+            # slow, full-price real-time fallback (Batches never used at all, DA-030).
+            if client is None:
+                from .client import get_client as _get_client
+
+                client = _get_client()
+
             try:
                 upload = upload_sheet_images(
                     client, sheet,
@@ -442,6 +458,15 @@ def collect_critique_batch(
     if not (batch.batch_id and submitted):
         return _assemble(batch)
 
+    # The poll / results / cancel / delete below all talk to the API; the pipeline
+    # may have deferred client creation and passed ``None`` (as the digest collect
+    # path allows). A no-batch collect returned just above, so a fully cache-served
+    # run still needs no key. Mirrors submit_critique_batch's resolution.
+    if client is None:
+        from .client import get_client as _get_client
+
+        client = _get_client()
+
     terminal = False
     canceled = False
     try:
@@ -452,6 +477,16 @@ def collect_critique_batch(
         # read count "sheet(s)" and rescale a determinate bar mid-stage, so the
         # poll reports only to ``on_log`` (its diagnostics still flow); the bar
         # advances per sheet as results are ingested.
+        #
+        # No stall watch here (deliberately, unlike the digest path):
+        # ``_poll_until_terminal`` counts only *completed* items, so it treats an
+        # hour with nothing finished as ``"stalled"``. That early give-up is only
+        # safe when the caller can recover the sheets another way — the digest pairs
+        # it with a direct-call rescue. The critique has no rescue: a give-up would
+        # cancel the batch and lose those sheets' critique. A small or image-heavy
+        # critique batch can legitimately sit with zero completed items for over an
+        # hour while every read is still processing, so tripping a stall watch here
+        # would cancel recoverable work. It rides the full elapsed bound instead.
         status = _poll_until_terminal(
             client,
             batch.batch_id,
