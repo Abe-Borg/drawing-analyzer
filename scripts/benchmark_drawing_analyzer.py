@@ -161,7 +161,15 @@ class OfflineClient:
 
 
 class _Instrumentation:
-    """Counts full-sheet rasterizations and per-source content hashes."""
+    """Counts full-sheet rasterizations and per-source full content hashes.
+
+    ``content_sha256`` is bound into **two** module namespaces — its home
+    (``source_registry``, whose globals also serve ``current_content_sha256``'s
+    re-hash fallback) and ``render`` (a ``from … import`` binding used by
+    ``inspect_inputs``) — so both are patched; patching only the home module
+    would leave the inventory's hashing invisible and let the hash-once gate
+    pass without measuring anything.
+    """
 
     def __init__(self) -> None:
         self.renders = 0
@@ -185,11 +193,13 @@ class _Instrumentation:
 
         render_mod.render_sheet = _render
         sr_mod.content_sha256 = _hash
+        render_mod.content_sha256 = _hash
         return self
 
     def __exit__(self, *exc) -> None:
         self._render_mod.render_sheet = self._real_render
         self._sr_mod.content_sha256 = self._real_hash
+        self._render_mod.content_sha256 = self._real_hash
 
 
 # --------------------------------------------------------------------------- #
@@ -259,9 +269,18 @@ def _offline_scenarios(sheets: int, repeats: int, check: bool) -> tuple[list[dic
         def _cold(_i):
             client = OfflineClient()
             ctx, inst, per_source = _standard(client, DigestCache(None, persist=False), "cold")
-            if check and per_source and max(per_source.values()) > 1:
-                failures.append("standard-cold: a source was content-hashed more than once")
+            if check:
+                if not per_source:
+                    # The gate must never pass by measuring nothing: a cold run
+                    # always hashes its sources at inventory (DA-001/DA-004).
+                    failures.append(
+                        "standard-cold: instrumentation observed no content hashing "
+                        "— the hash-once gate measured nothing"
+                    )
+                elif max(per_source.values()) > 1:
+                    failures.append("standard-cold: a source was content-hashed more than once")
             return {"digest_api_calls": client.digest_calls, "renders": inst.renders,
+                    "hash_calls": len(inst.hash_calls),
                     "usage": _usage_summary(ctx)}
 
         results.append(_run_scenario("standard-cold", _cold, repeats))
@@ -399,8 +418,8 @@ def _render_md(report: dict) -> str:
     ]
     for s in report["scenarios"]:
         notes = []
-        for key in ("digest_api_calls", "renders", "cache_hits", "qc_status",
-                    "coverage", "findings", "ok_sheets", "errors"):
+        for key in ("digest_api_calls", "renders", "hash_calls", "cache_hits",
+                    "qc_status", "coverage", "findings", "ok_sheets", "errors"):
             if key in s:
                 notes.append(f"{key}={s[key]}")
         usage = s.get("usage") or {}

@@ -955,6 +955,10 @@ def cross_sheet_qc(
         total_out += out_tok
         if err is not None:
             errors.append(err)
+            # A degraded shard still surrenders its parseable numeric claims —
+            # additive salvage (§2.4/I-3): the arithmetic auditor can use them
+            # while the shard itself stays failed (stage PARTIAL).
+            all_claims.extend(c)
             continue
         shards_completed += 1
         all_findings.extend(f)

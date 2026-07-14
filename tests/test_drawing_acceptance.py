@@ -1294,13 +1294,25 @@ def test_acceptance_84_sheet_reduction_reaches_every_shard():
 
 def test_acceptance_failed_shard_holds_cross_qc_partial():
     # §19.2: one failed shard → completeness is honestly PARTIAL while the other
-    # shard's findings stay usable (never a silent gap).
+    # shard's findings stay usable (never a silent gap). The degraded shard's
+    # response carries a parseable claims block but NO findings object — the
+    # claims are salvaged for the arithmetic auditor (additive, §2.4) even
+    # though the shard counts failed.
     sheets, geoms = [], []
     for i in range(44):
         prefix = "f" if i < 22 else "m"
         disc = "F" if i < 22 else "M"
         sheets.append(_ls_digest(f"{prefix}{i}.pdf"))
         geoms.append(_ls_geom(f"{prefix}{i}.pdf", f"{disc}-D-{i:02d}-1"))
+
+    degraded_body = (
+        "the model rambled instead of finishing the findings object\n"
+        "```json\n"
+        + json.dumps({"claims": [{"sheet_id": "S001", "quote": "TOTAL 540",
+                                  "kind": "sum", "terms": [180, 180, 180],
+                                  "expected": 540}]})
+        + "\n```"
+    )
 
     class _OneShardFails(_ShardOracleClient):
         def __init__(self):
@@ -1314,10 +1326,10 @@ def test_acceptance_failed_shard_holds_cross_qc_partial():
                 def create(_self, **kw):  # noqa: ANN001, ANN202
                     system = kw.get("system", "")
                     if not system.startswith(X.CROSS_QC_RECONCILE_SYSTEM_PROMPT[:60]):
-                        if outer.map_calls == 1:       # sabotage the second shard
+                        if outer.map_calls == 0:       # sabotage the first shard
                             outer.map_calls += 1
                             return FakeMessage(
-                                content=[FakeTextBlock(text="malformed, not a block")],
+                                content=[FakeTextBlock(text=degraded_body)],
                                 usage=FakeUsage(input_tokens=800, output_tokens=10),
                             )
                     return inner.create(**kw)
@@ -1329,3 +1341,7 @@ def test_acceptance_failed_shard_holds_cross_qc_partial():
     assert res.shards_planned == 2 and res.shards_completed == 1
     assert res.complete is False
     assert res.error and "no parseable findings object" in res.error
+    # The degraded shard's claims survived, rebound to the real sheet identity.
+    assert len(res.claims) == 1
+    assert res.claims[0].sheet_id == "F-D-00-1"
+    assert res.claims[0].source_name == "f0.pdf"
