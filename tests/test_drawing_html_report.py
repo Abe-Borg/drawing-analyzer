@@ -451,6 +451,92 @@ def test_chat_config_cannot_break_out_of_its_script_tag():
 
 
 # --------------------------------------------------------------------------- #
+# Chat client-tool data blocks (#da-findings / #da-summary).
+# --------------------------------------------------------------------------- #
+
+
+def _script_block_body(doc: str, block_id: str) -> str:
+    start = doc.index(f'id="{block_id}"')
+    return doc[doc.index(">", start) + 1: doc.index("</script>", start)]
+
+
+def test_findings_and_summary_data_blocks_present_and_structured():
+    # The chat's client tools read structured findings + run metadata from inert
+    # application/json blocks (data the prose digest deliberately omits).
+    import json
+
+    ctx = _findings_ctx(findings=[
+        _finding(sheet_id="M-501", category="conflict", severity="high",
+                 text="VAV-3 clearance missing", quote="VAV-3", verify_status="VERIFIED"),
+    ])
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
+
+    findings = json.loads(_script_block_body(doc, "da-findings"))
+    assert isinstance(findings, list) and len(findings) == 1
+    row = findings[0]
+    assert set(row) >= {"id", "sheet", "target", "category", "severity",
+                        "status", "text", "quote"}
+    assert row["category"] == "conflict" and row["severity"] == "high"
+    assert row["status"] == "VERIFIED" and row["quote"] == "VAV-3"
+
+    summary = json.loads(_script_block_body(doc, "da-summary"))
+    assert set(summary) >= {"generated", "sheets", "qc_status", "coverage_status",
+                            "tokens", "estimated_cost_usd", "errors", "sources"}
+    assert summary["sources"] == [SRC]
+
+
+def test_findings_data_block_cannot_break_out_of_its_script_tag():
+    # Hostile finding text/quote can't close the JSON <script> block: every `<`
+    # becomes `<` and JSON.parse round-trips it (same guarantee the chat
+    # config block carries).
+    import json
+
+    hostile = 'evil</script><script>window.__pwned=1</script>'
+    ctx = _findings_ctx(findings=[
+        _finding(text=hostile, quote=hostile, category="conflict", severity="high"),
+    ])
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
+    body = _script_block_body(doc, "da-findings")
+    assert "<" not in body
+    assert "\\u003c" in body
+    parsed = json.loads(body)
+    assert parsed[0]["text"] == hostile and parsed[0]["quote"] == hostile
+
+
+def test_data_blocks_absent_without_chat():
+    # include_chat=False must stay free of every chat artifact (the no-network
+    # invariant): neither data block is emitted.
+    ctx = _findings_ctx(findings=[_finding()])
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW, include_chat=False)
+    assert "da-findings" not in doc
+    assert "da-summary" not in doc
+
+
+def test_findings_data_block_absent_when_no_findings():
+    # No findings → no #da-findings block (the tool reports an empty ledger); the
+    # summary block is still emitted (there is always a run to describe).
+    doc = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW)
+    assert 'id="da-findings"' not in doc
+    assert 'id="da-summary"' in doc
+
+
+def test_chat_request_defines_client_tools_and_closure_loop():
+    # The six client-executed tools are declared with input schemas; the loop
+    # answers tool_use with tool_result and force-closes with tools disabled so a
+    # run can never end on a dangling tool call.
+    js = hr._CHAT_JS
+    for name in ("scroll_to_report", "query_findings", "filter_report",
+                 "get_report_summary", "highlight_term", "calculate"):
+        assert f"name: '{name}'" in js, f"{name} tool not declared"
+    assert "input_schema" in js
+    assert "tool_choice" in js and "type: 'none'" in js
+    assert "stopReason === 'tool_use'" in js
+    assert "type: 'tool_result'" in js
+    # The safe calculator never uses eval/Function.
+    assert "eval(" not in js and "new Function" not in js
+
+
+# --------------------------------------------------------------------------- #
 # QC Findings card + status chips (Phase 8)
 # --------------------------------------------------------------------------- #
 
