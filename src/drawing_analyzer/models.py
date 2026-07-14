@@ -1070,6 +1070,24 @@ RECEIPT_STATUSES = ("WRITTEN", "INDEXED", "FAILED")
 # A whole run's placement coverage over the ledger.
 COVERAGE_STATUSES = ("NOT_REQUESTED", "COMPLETE", "INCOMPLETE")
 
+
+def receipt_status_counts(receipts: Any) -> "dict[str, int]":
+    """Tally terminal receipts by status, keyed by :data:`RECEIPT_STATUSES`.
+
+    The one shared counter behind the journal's MARKUP_RECEIPTS event, the
+    run.log placements line, and ``run_manifest.json``'s coverage block
+    (Phase 26A) — so a status added to :data:`RECEIPT_STATUSES` reaches all
+    three consumers at once instead of drifting across hand-kept copies.
+    Duck-typed and tolerant: an unknown/malformed status is simply not
+    counted (the coverage reconciliation, not this tally, polices validity).
+    """
+    counts = {status: 0 for status in RECEIPT_STATUSES}
+    for receipt in receipts or []:
+        status = str(getattr(receipt, "status", "") or "")
+        if status in counts:
+            counts[status] += 1
+    return counts
+
 # The mandatory component kind(s) each placement must carry, exactly once, in the
 # saved PDF. A placement may also carry optional components (a QC tag beside a
 # cloud, a leader line from a callout); those are recorded but never gate

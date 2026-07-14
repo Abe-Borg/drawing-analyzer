@@ -567,3 +567,38 @@ def test_run_manifest_usage_block_is_sanitized_defensively(tmp_path):
     manifest = dx.build_run_manifest(ctx)
     assert "/home/user/private" not in json.dumps(manifest)
     assert manifest["usage"]["total_input_tokens"] == 10
+
+
+def test_export_survives_hostile_duck_typed_context(tmp_path):
+    # The two advisory artifacts must never sink write_drawing_export after
+    # every deliverable is on disk (I-3 spirit): a third-party duck-typed
+    # context with a raw-Decimal usage dict and a malformed prose_accounting
+    # still exports, and the artifacts degrade honestly instead of vanishing.
+    from decimal import Decimal
+
+    ctx = _make_ctx()
+    ctx.run_usage = SimpleNamespace(
+        to_dict=lambda: {"total_estimated_cost": Decimal("0.10")},
+        by_family=lambda: {},
+    )
+    ctx.prose_accounting = {"items": "three"}
+    folder = dx.write_drawing_export(ctx, tmp_path, source_names=[SRC], now=NOW)
+
+    assert (folder / "report.html").exists()
+    log = (folder / "run.log").read_text(encoding="utf-8")
+    assert "Drawing Analyzer — run log" in log
+    manifest = json.loads((folder / "run_manifest.json").read_text(encoding="utf-8"))
+    # The stray Decimal was serialized through the sanitize boundary, not fatal.
+    assert manifest["usage"]["total_estimated_cost"] == "0.10"
+
+
+def test_generated_at_matches_journal_timestamp_dialect(tmp_path):
+    # One JSON document, one timestamp dialect: generated_at is UTC-Z like the
+    # journal's started_at/ended_at (naive local `now` converted, not relabeled).
+    ctx = _make_ctx()
+    ctx.run_journal = RunJournal(run_id="RUN-tzcheck")
+    ctx.run_journal.finish("COMPLETE")
+    folder = dx.write_drawing_export(ctx, tmp_path, source_names=[SRC], now=NOW)
+    m = json.loads((folder / "run_manifest.json").read_text(encoding="utf-8"))
+    assert m["generated_at"].endswith("Z")
+    assert m["run"]["started_at"].endswith("Z")

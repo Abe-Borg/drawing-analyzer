@@ -250,11 +250,19 @@ def test_render_outcome_lines_match_gui_three_state():
         return render_run_log(ctx)
 
     assert "FAILED — no sheets were analyzed" in outcome(sheet_count=0)
-    assert "QC incomplete" in outcome(qc_status="FAILED")
+    # A failed/incomplete QC still shipped its digest → run outcome PARTIAL.
+    assert "PARTIAL — QC incomplete" in outcome(qc_status="FAILED")
     assert "QC incomplete" in outcome(qc_status="PARTIAL", markup_incomplete=True)
-    assert "completed with QC warnings" in outcome(qc_status="PARTIAL")
-    assert "exhaustive QC complete" in outcome(qc_status="COMPLETE")
+    # Label wording matches DrawingContext.qc_status_label exactly (§3.3).
+    assert "PARTIAL — Completed with QC warnings" in outcome(qc_status="PARTIAL")
+    assert "Exhaustive QC complete" in outcome(qc_status="COMPLETE")
     assert "no QC requested" in outcome(qc_status="NOT_REQUESTED")
+    # And the run-level outcome distinguishes a clean standard run (COMPLETE)
+    # from one with errors (PARTIAL) even though QC was never requested.
+    assert "COMPLETE — standard analysis (no QC requested)" in outcome()
+    assert "PARTIAL — standard analysis completed with warnings" in outcome(
+        errors=["boom"]
+    )
 
 
 def test_render_never_leaks_secrets_or_paths_from_context_errors():
@@ -265,3 +273,102 @@ def test_render_never_leaks_secrets_or_paths_from_context_errors():
     assert "/home/user/private" not in text
     assert "sk-ant-[REDACTED]" in text
     assert ".../x.pdf" in text
+
+
+# --------------------------------------------------------------------------- #
+# Review-fix regressions (Phase 26A review)
+# --------------------------------------------------------------------------- #
+
+from drawing_analyzer.run_journal import derive_run_outcome  # noqa: E402
+
+
+def test_scrub_paths_never_mangles_urls_with_colon_segments():
+    # A ':' immediately before a path slash inside a URL (MediaWiki File:,
+    # drive-style S3 keys) must survive byte-identical — URLs are masked
+    # during the scrub, not pattern-dodged.
+    url = "see https://en.wikipedia.org/wiki/File:/x/y.png ok"
+    assert scrub_paths(url) == url
+    # …while a colon-label PATH (usage-instance style) still scrubs.
+    assert scrub_paths("digest:/home/user/private/M-101.pdf:p0") == "digest:.../M-101.pdf:p0"
+
+
+def test_scrub_paths_drive_form_needs_a_directory():
+    # Prose like "option A:/B" or "drive C:\ is full" is not a path (no
+    # directory component → nothing to leak) and must not be eaten.
+    assert scrub_paths("option A:/B") == "option A:/B"
+    assert scrub_paths("drive C:\\ is full") == "drive C:\\ is full"
+    assert scrub_paths("bare C:/x stays") == "bare C:/x stays"
+    assert scrub_paths("C:/Users/x.pdf") == ".../x.pdf"
+
+
+def test_scrub_paths_file_urls_case_insensitive():
+    assert scrub_paths("File:///home/user/private/M-101.pdf") == "file://.../M-101.pdf"
+    assert scrub_paths("FILE://C:/Users/abe/x.pdf") == "file://.../x.pdf"
+
+
+def test_private_roots_scrub_spacey_directories():
+    # The literal known-roots pass is what handles spacey Windows dirs the
+    # bare regexes cannot bound (§18.3).
+    journal = RunJournal()
+    journal.add_private_roots([r"C:\Users\John Smith\Project X"])
+    journal.emit(
+        "API_ERROR",
+        detail=r"open failed: C:\Users\John Smith\Project X\M-101.pdf busy",
+    )
+    stored = journal.events[0].fields["detail"]
+    assert "John Smith" not in stored and "Project X" not in stored
+    assert "M-101.pdf" in stored
+    # Forward-slash spelling of the same root scrubs too.
+    journal.emit("API_ERROR", detail="C:/Users/John Smith/Project X/E-201.pdf")
+    assert "John Smith" not in journal.events[1].fields["detail"]
+
+
+def test_sanitize_text_strips_html_error_pages_only():
+    flooded = "<html><head><title>503</title></head><body>Service Unavailable</body></html>"
+    out = sanitize_text(f"API error: {flooded}")
+    assert "<html>" not in out and "Service Unavailable" in out
+    # An ordinary comparison with angle brackets survives.
+    assert sanitize_text("expects a < b and c > d") == "expects a < b and c > d"
+
+
+def test_derive_run_outcome_matrix():
+    # Run-level terminal status is distinct from the §3.3 QC status (§18.2).
+    assert derive_run_outcome(ok_sheets=0, error_count=0, qc_status="NOT_REQUESTED") == "FAILED"
+    assert derive_run_outcome(ok_sheets=3, error_count=0, qc_status="NOT_REQUESTED") == "COMPLETE"
+    assert derive_run_outcome(ok_sheets=3, error_count=1, qc_status="NOT_REQUESTED") == "PARTIAL"
+    assert derive_run_outcome(ok_sheets=3, error_count=0, qc_status="PARTIAL") == "PARTIAL"
+    assert derive_run_outcome(ok_sheets=3, error_count=0, qc_status="FAILED") == "PARTIAL"
+    assert (
+        derive_run_outcome(
+            ok_sheets=3, error_count=0, qc_status="COMPLETE", coverage_status="INCOMPLETE"
+        )
+        == "PARTIAL"
+    )
+    assert derive_run_outcome(ok_sheets=3, error_count=0, qc_status="COMPLETE") == "COMPLETE"
+
+
+def test_render_counts_empty_error_free_digest_as_failed():
+    # SheetDigest.ok = error-free AND non-empty: an empty, error-free digest is
+    # a failure in every accounting surface, not a phantom "ok" row.
+    from types import SimpleNamespace
+
+    ref = SimpleNamespace(display_label="M-101.pdf (page 1/1)", key=("SRC-0001", 0))
+    ctx = _MiniCtx()
+    ctx.sheets = [
+        SimpleNamespace(ref=ref, ok=False, error=None, text="", cached=False,
+                        findings_note=""),
+    ]
+    text = render_run_log(ctx)
+    assert "1 sheet(s): 0 ok, 1 failed" in text
+    assert "(empty digest)" in text
+
+
+def test_render_section_failure_costs_one_section_not_the_log():
+    # A hostile duck-typed field degrades its own section; the log still
+    # renders end to end (the export's never-fatal charter).
+    ctx = _MiniCtx()
+    ctx.prose_accounting = {"items": object()}   # unformattable in the order tuple
+    ctx.usage_by_family = {"digest": {"calls": "three"}}
+    text = render_run_log(ctx)
+    assert "Drawing Analyzer — run log" in text
+    assert "Final status:" in text

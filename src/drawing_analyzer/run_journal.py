@@ -71,35 +71,42 @@ def new_run_id() -> str:
 # --------------------------------------------------------------------------- #
 
 # A file:// URL embeds a local path — the one URL form that must scrub.
-_FILE_URL_RE = re.compile(r"file://[^\s'\"<>]+")
+# Case-insensitive: RFC 3986 schemes are, and Windows tooling emits ``File://``.
+_FILE_URL_RE = re.compile(r"(?i)\bfile://[^\s'\"<>]+")
+
+# Any other scheme://… URL is *masked* while the path scrubbers run and then
+# restored verbatim, so a colon or slash inside a URL path (a MediaWiki
+# ``File:`` segment, an S3 drive-style key) can never be mangled into ``...``.
+_URL_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9+.\-]*://[^\s'\"<>]+")
 
 # A quoted absolute path (as OSError reprs render them: ``'/a/b c/f.pdf'``).
 # Handled first because inside quotes a space is unambiguously part of the
 # path, so spacey Windows directories scrub fully here.
 _QUOTED_PATH_RE = re.compile(r"(['\"])((?:[A-Za-z]:[\\/]|\\\\|/)[^'\"\r\n]{2,})\1")
 
-# Bare Windows absolute paths: a drive (C:\ or C:/) or a UNC root
-# (\\server\share), then separator-joined components. Group 1 = final
-# component. The lookbehind stops a scheme's last letter reading as a drive
-# (``https://…`` is not ``s:/…``). Components deliberately exclude spaces: in
-# running prose the end of a spacey path is ambiguous, and over-matching would
-# swallow the sentence.
+# Bare Windows absolute paths, group 1 = final component. Two roots:
+# - UNC ``\\server\share`` + separator + any components (server/share already
+#   prove it is a path);
+# - a drive ``C:`` + separator + AT LEAST ONE directory component, so prose
+#   like ``option A:/B`` or ``drive C:\ is full`` is not a match (a bare
+#   ``C:/x`` also isn't — with no directory there is no layout to leak).
+# The lookbehind stops a scheme's last letter reading as a drive. Components
+# deliberately exclude spaces: in running prose the end of a spacey path is
+# ambiguous, and over-matching would swallow the sentence (the known-roots
+# literal pass in sanitize_text handles the run's own spacey directories).
 _WIN_PATH_RE = re.compile(
-    r"(?:\\\\[^\\/:*?\"<>|\s]+\\[^\\/:*?\"<>|\s]+|(?<![A-Za-z0-9])[A-Za-z]:)[\\/]"
-    r"(?:[^\\/:*?\"<>|\r\n ]+[\\/])*"
+    r"(?:\\\\[^\\/:*?\"<>|\s]+\\[^\\/:*?\"<>|\s]+[\\/](?:[^\\/:*?\"<>|\r\n ]+[\\/])*"
+    r"|(?<![A-Za-z0-9])[A-Za-z]:[\\/](?:[^\\/:*?\"<>|\r\n ]+[\\/])+)"
     r"([^\\/:*?\"<>|\r\n ]*)"
 )
 
-# Bare POSIX absolute paths with at least one directory component. Two entry
-# alternatives: an ordinary boundary (start/space/quote — not a word char,
-# dot, slash, or colon), or a colon-label prefix (``instance=digest:/home/…``)
-# — but only a SINGLE slash after the colon, so URL authorities
-# (``https://host/a/b``) never match; a slash inside the URL path is preceded
-# by a word char and is likewise safe. Mid-token slashes (``r1c1/r2c2``,
-# relative ``a/b/c``) stay untouched.
-_POSIX_PATH_RE = re.compile(
-    r"(?:(?<![\w:./])|(?<=:))/(?!/)(?:[^/\s]+/)+([^/\s]*)"
-)
+# Bare POSIX absolute paths with at least one directory component. The
+# lookbehind keeps this away from mid-token slashes (``r1c1/r2c2``, relative
+# ``a/b/c``); ``(?!/)`` skips protocol-relative ``//host/…`` (kept verbatim —
+# indistinguishable from a URL; the known-roots pass covers slash-UNC inputs).
+# A colon *may* precede (``instance=digest:/home/…``): real URLs were masked
+# away above, so the colon-label form is unambiguous here.
+_POSIX_PATH_RE = re.compile(r"(?<![\w./])/(?!/)(?:[^/\s]+/)+([^/\s]*)")
 
 
 def _basename_of(path: str) -> str:
@@ -112,37 +119,93 @@ def scrub_paths(text: str) -> str:
     The basename is the useful, non-private part (it matches the display names
     the rest of the run.log uses); the directory structure is the user's
     private filesystem layout and stays out of portable artifacts (§18.2).
-    Relative paths and URLs pass through untouched. Best-effort by design —
-    the primary defense is that the pipeline emits display names and source
-    ids, never paths; this catches paths smuggled in exception strings.
+    Relative paths pass through; ``scheme://`` URLs are masked during the scrub
+    and restored byte-identical. Best-effort by design — the primary defense is
+    that the pipeline emits display names and source ids, never paths; this
+    (plus the known-roots pass in :func:`sanitize_text`) catches paths smuggled
+    in exception strings.
     """
     text = _FILE_URL_RE.sub(lambda m: "file://.../" + _basename_of(m.group(0)), text)
+    masked: list[str] = []
+
+    def _mask(m: "re.Match[str]") -> str:
+        masked.append(m.group(0))
+        return f"\x00U{len(masked) - 1}\x00"
+
+    text = _URL_RE.sub(_mask, text)
     text = _QUOTED_PATH_RE.sub(
         lambda m: m.group(1) + ".../" + _basename_of(m.group(2)) + m.group(1), text
     )
     text = _WIN_PATH_RE.sub(lambda m: ".../" + m.group(1), text)
-    return _POSIX_PATH_RE.sub(lambda m: ".../" + m.group(1), text)
+    text = _POSIX_PATH_RE.sub(lambda m: ".../" + m.group(1), text)
+    for i, url in enumerate(masked):
+        text = text.replace(f"\x00U{i}\x00", url)
+    return text
 
 
-def sanitize_text(value: Any, *, max_chars: int = MAX_FIELD_CHARS) -> str:
+# HTML-ish payloads (a 5xx error page in an exception string) are tag-stripped
+# like diagnostics._short does, but only when a tag signature is present — a
+# bare "a < b" comparison in ordinary text must survive.
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def sanitize_text(
+    value: Any,
+    *,
+    max_chars: int = MAX_FIELD_CHARS,
+    private_roots: "tuple[str, ...] | list[str]" = (),
+) -> str:
     """One journal-safe line: stringified, secret-redacted, path-scrubbed, bounded.
 
-    The storage boundary for everything the journal keeps (§18.3). Redaction
-    runs *before* truncation so a secret can never survive as a recognizable
-    prefix, and before path-scrubbing order matters not at all (neither pattern
-    can produce the other's input). Never raises — an unprintable object
-    becomes a placeholder rather than sinking the emitting stage.
+    The storage boundary for everything the journal keeps (§18.3), in order:
+    flatten to one line; strip HTML tags when a tag signature is present (an
+    HTML 5xx body must not flood the log); replace each ``private_roots``
+    literal with ``...`` (the run's *known* directories — input parents, work
+    dir, home — which handles spacey Windows paths the bare regexes cannot);
+    redact secrets (before truncation, so a secret can never survive as a
+    recognizable prefix); scrub remaining absolute paths; bound the length.
+    Never raises — an unprintable object becomes a placeholder rather than
+    sinking the emitting stage.
     """
     try:
         text = str(value)
     except Exception:  # noqa: BLE001 - journal writes must never raise
-        text = "<unprintable " + type(value).__name__ + ">"
+        text = "(unprintable " + type(value).__name__ + ")"
     text = " ".join(text.split())  # flatten newlines/runs: one event = one line
+    if "</" in text or "/>" in text or "<html" in text.lower():
+        text = " ".join(_HTML_TAG_RE.sub(" ", text).split())
+    for root in private_roots:
+        if root:
+            text = text.replace(root, "...")
     text = redact_secrets(text)
     text = scrub_paths(text)
     if len(text) > max_chars:
         text = text[:max_chars] + f"... [+{len(text) - max_chars} chars]"
     return text
+
+
+def derive_run_outcome(
+    *, ok_sheets: int, error_count: int, qc_status: str, coverage_status: str = ""
+) -> str:
+    """The run-level terminal COMPLETE/PARTIAL/FAILED status (§18.2).
+
+    Deliberately distinct from the §3.3 *QC* status: a standard run that
+    analyzed everything cleanly is COMPLETE even though its QC status is
+    NOT_REQUESTED (QC simply was not asked for), and a run whose QC failed but
+    whose digest shipped is PARTIAL (I-3: the standard deliverable survives).
+    FAILED means nothing was analyzed. One derivation, shared by the journal's
+    ``finish()`` caller and the run.log outcome line, so run.log and
+    run_manifest.json can never disagree about the same run.
+    """
+    if ok_sheets <= 0:
+        return "FAILED"
+    if (
+        error_count
+        or qc_status in ("PARTIAL", "FAILED")
+        or coverage_status == "INCOMPLETE"
+    ):
+        return "PARTIAL"
+    return "COMPLETE"
 
 
 def _utc_now() -> datetime:
@@ -183,7 +246,7 @@ def collect_environment(**extra: Any) -> dict[str, str]:
         env["build"] = build
     for key, value in extra.items():
         env[str(key)] = str(value)
-    return {k: sanitize_text(v) for k, v in env.items()}
+    return env   # plain strings; RunJournal.set_environment owns sanitization
 
 
 # --------------------------------------------------------------------------- #
@@ -259,15 +322,41 @@ class RunJournal:
         self.started_at: datetime = self._clock()
         self.ended_at: "datetime | None" = None
         self.final_status: str = ""
+        # Known private directory literals (input parents, work dir, home) —
+        # replaced with "..." by the sanitize boundary. In-memory only: never
+        # rendered, never serialized (to_dict/render_text exclude them).
+        self.private_roots: tuple[str, ...] = ()
 
     # -- writing ------------------------------------------------------------ #
 
+    def add_private_roots(self, roots: "list | tuple") -> None:
+        """Register directory prefixes to strip from every future field value.
+
+        Longest-first so a nested root cannot leave a parent's tail behind;
+        both native and forward-slash spellings are registered (exception text
+        mixes them on Windows). This literal pass is what makes spacey
+        directories (``C:\\Users\\John Smith\\…``) scrub reliably — the bare
+        regexes cannot know where a spacey path ends (§18.3).
+        """
+        try:
+            expanded = set(self.private_roots)
+            for root in roots:
+                raw = str(root).rstrip("\\/")
+                if len(raw) > 1:
+                    expanded.add(raw)
+                    expanded.add(raw.replace("\\", "/"))
+            self.private_roots = tuple(sorted(expanded, key=len, reverse=True))
+        except Exception:  # noqa: BLE001 - advisory, never fatal
+            pass
+
+    def _sanitize(self, value: Any, *, max_chars: int = MAX_FIELD_CHARS) -> str:
+        return sanitize_text(value, max_chars=max_chars, private_roots=self.private_roots)
+
     def set_environment(self, mapping: dict) -> None:
-        """Record the run's environment block (sanitized; header-rendered)."""
+        """Record the run's environment block (values sanitized; header-rendered)."""
         try:
             self.environment = {
-                sanitize_text(k, max_chars=80): sanitize_text(v)
-                for k, v in dict(mapping).items()
+                str(k)[:80]: self._sanitize(v) for k, v in dict(mapping).items()
             }
         except Exception:  # noqa: BLE001 - advisory, never fatal
             pass
@@ -282,15 +371,14 @@ class RunJournal:
     ) -> "RunEvent | None":
         """Append one event; returns it (or ``None`` if journaling failed).
 
-        Every field value passes :func:`sanitize_text` *now*, so nothing
-        secret- or path-bearing is ever stored (§18.3). Never raises: the
-        journal is advisory and a logging failure must not fail the run.
+        Every field VALUE passes the sanitize boundary *now*, so nothing
+        secret- or path-bearing is ever stored (§18.3). Field keys are code-
+        owned ``**kwargs`` identifiers, not data — bounded, never sanitized.
+        Never raises: the journal is advisory and a logging failure must not
+        fail the run.
         """
         try:
-            event_fields = {
-                sanitize_text(k, max_chars=80): sanitize_text(v)
-                for k, v in fields.items()
-            }
+            event_fields = {str(k)[:80]: self._sanitize(v) for k, v in fields.items()}
             lvl = str(level).upper()
             if lvl not in EVENT_LEVELS:
                 lvl = "INFO"
@@ -299,8 +387,8 @@ class RunJournal:
                     sequence=self._next_sequence,
                     timestamp=_iso(self._clock()),
                     level=lvl,
-                    stage=sanitize_text(stage, max_chars=40) or "run",
-                    event_code=sanitize_text(event_code, max_chars=60) or "EVENT",
+                    stage=str(stage)[:40] or "run",
+                    event_code=str(event_code)[:60] or "EVENT",
                     fields=event_fields,
                 )
                 self._next_sequence += 1
@@ -310,10 +398,16 @@ class RunJournal:
             return None
 
     def finish(self, status: str) -> None:
-        """Stamp the run's end time and final status (idempotent; last wins)."""
+        """Stamp the run's end time and terminal run outcome (last call wins).
+
+        ``status`` is the RUN-level COMPLETE/PARTIAL/FAILED outcome from
+        :func:`derive_run_outcome` — not the §3.3 QC status, which is
+        NOT_REQUESTED for every standard run and would make completed runs
+        indistinguishable from anything else in ``run_manifest.json``.
+        """
         try:
             self.ended_at = self._clock()
-            self.final_status = sanitize_text(status, max_chars=60)
+            self.final_status = str(status)[:60]
         except Exception:  # noqa: BLE001
             pass
 
@@ -322,9 +416,6 @@ class RunJournal:
     @property
     def event_count(self) -> int:
         return len(self.events)
-
-    def events_for(self, event_code: str) -> list[RunEvent]:
-        return [e for e in self.events if e.event_code == event_code]
 
     def stage_durations(self) -> dict[str, float]:
         """Seconds between each stage's STAGE_START and STAGE_END events.
@@ -382,29 +473,63 @@ _RULE = "-" * 78
 _HEAVY_RULE = "=" * 78
 
 
-def _outcome_line(ctx: Any) -> str:
-    """The header's one-line run outcome — same three-state logic as the GUI.
+def _int(value: Any, default: int = 0) -> int:
+    """Defensive int coercion — a duck-typed context field must never raise
+    out of the renderer (the export's never-fatal charter, I-3 spirit)."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
-    Mirrors ``gui._on_done`` (§3.3: the dialog, run.log, and report header must
-    show the same state), with one addition: a run that analyzed nothing is
-    FAILED outright, so an all-inputs-rejected journal is honest (§18.1).
+
+def _ok_sheets(ctx: Any) -> int:
+    """ok-sheet count, falling back to ``sheet_count`` for duck-typed contexts
+    that don't derive the ok property (assume analyzed unless told otherwise)."""
+    value = getattr(ctx, "ok_sheet_count", None)
+    if value is None:
+        value = getattr(ctx, "sheet_count", 0)
+    return _int(value or 0)
+
+
+def context_run_outcome(ctx: Any) -> str:
+    """:func:`derive_run_outcome` over a (duck-typed) context's fields."""
+    return derive_run_outcome(
+        ok_sheets=_ok_sheets(ctx),
+        error_count=len(list(getattr(ctx, "errors", None) or [])),
+        qc_status=str(getattr(ctx, "qc_status", "NOT_REQUESTED") or "NOT_REQUESTED"),
+        coverage_status=str(getattr(ctx, "coverage_status", "") or ""),
+    )
+
+
+def _outcome_line(ctx: Any) -> str:
+    """The header's one-line outcome: run-level status + the GUI's §3.3 label.
+
+    Leads with :func:`derive_run_outcome` (the same value ``finish()`` stored,
+    so run.log and run_manifest.json agree) and takes the label wording from
+    ``ctx.qc_status_label`` — the shared property the GUI/report/manifest use —
+    folding ``markup_incomplete`` exactly like ``gui._on_done``.
     """
     if ctx is None:
         return "(no context attached — journal-only rendering)"
     qc_status = str(getattr(ctx, "qc_status", "NOT_REQUESTED") or "NOT_REQUESTED")
-    sheet_count = int(getattr(ctx, "sheet_count", 0) or 0)
-    errors = list(getattr(ctx, "errors", None) or [])
-    if sheet_count == 0:
+    outcome = context_run_outcome(ctx)
+    if _ok_sheets(ctx) <= 0:
         return "FAILED — no sheets were analyzed (see Errors below)"
     if getattr(ctx, "markup_incomplete", False) or qc_status == "FAILED":
-        return f"{qc_status} — QC incomplete"
-    if qc_status == "PARTIAL":
-        return "PARTIAL — completed with QC warnings"
-    if qc_status == "COMPLETE":
-        return "COMPLETE — exhaustive QC complete"
-    if errors:
-        return "COMPLETE — standard analysis completed with warnings (no QC requested)"
-    return "COMPLETE — standard analysis (no QC requested)"
+        return f"{outcome} — QC incomplete"
+    # The label wording comes from the shared DrawingContext.qc_status_label
+    # property (the §3.3 vocabulary the GUI/report/manifest all use); the map
+    # below is only the fallback for duck-typed contexts without the property,
+    # and deliberately repeats that property's exact strings.
+    label = str(getattr(ctx, "qc_status_label", "") or "") or {
+        "PARTIAL": "Completed with QC warnings",
+        "COMPLETE": "Exhaustive QC complete",
+    }.get(qc_status, qc_status)
+    if qc_status in ("PARTIAL", "COMPLETE"):
+        return f"{outcome} — {label}"
+    if list(getattr(ctx, "errors", None) or []):
+        return f"{outcome} — standard analysis completed with warnings (no QC requested)"
+    return f"{outcome} — standard analysis (no QC requested)"
 
 
 def _fmt_cost(value: Any) -> str:
@@ -512,7 +637,15 @@ def _sheet_lines(ctx: Any) -> list[str]:
         ref = getattr(s, "ref", None)
         label = sanitize_text(getattr(ref, "display_label", "") or "sheet", max_chars=80)
         error = getattr(s, "error", None)
-        status = "FAILED" if error else ("ok/cache" if getattr(s, "cached", False) else "ok/fresh")
+        # Classified by ``ok`` (error-free AND non-empty), matching the header
+        # sums above — an empty error-free digest is a failure, not "ok" (its
+        # row would otherwise contradict the summary line).
+        if getattr(s, "ok", False):
+            status = "ok/cache" if getattr(s, "cached", False) else "ok/fresh"
+        else:
+            status = "FAILED"
+            if not error:
+                error = "(empty digest)"
         bits = [f"digest {len(getattr(s, 'text', '') or ''):,} chars"]
         g = geoms.get(getattr(ref, "key", None))
         if g is not None:
@@ -560,15 +693,15 @@ def _usage_lines(ctx: Any) -> list[str]:
     ]
     for family, row in by_family.items():
         lines.append(
-            f"  {family:<12}{int(row.get('calls', 0)):<8}{int(row.get('cache_hits', 0)):<12}"
-            f"{int(row.get('input_tokens', 0)):<12,}{int(row.get('output_tokens', 0)):<12,}"
+            f"  {family:<12}{_int(row.get('calls', 0)):<8}{_int(row.get('cache_hits', 0)):<12}"
+            f"{_int(row.get('input_tokens', 0)):<12,}{_int(row.get('output_tokens', 0)):<12,}"
             f"{_fmt_cost(row.get('estimated_cost'))}"
         )
     if not by_family:
         lines.append("  (no API usage was recorded)")
     lines.append(
-        f"  TOTAL: input {int(getattr(ctx, 'total_input_tokens', 0) or 0):,} tok · "
-        f"output {int(getattr(ctx, 'total_output_tokens', 0) or 0):,} tok · "
+        f"  TOTAL: input {_int(getattr(ctx, 'total_input_tokens', 0) or 0):,} tok · "
+        f"output {_int(getattr(ctx, 'total_output_tokens', 0) or 0):,} tok · "
         f"est. cost {_fmt_cost(getattr(ctx, 'total_estimated_cost', None))}"
     )
     lines.append(
@@ -578,23 +711,29 @@ def _usage_lines(ctx: Any) -> list[str]:
     return lines
 
 
-def _receipt_counts(markup_run: Any) -> dict[str, int]:
-    counts = {"WRITTEN": 0, "INDEXED": 0, "FAILED": 0}
-    for r in getattr(markup_run, "receipts", None) or []:
-        status = str(getattr(r, "status", "") or "")
-        if status in counts:
-            counts[status] += 1
-    return counts
+def evidence_summary(findings: "list[Any]") -> dict:
+    """How many verifier crops were saved, over how many findings (DA-016).
+
+    The one shared counter behind run.log's evidence line and
+    ``run_manifest.json``'s evidence block (export.py imports it), so the two
+    artifacts in one export can never disagree about the crop count.
+    """
+    artifacts = 0
+    with_evidence = 0
+    for f in findings:
+        n = len(getattr(getattr(f, "verification", None), "evidence", None) or [])
+        artifacts += n
+        with_evidence += 1 if n else 0
+    return {"artifact_count": artifacts, "findings_with_evidence": with_evidence}
 
 
 def _ledger_lines(ctx: Any) -> list[str]:
+    from .models import receipt_status_counts
+
     findings = list(getattr(ctx, "findings", None) or [])
     reference = list(getattr(ctx, "reference_findings", None) or [])
     total = len(findings) + len(reference)
-    evidence = sum(
-        len(getattr(getattr(f, "verification", None), "evidence", None) or [])
-        for f in findings + reference
-    )
+    evidence = evidence_summary(findings + reference)["artifact_count"]
     lines = [
         f"  findings: {total} ledger entr{'y' if total == 1 else 'ies'} "
         f"({len(findings)} model/prose, {len(reference)} deterministic) · "
@@ -610,7 +749,7 @@ def _ledger_lines(ctx: Any) -> list[str]:
     markup_run = getattr(ctx, "markup_run", None)
     if markup_run is not None:
         expected = len(getattr(markup_run, "placements", None) or [])
-        receipts = _receipt_counts(markup_run)
+        receipts = receipt_status_counts(getattr(markup_run, "receipts", None))
         terminal = sum(receipts.values())
         lines.append(
             f"  markup placements: {expected} expected · {terminal} receipt(s) "
@@ -639,7 +778,7 @@ def _prose_lines(ctx: Any) -> list[str]:
         "items", "matched", "structured", "degraded",
         "set_level", "excluded_focus", "skipped", "missing",
     )
-    parts = [f"{k.replace('_', ' ')} {int(acc[k])}" for k in order if k in acc]
+    parts = [f"{k.replace('_', ' ')} {_int(acc[k])}" for k in order if k in acc]
     extra = [k for k in acc if k not in order and k != "complete"]
     parts += [f"{k} {acc[k]}" for k in sorted(extra)]
     line = "  " + " · ".join(parts)
@@ -686,17 +825,27 @@ def render_run_log(
         lines.append("Environment: " + pairs[0])
         lines.extend(f"             {p}" for p in pairs[1:])
 
-    def section(title: str, body: list[str]) -> None:
+    def section(title: str, *builders: Any) -> None:
+        # Each section renders independently and never sinks the log: run.log
+        # is an advisory artifact, so a hostile/duck-typed context field costs
+        # one section, not the export (I-3 spirit; the §18.4 guarantee is that
+        # every export CARRIES the log).
+        body: list[str] = []
+        for build in builders:
+            try:
+                body.extend(build(ctx))
+            except Exception as exc:  # noqa: BLE001 - render must stay total
+                body.append(f"  (section failed to render: {type(exc).__name__})")
         if body:
             lines.extend(["", title, _RULE, *body])
 
-    section("Inputs", _input_lines(ctx))
-    section("Configuration", _config_lines(ctx) + _profile_lines(ctx))
-    section("Sheets", _sheet_lines(ctx))
-    section("Stages", _stage_lines(ctx, journal))
-    section("Usage & estimated cost", _usage_lines(ctx))
-    section("Findings, ledger & markup coverage", _ledger_lines(ctx))
-    section("Prose carry-through (§14.9)", _prose_lines(ctx))
+    section("Inputs", _input_lines)
+    section("Configuration", _config_lines, _profile_lines)
+    section("Sheets", _sheet_lines)
+    section("Stages", lambda c: _stage_lines(c, journal))
+    section("Usage & estimated cost", _usage_lines)
+    section("Findings, ledger & markup coverage", _ledger_lines)
+    section("Prose carry-through (§14.9)", _prose_lines)
 
     if outputs is not None:
         body = [f"  {name}" for name in outputs]
@@ -705,18 +854,22 @@ def render_run_log(
             "  run_manifest.json — written after this log (it hashes every artifact"
             " above, run.log included, and excludes only itself; §18.4)"
         )
-        section("Outputs", body)
+        section("Outputs", lambda c: body)
 
-    errors = [sanitize_text(e, max_chars=240) for e in (getattr(ctx, "errors", None) or [])]
+    roots = tuple(getattr(journal, "private_roots", ()) or ())
+    errors = [
+        sanitize_text(e, max_chars=240, private_roots=roots)
+        for e in (getattr(ctx, "errors", None) or [])
+    ]
     section(
         f"Errors & warnings ({len(errors)})",
-        [f"  - {e}" for e in errors] or ["  (none)"],
+        lambda c: [f"  - {e}" for e in errors] or ["  (none)"],
     )
 
     if journal is not None and journal.events:
         section(
             f"Event trace ({journal.event_count} event(s))",
-            [f"  {e.line()}" for e in journal.events],
+            lambda c: [f"  {e.line()}" for e in journal.events],
         )
 
     lines.append("")

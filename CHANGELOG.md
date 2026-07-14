@@ -60,6 +60,66 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `omitted_tile_count` (`None` = not recorded, e.g. a level-1 cache hit that
   never re-rendered — the run.log says so instead of claiming zero).
 
+### Fixed (Phase 26A review — multi-angle adversarial review + Codex P2)
+
+A 8-angle adversarial review of the Phase 26A diff (line-scan, removed-behavior,
+cross-file, reuse, simplification, efficiency, altitude, conventions) plus a
+Codex bot finding surfaced 17 issues, all fixed with regression tests:
+
+- **Export can no longer fail after the deliverable is written.** The new
+  `run.log`/`run_manifest.json` writers were unguarded on
+  `write_drawing_export`'s critical path — a duck-typed context field (a raw
+  `Decimal` from a third-party `to_dict`, a malformed `prose_accounting`)
+  raised *after* every ordinary artifact was on disk. Rendering/serialization
+  now degrades per section (run.log) or to an error-bearing stub manifest;
+  stray non-JSON values serialize through the sanitize boundary
+  (`json.dumps(default=…)` so a `Path` can't leak a directory); only real
+  file-write failures propagate.
+- **`omitted_tile_count` was dead on every cache-enabled run** (the GUI's
+  default): with a cache active, all geometry came from the no-render prescan,
+  so even freshly rendered misses reported nothing. A `_GeometryOmissionSink`
+  now merges the render-time blank-tile count onto the prescan record for
+  misses; true cache hits honestly stay "not recorded".
+- **Run-level terminal status (Codex P2).** `journal.finish()` stored the QC
+  status, so a clean standard run's manifest said `final_status:
+  "NOT_REQUESTED"` — indistinguishable from "didn't finish". A shared
+  `derive_run_outcome` (COMPLETE/PARTIAL/FAILED: nothing analyzed → FAILED;
+  digest shipped but errors/partial QC → PARTIAL) now feeds both `finish()`
+  and run.log's outcome line, and `RUN_END` carries `outcome=` alongside the
+  QC `status=`.
+- **Scrubber hardening (empirically reproduced cases):** URLs are masked
+  during the path scrub and restored byte-identical, so a `:`-before-slash
+  URL segment (`…/wiki/File:/x/y.png`) is never mangled; the Windows-drive
+  pattern now requires a directory component (`option A:/B`, `drive C:\ is
+  full` untouched); `file://` matching is case-insensitive; and the journal
+  gains **known private roots** (input parents, work dir, home — registered
+  by the pipeline) replaced literally before the regexes run, which is what
+  makes spacey Windows directories (`C:\Users\John Smith\…`) scrub reliably.
+  HTML 5xx bodies in exception strings are tag-stripped like the diagnostics
+  file does.
+- **Empty-but-error-free digests are now failures in every accounting
+  surface** (`SheetDigest.ok` semantics): `SHEET_DIGESTED` status, the digest
+  `STAGE_END` ok/failed counts, and run.log's per-sheet rows all agree with
+  the header sums (previously such a sheet was "OK" in the event but "failed"
+  in the summary).
+- **Single-source helpers replace drift-prone copies:** one
+  `models.receipt_status_counts` behind the journal event / run.log line /
+  manifest coverage block (was 3 hand-kept tallies); `_finish_stage()` records
+  a StageResult AND emits its journal event in one call (a stage can no longer
+  land in the roll-up but miss the trace); run.log's outcome line composes
+  from the shared `qc_status_label` (§3.3 vocabulary); `evidence_summary` is
+  shared by run.log + manifest; prose accounting keys are defined once at the
+  producer (`HarvestResult.accounting()`); `run_manifest.json`'s
+  `generated_at` uses the journal's UTC-Z timestamp dialect (was naive local
+  in the same document); critique usage labels derive from the stamped refs
+  (no path-list ordering precondition); reviewed PDFs are hashed once per
+  export (shared cache between the two manifests); run.log's Outputs section
+  derives from the folder itself (cannot drift from what the manifest
+  hashes); `_journal_environment` uses plain imports (a broken import can no
+  longer silently erase the whole version-identity block); dead
+  `events_for` removed; emit no longer runs the full sanitize pipeline on
+  code-owned field keys.
+
 ### Changed (Phase 26A)
 
 - **Usage `stage_instance` labels are now portable (§10.4).** The per-sheet

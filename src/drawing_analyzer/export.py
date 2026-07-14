@@ -41,7 +41,8 @@ from pathlib import Path
 from typing import Any
 
 from .html_report import build_html_report
-from .run_journal import render_run_log, sanitize_text
+from .models import receipt_status_counts
+from .run_journal import _iso, evidence_summary, render_run_log, sanitize_text
 
 _SLUG_RE = re.compile(r"[^A-Za-z0-9]+")
 
@@ -345,17 +346,48 @@ def build_export_documents(
 # ---------------------------------------------------------------------------
 
 
+def _folder_inventory(folder: Path) -> list[str]:
+    """Top-level artifact names as they exist on disk (dirs marked ``name/``).
+
+    run.log's Outputs section derives from the folder itself — a single source
+    of truth, so a writer that forgets to report a name cannot make run.log
+    under-describe what ``run_manifest.json`` hashes.
+    """
+    names: list[str] = []
+    for p in sorted(Path(folder).iterdir()):
+        names.append(p.name + "/" if p.is_dir() else p.name)
+    return names
+
+
 def write_run_log(ctx: Any, folder: Path, *, outputs: list[str] | None = None) -> str:
     """Write the sanitized per-run ``run.log`` into ``folder``; return its name.
 
     Rendered from the run journal the pipeline attached to the context
     (``ctx.run_journal``) plus the context's structured summaries; a context
     without a journal (an old caller, a hand-built test double) still gets a
-    log — identity/trace sections simply state they were not recorded. CRLF
-    on disk so Windows Notepad reads it cleanly (§19.6).
+    log — identity/trace sections simply state they were not recorded.
+    ``outputs`` defaults to the folder's actual contents. Rendering failures
+    degrade to a minimal log (an advisory artifact must never sink the export,
+    I-3 spirit); only a real file-write failure propagates. CRLF on disk so
+    Windows Notepad reads it cleanly (§19.6).
     """
-    text = render_run_log(ctx, outputs=list(outputs or []))
-    with open(Path(folder) / "run.log", "w", encoding="utf-8", newline="\r\n") as fp:
+    folder = Path(folder)
+    if outputs is None:
+        outputs = _folder_inventory(folder)
+    journal = getattr(ctx, "run_journal", None)
+    try:
+        if journal is not None and hasattr(journal, "render_text"):
+            text = journal.render_text(context=ctx, outputs=list(outputs))
+        else:
+            text = render_run_log(ctx, outputs=list(outputs))
+    except Exception as exc:  # noqa: BLE001 - rendering is advisory, never fatal
+        text = (
+            "Drawing Analyzer — run log\n\n"
+            "run.log could not be fully rendered: "
+            + sanitize_text(f"{type(exc).__name__}: {exc}", max_chars=300)
+            + "\n"
+        )
+    with open(folder / "run.log", "w", encoding="utf-8", newline="\r\n") as fp:
         fp.write(text)
     return "run.log"
 
@@ -397,11 +429,7 @@ def _source_entries(ctx: Any) -> list[dict]:
 def _receipt_summary(ctx: Any) -> dict:
     """Receipt-derived markup coverage (§13.5) in compact machine form."""
     run = getattr(ctx, "markup_run", None)
-    counts = {"WRITTEN": 0, "INDEXED": 0, "FAILED": 0}
-    for r in getattr(run, "receipts", None) or []:
-        status = str(getattr(r, "status", "") or "")
-        if status in counts:
-            counts[status] += 1
+    counts = receipt_status_counts(getattr(run, "receipts", None))
     return {
         "coverage_status": str(
             getattr(ctx, "coverage_status", "NOT_REQUESTED") or "NOT_REQUESTED"
@@ -419,18 +447,7 @@ def _receipt_summary(ctx: Any) -> dict:
     }
 
 
-def _evidence_summary(findings: list[Any]) -> dict:
-    """How many verifier crops were saved, over how many findings (DA-016)."""
-    artifacts = 0
-    with_evidence = 0
-    for f in findings:
-        n = len(getattr(getattr(f, "verification", None), "evidence", None) or [])
-        artifacts += n
-        with_evidence += 1 if n else 0
-    return {"artifact_count": artifacts, "findings_with_evidence": with_evidence}
-
-
-def _sanitize_json(value: Any) -> Any:
+def _sanitize_json(value: Any, roots: "tuple[str, ...]" = ()) -> Any:
     """Recursively pass every string through the journal sanitize boundary.
 
     Defense in depth for manifest blocks assembled from free-form record
@@ -439,16 +456,20 @@ def _sanitize_json(value: Any) -> Any:
     ``run_manifest.json`` un-scrubbed (§18.3/§18.4).
     """
     if isinstance(value, str):
-        return sanitize_text(value)
+        return sanitize_text(value, private_roots=roots)
     if isinstance(value, dict):
-        return {k: _sanitize_json(v) for k, v in value.items()}
+        return {k: _sanitize_json(v, roots) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
-        return [_sanitize_json(v) for v in value]
+        return [_sanitize_json(v, roots) for v in value]
     return value
 
 
 def build_run_manifest(
-    ctx: Any, *, folder: Path | None = None, now: datetime | None = None
+    ctx: Any,
+    *,
+    folder: Path | None = None,
+    now: datetime | None = None,
+    hash_cache: "dict[str, str] | None" = None,
 ) -> dict:
     """The machine-readable run manifest (§18.4) — ``run.log``'s counterpart.
 
@@ -463,6 +484,7 @@ def build_run_manifest(
     already on disk and are hashed like any other artifact).
     """
     journal = getattr(ctx, "run_journal", None)
+    roots = tuple(getattr(journal, "private_roots", ()) or ())
     findings = list(getattr(ctx, "findings", None) or [])
     reference = list(getattr(ctx, "reference_findings", None) or [])
     usage = getattr(ctx, "run_usage", None)
@@ -476,7 +498,10 @@ def build_run_manifest(
     manifest: dict = {
         "schema_version": RUN_MANIFEST_SCHEMA_VERSION,
         "kind": "drawing_analyzer_run_manifest",
-        "generated_at": (now or datetime.now()).isoformat(timespec="seconds"),
+        # UTC millisecond ISO ("…Z") — the SAME dialect as the embedded
+        # journal's started_at/ended_at, so one document never mixes naive
+        # local and UTC timestamps. A naive `now` is treated as local time.
+        "generated_at": _iso((now or datetime.now()).astimezone()),
         "run": (
             journal.to_dict()
             if journal is not None and hasattr(journal, "to_dict")
@@ -501,11 +526,11 @@ def build_run_manifest(
             for s in (getattr(ctx, "profile_snapshots", None) or [])
         ],
         "stages": [
-            _sanitize_json(_stage_dict(sr))
+            _sanitize_json(_stage_dict(sr), roots)
             for sr in (getattr(ctx, "stage_results", None) or [])
         ],
         "usage": (
-            _sanitize_json(usage.to_dict())
+            _sanitize_json(usage.to_dict(), roots)
             if usage is not None and hasattr(usage, "to_dict")
             else None
         ),
@@ -516,10 +541,10 @@ def build_run_manifest(
             "total": len(findings) + len(reference),
         },
         "prose_accounting": dict(getattr(ctx, "prose_accounting", None) or {}),
-        "evidence": _evidence_summary(findings + reference),
+        "evidence": evidence_summary(findings + reference),
         "markup_coverage": _receipt_summary(ctx),
         "errors": [
-            sanitize_text(e, max_chars=240)
+            sanitize_text(e, max_chars=240, private_roots=roots)
             for e in (getattr(ctx, "errors", None) or [])
         ],
         "artifacts": [],
@@ -534,7 +559,7 @@ def build_run_manifest(
                 continue     # §18.4: the manifest excludes only itself
             try:
                 manifest["artifacts"].append(
-                    {"path": rel, "sha256": _sha256(p), "bytes": p.stat().st_size}
+                    {"path": rel, "sha256": _sha256(p, hash_cache), "bytes": p.stat().st_size}
                 )
             except OSError as exc:
                 manifest["artifacts"].append(
@@ -544,13 +569,42 @@ def build_run_manifest(
 
 
 def write_run_manifest(
-    ctx: Any, folder: Path, *, now: datetime | None = None
+    ctx: Any,
+    folder: Path,
+    *,
+    now: datetime | None = None,
+    hash_cache: "dict[str, str] | None" = None,
 ) -> str:
-    """Write ``run_manifest.json`` into ``folder`` (last, per §18.4); return its name."""
-    manifest = build_run_manifest(ctx, folder=Path(folder), now=now)
-    (Path(folder) / "run_manifest.json").write_text(
-        json.dumps(manifest, indent=2), encoding="utf-8"
-    )
+    """Write ``run_manifest.json`` into ``folder`` (last, per §18.4); return its name.
+
+    Building/serializing degrades to an error-bearing stub manifest rather than
+    sinking the export (a duck-typed context field must not fail
+    ``write_drawing_export`` after every deliverable is on disk); a stray
+    non-JSON value from a third-party ``to_dict`` is serialized through the
+    sanitize boundary (so a ``Path`` cannot leak a directory). Only a real
+    file-write failure propagates.
+    """
+    roots = tuple(getattr(getattr(ctx, "run_journal", None), "private_roots", ()) or ())
+
+    def _default(value: Any) -> str:
+        return sanitize_text(value, private_roots=roots)
+
+    try:
+        manifest = build_run_manifest(
+            ctx, folder=Path(folder), now=now, hash_cache=hash_cache
+        )
+        payload = json.dumps(manifest, indent=2, default=_default)
+    except Exception as exc:  # noqa: BLE001 - advisory artifact, never fatal
+        payload = json.dumps(
+            {
+                "schema_version": RUN_MANIFEST_SCHEMA_VERSION,
+                "kind": "drawing_analyzer_run_manifest",
+                "error": "run_manifest could not be fully built: "
+                + sanitize_text(f"{type(exc).__name__}: {exc}", max_chars=240),
+            },
+            indent=2,
+        )
+    (Path(folder) / "run_manifest.json").write_text(payload, encoding="utf-8")
     return "run_manifest.json"
 
 
@@ -717,12 +771,24 @@ def _sheet_text_name(ref: Any, used: set[str]) -> str:
     return name
 
 
-def _sha256(path: Path) -> str:
+def _sha256(path: Path, cache: "dict[str, str] | None" = None) -> str:
+    """sha256 of ``path``; ``cache`` (keyed by str(path)) skips a re-read.
+
+    One export hashes reviewed PDFs twice — ``markup_manifest.json`` first,
+    then the whole-folder ``run_manifest.json`` walk — and they are the
+    export's largest files, so the second pass reuses the first's digests.
+    """
+    key = str(path)
+    if cache is not None and key in cache:
+        return cache[key]
     h = hashlib.sha256()
     with open(path, "rb") as fp:
         for chunk in iter(lambda: fp.read(65536), b""):
             h.update(chunk)
-    return h.hexdigest()
+    digest = h.hexdigest()
+    if cache is not None:
+        cache[key] = digest
+    return digest
 
 
 def has_markup_manifest(ctx: Any) -> bool:
@@ -732,7 +798,12 @@ def has_markup_manifest(ctx: Any) -> bool:
     )
 
 
-def build_markup_manifest(ctx: Any, *, folder: Path | None = None) -> dict:
+def build_markup_manifest(
+    ctx: Any,
+    *,
+    folder: Path | None = None,
+    hash_cache: "dict[str, str] | None" = None,
+) -> dict:
     """The machine-readable markup-coverage manifest (§13.7).
 
     Carries the run's coverage status, the receipt-derived tally, every planned
@@ -771,12 +842,18 @@ def build_markup_manifest(ctx: Any, *, folder: Path | None = None) -> dict:
             out = Path(folder) / name
             if out.exists():
                 manifest["outputs"].append(
-                    {"name": name, "sha256": _sha256(out), "bytes": out.stat().st_size}
+                    {
+                        "name": name,
+                        "sha256": _sha256(out, hash_cache),
+                        "bytes": out.stat().st_size,
+                    }
                 )
     return manifest
 
 
-def write_qc_outputs(ctx: Any, folder: Path) -> list[str]:
+def write_qc_outputs(
+    ctx: Any, folder: Path, *, hash_cache: "dict[str, str] | None" = None
+) -> list[str]:
     """Write the QC inventory into ``folder``; return the relative names written.
 
     Idempotent and defensive: a missing reviewed PDF / evidence file is skipped
@@ -839,7 +916,10 @@ def write_qc_outputs(ctx: Any, folder: Path) -> list[str]:
     # run happened (a reference-audit-only run has no placements to account).
     if has_markup_manifest(ctx):
         (folder / "markup_manifest.json").write_text(
-            json.dumps(build_markup_manifest(ctx, folder=folder), indent=2),
+            json.dumps(
+                build_markup_manifest(ctx, folder=folder, hash_cache=hash_cache),
+                indent=2,
+            ),
             encoding="utf-8",
         )
         written.append("markup_manifest.json")
@@ -868,23 +948,27 @@ def write_drawing_export(
     now = now or datetime.now()
     folder = _unique_dir(Path(parent_dir) / export_folder_name(source_names, now=now))
     folder.mkdir(parents=True, exist_ok=False)
-    written: list[str] = []
+    # One sha256 per artifact per export: markup_manifest.json hashes the
+    # reviewed PDFs first, run_manifest.json's whole-folder walk reuses them.
+    hash_cache: dict[str, str] = {}
     for name, content in build_export_documents(
         ctx, source_names=source_names, now=now, api_key=api_key,
         embed_api_key=embed_api_key, include_chat=include_chat,
     ):
         (folder / name).write_text(content, encoding="utf-8")
-        written.append(name)
     # QC review inventory (findings.json/csv, sheet_text/, reviewed PDFs,
     # evidence/, markup_manifest.json) — only written when the run ran a QC stage.
-    written += write_qc_outputs(ctx, folder)
+    write_qc_outputs(ctx, folder, hash_cache=hash_cache)
     # Phase 26A finalization order (§18.4): every ordinary artifact and the
-    # markup manifest are on disk → finalize run.log (it lists them) → write
-    # run_manifest.json last (it hashes them all, run.log included, excluding
-    # only itself). Every export gets both, QC or not (§18.1).
+    # markup manifest are on disk → finalize run.log (it lists what is actually
+    # there) → write run_manifest.json last (it hashes them all, run.log
+    # included, excluding only itself). Every export gets both, QC or not
+    # (§18.1). The Outputs list derives from the folder itself, so it cannot
+    # drift from what the manifest hashes.
+    outputs = _folder_inventory(folder)
     journal = getattr(ctx, "run_journal", None)
     if journal is not None and hasattr(journal, "emit"):
-        journal.emit("EXPORT_WRITTEN", stage="export", files=len(written))
-    write_run_log(ctx, folder, outputs=written)
-    write_run_manifest(ctx, folder, now=now)
+        journal.emit("EXPORT_WRITTEN", stage="export", files=len(outputs))
+    write_run_log(ctx, folder, outputs=outputs)
+    write_run_manifest(ctx, folder, now=now, hash_cache=hash_cache)
     return folder

@@ -794,7 +794,11 @@ def test_every_run_carries_a_journal_and_inventory(tmp_path):
     assert "SHEET_DIGESTED" in codes
     assert codes[-1] == "RUN_END"
     assert journal.ended_at is not None
-    assert journal.final_status == "NOT_REQUESTED"    # no QC requested
+    # final_status is the RUN-level terminal outcome — a clean standard run is
+    # COMPLETE even though its QC status is NOT_REQUESTED, so a manifest
+    # consumer can tell "completed, no QC" apart from anything else (§18.2).
+    assert journal.final_status == "COMPLETE"
+    assert ctx.qc_status == "NOT_REQUESTED"
     # Sequences are contiguous even with the digest worker pool involved.
     assert [e.sequence for e in journal.events] == list(range(1, len(codes) + 1))
     # The classified inventory rides the context (manifest source of truth).
@@ -895,3 +899,34 @@ def test_exhaustive_run_journal_receipts_and_exported_run_log(tmp_path):
     assert "M-101_reviewed.pdf" in paths
     assert any(p.startswith("evidence/") for p in paths)
     assert "run.log" in paths and "run_manifest.json" not in paths
+
+
+def test_geometry_omission_sink_merges_render_facts_into_prescan(tmp_path):
+    # On a cache-enabled run the prescan captures geometry without rasterizing
+    # (omitted_tile_count unknown); a freshly-rendered MISS must still merge
+    # its blank-tile count onto the prescan record — the I-1 disclosure §18.2
+    # promises for every sheet rendered THIS run — while never growing the
+    # list and leaving true cache hits honestly None.
+    from types import SimpleNamespace
+
+    from drawing_analyzer.models import SheetGeometry, SheetRef
+    from drawing_analyzer.pipeline import _GeometryOmissionSink
+
+    ref_a = SheetRef(pdf_path=tmp_path / "A.pdf", page_index=0, source_name="A.pdf",
+                     page_count=1, source_id="SRC-0001")
+    ref_b = SheetRef(pdf_path=tmp_path / "B.pdf", page_index=0, source_name="B.pdf",
+                     page_count=1, source_id="SRC-0002")
+    prescan = [
+        SheetGeometry(ref=ref_a, page_width_pt=612, page_height_pt=792, rows=2, cols=2),
+        SheetGeometry(ref=ref_b, page_width_pt=612, page_height_pt=792, rows=2, cols=2),
+    ]
+    assert prescan[0].omitted_tile_count is None
+
+    sink = _GeometryOmissionSink(prescan)
+    sink.append(
+        SheetGeometry(ref=ref_a, page_width_pt=612, page_height_pt=792,
+                      rows=2, cols=2, omitted_tile_count=3)
+    )
+    assert prescan[0].omitted_tile_count == 3       # miss: render fact merged
+    assert prescan[1].omitted_tile_count is None    # hit: honestly unknown
+    assert len(prescan) == 2                        # never grows the list
