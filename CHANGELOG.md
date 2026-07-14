@@ -6,6 +6,96 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (Phase 27 — end-to-end acceptance & release gate, DA-027)
+
+- **The §19.1 automated trust gauntlet.** One deterministic synthetic *oracle
+  set* (`tests/fixtures/gauntlet.py`) packs every product guarantee into a
+  single hermetic exhaustive run: two different PDFs sharing a basename, pages
+  at 0°/90°/180°/270° plus a reduced CropBox, vector/raster/hybrid pages, a
+  pre-existing reviewer annotation (DA-029), unrelated same-tile findings,
+  repeated source text disambiguated by tile hint, prose items that match /
+  structure / degrade (one structuring call forced to fail), a critique finding
+  reproduced across both reads plus a read-1 singleton, a deterministic
+  arithmetic mismatch (`TEXT_EXTRACTED` operands, §17.5), a stale-reference
+  auditor finding, a dual-leg cross-sheet conflict, a REJECTED finding, an
+  unanchored margin finding, a set-level synthesis conflict, two materially
+  different claims citing one code reference (DA-017), and a corrupt input.
+  The cold run asserts the fifteen §19.1 guarantees (source isolation through
+  byte-exact verifier evidence — every image the verifier saw equals a saved,
+  hashed artifact — to receipt-backed coverage, output agreement across
+  report/CSV/JSON/PDF/manifests/run.log, sacred prose, and
+  `COMPLETE`-only-when-everything-succeeded). The second run proves the warm
+  cache (zero digest/critique API calls, zero rasterization, findings rebound
+  to current source identity, stable QC numbering); the third mutates one
+  source and proves only it misses the cache and the new content reaches
+  analysis. Per-stage failure injection (bad model output for
+  synthesis/critique/cross-QC/citation; crashes for auditors/harvest/verify;
+  a markup writer failure) proves every required stage degrades to
+  PARTIAL/FAILED honestly — incomplete PDFs are renamed, tallies never claim
+  unwritten ink — while the standard digest ships (I-3). A dense-page run
+  proves callout overflow lands on the appended AI Review Notes page with
+  receipts, never over drawing content (§17.6).
+- **§19.2 large-set acceptance.** Synthetic-digest tests prove the 44-sheet
+  two-discipline map→reconcile topology finds a conflict absent from every
+  local shard, resolves both legs to distinct real sources, and bills every
+  shard + reconciliation call; the 84-sheet three-shard variant proves the
+  reduction never isolates a group; a failed shard holds the pass at
+  PARTIAL with its findings still usable.
+- **§19.3 live API canary** (`tests/test_live_api_canary.py`, `network`
+  marker — skipped without a real key, never in CI): live digest schema +
+  structured-findings parse, critique structured-output compliance across both
+  reads, the pinned `web_search` tool type + real tool-result parsing with
+  claim-complete assessments, the Files API upload→delete lifecycle (deleted
+  ids must be unretrievable), no-key-in-exports redaction, and an
+  environment-identity printout for the release record.
+- **Release-gate tooling.** `scripts/run_acceptance.py` (one-command §19.8
+  automated gates with a PASS/FAIL table), `scripts/scan_secrets.py`
+  (credential-shape scan over tracked files; wired into CI),
+  `scripts/check_licenses.py` (stdlib dependency-license/AGPL-notice audit),
+  and `scripts/benchmark_drawing_analyzer.py` (§19.7 scenario harness —
+  offline hermetic by default with mechanical gates: warm runs make zero
+  digest/critique calls and rasterize nothing, sources hash once per run,
+  usage totals reconcile; `--live` measures real tokens/cost descriptively).
+- **CI release gates (§19.8).** Two new pinned, least-privilege jobs:
+  `security-gates` (secret scan; ruff correctness-classes E9/F63/F7/F82 only —
+  no style churn; the license/AGPL audit; `pip-audit` with a documented dated
+  `--ignore-vuln` exception policy) and `build` (wheel/sdist under the new
+  committed `requirements-release.lock` constraints, `twine check`, clean-venv
+  install smoke proving packaged profiles + version metadata agreement).
+- **Acceptance documents.** `docs/WINDOWS_ACCEPTANCE.md` (§19.4 real-Windows
+  path/input/GUI matrix), `docs/PERFORMANCE_AND_COST_VALIDATION.md` (§19.7
+  scenarios, gates, medians-based tolerance, recording template), and
+  `docs/RELEASE_ACCEPTANCE_TEMPLATE.md` (the master §19.9 record: automated
+  gates, live canary, Windows, Bluebeam Revu / Acrobat / Chromium script
+  (§19.5), Excel/Notepad script (§19.6), deferral/waiver table, sign-off).
+- **Release metadata.** Version bumped to **1.0.0rc1** (release candidate; the
+  final tag requires the completed acceptance record); a new
+  `tests/test_release_metadata.py` pins `pyproject.toml` and
+  `drawing_analyzer.__version__` together, and the CI install smoke pins the
+  installed-distribution leg (what `run.log`'s `app=` reports).
+
+### Fixed (Phase 27 gauntlet regressions — §3.3/§4 status honesty)
+
+- **Incomplete critique reads now hold the critique stage at PARTIAL.** A
+  sheet whose two self-consistency reads did not both return parse-valid
+  output (or whose critique call raised) was logged and recorded in usage but
+  never surfaced into the stage status, so a run with a partial critique could
+  still roll up `COMPLETE — "Exhaustive QC complete"`. `_run_critique_stage`
+  now returns the degraded sheets and the stage scores PARTIAL with the
+  per-sheet reasons (§3.3: "incomplete critique reads → PARTIAL or FAILED,
+  never a valid skip"); the useful findings are kept and the run error names
+  the count. Caught by the gauntlet's failure-injection matrix.
+- **A cross-QC response with no parseable findings object is no longer a
+  clean empty.** Prose-only, malformed, or truncated structured output from
+  the whole-set call, a shard map call, or a reconcile call parsed as
+  "0 conflicts, COMPLETE" (§4 item 4 violation: a failed parser presented as
+  a clean empty result). Each call site now returns an explicit error —
+  holding the stage at PARTIAL and, on the sharded path, counting the shard
+  failed — while still salvaging any parseable numeric claims (additive,
+  I-3). Test fixtures that returned *bare unfenced* JSON for cross-QC calls
+  (never valid under the fenced contract, silently tolerated before) were
+  corrected to fenced blocks (§22).
+
 ### Added (Phase 26B — final exhaustive activation, export hardening & report completion, DA-010/025/026/031/033)
 
 - **The exhaustive completeness gate is OPEN (§18.0, DA-010).** A clean NORMAL

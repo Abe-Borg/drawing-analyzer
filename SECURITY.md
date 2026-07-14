@@ -1,8 +1,11 @@
 # Security & Privacy
 
 This document describes the security boundary of Drawing Analyzer's outputs and
-how it handles your Anthropic API key and project data. It reflects the behavior
-shipped in Phase 17A of the remediation plan.
+how it handles your Anthropic API key and project data. The boundary was
+established in Phase 17A of the remediation plan and is enforced per release by
+the Phase 27 gates: the headless-Chromium exploit suite, a repo secret scan
+(`scripts/scan_secrets.py`), a dependency vulnerability + license audit in CI,
+and the recorded acceptance checklist (`docs/RELEASE_ACCEPTANCE_TEMPLATE.md`).
 
 ## Threat model: all model output is untrusted
 
@@ -106,7 +109,11 @@ accordingly:
 - `sheet_text/` — each sheet's extracted text layer.
 - `evidence/` — the image crops the verifier saw for each finding.
 - `findings.json` / `findings.csv` — the structured findings.
-- `*_reviewed.pdf` — the marked-up drawings.
+- `*_reviewed.pdf` / `Drawing_Set_Review_Notes.pdf` — the marked-up drawings.
+- `run.log` / `run_manifest.json` / `markup_manifest.json` — the run record:
+  display filenames, configuration, stage statuses, usage, and artifact hashes.
+  Sanitized at emit time (keys redacted, absolute paths reduced to basenames)
+  but still descriptive of the project — treat like the rest of the export.
 
 The Ask-AI assistant sends the report context and your question to Anthropic.
 The verification, citation, and QC stages send their described crops and claims

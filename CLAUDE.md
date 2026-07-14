@@ -10,11 +10,17 @@ python -m pytest             # full suite — hermetic: no API key, no network
 python -m pytest tests/test_drawing_ledger.py                # one file
 python -m pytest tests/test_drawing_ledger.py::test_name     # one test
 drawing-analyzer             # launch the GUI   (or: python -m drawing_analyzer)
+python scripts/run_acceptance.py   # Phase 27 automated release gates (PASS/FAIL table)
 ```
 
-Python 3.11+. No linter/formatter is configured. The `network` pytest marker is
-reserved for tests that need real API access; everything that runs by default
-uses the fakes in `tests/fixtures/fake_anthropic.py`.
+Python 3.11+. No linter/formatter is configured (CI runs ruff **correctness
+classes only** — E9/F63/F7/F82). The `network` pytest marker is reserved for
+tests that need real API access (the Phase 27 live canary,
+`tests/test_live_api_canary.py`); everything that runs by default uses the
+fakes in `tests/fixtures/fake_anthropic.py`. The §19.1 trust-gauntlet oracle
+set + all-stage scripted client live in `tests/fixtures/gauntlet.py`; release
+docs (Windows/viewer/Excel manual scripts, benchmark record, §19.9 checklist)
+live in `docs/`; `requirements-release.lock` pins release builds.
 
 ## Architecture
 

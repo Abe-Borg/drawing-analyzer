@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "drawing-analyzer"
-version = "0.1.0"
+version = "1.0.0rc1"
 description = "Extract structured information from construction-drawing PDF sets using Claude vision."
 readme = "README.md"
 requires-python = ">=3.11"

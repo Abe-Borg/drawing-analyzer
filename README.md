@@ -1061,6 +1061,23 @@ appearance streams, the stale-reference suggestion, a zero-digest-API cached
 re-run, and the raster fallback) against fake clients, so the whole findings →
 verify → cloud chain is exercised without a key.
 
+The same file also carries the **Phase 27 trust gauntlet**: one deterministic
+synthetic *oracle set* (`tests/fixtures/gauntlet.py`) containing duplicate
+basenames, every page rotation plus a reduced CropBox, vector/raster/hybrid
+pages, a pre-existing reviewer annotation, unrelated same-tile findings,
+repeated text, prose stragglers with a forced structuring failure, a
+reproduced-vs-singleton critique pair, a deterministic arithmetic mismatch, a
+dual-leg cross-sheet conflict, a rejected finding, an unanchored finding, a
+set-level synthesis conflict, two claims sharing one code reference, and a
+corrupt input — driven cold (fifteen first-run guarantees, from wrong-source
+isolation to byte-exact verifier evidence), warm (zero digest/critique calls,
+zero rasterization, stable QC numbering), and mutated (only the changed source
+re-analyzed), plus per-stage failure injection proving the run degrades to
+PARTIAL/FAILED honestly while the standard digest survives. The §19.2
+large-set tests prove the >40-sheet map/reconcile topology (44 sheets, two
+shards) and the 84-sheet three-shard reduction find a conflict no single shard
+can see.
+
 ### Browser security tests
 
 The report's security boundary (see [SECURITY.md](SECURITY.md)) is proven
@@ -1086,10 +1103,47 @@ errors sit in the report body.
 
 `.github/workflows/ci.yml` runs the hermetic suite on Windows + Ubuntu across
 Python 3.11 and 3.12 (byte-compile, the PyMuPDF import-isolation check, then the
-full suite), plus the headless-Chromium report-security suite on Linux. Actions
-are pinned to immutable commit SHAs, permissions are read-only, and the workflow
-never uses `pull_request_target`. Making these checks *required* is a one-time
-branch-protection setting an owner/admin configures in repository settings.
+full suite), plus the headless-Chromium report-security suite on Linux, plus two
+release-gate jobs (Phase 27 §19.8): `security-gates` (repo secret scan,
+correctness-class static analysis, the dependency license/AGPL audit, and a
+pip-audit vulnerability scan with a documented dated-exception policy) and
+`build` (wheel/sdist build under the committed `requirements-release.lock`
+constraints, `twine check`, and a clean-venv install smoke test proving the
+packaged review profiles ship in the wheel and the installed version matches
+`drawing_analyzer.__version__`). Actions are pinned to immutable commit SHAs,
+permissions are read-only, and the workflow never uses `pull_request_target`.
+Making these checks *required* is a one-time branch-protection setting an
+owner/admin configures in repository settings.
+
+## Acceptance & release gate
+
+A release candidate is **not** done when the test suite is green — it is done
+when the recorded acceptance evidence says so (Phase 27, §19.9). The pieces:
+
+- **Automated gates, one command:** `python scripts/run_acceptance.py` runs
+  byte-compile, import isolation, the full hermetic suite (including the trust
+  gauntlet), the secret scan, the browser exploit suite (when Playwright is
+  installed), and a wheel/sdist build + clean-venv install smoke — and prints a
+  PASS/FAIL table. CI runs the same gates per push.
+- **Live API canary (opt-in, billable):**
+  `ANTHROPIC_API_KEY=... python -m pytest -m network -rs -s tests/test_live_api_canary.py`
+  verifies the live request schemas, critique structured-output compliance, the
+  pinned web-search tool type, the Files API upload→delete lifecycle, and that
+  exported logs/manifests carry no key. Never runs in CI.
+- **Benchmarks:** `python scripts/benchmark_drawing_analyzer.py --check`
+  measures the §19.7 scenarios (cold/warm/mutated/exhaustive/corrupt-partial)
+  on medians and enforces the mechanical gates (a warm run makes zero
+  digest/critique calls and rasterizes nothing; sources hash once per run;
+  usage totals reconcile). See `docs/PERFORMANCE_AND_COST_VALIDATION.md`.
+- **Manual records:** `docs/WINDOWS_ACCEPTANCE.md` (real-Windows path/input
+  matrix) and `docs/RELEASE_ACCEPTANCE_TEMPLATE.md` (the master §19.9
+  checklist, including the Bluebeam Revu / Acrobat / Chromium viewer script and
+  the Excel/Notepad output script) are completed per release candidate and kept
+  with the release.
+- **Reproducible builds:** `requirements-release.lock` pins the dependency set
+  release artifacts are built and smoke-tested against
+  (`pip install -c requirements-release.lock ".[dev]"`); regenerate it
+  deliberately and note it in the changelog when bumping dependencies.
 
 ## Changelog
 

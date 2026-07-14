@@ -870,7 +870,7 @@ def _run_critique_stage(
     use_batch: bool = False,
     on_log: LogCallback | None = None,
     on_status: StatusCallback | None = None,
-) -> tuple[list[Finding], list[NumericClaim]]:
+) -> tuple[list[Finding], list[NumericClaim], list[str]]:
     """Critique every sheet (Phase 11): self-consistent critique, cached two ways.
 
     A **level-1** pre-render cache scan (Phase 19B) recognizes unchanged sheets
@@ -882,10 +882,14 @@ def _run_critique_stage(
     level-1 key too (store-under-both). Additive and non-fatal: a per-sheet failure
     is logged and contributes no findings; the run continues.
 
-    Returns ``(critique_findings, claims)``; the findings are sorted deterministically
-    so the pooled result is independent of completion order (I-7). ``claims`` are the
-    numeric relationships the critique transcribed (Phase 14), fed to the deterministic
-    arithmetic auditor. Per-sheet usage is appended to ``run_usage`` (§15.6): a
+    Returns ``(critique_findings, claims, degraded)``; the findings are sorted
+    deterministically so the pooled result is independent of completion order (I-7).
+    ``claims`` are the numeric relationships the critique transcribed (Phase 14), fed
+    to the deterministic arithmetic auditor. ``degraded`` names every sheet whose
+    critique was incomplete — a partial/malformed read (``res.error``) or a sheet
+    whose critique call raised — so the caller can hold the stage at PARTIAL
+    (§3.3: incomplete critique reads are never a valid skip; Phase 27 gauntlet
+    regression). Per-sheet usage is appended to ``run_usage`` (§15.6): a
     ``critique`` record per sheet (``CACHE`` for a hit — zero billed tokens — else
     ``REAL_TIME``); each record aggregates the sheet's two self-consistency reads.
     """
@@ -919,6 +923,7 @@ def _run_critique_stage(
     workers = _resolve_workers(max_workers, max(1, total))
     findings: list[Finding] = []
     claims: list[NumericClaim] = []
+    degraded: list[str] = []
     done = 0
 
     def _record_critique(res: Any, portable: "tuple[str, int]") -> None:
@@ -967,6 +972,7 @@ def _run_critique_stage(
         nonlocal done
         done += 1
         if res.error:
+            degraded.append(f"{getattr(ref, 'display_label', ref)}: {res.error}")
             _log.warning("critique degraded for a sheet: %s", res.error)
         findings.extend(res.findings)
         claims.extend(res.claims)
@@ -1015,6 +1021,7 @@ def _run_critique_stage(
                         res = fut.result()
                     except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
                         done += 1
+                        degraded.append(f"{getattr(ref, 'display_label', ref)}: {exc}")
                         _log.warning("critique failed for a sheet: %s", exc)
                         continue
                     _ingest_miss(res, ref)
@@ -1036,7 +1043,7 @@ def _run_critique_stage(
         "critique: %d finding(s), %d numeric claim(s) across %d sheet(s)",
         len(findings), len(claims), total,
     )
-    return findings, claims
+    return findings, claims, degraded
 
 
 def _run_qc_stages(
@@ -2191,7 +2198,7 @@ def extract_drawing_context(
                     len(resolved_profiles),
                     ", ".join(p.name for p in resolved_profiles),
                 )
-            critique_findings, c_claims = _run_critique_stage(
+            critique_findings, c_claims, critique_degraded = _run_critique_stage(
                 paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
                 client=client, cache=cache, progress=progress, total=total,
                 max_workers=max_workers, run_usage=run_usage,
@@ -2199,8 +2206,25 @@ def extract_drawing_context(
                 use_batch=use_batch, on_log=on_log, on_status=on_status,
             )
             numeric_claims.extend(c_claims)
-            critique_stage.status = "COMPLETE"
             critique_stage.items_out = len(critique_findings)
+            if critique_degraded:
+                # §3.3 (Phase 27 gauntlet regression): an incomplete critique read —
+                # one of a sheet's two self-consistency reads failed/parsed
+                # malformed, or a sheet's critique call raised — is never a valid
+                # skip. The useful findings stay, but the stage (and therefore the
+                # run) can no longer claim a complete exhaustive critique.
+                critique_stage.status = "PARTIAL"
+                # Sorted: the pool's completion order must not leak into the
+                # exported stage record (I-7).
+                critique_stage.errors.extend(sorted(critique_degraded)[:5])
+                msg = (
+                    f"Critique: {len(critique_degraded)} sheet(s) returned "
+                    "incomplete or malformed critique reads"
+                )
+                errors.append(msg)
+                _log.warning("%s", msg)
+            else:
+                critique_stage.status = "COMPLETE"
         except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
             errors.append(f"Critique: {exc}")
             critique_stage.status = "FAILED"
