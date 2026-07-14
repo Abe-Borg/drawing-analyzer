@@ -2710,7 +2710,7 @@ _CHAT_JS = r"""
         var c = rows[i].querySelector('.fcol-qcid');
         if(c && c.textContent.trim().toUpperCase() === qc){ el = rows[i]; break; }
       }
-      if(el){ expandCard(document.getElementById('findings')); el.classList.remove('hidden'); }
+      if(el){ expandCard(document.getElementById('findings')); }
     }
     if(!el){
       var cards = Array.prototype.slice.call(document.querySelectorAll('.card'));
@@ -2721,12 +2721,21 @@ _CHAT_JS = r"""
     }
     if(!el) return 'No matching section, sheet, or finding for "' + target + '".';
     var card = el.closest ? el.closest('.card') : null;
-    var hiddenByFilter = !!(card && card.classList.contains('hidden'));
+    // Capture the pre-reveal hidden state (of the target and its card) before we
+    // clear it, so the returned message is truthful.
+    var wasHidden = !!(card && card.classList.contains('hidden')) || el.classList.contains('hidden');
     expandCard(card || el);
+    el.classList.remove('hidden');
+    if(card && el === card){
+      // A search/category filter also hides the card's inner blocks — reveal
+      // them so a card-level jump doesn't land on a visible-but-empty card.
+      Array.prototype.slice.call(card.querySelectorAll('.block.hidden'))
+        .forEach(function(n){ n.classList.remove('hidden'); });
+    }
     el.scrollIntoView({behavior: 'smooth', block: 'start'});
     flash(el);
     return 'Scrolled the report to "' + target + '".' +
-      (hiddenByFilter ? ' (It was hidden by an active filter; I revealed it.)' : '');
+      (wasHidden ? ' (It was hidden by an active filter; I revealed it.)' : '');
   }
 
   function toolQuery(input){
@@ -2775,9 +2784,17 @@ _CHAT_JS = r"""
       }
     }
     if(!acted.length) return 'No filter change was requested.';
-    var rc = document.getElementById('result-count');
-    return 'Applied filter (' + acted.join(', ') + ').' +
-      (rc && rc.textContent ? ' Now showing: ' + rc.textContent + '.' : '');
+    // The report debounces apply() ~90ms after a synthetic search 'input' (chip
+    // and severity clicks apply synchronously), so wait it out before reading
+    // #result-count — otherwise the model gets the pre-filter count.
+    var searched = typeof input.search === 'string';
+    return new Promise(function(resolve){
+      setTimeout(function(){
+        var rc = document.getElementById('result-count');
+        resolve('Applied filter (' + acted.join(', ') + ').' +
+          (rc && rc.textContent ? ' Now showing: ' + rc.textContent + '.' : ''));
+      }, searched ? 130 : 0);
+    });
   }
 
   function toolSummary(){
@@ -2888,7 +2905,11 @@ _CHAT_JS = r"""
     try {
       var result = evalArith(e);
       if(!isFinite(result)) return 'The expression "' + e + '" does not evaluate to a finite number.';
-      var out = (Math.abs(result) < 1e15) ? parseFloat(result.toPrecision(12)) : result;
+      // Trim float64 rounding noise (e.g. 0.1+0.2) WITHOUT corrupting exactly
+      // representable integers: every integer below 1e15 has ≤15 significant
+      // digits, so toPrecision(15) preserves it while dropping the tail noise
+      // that only appears past the 15th digit.
+      var out = (Math.abs(result) < 1e15) ? parseFloat(result.toPrecision(15)) : result;
       return e + ' = ' + out;
     } catch(err){
       return 'Could not evaluate "' + e + '": ' + (err && err.message || 'invalid expression') + '.';
@@ -2903,15 +2924,18 @@ _CHAT_JS = r"""
     highlight_term: toolHighlightTerm,
     calculate: toolCalculate
   };
+  // Always resolves (never rejects) to {content, is_error} — a handler may return
+  // a value OR a Promise (filter_report waits out the report's search debounce),
+  // and a throw/rejection still yields an is_error tool_result so no tool_use id
+  // is ever left unanswered.
   function runTool(name, inp){
-    try {
-      var fn = TOOLS[name];
-      if(!fn) return {content: 'Unknown tool: ' + name, is_error: true};
-      var r = fn(inp);
+    var fn = TOOLS[name];
+    if(!fn) return Promise.resolve({content: 'Unknown tool: ' + name, is_error: true});
+    return Promise.resolve().then(function(){ return fn(inp); }).then(function(r){
       return {content: (r == null || r === '') ? '(no result)' : String(r), is_error: false};
-    } catch(e){
+    }, function(e){
       return {content: 'Tool "' + name + '" failed: ' + (e && e.message || e), is_error: true};
-    }
+    });
   }
   function markToolChip(st, id, isErr){
     var chip = st.toolChips[id];
@@ -3258,16 +3282,19 @@ _CHAT_JS = r"""
           var uses = blocks.filter(function(b){ return b.type === 'tool_use'; });
           if(uses.length){
             // Execute every client tool locally and answer EACH id in one user
-            // turn (a throwing handler still returns an is_error tool_result).
-            var results = uses.map(function(b){
-              var r = runTool(b.name, b.input || {});
-              markToolChip(st, b.id, r.is_error);
-              var tr = {type: 'tool_result', tool_use_id: b.id, content: r.content};
-              if(r.is_error) tr.is_error = true;
-              return tr;
+            // turn (handlers may be async; a throwing one still returns an
+            // is_error tool_result).
+            return Promise.all(uses.map(function(b){
+              return runTool(b.name, b.input || {}).then(function(r){
+                markToolChip(st, b.id, r.is_error);
+                var tr = {type: 'tool_result', tool_use_id: b.id, content: r.content};
+                if(r.is_error) tr.is_error = true;
+                return tr;
+              });
+            })).then(function(results){
+              history.push({role: 'user', content: results});
+              return step(round, toolRound + 1);
             });
-            history.push({role: 'user', content: results});
-            return step(round, toolRound + 1);
           }
         }
         if(st.stopReason === 'refusal') note(bubble, 'The model declined to answer this request.');

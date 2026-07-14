@@ -174,11 +174,11 @@ def test_client_tool_loop_executes_and_answers_all_ids(page, tmp_path):
         {"type": "content_block_start", "index": 1,
          "content_block": {"type": "tool_use", "id": "tu_2", "name": "calculate", "input": {}}},
         {"type": "content_block_delta", "index": 1,
-         "delta": {"type": "input_json_delta", "partial_json": '{"expression":"6*7"}'}},
+         "delta": {"type": "input_json_delta", "partial_json": '{"expression":"1234567890123+1"}'}},
         {"type": "content_block_stop", "index": 1},
         {"type": "message_delta", "delta": {"stop_reason": "tool_use"}},
     ])
-    round2 = _text_turn("One high-severity finding; 6*7 = 42.")
+    round2 = _text_turn("One high-severity finding; the sum is 1234567890124.")
 
     doc = hr.build_html_report(
         _findings_ctx(), source_names=["a.pdf"], now=NOW, api_key=KEY, embed_api_key=True
@@ -202,8 +202,10 @@ def test_client_tool_loop_executes_and_answers_all_ids(page, tmp_path):
     assert set(results) == {"tu_1", "tu_2"}, "every tool_use id must be answered once"
     # query_findings actually read #da-findings and returned the high finding.
     assert "HIGHSEVMARKER" in results["tu_1"]["content"]
-    # calculate did exact arithmetic (no eval).
-    assert "42" in results["tu_2"]["content"]
+    # calculate did EXACT arithmetic — a large representable integer is not
+    # rounded away (guards the toPrecision(15) precision fix).
+    assert "1234567890124" in results["tu_2"]["content"]
+    assert "1234567890120" not in results["tu_2"]["content"]
 
     # Both client-tool chips resolved to the done state; nothing executed.
     assert page.eval_on_selector_all(".da-tool.da-tool-done", "els => els.length") >= 2
@@ -245,6 +247,63 @@ def test_report_driving_tools_execute(page, tmp_path):
     assert "Highlighted" in results["h1"]
     # The term highlight was actually painted on the page.
     assert page.evaluate("!!(window.CSS && CSS.highlights && CSS.highlights.has('da-term'))")
+    assert page.evaluate("window.__pwned") is False
+
+
+def _one_tool_round(tool_id, name, input_json):
+    return _sse([
+        {"type": "content_block_start", "index": 0,
+         "content_block": {"type": "tool_use", "id": tool_id, "name": name, "input": {}}},
+        {"type": "content_block_delta", "index": 0,
+         "delta": {"type": "input_json_delta", "partial_json": input_json}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_delta", "delta": {"stop_reason": "tool_use"}},
+    ])
+
+
+def test_filter_report_search_reports_post_debounce_count(page, tmp_path):
+    # A search filter debounces the report's apply() ~90ms; filter_report must
+    # return the UPDATED count, not the stale pre-filter one. A nonsense term
+    # filters everything out, so a correct (post-debounce) read says "0 of".
+    doc = hr.build_html_report(
+        _findings_ctx(), source_names=["a.pdf"], now=NOW, api_key=KEY, embed_api_key=True
+    )
+    _load(page, doc, tmp_path,
+          queue=[_one_tool_round("ft", "filter_report", '{"search":"zznomatchzz"}'),
+                 _text_turn("nothing matched.")])
+    _ask(page, "search zznomatchzz")
+
+    reqs = page.evaluate("window.__REQ")
+    result = [b["content"] for b in reqs[1]["messages"][-1]["content"]
+              if b.get("type") == "tool_result"][0]
+    assert "0 of" in result, result
+
+
+def test_scroll_to_report_reveals_filter_hidden_blocks(page, tmp_path):
+    # scroll_to_report to a card the active filter hid must reveal the card AND
+    # its inner blocks (not land on a visible-but-empty card), while leaving the
+    # filter active elsewhere (a targeted reveal, not a filter reset).
+    ctx = _Ctx(
+        sheets=[_Sheet(_Ref("a.pdf", 0, 1), text="**Conflicts**\n- VAV-3 clearance conflict")],
+        synthesis_text="**Cross-sheet / cross-discipline conflicts**\n- overview conflict item",
+        combined_text="# Digest\n\nx",
+    )
+    doc = hr.build_html_report(
+        ctx, source_names=["a.pdf"], now=NOW, api_key=KEY, embed_api_key=True
+    )
+    if 'id="overview"' not in doc or 'id="sheet-1"' not in doc:
+        pytest.skip("expected overview + sheet-1 cards in this report")
+    _load(page, doc, tmp_path,
+          queue=[_one_tool_round("flt", "filter_report", '{"category":"coordination"}'),
+                 _one_tool_round("scr", "scroll_to_report", '{"target":"sheet-1"}'),
+                 _text_turn("jumped there.")])
+    _ask(page, "filter to coordination then jump to sheet 1")
+
+    # sheet-1 and its blocks are visible again...
+    assert page.eval_on_selector("#sheet-1", "el => el.classList.contains('hidden')") is False
+    assert page.eval_on_selector_all("#sheet-1 .block.hidden", "els => els.length") == 0
+    # ...but the coordination filter is still active (overview stays hidden).
+    assert page.eval_on_selector("#overview", "el => el.classList.contains('hidden')") is True
     assert page.evaluate("window.__pwned") is False
 
 
