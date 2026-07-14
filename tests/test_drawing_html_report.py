@@ -239,7 +239,10 @@ def test_report_has_no_qc_status_banner_for_a_standard_run():
     assert '<div class="qc-status-banner"' not in doc
 
 
-def test_report_qc_status_banner_partial_is_honest_about_the_gate():
+def test_report_qc_status_banner_partial_names_the_debug_override_cause():
+    # §18.0 (gate open): a PARTIAL with no degraded stage has exactly one
+    # cause — an explicit debug override — and the banner says so instead of
+    # the retired gate-era "intentionally withheld" wording.
     from drawing_analyzer.models import StageResult
 
     ctx = _make_ctx()
@@ -251,8 +254,8 @@ def test_report_qc_status_banner_partial_is_honest_about_the_gate():
     doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
     assert 'class="qc-status-banner" data-status="PARTIAL"' in doc
     assert "QC status: PARTIAL" in doc
-    # A clean-but-gated run explains the gate rather than implying failure.
-    assert "withheld pending later remediation" in doc
+    assert "deliberately weakened the exhaustive contract" in doc
+    assert "withheld pending later remediation" not in doc
 
 
 def test_report_qc_status_banner_names_degraded_stages_and_debug_override():
@@ -750,3 +753,173 @@ def test_embedded_key_forget_control_is_truthful():
     )
     assert 'id="da-chat-forget"' in doc
     assert "Removing the key requires regenerating" in doc
+
+
+# --------------------------------------------------------------------------- #
+# Phase 26B — §18.6 report completeness: stage table, severity toggle, shown
+# count, source disambiguation, run record, citation assessments, a11y.
+# --------------------------------------------------------------------------- #
+
+
+def test_stage_status_table_renders_per_stage_rows():
+    from drawing_analyzer.models import StageResult
+
+    ctx = _make_ctx()
+    ctx.qc_status = "PARTIAL"
+    ctx.stage_results = [
+        StageResult(stage="critique", expected=True, status="COMPLETE",
+                    calls_planned=2, calls_succeeded=2, items_in=3, items_out=5),
+        StageResult(stage="citation", expected=True, status="SKIPPED_VALID",
+                    warnings=["no cited claims"]),
+        StageResult(stage="cross_qc", expected=True, status="FAILED",
+                    errors=["api_error: <boom>"]),
+    ]
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
+    assert "QC stage status" in doc
+    assert 'class="usage-table stage-table"' in doc
+    # Status cells carry a per-status class (colored like the banners)...
+    assert 'class="st-complete"' in doc
+    assert 'class="st-skipped"' in doc
+    assert 'class="st-failed"' in doc
+    # ...calls/items are tallied, and the first error/warning shows — escaped.
+    assert "2/2" in doc
+    assert "no cited claims" in doc
+    assert "api_error: &lt;boom&gt;" in doc
+    assert "api_error: <boom>" not in doc
+
+
+def test_no_stage_status_table_without_stage_results():
+    doc = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW)
+    assert "QC stage status" not in doc
+    assert 'class="usage-table stage-table"' not in doc
+
+
+def test_high_severity_toggle_is_standalone_with_aria_pressed():
+    # DA-025: a toggle, not a member of the exclusive category-chip group — it
+    # carries no data-filter, so the exclusive-chip JS never touches it.
+    doc = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW)
+    assert 'id="sev-high"' in doc
+    assert "High severity only" in doc
+    sev_btn = doc[doc.index('<button class="chip chip-toggle" id="sev-high"'):]
+    sev_btn = sev_btn[: sev_btn.index("</button>")]
+    assert 'aria-pressed="false"' in sev_btn
+    assert "data-filter" not in sev_btn
+    # The JS keeps an independent highOnly state keyed to the numeric rank.
+    assert "var highOnly = false" in hr._JS
+    assert "row.getAttribute('data-severity') === '3'" in hr._JS
+    assert "sevHigh.setAttribute('aria-pressed'" in hr._JS
+
+
+def test_findings_shown_span_present_and_totals_stay_static():
+    ctx = _findings_ctx(findings=[_finding()])
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
+    # The live "showing K of N" line sits in the findings card header...
+    assert '<span id="findings-shown" class="muted" aria-live="polite">' in doc
+    # ...while the static total badge is untouched by filtering (§18.6).
+    assert "1 finding(s)" in doc
+    assert "findingsShown.textContent" in hr._JS
+
+
+def test_duplicate_display_names_get_source_id_suffix():
+    # Two different sources share the basename; labels get the opaque source id.
+    name = "M-101.pdf"
+    ref_a = _Ref(name, 0, 1, pdf_path="/rev_a/M-101.pdf", source_id="SRC-0001")
+    ref_b = _Ref(name, 0, 1, pdf_path="/rev_b/M-101.pdf", source_id="SRC-0002")
+    ctx = _Ctx(
+        sheets=[_Sheet(ref_a, text="rev A digest"), _Sheet(ref_b, text="rev B digest")],
+        combined_text="x",
+    )
+    f = _finding(sheet_id="M-101", source_name=name)
+    f.source_id = "SRC-0002"
+    ctx.findings = [f]
+    doc = hr.build_html_report(ctx, source_names=[name], now=NOW)
+    # Sheet cards (and the TOC rows) name which source each page came from.
+    assert "M-101.pdf (page 1/1) · SRC-0001" in doc
+    assert "M-101.pdf (page 1/1) · SRC-0002" in doc
+    # The finding's sheet cell is disambiguated the same way.
+    assert "M-101 · SRC-0002" in doc
+
+
+def test_unique_display_names_get_no_source_id_suffix():
+    ctx = _findings_ctx(findings=[_finding()])
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
+    assert " · SRC-" not in doc
+
+
+def test_run_record_details_renders_journal_and_manifest_pointer():
+    class _Journal:
+        run_id = "a3f9c2d871e4"
+        started_at = datetime(2026, 6, 7, 7, 0, 0)
+        ended_at = datetime(2026, 6, 7, 7, 2, 0)
+        final_status = "PARTIAL"
+
+    ctx = _make_ctx()
+    ctx.run_journal = _Journal()
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
+    assert "Run record" in doc
+    assert "a3f9c2d871e4" in doc
+    assert "2026-06-07 07:00:00" in doc          # started_at via str()
+    assert "Final status: PARTIAL" in doc
+    # The exported per-run record is named for the operator.
+    assert "run.log" in doc and "run_manifest.json" in doc
+    assert "written into every export folder" in doc
+
+
+def test_no_run_record_details_without_a_journal():
+    doc = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW)
+    assert "Run record" not in doc
+    assert "run_manifest.json" not in doc
+
+
+def test_citations_list_renders_per_reference_assessments():
+    from drawing_analyzer.models import CitationAssessment
+
+    f = _finding()
+    f.citations = [
+        CitationAssessment(reference="IMC 403.3", status="CHECKED_SUPPORTS",
+                           note="matches the table"),
+        CitationAssessment(reference="NEC 210.8", status="CHECKED_MISMATCH",
+                           note="x" * 200),
+    ]
+    doc = hr.build_html_report(_findings_ctx(findings=[f]), source_names=[SRC], now=NOW)
+    # One span per reference: "[REF: STATUS — note]".
+    assert "[IMC 403.3: CHECKED_SUPPORTS — matches the table]" in doc
+    assert "[NEC 210.8: CHECKED_MISMATCH — " in doc
+    # Long notes are truncated to ~120 chars.
+    assert "x" * 120 not in doc
+    assert "x" * 119 + "…" in doc
+
+
+def test_legacy_single_citation_fallback_when_citations_empty():
+    from drawing_analyzer.models import Citation
+
+    f = _finding()
+    f.citation = Citation(status="CHECKED_SUPPORTS", note="ok per 2021 edition")
+    doc = hr.build_html_report(_findings_ctx(findings=[f]), source_names=[SRC], now=NOW)
+    assert "[citation supports: ok per 2021 edition]" in doc
+
+
+def test_prose_chip_renders_item_count():
+    f = _finding()
+    f.prose_item_ids = ["M-101:p0:i1", "M-101:p0:i2"]
+    doc = hr.build_html_report(_findings_ctx(findings=[f]), source_names=[SRC], now=NOW)
+    assert "prose×2" in doc
+
+
+def test_a11y_attributes_present():
+    ctx = _findings_ctx(findings=[_finding()])
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
+    assert 'aria-label="Search the report"' in doc
+    assert 'id="result-count" role="status"' in doc
+    assert 'aria-label="Report contents"' in doc
+    # Every chip starts with an explicit pressed state ("All" is preselected).
+    assert 'data-filter="all" aria-pressed="true"' in doc
+    assert 'data-filter="issues" aria-pressed="false"' in doc
+    # Card heads announce their expanded state; sortable headers are keyboard-
+    # reachable and announce their sort direction.
+    assert 'role="button" tabindex="0" aria-expanded="true"' in doc
+    assert 'data-sort="severity" tabindex="0" aria-sort="none"' in doc
+    # The JS keeps all three in sync.
+    assert "setAttribute('aria-pressed'" in hr._JS
+    assert "setAttribute('aria-expanded'" in hr._JS
+    assert "setAttribute('aria-sort'" in hr._JS

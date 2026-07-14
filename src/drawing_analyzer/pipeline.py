@@ -76,13 +76,16 @@ StatusCallback = Callable[[str], None]
 # ``DRAWING_ANALYZER_MAX_WORKERS``.
 DEFAULT_DIGEST_WORKERS = 4
 
-# Phase 23 temporary completeness gate (§8, §15.5). While this is closed, a fully
-# successful exhaustive QC run is capped at ``QCStatus.PARTIAL`` rather than
-# ``COMPLETE`` — Phases 24–25 have not yet landed the cross-shard reconciliation,
-# claim-complete citations, complete evidence, and callout-overflow guarantees a
-# COMPLETE exhaustive review must prove. Phase 26 opens the gate once those close.
-# It is deliberately a module constant so a single edit removes the gate.
-EXHAUSTIVE_QC_COMPLETENESS_GATE_OPEN = False
+# The Phase 23 temporary completeness gate is OPEN (Phase 26B §18.0, DA-010):
+# Phases 24–25 landed the cross-shard reconciliation, claim-complete citations,
+# complete evidence, and callout-overflow guarantees a COMPLETE exhaustive
+# review must prove, so a clean NORMAL exhaustive run may now roll up to
+# ``QCStatus.COMPLETE``. The §8 phase-gate rules remain PERMANENT regressions —
+# they are enforced by the stage statuses themselves (a failed reconciliation,
+# an unchecked cited claim, a missing evidence leg, unresolved callout overflow,
+# or a mutated source each hold a required stage at PARTIAL/coverage at
+# INCOMPLETE, which the §3.3 roll-up can never call COMPLETE, gate or no gate).
+EXHAUSTIVE_QC_COMPLETENESS_GATE_OPEN = True
 
 _log = get_logger()
 
@@ -251,8 +254,7 @@ class DrawingContext:
     # Phase 23A (§15.1 / §15.4): the resolved run configuration, the typed
     # per-stage outcomes, and the overall QC status the completion dialog / report
     # header lead with. ``qc_status`` is NOT_REQUESTED unless exhaustive QC ran;
-    # otherwise COMPLETE / PARTIAL / FAILED per the §3.3 roll-up (capped at PARTIAL
-    # by the Phase 23 temporary completeness gate).
+    # otherwise COMPLETE / PARTIAL / FAILED per the §3.3 roll-up (gate open, §18.0).
     run_configuration: Any = None
     stage_results: list = field(default_factory=list)
     qc_status: str = "NOT_REQUESTED"
@@ -2369,8 +2371,8 @@ def extract_drawing_context(
     )
     stage_results.extend(qc.stage_results)
 
-    # Roll the per-stage outcomes into one overall QC status (§3.3). The temporary
-    # completeness gate keeps an exhaustive run at PARTIAL until Phases 24–26 land.
+    # Roll the per-stage outcomes into one overall QC status (§3.3). The
+    # completeness gate is open (§18.0): a clean NORMAL exhaustive run is COMPLETE.
     qc_status = roll_up_qc_status(
         config, stage_results, qc.coverage_status,
         completeness_gate_open=EXHAUSTIVE_QC_COMPLETENESS_GATE_OPEN,

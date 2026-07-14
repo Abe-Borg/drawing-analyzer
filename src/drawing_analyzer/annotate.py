@@ -954,20 +954,51 @@ def _status_label(finding: Finding) -> str:
     return _status(finding)
 
 
+# Severity triage rank for the reviewed-PDF index (§18.7, DA-025): high, then
+# medium, then everything else (low / question-tier / unset) together.
+_INDEX_SEVERITY_RANK = {"high": 0, "medium": 1}
+
+
+def _severity_first_key(finding: Finding) -> tuple:
+    """The §18.7 index/display sort key: actionable order, stable ids intact.
+
+    Severity tier first (high → medium → low/question), then the run's source
+    input order (the zero-padded ``SRC-####`` sorts by assignment order), page,
+    anchored-before-unanchored, top→left position, and finally the stable
+    ``QC-###`` / finding id as the deterministic tie-break (I-7). Display order
+    deliberately need NOT be numeric QC-id order — the ids themselves never
+    change (§18.7).
+    """
+    anchor = getattr(finding, "anchor", None)
+    rect = getattr(anchor, "rect_pdf", None) if anchor is not None else None
+    y, x = (float(rect[1]), float(rect[0])) if rect else (0.0, 0.0)
+    return (
+        _INDEX_SEVERITY_RANK.get((finding.severity or "").lower(), 2),
+        finding.source_id or finding.source_name or "~",
+        int(finding.page_index or 0),
+        rect is None,
+        y,
+        x,
+        finding.qc_id or "~",
+        finding.id,
+    )
+
+
 def _index_groups(
     pairs: "list[tuple[Finding, MarkupPlacement]]",
 ) -> "tuple[list, list, list]":
-    """``(inked, rejected, gated)`` (finding, placement) rows in QC-number order.
+    """``(inked, rejected, gated)`` (finding, placement) rows in triage order.
 
     The main table lists what's on paper; the rejected section (§18) and the
     "Not inked by operator gate" section (§6.4) make the verifier-contradicted and
     the conservatively-gated findings *visible* on the index — nothing is ever
     silently absent from the record. A gated finding's index row is its **sole
     artifact**, so it must exist and be reconciled (a bare no-ink status is
-    insufficient).
+    insufficient). Rows sort severity-first within every section (§18.7): the
+    operator reads the index top-down as a punch list, highest severity first.
     """
     def _order(items: list) -> list:
-        return sorted(items, key=lambda fp: (fp[0].qc_id or "~", fp[0].id))
+        return sorted(items, key=lambda fp: _severity_first_key(fp[0]))
 
     inked, rejected, gated = [], [], []
     for finding, placement in pairs:
@@ -1155,7 +1186,8 @@ def _insert_review_notes_page(
     collected: dict[str, list[tuple[str, int, int]]] = {}
     if not overflow:
         return collected
-    ordered = sorted(overflow, key=lambda fp: (fp[0].qc_id or "~", fp[0].id))
+    # Same severity-first triage order as the index pages (§18.7).
+    ordered = sorted(overflow, key=lambda fp: _severity_first_key(fp[0]))
     per_page = _NOTES_PER_PAGE
     n_pages = (len(ordered) + per_page - 1) // per_page
     first_pno = doc.page_count
@@ -1894,7 +1926,10 @@ def write_set_review_notes_pdf(
 
     run_id = artifact_run_id or new_artifact_run_id()
     output_dir = Path(output_dir)
-    items.sort(key=lambda f: (f.qc_id or "~", f.id))     # deterministic order (I-7)
+    # Severity-first triage order, deterministic (I-7) — same rule as the
+    # reviewed-PDF index pages (§18.7), so every generated listing reads
+    # highest-severity first.
+    items.sort(key=_severity_first_key)
     ordinals = itertools.count()
     pairs: list[tuple[Finding, MarkupPlacement]] = []
     for f in items:

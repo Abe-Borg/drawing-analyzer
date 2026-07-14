@@ -33,9 +33,11 @@ and neither the standard path (findings + text retained and offline-anchored for
 free, DA-012). Every stage reads the resolved config; no call site re-derives the
 booleans. Each QC stage records a typed `StageResult`; `roll_up_qc_status()` folds
 them (+ Phase 21 `coverage_status`) into one `qc_status` (`NOT_REQUESTED` / `COMPLETE`
-/ `PARTIAL` / `FAILED`, §3.3). A **temporary completeness gate**
-(`pipeline.EXHAUSTIVE_QC_COMPLETENESS_GATE_OPEN = False`) caps a clean exhaustive run
-at `PARTIAL` until Phases 24–26 land; Phase 26 opens it.
+/ `PARTIAL` / `FAILED`, §3.3). The Phase 23 completeness gate is **OPEN** (Phase 26B
+§18.0): a clean NORMAL exhaustive run earns `COMPLETE`; the §8 phase-gates are
+permanent regressions enforced by the stage statuses themselves (a failed
+reconciliation / unchecked cited claim / missing evidence leg / mutated source
+holds a required stage at PARTIAL, which the roll-up can never call COMPLETE).
 
 **Usage & cost (Phase 23B, §15.6).** Token/cost accounting is an **append-only**
 `RunUsage` ledger (`ctx.run_usage`): every API call/attempt appends a priced

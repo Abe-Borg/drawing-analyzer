@@ -34,6 +34,7 @@ import csv
 import hashlib
 import io
 import json
+import os
 import re
 import shutil
 from datetime import datetime
@@ -272,13 +273,19 @@ def _index_document(
             if tally:
                 lines.append(f"  - {tally}")
         lines.append("- `findings.json` / `findings.csv` — every finding, all fields")
+        # Preview the allocator names write_qc_outputs will copy under
+        # (DA-033): a hostile or colliding basename is advertised by its
+        # on-disk name, not a dead reference. (Pure builder — it cannot stat;
+        # if a listed PDF vanished, markup_manifest.json stays authoritative.)
+        _index_used: set[str] = set()
         for pdf in reviewed:
+            name = safe_artifact_name(Path(pdf).name, used=_index_used, default="reviewed.pdf")
             label = (
                 " — **incomplete markup** (labeled)"
-                if "_INCOMPLETE" in Path(pdf).name
+                if "_INCOMPLETE" in name
                 else " — the marked-up drawing"
             )
-            lines.append(f"- `{Path(pdf).name}`{label}")
+            lines.append(f"- `{name}`{label}")
         lines.append("- `sheet_text/` — each sheet's extracted text layer")
         if has_markup_manifest(ctx):
             lines.append(
@@ -620,6 +627,92 @@ def _unique_dir(path: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Artifact-name containment (Phase 26B §18.5, DA-033). Every name/destination
+# an export writes passes ONE allocator boundary: hostile components from a
+# source filename or a tampered work directory (traversal, separators, Windows
+# reserved device names, alternate-data-stream colons, trailing dots/spaces,
+# over-long names) are neutralized, and every resolved target is PROVEN to lie
+# beneath the export root before a byte is written.
+# ---------------------------------------------------------------------------
+
+# Windows reserved device names — writing "CON.txt" hangs/steals the write.
+_WINDOWS_RESERVED = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{n}" for n in range(1, 10)}
+    | {f"LPT{n}" for n in range(1, 10)}
+)
+# Characters invalid in Windows filenames (plus control chars, handled below).
+_INVALID_NAME_CHARS = re.compile(r'[<>:"|?*\\/\x00-\x1f]')
+# Component length cap: leaves headroom under MAX_PATH once the export folder
+# prefix is added, while preserving the extension.
+_MAX_NAME_COMPONENT = 120
+
+
+def safe_artifact_name(
+    name: Any, *, used: "set[str] | None" = None, default: str = "artifact"
+) -> str:
+    """Neutralize one artifact (base)name into a safe, flat filename (DA-033).
+
+    Takes the LAST path component (dropping traversal/absolute/drive prefixes
+    — a POSIX file can legally be named ``..\\..\\evil.pdf``, which would
+    traverse when the export is later copied to Windows), strips
+    alternate-data-stream colons and invalid/control characters, trims the
+    trailing dots/spaces Windows silently drops (an aliasing/collision
+    hazard), renames reserved device names, caps the length preserving the
+    extension, and — when ``used`` is given — dedupes collisions
+    deterministically (``name``, ``name_2``, …), recording the result.
+    """
+    text = str(name)
+    # Last component under BOTH separator conventions; "." / ".." vanish here.
+    for sep in ("/", "\\"):
+        text = text.split(sep)[-1]
+    # Every invalid character — including the ADS/drive colon — becomes "_":
+    # substituting (rather than truncating at the first colon) keeps the name
+    # recognizable and still leaves no way to address an alternate stream.
+    text = _INVALID_NAME_CHARS.sub("_", text)
+    text = text.rstrip(". ")
+    if text in ("", ".", ".."):
+        text = default
+    stem, dot, ext = text.partition(".")
+    if stem.upper() in _WINDOWS_RESERVED:
+        text = "_" + text
+        stem = "_" + stem
+    if len(text) > _MAX_NAME_COMPONENT:
+        ext_tail = text[text.rfind(".") :] if "." in text[1:] else ""
+        text = text[: _MAX_NAME_COMPONENT - len(ext_tail)].rstrip(". ") + ext_tail
+    if used is not None:
+        base, tail = (text[: text.rfind(".")], text[text.rfind(".") :]) if "." in text[1:] else (text, "")
+        n = 1
+        candidate = text
+        while candidate in used:
+            n += 1
+            suffix = f"_{n}{tail}"
+            # The dedupe suffix stays WITHIN the component cap: trim the base
+            # rather than overrun the invariant on a maximally-long name.
+            candidate = base[: max(1, _MAX_NAME_COMPONENT - len(suffix))] + suffix
+        used.add(candidate)
+        text = candidate
+    return text
+
+
+def contained_target(root: Path, relative: "Path | str") -> Path:
+    """``root/relative``, PROVEN to resolve beneath ``root`` (DA-033).
+
+    The last-line containment check before every export write/copy: resolves
+    symlinks and ``..`` in the joined path and raises ``ValueError`` if the
+    result escapes the export root — a failed proof is a hard error, never a
+    silent write elsewhere.
+    """
+    root = Path(root)
+    target = root / relative
+    root_resolved = root.resolve()
+    resolved = target.resolve()
+    if resolved != root_resolved and root_resolved not in resolved.parents:
+        raise ValueError(f"artifact target escapes the export root: {relative!r}")
+    return target
+
+
+# ---------------------------------------------------------------------------
 # Findings CSV (the QC-markup deliverable's flat, Excel-friendly export).
 #
 # Duck-typed on the §4.1 Finding shape so it stays PyMuPDF-free and testable:
@@ -642,6 +735,29 @@ FINDINGS_CSV_HEADER = [
     # zero-based ``tile`` column — appended so existing positions are unchanged.
     "tile_label",
 ]
+
+
+# Excel/DDE formula-injection guard (Phase 26B §18.5.1, DA-031). A cell whose
+# first meaningful character is one of these is interpreted by Excel (and
+# LibreOffice/Sheets) as a formula — `=HYPERLINK(...)`, `+cmd|' /C ...'!A0`,
+# `@SUM(...)` — even when the sigil follows leading whitespace/control chars.
+_FORMULA_SIGILS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _excel_safe(text: str) -> str:
+    """Neutralize formula interpretation for one UNTRUSTED text cell.
+
+    Prefixes a literal apostrophe (Excel's own "treat as text" marker) when the
+    first character after any leading whitespace/control characters is a
+    formula sigil. Applied ONLY to model/drawing-controlled text columns —
+    host-owned numeric/enum columns (page, rect, statuses) keep their exact
+    values, so an ordinary negative coordinate is never mangled (§18.5.1). The
+    canonical un-prefixed values remain in ``findings.json``.
+    """
+    stripped = text.lstrip(" \t\r\n\f\v\x00")
+    if (stripped and stripped[0] in _FORMULA_SIGILS) or text[:1] in ("\t", "\r"):
+        return "'" + text
+    return text
 
 
 def _finding_scope(finding: Any) -> str:
@@ -682,29 +798,32 @@ def _finding_row(finding: Any) -> list[str]:
     refs = list(getattr(finding, "refs", None) or [])
     page_index = int(getattr(finding, "page_index", 0) or 0)
     scope = _finding_scope(finding)
+    # Untrusted (model/drawing-controlled) text cells pass the DA-031 guard;
+    # host-owned cells — ids, 1-based page, host-formatted tile/rect, closed
+    # status/enum vocabularies — are emitted exactly (§18.5.1).
     return [
         str(getattr(finding, "qc_id", "") or ""),
         str(getattr(finding, "id", "")),
-        str(getattr(finding, "sheet_id", "")),
+        _excel_safe(str(getattr(finding, "sheet_id", ""))),
         str(getattr(finding, "source_id", "") or ""),
-        str(getattr(finding, "source_name", "")),
+        _excel_safe(str(getattr(finding, "source_name", ""))),
         "" if scope == "SET" else str(page_index + 1),   # 1-based page; blank for set-level
         str(getattr(finding, "category", "")),
         str(getattr(finding, "severity", "")),
-        str(getattr(finding, "text", "")),
-        str(getattr(finding, "source_quote", "")),
+        _excel_safe(str(getattr(finding, "text", ""))),
+        _excel_safe(str(getattr(finding, "source_quote", ""))),
         _fmt_tile(getattr(finding, "tile", None)),
-        "; ".join(str(r) for r in refs),
-        _fmt_also_on(getattr(finding, "also_on", None)),
-        "; ".join(str(s) for s in (getattr(finding, "sources", None) or [])),
+        _excel_safe("; ".join(str(r) for r in refs)),
+        _excel_safe(_fmt_also_on(getattr(finding, "also_on", None))),
+        _excel_safe("; ".join(str(s) for s in (getattr(finding, "sources", None) or []))),
         str(getattr(anchor, "status", "")) if anchor is not None else "",
         str(getattr(anchor, "method", "")) if anchor is not None else "",
         _fmt_rect(getattr(anchor, "rect_pdf", None)) if anchor is not None else "",
         str(getattr(verification, "status", "")) if verification is not None else "",
-        str(getattr(verification, "note", "")) if verification is not None else "",
-        str(getattr(verification, "evidence_png", "")) if verification is not None else "",
+        _excel_safe(str(getattr(verification, "note", ""))) if verification is not None else "",
+        _excel_safe(str(getattr(verification, "evidence_png", ""))) if verification is not None else "",
         str(getattr(citation, "status", "")) if citation is not None else "",
-        str(getattr(citation, "note", "")) if citation is not None else "",
+        _excel_safe(str(getattr(citation, "note", ""))) if citation is not None else "",
         scope,
         str(getattr(finding, "confidence", "") or ""),
         str(getattr(finding, "tile_label", "") or ""),
@@ -803,6 +922,7 @@ def build_markup_manifest(
     *,
     folder: Path | None = None,
     hash_cache: "dict[str, str] | None" = None,
+    copied: "list[tuple[str, str]] | None" = None,
 ) -> dict:
     """The machine-readable markup-coverage manifest (§13.7).
 
@@ -828,8 +948,34 @@ def build_markup_manifest(
         manifest["placements"] = run_dict.get("placements", [])
         manifest["receipts"] = run_dict.get("receipts", [])
     # Hash the reviewed PDFs as they actually exist in the export folder — the
-    # concrete artifacts the receipts describe.
-    if folder is not None:
+    # concrete artifacts the receipts describe. When the caller copied the PDFs
+    # itself (``write_qc_outputs``) it passes ``copied`` — ordered (original
+    # basename, on-disk name) PAIRS, unambiguous even when dedupe renamed one
+    # of two same-basename sources — and each entry records ``receipt_name``
+    # (the verbatim name the receipts carry) whenever it differs from the
+    # DA-033-sanitized on-disk ``name``. Receipts are never rewritten — they
+    # are the writer's reconciliation record, not the export copy's. Without
+    # ``copied`` (a direct library call), the legacy receipt-name scan applies.
+    if folder is not None and copied is not None:
+        renamed = [
+            {"receipt_name": original, "name": on_disk}
+            for original, on_disk in copied
+            if original != on_disk
+        ]
+        if renamed:
+            manifest["renamed_outputs"] = renamed
+        for original, on_disk in copied:
+            out = Path(folder) / on_disk
+            if out.exists():
+                entry = {
+                    "name": on_disk,
+                    "sha256": _sha256(out, hash_cache),
+                    "bytes": out.stat().st_size,
+                }
+                if on_disk != original:
+                    entry["receipt_name"] = original
+                manifest["outputs"].append(entry)
+    elif folder is not None:
         names = sorted(
             {
                 str(r.get("output_pdf") or "")
@@ -884,14 +1030,28 @@ def write_qc_outputs(
         used: set[str] = set()
         for geometry in geometries:
             name = _sheet_text_name(getattr(geometry, "ref", None), used)
-            (st_dir / name).write_text(getattr(geometry, "sheet_text", "") or "", encoding="utf-8")
+            contained_target(st_dir, name).write_text(
+                getattr(geometry, "sheet_text", "") or "", encoding="utf-8"
+            )
         written.append("sheet_text/")
 
+    # Reviewed-PDF names flow through the DA-033 allocator: a hostile source
+    # basename (a POSIX file legally named ``..\\..\\evil.pdf``) must land as a
+    # flat, contained file — and never clobber a sibling (deterministic dedupe).
+    # Every copy is recorded as an (original basename, on-disk name) PAIR — not
+    # a name-keyed map, which would be ambiguous for the very case dedupe
+    # exists for: two sources sharing one basename. The markup manifest aligns
+    # its outputs with these pairs; the receipts themselves stay verbatim (they
+    # describe what the writer reconciled, not the export copy).
+    used_pdf_names: set[str] = set()
+    copied_pdfs: list[tuple[str, str]] = []
     for pdf in reviewed:
         pdf = Path(pdf)
-        if pdf.exists():
-            shutil.copy2(pdf, folder / pdf.name)
-            written.append(pdf.name)
+        if pdf.exists() and not pdf.is_symlink():
+            name = safe_artifact_name(pdf.name, used=used_pdf_names, default="reviewed.pdf")
+            copied_pdfs.append((pdf.name, name))
+            shutil.copy2(pdf, contained_target(folder, name))
+            written.append(name)
 
     if work_dir is not None:
         evidence = Path(work_dir) / "evidence"
@@ -900,14 +1060,22 @@ def write_qc_outputs(
             # Copy the COMPLETE nested tree (DA-016): per-QC-ID subdirs, every leg
             # crop, and each request.json — not just the top-level PNGs. A shallow
             # ``glob("*.png")`` silently dropped the per-leg subdirectories.
+            # DA-033: symlinks are never followed (``os.walk(followlinks=False)``
+            # + a per-file symlink check), every component is sanitized, and
+            # every target is proven beneath the export root before copying.
             copied = 0
-            for src in sorted(evidence.rglob("*")):
-                if src.is_dir():
-                    continue
-                target = dest / src.relative_to(evidence)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src, target)
-                copied += 1
+            for dirpath, dirnames, filenames in os.walk(evidence, followlinks=False):
+                dirnames[:] = [d for d in dirnames if not (Path(dirpath) / d).is_symlink()]
+                for fname in sorted(filenames):
+                    src = Path(dirpath) / fname
+                    if src.is_symlink():
+                        continue
+                    rel = src.relative_to(evidence)
+                    safe_rel = Path(*(safe_artifact_name(part) for part in rel.parts))
+                    target = contained_target(dest, safe_rel)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src, target)
+                    copied += 1
             if copied:
                 written.append("evidence/")
 
@@ -917,7 +1085,9 @@ def write_qc_outputs(
     if has_markup_manifest(ctx):
         (folder / "markup_manifest.json").write_text(
             json.dumps(
-                build_markup_manifest(ctx, folder=folder, hash_cache=hash_cache),
+                build_markup_manifest(
+                    ctx, folder=folder, hash_cache=hash_cache, copied=copied_pdfs,
+                ),
                 indent=2,
             ),
             encoding="utf-8",
@@ -946,29 +1116,62 @@ def write_drawing_export(
     :func:`build_export_documents`).
     """
     now = now or datetime.now()
-    folder = _unique_dir(Path(parent_dir) / export_folder_name(source_names, now=now))
+    final = _unique_dir(Path(parent_dir) / export_folder_name(source_names, now=now))
+    # §18.4/§18.5 atomic publish: everything is written into a temporary
+    # SIBLING directory (same volume — a plain rename is atomic on POSIX and
+    # Windows alike when the destination does not exist) and published with one
+    # rename after the required files succeed. An interrupted export therefore
+    # never leaves a final-looking folder that is silently missing artifacts —
+    # the partial staging directory is renamed to an explicit *_INCOMPLETE
+    # label (or left as .partial if even that fails) and the error propagates.
+    folder = _unique_dir(final.with_name(final.name + ".partial"))
     folder.mkdir(parents=True, exist_ok=False)
-    # One sha256 per artifact per export: markup_manifest.json hashes the
-    # reviewed PDFs first, run_manifest.json's whole-folder walk reuses them.
-    hash_cache: dict[str, str] = {}
-    for name, content in build_export_documents(
-        ctx, source_names=source_names, now=now, api_key=api_key,
-        embed_api_key=embed_api_key, include_chat=include_chat,
-    ):
-        (folder / name).write_text(content, encoding="utf-8")
-    # QC review inventory (findings.json/csv, sheet_text/, reviewed PDFs,
-    # evidence/, markup_manifest.json) — only written when the run ran a QC stage.
-    write_qc_outputs(ctx, folder, hash_cache=hash_cache)
-    # Phase 26A finalization order (§18.4): every ordinary artifact and the
-    # markup manifest are on disk → finalize run.log (it lists what is actually
-    # there) → write run_manifest.json last (it hashes them all, run.log
-    # included, excluding only itself). Every export gets both, QC or not
-    # (§18.1). The Outputs list derives from the folder itself, so it cannot
-    # drift from what the manifest hashes.
-    outputs = _folder_inventory(folder)
-    journal = getattr(ctx, "run_journal", None)
-    if journal is not None and hasattr(journal, "emit"):
-        journal.emit("EXPORT_WRITTEN", stage="export", files=len(outputs))
-    write_run_log(ctx, folder, outputs=outputs)
-    write_run_manifest(ctx, folder, now=now, hash_cache=hash_cache)
-    return folder
+    try:
+        # One sha256 per artifact per export: markup_manifest.json hashes the
+        # reviewed PDFs first, run_manifest.json's whole-folder walk reuses them.
+        hash_cache: dict[str, str] = {}
+        for name, content in build_export_documents(
+            ctx, source_names=source_names, now=now, api_key=api_key,
+            embed_api_key=embed_api_key, include_chat=include_chat,
+        ):
+            contained_target(folder, name).write_text(content, encoding="utf-8")
+        # QC review inventory (findings.json/csv, sheet_text/, reviewed PDFs,
+        # evidence/, markup_manifest.json) — only written when the run ran a QC stage.
+        write_qc_outputs(ctx, folder, hash_cache=hash_cache)
+        # Phase 26A finalization order (§18.4): every ordinary artifact and the
+        # markup manifest are on disk → finalize run.log (it lists what is
+        # actually there) → write run_manifest.json last (it hashes them all,
+        # run.log included, excluding only itself). Every export gets both, QC
+        # or not (§18.1). The Outputs list derives from the folder itself, so
+        # it cannot drift from what the manifest hashes.
+        outputs = _folder_inventory(folder)
+        journal = getattr(ctx, "run_journal", None)
+        if journal is not None and hasattr(journal, "emit"):
+            journal.emit("EXPORT_WRITTEN", stage="export", files=len(outputs))
+        write_run_log(ctx, folder, outputs=outputs)
+        write_run_manifest(ctx, folder, now=now, hash_cache=hash_cache)
+    except BaseException:
+        try:
+            folder.rename(_unique_dir(final.with_name(final.name + "_INCOMPLETE")))
+        except OSError:
+            pass                      # the .partial name itself is the label then
+        raise
+    # Atomic same-volume publish (§18.5). ``final`` was reserved only by
+    # prediction (_unique_dir ran before the export was written), so a sibling
+    # export started in the same second can win the name first — re-derive a
+    # free name at publish time instead of failing a fully-written export.
+    for _ in range(3):
+        try:
+            folder.rename(final)
+            return final
+        except OSError:
+            fresh = _unique_dir(final)
+            if fresh == final:
+                continue              # transient (AV lock, etc.) — retry same name
+            final = fresh
+    try:
+        final = _unique_dir(final.with_name(final.name + "_INCOMPLETE"))
+        folder.rename(final)          # publish failed: label honestly, keep content
+    except OSError:
+        final = folder                # the .partial name itself is the label then
+    return final
