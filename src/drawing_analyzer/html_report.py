@@ -594,6 +594,38 @@ def _finding_sheet_key(ref_or_name: Any, page_index: int) -> tuple[str, int]:
     return (sid or name, int(page_index))
 
 
+def _ambiguous_names(ctx: Any) -> frozenset[str]:
+    """Display names shared by two *different* sources (§18.6).
+
+    A name is ambiguous when two sheet refs carry the same ``source_name`` but a
+    different identity (``source_id`` or ``pdf_path``) — e.g. two revisions of
+    ``M-101.pdf`` pulled from different folders. Labels for such sources get the
+    opaque source id suffixed (:func:`_disambiguated`) so the operator can tell
+    them apart; a name used by only one source stays clean.
+    """
+    identities: dict[str, set[tuple[str, str]]] = {}
+    for sheet in getattr(ctx, "sheets", None) or []:
+        ref = _ref_of(sheet)
+        name = getattr(ref, "source_name", "") or ""
+        sid = (getattr(ref, "source_id", "") or "").strip()
+        path = str(getattr(ref, "pdf_path", "") or "")
+        identities.setdefault(name, set()).add((sid, path))
+    return frozenset(name for name, ids in identities.items() if len(ids) > 1)
+
+
+def _disambiguated(label: str, owner: Any, ambiguous: frozenset[str]) -> str:
+    """Suffix ``label`` with the opaque source id when the owner's display name
+    is ambiguous (§18.6): ``"M-101.pdf (page 1/1) · SRC-0002"``. ``owner`` is
+    anything carrying ``source_name`` + ``source_id`` (a ref or a finding); no
+    suffix without a host-assigned id — a bare name has nothing truthful to add.
+    """
+    sid = (getattr(owner, "source_id", "") or "").strip()
+    name = getattr(owner, "source_name", "") or ""
+    if sid and name in ambiguous:
+        return f"{label} · {sid}"
+    return label
+
+
 def _sheet_card_index(sheets: list[Any]) -> dict[tuple[str, int], int]:
     """Map source identity → 1-based sheet-card index (for finding links)."""
     out: dict[tuple[str, int], int] = {}
@@ -613,13 +645,20 @@ def _geometry_index(ctx: Any) -> dict[tuple[str, int], Any]:
     return out
 
 
-def _finding_row_html(f: Any, card_index: int | None, *, link_evidence: bool) -> str:
+def _finding_row_html(
+    f: Any,
+    card_index: int | None,
+    *,
+    link_evidence: bool,
+    ambiguous: frozenset[str] = frozenset(),
+) -> str:
     status = _finding_display_status(f)
     label, cls = _FINDING_STATUS_CHIP.get(status, ("Uncertain", "uncertain"))
     category = getattr(f, "category", "") or "other"
     severity = (getattr(f, "severity", "") or "").lower()
     sev_rank = _SEVERITY_RANK.get(severity, 0)
     sheet_id = getattr(f, "sheet_id", "") or getattr(f, "source_name", "") or "—"
+    sheet_id = _disambiguated(sheet_id, f, ambiguous)
     text = getattr(f, "text", "") or ""
     quote = getattr(f, "source_quote", "") or ""
     qc_id = getattr(f, "qc_id", "") or ""
@@ -640,15 +679,39 @@ def _finding_row_html(f: Any, card_index: int | None, *, link_evidence: bool) ->
         text_cell += (
             f' <span class="muted provenance-chip">[{html.escape(provenance_label(sources))}]</span>'
         )
-    citation = getattr(f, "citation", None)
-    if citation is not None and getattr(citation, "status", "UNCHECKED") != "UNCHECKED":
-        cite_label = "supports" if citation.status == "CHECKED_SUPPORTS" else "mismatch"
-        cite_note = (getattr(citation, "note", "") or "").strip()
+    prose_ids = list(getattr(f, "prose_item_ids", None) or [])
+    if prose_ids:
+        # Phase 22 §14.6: how many enumerated prose items this entry accounts for.
         text_cell += (
-            f' <span class="muted citation-note">[citation {html.escape(cite_label)}'
-            + (f": {html.escape(cite_note)}" if cite_note else "")
-            + "]</span>"
+            f' <span class="muted provenance-chip">prose×{len(prose_ids)}</span>'
         )
+    assessments = list(getattr(f, "citations", None) or [])
+    if assessments:
+        # Per-reference, claim-complete citation verdicts (§18.6, DA-017) — one
+        # span per reference, never collapsed into one ambiguous status.
+        for a in assessments:
+            a_ref = str(getattr(a, "reference", "") or "")
+            a_status = str(getattr(a, "status", "") or "UNCHECKED")
+            a_note = (getattr(a, "note", "") or "").strip()
+            if len(a_note) > 120:
+                a_note = a_note[:119].rstrip() + "…"
+            text_cell += (
+                f' <span class="muted citation-note">[{html.escape(a_ref)}: '
+                f"{html.escape(a_status)}"
+                + (f" — {html.escape(a_note)}" if a_note else "")
+                + "]</span>"
+            )
+    else:
+        # Legacy single-verdict summary (a finding from an older cached run).
+        citation = getattr(f, "citation", None)
+        if citation is not None and getattr(citation, "status", "UNCHECKED") != "UNCHECKED":
+            cite_label = "supports" if citation.status == "CHECKED_SUPPORTS" else "mismatch"
+            cite_note = (getattr(citation, "note", "") or "").strip()
+            text_cell += (
+                f' <span class="muted citation-note">[citation {html.escape(cite_label)}'
+                + (f": {html.escape(cite_note)}" if cite_note else "")
+                + "]</span>"
+            )
     if link_evidence:
         verification = getattr(f, "verification", None)
         # DA-016: list EVERY saved crop (one per leg of a cross-sheet conflict),
@@ -687,12 +750,20 @@ def _finding_row_html(f: Any, card_index: int | None, *, link_evidence: bool) ->
     )
 
 
-def _findings_card(ctx: Any, sheets: list[Any], *, link_evidence: bool = False) -> str:
+def _findings_card(
+    ctx: Any,
+    sheets: list[Any],
+    *,
+    link_evidence: bool = False,
+    ambiguous: frozenset[str] = frozenset(),
+) -> str:
     """The pinned QC Findings card: a sortable, filterable table (``""`` if none).
 
     Default order is severity-desc then status-rank-desc; the columns are
     click-sortable in the browser. Rows link to the sheet card they sit on and
     carry ``data-category`` so the filter chips (and ⚠ Issues only) reach them.
+    The badge total is static (§18.6 — filters never change underlying counts);
+    the ``#findings-shown`` span is the JS-maintained "showing K of N" line.
     """
     findings = _report_findings(ctx)
     if not findings:
@@ -706,19 +777,28 @@ def _findings_card(ctx: Any, sheets: list[Any], *, link_evidence: bool = False) 
     rows = []
     for f in sorted(findings, key=_key):
         ref_key = _finding_sheet_key(f, int(getattr(f, "page_index", 0) or 0))
-        rows.append(_finding_row_html(f, index.get(ref_key), link_evidence=link_evidence))
+        rows.append(
+            _finding_row_html(
+                f, index.get(ref_key), link_evidence=link_evidence, ambiguous=ambiguous
+            )
+        )
+
+    def _th(key: str, label: str) -> str:
+        # tabindex + aria-sort: sortable headers are keyboard-reachable and
+        # announce their direction (the JS keeps aria-sort in sync).
+        return f'<th data-sort="{key}" tabindex="0" aria-sort="none">{label}</th>'
 
     table = (
         '<div class="findings-wrap"><table class="findings-table">'
         "<thead><tr>"
-        '<th data-sort="qcid">ID</th>'
-        '<th data-sort="sheet">Sheet</th>'
-        '<th data-sort="category">Category</th>'
-        '<th data-sort="severity">Severity</th>'
-        '<th data-sort="status">Status</th>'
-        '<th data-sort="text">Finding</th>'
-        '<th data-sort="quote">Quote</th>'
-        "</tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>"
+        + _th("qcid", "ID")
+        + _th("sheet", "Sheet")
+        + _th("category", "Category")
+        + _th("severity", "Severity")
+        + _th("status", "Status")
+        + _th("text", "Finding")
+        + _th("quote", "Quote")
+        + "</tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>"
     )
     hint = (
         '<p class="findings-hint muted">Click a column header to sort · click a '
@@ -729,7 +809,10 @@ def _findings_card(ctx: Any, sheets: list[Any], *, link_evidence: bool = False) 
     return _card(
         card_id="findings",
         title_html='<span class="seq">⚑</span> QC Findings',
-        badges_html=f'<span class="badge badge-findings">{len(findings)} finding(s)</span>',
+        badges_html=(
+            '<span id="findings-shown" class="muted" aria-live="polite"></span>'
+            f'<span class="badge badge-findings">{len(findings)} finding(s)</span>'
+        ),
         status="findings",
         body_html=f'<div class="findings-body">{hint}{tally}{checks}{table}</div>',
     )
@@ -804,7 +887,7 @@ def _card(
     """A collapsible, filterable card (one sheet, or the set overview)."""
     return (
         f'<article class="card" id="{card_id}" data-status="{_esc_attr(status)}">'
-        f'<header class="card-head" role="button" tabindex="0">'
+        f'<header class="card-head" role="button" tabindex="0" aria-expanded="true">'
         f'<span class="card-title">{title_html}</span>'
         f'<span class="badges">{badges_html}</span>'
         f'<span class="chevron" aria-hidden="true">▾</span>'
@@ -842,9 +925,17 @@ def _rawtext_block(geometry: Any) -> str:
     return f'<section class="block block-rawtext" data-category="other">{inner}</section>'
 
 
-def _sheet_card(index: int, total: int, sheet: Any, geometry: Any = None) -> str:
+def _sheet_card(
+    index: int,
+    total: int,
+    sheet: Any,
+    geometry: Any = None,
+    *,
+    ambiguous: frozenset[str] = frozenset(),
+) -> str:
     ref = _ref_of(sheet)
     label = getattr(ref, "display_label", None) or f"Sheet {index}/{total}"
+    label = _disambiguated(label, ref, ambiguous)
     status = _sheet_status(sheet)
     text = (getattr(sheet, "text", "") or "").strip()
     error = getattr(sheet, "error", None)
@@ -948,7 +1039,9 @@ def _overview_card(ctx: Any) -> str:
     )
 
 
-def _toc_html(ctx: Any, sheets: list[Any]) -> str:
+def _toc_html(
+    ctx: Any, sheets: list[Any], *, ambiguous: frozenset[str] = frozenset()
+) -> str:
     rows = []
     if _focus_value(ctx):
         rows.append(
@@ -971,6 +1064,7 @@ def _toc_html(ctx: Any, sheets: list[Any]) -> str:
     for i, sheet in enumerate(sheets, start=1):
         ref = _ref_of(sheet)
         label = getattr(ref, "display_label", None) or f"Sheet {i}/{total}"
+        label = _disambiguated(label, ref, ambiguous)
         status = _sheet_status(sheet)
         rows.append(
             f'<a class="toc-item" data-target="sheet-{i}" href="#sheet-{i}">'
@@ -983,17 +1077,29 @@ def _toc_html(ctx: Any, sheets: list[Any]) -> str:
 
 def _filter_chips_html(*, include_focus: bool = False) -> str:
     """The filter chip row. The Focus chip appears only when the run had a
-    per-run focus — otherwise it would be a chip that can never match."""
+    per-run focus — otherwise it would be a chip that can never match.
+
+    Category chips are exclusive (``data-filter``, one active at a time);
+    ``aria-pressed`` mirrors the active state for assistive tech. The trailing
+    ``#sev-high`` button is a standalone toggle (DA-025) that *combines* with
+    whichever category chip is active instead of replacing it — it carries no
+    ``data-filter`` so the exclusive-chip JS never touches it.
+    """
     chips = [
-        '<button class="chip chip-active" data-filter="all">All</button>',
-        '<button class="chip chip-issues" data-filter="issues">⚠ Issues only</button>',
+        '<button class="chip chip-active" data-filter="all" aria-pressed="true">All</button>',
+        '<button class="chip chip-issues" data-filter="issues" aria-pressed="false">⚠ Issues only</button>',
     ]
     for cid, _label, _kw in _CATEGORY_SPECS:
         if cid == "focus" and not include_focus:
             continue
         chips.append(
-            f'<button class="chip" data-filter="{cid}">{html.escape(CATEGORY_LABELS[cid])}</button>'
+            f'<button class="chip" data-filter="{cid}" aria-pressed="false">'
+            f"{html.escape(CATEGORY_LABELS[cid])}</button>"
         )
+    chips.append(
+        '<button class="chip chip-toggle" id="sev-high" aria-pressed="false">'
+        "High severity only</button>"
+    )
     return "".join(chips)
 
 
@@ -1035,12 +1141,97 @@ def _summary_html(ctx: Any, source_names: list[str], now: datetime) -> str:
         f'<div class="summary">'
         f"{_qc_status_banner_html(ctx)}"
         f"{_coverage_banner_html(ctx)}"
+        f"{_stage_table_html(ctx)}"
         f'<div class="stats">{cards}</div>'
         f"{_usage_html(ctx)}"
         f'<details class="sources"><summary>Source files</summary>'
         f"<ul>{sources}</ul></details>"
+        f"{_run_record_html(ctx)}"
         f"{errors_html}"
         f"</div>"
+    )
+
+
+# StageResult.status → status-cell css suffix (§18.6). SKIPPED_VALID is a benign
+# skip, so it reads muted like NOT_REQUESTED rather than as a warning.
+_STAGE_STATUS_CLASS = {
+    "COMPLETE": "complete",
+    "PARTIAL": "partial",
+    "FAILED": "failed",
+    "SKIPPED_VALID": "skipped",
+    "NOT_REQUESTED": "not-requested",
+}
+
+
+def _stage_table_html(ctx: Any) -> str:
+    """The per-stage QC status table (Phase 26B, §18.6).
+
+    One row per typed :class:`StageResult`, in recorded order — the drill-down
+    behind the one-line QC status banner. Collapsed by default like the usage
+    table, and absent entirely when the run recorded no stage results (a
+    standard run). The first error/warning per stage is shown inline so a
+    PARTIAL/FAILED row explains itself without opening the export's ``run.log``.
+    """
+    stages = list(getattr(ctx, "stage_results", None) or [])
+    if not stages:
+        return ""
+    rows = []
+    for s in stages:
+        status = str(getattr(s, "status", "") or "NOT_REQUESTED").upper()
+        cls = _STAGE_STATUS_CLASS.get(status, "not-requested")
+        errors = [str(e) for e in (getattr(s, "errors", None) or [])]
+        warnings = [str(w) for w in (getattr(s, "warnings", None) or [])]
+        note = errors[0] if errors else (warnings[0] if warnings else "")
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(str(getattr(s, 'stage', '') or ''))}</td>"
+            f"<td>{'yes' if getattr(s, 'expected', False) else 'no'}</td>"
+            f'<td class="st-{cls}">{html.escape(status)}</td>'
+            f"<td class='num'>{int(getattr(s, 'calls_succeeded', 0) or 0)}"
+            f"/{int(getattr(s, 'calls_planned', 0) or 0)}</td>"
+            f"<td class='num'>{int(getattr(s, 'items_in', 0) or 0)} → "
+            f"{int(getattr(s, 'items_out', 0) or 0)}</td>"
+            f'<td class="muted">{html.escape(note) if note else "—"}</td>'
+            "</tr>"
+        )
+    return (
+        '<details class="usage stage-status"><summary>QC stage status</summary>'
+        '<div class="usage-scroll"><table class="usage-table stage-table">'
+        "<thead><tr><th>Stage</th><th>Expected</th><th>Status</th>"
+        "<th class='num'>Calls</th><th class='num'>Items in → out</th>"
+        "<th>First issue</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table></div></details>"
+    )
+
+
+def _run_record_html(ctx: Any) -> str:
+    """The run-record pointer (Phase 26B, §18.6): the journal's identity plus
+    where the full per-run record lives. Duck-typed off ``ctx.run_journal``
+    (present on every pipeline run since Phase 26A; a context without one simply
+    omits the block). Every value is escaped — the journal sanitizes at emit
+    time, but the report never relies on that.
+    """
+    journal = getattr(ctx, "run_journal", None)
+    if journal is None:
+        return ""
+    run_id = str(getattr(journal, "run_id", "") or "")
+    items = [f"<li>Run ID: <code>{html.escape(run_id)}</code></li>"]
+    started = getattr(journal, "started_at", None)
+    if started is not None:
+        items.append(f"<li>Started: {html.escape(str(started))}</li>")
+    ended = getattr(journal, "ended_at", None)
+    if ended is not None:
+        items.append(f"<li>Ended: {html.escape(str(ended))}</li>")
+    final = str(getattr(journal, "final_status", "") or "")
+    if final:
+        items.append(f"<li>Final status: {html.escape(final)}</li>")
+    items.append(
+        "<li>Full event trace: <code>run.log</code> and "
+        "<code>run_manifest.json</code>, written into every export folder.</li>"
+    )
+    return (
+        '<details class="sources run-record"><summary>Run record</summary>'
+        f"<ul>{''.join(items)}</ul></details>"
     )
 
 
@@ -1219,6 +1410,7 @@ def build_html_report(
     sheets = list(getattr(ctx, "sheets", None) or [])
     total = len(sheets)
     geoms = _geometry_index(ctx)
+    ambiguous = _ambiguous_names(ctx)  # §18.6 same-name source disambiguation
 
     title = "Drawing Set Digest"
     if source_names:
@@ -1226,12 +1418,14 @@ def build_html_report(
 
     has_focus = bool(_focus_value(ctx))
     cards = [_focus_card(ctx)] if has_focus else []
-    findings_card = _findings_card(ctx, sheets, link_evidence=link_evidence)
+    findings_card = _findings_card(
+        ctx, sheets, link_evidence=link_evidence, ambiguous=ambiguous
+    )
     if findings_card:
         cards.append(findings_card)
     cards.append(_overview_card(ctx))
     cards += [
-        _sheet_card(i, total, s, geoms.get(_sheet_key(_ref_of(s))))
+        _sheet_card(i, total, s, geoms.get(_sheet_key(_ref_of(s))), ambiguous=ambiguous)
         for i, s in enumerate(sheets, start=1)
     ]
 
@@ -1239,11 +1433,11 @@ def build_html_report(
   <div class="brand">Drawing Digest</div>
   <div class="generated">{html.escape(now.strftime('%Y-%m-%d %H:%M'))}</div>
   <div class="search-wrap">
-    <input id="search" type="search" placeholder="Search all sheets…" autocomplete="off">
+    <input id="search" type="search" placeholder="Search all sheets…" autocomplete="off" aria-label="Search the report">
   </div>
   <div class="chips">{_filter_chips_html(include_focus=has_focus)}</div>
-  <div class="result-count" id="result-count"></div>
-  <nav class="toc" id="toc">{_toc_html(ctx, sheets)}</nav>
+  <div class="result-count" id="result-count" role="status"></div>
+  <nav class="toc" id="toc" aria-label="Report contents">{_toc_html(ctx, sheets, ambiguous=ambiguous)}</nav>
 </aside>
 <main class="content">
   <div class="content-head">
@@ -1404,6 +1598,11 @@ a{color:var(--accent); text-decoration:none}
 .usage-table th,.usage-table td{border-bottom:1px solid var(--line); padding:4px 10px; text-align:left}
 .usage-table th.num,.usage-table td.num{text-align:right; font-variant-numeric:tabular-nums}
 .usage-table thead th{color:var(--muted); font-weight:600}
+/* Per-stage QC table (§18.6) — status-cell colors match the banner palette. */
+.stage-table td.st-complete{color:var(--ok); font-weight:600}
+.stage-table td.st-partial{color:var(--coord); font-weight:600}
+.stage-table td.st-failed{color:var(--failed); font-weight:600}
+.stage-table td.st-skipped,.stage-table td.st-not-requested{color:var(--muted)}
 
 /* Cards */
 .card{
@@ -1433,6 +1632,7 @@ a{color:var(--accent); text-decoration:none}
 .badge-findings{background:#fdeaea; color:var(--findings)}
 .badge-raster{background:#efe7fb; color:#6b3fb0}
 .badge-tok{background:#eef1f6; color:var(--muted); font-variant-numeric:tabular-nums}
+#findings-shown{font-size:11px; white-space:nowrap}
 .chevron{color:var(--muted); transition:transform .15s}
 .card.collapsed .chevron{transform:rotate(-90deg)}
 .card.collapsed .card-body{display:none}
@@ -1564,7 +1764,9 @@ mark{background:#ffe9a8; color:inherit; padding:0 1px; border-radius:2px}
 _JS = r"""
 (function(){
   var search = document.getElementById('search');
-  var chips = Array.prototype.slice.call(document.querySelectorAll('.chip'));
+  // Only data-filter chips are exclusive; #sev-high is a standalone toggle.
+  var chips = Array.prototype.slice.call(document.querySelectorAll('.chip[data-filter]'));
+  var sevHigh = document.getElementById('sev-high');
   var cards = Array.prototype.slice.call(document.querySelectorAll('.card'));
   var toc = Array.prototype.slice.call(document.querySelectorAll('.toc-item'));
   var resultCount = document.getElementById('result-count');
@@ -1572,8 +1774,10 @@ _JS = r"""
   var findingsCard = document.getElementById('findings');
   var findingRows = findingsCard ?
     Array.prototype.slice.call(findingsCard.querySelectorAll('.finding-row')) : [];
+  var findingsShown = document.getElementById('findings-shown');
   var ISSUE = ['coordination','conflict'];
   var activeFilter = 'all';
+  var highOnly = false;   // DA-025: severity toggle, independent of the chips
 
   function activeCategories(){
     if(activeFilter === 'all') return null;          // null => every category
@@ -1596,10 +1800,18 @@ _JS = r"""
       var cat = row.getAttribute('data-category');
       var catOk = (activeFilter === 'all' || activeFilter === 'issues') || (cat === activeFilter);
       var textOk = q === '' || row.textContent.toLowerCase().indexOf(q) !== -1;
-      var show = catOk && textOk;
+      // DA-025: data-severity is the numeric rank (3=high, 2, 1, 0).
+      var sevOk = !highOnly || row.getAttribute('data-severity') === '3';
+      var show = catOk && textOk && sevOk;
       row.classList.toggle('hidden', !show);
       if(show) shown++;
     });
+    // §18.6: filters never change the static totals — the badge keeps the full
+    // count; this live line only says what the current filters are showing.
+    if(findingsShown){
+      findingsShown.textContent = shown === findingRows.length ? '' :
+        'showing ' + shown + ' of ' + findingRows.length;
+    }
     var cardShow = shown > 0;
     findingsCard.classList.toggle('hidden', !cardShow);
     var t = tocFor('findings'); if(t) t.classList.toggle('hidden', !cardShow);
@@ -1645,12 +1857,23 @@ _JS = r"""
 
   chips.forEach(function(chip){
     chip.addEventListener('click', function(){
-      chips.forEach(function(c){ c.classList.remove('chip-active'); });
+      chips.forEach(function(c){ c.classList.remove('chip-active'); c.setAttribute('aria-pressed','false'); });
       chip.classList.add('chip-active');
+      chip.setAttribute('aria-pressed','true');
       activeFilter = chip.getAttribute('data-filter');
       apply();
     });
   });
+
+  // DA-025: "High severity only" toggles on top of the exclusive chips.
+  if(sevHigh){
+    sevHigh.addEventListener('click', function(){
+      highOnly = !highOnly;
+      sevHigh.classList.toggle('chip-active', highOnly);
+      sevHigh.setAttribute('aria-pressed', highOnly ? 'true' : 'false');
+      apply();
+    });
+  }
 
   var timer = null;
   search.addEventListener('input', function(){
@@ -1658,10 +1881,16 @@ _JS = r"""
     timer = setTimeout(apply, 90);
   });
 
-  // Collapse / expand a card by clicking (or keyboard-activating) its header.
+  // Collapse / expand a card by clicking (or keyboard-activating) its header;
+  // aria-expanded on the header tracks the state for assistive tech.
+  function setExpanded(card, expanded){
+    card.classList.toggle('collapsed', !expanded);
+    var head = card.querySelector('.card-head');
+    if(head) head.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+  }
   cards.forEach(function(card){
     var head = card.querySelector('.card-head');
-    function toggle(){ card.classList.toggle('collapsed'); }
+    function toggle(){ setExpanded(card, card.classList.contains('collapsed')); }
     head.addEventListener('click', toggle);
     head.addEventListener('keydown', function(e){
       if(e.key === 'Enter' || e.key === ' '){ e.preventDefault(); toggle(); }
@@ -1669,8 +1898,8 @@ _JS = r"""
   });
   var ea = document.getElementById('expand-all');
   var ca = document.getElementById('collapse-all');
-  if(ea) ea.addEventListener('click', function(){ cards.forEach(function(c){ c.classList.remove('collapsed'); }); });
-  if(ca) ca.addEventListener('click', function(){ cards.forEach(function(c){ c.classList.add('collapsed'); }); });
+  if(ea) ea.addEventListener('click', function(){ cards.forEach(function(c){ setExpanded(c, true); }); });
+  if(ca) ca.addEventListener('click', function(){ cards.forEach(function(c){ setExpanded(c, false); }); });
 
   // Findings table — click a column header to sort; re-clicking a column flips
   // the direction. Severity and status sort by their numeric ranks (high→low,
@@ -1688,7 +1917,7 @@ _JS = r"""
       return cell ? cell.textContent.trim().toLowerCase() : '';
     }
     fths.forEach(function(th){
-      th.addEventListener('click', function(){
+      function sortBy(){
         if(!ftbody) return;
         var key = th.getAttribute('data-sort');
         if(fsort.key === key) fsort.dir = -fsort.dir; else { fsort.key = key; fsort.dir = 1; }
@@ -1700,8 +1929,13 @@ _JS = r"""
           return 0;
         });
         rows.forEach(function(r){ ftbody.appendChild(r); });
-        fths.forEach(function(t){ t.classList.remove('sort-asc','sort-desc'); });
+        fths.forEach(function(t){ t.classList.remove('sort-asc','sort-desc'); t.setAttribute('aria-sort','none'); });
         th.classList.add(fsort.dir === 1 ? 'sort-asc' : 'sort-desc');
+        th.setAttribute('aria-sort', fsort.dir === 1 ? 'ascending' : 'descending');
+      }
+      th.addEventListener('click', sortBy);
+      th.addEventListener('keydown', function(e){
+        if(e.key === 'Enter'){ e.preventDefault(); sortBy(); }
       });
     });
   }
@@ -1710,7 +1944,7 @@ _JS = r"""
   toc.forEach(function(item){
     item.addEventListener('click', function(){
       var el = document.getElementById(item.getAttribute('data-target'));
-      if(el) el.classList.remove('collapsed');
+      if(el) setExpanded(el, true);
     });
   });
 

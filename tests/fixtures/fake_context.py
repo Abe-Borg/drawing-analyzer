@@ -20,13 +20,16 @@ class FakeRef:
 
     ``pdf_path`` mirrors the real ref's full-identity field (optional here so the
     common ``FakeRef(name, page, count)`` positional call is unchanged); the
-    report uses it to disambiguate two sheets that share a basename.
+    report uses it to disambiguate two sheets that share a basename. ``source_id``
+    mirrors the host-owned input identity (``"SRC-0001"``, DA-001) — the report
+    suffixes it onto labels when two different sources share a display name.
     """
 
     source_name: str
     page_index: int
     page_count: int
     pdf_path: str | None = None
+    source_id: str = ""
 
     @property
     def display_label(self) -> str:
@@ -84,6 +87,10 @@ class FakeContext:
     stage_results: list = field(default_factory=list)
     # Phase 23B: the append-only usage ledger (a real RunUsage, or None).
     run_usage: object | None = None
+    # Phase 26A/B: the run journal (a real RunJournal or any duck-type carrying
+    # run_id/started_at/ended_at/final_status); None → the report omits the
+    # "Run record" block.
+    run_journal: object | None = None
 
     @property
     def total_estimated_cost(self) -> object | None:

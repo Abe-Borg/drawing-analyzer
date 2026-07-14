@@ -755,3 +755,34 @@ def test_export_publishes_atomically_and_labels_partials(tmp_path, monkeypatch):
     # The second final name was never published.
     finals = [p.name for p in tmp_path.iterdir() if p.name.endswith("_070200")]
     assert finals == [folder.name]
+
+
+def test_markup_manifest_aligns_with_sanitized_pdf_names(tmp_path):
+    # Codex P2 / DA-033 follow-up: when the allocator renames a reviewed PDF
+    # (hostile or colliding basename), markup_manifest.json must still hash the
+    # on-disk file and map it back to the verbatim receipt name — receipts are
+    # never rewritten, but the coverage record stays aligned with the folder.
+    ctx = _qc_ctx(tmp_path, with_reviewed=False, with_evidence=False)
+    hostile = tmp_path / "qc" / r"..\..\evil_reviewed.pdf"
+    hostile.parent.mkdir(parents=True, exist_ok=True)
+    hostile.write_bytes(b"%PDF-1.7 hostile")
+    ctx.reviewed_pdf_paths = [hostile]
+    ctx.markup_run = SimpleNamespace(
+        to_dict=lambda: {
+            "placements": [],
+            "receipts": [{"status": "WRITTEN", "output_pdf": hostile.name}],
+        },
+        placements=[], receipts=[SimpleNamespace(status="WRITTEN")],
+    )
+    folder = tmp_path / "out"
+    folder.mkdir()
+    dx.write_qc_outputs(ctx, folder)
+
+    manifest = json.loads((folder / "markup_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["renamed_outputs"] == {hostile.name: "evil_reviewed.pdf"}
+    outputs = {o["name"]: o for o in manifest["outputs"]}
+    assert "evil_reviewed.pdf" in outputs                       # on-disk name hashed
+    assert outputs["evil_reviewed.pdf"]["receipt_name"] == hostile.name
+    assert outputs["evil_reviewed.pdf"]["sha256"]
+    # Receipts stay verbatim — the writer's reconciliation record is untouched.
+    assert manifest["receipts"][0]["output_pdf"] == hostile.name

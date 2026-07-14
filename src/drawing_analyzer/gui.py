@@ -980,7 +980,10 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         if has_text:
             self.save_btn.configure(state="normal")
             self.html_btn.configure(state="normal")
-            self.export_btn.configure(state="normal")
+        # Export All stays available even for a run that analyzed nothing —
+        # the run record (run.log, inventory, run_manifest.json) is the
+        # diagnostic artifact for exactly those failures (§18.1).
+        self.export_btn.configure(state="normal")
         # QC outputs — enable the save actions only when a run produced them.
         if getattr(ctx, "finding_count", 0):
             self.csv_btn.configure(state="normal")
@@ -1245,7 +1248,11 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         opts in.
         """
         ctx = self._ctx
-        if not ctx or not ctx.combined_text.strip():
+        # Deliberately NOT gated on digest text: an all-inputs-rejected or
+        # preflight-blocked run is exactly when the operator needs the run
+        # record (run.log, input inventory, run_manifest.json) for diagnosis —
+        # the export writes an honest placeholder digest either way (§18.1).
+        if not ctx:
             return
         folder = filedialog.askdirectory(title="Export everything to folder")
         if not folder:
