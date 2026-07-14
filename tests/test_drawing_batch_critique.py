@@ -489,6 +489,74 @@ def test_non_terminal_cancel_fails_retains_files():
 
 
 # --------------------------------------------------------------------------- #
+# Stalled batch: give up at the stall window, not the 4h elapsed bound
+# --------------------------------------------------------------------------- #
+
+
+class _NeverEndingBatches(_FakeBatches):
+    """``retrieve`` always reports ``in_progress`` with zero completions, burning
+    ``tick`` fake-seconds per poll on a scripted clock — the stuck-batch shape
+    (``processing=N``, nothing moving) that hung two real runs to the 4h bound."""
+
+    def __init__(self, client, clock, tick):
+        super().__init__(client)
+        self._clock = clock
+        self._tick = tick
+        self.retrieve_calls: list[str] = []
+
+    def retrieve(self, batch_id):
+        self.retrieve_calls.append(batch_id)
+        self._clock["t"] += self._tick
+        n = len(self._c.submitted)
+        return _Obj(
+            processing_status="in_progress",
+            request_counts=_Obj(
+                succeeded=0, errored=0, canceled=0, expired=0, processing=n
+            ),
+        )
+
+
+def _install_batches(client, batches):
+    client.beta.messages.batches = batches
+    client.messages.batches = batches
+
+
+def test_stalled_critique_batch_gives_up_early_and_degrades(monkeypatch):
+    # A critique batch frozen at zero progress must give up at the stall window
+    # (~1h) instead of hanging to the ~4h elapsed bound. The critique runs
+    # mid-pipeline, so a 4h hang here freezes every downstream stage; the stuck
+    # sheet degrades honestly either way (additive/non-fatal, I-3), so the early
+    # give-up reaches the same outcome without the wait. (The digest path pairs
+    # its stall watch with a direct-call rescue; the critique owes none.)
+    from drawing_analyzer import batch_digest
+
+    clock = {"t": 0.0}
+    monkeypatch.setattr(batch_digest.time, "monotonic", lambda: clock["t"])
+    client = _FakeClient(_succeed)
+    stalling = _NeverEndingBatches(client, clock, tick=600.0)
+    _install_batches(client, stalling)
+
+    batch = submit_critique_batch(
+        iter([_make_sheet(1)]), client=client, model=OPUS, runs=2, total=1,
+    )
+    logs: list[tuple[str, str]] = []
+    results = collect_critique_batch(
+        batch, client=client, sleep=NOSLEEP, max_elapsed_seconds=100_000,
+        on_log=lambda msg, level="info": logs.append((level, msg)),
+    )
+
+    # Gave up at the stall window (1h of frozen counts), NOT the elapsed bound:
+    # 7 polls x 600s ~= 70 min, a fraction of the 100k-second budget.
+    assert len(stalling.retrieve_calls) == 7
+    assert clock["t"] < 10_000
+    assert client.cancel_calls == ["batch_crit"]
+    # The stuck sheet degraded to no-critique, naming the stall; files released.
+    _ref, res = results[0]
+    assert res.findings == [] and "not collected (stalled)" in res.error
+    assert sorted(client.files.deleted) == sorted(batch.all_file_ids)
+
+
+# --------------------------------------------------------------------------- #
 # Upload-failure fallback (per-sheet, non-fatal)
 # --------------------------------------------------------------------------- #
 
@@ -557,6 +625,63 @@ def test_dead_files_route_trips_breaker_and_stops_uploading():
     assert len(results) == n_sheets
     assert all(res.rescued and res.completed_runs == 2 for _ref, res in results)
     assert len(client.messages_create_calls) == 2 * n_sheets
+
+
+# --------------------------------------------------------------------------- #
+# Deferred client creation: the pipeline passes client=None (DA-030 regression)
+# --------------------------------------------------------------------------- #
+
+
+def test_none_client_is_resolved_for_batch_upload(monkeypatch):
+    # Regression: the pipeline defers client creation and passes ``client=None``
+    # (the digest batch path resolves it via get_client() "since the upload happens
+    # at submit time"; the critique path forgot to). Handing None to the Files-API
+    # upload raised ``AttributeError: 'NoneType' object has no attribute 'beta'``,
+    # which the per-sheet guard swallowed — silently degrading EVERY sheet to the
+    # slow, full-price real-time fallback and never using Batches at all.
+    client = _FakeClient(_succeed)
+    monkeypatch.setattr("drawing_analyzer.client.get_client", lambda: client)
+
+    batch = submit_critique_batch(
+        iter([_make_sheet(1), _make_sheet(2)]), client=None, model=OPUS,
+        runs=2, total=2,
+    )
+    # The Files API WAS used — a real batch off shared uploads, not the fallback.
+    assert batch.batch_id == "batch_crit"
+    assert len(client.files.uploaded_ids) == 2 * IMAGES_PER_SHEET
+    assert len(client.create_calls) == 1
+    assert [r["custom_id"] for r in client.submitted] == [
+        "sheet__0__r1", "sheet__0__r2", "sheet__1__r1", "sheet__1__r2",
+    ]
+    # Crucially, NOT one real-time rescue call — the bug's tell was messages.create
+    # firing for every read instead of the batch.
+    assert client.messages_create_calls == []
+
+    results = collect_critique_batch(batch, client=None, sleep=NOSLEEP)
+    assert len(results) == 2
+    for _ref, res in results:
+        assert res.completed_runs == 2 and res.error is None and not res.rescued
+
+
+def test_none_client_all_cache_hits_needs_no_key(monkeypatch):
+    # Offline safety: the None-client resolution must stay LAZY. A fully
+    # cache-served run (every sheet a level-2 hit) makes no API call, so it must
+    # never reach for a client/key even when the pipeline passed ``client=None``.
+    cache = DigestCache(None, persist=False)
+    _run(_FakeClient(_succeed), [_make_sheet(1)], cache=cache, runs=2)  # warm
+
+    def _boom():
+        raise AssertionError("get_client must not be called on a cache-served run")
+
+    monkeypatch.setattr("drawing_analyzer.client.get_client", _boom)
+    batch = submit_critique_batch(
+        iter([_make_sheet(1)]), client=None, cache=cache, model=OPUS,
+        runs=2, total=1,
+    )
+    assert batch.batch_id is None  # all hits: nothing uploaded, nothing batched
+    results = collect_critique_batch(batch, client=None, cache=cache, sleep=NOSLEEP)
+    _ref, res = results[0]
+    assert res.cached and res.completed_runs == 2 and len(res.findings) == 1
 
 
 # --------------------------------------------------------------------------- #

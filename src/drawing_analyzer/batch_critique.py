@@ -55,6 +55,7 @@ from typing import Any, Callable
 
 from .batch_digest import (
     DEFAULT_BATCH_MAX_ELAPSED_SECONDS,
+    DEFAULT_BATCH_STALL_TIMEOUT_SECONDS,
     MAX_CONSECUTIVE_FATAL_UPLOAD_FAILURES,
     LogCallback,
     ProgressCallback,
@@ -263,6 +264,22 @@ def submit_critique_batch(
                     tail = " after overload" if retrying else ""
                     on_status(f"[{_k}/{total}] critique {verb} image {pos}/{n}{tail} — {_label}")
 
+            # This sheet needs the Files API (the upload here, and the batch/collect
+            # that follow, all talk to it). The pipeline may DEFER client creation
+            # and pass ``None`` — exactly as the digest batch path allows, where
+            # ``_digest_sheets_via_batch`` resolves it "since the upload happens at
+            # submit time". Resolve it here too, at the first sheet that actually
+            # uploads. A fully cache-served pass ``continue``s above and never reaches
+            # this, so a warm offline re-run still needs no key. Without this the
+            # critique path handed ``None`` straight to ``client.beta.files.upload`` —
+            # an ``AttributeError: 'NoneType' object has no attribute 'beta'`` that the
+            # per-sheet guard below swallowed, silently degrading EVERY sheet to the
+            # slow, full-price real-time fallback (Batches never used at all, DA-030).
+            if client is None:
+                from .client import get_client as _get_client
+
+                client = _get_client()
+
             try:
                 upload = upload_sheet_images(
                     client, sheet,
@@ -442,6 +459,15 @@ def collect_critique_batch(
     if not (batch.batch_id and submitted):
         return _assemble(batch)
 
+    # The poll / results / cancel / delete below all talk to the API; the pipeline
+    # may have deferred client creation and passed ``None`` (as the digest collect
+    # path allows). A no-batch collect returned just above, so a fully cache-served
+    # run still needs no key. Mirrors submit_critique_batch's resolution.
+    if client is None:
+        from .client import get_client as _get_client
+
+        client = _get_client()
+
     terminal = False
     canceled = False
     try:
@@ -452,6 +478,17 @@ def collect_critique_batch(
         # read count "sheet(s)" and rescale a determinate bar mid-stage, so the
         # poll reports only to ``on_log`` (its diagnostics still flow); the bar
         # advances per sheet as results are ingested.
+        #
+        # Watch for a stalled batch (request counts frozen for the stall window —
+        # the stuck-batch signature that sat two real DIGEST batches at zero
+        # completions from submit to the 4h bound). The digest path pairs this
+        # watch with a direct-call rescue; the critique has none, but it does not
+        # need one: a stuck critique batch degrades those sheets' critique either
+        # way (additive/non-fatal, I-3), so giving up at the ~1h stall window
+        # instead of the ~4h elapsed bound reaches the *same* outcome without
+        # freezing the whole run (the critique runs mid-pipeline, so every
+        # downstream stage waits behind it). No rescue reserve is withheld — unlike
+        # the digest, nothing runs after the poll, so the poll keeps the full bound.
         status = _poll_until_terminal(
             client,
             batch.batch_id,
@@ -461,6 +498,7 @@ def collect_critique_batch(
             on_log=on_log,
             sleep=sleep,
             max_elapsed_seconds=max_elapsed_seconds,
+            stall_timeout_seconds=DEFAULT_BATCH_STALL_TIMEOUT_SECONDS,
         )
         if status in ("ended", "failed", "expired", "canceled"):
             terminal = True
@@ -499,10 +537,10 @@ def collect_critique_batch(
                             slot.ref.display_label, summarize_exc(exc),
                         )
         else:
-            # Non-terminal (detached / failed / poll_failed): the batch is abandoned
-            # for collection. Best-effort cancel it (leaving it running only burns
-            # quota) and degrade the unresolved sheets' critique honestly — additive
-            # and non-fatal (I-3), the standard deliverable is untouched.
+            # Non-terminal (stalled / detached / failed / poll_failed): the batch is
+            # abandoned for collection. Best-effort cancel it (leaving it running only
+            # burns quota) and degrade the unresolved sheets' critique honestly —
+            # additive and non-fatal (I-3), the standard deliverable is untouched.
             canceled = _cancel_batch(client, batch.batch_id, on_log=on_log)
             tail = "was canceled" if canceled else "may still be running"
             for slot in submitted:
