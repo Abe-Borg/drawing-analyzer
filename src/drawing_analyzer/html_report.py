@@ -1473,6 +1473,14 @@ def build_html_report(
         )
         chat_script = f"<script>{_CHAT_JS}</script>\n"
         script_sources.append(_CHAT_JS)
+        # Inert (type="application/json") data blocks the assistant's client-side
+        # tools read: the structured findings ledger and run summary the prose
+        # digest omits. Not executable → excluded from script_sources / CSP hashes,
+        # and chat-gated so a no-chat report stays network-reference-free.
+        chat_markup += (
+            "\n" + _findings_data_block(ctx, sheets, ambiguous=ambiguous)
+            + "\n" + _summary_data_block(ctx, source_names, now)
+        )
 
     # CSP hashes are computed over the *exact* inline script bodies emitted
     # below — the config block is inert (type="application/json") and needs no
@@ -2001,6 +2009,97 @@ _JS = r"""
 # --------------------------------------------------------------------------- #
 
 
+def _findings_data_block(
+    ctx: Any,
+    sheets: list[Any],
+    *,
+    ambiguous: frozenset[str] = frozenset(),
+) -> str:
+    """An inert ``#da-findings`` JSON block: the structured QC findings the chat
+    assistant can query (fields the prose digest deliberately omits).
+
+    Mirrors :func:`_findings_card`'s per-finding derivation (same ledger entries,
+    same sort, same sheet-card linking and §18.6 name disambiguation) so the
+    ``query_findings`` tool sees exactly what the table shows. Emitted through
+    :func:`_json_for_script` (every ``<`` escaped), so however adversarial a
+    finding's text/quote is, it cannot close the script element. Returns ``""``
+    when the run produced no findings (the tool then reports an empty ledger).
+    """
+    findings = _report_findings(ctx)
+    if not findings:
+        return ""
+    index = _sheet_card_index(sheets)
+
+    def _key(f: Any):
+        sev = _SEVERITY_RANK.get((getattr(f, "severity", "") or "").lower(), 0)
+        return (-sev, -_STATUS_RANK.get(_finding_display_status(f), 0))
+
+    items: list[dict[str, Any]] = []
+    for f in sorted(findings, key=_key):
+        card_index = index.get(
+            _finding_sheet_key(f, int(getattr(f, "page_index", 0) or 0))
+        )
+        sheet_id = getattr(f, "sheet_id", "") or getattr(f, "source_name", "") or "—"
+        items.append(
+            {
+                "id": getattr(f, "qc_id", "") or "",
+                "sheet": _disambiguated(sheet_id, f, ambiguous),
+                "target": f"sheet-{card_index}" if card_index else "",
+                "category": getattr(f, "category", "") or "other",
+                "severity": (getattr(f, "severity", "") or "").lower(),
+                "status": _finding_display_status(f),
+                "text": getattr(f, "text", "") or "",
+                "quote": getattr(f, "source_quote", "") or "",
+            }
+        )
+    return (
+        f'<script id="da-findings" type="application/json">'
+        f"{_json_for_script(items)}</script>"
+    )
+
+
+def _summary_data_block(
+    ctx: Any, source_names: list[str], now: datetime
+) -> str:
+    """An inert ``#da-summary`` JSON block: the run metadata the prose digest
+    lacks (sheet tally, QC/coverage status, tokens, est. cost, sources).
+
+    Reads exactly the fields :func:`_summary_html` already surfaces, so the
+    ``get_report_summary`` tool answers "what did this run cost / how many sheets
+    failed / is coverage complete" without the model guessing. Serialized through
+    :func:`_json_for_script` (inert). Always emitted with chat (there is always a
+    run to describe); finding *counts* are derived client-side from
+    ``#da-findings`` so the two blocks never disagree.
+    """
+    ok = int(getattr(ctx, "ok_sheet_count", 0) or 0)
+    total = int(getattr(ctx, "sheet_count", 0) or 0)
+    cached = int(getattr(ctx, "cached_sheet_count", 0) or 0)
+    cost = getattr(ctx, "total_estimated_cost", None)
+    summary: dict[str, Any] = {
+        "generated": now.strftime("%Y-%m-%d %H:%M"),
+        "sheets": {
+            "ok": ok,
+            "total": total,
+            "cached": cached,
+            "failed": max(0, total - ok),
+        },
+        "qc_status": (getattr(ctx, "qc_status", "") or "NOT_REQUESTED").upper(),
+        "coverage_status": (getattr(ctx, "coverage_status", "") or "").upper()
+        or "NOT_REQUESTED",
+        "tokens": {
+            "input": int(getattr(ctx, "total_input_tokens", 0) or 0),
+            "output": int(getattr(ctx, "total_output_tokens", 0) or 0),
+        },
+        "estimated_cost_usd": (round(float(cost), 4) if cost is not None else None),
+        "errors": len(list(getattr(ctx, "errors", None) or [])),
+        "sources": list(source_names),
+    }
+    return (
+        f'<script id="da-summary" type="application/json">'
+        f"{_json_for_script(summary)}</script>"
+    )
+
+
 def _chat_bootstrap_html(
     *, api_key: str, embed_key: bool, title: str, generated: str,
     source_names: list[str],
@@ -2054,6 +2153,9 @@ def _chat_bootstrap_html(
 _CHAT_HTML = """
 <button id="da-chat-fab" type="button" title="Ask questions about this report">✦ Ask AI</button>
 <section id="da-chat-panel" hidden aria-label="Report Q&amp;A">
+  <div class="da-rz da-rz-tl" aria-hidden="true"></div>
+  <div class="da-rz da-rz-t" aria-hidden="true"></div>
+  <div class="da-rz da-rz-l" aria-hidden="true"></div>
   <header class="da-chat-head">
     <span class="da-chat-title">Report Q&amp;A</span>
     <span class="da-chat-model" id="da-chat-model"></span>
@@ -2173,8 +2275,42 @@ _CHAT_CSS = """
   cursor:pointer; vertical-align:baseline; white-space:nowrap;
 }
 #da-chat-forget:hover{color:var(--conflict); border-color:var(--conflict)}
+/* ---- resize handles + drag ---- */
+.da-rz{position:absolute; z-index:3; touch-action:none}
+.da-rz-t{top:0; left:8px; right:8px; height:6px; cursor:ns-resize}
+.da-rz-l{left:0; top:8px; bottom:8px; width:6px; cursor:ew-resize}
+.da-rz-tl{top:0; left:0; width:14px; height:14px; cursor:nwse-resize; z-index:4}
+.da-chat-head{cursor:grab}
+body.da-dragging, body.da-dragging *{user-select:none !important}
+/* ---- highlight-to-ask: selection popover + pending-excerpt chip ---- */
+#da-sel-pop{
+  position:fixed; z-index:62; background:var(--accent); color:#fff; border:none;
+  border-radius:8px; padding:6px 12px; font-size:12.5px; font-weight:600; cursor:pointer;
+  box-shadow:0 4px 14px rgba(31,60,120,.3);
+}
+#da-sel-pop:hover{filter:brightness(1.08)}
+#da-sel-chip{
+  display:flex; align-items:center; gap:8px; margin:0 12px; padding:6px 10px;
+  background:var(--accent-soft); border:1px solid var(--line); border-radius:8px;
+  font-size:12px; color:var(--ink);
+}
+.da-sel-chip-text{flex:1 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.da-sel-chip-x{
+  border:none; background:none; cursor:pointer; font-size:16px; line-height:1;
+  color:var(--muted); padding:0 2px;
+}
+.da-sel-chip-x:hover{color:var(--conflict)}
+.da-userctx{margin-top:6px; font-size:12px}
+.da-userctx summary{cursor:pointer; opacity:.85}
+.da-userctx div{white-space:pre-wrap; margin-top:4px; opacity:.9; max-height:160px; overflow-y:auto}
+::highlight(da-sel){background-color:#ffe9a8; color:inherit}
+::highlight(da-term){background-color:#bfe3ff; color:inherit}
+/* ---- report-navigation flash (scroll_to_report / query targets) ---- */
+@keyframes daFlash{0%{background:#fff6d6}100%{background:transparent}}
+.da-flash{animation:daFlash 1.6s ease-out}
 @media (max-width:600px){
   #da-chat-panel{right:0; bottom:0; width:100vw; max-width:100vw; height:92vh; border-radius:14px 14px 0 0}
+  .da-rz{display:none}
 }
 @media print{
   #da-chat-fab,#da-chat-panel{display:none !important}
@@ -2192,6 +2328,7 @@ _CHAT_JS = r"""
 
   var API_URL = 'https://api.anthropic.com/v1/messages';
   var MAX_CONTINUATIONS = 5;   // pause_turn auto-resumes (server tool loops)
+  var MAX_TOOL_ROUNDS = 6;     // client tool_use rounds before forced text close
   var rawEl = document.getElementById('raw-md');
   var REPORT = rawEl ? rawEl.textContent : '';
   var KEY_STORE = 'da-api-key';
@@ -2449,19 +2586,360 @@ _CHAT_JS = r"""
   }
   var history = [];   // alternating {role, content}; assistant content = raw API blocks
 
-  function buildRequest(){
-    return {
+  // Custom tools are executed *in this browser* by the dispatch table below
+  // (unlike web_search/web_fetch, which are Anthropic server tools). When
+  // noTools is set — the final forced-closure turn once the tool-round budget
+  // is spent — every tool is withdrawn and tool_choice:'none' makes the model
+  // answer in text, so a run can never end on a dangling tool_use.
+  function buildRequest(noTools){
+    var req = {
       model: CFG.model,
       max_tokens: 16000,
       system: systemBlocks(),
       thinking: {type: 'adaptive', display: 'summarized'},
-      tools: [
-        {type: 'web_search_20260209', name: 'web_search', max_uses: 8},
-        {type: 'web_fetch_20260209', name: 'web_fetch', max_uses: 8}
-      ],
       messages: history,
       stream: true
     };
+    if(noTools){ req.tool_choice = {type: 'none'}; return req; }
+    req.tools = [
+      {type: 'web_search_20260209', name: 'web_search', max_uses: 8},
+      {type: 'web_fetch_20260209', name: 'web_fetch', max_uses: 8},
+      {name: 'scroll_to_report',
+       description: 'Scroll the on-page report to a section, sheet, or QC finding and briefly ' +
+         'highlight it for the reader. Use this to point the user at something specific in the ' +
+         'report they are looking at.',
+       input_schema: {type: 'object', properties: {
+         target: {type: 'string', description: 'A card id ("overview", "findings", "focus", ' +
+           'or "sheet-3"), a sheet label ("M-501"), or a QC finding id ("QC-014").'}
+       }, required: ['target']}},
+      {name: 'query_findings',
+       description: 'Search the structured QC findings ledger — the machine-checked findings ' +
+         'with their id, sheet, category, severity, status (VERIFIED/DETERMINISTIC/UNCERTAIN/' +
+         'UNANCHORED/REJECTED) and source quote. The prose report does NOT contain this ' +
+         'structured data, so use this for questions about specific findings, their status, ' +
+         'severities, or counts. Filter by any combination of fields; omit all to list every finding.',
+       input_schema: {type: 'object', properties: {
+         category: {type: 'string'},
+         severity: {type: 'string', enum: ['high', 'medium', 'low']},
+         status: {type: 'string', description: 'e.g. VERIFIED, UNANCHORED, REJECTED (substring match).'},
+         sheet: {type: 'string', description: 'Sheet label substring, e.g. "M-501".'},
+         text: {type: 'string', description: 'Substring to match in the finding text or quote.'},
+         limit: {type: 'integer', description: 'Max findings to return (default 50, cap 100).'}
+       }}},
+      {name: 'filter_report',
+       description: 'Change what the report shows on the page by driving its search box, the ' +
+         'exclusive category filter chips, and the "High severity only" toggle. Use to focus the ' +
+         "reader's view (e.g. show only conflicts, or search a term). Returns the resulting count.",
+       input_schema: {type: 'object', properties: {
+         search: {type: 'string', description: 'Text to type into the report search box ("" clears it).'},
+         category: {type: 'string', description: 'One of: all, issues, conflict, coordination, ' +
+           'equipment, dimensions, notes, scope, focus (only categories that exist in this report).'},
+         high_only: {type: 'boolean', description: 'Set the "High severity only" toggle.'}
+       }}},
+      {name: 'get_report_summary',
+       description: 'Get run-level metadata the prose does not state: sheets analyzed vs failed, ' +
+         'QC and coverage status, token usage, estimated cost, source files, and finding counts ' +
+         'by severity and status. Takes no arguments.',
+       input_schema: {type: 'object', properties: {}}},
+      {name: 'highlight_term',
+       description: 'Visually highlight every occurrence of a term across the whole report on the ' +
+         'page so the reader can see where it appears. Returns how many matches were highlighted. ' +
+         'Call with an empty term to clear the highlight.',
+       input_schema: {type: 'object', properties: {
+         term: {type: 'string', description: 'The text to highlight everywhere in the report.'}
+       }, required: ['term']}},
+      {name: 'calculate',
+       description: 'Evaluate an exact arithmetic expression (+, -, *, /, parentheses, decimals). ' +
+         'Use this for ANY calculation instead of computing in your head, so the arithmetic is ' +
+         'guaranteed correct. Example: "(12.5 + 3.25) * 2".',
+       input_schema: {type: 'object', properties: {
+         expression: {type: 'string', description: 'The arithmetic expression to evaluate.'}
+       }, required: ['expression']}}
+    ];
+    return req;
+  }
+
+  // ------------------------------------------------------ client-side tools
+  // These run IN THIS BROWSER (unlike the server web_search/web_fetch): each
+  // reads or drives the report DOM / the inert #da-findings & #da-summary data
+  // blocks and returns a short text result. No network, no eval. runTool always
+  // returns a tool_result (is_error on failure) so no tool_use id is left
+  // unanswered.
+  var TOOL_LABEL = {
+    scroll_to_report: '⚙ Navigating the report…',
+    query_findings: '⚙ Looking up findings…',
+    filter_report: '⚙ Filtering the report…',
+    get_report_summary: '⚙ Reading the run summary…',
+    highlight_term: '⚙ Highlighting…',
+    calculate: '⚙ Calculating…'
+  };
+  function readJsonBlock(id){
+    var el = document.getElementById(id);
+    if(!el) return null;
+    try { return JSON.parse(el.textContent); } catch(e){ return null; }
+  }
+  var FINDINGS = readJsonBlock('da-findings') || [];
+  var SUMMARY = readJsonBlock('da-summary');
+  var reportContent = document.querySelector('main.content');
+
+  function flash(el){
+    if(!el) return;
+    el.classList.remove('da-flash');   // restart the animation if re-fired
+    void el.offsetWidth;
+    el.classList.add('da-flash');
+    setTimeout(function(){ el.classList.remove('da-flash'); }, 1700);
+  }
+  function expandCard(card){
+    if(!card) return;
+    card.classList.remove('collapsed');
+    card.classList.remove('hidden');
+    var h = card.querySelector('.card-head');
+    if(h) h.setAttribute('aria-expanded', 'true');
+  }
+
+  function toolScroll(input){
+    var target = String((input && input.target) || '').trim();
+    if(!target) return 'No target was given.';
+    var el = /^(overview|findings|focus|sheet-\d+)$/.test(target)
+      ? document.getElementById(target) : null;
+    var qc = (target.match(/QC[-\s]?\d+/i) || [null])[0];
+    if(!el && qc){
+      qc = qc.toUpperCase().replace(/\s+/, '-');
+      var rows = Array.prototype.slice.call(document.querySelectorAll('.finding-row'));
+      for(var i = 0; i < rows.length; i++){
+        var c = rows[i].querySelector('.fcol-qcid');
+        if(c && c.textContent.trim().toUpperCase() === qc){ el = rows[i]; break; }
+      }
+      if(el){ expandCard(document.getElementById('findings')); }
+    }
+    if(!el){
+      var cards = Array.prototype.slice.call(document.querySelectorAll('.card'));
+      for(var j = 0; j < cards.length; j++){
+        var t = cards[j].querySelector('.card-title');
+        if(t && t.textContent.toLowerCase().indexOf(target.toLowerCase()) !== -1){ el = cards[j]; break; }
+      }
+    }
+    if(!el) return 'No matching section, sheet, or finding for "' + target + '".';
+    var card = el.closest ? el.closest('.card') : null;
+    // Capture the pre-reveal hidden state (of the target and its card) before we
+    // clear it, so the returned message is truthful.
+    var wasHidden = !!(card && card.classList.contains('hidden')) || el.classList.contains('hidden');
+    expandCard(card || el);
+    el.classList.remove('hidden');
+    if(card && el === card){
+      // A search/category filter also hides the card's inner blocks — reveal
+      // them so a card-level jump doesn't land on a visible-but-empty card.
+      Array.prototype.slice.call(card.querySelectorAll('.block.hidden'))
+        .forEach(function(n){ n.classList.remove('hidden'); });
+    }
+    el.scrollIntoView({behavior: 'smooth', block: 'start'});
+    flash(el);
+    return 'Scrolled the report to "' + target + '".' +
+      (wasHidden ? ' (It was hidden by an active filter; I revealed it.)' : '');
+  }
+
+  function toolQuery(input){
+    input = input || {};
+    function lc(s){ return String(s == null ? '' : s).toLowerCase(); }
+    var out = FINDINGS.filter(function(f){
+      if(input.category && lc(f.category) !== lc(input.category)) return false;
+      if(input.severity && lc(f.severity) !== lc(input.severity)) return false;
+      if(input.status && lc(f.status).indexOf(lc(input.status)) === -1) return false;
+      if(input.sheet && lc(f.sheet).indexOf(lc(input.sheet)) === -1) return false;
+      if(input.text && (lc(f.text) + ' ' + lc(f.quote)).indexOf(lc(input.text)) === -1) return false;
+      return true;
+    });
+    var cap = Math.max(1, Math.min(input.limit || 50, 100));
+    return JSON.stringify({total: out.length, returned: Math.min(out.length, cap),
+      findings: out.slice(0, cap)});
+  }
+
+  function toolFilter(input){
+    input = input || {};
+    var acted = [];
+    if(typeof input.search === 'string'){
+      var s = document.getElementById('search');
+      if(s){
+        s.value = input.search;
+        s.dispatchEvent(new Event('input', {bubbles: true}));
+        acted.push('search="' + input.search + '"');
+      }
+    }
+    if(input.category){
+      var cat = String(input.category).toLowerCase().replace(/["\\\]]/g, '');
+      var chip = document.querySelector('.chip[data-filter="' + cat + '"]');
+      if(chip){ chip.click(); acted.push('category=' + cat); }
+      else {
+        var avail = Array.prototype.slice.call(document.querySelectorAll('.chip[data-filter]'))
+          .map(function(c){ return c.getAttribute('data-filter'); }).join(', ');
+        return 'This report has no "' + input.category + '" filter. Available: ' + avail + '.';
+      }
+    }
+    if(input.high_only !== undefined){
+      var sev = document.getElementById('sev-high');
+      if(sev){
+        var on = sev.classList.contains('chip-active');
+        if(!!input.high_only !== on) sev.click();
+        acted.push('high_only=' + (!!input.high_only));
+      }
+    }
+    if(!acted.length) return 'No filter change was requested.';
+    // The report debounces apply() ~90ms after a synthetic search 'input' (chip
+    // and severity clicks apply synchronously), so wait it out before reading
+    // #result-count — otherwise the model gets the pre-filter count.
+    var searched = typeof input.search === 'string';
+    return new Promise(function(resolve){
+      setTimeout(function(){
+        var rc = document.getElementById('result-count');
+        resolve('Applied filter (' + acted.join(', ') + ').' +
+          (rc && rc.textContent ? ' Now showing: ' + rc.textContent + '.' : ''));
+      }, searched ? 130 : 0);
+    });
+  }
+
+  function toolSummary(){
+    var s = SUMMARY || {};
+    var bySev = {}, byStatus = {};
+    FINDINGS.forEach(function(f){
+      var sv = f.severity || 'none'; bySev[sv] = (bySev[sv] || 0) + 1;
+      var stt = f.status || 'UNKNOWN'; byStatus[stt] = (byStatus[stt] || 0) + 1;
+    });
+    return JSON.stringify({
+      generated: s.generated, sheets: s.sheets, qc_status: s.qc_status,
+      coverage_status: s.coverage_status, tokens: s.tokens,
+      estimated_cost_usd: s.estimated_cost_usd, run_errors: s.errors,
+      sources: s.sources, findings_total: FINDINGS.length,
+      findings_by_severity: bySev, findings_by_status: byStatus
+    });
+  }
+
+  function clearTermHighlight(){
+    try { if(window.CSS && CSS.highlights) CSS.highlights.delete('da-term'); } catch(e){}
+  }
+  function toolHighlightTerm(input){
+    var term = String((input && input.term) || '').trim();
+    clearTermHighlight();
+    if(!term) return 'Cleared the term highlight.';
+    if(!reportContent) return 'There is no report content to search.';
+    if(!(window.Highlight && window.CSS && CSS.highlights)){
+      return 'This browser cannot paint highlights, but "' + term + '" can still be searched manually.';
+    }
+    var needle = term.toLowerCase(), ranges = [], CAP = 5000;
+    var walker = document.createTreeWalker(reportContent, NodeFilter.SHOW_TEXT, null);
+    var node;
+    while((node = walker.nextNode())){
+      var hay = node.nodeValue.toLowerCase(), from = 0, at;
+      while((at = hay.indexOf(needle, from)) !== -1){
+        var r = document.createRange();
+        r.setStart(node, at); r.setEnd(node, at + needle.length);
+        ranges.push(r); from = at + needle.length;
+        if(ranges.length >= CAP) break;
+      }
+      if(ranges.length >= CAP) break;
+    }
+    if(!ranges.length) return 'No occurrences of "' + term + '" were found in the report.';
+    try {
+      var hl = new Highlight();
+      ranges.forEach(function(rg){ hl.add(rg); });
+      CSS.highlights.set('da-term', hl);
+    } catch(e){ return ranges.length + ' occurrence(s) found, but the highlight paint failed.'; }
+    return 'Highlighted ' + ranges.length + ' occurrence(s) of "' + term + '" in the report.';
+  }
+
+  // A tiny SAFE arithmetic evaluator (recursive descent) — never eval/Function.
+  // Grammar: expr = term (('+'|'-') term)*; term = factor (('*'|'/') factor)*;
+  //          factor = ('+'|'-') factor | '(' expr ')' | number
+  function evalArith(src){
+    var s = String(src).replace(/\s+/g, '');
+    if(s === '') throw new Error('empty expression');
+    if(!/^[0-9.eE+\-*/()]+$/.test(s)) throw new Error('only numbers and + - * / ( ) are allowed');
+    var pos = 0;
+    function expr(){
+      var v = term();
+      while(pos < s.length && (s[pos] === '+' || s[pos] === '-')){
+        var op = s[pos++]; var rhs = term();
+        v = op === '+' ? v + rhs : v - rhs;
+      }
+      return v;
+    }
+    function term(){
+      var v = factor();
+      while(pos < s.length && (s[pos] === '*' || s[pos] === '/')){
+        var op = s[pos++]; var rhs = factor();
+        v = op === '*' ? v * rhs : v / rhs;
+      }
+      return v;
+    }
+    function factor(){
+      if(pos >= s.length) throw new Error('unexpected end of expression');
+      var ch = s[pos];
+      if(ch === '+'){ pos++; return factor(); }
+      if(ch === '-'){ pos++; return -factor(); }
+      if(ch === '('){
+        pos++; var v = expr();
+        if(s[pos] !== ')') throw new Error('missing ")"');
+        pos++; return v;
+      }
+      return number();
+    }
+    function number(){
+      var start = pos;
+      while(pos < s.length){
+        var c = s[pos];
+        if((c === 'e' || c === 'E') && (s[pos + 1] === '+' || s[pos + 1] === '-')){ pos += 2; continue; }
+        if(/[0-9.eE]/.test(c)){ pos++; continue; }
+        break;
+      }
+      var num = s.slice(start, pos);
+      var n = parseFloat(num);
+      if(isNaN(n)) throw new Error('invalid number "' + num + '"');
+      return n;
+    }
+    var result = expr();
+    if(pos !== s.length) throw new Error('unexpected "' + s[pos] + '"');
+    return result;
+  }
+  function toolCalculate(input){
+    var e = String((input && input.expression) || '').trim();
+    if(!e) return 'No expression was given.';
+    try {
+      var result = evalArith(e);
+      if(!isFinite(result)) return 'The expression "' + e + '" does not evaluate to a finite number.';
+      // Trim float64 rounding noise (e.g. 0.1+0.2) WITHOUT corrupting exactly
+      // representable integers: every integer below 1e15 has ≤15 significant
+      // digits, so toPrecision(15) preserves it while dropping the tail noise
+      // that only appears past the 15th digit.
+      var out = (Math.abs(result) < 1e15) ? parseFloat(result.toPrecision(15)) : result;
+      return e + ' = ' + out;
+    } catch(err){
+      return 'Could not evaluate "' + e + '": ' + (err && err.message || 'invalid expression') + '.';
+    }
+  }
+
+  var TOOLS = {
+    scroll_to_report: toolScroll,
+    query_findings: toolQuery,
+    filter_report: toolFilter,
+    get_report_summary: toolSummary,
+    highlight_term: toolHighlightTerm,
+    calculate: toolCalculate
+  };
+  // Always resolves (never rejects) to {content, is_error} — a handler may return
+  // a value OR a Promise (filter_report waits out the report's search debounce),
+  // and a throw/rejection still yields an is_error tool_result so no tool_use id
+  // is ever left unanswered.
+  function runTool(name, inp){
+    var fn = TOOLS[name];
+    if(!fn) return Promise.resolve({content: 'Unknown tool: ' + name, is_error: true});
+    return Promise.resolve().then(function(){ return fn(inp); }).then(function(r){
+      return {content: (r == null || r === '') ? '(no result)' : String(r), is_error: false};
+    }, function(e){
+      return {content: 'Tool "' + name + '" failed: ' + (e && e.message || e), is_error: true};
+    });
+  }
+  function markToolChip(st, id, isErr){
+    var chip = st.toolChips[id];
+    if(chip) chip.className = isErr ? 'da-tool da-tool-err' : 'da-tool da-tool-done';
   }
 
   // ---------------------------------------------------------------------- UI
@@ -2476,11 +2954,13 @@ _CHAT_JS = r"""
   var forgetBtn = document.getElementById('da-chat-forget');
   document.getElementById('da-chat-model').textContent = CFG.model + ' · web search · thinking';
 
-  fab.addEventListener('click', function(){ panel.hidden = false; fab.hidden = true; input.focus(); });
+  fab.addEventListener('click', function(){ panel.hidden = false; fab.hidden = true; applyGeom(); input.focus(); });
   closeBtn.addEventListener('click', function(){ panel.hidden = true; fab.hidden = false; });
   clearBtn.addEventListener('click', function(){
     if(aborter) aborter.abort();
     history = [];
+    clearPendingSelection();   // drop any pending excerpt + its highlight
+    clearTermHighlight();      // and any highlight_term paint
     while(msgs.children.length > 1) msgs.removeChild(msgs.lastChild); // keep the hint
   });
   // "Forget key": in prompt mode this clears BOTH the in-memory copy and the
@@ -2541,7 +3021,7 @@ _CHAT_JS = r"""
   var streaming = false, aborter = null;
 
   // One POST + SSE read. Appends UI into `bubble`, returns {blocks, stopReason}.
-  function streamOnce(bubble){
+  function streamOnce(bubble, noTools){
     aborter = new AbortController();
     return fetch(API_URL, {
       method: 'POST',
@@ -2552,7 +3032,7 @@ _CHAT_JS = r"""
         'anthropic-version': '2023-06-01',
         'anthropic-dangerous-direct-browser-access': 'true'
       },
-      body: JSON.stringify(buildRequest())
+      body: JSON.stringify(buildRequest(noTools))
     }).then(function(resp){
       if(!resp.ok){
         return resp.json().catch(function(){ return {}; }).then(function(body){
@@ -2632,6 +3112,16 @@ _CHAT_JS = r"""
       bubble.appendChild(chip);
       st.els[index] = chip;
       st.toolChips[b.id] = chip;
+    } else if(b.type === 'tool_use'){
+      // A client (in-browser) tool call. Its chip is flipped done/err by
+      // markToolChip() after runTool executes — there is no *_tool_result SSE
+      // block for client tools the way there is for the server tools above.
+      var cchip = document.createElement('div');
+      cchip.className = 'da-tool';
+      cchip.textContent = TOOL_LABEL[b.name] || '⚙ Working…';
+      bubble.appendChild(cchip);
+      st.els[index] = cchip;
+      st.toolChips[b.id] = cchip;
     }
     // thinking gets its element lazily (first non-empty delta), so the
     // display:"omitted" fallback never shows an empty box.
@@ -2703,6 +3193,28 @@ _CHAT_JS = r"""
         try { if(b.input.url) q = new URL(b.input.url).hostname; } catch(e){}
         el.textContent = (b.name === 'web_fetch' ? '🌐 Reading ' : '🔍 Searching: ') + '“' + q + '”';
       }
+    } else if(b.type === 'tool_use' && el){
+      // Relabel the pending chip with the concrete call (model input → textContent, inert).
+      var inp = b.input || {};
+      if(b.name === 'query_findings'){
+        var parts = [];
+        ['category', 'severity', 'status', 'sheet', 'text'].forEach(function(k){
+          if(inp[k]) parts.push(k + ':' + inp[k]);
+        });
+        el.textContent = '⚙ Findings query' + (parts.length ? ' (' + parts.join(', ') + ')' : ' (all)');
+      } else if(b.name === 'scroll_to_report'){
+        el.textContent = '⚙ Go to ' + (inp.target || 'report');
+      } else if(b.name === 'filter_report'){
+        var fp = [];
+        if(inp.search !== undefined) fp.push('search:“' + inp.search + '”');
+        if(inp.category) fp.push(inp.category);
+        if(inp.high_only !== undefined) fp.push('high only:' + (inp.high_only ? 'on' : 'off'));
+        el.textContent = '⚙ Filter report' + (fp.length ? ' (' + fp.join(', ') + ')' : '');
+      } else if(b.name === 'highlight_term'){
+        el.textContent = '⚙ Highlight “' + (inp.term || '') + '”';
+      } else if(b.name === 'calculate'){
+        el.textContent = '⚙ Calculate ' + (inp.expression || '');
+      }
     } else if(b.type === 'web_search_tool_result' || b.type === 'web_fetch_tool_result'){
       var chip = st.toolChips[b.tool_use_id];
       if(chip){
@@ -2728,19 +3240,62 @@ _CHAT_JS = r"""
     if(!on) aborter = null;
   }
 
-  function runTurn(question){
-    history.push({role: 'user', content: question});
-    addMsg('da-user', question);
+  // apiContent : string|array  — pushed to history as the user turn's content
+  // displayText: string        — shown in the da-user bubble (textContent)
+  // opts       : {retryValue, excerpt, onCommit}
+  function runTurn(apiContent, displayText, opts){
+    opts = opts || {};
+    history.push({role: 'user', content: apiContent});
+    var userBubble = addMsg('da-user', displayText);
+    if(opts.excerpt){
+      // The selected excerpt as a collapsible disclosure under the typed
+      // question (textContent — never HTML): the transcript stays readable while
+      // the model still receives the full excerpt in apiContent.
+      var d = document.createElement('details');
+      d.className = 'da-userctx';
+      var sm = document.createElement('summary');
+      sm.textContent = '↳ about selected excerpt';
+      var bd = document.createElement('div');
+      bd.textContent = opts.excerpt;
+      d.appendChild(sm); d.appendChild(bd);
+      userBubble.appendChild(d);
+    }
     var bubble = addMsg('da-ai');
     setStreaming(true);
     var pushed = false; // any assistant content committed to history yet?
 
-    function step(round){
-      return streamOnce(bubble).then(function(st){
+    // Two independent budgets: `round` = server-tool pause_turn resumes;
+    // `toolRound` = client tool_use rounds. Once the tool budget is spent we
+    // re-request with tools disabled (noTools) so the model must answer in text
+    // — a run can never terminate on a dangling tool_use.
+    function step(round, toolRound){
+      var noTools = toolRound > MAX_TOOL_ROUNDS;
+      return streamOnce(bubble, noTools).then(function(st){
         var blocks = st.blocks.filter(function(b){ return !!b; });
+        // Commit the assistant turn (incl. any tool_use blocks) BEFORE answering
+        // tools, so history is always assistant(tool_use) → user(tool_result).
         if(blocks.length){ history.push({role: 'assistant', content: blocks}); pushed = true; }
         if(st.stopReason === 'pause_turn' && round < MAX_CONTINUATIONS){
-          return step(round + 1); // server tool loop paused — resume automatically
+          return step(round + 1, toolRound); // server tool loop paused — resume
+        }
+        if(st.stopReason === 'tool_use'){
+          var uses = blocks.filter(function(b){ return b.type === 'tool_use'; });
+          if(uses.length){
+            // Execute every client tool locally and answer EACH id in one user
+            // turn (handlers may be async; a throwing one still returns an
+            // is_error tool_result).
+            return Promise.all(uses.map(function(b){
+              return runTool(b.name, b.input || {}).then(function(r){
+                markToolChip(st, b.id, r.is_error);
+                var tr = {type: 'tool_result', tool_use_id: b.id, content: r.content};
+                if(r.is_error) tr.is_error = true;
+                return tr;
+              });
+            })).then(function(results){
+              history.push({role: 'user', content: results});
+              return step(round, toolRound + 1);
+            });
+          }
         }
         if(st.stopReason === 'refusal') note(bubble, 'The model declined to answer this request.');
         else if(st.stopReason === 'max_tokens') note(bubble, '(Answer truncated — output limit reached.)');
@@ -2748,11 +3303,11 @@ _CHAT_JS = r"""
       });
     }
 
-    step(0).catch(function(err){
+    step(0, 0).catch(function(err){
       var aborted = err && (err.name === 'AbortError' || err.code === 20);
       if(!pushed){
         history.pop();               // keep history consistent for the next question
-        if(!aborted) input.value = question;   // let the user retry without retyping
+        if(!aborted) input.value = (opts.retryValue !== undefined ? opts.retryValue : displayText);
       }
       if(aborted){
         note(bubble, '⏹ Stopped.');
@@ -2763,26 +3318,236 @@ _CHAT_JS = r"""
       }
     }).then(function(){
       if(!bubble.childNodes.length) bubble.remove(); // nothing ever rendered
+      if(pushed && opts.onCommit) opts.onCommit();   // e.g. clear the pending selection
       setStreaming(false);
       scrollDown(true);
     });
   }
 
   function send(){
-    var q = input.value.trim();
-    if(!q || streaming) return;
+    var typed = input.value.trim();
+    var hasSel = !!(pendingSel && pendingSel.text);
+    if((!typed && !hasSel) || streaming) return;
     if(!ensureKey()){
       addMsg('da-err', 'An Anthropic API key is required to use the assistant. ' +
         'Click Send again to enter one.');
       return;
     }
     input.value = '';
-    runTurn(q);
+    if(hasSel){
+      var ex = pendingSel.text;
+      var api = 'The user selected this excerpt from the report:\n<excerpt>\n' + ex + '\n</excerpt>\n\n' +
+        'Question: ' + (typed || '(no question typed — explain or comment on this excerpt)');
+      runTurn(api, typed || '(about the selected excerpt)', {
+        retryValue: typed, excerpt: ex, onCommit: clearPendingSelection
+      });
+    } else {
+      runTurn(typed, typed, {retryValue: typed});
+    }
   }
   sendBtn.addEventListener('click', send);
   stopBtn.addEventListener('click', function(){ if(aborter) aborter.abort(); });
   input.addEventListener('keydown', function(e){
     if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); send(); }
   });
+
+  // -------------------------------------------------- panel resize + drag
+  // Stay CSS-anchored (bottom-right) until the first gesture, then snapshot the
+  // rect into explicit left/top/width/height and own all geometry. On mobile
+  // (<=600px) the bottom-sheet media query governs and inline geometry is
+  // stripped. Persisted in localStorage; double-click the header to reset.
+  var GEO_KEY = 'da-chat-geo', MARGIN = 12, MIN_W = 320, MIN_H = 360;
+  function isMobile(){ return window.innerWidth <= 600; }
+  function loadGeo(){ try { return JSON.parse(localStorage.getItem(GEO_KEY) || 'null'); } catch(e){ return null; } }
+  function saveGeo(g){ try { localStorage.setItem(GEO_KEY, JSON.stringify(g)); } catch(e){} }
+  function clearGeo(){ try { localStorage.removeItem(GEO_KEY); } catch(e){} }
+
+  var customGeom = false;
+  function enterCustom(){
+    var r = panel.getBoundingClientRect();
+    panel.style.left = r.left + 'px'; panel.style.top = r.top + 'px';
+    panel.style.width = r.width + 'px'; panel.style.height = r.height + 'px';
+    panel.style.right = 'auto'; panel.style.bottom = 'auto';
+    panel.style.minHeight = '0px'; panel.style.maxWidth = 'none';  // defeat CSS floor/ceiling
+    customGeom = true;
+  }
+  function stripInline(){
+    ['left', 'top', 'width', 'height', 'right', 'bottom', 'minHeight', 'maxWidth']
+      .forEach(function(p){ panel.style[p] = ''; });
+    customGeom = false;
+  }
+  function clampGeo(g){
+    var vw = window.innerWidth, vh = window.innerHeight;
+    var maxW = vw - 2 * MARGIN, maxH = vh - 2 * MARGIN;
+    var minW = Math.min(MIN_W, maxW), minH = Math.min(MIN_H, maxH);
+    g.w = Math.max(minW, Math.min(g.w, maxW));
+    g.h = Math.max(minH, Math.min(g.h, maxH));
+    g.left = Math.max(MARGIN, Math.min(g.left, vw - g.w - MARGIN));
+    g.top = Math.max(MARGIN, Math.min(g.top, vh - g.h - MARGIN));
+    return g;
+  }
+  function writeGeo(g){
+    panel.style.left = g.left + 'px'; panel.style.top = g.top + 'px';
+    panel.style.width = g.w + 'px'; panel.style.height = g.h + 'px';
+  }
+  function applyGeom(){
+    if(isMobile()){ stripInline(); return; }   // media query owns the bottom sheet
+    var g = loadGeo();
+    if(!g){ stripInline(); return; }            // never moved → CSS default
+    enterCustom(); var c = clampGeo(g); writeGeo(c); saveGeo(c);
+  }
+
+  function startGesture(e, mode){
+    if(isMobile()) return;
+    if(mode === 'move' && e.target && e.target.closest && e.target.closest('button')) return;
+    var el = e.currentTarget;
+    var sx = e.clientX, sy = e.clientY, began = false, base = null;
+    function onMove(ev){
+      var dx = ev.clientX - sx, dy = ev.clientY - sy;
+      if(!began){
+        if(Math.abs(dx) + Math.abs(dy) < 4) return;  // threshold → lets dblclick fire
+        began = true;
+        if(!customGeom) enterCustom();
+        var r = panel.getBoundingClientRect();
+        base = {left: r.left, top: r.top, w: r.width, h: r.height, right: r.right, bottom: r.bottom};
+        document.body.classList.add('da-dragging');
+      }
+      ev.preventDefault();
+      var g;
+      if(mode === 'move'){
+        g = {left: base.left + dx, top: base.top + dy, w: base.w, h: base.h};
+      } else {
+        g = {left: base.left, top: base.top, w: base.w, h: base.h};
+        if(mode === 'l' || mode === 'tl'){ g.left = base.left + dx; g.w = base.right - g.left; }
+        if(mode === 't' || mode === 'tl'){ g.top = base.top + dy; g.h = base.bottom - g.top; }
+        // enforce mins against the FIXED far edge so the anchored corner holds
+        var minW = Math.min(MIN_W, window.innerWidth - 2 * MARGIN);
+        var minH = Math.min(MIN_H, window.innerHeight - 2 * MARGIN);
+        if(g.w < minW){ g.w = minW; if(mode === 'l' || mode === 'tl') g.left = base.right - minW; }
+        if(g.h < minH){ g.h = minH; if(mode === 't' || mode === 'tl') g.top = base.bottom - minH; }
+      }
+      g = clampGeo(g); writeGeo(g); saveGeo(g);
+    }
+    function onUp(ev){
+      try { el.releasePointerCapture(ev.pointerId); } catch(x){}
+      el.removeEventListener('pointermove', onMove);
+      el.removeEventListener('pointerup', onUp);
+      el.removeEventListener('pointercancel', onUp);
+      document.body.classList.remove('da-dragging');
+    }
+    try { el.setPointerCapture(e.pointerId); } catch(x){}
+    el.addEventListener('pointermove', onMove);
+    el.addEventListener('pointerup', onUp);
+    el.addEventListener('pointercancel', onUp);
+  }
+
+  var headEl = panel.querySelector('.da-chat-head');
+  if(headEl){
+    headEl.addEventListener('pointerdown', function(e){ startGesture(e, 'move'); });
+    headEl.addEventListener('dblclick', function(){ if(!isMobile()){ clearGeo(); stripInline(); } });
+  }
+  Array.prototype.slice.call(panel.querySelectorAll('.da-rz')).forEach(function(h){
+    var mode = h.classList.contains('da-rz-tl') ? 'tl' : (h.classList.contains('da-rz-t') ? 't' : 'l');
+    h.addEventListener('pointerdown', function(e){ startGesture(e, mode); });
+  });
+  window.addEventListener('resize', applyGeom);
+  applyGeom();
+
+  // ------------------------------------------------ highlight → ask about it
+  // Select text anywhere in the report → a floating "Ask AI about this" button →
+  // the excerpt rides into the chat as a dismissible chip and into the model's
+  // question, while the transcript shows only what the user typed.
+  var reportEl = reportContent || document.querySelector('main.content');
+  var selPop = null, pendingSelDraft = null, pendingSel = null;
+
+  function inReport(node){
+    if(!node || !reportEl) return false;
+    var el = node.nodeType === 1 ? node : node.parentNode;
+    return !!(el && reportEl.contains(el) && !panel.contains(el));
+  }
+  function hideSelPop(){ if(selPop){ selPop.remove(); selPop = null; } }
+  function showSelPop(){
+    var sel = window.getSelection();
+    if(!sel || sel.isCollapsed || !sel.rangeCount){ hideSelPop(); return; }
+    var rng = sel.getRangeAt(0);
+    if(!inReport(rng.commonAncestorContainer)){ hideSelPop(); return; }
+    var text = sel.toString().replace(/\s+/g, ' ').trim();
+    if(text.length < 2){ hideSelPop(); return; }
+    var CAP = 4000, truncated = false;
+    if(text.length > CAP){ text = text.slice(0, CAP); truncated = true; }
+    // Capture at SHOW time (clicking the button collapses the native selection).
+    pendingSelDraft = {text: text + (truncated ? ' …(excerpt truncated)' : ''), range: rng.cloneRange()};
+    var rect = rng.getBoundingClientRect();
+    if(!selPop){
+      selPop = document.createElement('button');
+      selPop.type = 'button';
+      selPop.id = 'da-sel-pop';
+      selPop.textContent = '✦ Ask AI about this';
+      selPop.addEventListener('mousedown', function(e){ e.preventDefault(); }); // keep selection alive
+      selPop.addEventListener('click', onAskSelection);
+      document.body.appendChild(selPop);
+    }
+    var pw = 170, ph = 34;
+    var left = Math.max(8, Math.min(rect.left, window.innerWidth - pw - 8));
+    var top = rect.top - ph; if(top < 8) top = rect.bottom + 8;
+    selPop.style.left = left + 'px';
+    selPop.style.top = top + 'px';
+  }
+  function onAskSelection(){
+    if(!pendingSelDraft) return;
+    setPendingSelection(pendingSelDraft);
+    pendingSelDraft = null;
+    hideSelPop();
+    panel.hidden = false; fab.hidden = true;
+    applyGeom();
+    input.focus();
+  }
+
+  function paintSelHighlight(range){
+    if(window.Highlight && window.CSS && CSS.highlights){
+      try { CSS.highlights.set('da-sel', new Highlight(range)); } catch(e){}
+    }
+  }
+  function clearSelHighlight(){ try { if(window.CSS && CSS.highlights) CSS.highlights.delete('da-sel'); } catch(e){} }
+
+  function setPendingSelection(sd){
+    pendingSel = {text: sd.text, range: sd.range};
+    paintSelHighlight(sd.range);
+    var compose = document.querySelector('.da-chat-compose');
+    var chip = document.getElementById('da-sel-chip');
+    if(!chip && compose){
+      chip = document.createElement('div');
+      chip.id = 'da-sel-chip';
+      var label = document.createElement('span');
+      label.className = 'da-sel-chip-text';
+      var x = document.createElement('button');
+      x.type = 'button'; x.className = 'da-sel-chip-x';
+      x.setAttribute('aria-label', 'Clear excerpt');
+      x.textContent = '×';
+      x.addEventListener('click', clearPendingSelection);
+      chip.appendChild(label); chip.appendChild(x);
+      compose.parentNode.insertBefore(chip, compose);
+    }
+    if(chip){
+      var preview = sd.text.length > 140 ? sd.text.slice(0, 140) + '…' : sd.text;
+      chip.querySelector('.da-sel-chip-text').textContent = '“' + preview + '”';
+    }
+  }
+  function clearPendingSelection(){
+    pendingSel = null;
+    clearSelHighlight();
+    var chip = document.getElementById('da-sel-chip');
+    if(chip) chip.remove();
+  }
+
+  if(reportEl){
+    reportEl.addEventListener('mouseup', function(){ setTimeout(showSelPop, 0); });
+  }
+  document.addEventListener('selectionchange', function(){
+    var s = window.getSelection();
+    if(!s || s.isCollapsed) hideSelPop();
+  });
+  window.addEventListener('scroll', hideSelPop, true);   // fixed popover would go stale
+  window.addEventListener('resize', hideSelPop);
 })();
 """
