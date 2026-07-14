@@ -70,6 +70,11 @@ class _RoutingClient:
                     self.verify_calls += 1
                     return FakeMessage(content=[FakeTextBlock(text=verdict_text)],
                                        usage=FakeUsage(input_tokens=40, output_tokens=8))
+                if system.startswith(CRITIQUE_SYSTEM_PROMPT):
+                    # A parse-valid empty read — a bare "ok" would (correctly,
+                    # §3.3) hold the critique stage at PARTIAL since Phase 27.
+                    return FakeMessage(content=[FakeTextBlock(text='```json\n{"findings":[]}\n```')],
+                                       usage=FakeUsage(input_tokens=10, output_tokens=4))
                 if system.startswith(DIGEST_SYSTEM_PROMPT):
                     self.digest_calls += 1
                     return FakeMessage(content=[FakeTextBlock(text=digest_text)],
@@ -77,7 +82,7 @@ class _RoutingClient:
                 if system.startswith(CITATION_SYSTEM_PROMPT):
                     return FakeMessage(content=[FakeTextBlock(text=_CITATION_OK)],
                                        usage=FakeUsage(input_tokens=20, output_tokens=8))
-                # anything else (synthesis/critique prose)
+                # anything else (synthesis prose)
                 return FakeMessage(content=[FakeTextBlock(text="ok")])
 
         self.messages = _Msgs()
@@ -288,7 +293,9 @@ class _CountingClient:
                                        usage=FakeUsage(input_tokens=1, output_tokens=1))
                 if s.startswith(CROSS_QC_SYSTEM_PROMPT):
                     calls["cross"] += 1
-                    return FakeMessage(content=[FakeTextBlock(text='{"findings":[],"claims":[]}')],
+                    # Fenced, as the contract requires: a bare/unfenced object is
+                    # (correctly) a failed parse since the Phase 27 regression fix.
+                    return FakeMessage(content=[FakeTextBlock(text='```json\n{"findings":[],"claims":[]}\n```')],
                                        usage=FakeUsage(input_tokens=1, output_tokens=1))
                 if s.startswith(SYNTHESIS_SYSTEM_PROMPT):
                     calls["synth"] += 1

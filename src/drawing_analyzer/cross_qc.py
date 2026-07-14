@@ -447,6 +447,16 @@ def _last_json_object(raw_text: str) -> dict | None:
     return blocks[-1] if blocks else None
 
 
+# §14.2 / §4 item 4 (Phase 27 gauntlet regression): a cross-QC response with no
+# parseable findings/facts object — prose-only, malformed, or truncated — is a
+# FAILED parse, never a clean "0 conflicts". The error holds the stage at
+# PARTIAL (§3.3) while any salvageable claims stay usable (additive, I-3).
+_NO_FINDINGS_OBJECT = (
+    "response contained no parseable findings object (prose-only, malformed, "
+    "or truncated structured output)"
+)
+
+
 def _resolve_claim_handles(
     claims: list[NumericClaim], entry_by_handle: dict[str, tuple]
 ) -> list[NumericClaim]:
@@ -605,19 +615,20 @@ def _one_cross_qc_call(
     if err is not None or raw is None:
         return [], [], in_tok, out_tok, err
     obj = _last_json_object(raw)
+    if obj is None:
+        return [], parse_numeric_claims(raw), in_tok, out_tok, _NO_FINDINGS_OBJECT
     findings: list[Finding] = []
-    if obj is not None:
-        dropped = 0
-        for item in obj.get("findings") or []:
-            if len(findings) >= DEFAULT_CROSS_QC_MAX_FINDINGS:
-                break
-            f = _validate_cross_item(item, sheet_map)
-            if f is None:
-                dropped += 1
-                continue
-            findings.append(f)
-        if dropped:
-            _log.info("cross-qc parse: dropped %d unplaceable/invalid finding(s)", dropped)
+    dropped = 0
+    for item in obj.get("findings") or []:
+        if len(findings) >= DEFAULT_CROSS_QC_MAX_FINDINGS:
+            break
+        f = _validate_cross_item(item, sheet_map)
+        if f is None:
+            dropped += 1
+            continue
+        findings.append(f)
+    if dropped:
+        _log.info("cross-qc parse: dropped %d unplaceable/invalid finding(s)", dropped)
     return findings, parse_numeric_claims(raw), in_tok, out_tok, None
 
 
@@ -634,7 +645,10 @@ def _map_call(
     )
     if err is not None or raw is None:
         return [], [], [], in_tok, out_tok, err
-    obj = _last_json_object(raw) or {}
+    obj = _last_json_object(raw)
+    if obj is None:
+        claims = _resolve_claim_handles(parse_numeric_claims(raw), entry_by_handle)
+        return [], claims, [], in_tok, out_tok, _NO_FINDINGS_OBJECT
     findings = [
         f for item in (obj.get("findings") or [])
         if (f := _finding_from_handles(item, entry_by_handle)) is not None
@@ -690,7 +704,10 @@ def _reconcile_call(
     )
     if err is not None or raw is None:
         return [], [], in_tok, out_tok, err
-    obj = _last_json_object(raw) or {}
+    obj = _last_json_object(raw)
+    if obj is None:
+        claims = _resolve_claim_handles(parse_numeric_claims(raw), entry_by_handle)
+        return [], claims, in_tok, out_tok, _NO_FINDINGS_OBJECT
     findings = [
         f for item in (obj.get("findings") or [])
         if (f := _finding_from_handles(item, entry_by_handle)) is not None
@@ -938,6 +955,10 @@ def cross_sheet_qc(
         total_out += out_tok
         if err is not None:
             errors.append(err)
+            # A degraded shard still surrenders its parseable numeric claims —
+            # additive salvage (§2.4/I-3): the arithmetic auditor can use them
+            # while the shard itself stays failed (stage PARTIAL).
+            all_claims.extend(c)
             continue
         shards_completed += 1
         all_findings.extend(f)

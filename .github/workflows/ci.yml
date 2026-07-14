@@ -1,23 +1,44 @@
-# Continuous integration for Drawing Analyzer (Phase 17B).
+# Continuous integration for Drawing Analyzer (Phase 17B; §19.8 gates in Phase 27).
 #
-# Two jobs:
+# Jobs:
 #   * test            — hermetic suite on the Windows + Linux / Py 3.11 + 3.12
-#                       matrix (no API key, no network).
+#                       matrix (no API key, no network). Includes the Phase 27
+#                       §19.1/§19.2 trust gauntlet.
 #   * browser-security — the mandatory headless-Chromium report exploit suite,
 #                       Linux only (a DOM emulator cannot prove CSP / file:// /
 #                       real event execution). Windows keeps the unit tests;
-#                       manual Edge acceptance is Phase 27.
+#                       manual Edge acceptance is recorded per
+#                       docs/RELEASE_ACCEPTANCE_TEMPLATE.md.
+#   * security-gates  — §19.8: repo secret scan, correctness-class static
+#                       analysis (ruff E9/F63/F7/F82 — never style rules), the
+#                       dependency-license/AGPL audit, and the pip-audit
+#                       vulnerability scan (the one step that talks to the PyPI
+#                       advisory DB; it is dependency tooling, not app traffic).
+#   * build           — §19.8: wheel + sdist build under the committed
+#                       requirements-release.lock constraints, twine metadata
+#                       check, and a clean-venv install smoke test that proves
+#                       the packaged review profiles ship in the wheel.
 #
 # Supply-chain notes (plan §9.8): actions are pinned to immutable commit SHAs
 # (the trailing comment is the human-readable version), permissions are minimal
 # and read-only, and the workflow triggers on `pull_request` — never
 # `pull_request_target`, so untrusted PR code is never run with repo secrets.
+# CI tools installed by pip (ruff/pip-audit/build/twine) are version-pinned in
+# this file for reproducibility.
+#
+# Vulnerability-exception policy (§19.8/§19.9): a finding that cannot be fixed
+# immediately gets an explicit `--ignore-vuln <ID>` flag added to the pip-audit
+# step BELOW with a dated justification comment and an owner-approved expiry —
+# never a silent downgrade of the gate.
 #
 # NOTE TO MAINTAINER: the two action SHAs below were pinned from their known
 # release tags but could not be re-verified against the GitHub API from the
 # build sandbox. Please confirm them (or let Dependabot manage them) before
 # marking these checks as required in branch protection. A stale/incorrect SHA
 # fails loudly at the checkout step — it is never a silent security gap.
+# Branch protection must name: test (all matrix legs), browser-security,
+# security-gates, and build as required checks (§9.8/§19.8 — an owner/admin
+# step that cannot be automated from here).
 name: CI
 
 on:
@@ -78,3 +99,62 @@ jobs:
         run: python -m playwright install --with-deps chromium
       - name: Report exploit suite
         run: python -m pytest -q -m browser
+
+  security-gates:
+    name: secret scan · static analysis · dependency audits (linux)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+      - name: Repo secret scan
+        run: python scripts/scan_secrets.py
+      - name: Static analysis (correctness classes only — no style churn)
+        run: |
+          python -m pip install --upgrade pip
+          pip install "ruff==0.14.5"
+          ruff check --select E9,F63,F7,F82 src tests scripts
+      - name: Install locked dependency set
+        run: pip install -c requirements-release.lock ".[dev]"
+      - name: Dependency license / AGPL-notice audit
+        run: python scripts/check_licenses.py
+      - name: Dependency vulnerability audit (pip-audit)
+        # Talks to the PyPI advisory DB — dependency tooling, not app traffic.
+        # Exceptions policy: add `--ignore-vuln <ID>` here with a dated,
+        # owner-approved justification comment (see the header note).
+        run: |
+          pip install "pip-audit==2.9.0"
+          pip-audit --skip-editable
+
+  build:
+    name: wheel/sdist build + clean-install smoke (linux)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.11"
+      - name: Build wheel + sdist (locked build tools)
+        run: |
+          python -m pip install --upgrade pip
+          pip install "build==1.4.0" "twine==6.2.0"
+          python -m build
+          twine check dist/*
+      - name: Clean-venv install smoke (import + packaged profiles + version)
+        run: |
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/pip install --quiet -c requirements-release.lock dist/*.whl
+          /tmp/smoke/bin/python -c "
+          import drawing_analyzer, importlib.resources as r
+          profiles = [p.name for p in r.files('drawing_analyzer').joinpath('profiles').iterdir() if p.name.endswith('.md')]
+          assert profiles, 'built-in review profiles missing from the wheel'
+          import importlib.metadata as m
+          dist_version = m.version('drawing-analyzer')
+          assert dist_version == drawing_analyzer.__version__, (dist_version, drawing_analyzer.__version__)
+          print('installed', dist_version, '| packaged profiles:', len(profiles))
+          "

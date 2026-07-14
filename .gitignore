@@ -48,3 +48,7 @@ drawing_digest_cache.json
 # OS cruft
 .DS_Store
 Thumbs.db
+
+# Analysis exports / acceptance + benchmark artifacts (Phase 27)
+*_drawings_*/
+benchmark_out/

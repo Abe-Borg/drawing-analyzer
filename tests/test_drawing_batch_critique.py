@@ -586,10 +586,11 @@ def test_pipeline_critique_stage_records_transport_batch(tmp_path):
 
     client = _FakeClient(_succeed)
     run_usage = RunUsage()
-    findings, _claims = _run_critique_stage(
+    findings, _claims, degraded = _run_critique_stage(
         [pdf], rows=2, cols=2, overlap_frac=0.1, client=client, cache=None,
         progress=None, total=1, max_workers=1, run_usage=run_usage, use_batch=True,
     )
+    assert degraded == []                      # a clean batch run degrades nothing
     # Both reads rode one batch off a single shared upload.
     assert len(client.create_calls) == 1
     assert [r["custom_id"] for r in client.submitted] == ["sheet__0__r1", "sheet__0__r2"]
