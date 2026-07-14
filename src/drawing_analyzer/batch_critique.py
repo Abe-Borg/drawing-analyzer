@@ -55,7 +55,6 @@ from typing import Any, Callable
 
 from .batch_digest import (
     DEFAULT_BATCH_MAX_ELAPSED_SECONDS,
-    DEFAULT_BATCH_STALL_TIMEOUT_SECONDS,
     MAX_CONSECUTIVE_FATAL_UPLOAD_FAILURES,
     LogCallback,
     ProgressCallback,
@@ -479,16 +478,15 @@ def collect_critique_batch(
         # poll reports only to ``on_log`` (its diagnostics still flow); the bar
         # advances per sheet as results are ingested.
         #
-        # Watch for a stalled batch (request counts frozen for the stall window —
-        # the stuck-batch signature that sat two real DIGEST batches at zero
-        # completions from submit to the 4h bound). The digest path pairs this
-        # watch with a direct-call rescue; the critique has none, but it does not
-        # need one: a stuck critique batch degrades those sheets' critique either
-        # way (additive/non-fatal, I-3), so giving up at the ~1h stall window
-        # instead of the ~4h elapsed bound reaches the *same* outcome without
-        # freezing the whole run (the critique runs mid-pipeline, so every
-        # downstream stage waits behind it). No rescue reserve is withheld — unlike
-        # the digest, nothing runs after the poll, so the poll keeps the full bound.
+        # No stall watch here (deliberately, unlike the digest path):
+        # ``_poll_until_terminal`` counts only *completed* items, so it treats an
+        # hour with nothing finished as ``"stalled"``. That early give-up is only
+        # safe when the caller can recover the sheets another way — the digest pairs
+        # it with a direct-call rescue. The critique has no rescue: a give-up would
+        # cancel the batch and lose those sheets' critique. A small or image-heavy
+        # critique batch can legitimately sit with zero completed items for over an
+        # hour while every read is still processing, so tripping a stall watch here
+        # would cancel recoverable work. It rides the full elapsed bound instead.
         status = _poll_until_terminal(
             client,
             batch.batch_id,
@@ -498,7 +496,6 @@ def collect_critique_batch(
             on_log=on_log,
             sleep=sleep,
             max_elapsed_seconds=max_elapsed_seconds,
-            stall_timeout_seconds=DEFAULT_BATCH_STALL_TIMEOUT_SECONDS,
         )
         if status in ("ended", "failed", "expired", "canceled"):
             terminal = True
@@ -537,10 +534,10 @@ def collect_critique_batch(
                             slot.ref.display_label, summarize_exc(exc),
                         )
         else:
-            # Non-terminal (stalled / detached / failed / poll_failed): the batch is
-            # abandoned for collection. Best-effort cancel it (leaving it running only
-            # burns quota) and degrade the unresolved sheets' critique honestly —
-            # additive and non-fatal (I-3), the standard deliverable is untouched.
+            # Non-terminal (detached / failed / poll_failed): the batch is abandoned
+            # for collection. Best-effort cancel it (leaving it running only burns
+            # quota) and degrade the unresolved sheets' critique honestly — additive
+            # and non-fatal (I-3), the standard deliverable is untouched.
             canceled = _cancel_batch(client, batch.batch_id, on_log=on_log)
             tail = "was canceled" if canceled else "may still be running"
             for slot in submitted:
