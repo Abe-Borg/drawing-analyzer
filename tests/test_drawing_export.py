@@ -164,6 +164,8 @@ def test_write_drawing_export_creates_folder_and_all_files(tmp_path):
     assert folder.parent == tmp_path
     assert folder.name == "Weld_County_Mechanical_Permit_Set_drawings_2026-06-07_070200"
     written = sorted(p.name for p in folder.iterdir())
+    # Phase 26A (§18.4/§18.5, DA-024): EVERY export — QC or not — carries the
+    # per-run ``run.log`` and the machine-readable ``run_manifest.json``.
     assert written == sorted(
         [
             "report.html",
@@ -173,6 +175,8 @@ def test_write_drawing_export_creates_folder_and_all_files(tmp_path):
             "02_Weld_County_Mechanical_Permit_Set_p2.md",
             "03_Weld_County_Mechanical_Permit_Set_p3.md",
             "combined.md",
+            "run.log",
+            "run_manifest.json",
         ]
     )
     # A failed sheet still produced a real file carrying its error.
@@ -407,3 +411,194 @@ def test_write_qc_outputs_writes_empty_findings_when_qc_ran(tmp_path):
     csv_bytes = (folder / "findings.csv").read_bytes()
     assert csv_bytes[:3] == b"\xef\xbb\xbf"
     assert "findings.json" in written and "findings.csv" in written
+
+
+# --------------------------------------------------------------------------- #
+# run.log + run_manifest.json (Phase 26A, §18.2/§18.4, DA-024)
+# --------------------------------------------------------------------------- #
+
+import hashlib  # noqa: E402
+import json  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+from drawing_analyzer.run_journal import RunJournal, collect_environment  # noqa: E402
+
+# Assembled from fragments so no live-looking key shape exists in the source.
+_ANT = "sk-" + "ant-"
+_FAKE_KEY = _ANT + "api03-abcdef1234567890"
+
+
+def _fake_inventory():
+    return SimpleNamespace(
+        documents=[
+            SimpleNamespace(
+                source_id="SRC-0001", display_name="M-101.pdf", input_order=1,
+                status="ACCEPTED", page_count=3, byte_size=1234, error="",
+                duplicate_of="", accepted=True,
+            ),
+            SimpleNamespace(
+                source_id="", display_name="broken.pdf", input_order=0,
+                status="UNREADABLE", page_count=0, byte_size=0,
+                error="not a PDF", duplicate_of="", accepted=False,
+            ),
+        ]
+    )
+
+
+def test_write_drawing_export_always_writes_run_log_and_manifest(tmp_path):
+    # §18.1/§18.5: EVERY export — here a plain standard run with no QC and no
+    # journal attached — still gets run.log + run_manifest.json, and the index
+    # advertises them.
+    folder = dx.write_drawing_export(_make_ctx(), tmp_path, source_names=[SRC], now=NOW)
+
+    log = (folder / "run.log").read_text(encoding="utf-8")
+    assert "Drawing Analyzer — run log" in log
+    assert "no run journal was recorded" in log      # duck-typed ctx: honest, not invented
+    manifest = json.loads((folder / "run_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["schema_version"] == dx.RUN_MANIFEST_SCHEMA_VERSION
+    assert manifest["kind"] == "drawing_analyzer_run_manifest"
+    index = (folder / "00_index.md").read_text(encoding="utf-8")
+    assert "`run.log`" in index and "`run_manifest.json`" in index
+
+
+def test_run_log_is_crlf_utf8(tmp_path):
+    # §19.6: run.log opens cleanly in Windows Notepad — UTF-8, CRLF only.
+    folder = dx.write_drawing_export(_make_ctx(), tmp_path, source_names=[SRC], now=NOW)
+    raw = (folder / "run.log").read_bytes()
+    assert raw.count(b"\r\n") > 10
+    assert raw.replace(b"\r\n", b"").count(b"\n") == 0
+    raw.decode("utf-8")                                  # must be valid UTF-8
+
+
+def test_run_manifest_hashes_every_artifact_except_itself(tmp_path):
+    # §18.4 non-circular finalization: the manifest hashes every artifact —
+    # run.log and markup_manifest.json included — and excludes only itself.
+    ctx = _qc_ctx(tmp_path)
+    ctx.sheets = _make_ctx().sheets
+    ctx.combined_text = "digest"
+    folder = dx.write_drawing_export(ctx, tmp_path, source_names=["M-101.pdf"], now=NOW)
+
+    manifest = json.loads((folder / "run_manifest.json").read_text(encoding="utf-8"))
+    listed = {a["path"] for a in manifest["artifacts"]}
+    actual = {
+        p.relative_to(folder).as_posix() for p in folder.rglob("*") if p.is_file()
+    } - {"run_manifest.json"}
+    assert listed == actual
+    assert "run.log" in listed
+    assert any(p.startswith("evidence/") for p in listed)      # nested tree hashed too
+    for a in manifest["artifacts"]:
+        digest = hashlib.sha256((folder / a["path"]).read_bytes()).hexdigest()
+        assert digest == a["sha256"], a["path"]
+        assert a["bytes"] == (folder / a["path"]).stat().st_size
+
+
+def test_run_manifest_summarizes_qc_run(tmp_path):
+    # The §18.4 machine-readable counterpart: status, sources (no paths, no
+    # content SHA), stage results, receipts-derived coverage, prose accounting.
+    ctx = _qc_ctx(tmp_path)
+    ctx.sheets = _make_ctx().sheets
+    ctx.combined_text = "digest"
+    ctx.qc_status = "PARTIAL"
+    ctx.coverage_status = "COMPLETE"
+    ctx.input_inventory = _fake_inventory()
+    ctx.prose_accounting = {"items": 5, "matched": 3, "degraded": 2, "missing": 0}
+    ctx.stage_results = [
+        SimpleNamespace(stage="auditors", expected=True, status="COMPLETE"),
+    ]
+    ctx.ledger_tally = {"cloud": 2, "margin": 1}
+    ctx.mutated_sources = []
+    ctx.markup_run = SimpleNamespace(
+        placements=[1, 2, 3],
+        receipts=[
+            SimpleNamespace(status="WRITTEN"),
+            SimpleNamespace(status="WRITTEN"),
+            SimpleNamespace(status="INDEXED"),
+        ],
+    )
+    folder = dx.write_drawing_export(ctx, tmp_path, source_names=["M-101.pdf"], now=NOW)
+    m = json.loads((folder / "run_manifest.json").read_text(encoding="utf-8"))
+
+    assert m["status"]["qc_status"] == "PARTIAL"
+    assert m["findings"] == {"model": 2, "deterministic": 1, "total": 3}
+    assert m["prose_accounting"]["items"] == 5
+    assert m["markup_coverage"]["placements_expected"] == 3
+    assert m["markup_coverage"]["receipts"] == {"WRITTEN": 2, "INDEXED": 1, "FAILED": 0}
+    assert m["markup_coverage"]["tally"] == {"cloud": 2, "margin": 1}
+    assert m["stages"] == [{"stage": "auditors", "expected": True, "status": "COMPLETE"}]
+    src = {s["source_id"]: s for s in m["sources"]}
+    assert src["SRC-0001"]["page_count"] == 3
+    assert src[""]["status"] == "UNREADABLE"
+    # §6.1/§18.4 privacy: no absolute path, no content hash for sources.
+    dumped = json.dumps(m["sources"])
+    assert "pdf_path" not in dumped and "content_sha256" not in dumped
+
+
+def test_run_log_and_manifest_leak_no_secret_or_absolute_path(tmp_path):
+    # §18.2 forbidden content: keys and absolute paths cannot reach the
+    # portable artifacts, even when a run error smuggles both.
+    ctx = _make_ctx()
+    ctx.errors = [f"digest failed: x-api-key: {_FAKE_KEY} at {tmp_path}/private/M-101.pdf"]
+    journal = RunJournal(run_id="RUN-leaktest")
+    journal.set_environment(collect_environment(model="claude-opus-4-8"))
+    journal.emit("API_ERROR", stage="digest", detail=f"401 {_FAKE_KEY}")
+    journal.finish("NOT_REQUESTED")
+    ctx.run_journal = journal
+
+    folder = dx.write_drawing_export(ctx, tmp_path, source_names=[SRC], now=NOW)
+    log = (folder / "run.log").read_text(encoding="utf-8")
+    manifest_text = (folder / "run_manifest.json").read_text(encoding="utf-8")
+    for text in (log, manifest_text):
+        assert _FAKE_KEY not in text
+        assert str(tmp_path) not in text
+    assert "sk-ant-[REDACTED]" in log
+    assert "RUN-leaktest" in log and "RUN-leaktest" in manifest_text
+
+
+def test_run_manifest_usage_block_is_sanitized_defensively(tmp_path):
+    # Even if a future producer embeds a path in a usage instance or custom id,
+    # the manifest scrubs it at the boundary (§18.3 defense in depth).
+    ctx = _make_ctx()
+    ctx.run_usage = SimpleNamespace(
+        to_dict=lambda: {
+            "total_input_tokens": 10,
+            "records": [{"stage_instance": "digest:/home/user/private/M-101.pdf:p0"}],
+        }
+    )
+    manifest = dx.build_run_manifest(ctx)
+    assert "/home/user/private" not in json.dumps(manifest)
+    assert manifest["usage"]["total_input_tokens"] == 10
+
+
+def test_export_survives_hostile_duck_typed_context(tmp_path):
+    # The two advisory artifacts must never sink write_drawing_export after
+    # every deliverable is on disk (I-3 spirit): a third-party duck-typed
+    # context with a raw-Decimal usage dict and a malformed prose_accounting
+    # still exports, and the artifacts degrade honestly instead of vanishing.
+    from decimal import Decimal
+
+    ctx = _make_ctx()
+    ctx.run_usage = SimpleNamespace(
+        to_dict=lambda: {"total_estimated_cost": Decimal("0.10")},
+        by_family=lambda: {},
+    )
+    ctx.prose_accounting = {"items": "three"}
+    folder = dx.write_drawing_export(ctx, tmp_path, source_names=[SRC], now=NOW)
+
+    assert (folder / "report.html").exists()
+    log = (folder / "run.log").read_text(encoding="utf-8")
+    assert "Drawing Analyzer — run log" in log
+    manifest = json.loads((folder / "run_manifest.json").read_text(encoding="utf-8"))
+    # The stray Decimal was serialized through the sanitize boundary, not fatal.
+    assert manifest["usage"]["total_estimated_cost"] == "0.10"
+
+
+def test_generated_at_matches_journal_timestamp_dialect(tmp_path):
+    # One JSON document, one timestamp dialect: generated_at is UTC-Z like the
+    # journal's started_at/ended_at (naive local `now` converted, not relabeled).
+    ctx = _make_ctx()
+    ctx.run_journal = RunJournal(run_id="RUN-tzcheck")
+    ctx.run_journal.finish("COMPLETE")
+    folder = dx.write_drawing_export(ctx, tmp_path, source_names=[SRC], now=NOW)
+    m = json.loads((folder / "run_manifest.json").read_text(encoding="utf-8"))
+    assert m["generated_at"].endswith("Z")
+    assert m["run"]["started_at"].endswith("Z")

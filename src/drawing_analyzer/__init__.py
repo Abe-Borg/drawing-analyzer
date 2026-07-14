@@ -40,8 +40,11 @@ Module layout::
     citation_check.py web-search check of cited code sections
     annotate.py       reviewed-PDF markup writer + reopen/reconcile receipts
                       (artifact-backed coverage, DA-007; PyMuPDF importer 2 of 2)
+    run_journal.py    per-run event journal -> sanitized run.log (secrets
+                      redacted + paths scrubbed at emit time; DA-024)
     export.py         folder export: findings.csv/json, sheet text, evidence,
-                      markup_manifest.json (placement receipts + coverage proof)
+                      markup_manifest.json (placement receipts + coverage proof),
+                      run.log + run_manifest.json (per-run log & artifact hashes)
     html_report.py    self-contained HTML report (+ in-browser Ask AI assistant)
     gui.py            standalone CustomTkinter window
     __main__.py       ``python -m drawing_analyzer`` launches the GUI

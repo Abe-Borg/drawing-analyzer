@@ -46,6 +46,19 @@ can overwrite another's counters (the old `v_in, v_out = vres…` overwrite is g
 `PRICING_EFFECTIVE_DATE`. `cost.estimate_exhaustive_run_cost` is the pre-run
 per-stage estimate (verification/citation quoted as a low–high band).
 
+**Run journal & manifests (Phase 26A, §18.1–18.4).** Every run owns a
+`RunJournal` (`ctx.run_journal`, `run_journal.py`): an append-only, thread-safe
+event trace whose every field is **sanitized at emit time** (shared Phase 17
+`redact_secrets` + an absolute-path scrubber → `.../basename`; one line;
+bounded). The pipeline emits RUN_START/INPUT_*/SHEET_DIGESTED/STAGE_START/
+STAGE_END/LEDGER_*/MARKUP_RECEIPTS/USAGE_TOTALS/RUN_END; `ctx.input_inventory`
+and `ctx.prose_accounting` are retained for the manifests. Every export gets
+`run.log` (rendered §18.2 log, UTF-8+CRLF) and `run_manifest.json`
+(schema v1: status/config/sources-without-paths/stages/usage/coverage + sha256
+of every artifact), written **last** in the §18.4 non-circular order (artifacts
+→ markup manifest → run.log → run manifest, which excludes only itself). Usage
+`stage_instance` labels are portable (`digest:SRC-0001:p0`, never a path).
+
 **Digest path:** `tiling.py` (pure geometry) → `render.py` (rasterization) →
 `digest.py` (prompt + tolerant findings-block parser), or `batch_digest.py`
 (Message Batches + Files APIs, ~50% cheaper) → `digest_cache.py` (two-level

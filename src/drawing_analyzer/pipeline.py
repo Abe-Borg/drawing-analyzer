@@ -49,6 +49,7 @@ from .models import (
     source_page_key,
 )
 from .render import inspect_inputs, iter_rendered_sheets, iter_sheet_prescan, list_sheets
+from .run_journal import RunJournal, collect_environment, derive_run_outcome
 from .source_registry import EST_BYTES_PER_SHEET, check_set_limits, check_work_disk
 
 # ``progress(done, total, label)`` — called once as each sheet *finishes*
@@ -263,6 +264,14 @@ class DrawingContext:
     # ``total_output_tokens`` above are derived sums over it; ``total_estimated_cost``
     # and the per-stage-family breakdown come from it too.
     run_usage: Any = None
+    # Phase 26A (§18.1–18.4, DA-024): the run-scoped journal (every run gets one,
+    # including all-input-failure and non-QC runs — the export renders it to
+    # ``run.log``), the classified input inventory (the §6.1 SourceDocument
+    # records ``run_manifest.json`` reports; paths/hashes stay internal), and the
+    # prose-harvest carry-through counts (§14.9) that were previously discarded.
+    run_journal: Any = None
+    input_inventory: Any = None
+    prose_accounting: dict = field(default_factory=dict)
 
     @property
     def total_estimated_cost(self) -> Any:
@@ -418,7 +427,8 @@ def _rendered_stream(
     ``only`` restricts rendering to the given sheet identities (the level-1 cache
     passes the set of sheets that missed, so cached sheets never render). Geometry
     for cached sheets is captured separately during the pre-scan, so when ``only``
-    is in play the caller passes ``geometry_sink=None`` here.
+    is in play the caller passes a :class:`_GeometryOmissionSink` (which merges
+    render-time facts into the prescan records instead of appending duplicates).
     """
     for rendered in iter_rendered_sheets(
         paths, rows=rows, cols=cols, overlap_frac=overlap_frac, only=only,
@@ -427,6 +437,28 @@ def _rendered_stream(
         if geometry_sink is not None:
             geometry_sink.append(SheetGeometry.from_rendered(rendered))
         yield rendered
+
+
+class _GeometryOmissionSink:
+    """Merges render-time facts into already-captured prescan geometries.
+
+    On a cache-enabled run the prescan captures every sheet's geometry without
+    rasterizing, so the blank-tile suppression count (the I-1 disclosure §18.2
+    asks the run.log to carry) is unknown at capture time. When a cache *miss*
+    then renders for real, :func:`_rendered_stream` "appends" the freshly built
+    :class:`SheetGeometry` here and only the render-time ``omitted_tile_count``
+    is copied onto the prescan record — the list itself never grows (the
+    prescan set is already complete), and never-rendered cache hits honestly
+    keep ``None``.
+    """
+
+    def __init__(self, geometries: "list[SheetGeometry]") -> None:
+        self._by_key = {source_page_key(g.ref): g for g in geometries}
+
+    def append(self, geom: "SheetGeometry") -> None:
+        existing = self._by_key.get(source_page_key(geom.ref))
+        if existing is not None and geom.omitted_tile_count is not None:
+            existing.omitted_tile_count = geom.omitted_tile_count
 
 
 def _digest_sheets_concurrent(
@@ -667,6 +699,71 @@ def _api_environment_fingerprint() -> str:
     return f"sdk=anthropic-{sdk_version} base_url={base_url}"
 
 
+def _journal_environment(*, model: str, use_batch: bool) -> dict:
+    """The §18.2 environment/version identity block for the run journal.
+
+    Everything a later reader needs to know *which* code analyzed the set: the
+    effective model, the renderer build (PyMuPDF/MuPDF — the pixels), the
+    prompt-content versions (the request contract), the digest-cache schema,
+    and the canonical coordinate space. Prompt hashes are shown truncated —
+    they identify, the caches consume the full value. Defensive throughout: an
+    unimportable module degrades to "unavailable", never a failed run.
+    """
+    # Plain imports — every module here is a package sibling with stdlib-only
+    # module-level imports (render is already imported at pipeline top), so a
+    # guard would only hide a real packaging break. The one fallible step is
+    # the renderer fingerprint *call*, guarded narrowly so a degraded renderer
+    # never erases the rest of the identity block.
+    from .critique import CRITIQUE_PROMPT_VERSION
+    from .digest_cache import _SCHEMA_VERSION as _cache_schema
+    from .models import COORDINATE_SPACE_VERSION
+    from .render import _renderer_environment_fingerprint
+    from .verify import VERIFY_PROMPT_VERSION
+
+    try:
+        renderer = _renderer_environment_fingerprint()
+    except Exception:  # noqa: BLE001 - identity is informational, never fatal
+        renderer = "unavailable"
+    return collect_environment(
+        model=model,
+        transport="batch" if use_batch else "real-time",
+        renderer=renderer,
+        api=_api_environment_fingerprint(),
+        digest_prompt=str(DIGEST_PROMPT_VERSION)[:12],
+        critique_prompt=str(CRITIQUE_PROMPT_VERSION)[:12],
+        verify_prompt=str(VERIFY_PROMPT_VERSION),
+        cache_schema=_cache_schema,
+        coordinate_space=COORDINATE_SPACE_VERSION,
+    )
+
+
+def _finish_stage(stage_results: "list[StageResult]", journal: Any, sr: StageResult) -> None:
+    """Record one stage result AND mirror it as a ``STAGE_END`` journal event.
+
+    The single mechanism through which every stage's outcome is recorded — a
+    stage that lands in the roll-up cannot be missing from the journal (and
+    vice versa), so the run.log stage table and event trace can never drift
+    (§18.2). The STAGE_END pairs with the stage's hand-placed ``STAGE_START``
+    (same ``stage`` string as ``StageResult.stage``) for the duration column.
+    A NOT_REQUESTED stage records but emits nothing — the stage table already
+    lists it.
+    """
+    stage_results.append(sr)
+    if journal is None or sr.status == "NOT_REQUESTED":
+        return
+    fields: dict[str, Any] = {"status": sr.status}
+    if sr.calls_planned or sr.calls_succeeded or sr.calls_failed:
+        fields["calls"] = f"{sr.calls_succeeded}/{sr.calls_planned}"
+    if sr.items_in or sr.items_out:
+        fields["items"] = f"{sr.items_in}->{sr.items_out}"
+    if sr.errors:
+        fields["error"] = sr.errors[0]
+    if sr.warnings:
+        fields["warning"] = sr.warnings[0]
+    level = {"FAILED": "ERROR", "PARTIAL": "WARNING"}.get(sr.status, "INFO")
+    journal.emit("STAGE_END", stage=sr.stage, level=level, **fields)
+
+
 @dataclass
 class _QCResult:
     findings: list[Finding] = field(default_factory=list)
@@ -687,6 +784,9 @@ class _QCResult:
     # auditors, prose harvest, verification, citation, and markup/coverage. The
     # pre-ledger stages (synthesis, critique, cross-QC) are recorded by the caller.
     stage_results: list[StageResult] = field(default_factory=list)
+    # Phase 26A (§14.9 / §18.4): the prose-harvest carry-through counts, kept for
+    # the run manifest / run.log instead of being discarded with the HarvestResult.
+    prose_accounting: dict = field(default_factory=dict)
 
 
 def _critique_level1_partition(
@@ -722,6 +822,11 @@ def _critique_level1_partition(
     cached_by_ref: dict[tuple[str, int], Any] = {}
     miss_only: set[tuple[str, int]] = set()
     level1_keys: dict[tuple[str, int], str] = {}
+    # Portable (source_id, page) identity per refkey, taken from the stamped
+    # refs themselves — the recorded usage instances must carry SRC-#### ids,
+    # never paths (§10.4), and deriving from the refs (like the digest path
+    # does) needs no assumption about the caller's path-list ordering.
+    portable_by_key: dict[tuple[str, int], tuple[str, int]] = {}
     for ref, identity, _geom in iter_sheet_prescan(
         paths, rows=rows, cols=cols, overlap_frac=overlap_frac, snapshot_by_path=snapshot_by_path
     ):
@@ -737,12 +842,13 @@ def _critique_level1_partition(
         )
         rk = _refkey(ref)
         level1_keys[rk] = key
+        portable_by_key[rk] = source_page_key(ref)
         entry = cache.get(key)
         if entry is not None:
             cached_by_ref[rk] = critique_result_from_entry(entry, ref)
         else:
             miss_only.add(rk)
-    return cached_by_ref, miss_only, level1_keys
+    return cached_by_ref, miss_only, level1_keys, portable_by_key
 
 
 def _run_critique_stage(
@@ -795,9 +901,10 @@ def _run_critique_stage(
 
     cached_by_ref: dict[tuple[str, int], Any] = {}
     level1_keys: dict[tuple[str, int], str] = {}
+    portable_by_key: dict[tuple[str, int], tuple[str, int]] = {}
     only: set[tuple[str, int]] | None = None
     if cache is not None:
-        cached_by_ref, only, level1_keys = _critique_level1_partition(
+        cached_by_ref, only, level1_keys, portable_by_key = _critique_level1_partition(
             paths, rows=rows, cols=cols, overlap_frac=overlap_frac, cache=cache,
             model=model, runs=runs, profiles_key=profiles_key, snapshot_by_path=snapshot_by_path,
         )
@@ -812,7 +919,13 @@ def _run_critique_stage(
     claims: list[NumericClaim] = []
     done = 0
 
-    def _record_critique(res: Any, key: "tuple[str, int]") -> None:
+    def _record_critique(res: Any, portable: "tuple[str, int]") -> None:
+        """Record one sheet's critique usage under its PORTABLE identity.
+
+        ``portable`` is ``source_page_key`` output (SRC-#### + page, from the
+        stamped refs) — never the raw pdf path: usage records are exported
+        verbatim into run_manifest.json (Phase 26A §18.4/§10.4).
+        """
         cached = bool(getattr(res, "cached", False))
         # A batched sheet bills at the batch rate; a cache hit bills nothing; a
         # rescued (real-time fallback) sheet — or any real-time run — bills the
@@ -824,7 +937,7 @@ def _run_critique_stage(
         )
         _record_usage(
             run_usage, family="critique",
-            instance=f"critique:{key[0]}:p{key[1]}",
+            instance=f"critique:{portable[0]}:p{portable[1]}",
             model=model,
             transport=transport,
             # A cache hit made no API call this run — zero billed tokens (as the
@@ -842,7 +955,7 @@ def _run_critique_stage(
     for rk, res in cached_by_ref.items():
         findings.extend(res.findings)
         claims.extend(res.claims)
-        _record_critique(res, rk)
+        _record_critique(res, portable_by_key.get(rk, (Path(rk[0]).name, rk[1])))
         done += 1
         if progress is not None:
             progress(total, total, f"Critiquing sheet {done}/{total}")
@@ -855,7 +968,7 @@ def _run_critique_stage(
             _log.warning("critique degraded for a sheet: %s", res.error)
         findings.extend(res.findings)
         claims.extend(res.claims)
-        _record_critique(res, _refkey(ref))
+        _record_critique(res, source_page_key(ref))
         # Store-under-both: promote a *complete* result to its level-1 key so the
         # next run skips rendering this sheet entirely. A partial (a dropped run) is
         # never cached — mirrors the level-2 guard inside
@@ -941,6 +1054,7 @@ def _run_qc_stages(
     claims: list[NumericClaim] | None = None,
     synthesis_text: str = "",
     accepted_documents: list | None = None,
+    journal: Any = None,
 ) -> _QCResult:
     """Run the ledger pipeline: ingest → harvest → anchor → number → verify → markups.
 
@@ -981,9 +1095,15 @@ def _run_qc_stages(
     # Typed per-stage outcomes (§15.4) rolled up into the overall QC status.
     stage_results: list[StageResult] = []
 
+    def _emit(event_code: str, **kw: Any) -> None:
+        """Journal an event (no-op without a journal; emit itself never raises)."""
+        if journal is not None:
+            journal.emit(event_code, **kw)
+
     ledger = Ledger()
     work_dir = qc_work_dir
     audit_stats: dict = {}
+    prose_accounting: dict = {}
 
     # --- ingest: every channel lands in the ledger ---------------------------
     digest_findings = [f for sd in sheets for f in getattr(sd, "findings", None) or []]
@@ -1004,6 +1124,7 @@ def _run_qc_stages(
     if reference_audit_enabled and geometries:
         if progress is not None:
             progress(total, total, "Auditing references")
+        _emit("STAGE_START", stage="auditors", sheets=len(geometries))
         try:
             from .auditors import run_auditors
 
@@ -1029,7 +1150,7 @@ def _run_qc_stages(
     elif reference_audit_enabled:
         # Requested but no geometry to audit — a valid (empty) skip, not a failure.
         audit_stage.status = "SKIPPED_VALID"
-    stage_results.append(audit_stage)
+    _finish_stage(stage_results, journal, audit_stage)
 
     # --- prose harvest (§17): the legacy channel's carry-through guarantee ----
     # Exhaustive QC only (§14.7 / §15.3): standard and audit-only runs keep any
@@ -1038,6 +1159,7 @@ def _run_qc_stages(
     if run_prose_harvest and sheets:
         if progress is not None:
             progress(total, total, "Harvesting prose findings")
+        _emit("STAGE_START", stage="prose_harvest")
         try:
             from .prose_harvest import harvest_prose
 
@@ -1056,6 +1178,12 @@ def _run_qc_stages(
                 input_tokens=hres.input_tokens, output_tokens=hres.output_tokens,
                 terminal_status="PARTIAL" if hres.missing else "COMPLETE",
             )
+            # §14.9 / §18.4: keep the carry-through accounting for run.log and
+            # run_manifest.json (it was previously discarded with the result).
+            # The dict's keys are defined ONCE, at the producer (HarvestResult
+            # .accounting), so a new harvest counter reaches the manifest
+            # without a parallel edit here.
+            prose_accounting = hres.accounting()
             harvest_stage.items_in = getattr(hres, "items", 0)
             # §14.9: every enumerated prose item must reach a ledger entry. Any that
             # could not be recovered even by the final degraded attempt is an
@@ -1079,7 +1207,7 @@ def _run_qc_stages(
             harvest_stage.status = "FAILED"
             harvest_stage.errors.append(str(exc))
             _log.warning("prose harvest failed: %s", exc)
-    stage_results.append(harvest_stage)
+    _finish_stage(stage_results, journal, harvest_stage)
 
     # --- seal ingestion, then anchor, reconcile, and number (§12.4) -----------
     # QC ids must be POSITIONAL, so numbering happens *after* anchoring — the
@@ -1087,6 +1215,7 @@ def _run_qc_stages(
     # entries), anchor every primary + leg, fold any duplicate the ingest pass
     # could not see without geometry, and only then assign QC-### in visual order.
     entries = ledger.seal()
+    _emit("LEDGER_SEALED", stage="ledger", entries=len(entries))
 
     # Anchor the entries that don't already carry a rectangle (auditor entries do).
     # The WHOLE block is wrapped (not just the per-sheet resolves): a throw in the
@@ -1096,6 +1225,7 @@ def _run_qc_stages(
     if entries and geometries:
         if progress is not None:
             progress(total, total, "Anchoring findings")
+        _emit("STAGE_START", stage="anchor", entries=len(entries))
         try:
             from .anchor import resolve_anchors, resolve_conflict_legs
 
@@ -1113,8 +1243,19 @@ def _run_qc_stages(
                     _log.warning("anchoring failed for %s: %s", key, exc)
             # Anchor the cross-sheet findings' also_on legs, each on its own sheet.
             resolve_conflict_legs(entries, geom_by_key)
+            _emit(
+                "STAGE_END", stage="anchor", status="COMPLETE",
+                anchored=sum(
+                    1 for e in entries
+                    if getattr(getattr(e, "anchor", None), "status", "") not in ("", "UNANCHORED")
+                ),
+            )
         except Exception as exc:  # noqa: BLE001 - anchoring must never sink numbering
             _log.warning("anchoring stage failed: %s", exc)
+            _emit(
+                "STAGE_END", stage="anchor", level="WARNING",
+                status="FAILED", error=str(exc),
+            )
 
     # Cautious post-anchor reconciliation (Pass B, §12.1): geometry is now available.
     try:
@@ -1126,6 +1267,11 @@ def _run_qc_stages(
 
     # Assign the run's positional QC-### numbers now that anchors exist (§12.4).
     entries = ledger.number()
+    _emit(
+        "LEDGER_NUMBERED", stage="ledger", entries=len(entries),
+        post_seal_adds=ledger.post_seal_adds,
+        level="WARNING" if ledger.post_seal_adds else "INFO",
+    )
     if ledger.post_seal_adds:
         # An entry landed after the seal — an orchestration invariant failure. The
         # entries still ship (I-3), but the run is flagged incomplete rather than
@@ -1146,12 +1292,15 @@ def _run_qc_stages(
         from .verify import default_verify_model
         from .verify import verify_findings as _run_verify
 
+        _emit("STAGE_START", stage="verification", entries=len(entries))
         verify_model = default_verify_model()
 
         if work_dir is None:
             import tempfile
 
             work_dir = Path(tempfile.mkdtemp(prefix="drawing_qc_"))
+            if journal is not None:
+                journal.add_private_roots([work_dir])
         evidence_dir = work_dir / "evidence"
 
         def _verify_progress(done: int, tot: int, label: str) -> None:
@@ -1242,7 +1391,7 @@ def _run_qc_stages(
     elif qc_markups and verify_enabled:
         # Requested, but no model entries were eligible to verify (§3.3).
         verify_stage.status = "SKIPPED_VALID"
-    stage_results.append(verify_stage)
+    _finish_stage(stage_results, journal, verify_stage)
 
     # Citation check (Phase 15): one web-search-backed call per unique code ref,
     # judged against the editions the set adopts (harvested from the text
@@ -1260,6 +1409,10 @@ def _run_qc_stages(
                 if progress is not None:
                     progress(total, total, label)
 
+            _emit(
+                "STAGE_START", stage="citation",
+                cited=sum(1 for f in all_findings if getattr(f, "refs", None)),
+            )
             try:
                 cires = check_citations(
                     all_findings, geometries, client=client, progress=_citation_progress,
@@ -1302,7 +1455,7 @@ def _run_qc_stages(
                 citation_stage.status = "FAILED"
                 citation_stage.errors.append(str(exc))
                 _log.warning("citation check failed: %s", exc)
-    stage_results.append(citation_stage)
+    _finish_stage(stage_results, journal, citation_stage)
 
     reviewed_pdf_paths: list[Path] = []
     mutated_sources: list[str] = []
@@ -1339,13 +1492,20 @@ def _run_qc_stages(
                         "re-run to mark up the current revision."
                     )
                     _log.warning("source mutated mid-run: %s (%s)", name, reason)
+                    _emit(
+                        "SOURCE_MUTATED", stage="markup", level="WARNING",
+                        source=sid, name=name, reason=reason,
+                    )
 
         if work_dir is None:
             import tempfile
 
             work_dir = Path(tempfile.mkdtemp(prefix="drawing_qc_"))
+            if journal is not None:
+                journal.add_private_roots([work_dir])
         if progress is not None:
             progress(total, total, "Writing markups")
+        _emit("STAGE_START", stage="markup", entries=len(all_findings))
         try:
             # Set-level findings (a synthesis conflict naming no in-set sheet, §14.8)
             # belong to no source PDF — route them to the dedicated
@@ -1425,6 +1585,21 @@ def _run_qc_stages(
                 failed, ledger_tally.get("mutated", 0),
             )
         _log.info("%s", _tally_line(len(entries), ledger_tally, coverage_status))
+        # Receipt accounting for the journal (§18.2): expected placements vs the
+        # terminal receipts actually reconciled from the reopened PDFs (DA-007).
+        from .models import receipt_status_counts
+
+        receipt_counts = receipt_status_counts(getattr(markup_run, "receipts", None))
+        _emit(
+            "MARKUP_RECEIPTS", stage="markup",
+            level="WARNING" if coverage_status == "INCOMPLETE" else "INFO",
+            expected=len(getattr(markup_run, "placements", None) or []),
+            written=receipt_counts["WRITTEN"],
+            indexed=receipt_counts["INDEXED"],
+            failed=receipt_counts["FAILED"],
+            coverage=coverage_status,
+            reviewed_pdfs=len(reviewed_pdf_paths),
+        )
 
     # Markup/coverage as a typed stage: COMPLETE only when every planned placement
     # was proven in the reopened PDF (receipt-derived, DA-007); an INCOMPLETE
@@ -1436,7 +1611,7 @@ def _run_qc_stages(
         else:
             markup_stage.status = "PARTIAL"
             markup_stage.errors.append(f"coverage {coverage_status}")
-    stage_results.append(markup_stage)
+    _finish_stage(stage_results, journal, markup_stage)
 
     # The context's two buckets are a *view* of the one ledger: entries produced
     # only by the deterministic auditors keep their historical
@@ -1463,6 +1638,7 @@ def _run_qc_stages(
         coverage_status=coverage_status,
         markup_run=markup_run,
         stage_results=stage_results,
+        prose_accounting=prose_accounting,
     )
 
 
@@ -1662,6 +1838,38 @@ def extract_drawing_context(
         use_batch=use_batch,
     )
 
+    # Run journal (Phase 26A §18.1): one journal per run, created before the
+    # inventory so even an all-inputs-rejected run leaves a trace, and attached
+    # to every DrawingContext this function can return. The export renders it to
+    # ``run.log``; everything it stores passes the shared redaction/scrub
+    # boundary at emit time (§18.3).
+    journal = RunJournal()
+    # Known private roots (§18.3): the run's own directories are replaced with
+    # "..." wherever they appear in a stored field — the literal pass that
+    # handles spacey Windows directories the bare scrub regexes cannot bound.
+    journal.add_private_roots(
+        [Path(p).resolve().parent for p in pdf_paths]
+        + [Path(p).parent for p in pdf_paths]
+        + ([qc_work_dir] if qc_work_dir is not None else [])
+        + [Path.home()]
+    )
+    journal.set_environment(_journal_environment(model=model, use_batch=use_batch))
+    journal.emit(
+        "RUN_START",
+        files=len(pdf_paths),
+        model=model,
+        transport="batch" if use_batch else "real-time",
+        cache=bool(cache is not None),
+        grid=f"{rows}x{cols}",
+        mode=(
+            "exhaustive_qc" if config.exhaustive_qc
+            else "deterministic_audit_only" if config.deterministic_audit_only
+            else "standard"
+        ),
+        configuration_kind=config.configuration_kind,
+        focus=bool(focus),
+    )
+
     # Inventory (Phase 18B): classify every selected input once, so a corrupt /
     # encrypted / zero-page / duplicate file degrades individually and *visibly*
     # instead of vanishing. Downstream stages process only accepted documents.
@@ -1670,6 +1878,18 @@ def extract_drawing_context(
     inventory_errors = inventory.error_lines()
     for line in inventory_errors:
         _log.info("input inventory: %s", line)
+    for doc in inventory.documents:
+        extra = {"error": doc.error} if doc.error else {}
+        journal.emit(
+            "INPUT_ACCEPTED" if doc.accepted else "INPUT_REJECTED",
+            stage="inventory",
+            level="INFO" if doc.accepted else "WARNING",
+            source=doc.source_id or "-",
+            name=doc.display_name,
+            status=doc.status,
+            pages=doc.page_count,
+            **extra,
+        )
 
     # Preflight (§10.7, DA-035): a large legitimate set requires explicit
     # confirmation rather than being silently truncated; a QC run that would
@@ -1687,11 +1907,15 @@ def extract_drawing_context(
     if block_reason is not None:
         if progress is not None:
             progress(0, 0, "Cannot start run")
+        journal.emit("RUN_BLOCKED", level="ERROR", reason=block_reason)
+        journal.finish("FAILED")
         return DrawingContext(
             combined_text="",
             file_count=len(all_paths),
             sheet_count=0,
             errors=inventory_errors + [block_reason],
+            run_journal=journal,
+            input_inventory=inventory,
         )
 
     paths = inventory.accepted_paths
@@ -1731,12 +1955,19 @@ def extract_drawing_context(
     if total == 0:
         if progress is not None:
             progress(0, 0, "No sheets found")
+        journal.emit(
+            "RUN_END", level="ERROR", status="FAILED",
+            reason="no readable PDF pages found in the selected files",
+        )
+        journal.finish("FAILED")
         return DrawingContext(
             combined_text="",
             file_count=len(all_paths),
             sheet_count=0,
             errors=inventory_errors
             + ["No readable PDF pages found in the selected files."],
+            run_journal=journal,
+            input_inventory=inventory,
         )
 
     # Capture each sheet's lightweight text/geometry record (words + text layer,
@@ -1748,6 +1979,11 @@ def extract_drawing_context(
     need_geometry = True
     sheet_geometries: list[SheetGeometry] = []
     geometry_sink = sheet_geometries
+
+    journal.emit(
+        "STAGE_START", stage="digest", sheets=total,
+        workers=_resolve_workers(max_workers, total),
+    )
 
     # Level-1 cache pre-scan (Phase 9): recognize unchanged sheets *before*
     # rendering and skip rasterization for them (the dominant re-run cost). Only
@@ -1765,11 +2001,16 @@ def extract_drawing_context(
         if need_geometry:
             sheet_geometries.extend(prescan_geoms)
         # The pre-scan already captured geometry for every sheet, so the render
-        # stream must not re-capture (it only sees the misses anyway).
-        geometry_sink = None
+        # stream must not re-capture — but a freshly-rendered MISS still merges
+        # its render-only fact (the omitted-blank-tile count, §18.2) into the
+        # prescan record via the update sink; cache hits keep None (unknown).
+        geometry_sink = _GeometryOmissionSink(sheet_geometries)
         _log.info(
             "level-1 cache: %d/%d sheet(s) hit — skipping render for them",
             len(cached_by_ref), total,
+        )
+        journal.emit(
+            "CACHE_PRESCAN", stage="digest", hits=len(cached_by_ref), total=total,
         )
         if cached_by_ref and progress is not None:
             progress(
@@ -1828,6 +2069,7 @@ def extract_drawing_context(
     # estimate of the image portion (already folded into each digest's input tokens).
     run_usage = RunUsage()
     img_tok = 0
+    geom_by_key = {source_page_key(g.ref): g for g in sheet_geometries}
     for sd in sheets:
         # A cached sheet made no API call, so it costs zero tokens *this run* — its
         # record carries the cache-hit metadata but zero billed tokens. A fresh
@@ -1839,9 +2081,14 @@ def extract_drawing_context(
             cached=cached, rescued=bool(getattr(sd, "rescued", False)),
             use_batch=use_batch,
         )
+        # The recorded instance uses the PORTABLE sheet identity (SRC-#### +
+        # page), never the pdf path — usage records are exported verbatim into
+        # run_manifest.json (Phase 26A §18.4), and an absolute path in a
+        # ``stage_instance`` would leak the user's directory layout (§10.4).
+        skey = source_page_key(sd.ref)
         _record_usage(
             run_usage, family="digest",
-            instance=f"digest:{_refkey(sd.ref)[0]}:p{_refkey(sd.ref)[1]}",
+            instance=f"digest:{skey[0]}:p{skey[1]}",
             model=model,
             transport=sheet_transport,
             input_tokens=0 if cached else sd.input_tokens,
@@ -1852,6 +2099,46 @@ def extract_drawing_context(
         )
         if sd.error:
             errors.append(f"{sd.ref.display_label}: {sd.error}")
+        # One journal event per sheet, in deterministic page order (§18.2):
+        # success, cache hit/miss, digest size, findings count, plus the
+        # geometry-side facts (raster/vector, text-layer length, omitted tiles)
+        # when this run rendered/prescanned them. Counts and flags only — never
+        # digest text or quotes.
+        # Classified by ``sd.ok`` (error-free AND non-empty): an error-free
+        # sheet whose digest came back empty is a failure for accounting
+        # purposes, matching run.log's Sheets section and ok_sheet_count.
+        sheet_fields: dict[str, Any] = {
+            "sheet": sd.ref.display_label,
+            "source": skey[0],
+            "status": "OK" if sd.ok else "FAILED",
+            "cached": cached,
+            "digest_chars": len(sd.text or ""),
+            "findings": len(getattr(sd, "findings", None) or []),
+        }
+        geom = geom_by_key.get(source_page_key(sd.ref))
+        if geom is not None:
+            sheet_fields["layer"] = "raster" if geom.is_raster else "vector"
+            sheet_fields["text_layer_chars"] = len(geom.sheet_text or "")
+            if getattr(geom, "omitted_tile_count", None) is not None:
+                sheet_fields["omitted_tiles"] = geom.omitted_tile_count
+        if getattr(sd, "findings_note", ""):
+            sheet_fields["parser_note"] = sd.findings_note
+        if sd.error:
+            sheet_fields["error"] = sd.error
+        elif not sd.ok:
+            sheet_fields["error"] = "(empty digest)"
+        journal.emit(
+            "SHEET_DIGESTED", stage="digest",
+            level="INFO" if sd.ok else "WARNING", **sheet_fields,
+        )
+    ok_sheets = sum(1 for s in sheets if s.ok)
+    journal.emit(
+        "STAGE_END", stage="digest",
+        status="COMPLETE" if ok_sheets == len(sheets) else "PARTIAL",
+        ok=ok_sheets,
+        failed=len(sheets) - ok_sheets,
+        cached=sum(1 for s in sheets if s.cached),
+    )
 
     # Critique pass (Phase 11): a second, adversarial full-coverage read per sheet
     # whose only job is finding problems, run self-consistently (twice) and merged.
@@ -1886,12 +2173,15 @@ def extract_drawing_context(
             )
         else:
             profile_stage.status = "COMPLETE"
-    stage_results.append(profile_stage)
+    _finish_stage(stage_results, journal, profile_stage)
 
     critique_stage = StageResult(stage="critique", expected=config.run_critique)
     if config.run_critique:
         if progress is not None:
             progress(total, total, "Critiquing sheets")
+        journal.emit(
+            "STAGE_START", stage="critique", sheets=total, reads=config.critique_reads,
+        )
         try:
             if resolved_profiles:
                 _log.info(
@@ -1914,7 +2204,7 @@ def extract_drawing_context(
             critique_stage.status = "FAILED"
             critique_stage.errors.append(str(exc))
             _log.warning("critique stage failed: %s", exc)
-    stage_results.append(critique_stage)
+    _finish_stage(stage_results, journal, critique_stage)
 
     # Cross-sheet QC pass (Phase 13): a deliberate whole-set conflict hunt over the
     # digests + text layers (text only), producing dual-anchored findings that
@@ -1925,6 +2215,7 @@ def extract_drawing_context(
     if config.run_cross_qc:
         if progress is not None:
             progress(total, total, "Cross-sheet QC")
+        journal.emit("STAGE_START", stage="cross_qc", sheets=total)
         try:
             from .cross_qc import cross_qc_model, cross_sheet_qc
 
@@ -1963,7 +2254,7 @@ def extract_drawing_context(
             cross_stage.status = "FAILED"
             cross_stage.errors.append(str(exc))
             _log.warning("cross-sheet QC stage failed: %s", exc)
-    stage_results.append(cross_stage)
+    _finish_stage(stage_results, journal, cross_stage)
 
     # Cross-sheet synthesis (one text-only call after all digests). Skipped for
     # <2 readable sheets; on failure we keep the per-sheet digests and record
@@ -1976,6 +2267,7 @@ def extract_drawing_context(
     if config.run_synthesis:
         if progress is not None:
             progress(total, total, "Synthesizing set overview")
+        journal.emit("STAGE_START", stage="synthesis", sheets=total)
         from .synthesis import (
             MIN_SHEETS_FOR_SYNTHESIS,
             default_synthesis_model,
@@ -2007,7 +2299,7 @@ def extract_drawing_context(
             # Fewer than two readable sheets — an applicable, valid skip (§3.3).
             synthesis_stage.status = "SKIPPED_VALID"
             _log.info("synthesis: skipped (<%d readable sheet(s))", MIN_SHEETS_FOR_SYNTHESIS)
-    stage_results.append(synthesis_stage)
+    _finish_stage(stage_results, journal, synthesis_stage)
 
     # Set-level focus report (one text-only call; independent of synthesis).
     # Additive: a failure here is recorded and the standard deliverable —
@@ -2023,6 +2315,7 @@ def extract_drawing_context(
         )
 
         _log.info("focus report: starting set-level pass")
+        journal.emit("STAGE_START", stage="focus")
         fresult = generate_focus_report(
             sheets, focus, client=client, model=focus_model
         )
@@ -2045,6 +2338,18 @@ def extract_drawing_context(
             _log.info(
                 "focus report: skipped (<%d readable sheet(s))", MIN_SHEETS_FOR_FOCUS
             )
+        # The focus report is additive (no StageResult of its own); its journal
+        # end-event still records the outcome for the trace.
+        journal.emit(
+            "STAGE_END", stage="focus",
+            level="INFO" if fresult.ok else "WARNING",
+            status=(
+                "COMPLETE" if fresult.ok
+                else "FAILED" if fresult.error
+                and len([s for s in sheets if s.ok]) >= MIN_SHEETS_FOR_FOCUS
+                else "SKIPPED_VALID"
+            ),
+        )
 
     # Ledger pipeline (Part III): ingest every channel into the findings ledger,
     # harvest the prose (exhaustive only), anchor, number, then verify → citation
@@ -2060,6 +2365,7 @@ def extract_drawing_context(
         cross_findings=cross_findings, claims=numeric_claims,
         synthesis_text=synthesis_text,
         accepted_documents=inventory.accepted_documents,
+        journal=journal,
     )
     stage_results.extend(qc.stage_results)
 
@@ -2085,6 +2391,33 @@ def extract_drawing_context(
     )
     for err in errors:
         _log.warning("issue: %s", err)
+
+    # Close out the run journal (§18.1): the derived usage totals, then the
+    # terminal status the header/footer of run.log lead with.
+    cost = run_usage.total_estimated_cost
+    journal.emit(
+        "USAGE_TOTALS",
+        input_tokens=in_tok, output_tokens=out_tok,
+        cache_hits=run_usage.cache_hits,
+        estimated_cost=str(cost) if cost is not None else "n/a",
+    )
+    # The RUN-level terminal outcome is distinct from the §3.3 QC status: a
+    # clean standard run is COMPLETE (QC status NOT_REQUESTED just means QC
+    # wasn't asked for), a run whose digest shipped but had failures/partial QC
+    # is PARTIAL. One derivation, shared with run.log's outcome line, so the
+    # manifest's run.final_status and the log header can never disagree.
+    run_outcome = derive_run_outcome(
+        ok_sheets=ok_count, error_count=len(errors),
+        qc_status=qc_status, coverage_status=qc.coverage_status,
+    )
+    journal.emit(
+        "RUN_END",
+        level="WARNING" if errors else "INFO",
+        outcome=run_outcome,
+        status=qc_status, coverage=qc.coverage_status, errors=len(errors),
+        sheets_ok=ok_count, sheets_total=total,
+    )
+    journal.finish(run_outcome)
 
     return DrawingContext(
         combined_text=_combine(
@@ -2119,6 +2452,9 @@ def extract_drawing_context(
         qc_status=qc_status,
         run_usage=run_usage,
         profile_snapshots=profile_snapshots,
+        run_journal=journal,
+        input_inventory=inventory,
+        prose_accounting=qc.prose_accounting,
     )
 
 

@@ -439,6 +439,25 @@ class HarvestResult:
         """True when every enumerated prose item reached a ledger entry."""
         return self.missing == 0
 
+    def accounting(self) -> dict:
+        """The §14.9 carry-through counts for run.log / ``run_manifest.json``.
+
+        Defined here — at the producer — so a future harvest counter reaches
+        the exported accounting without a parallel edit in the pipeline
+        (Phase 26A). Token usage and the raw id lists stay internal.
+        """
+        return {
+            "items": self.items,
+            "matched": self.matched,
+            "structured": self.structured,
+            "degraded": self.degraded,
+            "set_level": self.set_level,
+            "excluded_focus": self.excluded_focus,
+            "skipped": self.skipped,
+            "missing": self.missing,
+            "complete": self.complete,
+        }
+
 
 @dataclass
 class _Pending:

@@ -327,6 +327,11 @@ class SheetGeometry:
     is_raster: bool = False
     # PAGE_VIEW_V2 geometry + transforms (Phase 19); see :class:`RenderedSheet`.
     geometry: "PageGeometry | None" = None
+    # Phase 26A (§18.2): how many blank tiles the render omitted for this sheet
+    # (the documented I-1 exception, disclosed to the model). ``None`` = not
+    # recorded — a level-1 cache hit never re-rendered, so the count is unknown
+    # there, and the run.log must say so rather than claim zero.
+    omitted_tile_count: "int | None" = None
 
     @classmethod
     def from_rendered(cls, rendered: "RenderedSheet") -> "SheetGeometry":
@@ -341,6 +346,7 @@ class SheetGeometry:
             sheet_text=rendered.sheet_text,
             is_raster=rendered.is_raster,
             geometry=rendered.geometry,
+            omitted_tile_count=len(rendered.omitted_tiles or []),
         )
 
 
@@ -1063,6 +1069,24 @@ PLACEMENT_KINDS = ("CLOUD", "MARGIN", "REVIEW_NOTES", "REJECTED_INDEX", "GATED_I
 RECEIPT_STATUSES = ("WRITTEN", "INDEXED", "FAILED")
 # A whole run's placement coverage over the ledger.
 COVERAGE_STATUSES = ("NOT_REQUESTED", "COMPLETE", "INCOMPLETE")
+
+
+def receipt_status_counts(receipts: Any) -> "dict[str, int]":
+    """Tally terminal receipts by status, keyed by :data:`RECEIPT_STATUSES`.
+
+    The one shared counter behind the journal's MARKUP_RECEIPTS event, the
+    run.log placements line, and ``run_manifest.json``'s coverage block
+    (Phase 26A) — so a status added to :data:`RECEIPT_STATUSES` reaches all
+    three consumers at once instead of drifting across hand-kept copies.
+    Duck-typed and tolerant: an unknown/malformed status is simply not
+    counted (the coverage reconciliation, not this tally, polices validity).
+    """
+    counts = {status: 0 for status in RECEIPT_STATUSES}
+    for receipt in receipts or []:
+        status = str(getattr(receipt, "status", "") or "")
+        if status in counts:
+            counts[status] += 1
+    return counts
 
 # The mandatory component kind(s) each placement must carry, exactly once, in the
 # saved PDF. A placement may also carry optional components (a QC tag beside a
