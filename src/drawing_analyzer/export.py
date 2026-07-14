@@ -686,7 +686,10 @@ def safe_artifact_name(
         candidate = text
         while candidate in used:
             n += 1
-            candidate = f"{base}_{n}{tail}"
+            suffix = f"_{n}{tail}"
+            # The dedupe suffix stays WITHIN the component cap: trim the base
+            # rather than overrun the invariant on a maximally-long name.
+            candidate = base[: max(1, _MAX_NAME_COMPONENT - len(suffix))] + suffix
         used.add(candidate)
         text = candidate
     return text

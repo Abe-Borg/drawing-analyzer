@@ -675,6 +675,11 @@ def test_safe_artifact_name_neutralizes_hostile_components():
     assert san("..") == "artifact" and san("") == "artifact"
     long = san("x" * 500 + ".pdf")
     assert len(long) <= 120 and long.endswith(".pdf")
+    # The dedupe suffix respects the same cap (trims the base, never overruns).
+    used: set[str] = set()
+    first = san("y" * 500 + ".pdf", used=used)
+    second = san("y" * 500 + ".pdf", used=used)
+    assert first != second and len(second) <= 120 and second.endswith(".pdf")
 
 
 def test_safe_artifact_name_dedupes_deterministically():
