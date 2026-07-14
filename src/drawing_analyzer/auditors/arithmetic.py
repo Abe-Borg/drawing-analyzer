@@ -15,8 +15,17 @@ exact :class:`~decimal.Decimal` and adding / multiplying with the standard libra
 never :func:`eval`, never the model's answer — and raises a
 :class:`~drawing_analyzer.models.Finding` only when the numbers genuinely don't
 add up. Relationships that check out are counted (surfaced in the report as
-"N numeric relationships checked ✓"); mismatches are ``DETERMINISTIC`` findings,
-anchored on the sheet via the claim's verbatim quote.
+"N numeric relationships checked ✓").
+
+The *operation* is always host-deterministic, but the numbers it operated on may
+have been misread. Phase 25 §17.5 makes that distinction explicit: a mismatch is
+trusted (``verification.status="DETERMINISTIC"``, ``operand_origin=TEXT_EXTRACTED``)
+only when the claim's own verbatim quote independently carries every operand;
+otherwise the terms were model-transcribed (``operand_origin=MODEL_TRANSCRIBED``)
+and the mismatch stays ``UNCERTAIN`` so the crop verifier confirms the numbers
+before it inks as ground truth. ``computation_method`` is always
+``HOST_DETERMINISTIC``. Every finding is anchored on the sheet via the claim's
+verbatim quote.
 
 PDF-engine-free (I-5): it reuses the pure anchor resolver and word helpers; the
 pipeline owns rendering.
@@ -29,8 +38,16 @@ from dataclasses import dataclass, field
 from decimal import Decimal, DivisionByZero, InvalidOperation
 from typing import Any, Iterable
 
-from ..models import Finding, NumericClaim, Verification, source_page_key
-from .references import detect_sheet_id
+from ..models import (
+    HOST_DETERMINISTIC,
+    MODEL_TRANSCRIBED,
+    TEXT_EXTRACTED,
+    Finding,
+    NumericClaim,
+    Verification,
+    source_page_key,
+)
+from .references import detect_sheet_id, _wtext
 
 # --------------------------------------------------------------------------- #
 # Number parsing — tolerant of how numbers appear on drawings, with NO eval.
@@ -112,11 +129,16 @@ def _parse_number_str(raw: str) -> Decimal | None:
 # Tolerance + severity — a match allows for the rounding a drawing prints.
 # --------------------------------------------------------------------------- #
 
-# A claim "matches" if its stated value is within EITHER a small absolute slack OR
-# a small relative slack of the computed value — drawings round (a design area may
-# print 1,950 for a 1,948.5 computation). Everything past that is a real mismatch.
+# A claim "matches" within a **relative** slack of the computed value — drawings
+# round (a design area may print 1,950 for a 1,948.5 computation). The relative
+# rule is magnitude-aware by construction, so it never hides a meaningful small-
+# value difference the way a blanket absolute tolerance did (§17.5): under the old
+# ``abs <= 0.5`` rule a density ``0.2 + 0.2`` printed as ``0.5`` (actual 0.4, a 20%
+# error) falsely matched. A tiny absolute floor is retained only to absorb exact-
+# value rounding of a near-zero computed result (and the ``expected == 0`` case
+# where a relative error is undefined) — far too small to swallow a real gap.
 _DEFAULT_REL_TOL = Decimal("0.01")   # 1%
-_DEFAULT_ABS_TOL = Decimal("0.5")
+_ABS_FLOOR = Decimal("0.01")
 # Relative-error thresholds that grade a mismatch's severity.
 _SEVERITY_HIGH_REL = Decimal("0.10")
 _SEVERITY_MEDIUM_REL = Decimal("0.03")
@@ -143,9 +165,53 @@ def _relative_error(actual: Decimal, expected: Decimal) -> Decimal:
 
 
 def _is_match(actual: Decimal, expected: Decimal) -> bool:
-    if abs(actual - expected) <= _DEFAULT_ABS_TOL:
+    if abs(actual - expected) <= _ABS_FLOOR:
         return True
     return _relative_error(actual, expected) <= _rel_tolerance()
+
+
+# --------------------------------------------------------------------------- #
+# Operand provenance (§17.5) — did the numbers come off the sheet, or the model?
+# --------------------------------------------------------------------------- #
+
+# Number-shaped substrings in a quote, tokenized the SAME way :func:`parse_number`
+# reads an operand so the two never disagree (§17.5): a **mixed** number
+# (``2 1/2`` / ``2-1/2``) first, then a **simple** fraction (``1/2``), then a plain
+# integer/decimal with optional thousands commas. Alternation is longest-first so
+# ``2 1/2`` is one token (2.5), not ``2`` and ``1/2``. Each match is handed to
+# :func:`parse_number` for the exact-decimal compare.
+_NUM_IN_TEXT_RE = re.compile(
+    r"[-+]?\d+[\s-]+\d+\s*/\s*\d+"      # mixed number: 2 1/2, 2-1/2
+    r"|[-+]?\d+\s*/\s*\d+"             # simple fraction: 1/2
+    r"|[-+]?\d[\d,]*(?:\.\d+)?"        # plain / decimal / thousands: 1,200  0.20
+)
+
+
+def _numbers_in_text(text: str) -> list[Decimal]:
+    out: list[Decimal] = []
+    for m in _NUM_IN_TEXT_RE.finditer(str(text or "")):
+        v = parse_number(m.group(0))
+        if v is not None:
+            out.append(v)
+    return out
+
+
+def _operands_supported(terms: list[Decimal], expected: Decimal, quote: str) -> bool:
+    """True when EVERY operand (terms + expected) appears in the claim's quote.
+
+    The independent-validation test for :data:`TEXT_EXTRACTED` provenance (§17.5):
+    the model's own verbatim quote must literally carry each number the host
+    computed with. A column-sum whose addends live in a table the quote only
+    summarizes fails this — correctly — and stays model-transcribed / UNCERTAIN,
+    so a misread term is caught by the crop verifier rather than trusted.
+    """
+    present = _numbers_in_text(quote)
+    if not present:
+        return False
+    for n in [*terms, expected]:
+        if not any(p == n for p in present):
+            return False
+    return True
 
 
 def _severity_for(actual: Decimal, expected: Decimal) -> str:
@@ -298,6 +364,22 @@ def audit_arithmetic(
         op = "sum of" if kind == "sum" else "product of"
         term_str = ", ".join(_fmt(t) for t in terms)  # type: ignore[arg-type]
         note_tail = f" {claim.note.strip()}" if claim.note.strip() else ""
+
+        # Operand provenance (§17.5): the host *operation* is always deterministic,
+        # but the numbers it used are trusted only when the sheet's own quoted text
+        # independently carries every one of them (TEXT_EXTRACTED). Otherwise the
+        # terms were model-transcribed, so the mismatch stays UNCERTAIN and is
+        # crop-verified — a misread term must never ink as trusted ground truth.
+        text_extracted = _operands_supported(
+            terms, expected, claim.quote or ""  # type: ignore[arg-type]
+        )
+        origin = TEXT_EXTRACTED if text_extracted else MODEL_TRANSCRIBED
+        status = "DETERMINISTIC" if text_extracted else "UNCERTAIN"
+        provenance = (
+            "operands text-extracted from the sheet quote"
+            if text_extracted
+            else "host-computed from model-transcribed terms — verify against the sheet"
+        )
         finding = Finding(
             sheet_id=sheet_id,
             source_name=source_name,
@@ -312,8 +394,11 @@ def audit_arithmetic(
             source_quote=claim.quote or "",
             refs=[],
             verification=Verification(
-                status="DETERMINISTIC",
-                note=f"computed {op} terms = {_fmt(actual)}; stated = {_fmt(expected)}",
+                status=status,
+                note=f"computed {op} terms = {_fmt(actual)}; stated = {_fmt(expected)} "
+                     f"({provenance})",
+                computation_method=HOST_DETERMINISTIC,
+                operand_origin=origin,
             ),
             sources=["auditor_arithmetic"],
         )

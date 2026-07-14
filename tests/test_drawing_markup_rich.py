@@ -546,33 +546,80 @@ def test_appendix_page_off_by_default_and_on_when_asked(tmp_path):
         doc.close()
 
 
-def test_callouts_never_leave_the_page_when_band_is_at_the_bottom(tmp_path):
-    # Regression (Codex review): with the clear band near the page bottom, rows
-    # that wrap past it used to extend BELOW the page — the annot count passed
-    # but the reviewer couldn't see the ink. Overflow rows must stack upward and
-    # every callout must stay within the page rect.
+def test_callouts_overflow_to_review_notes_page_never_obscure_content(tmp_path):
+    # REVERSED (§17.6): the old behavior stacked overflow rows UPWARD, overlapping
+    # drawing content ("visible beats hidden"). Now a callout that will not fit a
+    # clear band overflows to an appended 'AI Review Notes' page instead — every
+    # on-sheet callout stays in-bounds and clear of the words, and every overflow
+    # item is still accounted with a successful receipt (coverage COMPLETE).
     src = _pdf(tmp_path)                       # 792 x 612
-    # Words cover the sheet down to y=540, leaving only a shallow bottom band.
+    # Words fill almost the whole sheet — only a shallow bottom band remains, so
+    # only a few callouts fit and the rest must overflow.
     words = [_w(30 + 150 * i, 20 + 24 * j, width=100, height=12)
              for i in range(5) for j in range(22)]
     absences = [
         _f(f"expected item {i}; not found on this sheet", source="M-101.pdf",
            hint="SHEET", quote="")
-        for i in range(7)                      # 3 per row -> forces 3 rows
+        for i in range(7)
     ]
     assign_qc_ids(absences)
     out = tmp_path / "M-101_reviewed.pdf"
-    annotate_pdf(src, absences, out, sheet_meta=_meta(words))
+    res = annotate_pdf(src, absences, out, sheet_meta=_meta(words))
+    # Every finding accounted, nothing failed.
+    assert res.coverage_status == "COMPLETE"
+    assert res.tally.get("failed", 0) == 0
+    assert res.tally.get("review_notes", 0) >= 1     # some overflowed
     doc = pymupdf.open(str(out))
     try:
-        page = doc[1]                          # after the index page
-        boxes = [pymupdf.Rect(a.rect) for a in page.annots() if a.type[1] == "FreeText"]
-        assert len(boxes) == 7
-        for box in boxes:
-            assert box.y0 >= 0 and box.y1 <= page.rect.height + 0.5, f"off-page: {box}"
-            assert box.x0 >= 0 and box.x1 <= page.rect.width + 0.5
+        # Locate the review-notes page by its analyzer label.
+        notes_pno = next(
+            p for p in range(doc.page_count)
+            if "AI REVIEW NOTES" in doc[p].get_text().upper()
+        )
+        wordrects = [pymupdf.Rect(w[0], w[1], w[2], w[3]) for w in words]
+        # On the SOURCE page (index=1, after the front index): every callout is
+        # in-bounds and never intersects a word.
+        src_page = doc[1]
+        for a in src_page.annots():
+            if a.type[1] != "FreeText":
+                continue
+            box = pymupdf.Rect(a.rect)
+            assert 0 <= box.y0 and box.y1 <= src_page.rect.height + 0.5
+            for wr in wordrects:
+                assert not box.intersects(wr), f"callout {box} obscures a word"
+        # The review-notes page carries the overflow rows, each with a GOTO link
+        # back to a source page.
+        notes_page = doc[notes_pno]
+        note_boxes = [a for a in notes_page.annots() if a.type[1] == "FreeText"]
+        assert len(note_boxes) >= 1
+        gotos = [lk for lk in notes_page.get_links() if lk.get("kind") == pymupdf.LINK_GOTO]
+        assert len(gotos) >= 1
     finally:
         doc.close()
+
+
+def test_callout_over_drawing_ink_overflows_even_in_a_text_free_band(tmp_path):
+    # §17.6: a text-free band is not automatically visually clear. The source PDF
+    # draws a dense ink block across the band the word list leaves open; occupancy
+    # analysis must reject a callout there and overflow it to the notes page.
+    doc = pymupdf.open()
+    page = doc.new_page(width=792, height=612)
+    # A solid black block filling the middle band (y 200-360) — no text there.
+    page.draw_rect(pymupdf.Rect(30, 200, 762, 360), color=(0, 0, 0), fill=(0, 0, 0))
+    src = tmp_path / "M-101.pdf"
+    doc.save(str(src)); doc.close()
+    # Word list: text only at the very top and bottom, leaving the inked middle
+    # "text-free" to a word-only analysis.
+    words = [_w(40 + 150 * i, 20 + 20 * j, width=100, height=12) for i in range(5) for j in range(8)]
+    words += [_w(40 + 150 * i, 580, width=100, height=12) for i in range(5)]
+    absences = [_f("expected item; not found", source="M-101.pdf", hint="SHEET", quote="")]
+    assign_qc_ids(absences)
+    out = tmp_path / "M-101_reviewed.pdf"
+    res = annotate_pdf(src, absences, out, sheet_meta=_meta(words))
+    assert res.coverage_status == "COMPLETE"
+    # The one callout could not sit on the inked band, so it is a review note.
+    assert res.tally.get("review_notes", 0) == 1
+    assert res.tally.get("margin", 0) == 0
 
 
 def test_multi_page_index_links_work_on_every_index_page(tmp_path):

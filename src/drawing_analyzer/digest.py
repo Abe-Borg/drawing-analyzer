@@ -41,6 +41,7 @@ from .models import (
     SheetRef,
     compute_finding_id,
 )
+from .tiling import parse_tile_label
 
 _log = get_logger()
 
@@ -258,8 +259,9 @@ findings section — output a single fenced code block labeled json containing \
 of code, conflict, coordination, question); severity (one of high, medium, \
 low); text (the finding, at most two sentences); source_quote (COPY VERBATIM \
 from the SHEET TEXT LAYER above — exact characters — or "" ONLY if the issue is \
-purely graphical with no supporting text); tile ([row, col] of the tile where \
-you saw it); refs (an array of any code or spec references you believe apply — \
+purely graphical with no supporting text); tile_label (the label printed on the \
+tile where you saw it, exactly as shown — e.g. "r1c1" — or omit it for a \
+whole-sheet finding); refs (an array of any code or spec references you believe apply — \
 cite conservatively). Every item you report under a Coordination or Conflict \
 prose section MUST also appear as an entry in this findings block — the block is \
 the machine-read mirror of those sections. Emit at most 40 findings, most \
@@ -779,6 +781,40 @@ def _coerce_tile(value: Any) -> list[int] | None:
     return None
 
 
+def _coerce_legacy_tile(value: Any, rows: int, cols: int) -> list[int] | None:
+    """A legacy ``tile: [row, col]`` array — accepted EXPLICITLY as zero-based.
+
+    Phase 25 §17.1: the current contract is ``tile_label`` (``"r1c1"``); a bare
+    array is only honored for backward compatibility, read as **zero-based** and
+    bounds-checked, and NEVER guessed to be 1-based (so ``[1, 1]`` is cell
+    ``(1, 1)``, not ``r1c1``). Out-of-range or non-integer arrays are dropped.
+    """
+    tile = _coerce_tile(value)
+    if tile is None:
+        return None
+    r, c = tile
+    if r < 0 or c < 0:
+        return None
+    if (rows > 0 and r >= rows) or (cols > 0 and c >= cols):
+        return None
+    _log.debug("finding used the legacy zero-based tile array [%d,%d] (no tile_label)", r, c)
+    return tile
+
+
+def _resolve_tile(item: dict, rows: int, cols: int) -> list[int] | None:
+    """The zero-based ``[row, col]`` for a finding item (Phase 25 §17.1).
+
+    Prefers the ``tile_label`` contract (``"r1c1"`` → ``[0, 0]``, self-describing
+    so never base-ambiguous); falls back to a legacy zero-based ``tile`` array for
+    older/hand-built payloads. Both are bounds-checked against the grid when its
+    dimensions are known.
+    """
+    label = item.get("tile_label")
+    if isinstance(label, str) and label.strip():
+        return parse_tile_label(label, rows, cols)
+    return _coerce_legacy_tile(item.get("tile"), rows, cols)
+
+
 def _coerce_refs(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(v) for v in value if isinstance(v, (str, int, float))][:20]
@@ -789,13 +825,17 @@ def _fallback_sheet_id(ref: SheetRef) -> str:
     return f"{Path(ref.source_name).stem}-p{ref.page_index + 1}"
 
 
-def _validate_finding_item(item: Any, ref: SheetRef) -> Finding | None:
+def _validate_finding_item(
+    item: Any, ref: SheetRef, rows: int = 0, cols: int = 0
+) -> Finding | None:
     """Build a validated :class:`Finding` from one model item, or drop it (None).
 
     Required: a recognized ``category`` and ``severity`` and a non-empty ``text``.
     A missing/blank ``sheet_id`` falls back to the source stem + page. Quotes are
     kept **verbatim** — a non-empty ``source_quote`` that later fails anchoring is
-    the hallucination signal the resolver reports; we never "fix" it here.
+    the hallucination signal the resolver reports; we never "fix" it here. The
+    tile is read from the ``tile_label`` contract, bounds-checked against
+    ``rows``/``cols`` when known (Phase 25 §17.1).
     """
     if not isinstance(item, dict):
         return None
@@ -826,7 +866,7 @@ def _validate_finding_item(item: Any, ref: SheetRef) -> Finding | None:
         severity=severity,
         text=text.strip(),
         source_quote=quote,
-        tile=_coerce_tile(item.get("tile")),
+        tile=_resolve_tile(item, rows, cols),
         refs=_coerce_refs(item.get("refs")),
         anchor_hint=anchor_hint,
     )
@@ -855,7 +895,9 @@ class FindingsParse:
     raw_item_count: int = 0
 
 
-def parse_findings_detailed(raw_text: str, ref: SheetRef) -> FindingsParse:
+def parse_findings_detailed(
+    raw_text: str, ref: SheetRef, rows: int = 0, cols: int = 0
+) -> FindingsParse:
     """Parse the findings block with a full :class:`FindingsParse` (§14.2).
 
     Extraction uses the **last** fenced block whose body parses to a
@@ -913,7 +955,7 @@ def parse_findings_detailed(raw_text: str, ref: SheetRef) -> FindingsParse:
         if len(findings) >= MAX_FINDINGS_PER_SHEET:
             capped = True
             break
-        finding = _validate_finding_item(item, ref)
+        finding = _validate_finding_item(item, ref, rows, cols)
         if finding is None:
             dropped += 1
             continue
@@ -934,14 +976,16 @@ def parse_findings_detailed(raw_text: str, ref: SheetRef) -> FindingsParse:
     return FindingsParse(prose, findings, status, note, raw_item_count=raw_item_count)
 
 
-def parse_findings(raw_text: str, ref: SheetRef) -> tuple[str, list[Finding], str]:
+def parse_findings(
+    raw_text: str, ref: SheetRef, rows: int = 0, cols: int = 0
+) -> tuple[str, list[Finding], str]:
     """Back-compat wrapper: ``(prose, findings, telemetry_note)`` (§14.2).
 
     Thin shim over :func:`parse_findings_detailed` for the digest / batch paths
     that only need the prose + findings + note; the critique inspects the richer
     ``status`` to tell a valid empty schema from a parse failure (DA-008).
     """
-    r = parse_findings_detailed(raw_text, ref)
+    r = parse_findings_detailed(raw_text, ref, rows, cols)
     return r.prose, r.findings, r.note
 
 
@@ -1239,7 +1283,9 @@ def digest_sheet(
     # Split the findings block off the prose. ``text`` is the prose only, so
     # ``combined_text`` never sees the JSON (I-2); ``findings`` and the telemetry
     # note ride separately. A parse problem never marks the sheet failed.
-    text, findings, findings_note = parse_findings(raw_text, sheet.ref)
+    text, findings, findings_note = parse_findings(
+        raw_text, sheet.ref, sheet.rows, sheet.cols
+    )
 
     # Cache only a real, successful digest — never an empty/error result (those
     # are transient and a re-run should re-attempt them).

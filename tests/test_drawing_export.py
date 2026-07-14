@@ -257,7 +257,8 @@ def test_findings_csv_header_and_row_flattening():
     row = lines[1]
     assert '"Missing, clearance"' in row          # comma-bearing field quoted
     assert '"VAV-3 ""typ"""' in row               # embedded quotes doubled
-    assert '"2,3"' in row                          # tile as row,col
+    assert '"2,3"' in row                          # internal zero-based tile column
+    assert row.rstrip().endswith("r3c4")           # human tile_label column (§17.1)
     assert "CMC 310; NFPA 90A" in row              # refs joined
     assert "10.2, 20.0, 88.5, 33.0" in row         # rect flattened + rounded
     # qc_id first (empty until assigned), then the content id

@@ -50,7 +50,7 @@ from .digest import (
     _MODEL_FINDING_CATEGORIES,
     _clean_error,
     _coerce_refs,
-    _coerce_tile,
+    _resolve_tile,
     _get,
     _is_transient_error,
     _message_text,
@@ -126,9 +126,10 @@ CROSS-SHEET conflict with: sheet_id (the PRIMARY sheet, one of the sheets \
 involved); category (one of code, conflict, coordination, question); severity \
 (one of high, medium, low); text (the conflict in <= 2 sentences, naming the \
 sheets); source_quote (COPY VERBATIM the conflicting string from the PRIMARY \
-sheet's text layer); tile ([row, col] on the primary sheet, or omit); also_on (an \
+sheet's text layer); tile_label (the label printed on the primary sheet's tile \
+where you saw it — e.g. "r1c1" — or omit); also_on (an \
 array of the OTHER sheets in the conflict, each an object {"sheet_id", \
-"source_quote" (verbatim from THAT sheet), "tile"}); refs (optional array of \
+"source_quote" (verbatim from THAT sheet), "tile_label"}); refs (optional array of \
 codes/specs). Every finding MUST list at least one also_on sheet — a conflict is \
 between sheets. Emit at most 60 findings, most important first; emit \
 "findings": [] if there are no cross-sheet conflicts.
@@ -309,17 +310,19 @@ def _validate_cross_item(item: Any, sheet_map: dict[str, Any]) -> Finding | None
     if not isinstance(text, str) or not text.strip():
         return None
 
+    # Keep each ref's raw dict so its tile_label is resolved against ITS OWN
+    # sheet's grid once the sheet is bound (Phase 25 §17.1).
     refs_raw = [{
         "sheet_id": str(item.get("sheet_id", "")).strip(),
         "source_quote": _quote(item.get("source_quote", "")),
-        "tile": _coerce_tile(item.get("tile")),
+        "raw": item,
     }]
     for leg in item.get("also_on") or []:
         if isinstance(leg, dict):
             refs_raw.append({
                 "sheet_id": str(leg.get("sheet_id", "")).strip(),
                 "source_quote": _quote(leg.get("source_quote", "")),
-                "tile": _coerce_tile(leg.get("tile")),
+                "raw": leg,
             })
 
     resolved = []
@@ -332,6 +335,9 @@ def _validate_cross_item(item: Any, sheet_map: dict[str, Any]) -> Finding | None
         if sheet_key in seen_sheets:
             continue
         seen_sheets.add(sheet_key)
+        r["tile"] = _resolve_tile(
+            r["raw"], getattr(geom, "rows", 0), getattr(geom, "cols", 0)
+        )
         resolved.append((r, geom))
     if len(resolved) < 2:
         return None

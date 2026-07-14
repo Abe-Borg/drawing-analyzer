@@ -130,3 +130,89 @@ def test_index_dedupes_identical_payload_under_one_key():
     assert idx.resolve("M-101").status == S.RESOLVED
     # A blank id is ignored.
     assert idx.add("", "x") == "" and "" not in idx.ids
+
+
+# --------------------------------------------------------------------------- #
+# Learned ID grammar — signatures (§17.3)
+# --------------------------------------------------------------------------- #
+
+
+def test_id_signature_is_revision_agnostic_but_prefix_and_separator_sensitive():
+    # Revision/number differences share a signature; prefix length and separators
+    # do not.
+    assert S.id_signature("F-D-01-1") == S.id_signature("F-D-02-0")
+    assert S.id_signature("M-101") == S.id_signature("M-999")           # digit-agnostic
+    assert S.id_signature("NFPA-13") != S.id_signature("M-101")         # A4 vs A1 prefix
+    assert S.id_signature("M-1-01") != S.id_signature("M1.01")          # separators differ
+    assert S.id_signature("FP101") != S.id_signature("F-101")           # compact vs hyphenated
+
+
+def test_id_signature_rejects_malformed():
+    assert S.id_signature("F--01") is None       # doubled hyphen
+    assert S.id_signature("-M101") is None        # leading separator
+    assert S.id_signature("M101-") is None        # trailing separator
+    assert S.id_signature("5/FP101") is None      # a slash is not a clean id char
+    assert S.id_signature("") is None
+
+
+def test_learn_and_match_grammar_across_families():
+    g = S.learn_grammar(["FP101", "FP102", "F-D-01-1"])
+    assert len(g) == 2                                    # compact + hyphenated
+    assert S.matches_grammar("FP205", g)                  # compact convention
+    assert S.matches_grammar("F-D-09-9", g)               # hyphenated convention
+    assert not S.matches_grammar("NFPA-13", g)
+
+
+def test_closest_in_set_is_deterministic_tie_break():
+    ids = ["M-101", "M-102"]
+    assert S.closest_in_set("M-100", ids) == ("M-101", 1)   # tie -> lexicographically first
+    assert S.closest_in_set("M-100", ids) == S.closest_in_set("M-100", ids)
+    assert S.closest_in_set("X-9", []) == (None, None)
+
+
+# --------------------------------------------------------------------------- #
+# Negative corpus + resolution policy (§17.3)
+# --------------------------------------------------------------------------- #
+
+
+def test_negative_corpus_rejects_non_sheet_tokens():
+    for t in ("NFPA-13", "IBC-202", "IFC-1", "UL-300", "T24", "RFI-123", "ASI-3",
+              "480V", "120/208V", "23", "101", "12-6"):
+        assert S.is_non_sheet_reference(t), t
+    # Real sheet ids are NOT in the negative corpus.
+    for t in ("M-101", "FP101", "F-D-01-1", "M1.01"):
+        assert not S.is_non_sheet_reference(t), t
+
+
+def test_classify_reference_full_policy():
+    ids = ["F-D-01-1", "F-D-02-0"]
+    g = S.learn_grammar(ids)
+    assert S.classify_reference("F-D-01-1", ids, g).status == S.RESOLVED_IN_SET
+    assert S.classify_reference("F-D-01-0", ids, g).status == S.MISSING_FROM_SET
+    assert S.classify_reference("F-D-O1-1", ids, g).status == S.MALFORMED   # O/0 typo
+    # A code token that is coincidentally a near-typo of a real sheet is still
+    # ignored — the negative corpus vetoes the malformed path.
+    assert S.classify_reference("NFPA-13", ids, g).status == S.IGNORE
+    assert S.classify_reference("480V", ids, g).status == S.IGNORE
+
+
+def test_classify_reference_low_confidence_suppresses_only_the_fuzzy_path():
+    ids = ["M-101"]
+    g = S.learn_grammar(ids)
+    # A well-formed reference that matches the (single) learned convention and is
+    # absent is still a real miss — a strong trigger should surface it (§17.3).
+    assert S.classify_reference("M-102", ids, g, low_confidence=True).status == S.MISSING_FROM_SET
+    assert S.classify_reference("M-101", ids, g, low_confidence=True).status == S.RESOLVED_IN_SET
+    # But the fuzzy near-typo (MALFORMED) path is suppressed on a thin grammar —
+    # a one-id convention can't reliably guess that an out-of-grammar token is a
+    # typo of the single sheet.
+    typo = S.classify_reference("MX-1-1", ids, g, low_confidence=True)
+    assert typo.status == S.IGNORE
+    assert S.classify_reference("MX-1-1", ids, g, low_confidence=False).status == S.MALFORMED
+
+
+def test_reference_resolution_suggestion_within_distance():
+    r = S.classify_reference("F-D-01-0", ["F-D-01-1"], S.learn_grammar(["F-D-01-1"]))
+    assert r.suggestion == " (closest in set: F-D-01-1)"
+    far = S.ReferenceResolution(S.MISSING_FROM_SET, "F-Z-88-7", "F-D-01-1", 5)
+    assert far.suggestion == ""

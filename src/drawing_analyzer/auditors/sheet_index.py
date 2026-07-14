@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ..models import Anchor, Finding, Verification
+from . import sheet_ids as _S
 from .references import (
     SheetInventory,
     _joined_stream,
@@ -83,22 +84,31 @@ def _find_header_rect(words: list[Any]) -> list[float] | None:
 
 
 def _as_index_sheet(geom: Any, inventory: SheetInventory) -> _IndexSheet | None:
-    """Read ``geom`` as a drawing-index sheet, or ``None`` if it isn't one."""
+    """Read ``geom`` as a drawing-index sheet, or ``None`` if it isn't one.
+
+    Collects *every* id-shaped token (so a malformed / out-of-convention entry is
+    surfaced, not silently dropped — §17.4), but the index is only recognized
+    when it carries at least ``_MIN_INDEX_ENTRIES`` **grammar-valid** entries, so a
+    general-notes sheet with a couple of stray tokens is never mistaken for one.
+    """
     words = list(getattr(geom, "words", []) or [])
     header_rect = _find_header_rect(words)
     if header_rect is None:
         return None
     own_id = detect_sheet_id(geom) or ""
     entries: dict[str, list[float]] = {}
+    grammar_valid = 0
     for w in words:
         raw = _wtext(w)
         if not _looks_like_sheet_id(raw):
             continue
         tok = _normalize_id(raw)
-        if not inventory.matches_grammar(tok):
+        if tok in entries:
             continue
-        entries.setdefault(tok, list(_wrect(w)))
-    if len(entries) < _MIN_INDEX_ENTRIES:
+        entries[tok] = list(_wrect(w))
+        if inventory.matches_grammar(tok):
+            grammar_valid += 1
+    if grammar_valid < _MIN_INDEX_ENTRIES:
         return None
     ref = geom.ref
     return _IndexSheet(
@@ -137,38 +147,56 @@ def audit_sheet_index(rendered_sheets: Iterable[Any]) -> list[Finding]:
     findings: list[Finding] = []
 
     # Direction 1: entries listed in an index but not present in the set — checked
-    # per index sheet, anchored on the entry's own words.
+    # per index sheet, anchored on the entry's own words. Each entry is classified
+    # through the shared resolver (§17.2) so a grammar-valid absent entry ("not in
+    # the provided set", medium) is distinguished from a malformed / out-of-
+    # convention entry (a likely typo in the index, low) rather than one being
+    # silently dropped (§17.4). Neither ever claims a sheet "does not exist".
     for index in index_sheets:
         ref = index.geom.ref
         for entry, rect in sorted(index.entries.items()):
-            if entry in inventory.ids:
+            r = _S.classify_reference(entry, inventory.ids, inventory.grammar)
+            if r.status == _S.RESOLVED_IN_SET:
                 continue
-            findings.append(Finding(
-                sheet_id=index.display_id,
-                source_name=ref.source_name,
-                source_id=ref.source_id,
-                page_index=ref.page_index,
-                category="reference",
-                severity="medium",
-                text=(
-                    f"The drawing index lists {entry}, which is not present in the "
-                    f"provided set."
-                ),
-                source_quote=entry,
-                refs=[],
-                anchor=Anchor(status="EXACT", rect_pdf=list(rect), method="sheet_index_entry"),
-                verification=Verification(
-                    status="DETERMINISTIC",
-                    note="index entry not present in the provided set",
-                ),
-                sources=["auditor_sheet_index"],
-            ))
+            anchor = Anchor(status="EXACT", rect_pdf=list(rect), method="sheet_index_entry")
+            if r.status == _S.MISSING_FROM_SET:
+                findings.append(Finding(
+                    sheet_id=index.display_id, source_name=ref.source_name,
+                    source_id=ref.source_id, page_index=ref.page_index,
+                    category="reference", severity="medium",
+                    text=f"The drawing index lists {entry}, which is not present "
+                         f"in the provided set.",
+                    source_quote=entry, refs=[], anchor=anchor,
+                    verification=Verification(
+                        status="DETERMINISTIC",
+                        note="index entry not present in the provided set",
+                    ),
+                    sources=["auditor_sheet_index"],
+                ))
+            elif r.status == _S.MALFORMED:
+                sug = f" (did you mean {r.closest}?)" if r.suggestion else ""
+                findings.append(Finding(
+                    sheet_id=index.display_id, source_name=ref.source_name,
+                    source_id=ref.source_id, page_index=ref.page_index,
+                    category="reference", severity="low",
+                    text=f"The drawing index lists {entry}, which does not match "
+                         f"this set's sheet-ID convention.{sug}",
+                    source_quote=entry, refs=[], anchor=anchor,
+                    verification=Verification(
+                        status="DETERMINISTIC",
+                        note="malformed index entry (does not match the set's convention)",
+                    ),
+                    sources=["auditor_sheet_index"],
+                ))
+            # r.status == IGNORE → a non-sheet token in the table; left alone.
 
     # Direction 2: set sheets listed in NO index page (union across all of them),
-    # reported once and anchored on the first index sheet's header.
+    # reported once and anchored on the first index sheet's header. Only
+    # grammar-valid listed entries count as a real listing (a malformed entry is
+    # not a clean listing of a real sheet).
     all_listed: set[str] = set()
     for index in index_sheets:
-        all_listed |= set(index.entries.keys())
+        all_listed |= {e for e in index.entries if e in inventory.ids or inventory.matches_grammar(e)}
     primary = index_sheets[0]
     pref = primary.geom.ref
     anchor = (

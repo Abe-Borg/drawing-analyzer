@@ -350,6 +350,9 @@ FINDINGS_CSV_HEADER = [
     # ``scope`` distinguishes a set-level finding (belongs to no source sheet) and
     # ``confidence`` surfaces the critique self-consistency verdict.
     "scope", "confidence",
+    # Phase 25 §17.1: the human 1-based tile label ("r1c1") alongside the internal
+    # zero-based ``tile`` column — appended so existing positions are unchanged.
+    "tile_label",
 ]
 
 
@@ -416,6 +419,7 @@ def _finding_row(finding: Any) -> list[str]:
         str(getattr(citation, "note", "")) if citation is not None else "",
         scope,
         str(getattr(finding, "confidence", "") or ""),
+        str(getattr(finding, "tile_label", "") or ""),
     ]
 
 

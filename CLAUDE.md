@@ -58,7 +58,12 @@ findings for free).
   vision read, run twice — self-consistency merge sets `reproduced`);
   `cross_qc.py` (text-only cross-sheet conflict hunt; dual anchors via
   `also_on` legs); `auditors/` (five deterministic zero-API auditors over the
-  text layers); `prose_harvest.py` (mirrors prose Coordination/Conflict items,
+  text layers, **all** grounded on the shared `auditors/sheet_ids.py` grammar
+  foundation — Phase 25 §17.2/17.3: `id_signature`/`learn_grammar` learn the set's
+  hyphenated/compact/dotted numbering convention, `classify_reference` +
+  `is_non_sheet_reference` adjudicate a reference against it with a negative corpus
+  so a code/tag/voltage/RFI/dimension never becomes a sheet finding);
+  `prose_harvest.py` (mirrors prose Coordination/Conflict items,
   synthesis conflicts, and opted-in focus items into findings — match first,
   one small structuring call for stragglers, degraded sheet-level entry on
   failure).
@@ -81,8 +86,12 @@ findings for free).
   `verify.py` (high-DPI crop re-check → VERIFIED/REJECTED/UNCERTAIN) →
   `citation_check.py` (server-side web-search per unique code ref) →
   `annotate.py` (§18 gating + Phase 21 receipts: every entry gets ink except
-  REJECTED/gated, which get reconciled index rows; margin callouts for rect-less
-  entries; the writer stamps every mark, reopens the saved PDF, and reconciles
+  REJECTED/gated, which get reconciled index rows; rect-less entries become
+  margin callouts **packed into visually-clear bands** — validated against words,
+  a rendered occupancy mask, and siblings so they never obscure the drawing
+  (Phase 25 §17.6); one that will not fit overflows to an appended *AI Review
+  Notes* page with a GOTO link back, rerouted to a `REVIEW_NOTES` placement; the
+  writer stamps every mark, reopens the saved PDF, and reconciles
   each **placement** against what it finds — returning a `MarkupRunResult` with
   per-placement `WRITTEN`/`INDEXED`/`FAILED` receipts and a receipt-derived
   `coverage_status`) → `export.py` (`markup_manifest.json`) / `html_report.py`.
@@ -114,7 +123,15 @@ store, pricing, tokenizer). `reference_audit.py` is a back-compat shim over
   index rows, merged output); no randomness or time-dependence in assembly.
 - **The model never calculates:** models transcribe `NumericClaim`s;
   `auditors/arithmetic.py` does the math with `Decimal` — never `eval`, never
-  the model's own arithmetic.
+  the model's own arithmetic. The host *operation* is always deterministic, but the
+  *operands* are trusted (`DETERMINISTIC` + auto deterministic-only ink) only when
+  the claim's quote independently carries every one (`operand_origin=TEXT_EXTRACTED`,
+  Phase 25 §17.5); a mismatch from `MODEL_TRANSCRIBED` terms stays `UNCERTAIN` and
+  is crop-verified before it inks as ground truth.
+- **Tiles use the `tile_label` contract (Phase 25 §17.1):** the model returns the
+  exact visible label (`"r1c1"`); `tiling.parse_tile_label` converts it to the
+  canonical **zero-based** internal `[row, col]`. A legacy `tile` array is accepted
+  only as explicit zero-based, bounds-checked — never guessed to be 1-based.
 - **Additive serialization:** `Finding.to_dict`/`from_dict` must default new
   fields cleanly so cached payloads from older runs still load.
 - **Ledger coverage is artifact-backed (Phase 21, DA-007):** on markup runs every

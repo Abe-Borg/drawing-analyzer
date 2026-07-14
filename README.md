@@ -632,7 +632,7 @@ finding status:
 | `VERIFIED` | verifier `CONFIRMED` | the crop shows the finding is correct |
 | `REJECTED` | verifier `CONTRADICTED` | the crop shows the finding is wrong — pulled from the ink and listed in the index's *Rejected by verification* section (grey struck ink only with `ink_rejected=True`) |
 | `UNCERTAIN` | verifier `NOT_VISIBLE` (or a garbled reply) | can't be decided from this crop (e.g. it depends on another sheet) — a perfectly fine outcome |
-| `DETERMINISTIC` | the offline auditors | trusted without a model re-check (references, arithmetic, naming, title-block, sheet-index) |
+| `DETERMINISTIC` | the offline auditors | trusted without a model re-check (references, naming, title-block, sheet-index; arithmetic **only** when its operands are text-extracted from the quote — a model-transcribed mismatch is `UNCERTAIN` and crop-verified) |
 | `SKIPPED` | — | nothing to look at (unanchored), no crop, or the pass was unavailable (no key) |
 
 The pass is additive and non-fatal: crops render sequentially (PyMuPDF is not
@@ -675,9 +675,14 @@ paths never appear in any exported artifact.
   finding draws **dashed** with an `[UNVERIFIED]` popup prefix.
 - **Sheet-level / absence findings** (`anchor_hint="SHEET"` — "expected X; not
   found on this sheet") have no rectangle to cloud. They become **callout boxes
-  stacked in a computed clear margin band** — the largest text-free horizontal
-  strip on the sheet, found from the word rectangles — with a **leader-line
-  arrow** to the reported tile's centroid when one is known.
+  packed into visually-clear bands** — each box validated against the sheet's word
+  rectangles, a rendered **occupancy mask** (so a text-free band that actually
+  sits on piping, symbols, or a raster block is *not* used), and its neighbours,
+  so a callout never obscures drawing content. A **leader-line arrow** points to
+  the reported tile when one is known and it would not cross another callout. A
+  callout that will not fit any clear band overflows to an appended **"AI Review
+  Notes"** page (with a GOTO link back to its source sheet) rather than being
+  stacked over the drawing.
 - **Index page(s).** Each reviewed PDF opens with **"AI DRAFT REVIEW - FINDINGS
   INDEX"** — a table (ID, sheet, severity, status, one-line finding) where every
   row is a **GOTO link** that jumps straight to the finding's page and rectangle
@@ -856,18 +861,22 @@ join `ctx.all_findings`, and the checks-passed tally lands on `ctx.audit_stats`.
 |---|---|---|---|---|
 | **References** | `auditors.references` | Stale / missing cross-references (`SEE DRAWING X`, detail bubbles `NN/X`, CSI spec sections) resolved against the set inventory | the reference's own words | medium (miss), low (spec/malformed) |
 | **Arithmetic** | `auditors.arithmetic` | Numbers that don't add up — column totals, density × area = demand, base area × 1.3 = design area — **computed by the host, never the model** | the claim's verbatim quote | graded by magnitude |
-| **Naming** | `auditors.naming` | The same thing tagged two ways across the set (`C1R` vs `C1-R`; a one-off `A1-2` drifting from the `A2` vocabulary) | each drifting occurrence | low (question) |
-| **Title-block** | `auditors.titleblock` | A project-number / date / field value that drifts on one sheet from the set-wide norm | the drifting token | low (coordination) |
-| **Sheet-index** | `auditors.sheet_index` | A drawing index that lists a sheet not in the set, or omits one that is | the index entry / header | medium / low |
+| **Naming** | `auditors.naming` | The same thing tagged two ways across the set (`C1R` vs `C1-R` — same letters and digits, only formatting differs). A changed *number* (`A1-2` vs `A2`) is meaning-bearing and is **not** flagged | each drifting occurrence | low (question) |
+| **Title-block** | `auditors.titleblock` | A project-number / **package/project name** (incl. multiword) / date that differs on one sheet from the set consensus — found by its field label, so a *substantially* different value is caught, not just a one-character typo | the drifting value | low (coordination) |
+| **Sheet-index** | `auditors.sheet_index` | A drawing index that lists a sheet not in the set (or a malformed / out-of-convention entry), or omits one that is | the index entry / header | medium / low |
 
-The **references** auditor learns the set's own sheet-ID grammar from each sheet's
-title-block ID (so it works across offices without a hardcoded numbering scheme),
-harvests trigger phrases and detail bubbles, and resolves each pointer: present →
-no finding; well-formed but **not present in the provided set** → a finding with
-the closest in-set ID suggested by edit distance; malformed → a likely typo. It
-never claims a sheet *doesn't exist* — only that it *isn't in the set you
-provided* — because a partial set legitimately omits sheets. On a real 8-sheet
-fire-protection set this alone caught three genuine coordination errors.
+All the auditors share one host-owned **sheet-ID grammar** (`auditors.sheet_ids`):
+it learns the set's numbering *convention* from each sheet's title-block ID —
+hyphenated (`M-101`), compact (`FP101`), or dotted (`M1.01`) — so it works across
+offices without a hardcoded scheme, and it resolves a reference as present,
+well-formed but **not present in the provided set** (with the closest in-set ID
+suggested), or malformed. A **negative corpus** keeps code/standard citations
+(`NFPA 13`), transmittal numbers (`RFI-123`), voltages (`480V`), room numbers, and
+dimensions from ever becoming a sheet finding. It never claims a sheet *doesn't
+exist* — only that it *isn't in the set you provided* — because a partial set
+legitimately omits sheets. On a real 8-sheet fire-protection set this alone caught
+three genuine coordination errors. A one-sheet set is treated as low-confidence:
+only strong trigger phrases run, and the finding reports the limitation.
 
 ### The numeric-claims contract (arithmetic auditor)
 
@@ -896,6 +905,16 @@ multiplying with the standard library, **never `eval`, never the model's answer*
 1.3 = 1950`, but the DIPA row still states `1500`). Relationships that check out
 are counted, not flagged, and surfaced in the report as *"N numeric relationships
 checked ✓"* — the balance column of a real review.
+
+The *operation* is always host-deterministic, but the numbers it operated on may
+have been misread. So a mismatch is trusted **`DETERMINISTIC`** (and clouded
+automatically, even in verified-only mode) only when the claim's own quote
+independently carries every operand; when the operands were merely transcribed by
+the model — the common case for a column sum whose addends live in a table — the
+mismatch is left **`UNCERTAIN`** and sent to the crop verifier before it inks as
+ground truth. The popup states which ("host-computed from model-transcribed
+terms"). The match tolerance is relative (magnitude-aware), so a small-value error
+like `0.2 + 0.2` printed as `0.5` is caught rather than swallowed by a fixed slack.
 
 ## Per-run focus
 
