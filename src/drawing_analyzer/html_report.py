@@ -2327,8 +2327,8 @@ _CHAT_JS = r"""
   if(!CFG) return;
 
   var API_URL = 'https://api.anthropic.com/v1/messages';
-  var MAX_CONTINUATIONS = 5;   // pause_turn auto-resumes (server tool loops)
-  var MAX_TOOL_ROUNDS = 6;     // client tool_use rounds before forced text close
+  var MAX_CONTINUATIONS = 8;   // pause_turn auto-resumes (server tool loops)
+  var MAX_TOOL_ROUNDS = 10;    // client tool_use rounds before forced text close
   var rawEl = document.getElementById('raw-md');
   var REPORT = rawEl ? rawEl.textContent : '';
   var KEY_STORE = 'da-api-key';
@@ -2602,8 +2602,8 @@ _CHAT_JS = r"""
     };
     if(noTools){ req.tool_choice = {type: 'none'}; return req; }
     req.tools = [
-      {type: 'web_search_20260209', name: 'web_search', max_uses: 8},
-      {type: 'web_fetch_20260209', name: 'web_fetch', max_uses: 8},
+      {type: 'web_search_20260209', name: 'web_search', max_uses: 15},
+      {type: 'web_fetch_20260209', name: 'web_fetch', max_uses: 15},
       {name: 'scroll_to_report',
        description: 'Scroll the on-page report to a section, sheet, or QC finding and briefly ' +
          'highlight it for the reader. Use this to point the user at something specific in the ' +
