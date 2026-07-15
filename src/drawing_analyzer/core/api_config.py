@@ -702,8 +702,7 @@ def token_count_preflight_enabled() -> bool:
 
 # Source-quality blocklist for ``web_search_20260209``. Mixing
 # ``allowed_domains`` and ``blocked_domains`` is not supported by the tool,
-# so this is blocked-only; California priority sources are documented in the
-# verifier system prompt as guidance rather than encoded as an allow-list.
+# so this is blocked-only.
 #
 # Domains are listed bare (no scheme/path) and the tool treats each entry as
 # "this apex and every subdomain", so adding ``simple.wikipedia.org`` when
@@ -780,11 +779,6 @@ def build_web_search_tool(*, max_uses: int = DEFAULT_VERIFICATION_MAX_USES) -> d
         "name": "web_search",
         "blocked_domains": list(_WEB_SEARCH_BLOCKED_DOMAINS),
         "max_uses": max_uses,
-        "user_location": {
-            "type": "approximate",
-            "country": "US",
-            "region": "California",
-        },
     }
 
 

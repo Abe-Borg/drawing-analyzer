@@ -178,8 +178,7 @@ def _retry_backoff_seconds(attempt: int) -> float:
 
 
 DIGEST_SYSTEM_PROMPT = """\
-You are a senior MEP (mechanical / plumbing / fire-protection) engineer reading \
-California K-12 / community-college DSA construction drawings. Your job is to \
+You are a senior design professional reading construction drawings. Your job is to \
 produce a precise, factual TEXT digest of ONE drawing sheet so that a separate \
 specification reviewer — who will NOT see the drawings — can check written specs \
 against what the drawings actually show.
@@ -197,17 +196,19 @@ in overlapping tiles.
 Extract, in this order, only what you can actually read on the sheet:
 
 - **Header line**: `Sheet <number> - <discipline> - <title>` from the title \
-block (discipline = Mechanical / Plumbing / Fire Protection / Plumbing-Fire / \
-Controls / etc.). If a field is illegible, say so rather than guessing.
+block (discipline = the sheet's own discipline as shown, e.g. Architectural / \
+Structural / Civil / Mechanical / Electrical / Plumbing / Fire Protection). If a \
+field is illegible, say so rather than guessing.
 - **Scope / systems shown** on this sheet.
 - **Equipment & schedules**: transcribe schedule rows that matter — tag/mark, \
 type, capacity/size, model or basis-of-design, and any noted standard. Keep tags \
-verbatim (e.g. `VAV-3`, `WH-1`, `FP-2`).
-- **Plan content**: spaces/rooms shown and what equipment, routing, or risers \
+verbatim (e.g. `A-1`, `S-2`, `VAV-3`, `P-4`).
+- **Plan content**: spaces/rooms shown and what equipment, elements, or systems \
 serve them; use the sheet's own column grid bubbles / match-lines / detail \
 callouts as the spatial reference frame where possible.
-- **Key dimensions, elevations, clearances, slopes, pipe/duct sizes** that a \
-spec would need to be consistent with.
+- **Key dimensions, elevations, clearances, slopes, and component sizes** \
+(structural members, pipes, ducts, conduits, etc.) that a spec would need to be \
+consistent with.
 - **General notes, keynotes, and callouts** (transcribe the substantive ones).
 - **Coordination / cross-discipline items**: penetrations, shared chases, \
 equipment served by another discipline, anything that must agree across trades \
