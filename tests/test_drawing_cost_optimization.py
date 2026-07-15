@@ -150,6 +150,26 @@ def test_outcome_captures_cache_tokens():
     assert oc.cache_write_tokens == 90
 
 
+def test_outcome_captures_cache_tokens_dict_shaped_usage():
+    # Regression (Codex P2): a dict-shaped ``usage`` — raw-REST clients, batch dict
+    # results, the ``dict_shape`` fixtures — must still count cache tokens. Input/
+    # output are read dict-tolerantly (``_get``), so the cache counters must be too,
+    # or prompt-cached runs silently undercount ``total_estimated_cost``.
+    ref = _rendered().ref
+    msg = FakeMessage(
+        content=[FakeTextBlock(text=_findings_block())],
+        usage={
+            "input_tokens": 7, "output_tokens": 3,
+            "cache_read_input_tokens": 900, "cache_creation_input_tokens": 90,
+        },
+    )
+    oc = outcome_from_message(msg, run_id="critique_1", ref=ref)
+    assert oc.status == "COMPLETE"
+    assert (oc.input_tokens, oc.output_tokens) == (7, 3)
+    assert oc.cache_read_tokens == 900
+    assert oc.cache_write_tokens == 90
+
+
 def test_result_sums_cache_tokens_across_reads():
     ref = _rendered().ref
     # Realistic split: read 1 WRITES the prefix, read 2 READS it.

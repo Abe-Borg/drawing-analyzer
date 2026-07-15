@@ -42,7 +42,6 @@ from typing import Any
 
 from .core.api_config import (
     REVIEW_MODEL_DEFAULT,
-    extract_cache_usage,
     model_supports_adaptive_thinking,
     model_supports_effort,
 )
@@ -853,10 +852,14 @@ def outcome_from_message(
     in_tok, out_tok = _message_usage(message)
     # Prompt-cache split (L2): on a cache hit/write the API reports the cached
     # image prefix in these separate counters and ``input_tokens`` is only the
-    # uncached remainder — carry them so the ledger prices the whole read.
-    _cache = extract_cache_usage(_get(message, "usage"))
-    cr = _cache["cache_read_input_tokens"]
-    cw = _cache["cache_creation_input_tokens"]
+    # uncached remainder — carry them so the ledger prices the whole read. Read
+    # them with the same dict-tolerant ``_get`` as ``_message_usage`` (not
+    # attribute-only ``extract_cache_usage``), so a dict-shaped usage — a
+    # raw-REST client, a batch dict result, or the ``dict_shape`` fixtures — is
+    # counted rather than silently zeroed (which would undercount the ledger).
+    _usage = _get(message, "usage")
+    cr = int(_get(_usage, "cache_read_input_tokens", 0) or 0)
+    cw = int(_get(_usage, "cache_creation_input_tokens", 0) or 0)
     if not raw:
         # An empty body (e.g. adaptive thinking consumed the whole token budget)
         # is a *failed* read, not a clean sheet — so the run counts as failed (not
