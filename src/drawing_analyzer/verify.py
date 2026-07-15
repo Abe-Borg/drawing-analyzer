@@ -60,7 +60,7 @@ DEFAULT_VERIFY_MAX_TOKENS = 1_000
 
 # Stamped into every evidence request.json so a saved trail is attributable to the
 # prompt/model that produced its verdict (bump on any verify-prompt change).
-VERIFY_PROMPT_VERSION = "verify-v1"
+VERIFY_PROMPT_VERSION = "verify-v2"
 
 # Context window around the anchor rect: grown to ~1.75x its size but never
 # smaller than this, so a tight single-word anchor still shows its surroundings.
