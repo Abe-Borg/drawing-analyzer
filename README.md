@@ -258,7 +258,10 @@ PDFs → list sheets → render (overview + 6×6 tiles) + extract vector text la
   sheets are flagged in the run and (later) badged in the report.
 - **Batch mode** (`use_batch=True`, the GUI default) digests every uncached sheet
   through the Message Batches API, uploading images via the Files API so no request
-  body approaches the 32 MB limit. ~50% cheaper than real time. If the Files API is
+  body approaches the 32 MB limit. ~50% cheaper than real time, for byte-identical
+  output. A library caller can opt every run into it globally with
+  `DRAWING_ANALYZER_USE_BATCH=1` — no call-site edits — while an explicit
+  `use_batch=` argument always wins. If the Files API is
   unavailable for your key/workspace (uploads return `404`), each affected sheet
   falls back to an inline real-time digest so the run still completes instead of
   producing nothing. In exhaustive QC the **critique** also rides the Batches path:
@@ -270,6 +273,12 @@ PDFs → list sheets → render (overview + 6×6 tiles) + extract vector text la
   release); a batch this run can't cancel keeps its files to expire server-side.
 - **Real-time mode** (`use_batch=False`) digests sheets concurrently on a bounded
   thread pool while rendering stays sequential (PyMuPDF is not thread-safe).
+  Running the **exhaustive** stack real-time is the most expensive configuration
+  (three full Opus reads per sheet), so the run logs a one-time nudge toward
+  batch. When you do stay real-time, the two self-consistency **critique** reads
+  cache their shared image prefix so the second read bills those ~90k image tokens
+  at ~0.1× — identical tokens in, so findings are unchanged (see the cost note
+  below).
 - **Caching** is content-keyed per sheet, so re-running a set after editing one
   sheet only re-pays vision for the changed sheet. It is now **two-level** — a
   cheap *pre-render* key recognizes an unchanged sheet before rasterizing, so a
@@ -333,10 +342,15 @@ stale digest after a rotation / re-crop / added annotation is no longer possible
 real-time (~half that via Batches). Turning on the [critique pass](#critique-pass-the-reviewer)
 adds a second full-coverage read run twice — but in a `use_batch` run those two
 reads ride the Message Batches path at the ~50% batch rate (Phase 23C), so the
-reviewer is no longer double-priced at real time. An exhaustive `critique=True`
-run lands around **$2–3.5/sheet** once verification (real-time) is included. The offline stages
-(reference audit, anchoring, markup, text extraction) stay $0. Every stage is
-individually cached, so a re-run of an unchanged set skips the model calls.
+reviewer is no longer double-priced at real time. On the **real-time** path the two
+self-consistency reads instead **prompt-cache their shared image prefix**: they are
+byte-identical requests issued back-to-back, so the first writes the cache and the
+second serves the ~90k image tokens at ~0.1× — the cache write/read tokens are
+priced by their own rate class in the usage ledger, so `total_estimated_cost` stays
+honest. An exhaustive `critique=True` run lands around **$2–3.5/sheet** once
+verification (real-time) is included. The offline stages (reference audit,
+anchoring, markup, text extraction) stay $0. Every stage is individually cached, so
+a re-run of an unchanged set skips the model calls.
 
 **Usage & cost accounting.** Every API call/attempt appends a priced
 `UsageRecord` to an **append-only** ledger on `DrawingContext.run_usage`
@@ -1016,6 +1030,7 @@ runs.
 | `DRAWING_ANALYZER_NAMING_DOMINANT_MIN_FREQ` | `2` | Naming auditor: occurrences that make a tag "established" vocabulary. |
 | `DRAWING_ANALYZER_NAMING_DRIFT_MAX_FREQ` | `2` | Naming auditor: a tag is only flagged as drift when this rare. |
 | `DRAWING_ANALYZER_PROFILES_DIR` | `~/.drawing_analyzer/profiles` | User review-profile directory (wins over built-ins on name). |
+| `DRAWING_ANALYZER_USE_BATCH` | off | Opt every run into the Message Batches transport (~50% cheaper, identical output) without editing call sites. An explicit `use_batch=` argument still wins. |
 | `DRAWING_ANALYZER_MAX_WORKERS` | `4` | Real-time digest concurrency (`1` = sequential). |
 | `DRAWING_ANALYZER_UPLOAD_WORKERS` | `6` | Files-API image-upload concurrency per sheet (`1` = sequential). |
 | `DRAWING_ANALYZER_SUPPRESS_NEAR_BLANK` | off | Also drop near-blank tiles (PNG-byte threshold), not just pixel-uniform ones. |

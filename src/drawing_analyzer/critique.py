@@ -42,6 +42,7 @@ from typing import Any
 
 from .core.api_config import (
     REVIEW_MODEL_DEFAULT,
+    extract_cache_usage,
     model_supports_adaptive_thinking,
     model_supports_effort,
 )
@@ -247,6 +248,7 @@ def build_critique_request_params(
     use_thinking: bool = True,
     effort: str | None = DEFAULT_CRITIQUE_EFFORT,
     checklist: str = "",
+    cache_prefix: bool = False,
 ) -> dict[str, Any]:
     """Build the Messages-API request body for one critique read.
 
@@ -255,7 +257,28 @@ def build_critique_request_params(
     system prompt. The user ``content`` is the digest's identical imagery + text
     layer, built with the critique closing instruction. ``checklist`` is the
     review-profile block injected into the system prompt.
+
+    ``cache_prefix`` (L2) attaches a prompt-cache breakpoint to the last content
+    block, so the whole shared prefix — system prompt + verbatim text layer + all
+    ~37 tile images — is cached. The self-consistency reads of one sheet are
+    **byte-identical** requests issued back-to-back on the calling thread
+    (:func:`critique_sheet_self_consistent`), so the first read writes the cache
+    and every later read serves that ~90k-image-token prefix at ~0.1x instead of
+    full price — the model sees identical tokens either way, so findings are
+    unchanged. Enabled ONLY when ``runs >= 2`` (a lone read would just pay the
+    ~1.25x cache-write premium for a cache nobody reads), and deliberately left
+    OFF on the Message-Batches path, whose reads run in parallel — parallel items
+    would each cache-*write* the same prefix (none can read a cache still being
+    written), making the batch strictly more expensive. Manual placement on the
+    last block (rather than top-level auto-caching) keeps the system prompt a
+    plain string and the block order byte-identical, and stays portable across
+    providers that don't support automatic caching.
     """
+    if cache_prefix and content:
+        # Copy-on-write the last block so the caller's ``content`` list (reused
+        # verbatim across the batch path's reads) is never mutated in place.
+        *head, last = content
+        content = [*head, {**last, "cache_control": {"type": "ephemeral"}}]
     params: dict[str, Any] = {
         "model": model,
         "max_tokens": max_tokens,
@@ -712,6 +735,14 @@ class CritiqueRunOutcome:
     claims: list[NumericClaim] = field(default_factory=list)
     input_tokens: int = 0
     output_tokens: int = 0
+    # Prompt-cache accounting (L2): when the self-consistency reads cache their
+    # shared image prefix, the API reports the cached portion in these separate
+    # counters (``input_tokens`` becomes only the uncached remainder). They are
+    # priced by their own rate class in the usage ledger — the cache WRITE at
+    # 1.25x input, the cache READ at 0.1x — so ``total_estimated_cost`` stays
+    # honest instead of silently under-counting the (cheaply-served) image tokens.
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
     parse_status: str = ""
     parse_note: str = ""
     error: str | None = None
@@ -739,6 +770,11 @@ class CritiqueResult:
     claims: list[NumericClaim] = field(default_factory=list)
     input_tokens: int = 0
     output_tokens: int = 0
+    # Prompt-cache tokens summed across this sheet's reads (L2). Runtime-only
+    # accounting for the usage ledger — deliberately NOT persisted in the cache
+    # entry (a later run's cache hit re-derives its own, and bills nothing).
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
     runs: int = 0            # completed reads (0 = all failed) — alias of completed_runs
     requested_runs: int = 0
     completed_runs: int = 0
@@ -815,6 +851,12 @@ def outcome_from_message(
     """
     raw = _message_text(message)
     in_tok, out_tok = _message_usage(message)
+    # Prompt-cache split (L2): on a cache hit/write the API reports the cached
+    # image prefix in these separate counters and ``input_tokens`` is only the
+    # uncached remainder — carry them so the ledger prices the whole read.
+    _cache = extract_cache_usage(_get(message, "usage"))
+    cr = _cache["cache_read_input_tokens"]
+    cw = _cache["cache_creation_input_tokens"]
     if not raw:
         # An empty body (e.g. adaptive thinking consumed the whole token budget)
         # is a *failed* read, not a clean sheet — so the run counts as failed (not
@@ -822,6 +864,7 @@ def outcome_from_message(
         stop = _get(message, "stop_reason")
         return CritiqueRunOutcome(
             run_id=run_id, status="FAILED", input_tokens=in_tok, output_tokens=out_tok,
+            cache_read_tokens=cr, cache_write_tokens=cw,
             error=f"empty critique (stop_reason={stop!r})",
         )
     # A critique read is successful ONLY if it parsed a valid findings schema. A
@@ -832,6 +875,7 @@ def outcome_from_message(
     if parsed.status not in FINDINGS_PARSE_OK:
         return CritiqueRunOutcome(
             run_id=run_id, status="FAILED", input_tokens=in_tok, output_tokens=out_tok,
+            cache_read_tokens=cr, cache_write_tokens=cw,
             parse_status=parsed.status, parse_note=parsed.note,
             error=f"critique produced no valid findings schema ({parsed.status})",
         )
@@ -842,6 +886,7 @@ def outcome_from_message(
         # next run rather than frozen clean in the cache (DA-008 / §14.2).
         return CritiqueRunOutcome(
             run_id=run_id, status="FAILED", input_tokens=in_tok, output_tokens=out_tok,
+            cache_read_tokens=cr, cache_write_tokens=cw,
             parse_status=parsed.status, parse_note=parsed.note,
             error=f"critique emitted {parsed.raw_item_count} finding(s), none valid "
                   f"({parsed.note})",
@@ -856,6 +901,7 @@ def outcome_from_message(
     return CritiqueRunOutcome(
         run_id=run_id, status="COMPLETE", findings=findings, claims=claims,
         input_tokens=in_tok, output_tokens=out_tok,
+        cache_read_tokens=cr, cache_write_tokens=cw,
         parse_status=parsed.status, parse_note=parsed.note,
     )
 
@@ -872,12 +918,17 @@ def _critique_read(
     max_retries: int = DEFAULT_CRITIQUE_MAX_RETRIES,
     sleep: Any = time.sleep,
     checklist: str = "",
+    cache_prefix: bool = False,
 ) -> CritiqueRunOutcome:
     """One real-time critique read → a provenance-stamped :class:`CritiqueRunOutcome`.
 
     Mirrors :func:`drawing_analyzer.digest.digest_sheet`'s call loop (transient
     retry + backoff; a permanent failure returns immediately), then hands the
     response to the shared :func:`outcome_from_message` parser (DA-008).
+
+    ``cache_prefix`` (L2) caches the shared image prefix so a byte-identical
+    re-read of this sheet serves it at ~0.1x; set by
+    :func:`critique_sheet_self_consistent` only when ``runs >= 2``.
     """
     model = model or critique_model()
     if client is None:
@@ -892,6 +943,7 @@ def _critique_read(
         use_thinking=use_thinking,
         effort=effort,
         checklist=checklist,
+        cache_prefix=cache_prefix,
     )
 
     attempt = 0
@@ -958,6 +1010,8 @@ def result_from_outcomes(
     """
     total_in = sum(oc.input_tokens for oc in all_outcomes)
     total_out = sum(oc.output_tokens for oc in all_outcomes)
+    total_cr = sum(oc.cache_read_tokens for oc in all_outcomes)
+    total_cw = sum(oc.cache_write_tokens for oc in all_outcomes)
     ok = [oc for oc in all_outcomes if oc.ok]
     errors = [oc.error for oc in all_outcomes if not oc.ok and oc.error]
 
@@ -967,6 +1021,8 @@ def result_from_outcomes(
             findings=[],
             input_tokens=total_in,
             output_tokens=total_out,
+            cache_read_tokens=total_cr,
+            cache_write_tokens=total_cw,
             runs=0,
             requested_runs=requested_runs,
             completed_runs=0,
@@ -997,6 +1053,8 @@ def result_from_outcomes(
         claims=claims,
         input_tokens=total_in,
         output_tokens=total_out,
+        cache_read_tokens=total_cr,
+        cache_write_tokens=total_cw,
         runs=len(ok),
         requested_runs=requested_runs,
         completed_runs=len(ok),
@@ -1054,6 +1112,12 @@ def critique_sheet_self_consistent(
         if hit is not None:
             return critique_result_from_entry(hit, rendered.ref)
 
+    # Cache the shared image prefix only when there is a repeat read to serve it
+    # (L2): the reads run sequentially right here, so read 1 writes the cache and
+    # reads 2..N serve the ~90k-token prefix at ~0.1x — identical tokens, so the
+    # merged findings are unchanged. A single-read critique gets no breakpoint (it
+    # would just pay the cache-write premium for nothing).
+    cache_prefix = runs >= 2
     all_outcomes: list[CritiqueRunOutcome] = [
         _critique_read(
             rendered,
@@ -1066,6 +1130,7 @@ def critique_sheet_self_consistent(
             max_retries=max_retries,
             sleep=sleep,
             checklist=run_checklists[i],
+            cache_prefix=cache_prefix,
         )
         for i in range(runs)
     ]

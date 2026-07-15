@@ -76,7 +76,11 @@ findings for free).
 **QC stack** (each stage optional and independently cached):
 
 - *Finders:* the digest's findings block; `critique.py` (a second full-coverage
-  vision read, run twice — self-consistency merge sets `reproduced`);
+  vision read, run twice — self-consistency merge sets `reproduced`; on the
+  real-time path the two byte-identical reads prompt-cache their shared image
+  prefix when `runs>=2`, so the second bills it at ~0.1× — cache write/read tokens
+  ride the ledger; the parallel batch path stays uncached, and `use_batch` resolves
+  from `DRAWING_ANALYZER_USE_BATCH` when the caller leaves it `None`);
   `cross_qc.py` (text-only cross-sheet conflict hunt; dual anchors via
   `also_on` legs); `auditors/` (five deterministic zero-API auditors over the
   text layers, **all** grounded on the shared `auditors/sheet_ids.py` grammar
