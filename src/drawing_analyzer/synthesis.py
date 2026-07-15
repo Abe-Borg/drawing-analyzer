@@ -52,9 +52,8 @@ def default_synthesis_model() -> str:
 
 
 SYNTHESIS_SYSTEM_PROMPT = """\
-You are a senior MEP (mechanical / plumbing / fire-protection) engineer reviewing \
-a complete SET of California K-12 / community-college DSA construction drawings. \
-You are given the per-sheet TEXT digests of every sheet in the set (each already \
+You are a senior design professional reviewing a complete SET of construction \
+drawings. You are given the per-sheet TEXT digests of every sheet in the set (each already \
 extracted from the drawings). Produce a concise SET-LEVEL overview that a \
 specification reviewer — who will NOT see the drawings — can use to understand \
 the set as a whole and check the written specs against it.
@@ -65,8 +64,8 @@ sheet):
 - **Systems spanning sheets**: equipment shown on a plan sheet and detailed in a \
 schedule on another; risers / mains / distribution continued across match-lines.
 - **Tag cross-references**: where the same tag appears on multiple sheets (e.g. \
-`VAV-3` on the M-101 plan and the M-501 schedule), reconcile them and name the \
-authoritative source.
+the same equipment or device tag on a plan sheet and in a schedule on another \
+sheet), reconcile them and name the authoritative source.
 - **Cross-sheet / cross-discipline conflicts**: a tag scheduled but never drawn \
 (or vice-versa), conflicting capacities or sizes, mismatched detail references, \
 disagreements between disciplines — flag these explicitly; they are the highest- \

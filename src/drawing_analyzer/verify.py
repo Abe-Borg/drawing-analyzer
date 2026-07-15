@@ -92,7 +92,7 @@ def default_verify_model() -> str:
 
 
 VERIFY_SYSTEM_PROMPT = """\
-You are a senior MEP (mechanical / plumbing / fire-protection) engineer doing a \
+You are a senior design professional doing a \
 back-check before a construction drawing set is issued. You are shown a SINGLE \
 cropped region of ONE drawing sheet and one FINDING a prior reviewer flagged \
 about it. Judge ONLY what is visible in this crop — do not re-argue the whole \

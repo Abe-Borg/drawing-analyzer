@@ -140,7 +140,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         ctk.CTkLabel(
             outer,
             text=(
-                "Drop mechanical / plumbing / fire-protection drawing PDFs "
+                "Drop construction drawing PDFs "
                 "(one or many; multi-sheet PDFs are split page-by-page). "
                 "Each sheet is read by Claude Opus 4.8 and summarized to text."
             ),
