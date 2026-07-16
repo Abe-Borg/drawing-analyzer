@@ -166,7 +166,10 @@ def audit_sheet_index(rendered_sheets: Iterable[Any]) -> list[Finding]:
                     category="reference", severity="medium",
                     text=f"The drawing index lists {entry}, which is not present "
                          f"in the provided set.",
-                    source_quote=entry, refs=[], anchor=anchor,
+                    source_quote=entry,
+                    recommended_action="Add the listed sheet to the set or "
+                                       "correct/remove the index entry.",
+                    refs=[], anchor=anchor,
                     verification=Verification(
                         status="DETERMINISTIC",
                         note="index entry not present in the provided set",
@@ -181,7 +184,10 @@ def audit_sheet_index(rendered_sheets: Iterable[Any]) -> list[Finding]:
                     category="reference", severity="low",
                     text=f"The drawing index lists {entry}, which does not match "
                          f"this set's sheet-ID convention.{sug}",
-                    source_quote=entry, refs=[], anchor=anchor,
+                    source_quote=entry,
+                    recommended_action="Correct the index entry to match this "
+                                       "set's sheet-numbering convention.",
+                    refs=[], anchor=anchor,
                     verification=Verification(
                         status="DETERMINISTIC",
                         note="malformed index entry (does not match the set's convention)",
@@ -218,6 +224,8 @@ def audit_sheet_index(rendered_sheets: Iterable[Any]) -> list[Finding]:
                 f"Sheet {sid} is present in the set but not listed in the drawing index."
             ),
             source_quote="",
+            recommended_action="Add this sheet to the drawing index or confirm "
+                               "it is intentionally unlisted.",
             refs=[],
             anchor=anchor,
             verification=Verification(

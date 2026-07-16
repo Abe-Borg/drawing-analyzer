@@ -47,6 +47,13 @@ widget says exactly that. Pass ``include_chat=False`` to omit the widget (and
 every network reference) entirely. The *Python* module still performs no
 network I/O.
 
+**Transcript persistence.** The conversation lives only in the tab's memory
+(nothing is written to disk or a server), so a **Save as PDF** control
+reformats the already-rendered message DOM for print and hands off to the
+browser's native print dialog (no new script, host, or dependency — "Save as
+PDF" is just a print destination there). A ``beforeunload`` handler warns
+before a refresh, close, or navigation silently drops that history.
+
 **Security boundary.** All model output and every run-derived value (filenames,
 titles, errors, quotes…) is treated as hostile — see the trust-boundary note
 above the imports: escaped-into-content on the Python side, safe-DOM-built on
@@ -709,6 +716,11 @@ def _finding_row_html(
         else '<span class="muted">—</span>'
     )
     text_cell = _render_inline(text)
+    action = (getattr(f, "recommended_action", "") or "").strip()
+    if action:
+        text_cell += (
+            f'<div class="finding-action">Action: {html.escape(action)}</div>'
+        )
     sources = getattr(f, "sources", None) or []
     if sources:
         from .ledger import provenance_label
@@ -1530,6 +1542,9 @@ def build_html_report(
         chat_markup += (
             "\n" + _findings_data_block(ctx, sheets, ambiguous=ambiguous, pdf_links=pdf_links)
             + "\n" + _summary_data_block(ctx, source_names, now)
+            + "\n" + _starters_data_block(
+                ctx, sheets, source_names, ambiguous=ambiguous
+            )
         )
 
     # CSP hashes are computed over the *exact* inline script bodies emitted
@@ -1790,6 +1805,7 @@ mark{background:#ffe9a8; color:inherit; padding:0 1px; border-radius:2px}
   height:34px; width:auto; border:1px solid var(--line); border-radius:4px;
   vertical-align:middle; margin-left:4px;
 }
+.finding-action{margin-top:3px; font-weight:600; color:#2f5fd0}
 /* Finding status chips */
 .fchip{
   display:inline-block; font-size:11px; font-weight:600; padding:2px 8px;
@@ -2062,6 +2078,36 @@ _JS = r"""
 # --------------------------------------------------------------------------- #
 
 
+def _citation_summary(f: Any) -> dict[str, Any] | None:
+    """Compact, chat-facing citation state for a finding, or ``None`` when it
+    carries no citation check.
+
+    Folds the derived overall :class:`Citation` (``status``/``note``) together
+    with the per-reference :class:`CitationAssessment` verdicts so the assistant
+    can answer "do the cited code sections check out?" from ``#da-findings``
+    without guessing. All values ride the shared :func:`_json_for_script`
+    escaping applied to the whole block.
+    """
+    out: dict[str, Any] = {}
+    cit = getattr(f, "citation", None)
+    if cit is not None:
+        status = (getattr(cit, "status", "") or "").strip()
+        if status:
+            out["status"] = status
+        note = (getattr(cit, "note", "") or "").strip()
+        if note:
+            out["note"] = note
+    per: list[dict[str, str]] = []
+    for a in getattr(f, "citations", None) or []:
+        ref = (getattr(a, "reference", "") or "").strip()
+        st = (getattr(a, "status", "") or "").strip()
+        if ref or st:
+            per.append({"reference": ref, "status": st})
+    if per:
+        out["assessments"] = per
+    return out or None
+
+
 def _findings_data_block(
     ctx: Any,
     sheets: list[Any],
@@ -2071,6 +2117,11 @@ def _findings_data_block(
 ) -> str:
     """An inert ``#da-findings`` JSON block: the structured QC findings the chat
     assistant can query (fields the prose digest deliberately omits).
+
+    Beyond the table's columns, each row carries the cross-sheet ``also_on`` legs
+    and any cited ``refs`` / ``citation`` verdict (see :func:`_citation_summary`),
+    so the cross-sheet and cited-code starter prompts are answerable from the
+    structured data rather than only the prose digest.
 
     Mirrors :func:`_findings_card`'s per-finding derivation (same ledger entries,
     same sort, same sheet-card linking and §18.6 name disambiguation) so the
@@ -2094,21 +2145,44 @@ def _findings_data_block(
             _finding_sheet_key(f, int(getattr(f, "page_index", 0) or 0))
         )
         sheet_id = getattr(f, "sheet_id", "") or getattr(f, "source_name", "") or "—"
-        items.append(
-            {
-                "id": getattr(f, "qc_id", "") or "",
-                "sheet": _disambiguated(sheet_id, f, ambiguous),
-                "target": f"sheet-{card_index}" if card_index else "",
-                # The marked-up-PDF deep link mirrored from the table, so the
-                # assistant can cite the same jump-to-page target the reader sees.
-                "pdf": _pdf_deep_link(pdf_links, getattr(f, "qc_id", "") or ""),
-                "category": getattr(f, "category", "") or "other",
-                "severity": (getattr(f, "severity", "") or "").lower(),
-                "status": _finding_display_status(f),
-                "text": getattr(f, "text", "") or "",
-                "quote": getattr(f, "source_quote", "") or "",
-            }
-        )
+        row: dict[str, Any] = {
+            "id": getattr(f, "qc_id", "") or "",
+            "sheet": _disambiguated(sheet_id, f, ambiguous),
+            "target": f"sheet-{card_index}" if card_index else "",
+            # The marked-up-PDF deep link mirrored from the table, so the
+            # assistant can cite the same jump-to-page target the reader sees.
+            "pdf": _pdf_deep_link(pdf_links, getattr(f, "qc_id", "") or ""),
+            "category": getattr(f, "category", "") or "other",
+            "severity": (getattr(f, "severity", "") or "").lower(),
+            "status": _finding_display_status(f),
+            "text": getattr(f, "text", "") or "",
+            "quote": getattr(f, "source_quote", "") or "",
+        }
+        # Cross-sheet legs (DA-016): the *other* sheet ids this one finding
+        # touches. Serialized so the "which issues span more than one sheet?"
+        # starter can be answered for a merged finding whose counterpart lives
+        # only in ``also_on`` (invisible in the single ``sheet`` field otherwise).
+        legs = [
+            (getattr(leg, "sheet_id", "") or "").strip()
+            for leg in (getattr(f, "also_on", None) or [])
+        ]
+        legs = [s for s in legs if s]
+        if legs:
+            row["also_on"] = legs
+        # Cited code sections + the web-search citation verdict, so the "do the
+        # cited code sections check out?" starter has the actual section numbers
+        # and their checked status rather than guessing from the prose.
+        refs = [
+            str(r).strip()
+            for r in (getattr(f, "refs", None) or [])
+            if str(r).strip()
+        ]
+        if refs:
+            row["refs"] = refs
+        citation = _citation_summary(f)
+        if citation:
+            row["citation"] = citation
+        items.append(row)
     return (
         f'<script id="da-findings" type="application/json">'
         f"{_json_for_script(items)}</script>"
@@ -2154,6 +2228,155 @@ def _summary_data_block(
     return (
         f'<script id="da-summary" type="application/json">'
         f"{_json_for_script(summary)}</script>"
+    )
+
+
+# Human-facing phrasing for the finding categories, used to build "Summarize the
+# {…}" starter prompts from whatever the set actually contains (never an invented
+# discipline). Keys are the FINDING_CATEGORIES the ledger assigns.
+_CATEGORY_PHRASE = {
+    "conflict": "conflicts",
+    "coordination": "coordination items",
+    "code": "code-compliance items",
+    "reference": "cross-reference issues",
+    "question": "open questions",
+}
+# Singular noun for the single most-severe finding's prompt.
+_CATEGORY_NOUN = {
+    "conflict": "conflict",
+    "coordination": "coordination item",
+    "code": "code item",
+    "reference": "reference issue",
+    "question": "open question",
+}
+# Fixed tie-break order when two categories are equally common (determinism, I-7).
+_CATEGORY_ORDER = ("conflict", "coordination", "code", "reference", "question")
+
+
+def _starter_prompts(
+    ctx: Any,
+    sheets: list[Any],
+    source_names: list[str],
+    *,
+    ambiguous: frozenset[str] = frozenset(),
+) -> list[str]:
+    """Up to five click-to-send starter questions, tailored to *this* run.
+
+    Deterministic (I-7): every candidate is gated on real data drawn from the
+    same ledger the report shows (:func:`_report_findings`, sorted by the
+    :func:`_findings_card` severity/status key), appended in a fixed priority
+    order, deduped, and capped at five. It never invents an equipment tag or a
+    discipline the set does not contain — a clean, findings-free run still yields
+    set-aware prompts built from the real sheet count and source names, not
+    generic filler.
+    """
+    findings = _report_findings(ctx)
+    prompts: list[str] = []
+
+    def add(text: str) -> None:
+        t = (text or "").strip()
+        if t and t not in prompts:
+            prompts.append(t)
+
+    if findings:
+        def _key(f: Any):
+            sev = _SEVERITY_RANK.get((getattr(f, "severity", "") or "").lower(), 0)
+            return (-sev, -_STATUS_RANK.get(_finding_display_status(f), 0))
+
+        ordered = sorted(findings, key=_key)
+
+        # 1. The single most-severe finding, named by its real sheet + subject.
+        top = ordered[0]
+        top_sheet = _disambiguated(
+            getattr(top, "sheet_id", "") or getattr(top, "source_name", "") or "",
+            top,
+            ambiguous,
+        )
+        if top_sheet:
+            top_sev = (getattr(top, "severity", "") or "").lower()
+            noun = _CATEGORY_NOUN.get(
+                (getattr(top, "category", "") or "").lower(), "issue"
+            )
+            sev_prefix = f"{top_sev}-severity " if top_sev else ""
+            add(f"What's driving the {sev_prefix}{noun} on {top_sheet}?")
+
+        # 2. Critical conflicts / coordination clashes across the set.
+        if any(
+            (getattr(f, "severity", "") or "").lower() == "high"
+            and (getattr(f, "category", "") or "").lower() in ("conflict", "coordination")
+            for f in findings
+        ):
+            add("What are the most critical conflicts across these sheets?")
+
+        # 3. Cross-sheet issues (a finding carrying also_on legs, DA-016).
+        if any(getattr(f, "also_on", None) for f in findings):
+            add("Which issues span more than one sheet?")
+
+        # 4. Summarize the category the set actually has the most of.
+        counts: dict[str, int] = {}
+        for f in findings:
+            c = (getattr(f, "category", "") or "").lower()
+            if c in _CATEGORY_PHRASE:
+                counts[c] = counts.get(c, 0) + 1
+        if counts:
+            best = max(
+                counts, key=lambda c: (counts[c], -_CATEGORY_ORDER.index(c))
+            )
+            add(f"Summarize the {_CATEGORY_PHRASE[best]}.")
+
+        # 5. Cited code sections (any finding carrying refs or a citation check).
+        if any(
+            getattr(f, "refs", None)
+            or getattr(f, "citations", None)
+            or getattr(f, "citation", None)
+            for f in findings
+        ):
+            add("Do the cited code sections check out?")
+
+        # 6. Unverified / unanchored findings — the hallucination signal.
+        if any(
+            _finding_display_status(f) in ("UNANCHORED", "UNCERTAIN")
+            for f in findings
+        ):
+            add("Which findings could not be verified against the drawings?")
+
+    # Set-aware fallbacks — always eligible, lowest priority. They guarantee a
+    # non-empty, relevant list for a clean run and only reach the final list when
+    # the finding-driven prompts above did not already fill all five slots.
+    total = int(getattr(ctx, "sheet_count", 0) or 0) or len(list(sheets) or [])
+    if total > 1:
+        add(f"Give me an executive summary of this {total}-sheet set.")
+    else:
+        add("Give me an executive summary of this drawing set.")
+    if len(source_names) == 1:
+        add(f"What are the key takeaways from {source_names[0]}?")
+    else:
+        add("What equipment and systems are documented across these sheets?")
+
+    return prompts[:5]
+
+
+def _starters_data_block(
+    ctx: Any,
+    sheets: list[Any],
+    source_names: list[str],
+    *,
+    ambiguous: frozenset[str] = frozenset(),
+) -> str:
+    """An inert ``#da-starters`` JSON block: up to five run-tailored, click-to-send
+    starter prompts (see :func:`_starter_prompts`).
+
+    Serialized through :func:`_json_for_script` (every ``<`` escaped), so however
+    adversarial a source filename or finding subject is, a prompt string cannot
+    close the script element. Returns ``""`` only if no prompts are produced (the
+    widget then just shows its static hint text with no chips).
+    """
+    prompts = _starter_prompts(ctx, sheets, source_names, ambiguous=ambiguous)
+    if not prompts:
+        return ""
+    return (
+        f'<script id="da-starters" type="application/json">'
+        f"{_json_for_script(prompts)}</script>"
     )
 
 
@@ -2216,14 +2439,15 @@ _CHAT_HTML = """
   <header class="da-chat-head">
     <span class="da-chat-title">Report Q&amp;A</span>
     <span class="da-chat-model" id="da-chat-model"></span>
+    <button id="da-chat-export" type="button" class="ghost-btn" title="Save this conversation as a PDF via your browser's print dialog">Save as PDF</button>
     <button id="da-chat-clear" type="button" class="ghost-btn">New chat</button>
     <button id="da-chat-close" type="button" aria-label="Close">×</button>
   </header>
+  <div id="da-chat-print-head"></div>
   <div id="da-chat-msgs">
-    <div class="da-msg da-hint">Ask anything about this drawing set — <em>“What are the
-    biggest conflicts?”</em>, <em>“Which sheets mention VAV-3?”</em>, <em>“Summarize the
-    plumbing coordination items.”</em> Answers are grounded in this report; the assistant
-    can also search the web for codes, standards, and product data.</div>
+    <div class="da-msg da-hint">Ask anything about this drawing set. Answers are grounded in
+    this report; the assistant can also search the web for codes, standards, and product data.
+    <div class="da-starters" id="da-starters-row" aria-label="Suggested questions"></div></div>
   </div>
   <div class="da-chat-compose">
     <textarea id="da-chat-input" rows="2" placeholder="Ask about this report…"></textarea>
@@ -2269,6 +2493,15 @@ _CHAT_CSS = """
 #da-chat-msgs{flex:1 1 auto; overflow-y:auto; padding:14px; display:flex; flex-direction:column; gap:10px}
 .da-msg{border-radius:10px; padding:9px 12px; font-size:13.5px; line-height:1.5; max-width:100%; overflow-wrap:break-word}
 .da-hint{background:var(--accent-soft); color:var(--ink)}
+.da-starters{display:flex; flex-wrap:wrap; gap:6px; margin-top:9px}
+.da-starters:empty{display:none}
+.da-starter{
+  text-align:left; border:1px solid var(--accent); background:#fff; color:var(--accent);
+  border-radius:999px; padding:5px 11px; font:12.5px/1.35 inherit; font-family:inherit;
+  cursor:pointer; max-width:100%; overflow-wrap:break-word;
+}
+.da-starter:hover{background:var(--accent); color:#fff}
+.da-starter:disabled{opacity:.5; cursor:default}
 .da-user{background:var(--accent); color:#fff; align-self:flex-end; max-width:88%; white-space:pre-wrap}
 .da-ai{background:#f4f6fa; border:1px solid var(--line); align-self:stretch}
 .da-err{background:var(--conflict-soft); border:1px solid var(--conflict); color:#8d2020}
@@ -2369,8 +2602,35 @@ body.da-dragging, body.da-dragging *{user-select:none !important}
   #da-chat-panel{right:0; bottom:0; width:100vw; max-width:100vw; height:92vh; border-radius:14px 14px 0 0}
   .da-rz{display:none}
 }
+#da-chat-print-head{display:none}
 @media print{
   #da-chat-fab,#da-chat-panel{display:none !important}
+  /* ---- Ask AI transcript export (Save as PDF → browser print dialog) ---- */
+  body.da-print-chat > *:not(#da-chat-panel){display:none !important}
+  body.da-print-chat #da-chat-panel{
+    display:block !important; position:static !important; z-index:auto !important;
+    width:auto !important; max-width:none !important; height:auto !important;
+    min-height:0 !important; border:none !important; box-shadow:none !important;
+    border-radius:0 !important;
+  }
+  body.da-print-chat .da-rz{display:none !important}
+  body.da-print-chat #da-chat-export,
+  body.da-print-chat #da-chat-clear,
+  body.da-print-chat #da-chat-close,
+  body.da-print-chat #da-chat-forget,
+  body.da-print-chat .da-chat-compose{display:none !important}
+  body.da-print-chat .da-chat-head{cursor:default}
+  body.da-print-chat #da-chat-print-head{
+    display:block; font-size:11px; color:#555; padding:0 0 10px; margin-bottom:8px;
+    border-bottom:1px solid #ccc;
+  }
+  body.da-print-chat #da-chat-msgs{
+    display:block !important; overflow:visible !important; height:auto !important; padding:0;
+  }
+  body.da-print-chat .da-msg{page-break-inside:avoid; max-width:100% !important; margin-bottom:8px}
+  body.da-print-chat .da-user{background:#eef2fb !important; color:#000 !important}
+  body.da-print-chat .da-ai{background:#fff !important}
+  body.da-print-chat .da-chat-foot{display:none !important}
 }
 """
 
@@ -2672,8 +2932,11 @@ _CHAT_JS = r"""
       {name: 'query_findings',
        description: 'Search the structured QC findings ledger — the machine-checked findings ' +
          'with their id, sheet, category, severity, status (VERIFIED/DETERMINISTIC/UNCERTAIN/' +
-         'UNANCHORED/REJECTED) and source quote. The prose report does NOT contain this ' +
-         'structured data, so use this for questions about specific findings, their status, ' +
+         'UNANCHORED/REJECTED) and source quote. A cross-sheet finding also carries "also_on" ' +
+         '(the other sheet ids it spans); a code finding may carry "refs" (the cited section ' +
+         'numbers) and "citation" (the web-search check status/verdict). The prose report does ' +
+         'NOT contain this structured data, so use this for questions about specific findings, ' +
+         'which issues span multiple sheets, whether cited code sections check out, their status, ' +
          'severities, or counts. Filter by any combination of fields; omit all to list every finding.',
        input_schema: {type: 'object', properties: {
          category: {type: 'string'},
@@ -3008,7 +3271,10 @@ _CHAT_JS = r"""
   var stopBtn = document.getElementById('da-chat-stop');
   var closeBtn = document.getElementById('da-chat-close');
   var clearBtn = document.getElementById('da-chat-clear');
+  var exportBtn = document.getElementById('da-chat-export');
+  var printHead = document.getElementById('da-chat-print-head');
   var forgetBtn = document.getElementById('da-chat-forget');
+  var startersRow = document.getElementById('da-starters-row');
   document.getElementById('da-chat-model').textContent = CFG.model + ' · web search · thinking';
 
   fab.addEventListener('click', function(){ panel.hidden = false; fab.hidden = true; applyGeom(); input.focus(); });
@@ -3019,7 +3285,42 @@ _CHAT_JS = r"""
     clearPendingSelection();   // drop any pending excerpt + its highlight
     clearTermHighlight();      // and any highlight_term paint
     while(msgs.children.length > 1) msgs.removeChild(msgs.lastChild); // keep the hint
+    if(startersRow) startersRow.style.display = '';  // bring the chips back
   });
+
+  // "Save as PDF": the transcript never leaves the browser or touches a server —
+  // this reformats the panel for print (see the body.da-print-chat rules) and
+  // hands off to the browser's native print dialog, where "Save as PDF" is a
+  // print destination. That keeps the CSP untouched (no new script/host) and
+  // reuses the already-rendered, already-sanitized message DOM verbatim.
+  if(exportBtn) exportBtn.addEventListener('click', function(){
+    if(!msgs.querySelector('.da-user, .da-ai')){
+      addMsg('da-hint', 'Nothing to export yet — ask a question first.');
+      return;
+    }
+    if(printHead){
+      var parts = ['Report Q&A transcript', '"' + CFG.title + '"'];
+      if(CFG.generated) parts.push('report generated ' + CFG.generated);
+      parts.push('exported ' + new Date().toLocaleString());
+      printHead.textContent = parts.join(' — ');
+    }
+    document.body.classList.add('da-print-chat');
+    window.print();
+  });
+  window.addEventListener('afterprint', function(){
+    document.body.classList.remove('da-print-chat');
+  });
+
+  // Refresh/close/navigate would silently drop the whole conversation (it
+  // lives only in this tab's memory — see `history` below), so warn once
+  // there is anything to lose. Browsers ignore custom text here and show
+  // their own generic confirmation; that's a platform restriction, not a bug.
+  window.addEventListener('beforeunload', function(e){
+    if(!msgs.querySelector('.da-user, .da-ai')) return;
+    e.preventDefault();
+    e.returnValue = '';
+  });
+
   // "Forget key": in prompt mode this clears BOTH the in-memory copy and the
   // tab's sessionStorage. In embedded mode there is nothing a runtime action
   // can truthfully delete — the credential is part of the HTML file — so say
@@ -3302,6 +3603,7 @@ _CHAT_JS = r"""
   // opts       : {retryValue, excerpt, onCommit}
   function runTurn(apiContent, displayText, opts){
     opts = opts || {};
+    if(startersRow) startersRow.style.display = 'none';  // chips give way to the thread
     history.push({role: 'user', content: apiContent});
     var userBubble = addMsg('da-user', displayText);
     if(opts.excerpt){
@@ -3407,6 +3709,30 @@ _CHAT_JS = r"""
   input.addEventListener('keydown', function(e){
     if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); send(); }
   });
+
+  // Starter prompts: deterministic, run-tailored questions from the inert
+  // #da-starters block (built server-side by _starter_prompts). Each chip fills
+  // the box and sends immediately — the same path as a typed question, so the
+  // key prompt, streaming, and tools all apply. Rendered as textContent, never
+  // HTML, so an adversarial prompt string can inject nothing.
+  (function(){
+    if(!startersRow) return;
+    var starters = readJsonBlock('da-starters');
+    if(!starters || !starters.length) return;
+    starters.slice(0, 5).forEach(function(q){
+      if(!q || typeof q !== 'string') return;
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'da-starter';
+      b.textContent = q;
+      b.addEventListener('click', function(){
+        if(streaming) return;
+        input.value = q;
+        send();
+      });
+      startersRow.appendChild(b);
+    });
+  })();
 
   // -------------------------------------------------- panel resize + drag
   // Stay CSS-anchored (bottom-right) until the first gesture, then snapshot the

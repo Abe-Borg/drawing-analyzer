@@ -364,6 +364,7 @@ def _make_finding(
     text: str,
     method: str,
     note: str,
+    action: str = "",
 ) -> Finding:
     anchor = (
         Anchor(status="EXACT", rect_pdf=rect, method=method)
@@ -379,6 +380,7 @@ def _make_finding(
         severity=severity,
         text=text,
         source_quote=quote,
+        recommended_action=action,
         tile=None,
         refs=[],
         anchor=anchor,
@@ -451,6 +453,8 @@ def _audit_sheet(
                     method=method,
                     note="referenced sheet not present in the provided set"
                          + (" (low-confidence grammar)" if low_conf else ""),
+                    action="Verify the referenced sheet or detail exists, or "
+                           "update the callout to the correct number.",
                 ))
             else:  # MALFORMED
                 sug = _suggestion(closest, dist).strip()
@@ -460,6 +464,8 @@ def _audit_sheet(
                          f"sheet-ID convention{('; did you mean ' + closest + '?') if closest and dist is not None and dist <= _SUGGEST_MAX_DIST else '.'}",
                     method=method,
                     note="malformed sheet reference (does not match the set's ID convention)",
+                    action="Correct the callout to match this set's "
+                           "sheet-numbering convention.",
                 ))
 
     findings.extend(_audit_spec_sections(sheet, display_id, words, seen))
@@ -506,6 +512,8 @@ def _audit_spec_sections(
                          f"set is not available to verify this reference.",
                     method="spec_section",
                     note="specification set not available to verify",
+                    action="Check this section against the project "
+                           "specifications when they are available.",
                 ))
         i = j  # skip past the whole run — never re-scan overlapping windows
     return findings

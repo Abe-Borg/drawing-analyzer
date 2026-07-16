@@ -392,6 +392,11 @@ def audit_arithmetic(
                 f"{_fmt(actual)}, but the sheet states {_fmt(expected)}.{note_tail}"
             ).strip(),
             source_quote=claim.quote or "",
+            recommended_action=(
+                f"Re-check the math: the {op} the printed values is "
+                f"{_fmt(actual)}, not the stated {_fmt(expected)} - correct "
+                "whichever is wrong."
+            ),
             refs=[],
             verification=Verification(
                 status=status,

@@ -49,8 +49,11 @@ from typing import Any
 # ``tile`` array is read as explicit zero-based, §17.1) and a stored
 # ``Verification`` gained ``computation_method`` / ``operand_origin`` (§17.5), so a
 # pre-v7 entry — cached under the old tile parse or lacking the provenance fields —
-# must miss once and be re-derived rather than served as current.
-_SCHEMA_VERSION = 7
+# must miss once and be re-derived rather than served as current. Bumped to 8:
+# a stored ``Finding`` gained ``recommended_action`` and the digest/critique
+# prompts now request it, so a pre-v8 entry must miss once rather than serve
+# action-less findings as current.
+_SCHEMA_VERSION = 8
 
 _FALSEY = {"0", "false", "no", "off", ""}
 

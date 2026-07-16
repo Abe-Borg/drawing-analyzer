@@ -46,6 +46,15 @@ def _block(findings):
     return "```json\n" + json.dumps({"findings": findings}) + "\n```"
 
 
+def test_every_cross_qc_prompt_requests_recommended_action():
+    # All three finding-emitting surfaces — whole-set, shard map, and reconcile —
+    # must ask for the "what to do" sentence, or shard-local conflicts would
+    # silently lose their Action: line on the markup.
+    assert "recommended_action" in cross_qc_system_prompt()
+    assert "recommended_action" in X.cross_qc_map_system_prompt()
+    assert "recommended_action" in X.CROSS_QC_RECONCILE_SYSTEM_PROMPT
+
+
 class _CrossClient:
     """Returns a scripted cross-QC findings block; counts calls."""
 

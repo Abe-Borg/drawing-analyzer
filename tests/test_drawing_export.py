@@ -255,14 +255,18 @@ def _finding(**over):
 
 
 def test_findings_csv_header_and_row_flattening():
-    csv = dx.build_findings_csv([_finding()])
+    csv = dx.build_findings_csv(
+        [_finding(recommended_action="Verify the clearance on site.")]
+    )
     lines = csv.split("\r\n")
     assert lines[0] == ",".join(dx.FINDINGS_CSV_HEADER)
     row = lines[1]
     assert '"Missing, clearance"' in row          # comma-bearing field quoted
     assert '"VAV-3 ""typ"""' in row               # embedded quotes doubled
     assert '"2,3"' in row                          # internal zero-based tile column
-    assert row.rstrip().endswith("r3c4")           # human tile_label column (§17.1)
+    assert ",r3c4," in row                         # human tile_label column (§17.1)
+    # recommended_action is the appended last column
+    assert row.rstrip().endswith("Verify the clearance on site.")
     assert "CMC 310; NFPA 90A" in row              # refs joined
     assert "10.2, 20.0, 88.5, 33.0" in row         # rect flattened + rounded
     # qc_id first (empty until assigned), then the content id
@@ -270,6 +274,13 @@ def test_findings_csv_header_and_row_flattening():
     # page is 1-based (page_index 2 -> page 3)
     assert ",3,code,high," in row
     assert "VERIFIED" in row and "evidence/x.png" in row
+
+
+def test_findings_csv_action_column_is_formula_guarded():
+    # DA-031: the action is model text — a leading formula sigil is neutralized.
+    csv = dx.build_findings_csv([_finding(recommended_action="=HYPERLINK(evil)")])
+    row = csv.split("\r\n")[1]
+    assert "'=HYPERLINK(evil)" in row
 
 
 def test_findings_csv_carries_qc_id_and_citation():

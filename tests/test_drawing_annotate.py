@@ -125,10 +125,10 @@ def test_annot_info_fields_populated(tmp_path):
         assert info["title"] == DEFAULT_AUTHOR
         assert info["subject"] == "code"
         assert "Missing clearance" in info["content"]
-        assert 'Quote: "VAV-3"' in info["content"]
-        assert "Verification: VERIFIED" in info["content"]
+        assert 'Look for: "VAV-3"' in info["content"]
+        assert "AI-verified against the drawing." in info["content"]
         assert "CMC 310" in info["content"]
-        assert not info["content"].startswith("[UNVERIFIED]")
+        assert not info["content"].startswith("[CHECK]")
     finally:
         doc.close()
 
@@ -140,7 +140,8 @@ def test_unverified_annot_is_prefixed(tmp_path):
     doc = pymupdf.open(str(tmp_path / "r.pdf"))
     try:
         content = next(a for page in doc for a in page.annots()).info["content"]
-        assert content.startswith("[UNVERIFIED]")
+        assert content.startswith("[CHECK]")
+        assert "Not yet verified - double-check on the sheet." in content
     finally:
         doc.close()
 
