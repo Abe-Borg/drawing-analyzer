@@ -21,7 +21,13 @@ from drawing_analyzer.investigate import (
     investigation_model,
     investigation_tools,
 )
-from drawing_analyzer.models import Anchor, Finding, SheetRef, Verification
+from drawing_analyzer.models import (
+    Anchor,
+    Finding,
+    SheetRef,
+    Verification,
+    source_page_key,
+)
 from tests.fixtures.fake_anthropic import (
     FakeMessage,
     FakeTextBlock,
@@ -76,14 +82,16 @@ def _render_fn(pdf_path, page_index, rect, dpi):
     )
 
 
-def _executor(tmp_path=None, sheet=None, sheet_id_map=None, finding=None):
+def _executor(tmp_path=None, sheet=None, sheet_id_map=None, finding=None,
+              all_sheets=None):
     sheet = sheet or _Geom(_ref())
     finding = finding or _finding()
+    id_map = sheet_id_map if sheet_id_map is not None else {"FP-101": sheet}
     return _ToolExecutor(
-        finding=finding, sheet=sheet,
-        sheet_id_map=sheet_id_map if sheet_id_map is not None else {"FP-101": sheet},
+        finding=finding, sheet=sheet, sheet_id_map=id_map,
         evidence_dir=tmp_path, dir_name="QC-001", next_leg_index=0,
         render_fn=_render_fn,
+        all_sheets=all_sheets if all_sheets is not None else list(id_map.values()),
     )
 
 
@@ -228,6 +236,41 @@ def test_view_sheet_resolves_by_id_and_by_source_page(tmp_path):
     assert ex.execute("view_sheet", {})[1] is True             # names nothing
     assert ex.execute("view_sheet", {"source_name": "mech.pdf",
                                      "page_number": 9})[1] is True
+
+
+def test_view_sheet_by_source_page_reaches_idless_sheets(tmp_path):
+    # A sheet with NO detectable title-block ID (e.g. raster) is absent from
+    # sheet_id_map but must stay reachable by source + page — that address
+    # form exists precisely for it.
+    own = _Geom(_ref())
+    idless = _Geom(_ref("scan.pdf", 0, "SRC-0003"))
+    ex = _executor(tmp_path, sheet=own, sheet_id_map={"FP-101": own},
+                   all_sheets=[own, idless])
+    content, is_error = ex.execute("view_sheet", {"source_name": "scan.pdf",
+                                                  "page_number": 1})
+    assert not is_error
+    assert ex.tool_trace[-1]["source_page_key"] == list(source_page_key(idless.ref))
+
+
+def test_partial_source_page_address_errors_instead_of_wrong_sheet():
+    # source_name without page_number (or the reverse) must be an error — a
+    # silent fallback to the finding's own sheet would hand the model an
+    # overview of the WRONG sheet and a verdict could rest on it.
+    ex = _executor()
+    content, is_error = ex.execute("view_sheet", {"source_name": "mech.pdf"})
+    assert is_error and "page_number" in content
+    content, is_error = ex.execute("crop_region",
+                                   {"rect": [10, 10, 300, 200],
+                                    "source_name": "mech.pdf"})
+    assert is_error and "page_number" in content
+    assert ex.tool_trace == []                     # nothing was ever rendered
+
+
+def test_garbage_page_number_is_an_error_not_an_exception():
+    ex = _executor()
+    content, is_error = ex.execute("view_sheet", {"source_name": "fp.pdf",
+                                                  "page_number": "abc"})
+    assert is_error and "1-based integer" in content
 
 
 def test_save_failure_blocks_the_image(tmp_path):

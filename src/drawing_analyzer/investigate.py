@@ -347,6 +347,7 @@ class _ToolExecutor:
     dir_name: str
     next_leg_index: int
     render_fn: RenderFn
+    all_sheets: list = field(default_factory=list)   # EVERY sheet in the set
     artifacts: list = field(default_factory=list)
     tool_trace: list = field(default_factory=list)
 
@@ -356,14 +357,27 @@ class _ToolExecutor:
         if not sid:
             source = str(tool_input.get("source_name", "") or "")
             page_number = tool_input.get("page_number")
-            if source and page_number is not None:
-                for sheet in self.sheet_id_map.values():
-                    ref = getattr(sheet, "ref", None)
-                    if (getattr(ref, "source_name", "") == source
-                            and int(getattr(ref, "page_index", -1)) == int(page_number) - 1):
-                        return sheet, ""
-                return None, f"no sheet at {source} p.{page_number}"
-            return self.sheet, ""
+            if not source and page_number is None:
+                return self.sheet, ""
+            # Source/page addressing needs BOTH halves — falling back to the
+            # finding's own sheet on a partial address would hand the model an
+            # overview of the WRONG sheet, and a verdict could rest on it.
+            if not source or page_number is None:
+                return None, "provide both source_name and page_number (1-based)"
+            try:
+                page = int(page_number)
+            except (TypeError, ValueError):
+                return None, "page_number must be a 1-based integer"
+            # Search the WHOLE set: a sheet with no detectable title-block ID
+            # (e.g. a raster sheet) is exactly the one that must stay reachable
+            # by source + page. Deterministic input order.
+            candidates = self.all_sheets or list(self.sheet_id_map.values())
+            for sheet in candidates:
+                ref = getattr(sheet, "ref", None)
+                if (getattr(ref, "source_name", "") == source
+                        and int(getattr(ref, "page_index", -1)) == page - 1):
+                    return sheet, ""
+            return None, f"no sheet at {source} p.{page_number}"
         sheet = self.sheet_id_map.get(sid)
         if sheet is None:
             known = ", ".join(list(self.sheet_id_map)[:_MAX_SHEET_INDEX_ENTRIES])
@@ -557,6 +571,7 @@ def _investigate_one(
     model: str,
     tools: list[dict],
     sheet_id_map: dict,
+    all_sheets: list,
     sheet_index: str,
     evidence_dir: Path | None,
     used_evidence_names: set,
@@ -577,6 +592,7 @@ def _investigate_one(
         finding=finding, sheet=sheet, sheet_id_map=sheet_id_map,
         evidence_dir=evidence_dir, dir_name=dir_name,
         next_leg_index=next_leg, render_fn=render_fn,
+        all_sheets=list(all_sheets),
     )
 
     page_w = float(getattr(sheet, "page_width_pt", 0.0) or 0.0)
@@ -1034,7 +1050,7 @@ def investigate_findings(
         result.investigated += 1
         outcome = _investigate_one(
             finding, sheet, client=client, model=model, tools=tools,
-            sheet_id_map=sheet_id_map, sheet_index=sheet_index,
+            sheet_id_map=sheet_id_map, all_sheets=sheets, sheet_index=sheet_index,
             evidence_dir=evidence_dir, used_evidence_names=used_evidence_names,
             max_rounds=max_rounds, max_retries=max_retries, sleep=sleep,
             render_fn=render_fn,
