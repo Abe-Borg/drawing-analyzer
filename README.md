@@ -71,18 +71,19 @@ Drop in (or browse to) PDFs, confirm the estimated cost, and the analyzer digest
 every sheet. Save the result as a **navigable HTML report** (*Save HTML Report…* —
 opens in your browser, searchable and filterable).
 
-> **GUI export options.** The GUI intentionally exposes only the two deliverables a
-> reviewer actually needs — the **HTML report** (*Save HTML Report…*) and the
-> **marked-up PDFs** (*Save Reviewed PDF(s)…*, after a QC run). The older *Save
-> Markdown…*, *Save Findings CSV…*, and one-click *Export All…* buttons were
-> **removed from the GUI** to keep it fast and uncluttered. This is a **GUI-only**
-> change: none of that functionality was deleted. The handlers and the whole export
-> engine remain in the codebase as dead code (see the `btn_row` note in `gui.py`),
-> the folder export still emits `findings.json` / `findings.csv` / `sheet_text/` /
-> the raw Markdown / `run_manifest.json`, and the library API
+> **GUI export options.** The GUI keeps the buttons a reviewer actually reaches
+> for: the **HTML report** (*Save HTML Report…*), the **marked-up PDFs** (*Save
+> Reviewed PDF(s)…*, after a QC run), and the one-click **full folder export**
+> (*Export All…*, which also writes the `run.log` / `run_manifest.json` run record
+> even for a failed run). The per-artifact *Save Markdown…* and *Save Findings
+> CSV…* buttons were **removed from the GUI** to keep it fast and uncluttered —
+> both artifacts are still written inside the *Export All…* folder. This is a
+> **GUI-only** change: none of that functionality was deleted. The two removed
+> buttons' handlers remain in the codebase as dead code (see the `btn_row` note in
+> `gui.py`), the folder export still emits `findings.json` / `findings.csv` /
+> `sheet_text/` / the raw Markdown / `run_manifest.json`, and the library API
 > (`write_drawing_export`, `write_findings_csv`, `build_html_report`) produces all
-> of it. Any button can be brought back later just by re-adding it in `gui.py`. We
-> may do that if the need returns.
+> of it. Either button can be brought back later just by re-adding it in `gui.py`.
 
 Optionally, type a **per-run focus** before pressing Analyze — e.g. *"the rooms,
 and what types of plumbing fixtures each has"*. You always get the standard
@@ -118,9 +119,9 @@ After a QC run, the completion summary reports the finding count, how many were
 clouded, and the **receipt-derived** coverage tally
 (`Ledger 47: 39 clouded, 5 margin, 2 rejected (indexed), 1 gated (verified-only
 mode), 0 failed; coverage COMPLETE`), and the **Save Reviewed PDF(s)…** button
-lights up (it copies every `*_reviewed.pdf` into a folder you pick). The findings
-CSV is no longer a GUI button (see [GUI export options](#gui) above), but it is
-still written by the folder export and the library `write_findings_csv`.
+lights up (it copies every `*_reviewed.pdf` into a folder you pick). The standalone
+findings-CSV button is no longer in the GUI (see [GUI export options](#gui) above),
+but the CSV is still written by *Export All…* and the library `write_findings_csv`.
 
 That tally is **artifact-backed**, not aspirational (Phase 21): after each
 reviewed PDF is saved it is **reopened and reconciled** against the plan — every
@@ -801,10 +802,9 @@ reserved names and alternate-data-stream colons neutralized, collisions deduped)
 every write target is proven to stay inside the export folder, evidence copies
 never follow symlinks, and the whole folder is staged and **atomically
 published** — an interrupted export leaves an explicitly `*_INCOMPLETE`-labeled
-directory, never a final-looking one with silently missing files. This complete
-folder is produced by the library `write_drawing_export`; the GUI's one-click
-*Export All…* button that used to trigger it was removed (see [GUI export
-options](#gui)), though the handler and export code remain in place.
+directory, never a final-looking one with silently missing files. In the GUI,
+**Export All…** produces this complete folder in one action (see [GUI export
+options](#gui)).
 
 ## Run log & run manifest
 
