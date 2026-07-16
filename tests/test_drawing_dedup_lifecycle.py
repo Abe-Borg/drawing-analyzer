@@ -92,6 +92,33 @@ def test_merge_never_mixes_one_findings_text_with_anothers_quote():
     assert e.severity == "high"
 
 
+def test_merge_action_rides_the_winning_bundle_and_backfills():
+    led = Ledger()
+    led.add([_f("VAV-3 has no clearance shown to the wall",
+                quote="VAV-3", sev="low")], "digest_json")
+    loser_action = "Confirm the clearance with the mechanical engineer."
+    led.entries[0].recommended_action = loser_action
+    winner = _f("VAV-3 has no clearance shown to the wall here",
+                quote="VAV-3 SCHEDULE ROOM 120", sev="high")
+    winner.recommended_action = "Verify the VAV-3 clearance and revise the plan."
+    led.add([winner], "critique_1")
+    assert len(led) == 1
+    # The action belongs to the text it was written for — it moved with the bundle.
+    assert led.entries[0].recommended_action == "Verify the VAV-3 clearance and revise the plan."
+
+    # An empty winner backfills from the loser (an action for the same deduped
+    # issue is still the action) — and differing actions never block a merge.
+    led2 = Ledger()
+    led2.add([_f("VAV-3 has no clearance shown to the wall",
+                 quote="VAV-3", sev="low")], "digest_json")
+    led2.entries[0].recommended_action = loser_action
+    bare_winner = _f("VAV-3 has no clearance shown to the wall here",
+                     quote="VAV-3 SCHEDULE ROOM 120", sev="high")
+    led2.add([bare_winner], "critique_1")
+    assert len(led2) == 1
+    assert led2.entries[0].recommended_action == loser_action
+
+
 def test_ingest_order_independent_entries_and_numbers():
     def build():
         return [

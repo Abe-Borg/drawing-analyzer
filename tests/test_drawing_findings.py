@@ -70,6 +70,21 @@ def test_parse_extracts_block_and_cleans_prose():
     assert note == ""
 
 
+def test_parse_reads_recommended_action_tolerantly():
+    # Populated: stripped and capped; absent / non-string: clean "" default.
+    raw = "p\n" + _block([
+        _item(text="a", recommended_action="  Verify the setpoint.  "),
+        _item(text="b"),
+        _item(text="c", recommended_action=["not", "a", "string"]),
+        _item(text="d", recommended_action="x" * 500),
+    ])
+    _, findings, _ = parse_findings(raw, _ref())
+    assert findings[0].recommended_action == "Verify the setpoint."
+    assert findings[1].recommended_action == ""
+    assert findings[2].recommended_action == ""
+    assert len(findings[3].recommended_action) == 300   # runaway paragraph capped
+
+
 def test_parse_reads_tile_label_contract():
     # §17.1: the model returns the visible label; the parser converts it to the
     # internal zero-based tile and derives the human label back.

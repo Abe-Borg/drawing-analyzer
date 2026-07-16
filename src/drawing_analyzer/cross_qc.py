@@ -125,7 +125,9 @@ containing {"findings": [ ... ], "claims": [ ... ]}. Each finding is a \
 CROSS-SHEET conflict with: sheet_id (the PRIMARY sheet, one of the sheets \
 involved); category (one of code, conflict, coordination, question); severity \
 (one of high, medium, low); text (the conflict in <= 2 sentences, naming the \
-sheets); source_quote (COPY VERBATIM the conflicting string from the PRIMARY \
+sheets); recommended_action (one sentence, imperative: what the reviewer should \
+DO about it - e.g. "Confirm the correct rating with the engineer of record and \
+update both sheets"); source_quote (COPY VERBATIM the conflicting string from the PRIMARY \
 sheet's text layer); tile_label (the label printed on the primary sheet's tile \
 where you saw it — e.g. "r1c1" — or omit); also_on (an \
 array of the OTHER sheets in the conflict, each an object {"sheet_id", \
@@ -154,7 +156,8 @@ Output a SINGLE fenced code block labeled json and nothing else, containing \
 
 - Each finding is a WITHIN-shard cross-sheet conflict: sheet_handle (the PRIMARY \
 sheet's handle); category (code, conflict, coordination, question); severity \
-(high, medium, low); text (<= 2 sentences); source_quote (VERBATIM from the \
+(high, medium, low); text (<= 2 sentences); recommended_action (one sentence, \
+imperative: what the reviewer should DO about it); source_quote (VERBATIM from the \
 primary sheet); also_on (array of {"sheet_handle", "source_quote" verbatim from \
 that sheet}); refs (optional). Every finding lists >= 1 also_on. Emit [] if none.
 - Each fact is one comparable data point another shard could contradict: \
@@ -183,7 +186,8 @@ exact_quotes — never invent a quote.
 Output a SINGLE fenced code block labeled json and nothing else, containing \
 {"findings": [ ... ], "claims": [ ... ]}. Each finding: sheet_handle (the PRIMARY \
 sheet's handle); category (code, conflict, coordination, question); severity \
-(high, medium, low); text (<= 2 sentences naming the conflict); source_quote (COPY \
+(high, medium, low); text (<= 2 sentences naming the conflict); recommended_action \
+(one sentence, imperative: what the reviewer should DO about it); source_quote (COPY \
 the exact_quote of the primary fact); also_on (array of {"sheet_handle", \
 "source_quote" = the other fact's exact_quote}); refs (optional). Every finding \
 lists >= 1 also_on and both quotes must come verbatim from the facts. Emit \
@@ -352,6 +356,7 @@ def _validate_cross_item(item: Any, sheet_map: dict[str, Any]) -> Finding | None
         severity=severity,
         text=text.strip(),
         source_quote=pr["source_quote"],
+        recommended_action=_action(item),
         tile=pr["tile"],
         refs=_coerce_refs(item.get("refs")),
         also_on=[
@@ -366,6 +371,14 @@ def _validate_cross_item(item: Any, sheet_map: dict[str, Any]) -> Finding | None
             for r, g in legs
         ],
     )
+
+
+def _action(item: dict) -> str:
+    """Tolerant read of the optional ``recommended_action`` (non-str → "")."""
+    action = item.get("recommended_action", "")
+    if not isinstance(action, str):
+        return ""
+    return action.strip()[:300]
 
 
 def _finding_from_handles(item: Any, entry_by_handle: dict[str, tuple]) -> Finding | None:
@@ -421,6 +434,7 @@ def _finding_from_handles(item: Any, entry_by_handle: dict[str, tuple]) -> Findi
         severity=severity,
         text=text.strip(),
         source_quote=p_quote,
+        recommended_action=_action(item),
         tile=None,
         refs=_coerce_refs(item.get("refs")),
         also_on=[

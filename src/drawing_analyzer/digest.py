@@ -258,7 +258,10 @@ After the digest — after every prose section above, including any Focus \
 findings section — output a single fenced code block labeled json containing \
 {"findings": [ ... ]}. Each finding is an object with: sheet_id; category (one \
 of code, conflict, coordination, question); severity (one of high, medium, \
-low); text (the finding, at most two sentences); source_quote (COPY VERBATIM \
+low); text (the finding, at most two sentences); recommended_action (one \
+sentence, imperative: what the reviewer should DO about it - e.g. "Confirm the \
+relief-valve setpoint with the mechanical engineer and revise the schedule"); \
+source_quote (COPY VERBATIM \
 from the SHEET TEXT LAYER above — exact characters — or "" ONLY if the issue is \
 purely graphical with no supporting text); tile_label (the label printed on the \
 tile where you saw it, exactly as shown — e.g. "r1c1" — or omit it for a \
@@ -858,6 +861,11 @@ def _validate_finding_item(
     anchor_hint = str(item.get("anchor_hint", "")).strip().upper()
     if anchor_hint != "SHEET":
         anchor_hint = ""
+    # ``recommended_action`` is optional and tolerant: absent / non-string → "";
+    # capped so a runaway paragraph can't bloat the popup or the CSV.
+    action = item.get("recommended_action", "")
+    if not isinstance(action, str):
+        action = ""
     return Finding(
         sheet_id=sheet_id,
         source_name=ref.source_name,
@@ -867,6 +875,7 @@ def _validate_finding_item(
         severity=severity,
         text=text.strip(),
         source_quote=quote,
+        recommended_action=action.strip()[:300],
         tile=_resolve_tile(item, rows, cols),
         refs=_coerce_refs(item.get("refs")),
         anchor_hint=anchor_hint,
