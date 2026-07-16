@@ -59,7 +59,7 @@ cffi==2.1.0; sys_platform == "linux"
 pycparser==3.0; sys_platform == "linux"
 
 # keyring's Windows Credential Manager backend (Windows only)
-pywin32-ctypes>=0.2.0; sys_platform == "win32"
+pywin32-ctypes==0.2.3; sys_platform == "win32"
 
 # importlib.metadata backport, needed on Python < 3.12
 importlib_metadata==9.0.0; python_version < "3.12"
