@@ -163,6 +163,15 @@ _ASSUMED_VERIFY_OUTPUT_TOKENS_PER_FINDING = 150
 _ASSUMED_CITATION_INPUT_TOKENS_PER_CLAIM = 2_000  # web-search prompt + tool results
 _ASSUMED_CITATION_OUTPUT_TOKENS_PER_CLAIM = 400
 _ASSUMED_WEB_SEARCHES_PER_CLAIM = 2
+# Phase A planning stages — one text-only call each. Identity reads a budgeted
+# corpus (digest heads + early text layers, scaling gently with the set);
+# the planner reads the identity + per-sheet digest heads.
+_ASSUMED_IDENTITY_INPUT_TOKENS_BASE = 2_000
+_ASSUMED_IDENTITY_INPUT_TOKENS_PER_SHEET = 400
+_ASSUMED_IDENTITY_OUTPUT_TOKENS = 1_200
+_ASSUMED_PLAN_INPUT_TOKENS_BASE = 2_000
+_ASSUMED_PLAN_INPUT_TOKENS_PER_SHEET = 250
+_ASSUMED_PLAN_OUTPUT_TOKENS = 2_500
 # Finding / unique-claim counts are unknown pre-run — a per-sheet low–high band.
 _FINDINGS_PER_SHEET_LOW = 0.5
 _FINDINGS_PER_SHEET_HIGH = 3.0
@@ -240,6 +249,24 @@ def estimate_exhaustive_run_cost(
         note="one vision call per sheet" + (" + text passes" if sheet_count >= 2 else ""),
     ))
 
+    # Phase A planning stages — one text-only real-time call each: the set
+    # identity (disciplines/jurisdiction/adopted codes) and the model-authored
+    # review plan the critique applies as its checklist.
+    components.append(_component(
+        "Set identity",
+        _ASSUMED_IDENTITY_INPUT_TOKENS_BASE
+        + sheet_count * _ASSUMED_IDENTITY_INPUT_TOKENS_PER_SHEET,
+        _ASSUMED_IDENTITY_OUTPUT_TOKENS, model=model, batch=False,
+        note="one text call — disciplines/jurisdiction/adopted codes",
+    ))
+    components.append(_component(
+        "Model review plan",
+        _ASSUMED_PLAN_INPUT_TOKENS_BASE
+        + sheet_count * _ASSUMED_PLAN_INPUT_TOKENS_PER_SHEET,
+        _ASSUMED_PLAN_OUTPUT_TOKENS, model=model, batch=False,
+        note="one text call — the authored review checklist",
+    ))
+
     # Critique — two adversarial reads per sheet. In a ``use_batch`` run both reads
     # ride one Message Batch referencing a single shared per-sheet upload (Phase
     # 23C), so they are batch-priced; otherwise real-time.
@@ -312,9 +339,9 @@ def format_exhaustive_cost_prompt(est: ExhaustiveCostEstimate) -> str:
     where = f" from {est.file_count} file(s)" if est.file_count else ""
     lines = [
         f"About to run the FULL exhaustive QC review on {est.sheet_count} sheet(s)"
-        f"{where} with {friendly_model_name(est.model)} — digest, two critique reads "
-        "per sheet, cross-sheet QC, deterministic auditors, prose harvest, "
-        "verification, and citation checks.",
+        f"{where} with {friendly_model_name(est.model)} — digest, set identity + "
+        "model review plan, two critique reads per sheet, cross-sheet QC, "
+        "deterministic auditors, prose harvest, verification, and citation checks.",
         "",
         "Estimated cost by stage:",
     ]
