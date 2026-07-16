@@ -156,7 +156,8 @@ Output a SINGLE fenced code block labeled json and nothing else, containing \
 
 - Each finding is a WITHIN-shard cross-sheet conflict: sheet_handle (the PRIMARY \
 sheet's handle); category (code, conflict, coordination, question); severity \
-(high, medium, low); text (<= 2 sentences); source_quote (VERBATIM from the \
+(high, medium, low); text (<= 2 sentences); recommended_action (one sentence, \
+imperative: what the reviewer should DO about it); source_quote (VERBATIM from the \
 primary sheet); also_on (array of {"sheet_handle", "source_quote" verbatim from \
 that sheet}); refs (optional). Every finding lists >= 1 also_on. Emit [] if none.
 - Each fact is one comparable data point another shard could contradict: \
