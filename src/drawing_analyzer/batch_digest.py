@@ -87,7 +87,9 @@ from .digest import (
     findings_from_cache,
     focus_cache_fragment,
     normalize_focus,
+    normalize_specs_text,
     parse_findings,
+    specs_cache_fragment,
 )
 from .digest_cache import digest_cache_key
 from .file_upload import (
@@ -735,6 +737,7 @@ def submit_drawing_batch(
     total: int = 0,
     on_status: StatusCallback | None = None,
     focus: str | None = None,
+    specs_text: str | None = None,
 ) -> DrawingBatch:
     """Render-stream → cache-or-upload → submit one Message Batch.
 
@@ -749,9 +752,21 @@ def submit_drawing_batch(
     prompt — the uploaded images and user content are unchanged — and is folded
     into the cache key, so a focused run never reuses a no-focus digest and
     vice-versa.
+
+    ``specs_text`` (optional uploaded project specifications) rides the system
+    prompt the same way, but is deliberately never given a ``cache_control``
+    breakpoint on the actual batch-item build below (``cache_specs=False``):
+    batch items submit in parallel, so a cache breakpoint here would only add
+    the 1.25x write cost to every item with nothing yet written to read (see
+    :func:`drawing_analyzer.digest.digest_system_prompt`). The Files-API-
+    unavailable inline fallback (:func:`_serve_inline`) runs sequentially on
+    the calling thread instead, so it gets the real caching benefit via
+    :func:`~drawing_analyzer.digest.digest_sheet`'s own default.
     """
     focus = normalize_focus(focus)
     focus_fragment = focus_cache_fragment(focus)
+    specs_text = normalize_specs_text(specs_text)
+    specs_fragment = specs_cache_fragment(specs_text)
     slots: list[_Slot] = []
     reqs: list[dict] = []
 
@@ -796,6 +811,7 @@ def submit_drawing_batch(
             effort=effort,
             cache=cache,
             focus=focus,
+            specs_text=specs_text,
         )
         # A fresh inline digest was a synchronous real-time call (no batch
         # discount); a cache hit stays a cache hit. Mark it so the usage ledger
@@ -828,6 +844,7 @@ def submit_drawing_batch(
                 effort=effort,
                 use_thinking=use_thinking,
                 focus=focus_fragment,
+                specs=specs_fragment,
                 sheet_text=sheet.sheet_text,
             )
             hit = cache.get(cache_key)
@@ -991,6 +1008,8 @@ def submit_drawing_batch(
             use_thinking=use_thinking,
             effort=effort,
             focus=focus,
+            specs_text=specs_text,
+            cache_specs=False,
         )
         reqs.append({"custom_id": custom_id, "params": slot.params})
         slots.append(slot)

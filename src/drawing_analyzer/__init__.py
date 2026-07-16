@@ -26,6 +26,8 @@ Module layout::
     digest_cache.py   two-level content-keyed digest cache
     synthesis.py      cross-sheet reconciliation pass (text-only)
     focus.py          optional per-run focus -> set-level Focus Report (text-only)
+    spec_documents.py optional uploaded project-specifications extraction
+                      (.pdf/.docx/.txt/.md -> budgeted text; no PyMuPDF import)
     pipeline.py       orchestration: PDFs -> sheets -> digests -> QC -> combined text
     set_identity.py   what the set IS: disciplines/jurisdiction/adopted codes
                       (text-only; advisory context for the stages below)

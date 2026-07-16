@@ -345,18 +345,52 @@ def build_focus_addendum(focus: str) -> str:
     return _FOCUS_ADDENDUM_TEMPLATE.format(focus=focus, header=FOCUS_SECTION_HEADER)
 
 
-def digest_system_prompt(focus: str | None = None) -> str:
-    """The effective system prompt: the standard digest prompt, the focus
-    addendum when a per-run focus is set, then the findings-block instruction.
+def digest_system_prompt(
+    focus: str | None = None,
+    specs_text: str | None = None,
+    *,
+    cache_specs: bool = True,
+) -> "str | list[dict]":
+    """The effective system prompt: the standard digest prompt, an optional
+    project-specifications block, an optional focus addendum, then the
+    findings-block instruction.
 
     The findings instruction is appended **last** (after any focus addendum) so
     the machine-read JSON block is emitted after every prose section — including
     the optional ``Focus findings`` section — which is what keeps the parser's
     "last fenced block" rule unambiguous.
+
+    ``specs_text`` (optional uploaded project specifications, see
+    :mod:`drawing_analyzer.spec_documents`) is spliced in as its own
+    ``<project_specifications>`` block, placed BEFORE the focus addendum so
+    the (large, run-constant) base-prompt+specs prefix can be prompt-cached
+    independent of whatever focus is set this run — see ``cache_specs``.
+
+    ``cache_specs`` (default ``True``) attaches an Anthropic ``cache_control``
+    breakpoint to the base-prompt+specs block when specs are present, so
+    sheets after the first serve that (potentially tens-of-thousands-of-token)
+    block at the ~0.1x cache-read rate instead of full price. The real-time
+    digest path leaves this on; the Message-Batches path (batch_digest.py)
+    passes ``False`` — batch items submit in parallel, so a cache breakpoint
+    there would only add the 1.25x write cost to every item with nothing to
+    read yet (mirrors critique.py's ``cache_prefix`` rationale,
+    critique.py's ``build_critique_request_params``). When ``False``, or when
+    there is no ``specs_text``, the return value is a single plain string —
+    no shape change from before this feature (verified against
+    ``tests/test_drawing_focus.py``'s no-specs prompt assertions).
     """
     focus = normalize_focus(focus)
-    base = DIGEST_SYSTEM_PROMPT if focus is None else DIGEST_SYSTEM_PROMPT + build_focus_addendum(focus)
-    return base + _FINDINGS_INSTRUCTION
+    specs_text = normalize_specs_text(specs_text)
+    tail = (build_focus_addendum(focus) if focus is not None else "") + _FINDINGS_INSTRUCTION
+    if specs_text is None:
+        return DIGEST_SYSTEM_PROMPT + tail
+    head = DIGEST_SYSTEM_PROMPT + build_specs_addendum(specs_text)
+    if not cache_specs:
+        return head + tail
+    return [
+        {"type": "text", "text": head, "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": tail},
+    ]
 
 
 def focus_cache_fragment(focus: Any) -> str | None:
@@ -371,6 +405,66 @@ def focus_cache_fragment(focus: Any) -> str | None:
     """
     focus = normalize_focus(focus)
     return build_focus_addendum(focus) if focus is not None else None
+
+
+# ---------------------------------------------------------------------------
+# Optional project specifications (uploaded spec documents, see
+# :mod:`drawing_analyzer.spec_documents`).
+#
+# Distinct from ``focus`` above (an operator's ad-hoc question about this run)
+# and from the unrelated, pre-existing "Project Context" concept
+# (:data:`core.tokenizer.PROJECT_CONTEXT_MAX_TOKENS` — an external, sibling
+# spec-review tool this repo's ``combined_text`` is manually pasted into): this
+# is ground-truth written spec text the operator uploaded for THIS run. Unlike
+# ``focus``, it does NOT create a new prose section — conflicts between the
+# specs and what's on the sheet are folded into the ORDINARY findings block
+# (the same ledger -> anchor -> verify -> markup pipeline every other finding
+# uses), so there is zero new downstream plumbing.
+# ---------------------------------------------------------------------------
+
+_SPECS_ADDENDUM_TEMPLATE = """\
+
+
+PROJECT SPECIFICATIONS (ground truth) — the operator has supplied the \
+following written project specifications for this run. They are NOT part of \
+the drawing set; treat them as the authoritative written requirements the \
+drawings must be consistent with.
+
+<project_specifications>
+{specs}
+</project_specifications>
+
+When something on THIS sheet conflicts with, is missing per, or is otherwise \
+inconsistent with the specifications above, report it as an ORDINARY finding \
+in the FINDINGS block below — category "conflict" or "code" as appropriate, \
+quoting the drawing text (not the spec text) in source_quote as usual, and \
+naming the specific spec requirement in the finding's text. Do NOT add a \
+separate prose section for this — the specifications are reference material \
+to check against, not something to summarize or transcribe. If nothing on \
+this sheet conflicts with them, do not mention them at all."""
+
+
+def normalize_specs_text(specs_text: Any) -> str | None:
+    """Normalize uploaded project-specifications text: stripped, or ``None``
+    when empty — mirrors :func:`normalize_focus`."""
+    if specs_text is None:
+        return None
+    text = str(specs_text).strip()
+    return text or None
+
+
+def build_specs_addendum(specs_text: str) -> str:
+    """Render the system-prompt addendum for (normalized, non-empty) spec text."""
+    return _SPECS_ADDENDUM_TEMPLATE.format(specs=specs_text)
+
+
+def specs_cache_fragment(specs_text: Any) -> str | None:
+    """Digest-cache-key component for uploaded spec text (mirrors
+    :func:`focus_cache_fragment`): hashes the *rendered* addendum, folded in
+    only when non-empty, so a no-specs key is byte-identical to a pre-feature
+    key and existing cache entries stay valid."""
+    specs_text = normalize_specs_text(specs_text)
+    return build_specs_addendum(specs_text) if specs_text is not None else None
 
 
 def _image_block(png_bytes: bytes) -> dict:
@@ -487,6 +581,8 @@ def build_digest_request_params(
     use_thinking: bool = True,
     effort: str | None = DEFAULT_DIGEST_EFFORT,
     focus: str | None = None,
+    specs_text: str | None = None,
+    cache_specs: bool = True,
 ) -> dict[str, Any]:
     """Build the Messages-API request body for one sheet digest.
 
@@ -496,14 +592,15 @@ def build_digest_request_params(
     thinking / effort. ``thinking`` and ``output_config`` are attached only when
     the model supports them (Opus 4.8 supports both; an unknown override
     silently omits them, never producing an API-rejected request). ``focus``
-    (an optional per-run operator focus) rides only on the system prompt, so
-    the user content — including the batch path's uploaded images — is
-    identical with or without it.
+    (an optional per-run operator focus) and ``specs_text`` (optional uploaded
+    project specifications) ride only on the system prompt, so the user
+    content — including the batch path's uploaded images — is identical
+    regardless of either. See :func:`digest_system_prompt` for ``cache_specs``.
     """
     params: dict[str, Any] = {
         "model": model,
         "max_tokens": max_tokens,
-        "system": digest_system_prompt(focus),
+        "system": digest_system_prompt(focus, specs_text, cache_specs=cache_specs),
         "messages": [{"role": "user", "content": content}],
     }
     if use_thinking and model_supports_adaptive_thinking(model):
@@ -541,6 +638,12 @@ class SheetDigest:
     # shipped, so a findings-parse problem must not touch ``error`` or ``ok``.
     findings: list[Finding] = field(default_factory=list)
     findings_note: str = ""
+    # Prompt-cache telemetry for the read/write of the (optional) cached
+    # project-specifications system-prompt block. Runtime-only — a digest
+    # cache *hit* made no API call this run, so it correctly reports 0/0
+    # (mirrors input_tokens/output_tokens on a hit).
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
     @property
     def ok(self) -> bool:
@@ -1199,6 +1302,7 @@ def digest_sheet(
     sleep: Any = time.sleep,
     cache: Any = None,
     focus: str | None = None,
+    specs_text: str | None = None,
 ) -> SheetDigest:
     """Run a single vision request for one sheet and return its text digest.
 
@@ -1221,8 +1325,15 @@ def digest_sheet(
     It is folded into the cache key, so a focused run never reuses a digest
     produced without (or under a different) focus, while a no-focus run keeps
     hitting pre-existing cache entries.
+
+    ``specs_text`` (optional uploaded project specifications — see
+    :func:`normalize_specs_text`) grounds the read against ground-truth spec
+    text; conflicts fold into the ordinary findings block, not a new section.
+    Folded into the cache key like ``focus``, and prompt-cached across sheets
+    (see :func:`digest_system_prompt`).
     """
     focus = normalize_focus(focus)
+    specs_text = normalize_specs_text(specs_text)
     image_est = estimate_image_tokens_total(sheet.image_sizes, model=model)
 
     cache_key: str | None = None
@@ -1235,6 +1346,7 @@ def digest_sheet(
             effort=effort,
             use_thinking=use_thinking,
             focus=focus_cache_fragment(focus),
+            specs=specs_cache_fragment(specs_text),
             sheet_text=sheet.sheet_text,
         )
         hit = cache.get(cache_key)
@@ -1263,6 +1375,7 @@ def digest_sheet(
         use_thinking=use_thinking,
         effort=effort,
         focus=focus,
+        specs_text=specs_text,
     )
 
     attempt = 0
@@ -1284,6 +1397,9 @@ def digest_sheet(
 
     raw_text = _message_text(resp)
     in_tok, out_tok = _message_usage(resp)
+    _usage = _get(resp, "usage")
+    cache_read_tok = int(_get(_usage, "cache_read_input_tokens", 0) or 0)
+    cache_write_tok = int(_get(_usage, "cache_creation_input_tokens", 0) or 0)
     stop = _get(resp, "stop_reason")
 
     error: str | None = None
@@ -1322,4 +1438,6 @@ def digest_sheet(
         error=error,
         findings=findings,
         findings_note=findings_note,
+        cache_read_tokens=cache_read_tok,
+        cache_write_tokens=cache_write_tok,
     )

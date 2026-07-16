@@ -184,3 +184,65 @@ def test_format_prompt_batch_mode_notes_batch_and_latency():
     assert "Batch" in msg  # names the batch submission + rate
     assert "Nothing is sent until you confirm" in msg
     assert "Proceed" in msg
+
+
+# --------------------------------------------------------------------------- #
+# spec_chars pricing — the specs block's transport-dependent cost
+# --------------------------------------------------------------------------- #
+
+
+def test_spec_chars_zero_matches_baseline():
+    base = estimate_drawing_set_cost(10, model=OPUS, batch=True, spec_chars=0)
+    explicit = estimate_drawing_set_cost(10, model=OPUS, batch=True)
+    assert base.total_cost == explicit.total_cost
+    assert base.input_tokens == explicit.input_tokens
+
+
+def test_spec_chars_batch_path_never_gets_the_cache_discount():
+    # The real batch-item build (batch_digest.py) always passes
+    # cache_specs=False — a parallel batch has no reader for a cache write —
+    # so the batch estimate must price specs as flat, uncached, per-sheet
+    # input at the batch discount rate, NOT the write-once/read-many model.
+    no_specs = estimate_drawing_set_cost(10, model=OPUS, batch=True, spec_chars=0)
+    with_specs = estimate_drawing_set_cost(10, model=OPUS, batch=True, spec_chars=40_000)
+    delta = with_specs.total_cost - no_specs.total_cost
+    spec_tokens = 40_000 // 4  # _SPEC_CHARS_PER_TOKEN_ESTIMATE
+    price = MODEL_PRICING[OPUS]
+    expected = (spec_tokens * 10 / 1_000_000) * price.input_per_mtok * BATCH_DISCOUNT
+    assert delta == pytest.approx(expected)
+
+
+def test_spec_chars_real_time_path_uses_cache_write_once_read_many():
+    no_specs = estimate_drawing_set_cost(10, model=OPUS, batch=False, spec_chars=0)
+    with_specs = estimate_drawing_set_cost(10, model=OPUS, batch=False, spec_chars=40_000)
+    delta = with_specs.total_cost - no_specs.total_cost
+    spec_tokens = 40_000 // 4
+    price = MODEL_PRICING[OPUS]
+    write = (spec_tokens / 1_000_000) * price.input_per_mtok * 1.25
+    read = (spec_tokens / 1_000_000) * price.input_per_mtok * 0.10
+    expected = write + read * 9  # 1 write + 9 reads across 10 sheets
+    assert delta == pytest.approx(expected)
+
+
+def test_spec_chars_batch_path_costs_more_than_real_time_for_the_same_specs():
+    # The whole point of the fix: batch never caches the specs block, so it
+    # must never look cheaper than the cached real-time path for the same
+    # upload — the confirmation dialog must not under-quote the common case.
+    batch = estimate_drawing_set_cost(10, model=OPUS, batch=True, spec_chars=40_000)
+    realtime = estimate_drawing_set_cost(10, model=OPUS, batch=False, spec_chars=40_000)
+    batch_specs_delta = batch.total_cost - estimate_drawing_set_cost(10, model=OPUS, batch=True).total_cost
+    realtime_specs_delta = realtime.total_cost - estimate_drawing_set_cost(10, model=OPUS, batch=False).total_cost
+    assert batch_specs_delta > realtime_specs_delta
+
+
+def test_spec_chars_unknown_model_keeps_total_cost_none():
+    est = estimate_drawing_set_cost(5, model="mystery-model", spec_chars=40_000)
+    assert est.total_cost is None
+
+
+def test_spec_chars_unknown_model_with_zero_spec_chars_stays_none():
+    # Regression: a naive `(total_cost or 0.0) + spec_cost` guarded only on
+    # spec_chars > 0 would leave this case correctly None too, but a guard
+    # that forgot to also check `total_cost is None` would coerce it to 0.0.
+    est = estimate_drawing_set_cost(5, model="mystery-model", spec_chars=0)
+    assert est.total_cost is None
