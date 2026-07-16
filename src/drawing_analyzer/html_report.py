@@ -2012,6 +2012,36 @@ _JS = r"""
 # --------------------------------------------------------------------------- #
 
 
+def _citation_summary(f: Any) -> dict[str, Any] | None:
+    """Compact, chat-facing citation state for a finding, or ``None`` when it
+    carries no citation check.
+
+    Folds the derived overall :class:`Citation` (``status``/``note``) together
+    with the per-reference :class:`CitationAssessment` verdicts so the assistant
+    can answer "do the cited code sections check out?" from ``#da-findings``
+    without guessing. All values ride the shared :func:`_json_for_script`
+    escaping applied to the whole block.
+    """
+    out: dict[str, Any] = {}
+    cit = getattr(f, "citation", None)
+    if cit is not None:
+        status = (getattr(cit, "status", "") or "").strip()
+        if status:
+            out["status"] = status
+        note = (getattr(cit, "note", "") or "").strip()
+        if note:
+            out["note"] = note
+    per: list[dict[str, str]] = []
+    for a in getattr(f, "citations", None) or []:
+        ref = (getattr(a, "reference", "") or "").strip()
+        st = (getattr(a, "status", "") or "").strip()
+        if ref or st:
+            per.append({"reference": ref, "status": st})
+    if per:
+        out["assessments"] = per
+    return out or None
+
+
 def _findings_data_block(
     ctx: Any,
     sheets: list[Any],
@@ -2020,6 +2050,11 @@ def _findings_data_block(
 ) -> str:
     """An inert ``#da-findings`` JSON block: the structured QC findings the chat
     assistant can query (fields the prose digest deliberately omits).
+
+    Beyond the table's columns, each row carries the cross-sheet ``also_on`` legs
+    and any cited ``refs`` / ``citation`` verdict (see :func:`_citation_summary`),
+    so the cross-sheet and cited-code starter prompts are answerable from the
+    structured data rather than only the prose digest.
 
     Mirrors :func:`_findings_card`'s per-finding derivation (same ledger entries,
     same sort, same sheet-card linking and §18.6 name disambiguation) so the
@@ -2043,18 +2078,41 @@ def _findings_data_block(
             _finding_sheet_key(f, int(getattr(f, "page_index", 0) or 0))
         )
         sheet_id = getattr(f, "sheet_id", "") or getattr(f, "source_name", "") or "—"
-        items.append(
-            {
-                "id": getattr(f, "qc_id", "") or "",
-                "sheet": _disambiguated(sheet_id, f, ambiguous),
-                "target": f"sheet-{card_index}" if card_index else "",
-                "category": getattr(f, "category", "") or "other",
-                "severity": (getattr(f, "severity", "") or "").lower(),
-                "status": _finding_display_status(f),
-                "text": getattr(f, "text", "") or "",
-                "quote": getattr(f, "source_quote", "") or "",
-            }
-        )
+        row: dict[str, Any] = {
+            "id": getattr(f, "qc_id", "") or "",
+            "sheet": _disambiguated(sheet_id, f, ambiguous),
+            "target": f"sheet-{card_index}" if card_index else "",
+            "category": getattr(f, "category", "") or "other",
+            "severity": (getattr(f, "severity", "") or "").lower(),
+            "status": _finding_display_status(f),
+            "text": getattr(f, "text", "") or "",
+            "quote": getattr(f, "source_quote", "") or "",
+        }
+        # Cross-sheet legs (DA-016): the *other* sheet ids this one finding
+        # touches. Serialized so the "which issues span more than one sheet?"
+        # starter can be answered for a merged finding whose counterpart lives
+        # only in ``also_on`` (invisible in the single ``sheet`` field otherwise).
+        legs = [
+            (getattr(leg, "sheet_id", "") or "").strip()
+            for leg in (getattr(f, "also_on", None) or [])
+        ]
+        legs = [s for s in legs if s]
+        if legs:
+            row["also_on"] = legs
+        # Cited code sections + the web-search citation verdict, so the "do the
+        # cited code sections check out?" starter has the actual section numbers
+        # and their checked status rather than guessing from the prose.
+        refs = [
+            str(r).strip()
+            for r in (getattr(f, "refs", None) or [])
+            if str(r).strip()
+        ]
+        if refs:
+            row["refs"] = refs
+        citation = _citation_summary(f)
+        if citation:
+            row["citation"] = citation
+        items.append(row)
     return (
         f'<script id="da-findings" type="application/json">'
         f"{_json_for_script(items)}</script>"
@@ -2775,8 +2833,11 @@ _CHAT_JS = r"""
       {name: 'query_findings',
        description: 'Search the structured QC findings ledger — the machine-checked findings ' +
          'with their id, sheet, category, severity, status (VERIFIED/DETERMINISTIC/UNCERTAIN/' +
-         'UNANCHORED/REJECTED) and source quote. The prose report does NOT contain this ' +
-         'structured data, so use this for questions about specific findings, their status, ' +
+         'UNANCHORED/REJECTED) and source quote. A cross-sheet finding also carries "also_on" ' +
+         '(the other sheet ids it spans); a code finding may carry "refs" (the cited section ' +
+         'numbers) and "citation" (the web-search check status/verdict). The prose report does ' +
+         'NOT contain this structured data, so use this for questions about specific findings, ' +
+         'which issues span multiple sheets, whether cited code sections check out, their status, ' +
          'severities, or counts. Filter by any combination of fields; omit all to list every finding.',
        input_schema: {type: 'object', properties: {
          category: {type: 'string'},

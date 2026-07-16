@@ -503,6 +503,34 @@ def test_findings_data_block_cannot_break_out_of_its_script_tag():
     assert parsed[0]["text"] == hostile and parsed[0]["quote"] == hostile
 
 
+def test_findings_data_block_exposes_cross_sheet_legs_and_citations():
+    # The cross-sheet and cited-code starters are answerable from #da-findings:
+    # also_on legs, code refs, and the citation verdict are serialized so the
+    # assistant does not have to guess (PR #65 review).
+    import json
+
+    from drawing_analyzer.models import Citation, ConflictLeg
+
+    f_cross = _finding(sheet_id="M-501", category="conflict", severity="high",
+                       text="Duct main conflicts with beam", quote="DUCT-1")
+    f_cross.also_on = [ConflictLeg(sheet_id="S-201")]
+    f_code = _finding(sheet_id="P-201", category="code", severity="medium",
+                      text="Cleanout spacing", quote="cleanout")
+    f_code.refs = ["IPC 708.3.1"]
+    f_code.citation = Citation(status="CHECKED_MISMATCH", note="renumbered in 2021")
+
+    ctx = _findings_ctx(findings=[f_cross, f_code])
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
+    rows = {r["sheet"]: r for r in json.loads(_script_block_body(doc, "da-findings"))}
+
+    assert rows["M-501"]["also_on"] == ["S-201"]
+    assert rows["P-201"]["refs"] == ["IPC 708.3.1"]
+    assert rows["P-201"]["citation"]["status"] == "CHECKED_MISMATCH"
+    # Findings without legs/refs stay lean — the keys are omitted, not empty.
+    assert "also_on" not in rows["P-201"]
+    assert "refs" not in rows["M-501"] and "citation" not in rows["M-501"]
+
+
 def test_data_blocks_absent_without_chat():
     # include_chat=False must stay free of every chat artifact (the no-network
     # invariant): neither data block is emitted.
