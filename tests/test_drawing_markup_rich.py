@@ -224,18 +224,52 @@ def test_web_search_tool_type_is_current_and_overridable(monkeypatch):
     assert web_search_tool()["type"] == "web_search_99990101"
 
 
+def test_web_search_max_uses_is_bounded_and_overridable(monkeypatch):
+    from drawing_analyzer.citation_check import web_search_max_uses
+
+    assert web_search_tool()["max_uses"] == 5
+    monkeypatch.setenv("DRAWING_ANALYZER_WEB_SEARCH_MAX_USES", "9")
+    assert web_search_max_uses() == 9 and web_search_tool()["max_uses"] == 9
+    monkeypatch.setenv("DRAWING_ANALYZER_WEB_SEARCH_MAX_USES", "0")
+    assert web_search_max_uses() == 5                    # sub-1 -> default
+    monkeypatch.setenv("DRAWING_ANALYZER_WEB_SEARCH_MAX_USES", "lots")
+    assert web_search_max_uses() == 5                    # junk -> default
+
+
+def test_server_web_search_requests_reader_is_shape_tolerant():
+    # Phase B exact billing: the reader must distinguish "server reported 0"
+    # from "this response shape carries no count" (None).
+    from drawing_analyzer.digest import _server_web_search_requests
+    from tests.fixtures.fake_anthropic import FakeServerToolUse
+
+    obj = FakeMessage(content=[], usage=FakeUsage(
+        server_tool_use=FakeServerToolUse(web_search_requests=4)))
+    assert _server_web_search_requests(obj) == 4
+    as_dict = {"usage": {"server_tool_use": {"web_search_requests": 2}}}
+    assert _server_web_search_requests(as_dict) == 2
+    assert _server_web_search_requests({"usage": {"server_tool_use": {"web_search_requests": 0}}}) == 0
+    assert _server_web_search_requests(FakeMessage(content=[], usage=FakeUsage())) is None
+    assert _server_web_search_requests({"usage": {}}) is None
+    assert _server_web_search_requests({}) is None
+    assert _server_web_search_requests(
+        {"usage": {"server_tool_use": {"web_search_requests": "junk"}}}
+    ) is None
+
+
 class _CitationClient:
     """Scripted responses; captures request kwargs.
 
     ``routes`` (an ordered list of ``(substring, text)``) routes by REQUEST BODY —
     deterministic regardless of worker-thread arrival order; the first route whose
     substring is in the body wins. Without routes it cycles ``texts`` by call count
-    (fine only for single-request tests).
+    (fine only for single-request tests). ``server_searches`` (when not None)
+    attaches a server-reported web-search count to every response's usage.
     """
 
-    def __init__(self, texts=None, *, routes=None):
+    def __init__(self, texts=None, *, routes=None, server_searches=None):
         self._texts = list(texts or [])
         self._routes = list(routes or [])
+        self._server_searches = server_searches
         self.captured = []
         outer = self
 
@@ -250,9 +284,16 @@ class _CitationClient:
                         break
                 if text is None:
                     text = outer._texts[min(len(outer.captured) - 1, len(outer._texts) - 1)]
+                usage = FakeUsage(input_tokens=200, output_tokens=40)
+                if outer._server_searches is not None:
+                    from tests.fixtures.fake_anthropic import FakeServerToolUse
+
+                    usage.server_tool_use = FakeServerToolUse(
+                        web_search_requests=outer._server_searches
+                    )
                 return FakeMessage(
                     content=[FakeTextBlock(text=text)],
-                    usage=FakeUsage(input_tokens=200, output_tokens=40),
+                    usage=usage,
                 )
 
         self.messages = _Msgs()
@@ -288,6 +329,36 @@ def test_check_citations_attaches_verdicts_per_unique_ref():
     assert kw["tools"][0]["name"] == "web_search"
     user_text = kw["messages"][0]["content"]
     assert "NFPA 13 2016" in user_text
+
+
+def test_check_citations_bills_exact_server_search_counts():
+    # Phase B: when responses carry usage.server_tool_use.web_search_requests,
+    # the result sums the exact figures instead of approximating.
+    f1 = _f("cites table", refs=["NFPA 13 Table 13.2.1"])
+    f2 = _f("cites relief", refs=["NFPA 13 §8.1.2"])
+    client = _CitationClient(
+        routes=[
+            ("Table 13.2.1", _verdict_block("CHECKED_MISMATCH")),
+            ("§8.1.2", _verdict_block("CHECKED_SUPPORTS")),
+        ],
+        server_searches=4,
+    )
+    res = check_citations([f1, f2], [], client=client, sleep=lambda *_: None)
+    assert res.requests == 2
+    assert res.web_search_requests == 8          # 2 requests × 4 reported each
+
+
+def test_check_citations_falls_back_to_one_search_per_request():
+    # No server-reported count anywhere -> the pre-Phase-B lower bound
+    # (1 per issued request) keeps the fee honest rather than zero.
+    f1 = _f("cites table", refs=["NFPA 13 Table 13.2.1"])
+    f2 = _f("cites relief", refs=["NFPA 13 §8.1.2"])
+    client = _CitationClient(routes=[
+        ("Table 13.2.1", _verdict_block("CHECKED_SUPPORTS")),
+        ("§8.1.2", _verdict_block("CHECKED_SUPPORTS")),
+    ])
+    res = check_citations([f1, f2], [], client=client, sleep=lambda *_: None)
+    assert res.requests == 2 and res.web_search_requests == 2
 
 
 def test_check_citations_garbled_reply_degrades_to_unchecked():

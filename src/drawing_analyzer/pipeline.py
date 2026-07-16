@@ -1498,10 +1498,12 @@ def _run_qc_stages(
                     all_findings, geometries, client=client, progress=_citation_progress,
                     identity=set_identity,
                 )
-                # Best-effort web-search fee: the citation stage does not yet surface
-                # the exact server ``web_search_requests`` count, so bill one search
-                # per unique citation checked (a lower bound — each ref runs ≥1
-                # search). Tokens are exact; the search micro-fee is approximate.
+                # Web-search fee (Phase B exact billing): the stage sums the
+                # server-reported ``usage.server_tool_use.web_search_requests``
+                # across every response (including pause_turn resumes); a
+                # request whose responses did not carry the field contributes
+                # the pre-Phase-B lower bound of 1 (each issued request runs
+                # >=1 search). Tokens are exact either way.
                 # A run is PARTIAL when any claim was left UNCHECKED/UNRESOLVABLE
                 # (DA-017 §16.5) — not only on a hard error — so a request/parser/
                 # tool failure for a cited claim can never masquerade as COMPLETE.
@@ -1510,12 +1512,10 @@ def _run_qc_stages(
                     run_usage, family="citation", instance="citation",
                     model=citation_model(),
                     input_tokens=cires.input_tokens, output_tokens=cires.output_tokens,
-                    # Bill one web search per REQUEST issued (each runs >=1 search),
-                    # not per unique reference — a reference with many claims is now
-                    # split into several claim-complete requests (DA-017), so the
-                    # per-reference count would under-bill the search fee.
                     billable_tool_uses={"web_search": int(
-                        getattr(cires, "requests", 0) or getattr(cires, "checked", 0) or 0
+                        getattr(cires, "web_search_requests", 0)
+                        or getattr(cires, "requests", 0)
+                        or getattr(cires, "checked", 0) or 0
                     )},
                     terminal_status="PARTIAL" if partial else "COMPLETE",
                 )

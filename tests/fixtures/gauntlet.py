@@ -601,10 +601,15 @@ class ScriptedQCClient:
         }
         return _msg(_fenced(payload), 300, 80)
 
+    # Server-reported searches per citation request (Phase B exact billing):
+    # the acceptance suite asserts the run bills exactly this per request.
+    CITATION_SEARCHES_PER_REQUEST = 3
+
     def _citation(self, text: str) -> FakeMessage:
         self.citation_requests.append(text)
         if self._sabotage == "citation_empty":
-            return _msg('{"assessments": []}', 10, 4)
+            return _msg('{"assessments": []}', 10, 4,
+                        searches=self.CITATION_SEARCHES_PER_REQUEST)
         assessments = []
         for handle, claim_text in re.findall(r"\[(C\d+)\] (.+)", text):
             status = "CHECKED_SUPPORTS"
@@ -617,15 +622,19 @@ class ScriptedQCClient:
             # A request shape without [Cn] handles: the back-compat single verdict.
             return _msg("searched...\n" + _fenced(
                 {"status": "CHECKED_SUPPORTS", "note": "supports", "edition_notes": "e"}
-            ), 20, 8)
+            ), 20, 8, searches=self.CITATION_SEARCHES_PER_REQUEST)
         return _msg("searched...\n" + _fenced(
             {"assessments": assessments, "edition_notes": "e"}
-        ), 20, 8)
+        ), 20, 8, searches=self.CITATION_SEARCHES_PER_REQUEST)
 
 
-def _msg(text: str, tin: int, tout: int) -> FakeMessage:
-    return FakeMessage(content=[FakeTextBlock(text=text)],
-                       usage=FakeUsage(input_tokens=tin, output_tokens=tout))
+def _msg(text: str, tin: int, tout: int, *, searches: int | None = None) -> FakeMessage:
+    from tests.fixtures.fake_anthropic import FakeServerToolUse
+
+    usage = FakeUsage(input_tokens=tin, output_tokens=tout)
+    if searches is not None:
+        usage.server_tool_use = FakeServerToolUse(web_search_requests=searches)
+    return FakeMessage(content=[FakeTextBlock(text=text)], usage=usage)
 
 
 # --------------------------------------------------------------------------- #

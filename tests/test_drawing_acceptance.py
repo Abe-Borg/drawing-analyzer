@@ -712,6 +712,14 @@ def test_gauntlet_citations_claim_complete(oracle):
     assert f1.id in a1.claim_finding_ids
     assert f2.id in a2.claim_finding_ids
 
+    # Phase B exact billing: the run bills the server-reported search count
+    # (the scripted client reports a fixed figure per request), never the old
+    # 1-per-request approximation when the exact number is available.
+    (citation_rec,) = [r for r in ctx.run_usage.records
+                       if r.stage_family == "citation"]
+    billed = citation_rec.billable_tool_uses.get("web_search")
+    assert billed == len(client.citation_requests) * G.ScriptedQCClient.CITATION_SEARCHES_PER_REQUEST
+
 
 # ---- assertion 10: QC ids are positional (source, page, anchored, position) -
 

@@ -57,6 +57,7 @@ from .digest import (
     _message_text,
     _message_usage,
     _retry_backoff_seconds,
+    _server_web_search_requests,
     _tolerant_json_object,
 )
 from .models import Citation, CitationAssessment, Finding
@@ -86,13 +87,29 @@ def citation_model() -> str:
     return os.environ.get("DRAWING_ANALYZER_CITATION_MODEL") or REVIEW_MODEL_DEFAULT
 
 
+def web_search_max_uses() -> int:
+    """Per-request web-search bound (``DRAWING_ANALYZER_WEB_SEARCH_MAX_USES``).
+
+    Defaults to :data:`_WEB_SEARCH_MAX_USES`; invalid or sub-1 values fall back
+    to the default. The bound rides the citation cache key (Phase B), so
+    changing it re-checks rather than serving verdicts searched under a
+    different budget.
+    """
+    raw = os.environ.get("DRAWING_ANALYZER_WEB_SEARCH_MAX_USES", "")
+    try:
+        value = int(raw.strip())
+    except (ValueError, AttributeError):
+        return _WEB_SEARCH_MAX_USES
+    return value if value >= 1 else _WEB_SEARCH_MAX_USES
+
+
 def web_search_tool() -> dict:
     """The server-side web-search tool definition for the citation call."""
     tool_type = (
         os.environ.get("DRAWING_ANALYZER_WEB_SEARCH_TOOL_TYPE")
         or _DEFAULT_WEB_SEARCH_TOOL_TYPE
     )
-    return {"type": tool_type, "name": "web_search", "max_uses": _WEB_SEARCH_MAX_USES}
+    return {"type": tool_type, "name": "web_search", "max_uses": web_search_max_uses()}
 
 
 # --------------------------------------------------------------------------- #
@@ -288,6 +305,24 @@ def _extract_web_sources(resp: Any) -> list[str]:
 # --------------------------------------------------------------------------- #
 
 
+@dataclass(frozen=True)
+class _CheckOutcome:
+    """One citation request's outcome (replaces the old 5-tuple).
+
+    ``web_search_requests`` is the server-reported search count summed across
+    the pause_turn resumes — ``None`` when no response in the loop carried the
+    field, so the caller can fall back to its per-request approximation only
+    when the count is genuinely unknown (Phase B exact billing).
+    """
+
+    raw_text: str | None = None
+    sources: tuple[str, ...] = ()
+    input_tokens: int = 0
+    output_tokens: int = 0
+    web_search_requests: int | None = None
+    error: str | None = None
+
+
 def _check_one(
     ref: str,
     editions_line: str,
@@ -298,8 +333,8 @@ def _check_one(
     max_retries: int,
     sleep: Any,
     jurisdiction_line: str = "",
-) -> tuple[str | None, list[str], int, int, str | None]:
-    """One citation request → ``(raw_text, sources, in_tok, out_tok, error)``.
+) -> _CheckOutcome:
+    """One citation request → :class:`_CheckOutcome`.
 
     Never raises. ``raw_text`` is ``None`` on a hard failure (``error`` set).
     """
@@ -308,6 +343,7 @@ def _check_one(
     )
     messages: list[dict] = [{"role": "user", "content": user_text}]
     total_in = total_out = 0
+    searches: int | None = None
 
     for _resume in range(_MAX_PAUSE_RESUMES + 1):
         kwargs: dict[str, Any] = {
@@ -327,10 +363,18 @@ def _check_one(
                     sleep(_retry_backoff_seconds(attempt))
                     attempt += 1
                     continue
-                return None, [], total_in, total_out, _clean_error(exc)
+                return _CheckOutcome(
+                    input_tokens=total_in, output_tokens=total_out,
+                    web_search_requests=searches, error=_clean_error(exc),
+                )
         in_tok, out_tok = _message_usage(resp)
         total_in += in_tok
         total_out += out_tok
+        # Sum server-reported search counts across resumes exactly like tokens;
+        # stay None only while NO response has carried the field.
+        reported = _server_web_search_requests(resp)
+        if reported is not None:
+            searches = (searches or 0) + reported
         if _get(resp, "stop_reason") == "pause_turn":
             # The server-side search loop paused; re-send with the partial
             # assistant turn appended — the server resumes where it left off.
@@ -340,9 +384,18 @@ def _check_one(
                 {"role": "assistant", "content": content},
             ]
             continue
-        return _message_text(resp), _extract_web_sources(resp), total_in, total_out, None
+        return _CheckOutcome(
+            raw_text=_message_text(resp),
+            sources=tuple(_extract_web_sources(resp)),
+            input_tokens=total_in, output_tokens=total_out,
+            web_search_requests=searches,
+        )
 
-    return None, [], total_in, total_out, "check did not finish (still paused)"
+    return _CheckOutcome(
+        input_tokens=total_in, output_tokens=total_out,
+        web_search_requests=searches,
+        error="check did not finish (still paused)",
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -371,6 +424,10 @@ class CitationCheckResult:
     unresolvable: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    # Billable web searches: the server-reported count summed where responses
+    # carried it, plus 1 per request whose responses did not (the pre-Phase-B
+    # lower-bound approximation, kept as the per-request fallback).
+    web_search_requests: int = 0
     error: str | None = None
     partial: bool = False
     assessments: list[CitationAssessment] = field(default_factory=list)
@@ -497,27 +554,37 @@ def check_citations(
 
     def _run(req: tuple) -> tuple:
         ref, rid, handled = req
-        handles = [h for h, _c in handled]
-        raw, sources, in_tok, out_tok, err = _check_one(
+        outcome = _check_one(
             ref, editions_line, [(h, c["text"]) for h, c in handled],
             client=client, model=model, max_retries=max_retries, sleep=sleep,
             jurisdiction_line=jurisdiction_line,
         )
-        return ref, rid, handled, raw, sources, in_tok, out_tok, err
+        return ref, rid, handled, outcome
 
     with ThreadPoolExecutor(max_workers=min(_MAX_WORKERS, len(requests))) as pool:
-        for ref, rid, handled, raw, sources, in_tok, out_tok, err in pool.map(_run, requests):
+        for ref, rid, handled, outcome in pool.map(_run, requests):
             done += 1
-            result.input_tokens += in_tok
-            result.output_tokens += out_tok
-            if err is not None or raw is None:
+            result.input_tokens += outcome.input_tokens
+            result.output_tokens += outcome.output_tokens
+            # Exact where the server reported it; else the 1-per-request
+            # lower-bound approximation this stage always billed.
+            result.web_search_requests += (
+                outcome.web_search_requests
+                if outcome.web_search_requests is not None
+                else 1
+            )
+            if outcome.error is not None or outcome.raw_text is None:
                 result.partial = True
-                if err:
-                    result.error = "; ".join(x for x in (result.error, err) if x)
+                if outcome.error:
+                    result.error = "; ".join(
+                        x for x in (result.error, outcome.error) if x
+                    )
                 per: dict[str, tuple[str, str]] = {}
                 edition_notes = ""
             else:
-                per, edition_notes, parsed = _parse_assessments(raw, [h for h, _c in handled])
+                per, edition_notes, parsed = _parse_assessments(
+                    outcome.raw_text, [h for h, _c in handled]
+                )
                 if not parsed:
                     result.partial = True
             for handle, claim in handled:
@@ -531,7 +598,7 @@ def check_citations(
                     note=note,
                     edition_notes=edition_notes,
                     adopted_edition=editions_line,
-                    sources=list(sources),
+                    sources=list(outcome.sources),
                     request_id=rid,
                 )
             if progress is not None:
