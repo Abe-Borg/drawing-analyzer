@@ -286,6 +286,12 @@ class DrawingContext:
     # (name + version + content hash + source) — recorded for the report / run
     # manifest and so a profile that disappeared/changed after selection is visible.
     profile_snapshots: list = field(default_factory=list)
+    # Phase A (§20.1): the model-detected set identity (disciplines, jurisdiction,
+    # language, units, adopted codes with evidence quotes), or ``None`` when the
+    # identity stage was off, skipped, or failed. Advisory context only — also
+    # rendered into ``combined_text`` as the additive "Set Identity" section,
+    # exported as ``set_identity.json``, and recorded in ``run_manifest.json``.
+    set_identity: Any = None
     # Phase 23B (§15.6): the run's append-only usage ledger. ``total_input_tokens`` /
     # ``total_output_tokens`` above are derived sums over it; ``total_estimated_cost``
     # and the per-stage-family breakdown come from it too.
@@ -380,6 +386,7 @@ def _combine(
     overview: str = "",
     focus: str = "",
     focus_report: str = "",
+    identity: str = "",
 ) -> str:
     """Build the combined digest document from per-sheet results.
 
@@ -389,7 +396,10 @@ def _combine(
     When ``focus_report`` is non-empty it is inserted as a "Focus Report"
     section ahead of even the overview — it answers the question the operator
     explicitly asked this run — quoting the ``focus`` so the document is
-    self-describing. Both are additive; the per-sheet digests are unchanged.
+    self-describing. When ``identity`` (the rendered set-identity context block,
+    Phase A) is non-empty it leads the document — a reader should know what the
+    set *is* before reading anything about it. All three are additive; the
+    per-sheet digests are unchanged (I-2).
     """
     total = len(sheets)
     lines: list[str] = [
@@ -401,6 +411,13 @@ def _combine(
         f"show._",
         "",
     ]
+    if identity.strip():
+        lines.append("## Set Identity (model-detected)")
+        lines.append("")
+        lines.append(identity.strip())
+        lines.append("")
+        lines.append("---")
+        lines.append("")
     if focus_report.strip():
         lines.append("## Focus Report (operator-requested)")
         lines.append("")
@@ -1736,6 +1753,8 @@ def extract_drawing_context(
     profiles: list | None = None,
     cross_qc: bool | None = None,
     citation_check: bool | None = None,
+    identity: bool | None = None,
+    review_plan: bool | None = None,
     ink_rejected: bool = False,
     focus_findings_to_markups: bool = False,
     qc_work_dir: Path | None = None,
@@ -1876,6 +1895,8 @@ def extract_drawing_context(
         cross_qc=cross_qc,
         citation_check=citation_check,
         verify_findings=verify_findings,
+        identity=identity,
+        review_plan=review_plan,
         markup_verified_only=markup_verified_only,
         ink_rejected=ink_rejected,
         focus_findings_to_markups=focus_findings_to_markups,
@@ -2202,6 +2223,76 @@ def extract_drawing_context(
         cached=sum(1 for s in sheets if s.cached),
     )
 
+    # Set identity (Phase A §20.1): the "which specialist am I?" pass — one
+    # text-only call over the digests + text layers that detects the set's
+    # disciplines, jurisdiction, language, units, and adopted codes. Purely
+    # advisory context for the planner / citation check / cross-QC below: a
+    # failure (or a misdetection) can never gate or suppress a finding (I-3).
+    set_identity_obj = None
+    identity_stage = StageResult(stage="identity", expected=config.run_identity)
+    if config.run_identity:
+        journal.emit("STAGE_START", stage="identity", sheets=len(sheets))
+        identity_stage.items_in = len(sheets)
+        if ok_sheets == 0:
+            # Applicable but nothing to identify — every digest failed/empty.
+            identity_stage.status = "SKIPPED_VALID"
+        else:
+            if progress is not None:
+                progress(total, total, "Identifying the set")
+            try:
+                from .set_identity import identify_set
+
+                ires = identify_set(
+                    sheets, sheet_geometries, client=client, cache=cache,
+                )
+                identity_stage.calls_planned = 1
+                _record_usage(
+                    run_usage, family="identity", instance="identity",
+                    model=ires.model_used,
+                    transport="CACHE" if ires.cached else "REAL_TIME",
+                    input_tokens=ires.input_tokens,
+                    output_tokens=ires.output_tokens,
+                    cache_hit=ires.cached,
+                    parse_success=ires.ok,
+                    terminal_status="COMPLETE" if ires.ok else "FAILED",
+                )
+                if ires.ok:
+                    set_identity_obj = ires.identity
+                    identity_stage.calls_succeeded = 1
+                    identity_stage.items_out = len(ires.identity.adopted_codes)
+                    if ires.omitted_chars:
+                        identity_stage.warnings.append(
+                            f"identity corpus over budget: {ires.omitted_chars} "
+                            "chars omitted (later sheets trimmed first)"
+                        )
+                    if ires.identity.has_content:
+                        identity_stage.status = "COMPLETE"
+                    else:
+                        identity_stage.status = "PARTIAL"
+                        identity_stage.warnings.append(
+                            "identity call returned no usable fields"
+                        )
+                else:
+                    identity_stage.calls_failed = 1
+                    identity_stage.status = "FAILED"
+                    msg = ires.error or "identity call failed"
+                    identity_stage.errors.append(msg)
+                    errors.append(f"Set identity: {msg}")
+            except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
+                errors.append(f"Set identity: {exc}")
+                identity_stage.status = "FAILED"
+                identity_stage.errors.append(str(exc))
+                _log.warning("set-identity stage failed: %s", exc)
+        if set_identity_obj is not None:
+            # Counts/short tags only — never quotes or free text (§18.3).
+            journal.emit(
+                "SET_IDENTIFIED", stage="identity",
+                disciplines=len(set_identity_obj.disciplines),
+                adopted_codes=len(set_identity_obj.adopted_codes),
+                confidence=set_identity_obj.confidence or "unstated",
+            )
+    _finish_stage(stage_results, journal, identity_stage)
+
     # Critique pass (Phase 11): a second, adversarial full-coverage read per sheet
     # whose only job is finding problems, run self-consistently (twice) and merged.
     # Additive and non-fatal; its findings pool with the digest findings in the QC
@@ -2505,6 +2596,7 @@ def extract_drawing_context(
             overview=synthesis_text,
             focus=focus,
             focus_report=focus_report_text,
+            identity=set_identity_obj.context_block() if set_identity_obj else "",
         ),
         sheets=sheets,
         file_count=file_count,
@@ -2531,6 +2623,7 @@ def extract_drawing_context(
         qc_status=qc_status,
         run_usage=run_usage,
         profile_snapshots=profile_snapshots,
+        set_identity=set_identity_obj,
         run_journal=journal,
         input_inventory=inventory,
         prose_accounting=qc.prose_accounting,

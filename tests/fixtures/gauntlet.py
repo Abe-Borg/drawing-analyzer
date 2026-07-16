@@ -52,6 +52,7 @@ from drawing_analyzer.digest import (
     _SHEET_TEXT_LAYER_RASTER_PLACEHOLDER,
 )
 from drawing_analyzer.prose_harvest import HARVEST_SYSTEM_PROMPT
+from drawing_analyzer.set_identity import IDENTITY_SYSTEM_PROMPT
 from drawing_analyzer.synthesis import SYNTHESIS_SYSTEM_PROMPT
 from drawing_analyzer.verify import VERIFY_SYSTEM_PROMPT
 from tests.fixtures.fake_anthropic import FakeMessage, FakeTextBlock, FakeUsage
@@ -349,7 +350,12 @@ class ScriptedQCClient:
     - ``"synthesis"``     — synthesis returns an empty max-tokens response;
     - ``"critique_read2"``— every sheet's second critique read is malformed;
     - ``"cross_qc"``      — the cross-sheet call returns unparseable text;
-    - ``"citation_empty"``— citation returns an empty assessments list (DA-017).
+    - ``"citation_empty"``— citation returns an empty assessments list (DA-017);
+    - ``"identity"``      — the set-identity call returns unparseable text (the
+      run must degrade to identity-less behavior, never fail);
+    - ``"identity_misdetect"`` — identity confidently reports a WRONG
+      discipline/jurisdiction (the advisory contract: nothing may be gated or
+      suppressed by it, and the misdetection stays visible in the manifest).
     """
 
     def __init__(
@@ -361,6 +367,7 @@ class ScriptedQCClient:
         verify_verdicts: tuple[tuple[str, str], ...] = (),
         harvest_garbage_tokens: tuple[str, ...] = (),
         citation_statuses: tuple[tuple[str, str], ...] = (),
+        identity_payload: dict | None = None,
         sabotage: str | None = None,
     ) -> None:
         self._sheets = list(sheets)
@@ -369,6 +376,7 @@ class ScriptedQCClient:
         self._verify_verdicts = tuple(verify_verdicts)
         self._harvest_garbage = tuple(harvest_garbage_tokens)
         self._citation_statuses = tuple(citation_statuses)
+        self._identity_payload = identity_payload
         self._sabotage = sabotage
 
         # Captures (assertion surface for the acceptance tests).
@@ -383,6 +391,8 @@ class ScriptedQCClient:
         self.verify_calls = 0
         self.verify_requests: list[tuple[str, list[bytes]]] = []
         self.raster_placeholder_seen = False
+        self.identity_calls = 0
+        self.identity_request_texts: list[str] = []
 
         outer = self
 
@@ -421,6 +431,8 @@ class ScriptedQCClient:
             return self._citation(text)
         if system.startswith(SYNTHESIS_SYSTEM_PROMPT):
             return self._synthesis()
+        if system == IDENTITY_SYSTEM_PROMPT:
+            return self._identity(text)
         return _msg("ok", 1, 1)
 
     # -- per-stage behaviors ------------------------------------------------ #
@@ -478,6 +490,46 @@ class ScriptedQCClient:
                 verdict = v
                 break
         return _msg(json.dumps({"verdict": verdict, "note": "checked"}), 40, 8)
+
+    def _identity(self, text: str) -> FakeMessage:
+        self.identity_calls += 1
+        self.identity_request_texts.append(text)
+        if self._sabotage == "identity":
+            return _msg("I could not classify this set, sorry.", 100, 10)
+        if self._sabotage == "identity_misdetect":
+            payload = {
+                "disciplines": ["landscape"],
+                "jurisdiction": "Reykjavik, Iceland",
+                "country": "Iceland",
+                "language": "is",
+                "units": "metric",
+                "adopted_codes": [],
+                "confidence": "high",
+            }
+            return _msg(_fenced(payload), 200, 40)
+        payload = self._identity_payload or {
+            "disciplines": ["electrical", "fire protection", "mechanical"],
+            "sheet_disciplines": [
+                {"sheet_id": "M-101", "discipline": "mechanical"},
+                {"sheet_id": "E-201", "discipline": "electrical"},
+                {"sheet_id": "FP-101", "discipline": "fire protection"},
+            ],
+            "project_type": "commercial building",
+            "set_type": "issued for construction",
+            "jurisdiction": "California, United States",
+            "country": "United States",
+            "region": "California",
+            "language": "en",
+            "units": "imperial",
+            "adopted_codes": [{
+                "code": "NFPA 13", "edition": "2016", "amendment_note": "",
+                "quote": "NFPA 13 2016", "source_sheet": "FP-101",
+            }],
+            "confidence": "high",
+            "evidence": ["general notes"],
+            "notes": "",
+        }
+        return _msg(_fenced(payload), 200, 40)
 
     def _citation(self, text: str) -> FakeMessage:
         self.citation_requests.append(text)

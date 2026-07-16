@@ -52,6 +52,7 @@ from drawing_analyzer.html_report import build_html_report  # noqa: E402
 from drawing_analyzer.models import SheetRef  # noqa: E402
 from drawing_analyzer.pipeline import extract_drawing_context  # noqa: E402
 from drawing_analyzer.render import render_sheet  # noqa: E402
+from drawing_analyzer.set_identity import IDENTITY_SYSTEM_PROMPT  # noqa: E402
 from drawing_analyzer.verify import VERIFY_SYSTEM_PROMPT  # noqa: E402
 from tests.fixtures.fake_anthropic import (  # noqa: E402
     FakeMessage,
@@ -171,6 +172,18 @@ class _AcceptanceClient:
                     return FakeMessage(
                         content=[FakeTextBlock(text=prose + "\n\n" + block)],
                         usage=FakeUsage(input_tokens=500, output_tokens=90),
+                    )
+                if system == IDENTITY_SYSTEM_PROMPT:
+                    payload = {
+                        "disciplines": ["fire protection"],
+                        "jurisdiction": "California, United States",
+                        "language": "en", "units": "imperial",
+                        "adopted_codes": [], "confidence": "medium",
+                    }
+                    return FakeMessage(
+                        content=[FakeTextBlock(
+                            text="```json\n" + json.dumps(payload) + "\n```")],
+                        usage=FakeUsage(input_tokens=30, output_tokens=10),
                     )
                 return FakeMessage(content=[FakeTextBlock(text="ok")])  # unused
 
@@ -834,12 +847,19 @@ def test_gauntlet_exhaustive_status_complete(oracle):
     assert ctx.configuration_kind == "NORMAL"
     assert ctx.coverage_status == "COMPLETE"
     statuses = {s.stage: s.status for s in ctx.stage_results}
-    for stage in ("critique", "cross_qc", "synthesis", "auditors",
+    for stage in ("identity", "critique", "cross_qc", "synthesis", "auditors",
                   "prose_harvest", "verification", "citation", "markup"):
         assert statuses[stage] in ("COMPLETE", "SKIPPED_VALID"), (stage, statuses)
     # Usage totals are the exact sum of the append-only ledger.
     assert ctx.total_input_tokens == sum(r.input_tokens for r in ctx.run_usage.records)
     assert ctx.total_output_tokens == sum(r.output_tokens for r in ctx.run_usage.records)
+    # Phase A: exactly one identity call, its usage in the ledger, and the
+    # detected identity on the context + woven into the combined text.
+    assert oracle.client.identity_calls == 1
+    assert any(r.stage_family == "identity" for r in ctx.run_usage.records)
+    assert ctx.set_identity is not None
+    assert "fire protection" in ctx.set_identity.disciplines
+    assert "## Set Identity (model-detected)" in ctx.combined_text
 
 
 # ---- the remaining §19.1 set contents: rejection, unanchored, set-level, ----
@@ -1037,11 +1057,59 @@ def _assert_degraded_honestly(ctx, stage: str, allowed=("PARTIAL", "FAILED")):
         ("critique_read2", "critique"),
         ("cross_qc", "cross_qc"),
         ("citation_empty", "citation"),
+        ("identity", "identity"),
     ],
 )
 def test_gauntlet_failure_injection_bad_model_output(tmp_path, sabotage, stage):
     ctx = _mini_run(tmp_path, G.mini_client(sabotage=sabotage))
     _assert_degraded_honestly(ctx, stage)
+
+
+def test_gauntlet_identity_failure_never_blocks_the_review(tmp_path):
+    # Phase A: an unparseable identity reply degrades the identity stage only —
+    # the critique still runs (identity-less), findings still land, and the
+    # combined text simply has no Set Identity section.
+    client = G.mini_client(sabotage="identity")
+    ctx = _mini_run(tmp_path, client)
+    assert ctx.set_identity is None
+    assert client.identity_calls == 1
+    assert sum(client.critique_calls.values()) > 0        # critique still ran
+    assert ctx.finding_count >= 1
+    assert "## Set Identity (model-detected)" not in ctx.combined_text
+    assert any(e.startswith("Set identity:") for e in ctx.errors)
+
+
+def test_gauntlet_identity_misdetection_is_advisory(tmp_path):
+    # Phase A advisory contract: a confidently WRONG identity (landscape /
+    # Iceland on a California mechanical set) steers context only. Nothing is
+    # gated: the same findings land, the run still earns COMPLETE, and the
+    # misdetection is visible — not laundered — in the manifest record.
+    from drawing_analyzer.export import build_run_manifest
+
+    wrong = _mini_run(tmp_path, G.mini_client(sabotage="identity_misdetect"))
+    assert wrong.qc_status == "COMPLETE"
+    assert wrong.set_identity is not None
+    assert wrong.set_identity.disciplines == ("landscape",)
+    baseline_count = _mini_run(tmp_path, G.mini_client()).finding_count
+    assert wrong.finding_count == baseline_count          # nothing suppressed
+    manifest = build_run_manifest(wrong)
+    assert manifest["set_identity"]["disciplines"] == ["landscape"]
+    assert manifest["set_identity"]["jurisdiction"] == "Reykjavik, Iceland"
+
+
+def test_gauntlet_identity_in_export_and_manifest(oracle):
+    # The identity record ships as set_identity.json (hashed into the manifest's
+    # artifact walk) and as the manifest's set_identity key.
+    import json as _json
+
+    art = oracle.export / "set_identity.json"
+    assert art.exists()
+    data = _json.loads(art.read_text(encoding="utf-8"))
+    assert "fire protection" in data["disciplines"]
+    manifest = _json.loads((oracle.export / "run_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["set_identity"]["disciplines"] == data["disciplines"]
+    assert any(a["path"] == "set_identity.json" for a in manifest["artifacts"])
+    assert manifest["configuration"]["run_identity"] is True
 
 
 @pytest.mark.parametrize(

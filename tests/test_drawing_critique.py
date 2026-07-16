@@ -34,6 +34,7 @@ from drawing_analyzer.critique import (
 )
 from drawing_analyzer.digest import DIGEST_SYSTEM_PROMPT
 from drawing_analyzer.digest_cache import DigestCache
+from drawing_analyzer.set_identity import IDENTITY_SYSTEM_PROMPT
 from drawing_analyzer.models import Anchor, Finding, ImageTile, RenderedSheet, SheetRef
 from drawing_analyzer.verify import VERIFY_SYSTEM_PROMPT
 from tests.fixtures.fake_anthropic import FakeMessage, FakeTextBlock, FakeUsage
@@ -781,6 +782,7 @@ class _PipelineClient:
         self.digest_calls = 0
         self.critique_calls = 0
         self.verify_calls = 0
+        self.identity_calls = 0
         self.critique_had_checklist = False
         outer = self
 
@@ -807,6 +809,17 @@ class _PipelineClient:
                     return FakeMessage(
                         content=[FakeTextBlock(text=prose + "\n\n" + _block([_D]))],
                         usage=FakeUsage(input_tokens=500, output_tokens=80))
+                if system == IDENTITY_SYSTEM_PROMPT:
+                    outer.identity_calls += 1
+                    payload = {
+                        "disciplines": ["fire protection"],
+                        "jurisdiction": "California, United States",
+                        "language": "en", "units": "imperial",
+                        "adopted_codes": [], "confidence": "medium",
+                    }
+                    return FakeMessage(
+                        content=[FakeTextBlock(text="```json\n" + json.dumps(payload) + "\n```")],
+                        usage=FakeUsage(input_tokens=30, output_tokens=10))
                 return FakeMessage(content=[FakeTextBlock(text="ok")])
 
         self.messages = _Msgs()
