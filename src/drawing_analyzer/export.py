@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import Any
 
 from .html_report import build_html_report
-from .models import receipt_status_counts
+from .models import PRIMARY_LEG_ID, receipt_status_counts
 from .run_journal import _iso, evidence_summary, render_run_log, sanitize_text
 
 _SLUG_RE = re.compile(r"[^A-Za-z0-9]+")
@@ -301,6 +301,7 @@ def _index_document(
 def build_export_documents(
     ctx: Any, *, source_names: list[str], now: datetime, api_key: str | None = None,
     embed_api_key: bool = False, include_chat: bool = True,
+    pdf_links: "dict[str, dict] | None" = None,
 ) -> list[tuple[str, str]]:
     """Build the ordered ``(filename, content)`` list for an export folder.
 
@@ -330,7 +331,7 @@ def build_export_documents(
         ("report.html",
          build_html_report(ctx, source_names=source_names, now=now, api_key=api_key,
                            embed_api_key=embed_api_key, link_evidence=True,
-                           include_chat=include_chat)),
+                           include_chat=include_chat, pdf_links=pdf_links)),
         ("00_index.md", _index_document(ctx, source_names=source_names, now=now, sheet_files=sheet_files)),
         ("00_synthesis.md", _synthesis_document(ctx)),
     ]
@@ -695,6 +696,76 @@ def safe_artifact_name(
     return text
 
 
+def allocate_reviewed_pdf_names(reviewed: "list[Any]") -> "list[tuple[Path, str]]":
+    """Map each reviewed PDF to its flat, de-duplicated on-disk export name.
+
+    Shared by :func:`write_qc_outputs` (which copies the files) and
+    :func:`build_reviewed_pdf_links` (which builds the report's deep-link
+    hrefs) so the linked name and the copied name can never drift. Mirrors the
+    copy loop exactly: only existing, non-symlink files are allocated, in order,
+    through the DA-033 allocator with a shared ``used`` set for deterministic
+    dedupe. Returns ``(original path, on-disk basename)`` pairs.
+    """
+    used: set[str] = set()
+    pairs: list[tuple[Path, str]] = []
+    for pdf in reviewed:
+        pdf = Path(pdf)
+        if pdf.exists() and not pdf.is_symlink():
+            name = safe_artifact_name(pdf.name, used=used, default="reviewed.pdf")
+            pairs.append((pdf, name))
+    return pairs
+
+
+def build_reviewed_pdf_links(
+    ctx: Any, name_pairs: "list[tuple[Path, str]]"
+) -> "dict[str, dict]":
+    """Map each finding's ``qc_id`` → ``{"pdf": on-disk name, "page": 1-based}``.
+
+    Joins the markup receipts (which know each placement's output-PDF basename
+    and its reconciled *final* page in the saved file — already offset by any
+    inserted index pages) with the export name allocation. Only a successful
+    receipt that landed on a resolvable page of a known reviewed PDF yields a
+    link; everything else (no markup run, ``FAILED``, page-less, unknown PDF,
+    no ``qc_id``) is skipped so the finding row renders as plain text.
+
+    When a ``qc_id`` has several receipts (the finding's own anchor plus
+    cross-sheet legs, or a cloud plus a margin callout), the finding's own
+    primary on-page cloud wins — the reader lands on the mark that names the
+    issue, not on a secondary leg or a generated index row.
+    """
+    markup_run = getattr(ctx, "markup_run", None)
+    receipts = list(getattr(markup_run, "receipts", None) or [])
+    if not receipts:
+        return {}
+    name_by_basename = {Path(orig).name: on_disk for orig, on_disk in name_pairs}
+    # Lower sort key wins: the finding's own leg, then the on-page cloud over a
+    # margin/notes/index placement, then proven ink (WRITTEN) over a generated
+    # row (INDEXED). Mirrors the ledger's own "most representative" preference.
+    kind_rank = {
+        "CLOUD": 0, "MARGIN": 1, "REVIEW_NOTES": 2, "REJECTED_INDEX": 3, "GATED_INDEX": 4,
+    }
+    best: dict[str, tuple] = {}
+    for r in receipts:
+        placement = getattr(r, "placement", None)
+        if placement is None:
+            continue
+        qc = getattr(placement, "qc_id", "") or ""
+        if not qc or getattr(r, "status", "") == "FAILED":
+            continue
+        page = getattr(r, "output_page_index", None)
+        if page is None or int(page) < 0:
+            continue
+        pdf_name = name_by_basename.get(getattr(r, "output_pdf", "") or "")
+        if not pdf_name:
+            continue
+        leg_rank = 0 if getattr(placement, "leg_id", "") == PRIMARY_LEG_ID else 1
+        status_rank = 0 if getattr(r, "status", "") == "WRITTEN" else 1
+        key = (leg_rank, kind_rank.get(getattr(placement, "expected", ""), 9), status_rank)
+        if qc not in best or key < best[qc][0]:
+            best[qc] = (key, {"pdf": pdf_name, "page": int(page) + 1})
+    return {qc: payload for qc, (_key, payload) in best.items()}
+
+
 def contained_target(root: Path, relative: "Path | str") -> Path:
     """``root/relative``, PROVEN to resolve beneath ``root`` (DA-033).
 
@@ -1043,15 +1114,11 @@ def write_qc_outputs(
     # exists for: two sources sharing one basename. The markup manifest aligns
     # its outputs with these pairs; the receipts themselves stay verbatim (they
     # describe what the writer reconciled, not the export copy).
-    used_pdf_names: set[str] = set()
     copied_pdfs: list[tuple[str, str]] = []
-    for pdf in reviewed:
-        pdf = Path(pdf)
-        if pdf.exists() and not pdf.is_symlink():
-            name = safe_artifact_name(pdf.name, used=used_pdf_names, default="reviewed.pdf")
-            copied_pdfs.append((pdf.name, name))
-            shutil.copy2(pdf, contained_target(folder, name))
-            written.append(name)
+    for pdf, name in allocate_reviewed_pdf_names(reviewed):
+        copied_pdfs.append((pdf.name, name))
+        shutil.copy2(pdf, contained_target(folder, name))
+        written.append(name)
 
     if work_dir is not None:
         evidence = Path(work_dir) / "evidence"
@@ -1130,9 +1197,17 @@ def write_drawing_export(
         # One sha256 per artifact per export: markup_manifest.json hashes the
         # reviewed PDFs first, run_manifest.json's whole-folder walk reuses them.
         hash_cache: dict[str, str] = {}
+        # Resolve each finding's marked-up-PDF deep link BEFORE the report is
+        # built: the reviewed-PDF export names are allocated here (the copy in
+        # write_qc_outputs reuses the same allocator, so the linked name and the
+        # copied name cannot drift), and the report needs them to point its
+        # QC-### cells at ``<reviewed>.pdf#page=N``.
+        pdf_links = build_reviewed_pdf_links(
+            ctx, allocate_reviewed_pdf_names(getattr(ctx, "reviewed_pdf_paths", None) or [])
+        )
         for name, content in build_export_documents(
             ctx, source_names=source_names, now=now, api_key=api_key,
-            embed_api_key=embed_api_key, include_chat=include_chat,
+            embed_api_key=embed_api_key, include_chat=include_chat, pdf_links=pdf_links,
         ):
             contained_target(folder, name).write_text(content, encoding="utf-8")
         # QC review inventory (findings.json/csv, sheet_text/, reviewed PDFs,

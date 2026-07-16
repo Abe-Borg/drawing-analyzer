@@ -1483,6 +1483,68 @@ def _result_from_receipts(
 # --------------------------------------------------------------------------- #
 
 
+_OUTLINE_ZOOM = 1.75            # modest zoom-to-mark for bookmark destinations
+
+
+def _set_findings_outline(
+    doc: "pymupdf.Document",
+    pairs: "list[tuple[Finding, MarkupPlacement]]",
+    *,
+    n_index: int,
+) -> None:
+    """Write a ``QC Findings`` bookmark outline into ``doc`` (Phase: HTML↔PDF links).
+
+    One child bookmark per finding that landed on a real page — in ``QC-###``
+    order — whose GOTO destination is the finding's own anchor: its final page
+    (``page_index + n_index``, the same front-index-page offset used elsewhere)
+    at the rect's top-left, zoomed in. Reuses :func:`_derotate_point` to move the
+    PAGE_VIEW_V2 rect corner into the target page's own space (identity on an
+    un-rotated page), exactly as the index-page GOTO links do. Bluebeam and
+    Acrobat surface this outline in their Bookmarks panel, making the marked-up
+    set self-navigable independent of the HTML report. Findings with no rect
+    target the page top. No-op when nothing anchors to a page.
+    """
+    page_count = doc.page_count
+    seen: set[str] = set()
+    entries: list[tuple[Finding, int]] = []
+    for finding, placement in pairs:
+        # One bookmark per finding, at its own anchor — not per cross-sheet leg
+        # or margin/index placement (those share the finding's qc_id).
+        if placement.leg_id != PRIMARY_LEG_ID or finding.id in seen:
+            continue
+        page_index = int(getattr(finding, "page_index", -1))
+        if page_index < 0:
+            continue                              # set-level: anchors to no source page
+        target_page = page_index + n_index
+        if not (0 <= target_page < page_count):
+            continue                              # out-of-range: no bookmark
+        seen.add(finding.id)
+        entries.append((finding, target_page))
+    if not entries:
+        return
+    entries.sort(key=lambda e: (e[0].qc_id or "~", e[0].id))
+
+    parent_page = 1 if n_index > 0 else entries[0][1] + 1     # index page, else first mark
+    toc: list = [[1, f"QC Findings ({len(entries)})", parent_page]]
+    for finding, target_page in entries:
+        rect = getattr(finding.anchor, "rect_pdf", None) if finding.anchor else None
+        if rect:
+            point = _derotate_point(doc[target_page], rect[0], rect[1])
+            dest = {"kind": pymupdf.LINK_GOTO, "to": point, "zoom": _OUTLINE_ZOOM}
+        else:
+            dest = {"kind": pymupdf.LINK_GOTO, "to": pymupdf.Point(0, 0), "zoom": 0}
+        qc = finding.qc_id or "QC-?"
+        sheet = (finding.sheet_id or "").strip()
+        text = " ".join((finding.text or "").split())
+        if len(text) > 60:
+            text = text[:57].rstrip() + "…"
+        title = f"[{qc}] " + (f"{sheet} — {text}" if sheet else text) if text else f"[{qc}] {sheet}".rstrip()
+        toc.append([2, title, target_page + 1, dest])
+    # A page-less/empty set is already handled above; set_toc replaces any
+    # existing outline (there is none — the writer builds a fresh document).
+    doc.set_toc(toc)
+
+
 def _annotate_units(
     pdf_path: Path | str,
     pairs: "list[tuple[Finding, MarkupPlacement]]",
@@ -1604,6 +1666,14 @@ def _annotate_units(
                     _stamp_component(doc, xref, pid, component, final_page)
                 except Exception:  # noqa: BLE001
                     _log.warning("could not stamp review note %s for %s", component, pid)
+
+        # A 'QC Findings' bookmark outline so the marked-up set is one-click
+        # navigable in Bluebeam/Acrobat (each issue → its page, zoomed to the
+        # mark). I-3: an outline is a nicety — a failure here never sinks the file.
+        try:
+            _set_findings_outline(doc, pairs, n_index=n_index)
+        except Exception:  # noqa: BLE001
+            _log.warning("could not build the findings bookmark outline for %s", src.name)
 
         out.parent.mkdir(parents=True, exist_ok=True)
         doc.save(str(out), garbage=3, deflate=True)

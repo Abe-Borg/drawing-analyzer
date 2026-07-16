@@ -820,3 +820,75 @@ def test_markup_manifest_aligns_with_deduped_pdf_names(tmp_path):
     )
     # Receipts stay verbatim — the writer's reconciliation record is untouched.
     assert all(r["output_pdf"] == "M-101_reviewed.pdf" for r in manifest["receipts"])
+
+
+# --------------------------------------------------------------------------- #
+# HTML↔PDF deep links — reviewed-PDF name allocation + qc_id→link join
+# --------------------------------------------------------------------------- #
+
+
+def _receipt(qc, *, pdf, page, status="WRITTEN", expected="CLOUD", leg="primary"):
+    placement = SimpleNamespace(qc_id=qc, leg_id=leg, expected=expected)
+    return SimpleNamespace(
+        placement=placement, status=status, output_pdf=pdf, output_page_index=page
+    )
+
+
+def test_allocate_reviewed_pdf_names_dedupes_and_skips_missing(tmp_path):
+    # Mirrors write_qc_outputs' copy loop: existing files are allocated in order
+    # through the DA-033 allocator (same-basename → deterministic _2), and a
+    # non-existent path is skipped so the two sites can't drift.
+    a = tmp_path / "site_a" / "M-101_reviewed.pdf"
+    b = tmp_path / "site_b" / "M-101_reviewed.pdf"
+    for p in (a, b):
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"%PDF-1.7")
+    missing = tmp_path / "gone.pdf"
+    pairs = dx.allocate_reviewed_pdf_names([a, b, missing])
+    assert [name for _p, name in pairs] == ["M-101_reviewed.pdf", "M-101_reviewed_2.pdf"]
+    assert [p for p, _n in pairs] == [a, b]     # missing dropped
+
+
+def test_build_reviewed_pdf_links_joins_receipts_to_names(tmp_path):
+    pdf = tmp_path / "M-101_reviewed.pdf"
+    pdf.write_bytes(b"%PDF-1.7")
+    pairs = dx.allocate_reviewed_pdf_names([pdf])
+    ctx = SimpleNamespace(markup_run=SimpleNamespace(receipts=[
+        _receipt("QC-001", pdf="M-101_reviewed.pdf", page=4),   # 0-based → page 5
+    ]))
+    links = dx.build_reviewed_pdf_links(ctx, pairs)
+    assert links == {"QC-001": {"pdf": "M-101_reviewed.pdf", "page": 5}}
+
+
+def test_build_reviewed_pdf_links_skips_unlinkable_receipts():
+    pairs = [(Path("M-101_reviewed.pdf"), "M-101_reviewed.pdf")]
+    ctx = SimpleNamespace(markup_run=SimpleNamespace(receipts=[
+        _receipt("QC-001", pdf="M-101_reviewed.pdf", page=None),        # page-less
+        _receipt("QC-002", pdf="M-101_reviewed.pdf", page=-1),          # set-level
+        _receipt("QC-003", pdf="M-101_reviewed.pdf", page=2, status="FAILED"),
+        _receipt("QC-004", pdf="unknown.pdf", page=2),                  # PDF not exported
+        _receipt("", pdf="M-101_reviewed.pdf", page=2),                 # no qc_id
+        _receipt("QC-005", pdf="M-101_reviewed.pdf", page=1),           # the one good link
+    ]))
+    links = dx.build_reviewed_pdf_links(ctx, pairs)
+    assert links == {"QC-005": {"pdf": "M-101_reviewed.pdf", "page": 2}}
+
+
+def test_build_reviewed_pdf_links_prefers_primary_cloud():
+    # A qc_id with several receipts resolves to the finding's own on-page cloud,
+    # not a cross-sheet leg or a margin/index placement.
+    pairs = [(Path("R.pdf"), "R.pdf")]
+    ctx = SimpleNamespace(markup_run=SimpleNamespace(receipts=[
+        _receipt("QC-001", pdf="R.pdf", page=8, expected="MARGIN", leg="primary"),
+        _receipt("QC-001", pdf="R.pdf", page=9, expected="CLOUD", leg="leg-abc"),
+        _receipt("QC-001", pdf="R.pdf", page=4, expected="CLOUD", leg="primary"),
+    ]))
+    links = dx.build_reviewed_pdf_links(ctx, pairs)
+    assert links == {"QC-001": {"pdf": "R.pdf", "page": 5}}     # primary cloud, page 4→5
+
+
+def test_build_reviewed_pdf_links_empty_without_markup_run():
+    assert dx.build_reviewed_pdf_links(SimpleNamespace(), []) == {}
+    assert dx.build_reviewed_pdf_links(
+        SimpleNamespace(markup_run=SimpleNamespace(receipts=[])), []
+    ) == {}

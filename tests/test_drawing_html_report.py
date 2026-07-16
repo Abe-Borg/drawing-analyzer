@@ -623,6 +623,78 @@ def test_evidence_thumbnail_only_with_link_evidence():
 
 
 # --------------------------------------------------------------------------- #
+# QC-### → marked-up-PDF deep links (HTML↔PDF navigation)
+# --------------------------------------------------------------------------- #
+
+
+def _qc(finding, qc_id):
+    finding.qc_id = qc_id
+    return finding
+
+
+def test_qc_cell_deep_links_to_reviewed_pdf_when_mapped():
+    # A finding whose qc_id is in the pdf_links map gets a QC-### cell that opens
+    # the marked-up PDF at its page in a new tab; an unmapped finding stays plain.
+    ctx = _findings_ctx(findings=[
+        _qc(_finding(severity="high", verify_status="VERIFIED"), "QC-001"),
+        _qc(_finding(text="unmapped", severity="low", verify_status="UNCERTAIN"), "QC-002"),
+    ])
+    links = {"QC-001": {"pdf": "M-101_reviewed.pdf", "page": 5}}
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW, pdf_links=links)
+    assert (
+        '<a class="pdf-link" href="M-101_reviewed.pdf#page=5" target="_blank" '
+        'rel="noopener noreferrer" title="Open QC-001 in the marked-up PDF">QC-001</a>'
+    ) in doc
+    # The finding not in the map keeps the plain cell (no second link).
+    assert '<td class="fcol-qcid">QC-002</td>' in doc
+    assert doc.count('class="pdf-link"') == 1
+
+
+def test_qc_cell_plain_without_pdf_links():
+    # Default (single-file report / non-markup run): no PDF links at all.
+    ctx = _findings_ctx(findings=[_qc(_finding(), "QC-001")])
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
+    assert 'class="pdf-link"' not in doc
+    assert '<td class="fcol-qcid">QC-001</td>' in doc
+
+
+def test_pdf_link_filename_is_percent_encoded():
+    # A reviewed-PDF basename with a space is a valid file but not a valid raw
+    # URL — the href must percent-encode the name while leaving #page= intact.
+    ctx = _findings_ctx(findings=[_qc(_finding(), "QC-001")])
+    links = {"QC-001": {"pdf": "M 101 reviewed.pdf", "page": 2}}
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW, pdf_links=links)
+    assert 'href="M%20101%20reviewed.pdf#page=2"' in doc
+
+
+def test_pdf_link_hostile_filename_cannot_break_out():
+    # Even a hostile reviewed-PDF name can't inject markup: it is percent-encoded
+    # (no raw < or ") before it ever reaches the href attribute.
+    ctx = _findings_ctx(findings=[_qc(_finding(), "QC-001")])
+    links = {"QC-001": {"pdf": 'x"><img src=x onerror=alert(1)>.pdf', "page": 1}}
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW, pdf_links=links)
+    # The raw injected payload never appears — < > " are all percent-encoded.
+    assert 'x"><img src=x onerror=alert(1)>' not in doc
+    assert "<img src=x" not in doc
+    # The link is still present and points at page 1 of the encoded name.
+    assert 'class="pdf-link"' in doc and "#page=1" in doc
+
+
+def test_findings_data_block_mirrors_pdf_link():
+    # The inert #da-findings JSON the assistant reads carries the same deep link.
+    import json
+
+    ctx = _findings_ctx(findings=[_qc(_finding(verify_status="VERIFIED"), "QC-001")])
+    links = {"QC-001": {"pdf": "M-101_reviewed.pdf", "page": 5}}
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW, pdf_links=links)
+    rows = json.loads(_script_block_body(doc, "da-findings"))
+    assert rows[0]["pdf"] == "M-101_reviewed.pdf#page=5"
+    # No map → empty pdf field (kept for a stable schema).
+    plain = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
+    assert json.loads(_script_block_body(plain, "da-findings"))[0]["pdf"] == ""
+
+
+# --------------------------------------------------------------------------- #
 # Per-sheet raw text layer + raster badge (Phase 8)
 # --------------------------------------------------------------------------- #
 
