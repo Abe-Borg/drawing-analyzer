@@ -819,3 +819,68 @@ def test_unanchored_finding_gets_margin_callout_with_prefix(tmp_path):
         assert "treat with caution" in content
     finally:
         doc.close()
+
+
+# --------------------------------------------------------------------------- #
+# QC Findings bookmark outline — Codex review follow-ups (HTML↔PDF links)
+# --------------------------------------------------------------------------- #
+
+
+def test_overflow_review_note_bookmark_targets_the_notes_page(tmp_path):
+    # A rect-less finding that overflows to the appended AI Review Notes page
+    # must get a bookmark pointing at THAT page (where its callout landed), not
+    # its source sheet — the same page its receipt and HTML deep link point at.
+    src = _pdf(tmp_path)
+    words = [_w(30 + 150 * i, 20 + 24 * j, width=100, height=12)
+             for i in range(5) for j in range(22)]
+    absences = [
+        _f(f"expected item {i}; not found on this sheet", source="M-101.pdf",
+           hint="SHEET", quote="")
+        for i in range(7)
+    ]
+    assign_qc_ids(absences)
+    out = tmp_path / "M-101_reviewed.pdf"
+    res = annotate_pdf(src, absences, out, sheet_meta=_meta(words))
+    assert res.tally.get("review_notes", 0) >= 1          # some overflowed
+
+    doc = pymupdf.open(str(out))
+    try:
+        notes_pno = next(p for p in range(doc.page_count)
+                         if "AI REVIEW NOTES" in doc[p].get_text().upper())
+        child_pages = {t[2] for t in doc.get_toc(simple=False) if t[0] == 2}
+    finally:
+        doc.close()
+
+    # Overflow findings are bookmarked to the notes page (1-based), agreeing with
+    # their receipts — and never dangle past the document.
+    notes_receipts = [r for r in res.receipts if r.placement.expected == "REVIEW_NOTES"]
+    assert notes_receipts
+    assert all(r.output_page_index == notes_pno for r in notes_receipts)
+    assert (notes_pno + 1) in child_pages
+
+
+def test_bookmark_outline_preserves_existing_source_outline(tmp_path):
+    # A source set with its own sheet-navigation bookmarks keeps them in the
+    # reviewed copy — the QC Findings section is appended, never substituted.
+    doc = pymupdf.open()
+    for _ in range(2):
+        doc.new_page(width=792, height=612).insert_text((80, 120), "VAV-3")
+    doc.set_toc([[1, "Sheet Index", 1], [2, "M-101", 1], [2, "M-102", 2]])
+    src = tmp_path / "M-101.pdf"
+    doc.save(str(src))
+    doc.close()
+
+    f = _f("clearance", source="M-101.pdf", page=0, rect=[100, 100, 220, 140])
+    assign_qc_ids([f])
+    out = tmp_path / "M-101_reviewed.pdf"
+    annotate_pdf(src, [f], out)
+
+    rd = pymupdf.open(str(out))
+    try:
+        titles = [t[1] for t in rd.get_toc(simple=False)]
+    finally:
+        rd.close()
+    # Original outline survived …
+    assert "Sheet Index" in titles and "M-101" in titles and "M-102" in titles
+    # … and the QC section was appended.
+    assert any(t.startswith("QC Findings") for t in titles)

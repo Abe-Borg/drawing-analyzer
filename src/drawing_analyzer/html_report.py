@@ -77,6 +77,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from .core.api_config import CHAT_MODEL_DEFAULT
 
@@ -652,12 +653,37 @@ def _geometry_index(ctx: Any) -> dict[tuple[str, int], Any]:
     return out
 
 
+def _pdf_deep_link(pdf_links: "dict[str, dict] | None", qc_id: str) -> str:
+    """The ``<name>.pdf#page=N`` href for a finding's QC-### cell, or ``""``.
+
+    ``#page=N`` is the one PDF-open fragment every browser PDF viewer honors
+    (Chrome/pdfium, Firefox/pdf.js, Safari, Acrobat), so the click reliably
+    opens the marked-up PDF at the finding's page — where the inked cloud + QC
+    tag already sit. Precise zoom-to-rect is delivered inside the PDF's own
+    bookmark outline (see :mod:`drawing_analyzer.annotate`) rather than a
+    ``#zoom`` fragment, whose coordinate origin is inconsistent across viewers.
+    The filename is percent-encoded (spaces etc.) but the ``#page`` fragment is
+    not. Returns ``""`` for any finding without a resolvable link.
+    """
+    if not pdf_links or not qc_id:
+        return ""
+    link = pdf_links.get(qc_id)
+    if not link:
+        return ""
+    pdf = str(link.get("pdf", "") or "")
+    page = link.get("page")
+    if not pdf or not isinstance(page, int) or page < 1:
+        return ""
+    return f"{quote(pdf)}#page={page}"
+
+
 def _finding_row_html(
     f: Any,
     card_index: int | None,
     *,
     link_evidence: bool,
     ambiguous: frozenset[str] = frozenset(),
+    pdf_links: "dict[str, dict] | None" = None,
 ) -> str:
     status = _finding_display_status(f)
     label, cls = _FINDING_STATUS_CHIP.get(status, ("Uncertain", "uncertain"))
@@ -674,6 +700,17 @@ def _finding_row_html(
         f'<a href="#sheet-{card_index}">{html.escape(sheet_id)}</a>'
         if card_index else html.escape(sheet_id)
     )
+    # The QC-### cell deep-links into the marked-up PDF (same export folder) at
+    # this finding's page when a reviewed PDF was produced; otherwise plain text.
+    pdf_href = _pdf_deep_link(pdf_links, qc_id)
+    qc_cell = html.escape(qc_id) or "—"
+    if pdf_href and qc_id:
+        qc_cell = (
+            f'<a class="pdf-link" href="{_esc_attr(pdf_href)}" target="_blank" '
+            f'rel="noopener noreferrer" '
+            f'title="Open {_esc_attr(qc_id)} in the marked-up PDF">'
+            f"{html.escape(qc_id)}</a>"
+        )
     quote_cell = (
         f"<code>{html.escape(quote)}</code>" if quote
         else '<span class="muted">—</span>'
@@ -749,7 +786,7 @@ def _finding_row_html(
         f'<tr class="finding-row" data-category="{_esc_attr(category)}" '
         f'data-severity="{sev_rank}" data-status="{status}" '
         f'data-status-rank="{_STATUS_RANK.get(status, 0)}">'
-        f'<td class="fcol-qcid">{html.escape(qc_id) or "—"}</td>'
+        f'<td class="fcol-qcid">{qc_cell}</td>'
         f'<td class="fcol-sheet">{sheet_cell}</td>'
         f'<td class="fcol-cat">{html.escape(category)}</td>'
         f'<td class="fcol-sev sev-{html.escape(severity or "none")}">'
@@ -768,6 +805,7 @@ def _findings_card(
     *,
     link_evidence: bool = False,
     ambiguous: frozenset[str] = frozenset(),
+    pdf_links: "dict[str, dict] | None" = None,
 ) -> str:
     """The pinned QC Findings card: a sortable, filterable table (``""`` if none).
 
@@ -791,7 +829,8 @@ def _findings_card(
         ref_key = _finding_sheet_key(f, int(getattr(f, "page_index", 0) or 0))
         rows.append(
             _finding_row_html(
-                f, index.get(ref_key), link_evidence=link_evidence, ambiguous=ambiguous
+                f, index.get(ref_key), link_evidence=link_evidence, ambiguous=ambiguous,
+                pdf_links=pdf_links,
             )
         )
 
@@ -1393,6 +1432,7 @@ def build_html_report(
     embed_api_key: bool = False,
     link_evidence: bool = False,
     include_chat: bool = True,
+    pdf_links: "dict[str, dict] | None" = None,
 ) -> str:
     """Render a :class:`DrawingContext` to one self-contained HTML document.
 
@@ -1417,6 +1457,15 @@ def build_html_report(
     are copied alongside), each finding row links a thumbnail of the crop the
     verifier saw, via the run-relative ``verification.evidence_png`` path. The
     single-file report leaves this off to stay light and self-contained.
+
+    ``pdf_links`` — an optional ``{qc_id: {"pdf": name, "page": 1-based}}`` map
+    (built by :func:`~drawing_analyzer.export.build_reviewed_pdf_links` for
+    folder exports, where the marked-up PDF sits alongside the report). When a
+    finding's ``qc_id`` is present, its QC-### cell becomes a deep link that
+    opens that reviewed PDF at the finding's page (``<name>.pdf#page=N``); the
+    inked cloud + QC tag already on that page put the reader on the mark. Absent
+    (single-file reports, non-markup runs) → the cell renders as today's plain
+    text.
     """
     now = now or datetime.now()
     sheets = list(getattr(ctx, "sheets", None) or [])
@@ -1431,7 +1480,8 @@ def build_html_report(
     has_focus = bool(_focus_value(ctx))
     cards = [_focus_card(ctx)] if has_focus else []
     findings_card = _findings_card(
-        ctx, sheets, link_evidence=link_evidence, ambiguous=ambiguous
+        ctx, sheets, link_evidence=link_evidence, ambiguous=ambiguous,
+        pdf_links=pdf_links,
     )
     if findings_card:
         cards.append(findings_card)
@@ -1490,7 +1540,7 @@ def build_html_report(
         # digest omits. Not executable → excluded from script_sources / CSP hashes,
         # and chat-gated so a no-chat report stays network-reference-free.
         chat_markup += (
-            "\n" + _findings_data_block(ctx, sheets, ambiguous=ambiguous)
+            "\n" + _findings_data_block(ctx, sheets, ambiguous=ambiguous, pdf_links=pdf_links)
             + "\n" + _summary_data_block(ctx, source_names, now)
             + "\n" + _starters_data_block(
                 ctx, sheets, source_names, ambiguous=ambiguous
@@ -1738,6 +1788,9 @@ mark{background:#ffe9a8; color:inherit; padding:0 1px; border-radius:2px}
 .findings-table thead th.sort-desc::after{content:" ▼"; color:var(--muted); font-size:10px}
 .findings-table tbody tr:nth-child(even) td{background:#fafbfd}
 .findings-table .fcol-qcid{white-space:nowrap; font-weight:600; color:var(--muted)}
+.findings-table .fcol-qcid a.pdf-link{color:var(--accent); font-weight:600}
+.findings-table .fcol-qcid a.pdf-link:hover{text-decoration:underline}
+.findings-table .fcol-qcid a.pdf-link::after{content:" \2197"; font-size:10px; color:var(--muted)}
 .findings-table .fcol-sheet{white-space:nowrap}
 .findings-table .fcol-cat{text-transform:capitalize; color:var(--muted)}
 .findings-table .fcol-sev{text-transform:capitalize; font-weight:600}
@@ -2060,6 +2113,7 @@ def _findings_data_block(
     sheets: list[Any],
     *,
     ambiguous: frozenset[str] = frozenset(),
+    pdf_links: "dict[str, dict] | None" = None,
 ) -> str:
     """An inert ``#da-findings`` JSON block: the structured QC findings the chat
     assistant can query (fields the prose digest deliberately omits).
@@ -2095,6 +2149,9 @@ def _findings_data_block(
             "id": getattr(f, "qc_id", "") or "",
             "sheet": _disambiguated(sheet_id, f, ambiguous),
             "target": f"sheet-{card_index}" if card_index else "",
+            # The marked-up-PDF deep link mirrored from the table, so the
+            # assistant can cite the same jump-to-page target the reader sees.
+            "pdf": _pdf_deep_link(pdf_links, getattr(f, "qc_id", "") or ""),
             "category": getattr(f, "category", "") or "other",
             "severity": (getattr(f, "severity", "") or "").lower(),
             "status": _finding_display_status(f),

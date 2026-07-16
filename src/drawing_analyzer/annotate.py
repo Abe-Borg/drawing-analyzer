@@ -1570,6 +1570,80 @@ def _result_from_receipts(
 # --------------------------------------------------------------------------- #
 
 
+_OUTLINE_ZOOM = 1.75            # modest zoom-to-mark for bookmark destinations
+
+
+def _set_findings_outline(
+    doc: "pymupdf.Document",
+    pairs: "list[tuple[Finding, MarkupPlacement]]",
+    final_page_by_pid: "dict[str, int]",
+    *,
+    n_index: int,
+) -> None:
+    """Write a ``QC Findings`` bookmark outline into ``doc`` (Phase: HTML↔PDF links).
+
+    One child bookmark per finding whose primary mark was actually drawn — in
+    ``QC-###`` order — whose GOTO destination is the page that mark **landed
+    on** (``final_page_by_pid``, keyed by placement id: the source page for an
+    on-sheet cloud/margin callout, the appended *AI Review Notes* page for one
+    that overflowed there), so a bookmark always points at the mark, the same
+    page its HTML deep link and receipt point at. A rect-bearing finding zooms
+    to the rect's top-left via :func:`_derotate_point` (moving the PAGE_VIEW_V2
+    corner into that page's own space, exactly as the index-page GOTO links do);
+    a rect-less one targets the page top.
+
+    Any outline already on the source PDF (a set's sheet-navigation bookmarks)
+    is **preserved** — the QC section is appended, never substituted: the writer
+    annotates the original document, whose outline must survive into the review
+    copy. Bluebeam and Acrobat surface the merged outline in their Bookmarks
+    panel, making the marked-up set self-navigable independent of the HTML
+    report. No-op when no finding's mark was drawn.
+    """
+    page_count = doc.page_count
+    seen: set[str] = set()
+    entries: list[tuple[Finding, int]] = []
+    for finding, placement in pairs:
+        # One bookmark per finding, at its own anchor — not per cross-sheet leg
+        # or margin/index placement (those share the finding's qc_id).
+        if placement.leg_id != PRIMARY_LEG_ID or finding.id in seen:
+            continue
+        # The page the mark actually landed on (overflow → notes page); fall
+        # back to the source page + front-index offset when the placement drew
+        # nothing recorded (defensive — such a finding has no mark to point at).
+        final_page = final_page_by_pid.get(placement.placement_id)
+        if final_page is None:
+            page_index = int(getattr(finding, "page_index", -1))
+            final_page = page_index + n_index if page_index >= 0 else -1
+        if not (0 <= final_page < page_count):
+            continue
+        seen.add(finding.id)
+        entries.append((finding, final_page))
+    if not entries:
+        return
+    entries.sort(key=lambda e: (e[0].qc_id or "~", e[0].id))
+
+    parent_page = 1 if n_index > 0 else entries[0][1] + 1     # index page, else first mark
+    qc_toc: list = [[1, f"QC Findings ({len(entries)})", parent_page]]
+    for finding, final_page in entries:
+        rect = getattr(finding.anchor, "rect_pdf", None) if finding.anchor else None
+        if rect:
+            point = _derotate_point(doc[final_page], rect[0], rect[1])
+            dest = {"kind": pymupdf.LINK_GOTO, "to": point, "zoom": _OUTLINE_ZOOM}
+        else:
+            dest = {"kind": pymupdf.LINK_GOTO, "to": pymupdf.Point(0, 0), "zoom": 0}
+        qc = finding.qc_id or "QC-?"
+        sheet = (finding.sheet_id or "").strip()
+        text = " ".join((finding.text or "").split())
+        if len(text) > 60:
+            text = text[:57].rstrip() + "…"
+        title = f"[{qc}] " + (f"{sheet} — {text}" if sheet else text) if text else f"[{qc}] {sheet}".rstrip()
+        qc_toc.append([2, title, final_page + 1, dest])
+    # Append after the source PDF's own outline (get_toc(simple=False) round-
+    # trips through set_toc), so existing sheet bookmarks survive the review copy.
+    existing = doc.get_toc(simple=False) or []
+    doc.set_toc(existing + qc_toc)
+
+
 def _annotate_units(
     pdf_path: Path | str,
     pairs: "list[tuple[Finding, MarkupPlacement]]",
@@ -1691,6 +1765,23 @@ def _annotate_units(
                     _stamp_component(doc, xref, pid, component, final_page)
                 except Exception:  # noqa: BLE001
                     _log.warning("could not stamp review note %s for %s", component, pid)
+
+        # A 'QC Findings' bookmark outline so the marked-up set is one-click
+        # navigable in Bluebeam/Acrobat (each issue → the page its mark landed
+        # on, zoomed). Source-page components carry their original page (shifted
+        # by the front index); review-notes components already carry their final
+        # page. I-3: an outline is a nicety — a failure here never sinks the file.
+        try:
+            final_page_by_pid: dict[str, int] = {}
+            for pid, comps in collected.items():
+                if comps:
+                    final_page_by_pid[pid] = comps[0][2] + n_index
+            for pid, comps in notes_collected.items():
+                if comps:
+                    final_page_by_pid[pid] = comps[0][2]
+            _set_findings_outline(doc, pairs, final_page_by_pid, n_index=n_index)
+        except Exception:  # noqa: BLE001
+            _log.warning("could not build the findings bookmark outline for %s", src.name)
 
         out.parent.mkdir(parents=True, exist_ok=True)
         doc.save(str(out), garbage=3, deflate=True)
