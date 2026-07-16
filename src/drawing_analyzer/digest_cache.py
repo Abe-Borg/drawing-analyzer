@@ -334,6 +334,45 @@ def identity_cache_key(
     return h.hexdigest()
 
 
+def review_plan_cache_key(
+    corpus_hash: str,
+    identity_hash: str,
+    *,
+    model: str,
+    prompt_version: str,
+    max_tokens: int,
+    effort: str | None,
+    use_thinking: bool,
+    max_items: int,
+) -> str:
+    """Content-address one run's *model-authored review plan* (Phase A §20.2).
+
+    Keyed on the exact planner corpus AND the identity it consumed (a changed
+    identity must re-plan even over identical digests), plus the request params
+    and the total-items cap (a different cap yields a different plan). Same
+    namespace-isolation rationale as :func:`identity_cache_key` — no
+    ``_SCHEMA_VERSION`` bump. A stable cached plan is what keeps the critique's
+    ``profiles_key`` byte-identical across warm runs, preserving the Phase 19B
+    cached-critique fast path.
+    """
+    h = hashlib.sha256()
+    for part in (
+        f"schema={_SCHEMA_VERSION}",
+        "stage=review_plan",
+        f"model={model or ''}",
+        f"prompt={prompt_version or ''}",
+        f"max_tokens={int(max_tokens)}",
+        f"effort={effort or ''}",
+        f"thinking={'1' if use_thinking else '0'}",
+        f"max_items={int(max_items)}",
+        f"identity={identity_hash or ''}",
+        f"corpus={corpus_hash or ''}",
+    ):
+        h.update(part.encode("utf-8"))
+        h.update(b"\x00")
+    return h.hexdigest()
+
+
 class DigestCache:
     """Thread-safe digest store, optionally persisted to ``path``.
 

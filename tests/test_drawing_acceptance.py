@@ -52,6 +52,7 @@ from drawing_analyzer.html_report import build_html_report  # noqa: E402
 from drawing_analyzer.models import SheetRef  # noqa: E402
 from drawing_analyzer.pipeline import extract_drawing_context  # noqa: E402
 from drawing_analyzer.render import render_sheet  # noqa: E402
+from drawing_analyzer.review_planner import PLANNER_SYSTEM_PROMPT  # noqa: E402
 from drawing_analyzer.set_identity import IDENTITY_SYSTEM_PROMPT  # noqa: E402
 from drawing_analyzer.verify import VERIFY_SYSTEM_PROMPT  # noqa: E402
 from tests.fixtures.fake_anthropic import (  # noqa: E402
@@ -183,6 +184,18 @@ class _AcceptanceClient:
                     return FakeMessage(
                         content=[FakeTextBlock(
                             text="```json\n" + json.dumps(payload) + "\n```")],
+                        usage=FakeUsage(input_tokens=30, output_tokens=10),
+                    )
+                if system == PLANNER_SYSTEM_PROMPT:
+                    plan = {"plans": [{
+                        "discipline": "fire protection", "title": "FP QC",
+                        "items": [{"text": "Flag a hydraulic schedule row with no "
+                                           "density stated.",
+                                   "severity": "medium", "refs": []}],
+                    }]}
+                    return FakeMessage(
+                        content=[FakeTextBlock(
+                            text="```json\n" + json.dumps(plan) + "\n```")],
                         usage=FakeUsage(input_tokens=30, output_tokens=10),
                     )
                 return FakeMessage(content=[FakeTextBlock(text="ok")])  # unused
@@ -860,6 +873,14 @@ def test_gauntlet_exhaustive_status_complete(oracle):
     assert ctx.set_identity is not None
     assert "fire protection" in ctx.set_identity.disciplines
     assert "## Set Identity (model-detected)" in ctx.combined_text
+    # Phase A: exactly one plan-authoring call, its items injected into every
+    # critique read's checklist, snapshotted as model-source profiles.
+    assert oracle.client.plan_calls == 1
+    assert any(r.stage_family == "review_plan" for r in ctx.run_usage.records)
+    assert ctx.review_plan_profiles and ctx.review_plan_markdown
+    assert all("no +30% increase applied" in s
+               for s in oracle.client.critique_system_prompts)
+    assert any(s.source == "model" for s in ctx.profile_snapshots)
 
 
 # ---- the remaining §19.1 set contents: rejection, unanchored, set-level, ----
@@ -1058,11 +1079,49 @@ def _assert_degraded_honestly(ctx, stage: str, allowed=("PARTIAL", "FAILED")):
         ("cross_qc", "cross_qc"),
         ("citation_empty", "citation"),
         ("identity", "identity"),
+        ("review_plan_malformed", "review_plan"),
     ],
 )
 def test_gauntlet_failure_injection_bad_model_output(tmp_path, sabotage, stage):
     ctx = _mini_run(tmp_path, G.mini_client(sabotage=sabotage))
     _assert_degraded_honestly(ctx, stage)
+
+
+def test_gauntlet_plan_failure_leaves_critique_on_user_profiles(tmp_path, monkeypatch):
+    # Phase A: a malformed plan degrades the review_plan stage only — the
+    # critique still runs, and a user-selected profile still rides its prompt.
+    user_dir = tmp_path / "profiles"
+    user_dir.mkdir()
+    (user_dir / "office.md").write_text(
+        "---\nname: office-list\ndisciplines: M\n---\n- Flag every OFFICE-TOKEN mismatch. [high]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DRAWING_ANALYZER_PROFILES_DIR", str(user_dir))
+    client = G.mini_client(sabotage="review_plan_malformed")
+    ctx = _mini_run(tmp_path, client, profiles=["office-list"])
+    assert client.plan_calls == 1
+    assert ctx.review_plan_profiles == []
+    assert sum(client.critique_calls.values()) > 0
+    # The user checklist still rode into every critique read.
+    assert all("OFFICE-TOKEN" in s for s in client.critique_system_prompts)
+    assert [s.name for s in ctx.profile_snapshots] == ["office-list"]
+    assert any(e.startswith("Review plan:") for e in ctx.errors)
+
+
+def test_gauntlet_plan_in_export(oracle):
+    # review_plan.md ships with the export and is hashed into the manifest.
+    import json as _json
+
+    art = oracle.export / "review_plan.md"
+    assert art.exists()
+    body = art.read_text(encoding="utf-8")
+    assert body.startswith("# Model-authored review plan")
+    assert "NFPA 13 2016 §19.2.3.2.5" in body
+    manifest = _json.loads((oracle.export / "run_manifest.json").read_text(encoding="utf-8"))
+    assert any(a["path"] == "review_plan.md" for a in manifest["artifacts"])
+    assert manifest["configuration"]["run_review_plan"] is True
+    # The injected plan appears in the manifest's profiles with source=model.
+    assert any(p.get("source") == "model" for p in manifest["profiles"])
 
 
 def test_gauntlet_identity_failure_never_blocks_the_review(tmp_path):

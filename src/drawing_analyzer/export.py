@@ -345,6 +345,12 @@ def build_export_documents(
             "set_identity.json",
             json.dumps(_sanitize_json(set_identity.to_dict(), roots), indent=2) + "\n",
         ))
+    review_plan_md = str(getattr(ctx, "review_plan_markdown", "") or "")
+    if review_plan_md.strip():
+        # Phase A (§20.2): the full authored checklist, auditable — exported
+        # even when it was not injected (an explicit review_plan=True with the
+        # critique off authors-and-exports without consuming).
+        docs.append(("review_plan.md", review_plan_md))
     if _focus_value(ctx):
         docs.append(("00_focus.md", _focus_document(ctx)))
     for index, sheet, fname in sheet_files:

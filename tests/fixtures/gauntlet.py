@@ -52,6 +52,7 @@ from drawing_analyzer.digest import (
     _SHEET_TEXT_LAYER_RASTER_PLACEHOLDER,
 )
 from drawing_analyzer.prose_harvest import HARVEST_SYSTEM_PROMPT
+from drawing_analyzer.review_planner import PLANNER_SYSTEM_PROMPT
 from drawing_analyzer.set_identity import IDENTITY_SYSTEM_PROMPT
 from drawing_analyzer.synthesis import SYNTHESIS_SYSTEM_PROMPT
 from drawing_analyzer.verify import VERIFY_SYSTEM_PROMPT
@@ -355,7 +356,9 @@ class ScriptedQCClient:
       run must degrade to identity-less behavior, never fail);
     - ``"identity_misdetect"`` — identity confidently reports a WRONG
       discipline/jurisdiction (the advisory contract: nothing may be gated or
-      suppressed by it, and the misdetection stays visible in the manifest).
+      suppressed by it, and the misdetection stays visible in the manifest);
+    - ``"review_plan_malformed"`` — the planner returns unparseable text (the
+      critique must still run with the user profiles only).
     """
 
     def __init__(
@@ -383,6 +386,7 @@ class ScriptedQCClient:
         self.digest_calls: dict[str, int] = {}
         self.digest_request_texts: list[str] = []
         self.critique_calls: dict[str, int] = {}
+        self.critique_system_prompts: list[str] = []
         self.synth_calls = 0
         self.cross_calls = 0
         self.reconcile_calls = 0
@@ -393,6 +397,8 @@ class ScriptedQCClient:
         self.raster_placeholder_seen = False
         self.identity_calls = 0
         self.identity_request_texts: list[str] = []
+        self.plan_calls = 0
+        self.plan_request_texts: list[str] = []
 
         outer = self
 
@@ -424,7 +430,7 @@ class ScriptedQCClient:
         if system.startswith(CROSS_QC_SYSTEM_PROMPT):
             return self._cross()
         if system.startswith(CRITIQUE_SYSTEM_PROMPT):
-            return self._critique(text)
+            return self._critique(text, system)
         if system.startswith(DIGEST_SYSTEM_PROMPT):
             return self._digest(text)
         if system.startswith(CITATION_SYSTEM_PROMPT):
@@ -433,6 +439,8 @@ class ScriptedQCClient:
             return self._synthesis()
         if system == IDENTITY_SYSTEM_PROMPT:
             return self._identity(text)
+        if system == PLANNER_SYSTEM_PROMPT:
+            return self._plan(text)
         return _msg("ok", 1, 1)
 
     # -- per-stage behaviors ------------------------------------------------ #
@@ -448,7 +456,8 @@ class ScriptedQCClient:
         findings = script.findings if script else []
         return _msg(prose + "\n\n" + _fenced({"findings": findings}), 500, 90)
 
-    def _critique(self, text: str) -> FakeMessage:
+    def _critique(self, text: str, system: str = "") -> FakeMessage:
+        self.critique_system_prompts.append(system)
         script = self._sheet_for(text)
         key = script.token if script else "<raster>"
         n = self.critique_calls.get(key, 0) + 1
@@ -530,6 +539,48 @@ class ScriptedQCClient:
             "notes": "",
         }
         return _msg(_fenced(payload), 200, 40)
+
+    def _plan(self, text: str) -> FakeMessage:
+        self.plan_calls += 1
+        self.plan_request_texts.append(text)
+        if self._sabotage == "review_plan_malformed":
+            return _msg("here is a checklist:\n- do good work\n- avoid bad work", 100, 20)
+        payload = {
+            "plans": [
+                {
+                    "discipline": "fire protection",
+                    "title": "Fire protection — NFPA 13 (2016) sprinkler QC",
+                    "items": [
+                        {
+                            "text": ("Flag any dry or preaction schedule row whose "
+                                     "remote design area equals the wet-system base "
+                                     "area (no +30% increase applied)."),
+                            "severity": "high",
+                            "refs": ["NFPA 13 2016 §19.2.3.2.5"],
+                        },
+                        {
+                            "text": ("Expected an inspector's test valve on every dry "
+                                     "system; flag when not found on this sheet."),
+                            "severity": "medium",
+                            "refs": ["NFPA 13 2016"],
+                        },
+                    ],
+                },
+                {
+                    "discipline": "mechanical",
+                    "title": "Mechanical — equipment schedule QC",
+                    "items": [
+                        {
+                            "text": ("Flag a scheduled equipment tag that appears in a "
+                                     "schedule but is never drawn on any plan sheet."),
+                            "severity": "medium",
+                            "refs": [],
+                        },
+                    ],
+                },
+            ]
+        }
+        return _msg(_fenced(payload), 300, 80)
 
     def _citation(self, text: str) -> FakeMessage:
         self.citation_requests.append(text)

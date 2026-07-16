@@ -18,6 +18,7 @@ from drawing_analyzer.critique import CRITIQUE_SYSTEM_PROMPT  # noqa: E402
 from drawing_analyzer.cross_qc import CROSS_QC_SYSTEM_PROMPT  # noqa: E402
 from drawing_analyzer.digest import DIGEST_SYSTEM_PROMPT  # noqa: E402
 from drawing_analyzer.pipeline import extract_drawing_context  # noqa: E402
+from drawing_analyzer.review_planner import PLANNER_SYSTEM_PROMPT  # noqa: E402
 from drawing_analyzer.set_identity import IDENTITY_SYSTEM_PROMPT  # noqa: E402
 from drawing_analyzer.synthesis import SYNTHESIS_SYSTEM_PROMPT  # noqa: E402
 from drawing_analyzer.verify import VERIFY_SYSTEM_PROMPT  # noqa: E402
@@ -49,6 +50,21 @@ def _digest_block(findings: list[dict]) -> str:
 _CITATION_OK = (
     "searched...\n```json\n"
     + json.dumps({"status": "CHECKED_SUPPORTS", "note": "supports", "edition_notes": "e"})
+    + "\n```"
+)
+
+# A parse-valid review-plan reply (Phase A): on exhaustive runs the planner
+# stage is expected, same contract as the identity reply below.
+_PLAN_OK = (
+    "```json\n"
+    + json.dumps({"plans": [{
+        "discipline": "mechanical",
+        "title": "Mechanical QC",
+        "items": [{
+            "text": "Flag a VAV scheduled without a corresponding plan tag.",
+            "severity": "medium", "refs": ["CMC 2022 §310"],
+        }],
+    }]})
     + "\n```"
 )
 
@@ -111,6 +127,9 @@ class _RoutingClient:
                                        usage=FakeUsage(input_tokens=20, output_tokens=8))
                 if system == IDENTITY_SYSTEM_PROMPT:
                     return FakeMessage(content=[FakeTextBlock(text=_IDENTITY_OK)],
+                                       usage=FakeUsage(input_tokens=30, output_tokens=12))
+                if system == PLANNER_SYSTEM_PROMPT:
+                    return FakeMessage(content=[FakeTextBlock(text=_PLAN_OK)],
                                        usage=FakeUsage(input_tokens=30, output_tokens=12))
                 # anything else (synthesis prose)
                 return FakeMessage(content=[FakeTextBlock(text="ok")])
@@ -300,7 +319,7 @@ class _CountingClient:
     def __init__(self, findings: list[dict]):
         self.calls = {
             "digest": 0, "critique": 0, "cross": 0, "synth": 0,
-            "verify": 0, "citation": 0, "identity": 0, "other": 0,
+            "verify": 0, "citation": 0, "identity": 0, "plan": 0, "other": 0,
         }
         prose = "Sheet M-101 - Mechanical - Plan\nVAV-3 serves Room 120."
         digest_text = prose + "\n\n" + _digest_block(findings)
@@ -341,6 +360,10 @@ class _CountingClient:
                     calls["identity"] += 1
                     return FakeMessage(content=[FakeTextBlock(text=_IDENTITY_OK)],
                                        usage=FakeUsage(input_tokens=1, output_tokens=1))
+                if s == PLANNER_SYSTEM_PROMPT:
+                    calls["plan"] += 1
+                    return FakeMessage(content=[FakeTextBlock(text=_PLAN_OK)],
+                                       usage=FakeUsage(input_tokens=1, output_tokens=1))
                 calls["other"] += 1
                 return FakeMessage(content=[FakeTextBlock(text="ok")],
                                    usage=FakeUsage(input_tokens=1, output_tokens=1))
@@ -373,14 +396,20 @@ def test_qc_markups_resolves_and_runs_exhaustive_stack(tmp_path):
     assert client.calls["verify"] >= 1
     assert client.calls["citation"] >= 1
     assert client.calls["identity"] == 1
-    assert cfg.run_identity is True
+    assert client.calls["plan"] == 1
+    assert cfg.run_identity is True and cfg.run_review_plan is True
 
     # Every stage is recorded; with the §18.0 gate open a clean NORMAL
     # exhaustive run earns COMPLETE.
     stages = {s.stage: s.status for s in ctx.stage_results}
-    for name in ("identity", "synthesis", "critique", "cross_qc", "auditors",
-                 "prose_harvest", "verification", "citation", "markup"):
+    for name in ("identity", "review_plan", "synthesis", "critique", "cross_qc",
+                 "auditors", "prose_harvest", "verification", "citation", "markup"):
         assert name in stages, name
+
+    # The authored plan rode the critique checklist and is snapshotted as a
+    # model-source profile after any user selections.
+    assert any(s.source == "model" for s in ctx.profile_snapshots)
+    assert ctx.review_plan_profiles and ctx.review_plan_markdown
     assert ctx.qc_status == "COMPLETE"
     assert ctx.configuration_kind == "NORMAL"
 

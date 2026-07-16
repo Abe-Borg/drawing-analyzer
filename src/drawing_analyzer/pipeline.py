@@ -292,6 +292,13 @@ class DrawingContext:
     # rendered into ``combined_text`` as the additive "Set Identity" section,
     # exported as ``set_identity.json``, and recorded in ``run_manifest.json``.
     set_identity: Any = None
+    # Phase A (§20.2): the model-authored review plan — the per-discipline
+    # Profile objects the planner authored (empty when the stage was off,
+    # skipped, or failed) and the rendered ``review_plan.md`` document. The
+    # profiles here are the AUTHORED set; whether they were also injected into
+    # the critique is visible via ``profile_snapshots`` (source == "model").
+    review_plan_profiles: list = field(default_factory=list)
+    review_plan_markdown: str = ""
     # Phase 23B (§15.6): the run's append-only usage ledger. ``total_input_tokens`` /
     # ``total_output_tokens`` above are derived sums over it; ``total_estimated_cost``
     # and the per-stage-family breakdown come from it too.
@@ -2293,6 +2300,71 @@ def extract_drawing_context(
             )
     _finish_stage(stage_results, journal, identity_stage)
 
+    # Review plan (Phase A §20.2): the model authors THIS set's specialist
+    # checklist from the identity + digests. Injected below through the existing
+    # profile machinery (after the user's own profiles) so checklist rendering,
+    # the critique cache fragment, and manifest snapshots apply unchanged. A
+    # failure degrades this stage only — the critique still runs (I-3).
+    plan_profiles: list = []
+    plan_markdown = ""
+    review_plan_stage = StageResult(stage="review_plan", expected=config.run_review_plan)
+    if config.run_review_plan:
+        journal.emit("STAGE_START", stage="review_plan", sheets=len(sheets))
+        if ok_sheets == 0:
+            review_plan_stage.status = "SKIPPED_VALID"
+        else:
+            if progress is not None:
+                progress(total, total, "Authoring the review plan")
+            try:
+                from .review_planner import author_review_plan
+
+                pres = author_review_plan(
+                    set_identity_obj, sheets, client=client, cache=cache,
+                )
+                review_plan_stage.calls_planned = 1
+                _record_usage(
+                    run_usage, family="review_plan", instance="review_plan",
+                    model=pres.model_used,
+                    transport="CACHE" if pres.cached else "REAL_TIME",
+                    input_tokens=pres.input_tokens,
+                    output_tokens=pres.output_tokens,
+                    cache_hit=pres.cached,
+                    parse_success=pres.ok,
+                    terminal_status="COMPLETE" if pres.ok else "FAILED",
+                )
+                if pres.ok:
+                    plan_profiles = list(pres.profiles)
+                    plan_markdown = pres.markdown
+                    review_plan_stage.calls_succeeded = 1
+                    review_plan_stage.items_out = pres.item_count
+                    if pres.dropped_items:
+                        # Partially usable: some items were malformed/overlong
+                        # and dropped (never truncated) — an honest PARTIAL.
+                        review_plan_stage.status = "PARTIAL"
+                        review_plan_stage.warnings.append(
+                            f"{pres.dropped_items} authored item(s) dropped "
+                            "(malformed, duplicate, overlong, or over the cap)"
+                        )
+                    else:
+                        review_plan_stage.status = "COMPLETE"
+                    journal.emit(
+                        "REVIEW_PLAN_AUTHORED", stage="review_plan",
+                        plans=len(plan_profiles), items=pres.item_count,
+                        dropped=pres.dropped_items,
+                    )
+                else:
+                    review_plan_stage.calls_failed = 1
+                    review_plan_stage.status = "FAILED"
+                    msg = pres.error or "review-plan call failed"
+                    review_plan_stage.errors.append(msg)
+                    errors.append(f"Review plan: {msg}")
+            except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
+                errors.append(f"Review plan: {exc}")
+                review_plan_stage.status = "FAILED"
+                review_plan_stage.errors.append(str(exc))
+                _log.warning("review-plan stage failed: %s", exc)
+    _finish_stage(stage_results, journal, review_plan_stage)
+
     # Critique pass (Phase 11): a second, adversarial full-coverage read per sheet
     # whose only job is finding problems, run self-consistently (twice) and merged.
     # Additive and non-fatal; its findings pool with the digest findings in the QC
@@ -2310,7 +2382,18 @@ def extract_drawing_context(
     from .profiles import resolve_profiles, snapshot_profiles
 
     resolved_profiles = resolve_profiles(profiles)
+    # Phase A (§20.2): the model-authored plan profiles are injected AFTER the
+    # user's own selections — the human's checklist keeps its exact order and
+    # prompt position; the plan is purely additive at the end. They are only
+    # injected when the critique (their sole consumer) actually runs; an
+    # explicitly-authored-but-unconsumed plan still exports its markdown.
+    injected_plan_profiles = list(plan_profiles) if config.run_critique else []
+    all_profiles = resolved_profiles + injected_plan_profiles
     profile_snapshots = snapshot_profiles(resolved_profiles)
+    if injected_plan_profiles:
+        from .review_planner import plan_snapshots
+
+        profile_snapshots = profile_snapshots + plan_snapshots(injected_plan_profiles)
     requested_count = len(list(profiles or []))
     profile_stage = StageResult(stage="profiles", expected=config.run_critique)
     if config.run_critique:
@@ -2336,17 +2419,17 @@ def extract_drawing_context(
             "STAGE_START", stage="critique", sheets=total, reads=config.critique_reads,
         )
         try:
-            if resolved_profiles:
+            if all_profiles:
                 _log.info(
                     "critique: applying %d review profile(s): %s",
-                    len(resolved_profiles),
-                    ", ".join(p.name for p in resolved_profiles),
+                    len(all_profiles),
+                    ", ".join(p.name for p in all_profiles),
                 )
             critique_findings, c_claims, critique_degraded = _run_critique_stage(
                 paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
                 client=client, cache=cache, progress=progress, total=total,
                 max_workers=max_workers, run_usage=run_usage,
-                profiles=resolved_profiles, snapshot_by_path=snapshot_by_path,
+                profiles=all_profiles, snapshot_by_path=snapshot_by_path,
                 use_batch=use_batch, on_log=on_log, on_status=on_status,
             )
             numeric_claims.extend(c_claims)
@@ -2624,6 +2707,8 @@ def extract_drawing_context(
         run_usage=run_usage,
         profile_snapshots=profile_snapshots,
         set_identity=set_identity_obj,
+        review_plan_profiles=plan_profiles,
+        review_plan_markdown=plan_markdown,
         run_journal=journal,
         input_inventory=inventory,
         prose_accounting=qc.prose_accounting,

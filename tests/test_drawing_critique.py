@@ -34,6 +34,7 @@ from drawing_analyzer.critique import (
 )
 from drawing_analyzer.digest import DIGEST_SYSTEM_PROMPT
 from drawing_analyzer.digest_cache import DigestCache
+from drawing_analyzer.review_planner import PLANNER_SYSTEM_PROMPT
 from drawing_analyzer.set_identity import IDENTITY_SYSTEM_PROMPT
 from drawing_analyzer.models import Anchor, Finding, ImageTile, RenderedSheet, SheetRef
 from drawing_analyzer.verify import VERIFY_SYSTEM_PROMPT
@@ -783,6 +784,7 @@ class _PipelineClient:
         self.critique_calls = 0
         self.verify_calls = 0
         self.identity_calls = 0
+        self.plan_calls = 0
         self.critique_had_checklist = False
         outer = self
 
@@ -819,6 +821,18 @@ class _PipelineClient:
                     }
                     return FakeMessage(
                         content=[FakeTextBlock(text="```json\n" + json.dumps(payload) + "\n```")],
+                        usage=FakeUsage(input_tokens=30, output_tokens=10))
+                if system == PLANNER_SYSTEM_PROMPT:
+                    outer.plan_calls += 1
+                    plan = {"plans": [{
+                        "discipline": "fire protection", "title": "FP QC",
+                        "items": [{"text": "Flag a relief valve note set below "
+                                           "175 psi on a wet system.",
+                                   "severity": "medium",
+                                   "refs": ["NFPA 13 2016 §8.1.2"]}],
+                    }]}
+                    return FakeMessage(
+                        content=[FakeTextBlock(text="```json\n" + json.dumps(plan) + "\n```")],
                         usage=FakeUsage(input_tokens=30, output_tokens=10))
                 return FakeMessage(content=[FakeTextBlock(text="ok")])
 
@@ -936,9 +950,13 @@ def test_pipeline_critique_applies_selected_profile(tmp_path, monkeypatch):
     assert client.critique_calls == 2                 # self-consistency still runs twice
     assert client.critique_had_checklist is True       # the FP checklist rode into the prompt
     # §16.4: the selected profile is snapshotted at Analyze time (name/version/hash)
-    # and the profile-application stage is COMPLETE.
-    assert [s.name for s in ctx.profile_snapshots] == ["fire-protection"]
+    # and the profile-application stage is COMPLETE. Phase A: the model-authored
+    # plan snapshots AFTER the user's selections (user first, model last).
+    assert [s.name for s in ctx.profile_snapshots] == [
+        "fire-protection", "model-plan-fire-protection",
+    ]
     assert ctx.profile_snapshots[0].content_hash and ctx.profile_snapshots[0].source == "builtin"
+    assert ctx.profile_snapshots[1].source == "model"
     stages = {s.stage: s.status for s in ctx.stage_results}
     assert stages.get("profiles") == "COMPLETE"
 
@@ -955,7 +973,11 @@ def test_pipeline_unresolved_profile_is_partial(tmp_path, monkeypatch):
     )
     stages = {s.stage: s.status for s in ctx.stage_results}
     assert stages.get("profiles") == "PARTIAL"
-    assert [s.name for s in ctx.profile_snapshots] == ["fire-protection"]
+    # The unresolved user profile is dropped-with-PARTIAL; the model plan still
+    # injects after the resolvable one (a failed user profile never blocks it).
+    assert [s.name for s in ctx.profile_snapshots] == [
+        "fire-protection", "model-plan-fire-protection",
+    ]
 
 
 def test_pipeline_profiles_ignored_without_critique(tmp_path):
