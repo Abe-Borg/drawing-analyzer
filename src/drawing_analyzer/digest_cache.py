@@ -394,6 +394,41 @@ def review_plan_cache_key(
     return h.hexdigest()
 
 
+def citation_cache_key(
+    payload_hash: str,
+    *,
+    model: str,
+    prompt_version: str,
+    max_uses: int,
+) -> str:
+    """Content-address one *citation request chunk*'s verdicts (Phase B).
+
+    ``payload_hash`` is the sha256 of the exact request payload — the ref
+    string, the chunk's normalized claim texts in request order, and the
+    editions/jurisdiction context lines — so an identity change, a reworded
+    claim, or different chunking all miss. ``max_uses`` (the per-request
+    web-search budget) and the prompt version ride the key: verdicts searched
+    under a different budget or prompt are different verdicts. Same
+    namespace-isolation rationale as :func:`identity_cache_key` — the
+    ``stage=citation`` tag means no ``_SCHEMA_VERSION`` bump. Entries carry a
+    ``checked_at`` timestamp the CALLER compares against its TTL (this module
+    stays time-blind; the I-7 carve-out is documented in
+    :mod:`drawing_analyzer.citation_check`).
+    """
+    h = hashlib.sha256()
+    for part in (
+        f"schema={_SCHEMA_VERSION}",
+        "stage=citation",
+        f"model={model or ''}",
+        f"prompt={prompt_version or ''}",
+        f"max_uses={int(max_uses)}",
+        f"payload={payload_hash or ''}",
+    ):
+        h.update(part.encode("utf-8"))
+        h.update(b"\x00")
+    return h.hexdigest()
+
+
 class DigestCache:
     """Thread-safe digest store, optionally persisted to ``path``.
 

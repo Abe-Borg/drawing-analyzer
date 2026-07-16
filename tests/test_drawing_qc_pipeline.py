@@ -414,6 +414,40 @@ def test_qc_markups_resolves_and_runs_exhaustive_stack(tmp_path):
     assert ctx.configuration_kind == "NORMAL"
 
 
+def test_pipeline_warm_rerun_serves_citation_cache(tmp_path):
+    # Phase B: a warm re-run serves citation verdicts from the TTL cache —
+    # zero citation API calls, zero web-search fees, a CACHE usage record,
+    # and byte-identical verdicts on the findings.
+    from drawing_analyzer.digest_cache import DigestCache
+
+    src = _make_pdf(tmp_path / "M-101.pdf")
+    cache = DigestCache(None, persist=False)
+    c1 = _CountingClient([_VAV_FINDING])
+    ctx1 = extract_drawing_context(
+        [src], client=c1, rows=2, cols=2, qc_markups=True, verify_findings=False,
+        cache=cache, qc_work_dir=tmp_path / "q1",
+    )
+    assert c1.calls["citation"] >= 1
+
+    c2 = _CountingClient([_VAV_FINDING])
+    ctx2 = extract_drawing_context(
+        [src], client=c2, rows=2, cols=2, qc_markups=True, verify_findings=False,
+        cache=cache, qc_work_dir=tmp_path / "q2",
+    )
+    assert c2.calls["citation"] == 0                        # served from cache
+    stages = {s.stage: s.status for s in ctx2.stage_results}
+    assert stages["citation"] == "COMPLETE"                 # a hit is never PARTIAL
+    recs = [r for r in ctx2.run_usage.records if r.stage_family == "citation"]
+    assert any(r.transport == "CACHE" and r.cache_hit for r in recs)
+    assert all(r.input_tokens == 0 and r.output_tokens == 0 for r in recs)
+    assert all((r.billable_tool_uses or {}).get("web_search", 0) == 0 for r in recs)
+    # The reconstructed verdicts match the cold run's.
+    f1 = next(f for f in ctx1.findings if f.refs)
+    f2 = next(f for f in ctx2.findings if f.refs)
+    assert [(a.reference, a.status) for a in f2.citations] == \
+        [(a.reference, a.status) for a in f1.citations]
+
+
 def test_audit_only_makes_no_incremental_api_calls(tmp_path):
     # DA-013 / §15.3: the deterministic-audit-only path runs the auditors over the
     # already-extracted text/geometry and makes ZERO model calls beyond the digest —

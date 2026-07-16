@@ -170,6 +170,11 @@ example is parked at `docs/examples/fire_protection.md`.
   what is stored or sent changes.
 - **I-7 — deterministic assembly:** same inputs → same ordering (QC numbering,
   index rows, merged output); no randomness or time-dependence in assembly.
+  One documented carve-out (Phase B): the citation verdict cache's TTL clock
+  (`DRAWING_ANALYZER_CITATION_TTL_DAYS`, injectable `now=`) governs cache
+  admission/refresh only — whether an API call is made — never numbering,
+  ordering, or merged output; a warm run's assembled output is byte-identical
+  to the run that populated the cache.
 - **The model never calculates:** models transcribe `NumericClaim`s;
   `auditors/arithmetic.py` does the math with `Decimal` — never `eval`, never
   the model's own arithmetic. The host *operation* is always deterministic, but the

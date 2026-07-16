@@ -1135,6 +1135,7 @@ def _run_qc_stages(
     accepted_documents: list | None = None,
     journal: Any = None,
     set_identity: Any = None,
+    cache: Any = None,
 ) -> _QCResult:
     """Run the ledger pipeline: ingest → harvest → anchor → number → verify → markups.
 
@@ -1496,7 +1497,7 @@ def _run_qc_stages(
             try:
                 cires = check_citations(
                     all_findings, geometries, client=client, progress=_citation_progress,
-                    identity=set_identity,
+                    identity=set_identity, cache=cache,
                 )
                 # Web-search fee (Phase B exact billing): the stage sums the
                 # server-reported ``usage.server_tool_use.web_search_requests``
@@ -1508,17 +1509,30 @@ def _run_qc_stages(
                 # (DA-017 §16.5) — not only on a hard error — so a request/parser/
                 # tool failure for a cited claim can never masquerade as COMPLETE.
                 partial = bool(cires.error) or bool(getattr(cires, "partial", False))
+                # ``web_search_requests`` already embeds the per-request lower
+                # bound for responses that carried no server count — and is
+                # honestly ZERO on a fully cache-served run, so no ``or``
+                # fallback may reintroduce a fee for work that never ran.
                 _record_usage(
                     run_usage, family="citation", instance="citation",
                     model=citation_model(),
                     input_tokens=cires.input_tokens, output_tokens=cires.output_tokens,
                     billable_tool_uses={"web_search": int(
-                        getattr(cires, "web_search_requests", 0)
-                        or getattr(cires, "requests", 0)
-                        or getattr(cires, "checked", 0) or 0
+                        getattr(cires, "web_search_requests", 0) or 0
                     )},
                     terminal_status="PARTIAL" if partial else "COMPLETE",
                 )
+                cached_chunks = int(getattr(cires, "cached_requests", 0) or 0)
+                if cached_chunks:
+                    # Phase B: verdict-cache hits ride their own CACHE record
+                    # (zero tokens, zero fees) so a warm run's savings are
+                    # visible in the ledger, mirroring the digest convention.
+                    _record_usage(
+                        run_usage, family="citation", instance="citation_cache",
+                        model=citation_model(), transport="CACHE",
+                        cache_hit=True, parent="citation",
+                        terminal_status="COMPLETE",
+                    )
                 citation_stage.items_out = len(getattr(cires, "assessments", []) or [])
                 if partial:
                     if cires.error:
@@ -2690,6 +2704,7 @@ def extract_drawing_context(
         accepted_documents=inventory.accepted_documents,
         journal=journal,
         set_identity=set_identity_obj,
+        cache=cache,
     )
     stage_results.extend(qc.stage_results)
 

@@ -437,6 +437,117 @@ def test_check_citations_falls_back_to_one_search_per_request():
     assert res.requests == 2 and res.web_search_requests == 2
 
 
+# --- Phase B: the per-request TTL verdict cache ------------------------------ #
+
+
+def _cited_finding():
+    return _f("cites relief valve", refs=["NFPA 13 §8.1.2"])
+
+
+def test_citation_ttl_days_env(monkeypatch):
+    from drawing_analyzer.citation_check import citation_ttl_days
+
+    assert citation_ttl_days() == 30                       # default
+    monkeypatch.setenv("DRAWING_ANALYZER_CITATION_TTL_DAYS", "7")
+    assert citation_ttl_days() == 7
+    monkeypatch.setenv("DRAWING_ANALYZER_CITATION_TTL_DAYS", "0")
+    assert citation_ttl_days() == 0                        # 0 = cache disabled
+    monkeypatch.setenv("DRAWING_ANALYZER_CITATION_TTL_DAYS", "-3")
+    assert citation_ttl_days() == 30                       # invalid -> default
+    monkeypatch.setenv("DRAWING_ANALYZER_CITATION_TTL_DAYS", "forever")
+    assert citation_ttl_days() == 30
+
+
+def test_citation_cache_hit_reconstructs_and_expires():
+    from drawing_analyzer.digest_cache import DigestCache
+
+    cache = DigestCache(None, persist=False)
+    t = {"now": 1_000_000.0}
+    clock = lambda: t["now"]  # noqa: E731 - injectable test clock (I-4)
+
+    f1 = _cited_finding()
+    c1 = _CitationClient([_verdict_block("CHECKED_MISMATCH", note="moved")])
+    r1 = check_citations([f1], [], client=c1, sleep=lambda *_: None,
+                         cache=cache, now=clock)
+    assert r1.requests == 1 and r1.cached_requests == 0
+
+    # Warm within the TTL: served from cache, no API call, verdict identical —
+    # a cached MISMATCH still reads mismatched.
+    f2 = _cited_finding()
+    c2 = _CitationClient([_verdict_block("CHECKED_SUPPORTS")])   # would flip if called
+    r2 = check_citations([f2], [], client=c2, sleep=lambda *_: None,
+                         cache=cache, now=clock)
+    assert c2.captured == []
+    assert r2.cached_requests == 1 and r2.requests == 0
+    assert r2.web_search_requests == 0 and not r2.partial
+    assert f2.citation.status == "CHECKED_MISMATCH"
+    assert f2.citations[0].note == "moved"
+
+    # 31 days later the entry is stale: a live re-check runs and overwrites.
+    t["now"] += 31 * 86400
+    f3 = _cited_finding()
+    c3 = _CitationClient([_verdict_block("CHECKED_SUPPORTS")])
+    r3 = check_citations([f3], [], client=c3, sleep=lambda *_: None,
+                         cache=cache, now=clock)
+    assert len(c3.captured) == 1
+    assert r3.requests == 1 and r3.cached_requests == 0
+    assert f3.citation.status == "CHECKED_SUPPORTS"
+
+
+def test_citation_cache_ttl_zero_disables_read_and_write(monkeypatch):
+    from drawing_analyzer.digest_cache import DigestCache
+
+    monkeypatch.setenv("DRAWING_ANALYZER_CITATION_TTL_DAYS", "0")
+    cache = DigestCache(None, persist=False)
+    for _ in range(2):
+        f = _cited_finding()
+        c = _CitationClient([_verdict_block("CHECKED_SUPPORTS")])
+        res = check_citations([f], [], client=c, sleep=lambda *_: None, cache=cache)
+        assert len(c.captured) == 1 and res.cached_requests == 0
+    assert cache.stats()["size"] == 0                     # nothing was written
+
+
+def test_citation_cache_never_stores_partial_chunks():
+    from drawing_analyzer.digest_cache import DigestCache
+
+    cache = DigestCache(None, persist=False)
+    f = _cited_finding()
+    res = check_citations([f], [], client=_CitationClient(["garbled, no json"]),
+                          sleep=lambda *_: None, cache=cache)
+    assert res.partial and cache.stats()["size"] == 0
+    # The next run re-checks live (no stale UNCHECKED can ever be served).
+    f2 = _cited_finding()
+    c2 = _CitationClient([_verdict_block("CHECKED_SUPPORTS")])
+    res2 = check_citations([f2], [], client=c2, sleep=lambda *_: None, cache=cache)
+    assert len(c2.captured) == 1 and not res2.partial
+
+
+def test_citation_cache_key_sensitivity(monkeypatch):
+    # Any change to editions context, jurisdiction, claim text, model, or the
+    # search budget must MISS — never serve a verdict computed under different
+    # conditions.
+    from drawing_analyzer.digest_cache import DigestCache
+    from drawing_analyzer.models import SetIdentity
+
+    cache = DigestCache(None, persist=False)
+
+    def _live_run(**kw):
+        f = kw.pop("finding", None) or _cited_finding()
+        c = _CitationClient([_verdict_block("CHECKED_SUPPORTS")])
+        check_citations([f], kw.pop("geometries", []), client=c,
+                        sleep=lambda *_: None, cache=cache, **kw)
+        return len(c.captured)
+
+    assert _live_run() == 1                                # populate
+    assert _live_run() == 0                                # identical -> hit
+    assert _live_run(geometries=[_Geom("PER NFPA 13 2016")]) == 1   # editions differ
+    assert _live_run(identity=SetIdentity(jurisdiction="Berlin, Germany")) == 1
+    assert _live_run(finding=_f("different claim text", refs=["NFPA 13 §8.1.2"])) == 1
+    assert _live_run(model="claude-haiku-4-5") == 1        # model rides the key
+    monkeypatch.setenv("DRAWING_ANALYZER_WEB_SEARCH_MAX_USES", "9")
+    assert _live_run() == 1                                # search budget re-keys
+
+
 def test_check_citations_garbled_reply_degrades_to_unchecked():
     f = _f("cites", refs=["CMC 310"])
     client = _CitationClient(["no json here at all"])

@@ -37,9 +37,23 @@ its iteration cap); the call is resumed a bounded number of times.
 
 PDF-engine-free (I-5); real-time only (citation checks are few and interactive —
 they don't batch).
+
+**Per-request verdict cache with a TTL (Phase B).** Complete, fully-parsed
+verdicts are cached content-addressed in the run's ``DigestCache`` (namespace
+``stage=citation``) keyed on the exact ref + claim texts + editions/jurisdiction
+context + model + prompt version + search budget — so a warm re-run serves the
+same verdicts without re-paying for web searches. Web truth drifts, so entries
+expire: ``DRAWING_ANALYZER_CITATION_TTL_DAYS`` (default 30; ``0`` disables the
+cache entirely, no read and no write). A chunk with ANY unchecked claim, parse
+failure, or error is **never cached**, so a cache hit can never mask the §8
+unchecked-claim PARTIAL gate. I-7 carve-out: the TTL clock governs cache
+admission/refresh only — whether an API call is made — never QC numbering,
+index ordering, or merged-output assembly; a warm run's assembled output is
+byte-identical to the run that populated the cache.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import time
@@ -204,6 +218,38 @@ actually verified this claim against, e.g. NFPA 13 2016, or \\"\\" if unclear>",
 \\"\\""}. Include exactly one entry per claim handle."""
 
 
+_CITATION_TASK_INSTRUCTION = (
+    "Check the citation with web search and answer in the required json block, "
+    "with one assessment per claim handle above."
+)
+
+# Content hash of the static prompt pieces (I-6): a prompt edit re-keys the
+# per-request verdict cache automatically. Dynamic request text (ref, claims,
+# editions, jurisdiction) is content-addressed separately in the cache key.
+CITATION_PROMPT_VERSION = hashlib.sha256(
+    (CITATION_SYSTEM_PROMPT + "\x00" + _CITATION_TASK_INSTRUCTION).encode("utf-8")
+).hexdigest()[:16]
+
+_DEFAULT_CITATION_TTL_DAYS = 30
+
+
+def citation_ttl_days() -> int:
+    """Verdict-cache TTL in days (``DRAWING_ANALYZER_CITATION_TTL_DAYS``).
+
+    Default 30. ``0`` disables the citation cache entirely — no read, no write
+    (one knob: no TTL means no cache). Invalid/negative values fall back to the
+    default.
+    """
+    raw = os.environ.get("DRAWING_ANALYZER_CITATION_TTL_DAYS", "")
+    try:
+        value = int(raw.strip())
+    except (ValueError, AttributeError):
+        return _DEFAULT_CITATION_TTL_DAYS
+    if value == 0:
+        return 0
+    return value if value > 0 else _DEFAULT_CITATION_TTL_DAYS
+
+
 def _normalize_claim(text: str) -> str:
     """Fold a claim (a finding's text) for grouping identical claims."""
     return " ".join((text or "").split()).lower()
@@ -222,10 +268,7 @@ def _build_citation_prompt(
         "CLAIMS CITING IT (verify each; echo its handle):",
     ]
     lines += [f"[{handle}] {text}" for handle, text in handled_claims]
-    lines.append(
-        "Check the citation with web search and answer in the required json block, "
-        "with one assessment per claim handle above."
-    )
+    lines.append(_CITATION_TASK_INSTRUCTION)
     return "\n".join(lines)
 
 
@@ -460,6 +503,7 @@ class CitationCheckResult:
 
     checked: int = 0                 # unique references a request was sent for
     requests: int = 0                # claim-complete requests actually issued
+    cached_requests: int = 0         # request chunks served from the verdict cache
     supports: int = 0
     mismatches: int = 0
     unchecked: int = 0
@@ -507,6 +551,14 @@ def _combine_finding_citation(assessments: list[CitationAssessment]) -> Citation
     return None
 
 
+def _citation_payload_hash(
+    ref: str, claim_texts: list[str], editions_line: str, jurisdiction_line: str
+) -> str:
+    """Content hash of one request chunk's exact payload (cache key input)."""
+    joined = "\x1f".join([ref, *claim_texts, editions_line, jurisdiction_line])
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()
+
+
 def check_citations(
     findings: Iterable[Finding],
     geometries: Iterable[Any],
@@ -517,6 +569,8 @@ def check_citations(
     sleep: Any = time.sleep,
     progress: Any = None,
     identity: Any = None,
+    cache: Any = None,
+    now: Any = time.time,
 ) -> CitationCheckResult:
     """Check every reference against the exact claims citing it; attach assessments.
 
@@ -533,6 +587,11 @@ def check_citations(
     or ``None``) enriches the prompt only: its adopted codes merge ahead of the
     regex edition harvest and its locale rides a JURISDICTION line. ``None``
     reproduces the pre-identity behavior byte-for-byte.
+
+    ``cache`` (Phase B, a :class:`~drawing_analyzer.digest_cache.DigestCache`
+    or ``None``) enables the per-request verdict cache; ``now`` is the
+    injectable clock its TTL comparison uses (tests stay deterministic, I-4).
+    Only COMPLETE chunks are ever cached — see the module docstring.
     """
     findings = [f for f in findings if getattr(f, "refs", None)]
 
@@ -594,18 +653,89 @@ def check_citations(
     total = len(requests)
     done = 0
 
+    # Phase B verdict cache: content-addressed per request chunk; TTL compared
+    # here with the injectable clock (DigestCache itself stays time-blind).
+    ttl_days = citation_ttl_days()
+    use_cache = cache is not None and ttl_days > 0
+    ttl_seconds = float(ttl_days) * 86400.0
+
+    def _cache_key_for(ref: str, handled: list) -> str:
+        from .digest_cache import citation_cache_key
+
+        return citation_cache_key(
+            _citation_payload_hash(
+                ref, [_normalize_claim(c["text"]) for _h, c in handled],
+                editions_line, jurisdiction_line,
+            ),
+            model=model,
+            prompt_version=CITATION_PROMPT_VERSION,
+            max_uses=web_search_max_uses(),
+        )
+
+    def _fresh_cached_entry(key: str, handled: list) -> dict | None:
+        entry = cache.get(key)
+        if entry is None or not isinstance(entry.get("per_claim"), dict):
+            return None
+        try:
+            checked_at = float(entry.get("checked_at", 0) or 0)
+        except (TypeError, ValueError):
+            return None
+        if not (float(now()) - checked_at < ttl_seconds):
+            return None                       # expired -> miss (fresh re-check)
+        per_claim = entry["per_claim"]
+        # Complete-only admission makes this redundant in practice, but a
+        # cache file is external input: verify every claim is covered by a
+        # valid verdict before serving (an incomplete entry can never mask
+        # the §8 unchecked-claim gate).
+        for _h, claim in handled:
+            fields = per_claim.get(_normalize_claim(claim["text"]))
+            if not isinstance(fields, dict) or fields.get("status") not in _VALID_VERDICTS:
+                return None
+        return entry
+
     def _run(req: tuple) -> tuple:
         ref, rid, handled = req
+        key = _cache_key_for(ref, handled) if use_cache else None
+        if key is not None:
+            entry = _fresh_cached_entry(key, handled)
+            if entry is not None:
+                return ref, rid, handled, None, entry, key
         outcome = _check_one(
             ref, editions_line, [(h, c["text"]) for h, c in handled],
             client=client, model=model, max_retries=max_retries, sleep=sleep,
             jurisdiction_line=jurisdiction_line,
         )
-        return ref, rid, handled, outcome
+        return ref, rid, handled, outcome, None, key
 
+    fresh_requests = 0
     with ThreadPoolExecutor(max_workers=min(_MAX_WORKERS, len(requests))) as pool:
-        for ref, rid, handled, outcome in pool.map(_run, requests):
+        for ref, rid, handled, outcome, entry, key in pool.map(_run, requests):
             done += 1
+            if entry is not None:
+                # Served from the verdict cache: zero tokens, zero searches.
+                result.cached_requests += 1
+                per_claim = entry["per_claim"]
+                cached_notes = str(entry.get("edition_notes", "") or "")
+                cached_sources = [str(u) for u in (entry.get("sources") or [])]
+                for handle, claim in handled:
+                    fields = per_claim[_normalize_claim(claim["text"])]
+                    claim_assessments[(ref, _normalize_claim(claim["text"]))] = CitationAssessment(
+                        reference=ref,
+                        status=str(fields.get("status", "UNCHECKED")),
+                        claim_finding_ids=list(claim["finding_ids"]),
+                        note=str(fields.get("note", "") or ""),
+                        edition_notes=cached_notes,
+                        adopted_edition=editions_line,
+                        checked_edition=str(fields.get("checked_edition", "") or ""),
+                        current_edition=str(fields.get("current_edition", "") or ""),
+                        evidence_url=str(fields.get("evidence_url", "") or ""),
+                        sources=cached_sources,
+                        request_id=rid,
+                    )
+                if progress is not None:
+                    progress(done, total, f"Checking citation {done}/{total}")
+                continue
+            fresh_requests += 1
             result.input_tokens += outcome.input_tokens
             result.output_tokens += outcome.output_tokens
             # Exact where the server reported it; else the 1-per-request
@@ -623,6 +753,7 @@ def check_citations(
                     )
                 per: dict[str, dict] = {}
                 edition_notes = ""
+                parsed = False
             else:
                 per, edition_notes, parsed = _parse_assessments(
                     outcome.raw_text, [h for h, _c in handled]
@@ -648,12 +779,33 @@ def check_citations(
                     sources=list(outcome.sources),
                     request_id=rid,
                 )
+            # Complete-only admission (Phase B): cache the chunk only when it
+            # parsed AND every claim got a valid verdict — a partial/failed
+            # chunk always re-runs live, so the cache can never mask PARTIAL.
+            if (
+                key is not None and parsed and outcome.error is None
+                and all(h in per for h, _c in handled)
+            ):
+                cache.put(key, {
+                    "per_claim": {
+                        _normalize_claim(c["text"]): dict(per[h])
+                        for h, c in handled
+                    },
+                    "edition_notes": edition_notes,
+                    "sources": list(outcome.sources),
+                    "web_search_requests": outcome.web_search_requests,
+                    "checked_at": float(now()),
+                    "model": model,
+                    "prompt_version": CITATION_PROMPT_VERSION,
+                })
             if progress is not None:
                 progress(done, total, f"Checking citation {done}/{total}")
 
     result.assessments = list(claim_assessments.values())
     result.checked = len(ref_order)
-    result.requests = len(requests)          # claim-complete requests actually issued
+    # ``requests`` = claim-complete API requests actually ISSUED this run;
+    # cache-served chunks count in ``cached_requests`` (zero tokens/searches).
+    result.requests = fresh_requests
 
     # Count unique references by dominant verdict (mismatch dominates) and populate
     # the compat ``by_ref`` map (one dominant Citation per reference).
