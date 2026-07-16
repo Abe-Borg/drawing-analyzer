@@ -1168,6 +1168,7 @@ def _run_qc_stages(
     qc_markups = config.run_markup
     markup_verified_only = config.markup_verified_only
     verify_enabled = config.run_verification
+    investigation_enabled = config.run_investigation
     citation_check_enabled = config.run_citation
     ink_rejected = config.ink_rejected
     focus_findings_to_markups = config.focus_findings_to_markups
@@ -1847,6 +1848,7 @@ def extract_drawing_context(
     citation_check: bool | None = None,
     identity: bool | None = None,
     review_plan: bool | None = None,
+    investigate: bool | None = None,
     ink_rejected: bool = False,
     focus_findings_to_markups: bool = False,
     qc_work_dir: Path | None = None,
@@ -2022,6 +2024,7 @@ def extract_drawing_context(
         verify_findings=verify_findings,
         identity=identity,
         review_plan=review_plan,
+        investigate=investigate,
         markup_verified_only=markup_verified_only,
         ink_rejected=ink_rejected,
         focus_findings_to_markups=focus_findings_to_markups,

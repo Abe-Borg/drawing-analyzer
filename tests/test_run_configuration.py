@@ -226,6 +226,50 @@ def test_to_dict_carries_planning_switches():
 
 
 # --------------------------------------------------------------------------- #
+# resolve_run_configuration — Phase C investigation loop
+# --------------------------------------------------------------------------- #
+
+
+def test_investigation_rides_the_verification_stage():
+    # Exhaustive turns it on with everything else.
+    c = resolve_run_configuration(qc_markups=True)
+    assert c.run_investigation is True
+    # Disabling verification drops investigation as a consequence, NOT a second
+    # override entry — nothing UNCERTAIN would exist to escalate.
+    c = resolve_run_configuration(qc_markups=True, verify_findings=False)
+    assert c.run_investigation is False
+    assert c.debug_overrides == ("verification",)
+    # Standard and free-battery runs keep it off.
+    assert resolve_run_configuration().run_investigation is False
+    assert resolve_run_configuration(reference_audit=True).run_investigation is False
+
+
+def test_explicit_investigate_false_inside_exhaustive_is_debug_override():
+    c = resolve_run_configuration(qc_markups=True, investigate=False)
+    assert c.run_investigation is False
+    assert "investigation" in c.debug_overrides
+    assert c.configuration_kind == "DEBUG_OVERRIDE"
+    # Verification itself still runs — only the escalation was disabled.
+    assert c.run_verification is True
+
+
+def test_explicit_investigate_true_is_honored_and_keeps_the_free_battery():
+    # An explicit True outside exhaustive is an expert invocation, honored
+    # verbatim (it yields SKIPPED_VALID downstream with no UNCERTAIN verdicts).
+    c = resolve_run_configuration(investigate=True)
+    assert c.run_investigation is True and c.run_verification is False
+    # Like verification (whose markup gate it rides), the stage never runs
+    # outside markup, so it does NOT defeat the zero-API promise (DA-013).
+    c = resolve_run_configuration(reference_audit=True, investigate=True)
+    assert c.deterministic_audit_only is True
+
+
+def test_to_dict_carries_investigation_switch():
+    assert resolve_run_configuration(qc_markups=True).to_dict()["run_investigation"] is True
+    assert resolve_run_configuration().to_dict()["run_investigation"] is False
+
+
+# --------------------------------------------------------------------------- #
 # roll_up_qc_status — the §3.3 deterministic roll-up + the §15.5 gate
 # --------------------------------------------------------------------------- #
 

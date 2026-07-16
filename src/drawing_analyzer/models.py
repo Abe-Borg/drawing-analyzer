@@ -1352,7 +1352,7 @@ CONFIGURATION_KINDS = ("NORMAL", "DEBUG_OVERRIDE")
 # exhaustive QC and are not individually overridable here.
 _OVERRIDABLE_EXHAUSTIVE_STAGES = (
     "synthesis", "critique", "cross_qc", "verification", "citation",
-    "identity", "review_plan",
+    "identity", "review_plan", "investigation",
 )
 
 
@@ -1658,6 +1658,9 @@ class RunConfiguration:
     # a standard digest-only run keeps them off so it stays zero-extra-cost.
     run_identity: bool = False
     run_review_plan: bool = False
+    # Phase C (universal reviewer): the agentic investigation loop that escalates
+    # UNCERTAIN verification verdicts. Rides the verification stage it escalates.
+    run_investigation: bool = False
     # Markup gating / transport, carried through verbatim (not product-derived).
     markup_verified_only: bool = False
     ink_rejected: bool = False
@@ -1700,6 +1703,7 @@ class RunConfiguration:
             "run_coverage_check": self.run_coverage_check,
             "run_identity": self.run_identity,
             "run_review_plan": self.run_review_plan,
+            "run_investigation": self.run_investigation,
             "markup_verified_only": self.markup_verified_only,
             "ink_rejected": self.ink_rejected,
             "focus_findings_to_markups": self.focus_findings_to_markups,
@@ -1719,6 +1723,7 @@ def resolve_run_configuration(
     verify_findings: "bool | None" = None,
     identity: "bool | None" = None,
     review_plan: "bool | None" = None,
+    investigate: "bool | None" = None,
     markup_verified_only: bool = False,
     ink_rejected: bool = False,
     focus_findings_to_markups: bool = False,
@@ -1780,6 +1785,16 @@ def resolve_run_configuration(
     else:
         run_review_plan = _exhaustive_switch(review_plan, "review_plan")
 
+    # Phase C: the agentic investigation loop escalates UNCERTAIN verification
+    # verdicts, so unspecified it runs exactly when verification runs (an
+    # explicit flag is honored through the same tri-state contract). Enabling
+    # it without verification is honored verbatim but yields SKIPPED_VALID
+    # downstream — no UNCERTAIN verdicts exist to escalate.
+    if investigate is None:
+        run_investigation = run_verification
+    else:
+        run_investigation = _exhaustive_switch(investigate, "investigation")
+
     # ``deterministic_audit_only`` is the "free battery, zero incremental API"
     # promise (DA-013): true ONLY when reference_audit is on, QC is not exhaustive,
     # and no expert flag enabled a model-calling stage. An expert who combines
@@ -1787,6 +1802,10 @@ def resolve_run_configuration(
     # is no longer zero-cost, so the flag must not claim it is. (verification does
     # not run outside markup, so it never breaks the promise.) The Phase A
     # planning stages are paid model calls, so they join the paid-expert set.
+    # Investigation is deliberately absent here: like verification (whose gate
+    # it rides), the stage runs only inside markup runs, so an explicit
+    # ``investigate=True`` outside markup never places a call and cannot break
+    # the zero-API promise.
     any_paid_expert = (
         run_synthesis or run_critique or run_cross_qc or run_citation
         or run_identity or run_review_plan
@@ -1815,6 +1834,7 @@ def resolve_run_configuration(
         run_coverage_check=exhaustive,
         run_identity=run_identity,
         run_review_plan=run_review_plan,
+        run_investigation=run_investigation,
         markup_verified_only=bool(markup_verified_only),
         ink_rejected=bool(ink_rejected),
         focus_findings_to_markups=bool(focus_findings_to_markups),
@@ -1881,7 +1901,7 @@ def roll_up_qc_status(
 USAGE_TRANSPORTS = ("REAL_TIME", "BATCH", "CACHE")
 USAGE_STAGE_FAMILIES = (
     "digest", "critique", "synthesis", "focus", "harvest", "cross_qc", "verify", "citation",
-    "identity", "review_plan",
+    "identity", "review_plan", "investigate",
 )
 USAGE_TERMINAL_STATUSES = ("COMPLETE", "PARTIAL", "FAILED")
 
