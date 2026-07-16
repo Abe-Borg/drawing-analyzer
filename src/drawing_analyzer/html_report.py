@@ -47,6 +47,13 @@ widget says exactly that. Pass ``include_chat=False`` to omit the widget (and
 every network reference) entirely. The *Python* module still performs no
 network I/O.
 
+**Transcript persistence.** The conversation lives only in the tab's memory
+(nothing is written to disk or a server), so a **Save as PDF** control
+reformats the already-rendered message DOM for print and hands off to the
+browser's native print dialog (no new script, host, or dependency — "Save as
+PDF" is just a print destination there). A ``beforeunload`` handler warns
+before a refresh, close, or navigation silently drops that history.
+
 **Security boundary.** All model output and every run-derived value (filenames,
 titles, errors, quotes…) is treated as hostile — see the trust-boundary note
 above the imports: escaped-into-content on the Python side, safe-DOM-built on
@@ -2159,9 +2166,11 @@ _CHAT_HTML = """
   <header class="da-chat-head">
     <span class="da-chat-title">Report Q&amp;A</span>
     <span class="da-chat-model" id="da-chat-model"></span>
+    <button id="da-chat-export" type="button" class="ghost-btn" title="Save this conversation as a PDF via your browser's print dialog">Save as PDF</button>
     <button id="da-chat-clear" type="button" class="ghost-btn">New chat</button>
     <button id="da-chat-close" type="button" aria-label="Close">×</button>
   </header>
+  <div id="da-chat-print-head"></div>
   <div id="da-chat-msgs">
     <div class="da-msg da-hint">Ask anything about this drawing set — <em>“What are the
     biggest conflicts?”</em>, <em>“Which sheets mention VAV-3?”</em>, <em>“Summarize the
@@ -2312,8 +2321,35 @@ body.da-dragging, body.da-dragging *{user-select:none !important}
   #da-chat-panel{right:0; bottom:0; width:100vw; max-width:100vw; height:92vh; border-radius:14px 14px 0 0}
   .da-rz{display:none}
 }
+#da-chat-print-head{display:none}
 @media print{
   #da-chat-fab,#da-chat-panel{display:none !important}
+  /* ---- Ask AI transcript export (Save as PDF → browser print dialog) ---- */
+  body.da-print-chat > *:not(#da-chat-panel){display:none !important}
+  body.da-print-chat #da-chat-panel{
+    display:block !important; position:static !important; z-index:auto !important;
+    width:auto !important; max-width:none !important; height:auto !important;
+    min-height:0 !important; border:none !important; box-shadow:none !important;
+    border-radius:0 !important;
+  }
+  body.da-print-chat .da-rz{display:none !important}
+  body.da-print-chat #da-chat-export,
+  body.da-print-chat #da-chat-clear,
+  body.da-print-chat #da-chat-close,
+  body.da-print-chat #da-chat-forget,
+  body.da-print-chat .da-chat-compose{display:none !important}
+  body.da-print-chat .da-chat-head{cursor:default}
+  body.da-print-chat #da-chat-print-head{
+    display:block; font-size:11px; color:#555; padding:0 0 10px; margin-bottom:8px;
+    border-bottom:1px solid #ccc;
+  }
+  body.da-print-chat #da-chat-msgs{
+    display:block !important; overflow:visible !important; height:auto !important; padding:0;
+  }
+  body.da-print-chat .da-msg{page-break-inside:avoid; max-width:100% !important; margin-bottom:8px}
+  body.da-print-chat .da-user{background:#eef2fb !important; color:#000 !important}
+  body.da-print-chat .da-ai{background:#fff !important}
+  body.da-print-chat .da-chat-foot{display:none !important}
 }
 """
 
@@ -2951,6 +2987,8 @@ _CHAT_JS = r"""
   var stopBtn = document.getElementById('da-chat-stop');
   var closeBtn = document.getElementById('da-chat-close');
   var clearBtn = document.getElementById('da-chat-clear');
+  var exportBtn = document.getElementById('da-chat-export');
+  var printHead = document.getElementById('da-chat-print-head');
   var forgetBtn = document.getElementById('da-chat-forget');
   document.getElementById('da-chat-model').textContent = CFG.model + ' · web search · thinking';
 
@@ -2963,6 +3001,40 @@ _CHAT_JS = r"""
     clearTermHighlight();      // and any highlight_term paint
     while(msgs.children.length > 1) msgs.removeChild(msgs.lastChild); // keep the hint
   });
+
+  // "Save as PDF": the transcript never leaves the browser or touches a server —
+  // this reformats the panel for print (see the body.da-print-chat rules) and
+  // hands off to the browser's native print dialog, where "Save as PDF" is a
+  // print destination. That keeps the CSP untouched (no new script/host) and
+  // reuses the already-rendered, already-sanitized message DOM verbatim.
+  if(exportBtn) exportBtn.addEventListener('click', function(){
+    if(!msgs.querySelector('.da-user, .da-ai')){
+      addMsg('da-hint', 'Nothing to export yet — ask a question first.');
+      return;
+    }
+    if(printHead){
+      var parts = ['Report Q&A transcript', '"' + CFG.title + '"'];
+      if(CFG.generated) parts.push('report generated ' + CFG.generated);
+      parts.push('exported ' + new Date().toLocaleString());
+      printHead.textContent = parts.join(' — ');
+    }
+    document.body.classList.add('da-print-chat');
+    window.print();
+  });
+  window.addEventListener('afterprint', function(){
+    document.body.classList.remove('da-print-chat');
+  });
+
+  // Refresh/close/navigate would silently drop the whole conversation (it
+  // lives only in this tab's memory — see `history` below), so warn once
+  // there is anything to lose. Browsers ignore custom text here and show
+  // their own generic confirmation; that's a platform restriction, not a bug.
+  window.addEventListener('beforeunload', function(e){
+    if(!msgs.querySelector('.da-user, .da-ai')) return;
+    e.preventDefault();
+    e.returnValue = '';
+  });
+
   // "Forget key": in prompt mode this clears BOTH the in-memory copy and the
   // tab's sessionStorage. In embedded mode there is nothing a runtime action
   // can truthfully delete — the credential is part of the HTML file — so say
