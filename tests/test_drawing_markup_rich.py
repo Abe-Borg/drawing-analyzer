@@ -507,6 +507,68 @@ def test_citation_cache_ttl_zero_disables_read_and_write(monkeypatch):
     assert cache.stats()["size"] == 0                     # nothing was written
 
 
+def test_citation_cache_fully_warm_run_needs_no_client(monkeypatch):
+    # A fully warm run must serve every chunk from cache even when no API
+    # key/client can be constructed — the client is created only on a cache
+    # miss (mirrors the identity/review-plan caches).
+    from drawing_analyzer.digest_cache import DigestCache
+
+    cache = DigestCache(None, persist=False)
+    f1 = _cited_finding()
+    c1 = _CitationClient([_verdict_block("CHECKED_MISMATCH", note="moved")])
+    check_citations([f1], [], client=c1, sleep=lambda *_: None, cache=cache)
+
+    def _boom():
+        raise RuntimeError("no API key configured")
+
+    monkeypatch.setattr("drawing_analyzer.client.get_client", _boom)
+    f2 = _cited_finding()
+    res = check_citations([f2], [], client=None, sleep=lambda *_: None, cache=cache)
+    assert res.cached_requests == 1 and res.requests == 0
+    assert not res.partial and res.error is None
+    assert res.web_search_requests == 0
+    assert f2.citation.status == "CHECKED_MISMATCH"
+
+
+def test_citation_cache_partial_warm_run_serves_hits_without_client(monkeypatch):
+    # Mixed warm/cold with no client available: the cached chunk is served,
+    # the uncached one degrades to UNCHECKED without billing, stage PARTIAL.
+    from drawing_analyzer.digest_cache import DigestCache
+
+    cache = DigestCache(None, persist=False)
+    f1 = _cited_finding()
+    c1 = _CitationClient([_verdict_block("CHECKED_MISMATCH", note="moved")])
+    check_citations([f1], [], client=c1, sleep=lambda *_: None, cache=cache)
+
+    def _boom():
+        raise RuntimeError("no API key configured")
+
+    monkeypatch.setattr("drawing_analyzer.client.get_client", _boom)
+    f2 = _cited_finding()
+    f3 = _f("cites the pump table", refs=["NFPA 20 Table 4.27"])
+    res = check_citations([f2, f3], [], client=None, sleep=lambda *_: None,
+                          cache=cache)
+    assert res.cached_requests == 1 and res.requests == 0
+    assert res.partial and "no API key" in (res.error or "")
+    assert res.web_search_requests == 0                    # no live call billed
+    assert f2.citation.status == "CHECKED_MISMATCH"
+    assert f3.citation.status == "UNCHECKED"
+    assert "client unavailable" in f3.citations[0].note
+    assert res.unchecked == 1 and res.mismatches == 1
+
+
+def test_citation_no_client_and_no_cache_degrades_everything_unchecked(monkeypatch):
+    # Zero-hit path unchanged: the pass cannot run at all → every ref UNCHECKED.
+    def _boom():
+        raise RuntimeError("no API key configured")
+
+    monkeypatch.setattr("drawing_analyzer.client.get_client", _boom)
+    f = _cited_finding()
+    res = check_citations([f], [], client=None, sleep=lambda *_: None)
+    assert res.partial and res.unchecked == 1 and res.requests == 0
+    assert f.citation is not None and f.citation.status == "UNCHECKED"
+
+
 def test_citation_cache_never_stores_partial_chunks():
     from drawing_analyzer.digest_cache import DigestCache
 

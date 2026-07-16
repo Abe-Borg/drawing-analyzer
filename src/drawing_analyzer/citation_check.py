@@ -222,9 +222,14 @@ _EDITION_SEP = r"[\s,:()–-]{0,4}"
 # A code+year mention immediately followed by a section marker is a CITATION
 # ("NFPA 13 2013 §8.15.1"), not an adoption statement — it must never enter
 # the adopted basis, or the stale citation would launder its own edition into
-# "adopted" and self-suppress the divergence it should trigger.
+# "adopted" and self-suppress the divergence it should trigger. The marker may
+# be separated from the year by light punctuation ("NFPA 13 2013, SEC 8.15.1",
+# "NFPA 13 (2013), §8.15.1") — a short punctuation/space run, never a sentence
+# gap, so a genuine adoption list followed by unrelated prose stays in the
+# basis.
 _SECTION_AFTER_RE = re.compile(
-    r"^\s*(?:§|SEC\b|SECTION\b|TABLE\b|CHAPTER\b|CH\.)", re.IGNORECASE
+    r"^[\s,;:.)\]–—-]{0,4}(?:§|SEC\b|SECTION\b|TABLE\b|CHAPTER\b|CH\.)",
+    re.IGNORECASE,
 )
 
 
@@ -243,7 +248,7 @@ def _basis_edition_claims(geometries: Iterable[Any]) -> list[str]:
     for geom in geometries or []:
         text = getattr(geom, "sheet_text", "") or ""
         for m in _EDITION_RE.finditer(text):
-            if _SECTION_AFTER_RE.match(text[m.end():m.end() + 12]):
+            if _SECTION_AFTER_RE.match(text[m.end():m.end() + 16]):
                 continue
             code = re.sub(
                 r"\s+", " ", (m.group("code") or m.group("code2") or "").upper()
@@ -900,18 +905,6 @@ def check_citations(
     if not ref_order:
         return result
 
-    if client is None:
-        try:
-            from .client import get_client as _get_client
-
-            client = _get_client()
-        except Exception as exc:  # noqa: BLE001 - no key etc. → skip the pass
-            result.error = _clean_error(exc)
-            result.unchecked = len(ref_order)
-            result.partial = True
-            _attach_unchecked(findings, ref_claims, result, note="citation client unavailable")
-            return result
-
     model = model or citation_model()
     editions_line = merged_editions(identity, geometries)
     jurisdiction_line = (
@@ -978,13 +971,41 @@ def check_citations(
                 return None
         return entry
 
-    def _run(req: tuple) -> tuple:
-        ref, rid, handled = req
-        key = _cache_key_for(ref, handled) if use_cache else None
-        if key is not None:
-            entry = _fresh_cached_entry(key, handled)
-            if entry is not None:
-                return ref, rid, handled, None, entry, key
+    # Probe the verdict cache BEFORE requiring a client (mirrors the identity/
+    # review-plan caches): a fully warm run serves every chunk from cache even
+    # when no API key/client is available. The client is created only when at
+    # least one chunk actually needs a live request.
+    probes: list[tuple[tuple, dict | None, str | None]] = []
+    for req in requests:
+        p_ref, _p_rid, p_handled = req
+        p_key = _cache_key_for(p_ref, p_handled) if use_cache else None
+        p_entry = _fresh_cached_entry(p_key, p_handled) if p_key is not None else None
+        probes.append((req, p_entry, p_key))
+
+    client_unavailable = False
+    if client is None and any(entry is None for _req, entry, _key in probes):
+        try:
+            from .client import get_client as _get_client
+
+            client = _get_client()
+        except Exception as exc:  # noqa: BLE001 - no key etc. → skip live work
+            result.error = _clean_error(exc)
+            result.partial = True
+            if all(entry is None for _req, entry, _key in probes):
+                # Nothing cache-served either: the pass could not run at all.
+                result.unchecked = len(ref_order)
+                _attach_unchecked(
+                    findings, ref_claims, result, note="citation client unavailable"
+                )
+                return result
+            client_unavailable = True  # serve the hits; misses go UNCHECKED
+
+    def _run(probe: tuple) -> tuple:
+        (ref, rid, handled), entry, key = probe
+        if entry is not None:
+            return ref, rid, handled, None, entry, key
+        if client_unavailable:
+            return ref, rid, handled, None, None, key
         outcome = _check_one(
             ref, editions_line, [(h, c["text"]) for h, c in handled],
             client=client, model=model, max_retries=max_retries, sleep=sleep,
@@ -994,7 +1015,7 @@ def check_citations(
 
     fresh_requests = 0
     with ThreadPoolExecutor(max_workers=min(_MAX_WORKERS, len(requests))) as pool:
-        for ref, rid, handled, outcome, entry, key in pool.map(_run, requests):
+        for ref, rid, handled, outcome, entry, key in pool.map(_run, probes):
             done += 1
             if entry is not None:
                 # Served from the verdict cache: zero tokens, zero searches.
@@ -1015,6 +1036,22 @@ def check_citations(
                         current_edition=str(fields.get("current_edition", "") or ""),
                         evidence_url=str(fields.get("evidence_url", "") or ""),
                         sources=cached_sources,
+                        request_id=rid,
+                    )
+                if progress is not None:
+                    progress(done, total, f"Checking citation {done}/{total}")
+                continue
+            if outcome is None:
+                # Cache miss with no client available: annotate UNCHECKED
+                # without billing — no API call was made for this chunk.
+                result.partial = True
+                for _handle, claim in handled:
+                    claim_assessments[(ref, _normalize_claim(claim["text"]))] = CitationAssessment(
+                        reference=ref,
+                        status="UNCHECKED",
+                        claim_finding_ids=list(claim["finding_ids"]),
+                        note="citation client unavailable",
+                        adopted_edition=editions_line,
                         request_id=rid,
                     )
                 if progress is not None:

@@ -220,6 +220,28 @@ def test_citation_shaped_mentions_never_enter_the_basis():
     assert set(_adopted_basis_map(None, geoms2)["NFPA 13"].years) == {"2016", "2010"}
 
 
+def test_punctuated_section_markers_are_still_citation_shaped():
+    # Light punctuation between the year and the section marker
+    # ("NFPA 13 2013, SEC 8.15.1") must not defeat the citation-shape filter —
+    # the stale year would launder into the adopted basis and self-suppress
+    # the divergence finding.
+    from drawing_analyzer.citation_check import _basis_edition_claims
+
+    for stale in (
+        "OLD RISER PER NFPA 13 2013, SEC 8.15.1",
+        "OLD RISER PER NFPA 13 2013, §8.15.1",
+        "OLD RISER PER NFPA 13 (2013), TABLE 8.15.1",
+        "OLD RISER PER NFPA 13 2013. SECTION 8.15.1",
+        "OLD RISER PER NFPA 13 2013 - CHAPTER 8",
+    ):
+        geoms = [_Geom(_ref(), _STATED + "\n" + stale)]
+        assert _basis_edition_claims(geoms) == ["NFPA 13 2016"], stale
+        f = _finding(refs=["NFPA 13 2013 §8.15.1"], quote="PER NFPA 13 2013")
+        (d,) = reconcile_cited_editions([f], None, geoms)
+        assert d.severity == "medium", stale
+        assert d.verification.status == "DETERMINISTIC", stale
+
+
 def test_identity_none_runs_regex_only():
     geoms = [_Geom(_ref(), _STATED + "\nRELIEF PER NFPA 13 2013 §8.15.1")]
     f = _finding(refs=["NFPA 13 2013 §8.15.1"], quote="NFPA 13 2013")
