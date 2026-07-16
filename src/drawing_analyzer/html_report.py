@@ -672,6 +672,11 @@ def _finding_row_html(
         else '<span class="muted">—</span>'
     )
     text_cell = _render_inline(text)
+    action = (getattr(f, "recommended_action", "") or "").strip()
+    if action:
+        text_cell += (
+            f'<div class="finding-action">Action: {html.escape(action)}</div>'
+        )
     sources = getattr(f, "sources", None) or []
     if sources:
         from .ledger import provenance_label
@@ -1737,6 +1742,7 @@ mark{background:#ffe9a8; color:inherit; padding:0 1px; border-radius:2px}
   height:34px; width:auto; border:1px solid var(--line); border-radius:4px;
   vertical-align:middle; margin-left:4px;
 }
+.finding-action{margin-top:3px; font-weight:600; color:#2f5fd0}
 /* Finding status chips */
 .fchip{
   display:inline-block; font-size:11px; font-weight:600; padding:2px 8px;

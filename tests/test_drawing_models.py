@@ -103,3 +103,27 @@ def test_finding_from_dict_tolerates_missing_optional_fields():
     assert f.anchor.status == "UNANCHORED"
     assert f.verification.status == "SKIPPED"
     assert f.id  # recomputed from content when absent
+    # Additive serialization: a pre-field cached payload defaults cleanly.
+    assert f.recommended_action == ""
+
+
+def test_finding_recommended_action_round_trips_and_defaults():
+    f = Finding(
+        sheet_id="M-101", source_name="s.pdf", page_index=0,
+        category="code", severity="low", text="x",
+        recommended_action="Confirm the setpoint with the engineer.",
+    )
+    d = f.to_dict()
+    assert d["recommended_action"] == "Confirm the setpoint with the engineer."
+    back = Finding.from_dict(d)
+    assert back.recommended_action == f.recommended_action
+    assert back == f
+    # The action never participates in the content id (I-7: ids stay stable
+    # across cache generations that predate the field).
+    bare = Finding(
+        sheet_id="M-101", source_name="s.pdf", page_index=0,
+        category="code", severity="low", text="x",
+    )
+    assert bare.id == f.id
+    # None round-trips to the empty-string default, not the string "None".
+    assert Finding.from_dict({**d, "recommended_action": None}).recommended_action == ""

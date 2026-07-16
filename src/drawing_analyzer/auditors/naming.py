@@ -226,6 +226,8 @@ def audit_naming(rendered_sheets: Iterable[Any]) -> list[Finding]:
                         f"same item and standardize the label."
                     ),
                     source_quote=drift,
+                    recommended_action="Confirm both spellings refer to the "
+                                       "same item and standardize the tag.",
                     refs=[],
                     anchor=Anchor(status="EXACT", rect_pdf=list(rect), method="naming"),
                     verification=Verification(

@@ -317,6 +317,27 @@ def test_merge_keeps_most_severe_longest_quote_unions_refs_and_coherent_groundin
     assert "VAV-3" in m.supporting_quotes                   # loser's quote preserved, not merged in
 
 
+def test_merge_action_travels_with_representative_and_backfills():
+    # The recommended action rides the representative's atomic bundle; when the
+    # representative has none, the first cluster member's action backfills.
+    a = _finding("VAV-3 has no clearance shown to the wall", quote="VAV-3",
+                 tile=[0, 0], sev="low")
+    a.recommended_action = "Confirm the clearance with mechanical."
+    b = _finding("VAV-3 has no clearance shown to the wall nearby",
+                 quote="VAV-3 SCHEDULE ROOM 120", tile=[0, 0], sev="high")
+    b.recommended_action = "Verify the VAV-3 clearance and revise the plan."
+    m = merge_self_consistency([[a], [b]])[0]
+    assert m.recommended_action == "Verify the VAV-3 clearance and revise the plan."
+
+    a2 = _finding("VAV-3 has no clearance shown to the wall", quote="VAV-3",
+                  tile=[0, 0], sev="low")
+    a2.recommended_action = "Confirm the clearance with mechanical."
+    b2 = _finding("VAV-3 has no clearance shown to the wall nearby",
+                  quote="VAV-3 SCHEDULE ROOM 120", tile=[0, 0], sev="high")
+    m2 = merge_self_consistency([[a2], [b2]])[0]
+    assert m2.recommended_action == "Confirm the clearance with mechanical."
+
+
 def test_pool_upgrades_reproduced_on_cross_source_agreement():
     # A critique singleton (reproduced False) that the digest independently
     # raised is upgraded to reproduced True; an unmatched singleton stays False.

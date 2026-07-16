@@ -249,6 +249,8 @@ def _make_tb_finding(
         severity="low",
         text=text,
         source_quote=quote,
+        recommended_action="Verify this title-block field and correct it to "
+                           "match the rest of the set.",
         refs=[],
         anchor=Anchor(status="EXACT", rect_pdf=list(rect), method="titleblock"),
         verification=Verification(status="DETERMINISTIC", note=note),

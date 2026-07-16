@@ -190,7 +190,10 @@ Output a SINGLE fenced code block labeled json and nothing else — no prose \
 before or after it — containing {"findings": [ ... ], "claims": [ ... ]}. Each \
 finding is an object with: sheet_id; category (one of code, conflict, \
 coordination, question); severity (one of high, medium, low); text (the finding, \
-at most two sentences); source_quote (COPY VERBATIM from the SHEET TEXT LAYER — \
+at most two sentences); recommended_action (one sentence, imperative: what the \
+reviewer should DO about it - e.g. "Confirm the relief-valve setpoint with the \
+mechanical engineer and revise the schedule"); \
+source_quote (COPY VERBATIM from the SHEET TEXT LAYER — \
 exact characters — or "" for a purely graphical finding or an absence); \
 anchor_hint (set to "SHEET" for a sheet-level finding or an absence — something \
 that should be on the sheet but is not — otherwise omit it); tile_label (the \
@@ -606,6 +609,10 @@ def _representative(
         severity=_most_severe(cluster),
         text=base.text,
         source_quote=base.source_quote,     # atomic with text/category/tile below
+        # The action rides the representative's bundle; an empty one backfills
+        # from the first cluster member that supplied one (deterministic order).
+        recommended_action=base.recommended_action
+        or next((f.recommended_action for f in cluster if f.recommended_action), ""),
         tile=base.tile,
         refs=_union_refs(cluster),
         anchor_hint=base.anchor_hint,

@@ -606,6 +606,19 @@ def test_findings_card_renders_table_chips_and_sheet_link():
     assert 'href="#sheet-1"' in doc
 
 
+def test_finding_action_renders_and_is_escaped():
+    f = _finding()
+    f.recommended_action = "Confirm the clearance & <verify> the schedule."
+    doc = hr.build_html_report(_findings_ctx(findings=[f]), source_names=[SRC], now=NOW)
+    assert 'class="finding-action"' in doc
+    assert "Action: Confirm the clearance &amp; &lt;verify&gt; the schedule." in doc
+    # No action → no empty Action div.
+    bare = hr.build_html_report(
+        _findings_ctx(findings=[_finding()]), source_names=[SRC], now=NOW
+    )
+    assert 'class="finding-action"' not in bare
+
+
 def test_no_findings_card_when_there_are_none():
     doc = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW)
     assert 'id="findings"' not in doc               # no card

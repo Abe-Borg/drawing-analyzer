@@ -734,6 +734,9 @@ FINDINGS_CSV_HEADER = [
     # Phase 25 §17.1: the human 1-based tile label ("r1c1") alongside the internal
     # zero-based ``tile`` column — appended so existing positions are unchanged.
     "tile_label",
+    # The model/auditor-supplied "what to do" sentence — appended last so
+    # existing column positions are unchanged.
+    "recommended_action",
 ]
 
 
@@ -827,6 +830,7 @@ def _finding_row(finding: Any) -> list[str]:
         scope,
         str(getattr(finding, "confidence", "") or ""),
         str(getattr(finding, "tile_label", "") or ""),
+        _excel_safe(str(getattr(finding, "recommended_action", "") or "")),
     ]
 
 
