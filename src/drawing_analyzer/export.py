@@ -732,12 +732,28 @@ def build_reviewed_pdf_links(
     cross-sheet legs, or a cloud plus a margin callout), the finding's own
     primary on-page cloud wins — the reader lands on the mark that names the
     issue, not on a secondary leg or a generated index row.
+
+    A reviewed-PDF *basename* shared by two sources (the DA-033 dedupe case:
+    two ``M-101_reviewed.pdf`` copies land as ``…`` and ``…_2``) is dropped
+    from the join: receipts carry only the basename in ``output_pdf``, so it
+    cannot say which on-disk copy a finding belongs to. Those findings render
+    as plain text — better no link than a link to the wrong marked-up file.
     """
     markup_run = getattr(ctx, "markup_run", None)
     receipts = list(getattr(markup_run, "receipts", None) or [])
     if not receipts:
         return {}
-    name_by_basename = {Path(orig).name: on_disk for orig, on_disk in name_pairs}
+    # Drop any basename that maps to more than one on-disk copy — an ambiguous
+    # receipt→file join (see docstring). A basename seen once maps cleanly.
+    name_by_basename: dict[str, str] = {}
+    ambiguous: set[str] = set()
+    for orig, on_disk in name_pairs:
+        base = Path(orig).name
+        if base in name_by_basename or base in ambiguous:
+            ambiguous.add(base)
+            name_by_basename.pop(base, None)
+        else:
+            name_by_basename[base] = on_disk
     # Lower sort key wins: the finding's own leg, then the on-page cloud over a
     # margin/notes/index placement, then proven ink (WRITTEN) over a generated
     # row (INDEXED). Mirrors the ledger's own "most representative" preference.

@@ -892,3 +892,21 @@ def test_build_reviewed_pdf_links_empty_without_markup_run():
     assert dx.build_reviewed_pdf_links(
         SimpleNamespace(markup_run=SimpleNamespace(receipts=[])), []
     ) == {}
+
+
+def test_build_reviewed_pdf_links_skips_ambiguous_basename():
+    # Two sources share the basename M-101_reviewed.pdf → the allocator lands
+    # them as `…` and `…_2`, but a receipt's output_pdf carries only the
+    # basename, so which copy a finding belongs to is unknowable. Rather than
+    # link every such finding to the wrong file, skip them (plain text).
+    pairs = [
+        (Path("site_a/M-101_reviewed.pdf"), "M-101_reviewed.pdf"),
+        (Path("site_b/M-101_reviewed.pdf"), "M-101_reviewed_2.pdf"),
+        (Path("D-901_reviewed.pdf"), "D-901_reviewed.pdf"),          # unambiguous
+    ]
+    ctx = SimpleNamespace(markup_run=SimpleNamespace(receipts=[
+        _receipt("QC-001", pdf="M-101_reviewed.pdf", page=1),        # ambiguous → skip
+        _receipt("QC-002", pdf="D-901_reviewed.pdf", page=3),        # clean → link
+    ]))
+    links = dx.build_reviewed_pdf_links(ctx, pairs)
+    assert links == {"QC-002": {"pdf": "D-901_reviewed.pdf", "page": 4}}
