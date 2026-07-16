@@ -448,6 +448,83 @@ def test_pipeline_warm_rerun_serves_citation_cache(tmp_path):
         [(a.reference, a.status) for a in f1.citations]
 
 
+def _make_edition_pdf(path: Path) -> Path:
+    doc = pymupdf.open()
+    page = doc.new_page(width=792, height=612)
+    page.insert_text((80, 100), "ALL WORK PER CMC 2022 EDITION")
+    page.insert_text((80, 160), "DUCT CLEARANCE PER CMC 2019 SECTION 310")
+    page.insert_text((650, 560), "M-101")
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+_STALE_EDITION_FINDING = {
+    # The TYPICAL case: the finding is about a different defect and merely
+    # cites the stale edition in its refs — semantically distinct from the
+    # divergence flag, so the ledger's conservative dedup keeps both entries.
+    "sheet_id": "M-101", "category": "code", "severity": "medium",
+    "text": "Duct clearance to combustibles appears less than required.",
+    "source_quote": "PER CMC 2019", "tile": [0, 0],
+    "refs": ["CMC 2019 §310"],
+}
+
+
+def test_pipeline_edition_audit_creates_first_class_finding(tmp_path):
+    # Phase B: a ref citing an edition the set does not adopt becomes a REAL
+    # ledger finding — numbered, anchored to the citing note, deterministic-
+    # tier verified, and visible to the citation stage — with its own stage row.
+    src = _make_edition_pdf(tmp_path / "M-101.pdf")
+    client = _CountingClient([_STALE_EDITION_FINDING])
+    ctx = extract_drawing_context(
+        [src], client=client, rows=2, cols=2,
+        qc_markups=True, qc_work_dir=tmp_path / "qc",
+    )
+    divergences = [f for f in ctx.findings
+                   if f.sources == ["edition_audit"]]
+    assert len(divergences) == 1
+    d = divergences[0]
+    assert d.qc_id.startswith("QC-")                       # first-class: numbered
+    assert d.anchor.status == "EXACT"                      # anchored to the note
+    assert d.severity == "medium"
+    assert d.verification.status == "DETERMINISTIC"        # both operands text-grounded
+    assert "cites CMC 2019" in d.text and "adopts CMC 2022" in d.text
+    stages = {s.stage: s.status for s in ctx.stage_results}
+    assert stages.get("edition_audit") == "COMPLETE"
+    # The run's completeness contract is unaffected.
+    assert ctx.qc_status == "COMPLETE"
+
+
+def test_edition_audit_runs_in_free_battery_with_zero_api_calls(tmp_path):
+    # reference_audit alone is the zero-API battery (DA-013); the edition audit
+    # is a host string comparison, so it rides along at zero cost. But the
+    # standard digest run has refs available and there is no divergence basis
+    # consumer — the stage must NOT run there.
+    src = _make_edition_pdf(tmp_path / "M-101.pdf")
+    client = _CountingClient([_STALE_EDITION_FINDING])
+    ctx = extract_drawing_context(
+        [src], client=client, rows=2, cols=2,
+        reference_audit=True, qc_work_dir=tmp_path / "qc",
+    )
+    # Only the digest was billed — no critique/citation/identity/plan calls.
+    assert client.calls["digest"] == 1
+    for family in ("critique", "cross", "synth", "verify", "citation",
+                   "identity", "plan"):
+        assert client.calls[family] == 0, family
+    divergences = [f for f in ctx.findings if "edition_audit" in (f.sources or [])]
+    assert len(divergences) == 1                           # regex-only basis worked
+    stages = {s.stage: s.status for s in ctx.stage_results}
+    assert stages.get("edition_audit") == "COMPLETE"
+
+    # Standard run: the stage stays NOT_REQUESTED.
+    ctx2 = extract_drawing_context(
+        [src], client=_CountingClient([_STALE_EDITION_FINDING]), rows=2, cols=2,
+    )
+    stages2 = {s.stage: s.status for s in ctx2.stage_results}
+    assert stages2.get("edition_audit") == "NOT_REQUESTED"
+    assert not [f for f in ctx2.findings if "edition_audit" in (f.sources or [])]
+
+
 def test_audit_only_makes_no_incremental_api_calls(tmp_path):
     # DA-013 / §15.3: the deterministic-audit-only path runs the auditors over the
     # already-extracted text/geometry and makes ZERO model calls beyond the digest —

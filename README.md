@@ -923,6 +923,18 @@ partial or failed check is never cached, so a cache hit can never hide an
 unchecked claim. The pre-run cost estimate quotes the cold-run figure — warm
 runs bill only cache-missed chunks.
 
+**The edition audit (Phase B)** runs before any of this, zero-API and
+pre-seal: when a ref cites an edition of a code the set adopts at a
+*different* edition (a note citing NFPA 13 **2013** on a set that adopts
+**2016** — the classic worldwide-set failure), it becomes a **real ledger
+finding** that numbers, anchors to the stale-edition text itself, and gets
+ink. When both the adopted and the cited edition are re-found verbatim in the
+sheet text, the finding earns the deterministic tier (auto-ink, like the
+offline auditors); a basis only the identity detected ships as a low-severity,
+explicitly-labeled advisory that is crop-verified and web-checked downstream.
+Runs with the citation check *or* the free deterministic battery
+(`reference_audit=True` gains it at zero cost, regex basis only).
+
 ## The findings ledger (Part III)
 
 Every QC item from **every** channel becomes an entry in one append-only

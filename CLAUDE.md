@@ -127,6 +127,17 @@ findings for free).
   A post-seal add marks the run incomplete (no `QC-XTRA` masquerade).
   Anchoring, verification, the citation check, the markup writer, the exports,
   and the report consume ledger entries and nothing else.
+- *Edition audit (Phase B):* `citation_check.reconcile_cited_editions` — a
+  zero-API, **strictly pre-seal** check turning an adopted-vs-cited edition
+  divergence into a first-class ledger finding (gated `run_citation or
+  run_auditors`; stage `edition_audit`). Basis = identity `adopted_codes`
+  (model entries need a quote; regex-union entries are ignored here) ∪ a
+  citation-shape-filtered regex harvest (`_basis_edition_claims` — a mention
+  followed by a section marker is a citation, never an adoption). Two-tier
+  trust mirroring §17.5: both operands re-found in sheet text → medium +
+  `DETERMINISTIC`; else low + advisory-labeled, crop-verified downstream. The
+  finding anchors to the stale-edition text's own matched span (never the
+  citing finding's quote — an identical quote would collide in Pass B).
 - *Disposition:* `anchor.py` (quote → PDF rect, tiered
   EXACT/FUZZY/TILE/UNANCHORED — UNANCHORED is the hallucination signal) →
   `verify.py` (high-DPI crop re-check → VERIFIED/REJECTED/UNCERTAIN) →

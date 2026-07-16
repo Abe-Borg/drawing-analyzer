@@ -1290,6 +1290,59 @@ def _run_qc_stages(
             _log.warning("prose harvest failed: %s", exc)
     _finish_stage(stage_results, journal, harvest_stage)
 
+    # Edition audit (Phase B): adopted-vs-cited edition divergence as a
+    # first-class finding. Zero-API (a host string comparison over the
+    # identity/regex adopted basis), and STRICTLY pre-seal — its findings enter
+    # the OPEN ledger here and then anchor/number/verify/ink like any other,
+    # so the post-seal add ban can never trip. The expensive web-search pass
+    # below still adjudicates the same refs post-number (it enriches entries
+    # in place, which is legal on a sealed ledger).
+    run_edition_audit = config.run_citation or config.run_auditors
+    edition_stage = StageResult(stage="edition_audit", expected=run_edition_audit)
+    if run_edition_audit:
+        pre_seal_entries = ledger.entries
+        cited_refs = {
+            " ".join(str(r).split())
+            for f in pre_seal_entries for r in (getattr(f, "refs", None) or [])
+            if str(r).strip()
+        }
+        _emit("STAGE_START", stage="edition_audit", cited=len(cited_refs))
+        edition_stage.items_in = len(cited_refs)
+        if not cited_refs:
+            # Applicable but nothing cites a code — a valid skip.
+            edition_stage.status = "SKIPPED_VALID"
+        else:
+            try:
+                from .citation_check import reconcile_cited_editions
+
+                divergences = reconcile_cited_editions(
+                    pre_seal_entries, set_identity, geometries or [],
+                )
+                if divergences:
+                    ledger.add(divergences, "edition_audit")
+                edition_stage.items_out = len(divergences)
+                # An empty adopted basis (no stated/detected editions) is a
+                # valid skip, not an empty COMPLETE claim.
+                from .citation_check import _adopted_basis_map
+
+                if not divergences and not _adopted_basis_map(
+                    set_identity, geometries or []
+                ):
+                    edition_stage.status = "SKIPPED_VALID"
+                else:
+                    edition_stage.status = "COMPLETE"
+                if divergences:
+                    _log.info(
+                        "edition audit: %d divergence finding(s) over %d cited ref(s)",
+                        len(divergences), len(cited_refs),
+                    )
+            except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
+                errors.append(f"Edition audit: {exc}")
+                edition_stage.status = "FAILED"
+                edition_stage.errors.append(str(exc))
+                _log.warning("edition audit failed: %s", exc)
+    _finish_stage(stage_results, journal, edition_stage)
+
     # --- seal ingestion, then anchor, reconcile, and number (§12.4) -----------
     # QC ids must be POSITIONAL, so numbering happens *after* anchoring — the
     # freeze-before-anchor ordering is gone (Phase 20). Seal first (no more

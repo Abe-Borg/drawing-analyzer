@@ -74,7 +74,13 @@ from .digest import (
     _server_web_search_requests,
     _tolerant_json_object,
 )
-from .models import Citation, CitationAssessment, Finding
+from .models import (
+    Citation,
+    CitationAssessment,
+    Finding,
+    Verification,
+    source_page_key,
+)
 
 _log = get_logger()
 
@@ -185,6 +191,285 @@ def merged_editions(identity: Any, geometries: Iterable[Any]) -> str:
         return "; ".join(regex_claims)
     extras = [c for c in regex_claims if " ".join(c.split()).upper() not in seen]
     return "; ".join(identity_claims + extras)
+
+
+# --------------------------------------------------------------------------- #
+# Pre-seal edition audit (Phase B) — adopted-vs-cited edition divergence
+# --------------------------------------------------------------------------- #
+#
+# The deterministically detectable divergence class: a finding's ref cites
+# edition X of a code family the set adopts at edition Y. No web search is
+# needed — it is a string comparison between the cited edition tokens and the
+# adopted-editions basis — so it runs BEFORE the ledger seals and its findings
+# anchor/number/verify/ink like any other (the post-seal add ban never trips).
+#
+# Trust model (mirrors the arithmetic §17.5 operand rule): the comparison's
+# host OPERATION is always deterministic, but each OPERAND is trusted only when
+# the drawing text independently carries it. The adopted side is corroborated
+# by a regex-harvest hit or by re-finding the identity entry's evidence quote
+# verbatim in a sheet text layer; the cited side by re-finding the family+year
+# in the citing finding's quote or its sheet's text. Fully corroborated →
+# medium severity + a DETERMINISTIC verdict (auto-ink, like the auditors);
+# anything model-asserted → a low-severity, explicitly-labeled advisory that
+# rides the normal crop-verify + web-check paths. An identity entry with NO
+# evidence quote never contributes a basis at all.
+
+_YEAR_TOKEN_RE = re.compile(r"\b((?:19|20)\d{2})\b")
+# Separators allowed between a family and its edition year. Deliberately
+# excludes "." and "§" so a section number like "IBC §2019.3" can never read
+# as an edition year; ":" is included for the EN convention ("EN 12845:2020").
+_EDITION_SEP = r"[\s,:()–-]{0,4}"
+# A code+year mention immediately followed by a section marker is a CITATION
+# ("NFPA 13 2013 §8.15.1"), not an adoption statement — it must never enter
+# the adopted basis, or the stale citation would launder its own edition into
+# "adopted" and self-suppress the divergence it should trigger.
+_SECTION_AFTER_RE = re.compile(
+    r"^\s*(?:§|SEC\b|SECTION\b|TABLE\b|CHAPTER\b|CH\.)", re.IGNORECASE
+)
+
+
+def _basis_edition_claims(geometries: Iterable[Any]) -> list[str]:
+    """Adoption-shaped ``"CODE YEAR"`` claims for the edition-audit basis.
+
+    Same scan as :func:`harvest_code_editions` (which stays loose — for the
+    citation PROMPT a passing mention is still useful context), but mentions
+    followed by a section marker are excluded here: they are citations, not
+    adoptions. A citation-shaped mention without a section marker still slips
+    in — the conservative direction (it can only SUPPRESS a divergence
+    finding, never fabricate one).
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for geom in geometries or []:
+        text = getattr(geom, "sheet_text", "") or ""
+        for m in _EDITION_RE.finditer(text):
+            if _SECTION_AFTER_RE.match(text[m.end():m.end() + 12]):
+                continue
+            code = re.sub(
+                r"\s+", " ", (m.group("code") or m.group("code2") or "").upper()
+            ).strip()
+            year = m.group("year") or m.group("year2") or ""
+            claim = (code + " " + year).strip()
+            if claim and claim not in seen:
+                seen.add(claim)
+                out.append(claim)
+    return out
+
+
+def _norm_family(code: str) -> str:
+    return " ".join(str(code or "").split()).upper()
+
+
+def _fold_text(text: str) -> str:
+    return " ".join(str(text or "").split()).upper()
+
+
+def _family_year_re(family: str) -> "re.Pattern[str]":
+    """A per-family variant of ``_EDITION_RE``: this family adjacent to a year.
+
+    Family tokens may be joined by spaces or hyphens on the drawings
+    ("NFPA 13" / "NFPA-13"); the trailing ``\\b`` keeps "NFPA 13" from matching
+    inside "NFPA 130".
+    """
+    fam = r"[\s-]*".join(re.escape(t) for t in family.split())
+    return re.compile(
+        rf"\b{fam}\b{_EDITION_SEP}\b((?:19|20)\d{{2}})\b"
+        rf"|\b((?:19|20)\d{{2}})\b{_EDITION_SEP}\b{fam}\b",
+        re.IGNORECASE,
+    )
+
+
+def _cited_years(rx: "re.Pattern[str]", text: str) -> set[str]:
+    return {m.group(1) or m.group(2) for m in rx.finditer(text or "")}
+
+
+@dataclass(frozen=True)
+class _AdoptedBasis:
+    """One code family's adopted-edition ground truth."""
+
+    display: str                     # family as displayed ("NFPA 13")
+    years: frozenset
+    corroborated: bool               # any contributing entry is text-grounded
+    basis_label: str                 # human wording for the finding text
+
+
+def _adopted_basis_map(identity: Any, geometries: list) -> dict:
+    """``{normalized_family: _AdoptedBasis}`` from identity ∪ regex harvest.
+
+    Regex-harvest entries are text facts (always corroborated). An identity
+    entry contributes only when its edition carries a 4-digit year AND it has
+    a non-empty evidence quote (or ``origin="regex"``); its corroboration is
+    decided by re-finding that quote verbatim (whitespace-folded) in a sheet
+    text layer — converting the model's containment claim into a checked fact.
+    """
+    folded_texts = [
+        _fold_text(getattr(g, "sheet_text", "") or "") for g in (geometries or [])
+    ]
+    raw: dict[str, dict] = {}
+
+    def _bucket(fam: str, display: str) -> dict:
+        return raw.setdefault(fam, {
+            "display": display, "years": set(),
+            "corroborated": False, "advisory_only": True, "label": "",
+        })
+
+    for claim in _basis_edition_claims(geometries or []):
+        code, _, year = claim.rpartition(" ")
+        if not code or not _YEAR_TOKEN_RE.fullmatch(year):
+            continue
+        b = _bucket(_norm_family(code), code)
+        b["years"].add(year)
+        b["corroborated"] = True
+        b["advisory_only"] = False
+        b["label"] = b["label"] or "stated in the drawing text"
+
+    for ac in getattr(identity, "adopted_codes", ()) or ():
+        code = str(getattr(ac, "code", "") or "").strip()
+        edition = str(getattr(ac, "edition", "") or "")
+        quote = str(getattr(ac, "quote", "") or "").strip()
+        origin = str(getattr(ac, "origin", "model") or "model")
+        if origin == "regex":
+            # Redundant here: identity's regex-union entries are the LOOSE
+            # harvest (Phase A containment for the prompt line), which would
+            # re-launder citation-shaped mentions into the basis. This audit's
+            # regex ground truth is the citation-shape-filtered
+            # ``_basis_edition_claims`` scan above.
+            continue
+        m = _YEAR_TOKEN_RE.search(edition)
+        if not code or m is None:
+            continue                      # no basis year → never assert divergence
+        if not quote:
+            continue                      # bare model assertion → no finding basis
+        corroborated = False
+        label = "model-detected basis — advisory"
+        folded = _fold_text(quote)
+        if folded and any(folded in t for t in folded_texts):
+            corroborated = True
+            src = str(getattr(ac, "source_sheet", "") or "")
+            label = f"stated on {src}" if src else "stated in the drawing text"
+        b = _bucket(_norm_family(code), code)
+        b["years"].add(m.group(1))
+        if corroborated:
+            b["corroborated"] = True
+            b["advisory_only"] = False
+            b["label"] = label if not b["label"] else b["label"]
+        elif b["advisory_only"]:
+            b["label"] = b["label"] or label
+
+    return {
+        fam: _AdoptedBasis(
+            display=b["display"], years=frozenset(b["years"]),
+            corroborated=b["corroborated"], basis_label=b["label"],
+        )
+        for fam, b in raw.items() if b["years"]
+    }
+
+
+def reconcile_cited_editions(
+    findings: Iterable[Finding], identity: Any, geometries: list
+) -> list[Finding]:
+    """Divergence findings: refs citing an edition the set does not adopt.
+
+    Zero-API and pre-seal by contract — the caller adds the returned findings
+    to the OPEN ledger, where they anchor (to the citing note's own quote),
+    number, verify, and ink like any other entry. Deduped one finding per
+    ``(source, page, family, cited year)``; deterministic ordering (I-7).
+    Never raises on malformed inputs; returns ``[]`` when there is no adopted
+    basis or no refs.
+    """
+    basis_map = _adopted_basis_map(identity, geometries)
+    if not basis_map:
+        return []
+    family_res = {fam: _family_year_re(b.display) for fam, b in basis_map.items()}
+    geom_text_by_key = {
+        source_page_key(g.ref): getattr(g, "sheet_text", "") or ""
+        for g in (geometries or [])
+        if getattr(g, "ref", None) is not None
+    }
+
+    def _cited_span(rx: "re.Pattern[str]", year: str, text: str) -> str:
+        """The exact matched ``FAMILY … YEAR`` snippet for this year ("" if none)."""
+        for m in rx.finditer(text or ""):
+            if (m.group(1) or m.group(2)) == year:
+                return " ".join(m.group(0).split())
+        return ""
+
+    # key -> {"refs": set, "rep": Finding, "sheet_span": str, "quote_span": str}
+    hits: dict[tuple, dict] = {}
+    for f in findings or []:
+        refs = list(getattr(f, "refs", None) or [])
+        if not refs:
+            continue
+        skey = source_page_key(f)
+        sheet_text = geom_text_by_key.get(skey, "")
+        quote = str(getattr(f, "source_quote", "") or "")
+        for ref in refs:
+            ref_text = str(ref or "")
+            for fam, rx in family_res.items():
+                b = basis_map[fam]
+                for year in _cited_years(rx, ref_text):
+                    if year in b.years:
+                        continue          # cited an adopted edition → fine
+                    key = (skey[0], skey[1], fam, year)
+                    rec = hits.setdefault(key, {
+                        "refs": set(), "rep": None,
+                        "sheet_span": "", "quote_span": "",
+                    })
+                    rec["refs"].add(" ".join(ref_text.split()))
+                    if rec["rep"] is None:
+                        rec["rep"] = f
+                    # The divergence anchors to the stale-edition text ITSELF —
+                    # its own matched span, never the citing finding's whole
+                    # quote (a copied quote would anchor to the identical rect
+                    # and Pass B would fold the two findings into one).
+                    if not rec["sheet_span"]:
+                        rec["sheet_span"] = _cited_span(rx, year, sheet_text)
+                    if not rec["quote_span"]:
+                        rec["quote_span"] = _cited_span(rx, year, quote)
+
+    out: list[Finding] = []
+    for key in sorted(hits, key=lambda k: (str(k[0]), int(k[1]), str(k[2]), str(k[3]))):
+        _src, _page, fam, year = key
+        rec = hits[key]
+        b = basis_map[fam]
+        rep = rec["rep"]
+        refs_sorted = sorted(rec["refs"])
+        adopted_years = "/".join(sorted(b.years))
+        # Cited-side corroboration = the family+year re-finds in the sheet's
+        # OWN text layer (a quote-only span is model-transcribed — advisory).
+        tier1 = b.corroborated and bool(rec["sheet_span"])
+        divergence_quote = rec["sheet_span"] or rec["quote_span"]
+        suffix = f" ({b.basis_label})" if b.basis_label else ""
+        text = (
+            f'Cited edition divergence: "{refs_sorted[0]}" cites {b.display} {year}, '
+            f"but the set adopts {b.display} {adopted_years}{suffix}. "
+            "Verify the cited section against the adopted edition."
+        )
+        divergence = Finding(
+            sheet_id=str(getattr(rep, "sheet_id", "") or ""),
+            source_name=str(getattr(rep, "source_name", "") or ""),
+            source_id=str(getattr(rep, "source_id", "") or ""),
+            page_index=int(getattr(rep, "page_index", 0) or 0),
+            category="code",
+            severity="medium" if tier1 else "low",
+            text=text,
+            source_quote=divergence_quote,
+            anchor_hint="" if divergence_quote else "SHEET",
+            refs=refs_sorted,
+            sources=["edition_audit"],
+        )
+        if tier1:
+            # Both operands text-grounded: the comparison is a checked fact,
+            # trusted like the offline auditors (deterministic-only ink gate).
+            divergence.verification = Verification(
+                status="DETERMINISTIC",
+                note=(
+                    f"host edition comparison: cited {b.display} {year} vs adopted "
+                    f"{b.display} {adopted_years}, both re-found in the drawing text"
+                ),
+            )
+        out.append(divergence)
+    return out
 
 
 # --------------------------------------------------------------------------- #

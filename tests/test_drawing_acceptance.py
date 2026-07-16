@@ -727,6 +727,30 @@ def test_gauntlet_citations_claim_complete(oracle):
     assert a1.evidence_url == "https://codes.example.org/nfpa13"
 
 
+def test_gauntlet_edition_divergence_is_first_class(oracle):
+    # Phase B: F4 cites NFPA 13 2013 on a set whose FP-101 states the 2016
+    # adoption — the pre-seal edition audit emits a real ledger finding that
+    # numbers, anchors to the stale-edition text itself, earns the
+    # deterministic tier (both operands re-found in the sheet text), gets ink,
+    # and is itself citation-checked. The COMPLETE path is unaffected.
+    ctx = oracle.ctx
+    (d,) = [f for f in ctx.all_findings if f.sources == ["edition_audit"]]
+    assert d.qc_id.startswith("QC-")
+    assert d.sheet_id == "FP-101"
+    assert d.anchor.status == "EXACT"
+    assert d.source_quote == "NFPA 13 2013"           # the stale span itself
+    assert d.severity == "medium"
+    assert d.verification.status == "DETERMINISTIC"
+    assert "cites NFPA 13 2013" in d.text and "adopts NFPA 13 2016" in d.text
+    # Inked like any deterministic finding, receipt-proven.
+    receipts = [r for r in ctx.markup_run.receipts
+                if r.placement.finding_id == d.id]
+    assert receipts and receipts[0].status == "WRITTEN"
+    # Its ref rode the web-search citation pass too.
+    assert any(G.STALE_EDITION_REF in req for req in oracle.client.citation_requests)
+    assert ctx.qc_status == "COMPLETE"
+
+
 # ---- assertion 10: QC ids are positional (source, page, anchored, position) -
 
 
@@ -773,7 +797,9 @@ def test_gauntlet_every_placement_has_terminal_receipt(oracle):
     # one cloud per sheet: entries + extra legs = placements accounted.
     extra_legs = sum(len(f.also_on) for f in ctx.all_findings)
     assert sum(ctx.ledger_tally.values()) == ctx.finding_count + extra_legs
-    assert ctx.ledger_tally == {"cloud": 11, "margin": 3, "rejected": 1,
+    # Phase B: the seeded stale-edition citation adds one deterministic
+    # edition-divergence cloud on FP-101 (11 → 12).
+    assert ctx.ledger_tally == {"cloud": 12, "margin": 3, "rejected": 1,
                                 "review_notes": 1}
 
 
@@ -875,7 +901,8 @@ def test_gauntlet_exhaustive_status_complete(oracle):
     assert ctx.coverage_status == "COMPLETE"
     statuses = {s.stage: s.status for s in ctx.stage_results}
     for stage in ("identity", "critique", "cross_qc", "synthesis", "auditors",
-                  "prose_harvest", "verification", "citation", "markup"):
+                  "prose_harvest", "edition_audit", "verification", "citation",
+                  "markup"):
         assert statuses[stage] in ("COMPLETE", "SKIPPED_VALID"), (stage, statuses)
     # Usage totals are the exact sum of the append-only ledger.
     assert ctx.total_input_tokens == sum(r.input_tokens for r in ctx.run_usage.records)
