@@ -312,38 +312,180 @@ def test_ask_ai_malicious_citation_is_inert(page, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# 3. Ask AI works without a build-time key: first send prompts for one.
+# 3. Ask AI works without a build-time key: the reader supplies one in the
+#    in-panel key field (a real masked input, never a native window.prompt);
+#    a 401 forgets the key and re-surfaces the field; errors are scrubbed.
 # --------------------------------------------------------------------------- #
 
 
-def test_ask_ai_without_key_prompts_on_first_use(page, tmp_path):
+def _wait_turn(page):
+    # Send disables during streaming, then re-enables when the turn finishes.
+    page.wait_for_function(
+        "() => { var b=document.getElementById('da-chat-send'); return b && b.disabled; }",
+        timeout=5000,
+    )
+    page.wait_for_function(
+        "() => { var b=document.getElementById('da-chat-send'); return b && !b.disabled; }",
+        timeout=10000,
+    )
+    page.wait_for_timeout(150)
+
+
+def test_ask_ai_without_key_uses_inline_key_field(page, tmp_path):
     doc = hr.build_html_report(
         _Ctx(sheets=[_Sheet(_Ref("a.pdf", 0, 1), text="x")], combined_text="x"),
-        source_names=["a.pdf"], now=NOW,   # no api_key → prompt-on-use mode
+        source_names=["a.pdf"], now=NOW,   # no api_key → inline key entry
+    )
+    page.add_init_script("window.__SSE = " + json.dumps(_malicious_stream()) + ";")
+    page.add_init_script(_FETCH_STUB)
+    # A native prompt()/alert() dialog must NEVER appear; record it if it does.
+    seen = {"dialogs": 0}
+
+    def _on_dialog(d):
+        seen["dialogs"] += 1
+        d.dismiss()
+
+    page.on("dialog", _on_dialog)
+    _load(page, doc, tmp_path)
+
+    page.click("#da-chat-fab")
+    # With no key, the entry form shows and the "set" state is hidden.
+    assert page.is_visible("#da-chat-key-input")
+    assert page.eval_on_selector("#da-chat-key-set", "el => el.hidden") is True
+
+    # Clicking Send with no key surfaces the form (never a window.prompt) and
+    # preserves the typed question.
+    page.fill("#da-chat-input", "hello")
+    page.click("#da-chat-send")
+    page.wait_for_timeout(200)
+    assert seen["dialogs"] == 0, "must not use a native prompt dialog"
+    assert page.is_visible("#da-chat-key-input")
+    assert page.eval_on_selector("#da-chat-input", "el => el.value") == "hello"
+
+    # Enter a key in the field and save it.
+    page.fill("#da-chat-key-input", "sk-ant-entered-at-runtime")
+    page.click("#da-chat-key-save")
+    # Stored only in sessionStorage, cleared from the DOM input, form collapses.
+    assert page.evaluate("sessionStorage.getItem('da-api-key')") == "sk-ant-entered-at-runtime"
+    assert "sk-ant-entered-at-runtime" not in doc
+    assert page.eval_on_selector("#da-chat-key-input", "el => el.value") == ""
+    assert page.eval_on_selector("#da-chat-key-form", "el => el.hidden") is True
+    assert page.is_visible("#da-chat-key-change")
+
+    # A question now streams normally through the stub and stays inert.
+    page.fill("#da-chat-input", "hello again")
+    page.click("#da-chat-send")
+    _wait_turn(page)
+    assert page.evaluate("window.__pwned") is False
+
+    # Forget key clears it and brings the entry form back.
+    page.click("#da-chat-forget")
+    assert page.evaluate("sessionStorage.getItem('da-api-key')") is None
+    assert page.is_visible("#da-chat-key-input")
+
+
+def test_ask_ai_401_forgets_key_and_resurfaces_field(page, tmp_path):
+    doc = hr.build_html_report(
+        _Ctx(sheets=[_Sheet(_Ref("a.pdf", 0, 1), text="x")], combined_text="x"),
+        source_names=["a.pdf"], now=NOW,
+    )
+    # fetch → 401: the entered key must be dropped and the field re-opened.
+    stub = (
+        "(function(){ window.fetch = function(){"
+        " return Promise.resolve({ ok:false, status:401,"
+        " json:function(){ return Promise.resolve({error:{message:'unauthorized'}}); } }); }; })();"
+    )
+    page.add_init_script(stub)
+    _load(page, doc, tmp_path)
+
+    page.click("#da-chat-fab")
+    page.fill("#da-chat-key-input", "sk-ant-will-be-rejected")
+    page.click("#da-chat-key-save")
+    assert page.evaluate("sessionStorage.getItem('da-api-key')") == "sk-ant-will-be-rejected"
+
+    page.fill("#da-chat-input", "hello")
+    page.click("#da-chat-send")
+    page.wait_for_selector(".da-err", timeout=5000)
+    assert "401" in page.eval_on_selector(".da-err", "el => el.textContent")
+    # Rejected key forgotten; the entry field is shown again for a new one.
+    assert page.evaluate("sessionStorage.getItem('da-api-key')") is None
+    assert page.is_visible("#da-chat-key-input")
+    assert page.evaluate("window.__pwned") is False
+
+
+def test_ask_ai_api_error_scrubs_key_material(page, tmp_path):
+    doc = hr.build_html_report(
+        _Ctx(sheets=[_Sheet(_Ref("a.pdf", 0, 1), text="x")], combined_text="x"),
+        source_names=["a.pdf"], now=NOW,
+    )
+    # A non-401 API error whose message echoes a key must be redacted in the DOM.
+    stub = (
+        "(function(){ window.fetch = function(){"
+        " return Promise.resolve({ ok:false, status:500,"
+        " json:function(){ return Promise.resolve("
+        "{error:{message:'boom sk-ant-LEAKED999 boom'}}); } }); }; })();"
+    )
+    page.add_init_script(stub)
+    _load(page, doc, tmp_path)
+
+    page.click("#da-chat-fab")
+    page.fill("#da-chat-key-input", "sk-ant-some-key")
+    page.click("#da-chat-key-save")
+    page.fill("#da-chat-input", "hello")
+    page.click("#da-chat-send")
+    page.wait_for_selector(".da-err", timeout=5000)
+    err = page.eval_on_selector(".da-err", "el => el.textContent")
+    assert "sk-ant-LEAKED999" not in err
+    assert "sk-ant-[redacted]" in err
+    assert page.evaluate("document.body.textContent.indexOf('sk-ant-LEAKED999')") == -1
+
+
+def test_key_field_toggle_masks_and_unmasks(page, tmp_path):
+    doc = hr.build_html_report(
+        _Ctx(sheets=[_Sheet(_Ref("a.pdf", 0, 1), text="x")], combined_text="x"),
+        source_names=["a.pdf"], now=NOW,
+    )
+    _load(page, doc, tmp_path)
+    page.click("#da-chat-fab")
+    assert page.eval_on_selector("#da-chat-key-input", "el => el.type") == "password"
+    page.click("#da-chat-key-toggle")
+    assert page.eval_on_selector("#da-chat-key-input", "el => el.type") == "text"
+    page.click("#da-chat-key-toggle")
+    assert page.eval_on_selector("#da-chat-key-input", "el => el.type") == "password"
+
+
+def test_embedded_key_hides_manual_entry(page, tmp_path):
+    doc = hr.build_html_report(
+        _Ctx(sheets=[_Sheet(_Ref("a.pdf", 0, 1), text="x")], combined_text="x"),
+        source_names=["a.pdf"], now=NOW,
+        api_key="sk-ant-fake-not-real", embed_api_key=True,
     )
     page.add_init_script("window.__SSE = " + json.dumps(_malicious_stream()) + ";")
     page.add_init_script(_FETCH_STUB)
     _load(page, doc, tmp_path)
+    _ask(page, "hi")   # opens the panel + sends using the embedded key
+    # Manual entry stays hidden throughout (the embedded key is authoritative).
+    assert page.eval_on_selector("#da-chat-key", "el => el.hidden") is True
+    assert page.is_visible("#da-chat-key-input") is False
+    assert page.evaluate("window.__pwned") is False
 
-    prompted = {"count": 0}
 
-    def _on_dialog(dialog):
-        prompted["count"] += 1
-        dialog.accept("sk-ant-entered-at-runtime")
-
-    page.on("dialog", _on_dialog)
+def test_key_field_hidden_in_pdf_transcript_export(page, tmp_path):
+    doc = hr.build_html_report(
+        _Ctx(sheets=[_Sheet(_Ref("a.pdf", 0, 1), text="x")], combined_text="x"),
+        source_names=["a.pdf"], now=NOW,
+    )
+    _load(page, doc, tmp_path)
     page.click("#da-chat-fab")
-    page.fill("#da-chat-input", "hello")
-    page.click("#da-chat-send")
-    page.wait_for_timeout(500)
-
-    assert prompted["count"] == 1, "first send with no key must prompt"
-    # The prompted key lives only in sessionStorage, never in the file.
-    assert "sk-ant-entered-at-runtime" not in doc
-    assert page.evaluate("sessionStorage.getItem('da-api-key')") == "sk-ant-entered-at-runtime"
-    # Forget key clears it from the tab.
-    page.click("#da-chat-forget")
-    assert page.evaluate("sessionStorage.getItem('da-api-key')") is None
+    assert page.is_visible("#da-chat-key-input")   # visible on screen
+    # "Save as PDF" adds body.da-print-chat and prints the panel as a transcript;
+    # under print media the key row must be hidden so a key can never land in the
+    # exported PDF (the panel itself is still shown by the transcript rules).
+    page.emulate_media(media="print")
+    page.evaluate("document.body.classList.add('da-print-chat')")
+    assert page.is_visible("#da-chat-panel")
+    assert page.is_visible("#da-chat-key") is False
+    assert page.is_visible("#da-chat-key-input") is False
 
 
 # --------------------------------------------------------------------------- #

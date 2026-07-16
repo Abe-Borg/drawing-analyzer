@@ -2450,9 +2450,9 @@ def _chat_bootstrap_html(
         )
     else:
         foot = (
-            "AI-generated answers — verify against the drawings. Your API key is "
-            "requested on first use and kept only in this browser tab "
-            "(sessionStorage) — it is never saved into this file."
+            "AI-generated answers — verify against the drawings. Enter your "
+            "Anthropic API key in the field above; it is kept only in this "
+            "browser tab (sessionStorage) and is never saved into this file."
         )
     return (
         f'<script id="da-chat-config" type="application/json">{config_json}</script>'
@@ -2478,6 +2478,20 @@ _CHAT_HTML = """
     <div class="da-msg da-hint">Ask anything about this drawing set. Answers are grounded in
     this report; the assistant can also search the web for codes, standards, and product data.
     <div class="da-starters" id="da-starters-row" aria-label="Suggested questions"></div></div>
+  </div>
+  <div id="da-chat-key">
+    <div id="da-chat-key-form">
+      <div class="da-key-row">
+        <input id="da-chat-key-input" type="password" placeholder="sk-ant-…" autocomplete="off" spellcheck="false" autocapitalize="off" autocorrect="off" aria-label="Anthropic API key">
+        <button id="da-chat-key-toggle" type="button" class="ghost-btn" aria-pressed="false" title="Show or hide the key">Show</button>
+        <button id="da-chat-key-save" type="button">Save key</button>
+      </div>
+    </div>
+    <div id="da-chat-key-set" hidden>
+      <span class="da-key-set-label">API key set for this browser tab.</span>
+      <button id="da-chat-key-change" type="button" class="ghost-btn">Change key</button>
+    </div>
+    <div id="da-chat-key-status" class="da-key-status" aria-live="polite"></div>
   </div>
   <div class="da-chat-compose">
     <textarea id="da-chat-input" rows="2" placeholder="Ask about this report…"></textarea>
@@ -2595,6 +2609,28 @@ _CHAT_CSS = """
   cursor:pointer; vertical-align:baseline; white-space:nowrap;
 }
 #da-chat-forget:hover{color:var(--conflict); border-color:var(--conflict)}
+/* ---- reader-supplied API-key entry ---- */
+#da-chat-key{
+  padding:9px 12px; border-top:1px solid var(--line); background:#fbfcfe;
+  display:flex; flex-direction:column; gap:6px;
+}
+#da-chat-key[hidden],#da-chat-key-form[hidden],#da-chat-key-set[hidden]{display:none}
+.da-key-row{display:flex; gap:6px; align-items:center}
+#da-chat-key-input{
+  flex:1 1 auto; min-width:0; border:1px solid var(--line); border-radius:8px;
+  padding:7px 10px; font-size:13px; font-family:inherit; background:#fff; color:var(--ink);
+}
+#da-chat-key-input:focus{outline:none; border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft)}
+#da-chat-key-toggle,#da-chat-key-change{white-space:nowrap; flex:0 0 auto}
+#da-chat-key-save{
+  border:none; border-radius:8px; padding:7px 13px; font-size:12.5px; font-weight:600;
+  cursor:pointer; color:#fff; background:var(--accent); white-space:nowrap; flex:0 0 auto;
+}
+#da-chat-key-save:hover{filter:brightness(1.08)}
+#da-chat-key-set{display:flex; align-items:center; gap:8px}
+.da-key-set-label{font-size:12px; color:var(--muted); flex:1 1 auto}
+.da-key-status{font-size:11px; color:var(--muted); line-height:1.4}
+.da-key-status:empty{display:none}
 /* ---- resize handles + drag ---- */
 .da-rz{position:absolute; z-index:3; touch-action:none}
 .da-rz-t{top:0; left:8px; right:8px; height:6px; cursor:ns-resize}
@@ -2648,6 +2684,7 @@ body.da-dragging, body.da-dragging *{user-select:none !important}
   body.da-print-chat #da-chat-clear,
   body.da-print-chat #da-chat-close,
   body.da-print-chat #da-chat-forget,
+  body.da-print-chat #da-chat-key,
   body.da-print-chat .da-chat-compose{display:none !important}
   body.da-print-chat .da-chat-head{cursor:default}
   body.da-print-chat #da-chat-print-head{
@@ -2680,29 +2717,30 @@ _CHAT_JS = r"""
   var REPORT = rawEl ? rawEl.textContent : '';
   var KEY_STORE = 'da-api-key';
 
-  // Key resolution: an embedded key (opt-in) wins; otherwise the reader is
-  // asked once and the value is kept only in this tab's sessionStorage — never
-  // written back into the file. forgetKey() drops a rejected prompted key (but
-  // keeps an embedded one) so a fresh key can be entered on the next send.
+  // Key resolution: an embedded key (opt-in) wins; otherwise the reader enters
+  // one in the in-panel field (renderKeyUi / revealKeyForm / saveKeyFromInput,
+  // below) and the value is kept only in this tab's sessionStorage — never
+  // written back into the file and never persisted to disk (no localStorage).
+  // ensureKey() is a pure lookup now (no window.prompt); a missing key surfaces
+  // the field. forgetKey() drops a stored/rejected key (but keeps an embedded
+  // one) and re-opens the field.
+  function storedKey(){
+    try { var k = sessionStorage.getItem(KEY_STORE); return (k && k.trim()) ? k.trim() : null; }
+    catch(e){ return null; }
+  }
   var apiKey = (CFG.apiKey || '').trim() || null;
+  function haveKey(){ return !!(apiKey || storedKey()); }
   function ensureKey(){
     if(apiKey) return apiKey;
-    var k = null;
-    try { k = sessionStorage.getItem(KEY_STORE); } catch(e){}
-    if(k && k.trim()){ apiKey = k.trim(); return apiKey; }
-    k = window.prompt('Enter your Anthropic API key to use the assistant.\n\n' +
-      'It is kept only in this browser tab (sessionStorage) and is NOT saved into this file.');
-    if(k && k.trim()){
-      apiKey = k.trim();
-      try { sessionStorage.setItem(KEY_STORE, apiKey); } catch(e){}
-      return apiKey;
-    }
+    var k = storedKey();
+    if(k){ apiKey = k; return apiKey; }
     return null;
   }
   function forgetKey(){
     if(CFG.apiKey){ apiKey = CFG.apiKey.trim() || null; return; }
     apiKey = null;
     try { sessionStorage.removeItem(KEY_STORE); } catch(e){}
+    renderKeyUi();
   }
 
   // ----------------------------------------------------------- secret hygiene
@@ -3305,6 +3343,14 @@ _CHAT_JS = r"""
   var printHead = document.getElementById('da-chat-print-head');
   var forgetBtn = document.getElementById('da-chat-forget');
   var startersRow = document.getElementById('da-starters-row');
+  var keyRow = document.getElementById('da-chat-key');
+  var keyForm = document.getElementById('da-chat-key-form');
+  var keySet = document.getElementById('da-chat-key-set');
+  var keyInput = document.getElementById('da-chat-key-input');
+  var keyToggle = document.getElementById('da-chat-key-toggle');
+  var keySave = document.getElementById('da-chat-key-save');
+  var keyChange = document.getElementById('da-chat-key-change');
+  var keyStatus = document.getElementById('da-chat-key-status');
   document.getElementById('da-chat-model').textContent = CFG.model + ' · web search · thinking';
 
   fab.addEventListener('click', function(){ panel.hidden = false; fab.hidden = true; applyGeom(); input.focus(); });
@@ -3351,10 +3397,66 @@ _CHAT_JS = r"""
     e.returnValue = '';
   });
 
-  // "Forget key": in prompt mode this clears BOTH the in-memory copy and the
-  // tab's sessionStorage. In embedded mode there is nothing a runtime action
-  // can truthfully delete — the credential is part of the HTML file — so say
-  // exactly that instead of pretending.
+  // ------------------------------------------------------- reader key entry UI
+  // The reader supplies their own key in the in-panel field (this replaces the
+  // old window.prompt). renderKeyUi() settles the row to its resting state; in
+  // embedded mode the whole row is hidden — the embedded key is authoritative
+  // and mutually exclusive with manual entry (mirrors the CFG.apiKey guards).
+  function setKeyStatus(msg){ if(keyStatus) keyStatus.textContent = msg || ''; }
+  function renderKeyUi(){
+    if(!keyRow) return;
+    if(CFG.apiKey){ keyRow.hidden = true; return; }   // embedded: no manual entry
+    keyRow.hidden = false;
+    var have = haveKey();
+    if(keyForm) keyForm.hidden = have;
+    if(keySet) keySet.hidden = !have;
+  }
+  // Force the entry form open (the replacement for window.prompt): used when a
+  // send is attempted with no key and when a key is rejected (401).
+  function revealKeyForm(reason){
+    if(!keyRow || CFG.apiKey) return;
+    keyRow.hidden = false;
+    if(keySet) keySet.hidden = true;
+    if(keyForm) keyForm.hidden = false;
+    setKeyStatus(reason || '');
+    if(keyInput){ try { keyInput.focus(); } catch(e){} }
+  }
+  function saveKeyFromInput(){
+    if(!keyInput) return;
+    var v = (keyInput.value || '').trim();
+    if(!v){ setKeyStatus('Enter your Anthropic API key to use the assistant.'); keyInput.focus(); return; }
+    apiKey = v;
+    try { sessionStorage.setItem(KEY_STORE, v); } catch(e){}
+    keyInput.value = '';                        // never keep the secret in the DOM
+    if(keyInput.type !== 'password'){           // re-mask if it had been revealed
+      keyInput.type = 'password';
+      if(keyToggle){ keyToggle.textContent = 'Show'; keyToggle.setAttribute('aria-pressed', 'false'); }
+    }
+    renderKeyUi();
+    setKeyStatus(/^sk-ant-/.test(v)
+      ? 'Key saved — kept only in this browser tab (sessionStorage).'
+      : 'Key saved. Note: that does not look like an Anthropic key (they usually start with "sk-ant-").');
+    if(input){ try { input.focus(); } catch(e){} }
+  }
+  if(keySave) keySave.addEventListener('click', saveKeyFromInput);
+  if(keyInput) keyInput.addEventListener('keydown', function(e){
+    if(e.key === 'Enter'){ e.preventDefault(); saveKeyFromInput(); }
+  });
+  if(keyToggle) keyToggle.addEventListener('click', function(){
+    if(!keyInput) return;
+    var reveal = keyInput.type === 'password';
+    keyInput.type = reveal ? 'text' : 'password';
+    keyToggle.textContent = reveal ? 'Hide' : 'Show';
+    keyToggle.setAttribute('aria-pressed', reveal ? 'true' : 'false');
+    keyInput.focus();
+  });
+  if(keyChange) keyChange.addEventListener('click', function(){ revealKeyForm(''); });
+  renderKeyUi();
+
+  // "Forget key": clears BOTH the in-memory copy and the tab's sessionStorage,
+  // then re-opens the entry field. In embedded mode there is nothing a runtime
+  // action can truthfully delete — the credential is part of the HTML file — so
+  // say exactly that instead of pretending.
   if(forgetBtn) forgetBtn.addEventListener('click', function(){
     if(CFG.apiKey){
       addMsg('da-err',
@@ -3363,10 +3465,10 @@ _CHAT_JS = r"""
         'the embed option (or delete this file) to withdraw the credential.');
       return;
     }
-    apiKey = null;
-    try { sessionStorage.removeItem(KEY_STORE); } catch(e){}
-    addMsg('da-hint', 'API key forgotten — removed from this tab (memory and sessionStorage). ' +
-      'You will be asked for a key the next time you send a question.');
+    forgetKey();                                // drops memory + sessionStorage, re-opens the field
+    setKeyStatus('Key removed from this tab. Enter a key above to ask another question.');
+    addMsg('da-hint', 'API key forgotten — removed from this browser tab (memory and sessionStorage). ' +
+      'Enter a key in the field above to ask another question.');
   });
 
   function nearBottom(){ return msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight < 60; }
@@ -3427,9 +3529,12 @@ _CHAT_JS = r"""
           var msg = (body && body.error && body.error.message) || ('HTTP ' + resp.status);
           if(resp.status === 401){
             forgetKey();
-            msg = CFG.apiKey
-              ? 'The API key embedded in this report was rejected (401). Regenerate the report with a valid key.'
-              : 'That API key was rejected (401). Send your question again to enter a different key.';
+            if(CFG.apiKey){
+              msg = 'The API key embedded in this report was rejected (401). Regenerate the report with a valid key.';
+            } else {
+              msg = 'That API key was rejected (401). Enter a different key above and resend.';
+              revealKeyForm('That API key was rejected (401). Enter a different key and resend.');
+            }
           }
           if(resp.status === 429) msg = 'Rate limited by the API (429) — wait a moment and try again. ' + msg;
           throw new Error(msg);
@@ -3718,8 +3823,7 @@ _CHAT_JS = r"""
     var hasSel = !!(pendingSel && pendingSel.text);
     if((!typed && !hasSel) || streaming) return;
     if(!ensureKey()){
-      addMsg('da-err', 'An Anthropic API key is required to use the assistant. ' +
-        'Click Send again to enter one.');
+      revealKeyForm('An Anthropic API key is required to use the assistant. Enter yours above.');
       return;
     }
     input.value = '';
