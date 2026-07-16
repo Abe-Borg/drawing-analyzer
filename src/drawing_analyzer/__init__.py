@@ -27,6 +27,10 @@ Module layout::
     synthesis.py      cross-sheet reconciliation pass (text-only)
     focus.py          optional per-run focus -> set-level Focus Report (text-only)
     pipeline.py       orchestration: PDFs -> sheets -> digests -> QC -> combined text
+    set_identity.py   what the set IS: disciplines/jurisdiction/adopted codes
+                      (text-only; advisory context for the stages below)
+    review_planner.py model-authored per-discipline review checklist, injected
+                      through the profile machinery (text-only)
     ledger.py         the per-run findings ledger every QC channel feeds (Part III)
     auditors/         deterministic zero-API auditors (references, arithmetic,
                       naming, title-block, sheet-index)
@@ -56,8 +60,10 @@ from __future__ import annotations
 
 from .digest import SheetDigest
 from .models import (
+    AdoptedCode,
     RunConfiguration,
     RunUsage,
+    SetIdentity,
     StageResult,
     UsageRecord,
     resolve_run_configuration,
@@ -72,7 +78,9 @@ from .pipeline import (
 __version__ = "1.0.0rc1"
 
 __all__ = [
+    "AdoptedCode",
     "DrawingContext",
+    "SetIdentity",
     "SheetDigest",
     "RunConfiguration",
     "RunUsage",

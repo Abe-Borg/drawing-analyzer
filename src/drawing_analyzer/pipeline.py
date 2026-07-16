@@ -286,6 +286,19 @@ class DrawingContext:
     # (name + version + content hash + source) — recorded for the report / run
     # manifest and so a profile that disappeared/changed after selection is visible.
     profile_snapshots: list = field(default_factory=list)
+    # Phase A (§20.1): the model-detected set identity (disciplines, jurisdiction,
+    # language, units, adopted codes with evidence quotes), or ``None`` when the
+    # identity stage was off, skipped, or failed. Advisory context only — also
+    # rendered into ``combined_text`` as the additive "Set Identity" section,
+    # exported as ``set_identity.json``, and recorded in ``run_manifest.json``.
+    set_identity: Any = None
+    # Phase A (§20.2): the model-authored review plan — the per-discipline
+    # Profile objects the planner authored (empty when the stage was off,
+    # skipped, or failed) and the rendered ``review_plan.md`` document. The
+    # profiles here are the AUTHORED set; whether they were also injected into
+    # the critique is visible via ``profile_snapshots`` (source == "model").
+    review_plan_profiles: list = field(default_factory=list)
+    review_plan_markdown: str = ""
     # Phase 23B (§15.6): the run's append-only usage ledger. ``total_input_tokens`` /
     # ``total_output_tokens`` above are derived sums over it; ``total_estimated_cost``
     # and the per-stage-family breakdown come from it too.
@@ -380,6 +393,7 @@ def _combine(
     overview: str = "",
     focus: str = "",
     focus_report: str = "",
+    identity: str = "",
 ) -> str:
     """Build the combined digest document from per-sheet results.
 
@@ -389,7 +403,10 @@ def _combine(
     When ``focus_report`` is non-empty it is inserted as a "Focus Report"
     section ahead of even the overview — it answers the question the operator
     explicitly asked this run — quoting the ``focus`` so the document is
-    self-describing. Both are additive; the per-sheet digests are unchanged.
+    self-describing. When ``identity`` (the rendered set-identity context block,
+    Phase A) is non-empty it leads the document — a reader should know what the
+    set *is* before reading anything about it. All three are additive; the
+    per-sheet digests are unchanged (I-2).
     """
     total = len(sheets)
     lines: list[str] = [
@@ -401,6 +418,13 @@ def _combine(
         f"show._",
         "",
     ]
+    if identity.strip():
+        lines.append("## Set Identity (model-detected)")
+        lines.append("")
+        lines.append(identity.strip())
+        lines.append("")
+        lines.append("---")
+        lines.append("")
     if focus_report.strip():
         lines.append("## Focus Report (operator-requested)")
         lines.append("")
@@ -1095,6 +1119,7 @@ def _run_qc_stages(
     synthesis_text: str = "",
     accepted_documents: list | None = None,
     journal: Any = None,
+    set_identity: Any = None,
 ) -> _QCResult:
     """Run the ledger pipeline: ingest → harvest → anchor → number → verify → markups.
 
@@ -1456,6 +1481,7 @@ def _run_qc_stages(
             try:
                 cires = check_citations(
                     all_findings, geometries, client=client, progress=_citation_progress,
+                    identity=set_identity,
                 )
                 # Best-effort web-search fee: the citation stage does not yet surface
                 # the exact server ``web_search_requests`` count, so bill one search
@@ -1736,6 +1762,8 @@ def extract_drawing_context(
     profiles: list | None = None,
     cross_qc: bool | None = None,
     citation_check: bool | None = None,
+    identity: bool | None = None,
+    review_plan: bool | None = None,
     ink_rejected: bool = False,
     focus_findings_to_markups: bool = False,
     qc_work_dir: Path | None = None,
@@ -1876,6 +1904,8 @@ def extract_drawing_context(
         cross_qc=cross_qc,
         citation_check=citation_check,
         verify_findings=verify_findings,
+        identity=identity,
+        review_plan=review_plan,
         markup_verified_only=markup_verified_only,
         ink_rejected=ink_rejected,
         focus_findings_to_markups=focus_findings_to_markups,
@@ -2202,6 +2232,141 @@ def extract_drawing_context(
         cached=sum(1 for s in sheets if s.cached),
     )
 
+    # Set identity (Phase A §20.1): the "which specialist am I?" pass — one
+    # text-only call over the digests + text layers that detects the set's
+    # disciplines, jurisdiction, language, units, and adopted codes. Purely
+    # advisory context for the planner / citation check / cross-QC below: a
+    # failure (or a misdetection) can never gate or suppress a finding (I-3).
+    set_identity_obj = None
+    identity_stage = StageResult(stage="identity", expected=config.run_identity)
+    if config.run_identity:
+        journal.emit("STAGE_START", stage="identity", sheets=len(sheets))
+        identity_stage.items_in = len(sheets)
+        if ok_sheets == 0:
+            # Applicable but nothing to identify — every digest failed/empty.
+            identity_stage.status = "SKIPPED_VALID"
+        else:
+            if progress is not None:
+                progress(total, total, "Identifying the set")
+            try:
+                from .set_identity import identify_set
+
+                ires = identify_set(
+                    sheets, sheet_geometries, client=client, cache=cache,
+                )
+                identity_stage.calls_planned = 1
+                _record_usage(
+                    run_usage, family="identity", instance="identity",
+                    model=ires.model_used,
+                    transport="CACHE" if ires.cached else "REAL_TIME",
+                    input_tokens=ires.input_tokens,
+                    output_tokens=ires.output_tokens,
+                    cache_hit=ires.cached,
+                    parse_success=ires.ok,
+                    terminal_status="COMPLETE" if ires.ok else "FAILED",
+                )
+                if ires.ok:
+                    set_identity_obj = ires.identity
+                    identity_stage.calls_succeeded = 1
+                    identity_stage.items_out = len(ires.identity.adopted_codes)
+                    if ires.omitted_chars:
+                        identity_stage.warnings.append(
+                            f"identity corpus over budget: {ires.omitted_chars} "
+                            "chars omitted (later sheets trimmed first)"
+                        )
+                    if ires.identity.has_content:
+                        identity_stage.status = "COMPLETE"
+                    else:
+                        identity_stage.status = "PARTIAL"
+                        identity_stage.warnings.append(
+                            "identity call returned no usable fields"
+                        )
+                else:
+                    identity_stage.calls_failed = 1
+                    identity_stage.status = "FAILED"
+                    msg = ires.error or "identity call failed"
+                    identity_stage.errors.append(msg)
+                    errors.append(f"Set identity: {msg}")
+            except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
+                errors.append(f"Set identity: {exc}")
+                identity_stage.status = "FAILED"
+                identity_stage.errors.append(str(exc))
+                _log.warning("set-identity stage failed: %s", exc)
+        if set_identity_obj is not None:
+            # Counts/short tags only — never quotes or free text (§18.3).
+            journal.emit(
+                "SET_IDENTIFIED", stage="identity",
+                disciplines=len(set_identity_obj.disciplines),
+                adopted_codes=len(set_identity_obj.adopted_codes),
+                confidence=set_identity_obj.confidence or "unstated",
+            )
+    _finish_stage(stage_results, journal, identity_stage)
+
+    # Review plan (Phase A §20.2): the model authors THIS set's specialist
+    # checklist from the identity + digests. Injected below through the existing
+    # profile machinery (after the user's own profiles) so checklist rendering,
+    # the critique cache fragment, and manifest snapshots apply unchanged. A
+    # failure degrades this stage only — the critique still runs (I-3).
+    plan_profiles: list = []
+    plan_markdown = ""
+    review_plan_stage = StageResult(stage="review_plan", expected=config.run_review_plan)
+    if config.run_review_plan:
+        journal.emit("STAGE_START", stage="review_plan", sheets=len(sheets))
+        if ok_sheets == 0:
+            review_plan_stage.status = "SKIPPED_VALID"
+        else:
+            if progress is not None:
+                progress(total, total, "Authoring the review plan")
+            try:
+                from .review_planner import author_review_plan
+
+                pres = author_review_plan(
+                    set_identity_obj, sheets, client=client, cache=cache,
+                )
+                review_plan_stage.calls_planned = 1
+                _record_usage(
+                    run_usage, family="review_plan", instance="review_plan",
+                    model=pres.model_used,
+                    transport="CACHE" if pres.cached else "REAL_TIME",
+                    input_tokens=pres.input_tokens,
+                    output_tokens=pres.output_tokens,
+                    cache_hit=pres.cached,
+                    parse_success=pres.ok,
+                    terminal_status="COMPLETE" if pres.ok else "FAILED",
+                )
+                if pres.ok:
+                    plan_profiles = list(pres.profiles)
+                    plan_markdown = pres.markdown
+                    review_plan_stage.calls_succeeded = 1
+                    review_plan_stage.items_out = pres.item_count
+                    if pres.dropped_items:
+                        # Partially usable: some items were malformed/overlong
+                        # and dropped (never truncated) — an honest PARTIAL.
+                        review_plan_stage.status = "PARTIAL"
+                        review_plan_stage.warnings.append(
+                            f"{pres.dropped_items} authored item(s) dropped "
+                            "(malformed, duplicate, overlong, or over the cap)"
+                        )
+                    else:
+                        review_plan_stage.status = "COMPLETE"
+                    journal.emit(
+                        "REVIEW_PLAN_AUTHORED", stage="review_plan",
+                        plans=len(plan_profiles), items=pres.item_count,
+                        dropped=pres.dropped_items,
+                    )
+                else:
+                    review_plan_stage.calls_failed = 1
+                    review_plan_stage.status = "FAILED"
+                    msg = pres.error or "review-plan call failed"
+                    review_plan_stage.errors.append(msg)
+                    errors.append(f"Review plan: {msg}")
+            except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
+                errors.append(f"Review plan: {exc}")
+                review_plan_stage.status = "FAILED"
+                review_plan_stage.errors.append(str(exc))
+                _log.warning("review-plan stage failed: %s", exc)
+    _finish_stage(stage_results, journal, review_plan_stage)
+
     # Critique pass (Phase 11): a second, adversarial full-coverage read per sheet
     # whose only job is finding problems, run self-consistently (twice) and merged.
     # Additive and non-fatal; its findings pool with the digest findings in the QC
@@ -2219,7 +2384,18 @@ def extract_drawing_context(
     from .profiles import resolve_profiles, snapshot_profiles
 
     resolved_profiles = resolve_profiles(profiles)
+    # Phase A (§20.2): the model-authored plan profiles are injected AFTER the
+    # user's own selections — the human's checklist keeps its exact order and
+    # prompt position; the plan is purely additive at the end. They are only
+    # injected when the critique (their sole consumer) actually runs; an
+    # explicitly-authored-but-unconsumed plan still exports its markdown.
+    injected_plan_profiles = list(plan_profiles) if config.run_critique else []
+    all_profiles = resolved_profiles + injected_plan_profiles
     profile_snapshots = snapshot_profiles(resolved_profiles)
+    if injected_plan_profiles:
+        from .review_planner import plan_snapshots
+
+        profile_snapshots = profile_snapshots + plan_snapshots(injected_plan_profiles)
     requested_count = len(list(profiles or []))
     profile_stage = StageResult(stage="profiles", expected=config.run_critique)
     if config.run_critique:
@@ -2245,17 +2421,17 @@ def extract_drawing_context(
             "STAGE_START", stage="critique", sheets=total, reads=config.critique_reads,
         )
         try:
-            if resolved_profiles:
+            if all_profiles:
                 _log.info(
                     "critique: applying %d review profile(s): %s",
-                    len(resolved_profiles),
-                    ", ".join(p.name for p in resolved_profiles),
+                    len(all_profiles),
+                    ", ".join(p.name for p in all_profiles),
                 )
             critique_findings, c_claims, critique_degraded = _run_critique_stage(
                 paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
                 client=client, cache=cache, progress=progress, total=total,
                 max_workers=max_workers, run_usage=run_usage,
-                profiles=resolved_profiles, snapshot_by_path=snapshot_by_path,
+                profiles=all_profiles, snapshot_by_path=snapshot_by_path,
                 use_batch=use_batch, on_log=on_log, on_status=on_status,
             )
             numeric_claims.extend(c_claims)
@@ -2298,7 +2474,9 @@ def extract_drawing_context(
         try:
             from .cross_qc import cross_qc_model, cross_sheet_qc
 
-            cross_res = cross_sheet_qc(sheets, sheet_geometries, client=client)
+            cross_res = cross_sheet_qc(
+                sheets, sheet_geometries, client=client, identity=set_identity_obj,
+            )
             cross_findings = cross_res.findings
             numeric_claims.extend(cross_res.claims)
             # DA-015/DA-028: a sharded run is COMPLETE only when every shard and the
@@ -2445,6 +2623,7 @@ def extract_drawing_context(
         synthesis_text=synthesis_text,
         accepted_documents=inventory.accepted_documents,
         journal=journal,
+        set_identity=set_identity_obj,
     )
     stage_results.extend(qc.stage_results)
 
@@ -2505,6 +2684,7 @@ def extract_drawing_context(
             overview=synthesis_text,
             focus=focus,
             focus_report=focus_report_text,
+            identity=set_identity_obj.context_block() if set_identity_obj else "",
         ),
         sheets=sheets,
         file_count=file_count,
@@ -2531,6 +2711,9 @@ def extract_drawing_context(
         qc_status=qc_status,
         run_usage=run_usage,
         profile_snapshots=profile_snapshots,
+        set_identity=set_identity_obj,
+        review_plan_profiles=plan_profiles,
+        review_plan_markdown=plan_markdown,
         run_journal=journal,
         input_inventory=inventory,
         prose_accounting=qc.prose_accounting,

@@ -335,6 +335,23 @@ def build_export_documents(
         ("00_index.md", _index_document(ctx, source_names=source_names, now=now, sheet_files=sheet_files)),
         ("00_synthesis.md", _synthesis_document(ctx)),
     ]
+    set_identity = getattr(ctx, "set_identity", None)
+    if set_identity is not None and hasattr(set_identity, "to_dict"):
+        # Phase A (§20.1): the machine-readable identity record. Written with the
+        # other documents, so it lands before run.log / run_manifest.json (§18.4)
+        # and is hashed into the manifest's artifact list like everything else.
+        journal = getattr(ctx, "run_journal", None)
+        roots = tuple(getattr(journal, "private_roots", ()) or ())
+        docs.append((
+            "set_identity.json",
+            json.dumps(_sanitize_json(set_identity.to_dict(), roots), indent=2) + "\n",
+        ))
+    review_plan_md = str(getattr(ctx, "review_plan_markdown", "") or "")
+    if review_plan_md.strip():
+        # Phase A (§20.2): the full authored checklist, auditable — exported
+        # even when it was not injected (an explicit review_plan=True with the
+        # critique off authors-and-exports without consuming).
+        docs.append(("review_plan.md", review_plan_md))
     if _focus_value(ctx):
         docs.append(("00_focus.md", _focus_document(ctx)))
     for index, sheet, fname in sheet_files:
@@ -533,6 +550,14 @@ def build_run_manifest(
             s.to_dict() if hasattr(s, "to_dict") else {"name": str(s)}
             for s in (getattr(ctx, "profile_snapshots", None) or [])
         ],
+        # Phase A (§20.1): the model-detected set identity, or null when the
+        # identity stage was off/failed. Additive key — schema stays v1.
+        "set_identity": (
+            _sanitize_json(ctx.set_identity.to_dict(), roots)
+            if getattr(ctx, "set_identity", None) is not None
+            and hasattr(ctx.set_identity, "to_dict")
+            else None
+        ),
         "stages": [
             _sanitize_json(_stage_dict(sr), roots)
             for sr in (getattr(ctx, "stage_results", None) or [])

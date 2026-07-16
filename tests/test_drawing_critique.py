@@ -34,6 +34,8 @@ from drawing_analyzer.critique import (
 )
 from drawing_analyzer.digest import DIGEST_SYSTEM_PROMPT
 from drawing_analyzer.digest_cache import DigestCache
+from drawing_analyzer.review_planner import PLANNER_SYSTEM_PROMPT
+from drawing_analyzer.set_identity import IDENTITY_SYSTEM_PROMPT
 from drawing_analyzer.models import Anchor, Finding, ImageTile, RenderedSheet, SheetRef
 from drawing_analyzer.verify import VERIFY_SYSTEM_PROMPT
 from tests.fixtures.fake_anthropic import FakeMessage, FakeTextBlock, FakeUsage
@@ -716,9 +718,32 @@ def test_both_reads_valid_empty_is_a_complete_clean_critique():
 
 # --- Review profiles (Phase 12): injection, cache key, chunking -------------- #
 
+# The retired built-in's shape, kept as a fixture (a worked copy lives in
+# docs/examples/): K-8.0 must survive verbatim so the injection assertions
+# below keep proving a real checklist item rode into the prompt.
+_FP_SAMPLE = """\
+---
+name: fire-protection
+title: Fire Protection — NFPA 13 sprinkler QC
+disciplines: F, FP, SP, FS
+version: 1
+---
+
+- Extra-hazard densities at or above 0.20 gpm/ft² call for K-8.0 or larger \
+orifice sprinklers; flag any such row that specifies a smaller K-factor. \
+[high] (NFPA 13 Ch. 9)
+- Wet-system relief valves must be set at 175 psi, or the maximum system \
+pressure plus 10 psi, whichever is greater; flag a note set below that. \
+[medium] (NFPA 13 2022 §8.1.2)
+"""
+
+
+def _fp_profile() -> P.Profile:
+    return P.parse_profile(_FP_SAMPLE, fallback_name="fire-protection")
+
 
 def test_checklist_injected_before_findings_instruction():
-    fp = P.get_profile("fire-protection")
+    fp = _fp_profile()
     checklist = _run_checklists([fp], 1)[0]
     client = _CritiqueClient([[]])
     critique_sheet(_rendered(), client=client, max_retries=0, sleep=_NOOP, checklist=checklist)
@@ -737,7 +762,7 @@ def test_no_profiles_reproduces_plain_prompt():
 
 
 def test_profiles_change_the_critique_cache_key():
-    fp = P.get_profile("fire-protection")
+    fp = _fp_profile()
     a = {"sheet_id": "F", "category": "code", "severity": "low", "text": "t"}
     c_plain = DigestCache(None, persist=False)
     c_prof = DigestCache(None, persist=False)
@@ -754,8 +779,8 @@ def test_every_read_gets_the_full_checklist_even_when_long():
     # prompted IDENTICALLY. A long checklist is no longer split into disjoint slices
     # across reads (which would make a finding prompted only in read 1 impossible to
     # corroborate in read 2 and then falsely stamp it an uncorroborated singleton).
-    fp = P.get_profile("fire-protection")
-    short = _run_checklists([fp], 2)               # shipped profile is short
+    fp = _fp_profile()
+    short = _run_checklists([fp], 2)               # the fixture profile is short
     assert short[0] == short[1] and "APPLY" in short[0]
     big = P.Profile(
         name="big", title="big", version="1", content_hash="h",
@@ -802,6 +827,8 @@ class _PipelineClient:
         self.digest_calls = 0
         self.critique_calls = 0
         self.verify_calls = 0
+        self.identity_calls = 0
+        self.plan_calls = 0
         self.critique_had_checklist = False
         outer = self
 
@@ -828,6 +855,29 @@ class _PipelineClient:
                     return FakeMessage(
                         content=[FakeTextBlock(text=prose + "\n\n" + _block([_D]))],
                         usage=FakeUsage(input_tokens=500, output_tokens=80))
+                if system == IDENTITY_SYSTEM_PROMPT:
+                    outer.identity_calls += 1
+                    payload = {
+                        "disciplines": ["fire protection"],
+                        "jurisdiction": "California, United States",
+                        "language": "en", "units": "imperial",
+                        "adopted_codes": [], "confidence": "medium",
+                    }
+                    return FakeMessage(
+                        content=[FakeTextBlock(text="```json\n" + json.dumps(payload) + "\n```")],
+                        usage=FakeUsage(input_tokens=30, output_tokens=10))
+                if system == PLANNER_SYSTEM_PROMPT:
+                    outer.plan_calls += 1
+                    plan = {"plans": [{
+                        "discipline": "fire protection", "title": "FP QC",
+                        "items": [{"text": "Flag a relief valve note set below "
+                                           "175 psi on a wet system.",
+                                   "severity": "medium",
+                                   "refs": ["NFPA 13 2016 §8.1.2"]}],
+                    }]}
+                    return FakeMessage(
+                        content=[FakeTextBlock(text="```json\n" + json.dumps(plan) + "\n```")],
+                        usage=FakeUsage(input_tokens=30, output_tokens=10))
                 return FakeMessage(content=[FakeTextBlock(text="ok")])
 
         self.messages = _Msgs()
@@ -933,8 +983,16 @@ def test_pipeline_warm_rerun_skips_rasterization(tmp_path, monkeypatch):
     assert all(f.source_id for f in ctx2.findings)
 
 
+def _install_fp_user_profile(tmp_path, monkeypatch) -> None:
+    """Write the FP fixture into a tmp user profiles dir (name resolution)."""
+    user_dir = tmp_path / "user_profiles"
+    user_dir.mkdir(exist_ok=True)
+    (user_dir / "fire_protection.md").write_text(_FP_SAMPLE, encoding="utf-8")
+    monkeypatch.setenv("DRAWING_ANALYZER_PROFILES_DIR", str(user_dir))
+
+
 def test_pipeline_critique_applies_selected_profile(tmp_path, monkeypatch):
-    monkeypatch.setenv("DRAWING_ANALYZER_PROFILES_DIR", str(tmp_path / "no_user"))  # builtins only
+    _install_fp_user_profile(tmp_path, monkeypatch)
     src = _make_pdf(tmp_path / "F-D-01-1.pdf")
     client = _PipelineClient()
     ctx = extract_drawing_context(
@@ -944,9 +1002,13 @@ def test_pipeline_critique_applies_selected_profile(tmp_path, monkeypatch):
     assert client.critique_calls == 2                 # self-consistency still runs twice
     assert client.critique_had_checklist is True       # the FP checklist rode into the prompt
     # §16.4: the selected profile is snapshotted at Analyze time (name/version/hash)
-    # and the profile-application stage is COMPLETE.
-    assert [s.name for s in ctx.profile_snapshots] == ["fire-protection"]
-    assert ctx.profile_snapshots[0].content_hash and ctx.profile_snapshots[0].source == "builtin"
+    # and the profile-application stage is COMPLETE. Phase A: the model-authored
+    # plan snapshots AFTER the user's selections (user first, model last).
+    assert [s.name for s in ctx.profile_snapshots] == [
+        "fire-protection", "model-plan-fire-protection",
+    ]
+    assert ctx.profile_snapshots[0].content_hash and ctx.profile_snapshots[0].source == "user"
+    assert ctx.profile_snapshots[1].source == "model"
     stages = {s.stage: s.status for s in ctx.stage_results}
     assert stages.get("profiles") == "COMPLETE"
 
@@ -954,7 +1016,7 @@ def test_pipeline_critique_applies_selected_profile(tmp_path, monkeypatch):
 def test_pipeline_unresolved_profile_is_partial(tmp_path, monkeypatch):
     # §16.4 / §3.3: a selected profile that cannot be resolved (missing/unreadable)
     # makes the profile-application stage PARTIAL — not a silent drop.
-    monkeypatch.setenv("DRAWING_ANALYZER_PROFILES_DIR", str(tmp_path / "no_user"))
+    _install_fp_user_profile(tmp_path, monkeypatch)
     src = _make_pdf(tmp_path / "F-D-01-1.pdf")
     client = _PipelineClient()
     ctx = extract_drawing_context(
@@ -963,7 +1025,11 @@ def test_pipeline_unresolved_profile_is_partial(tmp_path, monkeypatch):
     )
     stages = {s.stage: s.status for s in ctx.stage_results}
     assert stages.get("profiles") == "PARTIAL"
-    assert [s.name for s in ctx.profile_snapshots] == ["fire-protection"]
+    # The unresolved user profile is dropped-with-PARTIAL; the model plan still
+    # injects after the resolvable one (a failed user profile never blocks it).
+    assert [s.name for s in ctx.profile_snapshots] == [
+        "fire-protection", "model-plan-fire-protection",
+    ]
 
 
 def test_pipeline_profiles_ignored_without_critique(tmp_path):

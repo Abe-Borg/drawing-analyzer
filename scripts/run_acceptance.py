@@ -83,15 +83,20 @@ def gate_build_and_install_smoke() -> str:
         py = env_dir / bin_dir / ("python.exe" if sys.platform == "win32" else "python")
         if _run([str(py), "-m", "pip", "install", "--quiet", str(wheels[0])]) != 0:
             return "FAIL (wheel install)"
+        # No built-in profiles ship (review plans are model-authored per set —
+        # Phase A), so the smoke proves the profile MECHANISM in the installed
+        # wheel instead: the loader tolerates the absent builtin dir, and the
+        # parser round-trips a checklist item.
         smoke = (
-            "import drawing_analyzer, importlib.resources as r; "
-            "profiles = [p.name for p in r.files('drawing_analyzer').joinpath('profiles').iterdir() "
-            "if p.name.endswith('.md')]; "
-            "assert profiles, 'built-in profiles missing from the wheel'; "
-            "print('installed', drawing_analyzer.__version__, '| profiles:', len(profiles))"
+            "import drawing_analyzer; "
+            "from drawing_analyzer import profiles as P; "
+            "assert isinstance(P.load_profiles(), dict); "
+            "p = P.parse_profile('---\\nname: x\\n---\\n- item\\n'); "
+            "assert p.items == ('item',), p.items; "
+            "print('installed', drawing_analyzer.__version__, '| profile mechanism ok')"
         )
         if _run([str(py), "-c", smoke]) != 0:
-            return "FAIL (install smoke: import/profile package-data)"
+            return "FAIL (install smoke: import/profile mechanism)"
     return "PASS"
 
 

@@ -191,7 +191,8 @@ def test_exhaustive_estimate_exceeds_digest_only_and_lists_all_paid_stages():
     assert est.high_cost > digest_only.total_cost
     assert est.low_cost <= est.high_cost
     stages = " ".join(c.stage for c in est.components)
-    for needle in ("Digest", "Critique", "Cross-sheet QC", "Verification", "Citation"):
+    for needle in ("Digest", "Set identity", "Model review plan", "Critique",
+                   "Cross-sheet QC", "Verification", "Citation"):
         assert needle in stages, needle
     # Phase 23C: the digest AND the two critique reads ride batch; cross/verify/
     # citation are still real-time.
@@ -219,3 +220,18 @@ def test_exhaustive_prompt_is_labeled_an_estimate_and_names_stages():
     assert "exhaustive" in prompt.lower()
     assert "Critique" in prompt and "Citation" in prompt
     assert "rough" in prompt.lower() and PRICING_EFFECTIVE_DATE in prompt
+    # Phase A: the pre-run dialog discloses the two planning calls.
+    assert "Set identity" in prompt and "Model review plan" in prompt
+
+
+def test_exhaustive_estimate_planning_stages_are_realtime_and_scale_gently():
+    # Phase A: identity + plan are one text-only real-time call each; their
+    # input grows with the sheet count (bigger corpus) but stays small next to
+    # the per-sheet vision stages.
+    small = {c.stage: c for c in estimate_exhaustive_run_cost(2).components}
+    large = {c.stage: c for c in estimate_exhaustive_run_cost(50).components}
+    for stage in ("Set identity", "Model review plan"):
+        assert small[stage].transport == "real-time"
+        assert large[stage].input_tokens > small[stage].input_tokens
+        assert small[stage].cost is not None and small[stage].cost > 0
+    assert large["Set identity"].cost < large["Critique ×2 (per sheet)"].cost

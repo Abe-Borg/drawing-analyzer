@@ -75,6 +75,27 @@ findings for free).
 
 **QC stack** (each stage optional and independently cached):
 
+- *Planning (Phase A §20, universal reviewer):* `set_identity.py` — one text-only
+  call over a budgeted corpus (every digest head + early text layers + verbatim
+  windows around each code-edition mention) → a bounded `SetIdentity`
+  (disciplines, sheet→discipline map, jurisdiction, language, units, adopted
+  codes with evidence quotes; the regex edition harvest unions in as
+  `origin="regex"` — the backstop the model can't argue away). **Advisory only**:
+  consumers take `SetIdentity | None` and never gate a finding on it.
+  `review_planner.py` — one text-only call authoring the per-discipline review
+  checklist (bounded host-side: ≤60 items via `DRAWING_ANALYZER_MAX_PLAN_ITEMS`,
+  overlong items dropped-never-truncated; every code-based item must name
+  code+section+edition inline and never invent a section — the refs flow into
+  `Finding.refs`, which the citation check verifies). Plans become caller-built
+  `Profile` objects injected AFTER user profiles (snapshot `source="model"`),
+  so `profiles_cache_fragment` gives cache correctness for free; both stages
+  cache in `DigestCache` namespaces (`stage=identity` / `stage=review_plan`) so
+  warm re-runs keep the critique `profiles_key` byte-stable. Both ride the
+  critique stack (`run_identity` also on with citation alone); the standard run
+  stays zero-extra-cost (DA-012/DA-013). Artifacts: `set_identity.json`,
+  `review_plan.md`, a manifest `set_identity` key, and an additive combined-text
+  section (I-2). Identity also feeds `check_citations(identity=)` (merged
+  editions + jurisdiction line) and `cross_sheet_qc(identity=)` (preamble).
 - *Finders:* the digest's findings block; `critique.py` (a second full-coverage
   vision read, run twice — self-consistency merge sets `reproduced`; on the
   real-time path the two byte-identical reads prompt-cache their shared image
@@ -123,7 +144,10 @@ findings for free).
 
 `core/` is a shared kernel (model ids + env overrides in `api_config.py`, key
 store, pricing, tokenizer). `reference_audit.py` is a back-compat shim over
-`auditors/references.py`.
+`auditors/references.py`. **No built-in review profiles ship** (Phase A): the
+packaged `profiles/` dir is empty by design — the model authors the plan per
+set; user checklists live in `~/.drawing_analyzer/profiles/` and a worked
+example is parked at `docs/examples/fire_protection.md`.
 
 ## Binding invariants (cited by number in code comments)
 

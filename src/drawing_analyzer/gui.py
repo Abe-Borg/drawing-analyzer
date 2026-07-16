@@ -653,6 +653,16 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             return
         self._profiles_by_name = {p.name: p for p in profiles}
         if not profiles:
+            # Phase A: with no local checklists the review plan is authored by
+            # the model per set — say so instead of showing an empty panel.
+            ctk.CTkLabel(
+                parent,
+                text=("Review checklists: authored automatically per set "
+                      "(model-planned). Drop .md checklists in "
+                      "~/.drawing_analyzer/profiles to add your own."),
+                font=ctk.CTkFont(family="Segoe UI", size=11),
+                text_color=COLORS["text_muted"], wraplength=520, justify="left",
+            ).pack(anchor="w", padx=(28, 0), pady=(6, 0))
             return
         from .profiles import snapshot_profiles
 
@@ -1079,6 +1089,35 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                     "are still in the digest.",
                     level="warning",
                 )
+        # Phase A: what the run detected the set to BE, and the authored plan.
+        identity = getattr(ctx, "set_identity", None)
+        if identity is not None:
+            bits = []
+            if getattr(identity, "disciplines", ()):
+                bits.append(", ".join(identity.disciplines))
+            where = getattr(identity, "jurisdiction", "") or ", ".join(
+                p for p in (getattr(identity, "region", ""),
+                            getattr(identity, "country", "")) if p
+            )
+            if where:
+                bits.append(where)
+            locale = " / ".join(
+                p for p in (getattr(identity, "units", ""),
+                            getattr(identity, "language", "")) if p
+            )
+            if locale:
+                bits.append(locale)
+            if bits:
+                self._log("Set identity (model-detected): " + " — ".join(bits) + ".",
+                          level="muted")
+        plan_profiles = getattr(ctx, "review_plan_profiles", None) or []
+        if plan_profiles:
+            plan_items = sum(len(p.items) for p in plan_profiles)
+            self._log(
+                f"Review plan: model-authored — {plan_items} item(s) across "
+                f"{len(plan_profiles)} discipline(s); see review_plan.md in the export.",
+                level="muted",
+            )
         # QC findings summary — surface the count (and how many would be inked
         # under the default verified-only gating) when a QC run produced any.
         finding_count = getattr(ctx, "finding_count", 0)
