@@ -19,6 +19,43 @@ def _empty_user_dir(tmp_path, monkeypatch):
     return d
 
 
+@pytest.fixture
+def _builtin_dir(tmp_path, monkeypatch):
+    """A monkeypatched builtin profiles dir (empty by default).
+
+    No built-in ships anymore (Phase A: review plans are model-authored), but
+    the builtin discovery/precedence code path stays supported — these tests
+    exercise it against a temp dir standing in for the packaged one.
+    """
+    d = tmp_path / "builtin_profiles"
+    d.mkdir()
+    monkeypatch.setattr(P, "builtin_profiles_dir", lambda: d)
+    return d
+
+
+# The retired starter checklist's shape (a worked copy ships in docs/examples/);
+# used as the fixture profile wherever a realistic checklist is needed.
+_FP_FIXTURE = """\
+---
+name: fire-protection
+title: Fire Protection — NFPA 13 sprinkler QC
+disciplines: F, FP, SP, FS
+version: 1
+---
+
+- Extra-hazard densities at or above 0.20 gpm/ft² call for K-8.0 or larger \
+orifice sprinklers; flag any such row that specifies a smaller K-factor. \
+[high] (NFPA 13 Ch. 9)
+- Wet-system relief valves must be set at 175 psi, or the maximum system \
+pressure plus 10 psi, whichever is greater; flag a note set below that. \
+[medium] (NFPA 13 2022 §8.1.2)
+"""
+
+
+def _write_fp(directory) -> None:
+    (directory / "fire_protection.md").write_text(_FP_FIXTURE, encoding="utf-8")
+
+
 _SAMPLE = """\
 ---
 name: demo
@@ -91,7 +128,18 @@ def test_content_hash_changes_on_any_edit():
 # --------------------------------------------------------------------------- #
 
 
-def test_builtin_fire_protection_profile_ships_and_loads():
+def test_no_builtin_profiles_ship():
+    # Phase A: the software ships with zero discipline bias — the model authors
+    # the review plan per set. With an empty user dir, discovery finds nothing
+    # (and tolerates the absent packaged dir without raising).
+    assert P.load_profiles() == {}
+    assert P.list_profiles() == []
+    assert P.get_profile("fire-protection") is None
+
+
+def test_builtin_dir_still_loads_when_present(_builtin_dir):
+    # The builtin discovery path stays supported for a future shipped example.
+    _write_fp(_builtin_dir)
     profs = P.load_profiles()
     assert "fire-protection" in profs
     fp = profs["fire-protection"]
@@ -99,7 +147,8 @@ def test_builtin_fire_protection_profile_ships_and_loads():
     assert "f" in fp.disciplines
 
 
-def test_user_dir_adds_and_wins_on_name_collision(_empty_user_dir):
+def test_user_dir_adds_and_wins_on_name_collision(_empty_user_dir, _builtin_dir):
+    _write_fp(_builtin_dir)
     # A user profile with a fresh name is added...
     (_empty_user_dir / "mine.md").write_text(
         "---\nname: my-mechanical\ndisciplines: M\n---\n- check ducts\n",
@@ -116,7 +165,8 @@ def test_user_dir_adds_and_wins_on_name_collision(_empty_user_dir):
     assert profs["fire-protection"].version == "99"
 
 
-def test_get_and_resolve_profiles():
+def test_get_and_resolve_profiles(_empty_user_dir):
+    _write_fp(_empty_user_dir)
     fp = P.get_profile("fire-protection")
     assert fp is not None
     resolved = P.resolve_profiles(["fire-protection", "does-not-exist", fp])
@@ -133,7 +183,7 @@ def test_bad_encoding_file_does_not_sink_discovery(_empty_user_dir):
     )
     (_empty_user_dir / "bad.md").write_bytes("---\nname: bad\n- x\n".encode("utf-16"))
     profs = P.load_profiles()          # must not raise
-    assert "good" in profs and "fire-protection" in profs
+    assert "good" in profs
     assert "bad" not in profs
     assert P.list_profiles()           # must not raise
     # resolving only Profile objects must not even read the (poisoned) dir.
@@ -166,7 +216,8 @@ def test_discipline_hint_is_project_prefix_aware():
     assert P.discipline_hint("FP101") == "fp"
 
 
-def test_suggest_profiles_by_discipline():
+def test_suggest_profiles_by_discipline(_empty_user_dir):
+    _write_fp(_empty_user_dir)
     assert [p.name for p in P.suggest_profiles(["F-D-01-1", "F-G-02-0"])] == ["fire-protection"]
     assert [p.name for p in P.suggest_profiles(["F101", "FP201"])] == ["fire-protection"]
     # DA-018: FP101, F-D-01-1, and AVC10-F-D-01-1 all suggest fire protection.
@@ -199,7 +250,7 @@ def test_cache_fragment_fingerprints_the_actual_checklist():
 
 
 def test_build_checklist_prompt():
-    fp = P.get_profile("fire-protection")
+    fp = P.parse_profile(_FP_FIXTURE, fallback_name="fire-protection")
     items = P.flatten_items([fp])
     block = P.build_checklist_prompt(items)
     assert "APPLY THIS REVIEW CHECKLIST" in block
@@ -247,12 +298,13 @@ def test_resolve_profile_selection_does_not_leak_a_stale_suggestion():
     ) == []
 
 
-def test_snapshot_profiles_captures_version_hash_and_source():
+def test_snapshot_profiles_captures_version_hash_and_source(_builtin_dir):
+    _write_fp(_builtin_dir)
     fp = P.get_profile("fire-protection")
     (snap,) = P.snapshot_profiles([fp])
     assert snap.name == "fire-protection" and snap.version == fp.version
     assert snap.content_hash == fp.content_hash and len(snap.content_hash) == 16
-    assert snap.source == "builtin"          # ships inside the package
+    assert snap.source == "builtin"          # loaded from the packaged dir
     assert "f" in snap.disciplines
 
 
@@ -265,10 +317,20 @@ def test_snapshot_marks_user_profiles(_empty_user_dir):
     assert snap.source == "user" and snap.version == "2"
 
 
-def test_preflight_suggests_profiles_without_rasterizing(tmp_path):
+def test_snapshot_source_empty_for_object_built_profiles():
+    # A caller-built Profile (source_path=None) keeps source "" — the model-
+    # authored plan deliberately bypasses this heuristic with its own
+    # plan_snapshots(source="model"), so this default must stay locked.
+    prof = P.Profile(name="obj", title="obj", version="1", items=("check",))
+    (snap,) = P.snapshot_profiles([prof])
+    assert snap.source == ""
+
+
+def test_preflight_suggests_profiles_without_rasterizing(tmp_path, _empty_user_dir):
     # §16.4: a cheap text-only preflight detects the title-block sheet id and
     # auto-suggests a profile — no overview/tile rasterization needed.
     pymupdf = pytest.importorskip("pymupdf")
+    _write_fp(_empty_user_dir)
     path = tmp_path / "F-D-01-1.pdf"
     doc = pymupdf.open()
     page = doc.new_page(width=792, height=612)

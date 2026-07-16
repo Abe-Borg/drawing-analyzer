@@ -101,6 +101,40 @@ def test_live_critique_structured_output_compliance(tmp_path):
     print(f"\n[canary] critique reads: {res.completed_runs}/{res.requested_runs}")
 
 
+def test_live_identity_call(tmp_path):
+    """One real set-identity call parses against the live service (Phase A).
+
+    The identity content is the model's judgement — the canary asserts only the
+    contract: a parseable, bounded SetIdentity comes back (fields may be empty
+    on this minimal fixture). The review-plan call shares the same request
+    shape (plain text ``messages.create`` + fenced JSON, already canaried by
+    the digest/critique tests above), so it needs no second canary.
+    """
+    from drawing_analyzer.models import SetIdentity, SheetRef
+    from drawing_analyzer.digest import SheetDigest
+    from drawing_analyzer.set_identity import identify_set
+
+    src = _make_sheet(tmp_path / "M-101.pdf")
+    ref = SheetRef(pdf_path=src, page_index=0, source_name=src.name,
+                   page_count=1, source_id="SRC-0001")
+    sheet = SheetDigest(
+        ref=ref,
+        text="Sheet M-101 - Mechanical - Plan\nVAV-3 serves Room 120.",
+    )
+
+    class _Geom:
+        def __init__(self, r):
+            self.ref = r
+            self.sheet_text = "VAV-3 SERVES ROOM 120\nPER CMC 2022\nM-101"
+
+    res = identify_set([sheet], [_Geom(ref)], client=_live_client())
+    assert res.error is None, res.error
+    assert isinstance(res.identity, SetIdentity)
+    assert res.input_tokens > 0 and res.output_tokens > 0
+    print(f"\n[canary] identity model: {res.model_used}; "
+          f"disciplines: {list(res.identity.disciplines)}")
+
+
 def test_live_citation_web_search_tool_accepted():
     """The pinned web-search tool type is accepted and the parser copes with a
     real tool-result stream. The verdict content is the model's judgement — the

@@ -175,7 +175,7 @@ ctx = extract_drawing_context(
     # critique reads/sheet, cross-sheet QC, the deterministic auditors, prose
     # harvest, anchoring, verification, citation checks, markup, and coverage.
     qc_markups=True,
-    profiles=["fire-protection"],     # review-profile checklists to apply
+    profiles=["my-office-checklist"], # optional user checklists (added to the model plan)
     markup_verified_only=False,       # opt-in conservative ink gate (§18 default: ink all but REJECTED)
     ink_rejected=False,               # also draw verifier-rejected findings (grey/struck)
     focus_findings_to_markups=False,  # harvest Focus sections into markups too
@@ -184,7 +184,7 @@ ctx = extract_drawing_context(
     # an explicit True/False overrides it. Disabling a required exhaustive stage
     # marks the run DEBUG_OVERRIDE and caps qc_status at PARTIAL:
     #   critique=False, cross_qc=False, citation_check=False, verify_findings=False,
-    #   synthesize=False,
+    #   synthesize=False, identity=False, review_plan=False,
     # reference_audit=True alone (without qc_markups) is the free, zero-API battery.
 )
 print(ctx.combined_text)
@@ -456,31 +456,75 @@ batch that can't be collected degrades those sheets' critique, never the digest.
 (`DRAWING_ANALYZER_CRITIQUE_MODEL`); the run count is `DRAWING_ANALYZER_CRITIQUE_RUNS`
 (default 2; set 1 to disable self-consistency).
 
+## Set identity & the model-authored review plan
+
+The universal-reviewer stages (Phase A): before the critique runs, the pipeline
+first works out **what the set IS**, then **what a specialist would check**.
+
+**Set identity.** One text-only call reads a budgeted corpus — every sheet's
+digest head, the earliest sheets' verbatim text layers (cover sheet / index /
+general notes), and verbatim windows around every code-edition mention anywhere
+in the set — and returns a structured `SetIdentity`: the disciplines present, a
+sheet → discipline map, the project's jurisdiction / country / region, its
+language and units, and the **adopted codes** (each with a verbatim evidence
+quote and source sheet). Codes may come from any country's system — NFPA, IBC,
+Eurocode/EN, BS, DIN, AS/NZS, GB, … — and the deterministic regex edition
+harvest is always unioned in as a backstop, so a stated edition can never be
+argued away. The identity is **advisory**: it steers the stages below but never
+gates or suppresses a finding; a wrong detection is visible (not laundered) in
+`set_identity.json`, the run manifest, and the combined text's *Set Identity*
+section.
+
+**Model-authored review plan.** From the identity + digest heads, a second
+text-only call authors the per-discipline checklist a specialist for *this* set
+would apply — one-line "flag X when Y" items in the exact review-profile style,
+bounded host-side (≤60 items by default, `DRAWING_ANALYZER_MAX_PLAN_ITEMS`).
+Every code-based item must name its code + section + edition inline and never
+invent a section number: the critique echoes those refs into the findings, and
+the **citation check verifies them by web search** — the plan's code claims are
+never trusted, they are checked. The plan is injected through the profile
+machinery below (after any user checklists), snapshotted with
+`source="model"`, exported as `review_plan.md`, and cached content-addressed so
+warm re-runs rebuild it byte-identically (keeping the critique cache hot).
+
+Both stages ride the critique stack automatically (`qc_markups=True`, or an
+expert `critique=True` / `citation_check=True`) and add two real-time text
+calls, disclosed in the pre-run cost estimate; standard digest-only runs make
+neither call. Expert overrides: `identity=False` / `review_plan=False`
+(recorded debug overrides inside exhaustive QC). The identity also feeds the
+citation check (merged adopted-codes line + a jurisdiction/locale line) and
+cross-sheet QC (a set-context preamble that kills metric-vs-imperial false
+conflicts). Models are overridable via `DRAWING_ANALYZER_IDENTITY_MODEL` /
+`DRAWING_ANALYZER_REVIEW_PLAN_MODEL`.
+
 ## Review profiles
 
-The critique reads with a senior engineer's *general* judgment. A **review
-profile** makes that judgment *specific and repeatable*: it is the owner's QC
-knowledge written down as a versioned checklist, injected into the critique
-prompt so the model applies each item deliberately, not incidentally. Pass the
-profile names to a critique run:
+The critique reads with a senior engineer's *general* judgment, plus the
+model-authored plan above. A **review profile** adds *your own* judgment: the
+owner's QC knowledge written down as a versioned checklist, injected into the
+critique prompt so the model applies each item deliberately, not incidentally.
+Pass the profile names to a critique run:
 
 ```python
 ctx = extract_drawing_context(
     pdfs, critique=True, qc_markups=True,
-    profiles=["fire-protection"],   # names of profiles to apply
+    profiles=["my-office-checklist"],   # names of user profiles to apply
 )
 ```
 
 Selected profiles' checklists are appended to the critique prompt under *"APPLY
-THIS REVIEW CHECKLIST EXPLICITLY, ITEM BY ITEM"*, and the set of profiles (name +
-version + a content hash of each) folds into the critique cache key — so
-**editing a checklist re-critiques** the affected sheets, while an unchanged
-selection is served from cache. A very long checklist is split across the two
-self-consistency runs (each run covers a slice; the union is complete) rather
-than truncated. Profiles only take effect with `critique=True`; unknown names are
-skipped without failing the run.
+THIS REVIEW CHECKLIST EXPLICITLY, ITEM BY ITEM"* (user profiles first, then the
+model-authored plan), and the exact injected checklist text folds into the
+critique cache key — so **editing a checklist re-critiques** the affected
+sheets, while an unchanged selection is served from cache. Every
+self-consistency read receives the complete checklist (identical prompts — the
+merge's `reproduced` flag depends on it). Profiles only take effect with
+`critique=True`; unknown names are skipped without failing the run.
 
-A starter **fire-protection** profile (NFPA 13 sprinkler QC) ships with the tool.
+**No built-in checklists ship** — the model authors the review plan per set,
+so the tool carries no discipline bias. A worked NFPA 13 sprinkler example
+(the former starter profile) lives at `docs/examples/fire_protection.md`; copy
+it into your profiles directory to use or adapt it.
 `drawing_analyzer.profiles.suggest_profiles(sheet_ids)` proposes profiles whose
 disciplines match a set's sheet numbering — via a shared, **project-prefix-aware**
 discipline detector (`auditors/sheet_ids.py`), so a project-coded id like
@@ -514,20 +558,20 @@ date: 2026-07-08
   and gauges; flag any missing (an absence). [medium]
 ```
 
-- **Frontmatter** (between the `---` lines): `name` (stable id — reused to
-  *shadow* a built-in), `title`, `disciplines` (comma-separated tags matched
-  against sheet-id prefixes for auto-suggest), `version`, `author`, `date`.
+- **Frontmatter** (between the `---` lines): `name` (stable id — a user file
+  reusing a packaged profile's name *shadows* it), `title`, `disciplines`
+  (comma-separated tags matched against sheet-id prefixes for auto-suggest),
+  `version`, `author`, `date`.
 - **Items**: each Markdown bullet is one check, injected **verbatim** — say what
   to check, what "wrong" looks like, a severity hint in `[brackets]`, and a code
   reference where one applies. Absences read best as *"expected X; not found on
   this sheet."*
 
-Profiles are discovered from the built-in set shipped with the package and from
-your own directory — **`~/.drawing_analyzer/profiles/`** (override with
-`DRAWING_ANALYZER_PROFILES_DIR`) — where a file reusing a built-in `name` wins,
-so you can tune the shipped checklist without editing the install. Bump `version`
-(or just edit — the content hash changes either way) to re-run the critique
-against the new checklist.
+Profiles are discovered from the packaged profiles directory (empty by default)
+and from your own — **`~/.drawing_analyzer/profiles/`** (override with
+`DRAWING_ANALYZER_PROFILES_DIR`), where your file wins on a name collision.
+Bump `version` (or just edit — the content hash changes either way) to re-run
+the critique against the new checklist.
 
 ## Cross-sheet QC
 
@@ -1021,6 +1065,9 @@ runs.
 | `DRAWING_ANALYZER_CRITIQUE_MODEL` | Opus 4.8 | Critique-pass vision model (`critique=True`). |
 | `DRAWING_ANALYZER_CROSS_QC_MODEL` | Opus 4.8 | Cross-sheet QC model, text-only (`cross_qc=True`). |
 | `DRAWING_ANALYZER_CITATION_MODEL` | Opus 4.8 | Citation-check model, with web search (`citation_check=True`). |
+| `DRAWING_ANALYZER_IDENTITY_MODEL` | Opus 4.8 | Set-identity model, text-only (Phase A). |
+| `DRAWING_ANALYZER_REVIEW_PLAN_MODEL` | Opus 4.8 | Review-plan authoring model, text-only (Phase A). |
+| `DRAWING_ANALYZER_MAX_PLAN_ITEMS` | `60` | Total item cap on the model-authored review plan. |
 | `DRAWING_ANALYZER_HARVEST_MODEL` | Opus 4.8 | Prose-harvest structuring model (one small call per straggler). |
 | `DRAWING_ANALYZER_CHAT_MODEL` | Opus 4.8 | The HTML report's in-browser **Ask AI** assistant (needs current-generation web-search / thinking support). |
 | `DRAWING_ANALYZER_WEB_SEARCH_TOOL_TYPE` | `web_search_20260209` | Server-side web-search tool type string (survives an API rename). |
@@ -1029,7 +1076,7 @@ runs.
 | `DRAWING_ANALYZER_ARITHMETIC_REL_TOL` | `0.01` | Arithmetic auditor's relative match tolerance (drawings round). |
 | `DRAWING_ANALYZER_NAMING_DOMINANT_MIN_FREQ` | `2` | Naming auditor: occurrences that make a tag "established" vocabulary. |
 | `DRAWING_ANALYZER_NAMING_DRIFT_MAX_FREQ` | `2` | Naming auditor: a tag is only flagged as drift when this rare. |
-| `DRAWING_ANALYZER_PROFILES_DIR` | `~/.drawing_analyzer/profiles` | User review-profile directory (wins over built-ins on name). |
+| `DRAWING_ANALYZER_PROFILES_DIR` | `~/.drawing_analyzer/profiles` | User review-profile directory (wins over packaged profiles on name). |
 | `DRAWING_ANALYZER_USE_BATCH` | off | Opt every run into the Message Batches transport (~50% cheaper, identical output) without editing call sites. An explicit `use_batch=` argument still wins. |
 | `DRAWING_ANALYZER_MAX_WORKERS` | `4` | Real-time digest concurrency (`1` = sequential). |
 | `DRAWING_ANALYZER_UPLOAD_WORKERS` | `6` | Files-API image-upload concurrency per sheet (`1` = sequential). |
