@@ -1480,6 +1480,9 @@ def build_html_report(
         chat_markup += (
             "\n" + _findings_data_block(ctx, sheets, ambiguous=ambiguous)
             + "\n" + _summary_data_block(ctx, source_names, now)
+            + "\n" + _starters_data_block(
+                ctx, sheets, source_names, ambiguous=ambiguous
+            )
         )
 
     # CSP hashes are computed over the *exact* inline script bodies emitted
@@ -2100,6 +2103,155 @@ def _summary_data_block(
     )
 
 
+# Human-facing phrasing for the finding categories, used to build "Summarize the
+# {…}" starter prompts from whatever the set actually contains (never an invented
+# discipline). Keys are the FINDING_CATEGORIES the ledger assigns.
+_CATEGORY_PHRASE = {
+    "conflict": "conflicts",
+    "coordination": "coordination items",
+    "code": "code-compliance items",
+    "reference": "cross-reference issues",
+    "question": "open questions",
+}
+# Singular noun for the single most-severe finding's prompt.
+_CATEGORY_NOUN = {
+    "conflict": "conflict",
+    "coordination": "coordination item",
+    "code": "code item",
+    "reference": "reference issue",
+    "question": "open question",
+}
+# Fixed tie-break order when two categories are equally common (determinism, I-7).
+_CATEGORY_ORDER = ("conflict", "coordination", "code", "reference", "question")
+
+
+def _starter_prompts(
+    ctx: Any,
+    sheets: list[Any],
+    source_names: list[str],
+    *,
+    ambiguous: frozenset[str] = frozenset(),
+) -> list[str]:
+    """Up to five click-to-send starter questions, tailored to *this* run.
+
+    Deterministic (I-7): every candidate is gated on real data drawn from the
+    same ledger the report shows (:func:`_report_findings`, sorted by the
+    :func:`_findings_card` severity/status key), appended in a fixed priority
+    order, deduped, and capped at five. It never invents an equipment tag or a
+    discipline the set does not contain — a clean, findings-free run still yields
+    set-aware prompts built from the real sheet count and source names, not
+    generic filler.
+    """
+    findings = _report_findings(ctx)
+    prompts: list[str] = []
+
+    def add(text: str) -> None:
+        t = (text or "").strip()
+        if t and t not in prompts:
+            prompts.append(t)
+
+    if findings:
+        def _key(f: Any):
+            sev = _SEVERITY_RANK.get((getattr(f, "severity", "") or "").lower(), 0)
+            return (-sev, -_STATUS_RANK.get(_finding_display_status(f), 0))
+
+        ordered = sorted(findings, key=_key)
+
+        # 1. The single most-severe finding, named by its real sheet + subject.
+        top = ordered[0]
+        top_sheet = _disambiguated(
+            getattr(top, "sheet_id", "") or getattr(top, "source_name", "") or "",
+            top,
+            ambiguous,
+        )
+        if top_sheet:
+            top_sev = (getattr(top, "severity", "") or "").lower()
+            noun = _CATEGORY_NOUN.get(
+                (getattr(top, "category", "") or "").lower(), "issue"
+            )
+            sev_prefix = f"{top_sev}-severity " if top_sev else ""
+            add(f"What's driving the {sev_prefix}{noun} on {top_sheet}?")
+
+        # 2. Critical conflicts / coordination clashes across the set.
+        if any(
+            (getattr(f, "severity", "") or "").lower() == "high"
+            and (getattr(f, "category", "") or "").lower() in ("conflict", "coordination")
+            for f in findings
+        ):
+            add("What are the most critical conflicts across these sheets?")
+
+        # 3. Cross-sheet issues (a finding carrying also_on legs, DA-016).
+        if any(getattr(f, "also_on", None) for f in findings):
+            add("Which issues span more than one sheet?")
+
+        # 4. Summarize the category the set actually has the most of.
+        counts: dict[str, int] = {}
+        for f in findings:
+            c = (getattr(f, "category", "") or "").lower()
+            if c in _CATEGORY_PHRASE:
+                counts[c] = counts.get(c, 0) + 1
+        if counts:
+            best = max(
+                counts, key=lambda c: (counts[c], -_CATEGORY_ORDER.index(c))
+            )
+            add(f"Summarize the {_CATEGORY_PHRASE[best]}.")
+
+        # 5. Cited code sections (any finding carrying refs or a citation check).
+        if any(
+            getattr(f, "refs", None)
+            or getattr(f, "citations", None)
+            or getattr(f, "citation", None)
+            for f in findings
+        ):
+            add("Do the cited code sections check out?")
+
+        # 6. Unverified / unanchored findings — the hallucination signal.
+        if any(
+            _finding_display_status(f) in ("UNANCHORED", "UNCERTAIN")
+            for f in findings
+        ):
+            add("Which findings could not be verified against the drawings?")
+
+    # Set-aware fallbacks — always eligible, lowest priority. They guarantee a
+    # non-empty, relevant list for a clean run and only reach the final list when
+    # the finding-driven prompts above did not already fill all five slots.
+    total = int(getattr(ctx, "sheet_count", 0) or 0) or len(list(sheets) or [])
+    if total > 1:
+        add(f"Give me an executive summary of this {total}-sheet set.")
+    else:
+        add("Give me an executive summary of this drawing set.")
+    if len(source_names) == 1:
+        add(f"What are the key takeaways from {source_names[0]}?")
+    else:
+        add("What equipment and systems are documented across these sheets?")
+
+    return prompts[:5]
+
+
+def _starters_data_block(
+    ctx: Any,
+    sheets: list[Any],
+    source_names: list[str],
+    *,
+    ambiguous: frozenset[str] = frozenset(),
+) -> str:
+    """An inert ``#da-starters`` JSON block: up to five run-tailored, click-to-send
+    starter prompts (see :func:`_starter_prompts`).
+
+    Serialized through :func:`_json_for_script` (every ``<`` escaped), so however
+    adversarial a source filename or finding subject is, a prompt string cannot
+    close the script element. Returns ``""`` only if no prompts are produced (the
+    widget then just shows its static hint text with no chips).
+    """
+    prompts = _starter_prompts(ctx, sheets, source_names, ambiguous=ambiguous)
+    if not prompts:
+        return ""
+    return (
+        f'<script id="da-starters" type="application/json">'
+        f"{_json_for_script(prompts)}</script>"
+    )
+
+
 def _chat_bootstrap_html(
     *, api_key: str, embed_key: bool, title: str, generated: str,
     source_names: list[str],
@@ -2163,10 +2315,9 @@ _CHAT_HTML = """
     <button id="da-chat-close" type="button" aria-label="Close">×</button>
   </header>
   <div id="da-chat-msgs">
-    <div class="da-msg da-hint">Ask anything about this drawing set — <em>“What are the
-    biggest conflicts?”</em>, <em>“Which sheets mention VAV-3?”</em>, <em>“Summarize the
-    plumbing coordination items.”</em> Answers are grounded in this report; the assistant
-    can also search the web for codes, standards, and product data.</div>
+    <div class="da-msg da-hint">Ask anything about this drawing set. Answers are grounded in
+    this report; the assistant can also search the web for codes, standards, and product data.
+    <div class="da-starters" id="da-starters-row" aria-label="Suggested questions"></div></div>
   </div>
   <div class="da-chat-compose">
     <textarea id="da-chat-input" rows="2" placeholder="Ask about this report…"></textarea>
@@ -2212,6 +2363,15 @@ _CHAT_CSS = """
 #da-chat-msgs{flex:1 1 auto; overflow-y:auto; padding:14px; display:flex; flex-direction:column; gap:10px}
 .da-msg{border-radius:10px; padding:9px 12px; font-size:13.5px; line-height:1.5; max-width:100%; overflow-wrap:break-word}
 .da-hint{background:var(--accent-soft); color:var(--ink)}
+.da-starters{display:flex; flex-wrap:wrap; gap:6px; margin-top:9px}
+.da-starters:empty{display:none}
+.da-starter{
+  text-align:left; border:1px solid var(--accent); background:#fff; color:var(--accent);
+  border-radius:999px; padding:5px 11px; font:12.5px/1.35 inherit; font-family:inherit;
+  cursor:pointer; max-width:100%; overflow-wrap:break-word;
+}
+.da-starter:hover{background:var(--accent); color:#fff}
+.da-starter:disabled{opacity:.5; cursor:default}
 .da-user{background:var(--accent); color:#fff; align-self:flex-end; max-width:88%; white-space:pre-wrap}
 .da-ai{background:#f4f6fa; border:1px solid var(--line); align-self:stretch}
 .da-err{background:var(--conflict-soft); border:1px solid var(--conflict); color:#8d2020}
@@ -2952,6 +3112,7 @@ _CHAT_JS = r"""
   var closeBtn = document.getElementById('da-chat-close');
   var clearBtn = document.getElementById('da-chat-clear');
   var forgetBtn = document.getElementById('da-chat-forget');
+  var startersRow = document.getElementById('da-starters-row');
   document.getElementById('da-chat-model').textContent = CFG.model + ' · web search · thinking';
 
   fab.addEventListener('click', function(){ panel.hidden = false; fab.hidden = true; applyGeom(); input.focus(); });
@@ -2962,6 +3123,7 @@ _CHAT_JS = r"""
     clearPendingSelection();   // drop any pending excerpt + its highlight
     clearTermHighlight();      // and any highlight_term paint
     while(msgs.children.length > 1) msgs.removeChild(msgs.lastChild); // keep the hint
+    if(startersRow) startersRow.style.display = '';  // bring the chips back
   });
   // "Forget key": in prompt mode this clears BOTH the in-memory copy and the
   // tab's sessionStorage. In embedded mode there is nothing a runtime action
@@ -3245,6 +3407,7 @@ _CHAT_JS = r"""
   // opts       : {retryValue, excerpt, onCommit}
   function runTurn(apiContent, displayText, opts){
     opts = opts || {};
+    if(startersRow) startersRow.style.display = 'none';  // chips give way to the thread
     history.push({role: 'user', content: apiContent});
     var userBubble = addMsg('da-user', displayText);
     if(opts.excerpt){
@@ -3350,6 +3513,30 @@ _CHAT_JS = r"""
   input.addEventListener('keydown', function(e){
     if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); send(); }
   });
+
+  // Starter prompts: deterministic, run-tailored questions from the inert
+  // #da-starters block (built server-side by _starter_prompts). Each chip fills
+  // the box and sends immediately — the same path as a typed question, so the
+  // key prompt, streaming, and tools all apply. Rendered as textContent, never
+  // HTML, so an adversarial prompt string can inject nothing.
+  (function(){
+    if(!startersRow) return;
+    var starters = readJsonBlock('da-starters');
+    if(!starters || !starters.length) return;
+    starters.slice(0, 5).forEach(function(q){
+      if(!q || typeof q !== 'string') return;
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'da-starter';
+      b.textContent = q;
+      b.addEventListener('click', function(){
+        if(streaming) return;
+        input.value = q;
+        send();
+      });
+      startersRow.appendChild(b);
+    });
+  })();
 
   // -------------------------------------------------- panel resize + drag
   // Stay CSS-anchored (bottom-right) until the first gesture, then snapshot the
