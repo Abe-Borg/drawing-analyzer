@@ -251,6 +251,16 @@ _FINDINGS_PER_SHEET_LOW = 0.5
 _FINDINGS_PER_SHEET_HIGH = 3.0
 _CLAIMS_PER_SHEET_LOW = 0.1
 _CLAIMS_PER_SHEET_HIGH = 1.0
+# Phase C investigation — a multi-turn escalation of the findings that stay
+# UNCERTAIN after verification, on the (Opus) escalation model. Each turn
+# re-sends the conversation, so the per-round input allowance dominates
+# (history replay + one new crop per turn). Capped at the per-run default
+# budget (10 findings) — the cap the stage itself enforces.
+_UNCERTAIN_FINDINGS_FRACTION = 0.2
+_ASSUMED_INVESTIGATE_ROUNDS = 3
+_ASSUMED_INVESTIGATE_INPUT_TOKENS_PER_ROUND = 6_000
+_ASSUMED_INVESTIGATE_OUTPUT_TOKENS_PER_ROUND = 300
+_INVESTIGATE_MAX_FINDINGS_QUOTED = 10
 
 
 @dataclass(frozen=True)
@@ -393,10 +403,27 @@ def estimate_exhaustive_run_cost(
             extra_cost=search_cost, note=f"~{n} unique claim(s) × web search",
         )
 
+    def _investigate(findings: float) -> CostComponent:
+        from .core.api_config import VERIFICATION_ESCALATION_MODEL
+
+        n = min(max(0, round(findings * _UNCERTAIN_FINDINGS_FRACTION)),
+                _INVESTIGATE_MAX_FINDINGS_QUOTED)
+        rounds = n * _ASSUMED_INVESTIGATE_ROUNDS
+        return _component(
+            "Investigation",
+            rounds * _ASSUMED_INVESTIGATE_INPUT_TOKENS_PER_ROUND,
+            rounds * _ASSUMED_INVESTIGATE_OUTPUT_TOKENS_PER_ROUND,
+            model=VERIFICATION_ESCALATION_MODEL, batch=False,
+            note=f"~{n} uncertain finding(s) × ~{_ASSUMED_INVESTIGATE_ROUNDS}-turn "
+                 "evidence loop",
+        )
+
     low_verify = _verify(sheet_count * _FINDINGS_PER_SHEET_LOW)
     high_verify = _verify(sheet_count * _FINDINGS_PER_SHEET_HIGH)
     low_citation = _citation(sheet_count * _CLAIMS_PER_SHEET_LOW)
     high_citation = _citation(sheet_count * _CLAIMS_PER_SHEET_HIGH)
+    low_investigate = _investigate(sheet_count * _FINDINGS_PER_SHEET_LOW)
+    high_investigate = _investigate(sheet_count * _FINDINGS_PER_SHEET_HIGH)
 
     # ``components`` (for display) so far holds the fixed stages; the high band is
     # shown as the representative verification/citation rows. The low/high totals
@@ -406,9 +433,9 @@ def estimate_exhaustive_run_cost(
         known = [c.cost for c in components + variants if c.cost is not None]
         return sum(known) if known else None
 
-    low_cost = _total([low_verify, low_citation])
-    high_cost = _total([high_verify, high_citation])
-    components = components + [high_verify, high_citation]
+    low_cost = _total([low_verify, low_investigate, low_citation])
+    high_cost = _total([high_verify, high_investigate, high_citation])
+    components = components + [high_verify, high_investigate, high_citation]
     return ExhaustiveCostEstimate(
         sheet_count=sheet_count, file_count=file_count, model=model,
         components=components, low_cost=low_cost, high_cost=high_cost,
@@ -423,7 +450,8 @@ def format_exhaustive_cost_prompt(est: ExhaustiveCostEstimate) -> str:
         f"About to run the FULL exhaustive QC review on {est.sheet_count} sheet(s)"
         f"{where} with {friendly_model_name(est.model)} — digest, set identity + "
         "model review plan, two critique reads per sheet, cross-sheet QC, "
-        "deterministic auditors, prose harvest, verification, and citation checks.",
+        "deterministic auditors, prose harvest, verification, the uncertain-"
+        "finding investigation loop, and citation checks.",
         "",
         "Estimated cost by stage:",
     ]

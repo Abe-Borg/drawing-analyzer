@@ -141,6 +141,21 @@ findings for free).
 - *Disposition:* `anchor.py` (quote → PDF rect, tiered
   EXACT/FUZZY/TILE/UNANCHORED — UNANCHORED is the hallucination signal) →
   `verify.py` (high-DPI crop re-check → VERIFIED/REJECTED/UNCERTAIN) →
+  `investigate.py` (Phase C: a host-driven client-tool loop escalating each
+  anchored UNCERTAIN verdict — the model requests evidence via `crop_region`
+  / zero-API `find_text` / `view_sheet`, every image saved-before-send into
+  the finding's evidence dir with an `investigation.json` trace; strictly
+  sequential (I-5), budget-capped per finding (`…_INVESTIGATION_MAX_ROUNDS`,
+  default 6) and per run (`…_MAX_FINDINGS`, 10, severity-first) with the
+  assistant turn committed before its tools are answered, every tool_use id
+  answered in ONE user turn, and a forced no-tools text close at the cap so a
+  run never dangles; a capped/garbled outcome stays UNCERTAIN — never
+  REJECTED — and is a designed stage COMPLETE; it only ever UPDATES
+  `finding.verification` in place (legal post-seal); concluded verdicts cache
+  in `stage=investigation` keyed on finding identity + a whole-set content
+  fingerprint + model/prompt/budget, complete-only admission, and a warm hit
+  deterministically REPLAYS the tool trace with sha-compare so evidence bytes
+  are recreated and warm output stays byte-identical, no TTL) →
   `citation_check.py` (server-side web-search per unique code ref) →
   `annotate.py` (§18 gating + Phase 21 receipts: every entry gets ink except
   REJECTED/gated, which get reconciled index rows; rect-less entries become

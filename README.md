@@ -718,6 +718,34 @@ rest `SKIPPED` — the run always completes. Each call is tiny (one ~1–2k-toke
 crop image + a short prompt), on the order of $0.01–0.03 per finding. The model
 defaults to Opus 4.8, overridable with `DRAWING_ANALYZER_VERIFY_MODEL`.
 
+### The investigation loop (Phase C)
+
+One crop is sometimes not enough: the answer lives in a schedule elsewhere on
+the sheet, or on another sheet entirely, and the verifier honestly answers
+`NOT_VISIBLE`. On markup runs those **UNCERTAIN** findings get a second,
+*agentic* look: the model can request more evidence through three
+host-executed tools — `crop_region` (another region of a sheet, up to 300 DPI),
+`find_text` (a free, deterministic search of a sheet's vector text layer that
+returns match rectangles to crop next), and `view_sheet` (an overview of
+another sheet in the set) — iterating until it can conclude
+CONFIRMED/CONTRADICTED/NOT_VISIBLE. Every requested image is saved to the
+finding's evidence directory *before* it is sent (the trail also gets an
+`investigation.json` with the ordered tool trace), and the verdict updates the
+finding in place: a confirmation turns the dashed "double-check" callout into a
+solid verified cloud; a contradiction removes the ink.
+
+The loop is hard-bounded: `DRAWING_ANALYZER_INVESTIGATION_MAX_ROUNDS` evidence
+requests per finding (default 6) and `DRAWING_ANALYZER_INVESTIGATION_MAX_FINDINGS`
+investigations per run (default 10, severity-first). At the budget the host
+forces a final text-only answer, and a finding that still can't be decided
+**stays UNCERTAIN — a budget cap or a garbled reply can never mark a finding
+wrong**. Runs on the escalation model (Opus 4.8) by default, overridable with
+`DRAWING_ANALYZER_INVESTIGATION_MODEL`. Concluded verdicts cache
+content-addressed against a whole-set content fingerprint; a warm re-run
+*replays* the tool trace (re-render + hash-compare, zero API calls) so the
+evidence bytes are recreated exactly and any source edit falls back to a live
+investigation.
+
 ## Reviewed PDFs & findings CSV
 
 Turned on with the GUI's **QC Markups** checkbox or `qc_markups=True` in the
@@ -1101,6 +1129,9 @@ runs.
 | `DRAWING_ANALYZER_SYNTHESIS_MODEL` | Opus 4.8 | Cross-sheet synthesis model (text-only). |
 | `DRAWING_ANALYZER_FOCUS_MODEL` | Opus 4.8 | Focus-report model (text-only). |
 | `DRAWING_ANALYZER_VERIFY_MODEL` | Opus 4.8 | Per-finding verification model (crop + short prompt). |
+| `DRAWING_ANALYZER_INVESTIGATION_MODEL` | escalation model (Opus 4.8) | The Phase C investigation loop's model (multi-turn, vision + tools). |
+| `DRAWING_ANALYZER_INVESTIGATION_MAX_ROUNDS` | `6` | Evidence requests per investigation before the forced text-only close (rides the verdict-cache key). |
+| `DRAWING_ANALYZER_INVESTIGATION_MAX_FINDINGS` | `10` | UNCERTAIN findings investigated per run (severity-first; the excess is disclosed as a stage warning). |
 | `DRAWING_ANALYZER_CRITIQUE_MODEL` | Opus 4.8 | Critique-pass vision model (`critique=True`). |
 | `DRAWING_ANALYZER_CROSS_QC_MODEL` | Opus 4.8 | Cross-sheet QC model, text-only (`cross_qc=True`). |
 | `DRAWING_ANALYZER_CITATION_MODEL` | Opus 4.8 | Citation-check model, with web search (`citation_check=True`). |

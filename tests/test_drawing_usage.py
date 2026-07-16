@@ -192,7 +192,7 @@ def test_exhaustive_estimate_exceeds_digest_only_and_lists_all_paid_stages():
     assert est.low_cost <= est.high_cost
     stages = " ".join(c.stage for c in est.components)
     for needle in ("Digest", "Set identity", "Model review plan", "Critique",
-                   "Cross-sheet QC", "Verification", "Citation"):
+                   "Cross-sheet QC", "Verification", "Investigation", "Citation"):
         assert needle in stages, needle
     # Phase 23C: the digest AND the two critique reads ride batch; cross/verify/
     # citation are still real-time.
@@ -235,3 +235,17 @@ def test_exhaustive_estimate_planning_stages_are_realtime_and_scale_gently():
         assert large[stage].input_tokens > small[stage].input_tokens
         assert small[stage].cost is not None and small[stage].cost > 0
     assert large["Set identity"].cost < large["Critique ×2 (per sheet)"].cost
+
+
+def test_exhaustive_estimate_investigation_band_is_capped_and_realtime():
+    # Phase C: the investigation band scales with the finding volume but never
+    # quotes past the stage's own per-run budget (10 findings by default).
+    small = {c.stage: c for c in estimate_exhaustive_run_cost(2).components}
+    large = {c.stage: c for c in estimate_exhaustive_run_cost(500).components}
+    inv_small, inv_large = small["Investigation"], large["Investigation"]
+    assert inv_small.transport == "real-time" and inv_large.transport == "real-time"
+    assert inv_large.input_tokens >= inv_small.input_tokens
+    assert "~10 uncertain finding(s)" in inv_large.note      # capped at the budget
+    # It rides the low/high totals: an estimate without it would be smaller.
+    est = estimate_exhaustive_run_cost(10)
+    assert est.low_cost is not None and est.low_cost <= est.high_cost
