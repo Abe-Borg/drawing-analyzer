@@ -91,6 +91,23 @@ def test_configure_writes_detailed_lines(tmp_path):
     assert "batch_42" in text
 
 
+def test_configure_keeps_only_the_latest_run(tmp_path):
+    # A prior session's log (and a stale rotation backup) must not survive: the
+    # file holds only the latest run. Simulate two launches at the same path.
+    path = tmp_path / "diag.log"
+    path.write_text("SESSION-ONE line that must be gone\n", encoding="utf-8")
+    stale_backup = tmp_path / "diag.log.1"
+    stale_backup.write_text("SESSION-ONE rotated overflow\n", encoding="utf-8")
+
+    assert diagnostics.configure_file_logging(path) == path
+    diagnostics.get_logger().info("SESSION-TWO fresh line")
+
+    text = path.read_text(encoding="utf-8")
+    assert "SESSION-ONE" not in text          # prior session truncated away
+    assert "SESSION-TWO fresh line" in text    # current session captured
+    assert not stale_backup.exists()           # stale rotation backup removed
+
+
 def test_configure_is_idempotent(tmp_path):
     first = diagnostics.configure_file_logging(tmp_path / "a.log")
     second = diagnostics.configure_file_logging(tmp_path / "b.log")
