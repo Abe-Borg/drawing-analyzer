@@ -48,6 +48,7 @@ from .cost import (
     format_drawing_cost_prompt,
     format_exhaustive_cost_prompt,
 )
+from .help_content import HELP_DOCUMENTS, HelpDocument
 from .html_report import build_html_report
 from .pipeline import DrawingContext, extract_drawing_context
 from .render import list_sheets
@@ -141,6 +142,10 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         # the store when the key actually changed (and never auto-persists an
         # unchanged, env-supplied key).
         self._persisted_key = self._initial_key
+        # Open help modals ("How to use" / "How it works" / "Why trust it?"),
+        # keyed by HelpDocument.key so a second click re-focuses the existing
+        # window instead of stacking a duplicate.
+        self._help_windows: dict[str, ctk.CTkToplevel] = {}
 
         self._build_ui()
         self._register_dnd()
@@ -164,12 +169,19 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         outer = ctk.CTkFrame(self, fg_color=COLORS["bg_card"], corner_radius=8)
         outer.pack(fill="both", expand=True, padx=16, pady=16)
 
+        # Header row: title on the left, the three explainer buttons on the
+        # right ("How to use", "How it works", "Why trust it?"). Each opens a
+        # scrollable modal built from help_content.py (pure text, no engine
+        # dependency) via _open_help_modal.
+        header = ctk.CTkFrame(outer, fg_color="transparent")
+        header.pack(fill="x", padx=16, pady=(16, 2))
         ctk.CTkLabel(
-            outer,
+            header,
             text="Drawing Context Analyzer",
             font=ctk.CTkFont(family="Segoe UI", size=18, weight="bold"),
             text_color=COLORS["text_primary"],
-        ).pack(anchor="w", padx=16, pady=(16, 2))
+        ).pack(side="left", anchor="w")
+        self._build_help_buttons(header)
         ctk.CTkLabel(
             outer,
             text=(
@@ -536,6 +548,139 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         try:
             self.drop_zone.drop_target_register(DND_FILES)
             self.drop_zone.dnd_bind("<<Drop>>", self._on_drop)
+        except Exception:  # pragma: no cover - platform dependent
+            pass
+
+    # ------------------------------------------------------------- help modals
+
+    def _build_help_buttons(self, parent) -> None:
+        """Pack the three explainer buttons at the right of the header.
+
+        The buttons appear left → right in ``HELP_DOCUMENTS`` order; a shared
+        sub-frame packed to the right keeps them grouped beside the title.
+        """
+        bar = ctk.CTkFrame(parent, fg_color="transparent")
+        bar.pack(side="right", anchor="e")
+        for doc in HELP_DOCUMENTS:
+            ctk.CTkButton(
+                bar, text=doc.button_label, width=112, height=30,
+                font=ctk.CTkFont(family="Segoe UI", size=12),
+                fg_color=COLORS["bg_input"], hover_color=COLORS["border"],
+                border_width=1, border_color=COLORS["border"],
+                text_color=COLORS["text_secondary"],
+                command=lambda d=doc: self._open_help_modal(d),
+            ).pack(side="left", padx=(6, 0))
+
+    def _open_help_modal(self, doc: HelpDocument) -> None:
+        """Open (or re-focus) the scrollable modal for one help document.
+
+        The content is pure data from :mod:`help_content`; this method only
+        renders it. Re-clicking a button whose window is already open lifts and
+        focuses that window rather than stacking a duplicate.
+        """
+        existing = self._help_windows.get(doc.key)
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            existing.focus_force()
+            return
+
+        win = ctk.CTkToplevel(self)
+        self._help_windows[doc.key] = win
+        win.title(doc.title)
+        win.configure(fg_color=COLORS["bg_dark"])
+        win.geometry("720x640")
+        win.minsize(520, 400)
+        win.transient(self)
+        win.bind("<Escape>", lambda _e: self._close_help_modal(doc.key))
+        win.protocol("WM_DELETE_WINDOW", lambda: self._close_help_modal(doc.key))
+        # Grabbing input before the toplevel is viewable raises on some
+        # platforms; defer it a beat so the modal reliably takes focus.
+        win.after(150, lambda: self._grab_help_modal(win))
+
+        card = ctk.CTkFrame(win, fg_color=COLORS["bg_card"], corner_radius=8)
+        card.pack(fill="both", expand=True, padx=12, pady=12)
+
+        ctk.CTkLabel(
+            card, text=doc.title,
+            font=ctk.CTkFont(family="Segoe UI", size=17, weight="bold"),
+            text_color=COLORS["text_primary"], justify="left",
+        ).pack(anchor="w", padx=18, pady=(16, 2))
+        if doc.intro:
+            ctk.CTkLabel(
+                card, text=doc.intro,
+                font=ctk.CTkFont(family="Segoe UI", size=12),
+                text_color=COLORS["text_secondary"], wraplength=640, justify="left",
+            ).pack(anchor="w", padx=18, pady=(0, 8))
+
+        # Bottom bar first so the scrollable body fills the space between it and
+        # the header (pack reserves the bottom before the expand widget claims
+        # the rest).
+        bottom = ctk.CTkFrame(card, fg_color="transparent")
+        bottom.pack(side="bottom", fill="x", padx=18, pady=(4, 14))
+        ctk.CTkButton(
+            bottom, text="Close", width=100, height=32,
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
+            command=lambda: self._close_help_modal(doc.key),
+        ).pack(side="right")
+
+        body = ctk.CTkScrollableFrame(card, fg_color=COLORS["bg_dark"], corner_radius=6)
+        body.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+        self._render_help_body(body, doc)
+
+    @staticmethod
+    def _render_help_body(body, doc: HelpDocument) -> None:
+        """Render each section's heading, paragraphs, and bullets into ``body``."""
+        wrap = 610
+        for section in doc.sections:
+            ctk.CTkLabel(
+                body, text=section.heading,
+                font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
+                text_color=COLORS["accent_glow"], wraplength=wrap, justify="left",
+            ).pack(anchor="w", padx=10, pady=(14, 3))
+            for block in section.blocks:
+                if block.kind == "bullet":
+                    row = ctk.CTkFrame(body, fg_color="transparent")
+                    row.pack(fill="x", padx=10, pady=(1, 1))
+                    ctk.CTkLabel(
+                        row, text="•",
+                        font=ctk.CTkFont(family="Segoe UI", size=12),
+                        text_color=COLORS["text_secondary"],
+                    ).pack(side="left", anchor="n", padx=(4, 6))
+                    ctk.CTkLabel(
+                        row, text=block.text,
+                        font=ctk.CTkFont(family="Segoe UI", size=12),
+                        text_color=COLORS["text_secondary"],
+                        wraplength=wrap - 28, justify="left",
+                    ).pack(side="left", anchor="w", fill="x", expand=True)
+                else:
+                    ctk.CTkLabel(
+                        body, text=block.text,
+                        font=ctk.CTkFont(family="Segoe UI", size=12),
+                        text_color=COLORS["text_secondary"],
+                        wraplength=wrap, justify="left",
+                    ).pack(anchor="w", padx=10, pady=(2, 2))
+
+    def _grab_help_modal(self, win) -> None:
+        """Make a help modal application-modal once it is viewable (best-effort)."""
+        try:
+            if win.winfo_exists():
+                win.grab_set()
+                win.focus_force()
+        except Exception:  # pragma: no cover - platform dependent
+            pass
+
+    def _close_help_modal(self, key: str) -> None:
+        """Release the grab and destroy a help modal, forgetting its handle."""
+        win = self._help_windows.pop(key, None)
+        if win is None:
+            return
+        try:
+            win.grab_release()
+        except Exception:  # pragma: no cover - platform dependent
+            pass
+        try:
+            win.destroy()
         except Exception:  # pragma: no cover - platform dependent
             pass
 

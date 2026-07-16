@@ -52,6 +52,7 @@ Module layout::
                       markup_manifest.json (placement receipts + coverage proof),
                       run.log + run_manifest.json (per-run log & artifact hashes)
     html_report.py    self-contained HTML report (+ in-browser Ask AI assistant)
+    help_content.py   static text for the GUI's explainer modals (no GUI import)
     gui.py            standalone CustomTkinter window
     __main__.py       ``python -m drawing_analyzer`` launches the GUI
 
