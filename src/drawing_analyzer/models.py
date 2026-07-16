@@ -610,6 +610,12 @@ class Verification:
     # Arithmetic provenance (Phase 25 §17.5) — empty for non-arithmetic findings.
     computation_method: str = ""        # "" | HOST_DETERMINISTIC
     operand_origin: str = ""            # "" | TEXT_EXTRACTED | MODEL_TRANSCRIBED
+    # Phase C: set when the agentic investigation loop touched this verdict —
+    # whether it concluded (status upgraded) or exhausted its evidence budget
+    # (status unchanged, still UNCERTAIN). ``investigation_rounds`` counts the
+    # evidence rounds actually spent.
+    investigated: bool = False
+    investigation_rounds: int = 0
 
     def __post_init__(self) -> None:
         # Keep the legacy scalar alias in sync with the artifact list: it always
@@ -626,6 +632,8 @@ class Verification:
             "evidence": [a.to_dict() for a in self.evidence],
             "computation_method": self.computation_method,
             "operand_origin": self.operand_origin,
+            "investigated": self.investigated,
+            "investigation_rounds": self.investigation_rounds,
         }
 
     @classmethod
@@ -642,6 +650,8 @@ class Verification:
             evidence=evidence,
             computation_method=str(d.get("computation_method", "") or ""),
             operand_origin=str(d.get("operand_origin", "") or ""),
+            investigated=bool(d.get("investigated", False)),
+            investigation_rounds=int(d.get("investigation_rounds", 0) or 0),
         )
 
 

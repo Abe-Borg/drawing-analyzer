@@ -9,6 +9,8 @@ Model identifiers may be overridden via env vars:
     DRAWING_ANALYZER_VERIFICATION_MODEL          — verification initial pass
                                               (default Sonnet 4.6).
     DRAWING_ANALYZER_VERIFICATION_ESCALATION_MODEL — escalation (default Opus 4.8).
+    DRAWING_ANALYZER_INVESTIGATION_MODEL  — the agentic investigation loop
+                                              (default: the escalation model).
     DRAWING_ANALYZER_TRIAGE_MODEL                — verification triage
                                               (default Haiku 4.5).
     DRAWING_ANALYZER_CHAT_MODEL           — the in-report Q&A assistant
@@ -108,6 +110,7 @@ PHASE_CROSS_CHECK = "cross_check"
 PHASE_VERIFICATION = "verification"
 PHASE_VERIFICATION_RETRY = "verification_retry"
 PHASE_VERIFICATION_CONTINUATION = "verification_continuation"
+PHASE_INVESTIGATION = "investigation"
 PHASE_TRIAGE = "triage"
 
 
@@ -138,6 +141,9 @@ _PHASE_OUTPUT_BUDGET: dict[str, int] = {
     PHASE_VERIFICATION: VERIFICATION_OUTPUT_CAP,
     PHASE_VERIFICATION_RETRY: VERIFICATION_OUTPUT_CAP,
     PHASE_VERIFICATION_CONTINUATION: VERIFICATION_OUTPUT_CAP,
+    # Investigation turns are small (a tool request or a short verdict); the
+    # verification cap is the right envelope, registered explicitly.
+    PHASE_INVESTIGATION: VERIFICATION_OUTPUT_CAP,
     PHASE_TRIAGE: HAIKU_TRIAGE_OUTPUT_CAP,
 }
 
@@ -475,6 +481,10 @@ _PHASE_DEFAULT_EFFORT: dict[str, str] = {
     PHASE_VERIFICATION: EFFORT_MEDIUM,
     PHASE_VERIFICATION_RETRY: EFFORT_MEDIUM,
     PHASE_VERIFICATION_CONTINUATION: EFFORT_MEDIUM,
+    # The investigation loop is the deliberate escalation tier (multi-turn,
+    # Opus by default); it sets its level here rather than joining
+    # _VERIFICATION_PHASES, whose model-aware branch would override it.
+    PHASE_INVESTIGATION: EFFORT_HIGH,
 }
 
 # Verification phases get the model-aware bump: Opus on verification is
@@ -596,6 +606,10 @@ _PHASE_CACHE_POLICY: dict[str, CachePolicy] = {
     PHASE_VERIFICATION: CachePolicy(cache_system=True, cache_tools=True),
     PHASE_VERIFICATION_RETRY: CachePolicy(cache_system=True, cache_tools=True),
     PHASE_VERIFICATION_CONTINUATION: CachePolicy(cache_system=True, cache_tools=True),
+    # Investigation: the same system prompt + tool definitions ride every turn
+    # of every multi-turn investigation, so both breakpoints pay back within a
+    # single stage run.
+    PHASE_INVESTIGATION: CachePolicy(cache_system=True, cache_tools=True),
     # Triage: ~375-token system prompt called in batches of up to 20,
     # below the 2048-token Haiku cache minimum so repeated calls cannot
     # hit. Skip caching to avoid the cache-write cost.

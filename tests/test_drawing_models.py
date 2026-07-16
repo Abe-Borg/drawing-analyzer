@@ -67,6 +67,7 @@ def test_finding_to_dict_round_trips_the_contract():
     assert d["verification"] == {
         "status": "DETERMINISTIC", "note": "audit", "evidence_png": "", "evidence": [],
         "computation_method": "", "operand_origin": "",
+        "investigated": False, "investigation_rounds": 0,
     }
 
 
