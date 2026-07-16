@@ -435,6 +435,49 @@ def test_pipeline_budget_capped_investigation_stays_uncertain(tmp_path, monkeypa
     assert ctx.qc_status == "COMPLETE"
 
 
+def test_pipeline_warm_rerun_serves_investigation_cache(tmp_path):
+    # Phase C4: a warm re-run replays the cached conclusion — zero investigation
+    # API calls, the evidence bytes re-created on disk, a CACHE usage record,
+    # and an identical verdict (I-7).
+    from drawing_analyzer.digest_cache import DigestCache
+
+    src = _make_pdf(tmp_path / "M-101.pdf")
+    cache = DigestCache(None, persist=False)
+    c1 = _RoutingClient([_VAV_FINDING], verdict="NOT_VISIBLE",
+                        investigate_mode="confirm_after_crop")
+    ctx1 = extract_drawing_context(
+        [src], client=c1, rows=2, cols=2, reference_audit=True, qc_markups=True,
+        cache=cache, qc_work_dir=tmp_path / "q1",
+    )
+    assert c1.investigate_calls == 2
+    f1 = ctx1.findings[0]
+    assert f1.verification.status == "VERIFIED"
+
+    c2 = _RoutingClient([_VAV_FINDING], verdict="NOT_VISIBLE",
+                        investigate_mode="never_concludes")   # would differ if called
+    ctx2 = extract_drawing_context(
+        [src], client=c2, rows=2, cols=2, reference_audit=True, qc_markups=True,
+        cache=cache, qc_work_dir=tmp_path / "q2",
+    )
+    assert c2.investigate_calls == 0                          # served from cache
+    f2 = ctx2.findings[0]
+    assert (f2.verification.status, f2.verification.note) == \
+        (f1.verification.status, f1.verification.note)
+    assert f2.verification.investigated and f2.verification.investigation_rounds == 1
+    # The replayed evidence bytes are identical to the cold run's.
+    cold = sorted(p.read_bytes()
+                  for p in (tmp_path / "q1" / "evidence").rglob("leg-*.png"))
+    warm = sorted(p.read_bytes()
+                  for p in (tmp_path / "q2" / "evidence").rglob("leg-*.png"))
+    assert cold == warm
+    stages = {s.stage: s.status for s in ctx2.stage_results}
+    assert stages["investigation"] == "COMPLETE"
+    recs = [r for r in ctx2.run_usage.records if r.stage_family == "investigate"]
+    assert len(recs) == 1 and recs[0].transport == "CACHE" and recs[0].cache_hit
+    assert recs[0].input_tokens == 0 and recs[0].output_tokens == 0
+    assert ctx2.qc_status == "COMPLETE"
+
+
 def test_pipeline_malformed_investigation_never_rejects(tmp_path):
     src = _make_pdf(tmp_path / "M-101.pdf")
     client = _RoutingClient([_VAV_FINDING], verdict="NOT_VISIBLE",

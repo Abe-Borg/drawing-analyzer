@@ -35,6 +35,7 @@ thread-safe; each investigation interleaves renders with API turns).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
@@ -404,7 +405,10 @@ class _ToolExecutor:
         self.tool_trace.append({
             "kind": kind,
             "source_page_key": list(source_page_key(sheet.ref)),
-            "rect": [round(float(v), 2) for v in rect],
+            "sheet_label": self._sheet_label(sheet),
+            # Full precision: a warm-cache replay re-renders this exact rect
+            # and sha-compares — any rounding would change the pixels.
+            "rect": [float(v) for v in rect],
             "dpi": int(dpi),
             "sha256": artifact.sha256 if artifact is not None else "",
         })
@@ -567,15 +571,7 @@ def _investigate_one(
 
     old = finding.verification if finding.verification is not None else Verification()
     # Continue the verify pass's evidence directory and leg numbering.
-    dir_name = ""
-    for artifact in old.evidence:
-        parts = str(getattr(artifact, "relative_path", "") or "").split("/")
-        if len(parts) >= 3 and parts[0] == "evidence":
-            dir_name = parts[1]
-            break
-    if not dir_name:
-        dir_name = _reserve_evidence_dir(finding, used_evidence_names)
-    next_leg = max((int(a.leg_index) for a in old.evidence), default=-1) + 1
+    dir_name, next_leg = _evidence_continuation(finding, used_evidence_names)
 
     executor = _ToolExecutor(
         finding=finding, sheet=sheet, sheet_id_map=sheet_id_map,
@@ -758,6 +754,139 @@ def _write_investigation_json(
         _log.warning("could not write investigation.json for %s", finding.qc_id or dir_name)
 
 
+def set_content_fingerprint(documents: Iterable[Any]) -> str:
+    """One sha256 over the sorted ``(source_id, content_sha256)`` pairs.
+
+    The whole set is an investigation's input — the tools can roam every
+    sheet — so any source edit must invalidate every cached verdict. Returns
+    ``""`` (caching off, the safe default) when any document's content hash is
+    unknown.
+    """
+    pairs = sorted(
+        (str(getattr(d, "source_id", "") or ""),
+         str(getattr(d, "content_sha256", "") or ""))
+        for d in documents or []
+    )
+    if not pairs or any(not sha for _sid, sha in pairs):
+        return ""
+    h = hashlib.sha256()
+    for sid, sha in pairs:
+        h.update(sid.encode("utf-8"))
+        h.update(b"\x1f")
+        h.update(sha.encode("utf-8"))
+        h.update(b"\x1f")
+    return h.hexdigest()
+
+
+def _payload_hash(finding: Finding, set_fingerprint: str) -> str:
+    """The investigated finding's identity for the cache key (Phase C4)."""
+    rect = finding.anchor.rect_pdf if finding.anchor is not None else None
+    rect_part = ",".join(f"{float(v):.2f}" for v in rect) if rect else ""
+    prior = finding.verification.note if finding.verification is not None else ""
+    h = hashlib.sha256()
+    for part in (
+        finding.id or "", finding.text or "", finding.source_quote or "",
+        finding.category or "", finding.severity or "", rect_part,
+        prior or "", set_fingerprint or "",
+    ):
+        h.update(str(part).encode("utf-8"))
+        h.update(b"\x1f")
+    return h.hexdigest()
+
+
+def _evidence_continuation(finding: Finding, used: set) -> tuple[str, int]:
+    """(dir_name, next_leg_index) continuing the verify pass's evidence trail."""
+    old = finding.verification if finding.verification is not None else Verification()
+    dir_name = ""
+    for artifact in old.evidence:
+        parts = str(getattr(artifact, "relative_path", "") or "").split("/")
+        if len(parts) >= 3 and parts[0] == "evidence":
+            dir_name = parts[1]
+            break
+    if not dir_name:
+        dir_name = _reserve_evidence_dir(finding, used)
+    next_leg = max((int(a.leg_index) for a in old.evidence), default=-1) + 1
+    return dir_name, next_leg
+
+
+def _replay_cached(
+    finding: Finding,
+    entry: dict,
+    *,
+    lookup: dict,
+    evidence_dir: Path | None,
+    used_evidence_names: set,
+    render_fn: RenderFn,
+    model: str,
+) -> bool:
+    """Deterministically replay a cached conclusion (§16.6 + I-7).
+
+    Re-renders every step of the stored tool trace and sha-compares against
+    the recorded bytes; the verdict is applied ONLY on a full byte-for-byte
+    match, with the evidence re-created on disk exactly as the cold run left
+    it. Any mismatch (a drifted render, a missing sheet, a save failure)
+    returns ``False`` and the caller runs the investigation live.
+    """
+    status = str(entry.get("status", "") or "")
+    trace = entry.get("tool_trace")
+    if status not in ("VERIFIED", "REJECTED", "UNCERTAIN"):
+        return False
+    if not isinstance(trace, list) or not trace:
+        return False
+    # Verify every render BEFORE saving anything.
+    rendered: list[tuple[dict, Any, bytes]] = []
+    for step in trace:
+        if not isinstance(step, dict) or not step.get("sha256"):
+            return False
+        sheet = lookup.get(tuple(step.get("source_page_key") or ()))
+        if sheet is None:
+            return False
+        try:
+            png = render_fn(
+                sheet.ref.pdf_path, sheet.ref.page_index,
+                [float(v) for v in step.get("rect") or []], int(step.get("dpi", 0)),
+            )
+        except Exception:  # noqa: BLE001 - a replay failure is just a miss
+            return False
+        if not png or hashlib.sha256(png).hexdigest() != step["sha256"]:
+            return False
+        rendered.append((step, sheet, png))
+
+    old = finding.verification if finding.verification is not None else Verification()
+    dir_name, next_leg = _evidence_continuation(finding, used_evidence_names)
+    artifacts = []
+    for step, sheet, png in rendered:
+        artifact = _save_crop(
+            evidence_dir, dir_name, png,
+            qc_id=finding.qc_id, leg_index=next_leg,
+            sheet_id=str(step.get("sheet_label", "") or finding.sheet_id or "sheet"),
+            source_id=str(getattr(getattr(sheet, "ref", None), "source_id", "") or ""),
+            source_name=str(getattr(getattr(sheet, "ref", None), "source_name", "") or ""),
+            page_index=int(getattr(getattr(sheet, "ref", None), "page_index", 0) or 0),
+            anchor_rect=None, crop_rect=[float(v) for v in step.get("rect") or []],
+            dpi=int(step.get("dpi", 0)),
+        )
+        if evidence_dir is not None and artifact is None:
+            return False
+        if artifact is not None:
+            artifacts.append(artifact)
+        next_leg += 1
+
+    rounds = int(entry.get("rounds", 0) or 0)
+    finding.verification = Verification(
+        status=status,
+        note=str(entry.get("note", "") or "")[:_NOTE_CAP],
+        evidence=list(old.evidence) + artifacts,
+        computation_method=old.computation_method,
+        operand_origin=old.operand_origin,
+        investigated=True,
+        investigation_rounds=rounds,
+    )
+    out = _InvestigationOutcome(outcome="concluded", rounds=rounds, tool_trace=list(trace))
+    _write_investigation_json(evidence_dir, dir_name, finding, model, out)
+    return True
+
+
 @dataclass
 class InvestigationRecord:
     """One investigation's accounting (feeds the per-instance usage records)."""
@@ -859,6 +988,9 @@ def investigate_findings(
     tools = investigation_tools()
     used_evidence_names: set = set()
     total = len(picked)
+    # Phase C4: the verdict cache is keyed on the finding + the whole-set
+    # content fingerprint; an empty fingerprint disables it (safe default).
+    use_cache = cache is not None and bool(set_fingerprint)
 
     for i, finding in enumerate(picked):
         if progress is not None:
@@ -870,6 +1002,35 @@ def investigate_findings(
                 f"{finding.qc_id or finding.id}: sheet not available for investigation"
             )
             continue
+        cache_key = None
+        if use_cache:
+            from .digest_cache import investigation_cache_key
+
+            cache_key = investigation_cache_key(
+                _payload_hash(finding, set_fingerprint),
+                model=model, prompt_version=INVESTIGATE_PROMPT_VERSION,
+                max_rounds=max_rounds,
+            )
+            entry = cache.get(cache_key)
+            if entry is not None and _replay_cached(
+                finding, entry, lookup=lookup, evidence_dir=evidence_dir,
+                used_evidence_names=used_evidence_names, render_fn=render_fn,
+                model=model,
+            ):
+                result.investigated += 1
+                result.cache_hits += 1
+                status = finding.verification.status
+                if status == "VERIFIED":
+                    result.verified += 1
+                elif status == "REJECTED":
+                    result.rejected += 1
+                else:
+                    result.still_uncertain += 1
+                result.per_finding.append(InvestigationRecord(
+                    qc_id=finding.qc_id or "", outcome="concluded",
+                    rounds=int(entry.get("rounds", 0) or 0), cached=True,
+                ))
+                continue
         result.investigated += 1
         outcome = _investigate_one(
             finding, sheet, client=client, model=model, tools=tools,
@@ -894,6 +1055,20 @@ def investigate_findings(
                 result.rejected += 1
             else:
                 result.still_uncertain += 1
+            # Complete-only admission (Phase C4): cache ONLY a clean conclusion
+            # whose every rendered step carries an evidence sha the warm replay
+            # can verify — never a budget-capped, garbled, or errored outcome.
+            if (
+                cache_key is not None
+                and outcome.tool_trace
+                and all(step.get("sha256") for step in outcome.tool_trace)
+            ):
+                cache.put(cache_key, {
+                    "status": status,
+                    "note": finding.verification.note,
+                    "rounds": outcome.rounds,
+                    "tool_trace": list(outcome.tool_trace),
+                })
         elif outcome.outcome == "budget_capped":
             result.budget_capped += 1
             result.still_uncertain += 1

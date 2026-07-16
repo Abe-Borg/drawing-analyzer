@@ -1564,9 +1564,13 @@ def _run_qc_stages(
                     progress(total, total, label)
 
             try:
+                from .investigate import set_content_fingerprint
+
                 ires = _run_investigate(
                     all_findings, geometries, client=client,
                     evidence_dir=inv_evidence_dir, progress=_investigate_progress,
+                    cache=cache,
+                    set_fingerprint=set_content_fingerprint(accepted_documents or []),
                 )
                 for rec in ires.per_finding:
                     label = f"investigate:{rec.qc_id or 'finding'}"

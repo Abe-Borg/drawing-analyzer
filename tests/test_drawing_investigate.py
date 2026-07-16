@@ -482,6 +482,132 @@ def test_verification_serialization_roundtrips_the_new_fields():
     assert legacy.investigated is False and legacy.investigation_rounds == 0
 
 
+# --------------------------------------------------------------------------- #
+# Phase C4 — the verdict cache (complete-only admission, deterministic replay)
+# --------------------------------------------------------------------------- #
+
+
+def _confirm_responder(kw, _n):
+    return _verdict() if _tool_result_turns(kw) else _tool_use()
+
+
+def _cached_run(client, cache, tmp_path, *, fingerprint="fp1", max_rounds=6,
+                model=None, render_fn=_render_fn):
+    f = _finding()
+    res = investigate_findings(
+        [f], [_Geom(_ref())], client=client, cache=cache, model=model,
+        set_fingerprint=fingerprint, max_rounds=max_rounds,
+        evidence_dir=tmp_path, sleep=lambda *_: None, render_fn=render_fn,
+    )
+    return res, f
+
+
+def test_cache_warm_hit_replays_without_any_api_call(tmp_path):
+    from drawing_analyzer.digest_cache import DigestCache
+
+    cache = DigestCache(None, persist=False)
+    cold_dir, warm_dir = tmp_path / "cold", tmp_path / "warm"
+    r1, f1 = _cached_run(_LoopClient(_confirm_responder), cache, cold_dir)
+    assert r1.cache_hits == 0 and f1.verification.status == "VERIFIED"
+
+    def _explode(kw, n):
+        raise AssertionError("warm run must not call the API")
+
+    r2, f2 = _cached_run(_LoopClient(_explode), cache, warm_dir)
+    assert r2.cache_hits == 1 and r2.investigated == 1 and r2.verified == 1
+    assert r2.per_finding[0].cached is True
+    assert r2.input_tokens == 0 and r2.output_tokens == 0
+    # The verdict is byte-identical and the evidence bytes were re-created.
+    assert (f2.verification.status, f2.verification.note) == \
+        (f1.verification.status, f1.verification.note)
+    assert f2.verification.investigated and f2.verification.investigation_rounds == 1
+    cold_pngs = sorted(p.read_bytes() for p in cold_dir.rglob("leg-*.png"))
+    warm_pngs = sorted(p.read_bytes() for p in warm_dir.rglob("leg-*.png"))
+    assert cold_pngs == warm_pngs
+    assert [p.name for p in sorted(cold_dir.rglob("leg-*.png"))] == \
+        [p.name for p in sorted(warm_dir.rglob("leg-*.png"))]
+    assert (warm_dir / "QC-001" / "investigation.json").exists()
+
+
+def test_cache_never_admits_capped_or_garbled_outcomes(tmp_path):
+    from drawing_analyzer.digest_cache import DigestCache
+
+    def _never(kw, _n):
+        if "tools" in kw:
+            return _tool_use()
+        return FakeMessage(content=[FakeTextBlock(text="still unsure")],
+                           stop_reason="end_turn", usage=FakeUsage())
+
+    cache = DigestCache(None, persist=False)
+    _cached_run(_LoopClient(_never), cache, tmp_path / "a", max_rounds=1)
+    assert cache.stats()["size"] == 0                # budget-capped: not stored
+
+    garbled = _LoopClient(lambda kw, n: FakeMessage(
+        content=[FakeTextBlock(text="prose only")], stop_reason="end_turn",
+        usage=FakeUsage()))
+    _cached_run(garbled, cache, tmp_path / "b")
+    assert cache.stats()["size"] == 0                # garbled: not stored
+
+
+def test_cache_sha_mismatch_falls_back_to_a_live_run(tmp_path):
+    from drawing_analyzer.digest_cache import DigestCache
+
+    cache = DigestCache(None, persist=False)
+    _cached_run(_LoopClient(_confirm_responder), cache, tmp_path / "cold")
+    # The source "changed" under the same fingerprint (hostile case): the
+    # re-render no longer matches the recorded sha → live investigation.
+    drifted = lambda pdf_path, page_index, rect, dpi: b"DIFFERENT" + _render_fn(
+        pdf_path, page_index, rect, dpi)  # noqa: E731
+    live = _LoopClient(_confirm_responder)
+    r2, f2 = _cached_run(live, cache, tmp_path / "warm", render_fn=drifted)
+    assert r2.cache_hits == 0 and len(live.calls) >= 1
+    assert f2.verification.status == "VERIFIED"      # the live run still ran
+
+
+def test_cache_key_sensitivity(tmp_path):
+    from drawing_analyzer.digest_cache import DigestCache
+
+    cache = DigestCache(None, persist=False)
+    _cached_run(_LoopClient(_confirm_responder), cache, tmp_path / "a")
+
+    def _live_ran(**kw):
+        client = _LoopClient(_confirm_responder)
+        res, _f = _cached_run(client, cache, tmp_path / "x", **kw)
+        return len(client.calls) > 0
+
+    assert not _live_ran()                                   # identical → hit
+    assert _live_ran(fingerprint="fp2")                      # set content changed
+    assert _live_ran(max_rounds=3)                           # budget rides the key
+    assert _live_ran(model="claude-sonnet-4-6")              # model rides the key
+
+
+def test_cache_disabled_without_a_fingerprint(tmp_path):
+    from drawing_analyzer.digest_cache import DigestCache
+
+    cache = DigestCache(None, persist=False)
+    client = _LoopClient(_confirm_responder)
+    _cached_run(client, cache, tmp_path, fingerprint="")
+    assert cache.stats()["size"] == 0 and len(client.calls) >= 1
+
+
+def test_set_content_fingerprint_contract():
+    from drawing_analyzer.investigate import set_content_fingerprint
+
+    @dataclass
+    class _Doc:
+        source_id: str
+        content_sha256: str
+
+    a = [_Doc("SRC-0001", "aa"), _Doc("SRC-0002", "bb")]
+    fp = set_content_fingerprint(a)
+    assert fp and fp == set_content_fingerprint(list(reversed(a)))   # order-free
+    assert fp != set_content_fingerprint([_Doc("SRC-0001", "aa"),
+                                          _Doc("SRC-0002", "CHANGED")])
+    # Unknown content hashes (or no documents) disable caching entirely.
+    assert set_content_fingerprint([]) == ""
+    assert set_content_fingerprint([_Doc("SRC-0001", "")]) == ""
+
+
 def test_investigate_findings_never_raises_on_hostile_inputs():
     # No candidates at all; empty sheets; a candidate whose sheet is missing.
     assert investigate_findings([], [], client=None).investigated == 0

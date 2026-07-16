@@ -429,6 +429,43 @@ def citation_cache_key(
     return h.hexdigest()
 
 
+def investigation_cache_key(
+    payload_hash: str,
+    *,
+    model: str,
+    prompt_version: str,
+    max_rounds: int,
+) -> str:
+    """Content-address one investigation's *concluded* verdict (Phase C).
+
+    ``payload_hash`` is the sha256 of the investigated finding's identity
+    (id/text/quote/category/severity/anchor rect/prior verdict note) plus the
+    caller's whole-set fingerprint — the tools can roam every sheet, so the
+    whole set is an input and any source edit misses. ``max_rounds`` rides the
+    key: a verdict reached under a different evidence budget is a different
+    verdict. Only clean conclusions are admitted (never budget-capped/garbled
+    outcomes), and a warm hit deterministically REPLAYS the stored tool trace
+    (re-render + sha-compare) so the evidence bytes exist on disk this run —
+    a mismatch falls back to a live investigation. No TTL, unlike the citation
+    cache: citation's ground truth drifts with the live web, while every
+    investigation input is folded into this key. Same namespace-isolation
+    rationale as :func:`identity_cache_key` — the ``stage=investigation`` tag
+    means no ``_SCHEMA_VERSION`` bump.
+    """
+    h = hashlib.sha256()
+    for part in (
+        f"schema={_SCHEMA_VERSION}",
+        "stage=investigation",
+        f"model={model or ''}",
+        f"prompt={prompt_version or ''}",
+        f"max_rounds={int(max_rounds)}",
+        f"payload={payload_hash or ''}",
+    ):
+        h.update(part.encode("utf-8"))
+        h.update(b"\x00")
+    return h.hexdigest()
+
+
 class DigestCache:
     """Thread-safe digest store, optionally persisted to ``path``.
 
