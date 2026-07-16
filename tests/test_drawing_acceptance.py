@@ -606,9 +606,15 @@ def test_gauntlet_every_rect_valid_in_view_space(oracle):
 def test_gauntlet_verify_images_equal_saved_evidence(oracle):
     ctx, work, client = oracle.ctx, oracle.work, oracle.client
 
+    # What the models saw: the verifier's crops PLUS every image the Phase C
+    # investigation loop was shown (initial context crop + tool crops) — all
+    # ride the same evidence trail (§16.6).
     sent = sorted(
-        hashlib.sha256(img).hexdigest()
-        for _text, images in client.verify_requests for img in images
+        [hashlib.sha256(img).hexdigest()
+         for _text, images in client.verify_requests for img in images]
+        + [hashlib.sha256(img).hexdigest()
+           for _text, images, _tools in client.investigate_requests
+           for img in images]
     )
     assert sent, "verifier was never called"
 
@@ -616,7 +622,11 @@ def test_gauntlet_verify_images_equal_saved_evidence(oracle):
         hashlib.sha256(p.read_bytes()).hexdigest()
         for p in (work / "evidence").rglob("leg-*.png")
     )
-    assert sent == on_disk    # byte-for-byte: what the model saw IS what's saved
+    # Investigation turns re-send earlier images in the conversation history,
+    # so the SENT list can carry duplicates — compare as sets, then assert the
+    # §16.6 direction that matters both ways: nothing was sent unsaved, and
+    # nothing saved went unsent.
+    assert set(sent) == set(on_disk)
 
     # Every artifact record's hash matches its file, and its request trail exists.
     for f in ctx.all_findings:
@@ -625,6 +635,65 @@ def test_gauntlet_verify_images_equal_saved_evidence(oracle):
             assert saved.exists(), art.relative_path
             assert hashlib.sha256(saved.read_bytes()).hexdigest() == art.sha256
             assert (work / "evidence" / f.qc_id / "request.json").exists()
+
+
+# ---- assertion 5b: the Phase C investigation escalates the UNCERTAIN finding -
+
+
+def test_gauntlet_investigation_escalates_the_uncertain_finding(oracle):
+    ctx, work, client = oracle.ctx, oracle.work, oracle.client
+    f6 = next(f for f in ctx.all_findings if "Concrete pad" in f.text)
+    v = f6.verification
+    # Verify said NOT_VISIBLE; the investigation requested one crop, saw it,
+    # and concluded CONFIRMED — the verdict upgraded in place.
+    assert v.status == "VERIFIED"
+    assert v.investigated is True and v.investigation_rounds == 1
+    assert v.note.startswith("investigated: ")
+    # Two turns: the first offered tools and carried the initial context crop;
+    # the tool-answering turn carried the requested crop back.
+    assert client.investigate_calls == 2
+    first_text, first_images, first_tools = client.investigate_requests[0]
+    assert first_tools and first_images
+    assert "Concrete pad" in first_text
+    # The evidence trail carries the investigation's crops + its trace file.
+    assert len(v.evidence) >= 3            # verify crop + initial + tool crop
+    assert (work / "evidence" / f6.qc_id / "investigation.json").exists()
+    # One portable per-investigation usage record.
+    recs = [r for r in ctx.run_usage.records if r.stage_family == "investigate"]
+    assert [r.stage_instance for r in recs] == [f"investigate:{f6.qc_id}"]
+    statuses = {s.stage: s.status for s in ctx.stage_results}
+    assert statuses["investigation"] == "COMPLETE"
+
+
+def test_gauntlet_investigation_budget_cap_is_an_honest_complete(tmp_path, monkeypatch):
+    # The loop never concludes; the host budget forces the no-tools close and
+    # the finding honestly stays UNCERTAIN — a designed outcome, so the stage
+    # (and the run) remain COMPLETE, and nothing is ever REJECTED on a cap.
+    monkeypatch.setenv("DRAWING_ANALYZER_INVESTIGATION_MAX_ROUNDS", "2")
+    client = G.mini_client(sabotage="investigation_never_concludes",
+                           verify_verdicts=(("VAV-3", "NOT_VISIBLE"),))
+    ctx = _mini_run(tmp_path, client)
+    f = next(f for f in ctx.all_findings if "VAV-3" in f.text)
+    v = f.verification
+    assert v.status == "UNCERTAIN"
+    assert "investigated 2 round(s) without conclusion" in v.note
+    assert v.investigation_rounds == 2
+    assert any(not tools for _t, _i, tools in client.investigate_requests)
+    statuses = {s.stage: s.status for s in ctx.stage_results}
+    assert statuses["investigation"] == "COMPLETE"
+    assert ctx.qc_status == "COMPLETE"
+    assert "VAV-3 serves Room 120" in ctx.combined_text     # I-3 deliverable
+
+
+def test_gauntlet_investigation_malformed_never_rejects(tmp_path):
+    client = G.mini_client(sabotage="investigation_malformed",
+                           verify_verdicts=(("VAV-3", "NOT_VISIBLE"),))
+    ctx = _mini_run(tmp_path, client)
+    f = next(f for f in ctx.all_findings if "VAV-3" in f.text)
+    assert f.verification.status == "UNCERTAIN"             # garble never REJECTS
+    assert f.verification.investigated is True
+    statuses = {s.stage: s.status for s in ctx.stage_results}
+    assert statuses["investigation"] == "COMPLETE"
 
 
 # ---- assertion 6: critique provenance + reproduced status are truthful ------
@@ -901,8 +970,8 @@ def test_gauntlet_exhaustive_status_complete(oracle):
     assert ctx.coverage_status == "COMPLETE"
     statuses = {s.stage: s.status for s in ctx.stage_results}
     for stage in ("identity", "critique", "cross_qc", "synthesis", "auditors",
-                  "prose_harvest", "edition_audit", "verification", "citation",
-                  "markup"):
+                  "prose_harvest", "edition_audit", "verification",
+                  "investigation", "citation", "markup"):
         assert statuses[stage] in ("COMPLETE", "SKIPPED_VALID"), (stage, statuses)
     # Usage totals are the exact sum of the append-only ledger.
     assert ctx.total_input_tokens == sum(r.input_tokens for r in ctx.run_usage.records)
