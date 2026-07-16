@@ -21,11 +21,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   markup pipeline with no new plumbing. The block rides a prompt-cache
   breakpoint on the real-time path (never on the parallel batch-item build,
   which would only pay the cache-write premium with nothing to read); a
-  two-tier character budget (40k/file, 120k total) bounds cost and attention
-  dilution, with truncation surfaced as a non-fatal run warning. Pre-run cost
-  estimates now show the specs' contribution, priced correctly for each
-  transport (flat repeated input on the batch path; cache write-once/read-many
-  on real-time). `digest_cache._SCHEMA_VERSION` bumped 7→8.
+  two-tier character budget (400k/file, 400k total — a single spec may fill the
+  whole budget) bounds cost and attention dilution, with truncation surfaced as
+  a non-fatal run warning. Pre-run cost estimates now show the specs'
+  contribution, priced correctly for each transport (flat repeated input on the
+  batch path; cache write-once/read-many on real-time).
+  `digest_cache._SCHEMA_VERSION` bumped 7→8.
 
 ### Changed — stuck/sick batch recovery stays on the batch transport
 

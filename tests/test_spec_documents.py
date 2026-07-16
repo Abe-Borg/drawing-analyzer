@@ -191,23 +191,55 @@ def test_build_specs_text_under_budget_is_unchanged():
     assert budget.omitted_chars == 0
 
 
-def test_build_specs_text_per_file_budget_caps_one_huge_file():
+def test_build_specs_text_single_file_may_fill_the_whole_budget():
+    # Per-file cap now equals the whole-block cap, so one uploaded spec may use
+    # the ENTIRE budget: the per-file pass only trims a file that by itself
+    # exceeds the total. A file over the total is still capped and flagged.
     docs = [
-        SpecDocument(path=Path("a.txt"), display_name="a.txt", text="x" * (SPEC_FILE_CHAR_BUDGET + 500)),
-        SpecDocument(path=Path("b.txt"), display_name="b.txt", text="y" * 100),
+        SpecDocument(path=Path("a.txt"), display_name="a.txt", text="x" * (SPEC_TOTAL_CHAR_BUDGET + 500)),
     ]
     text, budget = build_specs_text(docs)
     assert budget.degraded
     assert "a.txt" in budget.omitted_files
-    assert "b.txt" not in budget.omitted_files
-    assert "y" * 100 in text  # the small file survives intact
+    assert len(text) <= SPEC_TOTAL_CHAR_BUDGET
+
+
+def test_build_specs_text_multiple_files_under_budget_all_survive():
+    # Several modest files whose combined size is under the whole-block budget
+    # are all kept intact (no per-file or whole-block truncation).
+    docs = [
+        SpecDocument(path=Path("a.txt"), display_name="a.txt", text="a" * 1_000),
+        SpecDocument(path=Path("b.txt"), display_name="b.txt", text="b" * 1_000),
+        SpecDocument(path=Path("c.txt"), display_name="c.txt", text="c" * 1_000),
+    ]
+    text, budget = build_specs_text(docs)
+    assert not budget.degraded
+    assert "a" * 1_000 in text
+    assert "b" * 1_000 in text
+    assert "c" * 1_000 in text
+
+
+def test_spec_budgets_are_equal_so_one_file_can_fill_the_budget():
+    # The per-file and whole-block caps are intentionally the SAME value: a
+    # single uploaded spec may use the entire budget (see build_specs_text).
+    assert SPEC_FILE_CHAR_BUDGET == SPEC_TOTAL_CHAR_BUDGET == 400_000
+
+
+def _docs_exceeding_total_budget() -> list[SpecDocument]:
+    """Enough equal-size docs that the combined block exceeds
+    SPEC_TOTAL_CHAR_BUDGET (so whole-block truncation must fire). Derived from
+    the constant — and with a per-doc size well under SPEC_FILE_CHAR_BUDGET so
+    only the whole-block pass truncates — so these tests hold at any budget."""
+    chunk = 10_000
+    n = SPEC_TOTAL_CHAR_BUDGET // chunk + 5
+    return [
+        SpecDocument(path=Path(f"{i}.txt"), display_name=f"{i}.txt", text="z" * chunk)
+        for i in range(n)
+    ]
 
 
 def test_build_specs_text_total_budget_caps_the_whole_block():
-    docs = [
-        SpecDocument(path=Path(f"{i}.txt"), display_name=f"{i}.txt", text="z" * 1_000)
-        for i in range(200)  # 200,000 chars total, well over the whole-block cap
-    ]
+    docs = _docs_exceeding_total_budget()
     text, budget = build_specs_text(docs)
     assert len(text) <= SPEC_TOTAL_CHAR_BUDGET + 100  # + truncation marker slack
     assert budget.degraded
@@ -259,11 +291,9 @@ def test_build_specs_text_included_chars_matches_returned_length():
 
 
 def test_build_specs_text_included_chars_matches_after_whole_block_truncation():
-    docs = [
-        SpecDocument(path=Path(f"{i}.txt"), display_name=f"{i}.txt", text="z" * 1_000)
-        for i in range(200)
-    ]
+    docs = _docs_exceeding_total_budget()
     text, budget = build_specs_text(docs)
+    assert budget.degraded  # ensure whole-block truncation actually fired
     assert budget.included_chars == len(text)
 
 
@@ -285,10 +315,7 @@ def test_double_truncation_never_corrupts_the_marker():
     # build_specs_text's whole-block truncation, followed by pipeline.py's
     # enforce_specs_budget backstop applying the SAME default budget again,
     # must never produce a truncated marker fragment.
-    docs = [
-        SpecDocument(path=Path(f"{i}.txt"), display_name=f"{i}.txt", text="z" * 1_000)
-        for i in range(200)
-    ]
+    docs = _docs_exceeding_total_budget()
     once, _budget = build_specs_text(docs)
     assert len(once) <= SPEC_TOTAL_CHAR_BUDGET  # _budgeted never overshoots
     twice, _budget2 = enforce_specs_budget(once)

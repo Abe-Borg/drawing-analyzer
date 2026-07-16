@@ -24,13 +24,18 @@ from pathlib import Path
 
 SPEC_FILE_EXTENSIONS = frozenset({".pdf", ".docx", ".txt", ".md"})
 
-# Per-file cap: one huge spec document can't crowd out the others when several
-# are uploaded together. Whole-block cap: bounds total system-prompt growth
-# (and therefore first-sheet cache-write cost + attention dilution) regardless
-# of how many files were attached. See CLAUDE.md-adjacent design notes in the
-# project plan for the cost/coverage rationale behind these numbers.
-SPEC_FILE_CHAR_BUDGET = 40_000
-SPEC_TOTAL_CHAR_BUDGET = 120_000
+# Both caps are the SAME value, so a single uploaded spec may fill the entire
+# budget — the per-file pass only trims a document that by itself exceeds the
+# total. The whole-block cap is the hard ceiling on the combined block: it
+# bounds per-sheet system-prompt growth (and therefore first-sheet cache-write
+# cost + attention dilution) regardless of how many files were attached. This
+# is a cost/attention *policy* cap, NOT a context-window limit — at ~4 chars/
+# token the 400k ceiling is ~100k tokens, a small fraction of the digest
+# model's 1,000,000-token window (see core/api_config.py). Over-budget uploads
+# are never an error: the omission is counted on SpecBudget and surfaced as a
+# non-fatal run warning (I-3).
+SPEC_FILE_CHAR_BUDGET = 400_000
+SPEC_TOTAL_CHAR_BUDGET = 400_000
 
 
 @dataclass
@@ -156,10 +161,13 @@ def _budgeted(text: str, budget_chars: int) -> tuple[str, int]:
 
 def build_specs_text(documents: list[SpecDocument]) -> tuple[str, SpecBudget]:
     """Concatenate every successfully-extracted document under a per-file
-    header, applying the per-file budget first (so one huge file can't starve
-    the others) and then the whole-block budget (a hard ceiling regardless of
-    file count). Failed/empty documents are skipped here — their errors are
-    the caller's responsibility to surface (the GUI logs them per-file)."""
+    header, applying the per-file budget first and then the whole-block budget.
+    With both budgets equal (see the module constants) a single uploaded spec
+    may use the entire budget — the per-file pass only trims a document that by
+    itself exceeds the total; the whole-block budget is the hard ceiling on the
+    combined block regardless of file count. Failed/empty documents are skipped
+    here — their errors are the caller's responsibility to surface (the GUI logs
+    them per-file)."""
     budget = SpecBudget()
     parts: list[str] = []
     for doc in documents:
