@@ -2464,8 +2464,13 @@ _CHAT_HTML = """
 <button id="da-chat-fab" type="button" title="Ask questions about this report">✦ Ask AI</button>
 <section id="da-chat-panel" hidden aria-label="Report Q&amp;A">
   <div class="da-rz da-rz-tl" aria-hidden="true"></div>
+  <div class="da-rz da-rz-tr" aria-hidden="true"></div>
+  <div class="da-rz da-rz-bl" aria-hidden="true"></div>
+  <div class="da-rz da-rz-br" aria-hidden="true"></div>
   <div class="da-rz da-rz-t" aria-hidden="true"></div>
+  <div class="da-rz da-rz-b" aria-hidden="true"></div>
   <div class="da-rz da-rz-l" aria-hidden="true"></div>
+  <div class="da-rz da-rz-r" aria-hidden="true"></div>
   <header class="da-chat-head">
     <span class="da-chat-title">Report Q&amp;A</span>
     <span class="da-chat-model" id="da-chat-model"></span>
@@ -2598,8 +2603,13 @@ _CHAT_CSS = """
 /* ---- resize handles + drag ---- */
 .da-rz{position:absolute; z-index:3; touch-action:none}
 .da-rz-t{top:0; left:8px; right:8px; height:6px; cursor:ns-resize}
+.da-rz-b{bottom:0; left:8px; right:8px; height:6px; cursor:ns-resize}
 .da-rz-l{left:0; top:8px; bottom:8px; width:6px; cursor:ew-resize}
+.da-rz-r{right:0; top:8px; bottom:8px; width:6px; cursor:ew-resize}
 .da-rz-tl{top:0; left:0; width:14px; height:14px; cursor:nwse-resize; z-index:4}
+.da-rz-br{bottom:0; right:0; width:14px; height:14px; cursor:nwse-resize; z-index:4}
+.da-rz-tr{top:0; right:0; width:14px; height:14px; cursor:nesw-resize; z-index:4}
+.da-rz-bl{bottom:0; left:0; width:14px; height:14px; cursor:nesw-resize; z-index:4}
 .da-chat-head{cursor:grab}
 body.da-dragging, body.da-dragging *{user-select:none !important}
 /* ---- highlight-to-ask: selection popover + pending-excerpt chip ---- */
@@ -3770,6 +3780,11 @@ _CHAT_JS = r"""
   // (<=600px) the bottom-sheet media query governs and inline geometry is
   // stripped. Persisted in localStorage; double-click the header to reset.
   var GEO_KEY = 'da-chat-geo', MARGIN = 12, MIN_W = 320, MIN_H = 360;
+  // Which edges each resize mode moves; the opposite edge stays pinned.
+  var RZ_EDGES = {
+    l:{l:1}, r:{r:1}, t:{t:1}, b:{b:1},
+    tl:{t:1,l:1}, tr:{t:1,r:1}, bl:{b:1,l:1}, br:{b:1,r:1}
+  };
   function isMobile(){ return window.innerWidth <= 600; }
   function loadGeo(){ try { return JSON.parse(localStorage.getItem(GEO_KEY) || 'null'); } catch(e){ return null; } }
   function saveGeo(g){ try { localStorage.setItem(GEO_KEY, JSON.stringify(g)); } catch(e){} }
@@ -3830,14 +3845,19 @@ _CHAT_JS = r"""
       if(mode === 'move'){
         g = {left: base.left + dx, top: base.top + dy, w: base.w, h: base.h};
       } else {
+        var m = RZ_EDGES[mode] || {};
         g = {left: base.left, top: base.top, w: base.w, h: base.h};
-        if(mode === 'l' || mode === 'tl'){ g.left = base.left + dx; g.w = base.right - g.left; }
-        if(mode === 't' || mode === 'tl'){ g.top = base.top + dy; g.h = base.bottom - g.top; }
-        // enforce mins against the FIXED far edge so the anchored corner holds
+        // A left/top drag moves that edge and pins the far edge; a right/bottom
+        // drag keeps the near edge fixed and grows width/height.
+        if(m.l){ g.left = base.left + dx; g.w = base.right - g.left; }
+        else if(m.r){ g.w = base.w + dx; }
+        if(m.t){ g.top = base.top + dy; g.h = base.bottom - g.top; }
+        else if(m.b){ g.h = base.h + dy; }
+        // enforce mins against the FIXED far edge so the anchored edge holds
         var minW = Math.min(MIN_W, window.innerWidth - 2 * MARGIN);
         var minH = Math.min(MIN_H, window.innerHeight - 2 * MARGIN);
-        if(g.w < minW){ g.w = minW; if(mode === 'l' || mode === 'tl') g.left = base.right - minW; }
-        if(g.h < minH){ g.h = minH; if(mode === 't' || mode === 'tl') g.top = base.bottom - minH; }
+        if(g.w < minW){ if(m.l) g.left = base.right - minW; g.w = minW; }
+        if(g.h < minH){ if(m.t) g.top = base.bottom - minH; g.h = minH; }
       }
       g = clampGeo(g); writeGeo(g); saveGeo(g);
     }
@@ -3860,7 +3880,9 @@ _CHAT_JS = r"""
     headEl.addEventListener('dblclick', function(){ if(!isMobile()){ clearGeo(); stripInline(); } });
   }
   Array.prototype.slice.call(panel.querySelectorAll('.da-rz')).forEach(function(h){
-    var mode = h.classList.contains('da-rz-tl') ? 'tl' : (h.classList.contains('da-rz-t') ? 't' : 'l');
+    var mode = ['tl','tr','bl','br','t','b','l','r'].filter(function(k){
+      return h.classList.contains('da-rz-' + k);
+    })[0] || 'l';
     h.addEventListener('pointerdown', function(e){ startGesture(e, mode); });
   });
   window.addEventListener('resize', applyGeom);
