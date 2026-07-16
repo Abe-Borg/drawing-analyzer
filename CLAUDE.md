@@ -127,6 +127,17 @@ findings for free).
   A post-seal add marks the run incomplete (no `QC-XTRA` masquerade).
   Anchoring, verification, the citation check, the markup writer, the exports,
   and the report consume ledger entries and nothing else.
+- *Edition audit (Phase B):* `citation_check.reconcile_cited_editions` — a
+  zero-API, **strictly pre-seal** check turning an adopted-vs-cited edition
+  divergence into a first-class ledger finding (gated `run_citation or
+  run_auditors`; stage `edition_audit`). Basis = identity `adopted_codes`
+  (model entries need a quote; regex-union entries are ignored here) ∪ a
+  citation-shape-filtered regex harvest (`_basis_edition_claims` — a mention
+  followed by a section marker is a citation, never an adoption). Two-tier
+  trust mirroring §17.5: both operands re-found in sheet text → medium +
+  `DETERMINISTIC`; else low + advisory-labeled, crop-verified downstream. The
+  finding anchors to the stale-edition text's own matched span (never the
+  citing finding's quote — an identical quote would collide in Pass B).
 - *Disposition:* `anchor.py` (quote → PDF rect, tiered
   EXACT/FUZZY/TILE/UNANCHORED — UNANCHORED is the hallucination signal) →
   `verify.py` (high-DPI crop re-check → VERIFIED/REJECTED/UNCERTAIN) →
@@ -170,6 +181,11 @@ example is parked at `docs/examples/fire_protection.md`.
   what is stored or sent changes.
 - **I-7 — deterministic assembly:** same inputs → same ordering (QC numbering,
   index rows, merged output); no randomness or time-dependence in assembly.
+  One documented carve-out (Phase B): the citation verdict cache's TTL clock
+  (`DRAWING_ANALYZER_CITATION_TTL_DAYS`, injectable `now=`) governs cache
+  admission/refresh only — whether an API call is made — never numbering,
+  ordering, or merged output; a warm run's assembled output is byte-identical
+  to the run that populated the cache.
 - **The model never calculates:** models transcribe `NumericClaim`s;
   `auditors/arithmetic.py` does the math with `Decimal` — never `eval`, never
   the model's own arithmetic. The host *operation* is always deterministic, but the

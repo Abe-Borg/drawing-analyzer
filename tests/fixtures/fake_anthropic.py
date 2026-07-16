@@ -38,11 +38,21 @@ from typing import Any
 
 
 @dataclass
+class FakeServerToolUse:
+    """Mimic ``usage.server_tool_use`` (server-reported tool telemetry)."""
+
+    web_search_requests: int = 0
+
+
+@dataclass
 class FakeUsage:
     input_tokens: int = 100
     output_tokens: int = 50
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0
+    # Present only when the response carried server tool telemetry — ``None``
+    # mimics the SDK shapes that omit it (readers must treat that as unknown).
+    server_tool_use: Any = None
 
 
 @dataclass

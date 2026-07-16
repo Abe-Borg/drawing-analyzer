@@ -1203,6 +1203,33 @@ def test_citations_list_renders_per_reference_assessments():
     # Long notes are truncated to ~120 chars.
     assert "x" * 120 not in doc
     assert "x" * 119 + "…" in doc
+    # Phase B: a mismatch reads as a warning, never the muted pass styling.
+    assert 'class="citation-note citation-mismatch"' in doc
+    assert ".citation-mismatch{" in doc
+
+
+def test_citation_mismatch_renders_editions_and_evidence_link():
+    from drawing_analyzer.models import CitationAssessment
+
+    f = _finding()
+    f.citations = [CitationAssessment(
+        reference="NFPA 13 §8.15.1", status="CHECKED_MISMATCH", note="moved",
+        adopted_edition="NFPA 13 2016", checked_edition="NFPA 13 2016",
+        current_edition="NFPA 13 2025",
+        evidence_url="https://codes.example.org/nfpa13?a=1&b=2",
+    )]
+    doc = hr.build_html_report(_findings_ctx(findings=[f]), source_names=[SRC], now=NOW)
+    assert "(adopted: NFPA 13 2016; checked: NFPA 13 2016; current: NFPA 13 2025)" in doc
+    # Evidence link: https-only, escaped, no-opener.
+    assert 'href="https://codes.example.org/nfpa13?a=1&amp;b=2"' in doc
+    assert 'rel="noopener noreferrer"' in doc
+    # A non-https URL never becomes a link (defense in depth beyond the parser).
+    f2 = _finding()
+    f2.citations = [CitationAssessment(reference="R", status="CHECKED_SUPPORTS",
+                                       evidence_url="javascript:alert(1)")]
+    doc2 = hr.build_html_report(_findings_ctx(findings=[f2]), source_names=[SRC], now=NOW)
+    assert "javascript:alert(1)" not in doc2
+    assert 'class="citation-evidence"' not in doc2
 
 
 def test_legacy_single_citation_fallback_when_citations_empty():
@@ -1212,6 +1239,11 @@ def test_legacy_single_citation_fallback_when_citations_empty():
     f.citation = Citation(status="CHECKED_SUPPORTS", note="ok per 2021 edition")
     doc = hr.build_html_report(_findings_ctx(findings=[f]), source_names=[SRC], now=NOW)
     assert "[citation supports: ok per 2021 edition]" in doc
+    # The legacy fallback also distinguishes a mismatch (Phase B).
+    f2 = _finding()
+    f2.citation = Citation(status="CHECKED_MISMATCH", note="renumbered")
+    doc2 = hr.build_html_report(_findings_ctx(findings=[f2]), source_names=[SRC], now=NOW)
+    assert 'class="citation-note citation-mismatch"' in doc2
 
 
 def test_prose_chip_renders_item_count():

@@ -849,7 +849,26 @@ FINDINGS_CSV_HEADER = [
     # The model/auditor-supplied "what to do" sentence — appended last so
     # existing column positions are unchanged.
     "recommended_action",
+    # Phase B structured citation provenance (per-ref assessments, joined
+    # "ref: value | …") — appended so existing column positions are unchanged.
+    "citation_adopted_edition", "citation_checked_edition",
+    "citation_current_edition", "citation_evidence_url",
 ]
+
+
+# Multi-ref provenance cells are joined "ref: value | …" and bounded like the
+# note column, so one finding citing many codes can't blow up a row.
+_CITATION_CELL_CAP = 400
+
+
+def _citation_provenance_cell(finding: Any, attr: str) -> str:
+    """One provenance column's value from the per-ref assessments ("" if none)."""
+    parts = []
+    for a in (getattr(finding, "citations", None) or []):
+        value = str(getattr(a, attr, "") or "")
+        if value:
+            parts.append(f"{getattr(a, 'reference', '')}: {value}")
+    return "; ".join(parts)[:_CITATION_CELL_CAP]
 
 
 # Excel/DDE formula-injection guard (Phase 26B §18.5.1, DA-031). A cell whose
@@ -943,6 +962,10 @@ def _finding_row(finding: Any) -> list[str]:
         str(getattr(finding, "confidence", "") or ""),
         str(getattr(finding, "tile_label", "") or ""),
         _excel_safe(str(getattr(finding, "recommended_action", "") or "")),
+        _excel_safe(_citation_provenance_cell(finding, "adopted_edition")),
+        _excel_safe(_citation_provenance_cell(finding, "checked_edition")),
+        _excel_safe(_citation_provenance_cell(finding, "current_edition")),
+        _excel_safe(_citation_provenance_cell(finding, "evidence_url")),
     ]
 
 

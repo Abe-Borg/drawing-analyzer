@@ -150,6 +150,23 @@ def test_popup_trust_note_speaks_plain_words(status, origin, unverified, rejecte
     assert content.rstrip().endswith(expected)
 
 
+def test_popup_names_the_checked_edition():
+    # Phase B: the reviewer sees which edition the verdict was checked against;
+    # URLs and raw provenance stay in the CSV/HTML report, never on the drawing.
+    from drawing_analyzer.models import Citation, CitationAssessment
+
+    f = _f("cites relief valve", status="VERIFIED")
+    f.citation = Citation(status="CHECKED_SUPPORTS", note="ok")
+    f.citations = [CitationAssessment(
+        reference="NFPA 13 2016 §8.1.2", status="CHECKED_SUPPORTS",
+        checked_edition="NFPA 13 2016",
+        evidence_url="https://codes.example.org/x",
+    )]
+    content = _annot_content(f, unverified=False)
+    assert "checked against NFPA 13 2016 §8.1.2: NFPA 13 2016" in content
+    assert "https://" not in content              # links never ink the drawing
+
+
 def test_popup_single_read_folds_into_the_unverified_note():
     f = _f("an issue", status="UNCERTAIN")
     f.reproduced = False
@@ -224,18 +241,52 @@ def test_web_search_tool_type_is_current_and_overridable(monkeypatch):
     assert web_search_tool()["type"] == "web_search_99990101"
 
 
+def test_web_search_max_uses_is_bounded_and_overridable(monkeypatch):
+    from drawing_analyzer.citation_check import web_search_max_uses
+
+    assert web_search_tool()["max_uses"] == 5
+    monkeypatch.setenv("DRAWING_ANALYZER_WEB_SEARCH_MAX_USES", "9")
+    assert web_search_max_uses() == 9 and web_search_tool()["max_uses"] == 9
+    monkeypatch.setenv("DRAWING_ANALYZER_WEB_SEARCH_MAX_USES", "0")
+    assert web_search_max_uses() == 5                    # sub-1 -> default
+    monkeypatch.setenv("DRAWING_ANALYZER_WEB_SEARCH_MAX_USES", "lots")
+    assert web_search_max_uses() == 5                    # junk -> default
+
+
+def test_server_web_search_requests_reader_is_shape_tolerant():
+    # Phase B exact billing: the reader must distinguish "server reported 0"
+    # from "this response shape carries no count" (None).
+    from drawing_analyzer.digest import _server_web_search_requests
+    from tests.fixtures.fake_anthropic import FakeServerToolUse
+
+    obj = FakeMessage(content=[], usage=FakeUsage(
+        server_tool_use=FakeServerToolUse(web_search_requests=4)))
+    assert _server_web_search_requests(obj) == 4
+    as_dict = {"usage": {"server_tool_use": {"web_search_requests": 2}}}
+    assert _server_web_search_requests(as_dict) == 2
+    assert _server_web_search_requests({"usage": {"server_tool_use": {"web_search_requests": 0}}}) == 0
+    assert _server_web_search_requests(FakeMessage(content=[], usage=FakeUsage())) is None
+    assert _server_web_search_requests({"usage": {}}) is None
+    assert _server_web_search_requests({}) is None
+    assert _server_web_search_requests(
+        {"usage": {"server_tool_use": {"web_search_requests": "junk"}}}
+    ) is None
+
+
 class _CitationClient:
     """Scripted responses; captures request kwargs.
 
     ``routes`` (an ordered list of ``(substring, text)``) routes by REQUEST BODY —
     deterministic regardless of worker-thread arrival order; the first route whose
     substring is in the body wins. Without routes it cycles ``texts`` by call count
-    (fine only for single-request tests).
+    (fine only for single-request tests). ``server_searches`` (when not None)
+    attaches a server-reported web-search count to every response's usage.
     """
 
-    def __init__(self, texts=None, *, routes=None):
+    def __init__(self, texts=None, *, routes=None, server_searches=None):
         self._texts = list(texts or [])
         self._routes = list(routes or [])
+        self._server_searches = server_searches
         self.captured = []
         outer = self
 
@@ -250,9 +301,16 @@ class _CitationClient:
                         break
                 if text is None:
                     text = outer._texts[min(len(outer.captured) - 1, len(outer._texts) - 1)]
+                usage = FakeUsage(input_tokens=200, output_tokens=40)
+                if outer._server_searches is not None:
+                    from tests.fixtures.fake_anthropic import FakeServerToolUse
+
+                    usage.server_tool_use = FakeServerToolUse(
+                        web_search_requests=outer._server_searches
+                    )
                 return FakeMessage(
                     content=[FakeTextBlock(text=text)],
-                    usage=FakeUsage(input_tokens=200, output_tokens=40),
+                    usage=usage,
                 )
 
         self.messages = _Msgs()
@@ -288,6 +346,268 @@ def test_check_citations_attaches_verdicts_per_unique_ref():
     assert kw["tools"][0]["name"] == "web_search"
     user_text = kw["messages"][0]["content"]
     assert "NFPA 13 2016" in user_text
+
+
+def test_check_citations_populates_structured_provenance():
+    # Phase B: the new-shape reply's checked/current edition + evidence URL
+    # land as structured CitationAssessment fields.
+    f = _f("cites relief valve", refs=["NFPA 13 §8.1.2"])
+    reply = "searched...\n```json\n" + json.dumps({
+        "assessments": [{
+            "claim": "C1", "status": "CHECKED_SUPPORTS", "note": "supports",
+            "checked_edition": "NFPA 13 2016",
+            "current_edition": "NFPA 13 2025",
+            "evidence_url": "https://example.org/nfpa13-8-1-2",
+        }],
+        "edition_notes": "renumbered in 2019",
+    }) + "\n```"
+    res = check_citations([f], [], client=_CitationClient([reply]), sleep=lambda *_: None)
+    (a,) = f.citations
+    assert a.checked_edition == "NFPA 13 2016"
+    assert a.current_edition == "NFPA 13 2025"
+    assert a.evidence_url == "https://example.org/nfpa13-8-1-2"
+    assert res.supports == 1
+    # Round-trips additively.
+    from drawing_analyzer.models import CitationAssessment
+
+    again = CitationAssessment.from_dict(a.to_dict())
+    assert again.checked_edition == a.checked_edition
+    assert again.evidence_url == a.evidence_url
+
+
+def test_check_citations_old_shape_reply_defaults_new_fields():
+    # A pre-Phase-B reply (no new keys) still parses; provenance stays "".
+    f = _f("cites relief valve", refs=["NFPA 13 §8.1.2"])
+    res = check_citations(
+        [f], [], client=_CitationClient([_verdict_block("CHECKED_SUPPORTS")]),
+        sleep=lambda *_: None,
+    )
+    (a,) = f.citations
+    assert a.status == "CHECKED_SUPPORTS"
+    assert a.checked_edition == "" and a.current_edition == "" and a.evidence_url == ""
+    assert not res.partial
+
+
+def test_citation_provenance_fields_are_bounded_and_https_only():
+    f = _f("cites", refs=["CMC 310"])
+    reply = "```json\n" + json.dumps({
+        "assessments": [{
+            "claim": "C1", "status": "CHECKED_MISMATCH", "note": "n" * 900,
+            "checked_edition": "E" * 300,
+            "current_edition": "javascript:alert(1)",
+            "evidence_url": "http://insecure.example.org/x",   # not https -> dropped
+        }],
+    }) + "\n```"
+    check_citations([f], [], client=_CitationClient([reply]), sleep=lambda *_: None)
+    (a,) = f.citations
+    assert len(a.note) <= 300
+    assert len(a.checked_edition) == 80                    # capped
+    assert a.evidence_url == ""                            # non-https dropped
+    # current_edition is a display string, not a link — capped only.
+    assert len(a.current_edition) <= 80
+
+
+def test_check_citations_bills_exact_server_search_counts():
+    # Phase B: when responses carry usage.server_tool_use.web_search_requests,
+    # the result sums the exact figures instead of approximating.
+    f1 = _f("cites table", refs=["NFPA 13 Table 13.2.1"])
+    f2 = _f("cites relief", refs=["NFPA 13 §8.1.2"])
+    client = _CitationClient(
+        routes=[
+            ("Table 13.2.1", _verdict_block("CHECKED_MISMATCH")),
+            ("§8.1.2", _verdict_block("CHECKED_SUPPORTS")),
+        ],
+        server_searches=4,
+    )
+    res = check_citations([f1, f2], [], client=client, sleep=lambda *_: None)
+    assert res.requests == 2
+    assert res.web_search_requests == 8          # 2 requests × 4 reported each
+
+
+def test_check_citations_falls_back_to_one_search_per_request():
+    # No server-reported count anywhere -> the pre-Phase-B lower bound
+    # (1 per issued request) keeps the fee honest rather than zero.
+    f1 = _f("cites table", refs=["NFPA 13 Table 13.2.1"])
+    f2 = _f("cites relief", refs=["NFPA 13 §8.1.2"])
+    client = _CitationClient(routes=[
+        ("Table 13.2.1", _verdict_block("CHECKED_SUPPORTS")),
+        ("§8.1.2", _verdict_block("CHECKED_SUPPORTS")),
+    ])
+    res = check_citations([f1, f2], [], client=client, sleep=lambda *_: None)
+    assert res.requests == 2 and res.web_search_requests == 2
+
+
+# --- Phase B: the per-request TTL verdict cache ------------------------------ #
+
+
+def _cited_finding():
+    return _f("cites relief valve", refs=["NFPA 13 §8.1.2"])
+
+
+def test_citation_ttl_days_env(monkeypatch):
+    from drawing_analyzer.citation_check import citation_ttl_days
+
+    assert citation_ttl_days() == 30                       # default
+    monkeypatch.setenv("DRAWING_ANALYZER_CITATION_TTL_DAYS", "7")
+    assert citation_ttl_days() == 7
+    monkeypatch.setenv("DRAWING_ANALYZER_CITATION_TTL_DAYS", "0")
+    assert citation_ttl_days() == 0                        # 0 = cache disabled
+    monkeypatch.setenv("DRAWING_ANALYZER_CITATION_TTL_DAYS", "-3")
+    assert citation_ttl_days() == 30                       # invalid -> default
+    monkeypatch.setenv("DRAWING_ANALYZER_CITATION_TTL_DAYS", "forever")
+    assert citation_ttl_days() == 30
+
+
+def test_citation_cache_hit_reconstructs_and_expires():
+    from drawing_analyzer.digest_cache import DigestCache
+
+    cache = DigestCache(None, persist=False)
+    t = {"now": 1_000_000.0}
+    clock = lambda: t["now"]  # noqa: E731 - injectable test clock (I-4)
+
+    f1 = _cited_finding()
+    c1 = _CitationClient([_verdict_block("CHECKED_MISMATCH", note="moved")])
+    r1 = check_citations([f1], [], client=c1, sleep=lambda *_: None,
+                         cache=cache, now=clock)
+    assert r1.requests == 1 and r1.cached_requests == 0
+
+    # Warm within the TTL: served from cache, no API call, verdict identical —
+    # a cached MISMATCH still reads mismatched.
+    f2 = _cited_finding()
+    c2 = _CitationClient([_verdict_block("CHECKED_SUPPORTS")])   # would flip if called
+    r2 = check_citations([f2], [], client=c2, sleep=lambda *_: None,
+                         cache=cache, now=clock)
+    assert c2.captured == []
+    assert r2.cached_requests == 1 and r2.requests == 0
+    assert r2.web_search_requests == 0 and not r2.partial
+    assert f2.citation.status == "CHECKED_MISMATCH"
+    assert f2.citations[0].note == "moved"
+
+    # 31 days later the entry is stale: a live re-check runs and overwrites.
+    t["now"] += 31 * 86400
+    f3 = _cited_finding()
+    c3 = _CitationClient([_verdict_block("CHECKED_SUPPORTS")])
+    r3 = check_citations([f3], [], client=c3, sleep=lambda *_: None,
+                         cache=cache, now=clock)
+    assert len(c3.captured) == 1
+    assert r3.requests == 1 and r3.cached_requests == 0
+    assert f3.citation.status == "CHECKED_SUPPORTS"
+
+
+def test_citation_cache_ttl_zero_disables_read_and_write(monkeypatch):
+    from drawing_analyzer.digest_cache import DigestCache
+
+    monkeypatch.setenv("DRAWING_ANALYZER_CITATION_TTL_DAYS", "0")
+    cache = DigestCache(None, persist=False)
+    for _ in range(2):
+        f = _cited_finding()
+        c = _CitationClient([_verdict_block("CHECKED_SUPPORTS")])
+        res = check_citations([f], [], client=c, sleep=lambda *_: None, cache=cache)
+        assert len(c.captured) == 1 and res.cached_requests == 0
+    assert cache.stats()["size"] == 0                     # nothing was written
+
+
+def test_citation_cache_fully_warm_run_needs_no_client(monkeypatch):
+    # A fully warm run must serve every chunk from cache even when no API
+    # key/client can be constructed — the client is created only on a cache
+    # miss (mirrors the identity/review-plan caches).
+    from drawing_analyzer.digest_cache import DigestCache
+
+    cache = DigestCache(None, persist=False)
+    f1 = _cited_finding()
+    c1 = _CitationClient([_verdict_block("CHECKED_MISMATCH", note="moved")])
+    check_citations([f1], [], client=c1, sleep=lambda *_: None, cache=cache)
+
+    def _boom():
+        raise RuntimeError("no API key configured")
+
+    monkeypatch.setattr("drawing_analyzer.client.get_client", _boom)
+    f2 = _cited_finding()
+    res = check_citations([f2], [], client=None, sleep=lambda *_: None, cache=cache)
+    assert res.cached_requests == 1 and res.requests == 0
+    assert not res.partial and res.error is None
+    assert res.web_search_requests == 0
+    assert f2.citation.status == "CHECKED_MISMATCH"
+
+
+def test_citation_cache_partial_warm_run_serves_hits_without_client(monkeypatch):
+    # Mixed warm/cold with no client available: the cached chunk is served,
+    # the uncached one degrades to UNCHECKED without billing, stage PARTIAL.
+    from drawing_analyzer.digest_cache import DigestCache
+
+    cache = DigestCache(None, persist=False)
+    f1 = _cited_finding()
+    c1 = _CitationClient([_verdict_block("CHECKED_MISMATCH", note="moved")])
+    check_citations([f1], [], client=c1, sleep=lambda *_: None, cache=cache)
+
+    def _boom():
+        raise RuntimeError("no API key configured")
+
+    monkeypatch.setattr("drawing_analyzer.client.get_client", _boom)
+    f2 = _cited_finding()
+    f3 = _f("cites the pump table", refs=["NFPA 20 Table 4.27"])
+    res = check_citations([f2, f3], [], client=None, sleep=lambda *_: None,
+                          cache=cache)
+    assert res.cached_requests == 1 and res.requests == 0
+    assert res.partial and "no API key" in (res.error or "")
+    assert res.web_search_requests == 0                    # no live call billed
+    assert f2.citation.status == "CHECKED_MISMATCH"
+    assert f3.citation.status == "UNCHECKED"
+    assert "client unavailable" in f3.citations[0].note
+    assert res.unchecked == 1 and res.mismatches == 1
+
+
+def test_citation_no_client_and_no_cache_degrades_everything_unchecked(monkeypatch):
+    # Zero-hit path unchanged: the pass cannot run at all → every ref UNCHECKED.
+    def _boom():
+        raise RuntimeError("no API key configured")
+
+    monkeypatch.setattr("drawing_analyzer.client.get_client", _boom)
+    f = _cited_finding()
+    res = check_citations([f], [], client=None, sleep=lambda *_: None)
+    assert res.partial and res.unchecked == 1 and res.requests == 0
+    assert f.citation is not None and f.citation.status == "UNCHECKED"
+
+
+def test_citation_cache_never_stores_partial_chunks():
+    from drawing_analyzer.digest_cache import DigestCache
+
+    cache = DigestCache(None, persist=False)
+    f = _cited_finding()
+    res = check_citations([f], [], client=_CitationClient(["garbled, no json"]),
+                          sleep=lambda *_: None, cache=cache)
+    assert res.partial and cache.stats()["size"] == 0
+    # The next run re-checks live (no stale UNCHECKED can ever be served).
+    f2 = _cited_finding()
+    c2 = _CitationClient([_verdict_block("CHECKED_SUPPORTS")])
+    res2 = check_citations([f2], [], client=c2, sleep=lambda *_: None, cache=cache)
+    assert len(c2.captured) == 1 and not res2.partial
+
+
+def test_citation_cache_key_sensitivity(monkeypatch):
+    # Any change to editions context, jurisdiction, claim text, model, or the
+    # search budget must MISS — never serve a verdict computed under different
+    # conditions.
+    from drawing_analyzer.digest_cache import DigestCache
+    from drawing_analyzer.models import SetIdentity
+
+    cache = DigestCache(None, persist=False)
+
+    def _live_run(**kw):
+        f = kw.pop("finding", None) or _cited_finding()
+        c = _CitationClient([_verdict_block("CHECKED_SUPPORTS")])
+        check_citations([f], kw.pop("geometries", []), client=c,
+                        sleep=lambda *_: None, cache=cache, **kw)
+        return len(c.captured)
+
+    assert _live_run() == 1                                # populate
+    assert _live_run() == 0                                # identical -> hit
+    assert _live_run(geometries=[_Geom("PER NFPA 13 2016")]) == 1   # editions differ
+    assert _live_run(identity=SetIdentity(jurisdiction="Berlin, Germany")) == 1
+    assert _live_run(finding=_f("different claim text", refs=["NFPA 13 §8.1.2"])) == 1
+    assert _live_run(model="claude-haiku-4-5") == 1        # model rides the key
+    monkeypatch.setenv("DRAWING_ANALYZER_WEB_SEARCH_MAX_USES", "9")
+    assert _live_run() == 1                                # search budget re-keys
 
 
 def test_check_citations_garbled_reply_degrades_to_unchecked():

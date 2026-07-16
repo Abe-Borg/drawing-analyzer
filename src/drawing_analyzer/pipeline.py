@@ -1135,6 +1135,7 @@ def _run_qc_stages(
     accepted_documents: list | None = None,
     journal: Any = None,
     set_identity: Any = None,
+    cache: Any = None,
 ) -> _QCResult:
     """Run the ledger pipeline: ingest → harvest → anchor → number → verify → markups.
 
@@ -1288,6 +1289,59 @@ def _run_qc_stages(
             harvest_stage.errors.append(str(exc))
             _log.warning("prose harvest failed: %s", exc)
     _finish_stage(stage_results, journal, harvest_stage)
+
+    # Edition audit (Phase B): adopted-vs-cited edition divergence as a
+    # first-class finding. Zero-API (a host string comparison over the
+    # identity/regex adopted basis), and STRICTLY pre-seal — its findings enter
+    # the OPEN ledger here and then anchor/number/verify/ink like any other,
+    # so the post-seal add ban can never trip. The expensive web-search pass
+    # below still adjudicates the same refs post-number (it enriches entries
+    # in place, which is legal on a sealed ledger).
+    run_edition_audit = config.run_citation or config.run_auditors
+    edition_stage = StageResult(stage="edition_audit", expected=run_edition_audit)
+    if run_edition_audit:
+        pre_seal_entries = ledger.entries
+        cited_refs = {
+            " ".join(str(r).split())
+            for f in pre_seal_entries for r in (getattr(f, "refs", None) or [])
+            if str(r).strip()
+        }
+        _emit("STAGE_START", stage="edition_audit", cited=len(cited_refs))
+        edition_stage.items_in = len(cited_refs)
+        if not cited_refs:
+            # Applicable but nothing cites a code — a valid skip.
+            edition_stage.status = "SKIPPED_VALID"
+        else:
+            try:
+                from .citation_check import reconcile_cited_editions
+
+                divergences = reconcile_cited_editions(
+                    pre_seal_entries, set_identity, geometries or [],
+                )
+                if divergences:
+                    ledger.add(divergences, "edition_audit")
+                edition_stage.items_out = len(divergences)
+                # An empty adopted basis (no stated/detected editions) is a
+                # valid skip, not an empty COMPLETE claim.
+                from .citation_check import _adopted_basis_map
+
+                if not divergences and not _adopted_basis_map(
+                    set_identity, geometries or []
+                ):
+                    edition_stage.status = "SKIPPED_VALID"
+                else:
+                    edition_stage.status = "COMPLETE"
+                if divergences:
+                    _log.info(
+                        "edition audit: %d divergence finding(s) over %d cited ref(s)",
+                        len(divergences), len(cited_refs),
+                    )
+            except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
+                errors.append(f"Edition audit: {exc}")
+                edition_stage.status = "FAILED"
+                edition_stage.errors.append(str(exc))
+                _log.warning("edition audit failed: %s", exc)
+    _finish_stage(stage_results, journal, edition_stage)
 
     # --- seal ingestion, then anchor, reconcile, and number (§12.4) -----------
     # QC ids must be POSITIONAL, so numbering happens *after* anchoring — the
@@ -1496,29 +1550,42 @@ def _run_qc_stages(
             try:
                 cires = check_citations(
                     all_findings, geometries, client=client, progress=_citation_progress,
-                    identity=set_identity,
+                    identity=set_identity, cache=cache,
                 )
-                # Best-effort web-search fee: the citation stage does not yet surface
-                # the exact server ``web_search_requests`` count, so bill one search
-                # per unique citation checked (a lower bound — each ref runs ≥1
-                # search). Tokens are exact; the search micro-fee is approximate.
+                # Web-search fee (Phase B exact billing): the stage sums the
+                # server-reported ``usage.server_tool_use.web_search_requests``
+                # across every response (including pause_turn resumes); a
+                # request whose responses did not carry the field contributes
+                # the pre-Phase-B lower bound of 1 (each issued request runs
+                # >=1 search). Tokens are exact either way.
                 # A run is PARTIAL when any claim was left UNCHECKED/UNRESOLVABLE
                 # (DA-017 §16.5) — not only on a hard error — so a request/parser/
                 # tool failure for a cited claim can never masquerade as COMPLETE.
                 partial = bool(cires.error) or bool(getattr(cires, "partial", False))
+                # ``web_search_requests`` already embeds the per-request lower
+                # bound for responses that carried no server count — and is
+                # honestly ZERO on a fully cache-served run, so no ``or``
+                # fallback may reintroduce a fee for work that never ran.
                 _record_usage(
                     run_usage, family="citation", instance="citation",
                     model=citation_model(),
                     input_tokens=cires.input_tokens, output_tokens=cires.output_tokens,
-                    # Bill one web search per REQUEST issued (each runs >=1 search),
-                    # not per unique reference — a reference with many claims is now
-                    # split into several claim-complete requests (DA-017), so the
-                    # per-reference count would under-bill the search fee.
                     billable_tool_uses={"web_search": int(
-                        getattr(cires, "requests", 0) or getattr(cires, "checked", 0) or 0
+                        getattr(cires, "web_search_requests", 0) or 0
                     )},
                     terminal_status="PARTIAL" if partial else "COMPLETE",
                 )
+                cached_chunks = int(getattr(cires, "cached_requests", 0) or 0)
+                if cached_chunks:
+                    # Phase B: verdict-cache hits ride their own CACHE record
+                    # (zero tokens, zero fees) so a warm run's savings are
+                    # visible in the ledger, mirroring the digest convention.
+                    _record_usage(
+                        run_usage, family="citation", instance="citation_cache",
+                        model=citation_model(), transport="CACHE",
+                        cache_hit=True, parent="citation",
+                        terminal_status="COMPLETE",
+                    )
                 citation_stage.items_out = len(getattr(cires, "assessments", []) or [])
                 if partial:
                     if cires.error:
@@ -2690,6 +2757,7 @@ def extract_drawing_context(
         accepted_documents=inventory.accepted_documents,
         journal=journal,
         set_identity=set_identity_obj,
+        cache=cache,
     )
     stage_results.extend(qc.stage_results)
 

@@ -683,6 +683,31 @@ def _message_usage(resp: Any) -> tuple[int, int]:
     )
 
 
+def _server_web_search_requests(resp: Any) -> int | None:
+    """The server-reported web-search count for one response, or ``None``.
+
+    Tolerant walk of ``usage.server_tool_use.web_search_requests`` (dict- and
+    object-shaped alike, like every reader in this family). ``None`` — not 0 —
+    when the field is absent, so a caller can tell "the server reported zero
+    searches" apart from "this SDK/response shape doesn't carry the count" and
+    fall back to its own approximation only in the second case (Phase B exact
+    web-search billing).
+    """
+    usage = _get(resp, "usage")
+    if usage is None:
+        return None
+    server = _get(usage, "server_tool_use")
+    if server is None:
+        return None
+    count = _get(server, "web_search_requests")
+    if count is None:
+        return None
+    try:
+        return max(0, int(count))
+    except (TypeError, ValueError):
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Structured findings parsing.
 #

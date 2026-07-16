@@ -170,9 +170,16 @@ F2 = {"sheet_id": "M-101", "category": "coordination", "severity": "medium",
 F3 = {"sheet_id": "M-101", "category": "question", "severity": "low",
       "text": "Detail 5 may be superseded.", "source_quote": Q_REPEATED,
       "tile_label": "r2c2"}
+# Phase B edition audit: FP-101 states its adopted edition and ALSO carries a
+# citation-shaped stale mention; F4 cites the stale ref, so the pre-seal audit
+# must emit exactly one fully-corroborated divergence finding on FP-101.
+ADOPTED_EDITION_LINE = "SPRINKLERS PER NFPA 13, 2016 EDITION"
+STALE_EDITION_LINE = "OLD RISER PER NFPA 13 2013 SEC 8.15.1"
+STALE_EDITION_REF = "NFPA 13 2013 §8.15.1"
+
 F4 = {"sheet_id": "FP-101", "category": "code", "severity": "high",
       "text": "Fire pump rating exceeds the service size.", "source_quote": Q_F4,
-      "tile_label": "r1c1"}
+      "tile_label": "r1c1", "refs": [STALE_EDITION_REF]}
 F5 = {"sheet_id": "E-201", "category": "code", "severity": "medium",
       "text": "GFCI protection is called out where none is required.",
       "source_quote": Q_F5, "tile_label": "r1c1"}
@@ -277,7 +284,8 @@ def build_oracle_set(root: Path) -> OracleSet:
     )
     b = build_vector_sheet(
         root / "b" / "M-101.pdf", sheet_id="FP-101", rotation=90,
-        lines=[(72, 100, Q_F4), (72, 128, "FIRE PUMP ROOM PLAN")],
+        lines=[(72, 100, Q_F4), (72, 128, "FIRE PUMP ROOM PLAN"),
+               (72, 156, ADOPTED_EDITION_LINE), (72, 184, STALE_EDITION_LINE)],
     )
     e = build_vector_sheet(
         root / "E-201.pdf", sheet_id="E-201", rotation=180,
@@ -601,10 +609,15 @@ class ScriptedQCClient:
         }
         return _msg(_fenced(payload), 300, 80)
 
+    # Server-reported searches per citation request (Phase B exact billing):
+    # the acceptance suite asserts the run bills exactly this per request.
+    CITATION_SEARCHES_PER_REQUEST = 3
+
     def _citation(self, text: str) -> FakeMessage:
         self.citation_requests.append(text)
         if self._sabotage == "citation_empty":
-            return _msg('{"assessments": []}', 10, 4)
+            return _msg('{"assessments": []}', 10, 4,
+                        searches=self.CITATION_SEARCHES_PER_REQUEST)
         assessments = []
         for handle, claim_text in re.findall(r"\[(C\d+)\] (.+)", text):
             status = "CHECKED_SUPPORTS"
@@ -612,20 +625,31 @@ class ScriptedQCClient:
                 if token in claim_text:
                     status = st
                     break
-            assessments.append({"claim": handle, "status": status, "note": "checked"})
+            assessments.append({
+                "claim": handle, "status": status, "note": "checked",
+                # Phase B structured provenance, echoed end-to-end so the
+                # acceptance suite can assert it lands in findings.json.
+                "checked_edition": "NFPA 13 2016",
+                "current_edition": "NFPA 13 2025",
+                "evidence_url": "https://codes.example.org/nfpa13",
+            })
         if not assessments:
             # A request shape without [Cn] handles: the back-compat single verdict.
             return _msg("searched...\n" + _fenced(
                 {"status": "CHECKED_SUPPORTS", "note": "supports", "edition_notes": "e"}
-            ), 20, 8)
+            ), 20, 8, searches=self.CITATION_SEARCHES_PER_REQUEST)
         return _msg("searched...\n" + _fenced(
             {"assessments": assessments, "edition_notes": "e"}
-        ), 20, 8)
+        ), 20, 8, searches=self.CITATION_SEARCHES_PER_REQUEST)
 
 
-def _msg(text: str, tin: int, tout: int) -> FakeMessage:
-    return FakeMessage(content=[FakeTextBlock(text=text)],
-                       usage=FakeUsage(input_tokens=tin, output_tokens=tout))
+def _msg(text: str, tin: int, tout: int, *, searches: int | None = None) -> FakeMessage:
+    from tests.fixtures.fake_anthropic import FakeServerToolUse
+
+    usage = FakeUsage(input_tokens=tin, output_tokens=tout)
+    if searches is not None:
+        usage.server_tool_use = FakeServerToolUse(web_search_requests=searches)
+    return FakeMessage(content=[FakeTextBlock(text=text)], usage=usage)
 
 
 # --------------------------------------------------------------------------- #

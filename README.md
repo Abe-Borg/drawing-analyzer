@@ -905,11 +905,35 @@ A finding that cites several references keeps one assessment **per reference**
 the CSV, and the report.
 
 The **adopted editions** are harvested offline from the sheet text layers (the
-general-notes "NFPA 13, 2016 EDITION" claims) and included in the prompt. **A
-MISMATCH downgrades nothing automatically** — it is surfaced for the engineer,
-because sometimes the stale citation *is* the finding. Real-time only (a handful of
-interactive calls; ~$0.03–0.08 per unique ref), additive, and non-fatal: any
+general-notes "NFPA 13, 2016 EDITION" claims), merged with the identity-detected
+adopted codes (Phase A), and included in the prompt. **A MISMATCH downgrades
+nothing automatically** — it is surfaced for the engineer, because sometimes the
+stale citation *is* the finding; in the HTML report a mismatch renders with a
+distinct warning style plus the structured provenance (which edition the verdict
+was **checked against**, the current published edition, and the model-selected
+https **evidence link**), and findings.csv carries four provenance columns.
+Real-time only (a handful of interactive calls; ~$0.03–0.08 per unique ref —
+billed by the server-reported search count), additive, and non-fatal: any
 failure leaves the affected claim `UNCHECKED` and holds the stage at `PARTIAL`.
+
+**Warm runs are cheap (Phase B):** complete verdicts cache content-addressed on
+the exact ref + claims + editions/jurisdiction context, expiring after
+`DRAWING_ANALYZER_CITATION_TTL_DAYS` (default 30; `0` disables the cache). A
+partial or failed check is never cached, so a cache hit can never hide an
+unchecked claim. The pre-run cost estimate quotes the cold-run figure — warm
+runs bill only cache-missed chunks.
+
+**The edition audit (Phase B)** runs before any of this, zero-API and
+pre-seal: when a ref cites an edition of a code the set adopts at a
+*different* edition (a note citing NFPA 13 **2013** on a set that adopts
+**2016** — the classic worldwide-set failure), it becomes a **real ledger
+finding** that numbers, anchors to the stale-edition text itself, and gets
+ink. When both the adopted and the cited edition are re-found verbatim in the
+sheet text, the finding earns the deterministic tier (auto-ink, like the
+offline auditors); a basis only the identity detected ships as a low-severity,
+explicitly-labeled advisory that is crop-verified and web-checked downstream.
+Runs with the citation check *or* the free deterministic battery
+(`reference_audit=True` gains it at zero cost, regex basis only).
 
 ## The findings ledger (Part III)
 
@@ -1086,6 +1110,8 @@ runs.
 | `DRAWING_ANALYZER_HARVEST_MODEL` | Opus 4.8 | Prose-harvest structuring model (one small call per straggler). |
 | `DRAWING_ANALYZER_CHAT_MODEL` | Opus 4.8 | The HTML report's in-browser **Ask AI** assistant (needs current-generation web-search / thinking support). |
 | `DRAWING_ANALYZER_WEB_SEARCH_TOOL_TYPE` | `web_search_20260209` | Server-side web-search tool type string (survives an API rename). |
+| `DRAWING_ANALYZER_WEB_SEARCH_MAX_USES` | `5` | Per-request web-search budget for citation checks (rides the verdict-cache key). |
+| `DRAWING_ANALYZER_CITATION_TTL_DAYS` | `30` | Citation verdict-cache TTL; `0` disables the cache (no read, no write). |
 | `DRAWING_ANALYZER_MARKUP_APPENDIX` | off | Append the "checked and consistent" page to reviewed PDFs. |
 | `DRAWING_ANALYZER_CRITIQUE_RUNS` | `2` | Critique self-consistency reads to merge (`1` disables it). |
 | `DRAWING_ANALYZER_ARITHMETIC_REL_TOL` | `0.01` | Arithmetic auditor's relative match tolerance (drawings round). |
