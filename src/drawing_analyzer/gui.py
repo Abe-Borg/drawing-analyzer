@@ -115,6 +115,11 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._qc_verified_only_var = BooleanVar(value=False)
         self._ink_rejected_var = BooleanVar(value=False)
         self._reference_audit_var = BooleanVar(value=False)
+        # Transport: off = Message Batches (~50% cheaper, minutes–hours); on =
+        # real-time (immediate, full rate). The GUI always passes an explicit
+        # value, so it shadows DRAWING_ANALYZER_USE_BATCH — exactly as the
+        # previously hardcoded use_batch=True did.
+        self._realtime_var = BooleanVar(value=False)
         # Review-profile selection (Phase 24 §16.4): name -> checkbox var, plus the
         # sets of profiles the user manually forced on/off — a manual override always
         # wins and survives a later preflight auto-suggest refresh. Preflight PyMuPDF
@@ -362,6 +367,24 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         # profile, showing its title/version/discipline/source. Applicable profiles
         # are auto-suggested (pre-checked) once files are loaded; manual choice wins.
         self._build_profile_panel(qc_row)
+
+        # Processing transport.
+        transport_row = ctk.CTkFrame(outer, fg_color="transparent")
+        transport_row.pack(fill="x", padx=16, pady=(0, 8))
+        ctk.CTkLabel(
+            transport_row, text="Processing",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            text_color=COLORS["text_secondary"],
+        ).pack(anchor="w")
+        self._realtime_check = ctk.CTkCheckBox(
+            transport_row,
+            text="Real-time mode — results immediately, ~2× API cost "
+                 "(off = Message Batches, ~50% cheaper)",
+            variable=self._realtime_var, command=self._refresh_summary,
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color=COLORS["text_primary"],
+        )
+        self._realtime_check.pack(anchor="w", pady=(4, 0))
 
         # Summary + actions row
         row = ctk.CTkFrame(outer, fg_color="transparent")
@@ -955,7 +978,8 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         sheets = len(refs)
         files = len({r.pdf_path for r in refs})
         est = estimate_drawing_set_cost(
-            sheets, file_count=files, model=REVIEW_MODEL_DEFAULT, batch=True,
+            sheets, file_count=files, model=REVIEW_MODEL_DEFAULT,
+            batch=not self._realtime_var.get(),
             focus=bool(self._current_focus()),
             spec_chars=len(self._current_specs_text()),
         )
@@ -997,6 +1021,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         ink_rejected = self._ink_rejected_var.get()
         reference_audit = self._reference_audit_var.get()
         profiles = self._selected_profiles()
+        use_batch = not self._realtime_var.get()
 
         # Cost-confirm gate — show the estimated spend before anything is sent.
         # For an exhaustive QC run (DA-010) show the full per-stage estimate with a
@@ -1006,7 +1031,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         if qc_markups:
             exh = estimate_exhaustive_run_cost(
                 len(refs), file_count=len(self._pdfs), model=REVIEW_MODEL_DEFAULT,
-                batch=True, focus=bool(focus),
+                batch=use_batch, focus=bool(focus),
                 spec_chars=len(project_specifications or ""),
             )
             prompt = format_exhaustive_cost_prompt(exh)
@@ -1014,7 +1039,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         else:
             estimate = estimate_drawing_set_cost(
                 len(refs), file_count=len(self._pdfs), model=REVIEW_MODEL_DEFAULT,
-                batch=True, focus=bool(focus),
+                batch=use_batch, focus=bool(focus),
                 spec_chars=len(project_specifications or ""),
             )
             prompt = format_drawing_cost_prompt(estimate)
@@ -1050,13 +1075,20 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 "chars — conflicts will be reported as ordinary findings.",
                 level="accent",
             )
+        if not use_batch:
+            self._log(
+                "Real-time mode: full-rate API calls with immediate results "
+                "(batch is ~50% cheaper).",
+                level="muted",
+            )
         self._set_progress_text("Starting…", color=COLORS["text_secondary"])
 
         pdfs = list(self._pdfs)
         threading.Thread(
             target=self._worker,
             args=(pdfs, focus, project_specifications, qc_markups,
-                  markup_verified_only, reference_audit, ink_rejected, profiles),
+                  markup_verified_only, reference_audit, ink_rejected, profiles,
+                  use_batch),
             daemon=True,
         ).start()
 
@@ -1070,6 +1102,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         reference_audit: bool = False,
         ink_rejected: bool = False,
         profiles: list[str] | None = None,
+        use_batch: bool = True,
     ) -> None:
         try:
             ctx = extract_drawing_context(
@@ -1080,7 +1113,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 on_status=self._status_from_thread,
                 use_cache=True,
                 synthesize=True,
-                use_batch=True,
+                use_batch=use_batch,
                 focus=focus or None,
                 project_specifications=project_specifications,
                 reference_audit=reference_audit,

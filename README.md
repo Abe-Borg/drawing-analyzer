@@ -273,7 +273,9 @@ PDFs → list sheets → render (overview + 6×6 tiles) + extract vector text la
 - **Batch mode** (`use_batch=True`, the GUI default) digests every uncached sheet
   through the Message Batches API, uploading images via the Files API so no request
   body approaches the 32 MB limit. ~50% cheaper than real time, for byte-identical
-  output. A library caller can opt every run into it globally with
+  output. In the GUI the *Processing → Real-time mode* checkbox switches
+  transports per run (off = batch; the cost preview and confirm dialog reprice
+  to match). A library caller can opt every run into it globally with
   `DRAWING_ANALYZER_USE_BATCH=1` — no call-site edits — while an explicit
   `use_batch=` argument always wins. If the Files API is
   unavailable for your key/workspace (uploads return `404`), each affected sheet
