@@ -237,6 +237,65 @@ def test_enforce_specs_budget_defensive_backstop():
     assert budget.omitted_chars == 1_000
 
 
+def test_enforce_specs_budget_coerces_non_string_input():
+    # I-3: extract_drawing_context is a public API; a caller who passes
+    # something other than str/None (e.g. a list of doc texts, forgetting to
+    # join them first) must degrade gracefully, not raise.
+    text, budget = enforce_specs_budget(["a", "b"])  # type: ignore[arg-type]
+    assert isinstance(text, str)
+    assert not budget.degraded or budget.omitted_chars >= 0  # never raises
+
+
+def test_build_specs_text_included_chars_matches_returned_length():
+    # Regression: included_chars used to be an accumulated per-file total
+    # that missed the "===== name =====" header overhead and any whole-block
+    # truncation, so it could disagree with what was actually returned.
+    docs = [
+        SpecDocument(path=Path("a.txt"), display_name="a.txt", text="alpha spec text"),
+        SpecDocument(path=Path("b.txt"), display_name="b.txt", text="beta spec text"),
+    ]
+    text, budget = build_specs_text(docs)
+    assert budget.included_chars == len(text)
+
+
+def test_build_specs_text_included_chars_matches_after_whole_block_truncation():
+    docs = [
+        SpecDocument(path=Path(f"{i}.txt"), display_name=f"{i}.txt", text="z" * 1_000)
+        for i in range(200)
+    ]
+    text, budget = build_specs_text(docs)
+    assert budget.included_chars == len(text)
+
+
+def test_budgeted_result_never_exceeds_the_budget():
+    # Regression: the truncation marker used to be appended ON TOP OF the
+    # budget rather than carved out of it, so a second truncation pass
+    # downstream (enforce_specs_budget re-applying the same default budget
+    # to GUI-already-budgeted text) could cut mid-marker, sending a garbled
+    # "...[TRUNCATED 452" fragment to the model.
+    from drawing_analyzer.spec_documents import _budgeted
+
+    for budget_chars in (10, 100, 1_000, SPEC_TOTAL_CHAR_BUDGET):
+        kept, omitted = _budgeted("x" * (budget_chars * 3), budget_chars)
+        assert len(kept) <= budget_chars
+        assert omitted > 0
+
+
+def test_double_truncation_never_corrupts_the_marker():
+    # build_specs_text's whole-block truncation, followed by pipeline.py's
+    # enforce_specs_budget backstop applying the SAME default budget again,
+    # must never produce a truncated marker fragment.
+    docs = [
+        SpecDocument(path=Path(f"{i}.txt"), display_name=f"{i}.txt", text="z" * 1_000)
+        for i in range(200)
+    ]
+    once, _budget = build_specs_text(docs)
+    assert len(once) <= SPEC_TOTAL_CHAR_BUDGET  # _budgeted never overshoots
+    twice, _budget2 = enforce_specs_budget(once)
+    assert twice == once  # already at/under budget; the backstop is a no-op
+    assert once.count("[TRUNCATED") == 1  # not corrupted into a second, partial marker
+
+
 # --------------------------------------------------------------------------- #
 # Prompt assembly (digest.py, pure)
 # --------------------------------------------------------------------------- #

@@ -47,32 +47,43 @@ def _specs_cost_contribution(
     """``(display_tokens, usd_cost)`` for an uploaded project-specifications
     block across the whole run.
 
-    Mirrors how ``digest.py`` actually issues the requests: the specs block
-    rides the digest system prompt behind a ``cache_control`` breakpoint (see
-    ``digest_system_prompt``), so the first sheet(s) pay the cache-WRITE
-    multiplier and every subsequent sheet pays the cheap cache-READ
-    multiplier. This is optimistic when ``max_workers > 1`` (a real run may
-    have up to ``min(workers, sheet_count)`` sheets in flight before the
-    first response lands and the cache becomes readable, so more than one
-    sheet may pay something closer to the write price) — the multi-writer
-    case only makes the real number *cheaper* than this estimate, never more
-    expensive, consistent with this module's stated "slightly high" estimate
-    philosophy. The Message-Batches path never attaches this cache breakpoint
-    at all (see ``batch_digest.py``); this estimate still uses the batch
-    discount rate for its own token cost, since that's the rate the specs
-    tokens would bill at either way.
+    Must mirror how ``digest.py``/``batch_digest.py`` actually issue the
+    requests, which differs by transport:
+
+    - ``batch=True`` (the Message-Batches path, and the GUI's default): the
+      actual per-sheet batch-item build ALWAYS passes ``cache_specs=False``
+      (parallel submission means a cache breakpoint would only add the
+      write-cost premium with nothing yet written to read — see
+      ``batch_digest.submit_drawing_batch``'s docstring). So every sheet
+      bills the specs block as ordinary, uncached input at the batch
+      discount rate — no cache multiplier applies here at all.
+    - ``batch=False`` (the real-time path): the specs block rides the digest
+      system prompt behind a ``cache_control`` breakpoint by default (see
+      ``digest_system_prompt``), so the first sheet(s) pay the cache-WRITE
+      multiplier and every subsequent sheet pays the cheap cache-READ
+      multiplier. This is optimistic when ``max_workers > 1`` (a real run
+      may have up to ``min(workers, sheet_count)`` sheets in flight before
+      the first response lands and the cache becomes readable, so more than
+      one sheet may pay the write price) — that multi-writer case makes the
+      real number *more* expensive than this single-write estimate, not
+      less, so it's a genuine (if usually small) understatement rather than
+      the "slightly high" bias the rest of this module aims for.
     """
     if spec_chars <= 0 or sheet_count <= 0:
         return 0, 0.0
     from .core.pricing import usage_record_cost
 
     spec_tokens = max(1, spec_chars // _SPEC_CHARS_PER_TOKEN_ESTIMATE)
-    write_cost = usage_record_cost(model=model, cache_write_tokens=spec_tokens, batch=batch)
-    read_cost = usage_record_cost(model=model, cache_read_tokens=spec_tokens, batch=batch)
+    display_tokens = spec_tokens * sheet_count
+    if batch:
+        cost = usage_record_cost(model=model, input_tokens=display_tokens, batch=True)
+        return display_tokens, None if cost is None else float(cost)
+    write_cost = usage_record_cost(model=model, cache_write_tokens=spec_tokens, batch=False)
+    read_cost = usage_record_cost(model=model, cache_read_tokens=spec_tokens, batch=False)
     if write_cost is None or read_cost is None:
-        return spec_tokens * sheet_count, None
+        return display_tokens, None
     total = float(write_cost) + float(read_cost) * max(0, sheet_count - 1)
-    return spec_tokens * sheet_count, total
+    return display_tokens, total
 
 
 @dataclass(frozen=True)
@@ -144,12 +155,11 @@ def estimate_drawing_set_cost(
     spec_display_tokens, spec_cost = _specs_cost_contribution(
         spec_chars, sheet_count, model=model, batch=batch
     )
-    if spec_chars > 0:
-        # Leave ``total_cost`` (including a pre-existing ``None`` for an
-        # unknown-priced model) untouched when there's nothing to add —
-        # ``spec_cost`` is 0.0 (not None) whenever spec_chars <= 0, which
-        # would otherwise turn an "unavailable" None into a bogus $0.00.
-        total_cost = None if spec_cost is None else (total_cost or 0.0) + spec_cost
+    # ``spec_cost`` is 0.0 (never None) whenever spec_chars <= 0 (see
+    # _specs_cost_contribution's early return), so this is a no-op add in
+    # that case. Propagates an unknown-priced model's ``None`` from either
+    # side, rather than coercing it into a bogus, spec-cost-only total.
+    total_cost = None if total_cost is None or spec_cost is None else total_cost + spec_cost
     input_tokens += spec_display_tokens
     return DrawingCostEstimate(
         sheet_count=sheet_count,

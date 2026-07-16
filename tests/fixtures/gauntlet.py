@@ -297,6 +297,23 @@ def build_oracle_set(root: Path) -> OracleSet:
 # --------------------------------------------------------------------------- #
 
 
+def _system_text(system) -> str:
+    """Normalize a captured request's ``system`` to a plain string.
+
+    ``digest_system_prompt`` returns a two-block cached-prefix list instead
+    of a plain string when project specifications are attached (see
+    digest.py), so a bare ``str(kw.get("system", ""))`` would stringify the
+    block list itself rather than its text — breaking every
+    ``.startswith(...)``-based route below.
+    """
+    if isinstance(system, list):
+        return "".join(
+            block.get("text", "") if isinstance(block, dict) else str(block)
+            for block in system
+        )
+    return str(system or "")
+
+
 def _joined_text(messages: list) -> str:
     parts: list[str] = []
     for m in messages or []:
@@ -401,7 +418,7 @@ class ScriptedQCClient:
         return None
 
     def _route(self, kw: dict) -> FakeMessage:
-        system = str(kw.get("system", ""))
+        system = _system_text(kw.get("system", ""))
         text = _joined_text(kw.get("messages", []))
 
         if system == VERIFY_SYSTEM_PROMPT:

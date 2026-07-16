@@ -511,7 +511,7 @@ def _digest_sheets_concurrent(
     total: int,
     max_workers: int | None,
     focus: str | None = None,
-    specs: str | None = None,
+    specs_text: str | None = None,
     geometry_sink: list | None = None,
     only: "set[tuple[str, int]] | None" = None,
     on_page_error: "Any" = None,
@@ -537,7 +537,7 @@ def _digest_sheets_concurrent(
             effort=effort,
             cache=cache,
             focus=focus,
-            specs_text=specs,
+            specs_text=specs_text,
         )
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -587,7 +587,7 @@ def _digest_sheets_via_batch(
     on_log: LogCallback | None = None,
     on_status: StatusCallback | None = None,
     focus: str | None = None,
-    specs: str | None = None,
+    specs_text: str | None = None,
     geometry_sink: list | None = None,
     only: "set[tuple[str, int]] | None" = None,
 ) -> list[SheetDigest]:
@@ -629,7 +629,7 @@ def _digest_sheets_via_batch(
         total=total,
         on_status=on_status,
         focus=focus,
-        specs_text=specs,
+        specs_text=specs_text,
     )
     # Run the post-batch file cleanup off the calling thread: the digests are
     # already in hand, and deleting a few hundred uploaded images one-by-one
@@ -1890,10 +1890,15 @@ def extract_drawing_context(
 
     focus = normalize_focus(focus) or ""
 
-    from .spec_documents import enforce_specs_budget
+    from .spec_documents import SpecBudget, enforce_specs_budget
 
-    specs_text, specs_budget = enforce_specs_budget(project_specifications)
     specs_errors: list[str] = []
+    try:
+        specs_text, specs_budget = enforce_specs_budget(project_specifications)
+    except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
+        specs_text, specs_budget = "", SpecBudget()
+        specs_errors.append(f"Project specifications: {exc}")
+        _log.warning("project specifications budgeting failed: %s", exc)
     if specs_budget.degraded:
         specs_errors.append(
             f"Project specifications: {specs_budget.omitted_chars:,} char(s) "
@@ -2029,7 +2034,8 @@ def extract_drawing_context(
             combined_text="",
             file_count=len(all_paths),
             sheet_count=0,
-            errors=inventory_errors + [block_reason],
+            errors=inventory_errors + specs_errors + [block_reason],
+            project_specifications=specs_text,
             run_journal=journal,
             input_inventory=inventory,
         )
@@ -2080,8 +2086,9 @@ def extract_drawing_context(
             combined_text="",
             file_count=len(all_paths),
             sheet_count=0,
-            errors=inventory_errors
+            errors=inventory_errors + specs_errors
             + ["No readable PDF pages found in the selected files."],
+            project_specifications=specs_text,
             run_journal=journal,
             input_inventory=inventory,
         )
@@ -2146,7 +2153,7 @@ def extract_drawing_context(
                 use_thinking=use_thinking, effort=effort, cache=cache,
                 progress=progress, total=miss_total, on_log=on_log,
                 on_status=on_status, focus=focus or None,
-                specs=specs_text or None,
+                specs_text=specs_text or None,
                 geometry_sink=geometry_sink, only=only,
             )
         else:
@@ -2155,7 +2162,7 @@ def extract_drawing_context(
                 client=client, model=model, max_tokens=max_tokens,
                 use_thinking=use_thinking, effort=effort, cache=cache,
                 progress=progress, total=miss_total, max_workers=max_workers,
-                focus=focus or None, specs=specs_text or None,
+                focus=focus or None, specs_text=specs_text or None,
                 geometry_sink=geometry_sink, only=only,
                 on_page_error=_on_page_error,
             )

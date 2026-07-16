@@ -692,18 +692,44 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         if not files:
             return
         paths = [Path(f) for f in files]
+        # Mirrors the main analyze flow's busy guard: without this, Analyze
+        # or Clear could run (the latter would apply this extraction's
+        # stale result right on top of a just-cleared state) before the
+        # background thread below finishes populating self._specs_text.
+        self._busy = True
         self.upload_specs_btn.configure(state="disabled", text="Reading…")
+        self.analyze_btn.configure(state="disabled")
+        self.clear_btn.configure(state="disabled")
         self.specs_status_label.configure(text="Reading spec documents…")
         threading.Thread(target=self._extract_specs_worker, args=(paths,), daemon=True).start()
 
     def _extract_specs_worker(self, paths: list[Path]) -> None:
         """Extract text off the calling worker thread (a large PDF spec must
-        not freeze the UI); the result lands back via ``self.after``."""
-        from .spec_documents import build_specs_text, extract_spec_documents
+        not freeze the UI); the result lands back via ``self.after``.
 
-        docs = extract_spec_documents(paths)
-        text, budget = build_specs_text(docs)
+        Per-file extraction failures are already captured on each
+        ``SpecDocument`` (I-3) and never raise, but this still guards the
+        whole pass (mirrors ``_worker``'s try/except around the analysis
+        run) so an unexpected failure reports back and clears the busy
+        state instead of leaving the UI stuck on "Reading…" forever.
+        """
+        try:
+            from .spec_documents import build_specs_text, extract_spec_documents
+
+            docs = extract_spec_documents(paths)
+            text, budget = build_specs_text(docs)
+        except Exception as exc:  # noqa: BLE001 - surface any unexpected failure
+            self.after(0, lambda e=exc: self._on_specs_extraction_error(str(e)))
+            return
         self.after(0, lambda: self._apply_specs_result(paths, docs, text, budget))
+
+    def _on_specs_extraction_error(self, message: str) -> None:
+        self._busy = False
+        self.upload_specs_btn.configure(state="normal", text="Upload spec documents…")
+        self.analyze_btn.configure(state="normal")
+        self.clear_btn.configure(state="normal")
+        self.specs_status_label.configure(text="No spec documents loaded.")
+        self._log(f"Could not read spec documents: {message}", level="error")
 
     def _apply_specs_result(
         self, paths: list[Path], docs: list[SpecDocument], text: str, budget: SpecBudget
@@ -712,7 +738,10 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._spec_documents = docs
         self._specs_text = text
         self._specs_budget = budget
+        self._busy = False
         self.upload_specs_btn.configure(state="normal", text="Upload spec documents…")
+        self.analyze_btn.configure(state="normal")
+        self.clear_btn.configure(state="normal")
         ok = [d for d in docs if d.ok]
         failed = [d for d in docs if not d.ok]
         if ok:

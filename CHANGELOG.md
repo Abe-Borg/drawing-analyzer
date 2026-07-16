@@ -6,6 +6,27 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — project specifications upload
+
+- **Upload real spec documents to ground the QC read.** A new "Upload spec
+  documents…" button (`.pdf`/`.docx`/`.txt`/`.md`, extracted via `pypdf`/
+  `python-docx` — new core dependencies, no PyMuPDF import, I-5 intact) lets
+  the operator attach the project's actual written specifications for a run,
+  gated by a blocking quality warning shown every time it's clicked. The
+  extracted text is folded into the digest system prompt as a distinct,
+  clearly-labeled `<project_specifications>` block (never conflated with the
+  unrelated external "Project Context" term, nor with the existing "Per-run
+  focus" question field) — the model reports drawing-vs-spec conflicts as
+  ordinary findings, so they flow through the existing ledger/anchor/verify/
+  markup pipeline with no new plumbing. The block rides a prompt-cache
+  breakpoint on the real-time path (never on the parallel batch-item build,
+  which would only pay the cache-write premium with nothing to read); a
+  two-tier character budget (40k/file, 120k total) bounds cost and attention
+  dilution, with truncation surfaced as a non-fatal run warning. Pre-run cost
+  estimates now show the specs' contribution, priced correctly for each
+  transport (flat repeated input on the batch path; cache write-once/read-many
+  on real-time). `digest_cache._SCHEMA_VERSION` bumped 7→8.
+
 ### Added (Phase 27 — end-to-end acceptance & release gate, DA-027)
 
 - **The §19.1 automated trust gauntlet.** One deterministic synthetic *oracle

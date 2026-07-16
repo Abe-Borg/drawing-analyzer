@@ -134,11 +134,24 @@ class SpecBudget:
 
 
 def _budgeted(text: str, budget_chars: int) -> tuple[str, int]:
-    """Truncate ``text`` to ``budget_chars``; return ``(kept_text, omitted_count)``."""
+    """Truncate ``text`` to ``budget_chars``; return ``(kept_text, omitted_count)``.
+
+    The returned text NEVER exceeds ``budget_chars`` — the truncation marker
+    is carved out of the budget, not appended on top of it. This matters
+    because ``build_specs_text``'s whole-block truncation and
+    ``enforce_specs_budget``'s pipeline-side backstop apply the *same*
+    default budget one after another (the backstop protects a direct library
+    caller who bypassed ``build_specs_text``); if a marker could push the
+    result past the budget, the second pass could truncate mid-marker,
+    sending a garbled ``...[TRUNCATED 452`` fragment to the model.
+    """
     if len(text) <= budget_chars:
         return text, 0
     omitted = len(text) - budget_chars
-    return text[:budget_chars] + f"\n[TRUNCATED {omitted} chars]", omitted
+    marker = f"\n[TRUNCATED {omitted} chars]"
+    if len(marker) >= budget_chars:
+        return text[:budget_chars], omitted  # degenerate: no room for a marker at all
+    return text[: budget_chars - len(marker)] + marker, omitted
 
 
 def build_specs_text(documents: list[SpecDocument]) -> tuple[str, SpecBudget]:
@@ -157,31 +170,38 @@ def build_specs_text(documents: list[SpecDocument]) -> tuple[str, SpecBudget]:
         if omitted:
             budget.omitted_chars += omitted
             budget.omitted_files.append(doc.display_name)
-        budget.included_chars += len(kept)
         parts.append(f"===== {doc.display_name} =====\n{kept}")
     combined = "\n\n".join(parts).strip()
     combined, extra_omitted = _budgeted(combined, SPEC_TOTAL_CHAR_BUDGET)
     if extra_omitted:
         budget.omitted_chars += extra_omitted
-    budget.included_chars = min(budget.included_chars, SPEC_TOTAL_CHAR_BUDGET)
+    # The true length of what's actually returned — not an accumulated,
+    # per-file running total, which would miss the "===== name =====\n"
+    # header/separator overhead and any whole-block truncation above.
+    budget.included_chars = len(combined)
     return combined, budget
 
 
 def enforce_specs_budget(
-    specs_text: str | None, *, budget_chars: int = SPEC_TOTAL_CHAR_BUDGET
+    specs_text: "object | None", *, budget_chars: int = SPEC_TOTAL_CHAR_BUDGET
 ) -> tuple[str, SpecBudget]:
     """Defensive backstop applied inside ``extract_drawing_context`` itself
     (I-3): a direct library caller who never went through the GUI's
     :func:`build_specs_text` still gets the total-chars ceiling enforced, so
     an arbitrarily large string handed straight to the pipeline can't blow the
-    per-sheet system-prompt cost/attention budget."""
-    text = (specs_text or "").strip()
+    per-sheet system-prompt cost/attention budget.
+
+    Coerces via ``str()`` (mirroring :func:`digest.normalize_specs_text`)
+    rather than assuming ``specs_text`` is already a string — never raises on
+    a caller mistake (e.g. passing a list of doc texts instead of joining
+    them first), consistent with I-3."""
+    text = "" if specs_text is None else str(specs_text).strip()
     if not text:
         return "", SpecBudget(budget_chars=budget_chars)
     kept, omitted = _budgeted(text, budget_chars)
     budget = SpecBudget(
         total_chars=len(text),
-        included_chars=min(len(text), budget_chars),
+        included_chars=len(kept),
         omitted_chars=omitted,
         budget_chars=budget_chars,
     )
