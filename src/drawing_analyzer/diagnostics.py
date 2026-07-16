@@ -5,7 +5,9 @@ records the detail needed to explain a *partial* run after the fact — which
 image upload 503'd, the Anthropic ``request-id`` to quote in a support ticket,
 the batch id to look up in the console, the per-item ``custom_id`` → sheet map.
 This module writes a verbose, timestamped trace to a rotating file under the app
-config dir so a flaky run is fully reconstructable later.
+config dir so a flaky run is fully reconstructable later. The file is truncated
+each time the app starts (see :func:`configure_file_logging`), so it holds only
+the latest session — the current run, never a pile-up of every past run.
 
 Design (standard "library" logging pattern):
 
@@ -58,8 +60,10 @@ ENV_DEBUG = "DRAWING_ANALYZER_DEBUG"
 
 _DISABLE_TOKENS = frozenset({"", "0", "false", "no", "off"})
 
-# Bounded on-disk footprint: 2 MB × 5 rotations. A run emits a few hundred short
-# lines, so this holds many runs' worth of history without unbounded growth.
+# Bounded on-disk footprint for a single session: 2 MB × 5 rotations. The log is
+# reset at each app launch (configure_file_logging deletes the file and any stale
+# backups before recreating it), so it holds only the latest run; the rotation
+# cap bounds that one session's footprint if it runs long or DEBUG-verbose.
 _MAX_BYTES = 2_000_000
 _BACKUP_COUNT = 5
 
@@ -182,6 +186,12 @@ def configure_file_logging(
 ) -> Path | None:
     """Attach a rotating file handler so a run leaves a detailed on-disk trace.
 
+    The log holds **only the latest run**: on each app launch the fixed-name file
+    and any stale rotation backups from a prior session are deleted before the
+    handler recreates a fresh file (``configure_file_logging`` is called once per
+    process, at GUI startup). Within the session, size-based rotation still bounds
+    the footprint (``_MAX_BYTES`` × ``_BACKUP_COUNT``).
+
     Idempotent and best-effort: a second call is a no-op, and any setup failure
     (read-only disk, etc.) is swallowed — diagnostics must never turn a working
     run into a failed one. Returns the active log path, or ``None`` when disabled
@@ -202,6 +212,20 @@ def configure_file_logging(
     try:
         target = Path(path) if path is not None else default_log_path()
         target.parent.mkdir(parents=True, exist_ok=True)
+        # Latest-run-only: start each app launch from an empty log. We can't just
+        # pass mode="w" — RotatingFileHandler forces append mode whenever
+        # maxBytes > 0 (it must append to measure size before a rollover) — so we
+        # remove the base file *and* any .1….N rotation backups a prior session
+        # left, then let the handler recreate a fresh file. Within the session,
+        # size-based rotation still bounds the footprint.
+        for stale in [target, *(target.with_name(f"{target.name}.{i}")
+                                for i in range(1, _BACKUP_COUNT + 1))]:
+            try:
+                stale.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass  # advisory: a locked/undeletable file must never fail the run
         handler = RotatingFileHandler(
             target, maxBytes=_MAX_BYTES, backupCount=_BACKUP_COUNT, encoding="utf-8"
         )
