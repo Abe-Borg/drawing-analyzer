@@ -150,6 +150,23 @@ def test_popup_trust_note_speaks_plain_words(status, origin, unverified, rejecte
     assert content.rstrip().endswith(expected)
 
 
+def test_popup_names_the_checked_edition():
+    # Phase B: the reviewer sees which edition the verdict was checked against;
+    # URLs and raw provenance stay in the CSV/HTML report, never on the drawing.
+    from drawing_analyzer.models import Citation, CitationAssessment
+
+    f = _f("cites relief valve", status="VERIFIED")
+    f.citation = Citation(status="CHECKED_SUPPORTS", note="ok")
+    f.citations = [CitationAssessment(
+        reference="NFPA 13 2016 §8.1.2", status="CHECKED_SUPPORTS",
+        checked_edition="NFPA 13 2016",
+        evidence_url="https://codes.example.org/x",
+    )]
+    content = _annot_content(f, unverified=False)
+    assert "checked against NFPA 13 2016 §8.1.2: NFPA 13 2016" in content
+    assert "https://" not in content              # links never ink the drawing
+
+
 def test_popup_single_read_folds_into_the_unverified_note():
     f = _f("an issue", status="UNCERTAIN")
     f.reproduced = False

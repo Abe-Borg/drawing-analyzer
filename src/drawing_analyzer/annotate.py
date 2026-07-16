@@ -532,6 +532,16 @@ def _citation_phrase(finding: Finding) -> str:
             phrase += f" - {citation.note}"
         if citation.edition_notes:
             phrase += f" ({citation.edition_notes} editions)"
+    # Phase B: name the edition each verdict was actually checked against —
+    # the reviewer-facing form of the structured provenance. Bounded; URLs and
+    # raw statuses stay in the CSV/HTML report, never on the drawing.
+    checked = []
+    for a in (getattr(finding, "citations", None) or []):
+        edition = str(getattr(a, "checked_edition", "") or "").strip()
+        if edition:
+            checked.append(f"{getattr(a, 'reference', '')}: {edition}")
+    if checked:
+        phrase += (" - checked against " + "; ".join(checked))[:220]
     return phrase
 
 

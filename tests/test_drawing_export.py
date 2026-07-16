@@ -265,8 +265,9 @@ def test_findings_csv_header_and_row_flattening():
     assert '"VAV-3 ""typ"""' in row               # embedded quotes doubled
     assert '"2,3"' in row                          # internal zero-based tile column
     assert ",r3c4," in row                         # human tile_label column (§17.1)
-    # recommended_action is the appended last column
-    assert row.rstrip().endswith("Verify the clearance on site.")
+    # recommended_action precedes the Phase B provenance tail (four cells,
+    # empty here — this finding carries no citation assessments).
+    assert row.rstrip().endswith("Verify the clearance on site.,,,,")
     assert "CMC 310; NFPA 90A" in row              # refs joined
     assert "10.2, 20.0, 88.5, 33.0" in row         # rect flattened + rounded
     # qc_id first (empty until assigned), then the content id
@@ -292,6 +293,44 @@ def test_findings_csv_carries_qc_id_and_citation():
     row = dx.build_findings_csv([f]).split("\r\n")[1]
     assert row.startswith("QC-001,")
     assert "CHECKED_MISMATCH" in row and "renumbered in 2019" in row
+
+
+def test_findings_csv_provenance_columns_appended_at_tail():
+    # Phase B: four structured-provenance columns ride at the END of the header
+    # (existing column positions preserved), joined per-ref and Excel-safe.
+    import csv as _csv
+    import io as _io
+
+    from drawing_analyzer.models import CitationAssessment
+
+    assert dx.FINDINGS_CSV_HEADER[-4:] == [
+        "citation_adopted_edition", "citation_checked_edition",
+        "citation_current_edition", "citation_evidence_url",
+    ]
+    f = _finding()
+    f.citations = [
+        CitationAssessment(reference="NFPA 13 §8.15.1", status="CHECKED_MISMATCH",
+                           adopted_edition="NFPA 13 2016",
+                           checked_edition="NFPA 13 2016",
+                           current_edition="NFPA 13 2025",
+                           evidence_url="https://codes.example.org/nfpa13"),
+        CitationAssessment(reference="IMC 403.3", status="CHECKED_SUPPORTS",
+                           checked_edition="IMC 2021"),
+    ]
+    text = dx.build_findings_csv([f])
+    (header, row) = list(_csv.reader(_io.StringIO(text)))[:2]
+    cells = dict(zip(header, row))
+    assert cells["citation_adopted_edition"] == "NFPA 13 §8.15.1: NFPA 13 2016"
+    assert cells["citation_checked_edition"] == (
+        "NFPA 13 §8.15.1: NFPA 13 2016; IMC 403.3: IMC 2021"
+    )
+    assert cells["citation_current_edition"] == "NFPA 13 §8.15.1: NFPA 13 2025"
+    assert cells["citation_evidence_url"] == (
+        "NFPA 13 §8.15.1: https://codes.example.org/nfpa13"
+    )
+    # A finding with no assessments leaves the columns empty.
+    bare = list(_csv.reader(_io.StringIO(dx.build_findings_csv([_finding()]))))[1]
+    assert bare[-4:] == ["", "", "", ""]
 
 
 def test_findings_csv_is_crlf_terminated():

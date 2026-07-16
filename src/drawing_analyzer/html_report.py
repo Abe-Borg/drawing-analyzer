@@ -737,18 +737,41 @@ def _finding_row_html(
     assessments = list(getattr(f, "citations", None) or [])
     if assessments:
         # Per-reference, claim-complete citation verdicts (§18.6, DA-017) — one
-        # span per reference, never collapsed into one ambiguous status.
+        # span per reference, never collapsed into one ambiguous status. Phase B:
+        # a mismatch gets its own warning class (it used to render in the same
+        # muted gray as a pass), plus the structured edition provenance and the
+        # model-selected evidence link (https-only, enforced at parse AND here).
         for a in assessments:
             a_ref = str(getattr(a, "reference", "") or "")
             a_status = str(getattr(a, "status", "") or "UNCHECKED")
             a_note = (getattr(a, "note", "") or "").strip()
             if len(a_note) > 120:
                 a_note = a_note[:119].rstrip() + "…"
+            css = "citation-note citation-mismatch" if a_status == "CHECKED_MISMATCH" \
+                else "muted citation-note"
+            edition_bits = []
+            for prov_label, prov_attr in (("adopted", "adopted_edition"),
+                                          ("checked", "checked_edition"),
+                                          ("current", "current_edition")):
+                value = str(getattr(a, prov_attr, "") or "").strip()
+                if value:
+                    edition_bits.append(f"{prov_label}: {html.escape(value)}")
+            detail = f" ({'; '.join(edition_bits)})" if edition_bits else ""
+            evidence_url = str(getattr(a, "evidence_url", "") or "").strip()
+            link = ""
+            if evidence_url.lower().startswith("https://"):
+                link = (
+                    f' <a class="citation-evidence" href="{html.escape(evidence_url, quote=True)}"'
+                    f' target="_blank" rel="noopener noreferrer">evidence</a>'
+                )
             text_cell += (
-                f' <span class="muted citation-note">[{html.escape(a_ref)}: '
+                f' <span class="{css}">[{html.escape(a_ref)}: '
                 f"{html.escape(a_status)}"
                 + (f" — {html.escape(a_note)}" if a_note else "")
-                + "]</span>"
+                + detail
+                + "]"
+                + link
+                + "</span>"
             )
     else:
         # Legacy single-verdict summary (a finding from an older cached run).
@@ -756,8 +779,10 @@ def _finding_row_html(
         if citation is not None and getattr(citation, "status", "UNCHECKED") != "UNCHECKED":
             cite_label = "supports" if citation.status == "CHECKED_SUPPORTS" else "mismatch"
             cite_note = (getattr(citation, "note", "") or "").strip()
+            css = ("citation-note citation-mismatch"
+                   if citation.status == "CHECKED_MISMATCH" else "muted citation-note")
             text_cell += (
-                f' <span class="muted citation-note">[citation {html.escape(cite_label)}'
+                f' <span class="{css}">[citation {html.escape(cite_label)}'
                 + (f": {html.escape(cite_note)}" if cite_note else "")
                 + "]</span>"
             )
@@ -1758,6 +1783,11 @@ a{color:var(--accent); text-decoration:none}
   padding:10px 14px; border-radius:8px;
 }
 .muted{color:var(--muted)}
+/* Phase B: a citation MISMATCH must read as a warning, not blend into the
+   muted pass styling — distinct color + weight. The evidence link is the
+   model-selected best https source for that verdict. */
+.citation-mismatch{color:#a04a00; font-weight:600}
+.citation-evidence{font-size:12px; margin-left:2px}
 
 /* Raw + misc */
 .raw-block{margin:22px 0; border:1px solid var(--line); border-radius:var(--radius); background:var(--panel); padding:10px 14px}
