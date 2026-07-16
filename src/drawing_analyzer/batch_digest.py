@@ -652,9 +652,25 @@ def _recover_via_batch_resubmit(
                     level="warning",
                 )
             continue
-        raw: dict[str, Any] = {}
-        for result in client.messages.batches.results(retry_id):
-            raw[_get(result, "custom_id")] = result
+        try:
+            raw: dict[str, Any] = {}
+            for result in client.messages.batches.results(retry_id):
+                raw[_get(result, "custom_id")] = result
+        except Exception as exc:  # noqa: BLE001 - recovery is best-effort; never crash collection
+            # The resubmission reached a terminal status but its results can't be
+            # read (the same failure the primary collection path guards against).
+            # The batch IS terminal, so it no longer references the shared files
+            # (``files_safe`` unaffected); we simply got no digests this round.
+            # Carry every pending sheet forward and let the round/budget bound
+            # end the loop — a crash here would escape the stalled-primary
+            # caller, which has no outer cleanup, and leak the canceled primary
+            # batch's uploaded files instead of returning retriable errors.
+            _log.warning(
+                "batch-resubmit round %d results read failed: %s; carrying "
+                "%d sheet(s) to the next round",
+                round_no, summarize_exc(exc), len(pending),
+            )
+            continue
         still: list[tuple[_Slot, dict]] = []
         for slot, params in pending:
             res = raw.get(slot.custom_id)

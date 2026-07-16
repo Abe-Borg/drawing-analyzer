@@ -1909,6 +1909,42 @@ def test_batch_resubmit_recovery_is_round_bounded_and_never_realtime(monkeypatch
     assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids)
 
 
+def test_batch_recovery_survives_a_results_read_failure(monkeypatch):
+    # A recovery batch can reach a terminal status yet fail while streaming
+    # results() (the primary collection path already guards against this). In
+    # the stalled-primary branch there is NO outer cleanup guard, so that
+    # exception must be caught inside recovery — otherwise it escapes, crashes
+    # collection, and leaks the canceled primary batch's uploaded files. Here
+    # the primary stalls and every resubmission terminates but its results()
+    # raises: the run must not crash, sheets keep clean errors, no real-time
+    # call is made, and the canceled batches' files are still released.
+    clock = {"t": 0.0}
+    monkeypatch.setattr(batch_digest.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setenv("DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS", "2")
+    client = _FakeClient(_succeed)
+    _install_batches(client, _StallFirstThenBatchOk(client, clock, tick=600.0))
+    # The resubmission batches terminate ``ended`` (via the harness) but their
+    # results stream is dark — the exact shape the guard must absorb.
+    client.results_raises = RuntimeError("batches.results down")
+
+    batch = submit_drawing_batch(
+        iter([_make_sheet(0), _make_sheet(1)]), client=client, model=OPUS, total=2
+    )
+    digests = collect_drawing_batch(
+        batch, client=client, sleep=NOSLEEP, retry_failed_items=True,
+        recovery_transport=batch_digest.RECOVERY_BATCH,
+        max_elapsed_seconds=100_000,
+    )
+
+    assert len(digests) == 2
+    assert all(not d.ok for d in digests)  # unrecovered, but no crash
+    assert client.rescue_calls == []  # never dropped to real-time
+    # Primary stall canceled + bounded resubmission rounds attempted, then the
+    # canceled batches' files released (nothing still references them).
+    assert "batch_1" in client.cancel_calls
+    assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids)
+
+
 # --------------------------------------------------------------------------- #
 # Diagnostics trace
 # --------------------------------------------------------------------------- #
