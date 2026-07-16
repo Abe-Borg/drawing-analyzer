@@ -34,17 +34,20 @@ A 401/403 upload rejection is credential-level — an inline request would fail
 identically — so those keep the original stop-and-skip behavior.
 
 Batch-backend outage fallback: a collected batch's retryable per-item failures
-are resubmitted as one follow-up batch (:func:`_resubmit_failed_items`) — but
-when the Batches backend *itself* is the sick component, the follow-up rides
-the same sick component and fails identically (a real 8-sheet run watched every
-item fail with ``api_error: Internal Server Error`` in BOTH rounds while the
-same run's ~300 Files-API uploads had just succeeded). A batch whose EVERY item
-failed that way therefore skips the doomed follow-up round outright, and items
-still failing retryably after a (partial-failure) follow-up round are rescued
-via synchronous, streamed Messages calls carrying each item's exact request
-params (:func:`_rescue_failed_items_sync`) — the uploaded ``file_id``
-references stay alive until cleanup, so the rescue bypasses batch processing
-entirely at the cost of the 50% discount for just the rescued sheets.
+are resubmitted while the uploaded ``file_id`` references are still alive — a
+real 8-sheet run watched every item fail with ``api_error: Internal Server
+Error`` in BOTH batch rounds while the same run's ~300 Files-API uploads had
+just succeeded. HOW they are resubmitted is the caller's ``recovery_transport``
+choice. ``RECOVERY_BATCH`` (what the pipeline passes) retries them as fresh
+batches in a bounded loop (:func:`_recover_via_batch_resubmit`), so recovery
+keeps the 50% batch discount and never issues a full-rate real-time call; when
+the bounded rounds (or the collection budget) are spent, unreached sheets keep
+a clean, retriable batch error. ``RECOVERY_DIRECT`` (the default for direct
+callers and unit tests) instead resubmits one follow-up batch
+(:func:`_resubmit_failed_items`) and rescues whatever still fails via
+synchronous, streamed Messages calls carrying each item's exact request params
+(:func:`_rescue_failed_items_sync`) — bypassing batch processing at the cost of
+the discount for just the rescued sheets.
 
 Stuck-batch fallback: a batch that never reaches a terminal state at all used
 to zero the whole run — two real runs (50 and 20 sheets) sat ``in_progress``
@@ -56,12 +59,14 @@ collection budget (:func:`_rescue_reserve_seconds`), gives up on a batch whose
 request counts haven't moved for :data:`DEFAULT_BATCH_STALL_TIMEOUT_SECONDS`
 ("stalled"), best-effort cancels the abandoned batch (its results will never
 be read, so left running it only burns quota and pins the uploaded files), and
-digests every unresolved sheet through the same direct-call rescue — so a
-stuck Batches backend now degrades the run to full-price direct calls instead
-of losing it.
+recovers every unresolved sheet through the same ``recovery_transport`` — the
+pipeline's ``RECOVERY_BATCH`` resubmits them as fresh batches (never real-time),
+so a stuck Batches backend is retried as a batch instead of degrading the run
+to full-price direct calls or losing it.
 """
 from __future__ import annotations
 
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -131,6 +136,25 @@ DEFAULT_BATCH_STALL_TIMEOUT_SECONDS = 60 * 60
 # nothing. Capped at 25% of the budget so a small bound still gives the poll
 # the lion's share.
 DEFAULT_RESCUE_RESERVE_SECONDS = 30 * 60
+
+# Recovery transport for a sick/stuck batch (the Batches backend erroring on
+# every item, or a batch whose request counts freeze). ``RECOVERY_DIRECT``
+# digests the unresolved sheets via synchronous, full-rate real-time Messages
+# calls (:func:`_rescue_failed_items_sync`) — fast, but it forfeits the 50%
+# batch discount for those sheets. ``RECOVERY_BATCH`` resubmits them as fresh
+# batches (:func:`_recover_via_batch_resubmit`) so recovery NEVER leaves the
+# discounted batch transport — the pipeline uses this; direct callers keep the
+# direct default.
+RECOVERY_DIRECT = "direct"
+RECOVERY_BATCH = "batch"
+
+# Ceiling on how many fresh batches ``RECOVERY_BATCH`` will submit for the
+# sheets a sick/stuck batch left unresolved. Each resubmission carries its own
+# stall watch, so a genuinely dead Batches backend can't loop forever; once the
+# rounds (or the collection budget, whichever binds first) are spent, unreached
+# sheets keep their retriable batch error — the run never silently drops to a
+# real-time call. Override with ``DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS``.
+DEFAULT_MAX_BATCH_RESUBMIT_ROUNDS = 4
 
 # Consecutive sheets failing their upload with the SAME run-fatal status
 # (credential/route-level — see ``RUN_FATAL_UPLOAD_STATUSES``) tolerated before
@@ -499,6 +523,165 @@ def _rescue_failed_items_sync(
     return recovered
 
 
+def _max_batch_resubmit_rounds() -> int:
+    """Resolve the batch-resubmit round ceiling (env override > default).
+
+    A malformed ``DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS`` falls back to
+    :data:`DEFAULT_MAX_BATCH_RESUBMIT_ROUNDS` rather than raising, and any value
+    is floored at 1 (a recovery transport that runs zero rounds is never what
+    the caller meant).
+    """
+    raw = os.environ.get("DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS")
+    if raw and raw.strip():
+        try:
+            return max(1, int(raw.strip()))
+        except ValueError:
+            pass
+    return DEFAULT_MAX_BATCH_RESUBMIT_ROUNDS
+
+
+def _recover_via_batch_resubmit(
+    items: list[tuple[_Slot, dict]],
+    results: list,
+    *,
+    batch_total: int,
+    client: Any,
+    cache: Any,
+    progress: ProgressCallback | None,
+    on_log: LogCallback | None,
+    sleep: Callable[[float], None],
+    max_elapsed_seconds: float,
+    stall_timeout_seconds: float | None,
+) -> tuple[int, bool]:
+    """Recover still-failed sheets by resubmitting them as FRESH batches.
+
+    The batch-pricing-preserving counterpart to
+    :func:`_rescue_failed_items_sync`: rather than one full-rate real-time
+    Messages call per sheet, the unresolved sheets are resubmitted as a new
+    Message Batch (same still-uploaded ``file_id`` references, same params, the
+    50% batch discount intact) and polled with the same stall watch as the
+    primary batch. Each item a fresh batch still fails retryably is carried into
+    the next resubmission; a batch that stalls, detaches, or can't be polled is
+    best-effort canceled and its items retried in the next round.
+
+    Bounded on BOTH axes so a genuinely dead Batches backend can never loop
+    forever: at most :func:`_max_batch_resubmit_rounds` fresh batches, and never
+    past the caller's remaining ``max_elapsed_seconds`` collection budget (a
+    round with less than one poll interval left is skipped). When the rounds or
+    the budget are spent, unreached sheets keep their existing retriable batch
+    error — the run never drops to a real-time call.
+
+    Returns ``(recovered, files_safe)``: the number of sheets recovered (a
+    successful, non-empty digest now in ``results``), and whether every batch
+    this function submitted is terminal or confirmed-canceled — i.e. no
+    resubmission may still be referencing the shared uploaded files, so the
+    caller may release them. ``files_safe`` goes ``False`` only when a
+    non-terminal resubmission could not be canceled (it may still be running).
+    """
+    started = time.monotonic()
+    recovered = 0
+    files_safe = True
+    pending = list(items)
+    max_rounds = _max_batch_resubmit_rounds()
+    for round_no in range(1, max_rounds + 1):
+        if not pending:
+            break
+        budget_left = max_elapsed_seconds - (time.monotonic() - started)
+        if budget_left < DEFAULT_POLL_INTERVAL_SECONDS:
+            _log.warning(
+                "batch-resubmit recovery out of collection budget after %d "
+                "round(s): %d sheet(s) not attempted",
+                round_no - 1, len(pending),
+            )
+            break
+        reqs = [{"custom_id": s.custom_id, "params": p} for s, p in pending]
+        _log.info(
+            "batch-resubmit recovery round %d/%d: resubmitting %d sheet(s) as a "
+            "fresh batch", round_no, max_rounds, len(pending),
+        )
+        if on_log is not None:
+            on_log(
+                f"Resubmitting {len(pending)} sheet(s) as a fresh batch "
+                f"(recovery round {round_no}/{max_rounds})"
+            )
+        try:
+            mb = client.beta.messages.batches.create(
+                requests=reqs, betas=[FILES_API_BETA]
+            )
+        except Exception as exc:  # noqa: BLE001 - recovery is best-effort; batch errors stand
+            # The backend rejecting even the submit is itself a sick-backend
+            # signal — back off (within budget) and let the next round retry,
+            # still as a batch, never real-time.
+            _log.warning(
+                "batch-resubmit round %d submit failed: %s; keeping batch errors",
+                round_no, summarize_exc(exc),
+            )
+            backoff = _retry_backoff_seconds(round_no - 1)
+            if backoff >= max_elapsed_seconds - (time.monotonic() - started):
+                break
+            sleep(backoff)
+            continue
+        retry_id = _get(mb, "id")
+        _log.info(
+            "batch-resubmit round %d submitted: id=%s items=%d request_id=%s",
+            round_no, retry_id, len(reqs), request_id_of(mb),
+        )
+        status = _poll_until_terminal(
+            client,
+            retry_id,
+            total=batch_total,
+            cached_done=max(0, batch_total - len(pending)),
+            progress=progress,
+            on_log=on_log,
+            sleep=sleep,
+            max_elapsed_seconds=budget_left,
+            stall_timeout_seconds=stall_timeout_seconds,
+        )
+        if status not in ("ended", "failed", "expired", "canceled"):
+            # Stalled / detached / poll_failed: this resubmission is itself sick
+            # (or out of budget). Its results are unreachable and it pins the
+            # shared file_ids, so best-effort cancel it and carry every pending
+            # sheet into the next round. A cancel that does not land means the
+            # batch may still be running — the files can't be released yet.
+            if not _cancel_batch(client, retry_id, on_log=on_log):
+                files_safe = False
+            if on_log is not None:
+                on_log(
+                    f"Resubmitted batch {status} (id={retry_id}); "
+                    f"{len(pending)} sheet(s) still unresolved",
+                    level="warning",
+                )
+            continue
+        raw: dict[str, Any] = {}
+        for result in client.messages.batches.results(retry_id):
+            raw[_get(result, "custom_id")] = result
+        still: list[tuple[_Slot, dict]] = []
+        for slot, params in pending:
+            res = raw.get(slot.custom_id)
+            if res is None:
+                # No envelope for the item this round; it was retryable (that is
+                # why it was resubmitted), so carry it to the next round.
+                still.append((slot, params))
+                continue
+            digest = _parse_item(slot, res, cache=cache)
+            # Fresher provenance than the error it replaces, even if still empty
+            # — and a batch digest, so no ``rescued`` full-rate flag.
+            results[slot.index] = digest
+            if digest.error is None:
+                recovered += 1
+                continue
+            again = _item_retry_params(slot, _get(res, "result"), digest, params=params)
+            if again is not None:
+                still.append((slot, again))
+        pending = still
+    if pending:
+        _log.warning(
+            "batch-resubmit recovery exhausted: %d sheet(s) keep their batch error",
+            len(pending),
+        )
+    return recovered, files_safe
+
+
 def _resubmit_failed_items(
     batch: DrawingBatch,
     results: list,
@@ -510,6 +693,7 @@ def _resubmit_failed_items(
     on_log: LogCallback | None,
     sleep: Callable[[float], None],
     max_elapsed_seconds: float,
+    recovery_transport: str = RECOVERY_DIRECT,
 ) -> bool:
     """One follow-up batch for a collected batch's retryable per-item failures.
 
@@ -542,8 +726,44 @@ def _resubmit_failed_items(
     Returns ``True`` when the uploaded files are safe to delete afterwards;
     ``False`` when the follow-up batch detached (still running remotely, so it
     still needs the files — mirroring the primary batch's detach policy).
+
+    With ``recovery_transport == RECOVERY_BATCH`` (what the pipeline passes) the
+    direct-call rescue is never reached: the retryable items are handed straight
+    to :func:`_recover_via_batch_resubmit`, which retries them as fresh batches
+    (bounded) so recovery keeps the 50% batch discount and never issues a
+    full-rate real-time call. The single-follow-up-batch + direct-rescue path
+    below is the ``RECOVERY_DIRECT`` default kept for direct callers and tests.
     """
     started = time.monotonic()
+
+    if recovery_transport == RECOVERY_BATCH:
+        retry_batch: list[tuple[_Slot, dict]] = []
+        for slot in batch.submitted_slots:
+            result_obj = _get(raw.get(slot.custom_id), "result")
+            params = _item_retry_params(slot, result_obj, results[slot.index])
+            if params is not None:
+                retry_batch.append((slot, params))
+        if not retry_batch:
+            return True
+        remaining = max_elapsed_seconds - (time.monotonic() - started)
+        recovered, files_safe = _recover_via_batch_resubmit(
+            retry_batch, results,
+            batch_total=batch.total,
+            client=client, cache=cache, progress=progress,
+            on_log=on_log, sleep=sleep,
+            max_elapsed_seconds=remaining,
+            stall_timeout_seconds=DEFAULT_BATCH_STALL_TIMEOUT_SECONDS,
+        )
+        _log.info(
+            "batch-resubmit recovery recovered %d/%d failed sheet(s)",
+            recovered, len(retry_batch),
+        )
+        if on_log is not None:
+            on_log(
+                f"Recovered {recovered} of {len(retry_batch)} sheet(s) via "
+                "batch resubmission"
+            )
+        return files_safe
 
     def _rescue_remaining(items: list[tuple[_Slot, dict]]) -> None:
         """Run the direct-call rescue on whatever budget this round has left."""
@@ -1259,6 +1479,7 @@ def collect_drawing_batch(
     max_elapsed_seconds: int = DEFAULT_BATCH_MAX_ELAPSED_SECONDS,
     cleanup_in_background: bool = False,
     retry_failed_items: bool = False,
+    recovery_transport: str = RECOVERY_DIRECT,
 ) -> list[SheetDigest]:
     """Poll the batch to completion and assemble per-sheet digests in page order.
 
@@ -1290,12 +1511,19 @@ def collect_drawing_batch(
     and watches for a stall (no per-item progress for
     :data:`DEFAULT_BATCH_STALL_TIMEOUT_SECONDS`); a batch that stalls,
     detaches, or can't be polled is best-effort canceled and every submitted
-    sheet digested through the same direct-call rescue, with the uploaded
-    files released only when the cancel landed. All recovery stages run
-    within this call's ``max_elapsed_seconds`` budget, so opting in never
-    lets a collect block meaningfully past the bound it was given. The
-    pipeline opts in; direct callers and the unit tests keep the
-    single-round default.
+    sheet digested through the recovery transport, with the uploaded files
+    released only when the cancel landed. All recovery stages run within this
+    call's ``max_elapsed_seconds`` budget, so opting in never lets a collect
+    block meaningfully past the bound it was given. The pipeline opts in;
+    direct callers and the unit tests keep the single-round default.
+
+    ``recovery_transport`` picks HOW an unresolved sheet is recovered once
+    ``retry_failed_items`` gives up on the original batch: ``RECOVERY_DIRECT``
+    (the default) digests it via a full-rate real-time Messages call, while
+    ``RECOVERY_BATCH`` resubmits it as a fresh batch (bounded, keeping the 50%
+    discount) and never issues a real-time call. The pipeline passes
+    ``RECOVERY_BATCH`` so a stalled/sick batch is retried as a batch rather than
+    silently dropping the run to real-time pricing.
     """
     # Size by the actual slot count (one slot per rendered sheet, indices
     # 0..n-1 in page order) so a divergent display ``total`` can never
@@ -1353,6 +1581,7 @@ def collect_drawing_batch(
                         client=client, cache=cache, progress=progress,
                         on_log=on_log, sleep=sleep,
                         max_elapsed_seconds=remaining,
+                        recovery_transport=recovery_transport,
                     )
                 if files_released:
                     _release_uploaded_files(
@@ -1386,12 +1615,15 @@ def collect_drawing_batch(
             # and request in hand being valid. With recovery enabled the
             # batch is abandoned for good: best-effort canceled (its results
             # will never be read, so left running it only burns quota) and
-            # every unresolved sheet digested via the direct-call rescue on
-            # the same still-uploaded file_ids, spending what remains of the
-            # collection budget (the poll held back a rescue reserve for
-            # exactly this). Without recovery the original behavior stands:
-            # files retained for the still-running batch, and a clear,
-            # retriable per-sheet error.
+            # every unresolved sheet recovered on the same still-uploaded
+            # file_ids, spending what remains of the collection budget (the poll
+            # held back a rescue reserve for exactly this). The recovery
+            # transport decides HOW: RECOVERY_BATCH (the pipeline) resubmits the
+            # sheets as fresh batches so the run keeps the 50% discount and never
+            # drops to real-time; RECOVERY_DIRECT digests them via full-rate
+            # direct calls. Without recovery the original behavior stands: files
+            # retained for the still-running batch, and a clear, retriable
+            # per-sheet error.
             canceled = False
             if retry_failed_items:
                 canceled = _cancel_batch(client, batch.batch_id, on_log=on_log)
@@ -1404,27 +1636,60 @@ def collect_drawing_batch(
                     remaining = max_elapsed_seconds - (
                         time.monotonic() - collect_started
                     )
-                    _log.info(
-                        "digesting %d sheet(s) from the %s batch via direct "
-                        "Messages calls (%.0fs of collection budget left)",
-                        len(rescue), status, max(0.0, remaining),
-                    )
-                    if on_log is not None:
-                        on_log(
-                            f"Drawing batch {status}; digesting "
-                            f"{len(rescue)} sheet(s) directly"
+                    if recovery_transport == RECOVERY_BATCH:
+                        _log.info(
+                            "recovering %d sheet(s) from the %s batch via fresh "
+                            "batch resubmission (%.0fs of collection budget left)",
+                            len(rescue), status, max(0.0, remaining),
                         )
-                    n = _rescue_failed_items_sync(
-                        rescue, results,
-                        client=client, cache=cache, sleep=sleep,
-                        max_elapsed_seconds=remaining,
-                    )
-                    _log.info(
-                        "direct-call rescue recovered %d/%d sheet(s) from "
-                        "the %s batch", n, len(rescue), status,
-                    )
-                    if on_log is not None:
-                        on_log(f"Recovered {n} of {len(rescue)} sheet(s) directly")
+                        if on_log is not None:
+                            on_log(
+                                f"Drawing batch {status}; resubmitting "
+                                f"{len(rescue)} sheet(s) as a fresh batch"
+                            )
+                        n, files_safe = _recover_via_batch_resubmit(
+                            rescue, results,
+                            batch_total=batch.total,
+                            client=client, cache=cache, progress=progress,
+                            on_log=on_log, sleep=sleep,
+                            max_elapsed_seconds=remaining,
+                            stall_timeout_seconds=DEFAULT_BATCH_STALL_TIMEOUT_SECONDS,
+                        )
+                        _log.info(
+                            "batch-resubmit recovery recovered %d/%d sheet(s) "
+                            "from the %s batch", n, len(rescue), status,
+                        )
+                        if on_log is not None:
+                            on_log(
+                                f"Recovered {n} of {len(rescue)} sheet(s) via "
+                                "batch resubmission"
+                            )
+                        # Retain the files if any resubmission may still be
+                        # running (its cancel did not land) — same policy as a
+                        # primary batch whose cancel failed.
+                        canceled = canceled and files_safe
+                    else:
+                        _log.info(
+                            "digesting %d sheet(s) from the %s batch via direct "
+                            "Messages calls (%.0fs of collection budget left)",
+                            len(rescue), status, max(0.0, remaining),
+                        )
+                        if on_log is not None:
+                            on_log(
+                                f"Drawing batch {status}; digesting "
+                                f"{len(rescue)} sheet(s) directly"
+                            )
+                        n = _rescue_failed_items_sync(
+                            rescue, results,
+                            client=client, cache=cache, sleep=sleep,
+                            max_elapsed_seconds=remaining,
+                        )
+                        _log.info(
+                            "direct-call rescue recovered %d/%d sheet(s) from "
+                            "the %s batch", n, len(rescue), status,
+                        )
+                        if on_log is not None:
+                            on_log(f"Recovered {n} of {len(rescue)} sheet(s) directly")
             tail = (
                 f"remote batch id={batch.batch_id} was canceled"
                 if canceled

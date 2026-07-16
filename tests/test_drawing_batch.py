@@ -1766,6 +1766,150 @@ def test_stuck_batch_rescue_shortfall_keeps_clear_errors(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# Batch-resubmit recovery transport (RECOVERY_BATCH — what the pipeline uses)
+#
+# The pipeline passes ``recovery_transport=RECOVERY_BATCH`` so a sick/stuck
+# batch is retried AS A BATCH (50% discount kept) rather than dropping to
+# full-rate real-time calls. These pin that: no ``beta.messages.stream`` (the
+# direct rescue) is ever issued, no digest is flagged ``rescued``, and a fresh
+# batch is submitted for the unresolved sheets.
+# --------------------------------------------------------------------------- #
+
+
+class _StallFirstThenBatchOk(_FakeBatches):
+    """The first submitted batch stalls forever (``in_progress``, zero
+    completions, burning ``tick`` fake-seconds per poll); every RESUBMITTED
+    batch terminates ``ended`` and its items succeed — modelling a stuck primary
+    batch that the batch-resubmit recovery then lands on a fresh batch."""
+
+    def __init__(self, client, clock, tick):
+        super().__init__(client)
+        self._clock = clock
+        self._tick = tick
+        self._n = 0
+        self._stalled_id: str | None = None
+
+    def create(self, *, requests, betas=None):
+        self._c.create_calls.append({"requests": list(requests), "betas": betas})
+        self._c.submitted = list(requests)
+        self._n += 1
+        bid = f"batch_{self._n}"
+        if self._stalled_id is None:
+            self._stalled_id = bid  # the primary batch — the one that stalls
+        return _Obj(id=bid)
+
+    def retrieve(self, batch_id):
+        self._c.retrieve_calls.append(batch_id)
+        n = len(self._c.submitted)
+        if batch_id == self._stalled_id:
+            self._clock["t"] += self._tick
+            return _Obj(
+                processing_status="in_progress",
+                request_counts=_Obj(
+                    succeeded=0, errored=0, canceled=0, expired=0, processing=n
+                ),
+            )
+        return _Obj(
+            processing_status="ended",
+            request_counts=_Obj(
+                succeeded=n, errored=0, canceled=0, expired=0, processing=0
+            ),
+        )
+
+
+def test_stalled_batch_recovers_via_fresh_batch_not_realtime(monkeypatch):
+    # The user's incident: the primary batch stalls, and under RECOVERY_BATCH
+    # the run must NOT drop to real-time. The stuck batch is canceled and its
+    # sheets resubmitted as a fresh batch (kept at the 50% discount).
+    clock = {"t": 0.0}
+    monkeypatch.setattr(batch_digest.time, "monotonic", lambda: clock["t"])
+    client = _FakeClient(_succeed)
+    _install_batches(client, _StallFirstThenBatchOk(client, clock, tick=600.0))
+
+    batch = submit_drawing_batch(
+        iter([_make_sheet(0), _make_sheet(1)]), client=client, model=OPUS, total=2
+    )
+    logs: list[tuple[str, str]] = []
+    digests = collect_drawing_batch(
+        batch, client=client, sleep=NOSLEEP, retry_failed_items=True,
+        recovery_transport=batch_digest.RECOVERY_BATCH,
+        max_elapsed_seconds=100_000,
+        on_log=lambda msg, level="info": logs.append((level, msg)),
+    )
+
+    assert all(d.ok for d in digests)
+    # Recovered on the BATCH transport — never a real-time streamed/inline call.
+    assert client.rescue_calls == []
+    assert client.messages_create_calls == []
+    assert not any(getattr(d, "rescued", False) for d in digests)
+    # The stalled primary was canceled and a fresh batch submitted for its sheets.
+    assert "batch_1" in client.cancel_calls
+    assert len(client.create_calls) == 2  # primary submit + one resubmission
+    assert any("resubmitting" in msg.lower() for _lvl, msg in logs)
+    assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids)
+
+
+def test_batch_backend_outage_recovers_via_fresh_batch_not_realtime():
+    # Every item of a TERMINAL batch failed server-side (the Batches backend
+    # erroring). Under RECOVERY_BATCH the items are resubmitted as a fresh
+    # batch — never handed to the full-rate direct-call rescue.
+    client = _FakeClient(
+        _flaky_then_ok(
+            {
+                "sheet__0": batch_errored_result(
+                    "sheet__0", error_message="Internal Server Error"
+                ),
+                "sheet__1": batch_errored_result(
+                    "sheet__1", error_message="Internal Server Error"
+                ),
+            }
+        )
+    )
+    batch = submit_drawing_batch(
+        iter([_make_sheet(0), _make_sheet(1)]), client=client, model=OPUS, total=2
+    )
+    digests = collect_drawing_batch(
+        batch, client=client, sleep=NOSLEEP, retry_failed_items=True,
+        recovery_transport=batch_digest.RECOVERY_BATCH,
+    )
+
+    assert all(d.ok for d in digests)
+    assert client.rescue_calls == []  # never dropped to real-time
+    assert not any(getattr(d, "rescued", False) for d in digests)
+    assert len(client.create_calls) == 2  # primary + one resubmission batch
+    assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids)
+
+
+def test_batch_resubmit_recovery_is_round_bounded_and_never_realtime(monkeypatch):
+    # A genuinely dead Batches backend (every batch stalls) must not loop
+    # forever: the resubmit rounds are capped, unreached sheets keep a clean,
+    # retriable batch error, and NO real-time call is ever made.
+    monkeypatch.setenv("DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS", "2")
+    clock = {"t": 0.0}
+    monkeypatch.setattr(batch_digest.time, "monotonic", lambda: clock["t"])
+    client = _FakeClient(_succeed)
+    _install_batches(client, _NeverEndingBatches(client, clock, tick=600.0))
+
+    batch = submit_drawing_batch(
+        iter([_make_sheet(0), _make_sheet(1)]), client=client, model=OPUS, total=2
+    )
+    digests = collect_drawing_batch(
+        batch, client=client, sleep=NOSLEEP, retry_failed_items=True,
+        recovery_transport=batch_digest.RECOVERY_BATCH,
+        max_elapsed_seconds=100_000,
+    )
+
+    assert client.rescue_calls == []  # never a real-time call, even when doomed
+    # primary submit + 2 bounded resubmission rounds; each stuck batch canceled.
+    assert len(client.create_calls) == 3
+    assert len(client.cancel_calls) == 3
+    assert all(not d.ok for d in digests)
+    assert all("not collected" in d.error and "stalled" in d.error for d in digests)
+    # Every stuck batch was canceled, so the uploaded files were released.
+    assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids)
+
+
+# --------------------------------------------------------------------------- #
 # Diagnostics trace
 # --------------------------------------------------------------------------- #
 

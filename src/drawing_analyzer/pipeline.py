@@ -624,7 +624,11 @@ def _digest_sheets_via_batch(
     lightweight geometry as it renders (before the batch discards the rendered
     sheet), so the QC stages survive the upload.
     """
-    from .batch_digest import collect_drawing_batch, submit_drawing_batch
+    from .batch_digest import (
+        RECOVERY_BATCH,
+        collect_drawing_batch,
+        submit_drawing_batch,
+    )
 
     if client is None:
         from .client import get_client as _get_client
@@ -660,16 +664,21 @@ def _digest_sheets_via_batch(
     # (slower still under the Files-API overload that drove the run) would
     # otherwise leave the UI frozen for minutes after the work is really done.
     # Retry the batch's own per-item failures (server-side 500s/overload,
-    # expired items, thinking-ate-the-budget empty digests) in one follow-up
-    # batch while the uploaded file_ids are still alive — a real run lost 10
-    # of 33 sheets to exactly these one-shot failures. Items the follow-up
-    # batch still can't land (the batch backend itself erroring — a real run
-    # lost all 8 sheets to `api_error` in both rounds) are digested via
-    # synchronous per-item Messages calls on the same file_ids before cleanup.
-    # The same opt-in covers a batch that never terminates at all (two real
-    # runs sat `in_progress` with zero completions for the full 4h bound and
-    # returned nothing): the stuck batch is canceled and every sheet digested
-    # via those direct calls instead of the run coming back empty.
+    # expired items, thinking-ate-the-budget empty digests) while the uploaded
+    # file_ids are still alive — a real run lost 10 of 33 sheets to exactly
+    # these one-shot failures. The same opt-in covers a batch that never
+    # terminates at all (two real runs sat `in_progress` with zero completions
+    # for the full 4h bound and returned nothing): the stuck batch is canceled
+    # and every sheet recovered instead of the run coming back empty.
+    #
+    # ``recovery_transport=RECOVERY_BATCH``: recovery ALWAYS stays on the batch
+    # transport. An unresolved sheet (per-item failure, or a stalled/sick batch)
+    # is resubmitted as a fresh batch — bounded rounds, each with its own stall
+    # watch — so it keeps the 50% batch discount and the run never silently
+    # degrades to full-rate real-time calls. When the rounds/budget are spent,
+    # unreached sheets keep a clean, retriable batch error (never a real-time
+    # call). Override the round ceiling with
+    # ``DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS``.
     return collect_drawing_batch(
         batch,
         client=client,
@@ -678,6 +687,7 @@ def _digest_sheets_via_batch(
         on_log=on_log,
         cleanup_in_background=True,
         retry_failed_items=True,
+        recovery_transport=RECOVERY_BATCH,
     )
 
 
