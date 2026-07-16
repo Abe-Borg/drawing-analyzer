@@ -27,6 +27,31 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   transport (flat repeated input on the batch path; cache write-once/read-many
   on real-time). `digest_cache._SCHEMA_VERSION` bumped 7→8.
 
+### Changed — stuck/sick batch recovery stays on the batch transport
+
+- **A stalled or backend-sick drawing batch is now recovered by resubmitting
+  the unresolved sheets as a fresh batch, never by dropping to full-rate
+  real-time calls.** Previously, when the primary batch made no per-item
+  progress for the stall window (`Drawing batch stalled; digesting N sheet(s)
+  directly`) — or when the Batches backend errored every item — the run rescued
+  those sheets via synchronous, streamed Messages calls
+  (`_rescue_failed_items_sync`), which forfeited the 50% batch discount for the
+  rescued sheets (flagged `rescued`, billed at full rate). `collect_drawing_batch`
+  now takes a `recovery_transport`, and the pipeline passes the new
+  `RECOVERY_BATCH`: the stuck batch is canceled and its sheets resubmitted as
+  fresh batches (same still-uploaded `file_id`s, same params, discount intact)
+  in a bounded loop (`_recover_via_batch_resubmit`), each resubmission carrying
+  its own stall watch. The loop is bounded on both axes — at most
+  `DEFAULT_MAX_BATCH_RESUBMIT_ROUNDS` (4, override
+  `DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS`) fresh batches, and never past the
+  collection budget — so a genuinely dead backend can't loop forever; once the
+  rounds/budget are spent, unreached sheets keep a clean, retriable batch error
+  (still never a real-time call). The original `RECOVERY_DIRECT` behavior is kept
+  as the default for direct callers and the unit tests. Trade-off: a persistently
+  stuck backend now takes longer to give up (repeated batch rounds rather than an
+  immediate real-time rescue), in exchange for never silently degrading a run to
+  real-time pricing.
+
 ### Changed (GUI export options cleanup — GUI-only)
 
 - **Trimmed the GUI's per-artifact export buttons.** The standalone window's

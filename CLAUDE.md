@@ -71,7 +71,14 @@ of every artifact), written **last** in the §18.4 non-circular order (artifacts
 `digest.py` (prompt + tolerant findings-block parser), or `batch_digest.py`
 (Message Batches + Files APIs, ~50% cheaper) → `digest_cache.py` (two-level
 content-keyed cache — a hit skips rendering entirely and restores parsed
-findings for free).
+findings for free). Batch recovery of a stuck/backend-sick batch stays on the
+batch transport for the pipeline (`recovery_transport=RECOVERY_BATCH`): a
+stalled batch is canceled and its unresolved sheets resubmitted as fresh
+batches (bounded rounds + collection budget, `_recover_via_batch_resubmit`), so
+a run **never silently drops to full-rate real-time calls**; when the rounds/
+budget are spent, unreached sheets keep a clean retriable batch error. The
+legacy full-rate direct-call rescue (`_rescue_failed_items_sync`) is the
+`RECOVERY_DIRECT` default kept only for direct callers/tests.
 
 **QC stack** (each stage optional and independently cached):
 
