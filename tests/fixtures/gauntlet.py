@@ -389,6 +389,7 @@ class ScriptedQCClient:
         self.critique_system_prompts: list[str] = []
         self.synth_calls = 0
         self.cross_calls = 0
+        self.cross_request_texts: list[str] = []
         self.reconcile_calls = 0
         self.harvest_calls = 0
         self.citation_requests: list[str] = []
@@ -428,7 +429,7 @@ class ScriptedQCClient:
             self.reconcile_calls += 1
             return _msg(_fenced({"findings": [], "claims": []}), 30, 8)
         if system.startswith(CROSS_QC_SYSTEM_PROMPT):
-            return self._cross()
+            return self._cross(text)
         if system.startswith(CRITIQUE_SYSTEM_PROMPT):
             return self._critique(text, system)
         if system.startswith(DIGEST_SYSTEM_PROMPT):
@@ -478,8 +479,9 @@ class ScriptedQCClient:
                                usage=FakeUsage(input_tokens=10, output_tokens=0))
         return _msg(self._synthesis_text or "Overview.", 300, 60)
 
-    def _cross(self) -> FakeMessage:
+    def _cross(self, text: str = "") -> FakeMessage:
         self.cross_calls += 1
+        self.cross_request_texts.append(text)
         if self._sabotage == "cross_qc":
             return _msg("no structured output here at all", 100, 10)
         return _msg(_fenced({"findings": self._cross_findings, "claims": []}), 800, 60)

@@ -132,6 +132,30 @@ def harvest_code_editions(geometries: Iterable[Any]) -> list[str]:
     return out
 
 
+def merged_editions(identity: Any, geometries: Iterable[Any]) -> str:
+    """The editions line: model-detected adopted codes ∪ the regex harvest.
+
+    The identity's entries lead (sorted; they carry amendments and reach the
+    worldwide codes the US-centric ``_CODE_TOKEN`` whitelist can never match);
+    regex-only extras follow in first-seen order as the deterministic backstop
+    — a code the text plainly states can never be argued away by the model.
+    With no identity this is byte-identical to the pre-Phase-A line.
+    """
+    regex_claims = harvest_code_editions(geometries)
+    identity_claims: list[str] = []
+    seen: set[str] = set()          # bare CODE EDITION, without amendment notes
+    for code in getattr(identity, "adopted_codes", ()) or ():
+        display = getattr(code, "display", "") or ""
+        note = getattr(code, "amendment_note", "") or ""
+        if display:
+            identity_claims.append(f"{display} ({note})" if note else display)
+            seen.add(" ".join(display.split()).upper())
+    if not identity_claims:
+        return "; ".join(regex_claims)
+    extras = [c for c in regex_claims if " ".join(c.split()).upper() not in seen]
+    return "; ".join(identity_claims + extras)
+
+
 # --------------------------------------------------------------------------- #
 # Prompt + parsing
 # --------------------------------------------------------------------------- #
@@ -147,6 +171,11 @@ number valid in one edition may have moved in a later one). Be conservative: rep
 a mismatch only when you found concrete evidence of one. Judge each claim on its own \
 — different claims citing the same section can have different verdicts.
 
+When a PROJECT JURISDICTION/LOCALE line is given, use it to resolve WHICH code, \
+edition, or local amendment applies, and search in the set's language when that \
+helps. The locale is model-detected from the drawings, not ground truth: when \
+your search evidence contradicts it, follow the evidence and say so in the note.
+
 After searching, output a SINGLE fenced code block labeled json and nothing after \
 it, containing exactly: {"assessments": [{"claim": "<the claim's handle, e.g. C1>", \
 "status": "CHECKED_SUPPORTS" or "CHECKED_MISMATCH", "note": "<= 30 words on whether \
@@ -160,11 +189,14 @@ def _normalize_claim(text: str) -> str:
 
 
 def _build_citation_prompt(
-    ref: str, editions_line: str, handled_claims: list[tuple[str, str]]
+    ref: str, editions_line: str, handled_claims: list[tuple[str, str]],
+    jurisdiction_line: str = "",
 ) -> str:
     ed = editions_line or "not stated on the drawings"
-    lines = [
-        f"CITATION TO CHECK: {ref}",
+    lines = [f"CITATION TO CHECK: {ref}"]
+    if jurisdiction_line:
+        lines.append(f"PROJECT JURISDICTION/LOCALE: {jurisdiction_line}")
+    lines += [
         f"CODE EDITIONS THE SET ADOPTS: {ed}",
         "CLAIMS CITING IT (verify each; echo its handle):",
     ]
@@ -265,12 +297,15 @@ def _check_one(
     model: str,
     max_retries: int,
     sleep: Any,
+    jurisdiction_line: str = "",
 ) -> tuple[str | None, list[str], int, int, str | None]:
     """One citation request → ``(raw_text, sources, in_tok, out_tok, error)``.
 
     Never raises. ``raw_text`` is ``None`` on a hard failure (``error`` set).
     """
-    user_text = _build_citation_prompt(ref, editions_line, handled_claims)
+    user_text = _build_citation_prompt(
+        ref, editions_line, handled_claims, jurisdiction_line
+    )
     messages: list[dict] = [{"role": "user", "content": user_text}]
     total_in = total_out = 0
 
@@ -382,6 +417,7 @@ def check_citations(
     max_retries: int = DEFAULT_CITATION_MAX_RETRIES,
     sleep: Any = time.sleep,
     progress: Any = None,
+    identity: Any = None,
 ) -> CitationCheckResult:
     """Check every reference against the exact claims citing it; attach assessments.
 
@@ -393,6 +429,11 @@ def check_citations(
     assessments. Additive and non-fatal (I-3): a failure leaves the affected claims
     UNCHECKED and marks the stage PARTIAL. ``progress(done, total, label)`` mirrors
     the verify pass's callback.
+
+    ``identity`` (Phase A §20.1, a :class:`~drawing_analyzer.models.SetIdentity`
+    or ``None``) enriches the prompt only: its adopted codes merge ahead of the
+    regex edition harvest and its locale rides a JURISDICTION line. ``None``
+    reproduces the pre-identity behavior byte-for-byte.
     """
     findings = [f for f in findings if getattr(f, "refs", None)]
 
@@ -429,7 +470,12 @@ def check_citations(
             return result
 
     model = model or citation_model()
-    editions_line = "; ".join(harvest_code_editions(geometries))
+    editions_line = merged_editions(identity, geometries)
+    jurisdiction_line = (
+        identity.citation_context_line()
+        if identity is not None and hasattr(identity, "citation_context_line")
+        else ""
+    )
 
     # Build the claim-complete request work-list.
     # request = (ref, request_id, [(handle, claim_dict)])
@@ -455,6 +501,7 @@ def check_citations(
         raw, sources, in_tok, out_tok, err = _check_one(
             ref, editions_line, [(h, c["text"]) for h, c in handled],
             client=client, model=model, max_retries=max_retries, sleep=sleep,
+            jurisdiction_line=jurisdiction_line,
         )
         return ref, rid, handled, raw, sources, in_tok, out_tok, err
 

@@ -506,10 +506,24 @@ def _budgeted_text_layer(text_layer: str, budget: _Budget) -> str:
     return kept + f"\n[TRUNCATED {len(text_layer) - _TEXT_LAYER_BUDGET} chars]"
 
 
-def _build_whole_set_input(entries: list[tuple], budget: _Budget) -> str:
+def _identity_preamble(identity: Any) -> str:
+    """One set-context block from the detected identity ("" when absent).
+
+    Prepended identically to the whole-set, shard-map, and reconcile inputs so
+    every cross-QC read shares the same locale facts — the units/language
+    context in particular kills metric-vs-imperial false conflicts. Advisory
+    text only; ``None`` keeps every input byte-identical to pre-Phase-A.
+    """
+    if identity is None or not getattr(identity, "has_content", False):
+        return ""
+    return identity.context_block() + "\n\n"
+
+
+def _build_whole_set_input(entries: list[tuple], budget: _Budget, preamble: str = "") -> str:
     """The whole-set user text: each sheet's id, digest, and budgeted text layer."""
     parts = [
-        f"DRAWING SET — {len(entries)} sheet(s). For each sheet you get its "
+        preamble
+        + f"DRAWING SET — {len(entries)} sheet(s). For each sheet you get its "
         f"structured digest and its verbatim text layer.\n"
     ]
     for sheet_id, digest_text, text_layer, _geom in entries:
@@ -523,10 +537,13 @@ def _build_whole_set_input(entries: list[tuple], budget: _Budget) -> str:
     return "\n".join(parts)
 
 
-def _build_map_input(shard: list[tuple], handle_by_key: dict, budget: _Budget) -> str:
+def _build_map_input(
+    shard: list[tuple], handle_by_key: dict, budget: _Budget, preamble: str = ""
+) -> str:
     """One shard's user text, sheets labeled by opaque handle (never source id)."""
     parts = [
-        f"DRAWING SET SHARD — {len(shard)} sheet(s), each labeled with an opaque "
+        preamble
+        + f"DRAWING SET SHARD — {len(shard)} sheet(s), each labeled with an opaque "
         f"HANDLE. Refer to sheets only by handle.\n"
     ]
     for sheet_id, digest_text, text_layer, geom in shard:
@@ -545,10 +562,10 @@ def _build_map_input(shard: list[tuple], handle_by_key: dict, budget: _Budget) -
 
 
 def _build_reconcile_input(
-    manifest: list[tuple], facts: list[CrossQCFact]
+    manifest: list[tuple], facts: list[CrossQCFact], preamble: str = ""
 ) -> str:
     """The reconciliation user text: the full handle manifest + every collected fact."""
-    lines = ["SHEET MANIFEST (handle = sheet-id (discipline)):"]
+    lines = [preamble + "SHEET MANIFEST (handle = sheet-id (discipline)):"]
     for handle, sheet_id, discipline in manifest:
         lines.append(f"  {handle} = {sheet_id} ({discipline or '?'})")
     lines.append("\nFACTS (sheet_handle | entity_or_tag | attribute | value | exact_quote):")
@@ -605,11 +622,12 @@ def _call(
 def _one_cross_qc_call(
     entries: list[tuple], sheet_map: dict[str, Any], *,
     client: Any, model: str, max_retries: int, sleep: Any, budget: _Budget,
+    preamble: str = "",
 ) -> tuple[list[Finding], list[NumericClaim], int, int, str | None]:
     """Whole-set cross-QC call over ``entries`` → ``(findings, claims, in, out, err)``."""
     raw, in_tok, out_tok, err = _call(
         client=client, model=model, system=cross_qc_system_prompt(),
-        user_text=_build_whole_set_input(entries, budget),
+        user_text=_build_whole_set_input(entries, budget, preamble),
         max_retries=max_retries, sleep=sleep,
     )
     if err is not None or raw is None:
@@ -636,11 +654,12 @@ def _map_call(
     shard: list[tuple], entry_by_handle: dict, handle_by_key: dict,
     discipline_by_handle: dict, *,
     client: Any, model: str, max_retries: int, sleep: Any, budget: _Budget,
+    preamble: str = "",
 ) -> tuple[list[Finding], list[NumericClaim], list[CrossQCFact], int, int, str | None]:
     """One shard-map call → local findings + claims + grounded facts (handle-keyed)."""
     raw, in_tok, out_tok, err = _call(
         client=client, model=model, system=cross_qc_map_system_prompt(),
-        user_text=_build_map_input(shard, handle_by_key, budget),
+        user_text=_build_map_input(shard, handle_by_key, budget, preamble),
         max_retries=max_retries, sleep=sleep,
     )
     if err is not None or raw is None:
@@ -695,11 +714,12 @@ def _parse_facts(
 def _reconcile_call(
     manifest: list[tuple], facts: list[CrossQCFact], entry_by_handle: dict, *,
     client: Any, model: str, max_retries: int, sleep: Any,
+    preamble: str = "",
 ) -> tuple[list[Finding], list[NumericClaim], int, int, str | None]:
     """One reconciliation call comparing ``facts`` across the whole manifest."""
     raw, in_tok, out_tok, err = _call(
         client=client, model=model, system=CROSS_QC_RECONCILE_SYSTEM_PROMPT,
-        user_text=_build_reconcile_input(manifest, facts),
+        user_text=_build_reconcile_input(manifest, facts, preamble),
         max_retries=max_retries, sleep=sleep,
     )
     if err is not None or raw is None:
@@ -724,6 +744,7 @@ _MAX_RECONCILE_PAIR_CALLS = 64
 def _reconcile_facts(
     manifest: list[tuple], facts: list[CrossQCFact], entry_by_handle: dict, *,
     client: Any, model: str, max_retries: int, sleep: Any,
+    preamble: str = "",
 ) -> tuple[list[Finding], list[NumericClaim], int, int, bool]:
     """Reconcile all facts, comparing across groups when they overflow one call.
 
@@ -742,6 +763,7 @@ def _reconcile_facts(
         f, c, i, o, err = _reconcile_call(
             manifest, facts, entry_by_handle,
             client=client, model=model, max_retries=max_retries, sleep=sleep,
+            preamble=preamble,
         )
         return f, c, i, o, err is None
 
@@ -766,6 +788,7 @@ def _reconcile_facts(
             f, c, in_t, out_t, err = _reconcile_call(
                 manifest, union, entry_by_handle,
                 client=client, model=model, max_retries=max_retries, sleep=sleep,
+                preamble=preamble,
             )
             calls += 1
             tot_in += in_t
@@ -852,6 +875,7 @@ def cross_sheet_qc(
     model: str | None = None,
     max_retries: int = DEFAULT_DIGEST_MAX_RETRIES,
     sleep: Any = time.sleep,
+    identity: Any = None,
 ) -> CrossQCResult:
     """Hunt cross-sheet conflicts over the set's digests + text layers.
 
@@ -860,8 +884,13 @@ def cross_sheet_qc(
     a final reconciliation compares the facts across all shards so a cross-shard
     conflict is still found (DA-015). Returns a :class:`CrossQCResult`; empty +
     ``skipped`` for fewer than two readable sheets. Never raises (I-3).
+
+    ``identity`` (Phase A §20.1) prepends the same set-context preamble to every
+    input (whole-set, shard maps, reconcile) — units/language context that kills
+    metric-vs-imperial false conflicts. ``None`` keeps inputs byte-identical.
     """
     model = model or cross_qc_model()
+    preamble = _identity_preamble(identity)
     geom_by_key = {source_page_key(g.ref): g for g in geometries}
 
     entries: list[tuple] = []          # (sheet_id, digest_text, text_layer, geom)
@@ -907,6 +936,7 @@ def cross_sheet_qc(
         findings, claims, in_tok, out_tok, err = _one_cross_qc_call(
             entries, sheet_map, client=client, model=model,
             max_retries=max_retries, sleep=sleep, budget=budget,
+            preamble=preamble,
         )
         deduped = _dedup_findings(findings)
         _log.info(
@@ -950,6 +980,7 @@ def cross_sheet_qc(
         f, c, facts, in_tok, out_tok, err = _map_call(
             shard, entry_by_handle, handle_by_key, discipline_by_handle,
             client=client, model=model, max_retries=max_retries, sleep=sleep, budget=budget,
+            preamble=preamble,
         )
         total_in += in_tok
         total_out += out_tok
@@ -974,6 +1005,7 @@ def cross_sheet_qc(
         r_find, r_claims, r_in, r_out, completed = _reconcile_facts(
             manifest, all_facts, entry_by_handle,
             client=client, model=model, max_retries=max_retries, sleep=sleep,
+            preamble=preamble,
         )
         total_in += r_in
         total_out += r_out

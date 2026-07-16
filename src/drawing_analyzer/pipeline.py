@@ -1119,6 +1119,7 @@ def _run_qc_stages(
     synthesis_text: str = "",
     accepted_documents: list | None = None,
     journal: Any = None,
+    set_identity: Any = None,
 ) -> _QCResult:
     """Run the ledger pipeline: ingest → harvest → anchor → number → verify → markups.
 
@@ -1480,6 +1481,7 @@ def _run_qc_stages(
             try:
                 cires = check_citations(
                     all_findings, geometries, client=client, progress=_citation_progress,
+                    identity=set_identity,
                 )
                 # Best-effort web-search fee: the citation stage does not yet surface
                 # the exact server ``web_search_requests`` count, so bill one search
@@ -2472,7 +2474,9 @@ def extract_drawing_context(
         try:
             from .cross_qc import cross_qc_model, cross_sheet_qc
 
-            cross_res = cross_sheet_qc(sheets, sheet_geometries, client=client)
+            cross_res = cross_sheet_qc(
+                sheets, sheet_geometries, client=client, identity=set_identity_obj,
+            )
             cross_findings = cross_res.findings
             numeric_claims.extend(cross_res.claims)
             # DA-015/DA-028: a sharded run is COMPLETE only when every shard and the
@@ -2619,6 +2623,7 @@ def extract_drawing_context(
         synthesis_text=synthesis_text,
         accepted_documents=inventory.accepted_documents,
         journal=journal,
+        set_identity=set_identity_obj,
     )
     stage_results.extend(qc.stage_results)
 

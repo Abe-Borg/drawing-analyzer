@@ -362,3 +362,57 @@ def test_identify_set_failure_is_not_cached():
 def test_prompt_version_is_a_content_hash():
     assert len(IDENTITY_PROMPT_VERSION) == 16
     assert IdentityResult().ok is False
+
+
+# --------------------------------------------------------------------------- #
+# Identity consumers: citation editions/jurisdiction + cross-QC preamble
+# --------------------------------------------------------------------------- #
+
+
+def test_merged_editions_identity_first_regex_backstop():
+    from drawing_analyzer.citation_check import merged_editions
+
+    si = parse_identity_text(_identity_reply())        # DIN EN 12845 2020 (model)
+    geoms = [_Geom(ref=_ref(0), sheet_text="PER NFPA 13 2016.")]
+    line = merged_editions(si, geoms)
+    # Identity entries lead; regex-only extras follow as the backstop.
+    assert line.index("DIN EN 12845 2020") < line.index("NFPA 13 2016")
+    # No identity -> byte-identical to the pre-Phase-A pure-regex line.
+    assert merged_editions(None, geoms) == "NFPA 13 2016"
+    assert merged_editions(SetIdentity(), geoms) == "NFPA 13 2016"
+
+
+def test_merged_editions_dedupes_and_carries_amendments():
+    from drawing_analyzer.citation_check import merged_editions
+
+    si = SetIdentity(adopted_codes=(
+        AdoptedCode(code="NFPA 13", edition="2016", amendment_note="LA amendments"),
+    ))
+    geoms = [_Geom(ref=_ref(0), sheet_text="NFPA 13 2016")]
+    line = merged_editions(si, geoms)
+    assert line == "NFPA 13 2016 (LA amendments)"       # regex duplicate folded in
+
+
+def test_citation_prompt_carries_jurisdiction_line():
+    from drawing_analyzer.citation_check import _build_citation_prompt
+
+    with_line = _build_citation_prompt(
+        "NFPA 13 §8.1.2", "NFPA 13 2016", [("C1", "relief valve at 150 psi")],
+        jurisdiction_line="Munich, Bavaria, Germany; language de; units metric",
+    )
+    assert "PROJECT JURISDICTION/LOCALE: Munich, Bavaria, Germany" in with_line
+    without = _build_citation_prompt(
+        "NFPA 13 §8.1.2", "NFPA 13 2016", [("C1", "relief valve at 150 psi")],
+    )
+    assert "JURISDICTION" not in without                # None -> byte-identical shape
+
+
+def test_cross_qc_preamble_present_only_with_identity():
+    from drawing_analyzer.cross_qc import _identity_preamble
+
+    si = parse_identity_text(_identity_reply())
+    pre = _identity_preamble(si)
+    assert pre.startswith("SET IDENTITY (model-detected):") and pre.endswith("\n\n")
+    assert "units: metric" in pre
+    assert _identity_preamble(None) == ""
+    assert _identity_preamble(SetIdentity()) == ""      # empty identity adds nothing

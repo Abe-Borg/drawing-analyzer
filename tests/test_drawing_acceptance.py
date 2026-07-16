@@ -881,6 +881,16 @@ def test_gauntlet_exhaustive_status_complete(oracle):
     assert all("no +30% increase applied" in s
                for s in oracle.client.critique_system_prompts)
     assert any(s.source == "model" for s in ctx.profile_snapshots)
+    # Phase A: the identity context reached the downstream consumers — every
+    # citation request carries the jurisdiction + merged-editions lines, and
+    # every cross-QC input opens with the set-context preamble.
+    assert oracle.client.citation_requests
+    for req in oracle.client.citation_requests:
+        assert "PROJECT JURISDICTION/LOCALE: California, United States" in req
+        assert "NFPA 13 2016" in req
+    assert oracle.client.cross_request_texts
+    assert all(t.startswith("SET IDENTITY (model-detected):")
+               for t in oracle.client.cross_request_texts)
 
 
 # ---- the remaining §19.1 set contents: rejection, unanchored, set-level, ----
