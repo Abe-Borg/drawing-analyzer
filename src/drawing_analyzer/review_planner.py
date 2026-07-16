@@ -238,6 +238,12 @@ def sanitize_plans(obj: dict) -> tuple[list[DisciplinePlan], int]:
     raw_plans = obj.get("plans") if isinstance(obj, dict) else None
     if not isinstance(raw_plans, list):
         return [], 0
+    # Plans past the cap are discarded WHOLE — count their items so the stage
+    # reports PARTIAL instead of silently losing entire discipline checklists
+    # (an uncounted drop would let the run claim a COMPLETE review plan).
+    for raw in raw_plans[_MAX_PLANS:]:
+        overflow_items = raw.get("items") if isinstance(raw, dict) else None
+        dropped += max(1, len(overflow_items)) if isinstance(overflow_items, list) else 1
     for raw in raw_plans[:_MAX_PLANS]:
         if not isinstance(raw, dict):
             dropped += 1
@@ -250,7 +256,11 @@ def sanitize_plans(obj: dict) -> tuple[list[DisciplinePlan], int]:
         title = _one_line(raw.get("title"))[:_TITLE_CAP] or f"Model review plan — {discipline}"
         items: list[PlanItem] = []
         seen_texts: set[str] = set()
-        for entry in (raw.get("items") or [])[: _MAX_ITEMS_PER_PLAN * 2]:
+        raw_items = raw.get("items") or []
+        if isinstance(raw_items, list) and len(raw_items) > _MAX_ITEMS_PER_PLAN * 2:
+            # Items past the scan window are discarded unseen — count them too.
+            dropped += len(raw_items) - _MAX_ITEMS_PER_PLAN * 2
+        for entry in raw_items[: _MAX_ITEMS_PER_PLAN * 2]:
             if len(items) >= _MAX_ITEMS_PER_PLAN:
                 dropped += 1
                 continue

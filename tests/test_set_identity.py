@@ -157,6 +157,33 @@ def test_corpus_edition_windows_reach_late_sheets():
     assert "REGEX-HARVESTED EDITION HINTS: NFPA 13 2016" in text
 
 
+def test_corpus_edition_windows_reach_international_codes():
+    # Codex review (PR #70): a non-US adopted-codes note on a LATE sheet must
+    # still get verbatim windows — the US-only citation regex can't see these.
+    from drawing_analyzer.set_identity import _edition_windows
+
+    sheets = [_sheet(i, f"Sheet X-{i} - D - T\nbody") for i in range(20)]
+    geoms = [_Geom(ref=s.ref, sheet_text="") for s in sheets]
+    geoms[-1] = _Geom(
+        ref=sheets[-1].ref,
+        sheet_text=(
+            "ALLGEMEINE HINWEISE: SPRINKLERANLAGEN NACH DIN EN 12845:2020.\n"
+            "ELEKTRO NACH IEC 60364."
+        ),
+    )
+    text, _ = build_identity_user_text(sheets, geoms)
+    assert "EDITION MENTIONS" in text
+    assert "DIN EN 12845:2020" in text
+    assert "IEC 60364" in text
+    # Direct window checks across families; a year is optional evidence
+    # ("designed to BS 9251" counts), and US behavior is unchanged.
+    assert _edition_windows("RESIDENTIAL SPRINKLERS DESIGNED TO BS 9251.")
+    assert _edition_windows("STRUCTURE PER AS/NZS 1170 2002 LOADING.")
+    assert _edition_windows("防火设计符合 GB 50016 (2014).")
+    assert _edition_windows("PER NFPA 13 2016.")
+    assert _edition_windows("no codes mentioned here at all") == []
+
+
 def test_corpus_budget_is_loss_aware_never_silent():
     huge = "B" * 6_000
     n = (_TOTAL_BUDGET // (_HEADER_SLICE + 100)) + 60   # comfortably over budget

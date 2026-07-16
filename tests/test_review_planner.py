@@ -156,6 +156,36 @@ def test_sanitize_caps_refs_and_plan_count():
     assert all(len(it.refs) <= 3 for p in plans for it in p.items)
 
 
+def test_sanitize_counts_plans_discarded_by_the_plan_cap():
+    # Codex review (PR #70): plans past _MAX_PLANS are discarded WHOLE — their
+    # items must be counted as dropped so the stage honestly reports PARTIAL
+    # instead of silently losing entire discipline checklists.
+    payload = {"plans": [
+        {"discipline": f"d{i}", "items": [{"text": f"Flag {i}-{j}."} for j in range(3)]}
+        for i in range(10)                       # 2 plans past the cap of 8
+    ]}
+    plans, dropped = sanitize_plans(payload)
+    assert len(plans) == 8
+    assert dropped == 6                          # 2 discarded plans × 3 items
+    # A malformed overflow entry still counts (as one drop): past-cap is now
+    # d8 (3 items) + d9 (3 items) + the string (1).
+    payload["plans"].append("not a dict")
+    _, dropped2 = sanitize_plans(payload)
+    assert dropped2 == 7
+
+
+def test_sanitize_counts_items_past_the_scan_window():
+    n = 25 * 2 + 5                               # 5 items past the 2×cap scan slice
+    payload = {"plans": [{
+        "discipline": "electrical",
+        "items": [{"text": f"Flag item {i}."} for i in range(n)],
+    }]}
+    plans, dropped = sanitize_plans(payload)
+    assert len(plans[0].items) == 25
+    # 25 counted inside the scan window (past the per-plan cap) + 5 unseen.
+    assert dropped == 30
+
+
 def test_parse_planner_text_tolerates_prose_and_rejects_junk():
     assert parse_planner_text("prose\n" + _reply()) is not None
     assert parse_planner_text("no fences at all") is None

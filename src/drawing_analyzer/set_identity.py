@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -159,21 +160,68 @@ def _one_line(text: str) -> str:
     return " ".join((text or "").split())
 
 
+# Window-selection pattern for NON-US code designations. Deliberately broader
+# and looser than ``citation_check._CODE_TOKEN`` (which stays conservative — it
+# CREATES ``adopted_codes`` entries; this only chooses which verbatim snippets
+# ride the identity prompt as context, capped per sheet, so a false positive
+# costs a few tokens, while a miss can hide the governing code of a non-US set
+# whose adopted-codes note sits past the deep-sliced early sheets). Covers the
+# common national/international families: EN and its national adoptions
+# (DIN/BS/NF/UNE/SS/NEN/PN EN, optionally EN ISO), ISO/IEC, bare DIN/BS,
+# AS/NZS (and bare AS/NZS), SANS, GB(/T), JIS, IS, SNiP/SP, NBC, Eurocode.
+# Year adjacency is optional — "designed to BS 9251" is evidence even
+# unyeared, and EN sets write editions colon-joined ("EN 12845:2020").
+_INTL_CODE_WINDOW_RE = re.compile(
+    r"\b(?:"
+    r"(?:DIN|BS|NF|UNE|SS|SFS|NEN|PN|CSN|ONORM|OENORM)[ -]?EN(?:[ -]?ISO)?[ ]?\d{2,6}"
+    r"|EN(?:[ -]?ISO)?[ ]?\d{3,6}"
+    r"|ISO[ ]?\d{3,6}"
+    r"|IEC[ ]?\d{3,6}"
+    r"|DIN[ ]?\d{3,6}"
+    r"|BS[ ]?\d{3,6}"
+    r"|AS[ ]?/[ ]?NZS[ ]?\d{3,6}"
+    r"|AS[ ]?\d{4,6}"
+    r"|NZS[ ]?\d{3,6}"
+    r"|SANS[ ]?\d{3,6}"
+    r"|GB(?:[ ]?/[ ]?T)?[ ]?\d{3,6}"
+    r"|JIS[ ]?[A-Z][ ]?\d{3,6}"
+    r"|IS[ ]?\d{3,6}"
+    r"|SNIP[ ]?[\d.-]{2,12}"
+    r"|SP[ ]?\d{1,4}\.\d{5}"
+    r"|NBC[ ]?(?:19|20)\d{2}"
+    r"|EUROCODE[ ]?\d?"
+    r")\b(?:[:\s,()–-]{0,3}(?:19|20)\d{2})?",
+    re.IGNORECASE,
+)
+
+
 def _edition_windows(sheet_text: str) -> list[str]:
-    """Verbatim ±window slices around each code-edition mention on one sheet."""
+    """Verbatim ±window slices around each code-edition mention on one sheet.
+
+    Two selectors feed the windows: the conservative US code+year pattern the
+    citation check harvests with, and the broader international designation
+    pattern above — so a Eurocode/BS/DIN/AS-NZS/GB adopted-codes note reaches
+    the prompt verbatim even when it sits on a late sheet (the finding a
+    US-only selector would silently miss). Overlaps merge; capped per sheet.
+    """
     from .citation_check import _EDITION_RE
 
+    text = sheet_text or ""
+    spans = sorted(
+        {m.span() for m in _EDITION_RE.finditer(text)}
+        | {m.span() for m in _INTL_CODE_WINDOW_RE.finditer(text)}
+    )
     out: list[str] = []
     last_end = -1
-    for m in _EDITION_RE.finditer(sheet_text or ""):
+    for start, end in spans:
         if len(out) >= _MAX_WINDOWS_PER_SHEET:
             break
-        start = max(0, m.start() - _EDITION_WINDOW)
-        end = min(len(sheet_text), m.end() + _EDITION_WINDOW)
-        if start < last_end:  # overlapping mention → already covered
+        w_start = max(0, start - _EDITION_WINDOW)
+        w_end = min(len(text), end + _EDITION_WINDOW)
+        if w_start < last_end:  # overlapping mention → already covered
             continue
-        out.append(_one_line(sheet_text[start:end]))
-        last_end = end
+        out.append(_one_line(text[w_start:w_end]))
+        last_end = w_end
     return out
 
 
