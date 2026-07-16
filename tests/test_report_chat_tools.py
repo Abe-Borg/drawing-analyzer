@@ -446,3 +446,73 @@ def test_new_chat_restores_the_starter_chips(page, tmp_path):
         "document.getElementById('da-starters-row').style.display"
     ) == ""
     assert page.eval_on_selector_all(".da-starter", "els => els.length") >= 1
+
+
+# --------------------------------------------------------------------------- #
+# Panel resize: every edge and corner grip drags its own edge(s) while the
+# opposite edge stays pinned — all eight directions, not just the original
+# top / left / top-left three.
+# --------------------------------------------------------------------------- #
+
+# handle class -> (drag dx, dy) and the per-edge shift it must produce. Any edge
+# not named must stay put. Every drag pushes the grip OUTWARD so the panel only
+# grows: that keeps each gesture clear of the viewport margins and the min-size
+# floor, so the pinned edges hold exactly.
+_RESIZE_CASES = [
+    ("da-rz-r",  (60, 0),    {"right": 60}),
+    ("da-rz-l",  (-60, 0),   {"left": -60}),
+    ("da-rz-t",  (0, -60),   {"top": -60}),
+    ("da-rz-b",  (0, 60),    {"bottom": 60}),
+    ("da-rz-tl", (-60, -60), {"left": -60, "top": -60}),
+    ("da-rz-tr", (60, -60),  {"right": 60, "top": -60}),
+    ("da-rz-bl", (-60, 60),  {"left": -60, "bottom": 60}),
+    ("da-rz-br", (60, 60),   {"right": 60, "bottom": 60}),
+]
+
+# Park the panel mid-viewport with slack on every side, defeating the CSS
+# floor/ceiling exactly as enterCustom() does, so each grip has room to grow.
+_BASELINE_GEOM = """
+(function(){
+  var p = document.getElementById('da-chat-panel');
+  p.style.left='485px'; p.style.top='150px';
+  p.style.width='430px'; p.style.height='460px';
+  p.style.right='auto'; p.style.bottom='auto';
+  p.style.minHeight='0px'; p.style.maxWidth='none';
+})();
+"""
+
+
+def _panel_rect(page):
+    return page.evaluate(
+        "() => { var r = document.getElementById('da-chat-panel').getBoundingClientRect();"
+        " return {left:r.left, top:r.top, right:r.right, bottom:r.bottom}; }"
+    )
+
+
+def test_resize_grips_cover_all_eight_edges(page, tmp_path):
+    doc = hr.build_html_report(
+        _findings_ctx(), source_names=["a.pdf"], now=NOW, api_key=KEY, embed_api_key=True
+    )
+    page.set_viewport_size({"width": 1400, "height": 1000})
+    _load(page, doc, tmp_path)
+    page.click("#da-chat-fab")
+    page.wait_for_selector("#da-chat-panel", state="visible", timeout=3000)
+
+    for cls, (dx, dy), expected in _RESIZE_CASES:
+        page.evaluate(_BASELINE_GEOM)
+        before = _panel_rect(page)
+        box = page.locator("." + cls).bounding_box()
+        assert box, cls + " grip should be laid out and grabbable"
+        cx, cy = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+        page.mouse.move(cx, cy)
+        page.mouse.down()
+        page.mouse.move(cx + dx, cy + dy, steps=15)  # cross the 4px drag threshold
+        page.mouse.up()
+        after = _panel_rect(page)
+        for edge in ("left", "top", "right", "bottom"):
+            want = expected.get(edge, 0)
+            got = after[edge] - before[edge]
+            assert abs(got - want) <= 10, (
+                cls + ": " + edge + " edge moved " + str(round(got, 1))
+                + "px, expected " + str(want) + "px (pinned edges must not move)"
+            )
