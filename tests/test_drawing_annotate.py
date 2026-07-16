@@ -125,10 +125,10 @@ def test_annot_info_fields_populated(tmp_path):
         assert info["title"] == DEFAULT_AUTHOR
         assert info["subject"] == "code"
         assert "Missing clearance" in info["content"]
-        assert 'Quote: "VAV-3"' in info["content"]
-        assert "Verification: VERIFIED" in info["content"]
+        assert 'Look for: "VAV-3"' in info["content"]
+        assert "AI-verified against the drawing." in info["content"]
         assert "CMC 310" in info["content"]
-        assert not info["content"].startswith("[UNVERIFIED]")
+        assert not info["content"].startswith("[CHECK]")
     finally:
         doc.close()
 
@@ -140,7 +140,8 @@ def test_unverified_annot_is_prefixed(tmp_path):
     doc = pymupdf.open(str(tmp_path / "r.pdf"))
     try:
         content = next(a for page in doc for a in page.annots()).info["content"]
-        assert content.startswith("[UNVERIFIED]")
+        assert content.startswith("[CHECK]")
+        assert "Not yet verified - double-check on the sheet." in content
     finally:
         doc.close()
 
@@ -324,3 +325,51 @@ def test_index_severity_ties_break_by_source_page_position(tmp_path):
         doc.close()
     pos = {qc: index_text.find(qc) for qc in ("QC-001", "QC-002", "QC-003")}
     assert pos["QC-001"] < pos["QC-002"] < pos["QC-003"]
+
+
+# --------------------------------------------------------------------------- #
+# QC Findings bookmark outline (HTML↔PDF links, Component B)
+# --------------------------------------------------------------------------- #
+
+
+def test_reviewed_pdf_carries_qc_findings_bookmark_outline(tmp_path):
+    # The marked-up set is self-navigable in Bluebeam/Acrobat: a 'QC Findings'
+    # outline with one GOTO child per inked finding, jumping to its page + mark.
+    src = _make_pdf(tmp_path, pages=2)
+    a = _finding("clearance", status="VERIFIED", page=0, quote="VAV-3")
+    b = _finding("page 2 issue", status="VERIFIED", page=1, rect=(120, 120, 300, 160), quote="WH-1")
+    a.qc_id, b.qc_id = "QC-001", "QC-002"
+
+    res = write_reviewed_pdfs([a, b], [src], tmp_path / "out")
+    doc = pymupdf.open(str(res.reviewed_pdfs[0]))
+    try:
+        toc = doc.get_toc(simple=False)
+    finally:
+        doc.close()
+
+    parents = [t for t in toc if t[0] == 1]
+    children = [t for t in toc if t[0] == 2]
+    assert parents and parents[0][1].startswith("QC Findings")
+    assert len(children) == 2
+    titles = " ".join(t[1] for t in children)
+    assert "QC-001" in titles and "QC-002" in titles
+    # Every child is a real GOTO destination (page + zoom) — what makes Bluebeam
+    # and Acrobat jump to the mark, not just list a heading.
+    for _lvl, _title, page, dest in children:
+        assert dest.get("kind") == pymupdf.LINK_GOTO
+        assert page >= 1
+
+
+def test_bookmark_outline_absent_when_no_findings_anchor_to_a_page(tmp_path):
+    # A set-level finding (page_index -1) anchors to no page → no outline, and
+    # the writer still ships the reviewed copy (I-3).
+    src = _make_pdf(tmp_path, pages=1)
+    f = _finding("set-level note", status="VERIFIED", page=-1, rect=None)
+    f.anchor = Anchor(status="UNANCHORED", rect_pdf=None, method="quote_not_found")
+    f.qc_id = "QC-001"
+    res = write_reviewed_pdfs([f], [src], tmp_path / "out")
+    doc = pymupdf.open(str(res.reviewed_pdfs[0]))
+    try:
+        assert doc.get_toc(simple=False) == []
+    finally:
+        doc.close()

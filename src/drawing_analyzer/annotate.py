@@ -9,7 +9,7 @@ result reads like a senior plan-review set (Phase 15):
 - **severity styling**: high = red, medium = orange, low / question = blue;
   DETERMINISTIC (auditor) findings draw a **solid** border, model findings a
   **revision cloud** (``clouds=2``), opted-in unverified findings **dashed** with
-  an ``[UNVERIFIED]`` popup prefix;
+  a ``[CHECK]`` popup prefix;
 - text-anchored defects are Square clouds; **sheet-level / absence findings**
   (``anchor_hint="SHEET"``) become FreeText **callout boxes stacked in a computed
   clear margin band** (the largest text-free horizontal band, found from the
@@ -21,9 +21,11 @@ result reads like a senior plan-review set (Phase 15):
   "AI DRAFT REVIEW — index";
 - an optional **appendix page** (off by default) lists the deterministic checks
   that *passed* — the balance column of a real review;
-- popups are exhaustive and descriptive: finding text, verbatim quote, refs plus
-  the citation-check verdict, verification status/note, the cross-sheet pointer,
-  the reproduced flag, the evidence filename, and both finding ids.
+- popups are lean and actionable, written for a human reviewer: finding text,
+  the recommended action, the verbatim quote to look for, the cross-sheet
+  pointer, human-meaningful refs plus the citation verdict in plain words, and
+  a closing plain-words trust note. Machine detail (finding ids, provenance
+  chips, evidence paths, raw statuses) lives in the CSV/HTML report instead.
 
 Opened in Bluebeam Revu the annots populate the Markups List (filter / sort /
 reply / export all work); Acrobat and Chromium render them too, and the index
@@ -112,6 +114,45 @@ REVIEW_NOTES_PAGE_LABEL = "AI DRAFT REVIEW - AI REVIEW NOTES"
 _TRUSTED = frozenset({"VERIFIED", "DETERMINISTIC"})
 # Rejected findings render grey/struck when explicitly opted in (--ink-rejected).
 _REJECTED_COLOR = (0.45, 0.45, 0.45)
+
+# ---- Plain-words trust vocabulary --------------------------------------- #
+# The popup speaks to a human reviewer, not to the pipeline: a short bracket
+# tag on line 1 (it survives the Markups List preview and is the glanceable
+# hallucination signal) plus a full plain sentence at the end of the popup.
+# ASCII only — the same strings must be safe on Base-14 ``insert_text`` pages.
+_TRUST_PREFIX = {"REJECTED": "[REJECTED] ", "UNVERIFIED": "[CHECK] "}
+_PLACE_PREFIX = {"SHEET": "[SHEET-WIDE]", "UNANCHORED": "[QUOTE NOT FOUND]"}
+_TRUST_NOTE = {
+    "VERIFIED": "AI-verified against the drawing.",
+    "DETERMINISTIC": "Found by an exact text check of the drawings - not an AI judgment.",
+    "UNCERTAIN": "Not yet verified - double-check on the sheet.",
+    "SKIPPED": "Not yet verified - double-check on the sheet.",
+    "REJECTED": "Rejected on AI re-check - kept for the record only.",
+}
+_TRUST_NOTE_UNVERIFIED = "Not yet verified - double-check on the sheet."
+_TRUST_NOTE_SINGLE_READ = "Not yet verified (seen in one AI read) - double-check on the sheet."
+# Arithmetic operand provenance (§17.5) overrides the generic note: the host
+# math is always deterministic, but only text-extracted operands make it
+# ground truth — model-transcribed terms must read as "re-check this".
+_TRUST_NOTE_TEXT_EXTRACTED = "Math checked by computer from the sheet's own printed numbers."
+_TRUST_NOTE_MODEL_TRANSCRIBED = (
+    "Computed from numbers as read by the AI - re-check the math against the sheet."
+)
+_UNANCHORED_QUOTE_CAUTION = (
+    " (the AI could not find this text on the sheet - treat with caution)"
+)
+_CITATION_PHRASE = {
+    "CHECKED_SUPPORTS": "Code ref checked - it supports this finding.",
+    "CHECKED_MISMATCH": "Code ref may be outdated",  # "- note (editions: X)" appended
+}
+# Index-page status column, in reviewer words (raw statuses are pipeline jargon).
+_INDEX_STATUS_LABEL = {
+    "VERIFIED": "Verified",
+    "DETERMINISTIC": "Computed",
+    "UNCERTAIN": "Check",
+    "SKIPPED": "Check",
+    "REJECTED": "Rejected",
+}
 
 # Stroke color by severity (RGB 0–1): red / orange / blue, grey fallback. A
 # "question"-category finding is blue regardless of its severity (Phase 15 spec:
@@ -323,7 +364,8 @@ def _units_for_finding(
         leg_finding = Finding(
             sheet_id=leg.sheet_id, source_name=leg.source_name, source_id=leg.source_id,
             page_index=leg.page_index, category=finding.category, severity=finding.severity,
-            text=finding.text, source_quote=leg.source_quote, refs=list(finding.refs),
+            text=finding.text, source_quote=leg.source_quote,
+            recommended_action=finding.recommended_action, refs=list(finding.refs),
             also_on=others, anchor=leg.anchor, verification=finding.verification,
             qc_id=finding.qc_id, citation=finding.citation, sources=list(finding.sources),
         )
@@ -380,7 +422,7 @@ def is_margin_callout(finding: Finding, *, include_unverified: bool) -> bool:
     Under the Part III gating amendment (§18) **every rect-less finding** gets a
     callout — sheet-level / absence findings (``anchor_hint="SHEET"``) *and*
     ``UNANCHORED`` ones (the quote-matched-nothing hallucination signals, drawn
-    with an ``[UNANCHORED]`` prefix so they read as flagged, never dropped) —
+    with a ``[QUOTE NOT FOUND]`` prefix so they read as flagged, never dropped) —
     subject to the same trust gating as clouds.
     """
     anchor = getattr(finding, "anchor", None)
@@ -427,74 +469,118 @@ def _color(finding: Finding) -> tuple[float, float, float]:
     return _SEVERITY_COLORS.get((finding.severity or "").lower(), _DEFAULT_COLOR)
 
 
+def _truncate_at_word(text: str, limit: int) -> str:
+    """Truncate to <= ``limit`` chars at a word boundary with an ASCII ``...``.
+
+    Never cuts mid-word: the cut backs up to the last whitespace, unless that
+    whitespace sits in the first half of the budget (one giant token), where a
+    hard cut is the only option. Short text passes through unchanged. Pure and
+    PyMuPDF-free, so the display-slice rule is unit-testable.
+    """
+    if len(text) <= limit:
+        return text
+    cut = max(limit - 3, 1)
+    head = text[:cut]
+    space = max(head.rfind(" "), head.rfind("\n"), head.rfind("\t"))
+    if space > cut // 2:
+        head = head[:space]
+    return head.rstrip() + "..."
+
+
+def _placement_kind(finding: Finding) -> str:
+    """The margin-callout placement key: ``"SHEET"`` / ``"UNANCHORED"`` / ``""``."""
+    if getattr(finding, "anchor_hint", "") == "SHEET":
+        return "SHEET"
+    return "UNANCHORED"
+
+
+def _trust_note(finding: Finding, *, unverified: bool, rejected: bool) -> str:
+    """The plain-words trust sentence that closes the popup ("" for none).
+
+    Arithmetic operand provenance (§17.5) overrides the generic phrasing: a
+    host computation over model-transcribed terms must not read as ground
+    truth just because the multiplication ran in Python. The self-consistency
+    ``reproduced`` flag folds into the unverified sentence — it only ever
+    carries signal there.
+    """
+    if rejected:
+        return _TRUST_NOTE["REJECTED"]
+    v = getattr(finding, "verification", None)
+    origin = getattr(v, "operand_origin", "") if v is not None else ""
+    if origin == "TEXT_EXTRACTED":
+        return _TRUST_NOTE_TEXT_EXTRACTED
+    if origin == "MODEL_TRANSCRIBED":
+        return _TRUST_NOTE_MODEL_TRANSCRIBED
+    if unverified:
+        if not getattr(finding, "reproduced", True):
+            return _TRUST_NOTE_SINGLE_READ
+        return _TRUST_NOTE_UNVERIFIED
+    status = (v.status if v is not None else "") or ""
+    return _TRUST_NOTE.get(status, "")
+
+
+def _citation_phrase(finding: Finding) -> str:
+    """The citation-check verdict as one reviewer sentence ("" when unchecked)."""
+    citation = getattr(finding, "citation", None)
+    if citation is None:
+        return ""
+    phrase = _CITATION_PHRASE.get(citation.status, "")
+    if not phrase:
+        return ""
+    if citation.status == "CHECKED_MISMATCH":
+        if citation.note:
+            phrase += f" - {citation.note}"
+        if citation.edition_notes:
+            phrase += f" ({citation.edition_notes} editions)"
+    return phrase
+
+
 def _annot_content(
     finding: Finding, *, unverified: bool, rejected: bool = False, place: str = ""
 ) -> str:
-    """The popup comment — exhaustive and descriptive (Phase 15 template).
+    """The popup comment — lean and actionable, written for a human reviewer.
 
     Order: the finding itself first (Revu's Markups List previews the first
-    line), then the verbatim quote, cross-sheet pointers, verification, refs +
-    citation-check verdict, provenance, the reproduced flag (only when it
-    carries signal), the evidence filename, and the ids. ``place`` is the §18
-    placement prefix for margin callouts (``[SHEET]`` / ``[UNANCHORED]``) — for a
-    FreeText annot ``/Contents`` *is* the displayed text, so the prefix must live
-    here to be visible on the box.
+    line), then what to do about it, where to look (the verbatim quote and any
+    cross-sheet pointers), human-meaningful code refs + the citation verdict in
+    plain words, and a closing plain-words trust note. Machine detail (finding
+    ids, provenance chips, evidence paths, raw statuses) stays in the CSV/HTML
+    report — never on the drawing. ``place`` is the §18 placement key for
+    margin callouts (``"SHEET"`` / ``"UNANCHORED"``, rendered via
+    ``_PLACE_PREFIX``) — for a FreeText annot ``/Contents`` *is* the displayed
+    text, so the prefix must live here to be visible on the box. ASCII only.
     """
     head = f"{finding.qc_id}: " if finding.qc_id else ""
     lines = [f"{head}{finding.text.strip()}"]
+    action = getattr(finding, "recommended_action", "").strip()
+    if action:
+        lines.append(f"Action: {action}")
     quote = finding.source_quote.strip()
     if quote:
-        lines.append(f'Quote: "{quote}"')
+        look = f'Look for: "{quote}"'
+        if getattr(finding.anchor, "status", "") == "UNANCHORED":
+            look += _UNANCHORED_QUOTE_CAUTION
+        lines.append(look)
     for leg in getattr(finding, "also_on", None) or []:
         lq = f': "{leg.source_quote.strip()}"' if leg.source_quote.strip() else ""
         pointer = f"Conflicts with {leg.sheet_id}{lq}"
         if finding.qc_id:
-            pointer += f" — see {finding.qc_id} there"
+            pointer += f" - see {finding.qc_id} there"
         lines.append(pointer)
-    v = getattr(finding, "verification", None)
-    if v is not None:
-        lines.append(f"Verification: {v.status}" + (f" — {v.note}" if v.note else ""))
-        # Arithmetic provenance (§17.5): a host computation over model-transcribed
-        # terms must not read as ground truth just because the multiplication ran
-        # in Python — say so on the mark so the reviewer weighs it correctly.
-        origin = getattr(v, "operand_origin", "")
-        if origin == "MODEL_TRANSCRIBED":
-            lines.append("Provenance: host-computed from model-transcribed terms")
-        elif origin == "TEXT_EXTRACTED":
-            lines.append("Provenance: host-computed from text-extracted operands")
     if finding.refs:
         lines.append("Refs: " + ", ".join(str(r) for r in finding.refs))
-    citation = getattr(finding, "citation", None)
-    if citation is not None and citation.status != "UNCHECKED":
-        cite = f"Citation check: {citation.status}"
-        if citation.note:
-            cite += f" — {citation.note}"
-        if citation.edition_notes:
-            cite += f" (editions: {citation.edition_notes})"
+    cite = _citation_phrase(finding)
+    if cite:
         lines.append(cite)
-    sources = getattr(finding, "sources", None) or []
-    if sources:
-        from .ledger import provenance_label
-
-        lines.append(f"Sources: {provenance_label(sources)}")
-    if not getattr(finding, "reproduced", True):
-        lines.append("Reproduced: no (seen in a single read)")
-    if v is not None:
-        # DA-016: list every saved crop (one per leg of a cross-sheet conflict),
-        # not only the first — the popup's evidence references must be complete.
-        rels = [
-            (getattr(a, "relative_path", "") or "").strip()
-            for a in (getattr(v, "evidence", None) or [])
-        ]
-        rels = [r for r in rels if r] or ([v.evidence_png] if v.evidence_png else [])
-        if len(rels) == 1:
-            lines.append(f"Evidence: {rels[0]}")
-        elif rels:
-            lines.append("Evidence: " + "; ".join(rels))
-    lines.append(f"Finding ID: {finding.id}")
+    note = _trust_note(finding, unverified=unverified, rejected=rejected)
+    if note:
+        lines.append(note)
     content = "\n".join(lines)
-    trust = "[REJECTED] " if rejected else ("[UNVERIFIED] " if unverified else "")
-    placement = f"{place} " if place else ""
+    trust = _TRUST_PREFIX["REJECTED"] if rejected else (
+        _TRUST_PREFIX["UNVERIFIED"] if unverified else ""
+    )
+    prefix = _PLACE_PREFIX.get(place, "")
+    placement = f"{prefix} " if prefix else ""
     return f"{trust}{placement}{content}"
 
 
@@ -885,14 +971,14 @@ def _add_margin_callouts(
         rejected = _status(finding) == "REJECTED"
         unverified = _is_unverified(finding) and not rejected
         color = _REJECTED_COLOR if rejected else _color(finding)
-        # Placement prefix (§18): sheet-level absences read [SHEET]; a quote that
-        # matched nothing reads [UNANCHORED] — the flagged-loudly hallucination
-        # signal, on the page but never dressed as a placed finding. For FreeText
-        # /Contents IS the displayed text, so the prefixed content set below is
-        # exactly what the box shows.
-        place = "[SHEET]" if (finding.anchor_hint or "").upper() == "SHEET" else "[UNANCHORED]"
+        # Placement prefix (§18): sheet-level absences read [SHEET-WIDE]; a quote
+        # that matched nothing reads [QUOTE NOT FOUND] — the flagged-loudly
+        # hallucination signal, on the page but never dressed as a placed finding.
+        # For FreeText /Contents IS the displayed text, so the prefixed content
+        # set below is exactly what the box shows.
         content = _annot_content(
-            finding, unverified=unverified, rejected=rejected, place=place
+            finding, unverified=unverified, rejected=rejected,
+            place=_placement_kind(finding),
         )
         components = drawn.setdefault(placement.placement_id, [])
         # Severity-colored text carries the legend (PyMuPDF rejects border_color
@@ -900,7 +986,7 @@ def _add_margin_callouts(
         # ``rotate=page.rotation`` keeps the text upright on a rotated sheet; the
         # box is transformed view→page so it lands in the computed clear band.
         annot = page.add_freetext_annot(
-            _derotate_rect(page, box), content[:220],
+            _derotate_rect(page, box), _truncate_at_word(content, 220),
             fontsize=7.5, text_color=color, fill_color=(1.0, 1.0, 0.92),
             rotate=int(page.rotation or 0),
         )
@@ -951,7 +1037,8 @@ def _add_margin_callouts(
 
 
 def _status_label(finding: Finding) -> str:
-    return _status(finding)
+    # Reviewer words on the index page, never raw pipeline statuses.
+    return _INDEX_STATUS_LABEL.get(_status(finding), _status(finding))
 
 
 # Severity triage rank for the reviewed-PDF index (§18.7, DA-025): high, then
@@ -1094,9 +1181,7 @@ def _insert_index_pages(
             page.insert_text((95, y), (finding.sheet_id or "")[:20], fontsize=8, color=text_color)
             page.insert_text((210, y), (finding.severity or "")[:6], fontsize=8, color=color)
             page.insert_text((258, y), _status_label(finding)[:13], fontsize=8, color=text_color)
-            text = finding.text.strip().replace("\n", " ")
-            if len(text) > 62:
-                text = text[:59] + "..."
+            text = _truncate_at_word(finding.text.strip().replace("\n", " "), 62)
             page.insert_text((340, y), text, fontsize=8, color=text_color)
 
             target_page = int(finding.page_index) + n_pages
@@ -1209,15 +1294,17 @@ def _insert_review_notes_page(
         for finding, placement in batch:
             rejected = _status(finding) == "REJECTED"
             unverified = _is_unverified(finding) and not rejected
-            place = "[SHEET]" if (finding.anchor_hint or "").upper() == "SHEET" else "[UNANCHORED]"
             content = (
                 f"{finding.qc_id or '-'}  [{finding.sheet_id} / {finding.severity}]\n"
-                + _annot_content(finding, unverified=unverified, rejected=rejected, place=place)
+                + _annot_content(
+                    finding, unverified=unverified, rejected=rejected,
+                    place=_placement_kind(finding),
+                )
             )
             box = pymupdf.Rect(_NOTE_LEFT, y, _INDEX_PAGE_W - _NOTE_LEFT, y + _NOTE_BOX_H)
             try:
                 annot = page.add_freetext_annot(
-                    box, content[:400], fontsize=8,
+                    box, _truncate_at_word(content, 400), fontsize=8,
                     text_color=(_REJECTED_COLOR if rejected else _color(finding)),
                     fill_color=(1.0, 1.0, 0.92),
                 )
@@ -1483,6 +1570,80 @@ def _result_from_receipts(
 # --------------------------------------------------------------------------- #
 
 
+_OUTLINE_ZOOM = 1.75            # modest zoom-to-mark for bookmark destinations
+
+
+def _set_findings_outline(
+    doc: "pymupdf.Document",
+    pairs: "list[tuple[Finding, MarkupPlacement]]",
+    final_page_by_pid: "dict[str, int]",
+    *,
+    n_index: int,
+) -> None:
+    """Write a ``QC Findings`` bookmark outline into ``doc`` (Phase: HTML↔PDF links).
+
+    One child bookmark per finding whose primary mark was actually drawn — in
+    ``QC-###`` order — whose GOTO destination is the page that mark **landed
+    on** (``final_page_by_pid``, keyed by placement id: the source page for an
+    on-sheet cloud/margin callout, the appended *AI Review Notes* page for one
+    that overflowed there), so a bookmark always points at the mark, the same
+    page its HTML deep link and receipt point at. A rect-bearing finding zooms
+    to the rect's top-left via :func:`_derotate_point` (moving the PAGE_VIEW_V2
+    corner into that page's own space, exactly as the index-page GOTO links do);
+    a rect-less one targets the page top.
+
+    Any outline already on the source PDF (a set's sheet-navigation bookmarks)
+    is **preserved** — the QC section is appended, never substituted: the writer
+    annotates the original document, whose outline must survive into the review
+    copy. Bluebeam and Acrobat surface the merged outline in their Bookmarks
+    panel, making the marked-up set self-navigable independent of the HTML
+    report. No-op when no finding's mark was drawn.
+    """
+    page_count = doc.page_count
+    seen: set[str] = set()
+    entries: list[tuple[Finding, int]] = []
+    for finding, placement in pairs:
+        # One bookmark per finding, at its own anchor — not per cross-sheet leg
+        # or margin/index placement (those share the finding's qc_id).
+        if placement.leg_id != PRIMARY_LEG_ID or finding.id in seen:
+            continue
+        # The page the mark actually landed on (overflow → notes page); fall
+        # back to the source page + front-index offset when the placement drew
+        # nothing recorded (defensive — such a finding has no mark to point at).
+        final_page = final_page_by_pid.get(placement.placement_id)
+        if final_page is None:
+            page_index = int(getattr(finding, "page_index", -1))
+            final_page = page_index + n_index if page_index >= 0 else -1
+        if not (0 <= final_page < page_count):
+            continue
+        seen.add(finding.id)
+        entries.append((finding, final_page))
+    if not entries:
+        return
+    entries.sort(key=lambda e: (e[0].qc_id or "~", e[0].id))
+
+    parent_page = 1 if n_index > 0 else entries[0][1] + 1     # index page, else first mark
+    qc_toc: list = [[1, f"QC Findings ({len(entries)})", parent_page]]
+    for finding, final_page in entries:
+        rect = getattr(finding.anchor, "rect_pdf", None) if finding.anchor else None
+        if rect:
+            point = _derotate_point(doc[final_page], rect[0], rect[1])
+            dest = {"kind": pymupdf.LINK_GOTO, "to": point, "zoom": _OUTLINE_ZOOM}
+        else:
+            dest = {"kind": pymupdf.LINK_GOTO, "to": pymupdf.Point(0, 0), "zoom": 0}
+        qc = finding.qc_id or "QC-?"
+        sheet = (finding.sheet_id or "").strip()
+        text = " ".join((finding.text or "").split())
+        if len(text) > 60:
+            text = text[:57].rstrip() + "…"
+        title = f"[{qc}] " + (f"{sheet} — {text}" if sheet else text) if text else f"[{qc}] {sheet}".rstrip()
+        qc_toc.append([2, title, final_page + 1, dest])
+    # Append after the source PDF's own outline (get_toc(simple=False) round-
+    # trips through set_toc), so existing sheet bookmarks survive the review copy.
+    existing = doc.get_toc(simple=False) or []
+    doc.set_toc(existing + qc_toc)
+
+
 def _annotate_units(
     pdf_path: Path | str,
     pairs: "list[tuple[Finding, MarkupPlacement]]",
@@ -1604,6 +1765,23 @@ def _annotate_units(
                     _stamp_component(doc, xref, pid, component, final_page)
                 except Exception:  # noqa: BLE001
                     _log.warning("could not stamp review note %s for %s", component, pid)
+
+        # A 'QC Findings' bookmark outline so the marked-up set is one-click
+        # navigable in Bluebeam/Acrobat (each issue → the page its mark landed
+        # on, zoomed). Source-page components carry their original page (shifted
+        # by the front index); review-notes components already carry their final
+        # page. I-3: an outline is a nicety — a failure here never sinks the file.
+        try:
+            final_page_by_pid: dict[str, int] = {}
+            for pid, comps in collected.items():
+                if comps:
+                    final_page_by_pid[pid] = comps[0][2] + n_index
+            for pid, comps in notes_collected.items():
+                if comps:
+                    final_page_by_pid[pid] = comps[0][2]
+            _set_findings_outline(doc, pairs, final_page_by_pid, n_index=n_index)
+        except Exception:  # noqa: BLE001
+            _log.warning("could not build the findings bookmark outline for %s", src.name)
 
         out.parent.mkdir(parents=True, exist_ok=True)
         doc.save(str(out), garbage=3, deflate=True)
@@ -1961,13 +2139,16 @@ def write_set_review_notes_pdf(
             y = _NOTE_TOP
             for finding, placement in batch:
                 box = pymupdf.Rect(_NOTE_LEFT, y, _INDEX_PAGE_W - _NOTE_LEFT, y + _NOTE_BOX_H)
+                action = getattr(finding, "recommended_action", "").strip()
                 content = (
                     f"{finding.qc_id or '-'}  [set-level / {finding.severity}]\n"
                     f"{finding.text.strip()}"
+                    + (f"\nAction: {action}" if action else "")
+                    + "\nNot yet verified - double-check across the set."
                 )
                 try:
                     annot = page.add_freetext_annot(
-                        box, content[:400], fontsize=8,
+                        box, _truncate_at_word(content, 400), fontsize=8,
                         text_color=_color(finding), fill_color=(1.0, 1.0, 0.92),
                     )
                     annot.set_info(title=author, subject="set-level review note", content=content)

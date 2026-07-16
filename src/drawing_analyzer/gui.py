@@ -442,12 +442,25 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             text_color=COLORS["text_secondary"], command=self._on_open_log,
         )
         self.open_log_btn.pack(side="left")
-        # Export All (primary/accent) writes the complete §18.5 deliverable in
-        # one go — report.html, Markdown, findings.json/csv, sheet_text/,
-        # reviewed PDFs, evidence/, markup_manifest.json, run.log and
-        # run_manifest.json — atomically published into a picked folder
-        # (Phase 26B, DA-024/DA-033). The individual save buttons remain for
-        # one-off artifacts.
+        # GUI export surface trimmed (gui-export-options-cleanup): the per-artifact
+        # "Save Markdown…" and "Save Findings CSV…" buttons were removed from the
+        # GUI to keep it fast and uncluttered — the operator's two review
+        # deliverables are the HTML report and the marked-up ("reviewed") PDFs.
+        #
+        # NOTE: this is a GUI-only change. Those two buttons' handlers (_on_save,
+        # _on_save_csv) and all the underlying export code are deliberately LEFT
+        # IN PLACE as dead code — nothing was removed from the engine — so either
+        # can be re-surfaced later just by re-adding a button here and re-wiring
+        # the enable/disable calls. See README ("GUI export options").
+        #
+        # "Export All…" is deliberately KEPT: it is the only GUI path that writes
+        # the run record (run.log / run_manifest.json) — the diagnostic artifact
+        # for a failed run that produced no digest text and no reviewed PDF — so
+        # it stays available even then (see the unconditional enable in _on_done).
+        # It writes the complete §18.5 deliverable in one go — report.html,
+        # Markdown, findings.json/csv, sheet_text/, reviewed PDFs, evidence/,
+        # markup_manifest.json, run.log and run_manifest.json — atomically
+        # published into a picked folder (Phase 26B, DA-024/DA-033).
         self.export_btn = ctk.CTkButton(
             btn_row, text="Export All…", width=140, height=34,
             font=ctk.CTkFont(family="Segoe UI", size=13),
@@ -464,26 +477,6 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             command=self._on_save_html, state="disabled",
         )
         self.html_btn.pack(side="right", padx=(0, 8))
-        self.save_btn = ctk.CTkButton(
-            btn_row, text="Save Markdown…", width=150, height=34,
-            font=ctk.CTkFont(family="Segoe UI", size=13),
-            fg_color=COLORS["bg_input"], hover_color=COLORS["border"],
-            border_width=1, border_color=COLORS["border"],
-            text_color=COLORS["text_secondary"],
-            command=self._on_save, state="disabled",
-        )
-        self.save_btn.pack(side="right", padx=(0, 8))
-        # QC outputs — enabled only when a run actually produced findings /
-        # reviewed PDFs (see _on_done).
-        self.csv_btn = ctk.CTkButton(
-            btn_row, text="Save Findings CSV…", width=170, height=34,
-            font=ctk.CTkFont(family="Segoe UI", size=13),
-            fg_color=COLORS["bg_input"], hover_color=COLORS["border"],
-            border_width=1, border_color=COLORS["border"],
-            text_color=COLORS["text_secondary"],
-            command=self._on_save_csv, state="disabled",
-        )
-        self.csv_btn.pack(side="right", padx=(0, 8))
         self.reviewed_btn = ctk.CTkButton(
             btn_row, text="Save Reviewed PDF(s)…", width=190, height=34,
             font=ctk.CTkFont(family="Segoe UI", size=13),
@@ -779,10 +772,8 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self.specs_status_label.configure(text="No spec documents loaded.")
         self._reset_profile_selection()
         self._clear_log()
-        self.save_btn.configure(state="disabled")
         self.html_btn.configure(state="disabled")
         self.reviewed_btn.configure(state="disabled")
-        self.csv_btn.configure(state="disabled")
         self.export_btn.configure(state="disabled")
         self._set_progress_text("")
         self._refresh_summary()
@@ -1025,10 +1016,8 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._ctx = None
         self.analyze_btn.configure(state="disabled", text="Analyzing…")
         self.clear_btn.configure(state="disabled")
-        self.save_btn.configure(state="disabled")
         self.html_btn.configure(state="disabled")
         self.reviewed_btn.configure(state="disabled")
-        self.csv_btn.configure(state="disabled")
         self.export_btn.configure(state="disabled")
         self.focus_box.configure(state="disabled")
         self.upload_specs_btn.configure(state="disabled")
@@ -1158,15 +1147,15 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self.upload_specs_btn.configure(state="normal")
         has_text = bool(ctx.combined_text.strip())
         if has_text:
-            self.save_btn.configure(state="normal")
             self.html_btn.configure(state="normal")
         # Export All stays available even for a run that analyzed nothing —
         # the run record (run.log, inventory, run_manifest.json) is the
         # diagnostic artifact for exactly those failures (§18.1).
         self.export_btn.configure(state="normal")
-        # QC outputs — enable the save actions only when a run produced them.
-        if getattr(ctx, "finding_count", 0):
-            self.csv_btn.configure(state="normal")
+        # QC outputs — enable the reviewed-PDF save action only when a run
+        # produced marked-up PDFs. (The per-artifact Markdown / findings-CSV
+        # buttons were removed from the GUI; their handlers remain as dead code
+        # — see the btn_row note in _build_ui.)
         if getattr(ctx, "reviewed_pdf_paths", None):
             self.reviewed_btn.configure(state="normal")
 
@@ -1280,9 +1269,9 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             if reviewed:
                 parts.append(f"{clouded} clouded across {reviewed} reviewed PDF(s)")
             self._log(
-                f"{' · '.join(parts)}. Save the findings CSV"
-                + (" or the reviewed PDF(s)" if reviewed else "")
-                + " with the buttons below.",
+                f"{' · '.join(parts)}."
+                + (" Save the reviewed PDF(s) with the button below."
+                   if reviewed else ""),
                 level="accent",
             )
             if getattr(ctx, "markup_incomplete", False):
@@ -1310,7 +1299,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         if has_text:
             self._log(
                 "Digest ready — click “Save HTML Report…” for a navigable, "
-                "searchable browser view, or “Save Markdown…” for the raw text.",
+                "searchable browser view of the review.",
                 level="accent",
             )
         else:
@@ -1338,6 +1327,9 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         return f"{stem}-drawings-context-analysis-{stamp}{ext}"
 
     def _on_save(self) -> None:
+        # DEAD CODE (gui-export-options-cleanup): the "Save Markdown…" button
+        # was removed from the GUI; this handler is retained so it can be
+        # re-wired later. See the btn_row note in _build_ui.
         if not self._ctx or not self._ctx.combined_text.strip():
             return
         path = filedialog.asksaveasfilename(
@@ -1465,7 +1457,12 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             self._log(f"Exported, but could not open the folder: {exc}", level="warning")
 
     def _on_save_csv(self) -> None:
-        """Write the findings CSV (Excel-friendly: UTF-8 BOM + CRLF)."""
+        """Write the findings CSV (Excel-friendly: UTF-8 BOM + CRLF).
+
+        DEAD CODE (gui-export-options-cleanup): the "Save Findings CSV…" button
+        was removed from the GUI; this handler is retained so it can be re-wired
+        later. See the btn_row note in _build_ui.
+        """
         ctx = self._ctx
         if not ctx or not getattr(ctx, "finding_count", 0):
             return

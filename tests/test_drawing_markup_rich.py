@@ -119,6 +119,80 @@ def test_clear_band_falls_back_without_words():
 
 
 # --------------------------------------------------------------------------- #
+# Plain-words popup composition (pure)
+# --------------------------------------------------------------------------- #
+
+from drawing_analyzer.annotate import (  # noqa: E402
+    _annot_content,
+    _status_label,
+    _truncate_at_word,
+)
+
+
+@pytest.mark.parametrize(
+    "status,origin,unverified,rejected,expected",
+    [
+        ("VERIFIED", "", False, False, "AI-verified against the drawing."),
+        ("UNCERTAIN", "", True, False, "Not yet verified - double-check on the sheet."),
+        ("REJECTED", "", False, True, "Rejected on AI re-check - kept for the record only."),
+        ("DETERMINISTIC", "TEXT_EXTRACTED", False, False,
+         "Math checked by computer from the sheet's own printed numbers."),
+        ("UNCERTAIN", "MODEL_TRANSCRIBED", True, False,
+         "Computed from numbers as read by the AI - re-check the math against the sheet."),
+        ("DETERMINISTIC", "", False, False,
+         "Found by an exact text check of the drawings - not an AI judgment."),
+    ],
+)
+def test_popup_trust_note_speaks_plain_words(status, origin, unverified, rejected, expected):
+    f = _f("an issue", status=status)
+    f.verification.operand_origin = origin
+    content = _annot_content(f, unverified=unverified, rejected=rejected)
+    assert content.rstrip().endswith(expected)
+
+
+def test_popup_single_read_folds_into_the_unverified_note():
+    f = _f("an issue", status="UNCERTAIN")
+    f.reproduced = False
+    content = _annot_content(f, unverified=True)
+    assert content.rstrip().endswith(
+        "Not yet verified (seen in one AI read) - double-check on the sheet."
+    )
+
+
+def test_popup_conflict_pointer_is_ascii():
+    from drawing_analyzer.models import ConflictLeg
+
+    f = _f("rating conflict", rect=[1, 2, 3, 4], quote="165 PSI")
+    f.also_on = [ConflictLeg(sheet_id="P-201", source_name="P-201.pdf",
+                             page_index=0, source_quote="150 PSI MAX")]
+    assign_qc_ids([f])
+    content = _annot_content(f, unverified=False)
+    assert 'Conflicts with P-201: "150 PSI MAX" - see QC-001 there' in content
+    assert "—" not in content       # ASCII-only: safe on Base-14 pages too
+
+
+def test_index_status_labels_are_reviewer_words():
+    assert _status_label(_f("x", status="VERIFIED")) == "Verified"
+    assert _status_label(_f("x", status="DETERMINISTIC")) == "Computed"
+    assert _status_label(_f("x", status="UNCERTAIN")) == "Check"
+    assert _status_label(_f("x", status="SKIPPED")) == "Check"
+    assert _status_label(_f("x", status="REJECTED")) == "Rejected"
+
+
+def test_truncate_at_word_never_cuts_mid_word():
+    text = "Confirm the relief-valve setpoint with the mechanical engineer and revise"
+    out = _truncate_at_word(text, 40)
+    assert len(out) <= 40
+    assert out.endswith("...")
+    assert text.startswith(out[:-3])
+    assert text[len(out) - 3] == " "     # the cut landed on a word boundary
+    # Short text passes through unchanged; a giant token falls back to a hard cut.
+    assert _truncate_at_word("short", 40) == "short"
+    giant = "x" * 100
+    assert _truncate_at_word(giant, 40) == "x" * 37 + "..."
+
+
+# --------------------------------------------------------------------------- #
 # Citation check (pure parsing + fake-client pass)
 # --------------------------------------------------------------------------- #
 
@@ -489,17 +563,22 @@ def test_deterministic_solid_model_cloudy_unverified_dashed(tmp_path):
         assert not border.get("dashes")
         border, content, colors = next(v for k, v in squares.items() if "maybe" in k)
         assert tuple(border.get("dashes") or ()) == (4, 3)        # dashed
-        assert content.startswith("[UNVERIFIED]")
+        assert content.startswith("[CHECK]")
         # question category renders blue regardless of severity.
         assert abs(colors["stroke"][2] - 0.82) < 0.01
     finally:
         doc.close()
 
 
-def test_popup_carries_the_full_template(tmp_path):
+def test_popup_carries_the_lean_template(tmp_path):
+    # The popup speaks to a human reviewer: issue, what to do, where to look,
+    # plain-words citation verdict, and a closing trust note. Machine detail
+    # (ids, provenance, evidence paths, raw statuses) stays OFF the drawing —
+    # it lives in the CSV/HTML report instead.
     src = _pdf(tmp_path)
     f = _f("clearance issue", source="M-101.pdf", rect=[10, 10, 60, 30],
            refs=["CMC 310"], quote="VAV-3")
+    f.recommended_action = "Confirm the clearance with the mechanical engineer."
     f.verification = Verification(status="VERIFIED", note="seen", evidence_png="evidence/x.png")
     f.citation = Citation(status="CHECKED_MISMATCH", note="renumbered", edition_notes="2019+")
     f.reproduced = False
@@ -511,13 +590,33 @@ def test_popup_carries_the_full_template(tmp_path):
         square = next(a for a in doc[1].annots() if a.type[1] == "Square")
         content = square.info.get("content", "")
         assert content.startswith("QC-001: clearance issue")
-        assert 'Quote: "VAV-3"' in content
-        assert "Verification: VERIFIED — seen" in content
+        assert "Action: Confirm the clearance with the mechanical engineer." in content
+        assert 'Look for: "VAV-3"' in content
         assert "Refs: CMC 310" in content
-        assert "Citation check: CHECKED_MISMATCH — renumbered (editions: 2019+)" in content
-        assert "Reproduced: no" in content
-        assert "Evidence: evidence/x.png" in content
-        assert f"Finding ID: {f.id}" in content
+        assert "Code ref may be outdated - renumbered (2019+ editions)" in content
+        assert "AI-verified against the drawing." in content
+        # Machine detail must NOT reach the PDF popup.
+        for machine in ("Finding ID:", "Sources:", "Verification:",
+                        "Citation check:", "Reproduced:", "Evidence:",
+                        "Provenance:", "Quote:"):
+            assert machine not in content
+    finally:
+        doc.close()
+
+
+def test_popup_action_line_absent_when_no_action(tmp_path):
+    src = _pdf(tmp_path)
+    f = _f("clearance issue", source="M-101.pdf", rect=[10, 10, 60, 30], quote="VAV-3")
+    f.verification = Verification(status="VERIFIED", note="seen")
+    assign_qc_ids([f])
+    out = tmp_path / "M-101_reviewed.pdf"
+    annotate_pdf(src, [f], out)
+    doc = pymupdf.open(str(out))
+    try:
+        square = next(a for a in doc[1].annots() if a.type[1] == "Square")
+        content = square.info.get("content", "")
+        # No fallback action is ever invented.
+        assert "Action:" not in content
     finally:
         doc.close()
 
@@ -701,7 +800,7 @@ def test_ink_rejected_draws_grey_struck_markup(tmp_path):
 
 def test_unanchored_finding_gets_margin_callout_with_prefix(tmp_path):
     # §18: a quote that matched nothing (the hallucination signal) is flagged on
-    # the page as an [UNANCHORED] margin callout — never silently dropped.
+    # the page as a [QUOTE NOT FOUND] margin callout — never silently dropped.
     src = _pdf(tmp_path)
     f = _f("quote matched nothing", source="M-101.pdf", status="UNCERTAIN")
     f.anchor = Anchor(status="UNANCHORED", method="quote_not_found")
@@ -715,6 +814,73 @@ def test_unanchored_finding_gets_margin_callout_with_prefix(tmp_path):
         # For FreeText annots /Contents IS the displayed text — the placement
         # and trust prefixes must both be there.
         content = box.info.get("content", "")
-        assert content.startswith("[UNVERIFIED] [UNANCHORED]")
+        assert content.startswith("[CHECK] [QUOTE NOT FOUND]")
+        # The unlocatable quote carries its plain-words caution inline.
+        assert "treat with caution" in content
     finally:
         doc.close()
+
+
+# --------------------------------------------------------------------------- #
+# QC Findings bookmark outline — Codex review follow-ups (HTML↔PDF links)
+# --------------------------------------------------------------------------- #
+
+
+def test_overflow_review_note_bookmark_targets_the_notes_page(tmp_path):
+    # A rect-less finding that overflows to the appended AI Review Notes page
+    # must get a bookmark pointing at THAT page (where its callout landed), not
+    # its source sheet — the same page its receipt and HTML deep link point at.
+    src = _pdf(tmp_path)
+    words = [_w(30 + 150 * i, 20 + 24 * j, width=100, height=12)
+             for i in range(5) for j in range(22)]
+    absences = [
+        _f(f"expected item {i}; not found on this sheet", source="M-101.pdf",
+           hint="SHEET", quote="")
+        for i in range(7)
+    ]
+    assign_qc_ids(absences)
+    out = tmp_path / "M-101_reviewed.pdf"
+    res = annotate_pdf(src, absences, out, sheet_meta=_meta(words))
+    assert res.tally.get("review_notes", 0) >= 1          # some overflowed
+
+    doc = pymupdf.open(str(out))
+    try:
+        notes_pno = next(p for p in range(doc.page_count)
+                         if "AI REVIEW NOTES" in doc[p].get_text().upper())
+        child_pages = {t[2] for t in doc.get_toc(simple=False) if t[0] == 2}
+    finally:
+        doc.close()
+
+    # Overflow findings are bookmarked to the notes page (1-based), agreeing with
+    # their receipts — and never dangle past the document.
+    notes_receipts = [r for r in res.receipts if r.placement.expected == "REVIEW_NOTES"]
+    assert notes_receipts
+    assert all(r.output_page_index == notes_pno for r in notes_receipts)
+    assert (notes_pno + 1) in child_pages
+
+
+def test_bookmark_outline_preserves_existing_source_outline(tmp_path):
+    # A source set with its own sheet-navigation bookmarks keeps them in the
+    # reviewed copy — the QC Findings section is appended, never substituted.
+    doc = pymupdf.open()
+    for _ in range(2):
+        doc.new_page(width=792, height=612).insert_text((80, 120), "VAV-3")
+    doc.set_toc([[1, "Sheet Index", 1], [2, "M-101", 1], [2, "M-102", 2]])
+    src = tmp_path / "M-101.pdf"
+    doc.save(str(src))
+    doc.close()
+
+    f = _f("clearance", source="M-101.pdf", page=0, rect=[100, 100, 220, 140])
+    assign_qc_ids([f])
+    out = tmp_path / "M-101_reviewed.pdf"
+    annotate_pdf(src, [f], out)
+
+    rd = pymupdf.open(str(out))
+    try:
+        titles = [t[1] for t in rd.get_toc(simple=False)]
+    finally:
+        rd.close()
+    # Original outline survived …
+    assert "Sheet Index" in titles and "M-101" in titles and "M-102" in titles
+    # … and the QC section was appended.
+    assert any(t.startswith("QC Findings") for t in titles)

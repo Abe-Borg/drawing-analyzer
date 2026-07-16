@@ -389,3 +389,60 @@ def test_selection_becomes_excerpt_in_request_not_transcript(page, tmp_path):
     # Sending clears the pending chip (the excerpt now lives in history).
     assert page.query_selector("#da-sel-chip") is None
     assert page.evaluate("window.__pwned") is False
+
+
+# --------------------------------------------------------------------------- #
+# Starter prompts: run-tailored chips render, and clicking one sends that exact
+# question (the same path as typing it) and clears the chip row.
+# --------------------------------------------------------------------------- #
+
+
+def test_starter_chip_click_sends_that_question_and_hides_the_row(page, tmp_path):
+    doc = hr.build_html_report(
+        _findings_ctx(), source_names=["a.pdf"], now=NOW, api_key=KEY, embed_api_key=True
+    )
+    _load(page, doc, tmp_path, queue=[_text_turn("answered.")])
+    page.click("#da-chat-fab")
+
+    # Chips rendered from the inert #da-starters block; at least one, at most five.
+    page.wait_for_selector(".da-starter", timeout=3000)
+    chips = page.eval_on_selector_all(".da-starter", "els => els.map(e => e.textContent)")
+    assert 1 <= len(chips) <= 5
+    # The high-severity conflict on M-501 drives the top chip — a real sheet id.
+    assert any("M-501" in c for c in chips)
+
+    first = chips[0]
+    page.click(".da-starter >> nth=0")
+    _finish(page)
+
+    # Clicking sent the chip's text verbatim as the user turn (no excerpt wrapper).
+    reqs = page.evaluate("window.__REQ")
+    sent = reqs[0]["messages"][-1]["content"]
+    assert sent == first
+    # The visible user bubble shows it, and the chip row is hidden for the thread.
+    assert first in page.eval_on_selector(".da-user", "el => el.textContent")
+    assert page.evaluate(
+        "document.getElementById('da-starters-row').style.display"
+    ) == "none"
+    assert page.evaluate("window.__pwned") is False
+
+
+def test_new_chat_restores_the_starter_chips(page, tmp_path):
+    doc = hr.build_html_report(
+        _findings_ctx(), source_names=["a.pdf"], now=NOW, api_key=KEY, embed_api_key=True
+    )
+    _load(page, doc, tmp_path, queue=[_text_turn("answered.")])
+    page.click("#da-chat-fab")
+    page.wait_for_selector(".da-starter", timeout=3000)
+
+    page.click(".da-starter >> nth=0")
+    _finish(page)
+    assert page.evaluate(
+        "document.getElementById('da-starters-row').style.display"
+    ) == "none"
+
+    page.click("#da-chat-clear")   # "New chat"
+    assert page.evaluate(
+        "document.getElementById('da-starters-row').style.display"
+    ) == ""
+    assert page.eval_on_selector_all(".da-starter", "els => els.length") >= 1

@@ -840,6 +840,9 @@ class Finding:
     text: str
     source_id: str = ""                 # host-owned identity of the source (DA-001)
     source_quote: str = ""
+    # One imperative sentence: what the reviewer should DO about the finding.
+    # "" when the producing channel supplied none — consumers must not invent one.
+    recommended_action: str = ""
     tile: list[int] | None = None
     refs: list[str] = field(default_factory=list)
     anchor_hint: str = ""               # "SHEET"/"SET_INDEX" placement hint
@@ -899,6 +902,7 @@ class Finding:
             "severity": self.severity,
             "text": self.text,
             "source_quote": self.source_quote,
+            "recommended_action": self.recommended_action,
             "tile": list(self.tile) if self.tile is not None else None,
             "refs": list(self.refs),
             "anchor_hint": self.anchor_hint,
@@ -933,6 +937,7 @@ class Finding:
             severity=d.get("severity", ""),
             text=d.get("text", ""),
             source_quote=d.get("source_quote", ""),
+            recommended_action=str(d.get("recommended_action", "") or ""),
             tile=[int(v) for v in tile] if tile else None,
             refs=list(d.get("refs", []) or []),
             anchor_hint=d.get("anchor_hint", "") or "",

@@ -49,12 +49,15 @@ from typing import Any
 # ``tile`` array is read as explicit zero-based, §17.1) and a stored
 # ``Verification`` gained ``computation_method`` / ``operand_origin`` (§17.5), so a
 # pre-v7 entry — cached under the old tile parse or lacking the provenance fields —
-# must miss once and be re-derived rather than served as current. Bumped to 8: the
-# digest request can now carry an uploaded project-specifications block (folded
-# into ``digest_cache_key``/``digest_cache_key_level1`` via a new ``specs``
-# param, mirroring ``focus``) and the request's system prompt may switch shape
-# (plain string -> cached content-block list) — a pre-v8 entry was cached under
-# neither axis and must miss once and be re-digested.
+# must miss once and be re-derived rather than served as current. Bumped to 8 for
+# two independent reasons landing together: (a) a stored ``Finding`` gained
+# ``recommended_action`` and the digest/critique prompts now request it, so a
+# pre-v8 entry would serve action-less findings; and (b) the digest request can
+# now carry an uploaded project-specifications block (folded into
+# ``digest_cache_key``/``digest_cache_key_level1`` via a new ``specs`` param,
+# mirroring ``focus``), and the request's system prompt may switch shape (plain
+# string -> cached content-block list). A pre-v8 entry predates both and must
+# miss once and be re-digested.
 _SCHEMA_VERSION = 8
 
 _FALSEY = {"0", "false", "no", "off", ""}

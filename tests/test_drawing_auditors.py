@@ -126,6 +126,11 @@ def test_arithmetic_sum_mismatch_flags_the_540_660_lesson():
     assert f.category == "conflict"
     assert "540" in f.text and "660" in f.text  # computed vs stated
     assert f.severity == "high"                  # 22% off
+    # Deterministic auditors carry a handcrafted "what to do" sentence.
+    assert f.recommended_action == (
+        "Re-check the math: the sum of the printed values is 540, "
+        "not the stated 660 - correct whichever is wrong."
+    )
 
 
 def test_arithmetic_text_extracted_operands_stay_deterministic():

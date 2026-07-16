@@ -503,6 +503,34 @@ def test_findings_data_block_cannot_break_out_of_its_script_tag():
     assert parsed[0]["text"] == hostile and parsed[0]["quote"] == hostile
 
 
+def test_findings_data_block_exposes_cross_sheet_legs_and_citations():
+    # The cross-sheet and cited-code starters are answerable from #da-findings:
+    # also_on legs, code refs, and the citation verdict are serialized so the
+    # assistant does not have to guess (PR #65 review).
+    import json
+
+    from drawing_analyzer.models import Citation, ConflictLeg
+
+    f_cross = _finding(sheet_id="M-501", category="conflict", severity="high",
+                       text="Duct main conflicts with beam", quote="DUCT-1")
+    f_cross.also_on = [ConflictLeg(sheet_id="S-201")]
+    f_code = _finding(sheet_id="P-201", category="code", severity="medium",
+                      text="Cleanout spacing", quote="cleanout")
+    f_code.refs = ["IPC 708.3.1"]
+    f_code.citation = Citation(status="CHECKED_MISMATCH", note="renumbered in 2021")
+
+    ctx = _findings_ctx(findings=[f_cross, f_code])
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
+    rows = {r["sheet"]: r for r in json.loads(_script_block_body(doc, "da-findings"))}
+
+    assert rows["M-501"]["also_on"] == ["S-201"]
+    assert rows["P-201"]["refs"] == ["IPC 708.3.1"]
+    assert rows["P-201"]["citation"]["status"] == "CHECKED_MISMATCH"
+    # Findings without legs/refs stay lean — the keys are omitted, not empty.
+    assert "also_on" not in rows["P-201"]
+    assert "refs" not in rows["M-501"] and "citation" not in rows["M-501"]
+
+
 def test_data_blocks_absent_without_chat():
     # include_chat=False must stay free of every chat artifact (the no-network
     # invariant): neither data block is emitted.
@@ -518,6 +546,122 @@ def test_findings_data_block_absent_when_no_findings():
     doc = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW)
     assert 'id="da-findings"' not in doc
     assert 'id="da-summary"' in doc
+
+
+# --------------------------------------------------------------------------- #
+# Starter prompts (#da-starters) — deterministic, run-tailored, click-to-send.
+# --------------------------------------------------------------------------- #
+
+
+def test_starter_prompts_capped_at_five_and_deduped():
+    # Never more than five; every entry unique (even with many findings).
+    findings = [
+        _finding(sheet_id=f"M-{500 + i}", category="conflict", severity="high",
+                 text=f"clash {i}", quote=f"D-{i}")
+        for i in range(8)
+    ]
+    prompts = hr._starter_prompts(_findings_ctx(findings=findings), [], [SRC])
+    assert 1 <= len(prompts) <= 5
+    assert len(prompts) == len(set(prompts))
+
+
+def test_starter_prompts_name_the_real_top_finding_sheet():
+    # The most-severe finding drives a prompt naming its actual sheet + category —
+    # no invented tag, no fabricated discipline.
+    ctx = _findings_ctx(findings=[
+        _finding(sheet_id="P-201", category="coordination", severity="high",
+                 text="floor drain clash", quote="FD-2"),
+    ])
+    prompts = hr._starter_prompts(ctx, [], [SRC])
+    assert any("P-201" in p and "coordination item" in p for p in prompts)
+
+
+def test_starter_prompts_flag_critical_conflicts_and_top_category():
+    ctx = _findings_ctx(findings=[
+        _finding(sheet_id="M-501", category="conflict", severity="high",
+                 text="duct vs beam", quote="D-1"),
+        _finding(sheet_id="M-502", category="conflict", severity="medium",
+                 text="another duct", quote="D-2"),
+    ])
+    prompts = hr._starter_prompts(ctx, [], [SRC])
+    assert "What are the most critical conflicts across these sheets?" in prompts
+    assert "Summarize the conflicts." in prompts
+
+
+def test_starter_prompts_flag_cross_sheet_issues():
+    f = _finding(sheet_id="M-101", category="reference", severity="low",
+                 text="spans sheets", quote="X", verify_status="VERIFIED")
+    f.also_on = [object()]   # any also_on leg marks a cross-sheet finding (DA-016)
+    prompts = hr._starter_prompts(_findings_ctx(findings=[f]), [], [SRC])
+    assert "Which issues span more than one sheet?" in prompts
+
+
+def test_starter_prompts_flag_cited_code():
+    f = _finding(sheet_id="M-101", category="code", severity="medium",
+                 text="IBC clearance", quote="IBC", verify_status="VERIFIED")
+    f.refs = ["IBC 1004.5"]
+    prompts = hr._starter_prompts(_findings_ctx(findings=[f]), [], [SRC])
+    assert "Do the cited code sections check out?" in prompts
+
+
+def test_starter_prompts_flag_unverified_findings():
+    ctx = _findings_ctx(findings=[
+        _finding(sheet_id="M-101", category="question", severity="low",
+                 text="unsure", quote="Q",
+                 anchor_status="UNANCHORED", verify_status="SKIPPED"),
+    ])
+    prompts = hr._starter_prompts(ctx, [], [SRC])
+    assert "Which findings could not be verified against the drawings?" in prompts
+
+
+def test_starter_prompts_fall_back_to_set_aware_prompts_without_findings():
+    # A clean, findings-free run still gets relevant prompts built from the real
+    # sheet count and source name — never the old fabricated VAV-3 / plumbing line.
+    prompts = hr._starter_prompts(_findings_ctx(findings=[]), [], [SRC])
+    assert prompts
+    assert any(SRC in p for p in prompts)
+    assert any("3-sheet" in p for p in prompts)   # _make_ctx has three sheets
+    assert all("VAV-3" not in p for p in prompts)
+
+
+def test_starters_data_block_present_and_structured():
+    import json
+
+    ctx = _findings_ctx(findings=[
+        _finding(sheet_id="M-501", category="conflict", severity="high",
+                 text="VAV-3 clash", quote="VAV-3"),
+    ])
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
+    starters = json.loads(_script_block_body(doc, "da-starters"))
+    assert isinstance(starters, list) and 1 <= len(starters) <= 5
+    assert all(isinstance(s, str) and s.strip() for s in starters)
+
+
+def test_starters_replace_the_old_hardcoded_examples():
+    # The fabricated VAV-3 / plumbing example line is gone; the chips row is in.
+    assert "Which sheets mention VAV-3" not in hr._CHAT_HTML
+    assert "plumbing coordination items" not in hr._CHAT_HTML
+    assert 'id="da-starters-row"' in hr._CHAT_HTML
+
+
+def test_starters_data_block_cannot_break_out_of_its_script_tag():
+    import json
+
+    hostile = 'M-1</script><script>window.__pwned=1</script>'
+    ctx = _findings_ctx(findings=[
+        _finding(sheet_id=hostile, category="conflict", severity="high",
+                 text="x", quote="x"),
+    ])
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
+    body = _script_block_body(doc, "da-starters")
+    assert "<" not in body
+    assert any(hostile in p for p in json.loads(body))
+
+
+def test_starters_data_block_absent_without_chat():
+    ctx = _findings_ctx(findings=[_finding()])
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW, include_chat=False)
+    assert "da-starters" not in doc
 
 
 def test_chat_request_defines_client_tools_and_closure_loop():
@@ -606,6 +750,19 @@ def test_findings_card_renders_table_chips_and_sheet_link():
     assert 'href="#sheet-1"' in doc
 
 
+def test_finding_action_renders_and_is_escaped():
+    f = _finding()
+    f.recommended_action = "Confirm the clearance & <verify> the schedule."
+    doc = hr.build_html_report(_findings_ctx(findings=[f]), source_names=[SRC], now=NOW)
+    assert 'class="finding-action"' in doc
+    assert "Action: Confirm the clearance &amp; &lt;verify&gt; the schedule." in doc
+    # No action → no empty Action div.
+    bare = hr.build_html_report(
+        _findings_ctx(findings=[_finding()]), source_names=[SRC], now=NOW
+    )
+    assert 'class="finding-action"' not in bare
+
+
 def test_no_findings_card_when_there_are_none():
     doc = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW)
     assert 'id="findings"' not in doc               # no card
@@ -620,6 +777,78 @@ def test_evidence_thumbnail_only_with_link_evidence():
     linked = hr.build_html_report(ctx, source_names=[SRC], now=NOW, link_evidence=True)
     assert 'class="evidence-thumb"' in linked
     assert 'src="evidence/abc123.png"' in linked
+
+
+# --------------------------------------------------------------------------- #
+# QC-### → marked-up-PDF deep links (HTML↔PDF navigation)
+# --------------------------------------------------------------------------- #
+
+
+def _qc(finding, qc_id):
+    finding.qc_id = qc_id
+    return finding
+
+
+def test_qc_cell_deep_links_to_reviewed_pdf_when_mapped():
+    # A finding whose qc_id is in the pdf_links map gets a QC-### cell that opens
+    # the marked-up PDF at its page in a new tab; an unmapped finding stays plain.
+    ctx = _findings_ctx(findings=[
+        _qc(_finding(severity="high", verify_status="VERIFIED"), "QC-001"),
+        _qc(_finding(text="unmapped", severity="low", verify_status="UNCERTAIN"), "QC-002"),
+    ])
+    links = {"QC-001": {"pdf": "M-101_reviewed.pdf", "page": 5}}
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW, pdf_links=links)
+    assert (
+        '<a class="pdf-link" href="M-101_reviewed.pdf#page=5" target="_blank" '
+        'rel="noopener noreferrer" title="Open QC-001 in the marked-up PDF">QC-001</a>'
+    ) in doc
+    # The finding not in the map keeps the plain cell (no second link).
+    assert '<td class="fcol-qcid">QC-002</td>' in doc
+    assert doc.count('class="pdf-link"') == 1
+
+
+def test_qc_cell_plain_without_pdf_links():
+    # Default (single-file report / non-markup run): no PDF links at all.
+    ctx = _findings_ctx(findings=[_qc(_finding(), "QC-001")])
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
+    assert 'class="pdf-link"' not in doc
+    assert '<td class="fcol-qcid">QC-001</td>' in doc
+
+
+def test_pdf_link_filename_is_percent_encoded():
+    # A reviewed-PDF basename with a space is a valid file but not a valid raw
+    # URL — the href must percent-encode the name while leaving #page= intact.
+    ctx = _findings_ctx(findings=[_qc(_finding(), "QC-001")])
+    links = {"QC-001": {"pdf": "M 101 reviewed.pdf", "page": 2}}
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW, pdf_links=links)
+    assert 'href="M%20101%20reviewed.pdf#page=2"' in doc
+
+
+def test_pdf_link_hostile_filename_cannot_break_out():
+    # Even a hostile reviewed-PDF name can't inject markup: it is percent-encoded
+    # (no raw < or ") before it ever reaches the href attribute.
+    ctx = _findings_ctx(findings=[_qc(_finding(), "QC-001")])
+    links = {"QC-001": {"pdf": 'x"><img src=x onerror=alert(1)>.pdf', "page": 1}}
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW, pdf_links=links)
+    # The raw injected payload never appears — < > " are all percent-encoded.
+    assert 'x"><img src=x onerror=alert(1)>' not in doc
+    assert "<img src=x" not in doc
+    # The link is still present and points at page 1 of the encoded name.
+    assert 'class="pdf-link"' in doc and "#page=1" in doc
+
+
+def test_findings_data_block_mirrors_pdf_link():
+    # The inert #da-findings JSON the assistant reads carries the same deep link.
+    import json
+
+    ctx = _findings_ctx(findings=[_qc(_finding(verify_status="VERIFIED"), "QC-001")])
+    links = {"QC-001": {"pdf": "M-101_reviewed.pdf", "page": 5}}
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW, pdf_links=links)
+    rows = json.loads(_script_block_body(doc, "da-findings"))
+    assert rows[0]["pdf"] == "M-101_reviewed.pdf#page=5"
+    # No map → empty pdf field (kept for a stable schema).
+    plain = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
+    assert json.loads(_script_block_body(plain, "da-findings"))[0]["pdf"] == ""
 
 
 # --------------------------------------------------------------------------- #

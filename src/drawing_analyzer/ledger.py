@@ -357,17 +357,25 @@ def _merge_into(existing: Finding, incoming: Finding, trace: list | None = None)
     # authoritative quote+rect wins the representative and its exact anchor is kept.
     if _grounding_quality(incoming) > _grounding_quality(existing):
         loser_quote = existing.source_quote
+        loser_action = existing.recommended_action
         existing.sheet_id = incoming.sheet_id
         existing.category = incoming.category
         existing.text = incoming.text
         existing.source_quote = incoming.source_quote
+        # The action belongs to the text it was written for — it rides the
+        # bundle; the loser's action only backfills an empty winner (below).
+        existing.recommended_action = incoming.recommended_action
         existing.tile = incoming.tile
         existing.anchor_hint = incoming.anchor_hint
         existing.anchor = incoming.anchor
         existing.id = incoming.id
         _add_supporting(existing, loser_quote)
+        if not existing.recommended_action:
+            existing.recommended_action = loser_action
     else:
         _add_supporting(existing, incoming.source_quote)
+        if not existing.recommended_action:
+            existing.recommended_action = incoming.recommended_action
 
     if not existing.also_on and incoming.also_on:
         existing.also_on = list(incoming.also_on)

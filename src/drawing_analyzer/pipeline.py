@@ -1874,8 +1874,8 @@ def extract_drawing_context(
     ``focus_findings_to_markups`` — the per-sheet Focus sections). Duplicates
     merge with unioned provenance (``Finding.sources``); the exhaustive default
     inks **everything except REJECTED**: anchored entries cloud (UNCERTAIN
-    dashed), rect-less entries become margin callouts (``[SHEET]`` /
-    ``[UNANCHORED]`` prefixes), and REJECTED entries are listed on the index
+    dashed), rect-less entries become margin callouts (``[SHEET-WIDE]`` /
+    ``[QUOTE NOT FOUND]`` prefixes), and REJECTED entries are listed on the index
     page's "Rejected by verification" section (inked grey only with
     ``ink_rejected=True``). ``markup_verified_only=True`` is the conservative
     opt-in that restricts ink to VERIFIED + DETERMINISTIC (it now defaults
