@@ -69,8 +69,20 @@ drawing-analyzer        # or:  python -m drawing_analyzer
 
 Drop in (or browse to) PDFs, confirm the estimated cost, and the analyzer digests
 every sheet. Save the result as a **navigable HTML report** (*Save HTML Report…* —
-opens in your browser, searchable and filterable) or as the raw **Markdown**
-digest (*Save Markdown…*).
+opens in your browser, searchable and filterable).
+
+> **GUI export options.** The GUI intentionally exposes only the two deliverables a
+> reviewer actually needs — the **HTML report** (*Save HTML Report…*) and the
+> **marked-up PDFs** (*Save Reviewed PDF(s)…*, after a QC run). The older *Save
+> Markdown…*, *Save Findings CSV…*, and one-click *Export All…* buttons were
+> **removed from the GUI** to keep it fast and uncluttered. This is a **GUI-only**
+> change: none of that functionality was deleted. The handlers and the whole export
+> engine remain in the codebase as dead code (see the `btn_row` note in `gui.py`),
+> the folder export still emits `findings.json` / `findings.csv` / `sheet_text/` /
+> the raw Markdown / `run_manifest.json`, and the library API
+> (`write_drawing_export`, `write_findings_csv`, `build_html_report`) produces all
+> of it. Any button can be brought back later just by re-adding it in `gui.py`. We
+> may do that if the need returns.
 
 Optionally, type a **per-run focus** before pressing Analyze — e.g. *"the rooms,
 and what types of plumbing fixtures each has"*. You always get the standard
@@ -105,9 +117,10 @@ Two **QC review** checkboxes sit beside the focus:
 After a QC run, the completion summary reports the finding count, how many were
 clouded, and the **receipt-derived** coverage tally
 (`Ledger 47: 39 clouded, 5 margin, 2 rejected (indexed), 1 gated (verified-only
-mode), 0 failed; coverage COMPLETE`), and two extra buttons light up: **Save
-Findings CSV…** and **Save Reviewed PDF(s)…** (the latter copies every
-`*_reviewed.pdf` into a folder you pick).
+mode), 0 failed; coverage COMPLETE`), and the **Save Reviewed PDF(s)…** button
+lights up (it copies every `*_reviewed.pdf` into a folder you pick). The findings
+CSV is no longer a GUI button (see [GUI export options](#gui) above), but it is
+still written by the folder export and the library `write_findings_csv`.
 
 That tally is **artifact-backed**, not aspirational (Phase 21): after each
 reviewed PDF is saved it is **reopened and reconciled** against the plan — every
@@ -788,8 +801,10 @@ reserved names and alternate-data-stream colons neutralized, collisions deduped)
 every write target is proven to stay inside the export folder, evidence copies
 never follow symlinks, and the whole folder is staged and **atomically
 published** — an interrupted export leaves an explicitly `*_INCOMPLETE`-labeled
-directory, never a final-looking one with silently missing files. In the GUI,
-**Export All…** produces this complete folder in one action.
+directory, never a final-looking one with silently missing files. This complete
+folder is produced by the library `write_drawing_export`; the GUI's one-click
+*Export All…* button that used to trigger it was removed (see [GUI export
+options](#gui)), though the handler and export code remain in place.
 
 ## Run log & run manifest
 

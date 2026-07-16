@@ -6,6 +6,19 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed (GUI export options cleanup — GUI-only)
+
+- **Trimmed the GUI's export surface to the two review deliverables.** The
+  standalone window now shows only *Save HTML Report…* and *Save Reviewed
+  PDF(s)…*; the *Save Markdown…*, *Save Findings CSV…*, and one-click *Export
+  All…* buttons were removed to keep the window fast and uncluttered. This is a
+  **GUI-only** change — no engine or export functionality was deleted. The
+  handlers (`_on_save`, `_on_save_csv`, `_on_export_all`) and the whole export
+  stack remain in place as dead code (marked as such in `gui.py`), the folder
+  export still emits `findings.json` / `findings.csv` / `sheet_text/` / the raw
+  Markdown, and the library API (`write_drawing_export`, `write_findings_csv`,
+  `build_html_report`) is unchanged, so any button can be re-surfaced later.
+
 ### Added (Phase 27 — end-to-end acceptance & release gate, DA-027)
 
 - **The §19.1 automated trust gauntlet.** One deterministic synthetic *oracle
