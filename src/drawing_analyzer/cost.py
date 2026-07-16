@@ -35,6 +35,45 @@ _ASSUMED_SYNTHESIS_OUTPUT_TOKENS = 2_000
 _ASSUMED_FOCUS_SECTION_TOKENS_PER_SHEET = 500
 _ASSUMED_FOCUS_OUTPUT_TOKENS = 2_000
 
+# ~4 chars/token for English technical prose — the same rough heuristic
+# implicit elsewhere in this module's assumed-token constants — used to turn
+# an uploaded project-specifications char count into a display token count.
+_SPEC_CHARS_PER_TOKEN_ESTIMATE = 4
+
+
+def _specs_cost_contribution(
+    spec_chars: int, sheet_count: int, *, model: str, batch: bool,
+) -> tuple[int, float | None]:
+    """``(display_tokens, usd_cost)`` for an uploaded project-specifications
+    block across the whole run.
+
+    Mirrors how ``digest.py`` actually issues the requests: the specs block
+    rides the digest system prompt behind a ``cache_control`` breakpoint (see
+    ``digest_system_prompt``), so the first sheet(s) pay the cache-WRITE
+    multiplier and every subsequent sheet pays the cheap cache-READ
+    multiplier. This is optimistic when ``max_workers > 1`` (a real run may
+    have up to ``min(workers, sheet_count)`` sheets in flight before the
+    first response lands and the cache becomes readable, so more than one
+    sheet may pay something closer to the write price) — the multi-writer
+    case only makes the real number *cheaper* than this estimate, never more
+    expensive, consistent with this module's stated "slightly high" estimate
+    philosophy. The Message-Batches path never attaches this cache breakpoint
+    at all (see ``batch_digest.py``); this estimate still uses the batch
+    discount rate for its own token cost, since that's the rate the specs
+    tokens would bill at either way.
+    """
+    if spec_chars <= 0 or sheet_count <= 0:
+        return 0, 0.0
+    from .core.pricing import usage_record_cost
+
+    spec_tokens = max(1, spec_chars // _SPEC_CHARS_PER_TOKEN_ESTIMATE)
+    write_cost = usage_record_cost(model=model, cache_write_tokens=spec_tokens, batch=batch)
+    read_cost = usage_record_cost(model=model, cache_read_tokens=spec_tokens, batch=batch)
+    if write_cost is None or read_cost is None:
+        return spec_tokens * sheet_count, None
+    total = float(write_cost) + float(read_cost) * max(0, sheet_count - 1)
+    return spec_tokens * sheet_count, total
+
 
 @dataclass(frozen=True)
 class DrawingCostEstimate:
@@ -46,6 +85,7 @@ class DrawingCostEstimate:
     output_tokens: int
     total_cost: float | None  # None when the model's pricing is unknown
     batch: bool = False  # estimate reflects the 50% Batch-API discount
+    spec_chars: int = 0  # uploaded project-specifications char count, if any
 
 
 def estimate_drawing_set_cost(
@@ -58,6 +98,7 @@ def estimate_drawing_set_cost(
     synthesize: bool = True,
     batch: bool = False,
     focus: bool = False,
+    spec_chars: int = 0,
 ) -> DrawingCostEstimate:
     """Estimate the cost of digesting ``sheet_count`` sheets.
 
@@ -70,6 +111,13 @@ def estimate_drawing_set_cost(
     deliberately slightly-high rather than under-stated. ``focus`` mirrors a
     per-run focus: each sheet's digest grows by a focus-findings section, and
     one more text-only pass (the focus report) re-reads the digests.
+
+    ``spec_chars`` (uploaded project-specifications character count, 0 when
+    none) is priced separately at the cache-aware rate (see
+    :func:`_specs_cost_contribution`) rather than folded into the flat 1x
+    ``input_tokens`` sum above — it rides a system-prompt block that is
+    cache-written once and cache-read (~0.1x) on every sheet after, so pricing
+    it at the flat rate would overstate what it actually costs.
     """
     image_tokens = estimate_image_tokens_for_set(
         sheet_count, rows=rows, cols=cols, model=model
@@ -93,6 +141,16 @@ def estimate_drawing_set_cost(
     total_cost = estimate_request_cost(
         input_tokens, output_tokens, model=model, batch=batch
     )
+    spec_display_tokens, spec_cost = _specs_cost_contribution(
+        spec_chars, sheet_count, model=model, batch=batch
+    )
+    if spec_chars > 0:
+        # Leave ``total_cost`` (including a pre-existing ``None`` for an
+        # unknown-priced model) untouched when there's nothing to add —
+        # ``spec_cost`` is 0.0 (not None) whenever spec_chars <= 0, which
+        # would otherwise turn an "unavailable" None into a bogus $0.00.
+        total_cost = None if spec_cost is None else (total_cost or 0.0) + spec_cost
+    input_tokens += spec_display_tokens
     return DrawingCostEstimate(
         sheet_count=sheet_count,
         file_count=file_count,
@@ -102,6 +160,7 @@ def estimate_drawing_set_cost(
         output_tokens=output_tokens,
         total_cost=total_cost,
         batch=batch,
+        spec_chars=spec_chars,
     )
 
 
@@ -120,6 +179,11 @@ def format_drawing_cost_prompt(est: DrawingCostEstimate) -> str:
         f"Estimated usage: ~{est.input_tokens:,} input tokens "
         f"(~{est.image_tokens:,} from images) / ~{est.output_tokens:,} output.",
     ]
+    if est.spec_chars:
+        lines.append(
+            f"Project specifications: ~{est.spec_chars:,} chars attached — "
+            "cached after the first sheet(s) (~0.1x rate)."
+        )
     if est.total_cost is not None:
         batch_note = " (Batch rate)" if est.batch else ""
         lines.append(
@@ -191,6 +255,7 @@ class ExhaustiveCostEstimate:
     low_cost: float | None
     high_cost: float | None
     verified_effective_date: str = PRICING_EFFECTIVE_DATE
+    spec_chars: int = 0  # uploaded project-specifications char count, if any
 
 
 def _component(
@@ -214,6 +279,7 @@ def estimate_exhaustive_run_cost(
     cols: int = tiling.DEFAULT_GRID_COLS,
     batch: bool = True,
     focus: bool = False,
+    spec_chars: int = 0,
 ) -> ExhaustiveCostEstimate:
     """Estimate an **exhaustive QC** run's cost, component by component (§15.7).
 
@@ -224,14 +290,19 @@ def estimate_exhaustive_run_cost(
     count.
     A component whose model price is unknown contributes ``None`` and drops out of
     the numeric total (the caller shows scale without a dollar figure).
+
+    ``spec_chars`` (uploaded project specifications) only affects the Digest
+    component — the specs block is digest-only (see ``digest.py``), never sent
+    to critique/cross-QC/verification/citation.
     """
     per_sheet_images = estimate_image_tokens_for_set(1, rows=rows, cols=cols, model=model)
     components: list[CostComponent] = []
 
-    # Digest (+ synthesis + focus) — the existing digest-path estimate, batch-priced.
+    # Digest (+ synthesis + focus + specs) — the existing digest-path estimate,
+    # batch-priced.
     digest_est = estimate_drawing_set_cost(
         sheet_count, file_count=file_count, model=model, rows=rows, cols=cols,
-        synthesize=True, batch=batch, focus=focus,
+        synthesize=True, batch=batch, focus=focus, spec_chars=spec_chars,
     )
     components.append(CostComponent(
         stage="Digest + synthesis" + (" + focus" if focus else ""),
@@ -304,6 +375,7 @@ def estimate_exhaustive_run_cost(
     return ExhaustiveCostEstimate(
         sheet_count=sheet_count, file_count=file_count, model=model,
         components=components, low_cost=low_cost, high_cost=high_cost,
+        spec_chars=spec_chars,
     )
 
 
@@ -318,6 +390,11 @@ def format_exhaustive_cost_prompt(est: ExhaustiveCostEstimate) -> str:
         "",
         "Estimated cost by stage:",
     ]
+    if est.spec_chars:
+        lines.append(
+            f"  (Digest includes ~{est.spec_chars:,} chars of uploaded project "
+            "specifications, cached after the first sheet(s).)"
+        )
     for c in est.components:
         money = f"~${c.cost:,.2f}" if c.cost is not None else "n/a"
         lines.append(f"  • {c.stage}: {money} ({c.transport}) — {c.note}")

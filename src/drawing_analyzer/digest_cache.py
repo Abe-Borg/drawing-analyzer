@@ -49,8 +49,13 @@ from typing import Any
 # ``tile`` array is read as explicit zero-based, §17.1) and a stored
 # ``Verification`` gained ``computation_method`` / ``operand_origin`` (§17.5), so a
 # pre-v7 entry — cached under the old tile parse or lacking the provenance fields —
-# must miss once and be re-derived rather than served as current.
-_SCHEMA_VERSION = 7
+# must miss once and be re-derived rather than served as current. Bumped to 8: the
+# digest request can now carry an uploaded project-specifications block (folded
+# into ``digest_cache_key``/``digest_cache_key_level1`` via a new ``specs``
+# param, mirroring ``focus``) and the request's system prompt may switch shape
+# (plain string -> cached content-block list) — a pre-v8 entry was cached under
+# neither axis and must miss once and be re-digested.
+_SCHEMA_VERSION = 8
 
 _FALSEY = {"0", "false", "no", "off", ""}
 
@@ -88,6 +93,7 @@ def digest_cache_key(
     effort: str | None,
     use_thinking: bool,
     focus: str | None = None,
+    specs: str | None = None,
     sheet_text: str | None = None,
 ) -> str:
     """Content-address one sheet's digest request.
@@ -112,6 +118,11 @@ def digest_cache_key(
     folded in **only when non-empty**, so a no-focus key is byte-identical to a
     key produced before the focus feature existed — pre-existing cache entries
     stay valid — while any focus (or a change to it) re-digests.
+
+    ``specs`` carries the uploaded project-specifications prompt fragment
+    (:func:`drawing_analyzer.digest.specs_cache_fragment`) when specs are
+    attached — folded in **only when non-empty**, same rationale as ``focus``,
+    and independent of it (a run can vary focus and specs on separate axes).
     """
     h = hashlib.sha256()
     for part in (
@@ -126,6 +137,9 @@ def digest_cache_key(
         h.update(b"\x00")
     if focus:
         h.update(f"focus={focus}".encode("utf-8"))
+        h.update(b"\x00")
+    if specs:
+        h.update(f"specs={specs}".encode("utf-8"))
         h.update(b"\x00")
     if sheet_text:
         h.update(b"sheet_text=")
@@ -146,6 +160,7 @@ def digest_cache_key_level1(
     effort: str | None,
     use_thinking: bool,
     focus: str | None = None,
+    specs: str | None = None,
 ) -> str:
     """Content-address one sheet's digest **before rendering** (Phase 9, level-1).
 
@@ -178,6 +193,9 @@ def digest_cache_key_level1(
         h.update(b"\x00")
     if focus:
         h.update(f"focus={focus}".encode("utf-8"))
+        h.update(b"\x00")
+    if specs:
+        h.update(f"specs={specs}".encode("utf-8"))
         h.update(b"\x00")
     h.update(b"render_identity=")
     h.update(render_identity.encode("utf-8"))

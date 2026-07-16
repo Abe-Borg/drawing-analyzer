@@ -51,8 +51,29 @@ from .cost import (
 from .html_report import build_html_report
 from .pipeline import DrawingContext, extract_drawing_context
 from .render import list_sheets
+from .spec_documents import SpecBudget, SpecDocument
 
 _PDF_FILETYPES = [("PDF drawings", "*.pdf"), ("All files", "*.*")]
+
+_SPEC_FILETYPES = [
+    ("Spec documents", "*.pdf *.docx *.txt *.md"),
+    ("PDF", "*.pdf"),
+    ("Word (.docx)", "*.docx"),
+    ("Text", "*.txt"),
+    ("Markdown", "*.md"),
+    ("All files", "*.*"),
+]
+
+_SPEC_WARNING_TITLE = "Confirm project specification documents"
+_SPEC_WARNING_BODY = (
+    "You're about to attach project specification documents for this run.\n\n"
+    "For QC to be meaningful, these must be the REAL, COMPLETE, CURRENT "
+    "project specifications — not a placeholder, an early draft, or an "
+    "unrelated template. Uploading incomplete or inaccurate specs will "
+    "reduce the quality of the QC findings (missed conflicts, or wrong "
+    "ones).\n\n"
+    "Choose spec document(s) now?"
+)
 
 _log = diagnostics.get_logger()
 
@@ -76,6 +97,13 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._pdfs: list[Path] = []
         self._ctx: DrawingContext | None = None
         self._busy = False
+        # Uploaded project specifications (optional) — see spec_documents.py.
+        # Distinct from "Per-run focus" below: this is ground-truth reference
+        # material, extracted once at upload time (not a live textbox).
+        self._spec_paths: list[Path] = []
+        self._spec_documents: list[SpecDocument] = []
+        self._specs_text: str = ""
+        self._specs_budget: SpecBudget | None = None
         self._last_log_msg: str | None = None
         # QC review options (see _build_ui). Reference audit is free; QC markups
         # add the verification pass + a marked-up PDF. Under the Part III gating
@@ -244,6 +272,46 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         # Keep the cost line live as the focus toggles between empty/non-empty
         # (a focus adds the focus-report pass to the estimate).
         self.focus_box.bind("<KeyRelease>", lambda _e: self._refresh_summary())
+
+        # Project specifications (optional) — the real project spec documents
+        # for this run, distinct from "Per-run focus" above: this is
+        # ground-truth reference material, not an ad-hoc question, and it never
+        # creates a new report section — conflicts fold into ordinary findings.
+        specs_row = ctk.CTkFrame(outer, fg_color="transparent")
+        specs_row.pack(fill="x", padx=16, pady=(0, 8))
+        ctk.CTkLabel(
+            specs_row, text="Project specifications (optional)",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            text_color=COLORS["text_secondary"],
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            specs_row,
+            text=(
+                "Upload the real project spec documents (.pdf/.docx/.txt/.md) "
+                "so QC can check the drawings against them. Any conflict shows "
+                "up as an ordinary finding — there's no separate spec report."
+            ),
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=COLORS["text_muted"],
+            wraplength=740,
+            justify="left",
+        ).pack(anchor="w")
+        specs_btn_row = ctk.CTkFrame(specs_row, fg_color="transparent")
+        specs_btn_row.pack(fill="x", pady=(4, 0))
+        self.upload_specs_btn = ctk.CTkButton(
+            specs_btn_row, text="Upload spec documents…", width=190, height=32,
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            fg_color=COLORS["bg_card"], hover_color=COLORS["border"],
+            border_width=1, border_color=COLORS["border"],
+            text_color=COLORS["text_secondary"], command=self._on_upload_specs,
+        )
+        self.upload_specs_btn.pack(side="left")
+        self.specs_status_label = ctk.CTkLabel(
+            specs_btn_row, text="No spec documents loaded.",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=COLORS["text_muted"],
+        )
+        self.specs_status_label.pack(side="left", padx=(10, 0))
 
         # QC review options.
         qc_row = ctk.CTkFrame(outer, fg_color="transparent")
@@ -606,11 +674,80 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             self._refresh_summary()
             self._refresh_profile_suggestions()
 
+    def _on_upload_specs(self) -> None:
+        """Prompt the quality warning, then let the operator pick spec files.
+
+        The warning is shown on EVERY click, before the file picker opens —
+        matches the existing ``askyesno(..., icon="warning")`` pattern used
+        for the cost-confirm / plaintext-key-storage dialogs. Only "Yes"
+        opens the picker; "No" leaves any previously-loaded specs untouched.
+        """
+        if self._busy:
+            return
+        if not messagebox.askyesno(_SPEC_WARNING_TITLE, _SPEC_WARNING_BODY, icon="warning"):
+            return
+        files = filedialog.askopenfilenames(
+            title="Select project specification documents", filetypes=_SPEC_FILETYPES
+        )
+        if not files:
+            return
+        paths = [Path(f) for f in files]
+        self.upload_specs_btn.configure(state="disabled", text="Reading…")
+        self.specs_status_label.configure(text="Reading spec documents…")
+        threading.Thread(target=self._extract_specs_worker, args=(paths,), daemon=True).start()
+
+    def _extract_specs_worker(self, paths: list[Path]) -> None:
+        """Extract text off the calling worker thread (a large PDF spec must
+        not freeze the UI); the result lands back via ``self.after``."""
+        from .spec_documents import build_specs_text, extract_spec_documents
+
+        docs = extract_spec_documents(paths)
+        text, budget = build_specs_text(docs)
+        self.after(0, lambda: self._apply_specs_result(paths, docs, text, budget))
+
+    def _apply_specs_result(
+        self, paths: list[Path], docs: list[SpecDocument], text: str, budget: SpecBudget
+    ) -> None:
+        self._spec_paths = paths
+        self._spec_documents = docs
+        self._specs_text = text
+        self._specs_budget = budget
+        self.upload_specs_btn.configure(state="normal", text="Upload spec documents…")
+        ok = [d for d in docs if d.ok]
+        failed = [d for d in docs if not d.ok]
+        if ok:
+            self.specs_status_label.configure(
+                text=f"{len(ok)} spec document(s) loaded ({len(text):,} chars)."
+            )
+            self._log(
+                "Loaded spec document(s): " + ", ".join(d.display_name for d in ok),
+                level="success",
+            )
+        else:
+            self.specs_status_label.configure(text="No spec documents loaded.")
+        for d in failed:
+            self._log(f"Could not read spec document {d.display_name}: {d.error}", level="warning")
+        if budget.degraded:
+            self._log(
+                f"Spec text truncated to the {budget.budget_chars:,}-char "
+                f"budget ({budget.omitted_chars:,} char(s) omitted).",
+                level="warning",
+            )
+        self._refresh_summary()
+
+    def _current_specs_text(self) -> str:
+        return self._specs_text or ""
+
     def _on_clear(self) -> None:
         if self._busy:
             return
         self._pdfs = []
         self._ctx = None
+        self._spec_paths = []
+        self._spec_documents = []
+        self._specs_text = ""
+        self._specs_budget = None
+        self.specs_status_label.configure(text="No spec documents loaded.")
         self._reset_profile_selection()
         self._clear_log()
         self.save_btn.configure(state="disabled")
@@ -790,6 +927,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         est = estimate_drawing_set_cost(
             sheets, file_count=files, model=REVIEW_MODEL_DEFAULT, batch=True,
             focus=bool(self._current_focus()),
+            spec_chars=len(self._current_specs_text()),
         )
         cost = (
             f"~${est.total_cost:,.2f} (est.)"
@@ -820,9 +958,10 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             )
             return
 
-        # Snapshot the focus + QC options with the file list, so mid-run edits
-        # can't change what a running analysis was asked to do.
+        # Snapshot the focus + specs + QC options with the file list, so mid-run
+        # edits can't change what a running analysis was asked to do.
         focus = self._current_focus()
+        project_specifications = self._current_specs_text() or None
         qc_markups = self._qc_markups_var.get()
         markup_verified_only = self._qc_verified_only_var.get()
         ink_rejected = self._ink_rejected_var.get()
@@ -838,6 +977,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             exh = estimate_exhaustive_run_cost(
                 len(refs), file_count=len(self._pdfs), model=REVIEW_MODEL_DEFAULT,
                 batch=True, focus=bool(focus),
+                spec_chars=len(project_specifications or ""),
             )
             prompt = format_exhaustive_cost_prompt(exh)
             dialog_title = "Confirm exhaustive QC review"
@@ -845,6 +985,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             estimate = estimate_drawing_set_cost(
                 len(refs), file_count=len(self._pdfs), model=REVIEW_MODEL_DEFAULT,
                 batch=True, focus=bool(focus),
+                spec_chars=len(project_specifications or ""),
             )
             prompt = format_drawing_cost_prompt(estimate)
             dialog_title = "Confirm drawing analysis"
@@ -861,6 +1002,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self.csv_btn.configure(state="disabled")
         self.export_btn.configure(state="disabled")
         self.focus_box.configure(state="disabled")
+        self.upload_specs_btn.configure(state="disabled")
         self._clear_log()
         self._log(
             f"Starting analysis — {len(self._pdfs)} file(s), {len(refs)} sheet(s).",
@@ -874,13 +1016,19 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 "re-analyzed.",
                 level="muted",
             )
+        if project_specifications:
+            self._log(
+                f"Project specifications attached: {len(project_specifications):,} "
+                "chars — conflicts will be reported as ordinary findings.",
+                level="accent",
+            )
         self._set_progress_text("Starting…", color=COLORS["text_secondary"])
 
         pdfs = list(self._pdfs)
         threading.Thread(
             target=self._worker,
-            args=(pdfs, focus, qc_markups, markup_verified_only, reference_audit,
-                  ink_rejected, profiles),
+            args=(pdfs, focus, project_specifications, qc_markups,
+                  markup_verified_only, reference_audit, ink_rejected, profiles),
             daemon=True,
         ).start()
 
@@ -888,6 +1036,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self,
         pdfs: list[Path],
         focus: str,
+        project_specifications: str | None = None,
         qc_markups: bool = False,
         markup_verified_only: bool = False,
         reference_audit: bool = False,
@@ -905,6 +1054,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 synthesize=True,
                 use_batch=True,
                 focus=focus or None,
+                project_specifications=project_specifications,
                 reference_audit=reference_audit,
                 qc_markups=qc_markups,
                 markup_verified_only=markup_verified_only,
@@ -976,6 +1126,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self.analyze_btn.configure(state="normal", text="Analyze Drawings")
         self.clear_btn.configure(state="normal")
         self.focus_box.configure(state="normal")
+        self.upload_specs_btn.configure(state="normal")
         has_text = bool(ctx.combined_text.strip())
         if has_text:
             self.save_btn.configure(state="normal")
@@ -1141,6 +1292,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self.analyze_btn.configure(state="normal", text="Analyze Drawings")
         self.clear_btn.configure(state="normal")
         self.focus_box.configure(state="normal")
+        self.upload_specs_btn.configure(state="normal")
         self._log(f"Analysis failed: {message}", level="error")
         self._set_progress_text(f"Failed: {message}", color=COLORS["error"])
         messagebox.showerror("Analysis failed", message)

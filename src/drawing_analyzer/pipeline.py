@@ -33,7 +33,9 @@ from .digest import (
     digest_sheet,
     focus_cache_fragment,
     normalize_focus,
+    normalize_specs_text,
     sheet_digest_from_cache_entry,
+    specs_cache_fragment,
 )
 from .digest_cache import digest_cache_key_level1
 from .models import (
@@ -240,6 +242,12 @@ class DrawingContext:
     # deliverable is never displaced by these — they are additive.
     focus: str = ""
     focus_report_text: str = ""
+    # The uploaded/extracted project specifications for this run (normalized;
+    # "" when none). Folded ONLY into the digest system prompt (see digest.py's
+    # _SPECS_ADDENDUM_TEMPLATE); conflicts against it surface as ordinary
+    # findings, not a new report section (contrast with focus/focus_report_text
+    # above, which add a dedicated "Focus Report" section).
+    project_specifications: str = ""
     # --- QC findings (populated when reference_audit / qc_markups are on) ------
     # Model findings parsed from the digests, anchored and (when qc_markups)
     # verified. ``reference_findings`` are the deterministic-auditor findings
@@ -503,6 +511,7 @@ def _digest_sheets_concurrent(
     total: int,
     max_workers: int | None,
     focus: str | None = None,
+    specs: str | None = None,
     geometry_sink: list | None = None,
     only: "set[tuple[str, int]] | None" = None,
     on_page_error: "Any" = None,
@@ -528,6 +537,7 @@ def _digest_sheets_concurrent(
             effort=effort,
             cache=cache,
             focus=focus,
+            specs_text=specs,
         )
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -577,6 +587,7 @@ def _digest_sheets_via_batch(
     on_log: LogCallback | None = None,
     on_status: StatusCallback | None = None,
     focus: str | None = None,
+    specs: str | None = None,
     geometry_sink: list | None = None,
     only: "set[tuple[str, int]] | None" = None,
 ) -> list[SheetDigest]:
@@ -618,6 +629,7 @@ def _digest_sheets_via_batch(
         total=total,
         on_status=on_status,
         focus=focus,
+        specs_text=specs,
     )
     # Run the post-batch file cleanup off the calling thread: the digests are
     # already in hand, and deleting a few hundred uploaded images one-by-one
@@ -662,6 +674,7 @@ def _level1_partition(
     use_thinking: bool,
     effort: str | None,
     focus: str | None,
+    specs_text: str | None = None,
     snapshot_by_path: "dict[str, tuple[str, int, int]] | None" = None,
 ) -> "tuple[dict, set, dict, list]":
     """Pre-render level-1 cache scan (Phase 9).
@@ -683,6 +696,7 @@ def _level1_partition(
     level1_keys: dict[tuple[str, int], str] = {}
     geometries: list[SheetGeometry] = []
     focus_frag = focus_cache_fragment(focus)
+    specs_frag = specs_cache_fragment(specs_text)
     for ref, identity, geometry in iter_sheet_prescan(
         paths, rows=rows, cols=cols, overlap_frac=overlap_frac, snapshot_by_path=snapshot_by_path
     ):
@@ -695,6 +709,7 @@ def _level1_partition(
             effort=effort,
             use_thinking=use_thinking,
             focus=focus_frag,
+            specs=specs_frag,
         )
         rk = _refkey(ref)
         level1_keys[rk] = key
@@ -1728,6 +1743,7 @@ def extract_drawing_context(
     on_status: StatusCallback | None = None,
     focus: str | None = None,
     focus_model: str | None = None,
+    project_specifications: str | None = None,
     reference_audit: bool = False,
     qc_markups: bool = False,
     markup_verified_only: bool = False,
@@ -1797,6 +1813,22 @@ def extract_drawing_context(
     focus is served from cache, while changing or clearing it re-digests —
     a no-focus run keeps hitting pre-focus cache entries.
 
+    ``project_specifications`` (optional, at the operator's discretion — see
+    :mod:`drawing_analyzer.spec_documents` for the GUI's upload/extraction
+    path) is ground-truth written spec text for this run, distinct from
+    ``focus`` above and from the unrelated "Project Context" external-tool
+    concept referenced elsewhere in this module's module docstring. Unlike
+    ``focus`` it creates NO new report section: it is folded only into each
+    sheet's digest system prompt (cached across sheets — see
+    :func:`drawing_analyzer.digest.digest_system_prompt`), instructing the
+    model to report any drawing-vs-spec conflict as an ORDINARY finding, so it
+    flows through the existing ledger -> anchor -> verify -> markup pipeline
+    with no new plumbing. Oversized input is truncated to a fixed character
+    budget (:func:`drawing_analyzer.spec_documents.enforce_specs_budget`); a
+    truncation is non-fatal and appended to ``ctx.errors`` (I-3). Folded into
+    the digest cache key like ``focus``, and exposed on
+    ``DrawingContext.project_specifications``.
+
     ``critique=True`` (Phase 11) adds a dedicated **critique pass**: a second
     full-coverage vision read per sheet, under a senior-QA-engineer persona, whose
     only job is finding problems (errors, code concerns, RFI-worthy ambiguities,
@@ -1857,6 +1889,18 @@ def extract_drawing_context(
         cache = get_default_digest_cache()
 
     focus = normalize_focus(focus) or ""
+
+    from .spec_documents import enforce_specs_budget
+
+    specs_text, specs_budget = enforce_specs_budget(project_specifications)
+    specs_errors: list[str] = []
+    if specs_budget.degraded:
+        specs_errors.append(
+            f"Project specifications: {specs_budget.omitted_chars:,} char(s) "
+            f"omitted (over the {specs_budget.budget_chars:,}-char budget) — "
+            "see run.log for detail."
+        )
+
     # Resolve the transport once (L1): explicit arg wins; else the
     # DRAWING_ANALYZER_USE_BATCH env opt-in; else real-time. Done before the
     # configuration + journal so every downstream reader sees the same value.
@@ -1912,7 +1956,17 @@ def extract_drawing_context(
         ),
         configuration_kind=config.configuration_kind,
         focus=bool(focus),
+        project_specifications=bool(specs_text),
     )
+    if specs_budget.degraded:
+        journal.emit(
+            "SPEC_TEXT_TRUNCATED",
+            level="WARNING",
+            stage="digest",
+            chars_included=specs_budget.included_chars,
+            chars_omitted=specs_budget.omitted_chars,
+            budget_chars=specs_budget.budget_chars,
+        )
 
     # Cost nudge (L1): the exhaustive stack reads each sheet's imagery three times
     # (digest + two critique reads), so running it real-time is the single most
@@ -2058,7 +2112,8 @@ def extract_drawing_context(
         cached_by_ref, only, level1_keys, prescan_geoms = _level1_partition(
             paths, rows=rows, cols=cols, overlap_frac=overlap_frac, cache=cache,
             model=model, max_tokens=max_tokens, use_thinking=use_thinking,
-            effort=effort, focus=focus or None, snapshot_by_path=snapshot_by_path,
+            effort=effort, focus=focus or None, specs_text=specs_text or None,
+            snapshot_by_path=snapshot_by_path,
         )
         if need_geometry:
             sheet_geometries.extend(prescan_geoms)
@@ -2091,6 +2146,7 @@ def extract_drawing_context(
                 use_thinking=use_thinking, effort=effort, cache=cache,
                 progress=progress, total=miss_total, on_log=on_log,
                 on_status=on_status, focus=focus or None,
+                specs=specs_text or None,
                 geometry_sink=geometry_sink, only=only,
             )
         else:
@@ -2099,7 +2155,8 @@ def extract_drawing_context(
                 client=client, model=model, max_tokens=max_tokens,
                 use_thinking=use_thinking, effort=effort, cache=cache,
                 progress=progress, total=miss_total, max_workers=max_workers,
-                focus=focus or None, geometry_sink=geometry_sink, only=only,
+                focus=focus or None, specs=specs_text or None,
+                geometry_sink=geometry_sink, only=only,
                 on_page_error=_on_page_error,
             )
 
@@ -2121,7 +2178,7 @@ def extract_drawing_context(
 
     # Seed the run errors with the inventory rejections and any page-level
     # render failures (§10.5 / §10.7) so a partial run explains what it dropped.
-    errors: list[str] = list(inventory_errors) + list(page_error_lines)
+    errors: list[str] = list(inventory_errors) + list(page_error_lines) + specs_errors
     # Typed per-stage outcomes for the pre-ledger stages (synthesis, critique,
     # cross-QC); the ledger stages append theirs inside ``_run_qc_stages`` (§15.4).
     stage_results: list[StageResult] = []
@@ -2155,6 +2212,8 @@ def extract_drawing_context(
             transport=sheet_transport,
             input_tokens=0 if cached else sd.input_tokens,
             output_tokens=0 if cached else sd.output_tokens,
+            cache_read_tokens=0 if cached else getattr(sd, "cache_read_tokens", 0),
+            cache_write_tokens=0 if cached else getattr(sd, "cache_write_tokens", 0),
             cache_hit=cached,
             parse_success=(sd.error is None),
             terminal_status="FAILED" if sd.error else "COMPLETE",
@@ -2516,6 +2575,7 @@ def extract_drawing_context(
         synthesis_text=synthesis_text,
         focus=focus,
         focus_report_text=focus_report_text,
+        project_specifications=specs_text,
         findings=qc.findings,
         reference_findings=qc.reference_findings,
         reviewed_pdf_paths=qc.reviewed_pdf_paths,
