@@ -720,6 +720,12 @@ def test_gauntlet_citations_claim_complete(oracle):
     billed = citation_rec.billable_tool_uses.get("web_search")
     assert billed == len(client.citation_requests) * G.ScriptedQCClient.CITATION_SEARCHES_PER_REQUEST
 
+    # Phase B structured provenance: the scripted checked/current editions and
+    # the https evidence URL land on the assessments end-to-end.
+    assert a1.checked_edition == "NFPA 13 2016"
+    assert a1.current_edition == "NFPA 13 2025"
+    assert a1.evidence_url == "https://codes.example.org/nfpa13"
+
 
 # ---- assertion 10: QC ids are positional (source, page, anchored, position) -
 

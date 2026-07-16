@@ -748,10 +748,12 @@ class CitationAssessment:
     therefore covers those findings and no others. A finding with several references
     keeps one assessment *per reference* rather than collapsing them into one
     ambiguous status. ``adopted_edition`` is the set's stated basis (harvested
-    offline); ``edition_notes`` carries the model's free-text renumbering finding;
-    ``current_edition`` is a reserved structured field (populated only when a
-    caller can supply it — the web-search verdict reports its finding in
-    ``edition_notes``); ``sources`` are the web-search citations backing the verdict.
+    offline / identity-merged); ``edition_notes`` carries the model's free-text
+    renumbering finding. Phase B structured provenance: ``checked_edition`` is
+    the edition the verdict was actually verified against, ``current_edition``
+    the current published edition found while searching, and ``evidence_url``
+    the model-selected best https URL supporting THIS verdict (``sources`` stays
+    the full web-search tool-result URL trail for the request).
     """
 
     reference: str
@@ -760,7 +762,9 @@ class CitationAssessment:
     note: str = ""
     edition_notes: str = ""
     adopted_edition: str = ""
+    checked_edition: str = ""
     current_edition: str = ""
+    evidence_url: str = ""
     sources: list[str] = field(default_factory=list)
     request_id: str = ""
 
@@ -772,7 +776,9 @@ class CitationAssessment:
             "note": self.note,
             "edition_notes": self.edition_notes,
             "adopted_edition": self.adopted_edition,
+            "checked_edition": self.checked_edition,
             "current_edition": self.current_edition,
+            "evidence_url": self.evidence_url,
             "sources": list(self.sources),
             "request_id": self.request_id,
         }
@@ -786,7 +792,9 @@ class CitationAssessment:
             note=str(d.get("note", "") or ""),
             edition_notes=str(d.get("edition_notes", "") or ""),
             adopted_edition=str(d.get("adopted_edition", "") or ""),
+            checked_edition=str(d.get("checked_edition", "") or ""),
             current_edition=str(d.get("current_edition", "") or ""),
+            evidence_url=str(d.get("evidence_url", "") or ""),
             sources=[str(x) for x in (d.get("sources") or [])],
             request_id=str(d.get("request_id", "") or ""),
         )

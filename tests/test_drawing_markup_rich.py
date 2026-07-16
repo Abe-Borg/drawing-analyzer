@@ -331,6 +331,65 @@ def test_check_citations_attaches_verdicts_per_unique_ref():
     assert "NFPA 13 2016" in user_text
 
 
+def test_check_citations_populates_structured_provenance():
+    # Phase B: the new-shape reply's checked/current edition + evidence URL
+    # land as structured CitationAssessment fields.
+    f = _f("cites relief valve", refs=["NFPA 13 §8.1.2"])
+    reply = "searched...\n```json\n" + json.dumps({
+        "assessments": [{
+            "claim": "C1", "status": "CHECKED_SUPPORTS", "note": "supports",
+            "checked_edition": "NFPA 13 2016",
+            "current_edition": "NFPA 13 2025",
+            "evidence_url": "https://example.org/nfpa13-8-1-2",
+        }],
+        "edition_notes": "renumbered in 2019",
+    }) + "\n```"
+    res = check_citations([f], [], client=_CitationClient([reply]), sleep=lambda *_: None)
+    (a,) = f.citations
+    assert a.checked_edition == "NFPA 13 2016"
+    assert a.current_edition == "NFPA 13 2025"
+    assert a.evidence_url == "https://example.org/nfpa13-8-1-2"
+    assert res.supports == 1
+    # Round-trips additively.
+    from drawing_analyzer.models import CitationAssessment
+
+    again = CitationAssessment.from_dict(a.to_dict())
+    assert again.checked_edition == a.checked_edition
+    assert again.evidence_url == a.evidence_url
+
+
+def test_check_citations_old_shape_reply_defaults_new_fields():
+    # A pre-Phase-B reply (no new keys) still parses; provenance stays "".
+    f = _f("cites relief valve", refs=["NFPA 13 §8.1.2"])
+    res = check_citations(
+        [f], [], client=_CitationClient([_verdict_block("CHECKED_SUPPORTS")]),
+        sleep=lambda *_: None,
+    )
+    (a,) = f.citations
+    assert a.status == "CHECKED_SUPPORTS"
+    assert a.checked_edition == "" and a.current_edition == "" and a.evidence_url == ""
+    assert not res.partial
+
+
+def test_citation_provenance_fields_are_bounded_and_https_only():
+    f = _f("cites", refs=["CMC 310"])
+    reply = "```json\n" + json.dumps({
+        "assessments": [{
+            "claim": "C1", "status": "CHECKED_MISMATCH", "note": "n" * 900,
+            "checked_edition": "E" * 300,
+            "current_edition": "javascript:alert(1)",
+            "evidence_url": "http://insecure.example.org/x",   # not https -> dropped
+        }],
+    }) + "\n```"
+    check_citations([f], [], client=_CitationClient([reply]), sleep=lambda *_: None)
+    (a,) = f.citations
+    assert len(a.note) <= 300
+    assert len(a.checked_edition) == 80                    # capped
+    assert a.evidence_url == ""                            # non-https dropped
+    # current_edition is a display string, not a link — capped only.
+    assert len(a.current_edition) <= 80
+
+
 def test_check_citations_bills_exact_server_search_counts():
     # Phase B: when responses carry usage.server_tool_use.web_search_requests,
     # the result sums the exact figures instead of approximating.

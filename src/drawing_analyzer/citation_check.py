@@ -196,8 +196,12 @@ your search evidence contradicts it, follow the evidence and say so in the note.
 After searching, output a SINGLE fenced code block labeled json and nothing after \
 it, containing exactly: {"assessments": [{"claim": "<the claim's handle, e.g. C1>", \
 "status": "CHECKED_SUPPORTS" or "CHECKED_MISMATCH", "note": "<= 30 words on whether \
-the section supports THIS claim"}], "edition_notes": "<= 40 words on edition/\
-renumbering differences, or \\"\\""}. Include exactly one entry per claim handle."""
+the section supports THIS claim", "checked_edition": "<the code edition you \
+actually verified this claim against, e.g. NFPA 13 2016, or \\"\\" if unclear>", \
+"current_edition": "<the current published edition you found while searching, or \
+\\"\\">", "evidence_url": "<the single best https URL supporting THIS verdict, or \
+\\"\\">"}], "edition_notes": "<= 40 words on edition/renumbering differences, or \
+\\"\\""}. Include exactly one entry per claim handle."""
 
 
 def _normalize_claim(text: str) -> str:
@@ -239,16 +243,54 @@ def _norm_handle(raw: Any) -> str:
     return str(raw or "").strip().strip("[](){}. ").upper()
 
 
+# Host-side caps on verdict fields (the model's output is never trusted bounded).
+_NOTE_CAP = 300
+_EDITION_FIELD_CAP = 80
+_EVIDENCE_URL_CAP = 500
+
+
+def _norm_edition_field(raw: Any) -> str:
+    return " ".join(str(raw or "").split())[:_EDITION_FIELD_CAP]
+
+
+def _norm_evidence_url(raw: Any) -> str:
+    """A single https URL or ``""`` — a non-https value never reaches a link.
+
+    Mirrors the HTML report's https-only link policy at the parse boundary, so
+    a hallucinated ``javascript:``/``http:`` value is dropped before it can be
+    stored, exported, or rendered anywhere.
+    """
+    url = str(raw or "").strip()
+    if not url.lower().startswith("https://") or any(c.isspace() for c in url):
+        return ""
+    return url[:_EVIDENCE_URL_CAP]
+
+
+def _verdict_fields(a: dict, status: str) -> dict:
+    """One claim's bounded verdict record (Phase B structured provenance)."""
+    return {
+        "status": status,
+        "note": str(a.get("note", "") or "").strip()[:_NOTE_CAP],
+        "checked_edition": _norm_edition_field(a.get("checked_edition")),
+        "current_edition": _norm_edition_field(a.get("current_edition")),
+        "evidence_url": _norm_evidence_url(a.get("evidence_url")),
+    }
+
+
 def _parse_assessments(
     raw_text: str, handles: list[str]
-) -> tuple[dict[str, tuple[str, str]], str, bool]:
-    """Parse a citation response into ``{handle: (status, note)}`` + edition notes.
+) -> tuple[dict[str, dict], str, bool]:
+    """Parse a citation response into ``{handle: verdict-fields}`` + edition notes.
 
-    Accepts the per-claim ``{"assessments": [{"claim", "status", "note"}]}`` shape
-    (validating every returned handle against ``handles`` — an unknown handle is
-    ignored, never trusted) and, for back-compat, a single ``{"status", "note",
-    "edition_notes"}`` verdict applied to every handle in the request. Returns
-    ``parsed=False`` when no verdict block is present (→ every claim UNCHECKED).
+    Each handle's value is the bounded dict :func:`_verdict_fields` builds
+    (``status``/``note`` plus the Phase B provenance: ``checked_edition``,
+    ``current_edition``, ``evidence_url`` — every new key optional, so an
+    old-shape reply parses unchanged with ``""`` defaults). Accepts the
+    per-claim ``{"assessments": [...]}`` shape (validating every returned
+    handle against ``handles`` — an unknown handle is ignored, never trusted)
+    and, for back-compat, a single ``{"status", "note", "edition_notes"}``
+    verdict applied to every handle in the request. Returns ``parsed=False``
+    when no verdict block is present (→ every claim UNCHECKED).
     """
     verdict: dict | None = None
     for m in _FENCE_RE.finditer(raw_text):
@@ -258,8 +300,8 @@ def _parse_assessments(
     if verdict is None:
         return {}, "", False
 
-    edition_notes = str(verdict.get("edition_notes", "") or "").strip()[:300]
-    per: dict[str, tuple[str, str]] = {}
+    edition_notes = str(verdict.get("edition_notes", "") or "").strip()[:_NOTE_CAP]
+    per: dict[str, dict] = {}
     assessments = verdict.get("assessments")
     if isinstance(assessments, list):
         # Validate every returned handle against the request manifest, tolerant of
@@ -274,16 +316,16 @@ def _parse_assessments(
             status = _norm_status(a.get("status"))
             if status is None:
                 continue
-            per[orig] = (status, str(a.get("note", "") or "").strip()[:300])
+            per[orig] = _verdict_fields(a, status)
         return per, edition_notes, True
 
     # Back-compat: one verdict for the whole request → applies to every claim in it.
     status = _norm_status(verdict.get("status"))
     if status is None:
         return {}, edition_notes, False
-    note = str(verdict.get("note", "") or "").strip()[:300]
+    fields = _verdict_fields(verdict, status)
     for h in handles:
-        per[h] = (status, note)
+        per[h] = dict(fields)
     return per, edition_notes, True
 
 
@@ -579,7 +621,7 @@ def check_citations(
                     result.error = "; ".join(
                         x for x in (result.error, outcome.error) if x
                     )
-                per: dict[str, tuple[str, str]] = {}
+                per: dict[str, dict] = {}
                 edition_notes = ""
             else:
                 per, edition_notes, parsed = _parse_assessments(
@@ -588,16 +630,21 @@ def check_citations(
                 if not parsed:
                     result.partial = True
             for handle, claim in handled:
-                status, note = per.get(handle, ("UNCHECKED", "no verdict for this claim"))
-                if status == "UNCHECKED":
+                fields = per.get(
+                    handle, {"status": "UNCHECKED", "note": "no verdict for this claim"}
+                )
+                if fields["status"] == "UNCHECKED":
                     result.partial = True
                 claim_assessments[(ref, _normalize_claim(claim["text"]))] = CitationAssessment(
                     reference=ref,
-                    status=status,
+                    status=fields["status"],
                     claim_finding_ids=list(claim["finding_ids"]),
-                    note=note,
+                    note=fields["note"],
                     edition_notes=edition_notes,
                     adopted_edition=editions_line,
+                    checked_edition=fields.get("checked_edition", ""),
+                    current_edition=fields.get("current_edition", ""),
+                    evidence_url=fields.get("evidence_url", ""),
                     sources=list(outcome.sources),
                     request_id=rid,
                 )

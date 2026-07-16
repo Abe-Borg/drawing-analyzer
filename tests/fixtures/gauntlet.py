@@ -617,7 +617,14 @@ class ScriptedQCClient:
                 if token in claim_text:
                     status = st
                     break
-            assessments.append({"claim": handle, "status": status, "note": "checked"})
+            assessments.append({
+                "claim": handle, "status": status, "note": "checked",
+                # Phase B structured provenance, echoed end-to-end so the
+                # acceptance suite can assert it lands in findings.json.
+                "checked_edition": "NFPA 13 2016",
+                "current_edition": "NFPA 13 2025",
+                "evidence_url": "https://codes.example.org/nfpa13",
+            })
         if not assessments:
             # A request shape without [Cn] handles: the back-compat single verdict.
             return _msg("searched...\n" + _fenced(
