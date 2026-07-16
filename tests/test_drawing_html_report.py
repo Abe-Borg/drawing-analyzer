@@ -430,6 +430,20 @@ def test_embed_api_key_without_a_key_stays_in_prompt_mode():
     assert "sessionStorage" in doc
 
 
+def test_report_key_entry_ui_present_when_not_embedded():
+    # A key-less (default) report ships the in-panel key-entry field so the
+    # reader can supply their own key — a real masked input, not window.prompt,
+    # and still no key material written into the file.
+    doc = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW)
+    assert 'id="da-chat-key-input"' in doc
+    assert 'id="da-chat-key-save"' in doc
+    assert 'id="da-chat-key-toggle"' in doc
+    assert 'id="da-chat-key-change"' in doc
+    assert 'type="password"' in doc          # the key field is masked
+    assert "window.prompt(" not in doc       # the old native prompt call is gone
+    assert '"apiKey"' not in doc             # no key material in the file
+
+
 def test_chat_config_cannot_break_out_of_its_script_tag():
     # Every `<` in any config value (e.g. a hostile source filename) is emitted
     # as the JSON string escape `\u003c`, so no value can close the JSON
