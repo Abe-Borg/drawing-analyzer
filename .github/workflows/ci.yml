@@ -17,7 +17,8 @@
 #   * build           — §19.8: wheel + sdist build under the committed
 #                       requirements-release.lock constraints, twine metadata
 #                       check, and a clean-venv install smoke test that proves
-#                       the packaged review profiles ship in the wheel.
+#                       the profile mechanism works in the installed wheel (no
+#                       built-in profiles ship — review plans are model-authored).
 #
 # Supply-chain notes (plan §9.8): actions are pinned to immutable commit SHAs
 # (the trailing comment is the human-readable version), permissions are minimal
@@ -145,16 +146,22 @@ jobs:
           pip install "build==1.4.0" "twine==6.2.0"
           python -m build
           twine check dist/*
-      - name: Clean-venv install smoke (import + packaged profiles + version)
+      # No built-in profiles ship (review plans are model-authored per set —
+      # Phase A), so the smoke proves the profile MECHANISM in the installed
+      # wheel: the loader tolerates the absent packaged dir, and the parser
+      # round-trips a checklist item. Mirrors scripts/run_acceptance.py.
+      - name: Clean-venv install smoke (import + profile mechanism + version)
         run: |
           python -m venv /tmp/smoke
           /tmp/smoke/bin/pip install --quiet -c requirements-release.lock dist/*.whl
           /tmp/smoke/bin/python -c "
-          import drawing_analyzer, importlib.resources as r
-          profiles = [p.name for p in r.files('drawing_analyzer').joinpath('profiles').iterdir() if p.name.endswith('.md')]
-          assert profiles, 'built-in review profiles missing from the wheel'
+          import drawing_analyzer
+          from drawing_analyzer import profiles as P
+          assert isinstance(P.load_profiles(), dict)
+          p = P.parse_profile('---' + chr(10) + 'name: x' + chr(10) + '---' + chr(10) + '- item' + chr(10))
+          assert p.items == ('item',), p.items
           import importlib.metadata as m
           dist_version = m.version('drawing-analyzer')
           assert dist_version == drawing_analyzer.__version__, (dist_version, drawing_analyzer.__version__)
-          print('installed', dist_version, '| packaged profiles:', len(profiles))
+          print('installed', dist_version, '| profile mechanism ok')
           "
