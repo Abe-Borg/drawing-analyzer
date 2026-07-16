@@ -31,7 +31,7 @@ def test_standard_mode_runs_no_paid_stage():
     for off in (
         c.run_synthesis, c.run_critique, c.run_cross_qc, c.run_auditors,
         c.run_prose_harvest, c.run_verification, c.run_citation, c.run_markup,
-        c.run_coverage_check,
+        c.run_coverage_check, c.run_identity, c.run_review_plan,
     ):
         assert off is False
     assert c.critique_reads == 0
@@ -47,6 +47,7 @@ def test_audit_only_runs_auditors_but_no_model_calls():
     assert not c.run_prose_harvest
     assert not c.run_critique and not c.run_cross_qc
     assert not c.run_verification and not c.run_citation and not c.run_markup
+    assert not c.run_identity and not c.run_review_plan
     # A deterministic-diagnostics run is not the QC mode the roll-up scores.
     assert c.qc_requested is False
 
@@ -57,7 +58,7 @@ def test_exhaustive_enables_every_required_stage():
     for on in (
         c.run_synthesis, c.run_critique, c.run_cross_qc, c.run_auditors,
         c.run_prose_harvest, c.run_anchoring, c.run_verification, c.run_citation,
-        c.run_markup, c.run_coverage_check,
+        c.run_markup, c.run_coverage_check, c.run_identity, c.run_review_plan,
     ):
         assert on is True
     assert c.critique_reads == 2
@@ -157,6 +158,71 @@ def test_to_dict_round_trips_the_switches():
     assert d["debug_overrides"] == ["critique"]
     assert d["critique_reads"] == 0  # critique disabled -> no reads
     assert d["run_critique"] is False
+
+
+# --------------------------------------------------------------------------- #
+# resolve_run_configuration — Phase A planning stages (identity / review_plan)
+# --------------------------------------------------------------------------- #
+
+
+def test_identity_and_plan_ride_the_critique_stack():
+    # Expert critique outside exhaustive brings both planning stages with it.
+    c = resolve_run_configuration(critique=True)
+    assert c.run_identity is True and c.run_review_plan is True
+    # Citation alone consumes identity (merged editions/jurisdiction) but no plan.
+    c = resolve_run_configuration(citation_check=True)
+    assert c.run_identity is True and c.run_review_plan is False
+    # Synthesis alone consumes neither.
+    c = resolve_run_configuration(synthesize=True)
+    assert c.run_identity is False and c.run_review_plan is False
+
+
+def test_explicit_false_planning_stage_inside_exhaustive_is_debug_override():
+    c = resolve_run_configuration(qc_markups=True, identity=False)
+    assert c.run_identity is False
+    assert "identity" in c.debug_overrides
+    assert c.configuration_kind == "DEBUG_OVERRIDE"
+    # The plan still runs (critique is on); the planner tolerates identity=None.
+    assert c.run_review_plan is True
+
+    c = resolve_run_configuration(qc_markups=True, review_plan=False)
+    assert c.run_review_plan is False and "review_plan" in c.debug_overrides
+    assert c.run_identity is True
+
+
+def test_critique_override_drops_plan_as_consequence_not_override():
+    # Disabling critique inside exhaustive drops the plan (its only consumer)
+    # WITHOUT a second override entry — the plan wasn't individually disabled.
+    c = resolve_run_configuration(qc_markups=True, critique=False)
+    assert c.run_review_plan is False
+    assert c.debug_overrides == ("critique",)
+    # Identity stays on: citation still consumes it.
+    assert c.run_identity is True
+
+
+def test_explicit_plan_without_critique_is_honored():
+    # An expert may author+export a plan with nothing consuming it (documented
+    # edge: no silent downgrade of an explicit True).
+    c = resolve_run_configuration(review_plan=True)
+    assert c.run_review_plan is True and c.run_critique is False
+    assert not c.exhaustive_qc
+
+
+def test_planning_stages_break_the_free_battery_promise_when_explicit():
+    # reference_audit + an explicit paid planning stage is no longer zero-API.
+    assert resolve_run_configuration(reference_audit=True, identity=True).deterministic_audit_only is False
+    assert resolve_run_configuration(reference_audit=True, review_plan=True).deterministic_audit_only is False
+    # The pure free battery keeps both planning stages off (zero-cost intact).
+    pure = resolve_run_configuration(reference_audit=True)
+    assert pure.deterministic_audit_only is True
+    assert pure.run_identity is False and pure.run_review_plan is False
+
+
+def test_to_dict_carries_planning_switches():
+    d = resolve_run_configuration(qc_markups=True).to_dict()
+    assert d["run_identity"] is True and d["run_review_plan"] is True
+    d = resolve_run_configuration().to_dict()
+    assert d["run_identity"] is False and d["run_review_plan"] is False
 
 
 # --------------------------------------------------------------------------- #

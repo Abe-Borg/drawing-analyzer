@@ -1337,7 +1337,10 @@ CONFIGURATION_KINDS = ("NORMAL", "DEBUG_OVERRIDE")
 # explicit ``False`` may override (recording a DEBUG_OVERRIDE). Anchoring, the
 # deterministic auditors, prose harvest, markup, and coverage are structural to
 # exhaustive QC and are not individually overridable here.
-_OVERRIDABLE_EXHAUSTIVE_STAGES = ("synthesis", "critique", "cross_qc", "verification", "citation")
+_OVERRIDABLE_EXHAUSTIVE_STAGES = (
+    "synthesis", "critique", "cross_qc", "verification", "citation",
+    "identity", "review_plan",
+)
 
 
 @dataclass
@@ -1392,7 +1395,7 @@ class ProfileSnapshot:
     title: str = ""
     version: str = "0"
     content_hash: str = ""
-    source: str = ""                    # "builtin" | "user" | ""
+    source: str = ""                    # "builtin" | "user" | "model" | ""
     disciplines: tuple[str, ...] = ()
 
     def to_dict(self) -> dict:
@@ -1404,6 +1407,205 @@ class ProfileSnapshot:
             "source": self.source,
             "disciplines": list(self.disciplines),
         }
+
+
+@dataclass(frozen=True)
+class AdoptedCode:
+    """One code/standard the set adopts, as stated on the drawings (Phase A §20.1).
+
+    ``quote`` is the verbatim evidence string lifted from a sheet's text layer —
+    the containment contract: an adopted-code claim without a quote is a model
+    assertion, one with a quote is checkable against the source. ``origin`` is
+    ``"model"`` for entries the identity call extracted and ``"regex"`` for
+    entries only the deterministic :func:`citation_check.harvest_code_editions`
+    scan found (the regex backstop can never be hallucinated away).
+    """
+
+    code: str
+    edition: str = ""
+    amendment_note: str = ""
+    quote: str = ""
+    source_sheet: str = ""
+    origin: str = "model"               # "model" | "regex"
+
+    @property
+    def display(self) -> str:
+        """``"NFPA 13 2016"`` — the code + edition token citation prompts use."""
+        return (self.code + " " + self.edition).strip()
+
+    def to_dict(self) -> dict:
+        return {
+            "code": self.code,
+            "edition": self.edition,
+            "amendment_note": self.amendment_note,
+            "quote": self.quote,
+            "source_sheet": self.source_sheet,
+            "origin": self.origin,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "AdoptedCode":
+        data = data or {}
+        return cls(
+            code=str(data.get("code", "") or ""),
+            edition=str(data.get("edition", "") or ""),
+            amendment_note=str(data.get("amendment_note", "") or ""),
+            quote=str(data.get("quote", "") or ""),
+            source_sheet=str(data.get("source_sheet", "") or ""),
+            origin=str(data.get("origin", "model") or "model"),
+        )
+
+
+@dataclass(frozen=True)
+class SetIdentity:
+    """What the drawing set *is* — the model-detected intake record (Phase A §20.1).
+
+    Produced once per run by the identity stage from the digests + text layers:
+    the disciplines present, where the project sits (jurisdiction / country /
+    region), its language and units, and the codes the set says it adopts. It is
+    **advisory context**: consumers (the review planner, citation check,
+    cross-sheet QC) accept ``SetIdentity | None`` and behave exactly as before
+    when it is ``None`` — a misdetection can steer emphasis but can never gate
+    or suppress a finding. ``sheet_disciplines`` maps sheet id → discipline and
+    is the future per-discipline delegation key.
+
+    Deterministic assembly (I-7): every tuple is sorted at construction, so the
+    same parsed payload always yields the same record regardless of the order
+    the model emitted it in.
+    """
+
+    disciplines: tuple[str, ...] = ()
+    sheet_disciplines: tuple[tuple[str, str], ...] = ()
+    project_type: str = ""
+    set_type: str = ""
+    jurisdiction: str = ""
+    country: str = ""
+    region: str = ""
+    language: str = ""
+    units: str = ""
+    adopted_codes: tuple["AdoptedCode", ...] = ()
+    confidence: str = ""
+    evidence: tuple[str, ...] = ()
+    notes: str = ""
+
+    def __post_init__(self) -> None:
+        # Normalize to sorted tuples so assembly is order-independent (I-7).
+        object.__setattr__(self, "disciplines", tuple(sorted(self.disciplines)))
+        object.__setattr__(
+            self, "sheet_disciplines", tuple(sorted(tuple(p) for p in self.sheet_disciplines))
+        )
+        object.__setattr__(
+            self,
+            "adopted_codes",
+            tuple(sorted(self.adopted_codes, key=lambda c: (c.code, c.edition, c.origin))),
+        )
+        object.__setattr__(self, "evidence", tuple(self.evidence))
+
+    @property
+    def has_content(self) -> bool:
+        """True when the identity carries at least one usable field."""
+        return bool(
+            self.disciplines or self.sheet_disciplines or self.project_type
+            or self.set_type or self.jurisdiction or self.country or self.region
+            or self.language or self.units or self.adopted_codes
+        )
+
+    def context_block(self) -> str:
+        """The canonical multi-line ``SET IDENTITY`` context text.
+
+        Consumed verbatim by the review planner's input, the cross-sheet QC
+        preamble, and the ``combined_text`` section — one rendering, so every
+        consumer sees the same facts. Empty fields are omitted.
+        """
+        lines = ["SET IDENTITY (model-detected):"]
+        if self.disciplines:
+            lines.append(f"- Disciplines: {', '.join(self.disciplines)}")
+        project = self.project_type
+        if self.set_type:
+            project = f"{project} ({self.set_type})" if project else self.set_type
+        if project:
+            lines.append(f"- Project: {project}")
+        where = self.jurisdiction or ", ".join(p for p in (self.region, self.country) if p)
+        if where:
+            lines.append(f"- Jurisdiction: {where}")
+        locale_bits = []
+        if self.language:
+            locale_bits.append(f"language: {self.language}")
+        if self.units:
+            locale_bits.append(f"units: {self.units}")
+        if locale_bits:
+            lines.append(f"- {'; '.join(locale_bits)}")
+        if self.adopted_codes:
+            lines.append("- Adopted codes:")
+            for c in self.adopted_codes:
+                extra = f" ({c.amendment_note})" if c.amendment_note else ""
+                src = f" [per {c.source_sheet}]" if c.source_sheet else ""
+                lines.append(f"  - {c.display}{extra}{src}")
+        if self.confidence:
+            lines.append(f"- Detection confidence: {self.confidence}")
+        if self.notes:
+            lines.append(f"- Notes: {self.notes}")
+        return "\n".join(lines)
+
+    def citation_context_line(self) -> str:
+        """One line of locale context for the citation-check prompt ("" if none)."""
+        bits = []
+        where = self.jurisdiction or ", ".join(p for p in (self.region, self.country) if p)
+        if where:
+            bits.append(where)
+        if self.language:
+            bits.append(f"language {self.language}")
+        if self.units:
+            bits.append(f"units {self.units}")
+        return "; ".join(bits)
+
+    def to_dict(self) -> dict:
+        return {
+            "disciplines": list(self.disciplines),
+            "sheet_disciplines": [list(p) for p in self.sheet_disciplines],
+            "project_type": self.project_type,
+            "set_type": self.set_type,
+            "jurisdiction": self.jurisdiction,
+            "country": self.country,
+            "region": self.region,
+            "language": self.language,
+            "units": self.units,
+            "adopted_codes": [c.to_dict() for c in self.adopted_codes],
+            "confidence": self.confidence,
+            "evidence": list(self.evidence),
+            "notes": self.notes,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "SetIdentity":
+        # Tolerant: every field defaults, unknown keys are ignored, so cached
+        # payloads from older/newer runs still load (additive serialization).
+        data = data or {}
+        pairs = []
+        for p in data.get("sheet_disciplines") or []:
+            try:
+                sheet, disc = p[0], p[1]
+            except (TypeError, IndexError, KeyError):
+                continue
+            pairs.append((str(sheet), str(disc)))
+        return cls(
+            disciplines=tuple(str(d) for d in (data.get("disciplines") or [])),
+            sheet_disciplines=tuple(pairs),
+            project_type=str(data.get("project_type", "") or ""),
+            set_type=str(data.get("set_type", "") or ""),
+            jurisdiction=str(data.get("jurisdiction", "") or ""),
+            country=str(data.get("country", "") or ""),
+            region=str(data.get("region", "") or ""),
+            language=str(data.get("language", "") or ""),
+            units=str(data.get("units", "") or ""),
+            adopted_codes=tuple(
+                AdoptedCode.from_dict(c) for c in (data.get("adopted_codes") or [])
+                if isinstance(c, dict)
+            ),
+            confidence=str(data.get("confidence", "") or ""),
+            evidence=tuple(str(e) for e in (data.get("evidence") or [])),
+            notes=str(data.get("notes", "") or ""),
+        )
 
 
 @dataclass(frozen=True)
@@ -1438,6 +1640,11 @@ class RunConfiguration:
     run_citation: bool = False
     run_markup: bool = False
     run_coverage_check: bool = False
+    # Phase A (universal reviewer): the set-identity harvest and the model-authored
+    # review plan. Both ride the critique stack by default (§ locked decision 3) —
+    # a standard digest-only run keeps them off so it stays zero-extra-cost.
+    run_identity: bool = False
+    run_review_plan: bool = False
     # Markup gating / transport, carried through verbatim (not product-derived).
     markup_verified_only: bool = False
     ink_rejected: bool = False
@@ -1478,6 +1685,8 @@ class RunConfiguration:
             "run_citation": self.run_citation,
             "run_markup": self.run_markup,
             "run_coverage_check": self.run_coverage_check,
+            "run_identity": self.run_identity,
+            "run_review_plan": self.run_review_plan,
             "markup_verified_only": self.markup_verified_only,
             "ink_rejected": self.ink_rejected,
             "focus_findings_to_markups": self.focus_findings_to_markups,
@@ -1495,6 +1704,8 @@ def resolve_run_configuration(
     cross_qc: "bool | None" = None,
     citation_check: "bool | None" = None,
     verify_findings: "bool | None" = None,
+    identity: "bool | None" = None,
+    review_plan: "bool | None" = None,
     markup_verified_only: bool = False,
     ink_rejected: bool = False,
     focus_findings_to_markups: bool = False,
@@ -1539,13 +1750,34 @@ def resolve_run_configuration(
     run_verification = _exhaustive_switch(verify_findings, "verification")
     run_citation = _exhaustive_switch(citation_check, "citation")
 
+    # Phase A (universal reviewer): the two model-planning stages ride the
+    # critique stack rather than being their own product mode. Unspecified,
+    # the set-identity harvest runs whenever a stage that consumes it runs
+    # (critique via the plan, citation via the merged editions/jurisdiction),
+    # and the review plan runs whenever critique — its only consumer — runs.
+    # An explicit flag is honored verbatim through the same tri-state contract
+    # as the other exhaustive stages (False inside exhaustive is a recorded
+    # debug override; True outside exhaustive is an expert invocation).
+    if identity is None:
+        run_identity = exhaustive or run_critique or run_citation
+    else:
+        run_identity = _exhaustive_switch(identity, "identity")
+    if review_plan is None:
+        run_review_plan = run_critique
+    else:
+        run_review_plan = _exhaustive_switch(review_plan, "review_plan")
+
     # ``deterministic_audit_only`` is the "free battery, zero incremental API"
     # promise (DA-013): true ONLY when reference_audit is on, QC is not exhaustive,
     # and no expert flag enabled a model-calling stage. An expert who combines
     # reference_audit with e.g. critique=True still runs the auditors, but the run
     # is no longer zero-cost, so the flag must not claim it is. (verification does
-    # not run outside markup, so it never breaks the promise.)
-    any_paid_expert = run_synthesis or run_critique or run_cross_qc or run_citation
+    # not run outside markup, so it never breaks the promise.) The Phase A
+    # planning stages are paid model calls, so they join the paid-expert set.
+    any_paid_expert = (
+        run_synthesis or run_critique or run_cross_qc or run_citation
+        or run_identity or run_review_plan
+    )
     audit_only = bool(reference_audit) and not exhaustive and not any_paid_expert
 
     return RunConfiguration(
@@ -1568,6 +1800,8 @@ def resolve_run_configuration(
         run_citation=run_citation,
         run_markup=exhaustive,
         run_coverage_check=exhaustive,
+        run_identity=run_identity,
+        run_review_plan=run_review_plan,
         markup_verified_only=bool(markup_verified_only),
         ink_rejected=bool(ink_rejected),
         focus_findings_to_markups=bool(focus_findings_to_markups),
@@ -1634,6 +1868,7 @@ def roll_up_qc_status(
 USAGE_TRANSPORTS = ("REAL_TIME", "BATCH", "CACHE")
 USAGE_STAGE_FAMILIES = (
     "digest", "critique", "synthesis", "focus", "harvest", "cross_qc", "verify", "citation",
+    "identity", "review_plan",
 )
 USAGE_TERMINAL_STATUSES = ("COMPLETE", "PARTIAL", "FAILED")
 
