@@ -51,12 +51,18 @@ from drawing_analyzer.digest import (
     DIGEST_SYSTEM_PROMPT,
     _SHEET_TEXT_LAYER_RASTER_PLACEHOLDER,
 )
+from drawing_analyzer.investigate import INVESTIGATE_SYSTEM_PROMPT
 from drawing_analyzer.prose_harvest import HARVEST_SYSTEM_PROMPT
 from drawing_analyzer.review_planner import PLANNER_SYSTEM_PROMPT
 from drawing_analyzer.set_identity import IDENTITY_SYSTEM_PROMPT
 from drawing_analyzer.synthesis import SYNTHESIS_SYSTEM_PROMPT
 from drawing_analyzer.verify import VERIFY_SYSTEM_PROMPT
-from tests.fixtures.fake_anthropic import FakeMessage, FakeTextBlock, FakeUsage
+from tests.fixtures.fake_anthropic import (
+    FakeMessage,
+    FakeTextBlock,
+    FakeToolUseBlock,
+    FakeUsage,
+)
 
 _PAGE_W, _PAGE_H = 792.0, 612.0
 
@@ -339,17 +345,28 @@ def _joined_text(messages: list) -> str:
 
 def _image_bytes(messages: list) -> list[bytes]:
     out: list[bytes] = []
-    for m in messages or []:
-        content = m.get("content") if isinstance(m, dict) else None
-        if isinstance(content, str):
-            continue
-        for block in content or []:
-            if isinstance(block, dict) and block.get("type") == "image":
+
+    def _walk(blocks) -> None:
+        for block in blocks or []:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "image":
                 data = (block.get("source") or {}).get("data", "")
                 try:
                     out.append(base64.b64decode(data))
                 except Exception:  # noqa: BLE001 — capture helper, never fatal
                     out.append(b"")
+            elif block.get("type") == "tool_result":
+                # Phase C returns crops nested inside tool_result content.
+                nested = block.get("content")
+                if isinstance(nested, list):
+                    _walk(nested)
+
+    for m in messages or []:
+        content = m.get("content") if isinstance(m, dict) else None
+        if isinstance(content, str):
+            continue
+        _walk(content)
     return out
 
 
@@ -383,7 +400,12 @@ class ScriptedQCClient:
       discipline/jurisdiction (the advisory contract: nothing may be gated or
       suppressed by it, and the misdetection stays visible in the manifest);
     - ``"review_plan_malformed"`` — the planner returns unparseable text (the
-      critique must still run with the user profiles only).
+      critique must still run with the user profiles only);
+    - ``"investigation_never_concludes"`` — the investigation loop keeps
+      requesting evidence while tools are offered (the host budget must force
+      the no-tools close and the finding must stay UNCERTAIN, never REJECTED);
+    - ``"investigation_malformed"`` — the investigation's final answer is
+      unparseable (same rule: stays UNCERTAIN).
     """
 
     def __init__(
@@ -396,6 +418,7 @@ class ScriptedQCClient:
         harvest_garbage_tokens: tuple[str, ...] = (),
         citation_statuses: tuple[tuple[str, str], ...] = (),
         identity_payload: dict | None = None,
+        investigate_verdicts: tuple[tuple[str, str], ...] = (),
         sabotage: str | None = None,
     ) -> None:
         self._sheets = list(sheets)
@@ -405,6 +428,7 @@ class ScriptedQCClient:
         self._harvest_garbage = tuple(harvest_garbage_tokens)
         self._citation_statuses = tuple(citation_statuses)
         self._identity_payload = identity_payload
+        self._investigate_verdicts = tuple(investigate_verdicts)
         self._sabotage = sabotage
 
         # Captures (assertion surface for the acceptance tests).
@@ -425,6 +449,9 @@ class ScriptedQCClient:
         self.identity_request_texts: list[str] = []
         self.plan_calls = 0
         self.plan_request_texts: list[str] = []
+        self.investigate_calls = 0
+        # (request text, image bytes, whether tools were offered) per turn.
+        self.investigate_requests: list[tuple[str, list[bytes], bool]] = []
 
         outer = self
 
@@ -467,6 +494,8 @@ class ScriptedQCClient:
             return self._identity(text)
         if system == PLANNER_SYSTEM_PROMPT:
             return self._plan(text)
+        if system == INVESTIGATE_SYSTEM_PROMPT:
+            return self._investigate(kw, text)
         return _msg("ok", 1, 1)
 
     # -- per-stage behaviors ------------------------------------------------ #
@@ -526,6 +555,50 @@ class ScriptedQCClient:
                 verdict = v
                 break
         return _msg(json.dumps({"verdict": verdict, "note": "checked"}), 40, 8)
+
+    def _investigate(self, kw: dict, text: str) -> FakeMessage:
+        self.investigate_calls += 1
+        tools_present = bool(kw.get("tools"))
+        self.investigate_requests.append(
+            (text, _image_bytes(kw.get("messages", [])), tools_present)
+        )
+        if self._sabotage == "investigation_never_concludes":
+            if tools_present:
+                return FakeMessage(
+                    content=[FakeToolUseBlock(
+                        name="crop_region",
+                        input={"rect": [10.0, 10.0, 300.0, 200.0]},
+                        id=f"toolu_g{self.investigate_calls}",
+                    )],
+                    stop_reason="tool_use",
+                    usage=FakeUsage(input_tokens=100, output_tokens=20),
+                )
+            # Even the forced no-tools close gets no parseable verdict.
+            return _msg("still cannot decide from the evidence shown", 60, 10)
+        if self._sabotage == "investigation_malformed":
+            return _msg("cannot express a verdict in the requested shape", 60, 10)
+        answered_tools = any(
+            isinstance(b, dict) and b.get("type") == "tool_result"
+            for m in kw.get("messages", [])
+            if isinstance(m.get("content"), list)
+            for b in m["content"]
+        )
+        if tools_present and not answered_tools:
+            # First turn: request one follow-up crop like a real investigation.
+            return FakeMessage(
+                content=[FakeToolUseBlock(
+                    name="crop_region", input={"rect": [10.0, 10.0, 300.0, 200.0]},
+                    id=f"toolu_g{self.investigate_calls}",
+                )],
+                stop_reason="tool_use",
+                usage=FakeUsage(input_tokens=100, output_tokens=20),
+            )
+        verdict = "CONFIRMED"
+        for token, v in self._investigate_verdicts:
+            if token in text:
+                verdict = v
+                break
+        return _msg(json.dumps({"verdict": verdict, "note": "investigated"}), 60, 12)
 
     def _identity(self, text: str) -> FakeMessage:
         self.identity_calls += 1
@@ -670,7 +743,9 @@ def oracle_client(sabotage: str | None = None) -> ScriptedQCClient:
         sheets,
         synthesis_text=SYNTHESIS_TEXT,
         cross_findings=[CROSS_CONFLICT],
-        verify_verdicts=((Q_F5, "CONTRADICTED"),),      # F5 → REJECTED
+        # F5 → REJECTED; F6 → UNCERTAIN, which the Phase C investigation loop
+        # escalates (one scripted crop request, then CONFIRMED → VERIFIED).
+        verify_verdicts=((Q_F5, "CONTRADICTED"), (Q_F6, "NOT_VISIBLE")),
         harvest_garbage_tokens=("Access panels",),      # PROSE_DEGRADED → degraded
         citation_statuses=(("clearance", "CHECKED_SUPPORTS"),
                            ("liner", "CHECKED_MISMATCH")),
@@ -703,7 +778,11 @@ def build_mini_set(root: Path) -> list[Path]:
     return [a, b]
 
 
-def mini_client(sabotage: str | None = None) -> ScriptedQCClient:
+def mini_client(
+    sabotage: str | None = None,
+    *,
+    verify_verdicts: tuple[tuple[str, str], ...] = (),
+) -> ScriptedQCClient:
     sheets = [
         SheetScript(token="VAV-3", prose=MINI_PROSE, findings=[MINI_F1],
                     read1=([], []), read2=([], [])),
@@ -714,5 +793,6 @@ def mini_client(sabotage: str | None = None) -> ScriptedQCClient:
         sheets,
         synthesis_text="Drawing Set Overview\n\nThe two sheets are consistent.",
         cross_findings=[],
+        verify_verdicts=verify_verdicts,
         sabotage=sabotage,
     )

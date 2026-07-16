@@ -1528,6 +1528,93 @@ def _run_qc_stages(
         verify_stage.status = "SKIPPED_VALID"
     _finish_stage(stage_results, journal, verify_stage)
 
+    # Investigation (Phase C): escalate UNCERTAIN verification verdicts through
+    # the agentic evidence loop. Only ever UPDATES finding.verification in place
+    # (legal post-seal, exactly like verify and citation); a budget-capped
+    # outcome stays UNCERTAIN by design and is a COMPLETE, never a PARTIAL.
+    # Additive and non-fatal (I-3).
+    investigate_stage = StageResult(
+        stage="investigation", expected=bool(qc_markups and investigation_enabled)
+    )
+    if qc_markups and investigation_enabled and entries:
+        uncertain = [
+            f for f in all_findings
+            if f.verification is not None
+            and f.verification.status == "UNCERTAIN"
+            and f.anchor is not None and f.anchor.rect_pdf is not None
+        ]
+        if not uncertain:
+            investigate_stage.status = "SKIPPED_VALID"
+        else:
+            from .investigate import investigate_findings as _run_investigate
+            from .investigate import investigation_model
+
+            _emit("STAGE_START", stage="investigation", candidates=len(uncertain))
+            inv_model = investigation_model()
+            if work_dir is None:
+                import tempfile
+
+                work_dir = Path(tempfile.mkdtemp(prefix="drawing_qc_"))
+                if journal is not None:
+                    journal.add_private_roots([work_dir])
+            inv_evidence_dir = work_dir / "evidence"
+
+            def _investigate_progress(done: int, tot: int, label: str) -> None:
+                if progress is not None:
+                    progress(total, total, label)
+
+            try:
+                ires = _run_investigate(
+                    all_findings, geometries, client=client,
+                    evidence_dir=inv_evidence_dir, progress=_investigate_progress,
+                )
+                for rec in ires.per_finding:
+                    label = f"investigate:{rec.qc_id or 'finding'}"
+                    if rec.cached:
+                        _record_usage(
+                            run_usage, family="investigate", instance=label,
+                            model=inv_model, transport="CACHE", cache_hit=True,
+                        )
+                    else:
+                        _record_usage(
+                            run_usage, family="investigate", instance=label,
+                            model=inv_model,
+                            input_tokens=rec.input_tokens,
+                            output_tokens=rec.output_tokens,
+                            terminal_status=(
+                                "COMPLETE" if rec.outcome != "error" else "FAILED"
+                            ),
+                        )
+                investigate_stage.items_in = len(uncertain)
+                investigate_stage.items_out = ires.verified + ires.rejected
+                if ires.skipped_over_budget:
+                    investigate_stage.warnings.append(
+                        f"{ires.skipped_over_budget} UNCERTAIN finding(s) beyond "
+                        "the per-run investigation budget were not investigated"
+                    )
+                if ires.errors or ires.fatal:
+                    # An investigation the config required could not run; the
+                    # untouched findings keep their valid UNCERTAIN verdicts.
+                    investigate_stage.errors.extend(ires.errors)
+                    investigate_stage.status = "PARTIAL"
+                else:
+                    investigate_stage.status = "COMPLETE"
+                _log.info(
+                    "investigation: %d investigated — %d verified, %d rejected, "
+                    "%d still uncertain (%d budget-capped)",
+                    ires.investigated, ires.verified, ires.rejected,
+                    ires.still_uncertain, ires.budget_capped,
+                )
+            except Exception as exc:  # noqa: BLE001 - never fatal (I-3)
+                errors.append(f"Investigation: {exc}")
+                investigate_stage.status = "FAILED"
+                investigate_stage.errors.append(str(exc))
+                _log.warning("investigation failed: %s", exc)
+    elif qc_markups and investigation_enabled:
+        # Requested, but no ledger entries at all (§3.3).
+        investigate_stage.status = "SKIPPED_VALID"
+    _finish_stage(stage_results, journal, investigate_stage)
+
     # Citation check (Phase 15): one web-search-backed call per unique code ref,
     # judged against the editions the set adopts (harvested from the text
     # layers). Verdicts attach to the findings and ride the popup/CSV/report; a

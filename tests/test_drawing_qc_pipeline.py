@@ -17,6 +17,7 @@ from drawing_analyzer.citation_check import CITATION_SYSTEM_PROMPT  # noqa: E402
 from drawing_analyzer.critique import CRITIQUE_SYSTEM_PROMPT  # noqa: E402
 from drawing_analyzer.cross_qc import CROSS_QC_SYSTEM_PROMPT  # noqa: E402
 from drawing_analyzer.digest import DIGEST_SYSTEM_PROMPT  # noqa: E402
+from drawing_analyzer.investigate import INVESTIGATE_SYSTEM_PROMPT  # noqa: E402
 from drawing_analyzer.pipeline import extract_drawing_context  # noqa: E402
 from drawing_analyzer.review_planner import PLANNER_SYSTEM_PROMPT  # noqa: E402
 from drawing_analyzer.set_identity import IDENTITY_SYSTEM_PROMPT  # noqa: E402
@@ -25,6 +26,7 @@ from drawing_analyzer.verify import VERIFY_SYSTEM_PROMPT  # noqa: E402
 from tests.fixtures.fake_anthropic import (  # noqa: E402
     FakeMessage,
     FakeTextBlock,
+    FakeToolUseBlock,
     FakeUsage,
 )
 
@@ -95,20 +97,77 @@ _IDENTITY_OK = (
 )
 
 
-class _RoutingClient:
-    """One fake client that answers digest, verify, citation, and synthesis calls."""
+def _system_text(system) -> str:
+    """Normalize a request's system payload — investigation sends cache blocks."""
+    if isinstance(system, list):
+        return "".join(b.get("text", "") for b in system if isinstance(b, dict))
+    return system or ""
 
-    def __init__(self, digest_findings: list[dict], *, verdict: str = "CONFIRMED"):
+
+class _RoutingClient:
+    """One fake client that answers digest, verify, citation, and synthesis calls.
+
+    ``investigate_mode`` scripts the Phase C loop when an UNCERTAIN finding
+    reaches it: ``"not_visible"`` (default) concludes NOT_VISIBLE immediately —
+    the finding stays honestly UNCERTAIN and every pre-Phase-C fixture keeps
+    its meaning; ``"confirm_after_crop"`` requests one crop then CONFIRMED;
+    ``"never_concludes"`` keeps requesting evidence while tools are offered;
+    ``"malformed"`` answers with unparseable text.
+    """
+
+    def __init__(self, digest_findings: list[dict], *, verdict: str = "CONFIRMED",
+                 investigate_mode: str = "not_visible"):
         self.digest_calls = 0
         self.verify_calls = 0
+        self.investigate_calls = 0
+        self.investigate_requests: list[dict] = []
 
         prose = "Sheet M-101 - Mechanical - Plan\nVAV-3 serves Room 120."
         digest_text = prose + "\n\n" + _digest_block(digest_findings)
         verdict_text = f'{{"verdict":"{verdict}","note":"seen"}}'
 
+        def _investigate(kw):
+            self.investigate_calls += 1
+            self.investigate_requests.append(kw)
+            tools_present = bool(kw.get("tools"))
+            answered = any(
+                isinstance(b, dict) and b.get("type") == "tool_result"
+                for m in kw.get("messages", [])
+                if isinstance(m.get("content"), list)
+                for b in m["content"]
+            )
+            if investigate_mode == "never_concludes":
+                if tools_present:
+                    return FakeMessage(
+                        content=[FakeToolUseBlock(
+                            name="crop_region",
+                            input={"rect": [10.0, 10.0, 400.0, 300.0]},
+                            id=f"toolu_p{self.investigate_calls}")],
+                        stop_reason="tool_use", usage=FakeUsage())
+                # Even the forced no-tools close cannot get a verdict out of it.
+                return FakeMessage(content=[FakeTextBlock(text="still cannot say")],
+                                   usage=FakeUsage())
+            if investigate_mode == "malformed":
+                return FakeMessage(content=[FakeTextBlock(text="no verdict here")],
+                                   usage=FakeUsage())
+            if investigate_mode == "confirm_after_crop" and tools_present and not answered:
+                return FakeMessage(
+                    content=[FakeToolUseBlock(
+                        name="crop_region", input={"rect": [10.0, 10.0, 400.0, 300.0]},
+                        id=f"toolu_p{self.investigate_calls}")],
+                    stop_reason="tool_use", usage=FakeUsage())
+            final = ("CONFIRMED" if investigate_mode == "confirm_after_crop"
+                     else "NOT_VISIBLE")
+            return FakeMessage(
+                content=[FakeTextBlock(
+                    text=f'{{"verdict":"{final}","note":"investigated look"}}')],
+                usage=FakeUsage(input_tokens=60, output_tokens=12))
+
         class _Msgs:
             def create(_self, **kw):
-                system = kw.get("system", "")
+                system = _system_text(kw.get("system", ""))
+                if system == INVESTIGATE_SYSTEM_PROMPT:
+                    return _investigate(kw)
                 if system == VERIFY_SYSTEM_PROMPT:
                     self.verify_calls += 1
                     return FakeMessage(content=[FakeTextBlock(text=verdict_text)],
@@ -286,6 +345,111 @@ def test_qc_markups_include_unverified(tmp_path):
     assert _annot_count(ctx.reviewed_pdf_paths[0]) == 4
 
 
+# --------------------------------------------------------------------------- #
+# Phase C — the agentic investigation loop as a pipeline stage
+# --------------------------------------------------------------------------- #
+
+
+def test_pipeline_investigation_upgrades_uncertain_to_verified(tmp_path):
+    src = _make_pdf(tmp_path / "M-101.pdf")
+    # Verify says NOT_VISIBLE → UNCERTAIN; the investigation requests one more
+    # crop and concludes CONFIRMED → the finding upgrades to VERIFIED in place.
+    client = _RoutingClient([_VAV_FINDING], verdict="NOT_VISIBLE",
+                            investigate_mode="confirm_after_crop")
+    ctx = extract_drawing_context(
+        [src], client=client, rows=2, cols=2,
+        reference_audit=True, qc_markups=True, qc_work_dir=tmp_path / "qc",
+    )
+    f = ctx.findings[0]
+    v = f.verification
+    assert v.status == "VERIFIED"
+    assert v.investigated is True and v.investigation_rounds == 1
+    assert v.note.startswith("investigated: ")
+    # Evidence: the verify crop, the investigation's initial crop, the tool crop
+    # — all in the SAME per-finding directory, leg numbering continued.
+    assert len(v.evidence) == 3
+    assert {a.relative_path.split("/")[1] for a in v.evidence} == {f.qc_id}
+    assert [a.leg_index for a in v.evidence] == [0, 1, 2]
+    assert (tmp_path / "qc" / "evidence" / f.qc_id / "investigation.json").exists()
+    stages = {s.stage: s.status for s in ctx.stage_results}
+    assert stages["investigation"] == "COMPLETE"
+    assert ctx.qc_status == "COMPLETE"
+    # Per-investigation usage records with portable labels (no paths).
+    recs = [r for r in ctx.run_usage.records if r.stage_family == "investigate"]
+    assert [r.stage_instance for r in recs] == [f"investigate:{f.qc_id}"]
+    assert all("/" not in r.stage_instance and "\\" not in r.stage_instance
+               for r in recs)
+    assert recs[0].input_tokens > 0
+
+
+def test_pipeline_no_uncertain_findings_skip_investigation(tmp_path):
+    src = _make_pdf(tmp_path / "M-101.pdf")
+    client = _RoutingClient([_VAV_FINDING])            # verify CONFIRMS everything
+    ctx = extract_drawing_context(
+        [src], client=client, rows=2, cols=2,
+        reference_audit=True, qc_markups=True, qc_work_dir=tmp_path / "qc",
+    )
+    assert client.investigate_calls == 0               # zero API calls
+    stages = {s.stage: s.status for s in ctx.stage_results}
+    assert stages["investigation"] == "SKIPPED_VALID"
+    assert ctx.qc_status == "COMPLETE"
+
+
+def test_pipeline_investigate_false_is_a_debug_override(tmp_path):
+    src = _make_pdf(tmp_path / "M-101.pdf")
+    client = _RoutingClient([_VAV_FINDING], verdict="NOT_VISIBLE")
+    ctx = extract_drawing_context(
+        [src], client=client, rows=2, cols=2,
+        reference_audit=True, qc_markups=True, investigate=False,
+        qc_work_dir=tmp_path / "qc",
+    )
+    assert client.investigate_calls == 0
+    stages = {s.stage: s.status for s in ctx.stage_results}
+    assert stages["investigation"] == "NOT_REQUESTED"
+    assert ctx.configuration_kind == "DEBUG_OVERRIDE"
+    assert ctx.qc_status == "PARTIAL"                  # never a clean COMPLETE
+    # The finding keeps its untouched UNCERTAIN verdict.
+    v = ctx.findings[0].verification
+    assert v.status == "UNCERTAIN" and v.investigated is False
+
+
+def test_pipeline_budget_capped_investigation_stays_uncertain(tmp_path, monkeypatch):
+    monkeypatch.setenv("DRAWING_ANALYZER_INVESTIGATION_MAX_ROUNDS", "2")
+    src = _make_pdf(tmp_path / "M-101.pdf")
+    client = _RoutingClient([_VAV_FINDING], verdict="NOT_VISIBLE",
+                            investigate_mode="never_concludes")
+    ctx = extract_drawing_context(
+        [src], client=client, rows=2, cols=2,
+        reference_audit=True, qc_markups=True, qc_work_dir=tmp_path / "qc",
+    )
+    v = ctx.findings[0].verification
+    assert v.status == "UNCERTAIN"                     # never REJECTED on a cap
+    assert "investigated 2 round(s) without conclusion" in v.note
+    assert v.investigated is True and v.investigation_rounds == 2
+    # The host forced the text-only close: a request WITHOUT tools was made.
+    assert any(not kw.get("tools") for kw in client.investigate_requests)
+    # Budget exhaustion is the designed outcome of a bounded loop — the stage
+    # is COMPLETE and the run stays a clean COMPLETE.
+    stages = {s.stage: s.status for s in ctx.stage_results}
+    assert stages["investigation"] == "COMPLETE"
+    assert ctx.qc_status == "COMPLETE"
+
+
+def test_pipeline_malformed_investigation_never_rejects(tmp_path):
+    src = _make_pdf(tmp_path / "M-101.pdf")
+    client = _RoutingClient([_VAV_FINDING], verdict="NOT_VISIBLE",
+                            investigate_mode="malformed")
+    ctx = extract_drawing_context(
+        [src], client=client, rows=2, cols=2,
+        reference_audit=True, qc_markups=True, qc_work_dir=tmp_path / "qc",
+    )
+    v = ctx.findings[0].verification
+    assert v.status == "UNCERTAIN"                     # garble can never REJECT
+    assert v.investigated is True
+    stages = {s.stage: s.status for s in ctx.stage_results}
+    assert stages["investigation"] == "COMPLETE"
+
+
 def test_verify_disabled_still_anchors_and_marks(tmp_path):
     src = _make_pdf(tmp_path / "M-101.pdf")
     client = _RoutingClient([_VAV_FINDING])
@@ -319,7 +483,8 @@ class _CountingClient:
     def __init__(self, findings: list[dict]):
         self.calls = {
             "digest": 0, "critique": 0, "cross": 0, "synth": 0,
-            "verify": 0, "citation": 0, "identity": 0, "plan": 0, "other": 0,
+            "verify": 0, "citation": 0, "identity": 0, "plan": 0,
+            "investigate": 0, "other": 0,
         }
         prose = "Sheet M-101 - Mechanical - Plan\nVAV-3 serves Room 120."
         digest_text = prose + "\n\n" + _digest_block(findings)
@@ -327,7 +492,12 @@ class _CountingClient:
 
         class _Msgs:
             def create(_self, **kw):
-                s = kw.get("system", "")
+                s = _system_text(kw.get("system", ""))
+                if s == INVESTIGATE_SYSTEM_PROMPT:
+                    calls["investigate"] += 1
+                    return FakeMessage(
+                        content=[FakeTextBlock(text='{"verdict":"NOT_VISIBLE","note":"x"}')],
+                        usage=FakeUsage(input_tokens=1, output_tokens=1))
                 if s == VERIFY_SYSTEM_PROMPT:
                     calls["verify"] += 1
                     return FakeMessage(content=[FakeTextBlock(text='{"verdict":"CONFIRMED","note":"x"}')],
@@ -403,7 +573,8 @@ def test_qc_markups_resolves_and_runs_exhaustive_stack(tmp_path):
     # exhaustive run earns COMPLETE.
     stages = {s.stage: s.status for s in ctx.stage_results}
     for name in ("identity", "review_plan", "synthesis", "critique", "cross_qc",
-                 "auditors", "prose_harvest", "verification", "citation", "markup"):
+                 "auditors", "prose_harvest", "verification", "investigation",
+                 "citation", "markup"):
         assert name in stages, name
 
     # The authored plan rode the critique checklist and is snapshotted as a
