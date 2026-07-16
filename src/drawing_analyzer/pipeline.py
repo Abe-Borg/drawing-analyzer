@@ -185,6 +185,30 @@ def _resolve_workers(max_workers: int | None, total: int) -> int:
     return min(max(1, int(max_workers)), max(1, total))
 
 
+# Truthy tokens for the batch-default env var (mirrors the disable-token
+# convention used elsewhere; anything else — or unset — resolves to False).
+_BATCH_ENV_TRUE = frozenset({"1", "true", "yes", "on"})
+
+
+def _resolve_use_batch(use_batch: bool | None) -> bool:
+    """Resolve the batch transport: explicit arg > ``DRAWING_ANALYZER_USE_BATCH`` > False.
+
+    An explicit ``True``/``False`` from the caller always wins (the GUI passes
+    ``True``; a test passes whichever it needs). Only when the caller leaves it
+    unspecified (``None``) does the env var decide, defaulting to real-time
+    (``False``) so behavior is byte-identical to before this knob existed. The
+    Batch API is ~50% cheaper for identical output, so a library operator can opt
+    every run into it globally — ``DRAWING_ANALYZER_USE_BATCH=1`` — without editing
+    a single call site (L1).
+    """
+    if use_batch is not None:
+        return bool(use_batch)
+    raw = os.environ.get("DRAWING_ANALYZER_USE_BATCH")
+    if raw is None:
+        return False
+    return raw.strip().lower() in _BATCH_ENV_TRUE
+
+
 def _markup_appendix_enabled() -> bool:
     """Whether the reviewed PDFs get the optional "checked and consistent"
     appendix page (``DRAWING_ANALYZER_MARKUP_APPENDIX=1``; off by default)."""
@@ -951,6 +975,13 @@ def _run_critique_stage(
             # digest path does); the record still carries the cache-hit metadata.
             input_tokens=0 if cached else res.input_tokens,
             output_tokens=0 if cached else res.output_tokens,
+            # L2: the self-consistency reads cache their shared image prefix, so a
+            # real read splits its image tokens into cache write (read 1) + cache
+            # read (reads 2..N). Price them by their own rate class (1.25x / 0.1x)
+            # so ``total_estimated_cost`` reflects the discount instead of dropping
+            # the cheaply-served tokens from the ledger entirely.
+            cache_read_tokens=0 if cached else getattr(res, "cache_read_tokens", 0),
+            cache_write_tokens=0 if cached else getattr(res, "cache_write_tokens", 0),
             cache_hit=cached,
             parse_success=(getattr(res, "error", None) is None),
             terminal_status=(
@@ -1692,7 +1723,7 @@ def extract_drawing_context(
     max_workers: int | None = None,
     synthesize: bool | None = None,
     synthesis_model: str | None = None,
-    use_batch: bool = False,
+    use_batch: bool | None = None,
     on_log: LogCallback | None = None,
     on_status: StatusCallback | None = None,
     focus: str | None = None,
@@ -1826,6 +1857,10 @@ def extract_drawing_context(
         cache = get_default_digest_cache()
 
     focus = normalize_focus(focus) or ""
+    # Resolve the transport once (L1): explicit arg wins; else the
+    # DRAWING_ANALYZER_USE_BATCH env opt-in; else real-time. Done before the
+    # configuration + journal so every downstream reader sees the same value.
+    use_batch = _resolve_use_batch(use_batch)
 
     # Normalize the run options into one immutable configuration (§15.1): the
     # single place ``qc_markups=True`` becomes the exhaustive stack, ``reference_audit``
@@ -1878,6 +1913,24 @@ def extract_drawing_context(
         configuration_kind=config.configuration_kind,
         focus=bool(focus),
     )
+
+    # Cost nudge (L1): the exhaustive stack reads each sheet's imagery three times
+    # (digest + two critique reads), so running it real-time is the single most
+    # expensive configuration. The Batch API is ~50% cheaper for byte-identical
+    # output, so surface the opportunity once at run start rather than letting it
+    # stay a silent trap. Purely advisory — no behavior change; a real-time run may
+    # be a deliberate latency choice, so this only informs.
+    if config.exhaustive_qc and not use_batch:
+        _batch_hint = (
+            "Running the exhaustive QC stack in real-time — the most expensive "
+            "mode. The Batch API is ~50% cheaper for identical output: pass "
+            "use_batch=True (or set DRAWING_ANALYZER_USE_BATCH=1) if the batch "
+            "turnaround (usually minutes) is acceptable."
+        )
+        _log.warning(_batch_hint)
+        journal.emit("COST_HINT", level="WARNING", hint=_batch_hint)
+        if on_log is not None:
+            on_log(_batch_hint, level="warning")
 
     # Inventory (Phase 18B): classify every selected input once, so a corrupt /
     # encrypted / zero-page / duplicate file degrades individually and *visibly*
