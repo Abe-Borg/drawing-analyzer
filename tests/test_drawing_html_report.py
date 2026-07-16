@@ -503,6 +503,34 @@ def test_findings_data_block_cannot_break_out_of_its_script_tag():
     assert parsed[0]["text"] == hostile and parsed[0]["quote"] == hostile
 
 
+def test_findings_data_block_exposes_cross_sheet_legs_and_citations():
+    # The cross-sheet and cited-code starters are answerable from #da-findings:
+    # also_on legs, code refs, and the citation verdict are serialized so the
+    # assistant does not have to guess (PR #65 review).
+    import json
+
+    from drawing_analyzer.models import Citation, ConflictLeg
+
+    f_cross = _finding(sheet_id="M-501", category="conflict", severity="high",
+                       text="Duct main conflicts with beam", quote="DUCT-1")
+    f_cross.also_on = [ConflictLeg(sheet_id="S-201")]
+    f_code = _finding(sheet_id="P-201", category="code", severity="medium",
+                      text="Cleanout spacing", quote="cleanout")
+    f_code.refs = ["IPC 708.3.1"]
+    f_code.citation = Citation(status="CHECKED_MISMATCH", note="renumbered in 2021")
+
+    ctx = _findings_ctx(findings=[f_cross, f_code])
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
+    rows = {r["sheet"]: r for r in json.loads(_script_block_body(doc, "da-findings"))}
+
+    assert rows["M-501"]["also_on"] == ["S-201"]
+    assert rows["P-201"]["refs"] == ["IPC 708.3.1"]
+    assert rows["P-201"]["citation"]["status"] == "CHECKED_MISMATCH"
+    # Findings without legs/refs stay lean — the keys are omitted, not empty.
+    assert "also_on" not in rows["P-201"]
+    assert "refs" not in rows["M-501"] and "citation" not in rows["M-501"]
+
+
 def test_data_blocks_absent_without_chat():
     # include_chat=False must stay free of every chat artifact (the no-network
     # invariant): neither data block is emitted.
@@ -518,6 +546,122 @@ def test_findings_data_block_absent_when_no_findings():
     doc = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW)
     assert 'id="da-findings"' not in doc
     assert 'id="da-summary"' in doc
+
+
+# --------------------------------------------------------------------------- #
+# Starter prompts (#da-starters) — deterministic, run-tailored, click-to-send.
+# --------------------------------------------------------------------------- #
+
+
+def test_starter_prompts_capped_at_five_and_deduped():
+    # Never more than five; every entry unique (even with many findings).
+    findings = [
+        _finding(sheet_id=f"M-{500 + i}", category="conflict", severity="high",
+                 text=f"clash {i}", quote=f"D-{i}")
+        for i in range(8)
+    ]
+    prompts = hr._starter_prompts(_findings_ctx(findings=findings), [], [SRC])
+    assert 1 <= len(prompts) <= 5
+    assert len(prompts) == len(set(prompts))
+
+
+def test_starter_prompts_name_the_real_top_finding_sheet():
+    # The most-severe finding drives a prompt naming its actual sheet + category —
+    # no invented tag, no fabricated discipline.
+    ctx = _findings_ctx(findings=[
+        _finding(sheet_id="P-201", category="coordination", severity="high",
+                 text="floor drain clash", quote="FD-2"),
+    ])
+    prompts = hr._starter_prompts(ctx, [], [SRC])
+    assert any("P-201" in p and "coordination item" in p for p in prompts)
+
+
+def test_starter_prompts_flag_critical_conflicts_and_top_category():
+    ctx = _findings_ctx(findings=[
+        _finding(sheet_id="M-501", category="conflict", severity="high",
+                 text="duct vs beam", quote="D-1"),
+        _finding(sheet_id="M-502", category="conflict", severity="medium",
+                 text="another duct", quote="D-2"),
+    ])
+    prompts = hr._starter_prompts(ctx, [], [SRC])
+    assert "What are the most critical conflicts across these sheets?" in prompts
+    assert "Summarize the conflicts." in prompts
+
+
+def test_starter_prompts_flag_cross_sheet_issues():
+    f = _finding(sheet_id="M-101", category="reference", severity="low",
+                 text="spans sheets", quote="X", verify_status="VERIFIED")
+    f.also_on = [object()]   # any also_on leg marks a cross-sheet finding (DA-016)
+    prompts = hr._starter_prompts(_findings_ctx(findings=[f]), [], [SRC])
+    assert "Which issues span more than one sheet?" in prompts
+
+
+def test_starter_prompts_flag_cited_code():
+    f = _finding(sheet_id="M-101", category="code", severity="medium",
+                 text="IBC clearance", quote="IBC", verify_status="VERIFIED")
+    f.refs = ["IBC 1004.5"]
+    prompts = hr._starter_prompts(_findings_ctx(findings=[f]), [], [SRC])
+    assert "Do the cited code sections check out?" in prompts
+
+
+def test_starter_prompts_flag_unverified_findings():
+    ctx = _findings_ctx(findings=[
+        _finding(sheet_id="M-101", category="question", severity="low",
+                 text="unsure", quote="Q",
+                 anchor_status="UNANCHORED", verify_status="SKIPPED"),
+    ])
+    prompts = hr._starter_prompts(ctx, [], [SRC])
+    assert "Which findings could not be verified against the drawings?" in prompts
+
+
+def test_starter_prompts_fall_back_to_set_aware_prompts_without_findings():
+    # A clean, findings-free run still gets relevant prompts built from the real
+    # sheet count and source name — never the old fabricated VAV-3 / plumbing line.
+    prompts = hr._starter_prompts(_findings_ctx(findings=[]), [], [SRC])
+    assert prompts
+    assert any(SRC in p for p in prompts)
+    assert any("3-sheet" in p for p in prompts)   # _make_ctx has three sheets
+    assert all("VAV-3" not in p for p in prompts)
+
+
+def test_starters_data_block_present_and_structured():
+    import json
+
+    ctx = _findings_ctx(findings=[
+        _finding(sheet_id="M-501", category="conflict", severity="high",
+                 text="VAV-3 clash", quote="VAV-3"),
+    ])
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
+    starters = json.loads(_script_block_body(doc, "da-starters"))
+    assert isinstance(starters, list) and 1 <= len(starters) <= 5
+    assert all(isinstance(s, str) and s.strip() for s in starters)
+
+
+def test_starters_replace_the_old_hardcoded_examples():
+    # The fabricated VAV-3 / plumbing example line is gone; the chips row is in.
+    assert "Which sheets mention VAV-3" not in hr._CHAT_HTML
+    assert "plumbing coordination items" not in hr._CHAT_HTML
+    assert 'id="da-starters-row"' in hr._CHAT_HTML
+
+
+def test_starters_data_block_cannot_break_out_of_its_script_tag():
+    import json
+
+    hostile = 'M-1</script><script>window.__pwned=1</script>'
+    ctx = _findings_ctx(findings=[
+        _finding(sheet_id=hostile, category="conflict", severity="high",
+                 text="x", quote="x"),
+    ])
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
+    body = _script_block_body(doc, "da-starters")
+    assert "<" not in body
+    assert any(hostile in p for p in json.loads(body))
+
+
+def test_starters_data_block_absent_without_chat():
+    ctx = _findings_ctx(findings=[_finding()])
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW, include_chat=False)
+    assert "da-starters" not in doc
 
 
 def test_chat_request_defines_client_tools_and_closure_loop():
