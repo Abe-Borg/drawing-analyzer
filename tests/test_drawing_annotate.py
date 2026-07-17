@@ -14,12 +14,18 @@ from drawing_analyzer.annotate import (
     is_cloudable,
     write_reviewed_pdfs,
 )
-from drawing_analyzer.models import Anchor, Finding, Verification
+from drawing_analyzer.models import Anchor, Finding, Verification, assign_qc_ids
 from drawing_analyzer.source_registry import assign_source_ids
 
 pymupdf = pytest.importorskip("pymupdf")
 
-from drawing_analyzer.annotate import annotate_pdf, count_annotations  # noqa: E402
+from drawing_analyzer.annotate import (  # noqa: E402
+    _SEVERITY_LAYER_NAMES,
+    _SEVERITY_LAYER_ORDER,
+    annotate_pdf,
+    count_annotations,
+    write_set_review_notes_pdf,
+)
 
 
 def _finding(text="Issue", *, severity="high", status="VERIFIED", rect=(100.0, 100.0, 220.0, 140.0),
@@ -371,5 +377,171 @@ def test_bookmark_outline_absent_when_no_findings_anchor_to_a_page(tmp_path):
     doc = pymupdf.open(str(res.reviewed_pdfs[0]))
     try:
         assert doc.get_toc(simple=False) == []
+    finally:
+        doc.close()
+
+
+# --------------------------------------------------------------------------- #
+# Severity layers (PDF optional-content groups)
+# --------------------------------------------------------------------------- #
+
+
+def _layer_names(doc) -> "dict[int, str]":
+    return {xref: info["name"] for xref, info in doc.get_ocgs().items()}
+
+
+def test_severity_layers_created_named_and_all_on(tmp_path):
+    # High/medium/low findings each earn a layer, created in the fixed
+    # high→medium→low order (deterministic, I-7) and all shipped visible so the
+    # reviewed PDF renders exactly as before.
+    src = _make_pdf(tmp_path, pages=1)
+    findings = [
+        _finding("hi", severity="high", quote="HQ", rect=(100, 100, 220, 140)),
+        _finding("med", severity="medium", quote="MQ", rect=(300, 100, 420, 140)),
+        _finding("lo", severity="low", quote="LQ", rect=(100, 300, 220, 340)),
+    ]
+    res = write_reviewed_pdfs(findings, [src], tmp_path / "out")
+    assert res.coverage_status == "COMPLETE"       # layers never break DA-007
+    doc = pymupdf.open(str(res.reviewed_pdfs[0]))
+    try:
+        ocgs = doc.get_ocgs()
+        # add_ocg allocates increasing xrefs, so sorted-by-xref == creation order.
+        ordered = [ocgs[x]["name"] for x in sorted(ocgs)]
+        assert ordered == [_SEVERITY_LAYER_NAMES[t] for t in _SEVERITY_LAYER_ORDER]
+        assert all(info["on"] for info in ocgs.values())
+    finally:
+        doc.close()
+
+
+def test_each_cloud_lands_on_its_severity_layer(tmp_path):
+    src = _make_pdf(tmp_path, pages=1)
+    findings = [
+        _finding("hi", severity="high", quote="HQ", rect=(100, 100, 220, 140)),
+        _finding("med", severity="medium", quote="MQ", rect=(300, 100, 420, 140)),
+        _finding("lo", severity="low", quote="LQ", rect=(100, 300, 220, 340)),
+    ]
+    res = write_reviewed_pdfs(findings, [src], tmp_path / "out")
+    doc = pymupdf.open(str(res.reviewed_pdfs[0]))
+    try:
+        names = _layer_names(doc)
+        by_layer = {
+            names[a.get_oc()]: a.info["content"]
+            for page in doc for a in page.annots() if a.type[1] == "Square"
+        }
+        assert "hi" in by_layer[_SEVERITY_LAYER_NAMES["high"]]
+        assert "med" in by_layer[_SEVERITY_LAYER_NAMES["medium"]]
+        assert "lo" in by_layer[_SEVERITY_LAYER_NAMES["low"]]
+    finally:
+        doc.close()
+
+
+def test_question_finding_layers_by_severity_not_color(tmp_path):
+    # A question-category finding is drawn blue (like low), but it must ride its
+    # own SEVERITY layer — a high-severity question belongs on the High layer.
+    src = _make_pdf(tmp_path, pages=1)
+    q = _finding("a question", severity="high", category="question", quote="QQ",
+                 rect=(100, 100, 220, 140))
+    res = write_reviewed_pdfs([q], [src], tmp_path / "out")
+    doc = pymupdf.open(str(res.reviewed_pdfs[0]))
+    try:
+        assert [i["name"] for i in doc.get_ocgs().values()] == [
+            _SEVERITY_LAYER_NAMES["high"]
+        ]
+        square = next(a for page in doc for a in page.annots() if a.type[1] == "Square")
+        assert _layer_names(doc)[square.get_oc()] == _SEVERITY_LAYER_NAMES["high"]
+    finally:
+        doc.close()
+
+
+def test_only_present_severity_tiers_get_a_layer(tmp_path):
+    # No empty layers: a set with only high-severity ink creates only the High layer.
+    src = _make_pdf(tmp_path, pages=1)
+    findings = [
+        _finding("hi one", severity="high", quote="H1", rect=(100, 100, 220, 140)),
+        _finding("hi two", severity="high", quote="H2", rect=(300, 100, 420, 140)),
+    ]
+    res = write_reviewed_pdfs(findings, [src], tmp_path / "out")
+    doc = pymupdf.open(str(res.reviewed_pdfs[0]))
+    try:
+        assert [i["name"] for i in doc.get_ocgs().values()] == [
+            _SEVERITY_LAYER_NAMES["high"]
+        ]
+    finally:
+        doc.close()
+
+
+def test_unset_severity_folds_into_the_low_layer(tmp_path):
+    src = _make_pdf(tmp_path, pages=1)
+    f = _finding("no sev", severity="", quote="NS", rect=(100, 100, 220, 140))
+    res = write_reviewed_pdfs([f], [src], tmp_path / "out")
+    doc = pymupdf.open(str(res.reviewed_pdfs[0]))
+    try:
+        assert [i["name"] for i in doc.get_ocgs().values()] == [
+            _SEVERITY_LAYER_NAMES["low"]
+        ]
+        square = next(a for page in doc for a in page.annots() if a.type[1] == "Square")
+        assert _layer_names(doc)[square.get_oc()] == _SEVERITY_LAYER_NAMES["low"]
+    finally:
+        doc.close()
+
+
+def test_qc_tag_and_leader_share_the_finding_layer(tmp_path):
+    # A cloud's QC tag and a margin callout's leader line ride the same severity
+    # layer as the finding they belong to.
+    src = _make_pdf(tmp_path, pages=1)
+    cloud = _finding("cloud hi", severity="high", quote="CQ", rect=(100, 100, 220, 140))
+    margin = _finding("absent lo", severity="low", quote="", rect=None)
+    margin.anchor_hint = "SHEET"
+    margin.tile = [1, 1]
+    assign_qc_ids([cloud, margin])
+    meta = {0: {"words": [], "rows": 6, "cols": 6, "overlap_frac": 0.08,
+                "page_width_pt": 792.0, "page_height_pt": 612.0}}
+    res = annotate_pdf(src, [cloud, margin], tmp_path / "r.pdf",
+                       include_unverified=True, sheet_meta=meta, index_pages=False)
+    assert res.coverage_status == "COMPLETE"
+    doc = pymupdf.open(str(tmp_path / "r.pdf"))
+    try:
+        names = _layer_names(doc)
+        square = next(a for page in doc for a in page.annots() if a.type[1] == "Square")
+        line = next(a for page in doc for a in page.annots() if a.type[1] == "Line")
+        assert names[square.get_oc()] == _SEVERITY_LAYER_NAMES["high"]   # cloud
+        assert names[line.get_oc()] == _SEVERITY_LAYER_NAMES["low"]      # leader
+        # The two FreeText annots are the cloud's tag (High) and the callout (Low).
+        freetext_layers = {
+            names[a.get_oc()]
+            for page in doc for a in page.annots() if a.type[1] == "FreeText"
+        }
+        assert freetext_layers == {
+            _SEVERITY_LAYER_NAMES["high"], _SEVERITY_LAYER_NAMES["low"]
+        }
+    finally:
+        doc.close()
+
+
+def test_set_review_notes_pdf_is_layered_by_severity(tmp_path):
+    # The set-level notes PDF carries the same severity layers as the reviewed PDFs.
+    def _set_level(text, sev):
+        return Finding(
+            sheet_id="", source_name="", page_index=-1, category="conflict",
+            severity=sev, text=text, anchor_hint="SET_INDEX",
+            verification=Verification(status="SKIPPED"),
+        )
+
+    findings = [_set_level("set hi", "high"), _set_level("set lo", "low")]
+    assign_qc_ids(findings)
+    res = write_set_review_notes_pdf(findings, tmp_path / "out")
+    assert res.coverage_status == "COMPLETE"
+    doc = pymupdf.open(str(res.reviewed_pdfs[0]))
+    try:
+        names = _layer_names(doc)
+        assert {i["name"] for i in doc.get_ocgs().values()} == {
+            _SEVERITY_LAYER_NAMES["high"], _SEVERITY_LAYER_NAMES["low"]
+        }
+        by_layer = {
+            names[a.get_oc()]: a.info["content"]
+            for page in doc for a in page.annots()
+        }
+        assert "set hi" in by_layer[_SEVERITY_LAYER_NAMES["high"]]
+        assert "set lo" in by_layer[_SEVERITY_LAYER_NAMES["low"]]
     finally:
         doc.close()

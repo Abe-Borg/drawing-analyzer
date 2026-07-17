@@ -6,6 +6,25 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — QC markups on severity layers
+
+- **Every finding's ink now lands on a per-severity PDF layer.** The reviewed
+  PDFs group their markups into three optional-content layers —
+  `QC markups - High/Medium/Low severity` — so a reviewer can show or hide a
+  whole severity tier at once in Bluebeam Revu / Acrobat / Chromium (e.g. "just
+  the high-severity issues"). Clouds, QC tags, margin callouts, leader lines, the
+  overflow *AI Review Notes* callouts, and the set-level
+  `Drawing_Set_Review_Notes.pdf` notes are all layered. Findings are grouped
+  strictly by `severity` (a question-category finding rides its own tier even
+  though its *color* stays blue; an unset/other severity folds into the low tier,
+  mirroring the index triage rank). Layers are created only for tiers that carry
+  ink, in a fixed high→medium→low order (deterministic output, I-7), and every
+  layer ships **on** — a freshly-opened reviewed set renders exactly as before,
+  the layers only add the option to filter. Additive and non-fatal (I-3): if the
+  backend cannot create a layer the ink is drawn unlayered, and the DA-007
+  reopen-and-reconcile coverage protocol is untouched (the `/OC` layer reference
+  and the placement stamp are independent keys on the annotation object).
+
 ### Added — About modal in the GUI header
 
 - **A fourth header button, "About", beside the three explainers.** It opens

@@ -10,6 +10,14 @@ result reads like a senior plan-review set (Phase 15):
   DETERMINISTIC (auditor) findings draw a **solid** border, model findings a
   **revision cloud** (``clouds=2``), opted-in unverified findings **dashed** with
   a ``[CHECK]`` popup prefix;
+- **severity layers**: every finding's ink (cloud, QC tag, margin callout, leader
+  line, overflow / set-level note) is placed on a per-severity **PDF
+  optional-content layer** — ``QC markups - High/Medium/Low severity`` — so a
+  reviewer can show or hide a whole severity tier's markups at once in Bluebeam
+  Revu / Acrobat / Chromium. Findings layer strictly by ``severity`` (a
+  question-category finding rides its own tier, even though its *color* is blue);
+  every layer ships **on**, so a freshly-opened reviewed set looks exactly as it
+  did before — the layers only add the *option* to filter;
 - text-anchored defects are Square clouds; **sheet-level / absence findings**
   (``anchor_hint="SHEET"``) become FreeText **callout boxes stacked in a computed
   clear margin band** (the largest text-free horizontal band, found from the
@@ -164,6 +172,25 @@ _SEVERITY_COLORS = {
 }
 _QUESTION_COLOR = (0.16, 0.42, 0.82)
 _DEFAULT_COLOR = (0.40, 0.40, 0.40)
+
+# Severity → the PDF **optional-content layer** (OCG) a finding's ink lands on.
+# In Bluebeam Revu / Acrobat / Chromium a layer can be toggled on or off, so a
+# reviewer can show or hide a whole severity tier's markups at once (e.g. "just
+# the high-severity issues"). Findings are layered strictly by ``severity`` — a
+# "question"-category finding rides its own severity tier (unlike the *color*,
+# which is blue for questions) — and an unset/other severity folds into the low
+# tier, mirroring the index triage rank (:data:`_INDEX_SEVERITY_RANK`). Every
+# layer ships **ON**, so a freshly-opened reviewed PDF looks exactly as it did
+# before layers existed; the layers only add the *option* to filter. The fixed
+# high→medium→low order keeps the layer panel and the saved bytes deterministic
+# (I-7). ASCII hyphen (not em-dash): the names appear in the Base-14-rendered
+# layer UI of some viewers.
+_SEVERITY_LAYER_NAMES = {
+    "high": "QC markups - High severity",
+    "medium": "QC markups - Medium severity",
+    "low": "QC markups - Low severity",
+}
+_SEVERITY_LAYER_ORDER = ("high", "medium", "low")
 
 _BORDER_WIDTH = 1.5
 _TAG_FONTSIZE = 8.0
@@ -872,12 +899,78 @@ def _derotate_point(page: "pymupdf.Page", x: float, y: float) -> "pymupdf.Point"
 
 
 # --------------------------------------------------------------------------- #
+# Severity layers (PDF optional-content groups) — see _SEVERITY_LAYER_NAMES.
+# The ink is grouped by severity so a reviewer can toggle a whole tier on/off in
+# Bluebeam/Acrobat/Chromium. Layering is additive and non-fatal (I-3): if the
+# backend cannot create a layer, or a single annot cannot be tagged, the mark is
+# still drawn — just unfilterable — never lost, and DA-007 reconciliation is
+# untouched (the ``/OC`` reference and the placement stamp are independent keys
+# on the annotation object, verified to coexist across save/reopen).
+# --------------------------------------------------------------------------- #
+
+
+def _severity_layer_tier(finding: Finding) -> str:
+    """The severity tier whose OCG layer this finding's ink belongs on.
+
+    One of ``"high"`` / ``"medium"`` / ``"low"``; an unset or unrecognized
+    severity folds into ``"low"`` (the index triage rank's catch-all tier), so
+    every drawable finding maps to exactly one layer.
+    """
+    sev = (finding.severity or "").lower()
+    return sev if sev in _SEVERITY_LAYER_NAMES else "low"
+
+
+def _create_severity_layers(
+    doc: "pymupdf.Document", tiers: "set[str]"
+) -> "dict[str, int]":
+    """Create the severity OCG layers named in ``tiers`` → ``{tier: ocg_xref}``.
+
+    Only tiers that actually carry ink get a layer (no empty layers), created in
+    the fixed high→medium→low order so the layer panel and the saved bytes are
+    deterministic across runs (I-7). Every layer ships **ON**. Non-fatal (I-3):
+    if the backend cannot create an OCG the writer returns an empty map and every
+    annot is drawn unlayered, exactly as before this feature.
+    """
+    layers: "dict[str, int]" = {}
+    for tier in _SEVERITY_LAYER_ORDER:
+        if tier not in tiers:
+            continue
+        try:
+            layers[tier] = doc.add_ocg(_SEVERITY_LAYER_NAMES[tier], on=True)
+        except Exception:  # noqa: BLE001 - layering is a refinement, never fatal
+            _log.warning("could not create severity OCG layers; drawing unlayered")
+            return {}
+    return layers
+
+
+def _assign_layer(
+    annot: "pymupdf.Annot", finding: Finding, oc_layers: "dict[str, int] | None"
+) -> None:
+    """Put ``annot`` on its finding's severity layer (a no-op without layers).
+
+    Call **before** ``annot.update()`` so the ``/OC`` reference is folded into the
+    appearance stream the viewer builds. Non-fatal (I-3): a failure leaves the
+    annot unlayered — visible, just not filterable — never a dropped mark.
+    """
+    if not oc_layers:
+        return
+    xref = oc_layers.get(_severity_layer_tier(finding))
+    if not xref:
+        return
+    try:
+        annot.set_oc(xref)
+    except Exception:  # noqa: BLE001 - keep the mark; drop only the layer tag
+        _log.debug("could not set OCG layer for finding %s", getattr(finding, "id", "?"))
+
+
+# --------------------------------------------------------------------------- #
 # Drawing (each helper returns how many annots it added)
 # --------------------------------------------------------------------------- #
 
 
 def _add_qc_tag(
-    page: "pymupdf.Page", view_rect: "pymupdf.Rect", finding: Finding, *, author: str
+    page: "pymupdf.Page", view_rect: "pymupdf.Rect", finding: Finding, *, author: str,
+    oc_layers: "dict[str, int] | None" = None,
 ) -> "int | None":
     """A small FreeText tag with the finding's QC number beside its markup.
 
@@ -904,13 +997,14 @@ def _add_qc_tag(
     annot.set_info(title=author, subject="QC tag", content=finding.qc_id)
     # No border_color: PyMuPDF rejects it on plain (non-rich) FreeText annots —
     # the severity-colored text itself is the tag's legend.
+    _assign_layer(annot, finding, oc_layers)
     annot.update()
     return annot.xref
 
 
 def _add_cloud(
     page: "pymupdf.Page", finding: Finding, *, unverified: bool, author: str,
-    rejected: bool = False,
+    rejected: bool = False, oc_layers: "dict[str, int] | None" = None,
 ) -> "list[tuple[str, int]]":
     """The finding's Square annot + its QC tag; returns ``[(component, xref), …]``.
 
@@ -939,11 +1033,13 @@ def _add_cloud(
         subject=finding.category,
         content=_annot_content(finding, unverified=unverified, rejected=rejected),
     )
+    # Put the cloud on its severity layer before update() folds /OC into the /AP.
+    _assign_layer(annot, finding, oc_layers)
     # `update()` builds the appearance stream (/AP); without it some viewers draw
     # nothing. This is the whole reason PyMuPDF is used here (see module docstring).
     annot.update()
     components: list[tuple[str, int]] = [("cloud", annot.xref)]
-    tag_xref = _add_qc_tag(page, view_rect, finding, author=author)
+    tag_xref = _add_qc_tag(page, view_rect, finding, author=author, oc_layers=oc_layers)
     if tag_xref is not None:
         components.append(("tag", tag_xref))
     return components
@@ -955,6 +1051,7 @@ def _add_margin_callouts(
     *,
     meta: dict | None,
     author: str,
+    oc_layers: "dict[str, int] | None" = None,
 ) -> "tuple[dict[str, list[tuple[str, int]]], list[tuple[Finding, MarkupPlacement]]]":
     """Rect-less findings as FreeText boxes packed into visually-clear bands.
 
@@ -1006,6 +1103,7 @@ def _add_margin_callouts(
         except Exception:  # noqa: BLE001
             pass
         annot.set_info(title=author, subject=finding.category, content=content)
+        _assign_layer(annot, finding, oc_layers)
         annot.update()
         components.append(("callout", annot.xref))
 
@@ -1028,6 +1126,7 @@ def _add_margin_callouts(
                 except Exception:  # noqa: BLE001 - line-end styles vary by version
                     pass
                 line.set_info(title=author, subject="QC leader", content=finding.qc_id or "")
+                _assign_layer(line, finding, oc_layers)   # leader shares the finding's tier
                 line.update()
                 components.append(("leader", line.xref))
             except Exception:  # noqa: BLE001 - a failed leader never drops the box
@@ -1264,6 +1363,7 @@ def _insert_review_notes_page(
     n_index: int,
     run_id: str,
     author: str,
+    oc_layers: "dict[str, int] | None" = None,
 ) -> "dict[str, list[tuple[str, int, int]]]":
     """Append an 'AI Review Notes' page carrying the callouts that did not fit.
 
@@ -1319,6 +1419,7 @@ def _insert_review_notes_page(
                     fill_color=(1.0, 1.0, 0.92),
                 )
                 annot.set_info(title=author, subject="AI review note", content=content)
+                _assign_layer(annot, finding, oc_layers)
                 annot.update()
                 collected.setdefault(placement.placement_id, []).append(
                     ("callout", annot.xref, pno)
@@ -1687,6 +1788,18 @@ def _annotate_units(
     collected: dict[str, list[tuple[str, int, int]]] = {}
     try:
         page_count = doc.page_count
+        # Severity layers (OCGs): one per severity tier that actually carries
+        # drawable ink, so a reviewer can toggle a whole tier's markups in
+        # Bluebeam/Acrobat/Chromium. Index-only placements (REJECTED_INDEX /
+        # GATED_INDEX) draw no annotation, so they need no layer. Created here,
+        # once, before any ink; non-fatal (I-3) — an empty map draws everything
+        # unlayered, exactly as before.
+        tiers_present = {
+            _severity_layer_tier(f)
+            for f, pl in pairs
+            if pl.expected in ("CLOUD", "MARGIN", "REVIEW_NOTES")
+        }
+        oc_layers = _create_severity_layers(doc, tiers_present) if tiers_present else {}
         callouts_by_page: dict[int, list[tuple[Finding, MarkupPlacement]]] = {}
         for finding, placement in pairs:
             kind = placement.expected
@@ -1705,7 +1818,7 @@ def _annotate_units(
                     comps = _add_cloud(
                         doc[page_index], finding,
                         unverified=_is_unverified(finding) and not rejected,
-                        author=author, rejected=rejected,
+                        author=author, rejected=rejected, oc_layers=oc_layers,
                     )
                     collected.setdefault(placement.placement_id, []).extend(
                         (c, x, page_index) for c, x in comps
@@ -1722,6 +1835,7 @@ def _annotate_units(
                 drawn, page_overflow = _add_margin_callouts(
                     doc[page_index], group,
                     meta=(sheet_meta or {}).get(page_index), author=author,
+                    oc_layers=oc_layers,
                 )
                 for pid, comps in drawn.items():
                     collected.setdefault(pid, []).extend(
@@ -1755,6 +1869,7 @@ def _annotate_units(
             try:
                 notes_collected = _insert_review_notes_page(
                     doc, overflow, n_index=n_index, run_id=run_id, author=author,
+                    oc_layers=oc_layers,
                 )
             except Exception:  # noqa: BLE001 - the notes page must not sink the file
                 _log.warning("could not build the review-notes page for %s", src.name)
@@ -2134,6 +2249,9 @@ def write_set_review_notes_pdf(
     out = output_dir / SET_REVIEW_NOTES_FILENAME
     collected: dict[str, list[tuple[str, int, int]]] = {}
     doc = pymupdf.open()                                  # a fresh, analyzer-owned doc
+    # Same severity layers as the reviewed PDFs, so set-level notes are filterable
+    # by tier alongside the on-sheet markups.
+    oc_layers = _create_severity_layers(doc, {_severity_layer_tier(f) for f in items})
     try:
         n_pages = (len(pairs) + _NOTES_PER_PAGE - 1) // _NOTES_PER_PAGE
         for pno in range(n_pages):
@@ -2162,6 +2280,7 @@ def write_set_review_notes_pdf(
                         text_color=_color(finding), fill_color=(1.0, 1.0, 0.92),
                     )
                     annot.set_info(title=author, subject="set-level review note", content=content)
+                    _assign_layer(annot, finding, oc_layers)
                     annot.update()
                     collected.setdefault(placement.placement_id, []).append(
                         ("callout", annot.xref, pno)
