@@ -173,7 +173,14 @@ legacy full-rate direct-call rescue (`_rescue_failed_items_sync`) is the
   writer stamps every mark, reopens the saved PDF, and reconciles
   each **placement** against what it finds — returning a `MarkupRunResult` with
   per-placement `WRITTEN`/`INDEXED`/`FAILED` receipts and a receipt-derived
-  `coverage_status`) → `export.py` (`markup_manifest.json`) / `html_report.py`.
+  `coverage_status`. Every finding annotation (cloud, tag, callout, leader,
+  overflow/set-level note) is also placed on a per-**severity** PDF
+  optional-content layer (`QC markups - High/Medium/Low severity`, all shipped on)
+  so a reviewer can toggle a whole severity tier; layered strictly by `severity`
+  (question rides its own tier), created only for tiers with ink in fixed
+  high→medium→low order (I-7), additive/non-fatal (I-3), and the `/OC` reference
+  is independent of the DA-007 placement stamp so reconciliation is untouched) →
+  `export.py` (`markup_manifest.json`) / `html_report.py`.
 
 `core/` is a shared kernel (model ids + env overrides in `api_config.py`, key
 store, pricing, tokenizer). `reference_audit.py` is a back-compat shim over
