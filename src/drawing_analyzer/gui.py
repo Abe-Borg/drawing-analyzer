@@ -15,6 +15,7 @@ import shlex
 import subprocess
 import sys
 import threading
+import webbrowser
 from datetime import datetime
 from pathlib import Path
 from tkinter import BooleanVar, StringVar, filedialog, messagebox
@@ -142,9 +143,9 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         # the store when the key actually changed (and never auto-persists an
         # unchanged, env-supplied key).
         self._persisted_key = self._initial_key
-        # Open help modals ("How to use" / "How it works" / "Why trust it?"),
-        # keyed by HelpDocument.key so a second click re-focuses the existing
-        # window instead of stacking a duplicate.
+        # Open help modals ("How to use" / "How it works" / "Why trust it?" /
+        # "About"), keyed by HelpDocument.key so a second click re-focuses the
+        # existing window instead of stacking a duplicate.
         self._help_windows: dict[str, ctk.CTkToplevel] = {}
 
         self._build_ui()
@@ -169,9 +170,9 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         outer = ctk.CTkFrame(self, fg_color=COLORS["bg_card"], corner_radius=8)
         outer.pack(fill="both", expand=True, padx=16, pady=16)
 
-        # Header row: title on the left, the three explainer buttons on the
-        # right ("How to use", "How it works", "Why trust it?"). Each opens a
-        # scrollable modal built from help_content.py (pure text, no engine
+        # Header row: title on the left, the header buttons on the right
+        # ("How to use", "How it works", "Why trust it?", "About"). Each opens
+        # a scrollable modal built from help_content.py (pure text, no engine
         # dependency) via _open_help_modal.
         header = ctk.CTkFrame(outer, fg_color="transparent")
         header.pack(fill="x", padx=16, pady=(16, 2))
@@ -554,16 +555,19 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
     # ------------------------------------------------------------- help modals
 
     def _build_help_buttons(self, parent) -> None:
-        """Pack the three explainer buttons at the right of the header.
+        """Pack the header buttons (explainers + About) at the right.
 
         The buttons appear left → right in ``HELP_DOCUMENTS`` order; a shared
         sub-frame packed to the right keeps them grouped beside the title.
+        Short labels ("About") get a narrower button so the four-button row
+        still fits beside the title at modest window widths.
         """
         bar = ctk.CTkFrame(parent, fg_color="transparent")
         bar.pack(side="right", anchor="e")
         for doc in HELP_DOCUMENTS:
             ctk.CTkButton(
-                bar, text=doc.button_label, width=112, height=30,
+                bar, text=doc.button_label,
+                width=112 if len(doc.button_label) > 6 else 68, height=30,
                 font=ctk.CTkFont(family="Segoe UI", size=12),
                 fg_color=COLORS["bg_input"], hover_color=COLORS["border"],
                 border_width=1, border_color=COLORS["border"],
@@ -653,6 +657,18 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                         text_color=COLORS["text_secondary"],
                         wraplength=wrap - 28, justify="left",
                     ).pack(side="left", anchor="w", fill="x", expand=True)
+                elif block.kind == "link" and block.href:
+                    link = ctk.CTkLabel(
+                        body, text=block.text,
+                        font=ctk.CTkFont(family="Segoe UI", size=12, underline=True),
+                        text_color=COLORS["accent_glow"],
+                        wraplength=wrap, justify="left", cursor="hand2",
+                    )
+                    link.pack(anchor="w", padx=10, pady=(2, 2))
+                    link.bind(
+                        "<Button-1>",
+                        lambda _e, url=block.href: webbrowser.open(url),
+                    )
                 else:
                     ctk.CTkLabel(
                         body, text=block.text,

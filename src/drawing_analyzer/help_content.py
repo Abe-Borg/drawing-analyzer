@@ -1,28 +1,36 @@
-"""Static help content for the GUI's three explainer modals.
+"""Static help content for the GUI's header modals.
 
-The GUI header carries three buttons — **How to use**, **How it works**, and
-**Why trust it?** — each opening a scrollable modal. The *content* of those
-modals lives here as plain data (:class:`HelpDocument` trees) with **no GUI /
-tkinter import**, so it is importable and unit-testable in the hermetic suite
-even on machines without ``tkinter`` / ``customtkinter`` installed. ``gui.py``
-owns only the thin CustomTkinter rendering (see ``_open_help_modal``).
+The GUI header carries four buttons — **How to use**, **How it works**,
+**Why trust it?**, and **About** — each opening a scrollable modal. The
+*content* of those modals lives here as plain data (:class:`HelpDocument`
+trees) with **no GUI / tkinter import**, so it is importable and unit-testable
+in the hermetic suite even on machines without ``tkinter`` / ``customtkinter``
+installed. ``gui.py`` owns only the thin CustomTkinter rendering (see
+``_open_help_modal``).
 
 Keep the prose faithful to the README and ``CLAUDE.md``: these panels are the
 in-app version of that documentation, so a claim here (verification, gating,
-artifact-backed coverage, "the model never calculates") must match what the
-pipeline actually does.
+artifact-backed coverage, "the model never calculates", the licensing story)
+must match what the pipeline actually does and what LICENSE actually says.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+from . import __version__
+
 
 @dataclass(frozen=True)
 class HelpBlock:
-    """One rendered block within a section: a paragraph or a bullet line."""
+    """One rendered block within a section: a paragraph, bullet, or link.
 
-    kind: str  # "para" | "bullet"
+    ``href`` is set only on ``kind="link"`` blocks; the GUI renders those as a
+    clickable label that opens the URL in the default browser.
+    """
+
+    kind: str  # "para" | "bullet" | "link"
     text: str
+    href: str | None = None
 
 
 @dataclass(frozen=True)
@@ -50,6 +58,10 @@ def _para(text: str) -> HelpBlock:
 
 def _bullet(text: str) -> HelpBlock:
     return HelpBlock(kind="bullet", text=text)
+
+
+def _link(text: str, href: str) -> HelpBlock:
+    return HelpBlock(kind="link", text=text, href=href)
 
 
 def _section(heading: str, *blocks: HelpBlock) -> HelpSection:
@@ -375,8 +387,57 @@ _WHY_TRUST_IT = HelpDocument(
 )
 
 
+# --------------------------------------------------------------------------
+# About
+# --------------------------------------------------------------------------
+
+_ABOUT = HelpDocument(
+    key="about",
+    button_label="About",
+    title="About Drawing Analyzer",
+    intro=f"Version {__version__} — free software under the GNU AGPL.",
+    sections=(
+        _section(
+            "License",
+            _para(
+                "Drawing Analyzer is free software, distributed under the GNU "
+                "Affero General Public License, version 3 or later "
+                "(AGPL-3.0-or-later). Anyone may use, study, modify, and "
+                "redistribute it — commercially or otherwise — provided derived "
+                "versions stay under the same license and their source is made "
+                "available, including when the software is offered as a network "
+                "service."
+            ),
+            _para(
+                "The full license text ships with the source as the LICENSE "
+                "file. This program comes with NO WARRANTY, to the extent "
+                "permitted by law."
+            ),
+            _bullet(
+                "Why AGPL: the PDF engine, PyMuPDF, is itself licensed "
+                "AGPL-3.0, so a combined work distributed with it must carry "
+                "the same license."
+            ),
+        ),
+        _section(
+            "Author & copyright",
+            _para("Copyright © 2026 Abraham Borg."),
+            _link(
+                "Abraham Borg — www.linkedin.com/in/abrahamborg",
+                "https://www.linkedin.com/in/abrahamborg/",
+            ),
+        ),
+    ),
+)
+
+
 # Ordered as they appear on the header, left → right.
-HELP_DOCUMENTS: tuple[HelpDocument, ...] = (_HOW_TO_USE, _HOW_IT_WORKS, _WHY_TRUST_IT)
+HELP_DOCUMENTS: tuple[HelpDocument, ...] = (
+    _HOW_TO_USE,
+    _HOW_IT_WORKS,
+    _WHY_TRUST_IT,
+    _ABOUT,
+)
 
 
 def help_document(key: str) -> HelpDocument:
