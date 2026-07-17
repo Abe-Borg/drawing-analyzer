@@ -32,13 +32,19 @@ _GUI_PATH = Path(__file__).resolve().parent.parent / "src" / "drawing_analyzer" 
 # --------------------------------------------------------------------------
 
 
-def test_exactly_the_three_requested_modals() -> None:
-    """The three explainer modals the task asked for exist, in header order."""
-    assert [d.key for d in HELP_DOCUMENTS] == ["how_to_use", "how_it_works", "why_trust_it"]
+def test_exactly_the_four_header_modals() -> None:
+    """The three explainers plus About exist, in header order."""
+    assert [d.key for d in HELP_DOCUMENTS] == [
+        "how_to_use",
+        "how_it_works",
+        "why_trust_it",
+        "about",
+    ]
     assert [d.button_label for d in HELP_DOCUMENTS] == [
         "How to use",
         "How it works",
         "Why trust it?",
+        "About",
     ]
 
 
@@ -61,8 +67,12 @@ def test_document_is_well_formed(doc: HelpDocument) -> None:
         assert section.blocks, f"section {section.heading!r} has no content"
         for block in section.blocks:
             assert isinstance(block, HelpBlock)
-            assert block.kind in {"para", "bullet"}
+            assert block.kind in {"para", "bullet", "link"}
             assert block.text.strip()
+            if block.kind == "link":
+                assert block.href and block.href.startswith("https://")
+            else:
+                assert block.href is None
 
 
 @pytest.mark.parametrize("doc", HELP_DOCUMENTS, ids=lambda d: d.key)
@@ -76,6 +86,24 @@ def test_help_document_lookup() -> None:
     assert help_document("why_trust_it").title == "Why you can trust the review"
     with pytest.raises(KeyError):
         help_document("does_not_exist")
+
+
+def test_about_links_to_linkedin() -> None:
+    """The About modal carries exactly one link block, pointing at the author."""
+    links = [
+        block
+        for section in help_document("about").sections
+        for block in section.blocks
+        if block.kind == "link"
+    ]
+    assert [link.href for link in links] == ["https://www.linkedin.com/in/abrahamborg/"]
+
+
+def test_about_states_the_version() -> None:
+    """The About intro shows the real package version, not a stale copy."""
+    from drawing_analyzer import __version__
+
+    assert __version__ in help_document("about").intro
 
 
 # --------------------------------------------------------------------------
@@ -112,6 +140,18 @@ def doc_blocks(section: HelpSection):
                 "verif",
                 "INCOMPLETE",
                 "index",
+            ],
+        ),
+        # About — the licensing story must match LICENSE and the README.
+        (
+            "about",
+            [
+                "AGPL",
+                "redistribute",
+                "NO WARRANTY",
+                "Copyright © 2026 Abraham Borg",
+                "PyMuPDF",
+                "linkedin.com/in/abrahamborg",
             ],
         ),
     ],
@@ -181,12 +221,17 @@ class _FakeWidget:
     def __init__(self, master=None, **kw):
         self.master = master
         self.kw = kw
+        self.bound: list[str] = []
         _FakeWidget.created.append((type(self).__name__, kw))
 
     def pack(self, *a, **k):
         return self
 
     def configure(self, *a, **k):
+        return self
+
+    def bind(self, sequence=None, *a, **k):
+        self.bound.append(sequence)
         return self
 
     def winfo_exists(self):

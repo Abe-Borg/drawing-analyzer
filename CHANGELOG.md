@@ -6,6 +6,18 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — About modal in the GUI header
+
+- **A fourth header button, "About", beside the three explainers.** It opens
+  the same style of scrollable modal (content in `help_content.py`, pure data,
+  hermetic-testable) showing the package version, the licensing story
+  (AGPL-3.0-or-later, why PyMuPDF makes the copyleft mandatory, the NO
+  WARRANTY notice), the author's copyright (© 2026 Abraham Borg), and a
+  clickable link to the author's LinkedIn. `HelpBlock` gains an additive
+  `kind="link"` / `href` field; `gui.py` renders link blocks as underlined
+  labels that open the default browser. Short button labels get a narrower
+  width so the four-button row still fits beside the title.
+
 ### Added — project specifications upload
 
 - **Upload real spec documents to ground the QC read.** A new "Upload spec
