@@ -275,10 +275,18 @@ def fetch_manifest(url: str, *, timeout: float = DEFAULT_MANIFEST_TIMEOUT) -> di
     Uses :mod:`urllib` (standard library — no extra dependency) which honours
     the system / env proxy settings a corporate Windows box may impose.
     """
+    if not url.lower().startswith("https://"):
+        # The manifest is the ROOT of trust: the installer's authenticating
+        # sha256 comes FROM it, so it must arrive over an authenticated channel
+        # or an on-path attacker could supply both a malicious installer URL and
+        # a matching hash. Enforced here (symmetric with parse_manifest's check
+        # on the installer URL) so a DRAWING_ANALYZER_UPDATE_URL override can
+        # never downgrade the manifest fetch to http.
+        raise UpdateError("refusing to fetch the update manifest over a non-https URL")
     request = urllib.request.Request(
         url, headers={"User-Agent": _USER_AGENT, "Accept": "application/json"}
     )
-    with urllib.request.urlopen(request, timeout=timeout) as resp:  # noqa: S310 - https enforced downstream
+    with urllib.request.urlopen(request, timeout=timeout) as resp:  # noqa: S310 - https enforced above
         raw = resp.read(MAX_MANIFEST_BYTES + 1)
     if len(raw) > MAX_MANIFEST_BYTES:
         raise UpdateError("update manifest is unexpectedly large; refusing to parse")
@@ -370,12 +378,16 @@ def download_installer(
 ) -> Path:
     """Download ``info.url`` into ``dest_dir`` and verify its SHA-256.
 
-    Returns the path to the verified installer. Raises :class:`UpdateError` if
-    the URL is not https or the checksum does not match — in which case the
-    partial/failed file is removed so a bad download is never left behind to be
-    run by mistake. ``opener`` and ``progress`` are seams for tests / the GUI's
-    progress bar; ``opener(url, timeout=...)`` must return a context-managed
-    response exposing ``.read(n)`` (and optionally a ``Content-Length`` header).
+    Returns the path to the verified installer. The download streams to a
+    ``.part`` temp file and is promoted to the final name with an atomic
+    ``os.replace`` **only** after the SHA-256 matches — so the installer path
+    never holds a partial or failed file. Any failure (non-https URL,
+    interrupted transfer, disk error, checksum mismatch) raises
+    :class:`UpdateError` (or re-raises the transfer error) and removes the temp
+    file, so a bad download is never left behind to be run by mistake.
+    ``opener`` and ``progress`` are seams for tests / the GUI's progress bar;
+    ``opener(url, timeout=...)`` must return a context-managed response exposing
+    ``.read(n)`` (and optionally a ``Content-Length`` header).
     """
     if not info.url.lower().startswith("https://"):
         raise UpdateError("refusing to download an installer over a non-https URL")
@@ -383,33 +395,41 @@ def download_installer(
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / _installer_filename(info.url)
+    part = dest.with_name(dest.name + ".part")
 
     open_fn = opener or _open_url
     digest = hashlib.sha256()
     downloaded = 0
-    with open_fn(info.url, timeout=timeout) as resp:
-        total = _content_length(resp)
-        with open(dest, "wb") as fh:
-            while True:
-                buf = resp.read(chunk)
-                if not buf:
-                    break
-                fh.write(buf)
-                digest.update(buf)
-                downloaded += len(buf)
-                if progress is not None:
-                    progress(downloaded, total)
-
-    actual = digest.hexdigest()
-    if actual.lower() != info.sha256.lower():
+    try:
+        with open_fn(info.url, timeout=timeout) as resp:
+            total = _content_length(resp)
+            with open(part, "wb") as fh:
+                while True:
+                    buf = resp.read(chunk)
+                    if not buf:
+                        break
+                    fh.write(buf)
+                    digest.update(buf)
+                    downloaded += len(buf)
+                    if progress is not None:
+                        progress(downloaded, total)
+        actual = digest.hexdigest()
+        if actual.lower() != info.sha256.lower():
+            raise UpdateError(
+                f"downloaded installer failed integrity check "
+                f"(expected {info.sha256}, got {actual})"
+            )
+        # Promote atomically: the final installer path only ever appears as a
+        # fully-downloaded, integrity-verified file.
+        os.replace(part, dest)
+    except BaseException:
+        # Interrupted transfer, disk error, or checksum mismatch — remove the
+        # temp file so nothing partial survives for a user to run by mistake.
         try:
-            dest.unlink()
+            part.unlink()
         except OSError:
             pass
-        raise UpdateError(
-            f"downloaded installer failed integrity check "
-            f"(expected {info.sha256}, got {actual})"
-        )
+        raise
     return dest
 
 

@@ -157,6 +157,12 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         # docs/RELEASE_WINDOWS.md.
         self._update_state_path = updates.default_state_path()
         self._update_checking = False
+        # Guards the download lifecycle: only one download at a time, and a
+        # download whose dialog was dismissed is cancelled so its completion
+        # never pops a stray install prompt. (The daemon worker can't be killed,
+        # but its result is ignored.)
+        self._update_downloading = False
+        self._update_download_cancelled = False
         self._update_dialog: ctk.CTkToplevel | None = None
 
         self._build_ui()
@@ -2056,12 +2062,19 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         link.bind("<Button-1>", lambda _e: self._open_releases_page())
 
     def _start_update_download(self, info) -> None:
+        if self._update_downloading:
+            # A download is already running (e.g. the dialog was closed and
+            # reopened). Don't start a second writer to the same file.
+            self._set_update_status("A download is already in progress…")
+            return
         if self._busy:
             messagebox.showinfo(
                 "Analysis in progress",
                 "Please wait for the current analysis to finish before updating.",
             )
             return
+        self._update_downloading = True
+        self._update_download_cancelled = False
         for name in ("_update_download_btn", "_update_skip_btn", "_update_later_btn"):
             widget = getattr(self, name, None)
             if widget is not None:
@@ -2109,6 +2122,13 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             pass
 
     def _on_update_download_done(self, path) -> None:
+        self._update_downloading = False
+        if self._update_download_cancelled or self._update_dialog is None:
+            # The user dismissed the update dialog while the download was in
+            # flight — respect that and don't pop a surprise install prompt. The
+            # verified file stays cached; the next check will offer it again.
+            self._set_update_status("Update downloaded — install it later.")
+            return
         try:
             self._update_progress.set(1.0)
             self._update_progress_status.configure(text="Download verified.")
@@ -2135,10 +2155,18 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             )
             self._reset_update_dialog_buttons()
             return
-        # Exit so the installer can overwrite the running files and relaunch.
+        # Release the modal grab / tear down the dialog, then exit so the
+        # installer can replace the running files (installer.iss sets
+        # CloseApplications=yes to close any lingering handle on them).
+        self._close_update_dialog()
         self.quit()
 
     def _on_update_download_error(self, message: str) -> None:
+        self._update_downloading = False
+        if self._update_download_cancelled or self._update_dialog is None:
+            # Dialog was dismissed mid-download; fail quietly.
+            self._set_update_status("Update download cancelled.")
+            return
         self._reset_update_dialog_buttons()
         self._set_update_status("Update download failed.")
         messagebox.showerror(
@@ -2180,6 +2208,10 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             pass
 
     def _close_update_dialog(self) -> None:
+        if self._update_downloading:
+            # Cancel the in-flight download's completion handling so it can't
+            # pop a surprise install prompt after the dialog is dismissed.
+            self._update_download_cancelled = True
         win = getattr(self, "_update_dialog", None)
         self._update_dialog = None
         if win is None:

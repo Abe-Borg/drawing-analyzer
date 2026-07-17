@@ -85,15 +85,14 @@ jobs:
           "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           Write-Host "Resolved version: $v"
 
-      - name: Guard - tag matches package version
+      - name: Guard - tag matches both version literals
         if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
-        run: |
-          $pkg = python -c "import tomllib,pathlib;print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])"
-          if ($pkg -ne "${{ steps.ver.outputs.version }}") {
-            Write-Error "Tag version ${{ steps.ver.outputs.version }} does not match pyproject version $pkg. Bump the version and re-tag."
-            exit 1
-          }
+        # Checks the tag against BOTH pyproject.toml AND
+        # src/drawing_analyzer/__init__.py (the version the frozen app reports
+        # to the updater). A half-bumped tag would otherwise ship an installer
+        # stuck in a perpetual "update available" loop.
+        run: python packaging/windows/check_release_version.py --tag "${{ github.ref_name }}"
 
       - name: Install app (gui extras) + PyInstaller
         shell: pwsh

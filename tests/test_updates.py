@@ -390,6 +390,107 @@ def test_make_manifest_script_roundtrips(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------
+# Manifest transport must be https too (the sha256 root of trust)
+# --------------------------------------------------------------------------
+
+
+def test_fetch_manifest_rejects_non_https() -> None:
+    # Raises before any network call — the manifest is the root of trust, so a
+    # DRAWING_ANALYZER_UPDATE_URL override cannot downgrade it to http.
+    for bad in ["http://updates.lan/latest.json", "ftp://x/latest.json", "file:///etc/x"]:
+        with pytest.raises(UpdateError):
+            updates.fetch_manifest(bad)
+
+
+# --------------------------------------------------------------------------
+# An interrupted download leaves nothing behind (atomic .part -> final)
+# --------------------------------------------------------------------------
+
+
+class _BrokenResponse:
+    """A response whose read() raises partway through (dropped connection)."""
+
+    def __init__(self, data: bytes, *, fail_after: int):
+        self._buf = io.BytesIO(data)
+        self._fail_after = fail_after
+        self._reads = 0
+
+    def read(self, n: int = -1) -> bytes:
+        if self._reads >= self._fail_after:
+            raise OSError("connection reset by peer")
+        self._reads += 1
+        return self._buf.read(n)
+
+    def getheader(self, name, default=None):
+        return {"Content-Length": "999999"}.get(name, default)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_download_interrupted_leaves_no_file(tmp_path: Path) -> None:
+    info = UpdateInfo(version="2.0.0", url="https://host/DrawingAnalyzerSetup.exe", sha256=_GOOD_SHA)
+
+    def opener(url, *, timeout=None):
+        return _BrokenResponse(b"x" * 10000, fail_after=2)
+
+    with pytest.raises(OSError):
+        updates.download_installer(info, tmp_path, opener=opener, chunk=1024)
+    # Neither the final installer nor the .part temp survives the interruption.
+    assert not (tmp_path / "DrawingAnalyzerSetup.exe").exists()
+    assert not (tmp_path / "DrawingAnalyzerSetup.exe.part").exists()
+
+
+def test_download_success_leaves_no_part_file(tmp_path: Path) -> None:
+    payload = b"complete installer" * 50
+    sha = hashlib.sha256(payload).hexdigest()
+    info = UpdateInfo(version="2.0.0", url="https://host/DrawingAnalyzerSetup.exe", sha256=sha)
+    dest = updates.download_installer(info, tmp_path, opener=_opener_for(payload))
+    assert dest.read_bytes() == payload
+    assert not (tmp_path / "DrawingAnalyzerSetup.exe.part").exists()
+
+
+# --------------------------------------------------------------------------
+# Release version guard (packaging/windows/check_release_version.py)
+# --------------------------------------------------------------------------
+
+
+def _load_guard():
+    import importlib.util
+
+    script = (
+        Path(__file__).resolve().parent.parent
+        / "packaging" / "windows" / "check_release_version.py"
+    )
+    spec = importlib.util.spec_from_file_location("check_release_version", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)  # type: ignore[union-attr]
+    return module
+
+
+def test_release_guard_accepts_matching_tag() -> None:
+    from drawing_analyzer import __version__
+
+    guard = _load_guard()
+    # Both the current pyproject and __init__ literals must equal the tag; they
+    # are kept in lockstep, so the real repo version passes with and without "v".
+    assert guard.check(f"v{__version__}") == []
+    assert guard.check(__version__) == []
+
+
+def test_release_guard_rejects_mismatched_tag() -> None:
+    guard = _load_guard()
+    problems = guard.check("v99.99.99")
+    # Both literals disagree with a bogus tag, so both are reported.
+    assert len(problems) == 2
+    assert any("pyproject.toml" in p for p in problems)
+    assert any("__init__.py" in p for p in problems)
+
+
+# --------------------------------------------------------------------------
 # GUI wiring — checked structurally (gui.py can't import without customtkinter).
 # Mirrors tests/test_help_content.py's AST approach.
 # --------------------------------------------------------------------------
