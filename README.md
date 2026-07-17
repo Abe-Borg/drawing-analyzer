@@ -1290,9 +1290,18 @@ constants depend on.
 
 ## Licensing
 
-This project depends on **[PyMuPDF](https://pymupdf.readthedocs.io/), which is
-licensed AGPL-3.0**, so the project is distributed under **AGPL-3.0-or-later** (see
-`LICENSE`). All PyMuPDF usage is isolated to exactly **two** modules —
+Drawing Analyzer is **free software**. Copyright © 2026 Abraham Borg; distributed
+under the **GNU Affero General Public License, version 3 or later**
+(**AGPL-3.0-or-later** — see [`LICENSE`](LICENSE)). Anyone may use, study, modify,
+and redistribute it, commercially or otherwise, under that license's terms; there
+are no restrictions on distribution beyond the AGPL's own conditions (share the
+source of modified versions, including when they are offered over a network).
+
+The copyleft license is not optional here: the project depends on
+**[PyMuPDF](https://pymupdf.readthedocs.io/)**, which is dual-licensed
+**AGPL-3.0 / Artifex commercial**, so a combined work distributed with PyMuPDF
+must itself be AGPL (unless you obtain Artifex's commercial license).
+All PyMuPDF usage is isolated to exactly **two** modules —
 `src/drawing_analyzer/render.py` (rasterizing sheets and crops) and
 `src/drawing_analyzer/annotate.py` (writing cloud annotations onto reviewed
 PDFs) — so the PDF backend can be swapped for a permissively-licensed one by
