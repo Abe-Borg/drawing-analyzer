@@ -93,7 +93,10 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
 
         self.title("Drawing Context Analyzer")
         self.geometry("820x780")
-        self.minsize(640, 560)
+        # Width floor: the header must fit the title (~230px) plus the
+        # four-button bar (3×112 + 68 + padding ≈ 428px) inside the 32+32px
+        # outer/card padding — 640 clipped the row once "About" was added.
+        self.minsize(740, 560)
         self.configure(fg_color=COLORS["bg_dark"])
 
         self._pdfs: list[Path] = []
