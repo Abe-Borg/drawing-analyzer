@@ -68,18 +68,21 @@ Two free pieces of GitHub infrastructure do all the work:
    The `notes` string in `latest.json` is what shows in the app's update dialog;
    by default it points users to the release page.
 
-> **Only-non-prerelease is "latest".** GitHub treats a *pre-release* as not the
-> "latest" release, so mark `rcN` builds as pre-releases if you don't want them
-> auto-offered to everyone. The updater reads
+> **Release candidates are handled for you.** A tag with an `rcN` suffix
+> (`v1.0.0rc1`) is published as a GitHub **pre-release** automatically, so GitHub
+> never marks it "latest". The updater reads
 > `releases/latest/download/latest.json`, which always resolves to the newest
-> **full** release.
+> **full** release — so stable installs are never auto-offered a release
+> candidate. Testers can still install an RC by downloading it from its release
+> page directly.
 
 ## What CI validates on every PR (before you ever tag)
 
 The same workflow runs on pull requests that touch packaging files
 (`packaging/windows/**`, `release.yml`, `updates.py`, `pyproject.toml`). On a PR
-it builds and self-checks the app and compiles the installer **without
-publishing**, and uploads the installer as a downloadable artifact. So you can:
+the read-only `build` job builds and self-checks the app and compiles the
+installer **without publishing** (only the tag-gated `publish` job can write to
+the repo), and it uploads the installer as a downloadable artifact. So you can:
 
 - confirm the Windows build still works before merging, and
 - download and hand-test the actual installer from the PR's workflow run.
@@ -112,7 +115,7 @@ dist\DrawingAnalyzer\DrawingAnalyzer.exe --selfcheck   # sanity check
 | `packaging/windows/installer.iss` | Inno Setup script → `DrawingAnalyzerSetup.exe`. Per-user install (no admin), Start-menu shortcut, clean uninstaller, closes a running instance on update. |
 | `packaging/windows/make_manifest.py` | Writes `latest.json` (version, download URL, sha256). Round-tripped against the app's parser in `tests/test_updates.py`. |
 | `src/drawing_analyzer/core/updates.py` | The in-app updater: fetch manifest → compare → download → verify sha256 → launch installer. Fully unit-tested, no network in tests. |
-| `.github/workflows/release.yml` | Ties it together: build on every relevant PR, publish on every `v*` tag. |
+| `.github/workflows/release.yml` | Ties it together: a read-only `build` job (every relevant PR + tag) and a write-scoped, tag-only `publish` job. RC tags publish as pre-releases. |
 
 ## The code-signing situation (why users see a SmartScreen warning)
 

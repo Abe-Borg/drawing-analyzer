@@ -1,26 +1,33 @@
 # Windows installer build + release for Drawing Analyzer.
 #
 # What it does:
-#   * push a tag  vX.Y.Z  -> build the installer, generate latest.json, and
-#                            publish both as assets on a GitHub Release. The
-#                            installed app's updater fetches
+#   * push a tag  vX.Y.Z  -> the `build` job builds the installer + latest.json,
+#                            then the tag-only `publish` job attaches both to a
+#                            GitHub Release. The installed app's updater fetches
 #                            releases/latest/download/latest.json to discover it.
-#   * pull_request / workflow_dispatch (packaging-related changes) -> build +
-#                            self-check + compile the installer WITHOUT
-#                            publishing, and upload the artifacts, so the whole
-#                            Windows packaging pipeline is validated (and the
+#   * pull_request / workflow_dispatch (packaging-related changes) -> the `build`
+#                            job builds + self-checks + compiles the installer
+#                            WITHOUT publishing, and uploads the artifacts, so the
+#                            whole Windows packaging pipeline is validated (and the
 #                            installer is downloadable) before any release.
 #
 # Cutting a release (see docs/RELEASE_WINDOWS.md for the full runbook):
 #   1. Bump the version in pyproject.toml AND src/drawing_analyzer/__init__.py
 #      (tests/test_release_metadata.py keeps them in lockstep).
 #   2. Commit, then:  git tag v1.2.3 && git push origin v1.2.3
-#   3. This workflow builds and publishes the release automatically.
+#   3. This workflow builds and publishes the release automatically. A tag with
+#      an `rcN` suffix is published as a GitHub *pre-release*, so it never
+#      becomes `releases/latest` and is not auto-offered to stable installs.
 #
-# Supply-chain notes (mirrors .github/workflows/ci.yml §9.8): third-party
-# actions are pinned to immutable commit SHAs (the trailing comment is the
-# human-readable version); the release/publish step is gated to tag refs and is
-# the only step that needs write access.
+# Security posture (mirrors .github/workflows/ci.yml §9.8):
+#   * The `build` job executes repo-controlled code (PyInstaller runs the spec
+#     and imports the package), so it is READ-ONLY: `contents: read`, and the
+#     checkout does not persist the git credential. A PR build therefore never
+#     holds a write-capable token.
+#   * Only the `publish` job has `contents: write`, it is gated to tag refs, and
+#     it runs NO repo code — it just downloads the built artifact and calls `gh`.
+#   * Third-party actions are pinned to immutable commit SHAs (the trailing
+#     comment is the human-readable version).
 #
 # NOTE TO MAINTAINER: the action SHAs below were pinned from their release tags
 # but could not be re-verified against the GitHub API from the build sandbox.
@@ -39,8 +46,7 @@ on:
       - "pyproject.toml"
   workflow_dispatch:
 
-# Least privilege by default; the tag-gated publish step needs write and
-# declares it at the job level below.
+# Least privilege by default; the tag-gated publish job elevates to write.
 permissions:
   contents: read
 
@@ -49,15 +55,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  windows-installer:
+  build:
     name: Build Windows installer
     runs-on: windows-latest
-    # Write is exercised ONLY by the tag-gated "Publish GitHub Release" step;
-    # every other step only reads.
+    # Read-only: this job runs PR-controlled code (PyInstaller executes the spec
+    # and imports the package). No write token is ever exposed to it.
     permissions:
-      contents: write
+      contents: read
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # Don't leave a push-capable credential in .git/config for later steps.
+          persist-credentials: false
 
       - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
         with:
@@ -142,22 +151,50 @@ jobs:
             dist/installer/latest.json
           if-no-files-found: error
 
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    # Tag refs only. This job runs NO repo-controlled code — it downloads the
+    # already-built artifact and calls `gh` — so holding a write token here does
+    # not expose the repo to PR-supplied build steps.
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create the release / upload assets
+      actions: read      # download-artifact reads the run's artifact
+    steps:
+      - name: Download built installer
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: windows-installer
+          path: artifact
+
       - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
-        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = "${{ github.ref_name }}"
-          $notes = "Windows installer for Drawing Analyzer $tag.`n`n" +
-                   "Download **DrawingAnalyzerSetup.exe** below and run it. " +
-                   "The app is not code-signed, so Windows SmartScreen may warn " +
-                   "on first run - choose **More info** then **Run anyway**.`n`n" +
-                   "Existing installs will offer this update automatically."
-          $assets = "dist/installer/DrawingAnalyzerSetup.exe", "dist/installer/latest.json"
-          gh release create "$tag" $assets --repo "${{ github.repository }}" `
-            --title "Drawing Analyzer $tag" --notes "$notes" --verify-tag
-          if ($LASTEXITCODE -ne 0) {
-            # Release already exists (e.g. a re-run) - upload/replace the assets.
-            gh release upload "$tag" $assets --repo "${{ github.repository }}" --clobber
-          }
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          notes=$'Windows installer for Drawing Analyzer '"$tag"$'.\n\n'
+          notes+=$'Download **DrawingAnalyzerSetup.exe** below and run it. '
+          notes+=$'The app is not code-signed, so Windows SmartScreen may warn on '
+          notes+=$'first run - choose **More info** then **Run anyway**.\n\n'
+          notes+=$'Existing installs will offer this update automatically.'
+
+          # A release-candidate tag (vX.Y.ZrcN) is published as a pre-release so
+          # GitHub never marks it "latest" — the updater reads
+          # releases/latest/download/latest.json, so stable installs are not
+          # auto-offered an RC.
+          flags=(--verify-tag --title "Drawing Analyzer ${tag}" --notes "${notes}")
+          if [[ "${version}" == *rc* ]]; then
+            flags+=(--prerelease)
+          else
+            flags+=(--latest)
+          fi
+
+          assets=(artifact/DrawingAnalyzerSetup.exe artifact/latest.json)
+          if ! gh release create "${tag}" "${assets[@]}" --repo "${GITHUB_REPOSITORY}" "${flags[@]}"; then
+            # Release already exists (e.g. a re-run) - replace the assets.
+            gh release upload "${tag}" "${assets[@]}" --repo "${GITHUB_REPOSITORY}" --clobber
+          fi
