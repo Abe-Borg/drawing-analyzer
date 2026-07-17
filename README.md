@@ -40,7 +40,31 @@ See [SECURITY.md](SECURITY.md) for the report's trust boundary (all model output
 treated as hostile and can never execute), API-key handling, secret redaction in
 logs, and what project data each artifact and the Ask-AI assistant contains.
 
-## Install
+## Download & install (Windows)
+
+Drawing Analyzer ships as a normal downloadable Windows app — there is **no
+server to host and nothing to run in the cloud**. The app runs entirely on your
+own PC and talks only to the Anthropic API using your own API key.
+
+1. Go to the [latest release](https://github.com/abe-borg/drawing-analyzer/releases/latest)
+   and download **`DrawingAnalyzerSetup.exe`**.
+2. Run it. Because the app is not code-signed, Windows SmartScreen may show a
+   **"Windows protected your PC"** notice — click **More info → Run anyway**.
+   This is expected for independent software; you'll see it on the first install
+   and on each update.
+3. It installs per-user (no admin prompt), adds a Start-menu shortcut, and
+   launches. Paste your Anthropic API key into the field at the top and you're
+   ready.
+
+**Staying up to date.** The app checks for a newer version once a day at launch,
+and you can check any time with **Check for Updates** in the bottom-right
+corner. When an update is available it shows what's new and offers to download
+and install it — you decide when. Every download is verified against a published
+SHA-256 hash before it runs, so a corrupted or tampered installer is rejected
+automatically. (Building and publishing a release is documented in
+[`docs/RELEASE_WINDOWS.md`](docs/RELEASE_WINDOWS.md).)
+
+## Install from source (developers)
 
 ```bash
 pip install -e ".[gui]"      # GUI + engine
@@ -1159,6 +1183,8 @@ runs.
 | `DRAWING_ANALYZER_CACHE_PATH` | `~/.drawing_analyzer/drawing_digest_cache.json` | On-disk digest cache. |
 | `DRAWING_ANALYZER_CACHE_PERSIST` | on | Disable to keep the cache in-memory only. |
 | `DRAWING_ANALYZER_DIAGNOSTICS` | on | Set `0`/`false` to disable the rotating `drawing_analyzer.log` diagnostics file the GUI writes. |
+| `DRAWING_ANALYZER_DISABLE_UPDATE_CHECK` | off | Set truthy to turn off the desktop app's daily update check and "Check for Updates" button (locked-down deployments). |
+| `DRAWING_ANALYZER_UPDATE_URL` | GitHub releases `latest.json` | Override the update-manifest URL (testing, or self-hosting a fork's releases). |
 | `DRAWING_ANALYZER_DEBUG` | off | Also route the Anthropic SDK / httpx wire-level logs (status codes, request-ids, retries) into the diagnostics file. |
 | `DRAWING_ANALYZER_CACHE_DIAGNOSTICS` | off | Request the prompt-cache diagnostics beta on API calls (operator debugging only). |
 | `DRAWING_ANALYZER_MAX_SHEETS` | `2000` | Sheet count above which a run needs explicit confirmation (`confirm_large_set=True`) rather than silent truncation. |

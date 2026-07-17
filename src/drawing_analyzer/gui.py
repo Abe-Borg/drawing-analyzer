@@ -34,14 +34,15 @@ if TkinterDnD is not None:
 else:  # pragma: no cover - exercised only without tkinterdnd2
     _CTkDnDRoot = ctk.CTk
 
-from . import diagnostics
+from . import __version__, diagnostics
+from .core import updates
 from .core.api_config import REVIEW_MODEL_DEFAULT
 from .core.api_key_store import (
     SecureKeyStorageUnavailable,
     load_api_key_from_file,
     save_api_key,
 )
-from .core.app_paths import api_key_paths
+from .core.app_paths import api_key_paths, app_config_dir
 from .colors import COLORS
 from .cost import (
     estimate_drawing_set_cost,
@@ -150,10 +151,28 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         # "About"), keyed by HelpDocument.key so a second click re-focuses the
         # existing window instead of stacking a duplicate.
         self._help_windows: dict[str, ctk.CTkToplevel] = {}
+        # Self-update checker (Windows desktop build). The last-check date and
+        # any "skipped" version persist in the app config dir; the network
+        # fetch/download always runs off the UI thread. See core/updates.py and
+        # docs/RELEASE_WINDOWS.md.
+        self._update_state_path = updates.default_state_path()
+        self._update_checking = False
+        # Guards the download lifecycle: only one download at a time, and a
+        # download whose dialog was dismissed is cancelled so its completion
+        # never pops a stray install prompt. (The daemon worker can't be killed,
+        # but its result is ignored.)
+        self._update_downloading = False
+        self._update_download_cancelled = False
+        self._update_dialog: ctk.CTkToplevel | None = None
 
         self._build_ui()
         self._register_dnd()
         self._refresh_summary()
+        # Silent, throttled (once/day) update check shortly after the window
+        # paints — never blocks startup, and only surfaces a dialog when an
+        # update is actually available. The footer's "Check for Updates" button
+        # runs the same path on demand with visible results.
+        self.after(1500, self._maybe_auto_check_for_updates)
 
     # ------------------------------------------------------------------ setup
 
@@ -172,6 +191,11 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
     def _build_ui(self) -> None:
         outer = ctk.CTkFrame(self, fg_color=COLORS["bg_card"], corner_radius=8)
         outer.pack(fill="both", expand=True, padx=16, pady=16)
+
+        # Footer packed first (side="bottom") so the version + "Check for
+        # Updates" strip reserves the bottom edge before the content below
+        # claims the remaining space with expand=True.
+        self._build_footer(outer)
 
         # Header row: title on the left, the header buttons on the right
         # ("How to use", "How it works", "Why trust it?", "About"). Each opens
@@ -1799,6 +1823,407 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             messagebox.showinfo(
                 "Diagnostics log", f"The diagnostics log is here:\n\n{path}"
             )
+
+    # ------------------------------------------------------------ self-update
+
+    def _build_footer(self, parent) -> None:
+        """A slim footer: version at left, an update-status note, and a button.
+
+        Deliberately NOT a fifth header button — the header row is
+        width-constrained (see ``_build_help_buttons``). The footer keeps the
+        version visible and gives the manual update check a permanent home,
+        matching the "Help ▸ About / Check for Updates" placement desktop users
+        expect. See ``core/updates.py`` for the mechanism.
+        """
+        footer = ctk.CTkFrame(parent, fg_color="transparent")
+        footer.pack(side="bottom", fill="x", padx=16, pady=(0, 12))
+        ctk.CTkLabel(
+            footer, text=f"v{__version__}",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=COLORS["text_muted"],
+        ).pack(side="left")
+        self.update_status_label = ctk.CTkLabel(
+            footer, text="",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=COLORS["text_muted"],
+        )
+        self.update_status_label.pack(side="left", padx=(10, 0))
+        self.check_update_btn = ctk.CTkButton(
+            footer, text="Check for Updates", width=150, height=28,
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            fg_color=COLORS["bg_input"], hover_color=COLORS["border"],
+            border_width=1, border_color=COLORS["border"],
+            text_color=COLORS["text_secondary"],
+            command=self._on_check_for_updates_clicked,
+        )
+        self.check_update_btn.pack(side="right")
+
+    def _set_update_status(self, text: str, *, color: str | None = None) -> None:
+        label = getattr(self, "update_status_label", None)
+        if label is not None:
+            try:
+                label.configure(text=text, text_color=color or COLORS["text_muted"])
+            except Exception:  # pragma: no cover - defensive UI update
+                pass
+
+    def _maybe_auto_check_for_updates(self) -> None:
+        """Launch a silent, throttled update check (once/day). Never nags.
+
+        Only surfaces a dialog if an update is available and the user has not
+        chosen to skip that version; a clean or failed check stays silent.
+        """
+        try:
+            if updates.update_check_disabled():
+                return
+            state = updates.load_state(self._update_state_path)
+            if not updates.should_auto_check(state, now=datetime.now()):
+                return
+        except Exception:  # noqa: BLE001 - startup convenience, never fatal
+            return
+        self._start_update_check(manual=False)
+
+    def _on_check_for_updates_clicked(self) -> None:
+        """The footer button: an explicit check that always reports its result."""
+        self._start_update_check(manual=True)
+
+    def _start_update_check(self, *, manual: bool) -> None:
+        if self._update_checking:
+            return
+        self._update_checking = True
+        if manual:
+            try:
+                self.check_update_btn.configure(state="disabled", text="Checking…")
+            except Exception:  # pragma: no cover - defensive UI update
+                pass
+            self._set_update_status("Checking for updates…")
+        threading.Thread(
+            target=self._update_check_worker, args=(manual,), daemon=True
+        ).start()
+
+    def _update_check_worker(self, manual: bool) -> None:
+        """Fetch + compare off the UI thread; marshal the result back via after()."""
+        result = updates.check_for_update(__version__)
+        # Record the check time regardless of outcome so the daily throttle holds.
+        try:
+            state = updates.load_state(self._update_state_path)
+            updates.record_check(state, now=datetime.now())
+            updates.save_state(self._update_state_path, state)
+        except Exception:  # noqa: BLE001 - best-effort state write
+            pass
+        self.after(0, lambda: self._on_update_check_done(result, manual))
+
+    def _on_update_check_done(self, result, manual: bool) -> None:
+        self._update_checking = False
+        try:
+            self.check_update_btn.configure(state="normal", text="Check for Updates")
+        except Exception:  # pragma: no cover - defensive UI update
+            pass
+
+        if result.status == updates.STATUS_UPDATE_AVAILABLE and result.info is not None:
+            info = result.info
+            self._set_update_status(
+                f"Update available: v{info.version}", color=COLORS["accent_glow"]
+            )
+            skipped = False
+            if not manual:
+                try:
+                    state = updates.load_state(self._update_state_path)
+                    skipped = updates.version_is_skipped(state, info.version)
+                except Exception:  # noqa: BLE001
+                    skipped = False
+            if manual or not skipped:
+                self._show_update_dialog(info)
+            return
+
+        if result.status == updates.STATUS_UP_TO_DATE:
+            self._set_update_status("You're up to date.")
+            if manual:
+                messagebox.showinfo(
+                    "Up to date",
+                    f"You're running the latest version (v{__version__}).",
+                )
+            return
+
+        if result.status == updates.STATUS_DISABLED:
+            if manual:
+                messagebox.showinfo(
+                    "Update checks are off",
+                    "Automatic update checks are disabled by the "
+                    "DRAWING_ANALYZER_DISABLE_UPDATE_CHECK environment variable.",
+                )
+            return
+
+        # STATUS_ERROR
+        self._set_update_status("Update check failed.")
+        if manual:
+            messagebox.showwarning(
+                "Couldn't check for updates",
+                "Could not reach the update service.\n\n"
+                f"{result.error or 'Unknown error.'}\n\n"
+                "You can download the latest version manually from the "
+                "releases page.",
+            )
+
+    def _show_update_dialog(self, info) -> None:
+        """A styled dialog offering to download + install ``info`` (or skip / defer)."""
+        existing = getattr(self, "_update_dialog", None)
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            existing.focus_force()
+            return
+
+        win = ctk.CTkToplevel(self)
+        self._update_dialog = win
+        win.title("Update available")
+        win.configure(fg_color=COLORS["bg_dark"])
+        win.geometry("560x480")
+        win.minsize(460, 380)
+        win.transient(self)
+        win.protocol("WM_DELETE_WINDOW", self._close_update_dialog)
+        win.after(150, lambda: self._grab_help_modal(win))
+
+        card = ctk.CTkFrame(win, fg_color=COLORS["bg_card"], corner_radius=8)
+        card.pack(fill="both", expand=True, padx=12, pady=12)
+
+        ctk.CTkLabel(
+            card, text=f"Version {info.version} is available",
+            font=ctk.CTkFont(family="Segoe UI", size=17, weight="bold"),
+            text_color=COLORS["text_primary"], justify="left",
+        ).pack(anchor="w", padx=18, pady=(16, 2))
+        ctk.CTkLabel(
+            card,
+            text=(
+                f"You have v{__version__}. Update to get the latest fixes and "
+                "improvements. The app will close so the installer can replace it."
+            ),
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            text_color=COLORS["text_secondary"], wraplength=490, justify="left",
+        ).pack(anchor="w", padx=18, pady=(0, 8))
+
+        # Bottom button bar first so pack reserves the bottom edge.
+        bottom = ctk.CTkFrame(card, fg_color="transparent")
+        bottom.pack(side="bottom", fill="x", padx=18, pady=(4, 14))
+        self._update_download_btn = ctk.CTkButton(
+            bottom, text="Download & Install", width=170, height=34,
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
+            command=lambda: self._start_update_download(info),
+        )
+        self._update_download_btn.pack(side="right")
+        self._update_later_btn = ctk.CTkButton(
+            bottom, text="Later", width=80, height=34,
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            fg_color=COLORS["bg_input"], hover_color=COLORS["border"],
+            border_width=1, border_color=COLORS["border"],
+            text_color=COLORS["text_secondary"],
+            command=self._close_update_dialog,
+        )
+        self._update_later_btn.pack(side="right", padx=(0, 8))
+        self._update_skip_btn = ctk.CTkButton(
+            bottom, text="Skip this Version", width=140, height=34,
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            fg_color=COLORS["bg_input"], hover_color=COLORS["border"],
+            border_width=1, border_color=COLORS["border"],
+            text_color=COLORS["text_muted"],
+            command=lambda: self._skip_update_version(info),
+        )
+        self._update_skip_btn.pack(side="left")
+
+        # Progress row — created now, packed only once a download starts.
+        self._update_progress = ctk.CTkProgressBar(card, height=10)
+        self._update_progress.set(0)
+        self._update_progress_status = ctk.CTkLabel(
+            card, text="",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=COLORS["text_muted"],
+        )
+
+        ctk.CTkLabel(
+            card, text="What's new",
+            font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
+            text_color=COLORS["accent_glow"],
+        ).pack(anchor="w", padx=18, pady=(6, 2))
+        notes = (info.notes or "").strip() or "No release notes were provided."
+        notes_box = ctk.CTkTextbox(
+            card, fg_color=COLORS["bg_dark"], text_color=COLORS["text_secondary"],
+            wrap="word", height=150,
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+        )
+        notes_box.pack(fill="both", expand=True, padx=18, pady=(0, 6))
+        notes_box.insert("1.0", notes)
+        notes_box.configure(state="disabled")
+
+        link = ctk.CTkLabel(
+            card, text="View this release on GitHub",
+            font=ctk.CTkFont(family="Segoe UI", size=11, underline=True),
+            text_color=COLORS["accent_glow"], cursor="hand2",
+        )
+        link.pack(anchor="w", padx=18, pady=(0, 4))
+        link.bind("<Button-1>", lambda _e: self._open_releases_page())
+
+    def _start_update_download(self, info) -> None:
+        if self._update_downloading:
+            # A download is already running (e.g. the dialog was closed and
+            # reopened). Don't start a second writer to the same file.
+            self._set_update_status("A download is already in progress…")
+            return
+        if self._busy:
+            messagebox.showinfo(
+                "Analysis in progress",
+                "Please wait for the current analysis to finish before updating.",
+            )
+            return
+        self._update_downloading = True
+        self._update_download_cancelled = False
+        for name in ("_update_download_btn", "_update_skip_btn", "_update_later_btn"):
+            widget = getattr(self, name, None)
+            if widget is not None:
+                try:
+                    widget.configure(state="disabled")
+                except Exception:  # pragma: no cover - defensive UI update
+                    pass
+        try:
+            self._update_progress_status.pack(side="bottom", fill="x", padx=18, pady=(0, 2))
+            self._update_progress.pack(side="bottom", fill="x", padx=18, pady=(2, 4))
+            self._update_progress.set(0)
+            self._update_progress_status.configure(text="Starting download…")
+        except Exception:  # pragma: no cover - defensive UI update
+            pass
+        threading.Thread(
+            target=self._update_download_worker, args=(info,), daemon=True
+        ).start()
+
+    def _update_download_worker(self, info) -> None:
+        try:
+            dest_dir = app_config_dir() / "updates"
+
+            def _progress(done: int, total: int) -> None:
+                self.after(0, lambda d=done, t=total: self._on_update_download_progress(d, t))
+
+            path = updates.download_installer(info, dest_dir, progress=_progress)
+        except Exception as exc:  # noqa: BLE001 - surfaced in the dialog
+            self.after(0, lambda e=str(exc): self._on_update_download_error(e))
+            return
+        self.after(0, lambda p=path: self._on_update_download_done(p))
+
+    def _on_update_download_progress(self, done: int, total: int) -> None:
+        mb = 1024 * 1024
+        try:
+            if total > 0:
+                self._update_progress.set(min(1.0, done / total))
+                self._update_progress_status.configure(
+                    text=f"Downloading… {done // mb} / {total // mb} MB"
+                )
+            else:
+                self._update_progress_status.configure(
+                    text=f"Downloading… {done // mb} MB"
+                )
+        except Exception:  # pragma: no cover - defensive UI update
+            pass
+
+    def _on_update_download_done(self, path) -> None:
+        self._update_downloading = False
+        if self._update_download_cancelled or self._update_dialog is None:
+            # The user dismissed the update dialog while the download was in
+            # flight — respect that and don't pop a surprise install prompt. The
+            # verified file stays cached; the next check will offer it again.
+            self._set_update_status("Update downloaded — install it later.")
+            return
+        try:
+            self._update_progress.set(1.0)
+            self._update_progress_status.configure(text="Download verified.")
+        except Exception:  # pragma: no cover - defensive UI update
+            pass
+        proceed = messagebox.askyesno(
+            "Install update",
+            "The update downloaded and passed its integrity check.\n\n"
+            "Drawing Analyzer will now close so the installer can replace it. "
+            "Continue?",
+        )
+        if not proceed:
+            self._reset_update_dialog_buttons()
+            self._set_update_status("Update downloaded (not installed).")
+            return
+        try:
+            updates.spawn_installer(path)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror(
+                "Couldn't start the installer",
+                f"The installer was saved to:\n\n{path}\n\n"
+                f"but could not be launched automatically ({exc}).\n"
+                "You can run it manually.",
+            )
+            self._reset_update_dialog_buttons()
+            return
+        # Release the modal grab / tear down the dialog, then exit so the
+        # installer can replace the running files (installer.iss sets
+        # CloseApplications=yes to close any lingering handle on them).
+        self._close_update_dialog()
+        self.quit()
+
+    def _on_update_download_error(self, message: str) -> None:
+        self._update_downloading = False
+        if self._update_download_cancelled or self._update_dialog is None:
+            # Dialog was dismissed mid-download; fail quietly.
+            self._set_update_status("Update download cancelled.")
+            return
+        self._reset_update_dialog_buttons()
+        self._set_update_status("Update download failed.")
+        messagebox.showerror(
+            "Download failed",
+            f"The update could not be downloaded or verified:\n\n{message}\n\n"
+            "You can download it manually from the releases page.",
+        )
+
+    def _reset_update_dialog_buttons(self) -> None:
+        for name in ("_update_download_btn", "_update_skip_btn", "_update_later_btn"):
+            widget = getattr(self, name, None)
+            if widget is not None:
+                try:
+                    widget.configure(state="normal")
+                except Exception:  # pragma: no cover - defensive UI update
+                    pass
+        for name in ("_update_progress", "_update_progress_status"):
+            widget = getattr(self, name, None)
+            if widget is not None:
+                try:
+                    widget.pack_forget()
+                except Exception:  # pragma: no cover - defensive UI update
+                    pass
+
+    def _skip_update_version(self, info) -> None:
+        try:
+            state = updates.load_state(self._update_state_path)
+            updates.mark_skipped(state, info.version)
+            updates.save_state(self._update_state_path, state)
+        except Exception:  # noqa: BLE001 - best-effort state write
+            pass
+        self._set_update_status(f"Skipped v{info.version}.")
+        self._close_update_dialog()
+
+    def _open_releases_page(self) -> None:
+        try:
+            webbrowser.open(updates.releases_page_url())
+        except Exception:  # pragma: no cover - best-effort external opener
+            pass
+
+    def _close_update_dialog(self) -> None:
+        if self._update_downloading:
+            # Cancel the in-flight download's completion handling so it can't
+            # pop a surprise install prompt after the dialog is dismissed.
+            self._update_download_cancelled = True
+        win = getattr(self, "_update_dialog", None)
+        self._update_dialog = None
+        if win is None:
+            return
+        try:
+            win.grab_release()
+        except Exception:  # pragma: no cover - platform dependent
+            pass
+        try:
+            win.destroy()
+        except Exception:  # pragma: no cover - platform dependent
+            pass
 
 
 def main() -> None:

@@ -82,6 +82,17 @@ representative real/redacted set):
 | 3.5 | API-key storage | Key persisted via Windows Credential Manager (keyring); session-only fallback when unavailable; no plaintext file without explicit consent | |
 | 3.6 | Cost preview | Exhaustive-run estimate appears before submission and lists paid stages | |
 
+## 3A. Packaged installer & self-update (see docs/RELEASE_WINDOWS.md)
+
+| # | Case | Expected | Result / notes |
+|---|---|---|---|
+| 3A.1 | Install `DrawingAnalyzerSetup.exe` | Per-user install with no admin/UAC prompt; SmartScreen "Run anyway" path works; Start-menu shortcut launches the app | |
+| 3A.2 | Version shown | Footer shows `v<version>` matching the release tag and `run.log` | |
+| 3A.3 | Manual "Check for Updates" (up to date) | On the newest version, clicking the footer button reports "You're up to date" | |
+| 3A.4 | Update available | With an older install (or `DRAWING_ANALYZER_UPDATE_URL` pointing at a test manifest), the dialog shows the new version + notes and offers Download / Skip / Later | |
+| 3A.5 | Download + integrity | The download completes, passes its SHA-256 check, the app closes, and the installer replaces it in place (a tampered `sha256` is rejected with an error, not run) | |
+| 3A.6 | Skip / disable | "Skip this Version" suppresses the auto-prompt for that version; `DRAWING_ANALYZER_DISABLE_UPDATE_CHECK=1` silences the daily check | |
+
 ## 4. Output encoding spot checks (see also §19.6 script in RELEASE_ACCEPTANCE_TEMPLATE)
 
 | # | Case | Expected | Result / notes |

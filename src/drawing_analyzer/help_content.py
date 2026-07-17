@@ -420,6 +420,27 @@ _ABOUT = HelpDocument(
             ),
         ),
         _section(
+            "Updates",
+            _para(
+                "Drawing Analyzer checks for a newer version once a day when it "
+                "starts, and you can check any time with the \"Check for "
+                "Updates\" button in the bottom-right corner. When an update is "
+                "available it offers to download and install it — you're always "
+                "in control of when to update."
+            ),
+            _bullet(
+                "Every downloaded update is integrity-checked against a "
+                "published SHA-256 hash before it is ever run, so a corrupted "
+                "or tampered download is rejected automatically."
+            ),
+            _bullet(
+                "The installer is not code-signed, so Windows SmartScreen may "
+                "show a \"Windows protected your PC\" notice the first time you "
+                "run it. Choose \"More info\" then \"Run anyway\" to continue — "
+                "this is expected for independent software."
+            ),
+        ),
+        _section(
             "Author & copyright",
             _para("Copyright © 2026 Abraham Borg."),
             _link(
