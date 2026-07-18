@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from drawing_analyzer.help_content import (
+    GET_API_KEY,
     HELP_DOCUMENTS,
     HelpBlock,
     HelpDocument,
@@ -104,6 +105,65 @@ def test_about_states_the_version() -> None:
     from drawing_analyzer import __version__
 
     assert __version__ in help_document("about").intro
+
+
+# --------------------------------------------------------------------------
+# Get-an-API-key guide — a standalone modal reached from the key field, not
+# one of the four header buttons.
+# --------------------------------------------------------------------------
+
+
+def test_get_api_key_is_not_a_header_modal() -> None:
+    """The guide is standalone — it must not appear in the header button row."""
+    assert GET_API_KEY.key not in {d.key for d in HELP_DOCUMENTS}
+
+
+def test_get_api_key_is_well_formed() -> None:
+    """Same structural contract as the header modals so the renderer is happy."""
+    doc = GET_API_KEY
+    assert isinstance(doc, HelpDocument)
+    assert doc.title.strip()
+    assert doc.button_label.strip()
+    assert doc.intro.strip()
+    assert doc.sections, "a modal with no sections would render blank"
+    for section in doc.sections:
+        assert isinstance(section, HelpSection)
+        assert section.heading.strip()
+        assert section.blocks, f"section {section.heading!r} has no content"
+        for block in section.blocks:
+            assert isinstance(block, HelpBlock)
+            assert block.kind in {"para", "bullet", "link"}
+            assert block.text.strip()
+            if block.kind == "link":
+                assert block.href and block.href.startswith("https://")
+            else:
+                assert block.href is None
+
+
+def test_get_api_key_lookup_and_content() -> None:
+    """It is reachable by key and names the console and the key-safety basics."""
+    doc = help_document("get_api_key")
+    assert doc is GET_API_KEY
+    text = _all_text(doc).lower()
+    for needle in ["console.anthropic.com", "sk-ant-", "create key", "pay"]:
+        assert needle.lower() in text, f"get_api_key guide should mention {needle!r}"
+
+
+def test_get_api_key_links_to_the_console() -> None:
+    """The guide carries a link to the console's key-creation page."""
+    links = [
+        block
+        for section in GET_API_KEY.sections
+        for block in section.blocks
+        if block.kind == "link"
+    ]
+    assert links, "the guide must offer a clickable link to the console"
+    assert all(link.href.startswith("https://console.anthropic.com") for link in links)
+
+
+def test_get_api_key_is_frozen() -> None:
+    with pytest.raises(Exception):
+        GET_API_KEY.title = "mutated"  # type: ignore[misc]
 
 
 # --------------------------------------------------------------------------
@@ -205,6 +265,20 @@ def test_build_ui_installs_help_buttons() -> None:
     """The header wiring calls _build_help_buttons, so the buttons are shown."""
     source = _GUI_PATH.read_text(encoding="utf-8")
     assert "self._build_help_buttons(header)" in source
+
+
+def test_gui_imports_and_wires_get_api_key_guide() -> None:
+    """gui.py imports GET_API_KEY and opens it from the key-field hint link."""
+    tree = _gui_module_ast()
+    imported = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "help_content"
+        for alias in node.names
+    }
+    assert "GET_API_KEY" in imported
+    source = _GUI_PATH.read_text(encoding="utf-8")
+    assert "self._open_help_modal(GET_API_KEY)" in source
 
 
 # --------------------------------------------------------------------------
