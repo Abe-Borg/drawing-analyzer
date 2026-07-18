@@ -4,7 +4,46 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project aims to
 adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.1.0] - 2026-07-18
+
+A usability-focused release: the standalone GUI is now more compact and
+self-explanatory. No engine, output, or pricing changes — analysis, exports, and
+the review pipeline are byte-for-byte identical to 1.0.0. Installed 1.0.0 apps
+are offered this update automatically.
+
+### Added
+
+- **Collapsible input sections in the GUI.** The optional inputs — Anthropic API
+  Key, drawing-PDF drop zone, per-run focus, project specifications, QC review,
+  and processing — each fold into a thin click-to-toggle header, so the window
+  opens compact and a section only claims space when it's in use. Collapsed
+  headers carry a live one-line state summary (e.g. `3 PDF(s)`, `2 on`,
+  `loaded`). The drop zone auto-collapses once files are loaded and re-expands on
+  Clear; the API-key section starts collapsed when a key is already present and
+  expanded (prompting for one) when it isn't.
+- **Collapsible activity log.** The activity log now folds away like the sections
+  above it. Its collapsed header shows the latest status line, folding it never
+  shifts the action buttons, and the always-visible progress line above it keeps
+  live run status in view even while the log is collapsed.
+- **In-app "How do I get a key?" guide.** A link beside the API-key field opens a
+  short, step-by-step guide to creating an Anthropic API key, so a first-run user
+  is never stranded at the first screen.
+- **Cost & time expectations surfaced throughout the GUI.** Mode-aware hints now
+  state the concrete cost/time to expect at each decision point (batch vs
+  real-time transport, the exhaustive QC run), single-sourced so the checkbox,
+  the cost dialog, and the help panel never disagree.
+
+### Fixed
+
+- Corrected the batch cost framing so the "~$0.50" figure is tied to the digest,
+  not the full QC run.
+- Fixed misaligned bullets in the GUI help modals.
+
+## [1.0.0] - 2026-07-17
+
+The first public release — the full vision pipeline, the exhaustive QC stack, the
+run journal/manifests, and the Windows desktop app. (Entries below accumulated
+during pre-1.0 development and all shipped in 1.0.0.)
 
 ### Added — QC markups on severity layers
 
