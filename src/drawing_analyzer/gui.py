@@ -421,8 +421,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         # creates a new report section — conflicts fold into ordinary findings.
         self._specs_sec = CollapsibleSection(
             outer, "Project specifications (optional)", expanded=False,
-            summary_provider=lambda: f"{len(self._spec_documents)} doc(s)"
-            if self._spec_documents else "",
+            summary_provider=self._specs_summary,
         )
         specs_row = self._specs_sec.body
         ctk.CTkLabel(
@@ -1245,6 +1244,18 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             return box.get("1.0", "end").strip()
         except Exception:  # noqa: BLE001 - a widget hiccup must not break refresh
             return ""
+
+    def _specs_summary(self) -> str:
+        """Collapsed specs-header hint: count only successfully-loaded docs.
+
+        A failed/unreadable spec (unsupported, corrupt, image-only) is still
+        stored in self._spec_documents with an ``error``, but contributes no
+        spec text and is NOT sent to QC (project_specifications stays None), so
+        counting it would falsely imply specs are included. Mirror the ``d.ok``
+        basis used by _apply_specs_result's status label.
+        """
+        n = sum(1 for d in self._spec_documents if d.ok)
+        return f"{n} doc(s)" if n else ""
 
     def _qc_summary(self) -> str:
         """Collapsed QC-header hint: how many of the four QC options are on."""
