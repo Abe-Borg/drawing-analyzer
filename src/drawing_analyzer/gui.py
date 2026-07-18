@@ -80,6 +80,88 @@ _SPEC_WARNING_BODY = (
 
 _log = diagnostics.get_logger()
 
+# Collapsible-section carets. Kept as constants so switching to the full-size
+# glyphs (▼/►) or ASCII (−/+) is a one-line change if a target machine renders
+# the small triangles as tofu.
+_CARET_OPEN = "▾"
+_CARET_SHUT = "▸"
+
+
+class CollapsibleSection:
+    """A click-to-toggle section: a thin header bar over a hideable body frame.
+
+    Each section owns its own ``container`` (packed into the parent where the
+    old flat ``*_row`` frame used to pack), holding a full-width header button
+    and a ``body`` frame. Collapsing ``pack_forget()``s the body; expanding
+    re-``pack()``s it — and because the container is never unpacked and the
+    header is always its first child, the body re-appears directly under its
+    header, so toggling never reorders sibling sections (no re-pack needed).
+
+    ``summary_provider`` is an optional zero-arg callable read lazily on every
+    header render, so the collapsed bar can show live state (e.g. "2 on")
+    without any edits to the existing state handlers.
+    """
+
+    def __init__(
+        self,
+        master,
+        title: str,
+        *,
+        expanded: bool = True,
+        summary_provider=None,
+        pady=(0, 8),
+    ) -> None:
+        self.title = title
+        self._expanded = expanded
+        self._summary_provider = summary_provider
+        # Reproduces each old *_row's geometry exactly so surrounding spacing is
+        # unchanged (the sections used fill="x", padx=16, pady=(0, 8)).
+        self.container = ctk.CTkFrame(master, fg_color="transparent")
+        self.container.pack(fill="x", padx=16, pady=pady)
+        # A CTkButton makes the whole row clickable with hover for free; a bare
+        # frame wouldn't receive clicks that land on a child label on top of it.
+        self.header = ctk.CTkButton(
+            self.container, text="", anchor="w", corner_radius=6, height=28,
+            fg_color="transparent", hover_color=COLORS["bg_input"],
+            text_color=COLORS["text_secondary"],
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            command=self.toggle,
+        )
+        self.header.pack(fill="x")
+        self.body = ctk.CTkFrame(self.container, fg_color="transparent")
+        if self._expanded:
+            self.body.pack(fill="x")
+        self._render_header()
+
+    def toggle(self) -> None:
+        self._expanded = not self._expanded
+        if self._expanded:
+            self.body.pack(fill="x")
+        else:
+            self.body.pack_forget()
+        self._render_header()
+
+    def set_expanded(self, expanded: bool) -> None:
+        """Idempotently force a collapse/expand (used by host auto-collapse)."""
+        if expanded != self._expanded:
+            self.toggle()
+
+    def refresh(self) -> None:
+        """Re-pull the state summary into the collapsed/expanded header bar."""
+        self._render_header()
+
+    def _render_header(self) -> None:
+        caret = _CARET_OPEN if self._expanded else _CARET_SHUT
+        summary = ""
+        if self._summary_provider is not None:
+            try:
+                text = self._summary_provider()
+            except Exception:  # noqa: BLE001 - a summary must never break the UI
+                text = ""
+            if text:
+                summary = f"   —  {text}"
+        self.header.configure(text=f"{caret}  {self.title}{summary}")
+
 
 class DrawingAnalyzerApp(_CTkDnDRoot):
     """Minimal standalone window driving the drawing-digest pipeline."""
@@ -93,7 +175,10 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 pass
 
         self.title("Drawing Context Analyzer")
-        self.geometry("820x780")
+        # Shorter default now that the optional sections (and the API key when a
+        # key is already loaded) start collapsed; the activity log — the sole
+        # expand=True widget — absorbs any slack and grows as sections collapse.
+        self.geometry("820x660")
         # Width floor: the header must fit the title (~230px) plus the
         # four-button bar (3×112 + 68 + padding ≈ 428px) inside the 32+32px
         # outer/card padding — 640 clipped the row once "About" was added.
@@ -190,7 +275,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
 
     def _build_ui(self) -> None:
         outer = ctk.CTkFrame(self, fg_color=COLORS["bg_card"], corner_radius=8)
-        outer.pack(fill="both", expand=True, padx=16, pady=16)
+        outer.pack(fill="both", expand=True, padx=16, pady=(16, 12))
 
         # Footer packed first (side="bottom") so the version + "Check for
         # Updates" strip reserves the bottom edge before the content below
@@ -202,7 +287,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         # a scrollable modal built from help_content.py (pure text, no engine
         # dependency) via _open_help_modal.
         header = ctk.CTkFrame(outer, fg_color="transparent")
-        header.pack(fill="x", padx=16, pady=(16, 2))
+        header.pack(fill="x", padx=16, pady=(20, 4))
         ctk.CTkLabel(
             header,
             text="Drawing Context Analyzer",
@@ -226,13 +311,16 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         # API key — paste a key here when ANTHROPIC_API_KEY isn't set in the
         # environment. It applies the moment it's entered (no button), and is
         # saved (OS keyring, or a local key file) when editing finishes.
-        key_row = ctk.CTkFrame(outer, fg_color="transparent")
-        key_row.pack(fill="x", padx=16, pady=(0, 10))
-        ctk.CTkLabel(
-            key_row, text="Anthropic API Key",
-            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
-            text_color=COLORS["text_secondary"],
-        ).pack(side="left", padx=(0, 8))
+        # Collapsed on launch when a key is already loaded (the common case);
+        # expanded when there's none, so a first-run user is prompted for it.
+        self._key_sec = CollapsibleSection(
+            outer, "Anthropic API Key", expanded=not self._has_key,
+            pady=(0, 10),
+            summary_provider=lambda: "loaded"
+            if getattr(self, "_key_var", None) and self._key_var.get().strip()
+            else "no key",
+        )
+        key_row = self._key_sec.body
         self._key_var = StringVar(value=self._initial_key or "")
         self.key_entry = ctk.CTkEntry(
             key_row, show="•", textvariable=self._key_var,
@@ -259,12 +347,20 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         )
         self.key_status_label.pack(side="left", padx=(8, 0))
 
-        # Drop zone
+        # Drop zone. Expanded on launch (and while empty): drag-and-drop is
+        # registered only on this widget (_register_dnd), so a hidden drop
+        # target can't receive files — the host auto-collapses it once files
+        # are loaded (and re-expands on Clear) via _sync_dropzone_section().
+        self._drop_sec = CollapsibleSection(
+            outer, "Drawing PDFs",
+            summary_provider=lambda: f"{len(self._pdfs)} PDF(s)"
+            if self._pdfs else "",
+        )
         self.drop_zone = ctk.CTkFrame(
-            outer, fg_color=COLORS["bg_input"], corner_radius=8,
+            self._drop_sec.body, fg_color=COLORS["bg_input"], corner_radius=8,
             border_width=2, border_color=COLORS["border"], height=90,
         )
-        self.drop_zone.pack(fill="x", padx=16, pady=(0, 8))
+        self.drop_zone.pack(fill="x")
         self.drop_zone.pack_propagate(False)
         self.drop_label = ctk.CTkLabel(
             self.drop_zone,
@@ -286,13 +382,14 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         # additionally asks each sheet read for "Focus findings" and adds a
         # set-level Focus Report deliverable answering it. Snapshotted when
         # Analyze is pressed (mid-run edits don't affect a running analysis).
-        focus_row = ctk.CTkFrame(outer, fg_color="transparent")
-        focus_row.pack(fill="x", padx=16, pady=(0, 8))
-        ctk.CTkLabel(
-            focus_row, text="Per-run focus (optional)",
-            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
-            text_color=COLORS["text_secondary"],
-        ).pack(anchor="w")
+        self._focus_sec = CollapsibleSection(
+            outer, "Per-run focus (optional)", expanded=False,
+            summary_provider=lambda: "set"
+            if getattr(self, "focus_box", None)
+            and self.focus_box.get("1.0", "end").strip()
+            else "",
+        )
+        focus_row = self._focus_sec.body
         ctk.CTkLabel(
             focus_row,
             text=(
@@ -322,13 +419,11 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         # for this run, distinct from "Per-run focus" above: this is
         # ground-truth reference material, not an ad-hoc question, and it never
         # creates a new report section — conflicts fold into ordinary findings.
-        specs_row = ctk.CTkFrame(outer, fg_color="transparent")
-        specs_row.pack(fill="x", padx=16, pady=(0, 8))
-        ctk.CTkLabel(
-            specs_row, text="Project specifications (optional)",
-            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
-            text_color=COLORS["text_secondary"],
-        ).pack(anchor="w")
+        self._specs_sec = CollapsibleSection(
+            outer, "Project specifications (optional)", expanded=False,
+            summary_provider=self._specs_summary,
+        )
+        specs_row = self._specs_sec.body
         ctk.CTkLabel(
             specs_row,
             text=(
@@ -359,13 +454,11 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self.specs_status_label.pack(side="left", padx=(10, 0))
 
         # QC review options.
-        qc_row = ctk.CTkFrame(outer, fg_color="transparent")
-        qc_row.pack(fill="x", padx=16, pady=(0, 8))
-        ctk.CTkLabel(
-            qc_row, text="QC review (optional)",
-            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
-            text_color=COLORS["text_secondary"],
-        ).pack(anchor="w")
+        self._qc_sec = CollapsibleSection(
+            outer, "QC review (optional)", expanded=False,
+            summary_provider=self._qc_summary,
+        )
+        qc_row = self._qc_sec.body
         self._qc_markups_check = ctk.CTkCheckBox(
             qc_row, text="QC Markups — exhaustive engineering review + marked-up PDFs",
             variable=self._qc_markups_var, command=self._on_qc_toggle,
@@ -409,13 +502,12 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._build_profile_panel(qc_row)
 
         # Processing transport.
-        transport_row = ctk.CTkFrame(outer, fg_color="transparent")
-        transport_row.pack(fill="x", padx=16, pady=(0, 8))
-        ctk.CTkLabel(
-            transport_row, text="Processing",
-            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
-            text_color=COLORS["text_secondary"],
-        ).pack(anchor="w")
+        self._transport_sec = CollapsibleSection(
+            outer, "Processing", expanded=False,
+            summary_provider=lambda: "real-time"
+            if self._realtime_var.get() else "batch",
+        )
+        transport_row = self._transport_sec.body
         self._realtime_check = ctk.CTkCheckBox(
             transport_row,
             text="Real-time mode — results immediately, ~2× API cost "
@@ -885,6 +977,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 existing.add(str(p))
                 added = True
         if added:
+            self._sync_dropzone_section()
             self._refresh_summary()
             self._refresh_profile_suggestions()
 
@@ -997,6 +1090,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self.reviewed_btn.configure(state="disabled")
         self.export_btn.configure(state="disabled")
         self._set_progress_text("")
+        self._sync_dropzone_section()
         self._refresh_summary()
 
     def _on_qc_toggle(self) -> None:
@@ -1170,7 +1264,57 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             hint.configure(text=transport_hint(self._realtime_var.get()))
         self._refresh_summary()
 
+    def _specs_summary(self) -> str:
+        """Collapsed specs-header hint: count only successfully-loaded docs.
+
+        A failed/unreadable spec (unsupported, corrupt, image-only) is still
+        stored in self._spec_documents with an ``error``, but contributes no
+        spec text and is NOT sent to QC (project_specifications stays None), so
+        counting it would falsely imply specs are included. Mirror the ``d.ok``
+        basis used by _apply_specs_result's status label.
+        """
+        n = sum(1 for d in self._spec_documents if d.ok)
+        return f"{n} doc(s)" if n else ""
+
+    def _qc_summary(self) -> str:
+        """Collapsed QC-header hint: how many of the four QC options are on."""
+        on = sum(
+            bool(v.get()) for v in (
+                self._qc_markups_var, self._qc_verified_only_var,
+                self._ink_rejected_var, self._reference_audit_var,
+            )
+        )
+        return f"{on} on" if on else ""
+
+    def _refresh_section_headers(self) -> None:
+        """Re-pull each collapsible header's live state summary.
+
+        Called from _refresh_summary (the central state hook), so headers stay
+        current as focus text / QC options / transport change — no per-handler
+        wiring needed. Guarded because _refresh_summary can fire mid-build.
+        """
+        for name in (
+            "_key_sec", "_drop_sec", "_focus_sec",
+            "_specs_sec", "_qc_sec", "_transport_sec",
+        ):
+            sec = getattr(self, name, None)
+            if sec is not None:
+                sec.refresh()
+
+    def _sync_dropzone_section(self) -> None:
+        """Auto-collapse the drop zone once files are loaded, expand when empty.
+
+        Keeps the ~90px drop target visible exactly when it's useful (drag-drop
+        is only registered on it) and hands its space back afterwards.
+        """
+        sec = getattr(self, "_drop_sec", None)
+        if sec is not None:
+            sec.set_expanded(not self._pdfs)
+
     def _refresh_summary(self) -> None:
+        # Keep the collapsible headers' state summaries live on every state
+        # change (this is the central hook). Guarded inside the helper.
+        self._refresh_section_headers()
         # Defensive: _on_qc_toggle() fires this during _build_ui before the
         # summary label exists (mirrors _current_focus's early-refresh guard on
         # focus_box). __init__ calls _refresh_summary() again once the UI is
