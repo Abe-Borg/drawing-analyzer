@@ -17,7 +17,9 @@ from drawing_analyzer.cost import (
     _ASSUMED_PROMPT_TOKENS_PER_SHEET as PROMPT_PER_SHEET,
     _ASSUMED_SYNTHESIS_OUTPUT_TOKENS as SYNTH_OUT,
     estimate_drawing_set_cost,
+    estimate_exhaustive_run_cost,
     format_drawing_cost_prompt,
+    format_exhaustive_cost_prompt,
 )
 
 OPUS = "claude-opus-4-8"
@@ -184,6 +186,40 @@ def test_format_prompt_batch_mode_notes_batch_and_latency():
     assert "Batch" in msg  # names the batch submission + rate
     assert "Nothing is sent until you confirm" in msg
     assert "Proceed" in msg
+
+
+def test_format_prompt_batch_mode_explains_the_shared_queue():
+    """The batch dialog teaches the queue mechanic + the overnight worst case."""
+    msg = format_drawing_cost_prompt(
+        estimate_drawing_set_cost(8, model=OPUS, batch=True)
+    )
+    low = msg.lower()
+    assert "queue" in low
+    assert "overnight" in low or "8+ hours" in msg
+
+
+def test_format_prompt_realtime_mode_gives_per_sheet_time():
+    """The real-time dialog sets a per-sheet time expectation and skips the queue talk."""
+    msg = format_drawing_cost_prompt(
+        estimate_drawing_set_cost(8, model=OPUS, batch=False)
+    )
+    assert "4–6 minutes per sheet" in msg
+    assert "Nothing is sent until you confirm" in msg
+
+
+def test_exhaustive_estimate_carries_transport_and_prompt_reflects_it():
+    """ExhaustiveCostEstimate.batch propagates; the dialog's timing note matches it."""
+    batch_est = estimate_exhaustive_run_cost(6, file_count=2, model=OPUS, batch=True)
+    rt_est = estimate_exhaustive_run_cost(6, file_count=2, model=OPUS, batch=False)
+    assert batch_est.batch is True and rt_est.batch is False
+
+    batch_msg = format_exhaustive_cost_prompt(batch_est)
+    assert "queue" in batch_msg.lower()
+    assert "overnight" in batch_msg.lower() or "8+ hours" in batch_msg
+
+    rt_msg = format_exhaustive_cost_prompt(rt_est)
+    assert "4–6 minutes per sheet" in rt_msg
+    assert "no queue" in rt_msg.lower()
 
 
 # --------------------------------------------------------------------------- #
