@@ -682,8 +682,8 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                         row, text=block.text,
                         font=ctk.CTkFont(family="Segoe UI", size=12),
                         text_color=COLORS["text_secondary"],
-                        wraplength=wrap - 28, justify="left",
-                    ).pack(side="left", anchor="w", fill="x", expand=True)
+                        wraplength=wrap - 28, justify="left", anchor="w",
+                    ).pack(side="left", anchor="w")
                 elif block.kind == "link" and block.href:
                     link = ctk.CTkLabel(
                         body, text=block.text,
