@@ -100,6 +100,14 @@ class CollapsibleSection:
     ``summary_provider`` is an optional zero-arg callable read lazily on every
     header render, so the collapsed bar can show live state (e.g. "2 on")
     without any edits to the existing state handlers.
+
+    ``expand=True`` makes the section claim vertical slack: its container and
+    body pack with ``fill="both", expand=True`` so the body grows to fill the
+    window. The container keeps ``expand=True`` even while collapsed, so its
+    header stays anchored under the content above it and the reclaimed space
+    falls below the header (sibling widgets never shift) — used by the activity
+    log, the one section that should absorb the space collapsed sections hand
+    back and hand its own back when collapsed.
     """
 
     def __init__(
@@ -110,14 +118,21 @@ class CollapsibleSection:
         expanded: bool = True,
         summary_provider=None,
         pady=(0, 8),
+        expand: bool = False,
     ) -> None:
         self.title = title
         self._expanded = expanded
         self._summary_provider = summary_provider
+        self._expand = expand
         # Reproduces each old *_row's geometry exactly so surrounding spacing is
-        # unchanged (the sections used fill="x", padx=16, pady=(0, 8)).
+        # unchanged (the sections used fill="x", padx=16, pady=(0, 8)). An
+        # ``expand`` section instead claims the vertical slack (fill="both",
+        # expand=True) and keeps it even while collapsed (see the class docstring).
         self.container = ctk.CTkFrame(master, fg_color="transparent")
-        self.container.pack(fill="x", padx=16, pady=pady)
+        if expand:
+            self.container.pack(fill="both", expand=True, padx=16, pady=pady)
+        else:
+            self.container.pack(fill="x", padx=16, pady=pady)
         # A CTkButton makes the whole row clickable with hover for free; a bare
         # frame wouldn't receive clicks that land on a child label on top of it.
         self.header = ctk.CTkButton(
@@ -130,13 +145,20 @@ class CollapsibleSection:
         self.header.pack(fill="x")
         self.body = ctk.CTkFrame(self.container, fg_color="transparent")
         if self._expanded:
-            self.body.pack(fill="x")
+            self._pack_body()
         self._render_header()
+
+    def _pack_body(self) -> None:
+        """Pack the body with the fill mode this section was built for."""
+        if self._expand:
+            self.body.pack(fill="both", expand=True)
+        else:
+            self.body.pack(fill="x")
 
     def toggle(self) -> None:
         self._expanded = not self._expanded
         if self._expanded:
-            self.body.pack(fill="x")
+            self._pack_body()
         else:
             self.body.pack_forget()
         self._render_header()
@@ -145,6 +167,11 @@ class CollapsibleSection:
         """Idempotently force a collapse/expand (used by host auto-collapse)."""
         if expanded != self._expanded:
             self.toggle()
+
+    @property
+    def expanded(self) -> bool:
+        """Whether the body is currently shown (read-only)."""
+        return self._expanded
 
     def refresh(self) -> None:
         """Re-pull the state summary into the collapsed/expanded header bar."""
@@ -177,7 +204,8 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self.title("Drawing Context Analyzer")
         # Shorter default now that the optional sections (and the API key when a
         # key is already loaded) start collapsed; the activity log — the sole
-        # expand=True widget — absorbs any slack and grows as sections collapse.
+        # expand=True section — absorbs any slack and grows as sections collapse
+        # (and is itself collapsible, handing its space to the buttons below).
         self.geometry("820x660")
         # Width floor: the header must fit the title (~230px) plus the
         # four-button bar (3×112 + 68 + padding ≈ 428px) inside the 32+32px
@@ -196,6 +224,9 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._specs_text: str = ""
         self._specs_budget: SpecBudget | None = None
         self._last_log_msg: str | None = None
+        # Latest activity-log line, surfaced in the log section's collapsed
+        # header so the most recent status stays visible without expanding it.
+        self._log_summary_text: str | None = None
         # QC review options (see _build_ui). Reference audit is free; QC markups
         # add the verification pass + a marked-up PDF. Under the Part III gating
         # amendment (§18) the exhaustive default inks everything except REJECTED;
@@ -587,12 +618,24 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
 
         # Activity log — live status + per-sheet diagnostics. The digest itself
         # is no longer shown here; it is written only to the saved Markdown file.
+        # Collapsible like the sections above, and the sole ``expand=True``
+        # section: it absorbs the slack the collapsed sections hand back, and
+        # hands its own space to the action buttons below when collapsed. The
+        # always-visible progress label above keeps the live status in view even
+        # while the log is collapsed.
+        self._log_sec = CollapsibleSection(
+            outer, "Activity log", expand=True,
+            summary_provider=self._log_summary,
+        )
         self.log_box = ctk.CTkTextbox(
-            outer, fg_color=COLORS["bg_input"], border_color=COLORS["border"],
-            border_width=2, text_color=COLORS["text_secondary"],
+            self._log_sec.body, fg_color=COLORS["bg_input"],
+            border_color=COLORS["border"], border_width=2,
+            text_color=COLORS["text_secondary"],
             font=ctk.CTkFont(family="Consolas", size=12), wrap="word",
         )
-        self.log_box.pack(fill="both", expand=True, padx=16, pady=(4, 8))
+        # padx comes from the section container (inset 16 from the card); the
+        # 8px below matches the container's own bottom pad before the next row.
+        self.log_box.pack(fill="both", expand=True, pady=(4, 0))
         for _tag, _color in (
             ("muted", COLORS["text_muted"]),
             ("info", COLORS["text_secondary"]),
@@ -1312,6 +1355,20 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         )
         return f"{on} on" if on else ""
 
+    def _log_summary(self) -> str:
+        """Collapsed activity-log header hint: the latest log line.
+
+        Shown only while the log is collapsed, so the most recent status stays
+        visible at a glance; when expanded the log below already shows it, so the
+        header stays uncluttered. Whitespace/newlines are flattened to one line
+        and the result is truncated so a long line never blows out the header.
+        """
+        sec = getattr(self, "_log_sec", None)
+        if sec is None or sec.expanded:
+            return ""
+        text = " ".join((self._log_summary_text or "").split())
+        return text if len(text) <= 48 else text[:47] + "…"
+
     def _refresh_section_headers(self) -> None:
         """Re-pull each collapsible header's live state summary.
 
@@ -1321,7 +1378,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         """
         for name in (
             "_key_sec", "_drop_sec", "_focus_sec",
-            "_specs_sec", "_qc_sec", "_transport_sec",
+            "_specs_sec", "_qc_sec", "_transport_sec", "_log_sec",
         ):
             sec = getattr(self, name, None)
             if sec is not None:
@@ -1558,12 +1615,23 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self.log_box.insert("end", f"{message}\n", level)
         self.log_box.see("end")
         self.log_box.configure(state="disabled")
+        # Keep the collapsed log header's latest-line hint live. No-op work is
+        # avoided while expanded (the summary is empty then); refreshing only
+        # when collapsed also keeps this off the hot path during a normal run.
+        self._log_summary_text = message
+        sec = getattr(self, "_log_sec", None)
+        if sec is not None and not sec.expanded:
+            sec.refresh()
 
     def _clear_log(self) -> None:
         self.log_box.configure(state="normal")
         self.log_box.delete("1.0", "end")
         self.log_box.configure(state="disabled")
         self._last_log_msg = None
+        self._log_summary_text = None
+        sec = getattr(self, "_log_sec", None)
+        if sec is not None:
+            sec.refresh()
 
     def _on_done(self, ctx: DrawingContext) -> None:
         self._busy = False

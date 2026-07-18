@@ -321,6 +321,78 @@ def test_gui_imports_and_wires_get_api_key_guide() -> None:
     assert "self._open_help_modal(GET_API_KEY)" in source
 
 
+def test_build_ui_makes_activity_log_collapsible() -> None:
+    """The activity log is wrapped in an expand-mode CollapsibleSection.
+
+    Structural check (gui.py can't import without customtkinter): the log box is
+    parented to the section body, the section is created in expand mode, and its
+    header is refreshed alongside the other collapsible headers.
+    """
+    source = _GUI_PATH.read_text(encoding="utf-8")
+    assert "self._log_sec = CollapsibleSection(" in source
+    assert '"Activity log"' in source
+    # The textbox is parented to the section body, not directly to ``outer``.
+    assert "self._log_sec.body" in source
+    # Registered in _refresh_section_headers so its collapsed hint stays live.
+    assert '"_log_sec"' in source
+
+
+def test_gui_defines_log_summary_method() -> None:
+    """The collapsed log header's latest-line hint is provided by _log_summary."""
+    cls = _app_class(_gui_module_ast())
+    methods = {n.name for n in cls.body if isinstance(n, ast.FunctionDef)}
+    assert "_log_summary" in methods
+
+
+def test_collapsible_section_expand_mode_fills_and_survives_collapse() -> None:
+    """expand=True fills vertically; the container keeps expand while collapsed.
+
+    Drives the real CollapsibleSection under the fake toolkit so the toggle
+    logic — not just its source — is exercised.
+    """
+    with _fake_gui_toolkit() as (gui_module, ctk):
+        sec = gui_module.CollapsibleSection(
+            ctk.CTkFrame(), "Activity log", expand=True
+        )
+        # Container claims vertical slack, and so does the body while expanded.
+        assert sec.container.pack_kwargs.get("fill") == "both"
+        assert sec.container.pack_kwargs.get("expand") is True
+        assert sec.expanded is True
+        assert sec.body.mapped is True
+        assert sec.body.pack_kwargs.get("fill") == "both"
+        assert sec.body.pack_kwargs.get("expand") is True
+
+        # Collapsing hides the body but leaves the container packed with
+        # expand=True — so the header stays anchored and siblings never shift.
+        sec.toggle()
+        assert sec.expanded is False
+        assert sec.body.mapped is False
+        assert sec.container.pack_kwargs.get("expand") is True
+
+        # Re-expanding re-packs the body with the fill mode it was built for.
+        sec.toggle()
+        assert sec.expanded is True
+        assert sec.body.mapped is True
+        assert sec.body.pack_kwargs.get("expand") is True
+
+
+def test_collapsible_section_default_mode_is_unchanged() -> None:
+    """Without expand, sections still pack fill='x' (regression guard)."""
+    with _fake_gui_toolkit() as (gui_module, ctk):
+        sec = gui_module.CollapsibleSection(
+            ctk.CTkFrame(), "QC review", expanded=False
+        )
+        assert sec.expanded is False
+        assert sec.body.mapped is False  # starts collapsed
+        assert sec.container.pack_kwargs.get("fill") == "x"
+        assert sec.container.pack_kwargs.get("expand") in (None, False)
+        sec.toggle()
+        assert sec.expanded is True
+        assert sec.body.mapped is True
+        assert sec.body.pack_kwargs.get("fill") == "x"
+        assert sec.body.pack_kwargs.get("expand") in (None, False)
+
+
 # --------------------------------------------------------------------------
 # Rendering — exercise the real _render_help_body under a fake toolkit.
 #
@@ -336,9 +408,19 @@ class _FakeWidget:
         self.master = master
         self.kw = kw
         self.bound: list[str] = []
+        # pack geometry state, so tests can assert how a widget was packed and
+        # whether it is currently mapped (used by the CollapsibleSection tests).
+        self.pack_kwargs: dict = {}
+        self.mapped = False
         _FakeWidget.created.append((type(self).__name__, kw))
 
     def pack(self, *a, **k):
+        self.pack_kwargs = k
+        self.mapped = True
+        return self
+
+    def pack_forget(self, *a, **k):
+        self.mapped = False
         return self
 
     def configure(self, *a, **k):
