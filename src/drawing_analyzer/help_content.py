@@ -52,6 +52,42 @@ class HelpDocument:
     sections: tuple[HelpSection, ...]
 
 
+# --------------------------------------------------------------------------
+# Cost & time expectations (shared, single-sourced)
+#
+# The live estimator (``cost.py``) owns the precise dollar figure for a given
+# set; these are the deliberately-rough "what to expect" rules of thumb for a
+# full QC review. They are kept in ONE place and sprinkled across the GUI — the
+# Processing checkbox hint, the cost-confirm dialog, and the "Batch vs
+# real-time" help panel — so an operator builds the cost/time picture
+# progressively rather than reading one dense paragraph. Change a number here
+# and every surface agrees.
+# --------------------------------------------------------------------------
+
+REALTIME_COST_PER_SHEET = "roughly $3–5 per sheet"
+REALTIME_TIME_PER_SHEET = "about 4–6 minutes per sheet"
+BATCH_COST_PER_SHEET = "around $0.50 per sheet"
+
+
+def transport_hint(realtime: bool) -> str:
+    """One-line, mode-aware hint shown under the Processing checkbox.
+
+    ``realtime`` is the checkbox state (True = real-time, False = batch). The
+    two branches trade the same money-for-speed story from opposite sides.
+    """
+    if realtime:
+        return (
+            f"No queue — each sheet is analyzed right away ({REALTIME_TIME_PER_SHEET}), "
+            f"at {REALTIME_COST_PER_SHEET}. Choose this when you need results now."
+        )
+    return (
+        "Sheets wait in Anthropic's shared queue and come back when they reach "
+        "the front — often within a few hours, sometimes overnight (8+ hours). "
+        f"By far the cheapest option ({BATCH_COST_PER_SHEET}); ideal for an "
+        "overnight run when you're not in a rush."
+    )
+
+
 def _para(text: str) -> HelpBlock:
     return HelpBlock(kind="para", text=text)
 
@@ -221,13 +257,26 @@ _HOW_IT_WORKS = HelpDocument(
         ),
         _section(
             "Batch vs real-time",
-            _bullet(
-                "Batch mode (the GUI default) digests every uncached sheet through the "
-                "Message Batches API — about 50% cheaper, for byte-identical output."
+            _para(
+                "Every sheet is a paid vision call, so how those calls are sent is the "
+                "single biggest lever on what a run costs and how long it takes. The "
+                "output is byte-identical either way — you are only trading money for "
+                "speed — and cached sheets are free in both modes."
             ),
             _bullet(
-                "Real-time mode digests sheets concurrently on a bounded pool; running the "
-                "exhaustive stack real-time is the most expensive configuration."
+                "Batch mode (the GUI default) submits every uncached sheet through the "
+                "Message Batches API. Your sheets join Anthropic's shared queue and are "
+                "processed once they reach the front — so a run can finish in a few "
+                "minutes, a few hours, or run overnight (8+ hours) depending on how busy "
+                f"that queue is. In exchange it is about half price ({BATCH_COST_PER_SHEET} "
+                "for a full QC review). Ideal for an overnight run when you're not in a rush."
+            ),
+            _bullet(
+                "Real-time mode skips the queue: every sheet is analyzed immediately and "
+                f"concurrently ({REALTIME_TIME_PER_SHEET}), for {REALTIME_COST_PER_SHEET}. "
+                "Roughly double the batch price, and running the exhaustive stack "
+                "real-time is the most expensive configuration — but you get results now. "
+                "Choose it when you're in a rush."
             ),
         ),
         _section(
