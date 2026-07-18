@@ -131,6 +131,10 @@ _HOW_TO_USE = HelpDocument(
                 "your explicit consent, a local file). An environment variable always "
                 "wins over a saved key."
             ),
+            _bullet(
+                "Don't have a key yet? Click “How do I get one?” beside the key field "
+                "for a short, step-by-step walkthrough of creating one."
+            ),
         ),
         _section(
             "2 · Add drawing PDFs",
@@ -206,6 +210,70 @@ _HOW_TO_USE = HelpDocument(
                 "the run.log / run_manifest.json record) — written even for a failed run."
             ),
             _bullet("Open Diagnostics Log — the detailed request-level trace, available any time."),
+        ),
+    ),
+)
+
+
+# --------------------------------------------------------------------------
+# Getting an API key
+#
+# Reached from a "How do I get a key?" link beside the API-key field — this is
+# the first wall a non-technical user hits, so the steps are deliberately terse
+# and concrete. It is NOT one of the four header modals (HELP_DOCUMENTS), so it
+# is exported separately as GET_API_KEY and rendered through the same modal
+# machinery.
+# --------------------------------------------------------------------------
+
+_CONSOLE_KEYS_URL = "https://console.anthropic.com/settings/keys"
+
+GET_API_KEY = HelpDocument(
+    key="get_api_key",
+    button_label="How do I get a key?",
+    title="How to get an Anthropic API key",
+    intro="A one-time setup, about five minutes. You only do this once.",
+    sections=(
+        _section(
+            "What a key is",
+            _para(
+                "An API key is a secret password that lets this app use Anthropic's "
+                "Claude models on your behalf. You pay Anthropic directly for what you "
+                "use — there is no subscription, and this app shows the cost before "
+                "every paid run."
+            ),
+        ),
+        _section(
+            "Get one in four steps",
+            _bullet(
+                "1 · Go to console.anthropic.com and sign up, or log in if you already "
+                "have an account. Creating one is free."
+            ),
+            _bullet(
+                "2 · Open Billing (or “Plans & billing”), add a payment method, and buy "
+                "a little credit to start — $5 goes a long way. Usage is pay-as-you-go."
+            ),
+            _bullet(
+                "3 · Open API keys in the left-hand menu, click Create Key, give it any "
+                "name, and press Copy. The key is shown only once, so copy it now."
+            ),
+            _bullet(
+                "4 · Paste it into the Anthropic API Key field at the top of this "
+                "window. It works immediately and is remembered for next time."
+            ),
+        ),
+        _section(
+            "Open the console",
+            _para("The Create Key page lives here:"),
+            _link("console.anthropic.com/settings/keys", _CONSOLE_KEYS_URL),
+        ),
+        _section(
+            "Keep it safe",
+            _para(
+                "Your key begins with “sk-ant-”. Treat it like a password: anyone who "
+                "has it can spend your credit. This app stores it in your operating "
+                "system's secure keyring (never in plain text unless you explicitly "
+                "allow it), so you won't have to paste it again."
+            ),
         ),
     ),
 )
@@ -516,8 +584,12 @@ HELP_DOCUMENTS: tuple[HelpDocument, ...] = (
 
 
 def help_document(key: str) -> HelpDocument:
-    """Return the :class:`HelpDocument` with ``key`` (raises ``KeyError`` if absent)."""
-    for doc in HELP_DOCUMENTS:
+    """Return the :class:`HelpDocument` with ``key`` (raises ``KeyError`` if absent).
+
+    Covers both the four header modals (:data:`HELP_DOCUMENTS`) and the
+    standalone :data:`GET_API_KEY` guide reached from the API-key field.
+    """
+    for doc in (*HELP_DOCUMENTS, GET_API_KEY):
         if doc.key == key:
             return doc
     raise KeyError(key)

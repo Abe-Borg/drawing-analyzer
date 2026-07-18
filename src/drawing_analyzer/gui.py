@@ -50,7 +50,7 @@ from .cost import (
     format_drawing_cost_prompt,
     format_exhaustive_cost_prompt,
 )
-from .help_content import HELP_DOCUMENTS, HelpDocument, transport_hint
+from .help_content import GET_API_KEY, HELP_DOCUMENTS, HelpDocument, transport_hint
 from .html_report import build_html_report
 from .pipeline import DrawingContext, extract_drawing_context
 from .render import list_sheets
@@ -320,7 +320,11 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             if getattr(self, "_key_var", None) and self._key_var.get().strip()
             else "no key",
         )
-        key_row = self._key_sec.body
+        # The section body stacks vertically: the entry + buttons on one row,
+        # then the "how do I get a key?" hint beneath it — so the hint hides
+        # along with the field when the section is collapsed (key already set).
+        key_row = ctk.CTkFrame(self._key_sec.body, fg_color="transparent")
+        key_row.pack(fill="x")
         self._key_var = StringVar(value=self._initial_key or "")
         self.key_entry = ctk.CTkEntry(
             key_row, show="•", textvariable=self._key_var,
@@ -346,6 +350,28 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             text_color=COLORS["text_muted"],
         )
         self.key_status_label.pack(side="left", padx=(8, 0))
+
+        # "How do I get a key?" — most users have never seen an API key. A small
+        # clickable hint under the field opens the terse step-by-step guide
+        # (help_content.GET_API_KEY) so they're never left stuck at this first
+        # wall. Rendered as an underlined link that reuses the help-modal path.
+        # Lives inside the key section so it collapses away with the field.
+        hint_row = ctk.CTkFrame(self._key_sec.body, fg_color="transparent")
+        hint_row.pack(fill="x", pady=(6, 0))
+        ctk.CTkLabel(
+            hint_row, text="Don't have a key?",
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=COLORS["text_muted"],
+        ).pack(side="left", padx=(0, 6))
+        get_key_link = ctk.CTkLabel(
+            hint_row, text="How do I get one?",
+            font=ctk.CTkFont(family="Segoe UI", size=11, underline=True),
+            text_color=COLORS["accent_glow"], cursor="hand2",
+        )
+        get_key_link.pack(side="left")
+        get_key_link.bind(
+            "<Button-1>", lambda _e: self._open_help_modal(GET_API_KEY)
+        )
 
         # Drop zone. Expanded on launch (and while empty): drag-and-drop is
         # registered only on this widget (_register_dnd), so a hidden drop
