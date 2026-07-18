@@ -64,7 +64,11 @@ class HelpDocument:
 # and every surface agrees.
 # --------------------------------------------------------------------------
 
-REALTIME_COST_PER_SHEET = "roughly $3–5 per sheet"
+# Cost scales with the depth of the review, so each figure names its workload:
+# batch is exactly half the real-time rate for the *same* run, and the cheap
+# ~$0.50/sheet number is a plain digest — not a full QC review, which costs
+# correspondingly more (about half of the real-time $3–5).
+REALTIME_COST_PER_SHEET = "roughly $3–5 per sheet for a full QC review"
 REALTIME_TIME_PER_SHEET = "about 4–6 minutes per sheet"
 BATCH_COST_PER_SHEET = "around $0.50 per sheet"
 
@@ -83,8 +87,8 @@ def transport_hint(realtime: bool) -> str:
     return (
         "Sheets wait in Anthropic's shared queue and come back when they reach "
         "the front — often within a few hours, sometimes overnight (8+ hours). "
-        f"By far the cheapest option ({BATCH_COST_PER_SHEET}); ideal for an "
-        "overnight run when you're not in a rush."
+        f"About half the real-time rate, and a plain digest runs {BATCH_COST_PER_SHEET}; "
+        "ideal for an overnight run when you're not in a rush."
     )
 
 
@@ -268,13 +272,14 @@ _HOW_IT_WORKS = HelpDocument(
                 "Message Batches API. Your sheets join Anthropic's shared queue and are "
                 "processed once they reach the front — so a run can finish in a few "
                 "minutes, a few hours, or run overnight (8+ hours) depending on how busy "
-                f"that queue is. In exchange it is about half price ({BATCH_COST_PER_SHEET} "
-                "for a full QC review). Ideal for an overnight run when you're not in a rush."
+                "that queue is. In exchange it costs about half the real-time rate — a "
+                f"plain digest runs {BATCH_COST_PER_SHEET}, and a full QC review costs "
+                "correspondingly more. Ideal for an overnight run when you're not in a rush."
             ),
             _bullet(
                 "Real-time mode skips the queue: every sheet is analyzed immediately and "
-                f"concurrently ({REALTIME_TIME_PER_SHEET}), for {REALTIME_COST_PER_SHEET}. "
-                "Roughly double the batch price, and running the exhaustive stack "
+                f"concurrently ({REALTIME_TIME_PER_SHEET}) — {REALTIME_COST_PER_SHEET}. "
+                "Roughly double the batch rate, and running the exhaustive stack "
                 "real-time is the most expensive configuration — but you get results now. "
                 "Choose it when you're in a rush."
             ),
