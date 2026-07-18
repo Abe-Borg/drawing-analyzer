@@ -23,6 +23,7 @@ from drawing_analyzer.help_content import (
     HelpDocument,
     HelpSection,
     help_document,
+    transport_hint,
 )
 
 _GUI_PATH = Path(__file__).resolve().parent.parent / "src" / "drawing_analyzer" / "gui.py"
@@ -223,6 +224,35 @@ def test_content_is_faithful(key: str, needles: list[str]) -> None:
 
 
 # --------------------------------------------------------------------------
+# Cost & time guidance — the sprinkled, single-sourced expectation strings.
+# --------------------------------------------------------------------------
+
+
+def test_transport_hint_batch_explains_the_queue_and_price() -> None:
+    """The default (batch) hint teaches the shared-queue trade-off + cheap price."""
+    hint = transport_hint(realtime=False)
+    low = hint.lower()
+    assert "queue" in low
+    assert "overnight" in low or "8+ hours" in hint
+    assert "0.50" in hint  # the batch per-sheet rule of thumb
+
+
+def test_transport_hint_realtime_gives_time_and_price() -> None:
+    """The real-time hint states the per-sheet time and (higher) price, no queue."""
+    hint = transport_hint(realtime=True)
+    assert "4–6 minutes" in hint
+    assert "$3–5" in hint
+    assert "no queue" in hint.lower()  # real-time's whole point is skipping it
+
+
+def test_how_it_works_covers_the_cost_time_story() -> None:
+    """The 'Batch vs real-time' panel carries the concrete queue / time / price story."""
+    text = _all_text(help_document("how_it_works")).lower()
+    for needle in ("queue", "overnight", "4–6 minutes", "$3–5", "0.50"):
+        assert needle.lower() in text, f"how_it_works should mention {needle!r}"
+
+
+# --------------------------------------------------------------------------
 # GUI wiring — checked structurally (gui.py can't import without customtkinter).
 # --------------------------------------------------------------------------
 
@@ -246,7 +276,17 @@ def test_gui_imports_help_content() -> None:
         if isinstance(node, ast.ImportFrom) and node.module == "help_content"
         for alias in node.names
     }
-    assert {"HELP_DOCUMENTS", "HelpDocument"} <= imported
+    assert {"HELP_DOCUMENTS", "HelpDocument", "transport_hint"} <= imported
+
+
+def test_gui_wires_the_transport_hint() -> None:
+    """The Processing checkbox drives a mode-aware hint via _on_transport_toggle."""
+    cls = _app_class(_gui_module_ast())
+    methods = {n.name for n in cls.body if isinstance(n, ast.FunctionDef)}
+    assert "_on_transport_toggle" in methods
+    source = _GUI_PATH.read_text(encoding="utf-8")
+    assert "command=self._on_transport_toggle" in source
+    assert "self._transport_hint" in source
 
 
 def test_gui_defines_help_modal_methods() -> None:

@@ -50,7 +50,7 @@ from .cost import (
     format_drawing_cost_prompt,
     format_exhaustive_cost_prompt,
 )
-from .help_content import GET_API_KEY, HELP_DOCUMENTS, HelpDocument
+from .help_content import GET_API_KEY, HELP_DOCUMENTS, HelpDocument, transport_hint
 from .html_report import build_html_report
 from .pipeline import DrawingContext, extract_drawing_context
 from .render import list_sheets
@@ -538,11 +538,21 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             transport_row,
             text="Real-time mode — results immediately, ~2× API cost "
                  "(off = Message Batches, ~50% cheaper)",
-            variable=self._realtime_var, command=self._refresh_summary,
+            variable=self._realtime_var, command=self._on_transport_toggle,
             font=ctk.CTkFont(family="Segoe UI", size=12),
             text_color=COLORS["text_primary"],
         )
         self._realtime_check.pack(anchor="w", pady=(4, 0))
+        # A muted, mode-aware hint carrying the concrete cost/time expectation
+        # (and the "batch is a shared queue" explanation) right at the decision
+        # point. Text is single-sourced in help_content.transport_hint so the
+        # checkbox, cost dialog, and help panel never drift apart.
+        self._transport_hint = ctk.CTkLabel(
+            transport_row, text=transport_hint(self._realtime_var.get()),
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            text_color=COLORS["text_muted"], justify="left", wraplength=780,
+        )
+        self._transport_hint.pack(anchor="w", pady=(2, 0))
 
         # Summary + actions row
         row = ctk.CTkFrame(outer, fg_color="transparent")
@@ -800,8 +810,8 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                         row, text=block.text,
                         font=ctk.CTkFont(family="Segoe UI", size=12),
                         text_color=COLORS["text_secondary"],
-                        wraplength=wrap - 28, justify="left",
-                    ).pack(side="left", anchor="w", fill="x", expand=True)
+                        wraplength=wrap - 28, justify="left", anchor="w",
+                    ).pack(side="left", anchor="w")
                 elif block.kind == "link" and block.href:
                     link = ctk.CTkLabel(
                         body, text=block.text,
@@ -1271,6 +1281,15 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         except Exception:  # noqa: BLE001 - a widget hiccup must not break refresh
             return ""
 
+    def _on_transport_toggle(self) -> None:
+        # Keep the muted hint under the Processing checkbox in sync with the
+        # chosen transport, then refresh the cost summary (whose rate also
+        # depends on the batch/real-time choice).
+        hint = getattr(self, "_transport_hint", None)
+        if hint is not None:
+            hint.configure(text=transport_hint(self._realtime_var.get()))
+        self._refresh_summary()
+
     def _specs_summary(self) -> str:
         """Collapsed specs-header hint: count only successfully-loaded docs.
 
@@ -1433,10 +1452,17 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 "chars — conflicts will be reported as ordinary findings.",
                 level="accent",
             )
-        if not use_batch:
+        if use_batch:
+            self._log(
+                "Batch mode: sheets join Anthropic's shared queue — often ready in "
+                "a few hours, but it can run overnight (8+ hours). Cheapest option; "
+                "leave it running and check back later.",
+                level="muted",
+            )
+        else:
             self._log(
                 "Real-time mode: full-rate API calls with immediate results "
-                "(batch is ~50% cheaper).",
+                "(~4–6 min/sheet; batch is ~50% cheaper).",
                 level="muted",
             )
         self._set_progress_text("Starting…", color=COLORS["text_secondary"])

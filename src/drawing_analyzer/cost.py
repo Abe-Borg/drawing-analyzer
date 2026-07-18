@@ -206,9 +206,17 @@ def format_drawing_cost_prompt(est: DrawingCostEstimate) -> str:
     if est.batch:
         lines += [
             "",
-            "Nothing is sent until you confirm. The batch runs in the "
-            "background — usually a few minutes, but it can take up to an hour "
-            "(occasionally longer) before the digest is ready to attach.",
+            "Nothing is sent until you confirm. Batch mode puts your sheets in "
+            "Anthropic's shared queue: they are processed when they reach the "
+            "front, so this can finish in a few minutes, take a few hours, or "
+            "run overnight (8+ hours) depending on how busy the queue is. Best "
+            "left running when you're not in a rush.",
+        ]
+    else:
+        lines += [
+            "",
+            "Nothing is sent until you confirm. Real-time mode skips the queue — "
+            "expect roughly 4–6 minutes per sheet, with results as they finish.",
         ]
     lines += ["", "Proceed with the analysis?"]
     return "\n".join(lines)
@@ -283,6 +291,7 @@ class ExhaustiveCostEstimate:
     components: list[CostComponent]
     low_cost: float | None
     high_cost: float | None
+    batch: bool = True  # estimate reflects the 50% Batch-API discount / queue transport
     verified_effective_date: str = PRICING_EFFECTIVE_DATE
     spec_chars: int = 0  # uploaded project-specifications char count, if any
 
@@ -439,7 +448,7 @@ def estimate_exhaustive_run_cost(
     return ExhaustiveCostEstimate(
         sheet_count=sheet_count, file_count=file_count, model=model,
         components=components, low_cost=low_cost, high_cost=high_cost,
-        spec_chars=spec_chars,
+        batch=batch, spec_chars=spec_chars,
     )
 
 
@@ -473,5 +482,18 @@ def format_exhaustive_cost_prompt(est: ExhaustiveCostEstimate) -> str:
         ]
     else:
         lines += ["", "Estimated total: unavailable for this model."]
+    if est.batch:
+        lines += [
+            "",
+            "Batch mode: sheets go into Anthropic's shared queue and are processed "
+            "when they reach the front — often a few hours, sometimes overnight "
+            "(8+ hours). Cheapest option; best left running when you're not in a rush.",
+        ]
+    else:
+        lines += [
+            "",
+            "Real-time mode: no queue — expect roughly 4–6 minutes per sheet, at the "
+            "full (un-discounted) API rate. Choose this when you need results now.",
+        ]
     lines += ["", "Proceed with the exhaustive review?"]
     return "\n".join(lines)
