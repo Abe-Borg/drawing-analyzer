@@ -180,7 +180,12 @@ legacy full-rate direct-call rescue (`_rescue_failed_items_sync`) is the
   (question rides its own tier), created only for tiers with ink in fixed
   high→medium→low order (I-7), additive/non-fatal (I-3), and the `/OC` reference
   is independent of the DA-007 placement stamp so reconciliation is untouched) →
-  `export.py` (`markup_manifest.json`) / `html_report.py`.
+  `export.py` (`markup_manifest.json`) / `html_report.py`. The opt-in
+  `save_tile_artifacts` option (GUI "Save tile images + per-tile notes",
+  `DRAWING_ANALYZER_SAVE_TILES`) stages every rendered tile PNG at render time
+  (`tile_artifacts.py`) and exports a `tiles/` folder with mirrored per-tile
+  notes; it bypasses the level-1 render skip so tiles exist on warm runs, while
+  the level-2 (PNG-keyed) cache still serves the digests with zero API calls.
 
 `core/` is a shared kernel (model ids + env overrides in `api_config.py`, key
 store, pricing, tokenizer). `reference_audit.py` is a back-compat shim over

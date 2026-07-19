@@ -960,3 +960,148 @@ def test_build_reviewed_pdf_links_skips_ambiguous_basename():
     ]))
     links = dx.build_reviewed_pdf_links(ctx, pairs)
     assert links == {"QC-002": {"pdf": "D-901_reviewed.pdf", "page": 4}}
+
+
+# --------------------------------------------------------------------------- #
+# tile artifacts (save_tile_artifacts): tiles/ copy + mirrored notes
+# --------------------------------------------------------------------------- #
+
+from drawing_analyzer.models import ImageTile, RenderedSheet, SheetRef  # noqa: E402
+from drawing_analyzer.tile_artifacts import stage_rendered_sheet  # noqa: E402
+
+
+def _staged_sheet(source_id="SRC-0001", name="M-101.pdf", page=0):
+    return RenderedSheet(
+        ref=SheetRef(pdf_path=Path(name), page_index=page, source_name=name,
+                     page_count=1, source_id=source_id),
+        overview=ImageTile(png_bytes=b"\x89PNGov", width_px=20, height_px=16,
+                           kind="overview"),
+        tiles=[ImageTile(png_bytes=b"\x89PNGt", width_px=10, height_px=8,
+                         kind="tile", row=0, col=0, label="upper-left")],
+        page_width_pt=612.0, page_height_pt=792.0, rows=1, cols=1,
+    )
+
+
+def _tiles_ctx(tmp_path):
+    work = tmp_path / "qc"
+    stage_rendered_sheet(_staged_sheet(), work / "tiles")
+    tagged = _finding(
+        source_name="M-101.pdf", source_id="SRC-0001", page_index=0,
+        tile=[0, 0], qc_id="QC-001",
+    )
+    sheet_level = _finding(
+        source_name="M-101.pdf", source_id="SRC-0001", page_index=0,
+        tile=None, text="Missing legend", source_quote="", qc_id="QC-002",
+    )
+    ctx = _make_ctx()
+    ctx.sheets = [_Sheet(_Ref("M-101.pdf", 0, 1, source_id="SRC-0001"),
+                         text="# Sheet digest prose")]
+    ctx.findings = [tagged, sheet_level]
+    ctx.qc_work_dir = work
+    return ctx
+
+
+def test_write_tile_artifacts_copies_pngs_and_writes_notes(tmp_path):
+    ctx = _tiles_ctx(tmp_path)
+    folder = tmp_path / "out"
+    folder.mkdir()
+    written = dx.write_tile_artifacts(ctx, folder)
+    assert written == ["tiles/"]
+
+    sheet_dir = folder / "tiles" / "SRC-0001_p1_m-101"
+    assert (sheet_dir / "overview.png").read_bytes() == b"\x89PNGov"
+    assert (sheet_dir / "r1c1.png").read_bytes() == b"\x89PNGt"
+    assert (sheet_dir / "tiles.json").exists()
+    # I-2: the digest prose is copied verbatim.
+    assert (sheet_dir / "digest.md").read_text(encoding="utf-8") == "# Sheet digest prose"
+    data = json.loads((sheet_dir / "findings.json").read_text(encoding="utf-8"))
+    assert [f["qc_id"] for f in data["findings"]] == ["QC-001", "QC-002"]
+    index = json.loads((sheet_dir / "tile_index.json").read_text(encoding="utf-8"))
+    assert [f["qc_id"] for f in index["tiles"][0]["findings"]] == ["QC-001"]
+    assert index["tiles"][0]["model_notes"] is None
+    assert [f["qc_id"] for f in index["sheet_level_findings"]] == ["QC-002"]
+    md = (sheet_dir / "r1c1.md").read_text(encoding="utf-8")
+    assert "QC-001" in md and "QC-002" not in md
+    root = json.loads((folder / "tiles" / "index.json").read_text(encoding="utf-8"))
+    assert root["sheets"][0]["dir"] == "SRC-0001_p1_m-101"
+    assert root["sheets"][0]["finding_count"] == 2
+
+
+def test_write_tile_artifacts_noop_without_staged_tiles(tmp_path):
+    folder = tmp_path / "out"
+    folder.mkdir()
+    assert dx.write_tile_artifacts(_make_ctx(), folder) == []          # no work dir
+    ctx = _make_ctx()
+    ctx.qc_work_dir = tmp_path / "qc"                                  # no tiles/ dir
+    assert dx.write_tile_artifacts(ctx, folder) == []
+    assert not (folder / "tiles").exists()
+
+
+@_pytest_mod.mark.skipif(
+    _os.name == "nt",
+    reason="a backslash FILENAME is only constructible on POSIX (on Windows it "
+           "is a path), and unprivileged symlink creation is unreliable there",
+)
+def test_write_tile_artifacts_sanitizes_and_skips_symlinks(tmp_path):
+    ctx = _tiles_ctx(tmp_path)
+    staged = tmp_path / "qc" / "tiles" / "SRC-0001_p1_m-101"
+    # A POSIX-legal hostile basename must land flat + contained, never traverse.
+    (staged / "..\\..\\evil.png").write_bytes(b"\x89PNGevil")
+    (staged / "leak.png").symlink_to("/etc/hostname")
+    folder = tmp_path / "out"
+    folder.mkdir()
+    dx.write_tile_artifacts(ctx, folder)
+    sheet_dir = folder / "tiles" / "SRC-0001_p1_m-101"
+    assert not (sheet_dir / "leak.png").exists()
+    copied = {p.name for p in sheet_dir.iterdir()}
+    assert any("evil" in n for n in copied)
+    # Everything stayed under the export root.
+    for p in (folder / "tiles").rglob("*"):
+        assert str(p.resolve()).startswith(str((folder / "tiles").resolve()))
+
+
+def test_write_tile_artifacts_corrupt_inventory_still_copies_pngs(tmp_path):
+    ctx = _tiles_ctx(tmp_path)
+    staged = tmp_path / "qc" / "tiles" / "SRC-0001_p1_m-101"
+    (staged / "tiles.json").write_text("{not json", encoding="utf-8")
+    folder = tmp_path / "out"
+    folder.mkdir()
+    dx.write_tile_artifacts(ctx, folder)
+    sheet_dir = folder / "tiles" / "SRC-0001_p1_m-101"
+    assert (sheet_dir / "overview.png").exists() and (sheet_dir / "r1c1.png").exists()
+    assert not (sheet_dir / "tile_index.json").exists()                # notes skipped
+    assert not (sheet_dir / "digest.md").exists()
+
+
+def test_write_tile_artifacts_malformed_schema_still_copies_pngs(tmp_path):
+    # Valid JSON whose schema is broken (null page_index, non-numeric row) must
+    # not abort the export: the sheet's PNGs land, only its notes are skipped.
+    ctx = _tiles_ctx(tmp_path)
+    staged = tmp_path / "qc" / "tiles" / "SRC-0001_p1_m-101"
+    inv = json.loads((staged / "tiles.json").read_text(encoding="utf-8"))
+    inv["sheet"]["page_index"] = None
+    inv["tiles"][0]["row"] = "x"
+    (staged / "tiles.json").write_text(json.dumps(inv), encoding="utf-8")
+    folder = tmp_path / "out"
+    folder.mkdir()
+    assert dx.write_tile_artifacts(ctx, folder) == ["tiles/"]     # no raise
+    sheet_dir = folder / "tiles" / "SRC-0001_p1_m-101"
+    assert (sheet_dir / "overview.png").exists() and (sheet_dir / "r1c1.png").exists()
+    assert not (sheet_dir / "digest.md").exists()                 # notes skipped
+    # The root index still lists the sheet dir (without the notes-derived fields).
+    root = json.loads((folder / "tiles" / "index.json").read_text(encoding="utf-8"))
+    assert root["sheets"][0]["dir"] == "SRC-0001_p1_m-101"
+    assert "finding_count" not in root["sheets"][0]
+
+
+def test_write_drawing_export_includes_tiles_in_manifest_and_log(tmp_path):
+    ctx = _tiles_ctx(tmp_path)
+    folder = dx.write_drawing_export(ctx, tmp_path, source_names=[SRC], now=NOW)
+    assert (folder / "tiles" / "SRC-0001_p1_m-101" / "r1c1.png").exists()
+    manifest = json.loads((folder / "run_manifest.json").read_text(encoding="utf-8"))
+    arts = {a["path"] for a in manifest["artifacts"]}
+    assert "tiles/SRC-0001_p1_m-101/r1c1.png" in arts
+    assert "tiles/SRC-0001_p1_m-101/tile_index.json" in arts
+    assert "tiles/index.json" in arts
+    log = (folder / "run.log").read_text(encoding="utf-8")
+    assert "tiles/" in log

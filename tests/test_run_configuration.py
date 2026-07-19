@@ -218,6 +218,25 @@ def test_planning_stages_break_the_free_battery_promise_when_explicit():
     assert pure.run_identity is False and pure.run_review_plan is False
 
 
+def test_save_tile_artifacts_defaults_off_and_carries_verbatim():
+    assert resolve_run_configuration().save_tile_artifacts is False
+    for kwargs in ({}, {"reference_audit": True}, {"qc_markups": True}):
+        c = resolve_run_configuration(save_tile_artifacts=True, **kwargs)
+        assert c.save_tile_artifacts is True
+        # Output-side only: never a debug override, never a paid stage.
+        assert c.debug_overrides == ()
+        assert c.configuration_kind == "NORMAL"
+    # It must not break the free-battery promise (it places no calls).
+    c = resolve_run_configuration(reference_audit=True, save_tile_artifacts=True)
+    assert c.deterministic_audit_only is True
+
+
+def test_to_dict_carries_save_tile_artifacts():
+    assert resolve_run_configuration().to_dict()["save_tile_artifacts"] is False
+    d = resolve_run_configuration(save_tile_artifacts=True).to_dict()
+    assert d["save_tile_artifacts"] is True
+
+
 def test_to_dict_carries_planning_switches():
     d = resolve_run_configuration(qc_markups=True).to_dict()
     assert d["run_identity"] is True and d["run_review_plan"] is True

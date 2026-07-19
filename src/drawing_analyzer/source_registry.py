@@ -325,6 +325,11 @@ DEFAULT_MAX_FILES = _env_num("DRAWING_ANALYZER_MAX_FILES", 500, int)
 # Rough per-sheet temp/output budget used by the pipeline's disk preflight
 # (evidence crops, reviewed-PDF copies) — deliberately conservative.
 EST_BYTES_PER_SHEET = _env_num("DRAWING_ANALYZER_EST_BYTES_PER_SHEET", 3 << 20, int)
+# Additional per-sheet budget when the opt-in tile-artifact dump stages every
+# rendered PNG (overview + up to 36 tiles) in the work dir.
+EST_TILE_BYTES_PER_SHEET = _env_num(
+    "DRAWING_ANALYZER_EST_TILE_BYTES_PER_SHEET", 30 << 20, int
+)
 
 
 def page_dimensions_ok(width_pt: float, height_pt: float) -> bool:

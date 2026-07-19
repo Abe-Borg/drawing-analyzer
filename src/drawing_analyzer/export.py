@@ -42,8 +42,16 @@ from pathlib import Path
 from typing import Any
 
 from .html_report import build_html_report
-from .models import PRIMARY_LEG_ID, receipt_status_counts
+from .models import PRIMARY_LEG_ID, receipt_status_counts, source_page_key
 from .run_journal import _iso, evidence_summary, render_run_log, sanitize_text
+from .tile_artifacts import (
+    TILES_DIRNAME,
+    TILES_INVENTORY_NAME,
+    build_tile_index,
+    build_tile_note_markdown,
+    build_tiles_root_index,
+    findings_for_sheet,
+)
 
 _SLUG_RE = re.compile(r"[^A-Za-z0-9]+")
 
@@ -1232,6 +1240,147 @@ def write_qc_outputs(
     return written
 
 
+def write_tile_artifacts(ctx: Any, folder: Path) -> list[str]:
+    """Copy the staged tile PNGs into ``tiles/`` and write the mirrored notes.
+
+    Runs only when the pipeline staged tiles (``save_tile_artifacts``): the gate
+    is the presence of ``<qc_work_dir>/tiles/`` — a library caller who staged a
+    tree by hand exports it the same way. The notes are written here, at export
+    time, because findings reach their final state (dedup, QC ids, verification,
+    citation) only after the ledger pipeline; the PNGs were staged at render
+    time, the only moment the bytes existed. Defensive per sheet (a missing or
+    corrupt ``tiles.json`` still copies that sheet's PNGs, skipping its notes);
+    every path passes the DA-033 sanitize/contain boundary; ordering is
+    deterministic throughout (I-7).
+    """
+    work_dir = getattr(ctx, "qc_work_dir", None)
+    if work_dir is None:
+        return []
+    staged_root = Path(work_dir) / TILES_DIRNAME
+    if not staged_root.is_dir():
+        return []
+    staged_dirs = sorted(
+        p for p in staged_root.iterdir() if p.is_dir() and not p.is_symlink()
+    )
+    if not staged_dirs:
+        return []
+
+    findings = _qc_findings(ctx)
+    digest_by_key = {
+        source_page_key(sd.ref): sd
+        for sd in getattr(ctx, "sheets", None) or []
+        if getattr(sd, "ref", None) is not None
+    }
+    dest_root = folder / TILES_DIRNAME
+    sheet_entries: list[dict] = []
+
+    for staged_dir in staged_dirs:
+        safe_dir = safe_artifact_name(staged_dir.name)
+        dest_dir = contained_target(dest_root, safe_dir)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+        # Staged files (PNGs + tiles.json) — the evidence-copy pattern (DA-033):
+        # symlinks never followed, every component sanitized, every target
+        # proven beneath the export root before copying.
+        for dirpath, dirnames, filenames in os.walk(staged_dir, followlinks=False):
+            dirnames[:] = [d for d in dirnames if not (Path(dirpath) / d).is_symlink()]
+            for fname in sorted(filenames):
+                src = Path(dirpath) / fname
+                if src.is_symlink():
+                    continue
+                rel = src.relative_to(staged_dir)
+                safe_rel = Path(*(safe_artifact_name(part) for part in rel.parts))
+                target = contained_target(dest_dir, safe_rel)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, target)
+
+        entry: dict = {"dir": safe_dir}
+        try:
+            inventory = json.loads(
+                (staged_dir / TILES_INVENTORY_NAME).read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            inventory = None
+        try:
+            if isinstance(inventory, dict):
+                entry.update(_write_tile_notes(
+                    inventory, dest_dir=dest_dir,
+                    findings=findings, digest_by_key=digest_by_key,
+                ))
+        except Exception:
+            # A hand-staged/tampered inventory that parses as JSON but breaks
+            # the schema (null page_index, non-numeric row/col, …) must not
+            # abort the export: this sheet's PNGs are already copied — only
+            # its notes are skipped, mirroring the corrupt-JSON path above.
+            pass
+        sheet_entries.append(entry)
+
+    contained_target(dest_root, "index.json").write_text(
+        json.dumps(build_tiles_root_index(sheet_entries), indent=2),
+        encoding="utf-8",
+    )
+    return [f"{TILES_DIRNAME}/"]
+
+
+def _write_tile_notes(
+    inventory: dict, *, dest_dir: Path, findings: list, digest_by_key: dict,
+) -> dict:
+    """Write one staged sheet's mirrored notes; return its index-entry fields.
+
+    Trusts the inventory schema — the caller wraps this in the per-sheet guard,
+    so a malformed hand-staged/tampered ``tiles.json`` skips only these notes.
+    """
+    sheet_info = inventory.get("sheet") or {}
+    sheet_findings = findings_for_sheet(findings, inventory)
+    skey = (
+        (sheet_info.get("source_id") or "").strip()
+        or (sheet_info.get("source_name") or ""),
+        int(sheet_info.get("page_index", -1)),
+    )
+    sd = digest_by_key.get(skey)
+    if sd is not None and (getattr(sd, "text", "") or "").strip():
+        # I-2: the digest prose is copied verbatim (the findings block
+        # was already stripped byte-exactly at parse time).
+        contained_target(dest_dir, "digest.md").write_text(
+            sd.text, encoding="utf-8"
+        )
+    contained_target(dest_dir, "findings.json").write_text(
+        json.dumps(
+            {"findings": [f.to_dict() for f in sheet_findings]}, indent=2
+        ),
+        encoding="utf-8",
+    )
+    contained_target(dest_dir, "tile_index.json").write_text(
+        json.dumps(build_tile_index(inventory, sheet_findings), indent=2),
+        encoding="utf-8",
+    )
+    by_tile: dict[tuple[int, int], list] = {}
+    for f in sheet_findings:
+        if f.tile is not None and len(f.tile) == 2:
+            by_tile.setdefault((int(f.tile[0]), int(f.tile[1])), []).append(f)
+    for tile_entry in inventory.get("tiles") or []:
+        label = str(tile_entry.get("tile_label") or "")
+        if not label:
+            continue
+        pos = (int(tile_entry.get("row", -1)), int(tile_entry.get("col", -1)))
+        contained_target(
+            dest_dir, safe_artifact_name(f"{label}.md")
+        ).write_text(
+            build_tile_note_markdown(
+                tile_entry, inventory, by_tile.get(pos, [])
+            ),
+            encoding="utf-8",
+        )
+    return {
+        "source_id": sheet_info.get("source_id", ""),
+        "source_name": sheet_info.get("source_name", ""),
+        "page_index": sheet_info.get("page_index"),
+        "tile_count": len(inventory.get("tiles") or []),
+        "omitted_tile_count": len(inventory.get("omitted_tiles") or []),
+        "finding_count": len(sheet_findings),
+    }
+
+
 def write_drawing_export(
     ctx: Any,
     parent_dir: Any,
@@ -1281,6 +1430,10 @@ def write_drawing_export(
         # QC review inventory (findings.json/csv, sheet_text/, reviewed PDFs,
         # evidence/, markup_manifest.json) — only written when the run ran a QC stage.
         write_qc_outputs(ctx, folder, hash_cache=hash_cache)
+        # Opt-in tile artifacts (save_tile_artifacts): staged tile PNGs + the
+        # mirrored per-tile notes. Before run.log/run_manifest.json so the §18.4
+        # inventory and hashes include every tile file automatically.
+        write_tile_artifacts(ctx, folder)
         # Phase 26A finalization order (§18.4): every ordinary artifact and the
         # markup manifest are on disk → finalize run.log (it lists what is
         # actually there) → write run_manifest.json last (it hashes them all,
