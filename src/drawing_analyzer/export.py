@@ -1301,56 +1301,18 @@ def write_tile_artifacts(ctx: Any, folder: Path) -> list[str]:
             )
         except (OSError, ValueError):
             inventory = None
-        if isinstance(inventory, dict):
-            sheet_info = inventory.get("sheet") or {}
-            sheet_findings = findings_for_sheet(findings, inventory)
-            skey = (
-                (sheet_info.get("source_id") or "").strip()
-                or (sheet_info.get("source_name") or ""),
-                int(sheet_info.get("page_index", -1)),
-            )
-            sd = digest_by_key.get(skey)
-            if sd is not None and (getattr(sd, "text", "") or "").strip():
-                # I-2: the digest prose is copied verbatim (the findings block
-                # was already stripped byte-exactly at parse time).
-                contained_target(dest_dir, "digest.md").write_text(
-                    sd.text, encoding="utf-8"
-                )
-            contained_target(dest_dir, "findings.json").write_text(
-                json.dumps(
-                    {"findings": [f.to_dict() for f in sheet_findings]}, indent=2
-                ),
-                encoding="utf-8",
-            )
-            contained_target(dest_dir, "tile_index.json").write_text(
-                json.dumps(build_tile_index(inventory, sheet_findings), indent=2),
-                encoding="utf-8",
-            )
-            by_tile: dict[tuple[int, int], list] = {}
-            for f in sheet_findings:
-                if f.tile is not None and len(f.tile) == 2:
-                    by_tile.setdefault((int(f.tile[0]), int(f.tile[1])), []).append(f)
-            for tile_entry in inventory.get("tiles") or []:
-                label = str(tile_entry.get("tile_label") or "")
-                if not label:
-                    continue
-                pos = (int(tile_entry.get("row", -1)), int(tile_entry.get("col", -1)))
-                contained_target(
-                    dest_dir, safe_artifact_name(f"{label}.md")
-                ).write_text(
-                    build_tile_note_markdown(
-                        tile_entry, inventory, by_tile.get(pos, [])
-                    ),
-                    encoding="utf-8",
-                )
-            entry.update({
-                "source_id": sheet_info.get("source_id", ""),
-                "source_name": sheet_info.get("source_name", ""),
-                "page_index": sheet_info.get("page_index"),
-                "tile_count": len(inventory.get("tiles") or []),
-                "omitted_tile_count": len(inventory.get("omitted_tiles") or []),
-                "finding_count": len(sheet_findings),
-            })
+        try:
+            if isinstance(inventory, dict):
+                entry.update(_write_tile_notes(
+                    inventory, dest_dir=dest_dir,
+                    findings=findings, digest_by_key=digest_by_key,
+                ))
+        except Exception:
+            # A hand-staged/tampered inventory that parses as JSON but breaks
+            # the schema (null page_index, non-numeric row/col, …) must not
+            # abort the export: this sheet's PNGs are already copied — only
+            # its notes are skipped, mirroring the corrupt-JSON path above.
+            pass
         sheet_entries.append(entry)
 
     contained_target(dest_root, "index.json").write_text(
@@ -1358,6 +1320,65 @@ def write_tile_artifacts(ctx: Any, folder: Path) -> list[str]:
         encoding="utf-8",
     )
     return [f"{TILES_DIRNAME}/"]
+
+
+def _write_tile_notes(
+    inventory: dict, *, dest_dir: Path, findings: list, digest_by_key: dict,
+) -> dict:
+    """Write one staged sheet's mirrored notes; return its index-entry fields.
+
+    Trusts the inventory schema — the caller wraps this in the per-sheet guard,
+    so a malformed hand-staged/tampered ``tiles.json`` skips only these notes.
+    """
+    sheet_info = inventory.get("sheet") or {}
+    sheet_findings = findings_for_sheet(findings, inventory)
+    skey = (
+        (sheet_info.get("source_id") or "").strip()
+        or (sheet_info.get("source_name") or ""),
+        int(sheet_info.get("page_index", -1)),
+    )
+    sd = digest_by_key.get(skey)
+    if sd is not None and (getattr(sd, "text", "") or "").strip():
+        # I-2: the digest prose is copied verbatim (the findings block
+        # was already stripped byte-exactly at parse time).
+        contained_target(dest_dir, "digest.md").write_text(
+            sd.text, encoding="utf-8"
+        )
+    contained_target(dest_dir, "findings.json").write_text(
+        json.dumps(
+            {"findings": [f.to_dict() for f in sheet_findings]}, indent=2
+        ),
+        encoding="utf-8",
+    )
+    contained_target(dest_dir, "tile_index.json").write_text(
+        json.dumps(build_tile_index(inventory, sheet_findings), indent=2),
+        encoding="utf-8",
+    )
+    by_tile: dict[tuple[int, int], list] = {}
+    for f in sheet_findings:
+        if f.tile is not None and len(f.tile) == 2:
+            by_tile.setdefault((int(f.tile[0]), int(f.tile[1])), []).append(f)
+    for tile_entry in inventory.get("tiles") or []:
+        label = str(tile_entry.get("tile_label") or "")
+        if not label:
+            continue
+        pos = (int(tile_entry.get("row", -1)), int(tile_entry.get("col", -1)))
+        contained_target(
+            dest_dir, safe_artifact_name(f"{label}.md")
+        ).write_text(
+            build_tile_note_markdown(
+                tile_entry, inventory, by_tile.get(pos, [])
+            ),
+            encoding="utf-8",
+        )
+    return {
+        "source_id": sheet_info.get("source_id", ""),
+        "source_name": sheet_info.get("source_name", ""),
+        "page_index": sheet_info.get("page_index"),
+        "tile_count": len(inventory.get("tiles") or []),
+        "omitted_tile_count": len(inventory.get("omitted_tiles") or []),
+        "finding_count": len(sheet_findings),
+    }
 
 
 def write_drawing_export(

@@ -1073,6 +1073,27 @@ def test_write_tile_artifacts_corrupt_inventory_still_copies_pngs(tmp_path):
     assert not (sheet_dir / "digest.md").exists()
 
 
+def test_write_tile_artifacts_malformed_schema_still_copies_pngs(tmp_path):
+    # Valid JSON whose schema is broken (null page_index, non-numeric row) must
+    # not abort the export: the sheet's PNGs land, only its notes are skipped.
+    ctx = _tiles_ctx(tmp_path)
+    staged = tmp_path / "qc" / "tiles" / "SRC-0001_p1_m-101"
+    inv = json.loads((staged / "tiles.json").read_text(encoding="utf-8"))
+    inv["sheet"]["page_index"] = None
+    inv["tiles"][0]["row"] = "x"
+    (staged / "tiles.json").write_text(json.dumps(inv), encoding="utf-8")
+    folder = tmp_path / "out"
+    folder.mkdir()
+    assert dx.write_tile_artifacts(ctx, folder) == ["tiles/"]     # no raise
+    sheet_dir = folder / "tiles" / "SRC-0001_p1_m-101"
+    assert (sheet_dir / "overview.png").exists() and (sheet_dir / "r1c1.png").exists()
+    assert not (sheet_dir / "digest.md").exists()                 # notes skipped
+    # The root index still lists the sheet dir (without the notes-derived fields).
+    root = json.loads((folder / "tiles" / "index.json").read_text(encoding="utf-8"))
+    assert root["sheets"][0]["dir"] == "SRC-0001_p1_m-101"
+    assert "finding_count" not in root["sheets"][0]
+
+
 def test_write_drawing_export_includes_tiles_in_manifest_and_log(tmp_path):
     ctx = _tiles_ctx(tmp_path)
     folder = dx.write_drawing_export(ctx, tmp_path, source_names=[SRC], now=NOW)
