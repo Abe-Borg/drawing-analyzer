@@ -52,7 +52,13 @@ from .models import (
 )
 from .render import inspect_inputs, iter_rendered_sheets, iter_sheet_prescan, list_sheets
 from .run_journal import RunJournal, collect_environment, derive_run_outcome
-from .source_registry import EST_BYTES_PER_SHEET, check_set_limits, check_work_disk
+from .source_registry import (
+    EST_BYTES_PER_SHEET,
+    EST_TILE_BYTES_PER_SHEET,
+    check_set_limits,
+    check_work_disk,
+)
+from .tile_artifacts import TILES_DIRNAME, stage_rendered_sheet
 
 # ``progress(done, total, label)`` — called once as each sheet *finishes*
 # (done = number completed so far, in completion order) and once at the end
@@ -206,6 +212,21 @@ def _resolve_use_batch(use_batch: bool | None) -> bool:
     if use_batch is not None:
         return bool(use_batch)
     raw = os.environ.get("DRAWING_ANALYZER_USE_BATCH")
+    if raw is None:
+        return False
+    return raw.strip().lower() in _BATCH_ENV_TRUE
+
+
+def _resolve_save_tiles(save_tile_artifacts: bool | None) -> bool:
+    """Resolve the tile-artifact dump: explicit arg > ``DRAWING_ANALYZER_SAVE_TILES`` > False.
+
+    Same contract as :func:`_resolve_use_batch`: the caller's explicit value wins
+    (the GUI passes the checkbox verbatim); only an unspecified ``None`` consults
+    the env var, so a library operator can opt every run in globally.
+    """
+    if save_tile_artifacts is not None:
+        return bool(save_tile_artifacts)
+    raw = os.environ.get("DRAWING_ANALYZER_SAVE_TILES")
     if raw is None:
         return False
     return raw.strip().lower() in _BATCH_ENV_TRUE
@@ -472,6 +493,7 @@ def _rendered_stream(
     geometry_sink: list | None,
     only: "set[tuple[str, int]] | None" = None,
     on_page_error: "Any" = None,
+    tile_sink: "Any" = None,
 ) -> "Any":
     """Stream :class:`RenderedSheet`, capturing each sheet's lightweight geometry.
 
@@ -494,6 +516,11 @@ def _rendered_stream(
     ):
         if geometry_sink is not None:
             geometry_sink.append(SheetGeometry.from_rendered(rendered))
+        if tile_sink is not None:
+            # Tile-artifact staging (save_tile_artifacts): the only moment the
+            # PNG bytes exist on both transports — the batch path discards the
+            # rendered sheet after upload. The sink absorbs its own errors (I-3).
+            tile_sink(rendered)
         yield rendered
 
 
@@ -539,6 +566,7 @@ def _digest_sheets_concurrent(
     geometry_sink: list | None = None,
     only: "set[tuple[str, int]] | None" = None,
     on_page_error: "Any" = None,
+    tile_sink: "Any" = None,
 ) -> list[SheetDigest]:
     """Real-time path: render sequentially, digest on a bounded thread pool.
 
@@ -582,6 +610,7 @@ def _digest_sheets_concurrent(
             _rendered_stream(
                 paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
                 geometry_sink=geometry_sink, only=only, on_page_error=on_page_error,
+                tile_sink=tile_sink,
             )
         ):
             in_flight.add(executor.submit(_run, index, rendered))
@@ -614,6 +643,7 @@ def _digest_sheets_via_batch(
     specs_text: str | None = None,
     geometry_sink: list | None = None,
     only: "set[tuple[str, int]] | None" = None,
+    tile_sink: "Any" = None,
 ) -> list[SheetDigest]:
     """Batch path: render-stream → Files-API upload → one Message Batch.
 
@@ -645,7 +675,7 @@ def _digest_sheets_via_batch(
     batch = submit_drawing_batch(
         _rendered_stream(
             paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
-            geometry_sink=geometry_sink, only=only,
+            geometry_sink=geometry_sink, only=only, tile_sink=tile_sink,
         ),
         client=client,
         model=model,
@@ -1952,6 +1982,7 @@ def extract_drawing_context(
     investigate: bool | None = None,
     ink_rejected: bool = False,
     focus_findings_to_markups: bool = False,
+    save_tile_artifacts: bool | None = None,
     qc_work_dir: Path | None = None,
     confirm_large_set: bool = False,
 ) -> DrawingContext:
@@ -2130,7 +2161,20 @@ def extract_drawing_context(
         ink_rejected=ink_rejected,
         focus_findings_to_markups=focus_findings_to_markups,
         use_batch=use_batch,
+        save_tile_artifacts=_resolve_save_tiles(save_tile_artifacts),
     )
+
+    # Tile-artifact staging needs the work dir *before* the digest phase (the
+    # QC stages otherwise create it lazily, after rendering) so the render
+    # stream can write each sheet's PNGs the moment the bytes exist. Created
+    # here — before the journal's private roots and the disk preflight — so
+    # path scrubbing and the §10.7 preflight both cover it.
+    _created_work_dir = False
+    if config.save_tile_artifacts and qc_work_dir is None:
+        import tempfile
+
+        qc_work_dir = Path(tempfile.mkdtemp(prefix="drawing_qc_"))
+        _created_work_dir = True
 
     # Run journal (Phase 26A §18.1): one journal per run, created before the
     # inventory so even an all-inputs-rejected run leaves a trace, and attached
@@ -2223,12 +2267,17 @@ def extract_drawing_context(
     )
     if block_reason is None and qc_work_dir is not None:
         est_sheets = sum(d.page_count for d in inventory.accepted_documents)
-        block_reason = check_work_disk(
-            est_sheets * EST_BYTES_PER_SHEET, qc_work_dir
+        per_sheet = EST_BYTES_PER_SHEET + (
+            EST_TILE_BYTES_PER_SHEET if config.save_tile_artifacts else 0
         )
+        block_reason = check_work_disk(est_sheets * per_sheet, qc_work_dir)
     if block_reason is not None:
         if progress is not None:
             progress(0, 0, "Cannot start run")
+        if _created_work_dir:
+            import shutil
+
+            shutil.rmtree(qc_work_dir, ignore_errors=True)
         journal.emit("RUN_BLOCKED", level="ERROR", reason=block_reason)
         journal.finish("FAILED")
         return DrawingContext(
@@ -2330,12 +2379,29 @@ def extract_drawing_context(
         # its render-only fact (the omitted-blank-tile count, §18.2) into the
         # prescan record via the update sink; cache hits keep None (unknown).
         geometry_sink = _GeometryOmissionSink(sheet_geometries)
-        _log.info(
-            "level-1 cache: %d/%d sheet(s) hit — skipping render for them",
-            len(cached_by_ref), total,
-        )
+        prescan_hits = len(cached_by_ref)
+        render_forced = config.save_tile_artifacts and only is not None
+        if render_forced:
+            # Tile artifacts need real pixels: bypass the level-1 render skip and
+            # rasterize every sheet. The level-2 (PNG-keyed) cache still serves
+            # each unchanged sheet's digest with zero API calls on both
+            # transports, so the bypass costs rasterization only.
+            only = None
+            cached_by_ref = {}
+        if render_forced:
+            _log.info(
+                "level-1 cache: %d/%d sheet(s) hit — rendering anyway for tile "
+                "artifacts (digests still served from cache)",
+                prescan_hits, total,
+            )
+        else:
+            _log.info(
+                "level-1 cache: %d/%d sheet(s) hit — skipping render for them",
+                prescan_hits, total,
+            )
         journal.emit(
-            "CACHE_PRESCAN", stage="digest", hits=len(cached_by_ref), total=total,
+            "CACHE_PRESCAN", stage="digest", hits=prescan_hits, total=total,
+            **({"render_forced": True} if render_forced else {}),
         )
         if cached_by_ref and progress is not None:
             progress(
@@ -2344,6 +2410,28 @@ def extract_drawing_context(
             )
 
     miss_total = total if only is None else len(only)
+
+    # Tile-artifact staging sink (save_tile_artifacts): writes each rendered
+    # sheet's overview + tile PNGs into the work dir the moment the render
+    # stream produces them — the only point the bytes exist on both transports.
+    # Additive and non-fatal (I-3): a failed save records itself on the stage
+    # and lets the digest proceed untouched.
+    tile_sink = None
+    tile_stage: StageResult | None = None
+    tile_counts = {"sheets": 0, "files": 0}
+    if config.save_tile_artifacts:
+        tile_stage = StageResult(stage="tile_artifacts", expected=False)
+        tiles_root = qc_work_dir / TILES_DIRNAME
+        journal.emit("STAGE_START", stage="tile_artifacts", sheets=total)
+
+        def tile_sink(rendered: Any) -> None:
+            try:
+                tile_counts["files"] += stage_rendered_sheet(rendered, tiles_root)
+                tile_counts["sheets"] += 1
+            except Exception as exc:  # I-3: never abort the digest
+                tile_stage.errors.append(
+                    f"failed to stage {rendered.ref.display_label}: {exc}"
+                )
 
     miss_sheets: list[SheetDigest] = []
     if miss_total > 0:
@@ -2355,7 +2443,7 @@ def extract_drawing_context(
                 progress=progress, total=miss_total, on_log=on_log,
                 on_status=on_status, focus=focus or None,
                 specs_text=specs_text or None,
-                geometry_sink=geometry_sink, only=only,
+                geometry_sink=geometry_sink, only=only, tile_sink=tile_sink,
             )
         else:
             miss_sheets = _digest_sheets_concurrent(
@@ -2364,7 +2452,7 @@ def extract_drawing_context(
                 use_thinking=use_thinking, effort=effort, cache=cache,
                 progress=progress, total=miss_total, max_workers=max_workers,
                 focus=focus or None, specs_text=specs_text or None,
-                geometry_sink=geometry_sink, only=only,
+                geometry_sink=geometry_sink, only=only, tile_sink=tile_sink,
                 on_page_error=_on_page_error,
             )
 
@@ -2390,6 +2478,23 @@ def extract_drawing_context(
     # Typed per-stage outcomes for the pre-ledger stages (synthesis, critique,
     # cross-QC); the ledger stages append theirs inside ``_run_qc_stages`` (§15.4).
     stage_results: list[StageResult] = []
+    if tile_stage is not None:
+        # expected=False keeps the roll-up from ever scoring this additive
+        # debug-artifact stage — a failed dump must not degrade a clean run.
+        if tile_stage.errors:
+            tile_stage.status = "FAILED"
+            extra = len(tile_stage.errors) - 1
+            errors.append(
+                "tile artifacts: " + tile_stage.errors[0]
+                + (f" (+{extra} more sheet(s))" if extra else "")
+            )
+        elif tile_counts["sheets"] > 0:
+            tile_stage.status = "COMPLETE"
+        else:
+            tile_stage.status = "SKIPPED_VALID"  # requested, nothing rendered
+        tile_stage.items_in = tile_counts["sheets"]
+        tile_stage.items_out = tile_counts["files"]
+        _finish_stage(stage_results, journal, tile_stage)
     # Append-only usage ledger (§15.6): every API call/attempt below appends a
     # priced record; the run's token/cost totals are *derived* sums over it, so no
     # stage can overwrite another's counters. ``img_tok`` is a separate informational

@@ -1676,6 +1676,10 @@ class RunConfiguration:
     ink_rejected: bool = False
     focus_findings_to_markups: bool = False
     use_batch: bool = False
+    # Opt-in tile artifact dump: stage every rendered tile PNG at render time and
+    # export a ``tiles/`` folder with per-tile notes. Output-side only — it never
+    # places a call, never joins the paid-expert set, and never gates QC status.
+    save_tile_artifacts: bool = False
     # Names of normally-required exhaustive stages an explicit flag disabled. A
     # non-empty tuple makes this a DEBUG_OVERRIDE configuration (§3.3 / §15.1).
     debug_overrides: tuple[str, ...] = ()
@@ -1718,6 +1722,7 @@ class RunConfiguration:
             "ink_rejected": self.ink_rejected,
             "focus_findings_to_markups": self.focus_findings_to_markups,
             "use_batch": self.use_batch,
+            "save_tile_artifacts": self.save_tile_artifacts,
             "debug_overrides": list(self.debug_overrides),
         }
 
@@ -1738,6 +1743,7 @@ def resolve_run_configuration(
     ink_rejected: bool = False,
     focus_findings_to_markups: bool = False,
     use_batch: bool = False,
+    save_tile_artifacts: bool = False,
 ) -> RunConfiguration:
     """Resolve the raw run options into one normalized :class:`RunConfiguration`.
 
@@ -1849,6 +1855,7 @@ def resolve_run_configuration(
         ink_rejected=bool(ink_rejected),
         focus_findings_to_markups=bool(focus_findings_to_markups),
         use_batch=bool(use_batch),
+        save_tile_artifacts=bool(save_tile_artifacts),
         debug_overrides=tuple(overrides),
     )
 

@@ -1380,3 +1380,111 @@ def test_gate_open_never_masks_a_degraded_required_stage(tmp_path):
     assert ctx.qc_status_label == "Completed with QC warnings"
     # The standard deliverable still shipped (I-3).
     assert ctx.combined_text.strip()
+
+
+# --------------------------------------------------------------------------- #
+# Tile artifacts (save_tile_artifacts)
+# --------------------------------------------------------------------------- #
+
+
+def test_save_tile_artifacts_end_to_end(tmp_path):
+    # Standard run + the tile dump: PNGs staged at render time, the stage records
+    # as COMPLETE with expected=False, and the export carries the mirrored notes.
+    from drawing_analyzer.export import write_drawing_export
+
+    src = _make_pdf(tmp_path / "M-101.pdf")
+    client = _RoutingClient([_VAV_FINDING])
+    ctx = extract_drawing_context(
+        [src], client=client, rows=2, cols=2,
+        save_tile_artifacts=True, qc_work_dir=tmp_path / "qc",
+    )
+
+    assert ctx.run_configuration.save_tile_artifacts is True
+    staged = list((tmp_path / "qc" / "tiles").iterdir())
+    assert len(staged) == 1
+    sheet_dir = staged[0]
+    assert sheet_dir.name.startswith("SRC-0001_p1_")
+    assert (sheet_dir / "overview.png").stat().st_size > 0
+    inv = json.loads((sheet_dir / "tiles.json").read_text(encoding="utf-8"))
+    assert inv["rows"] == 2 and inv["cols"] == 2
+    assert inv["sheet"]["source_id"] == "SRC-0001"
+    # Every non-blank tile PNG is on disk under its visible label.
+    for entry in inv["tiles"]:
+        assert (sheet_dir / entry["file"]).stat().st_size > 0
+    stages = {s.stage: s for s in ctx.stage_results}
+    tile_stage = stages["tile_artifacts"]
+    assert tile_stage.status == "COMPLETE"
+    assert tile_stage.expected is False              # never scored by the roll-up
+    assert tile_stage.items_in == 1
+    assert tile_stage.items_out == len(inv["tiles"]) + 2   # + overview + tiles.json
+    # A standard run stays NOT_REQUESTED regardless of the dump.
+    assert ctx.qc_status == "NOT_REQUESTED"
+
+    folder = write_drawing_export(ctx, tmp_path / "out_parent", source_names=["M-101.pdf"])
+    exported = folder / "tiles" / sheet_dir.name
+    assert (exported / "overview.png").exists()
+    assert (exported / "digest.md").exists()
+    # The r1c1 sidecar names the finding's QC id (the digest tagged tile [0,0]).
+    md = (exported / "r1c1.md").read_text(encoding="utf-8")
+    assert "QC-001" in md and "VAV-3 has no shown clearance." in md
+    index = json.loads((exported / "tile_index.json").read_text(encoding="utf-8"))
+    labels = {t["tile_label"]: t for t in index["tiles"]}
+    assert [f["qc_id"] for f in labels["r1c1"]["findings"]] == ["QC-001"]
+    manifest = json.loads((folder / "run_manifest.json").read_text(encoding="utf-8"))
+    arts = {a["path"] for a in manifest["artifacts"]}
+    assert f"tiles/{sheet_dir.name}/overview.png" in arts
+
+
+def test_save_tile_artifacts_bypasses_level1_render_skip_without_api_calls(tmp_path):
+    # The load-bearing zero-cost promise: a warm run with the flag on re-renders
+    # (so tiles exist) but the level-2 (PNG-keyed) cache serves every digest —
+    # the fake client's digest counter must not move.
+    from drawing_analyzer.digest_cache import DigestCache
+
+    src = _make_pdf(tmp_path / "M-101.pdf")
+    cache = DigestCache(None, persist=False)
+    c1 = _RoutingClient([_VAV_FINDING])
+    ctx1 = extract_drawing_context(
+        [src], client=c1, rows=2, cols=2, cache=cache,
+        qc_work_dir=tmp_path / "q1",
+    )
+    assert c1.digest_calls == 1
+    assert not (tmp_path / "q1" / "tiles").exists()   # flag off: nothing staged
+
+    c2 = _RoutingClient([_VAV_FINDING])
+    ctx2 = extract_drawing_context(
+        [src], client=c2, rows=2, cols=2, cache=cache,
+        save_tile_artifacts=True, qc_work_dir=tmp_path / "q2",
+    )
+    assert c2.digest_calls == 0                       # level-2 served the digest
+    staged = list((tmp_path / "q2" / "tiles").iterdir())
+    assert len(staged) == 1                           # render happened anyway
+    assert (staged[0] / "overview.png").stat().st_size > 0
+    # The warm digest is byte-identical and honestly marked cached.
+    assert ctx2.sheets[0].text == ctx1.sheets[0].text
+    assert ctx2.sheets[0].cached is True
+    stages = {s.stage: s.status for s in ctx2.stage_results}
+    assert stages["tile_artifacts"] == "COMPLETE"
+
+
+def test_tile_sink_failure_is_nonfatal(tmp_path, monkeypatch):
+    # I-3: a staging failure records itself (stage FAILED + one errors line) and
+    # the digest deliverable ships untouched.
+    import drawing_analyzer.pipeline as pl
+
+    def _boom(rendered, tiles_root):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(pl, "stage_rendered_sheet", _boom)
+    src = _make_pdf(tmp_path / "M-101.pdf")
+    client = _RoutingClient([_VAV_FINDING])
+    ctx = extract_drawing_context(
+        [src], client=client, rows=2, cols=2,
+        save_tile_artifacts=True, qc_work_dir=tmp_path / "qc",
+    )
+    assert len(ctx.sheets) == 1 and ctx.sheets[0].ok
+    assert len(ctx.findings) == 1
+    stages = {s.stage: s for s in ctx.stage_results}
+    assert stages["tile_artifacts"].status == "FAILED"
+    assert stages["tile_artifacts"].expected is False
+    assert any("tile artifacts:" in e and "disk full" in e for e in ctx.errors)
