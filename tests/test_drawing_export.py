@@ -1037,6 +1037,11 @@ def test_write_tile_artifacts_noop_without_staged_tiles(tmp_path):
     assert not (folder / "tiles").exists()
 
 
+@_pytest_mod.mark.skipif(
+    _os.name == "nt",
+    reason="a backslash FILENAME is only constructible on POSIX (on Windows it "
+           "is a path), and unprivileged symlink creation is unreliable there",
+)
 def test_write_tile_artifacts_sanitizes_and_skips_symlinks(tmp_path):
     ctx = _tiles_ctx(tmp_path)
     staged = tmp_path / "qc" / "tiles" / "SRC-0001_p1_m-101"
