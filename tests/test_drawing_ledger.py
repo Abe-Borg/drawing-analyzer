@@ -8,6 +8,8 @@ structuring calls, no network, no PyMuPDF (the PDF-facing gating matrix lives in
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
 
 from drawing_analyzer.ledger import Ledger, provenance_label
@@ -287,6 +289,207 @@ def test_harvest_structuring_failure_degrades_to_sheet_entry():
     assert entry.anchor_hint == "SHEET"
     assert entry.sources == ["digest_prose_conflict"]
     assert "schedule flow total disagrees" in entry.text
+
+
+def test_harvest_warm_item_cache_skips_structuring_call():
+    from drawing_analyzer.digest_cache import DigestCache
+
+    cache = DigestCache(None, persist=False)
+    client = _structuring_client([
+        _finding_block("Structured cached coordination item.")
+    ])
+    digest = _Digest(
+        "**Coordination items**\n"
+        "- Shared chase clearances must be coordinated with the electrical layout."
+    )
+    geom = _Geom(words=[_titleblock_word("F-D-01-1")])
+
+    first_ledger = Ledger()
+    first = harvest_prose(
+        first_ledger, [digest], [geom], client=client, cache=cache,
+        sleep=lambda *_: None,
+    )
+    second_ledger = Ledger()
+    second = harvest_prose(
+        second_ledger, [digest], [geom], client=client, cache=cache,
+        sleep=lambda *_: None,
+    )
+
+    assert first.api_calls == 1 and first.cache_misses == 1
+    assert second.api_calls == 0 and second.cache_hits == 1
+    assert second.input_tokens == 0 and second.output_tokens == 0
+    assert client.calls == 1
+    assert second_ledger.entries[0].text == first_ledger.entries[0].text
+
+
+def test_harvest_structuring_overlaps_across_pages_and_ingests_in_item_order():
+    barrier = threading.Barrier(2)
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    class _ParallelClient:
+        def __init__(self):
+            outer = self
+
+            class _Msgs:
+                def create(self, **kw):  # noqa: ANN001, ANN202
+                    nonlocal active, max_active
+                    user = kw["messages"][0]["content"]
+                    first = "First independent" in user
+                    with lock:
+                        active += 1
+                        max_active = max(max_active, active)
+                    barrier.wait(timeout=5)
+                    if first:
+                        time.sleep(0.04)  # complete second item first
+                    with lock:
+                        active -= 1
+                    text = "structured first" if first else "structured second"
+                    return FakeMessage(
+                        content=[FakeTextBlock(text=_finding_block(text))],
+                        usage=FakeUsage(input_tokens=90, output_tokens=30),
+                    )
+
+            self.messages = _Msgs()
+
+    first_digest = _Digest(
+        "**Coordination items**\n"
+        "- First independent coordination issue needs discipline review.",
+        page=0,
+    )
+    second_digest = _Digest(
+        "**Coordination items**\n"
+        "- Second independent coordination issue needs discipline review.",
+        page=1,
+    )
+    ledger = Ledger()
+    result = harvest_prose(
+        ledger,
+        [first_digest, second_digest],
+        [
+            _Geom(page=0, words=[_titleblock_word("F-D-01-1")]),
+            _Geom(page=1, words=[_titleblock_word("F-D-01-1")]),
+        ],
+        client=_ParallelClient(), max_workers=2, sleep=lambda *_: None,
+    )
+
+    assert max_active == 2 and result.api_calls == 2
+    assert [entry.text for entry in ledger.entries] == [
+        "structured first", "structured second",
+    ]
+
+
+def test_harvest_same_page_chain_skips_later_duplicate_call():
+    first_item = (
+        "The fire pump equipment pad shown by structural requires confirmation."
+    )
+    duplicate_item = (
+        "The fire pump equipment pad shown by structural requires coordination."
+    )
+    client = _structuring_client([_finding_block(duplicate_item)])
+    digest = _Digest(
+        "**Coordination items**\n"
+        f"- {first_item}\n"
+        f"- {duplicate_item}"
+    )
+    ledger = Ledger()
+
+    result = harvest_prose(
+        ledger,
+        [digest],
+        [_Geom(words=[_titleblock_word("F-D-01-1")])],
+        client=client,
+        max_workers=4,
+        sleep=lambda *_: None,
+    )
+
+    # The first result makes item 2 a free same-page match. The sequential
+    # algorithm makes one request, so concurrency must never speculate a second.
+    assert client.calls == result.api_calls == 1
+    assert result.structured == 1 and result.matched == 1
+    assert len(ledger.entries) == 1
+    assert len(ledger.entries[0].prose_item_ids) == 2
+
+
+def test_harvest_parallel_page_chains_match_sequential_results_and_order():
+    page_zero_first = "Page-zero first coordination condition needs review."
+    page_zero_duplicate = "Page-zero resulting coordination condition needs review."
+    page_one_first = "Page-one first coordination condition needs review."
+    page_one_duplicate = "Page-one resulting coordination condition needs review."
+    sheets = [
+        _Digest(
+            "**Coordination items**\n"
+            f"- {page_zero_first}\n"
+            f"- {page_zero_duplicate}",
+            page=0,
+        ),
+        _Digest(
+            "**Coordination items**\n"
+            f"- {page_one_first}\n"
+            f"- {page_one_duplicate}",
+            page=1,
+        ),
+    ]
+    geometries = [
+        _Geom(page=0, words=[_titleblock_word("F-D-01-1")]),
+        _Geom(page=1, words=[_titleblock_word("F-D-01-1")]),
+    ]
+
+    class _PromptClient:
+        def __init__(self, *, delay_page_zero=False):
+            self.calls: list[str] = []
+            self.barrier = threading.Barrier(2) if delay_page_zero else None
+            outer = self
+
+            class _Msgs:
+                def create(self, **kw):  # noqa: ANN001, ANN202
+                    user = kw["messages"][0]["content"]
+                    if page_zero_first in user:
+                        marker, text = "page-zero", page_zero_duplicate
+                    else:
+                        marker, text = "page-one", page_one_duplicate
+                    if outer.barrier is not None:
+                        outer.barrier.wait(timeout=5)
+                    if delay_page_zero and marker == "page-zero":
+                        time.sleep(0.04)  # page one completes first
+                    outer.calls.append(marker)
+                    return FakeMessage(
+                        content=[FakeTextBlock(text=_finding_block(text))],
+                        usage=FakeUsage(input_tokens=90, output_tokens=30),
+                    )
+
+            self.messages = _Msgs()
+
+    sequential_ledger = Ledger()
+    sequential_client = _PromptClient()
+    sequential = harvest_prose(
+        sequential_ledger,
+        sheets,
+        geometries,
+        client=sequential_client,
+        max_workers=1,
+        sleep=lambda *_: None,
+    )
+
+    parallel_ledger = Ledger()
+    parallel_client = _PromptClient(delay_page_zero=True)
+    parallel = harvest_prose(
+        parallel_ledger,
+        sheets,
+        geometries,
+        client=parallel_client,
+        max_workers=2,
+        sleep=lambda *_: None,
+    )
+
+    assert parallel == sequential
+    assert [entry.to_dict() for entry in parallel_ledger.entries] == [
+        entry.to_dict() for entry in sequential_ledger.entries
+    ]
+    assert sequential_client.calls == ["page-zero", "page-one"]
+    assert parallel_client.calls == ["page-one", "page-zero"]
+    assert parallel.api_calls == 2  # one necessary request per page, never four
 
 
 def test_harvest_without_client_still_upholds_the_invariant():

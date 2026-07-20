@@ -34,6 +34,7 @@ from __future__ import annotations
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
@@ -61,6 +62,11 @@ from .models import (
     compute_prose_item_id,
     source_page_key,
 )
+from .stage_cache import (
+    get_stage_cache_entry,
+    put_stage_cache_entry,
+    stage_cache_key,
+)
 
 # The sheet_id label a set-level synthesis conflict carries (it belongs to no
 # single source sheet). Kept short for the review-notes row / report section.
@@ -77,6 +83,23 @@ DEFAULT_HARVEST_MAX_RETRIES = 2
 # The sheet text layer sent with a structuring call (a straggler needs context,
 # not the whole sheet).
 _HARVEST_TEXT_CAP = 6_000
+_HARVEST_CACHE_CONTRACT = 1
+DEFAULT_HARVEST_WORKERS = 4
+_HARVEST_WORKERS_ENV = "DRAWING_ANALYZER_HARVEST_WORKERS"
+
+
+def _resolve_harvest_workers(max_workers: int | None, total: int) -> int:
+    """Resolve bounded prose-call concurrency (argument, env, then default)."""
+    if max_workers is None:
+        raw = os.environ.get(_HARVEST_WORKERS_ENV)
+        if raw and raw.strip():
+            try:
+                max_workers = int(raw.strip())
+            except ValueError:
+                max_workers = DEFAULT_HARVEST_WORKERS
+        else:
+            max_workers = DEFAULT_HARVEST_WORKERS
+    return min(max(1, int(max_workers)), max(1, int(total)))
 
 _LIST_ITEM_RE = re.compile(r"^(\s*)(?:[-*+•]|\d+[.)])\s+(.*)$")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.;])\s+(?=[A-Z0-9(])")
@@ -318,8 +341,9 @@ def _structure_item(
     model: str,
     max_retries: int,
     sleep: Any,
-) -> tuple[Finding | None, int, int]:
-    """One structuring call → ``(finding_or_None, in_tok, out_tok)``. Never raises."""
+    cache: Any = None,
+) -> tuple[Finding | None, int, int, bool, bool]:
+    """Structure one item and report token, cache-hit, and live-call telemetry."""
     text = (sheet_text or "")[:_HARVEST_TEXT_CAP]
     user = (
         f"PROSE QC ITEM (from the sheet's {category_hint} section):\n{item}\n\n"
@@ -327,6 +351,43 @@ def _structure_item(
         f"SHEET TEXT LAYER (verbatim):\n{text or '[none]'}\n\n"
         "Convert the item into the single finding object now."
     )
+    cache_key = stage_cache_key(
+        "prose_harvest_item",
+        model=model,
+        prompt=HARVEST_SYSTEM_PROMPT,
+        inputs={
+            "user_text": user,
+            # Host binding is part of the durable result even though the model
+            # sees only the display sheet id above.
+            "source_name": ref.source_name,
+            "source_id": ref.source_id,
+            "page_index": ref.page_index,
+        },
+        params={
+            "contract": _HARVEST_CACHE_CONTRACT,
+            "max_tokens": DEFAULT_HARVEST_MAX_TOKENS,
+            "text_cap": _HARVEST_TEXT_CAP,
+        },
+    )
+    cached_entry = get_stage_cache_entry(
+        cache, cache_key, stage="prose_harvest_item"
+    )
+    if cached_entry is not None and isinstance(cached_entry.get("finding"), dict):
+        try:
+            cached_finding = Finding.from_dict(cached_entry["finding"])
+        except (TypeError, ValueError):
+            cached_finding = None
+        if (
+            cached_finding is not None
+            and cached_finding.source_name == ref.source_name
+            and cached_finding.source_id == ref.source_id
+            and cached_finding.page_index == ref.page_index
+        ):
+            return cached_finding, 0, 0, True, False
+
+    if client is None:
+        return None, 0, 0, False, False
+
     kwargs: dict[str, Any] = {
         "model": model,
         "max_tokens": DEFAULT_HARVEST_MAX_TOKENS,
@@ -344,7 +405,7 @@ def _structure_item(
                 attempt += 1
                 continue
             _log.warning("prose-harvest structuring call failed: %s", _clean_error(exc))
-            return None, 0, 0
+            return None, 0, 0, False, True
 
     in_tok, out_tok = _message_usage(resp)
     raw = _message_text(resp)
@@ -354,11 +415,18 @@ def _structure_item(
         if isinstance(candidate, dict):
             obj = candidate
     if obj is None:
-        return None, in_tok, out_tok
+        return None, in_tok, out_tok, False, True
     if isinstance(obj.get("findings"), list) and obj["findings"]:
         obj = obj["findings"][0] if isinstance(obj["findings"][0], dict) else None
     finding = _validate_finding_item(obj, ref) if isinstance(obj, dict) else None
-    return finding, in_tok, out_tok
+    if finding is not None:
+        put_stage_cache_entry(
+            cache,
+            cache_key,
+            stage="prose_harvest_item",
+            payload={"finding": finding.to_dict()},
+        )
+    return finding, in_tok, out_tok, False, True
 
 
 def _degraded_entry(
@@ -431,6 +499,9 @@ class HarvestResult:
     missing: int = 0          # enumerated items with NO ledger entry after reconcile
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_hits: int = 0
+    cache_misses: int = 0
+    api_calls: int = 0
     expected_ids: list[str] = field(default_factory=list)
     accounted_ids: list[str] = field(default_factory=list)
 
@@ -488,6 +559,69 @@ def _client_or_none(client: Any) -> Any:
         return None
 
 
+def _process_free_pending(ledger: Ledger, p: _Pending, result: HarvestResult) -> bool:
+    """Apply the set-level or existing-ledger path; return whether handled."""
+    pid = p.pid
+    if p.ref is None:
+        finding = _set_level_entry(p.item.verbatim_text)
+        finding.prose_item_ids = [pid]
+        ledger.add([finding], p.tag)
+        result.set_level += 1
+        return True
+
+    match = _match_entry(p.item.verbatim_text, ledger.entries_for(p.ref))
+    if match is None:
+        return False
+    if p.tag not in match.sources:
+        match.sources.append(p.tag)
+    if p.also_on and not match.also_on:
+        match.also_on = list(p.also_on)
+    if pid not in match.prose_item_ids:
+        match.prose_item_ids.append(pid)
+    result.matched += 1
+    return True
+
+
+def _record_structure_telemetry(
+    result: HarvestResult,
+    outcome: tuple[Finding | None, int, int, bool, bool],
+    *,
+    cache_enabled: bool,
+) -> None:
+    """Account every executed/cache-served request, including an unused one."""
+    _finding, in_tok, out_tok, cache_hit, live_call = outcome
+    result.input_tokens += in_tok
+    result.output_tokens += out_tok
+    if cache_hit:
+        result.cache_hits += 1
+    elif cache_enabled:
+        result.cache_misses += 1
+    if live_call:
+        result.api_calls += 1
+
+
+def _ingest_structured_pending(
+    ledger: Ledger,
+    p: _Pending,
+    result: HarvestResult,
+    finding: Finding | None,
+) -> None:
+    """Deterministically ingest one precomputed structuring outcome."""
+    if finding is not None:
+        if not finding.source_quote.strip() and not finding.anchor_hint:
+            finding.anchor_hint = "SHEET"
+        result.structured += 1
+    else:
+        # ``p.ref`` is guaranteed by the caller: set-level items are handled by
+        # ``_process_free_pending`` and never enter the structuring pool.
+        finding = _degraded_entry(p.item.verbatim_text, p.hint, p.ref, p.sheet_id)
+        result.degraded += 1
+    if p.also_on:
+        finding.also_on = list(p.also_on)
+    finding.prose_item_ids = [p.pid]
+    ledger.add([finding], p.tag)
+
+
 def _process_pending(
     ledger: Ledger,
     p: _Pending,
@@ -497,50 +631,27 @@ def _process_pending(
     model: str,
     max_retries: int,
     sleep: Any,
+    cache: Any = None,
 ) -> None:
     """Mechanisms 2 → 3 → degraded for one prose item; attach its ``prose_item_id``.
 
     A set-level item (a synthesis conflict naming no in-set sheet) has no sheet to
     match or structure against, so it degrades directly to a set-level ledger entry.
     """
-    pid = p.pid
-    if p.ref is None:                       # set-level: nowhere to match/structure
-        finding = _set_level_entry(p.item.verbatim_text)
-        finding.prose_item_ids = [pid]
-        ledger.add([finding], p.tag)
-        result.set_level += 1
+    if _process_free_pending(ledger, p, result):
         return
 
-    match = _match_entry(p.item.verbatim_text, ledger.entries_for(p.ref))
-    if match is not None:
-        if p.tag not in match.sources:
-            match.sources.append(p.tag)
-        if p.also_on and not match.also_on:
-            match.also_on = list(p.also_on)
-        if pid not in match.prose_item_ids:
-            match.prose_item_ids.append(pid)
-        result.matched += 1
-        return
-
-    finding: Finding | None = None
-    if client is not None:
-        finding, in_tok, out_tok = _structure_item(
+    outcome: tuple[Finding | None, int, int, bool, bool] = (
+        None, 0, 0, False, False,
+    )
+    if client is not None or cache is not None:
+        outcome = _structure_item(
             p.item.verbatim_text, p.hint, p.sheet_text, p.ref, p.sheet_id,
             client=client, model=model, max_retries=max_retries, sleep=sleep,
+            cache=cache,
         )
-        result.input_tokens += in_tok
-        result.output_tokens += out_tok
-    if finding is not None:
-        if not finding.source_quote.strip() and not finding.anchor_hint:
-            finding.anchor_hint = "SHEET"      # nothing to anchor on → margin callout
-        result.structured += 1
-    else:
-        finding = _degraded_entry(p.item.verbatim_text, p.hint, p.ref, p.sheet_id)
-        result.degraded += 1
-    if p.also_on:
-        finding.also_on = list(p.also_on)
-    finding.prose_item_ids = [pid]
-    ledger.add([finding], p.tag)
+        _record_structure_telemetry(result, outcome, cache_enabled=cache is not None)
+    _ingest_structured_pending(ledger, p, result, outcome[0])
 
 
 def _accounted_ids(ledger: Ledger) -> set[str]:
@@ -666,6 +777,8 @@ def harvest_prose(
     max_retries: int = DEFAULT_HARVEST_MAX_RETRIES,
     sleep: Any = time.sleep,
     progress: Any = None,
+    cache: Any = None,
+    max_workers: int | None = None,
 ) -> HarvestResult:
     """Mirror every prose QC item into the ledger (§17/§14). Never raises.
 
@@ -715,20 +828,145 @@ def harvest_prose(
     )
     result.items = len(pending)
 
-    # --- process each item under its own guard (a raise can't abandon the rest) --
-    for done, p in enumerate(pending, start=1):
+    # A structured result can make a later prose item match for free, but only
+    # inside that source-page's ledger bucket.  Therefore each collision-safe
+    # source/page is one dependency chain: calls within a chain stay sequential,
+    # while the next necessary call from different chains may overlap.  This is
+    # deliberately stricter than submitting every item that is unmatched against
+    # the *initial* ledger — that speculative approach could bill a later duplicate
+    # before an earlier result had a chance to absorb it.
+    chains: dict[tuple[str, int], list[int]] = {}
+    for index, p in enumerate(pending):
+        if p.ref is not None:
+            chains.setdefault(source_page_key(p.ref), []).append(index)
+
+    # Parallelism is useful only when at least two page chains contain a current
+    # straggler.  A one-page harvest follows the original sequential loop exactly.
+    active_chain_count = sum(
+        any(
+            _match_entry(pending[index].item.verbatim_text, ledger.entries_for(pending[index].ref))
+            is None
+            for index in indices
+        )
+        for indices in chains.values()
+    )
+    workers = _resolve_harvest_workers(max_workers, active_chain_count)
+    use_parallel = (
+        (client is not None or cache is not None)
+        and workers > 1
+        and active_chain_count > 1
+    )
+
+    def _run_structure(index: int) -> tuple[Finding | None, int, int, bool, bool]:
+        p = pending[index]
         try:
-            _process_pending(
-                ledger, p, result,
+            return _structure_item(
+                p.item.verbatim_text, p.hint, p.sheet_text, p.ref, p.sheet_id,
                 client=client, model=model, max_retries=max_retries, sleep=sleep,
+                cache=cache,
             )
-        except Exception as exc:  # noqa: BLE001 - one item's failure is reconciled below
+        except Exception as exc:  # noqa: BLE001 - reconciled to degraded below
             _log.warning(
-                "prose harvest: item %s failed (%s); will reconcile",
+                "prose harvest: structuring item %s failed (%s)",
                 p.pid, _clean_error(exc),
             )
-        if progress is not None:
-            progress(done, len(pending), "Harvesting prose findings")
+            return None, 0, 0, False, False
+
+    if not use_parallel:
+        # Exact legacy path for one dependency chain / one worker / no client.
+        for index, p in enumerate(pending):
+            try:
+                _process_pending(
+                    ledger, p, result,
+                    client=client, model=model, max_retries=max_retries, sleep=sleep,
+                    cache=cache,
+                )
+            except Exception as exc:  # noqa: BLE001 - reconciled below
+                _log.warning(
+                    "prose harvest: item %s failed (%s); will reconcile",
+                    p.pid, _clean_error(exc),
+                )
+            if progress is not None:
+                progress(index + 1, len(pending), "Harvesting prose findings")
+    else:
+        # Only the main thread mutates the ledger.  ``_prime_chain`` consumes any
+        # now-free matches (which append no entries) and submits at most ONE call
+        # for that page.  The next call for the page is considered only after the
+        # current outcome has been ingested into the real ledger.
+        chain_positions = {key: 0 for key in chains}
+        handled_free: set[int] = set()
+        futures: dict[int, Any] = {}
+        disabled_chains: set[tuple[str, int]] = set()
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            def _prime_chain(key: tuple[str, int]) -> None:
+                if key in disabled_chains:
+                    return
+                indices = chains[key]
+                position = chain_positions[key]
+                while position < len(indices):
+                    index = indices[position]
+                    chain_positions[key] = position + 1
+                    position += 1
+                    p = pending[index]
+                    try:
+                        if _process_free_pending(ledger, p, result):
+                            handled_free.add(index)
+                            continue
+                    except Exception as exc:  # noqa: BLE001 - reconcile later
+                        handled_free.add(index)
+                        _log.warning(
+                            "prose harvest: item %s failed (%s); will reconcile",
+                            p.pid, _clean_error(exc),
+                        )
+                        continue
+                    try:
+                        futures[index] = pool.submit(_run_structure, index)
+                    except Exception as exc:  # noqa: BLE001 - old path remains safe
+                        disabled_chains.add(key)
+                        _log.warning(
+                            "prose harvest: could not schedule item %s (%s); "
+                            "continuing sequentially",
+                            p.pid, _clean_error(exc),
+                        )
+                    return
+
+            # Prime in first-occurrence order; executor capacity, not dict/set
+            # timing, decides when work runs.  Assembly below remains input-order.
+            for key in chains:
+                _prime_chain(key)
+
+            for index, p in enumerate(pending):
+                try:
+                    if index in handled_free:
+                        pass
+                    elif index in futures:
+                        key = source_page_key(p.ref)
+                        try:
+                            outcome = futures.pop(index).result()
+                            _record_structure_telemetry(
+                                result, outcome, cache_enabled=cache is not None
+                            )
+                            _ingest_structured_pending(ledger, p, result, outcome[0])
+                        finally:
+                            # Whether this item structured, degraded, or failed,
+                            # its page's next dependency can now be evaluated.
+                            _prime_chain(key)
+                    else:
+                        # Set-level items and chains whose executor submission
+                        # failed retain the exact original per-item behavior.
+                        _process_pending(
+                            ledger, p, result,
+                            client=client, model=model, max_retries=max_retries,
+                            sleep=sleep, cache=cache,
+                        )
+                except Exception as exc:  # noqa: BLE001 - reconcile below
+                    _log.warning(
+                        "prose harvest: item %s failed (%s); will reconcile",
+                        p.pid, _clean_error(exc),
+                    )
+                if progress is not None:
+                    progress(index + 1, len(pending), "Harvesting prose findings")
 
     # --- reconcile: every enumerated id must have reached a ledger entry (§14.9) --
     expected = {p.pid for p in pending}

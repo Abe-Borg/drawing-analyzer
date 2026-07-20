@@ -10,8 +10,10 @@ from pathlib import Path
 
 import pytest
 
+from drawing_analyzer.digest_cache import DigestCache
 from drawing_analyzer.models import (
     Anchor,
+    ConflictLeg,
     Finding,
     ImageTile,
     RenderedSheet,
@@ -24,6 +26,7 @@ from drawing_analyzer.verify import (
     context_rect,
     default_verify_model,
     parse_verdict,
+    verify_cross_findings,
     verify_findings,
 )
 
@@ -101,6 +104,21 @@ def _finding(marker, *, status="EXACT", rect=(100.0, 100.0, 160.0, 114.0), sourc
     return f
 
 
+def _cross_finding(marker: str) -> Finding:
+    finding = _finding(marker, source="primary.pdf")
+    finding.also_on = [ConflictLeg(
+        sheet_id="M-102",
+        source_name="other.pdf",
+        page_index=0,
+        source_quote=f"{marker}-other",
+        anchor=Anchor(
+            status="EXACT", rect_pdf=[200.0, 200.0, 260.0, 214.0],
+            method="exact",
+        ),
+    )]
+    return finding
+
+
 def _crop_renderer(items):
     for finding, sheet, rect, dpi in items:
         yield finding, b"\x89PNG-crop"
@@ -160,12 +178,12 @@ def test_is_verifiable_excludes_deterministic_and_unanchored():
 
 
 def test_default_verify_model_env_override(monkeypatch):
-    from drawing_analyzer.core.api_config import REVIEW_MODEL_DEFAULT
+    from drawing_analyzer.core.api_config import VERIFICATION_MODEL_DEFAULT
 
     monkeypatch.delenv("DRAWING_ANALYZER_VERIFY_MODEL", raising=False)
-    assert default_verify_model() == REVIEW_MODEL_DEFAULT
-    monkeypatch.setenv("DRAWING_ANALYZER_VERIFY_MODEL", "claude-sonnet-4-6")
-    assert default_verify_model() == "claude-sonnet-4-6"
+    assert default_verify_model() == VERIFICATION_MODEL_DEFAULT
+    monkeypatch.setenv("DRAWING_ANALYZER_VERIFY_MODEL", "legacy-model")
+    assert default_verify_model() == "legacy-model"
 
 
 # --------------------------------------------------------------------------- #
@@ -214,6 +232,119 @@ def test_verify_writes_evidence_artifact_per_finding(tmp_path):
         assert req["artifacts"][0]["sha256"] == want_sha
         assert req["verdict"] == f.verification.status
         assert req["prompt_version"]
+
+
+def test_verify_cache_cold_then_warm_recreates_exact_evidence(tmp_path):
+    cache = DigestCache(None, persist=False)
+    cold_finding = _finding("cache-me")
+    cold_client = _FakeClient({"cache-me": '{"verdict":"CONFIRMED","note":"visible"}'})
+    cold = _run(
+        [cold_finding], client=cold_client, cache=cache,
+        evidence_dir=tmp_path / "cold" / "evidence",
+    )
+
+    warm_finding = _finding("cache-me")
+    warm_client = _FakeClient({})
+    warm = _run(
+        [warm_finding], client=warm_client, cache=cache,
+        evidence_dir=tmp_path / "warm" / "evidence",
+    )
+
+    assert (cold.api_calls, cold.cache_hits, cold.cache_misses) == (1, 0, 1)
+    assert (warm.api_calls, warm.cache_hits, warm.cache_misses) == (0, 1, 0)
+    assert warm.input_tokens == 0 and warm.output_tokens == 0
+    assert warm_client.calls == []
+    assert (warm_finding.verification.status, warm_finding.verification.note) == (
+        cold_finding.verification.status,
+        cold_finding.verification.note,
+    )
+    cold_art = cold_finding.verification.evidence[0]
+    warm_art = warm_finding.verification.evidence[0]
+    assert cold_art.sha256 == warm_art.sha256
+    assert (tmp_path / "cold" / cold_art.relative_path).read_bytes() == b"\x89PNG-crop"
+    assert (tmp_path / "warm" / warm_art.relative_path).read_bytes() == b"\x89PNG-crop"
+    assert (tmp_path / "warm" / "evidence" / warm_finding.id / "request.json").is_file()
+
+
+@pytest.mark.parametrize("changed", ["crop", "anchor", "dpi", "model", "finding"])
+def test_verify_cache_invalidates_verdict_shaping_inputs(changed):
+    cache = DigestCache(None, persist=False)
+    client = _FakeClient({}, default='{"verdict":"CONFIRMED"}')
+
+    def baseline_renderer(items):
+        for finding, _sheet_obj, _rect, _dpi in items:
+            yield finding, b"crop-a"
+
+    verify_findings(
+        [_finding("same")], [_sheet()], client=client, model=OPUS,
+        dpi=300, crop_renderer=baseline_renderer, sleep=lambda _s: None,
+        cache=cache,
+    )
+
+    candidate = _finding("same")
+    candidate_model = OPUS
+    candidate_dpi = 300
+    candidate_renderer = baseline_renderer
+    if changed == "crop":
+        def candidate_renderer(items):
+            for finding, _sheet_obj, _rect, _dpi in items:
+                yield finding, b"crop-b"
+    elif changed == "anchor":
+        candidate.anchor.rect_pdf = [101.0, 100.0, 161.0, 114.0]
+    elif changed == "dpi":
+        candidate_dpi = 301
+    elif changed == "model":
+        candidate_model = "different-verifier"
+    elif changed == "finding":
+        candidate.text = "same quote, materially different finding"
+
+    result = verify_findings(
+        [candidate], [_sheet()], client=client, model=candidate_model,
+        dpi=candidate_dpi, crop_renderer=candidate_renderer,
+        sleep=lambda _s: None, cache=cache,
+    )
+    assert result.cache_hits == 0 and result.cache_misses == 1
+    assert result.api_calls == 1 and len(client.calls) == 2
+
+
+def test_verify_cache_never_admits_malformed_or_api_failure():
+    malformed_cache = DigestCache(None, persist=False)
+    malformed_client = _FakeClient({}, default="not json")
+    for _ in range(2):
+        result = _run([_finding("bad")], client=malformed_client, cache=malformed_cache)
+        assert result.cache_hits == 0 and result.api_calls == 1
+    assert len(malformed_client.calls) == 2
+
+    class _FailureClient:
+        def __init__(self):
+            self.calls = 0
+
+            class _Messages:
+                def create(_self, **_kw):
+                    self.calls += 1
+                    raise _StatusError(400, "bad request")
+
+            self.messages = _Messages()
+
+    failed_cache = DigestCache(None, persist=False)
+    failed_client = _FailureClient()
+    for _ in range(2):
+        result = _run([_finding("failure")], client=failed_client, cache=failed_cache)
+        assert result.cache_hits == 0 and result.api_calls == 1
+    assert failed_client.calls == 2
+
+
+def test_verify_cache_admits_valid_not_visible_but_not_garbled_uncertain():
+    cache = DigestCache(None, persist=False)
+    client = _FakeClient({}, default='{"verdict":"NOT_VISIBLE","note":"outside crop"}')
+    cold = _run([_finding("not-visible")], client=client, cache=cache)
+    warm_finding = _finding("not-visible")
+    warm = _run([warm_finding], client=client, cache=cache)
+
+    assert cold.uncertain == 1 and cold.api_calls == 1
+    assert warm_finding.verification.status == "UNCERTAIN"
+    assert warm.cache_hits == 1 and warm.api_calls == 0
+    assert len(client.calls) == 1
 
 
 def test_verify_no_evidence_dir_leaves_path_empty():
@@ -457,6 +588,107 @@ def test_verify_runs_concurrently():
     findings = [_finding("a"), _finding("b"), _finding("c")]
     res = _run(findings, client=_Barriered(), max_workers=3)
     assert res.verified == 3   # all cleared the barrier => true concurrency
+
+
+def test_cross_verify_model_calls_concurrent_but_render_and_attach_ordered(monkeypatch):
+    main_thread = threading.get_ident()
+    render_threads: list[int] = []
+    model_threads: list[int] = []
+    barrier = threading.Barrier(3, timeout=8)
+
+    def fake_render(_requests, _dpi):
+        render_threads.append(threading.get_ident())
+        return [b"primary-crop", b"other-crop"]
+
+    monkeypatch.setattr("drawing_analyzer.verify._render_leg_crops", fake_render)
+
+    class _Barriered:
+        def __init__(self):
+            class _M:
+                def create(_s, **_kw):
+                    model_threads.append(threading.get_ident())
+                    barrier.wait()
+                    return _FakeResp('{"verdict":"CONFIRMED"}')
+            self.messages = _M()
+
+    findings = [_cross_finding(marker) for marker in ("a", "b", "c")]
+    progress: list[tuple[int, int]] = []
+    res = verify_cross_findings(
+        findings,
+        [_sheet("primary.pdf"), _sheet("other.pdf")],
+        client=_Barriered(), model=OPUS, max_workers=3,
+        sleep=lambda _s: None,
+        progress=lambda done, total, _label: progress.append((done, total)),
+    )
+
+    assert res.verified == 3
+    assert res.input_tokens == 150 and res.output_tokens == 30
+    assert render_threads == [main_thread, main_thread, main_thread]
+    assert len(set(model_threads)) == 3 and main_thread not in model_threads
+    assert [f.verification.status for f in findings] == ["VERIFIED"] * 3
+    assert progress == [(1, 3), (2, 3), (3, 3)]
+
+
+def test_cross_verify_cache_replays_ordered_leg_evidence(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "drawing_analyzer.verify._render_leg_crops",
+        lambda _requests, _dpi: [b"primary-crop", b"other-crop"],
+    )
+    cache = DigestCache(None, persist=False)
+    sheets = [_sheet("primary.pdf"), _sheet("other.pdf")]
+
+    cold_finding = _cross_finding("cached-conflict")
+    cold_client = _FakeClient({}, default='{"verdict":"CONFIRMED","note":"conflict"}')
+    cold = verify_cross_findings(
+        [cold_finding], sheets, client=cold_client, model=OPUS, cache=cache,
+        evidence_dir=tmp_path / "cold" / "evidence", sleep=lambda _s: None,
+    )
+
+    warm_finding = _cross_finding("cached-conflict")
+    warm_client = _FakeClient({})
+    warm = verify_cross_findings(
+        [warm_finding], sheets, client=warm_client, model=OPUS, cache=cache,
+        evidence_dir=tmp_path / "warm" / "evidence", sleep=lambda _s: None,
+    )
+
+    assert (cold.api_calls, cold.cache_hits, cold.cache_misses) == (1, 0, 1)
+    assert (warm.api_calls, warm.cache_hits, warm.cache_misses) == (0, 1, 0)
+    assert warm_client.calls == [] and warm.input_tokens == warm.output_tokens == 0
+    assert [a.request_order for a in warm_finding.verification.evidence] == [1, 2]
+    assert [a.sha256 for a in warm_finding.verification.evidence] == [
+        a.sha256 for a in cold_finding.verification.evidence
+    ]
+    for expected, artifact in zip(
+        (b"primary-crop", b"other-crop"), warm_finding.verification.evidence,
+    ):
+        assert (tmp_path / "warm" / artifact.relative_path).read_bytes() == expected
+    assert (
+        tmp_path / "warm" / "evidence" / warm_finding.id / "request.json"
+    ).is_file()
+
+
+def test_cross_verify_cache_invalidates_when_any_leg_crop_changes(monkeypatch):
+    cache = DigestCache(None, persist=False)
+    client = _FakeClient({}, default='{"verdict":"CONFIRMED"}')
+    rendered = [[b"primary", b"other-a"], [b"primary", b"other-b"]]
+
+    def fake_render(_requests, _dpi):
+        return rendered.pop(0)
+
+    monkeypatch.setattr("drawing_analyzer.verify._render_leg_crops", fake_render)
+    sheets = [_sheet("primary.pdf"), _sheet("other.pdf")]
+    first = verify_cross_findings(
+        [_cross_finding("conflict")], sheets, client=client, model=OPUS,
+        cache=cache, sleep=lambda _s: None,
+    )
+    second = verify_cross_findings(
+        [_cross_finding("conflict")], sheets, client=client, model=OPUS,
+        cache=cache, sleep=lambda _s: None,
+    )
+
+    assert first.api_calls == second.api_calls == 1
+    assert second.cache_hits == 0 and second.cache_misses == 1
+    assert len(client.calls) == 2
 
 
 def test_verify_progress_reports_k_of_n():

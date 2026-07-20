@@ -1675,7 +1675,12 @@ class RunConfiguration:
     markup_verified_only: bool = False
     ink_rejected: bool = False
     focus_findings_to_markups: bool = False
+    # Digest and critique transport can be selected independently.  Keeping the
+    # critique value explicit makes the GUI's Hybrid mode auditable; legacy API
+    # callers that provide only ``use_batch`` still get the historical all-batch
+    # or all-real-time behavior through ``resolve_run_configuration``.
     use_batch: bool = False
+    critique_use_batch: bool = False
     # Opt-in tile artifact dump: stage every rendered tile PNG at render time and
     # export a ``tiles/`` folder with per-tile notes. Output-side only — it never
     # places a call, never joins the paid-expert set, and never gates QC status.
@@ -1722,6 +1727,7 @@ class RunConfiguration:
             "ink_rejected": self.ink_rejected,
             "focus_findings_to_markups": self.focus_findings_to_markups,
             "use_batch": self.use_batch,
+            "critique_use_batch": self.critique_use_batch,
             "save_tile_artifacts": self.save_tile_artifacts,
             "debug_overrides": list(self.debug_overrides),
         }
@@ -1743,6 +1749,7 @@ def resolve_run_configuration(
     ink_rejected: bool = False,
     focus_findings_to_markups: bool = False,
     use_batch: bool = False,
+    critique_use_batch: "bool | None" = None,
     save_tile_artifacts: bool = False,
 ) -> RunConfiguration:
     """Resolve the raw run options into one normalized :class:`RunConfiguration`.
@@ -1855,6 +1862,10 @@ def resolve_run_configuration(
         ink_rejected=bool(ink_rejected),
         focus_findings_to_markups=bool(focus_findings_to_markups),
         use_batch=bool(use_batch),
+        critique_use_batch=(
+            bool(use_batch) if critique_use_batch is None
+            else bool(critique_use_batch)
+        ),
         save_tile_artifacts=bool(save_tile_artifacts),
         debug_overrides=tuple(overrides),
     )

@@ -101,7 +101,7 @@ class _Stream:
     token span maps straight back to the original word rectangles.
     """
 
-    __slots__ = ("tokens", "word_of", "freq")
+    __slots__ = ("tokens", "word_of", "freq", "positions", "subsequence_cache")
 
     def __init__(self, words: list[Any]) -> None:
         self.tokens: list[str] = []
@@ -111,6 +111,33 @@ class _Stream:
                 self.tokens.append(tok)
                 self.word_of.append(i)
         self.freq = Counter(self.tokens)
+        self.positions: dict[str, list[int]] = {}
+        for pos, token in enumerate(self.tokens):
+            self.positions.setdefault(token, []).append(pos)
+        # Exact and fuzzy-subphrase anchoring repeatedly ask for the same token
+        # sequences across findings.  Cache the immutable start-index result for
+        # this one sheet; it never crosses a source or survives the run.
+        self.subsequence_cache: dict[tuple[str, ...], tuple[int, ...]] = {}
+
+    def find_subsequences(self, query: list[str]) -> list[int]:
+        key = tuple(query)
+        cached = self.subsequence_cache.get(key)
+        if cached is not None:
+            return list(cached)
+        m = len(query)
+        n = len(self.tokens)
+        if m == 0 or m > n:
+            starts: tuple[int, ...] = ()
+        else:
+            # Probe only positions carrying the first token instead of slicing
+            # at every word on the sheet.  The final equality predicate is the
+            # historical exact check, so matching semantics do not change.
+            starts = tuple(
+                pos for pos in self.positions.get(query[0], ())
+                if pos + m <= n and self.tokens[pos : pos + m] == query
+            )
+        self.subsequence_cache[key] = starts
+        return list(starts)
 
 
 def _rect_union(rects: list[tuple[float, float, float, float]]) -> list[float]:
@@ -164,20 +191,6 @@ def _reported_tile(finding: Finding, rows: int, cols: int) -> tuple[int, int] | 
     return None
 
 
-def _find_subsequences(stream_tokens: list[str], query: list[str]) -> list[int]:
-    """Start indices where ``stream_tokens[k:k+len(query)] == query`` (exact)."""
-    m = len(query)
-    n = len(stream_tokens)
-    if m == 0 or m > n:
-        return []
-    first = query[0]
-    out: list[int] = []
-    for k in range(n - m + 1):
-        if stream_tokens[k] == first and stream_tokens[k : k + m] == query:
-            out.append(k)
-    return out
-
-
 def _tile_preferred_start(
     starts: list[int], length: int, stream: _Stream, words: list[Any],
     tile: tuple[int, int] | None, w: float, h: float, rows: int, cols: int,
@@ -212,7 +225,7 @@ def _try_exact(
     query = _tokenize(finding.source_quote)
     if not query:
         return None
-    starts = _find_subsequences(stream.tokens, query)
+    starts = stream.find_subsequences(query)
     if not starts:
         return None
     start, disambiguated = _tile_preferred_start(
@@ -242,15 +255,36 @@ def _try_fuzzy_window(
     qcount = Counter(query)
     best_overlap = 0.0
     best_starts: list[int] = []
+    window = Counter(stream.tokens[:m])
+    matched = sum(min(count, window.get(token, 0)) for token, count in qcount.items())
     for k in range(n - m + 1):
-        window = stream.tokens[k : k + m]
-        overlap = sum((qcount & Counter(window)).values()) / m
+        overlap = matched / m
         if overlap < _FUZZY_WINDOW_MIN_OVERLAP:
-            continue
-        if overlap > best_overlap:
+            pass
+        elif overlap > best_overlap:
             best_overlap, best_starts = overlap, [k]
         elif overlap == best_overlap:
             best_starts.append(k)
+        if k + m >= n:
+            continue
+        outgoing = stream.tokens[k]
+        incoming = stream.tokens[k + m]
+        if outgoing in qcount:
+            before = min(qcount[outgoing], window[outgoing])
+            window[outgoing] -= 1
+            after = min(qcount[outgoing], window[outgoing])
+            matched += after - before
+        else:
+            window[outgoing] -= 1
+        if window[outgoing] <= 0:
+            del window[outgoing]
+        if incoming in qcount:
+            before = min(qcount[incoming], window.get(incoming, 0))
+            window[incoming] += 1
+            after = min(qcount[incoming], window[incoming])
+            matched += after - before
+        else:
+            window[incoming] += 1
     if not best_starts:
         return None
     start, _ = _tile_preferred_start(best_starts, m, stream, words, tile, w, h, rows, cols)
@@ -273,7 +307,7 @@ def _try_fuzzy_subphrase(
         candidates: list[tuple[int, list[int]]] = []  # (distinctiveness, starts)
         for s in range(0, m - length + 1):
             sub = query[s : s + length]
-            starts = _find_subsequences(stream.tokens, sub)
+            starts = stream.find_subsequences(sub)
             if not starts:
                 continue
             # Distinctiveness = rarity of the sub-phrase's rarest token in the

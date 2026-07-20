@@ -2,7 +2,7 @@
 
 A small, dependency-free pricing table so the app can show a spend estimate
 before launching an expensive run (e.g. the drawing-analysis cost-confirm
-dialog). Rates are USD per million tokens, current as of 2026-06. Image/vision
+dialog). Rates are USD per million tokens, verified on 2026-07-20. Image/vision
 input is billed as ordinary input tokens, so no separate image rate is needed;
 the Batch API bills at 50% of standard, exposed via the ``batch=`` flag.
 
@@ -20,7 +20,7 @@ from decimal import Decimal
 # pricing (§15.7). Rates drift — re-verify against the official pricing page and
 # bump this date before a release; the GUI/report surface it so a stale figure is
 # never presented as authoritative.
-PRICING_EFFECTIVE_DATE = "2026-06"
+PRICING_EFFECTIVE_DATE = "2026-07-20"
 
 # Batch API bills at half of standard, per Anthropic's published pricing.
 BATCH_DISCOUNT = 0.5

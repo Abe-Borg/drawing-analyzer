@@ -1,11 +1,10 @@
-"""Phase 19B — cache identity & schema migration (DA-004, §11.5).
+"""Level-1 cache identity and schema migration (DA-004, §11.5).
 
-The level-1 render identity is now keyed on the whole source file's
-``content_sha256`` plus the render config, coordinate space, and renderer
-environment — so *any* visible change (rotation, CropBox, a rendered annotation's
-appearance stream, or the drawing itself) re-keys and a stale level-1 hit is
-impossible. Adds the critique level-1 cache, which lets an unchanged exhaustive
-re-run skip **both** the critique API calls and rasterization.
+The render identity conservatively hashes the transitive PDF dependencies that
+can affect one page's pixels, plus render configuration and environment. A local
+page edit rekeys that page while preserving unchanged siblings; any ambiguity
+falls back to the whole-source hash, so stale hits remain impossible. The same
+identity supports digest and critique pre-render cache hits.
 """
 from __future__ import annotations
 
@@ -33,7 +32,7 @@ from drawing_analyzer.source_registry import content_sha256  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
-# Helpers — build a PDF file and compute its whole-file render identity
+# Helpers — build a PDF file and compute its page render identity
 # --------------------------------------------------------------------------- #
 
 
@@ -59,7 +58,7 @@ def _identity(path: Path, *, page_index: int = 0, rows: int = 2, cols: int = 2) 
 
 
 # --------------------------------------------------------------------------- #
-# DA-004: the whole-source hash catches rotation / CropBox / annotations
+# DA-004: page dependencies catch rotation / CropBox / annotations
 # --------------------------------------------------------------------------- #
 
 
@@ -68,7 +67,7 @@ def test_rotation_change_rekeys(tmp_path, rot):
     # 180° is the case the old per-page fingerprint MISSED: it hashed content
     # streams + page.rect dims, and a 180° rotation changes neither (dims are the
     # same, /Rotate is a page-dict attribute, not a content stream). The whole-file
-    # hash catches every rotation.
+    # dependency hash catches every rotation.
     d0 = _base_doc()
     a = tmp_path / "a.pdf"
     d0.save(str(a))
@@ -84,7 +83,7 @@ def test_rotation_change_rekeys(tmp_path, rot):
 def test_cropbox_offset_change_rekeys_even_at_same_size(tmp_path):
     # Two CropBoxes with the SAME width/height but a different ORIGIN — the old
     # fingerprint (which hashed only page.rect *dimensions*) would MISS this; the
-    # whole-file hash catches it because the CropBox bytes differ.
+    # page dependency hash catches it because the CropBox differs.
     d0 = _base_doc()
     d0[0].set_cropbox(pymupdf.Rect(0, 0, 400, 500))
     a = tmp_path / "a.pdf"
@@ -114,7 +113,7 @@ def test_adding_a_rendered_annotation_rekeys(tmp_path):
 
 def test_annotation_appearance_change_rekeys(tmp_path):
     # Same annotation text/rect, DIFFERENT appearance (color) — the appearance
-    # stream bytes differ, so the whole-file hash differs (§11 test 8).
+    # appearance-stream bytes differ, so the page dependency hash differs.
     def _with_color(color):
         d = _base_doc()
         an = d[0].add_rect_annot(pymupdf.Rect(80, 100, 260, 140))
@@ -189,6 +188,46 @@ def test_page_index_and_count_distinguish_pages(tmp_path):
     d.save(str(a))
     d.close()
     assert _identity(a, page_index=0) != _identity(a, page_index=1)
+
+
+def test_editing_one_page_preserves_unchanged_sibling_identity(tmp_path):
+    """The transitive page graph localizes an incremental multi-page revision."""
+    doc = pymupdf.open()
+    doc.new_page(width=612, height=792).insert_text((80, 120), "SHEET A-101", fontsize=14)
+    doc.new_page(width=612, height=792).insert_text((80, 120), "SHEET A-102", fontsize=14)
+    path = tmp_path / "set.pdf"
+    doc.save(str(path))
+    doc.close()
+
+    before = [_identity(path, page_index=i) for i in range(2)]
+    doc = pymupdf.open(str(path))
+    doc[1].insert_text((80, 160), "REVISION ON SECOND SHEET ONLY", fontsize=12)
+    doc.saveIncr()
+    doc.close()
+    after = [_identity(path, page_index=i) for i in range(2)]
+
+    assert after[0] == before[0]
+    assert after[1] != before[1]
+
+
+def test_annotation_change_invalidates_only_its_page(tmp_path):
+    doc = pymupdf.open()
+    doc.new_page(width=612, height=792).insert_text((80, 120), "SHEET M-101", fontsize=14)
+    doc.new_page(width=612, height=792).insert_text((80, 120), "SHEET M-102", fontsize=14)
+    path = tmp_path / "set.pdf"
+    doc.save(str(path))
+    doc.close()
+    before = [_identity(path, page_index=i) for i in range(2)]
+
+    doc = pymupdf.open(str(path))
+    annot = doc[0].add_rect_annot(pymupdf.Rect(70, 90, 240, 145))
+    annot.update()
+    doc.saveIncr()
+    doc.close()
+    after = [_identity(path, page_index=i) for i in range(2)]
+
+    assert after[0] != before[0]
+    assert after[1] == before[1]
 
 
 def test_unhashable_sources_do_not_collide(tmp_path, monkeypatch):
@@ -271,7 +310,7 @@ def test_old_schema_entries_are_discarded(tmp_path):
 
 def test_level1_keys_fold_schema_version():
     # Both level-1 keys namespace on the schema version, so a bump invalidates them.
-    render_identity = "render-identity-v2|content_sha256=abc|..."
+    render_identity = "render-identity-v3|content_dependency=page:abc|..."
     d = digest_cache_key_level1(
         render_identity, model="m", prompt_version="p", max_tokens=1,
         effort=None, use_thinking=True,
@@ -290,7 +329,7 @@ def test_level1_keys_fold_schema_version():
 
 
 def test_critique_level1_key_sensitive_to_runs_and_profiles():
-    ri = "render-identity-v2|content_sha256=abc"
+    ri = "render-identity-v3|content_dependency=page:abc"
     base = dict(model="m", prompt_version="p", max_tokens=1, effort=None, use_thinking=True)
     k1 = critique_cache_key_level1(ri, runs=1, **base)
     k2 = critique_cache_key_level1(ri, runs=2, **base)

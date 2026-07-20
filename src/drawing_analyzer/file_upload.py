@@ -22,7 +22,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, Iterable, Iterator
 
 from .diagnostics import get_logger, summarize_exc
 from .digest import (
@@ -186,6 +186,134 @@ class SheetUpload:
     file_ids: list[str] = field(default_factory=list)
 
 
+def retask_uploaded_content(content: list[dict], task_instruction: str) -> list[dict]:
+    """Return uploaded-sheet content with only its final instruction replaced.
+
+    Digest and critique deliberately share the same framing, text layer, image
+    order, labels, and uploaded ``file_id`` references.  Reusing an upload across
+    those stages therefore requires changing only the final text block.  The
+    input list and its blocks are never mutated, which keeps any in-flight digest
+    request byte-stable.
+    """
+    blocks = list(content)
+    replacement = {"type": "text", "text": str(task_instruction)}
+    if blocks and blocks[-1].get("type") == "text":
+        blocks[-1] = replacement
+    else:
+        # Defensive compatibility for a custom uploader that omitted the
+        # closing task.  The standard builder always takes the replacement path.
+        blocks.append(replacement)
+    return blocks
+
+
+@dataclass
+class ReusableSheetUpload:
+    """A run-local uploaded sheet whose file IDs can serve a later stage.
+
+    Ownership is explicit: the manifest that holds this object must either
+    release ``file_ids`` itself or transfer them to a submitted critique batch.
+    The class contains no API client and performs no cleanup on destruction.
+    """
+
+    ref: Any
+    rows: int
+    cols: int
+    content: list[dict]
+    file_ids: list[str] = field(default_factory=list)
+    _owns_cleanup: bool = field(default=True, init=False, repr=False)
+    _ownership_lock: threading.Lock = field(
+        default_factory=threading.Lock, init=False, repr=False
+    )
+
+    def content_for(self, task_instruction: str) -> list[dict]:
+        return retask_uploaded_content(self.content, task_instruction)
+
+    @property
+    def available(self) -> bool:
+        """Whether this manifest still owns IDs that may be transferred."""
+        with self._ownership_lock:
+            return self._owns_cleanup and bool(self.file_ids)
+
+    def transfer(self, task_instruction: str) -> SheetUpload | None:
+        """Atomically transfer cleanup ownership to one later-stage request.
+
+        The returned :class:`SheetUpload` owns the IDs.  A second transfer (or a
+        transfer after :meth:`release_ids`) returns ``None``, preventing two
+        stages from independently deleting or submitting the same ownership.
+        """
+        with self._ownership_lock:
+            if not self._owns_cleanup or not self.file_ids:
+                return None
+            transferred = SheetUpload(
+                content=self.content_for(task_instruction),
+                file_ids=list(self.file_ids),
+            )
+            self._owns_cleanup = False
+            return transferred
+
+    def release_ids(self) -> list[str]:
+        """Take still-owned IDs for deletion, at most once."""
+        with self._ownership_lock:
+            if not self._owns_cleanup:
+                return []
+            self._owns_cleanup = False
+            return list(self.file_ids)
+
+
+def iter_prefetched_sheets(
+    rendered_sheets: Iterable[RenderedSheet],
+) -> Iterator[RenderedSheet]:
+    """Render one sheet ahead while the caller uploads the current sheet.
+
+    The source iterator is advanced only by one dedicated worker, so a PDF
+    renderer is never shared across threads.  Before yielding the current sheet,
+    the worker starts advancing to the next one; the caller's existing sequential
+    cache/upload/circuit-breaker logic therefore runs unchanged while that render
+    proceeds.  One yielded sheet plus one in-flight/ready sheet is the hard memory
+    bound, and source order is preserved exactly.
+    """
+    iterator = iter(rendered_sheets)
+
+    def _advance() -> tuple[bool, RenderedSheet | None]:
+        try:
+            return False, next(iterator)
+        except StopIteration:
+            return True, None
+
+    def _close_source() -> None:
+        close = getattr(iterator, "close", None)
+        if callable(close):
+            close()
+
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="sheet-render") as executor:
+        future = executor.submit(_advance)
+        try:
+            while True:
+                exhausted, sheet = future.result()
+                if exhausted:
+                    return
+                # Schedule exactly one lookahead before handing the current sheet to
+                # the upload loop.  ``future.result`` above also propagates a source
+                # render exception with its original traceback.
+                future = executor.submit(_advance)
+                assert sheet is not None
+                yield sheet
+        finally:
+            # If upload/cache work aborts early, let the single lookahead finish
+            # (or cancel it before it starts), then finalize the renderer iterator
+            # on this same dedicated worker. PyMuPDF documents opened inside the
+            # source generator are therefore never closed from the caller thread.
+            future.cancel()
+            try:
+                future.result()
+            except BaseException:
+                pass
+            try:
+                executor.submit(_close_source).result()
+            except Exception as exc:  # noqa: BLE001 - preserve the caller's error
+                _log.warning("render source cleanup failed: %s", summarize_exc(exc))
+
+
 def _safe_stem(sheet: RenderedSheet) -> str:
     raw = sheet.ref.display_label
     return "".join(c if c.isalnum() else "_" for c in raw)[:60] or "sheet"
@@ -257,8 +385,8 @@ def upload_sheet_images(
     lock = threading.Lock()
     completed = 0
     # Once any image fails for good, queued uploads short-circuit instead of
-    # hammering the API for a sheet that is already doomed — mirroring the
-    # sequential path, which stopped at the first failure.
+    # hammering the API for a sheet that is already doomed.  Workers already in
+    # the Files API may finish; their IDs are collected and deleted below.
     aborted = threading.Event()
 
     def _notify(retrying: bool) -> None:
@@ -271,7 +399,7 @@ def upload_sheet_images(
         attempt = 0
         while True:
             if aborted.is_set():
-                return position, None  # another image already failed the sheet
+                return position, None
             try:
                 uploaded = client.beta.files.upload(
                     file=(name, image.png_bytes, "image/png")
@@ -310,7 +438,7 @@ def upload_sheet_images(
                     label, name, position + 1, total_images,
                     len(image.png_bytes), summarize_exc(exc),
                 )
-                aborted.set()  # stop the sheet's other (queued) uploads
+                aborted.set()
                 raise
         fid = _uploaded_id(uploaded)
         with lock:
@@ -334,7 +462,7 @@ def upload_sheet_images(
         for future in as_completed(futures):
             try:
                 pos, fid = future.result()
-                if fid is not None:            # None => skipped after an abort
+                if fid is not None:
                     by_position[pos] = fid
             except Exception as exc:  # noqa: BLE001 - first failure fails the sheet
                 if error is None:

@@ -4,6 +4,25 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project aims to
 adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Replaced whole-file JSON cache rewrites with transactional SQLite/WAL row
+  storage and automatic in-place legacy migration.
+- Added exact complete-result caching for paid post-digest review stages; failed,
+  malformed, incomplete, or evidence-invalid results are never reused.
+- Reused digest renders and Files-API uploads for critique, and overlapped Batch
+  rendering with upload through a bounded one-sheet lookahead.
+- Added bounded, deterministic concurrency for independent cross-QC, prose,
+  verification, and per-source reviewed-PDF work while keeping PDF access safe.
+- Narrowed pre-render invalidation to conservative page dependency graphs, with a
+  whole-source fallback whenever page isolation cannot be proven.
+- Added Economy, Hybrid, and Fast processing choices and full-stack QC estimates;
+  model/retry usage now records each billable transport attempt separately.
+- Accelerated exact anchoring and ledger de-duplication with indexed candidates,
+  and moved Export All work off the GUI thread.
+
 ## [1.1.0] - 2026-07-18
 
 A usability-focused release: the standalone GUI is now more compact and

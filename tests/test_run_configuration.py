@@ -288,6 +288,20 @@ def test_to_dict_carries_investigation_switch():
     assert resolve_run_configuration().to_dict()["run_investigation"] is False
 
 
+def test_critique_transport_defaults_to_digest_transport_for_legacy_callers():
+    assert resolve_run_configuration(use_batch=True).critique_use_batch is True
+    assert resolve_run_configuration(use_batch=False).critique_use_batch is False
+
+
+def test_critique_transport_can_be_selected_independently_for_hybrid_mode():
+    config = resolve_run_configuration(
+        qc_markups=True, use_batch=False, critique_use_batch=True,
+    )
+    assert config.use_batch is False
+    assert config.critique_use_batch is True
+    assert config.to_dict()["critique_use_batch"] is True
+
+
 # --------------------------------------------------------------------------- #
 # roll_up_qc_status — the §3.3 deterministic roll-up + the §15.5 gate
 # --------------------------------------------------------------------------- #

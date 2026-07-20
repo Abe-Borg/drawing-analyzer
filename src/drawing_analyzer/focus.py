@@ -38,6 +38,11 @@ from .digest import (
     _message_usage,
     _retry_backoff_seconds,
 )
+from .stage_cache import (
+    get_stage_cache_entry,
+    put_stage_cache_entry,
+    stage_cache_key,
+)
 
 # A focused answer needs less room than a full per-sheet transcription, but can
 # legitimately be long (e.g. a room-by-room fixture table for a large campus).
@@ -47,6 +52,7 @@ DEFAULT_FOCUS_EFFORT = "high"
 # Unlike synthesis (which reconciles ACROSS sheets and needs >=2), a focus
 # question is answerable from a single readable sheet.
 MIN_SHEETS_FOR_FOCUS = 1
+_FOCUS_CACHE_CONTRACT = 1
 
 
 def default_focus_model() -> str:
@@ -129,6 +135,7 @@ class FocusReportResult:
     output_tokens: int = 0
     model_used: str = ""
     error: str | None = None
+    cached: bool = False
 
     @property
     def ok(self) -> bool:
@@ -146,6 +153,7 @@ def generate_focus_report(
     effort: str | None = DEFAULT_FOCUS_EFFORT,
     max_retries: int = DEFAULT_DIGEST_MAX_RETRIES,
     sleep: Any = time.sleep,
+    cache: Any = None,
 ) -> FocusReportResult:
     """Answer the operator's focus across the set (one text-only call).
 
@@ -162,6 +170,33 @@ def generate_focus_report(
             error=f"insufficient readable sheets for focus report ({len(ok_sheets)})",
         )
 
+    user_text = build_focus_user_text(focus, ok_sheets)
+    thinking_enabled = bool(
+        use_thinking and model_supports_adaptive_thinking(model)
+    )
+    effective_effort = effort if effort and model_supports_effort(model) else None
+    cache_key = stage_cache_key(
+        "focus",
+        model=model,
+        prompt=FOCUS_REPORT_SYSTEM_PROMPT,
+        inputs={"user_text": user_text},
+        params={
+            "contract": _FOCUS_CACHE_CONTRACT,
+            "max_tokens": int(max_tokens),
+            "thinking": thinking_enabled,
+            "effort": effective_effort or "",
+        },
+    )
+    cached_entry = get_stage_cache_entry(cache, cache_key, stage="focus")
+    if cached_entry is not None:
+        cached_text = cached_entry.get("text")
+        if isinstance(cached_text, str) and cached_text.strip():
+            return FocusReportResult(
+                text=cached_text,
+                model_used=model,
+                cached=True,
+            )
+
     if client is None:
         from .client import get_client as _get_client
 
@@ -172,13 +207,13 @@ def generate_focus_report(
         "max_tokens": max_tokens,
         "system": FOCUS_REPORT_SYSTEM_PROMPT,
         "messages": [
-            {"role": "user", "content": build_focus_user_text(focus, ok_sheets)}
+            {"role": "user", "content": user_text}
         ],
     }
-    if use_thinking and model_supports_adaptive_thinking(model):
+    if thinking_enabled:
         kwargs["thinking"] = {"type": "adaptive"}
-    if effort and model_supports_effort(model):
-        kwargs["output_config"] = {"effort": effort}
+    if effective_effort:
+        kwargs["output_config"] = {"effort": effective_effort}
 
     attempt = 0
     while True:
@@ -195,10 +230,18 @@ def generate_focus_report(
     text = _message_text(resp)
     in_tok, out_tok = _message_usage(resp)
     error = None if text else "empty focus report"
-    return FocusReportResult(
+    result = FocusReportResult(
         text=text,
         input_tokens=in_tok,
         output_tokens=out_tok,
         model_used=model,
         error=error,
     )
+    if result.ok:
+        put_stage_cache_entry(
+            cache,
+            cache_key,
+            stage="focus",
+            payload={"text": result.text},
+        )
+    return result

@@ -24,7 +24,7 @@ import customtkinter as ctk
 
 try:  # drag-and-drop is optional (mirrors the main app shell)
     from tkinterdnd2 import DND_FILES, TkinterDnD
-except ImportError:  # pragma: no cover - depends on optional dependency
+except Exception:  # pragma: no cover - optional/native Tk can be unavailable
     DND_FILES = None
     TkinterDnD = None
 
@@ -50,7 +50,16 @@ from .cost import (
     format_drawing_cost_prompt,
     format_exhaustive_cost_prompt,
 )
-from .help_content import GET_API_KEY, HELP_DOCUMENTS, HelpDocument, transport_hint
+from .help_content import (
+    GET_API_KEY,
+    HELP_DOCUMENTS,
+    PROCESSING_MODE_ECONOMY,
+    PROCESSING_MODE_HYBRID,
+    PROCESSING_MODES,
+    HelpDocument,
+    processing_transports,
+    transport_hint,
+)
 from .html_report import build_html_report
 from .pipeline import DrawingContext, extract_drawing_context
 from .render import list_sheets
@@ -216,6 +225,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._pdfs: list[Path] = []
         self._ctx: DrawingContext | None = None
         self._busy = False
+        self._export_busy = False
         # Uploaded project specifications (optional) — see spec_documents.py.
         # Distinct from "Per-run focus" below: this is ground-truth reference
         # material, extracted once at upload time (not a live textbox).
@@ -237,11 +247,10 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._qc_verified_only_var = BooleanVar(value=False)
         self._ink_rejected_var = BooleanVar(value=False)
         self._reference_audit_var = BooleanVar(value=False)
-        # Transport: off = Message Batches (~50% cheaper, minutes–hours); on =
-        # real-time (immediate, full rate). The GUI always passes an explicit
-        # value, so it shadows DRAWING_ANALYZER_USE_BATCH — exactly as the
-        # previously hardcoded use_batch=True did.
-        self._realtime_var = BooleanVar(value=False)
+        # Named transport plans: Economy batches digest + critique, Hybrid runs
+        # digests now and batches critique, Fast runs both now. The GUI passes
+        # both resolved values explicitly, so the choice is auditable.
+        self._processing_mode_var = StringVar(value=PROCESSING_MODE_ECONOMY)
         # Opt-in tile artifact dump: every rendered tile PNG + mirrored per-tile
         # notes land in a tiles/ folder inside the export. Passed explicitly, so
         # it shadows DRAWING_ANALYZER_SAVE_TILES (same contract as use_batch).
@@ -584,26 +593,30 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._transport_sec = CollapsibleSection(
             outer, "Processing", expanded=False,
             summary_provider=lambda: (
-                ("real-time" if self._realtime_var.get() else "batch")
+                self._processing_mode_var.get().lower()
                 + (" + tiles" if self._save_tiles_var.get() else "")
             ),
         )
         transport_row = self._transport_sec.body
-        self._realtime_check = ctk.CTkCheckBox(
-            transport_row,
-            text="Real-time mode — results immediately, ~2× API cost "
-                 "(off = Message Batches, ~50% cheaper)",
-            variable=self._realtime_var, command=self._on_transport_toggle,
+        ctk.CTkLabel(
+            transport_row, text="Processing mode",
             font=ctk.CTkFont(family="Segoe UI", size=12),
             text_color=COLORS["text_primary"],
+        ).pack(anchor="w", pady=(4, 2))
+        self._processing_mode_menu = ctk.CTkOptionMenu(
+            transport_row,
+            values=list(PROCESSING_MODES),
+            variable=self._processing_mode_var,
+            command=self._on_transport_toggle,
+            font=ctk.CTkFont(family="Segoe UI", size=12),
         )
-        self._realtime_check.pack(anchor="w", pady=(4, 0))
+        self._processing_mode_menu.pack(anchor="w")
         # A muted, mode-aware hint carrying the concrete cost/time expectation
         # (and the "batch is a shared queue" explanation) right at the decision
         # point. Text is single-sourced in help_content.transport_hint so the
         # checkbox, cost dialog, and help panel never drift apart.
         self._transport_hint = ctk.CTkLabel(
-            transport_row, text=transport_hint(self._realtime_var.get()),
+            transport_row, text=transport_hint(self._processing_mode_var.get()),
             font=ctk.CTkFont(family="Segoe UI", size=11),
             text_color=COLORS["text_muted"], justify="left", wraplength=780,
         )
@@ -1460,13 +1473,13 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         if self.focus_popout_box is not None:
             self.focus_popout_box.configure(state=state)
 
-    def _on_transport_toggle(self) -> None:
+    def _on_transport_toggle(self, _selection: str | None = None) -> None:
         # Keep the muted hint under the Processing checkbox in sync with the
         # chosen transport, then refresh the cost summary (whose rate also
         # depends on the batch/real-time choice).
         hint = getattr(self, "_transport_hint", None)
         if hint is not None:
-            hint.configure(text=transport_hint(self._realtime_var.get()))
+            hint.configure(text=transport_hint(self._processing_mode_var.get()))
         self._refresh_summary()
 
     def _specs_summary(self) -> str:
@@ -1547,22 +1560,37 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         refs = list_sheets(self._pdfs)
         sheets = len(refs)
         files = len({r.pdf_path for r in refs})
-        est = estimate_drawing_set_cost(
+        digest_batch, critique_batch = processing_transports(
+            self._processing_mode_var.get()
+        )
+        digest_est = estimate_drawing_set_cost(
             sheets, file_count=files, model=REVIEW_MODEL_DEFAULT,
-            batch=not self._realtime_var.get(),
+            batch=digest_batch,
             focus=bool(self._current_focus()),
             spec_chars=len(self._current_specs_text()),
         )
-        cost = (
-            f"~${est.total_cost:,.2f} (est.)"
-            if est.total_cost is not None
-            else "cost n/a"
-        )
-        qc_note = "  ·  + QC verify (~$0.01–0.03/finding)" if self._qc_markups_var.get() else ""
+        if self._qc_markups_var.get():
+            full = estimate_exhaustive_run_cost(
+                sheets, file_count=files, model=REVIEW_MODEL_DEFAULT,
+                batch=digest_batch, critique_batch=critique_batch,
+                focus=bool(self._current_focus()),
+                spec_chars=len(self._current_specs_text()),
+            )
+            cost = (
+                f"~${full.low_cost:,.2f}–${full.high_cost:,.2f} (full QC est.)"
+                if full.low_cost is not None and full.high_cost is not None
+                else "full QC cost n/a"
+            )
+        else:
+            cost = (
+                f"~${digest_est.total_cost:,.2f} (est.)"
+                if digest_est.total_cost is not None
+                else "cost n/a"
+            )
         label.configure(
             text=(
                 f"{files} file(s), {sheets} sheet(s)  ·  "
-                f"~{est.image_tokens:,} image tokens  ·  {cost}{qc_note}"
+                f"~{digest_est.image_tokens:,} digest image tokens  ·  {cost}"
             )
         )
 
@@ -1591,7 +1619,8 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         ink_rejected = self._ink_rejected_var.get()
         reference_audit = self._reference_audit_var.get()
         profiles = self._selected_profiles()
-        use_batch = not self._realtime_var.get()
+        processing_mode = self._processing_mode_var.get()
+        use_batch, critique_use_batch = processing_transports(processing_mode)
         save_tiles = self._save_tiles_var.get()
 
         # Cost-confirm gate — show the estimated spend before anything is sent.
@@ -1602,7 +1631,8 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         if qc_markups:
             exh = estimate_exhaustive_run_cost(
                 len(refs), file_count=len(self._pdfs), model=REVIEW_MODEL_DEFAULT,
-                batch=use_batch, focus=bool(focus),
+                batch=use_batch, critique_batch=critique_use_batch,
+                focus=bool(focus),
                 spec_chars=len(project_specifications or ""),
             )
             prompt = format_exhaustive_cost_prompt(exh)
@@ -1646,16 +1676,22 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 "chars — conflicts will be reported as ordinary findings.",
                 level="accent",
             )
-        if use_batch:
+        if processing_mode == PROCESSING_MODE_ECONOMY:
             self._log(
-                "Batch mode: sheets join Anthropic's shared queue — often ready in "
+                "Economy mode: all eligible vision reads join Anthropic's shared queue — often ready in "
                 "a few hours, but it can run overnight (8+ hours). Cheapest option; "
                 "leave it running and check back later.",
                 level="muted",
             )
+        elif processing_mode == PROCESSING_MODE_HYBRID:
+            self._log(
+                "Hybrid mode: initial sheet analysis runs now; exhaustive-QC critique "
+                "reads use the half-rate Batch queue and may take hours.",
+                level="muted",
+            )
         else:
             self._log(
-                "Real-time mode: full-rate API calls with immediate results "
+                "Fast mode: full-rate API calls with immediate results "
                 "(~4–6 min/sheet; batch is ~50% cheaper).",
                 level="muted",
             )
@@ -1672,7 +1708,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             target=self._worker,
             args=(pdfs, focus, project_specifications, qc_markups,
                   markup_verified_only, reference_audit, ink_rejected, profiles,
-                  use_batch, save_tiles),
+                  use_batch, critique_use_batch, save_tiles),
             daemon=True,
         ).start()
 
@@ -1687,6 +1723,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         ink_rejected: bool = False,
         profiles: list[str] | None = None,
         use_batch: bool = True,
+        critique_use_batch: bool | None = None,
         save_tiles: bool = False,
     ) -> None:
         try:
@@ -1699,6 +1736,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 use_cache=True,
                 synthesize=True,
                 use_batch=use_batch,
+                critique_use_batch=critique_use_batch,
                 focus=focus or None,
                 project_specifications=project_specifications,
                 reference_audit=reference_audit,
@@ -2094,24 +2132,53 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         # preflight-blocked run is exactly when the operator needs the run
         # record (run.log, input inventory, run_manifest.json) for diagnosis —
         # the export writes an honest placeholder digest either way (§18.1).
-        if not ctx:
+        if not ctx or self._export_busy:
             return
         folder = filedialog.askdirectory(title="Export everything to folder")
         if not folder:
             return
+        embed_key = self._embed_key_var.get()
+        self._export_busy = True
+        self.export_btn.configure(state="disabled", text="Exporting...")
+        self._set_progress_text("Exporting full run record...", color=COLORS["text_secondary"])
+        self._log("Exporting the full run record in the background...", level="muted")
+        threading.Thread(
+            target=self._export_all_worker,
+            args=(ctx, folder, [p.name for p in self._pdfs], embed_key),
+            daemon=True,
+        ).start()
+
+    def _export_all_worker(
+        self,
+        ctx: DrawingContext,
+        folder: str,
+        source_names: list[str],
+        embed_key: bool,
+    ) -> None:
+        """Build/hash/copy a complete export without blocking Tk's event loop."""
         from .export import write_drawing_export
 
-        embed_key = self._embed_key_var.get()
         try:
             api_key = os.environ.get("ANTHROPIC_API_KEY") or load_api_key_from_file()
             out = write_drawing_export(
-                ctx, folder, source_names=[p.name for p in self._pdfs],
+                ctx, folder, source_names=source_names,
                 api_key=api_key or None, embed_api_key=embed_key,
             )
         except Exception as exc:  # noqa: BLE001
-            self._log(f"Export failed: {exc}", level="error")
-            messagebox.showerror("Export failed", str(exc))
+            self.after(0, lambda e=exc: self._on_export_all_failed(e))
             return
+        self.after(0, lambda: self._on_export_all_done(ctx, out))
+
+    def _on_export_all_failed(self, exc: Exception) -> None:
+        self._export_busy = False
+        self.export_btn.configure(state="normal", text="Export All...")
+        self._log(f"Export failed: {exc}", level="error")
+        self._set_progress_text(f"Export failed: {exc}", color=COLORS["error"])
+        messagebox.showerror("Export failed", str(exc))
+
+    def _on_export_all_done(self, ctx: DrawingContext, out: Path) -> None:
+        self._export_busy = False
+        self.export_btn.configure(state="normal", text="Export All...")
         self._set_progress_text(f"Exported everything to {out}", color=COLORS["success"])
         self._log(f"Exported the full run record to {out}", level="success")
         if getattr(ctx, "markup_incomplete", False):

@@ -276,6 +276,56 @@ def test_focus_report_success_shape_and_telemetry():
     assert "rooms plan" in content and "fixture schedule" in content
 
 
+def test_focus_report_complete_result_is_reused_from_cache():
+    cache = DigestCache(None, persist=False)
+    client = _FakeClient(
+        lambda _kw: FakeMessage(
+            content=[FakeTextBlock(text="Room 101: WC-1 (P-101)")],
+            usage=FakeUsage(input_tokens=700, output_tokens=90),
+        )
+    )
+    sheets = [_digest("P-101", "Room 101 has WC-1")]
+
+    first = generate_focus_report(
+        sheets, ROOMS_FOCUS, client=client, model=OPUS, cache=cache,
+    )
+    second = generate_focus_report(
+        sheets, ROOMS_FOCUS, client=client, model=OPUS, cache=cache,
+    )
+
+    assert first.ok and not first.cached
+    assert second.ok and second.cached
+    assert second.text == first.text
+    assert second.input_tokens == 0 and second.output_tokens == 0
+    assert len(client.calls) == 1
+
+
+def test_focus_report_cache_keys_every_model_visible_input():
+    cache = DigestCache(None, persist=False)
+    client = _FakeClient(
+        lambda _kw: FakeMessage(content=[FakeTextBlock(text="focus report")])
+    )
+    sheets = [_digest("P-101", "Room 101 has WC-1")]
+
+    generate_focus_report(
+        sheets, ROOMS_FOCUS, client=client, model=OPUS, cache=cache,
+    )
+    changed_focus = generate_focus_report(
+        sheets, "list every lavatory", client=client, model=OPUS, cache=cache,
+    )
+    changed_digest = generate_focus_report(
+        [_digest("P-101", "Room 101 has WC-1 and LAV-2")],
+        ROOMS_FOCUS,
+        client=client,
+        model=OPUS,
+        cache=cache,
+    )
+
+    assert not changed_focus.cached
+    assert not changed_digest.cached
+    assert len(client.calls) == 3
+
+
 def test_focus_report_excludes_failed_sheets_from_input():
     client = _FakeClient(lambda kw: FakeMessage(content=[FakeTextBlock(text="report")]))
     sheets = [

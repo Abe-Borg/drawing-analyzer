@@ -799,6 +799,79 @@ def test_cached_digest_records_zero_billed_tokens(tmp_path):
     assert ctx2.total_input_tokens == 0                # a fully-cached re-run bills nothing
 
 
+def test_warm_verification_cache_records_zero_cost_and_recreates_evidence(tmp_path):
+    from drawing_analyzer.digest_cache import DigestCache
+
+    src = _make_pdf(tmp_path / "M-101.pdf")
+    cache = DigestCache(None, persist=False)
+    cold_client = _RoutingClient([_VAV_FINDING], verdict="CONFIRMED")
+    cold = extract_drawing_context(
+        [src], client=cold_client, rows=2, cols=2, qc_markups=True,
+        qc_work_dir=tmp_path / "cold", cache=cache,
+    )
+    warm_client = _RoutingClient([_VAV_FINDING], verdict="CONFIRMED")
+    warm = extract_drawing_context(
+        [src], client=warm_client, rows=2, cols=2, qc_markups=True,
+        qc_work_dir=tmp_path / "warm", cache=cache,
+    )
+
+    assert cold_client.verify_calls == 1
+    assert warm_client.verify_calls == 0
+    verify_cache = [
+        record for record in warm.run_usage.records
+        if record.stage_instance == "verify_cache"
+    ]
+    assert len(verify_cache) == 1
+    assert verify_cache[0].transport == "CACHE" and verify_cache[0].cache_hit
+    assert verify_cache[0].input_tokens == verify_cache[0].output_tokens == 0
+    assert not [
+        record for record in warm.run_usage.records
+        if record.stage_instance == "verify"
+    ]
+
+    cold_artifact = cold.findings[0].verification.evidence[0]
+    warm_artifact = warm.findings[0].verification.evidence[0]
+    assert cold_artifact.sha256 == warm_artifact.sha256
+    assert (tmp_path / "cold" / cold_artifact.relative_path).read_bytes() == (
+        tmp_path / "warm" / warm_artifact.relative_path
+    ).read_bytes()
+
+
+def test_pipeline_prices_investigation_prompt_cache_tokens(tmp_path):
+    src = _make_pdf(tmp_path / "M-101.pdf")
+    client = _RoutingClient(
+        [_VAV_FINDING], verdict="NOT_VISIBLE",
+        investigate_mode="confirm_after_crop",
+    )
+    create = client.messages.create
+
+    class _CacheUsageMessages:
+        def create(self, **kwargs):
+            response = create(**kwargs)
+            if _system_text(kwargs.get("system", "")) == INVESTIGATE_SYSTEM_PROMPT:
+                if client.investigate_calls == 1:
+                    response.usage.cache_creation_input_tokens = 900
+                else:
+                    response.usage.cache_read_input_tokens = 700
+            return response
+
+    client.messages = _CacheUsageMessages()
+    context = extract_drawing_context(
+        [src], client=client, rows=2, cols=2, qc_markups=True,
+        qc_work_dir=tmp_path / "qc",
+    )
+
+    records = [
+        record for record in context.run_usage.records
+        if record.stage_family == "investigate" and record.transport == "REAL_TIME"
+    ]
+    assert len(records) == 1
+    assert records[0].cache_write_tokens == 900
+    assert records[0].cache_read_tokens == 700
+    assert context.run_usage.total_cache_write_tokens >= 900
+    assert context.run_usage.total_cache_read_tokens >= 700
+
+
 def test_report_and_context_usage_totals_agree(tmp_path):
     # GUI/report/context totals all derive from the one ledger, so they agree (§15.7).
     from drawing_analyzer.html_report import build_html_report

@@ -310,6 +310,35 @@ def test_investigation_upgrades_uncertain_to_verified(tmp_path):
     assert (tmp_path / "QC-001" / "investigation.json").exists()
 
 
+def test_investigation_accumulates_prompt_cache_tokens_for_every_turn():
+    def responder(kw, _n):
+        if _tool_result_turns(kw):
+            response = _verdict()
+            # Raw-REST/batch adapters may expose usage as a dict rather than
+            # an SDK object; both shapes must be billed identically.
+            response.usage = {
+                "input_tokens": 80, "output_tokens": 15,
+                "cache_read_input_tokens": 700,
+            }
+            return response
+        response = _tool_use()
+        response.usage = FakeUsage(
+            input_tokens=100, output_tokens=20,
+            cache_creation_input_tokens=900,
+        )
+        return response
+
+    result, finding = _run_one(_LoopClient(responder))
+
+    assert finding.verification.status == "VERIFIED"
+    assert result.input_tokens == 180 and result.output_tokens == 35
+    assert result.cache_read_tokens == 700
+    assert result.cache_write_tokens == 900
+    record = result.per_finding[0]
+    assert record.cache_read_tokens == 700
+    assert record.cache_write_tokens == 900
+
+
 def test_multiple_tool_uses_in_one_turn_are_all_answered_together():
     def responder(kw, _n):
         if _tool_result_turns(kw):
@@ -511,6 +540,49 @@ def test_system_prompt_and_tools_ride_every_request():
         assert text == INVESTIGATE_SYSTEM_PROMPT
     names = [t["name"] for t in client.calls[0]["tools"]]
     assert names == ["crop_region", "find_text", "view_sheet"]
+
+
+def test_multi_turn_requests_cache_initial_image_and_rolling_evidence_prefix():
+    def responder(kw, n):
+        return _verdict() if _tool_result_turns(kw) >= 2 else _tool_use(
+            block_id=f"toolu_{n}"
+        )
+
+    client = _LoopClient(responder)
+    res, finding = _run_one(client, max_rounds=3)
+    assert finding.verification.status == "VERIFIED" and res.investigated == 1
+    assert len(client.calls) == 3
+
+    initial_turns = [call["messages"][0]["content"] for call in client.calls]
+    assert initial_turns[0] == initial_turns[1] == initial_turns[2]
+    for initial in initial_turns:
+        marker = initial[-1]["cache_control"]
+        assert marker == {"type": "ephemeral", "ttl": "1h"}
+        assert any(block.get("type") == "image" for block in initial)
+
+    def _breakpoint_count(call):
+        count = sum(
+            1 for block in call["system"]
+            if isinstance(block, dict) and block.get("cache_control")
+        )
+        count += sum(1 for tool in call.get("tools", []) if tool.get("cache_control"))
+        count += sum(
+            1
+            for message in call["messages"]
+            for block in (message.get("content") or [])
+            if isinstance(block, dict) and block.get("cache_control")
+        )
+        return count
+
+    # system + tools + initial; later requests add one rolling evidence prefix.
+    assert [_breakpoint_count(call) for call in client.calls] == [3, 4, 4]
+    final_users = [
+        message for message in client.calls[-1]["messages"]
+        if message.get("role") == "user"
+    ]
+    assert len(final_users) == 3
+    assert "cache_control" not in final_users[1]["content"][-1]
+    assert final_users[2]["content"][-1]["cache_control"]["ttl"] == "1h"
 
 
 def test_verification_serialization_roundtrips_the_new_fields():

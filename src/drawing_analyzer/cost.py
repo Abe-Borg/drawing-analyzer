@@ -116,12 +116,11 @@ def estimate_drawing_set_cost(
     ``synthesize`` mirrors the run: when on (and ≥2 sheets) it adds the
     text-only cross-sheet pass, whose input is roughly the per-sheet digests fed
     back in. Image tokens are folded into ``input_tokens`` (vision is billed as
-    input). ``batch=True`` applies the 50% Message Batches discount to the
-    per-sheet digest spend (the dominant cost); the synthesis pass runs
-    synchronously, but folding it in at the batch rate too keeps the estimate
-    deliberately slightly-high rather than under-stated. ``focus`` mirrors a
-    per-run focus: each sheet's digest grows by a focus-findings section, and
-    one more text-only pass (the focus report) re-reads the digests.
+    input). ``batch=True`` applies the 50% Message Batches discount only to the
+    per-sheet digest spend; synthesis and the optional focus report are issued
+    synchronously and are therefore priced at the full real-time rate.
+    ``focus`` mirrors a per-run focus: each sheet's digest grows by a
+    focus-findings section, and one more text-only pass re-reads the digests.
 
     ``spec_chars`` (uploaded project-specifications character count, 0 when
     none) is priced separately at the cache-aware rate (see
@@ -136,21 +135,37 @@ def estimate_drawing_set_cost(
     digest_output = sheet_count * _ASSUMED_OUTPUT_TOKENS_PER_SHEET
     if focus:
         digest_output += sheet_count * _ASSUMED_FOCUS_SECTION_TOKENS_PER_SHEET
-    input_tokens = image_tokens + sheet_count * _ASSUMED_PROMPT_TOKENS_PER_SHEET
+    digest_input = image_tokens + sheet_count * _ASSUMED_PROMPT_TOKENS_PER_SHEET
+    input_tokens = digest_input
     output_tokens = digest_output
+    stage_costs: list[float | None] = [
+        estimate_request_cost(
+            digest_input, digest_output, model=model, batch=batch
+        )
+    ]
 
     if synthesize and sheet_count >= 2:
         # Synthesis re-reads the per-sheet digests (≈ digest_output) as text.
-        input_tokens += digest_output + _ASSUMED_PROMPT_TOKENS_PER_SHEET
+        synth_input = digest_output + _ASSUMED_PROMPT_TOKENS_PER_SHEET
+        input_tokens += synth_input
         output_tokens += _ASSUMED_SYNTHESIS_OUTPUT_TOKENS
+        stage_costs.append(estimate_request_cost(
+            synth_input, _ASSUMED_SYNTHESIS_OUTPUT_TOKENS,
+            model=model, batch=False,
+        ))
 
     if focus and sheet_count >= 1:
         # The focus report likewise re-reads the per-sheet digests as text.
-        input_tokens += digest_output + _ASSUMED_PROMPT_TOKENS_PER_SHEET
+        focus_input = digest_output + _ASSUMED_PROMPT_TOKENS_PER_SHEET
+        input_tokens += focus_input
         output_tokens += _ASSUMED_FOCUS_OUTPUT_TOKENS
+        stage_costs.append(estimate_request_cost(
+            focus_input, _ASSUMED_FOCUS_OUTPUT_TOKENS,
+            model=model, batch=False,
+        ))
 
-    total_cost = estimate_request_cost(
-        input_tokens, output_tokens, model=model, batch=batch
+    total_cost = None if any(c is None for c in stage_costs) else sum(
+        c for c in stage_costs if c is not None
     )
     spec_display_tokens, spec_cost = _specs_cost_contribution(
         spec_chars, sheet_count, model=model, batch=batch
@@ -195,7 +210,10 @@ def format_drawing_cost_prompt(est: DrawingCostEstimate) -> str:
             "cached after the first sheet(s) (~0.1x rate)."
         )
     if est.total_cost is not None:
-        batch_note = " (Batch rate)" if est.batch else ""
+        batch_note = (
+            " (Batch digest rate; synchronous text passes are full rate)"
+            if est.batch else ""
+        )
         lines.append(
             f"Estimated cost: ~${est.total_cost:,.2f}{batch_note} — a rough, "
             "slightly-high estimate; actual cost varies with sheet complexity, "
@@ -292,6 +310,7 @@ class ExhaustiveCostEstimate:
     low_cost: float | None
     high_cost: float | None
     batch: bool = True  # estimate reflects the 50% Batch-API discount / queue transport
+    critique_batch: bool = True
     verified_effective_date: str = PRICING_EFFECTIVE_DATE
     spec_chars: int = 0  # uploaded project-specifications char count, if any
 
@@ -316,16 +335,22 @@ def estimate_exhaustive_run_cost(
     rows: int = tiling.DEFAULT_GRID_ROWS,
     cols: int = tiling.DEFAULT_GRID_COLS,
     batch: bool = True,
+    critique_batch: bool | None = None,
     focus: bool = False,
     spec_chars: int = 0,
+    verification_model: str | None = None,
 ) -> ExhaustiveCostEstimate:
     """Estimate an **exhaustive QC** run's cost, component by component (§15.7).
 
-    The digest (and synthesis / focus) and the two critique reads ride the Batch
-    path when ``batch`` is set (Phase 23C routed critique through Batches); cross-QC,
-    verification, and citation still run real-time. Verification and citation are
-    quoted as a low–high band because their volume tracks the finding / unique-claim
-    count.
+    ``batch`` selects digest transport. ``critique_batch`` independently selects
+    the two critique reads and defaults to ``batch`` for legacy callers. This
+    prices Economy (both batch), Hybrid (real-time digest/batch critique), and
+    Fast (both real-time) without changing any model or review contract.
+    Synthesis, focus, cross-QC,
+    verification, and citation still run real-time. Verification and citation
+    are quoted as a low–high band because their volume tracks the finding /
+    unique-claim count. Verification is priced with the same independently
+    configurable model the runtime verifier resolves.
     A component whose model price is unknown contributes ``None`` and drops out of
     the numeric total (the caller shows scale without a dollar figure).
 
@@ -333,21 +358,57 @@ def estimate_exhaustive_run_cost(
     component — the specs block is digest-only (see ``digest.py``), never sent
     to critique/cross-QC/verification/citation.
     """
+    if critique_batch is None:
+        critique_batch = batch
+    if verification_model is None:
+        # Resolve through the same function as the runtime verifier, including
+        # the legacy compatibility override.
+        from .verify import default_verify_model
+
+        verification_model = default_verify_model()
+
     per_sheet_images = estimate_image_tokens_for_set(1, rows=rows, cols=cols, model=model)
     components: list[CostComponent] = []
 
-    # Digest (+ synthesis + focus + specs) — the existing digest-path estimate,
-    # batch-priced.
-    digest_est = estimate_drawing_set_cost(
-        sheet_count, file_count=file_count, model=model, rows=rows, cols=cols,
-        synthesize=True, batch=batch, focus=focus, spec_chars=spec_chars,
+    # Digest vision calls use the selected transport. The later synthesis and
+    # focus report are synchronous calls even when digest/critique use Batch, so
+    # show and price them independently rather than discounting them by mistake.
+    digest_input = sheet_count * per_sheet_images + (
+        sheet_count * _ASSUMED_PROMPT_TOKENS_PER_SHEET
     )
+    digest_output = sheet_count * _ASSUMED_OUTPUT_TOKENS_PER_SHEET
+    if focus:
+        digest_output += sheet_count * _ASSUMED_FOCUS_SECTION_TOKENS_PER_SHEET
+    spec_display_tokens, spec_cost = _specs_cost_contribution(
+        spec_chars, sheet_count, model=model, batch=batch,
+    )
+    digest_cost = estimate_request_cost(
+        digest_input, digest_output, model=model, batch=batch,
+    )
+    if digest_cost is None or spec_cost is None:
+        digest_total_cost = None
+    else:
+        digest_total_cost = digest_cost + spec_cost
     components.append(CostComponent(
-        stage="Digest + synthesis" + (" + focus" if focus else ""),
-        input_tokens=digest_est.input_tokens, output_tokens=digest_est.output_tokens,
-        cost=digest_est.total_cost, transport="batch" if batch else "real-time",
-        note="one vision call per sheet" + (" + text passes" if sheet_count >= 2 else ""),
+        stage="Digest",
+        input_tokens=digest_input + spec_display_tokens,
+        output_tokens=digest_output,
+        cost=digest_total_cost,
+        transport="batch" if batch else "real-time",
+        note="one vision call per sheet",
     ))
+    if sheet_count >= 2:
+        synth_input = digest_output + _ASSUMED_PROMPT_TOKENS_PER_SHEET
+        components.append(_component(
+            "Synthesis", synth_input, _ASSUMED_SYNTHESIS_OUTPUT_TOKENS,
+            model=model, batch=False, note="one text-only set overview",
+        ))
+    if focus and sheet_count >= 1:
+        focus_input = digest_output + _ASSUMED_PROMPT_TOKENS_PER_SHEET
+        components.append(_component(
+            "Focus report", focus_input, _ASSUMED_FOCUS_OUTPUT_TOKENS,
+            model=model, batch=False, note="one text-only focused summary",
+        ))
 
     # Phase A planning stages — one text-only real-time call each: the set
     # identity (disciplines/jurisdiction/adopted codes) and the model-authored
@@ -373,9 +434,10 @@ def estimate_exhaustive_run_cost(
     crit_in = 2 * sheet_count * (per_sheet_images + _ASSUMED_PROMPT_TOKENS_PER_SHEET)
     crit_out = 2 * sheet_count * _ASSUMED_CRITIQUE_OUTPUT_TOKENS_PER_READ
     components.append(_component(
-        "Critique ×2 (per sheet)", crit_in, crit_out, model=model, batch=batch,
+        "Critique ×2 (per sheet)", crit_in, crit_out, model=model,
+        batch=critique_batch,
         note="two full reads per sheet"
-        + (" — one shared upload, Batch rate" if batch else " — real-time"),
+        + (" — one shared upload, Batch rate" if critique_batch else " — real-time"),
     ))
 
     # Cross-sheet QC — one (or a few sharded) text passes over all the digests.
@@ -398,8 +460,10 @@ def estimate_exhaustive_run_cost(
         n = max(0, round(findings))
         return _component(
             "Verification", n * _ASSUMED_VERIFY_INPUT_TOKENS_PER_FINDING,
-            n * _ASSUMED_VERIFY_OUTPUT_TOKENS_PER_FINDING, model=model, batch=False,
-            note=f"~{n} finding(s) × one crop re-check",
+            n * _ASSUMED_VERIFY_OUTPUT_TOKENS_PER_FINDING,
+            model=verification_model, batch=False,
+            note=(f"~{n} finding(s) × one crop re-check with "
+                  f"{friendly_model_name(verification_model)}"),
         )
 
     def _citation(claims: float) -> CostComponent:
@@ -448,7 +512,7 @@ def estimate_exhaustive_run_cost(
     return ExhaustiveCostEstimate(
         sheet_count=sheet_count, file_count=file_count, model=model,
         components=components, low_cost=low_cost, high_cost=high_cost,
-        batch=batch, spec_chars=spec_chars,
+        batch=batch, critique_batch=critique_batch, spec_chars=spec_chars,
     )
 
 
@@ -482,17 +546,30 @@ def format_exhaustive_cost_prompt(est: ExhaustiveCostEstimate) -> str:
         ]
     else:
         lines += ["", "Estimated total: unavailable for this model."]
-    if est.batch:
+    if est.batch and est.critique_batch:
         lines += [
             "",
-            "Batch mode: sheets go into Anthropic's shared queue and are processed "
+            "Economy mode: digest and critique reads go into Anthropic's shared "
+            "queue and are processed "
             "when they reach the front — often a few hours, sometimes overnight "
             "(8+ hours). Cheapest option; best left running when you're not in a rush.",
+        ]
+    elif not est.batch and est.critique_batch:
+        lines += [
+            "",
+            "Hybrid mode: digest reads run immediately; the two exhaustive-QC "
+            "critique reads use the half-rate shared queue and can still take hours.",
+        ]
+    elif est.batch and not est.critique_batch:
+        lines += [
+            "",
+            "Custom transport: digest reads use the Batch queue; critique reads run "
+            "at the full real-time rate after the digest batch completes.",
         ]
     else:
         lines += [
             "",
-            "Real-time mode: no queue — expect roughly 4–6 minutes per sheet, at the "
+            "Fast mode: no queue — expect roughly 4–6 minutes per sheet, at the "
             "full (un-discounted) API rate. Choose this when you need results now.",
         ]
     lines += ["", "Proceed with the exhaustive review?"]

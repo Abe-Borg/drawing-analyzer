@@ -9,6 +9,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -161,6 +163,28 @@ def test_conflict_is_stamped_with_dual_anchors():
     assert res.input_tokens == 800 and res.output_tokens == 60
 
 
+def test_cross_qc_warm_cache_skips_api_and_billed_tokens():
+    from drawing_analyzer.digest_cache import DigestCache
+
+    sheets = [_digest("a.pdf"), _digest("b.pdf")]
+    geoms = [_geom("a.pdf", "F-D-01-1"), _geom("b.pdf", "F-A-01-1")]
+    cache = DigestCache(None, persist=False)
+    client = _CrossClient([[_CONFLICT]])
+
+    cold = cross_sheet_qc(
+        sheets, geoms, client=client, cache=cache, max_retries=0, sleep=_NOOP,
+    )
+    warm = cross_sheet_qc(
+        sheets, geoms, client=client, cache=cache, max_retries=0, sleep=_NOOP,
+    )
+
+    assert cold.complete and cold.cached is False
+    assert warm.complete and warm.cached is True
+    assert warm.input_tokens == 0 and warm.output_tokens == 0
+    assert [f.to_dict() for f in warm.findings] == [f.to_dict() for f in cold.findings]
+    assert client.calls == 1
+
+
 def test_finding_needs_two_resolvable_sheets():
     # also_on references a sheet not in the set → only one leg resolves → dropped.
     bad = dict(_CONFLICT, also_on=[{"sheet_id": "Z-9-99", "source_quote": "x"}])
@@ -309,6 +333,51 @@ def _mk_two_shard_set():
     return sheets, geoms
 
 
+def test_map_shards_overlap_but_assemble_in_shard_order(monkeypatch):
+    sheets, geoms = _mk_two_shard_set()
+    barrier = threading.Barrier(2)
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    def fake_map(shard, *_args, **_kwargs):
+        nonlocal active, max_active
+        label = shard[0][0]
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        barrier.wait(timeout=5)
+        if label.startswith("F-"):
+            time.sleep(0.04)  # force the first shard to finish second
+        with lock:
+            active -= 1
+        geom = shard[0][3]
+        finding = Finding(
+            sheet_id=label,
+            source_name=geom.ref.source_name,
+            source_id=geom.ref.source_id,
+            page_index=geom.ref.page_index,
+            category="conflict",
+            severity="low",
+            text=f"result for {label}",
+            source_quote=label,
+        )
+        return [finding], [], [], 10, 2, None
+
+    monkeypatch.setattr(X, "_map_call", fake_map)
+    res = cross_sheet_qc(
+        sheets, geoms, client=object(), max_retries=0, sleep=_NOOP,
+        max_workers=2,
+    )
+
+    assert max_active == 2
+    assert [f.text for f in res.findings] == [
+        "result for F-D-00-1",
+        "result for M-D-00-1",
+    ]
+    assert res.input_tokens == 20 and res.output_tokens == 4
+
+
 def test_sharded_claims_are_rebound_to_real_sheets():
     # DA-015 fix: a map/reconcile claim keyed by the opaque HANDLE (as the map
     # prompt instructs) is rebound to the real sheet id + source so the arithmetic
@@ -351,6 +420,49 @@ def test_reconcile_all_pairs_finds_conflict_across_fact_groups(monkeypatch):
     assert len(conflicts) == 1
     assert conflicts[0].also_on[0].source_name == "m0.pdf"
     assert res.reconciliation_completed is True
+
+
+def test_reconcile_pairs_overlap_but_fold_in_pair_order(monkeypatch):
+    monkeypatch.setattr(X, "MAX_FACTS_PER_RECONCILE", 4)
+    facts = [
+        X.CrossQCFact(
+            sheet_handle=f"S{i:03d}", sheet_id=f"F-{i}", discipline="F",
+            entity_or_tag="TAG", attribute="value", value=str(i),
+            exact_quote=f"VALUE {i}",
+        )
+        for i in range(6)
+    ]
+    barrier = threading.Barrier(3)
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    def fake_reconcile(_manifest, pair, _entries, **_kwargs):
+        nonlocal active, max_active
+        label = f"{pair[0].value}-{pair[2].value}"
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        barrier.wait(timeout=5)
+        time.sleep({"0-2": 0.04, "0-4": 0.02, "2-4": 0.0}.get(label, 0.0))
+        with lock:
+            active -= 1
+        finding = Finding(
+            sheet_id=label, source_name="pair.pdf", page_index=0,
+            category="conflict", severity="low",
+            text=label, source_quote=label,
+        )
+        return [finding], [], 5, 1, None
+
+    monkeypatch.setattr(X, "_reconcile_call", fake_reconcile)
+    findings, _claims, in_tok, out_tok, completed = X._reconcile_facts(
+        [], facts, {}, client=object(), model="claude-opus-4-8", max_retries=0,
+        sleep=_NOOP, max_workers=3,
+    )
+
+    assert max_active == 3 and completed is True
+    assert [f.text for f in findings] == ["0-2", "0-4", "2-4"]
+    assert in_tok == 15 and out_tok == 3
 
 
 def test_reconcile_drops_ungrounded_cross_shard_quote():

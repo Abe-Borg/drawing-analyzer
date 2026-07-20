@@ -6,23 +6,29 @@ deterministic given the rendered sheet images + the model + the digest prompt +
 the request params, so re-running a set (after editing one sheet, or just
 re-opening the project) should not re-pay for the sheets that didn't change.
 
-This mirrors ``verification_cache``'s persistence shape — JSON on disk, atomic
-write, defensive load, env-overridable path/toggle — but is far simpler:
-entries never expire (the key already invalidates on any content / model /
-prompt change) and only the durable digest text + token telemetry are stored.
+Persistent caches use a transactional SQLite/WAL store.  Older releases wrote
+one JSON object and replaced the whole file on every ``put``; that made a cold
+multi-sheet run rewrite an ever-growing cache many times.  The first open of a
+legacy JSON cache migrates its current-schema entries in place, atomically, so
+existing ``DRAWING_ANALYZER_CACHE_PATH`` values remain valid even when their
+filename ends in ``.json``.
 
 Thread-safe by design: ``digest_sheet`` calls may run concurrently (the parallel
-dispatch follow-up), so ``get`` / ``put`` / save are guarded by a lock.
+dispatch follow-up), so each instance guards its connection with a lock while
+SQLite coordinates transactions across instances and processes.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import os
+import sqlite3
 import tempfile
 import threading
+import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 # Bumped to 2 when the cache entry gained a serialized ``findings`` list (Phase
 # 3); to 3 for the two-level key (Phase 9) — a digest is now also stored under a
@@ -60,6 +66,15 @@ from typing import Any
 # miss once and be re-digested.
 _SCHEMA_VERSION = 8
 
+# Storage format and concurrency settings are intentionally separate from the
+# content schema above.  ``_SCHEMA_VERSION`` invalidates cached model results;
+# ``_DB_FORMAT_VERSION`` describes only the SQLite tables that hold them.
+_DB_FORMAT_VERSION = 1
+_SQLITE_HEADER = b"SQLite format 3\x00"
+_BUSY_TIMEOUT_SECONDS = 30.0
+_INIT_LOCK_TIMEOUT_SECONDS = 30.0
+_STALE_INIT_LOCK_SECONDS = 10 * 60.0
+
 _FALSEY = {"0", "false", "no", "off", ""}
 
 
@@ -74,7 +89,8 @@ def default_cache_path() -> Path:
 
     Overridable via ``DRAWING_ANALYZER_CACHE_PATH`` (``~`` and ``$VAR``
     expanded); defaults to ``~/.drawing_analyzer/drawing_digest_cache.json``,
-    alongside the verification cache.
+    alongside the verification cache.  The legacy filename is retained for
+    compatibility; persistent contents are SQLite after first open.
     """
     override = os.environ.get("DRAWING_ANALYZER_CACHE_PATH")
     if override and override.strip():
@@ -173,8 +189,9 @@ def digest_cache_key_level1(
     rendering. ``render_identity`` is exactly that "would the images match"
     fingerprint, produced from cheap page access alone
     (:func:`drawing_analyzer.render.sheet_render_identity`): the PyMuPDF version,
-    grid + overlap + render target, the blank-suppression mode, and a hash of the
-    page's content streams + referenced image bytes + rect.
+    grid + overlap + render target, the blank-suppression mode, and a conservative
+    hash of every page dependency that can affect rendered pixels or extracted text
+    (with whole-source fallback when isolation is uncertain).
 
     This folds the *same* request/model params as :func:`digest_cache_key` around
     that identity, plus a ``level=1`` namespace tag so a level-1 key can never
@@ -466,19 +483,253 @@ def investigation_cache_key(
     return h.hexdigest()
 
 
+def _serialize_entry(value: dict) -> str:
+    """Serialize one cache row without coupling unrelated writes together."""
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _read_legacy_json(path: Path) -> dict[str, dict]:
+    """Read a pre-SQLite cache defensively.
+
+    Only entries from the current content schema are eligible for migration.
+    This preserves the old loader's fail-closed behavior: malformed files,
+    stale schemas, and non-dict row values all become cache misses.
+    """
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(raw, dict) or raw.get("_schema_version") != _SCHEMA_VERSION:
+        return {}
+    entries = raw.get("entries")
+    if not isinstance(entries, dict):
+        return {}
+    return {str(key): dict(value) for key, value in entries.items() if isinstance(value, dict)}
+
+
+def _is_sqlite_database(path: Path) -> bool:
+    try:
+        with path.open("rb") as fp:
+            return fp.read(len(_SQLITE_HEADER)) == _SQLITE_HEADER
+    except OSError:
+        return False
+
+
+@contextmanager
+def _initialization_lock(path: Path) -> Iterator[None]:
+    """Serialize first-open creation/migration across processes.
+
+    Normal reads and writes are coordinated by SQLite.  A tiny adjacent lock is
+    needed only before SQLite exists, when several application processes could
+    otherwise try to replace the same legacy JSON file concurrently.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_name(f".{path.name}.migration.lock")
+    deadline = time.monotonic() + _INIT_LOCK_TIMEOUT_SECONDS
+
+    while True:
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            try:
+                age = time.time() - lock_path.stat().st_mtime
+                if age > _STALE_INIT_LOCK_SECONDS:
+                    lock_path.unlink()
+                    continue
+            except OSError:
+                pass
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"timed out initializing cache at {path}")
+            time.sleep(0.05)
+            continue
+
+        try:
+            try:
+                os.write(fd, str(os.getpid()).encode("ascii"))
+            finally:
+                os.close(fd)
+            yield
+        finally:
+            try:
+                lock_path.unlink()
+            except OSError:
+                pass
+        return
+
+
+def _create_database_file(path: Path, entries: dict[str, dict]) -> None:
+    """Create a complete SQLite cache at ``path`` in one transaction."""
+    connection = sqlite3.connect(str(path), timeout=_BUSY_TIMEOUT_SECONDS)
+    try:
+        # Migration is private until os.replace(), so a rollback journal keeps
+        # the temporary artifact self-contained.  The live connection switches
+        # the installed database to WAL after the replacement.
+        connection.execute("PRAGMA journal_mode=DELETE")
+        connection.execute("PRAGMA synchronous=FULL")
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            """
+            CREATE TABLE cache_metadata (
+                name TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            ) WITHOUT ROWID
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE cache_entries (
+                cache_key TEXT PRIMARY KEY,
+                value_json TEXT NOT NULL
+            ) WITHOUT ROWID
+            """
+        )
+        connection.execute(
+            "INSERT INTO cache_metadata(name, value) VALUES (?, ?)",
+            ("cache_schema_version", str(_SCHEMA_VERSION)),
+        )
+        connection.executemany(
+            "INSERT INTO cache_entries(cache_key, value_json) VALUES (?, ?)",
+            ((key, _serialize_entry(value)) for key, value in entries.items()),
+        )
+        connection.execute(f"PRAGMA user_version={_DB_FORMAT_VERSION}")
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+    # Flush the complete temporary database before its atomic replacement.
+    # Windows' CRT rejects fsync() on a read-only descriptor, so open the
+    # already-complete file read/write without modifying it.
+    with path.open("r+b") as fp:
+        os.fsync(fp.fileno())
+
+
+def _atomic_replace_database(target: Path, entries: dict[str, dict]) -> None:
+    """Atomically replace ``target`` with a freshly built SQLite database."""
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=".drawing_digest_cache.", suffix=".sqlite3.tmp", dir=str(target.parent)
+    )
+    os.close(fd)
+    temporary = Path(temporary_name)
+    try:
+        _create_database_file(temporary, entries)
+        os.replace(temporary, target)
+    finally:
+        # A failed migration leaves the source JSON untouched.  SQLite can also
+        # leave a journal beside the private temporary file after an I/O error.
+        for candidate in (
+            temporary,
+            Path(f"{temporary}-journal"),
+            Path(f"{temporary}-wal"),
+            Path(f"{temporary}-shm"),
+        ):
+            try:
+                candidate.unlink()
+            except OSError:
+                pass
+
+
+def _prepare_database_path(path: Path) -> None:
+    """Create or migrate ``path`` while preserving the configured filename."""
+    with _initialization_lock(path):
+        # Another process may have completed migration while this one waited.
+        if _is_sqlite_database(path):
+            return
+        _atomic_replace_database(path, _read_legacy_json(path))
+
+
+def _ensure_database_schema(connection: sqlite3.Connection) -> None:
+    """Create tables and transactionally invalidate incompatible cache rows."""
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cache_metadata (
+                name TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            ) WITHOUT ROWID
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cache_entries (
+                cache_key TEXT PRIMARY KEY,
+                value_json TEXT NOT NULL
+            ) WITHOUT ROWID
+            """
+        )
+
+        db_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        schema_row = connection.execute(
+            "SELECT value FROM cache_metadata WHERE name = ?",
+            ("cache_schema_version",),
+        ).fetchone()
+        try:
+            cache_schema = int(schema_row[0]) if schema_row is not None else None
+        except (TypeError, ValueError):
+            cache_schema = None
+
+        if db_version != _DB_FORMAT_VERSION or cache_schema != _SCHEMA_VERSION:
+            # Cache invalidation is all-or-nothing.  No reader can observe old
+            # and current-schema rows mixed together.
+            connection.execute("DELETE FROM cache_entries")
+        connection.execute(
+            """
+            INSERT INTO cache_metadata(name, value) VALUES (?, ?)
+            ON CONFLICT(name) DO UPDATE SET value=excluded.value
+            """,
+            ("cache_schema_version", str(_SCHEMA_VERSION)),
+        )
+        connection.execute(f"PRAGMA user_version={_DB_FORMAT_VERSION}")
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+
+
+def _open_database(path: Path) -> sqlite3.Connection:
+    connection = sqlite3.connect(
+        str(path),
+        timeout=_BUSY_TIMEOUT_SECONDS,
+        isolation_level=None,
+        check_same_thread=False,
+    )
+    try:
+        connection.execute(f"PRAGMA busy_timeout={int(_BUSY_TIMEOUT_SECONDS * 1000)}")
+        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA synchronous=NORMAL")
+        _ensure_database_schema(connection)
+    except Exception:
+        connection.close()
+        raise
+    return connection
+
+
 class DigestCache:
     """Thread-safe digest store, optionally persisted to ``path``.
 
     ``persist=False`` (or ``path=None``) keeps it purely in-memory — used by
     tests and by an explicit opt-out — so a hermetic run never touches the
-    user's real cache file.
+    user's real cache file.  Persistent stores use one transactional SQLite row
+    per key; the configured path is intentionally unchanged for compatibility
+    with legacy ``*.json`` cache paths and environment overrides.
+
+    Cache I/O is best-effort.  A failed database write is retained in this
+    instance's in-memory overlay, matching the historical guarantee that cache
+    failures never sink an otherwise successful analysis run.
     """
 
     def __init__(self, path: Path | None = None, *, persist: bool = True) -> None:
-        self._path = path
+        self._path = Path(path) if path is not None else None
         self._persist = bool(persist and path is not None)
         self._lock = threading.Lock()
+        # In memory-only mode this is the complete store.  In persistent mode it
+        # contains only legacy/failure fallback rows whose newest value has not
+        # reached SQLite.
         self._entries: dict[str, dict] = {}
+        self._connection: sqlite3.Connection | None = None
         self._hits = 0
         self._misses = 0
         if self._persist:
@@ -487,61 +738,148 @@ class DigestCache:
     def get(self, key: str) -> dict | None:
         with self._lock:
             value = self._entries.get(key)
-            if value is None:
+            if value is not None:
+                self._hits += 1
+                return dict(value)
+
+            if self._connection is None:
                 self._misses += 1
                 return None
+
+            try:
+                row = self._connection.execute(
+                    "SELECT value_json FROM cache_entries WHERE cache_key = ?", (key,)
+                ).fetchone()
+            except sqlite3.Error:
+                self._misses += 1
+                return None
+            if row is None:
+                self._misses += 1
+                return None
+
+            raw_value = row[0]
+            try:
+                decoded = json.loads(raw_value)
+            except (TypeError, ValueError):
+                decoded = None
+            if not isinstance(decoded, dict):
+                # Discard only the exact corrupt value read.  A concurrent writer
+                # that already repaired the key must not have its row removed.
+                try:
+                    self._connection.execute(
+                        "DELETE FROM cache_entries WHERE cache_key = ? AND value_json = ?",
+                        (key, raw_value),
+                    )
+                except sqlite3.Error:
+                    pass
+                self._misses += 1
+                return None
+
             self._hits += 1
-            return dict(value)
+            return dict(decoded)
 
     def put(self, key: str, value: dict) -> None:
+        copied = dict(value)
         with self._lock:
-            self._entries[key] = dict(value)
-            if self._persist:
+            # Stage the newest value first.  Besides preserving the historical
+            # nonfatal-write semantics, this overlay lets a later successful
+            # put retry rows held back by a transient SQLite error.
+            self._entries[key] = copied
+            if self._connection is None:
+                return
+
+            pending: list[tuple[str, str]] = []
+            for pending_key, pending_value in self._entries.items():
                 try:
-                    self._save_locked()
+                    pending.append((pending_key, _serialize_entry(pending_value)))
                 except Exception:
-                    # A cache-write failure must never sink a run; the digest is
-                    # already computed and returned to the caller.
+                    # A malformed/non-JSON value remains usable in memory but
+                    # must not prevent independent serializable rows persisting.
+                    continue
+            if not pending:
+                return
+
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                self._connection.executemany(
+                    """
+                    INSERT INTO cache_entries(cache_key, value_json) VALUES (?, ?)
+                    ON CONFLICT(cache_key) DO UPDATE SET value_json=excluded.value_json
+                    """,
+                    pending,
+                )
+                self._connection.commit()
+            except Exception:
+                try:
+                    self._connection.rollback()
+                except sqlite3.Error:
                     pass
+                # A cache-write failure must never sink a run; the digest is
+                # already computed and returned to the caller.
+                pass
+            else:
+                for persisted_key, _encoded in pending:
+                    self._entries.pop(persisted_key, None)
 
     def stats(self) -> dict:
         with self._lock:
+            size = len(self._entries)
+            if self._connection is not None:
+                try:
+                    size = int(
+                        self._connection.execute("SELECT COUNT(*) FROM cache_entries").fetchone()[0]
+                    )
+                    # A failed overwrite may shadow an existing durable row;
+                    # count only genuinely new overlay keys in addition to SQL.
+                    for key in self._entries:
+                        exists = self._connection.execute(
+                            "SELECT 1 FROM cache_entries WHERE cache_key = ?", (key,)
+                        ).fetchone()
+                        if exists is None:
+                            size += 1
+                except sqlite3.Error:
+                    size = len(self._entries)
             return {
                 "hits": self._hits,
                 "misses": self._misses,
-                "size": len(self._entries),
+                "size": size,
             }
+
+    def close(self) -> None:
+        """Close this instance's database connection.
+
+        The process-wide cache normally lives until interpreter shutdown.  The
+        explicit hook is useful for short-lived cache instances and guarantees
+        timely release of SQLite/WAL file handles on Windows.
+        """
+        with self._lock:
+            connection = self._connection
+            self._connection = None
+        if connection is not None:
+            connection.close()
+
+    def __del__(self) -> None:
+        # Avoid acquiring locks during interpreter teardown, when modules and
+        # synchronization primitives may already be partially finalized.
+        connection = getattr(self, "_connection", None)
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                pass
 
     # -- persistence -------------------------------------------------------
 
     def _load(self) -> None:
+        assert self._path is not None
         try:
-            raw = json.loads(self._path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return  # missing or corrupt → start empty (never raise on load)
-        if not isinstance(raw, dict) or raw.get("_schema_version") != _SCHEMA_VERSION:
-            return
-        entries = raw.get("entries")
-        if isinstance(entries, dict):
-            self._entries = {k: v for k, v in entries.items() if isinstance(v, dict)}
-
-    def _save_locked(self) -> None:
-        target = self._path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"_schema_version": _SCHEMA_VERSION, "entries": self._entries}
-        tmp_fd, tmp_name = tempfile.mkstemp(
-            prefix=".drawing_digest_cache.", suffix=".tmp", dir=str(target.parent)
-        )
-        try:
-            with os.fdopen(tmp_fd, "w", encoding="utf-8") as fp:
-                json.dump(payload, fp)
-            os.replace(tmp_name, target)
+            _prepare_database_path(self._path)
+            self._connection = _open_database(self._path)
         except Exception:
-            try:
-                os.unlink(tmp_name)
-            except OSError:
-                pass
-            raise
+            # Missing permissions, a failed atomic migration, or a malformed
+            # database must not abort analysis.  If the original artifact is a
+            # valid legacy JSON cache, continue serving it in memory this run.
+            self._entries = _read_legacy_json(self._path)
 
 
 _default_cache: DigestCache | None = None

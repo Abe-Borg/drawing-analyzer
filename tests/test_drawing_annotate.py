@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import drawing_analyzer.annotate as annotate
 from drawing_analyzer.annotate import (
     DEFAULT_AUTHOR,
     is_cloudable,
@@ -289,6 +290,206 @@ def test_duplicate_stems_each_source_keeps_its_own_finding(tmp_path):
             assert sum(1 for page in doc for _ in page.annots()) >= 1
         finally:
             doc.close()
+
+
+def test_reviewed_pdf_worker_resolution_is_bounded(monkeypatch):
+    monkeypatch.delenv("DRAWING_ANALYZER_ANNOTATE_WORKERS", raising=False)
+    assert annotate._resolve_annotate_workers(None, 10) == 2
+
+    monkeypatch.setenv("DRAWING_ANALYZER_ANNOTATE_WORKERS", "99")
+    assert annotate._resolve_annotate_workers(None, 10) == 4
+
+    monkeypatch.setenv("DRAWING_ANALYZER_ANNOTATE_WORKERS", "not-a-number")
+    assert annotate._resolve_annotate_workers(None, 10) == 2
+    assert annotate._resolve_annotate_workers(1, 10) == 1
+    assert annotate._resolve_annotate_workers(4, 2) == 2
+
+
+def test_multi_source_jobs_use_spawn_and_fold_in_input_order(tmp_path, monkeypatch):
+    first = _make_pdf(tmp_path / "first", "B-202.pdf")
+    second = _make_pdf(tmp_path / "second", "A-101.pdf")
+    ids = assign_source_ids([first, second])
+    findings = [
+        _finding("second issue", source=second.name, source_id=ids[str(second)]),
+        _finding("first issue", source=first.name, source_id=ids[str(first)]),
+    ]
+    observed: dict[str, object] = {}
+
+    class _ImmediateFuture:
+        def __init__(self, value):
+            self.value = value
+
+        def result(self):
+            return self.value
+
+    class _RecordingPool:
+        def __init__(self, *, max_workers, mp_context):
+            observed["max_workers"] = max_workers
+            observed["start_method"] = mp_context.get_start_method()
+            observed["submitted"] = []
+
+        def submit(self, fn, job):
+            observed["submitted"].append(job.pdf_path.name)
+            return _ImmediateFuture(fn(job))
+
+        def shutdown(self, *, wait):
+            observed["shutdown_wait"] = wait
+
+    monkeypatch.setattr(annotate, "_PROCESS_POOL_EXECUTOR", _RecordingPool)
+    result = write_reviewed_pdfs(
+        findings,
+        [first, second],
+        tmp_path / "out",
+        max_workers=2,
+        artifact_run_id="run-scheduling",
+    )
+
+    assert observed == {
+        "max_workers": 2,
+        "start_method": "spawn",
+        "submitted": ["B-202.pdf", "A-101.pdf"],
+        "shutdown_wait": True,
+    }
+    assert [path.name for path in result.reviewed_pdfs] == [
+        "B-202_reviewed.pdf",
+        "A-101_reviewed.pdf",
+    ]
+    assert [receipt.output_pdf for receipt in result.receipts] == [
+        "B-202_reviewed.pdf",
+        "A-101_reviewed.pdf",
+    ]
+    assert result.coverage_status == "COMPLETE"
+
+
+def test_parallel_and_single_worker_runs_have_identical_accounting(tmp_path):
+    first = _make_pdf(tmp_path / "first", "A-101.pdf")
+    second = _make_pdf(tmp_path / "second", "B-202.pdf")
+    ids = assign_source_ids([first, second])
+    findings = [
+        _finding("first issue", source=first.name, source_id=ids[str(first)]),
+        _finding("second issue", source=second.name, source_id=ids[str(second)]),
+    ]
+    kwargs = {"artifact_run_id": "run-parity"}
+
+    sequential = write_reviewed_pdfs(
+        findings,
+        [first, second],
+        tmp_path / "sequential",
+        max_workers=1,
+        **kwargs,
+    )
+    parallel = write_reviewed_pdfs(
+        findings,
+        [first, second],
+        tmp_path / "parallel",
+        max_workers=2,
+        **kwargs,
+    )
+
+    assert [item.to_dict() for item in parallel.placements] == [
+        item.to_dict() for item in sequential.placements
+    ]
+    assert [item.to_dict() for item in parallel.receipts] == [
+        item.to_dict() for item in sequential.receipts
+    ]
+    assert [path.name for path in parallel.reviewed_pdfs] == [
+        path.name for path in sequential.reviewed_pdfs
+    ]
+    assert parallel.coverage_status == sequential.coverage_status == "COMPLETE"
+    assert parallel.tally == sequential.tally
+
+
+def test_unpicklable_job_payload_falls_back_before_pool_start(tmp_path, monkeypatch):
+    first = _make_pdf(tmp_path / "first", "A-101.pdf")
+    second = _make_pdf(tmp_path / "second", "B-202.pdf")
+    ids = assign_source_ids([first, second])
+    findings = [
+        _finding("first issue", source=first.name, source_id=ids[str(first)]),
+        _finding("second issue", source=second.name, source_id=ids[str(second)]),
+    ]
+
+    class _ForbiddenPool:
+        def __init__(self, **kwargs):
+            raise AssertionError("unpicklable jobs must not start a process pool")
+
+    monkeypatch.setattr(annotate, "_PROCESS_POOL_EXECUTOR", _ForbiddenPool)
+    result = write_reviewed_pdfs(
+        findings,
+        [first, second],
+        tmp_path / "out",
+        max_workers=2,
+        audit_stats={"injected_test_callable": lambda: None},
+    )
+
+    assert result.coverage_status == "COMPLETE"
+    assert [path.name for path in result.reviewed_pdfs] == [
+        "A-101_reviewed.pdf",
+        "B-202_reviewed.pdf",
+    ]
+
+
+def test_injected_writer_callable_keeps_multi_source_path_sequential(tmp_path, monkeypatch):
+    first = _make_pdf(tmp_path / "first", "A-101.pdf")
+    second = _make_pdf(tmp_path / "second", "B-202.pdf")
+    ids = assign_source_ids([first, second])
+    findings = [
+        _finding("first issue", source=first.name, source_id=ids[str(first)]),
+        _finding("second issue", source=second.name, source_id=ids[str(second)]),
+    ]
+    original = annotate._annotate_units
+    calls: list[str] = []
+
+    def _injected_writer(pdf_path, *args, **kwargs):
+        calls.append(Path(pdf_path).name)
+        return original(pdf_path, *args, **kwargs)
+
+    class _ForbiddenPool:
+        def __init__(self, **kwargs):
+            raise AssertionError("a monkeypatched writer must stay in-process")
+
+    monkeypatch.setattr(annotate, "_annotate_units", _injected_writer)
+    monkeypatch.setattr(annotate, "_PROCESS_POOL_EXECUTOR", _ForbiddenPool)
+    result = write_reviewed_pdfs(
+        findings, [first, second], tmp_path / "out", max_workers=2
+    )
+
+    assert calls == ["A-101.pdf", "B-202.pdf"]
+    assert result.coverage_status == "COMPLETE"
+
+
+def test_worker_boot_failure_retries_only_when_no_output_exists(tmp_path, monkeypatch):
+    first = _make_pdf(tmp_path / "first", "A-101.pdf")
+    second = _make_pdf(tmp_path / "second", "B-202.pdf")
+    ids = assign_source_ids([first, second])
+    findings = [
+        _finding("first issue", source=first.name, source_id=ids[str(first)]),
+        _finding("second issue", source=second.name, source_id=ids[str(second)]),
+    ]
+
+    class _BootFailure:
+        def result(self):
+            raise RuntimeError("worker failed during boot")
+
+    class _BrokenPool:
+        def __init__(self, **kwargs):
+            pass
+
+        def submit(self, fn, job):
+            return _BootFailure()
+
+        def shutdown(self, *, wait):
+            pass
+
+    monkeypatch.setattr(annotate, "_PROCESS_POOL_EXECUTOR", _BrokenPool)
+    result = write_reviewed_pdfs(
+        findings, [first, second], tmp_path / "out", max_workers=2
+    )
+
+    assert result.coverage_status == "COMPLETE"
+    assert [path.name for path in result.reviewed_pdfs] == [
+        "A-101_reviewed.pdf",
+        "B-202_reviewed.pdf",
+    ]
 
 
 def test_index_rows_are_severity_first_then_position(tmp_path):

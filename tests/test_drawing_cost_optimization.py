@@ -25,7 +25,11 @@ from drawing_analyzer.critique import (
     result_from_outcomes,
 )
 from drawing_analyzer.models import ImageTile, RenderedSheet, SheetRef
-from drawing_analyzer.pipeline import _resolve_use_batch, extract_drawing_context
+from drawing_analyzer.pipeline import (
+    _resolve_use_batch,
+    _transport_plan_name,
+    extract_drawing_context,
+)
 from tests.fixtures.fake_anthropic import FakeMessage, FakeTextBlock, FakeUsage
 
 _NOOP = lambda *_a, **_k: None  # noqa: E731 - injectable no-op sleep
@@ -213,6 +217,13 @@ def test_resolve_use_batch_env_opt_in(monkeypatch):
 def test_resolve_use_batch_default_realtime(monkeypatch):
     monkeypatch.delenv("DRAWING_ANALYZER_USE_BATCH", raising=False)
     assert _resolve_use_batch(None) is False
+
+
+def test_independent_transport_pairs_have_stable_mode_names():
+    assert _transport_plan_name(True, True) == "economy"
+    assert _transport_plan_name(False, True) == "hybrid"
+    assert _transport_plan_name(False, False) == "fast"
+    assert _transport_plan_name(True, False) == "custom-batch-digest"
 
 
 # --------------------------------------------------------------------------- #

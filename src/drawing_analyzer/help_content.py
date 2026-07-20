@@ -72,13 +72,53 @@ REALTIME_COST_PER_SHEET = "roughly $3–5 per sheet for a full QC review"
 REALTIME_TIME_PER_SHEET = "about 4–6 minutes per sheet"
 BATCH_COST_PER_SHEET = "around $0.50 per sheet"
 
+PROCESSING_MODE_ECONOMY = "Economy"
+PROCESSING_MODE_HYBRID = "Hybrid"
+PROCESSING_MODE_FAST = "Fast"
+PROCESSING_MODES = (
+    PROCESSING_MODE_ECONOMY,
+    PROCESSING_MODE_HYBRID,
+    PROCESSING_MODE_FAST,
+)
 
-def transport_hint(realtime: bool) -> str:
+
+def processing_transports(mode: str) -> tuple[bool, bool]:
+    """Return ``(digest_batch, critique_batch)`` for a GUI processing mode."""
+    normalized = str(mode or "").strip().casefold()
+    if normalized == PROCESSING_MODE_ECONOMY.casefold():
+        return True, True
+    if normalized == PROCESSING_MODE_HYBRID.casefold():
+        return False, True
+    if normalized == PROCESSING_MODE_FAST.casefold():
+        return False, False
+    raise ValueError(f"unknown processing mode: {mode!r}")
+
+
+def transport_hint(realtime: bool | str) -> str:
     """One-line, mode-aware hint shown under the Processing checkbox.
 
-    ``realtime`` is the checkbox state (True = real-time, False = batch). The
-    two branches trade the same money-for-speed story from opposite sides.
+    The bool spelling is retained for API/backward compatibility.  The GUI now
+    passes ``Economy``, ``Hybrid``, or ``Fast`` so digest and critique transport
+    can be chosen independently without exposing implementation details.
     """
+    if isinstance(realtime, str):
+        digest_batch, critique_batch = processing_transports(realtime)
+        if digest_batch and critique_batch:
+            return (
+                "All eligible vision reads use Anthropic's shared Batch queue: "
+                "lowest API price (about half-rate), but often hours and sometimes "
+                "overnight. Best when cost matters more than turnaround."
+            )
+        if not digest_batch and critique_batch:
+            return (
+                "The initial sheet analysis runs immediately; the two exhaustive-QC "
+                "critique reads use the half-rate Batch queue. Standard analysis is "
+                "fast; a QC run can still wait hours for its critique batch."
+            )
+        return (
+            f"All reads skip the queue ({REALTIME_TIME_PER_SHEET}); fastest turnaround "
+            f"at {REALTIME_COST_PER_SHEET}."
+        )
     if realtime:
         return (
             f"No queue — each sheet is analyzed right away ({REALTIME_TIME_PER_SHEET}), "
@@ -328,15 +368,15 @@ _HOW_IT_WORKS = HelpDocument(
             ),
         ),
         _section(
-            "Batch vs real-time",
+            "Economy, Hybrid, and Fast processing",
             _para(
                 "Every sheet is a paid vision call, so how those calls are sent is the "
                 "single biggest lever on what a run costs and how long it takes. The "
-                "output is byte-identical either way — you are only trading money for "
-                "speed — and cached sheets are free in both modes."
+                "output contract is identical in every mode — you are only trading money for "
+                "speed — and cached sheets are free in every mode."
             ),
             _bullet(
-                "Batch mode (the GUI default) submits every uncached sheet through the "
+                "Economy (the GUI default) submits every eligible vision read through the "
                 "Message Batches API. Your sheets join Anthropic's shared queue and are "
                 "processed once they reach the front — so a run can finish in a few "
                 "minutes, a few hours, or run overnight (8+ hours) depending on how busy "
@@ -345,7 +385,13 @@ _HOW_IT_WORKS = HelpDocument(
                 "correspondingly more. Ideal for an overnight run when you're not in a rush."
             ),
             _bullet(
-                "Real-time mode skips the queue: every sheet is analyzed immediately and "
+                "Hybrid analyzes the initial sheet digests immediately, then sends the two "
+                "extra per-sheet critique reads required by QC through the half-rate Batch "
+                "queue. A standard (non-QC) run therefore finishes like Fast; a full QC run "
+                "can still wait for the critique queue."
+            ),
+            _bullet(
+                "Fast skips the queue: every sheet is analyzed immediately and "
                 f"concurrently ({REALTIME_TIME_PER_SHEET}) — {REALTIME_COST_PER_SHEET}. "
                 "Roughly double the batch rate, and running the exhaustive stack "
                 "real-time is the most expensive configuration — but you get results now. "
@@ -359,6 +405,12 @@ _HOW_IT_WORKS = HelpDocument(
                 "sheet only re-pays for the changed sheet. A two-level key recognizes an "
                 "unchanged sheet before rasterizing, so a fully cached re-run skips "
                 "rendering entirely."
+            ),
+            _para(
+                "Successful set-level and QC model stages are cached too, but only against "
+                "their complete inputs, prompt, model, and settings. Partial or malformed "
+                "answers are never reused, and evidence-backed verification still recreates "
+                "its audit artifacts."
             ),
         ),
         _section(

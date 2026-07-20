@@ -19,6 +19,7 @@ sheets, and several PDFs flatten into one ordered sheet list.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import platform
 import re
@@ -322,7 +323,141 @@ def _renderer_environment_fingerprint() -> str:
 # **source** content hash (``SourceDocument.content_sha256``), which covers every
 # byte of the file (so rotation, CropBox, and annotations are all captured), plus
 # the canonical coordinate-space version and the renderer-environment fingerprint.
-_RENDER_IDENTITY_SCHEME = "render-identity-v2"
+_RENDER_IDENTITY_SCHEME = "render-identity-v3"
+
+_XREF_REF_RE = re.compile(r"(?<!\d)(\d+)\s+\d+\s+R\b")
+_PARENT_REF_RE = re.compile(r"/Parent\s+\d+\s+\d+\s+R\b")
+_MAX_PAGE_DEPENDENCY_OBJECTS = 20_000
+_INHERITED_PAGE_KEYS = ("Resources", "MediaBox", "CropBox", "Rotate", "UserUnit")
+_CATALOG_RENDER_KEYS = ("OCProperties", "OutputIntents")
+
+
+def _refs_in(text: str) -> set[int]:
+    return {int(match.group(1)) for match in _XREF_REF_RE.finditer(text or "")}
+
+
+def _page_dependency_sha256(
+    page: "pymupdf.Page",
+    whole_source_sha256: str,
+    object_cache: "dict[int, tuple[bytes, tuple[int, ...]]] | None" = None,
+) -> str:
+    """Hash the transitive PDF dependencies capable of changing this page's pixels.
+
+    The page-tree ``/Parent`` is handled specially: traversing it wholesale reaches
+    ``/Kids`` and makes every sibling page a dependency.  We instead hash the page
+    dictionary and resolve only its effective inherited rendering attributes.  All
+    other references are walked transitively, including streams, fonts, images,
+    forms, annotations and appearance streams.  Document globals that influence
+    rendering are included too.  Any uncertainty safely falls back to the supplied
+    whole-source hash; false misses are acceptable, while a false hit is not.
+    """
+    source_token = str(whole_source_sha256)
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", source_token):
+        return "source:" + str(whole_source_sha256)
+    doc = page.parent
+    object_cache = object_cache if object_cache is not None else {}
+    try:
+        xref_len = int(doc.xref_length())
+        page_xref = int(page.xref)
+        if page_xref <= 0 or page_xref >= xref_len:
+            raise ValueError("invalid page xref")
+
+        inherited_parts: list[str] = []
+        inherited_refs: set[int] = set()
+        unresolved = set(_INHERITED_PAGE_KEYS)
+        current = page_xref
+        visited_parents: set[int] = set()
+        while current > 0 and current not in visited_parents:
+            visited_parents.add(current)
+            for key in tuple(unresolved):
+                kind, value = doc.xref_get_key(current, key)
+                if kind and kind != "null":
+                    inherited_parts.append(f"{key}:{kind}:{value}")
+                    inherited_refs.update(_refs_in(value))
+                    unresolved.remove(key)
+            kind, parent_value = doc.xref_get_key(current, "Parent")
+            parent_refs = sorted(_refs_in(parent_value)) if kind == "xref" else []
+            if len(parent_refs) > 1:
+                raise ValueError("ambiguous page parent")
+            current = parent_refs[0] if parent_refs else 0
+
+        global_parts: list[str] = []
+        global_refs: set[int] = set()
+        catalog = int(doc.pdf_catalog())
+        for key in _CATALOG_RENDER_KEYS:
+            kind, value = doc.xref_get_key(catalog, key)
+            if kind and kind != "null":
+                global_parts.append(f"catalog:{key}:{kind}:{value}")
+                global_refs.update(_refs_in(value))
+
+        # A widget without /AP may be synthesized from these AcroForm defaults.
+        # Do not traverse /Fields: that would lead through widgets on every page.
+        acro_kind, acro_value = doc.xref_get_key(catalog, "AcroForm")
+        acro_refs = sorted(_refs_in(acro_value)) if acro_kind == "xref" else []
+        if len(acro_refs) > 1:
+            raise ValueError("ambiguous AcroForm reference")
+        if acro_refs:
+            acro_xref = acro_refs[0]
+            for key in ("DR", "DA", "Q", "NeedAppearances"):
+                kind, value = doc.xref_get_key(acro_xref, key)
+                if kind and kind != "null":
+                    global_parts.append(f"acroform:{key}:{kind}:{value}")
+                    global_refs.update(_refs_in(value))
+
+        digest = hashlib.sha256()
+        digest.update(b"drawing-analyzer-page-dependencies-v1\0")
+        for part in sorted(inherited_parts + global_parts):
+            digest.update(part.encode("utf-8", errors="surrogatepass"))
+            digest.update(b"\0")
+
+        queue = [page_xref, *sorted(inherited_refs | global_refs)]
+        seen: set[int] = set()
+        while queue:
+            xref = int(queue.pop())
+            if xref in seen:
+                continue
+            if xref <= 0 or xref >= xref_len:
+                raise ValueError(f"out-of-range referenced xref {xref}")
+            seen.add(xref)
+            if len(seen) > _MAX_PAGE_DEPENDENCY_OBJECTS:
+                raise ValueError("page dependency graph exceeded safety cap")
+            cached_object = object_cache.get(xref)
+            if cached_object is None:
+                obj = doc.xref_object(xref, compressed=False)
+                object_digest = hashlib.sha256()
+                object_digest.update(obj.encode("utf-8", errors="surrogatepass"))
+                object_digest.update(b"\0")
+                if doc.xref_is_stream(xref):
+                    raw = doc.xref_stream_raw(xref)
+                    if raw is None:
+                        raise ValueError(f"stream {xref} could not be read")
+                    object_digest.update(raw)
+                    object_digest.update(b"\0")
+                cached_object = (
+                    object_digest.digest(),
+                    tuple(sorted(_refs_in(obj))),
+                )
+                object_cache[xref] = cached_object
+            object_hash, object_refs = cached_object
+            digest.update(f"xref:{xref}\0".encode("ascii"))
+            digest.update(object_hash)
+            digest.update(b"\0")
+            refs = object_refs
+            if xref == page_xref:
+                # The cached generic ref list includes /Parent; recompute this one
+                # small page dictionary without it so /Kids never enters the graph.
+                obj = doc.xref_object(xref, compressed=False)
+                refs = tuple(sorted(_refs_in(_PARENT_REF_RE.sub("", obj))))
+            for ref in sorted(refs, reverse=True):
+                if ref not in seen:
+                    queue.append(ref)
+        return "page:" + digest.hexdigest()
+    except Exception as exc:  # noqa: BLE001 - correctness-first fallback
+        _log.debug(
+            "page-local render identity unavailable for page %s; using whole source: %s",
+            getattr(page, "number", "?"), exc,
+        )
+        return "source:" + str(whole_source_sha256)
 
 
 def sheet_render_identity(
@@ -334,16 +469,19 @@ def sheet_render_identity(
     rows: int = tiling.DEFAULT_GRID_ROWS,
     cols: int = tiling.DEFAULT_GRID_COLS,
     overlap_frac: float = tiling.DEFAULT_OVERLAP_FRAC,
+    dependency_cache: "dict[int, tuple[bytes, tuple[int, ...]]] | None" = None,
 ) -> str:
     """A stable digest of everything that determines this sheet's rendered images
     **except** the model/request params — computed without rasterizing.
 
-    The content identity is the **whole source file's** ``content_sha256`` (DA-004),
-    which covers every byte — content streams, forms, images, page rotation, the
-    CropBox, and every rendered annotation's appearance stream — so any visible
-    change to a multi-page source invalidates all of its pages (the safe,
-    correctness-first behaviour §11.5 prescribes; hash the source once, never once
-    per page). ``page_index`` / ``page_count`` name the page within it. The rest
+    The source's ``content_sha256`` is the trusted root, while a conservative
+    per-page dependency walk narrows it to the objects capable of changing this
+    page's pixels: content streams, forms, images, fonts, effective inherited page
+    attributes, annotations/appearance streams, and relevant document rendering
+    globals. This lets an edit to one page preserve sibling-page hits. If the
+    graph is malformed, ambiguous, or exceeds its safety bound, identity falls
+    back to the whole-source hash, so optimization can create false misses but
+    never a false hit. ``page_index`` / ``page_count`` name the page. The rest
     fingerprints the render *configuration*: the coordinate-space version, the
     renderer environment (§11.5), the annotation-render policy, the grid + overlap,
     the resolved target (which flips on the raster/vector split), the near-blank
@@ -355,9 +493,12 @@ def sheet_render_identity(
     total_images = tiling.total_images_for_grid(rows, cols)
     target_px = tiling.target_long_edge_px(total_images, is_raster=is_raster)
     near_blank, near_blank_bytes = _near_blank_config()
+    page_dependency = _page_dependency_sha256(
+        page, content_sha256, object_cache=dependency_cache
+    )
     parts = [
         _RENDER_IDENTITY_SCHEME,
-        f"content_sha256={content_sha256}",
+        f"content_dependency={page_dependency}",
         f"page_index={int(page_index)}",
         f"page_count={int(page_count)}",
         f"coord_space={COORDINATE_SPACE_VERSION}",
@@ -708,9 +849,10 @@ def iter_sheet_prescan(
     pipeline uses the identities to decide which sheets can skip rasterization and
     only feeds the misses to :func:`iter_rendered_sheets`.
 
-    The render identity keys on the **whole source file's** ``content_sha256``
-    (DA-004), computed **once per source** here — and, crucially, for the bytes on
-    disk *at prescan time*. ``snapshot_by_path`` carries the inventory's captured
+    The render identity derives a conservative page-local dependency hash from the
+    source's ``content_sha256`` (computed **once per source**) and falls back to
+    that whole-source hash whenever dependency isolation is uncertain. Crucially,
+    it uses the bytes on disk *at prescan time*. ``snapshot_by_path`` carries the inventory's captured
     ``str(path) -> (sha, byte_size, mtime_ns)`` so the common (unchanged) case
     reuses the hash via a ``stat`` fast-gate without re-reading; a source whose
     ``stat`` drifted since the inventory is **re-hashed now**
@@ -734,6 +876,7 @@ def iter_sheet_prescan(
         try:
             count = doc.page_count
             source_id = source_ids.get(str(path), "")
+            dependency_cache: dict[int, tuple[bytes, tuple[int, ...]]] = {}
             for i in range(count):
                 ref = SheetRef(
                     pdf_path=path,
@@ -746,6 +889,7 @@ def iter_sheet_prescan(
                 identity = sheet_render_identity(
                     page, content_sha256=sha, page_index=i, page_count=count,
                     rows=rows, cols=cols, overlap_frac=overlap_frac,
+                    dependency_cache=dependency_cache,
                 )
                 geometry = _sheet_geometry_no_render(
                     page, ref, rows=rows, cols=cols, overlap_frac=overlap_frac

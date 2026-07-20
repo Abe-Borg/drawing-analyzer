@@ -99,7 +99,9 @@ from .digest import (
 from .digest_cache import digest_cache_key
 from .file_upload import (
     FILES_API_BETA,
+    ReusableSheetUpload,
     delete_files,
+    iter_prefetched_sheets,
     run_fatal_upload_status,
     upload_failure_allows_inline_fallback,
     upload_failure_hint,
@@ -220,6 +222,67 @@ def _release_uploaded_files(
 
 
 @dataclass
+class DigestUsageAttempt:
+    """One response-bearing digest attempt, retained until the usage ledger runs.
+
+    This is deliberately runtime-only metadata attached to ``SheetDigest``
+    instances. It is not written into the digest cache: a warm cache hit made no
+    request in the current run, while a cold run needs every response-bearing
+    retry priced at its own Batch or real-time rate.
+    """
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    transport: str = "BATCH"
+    parse_success: bool = True
+    terminal_status: str = "COMPLETE"
+    attempt_number: int = 1
+    request_or_custom_id: str = ""
+
+
+def _attach_usage_attempt(
+    digest: SheetDigest,
+    *,
+    transport: str,
+    attempt_number: int,
+    request_or_custom_id: str = "",
+) -> SheetDigest:
+    """Attach this response's usage without changing cache serialization."""
+    attempts = list(getattr(digest, "usage_attempts", ()) or ())
+    attempts.append(DigestUsageAttempt(
+        input_tokens=int(digest.input_tokens or 0),
+        output_tokens=int(digest.output_tokens or 0),
+        cache_read_tokens=int(getattr(digest, "cache_read_tokens", 0) or 0),
+        cache_write_tokens=int(getattr(digest, "cache_write_tokens", 0) or 0),
+        transport=transport,
+        parse_success=(digest.error is None),
+        terminal_status="FAILED" if digest.error else "COMPLETE",
+        attempt_number=max(1, int(attempt_number or 1)),
+        request_or_custom_id=request_or_custom_id,
+    ))
+    # SheetDigest intentionally has no slots, so this stays a runtime-only
+    # extension and cannot perturb existing cache/export schemas.
+    setattr(digest, "usage_attempts", attempts)
+    return digest
+
+
+def _replace_result_with_attempt_history(
+    results: list,
+    index: int,
+    digest: SheetDigest,
+) -> None:
+    """Replace a recovery result while retaining earlier billable responses."""
+    previous = results[index]
+    prior = list(getattr(previous, "usage_attempts", ()) or ()) if previous else []
+    current = list(getattr(digest, "usage_attempts", ()) or ())
+    if prior or current:
+        setattr(digest, "usage_attempts", prior + current)
+    results[index] = digest
+
+
+@dataclass
 class _Slot:
     """One sheet's place in the page-ordered result, plus how it's being served."""
 
@@ -240,6 +303,17 @@ class _Slot:
     # references stay valid until cleanup) without re-rendering or
     # re-uploading the sheet.
     params: dict | None = None
+    # Exact digest-stage file-id content retained only after every digest batch
+    # that referenced it is terminal/canceled.  Ownership may then move once to
+    # the critique stage instead of deleting and re-uploading the same pixels.
+    reusable_upload: ReusableSheetUpload | None = None
+    # ``file_ids`` remains as immutable lifecycle/diagnostic history (and is
+    # inspected by existing callers after collection). This flag, plus the
+    # manifest's atomic claim, records that cleanup ownership left this slot.
+    upload_ownership_transferred: bool = False
+    # Number of Messages attempts accepted/submitted for this sheet. Failed
+    # batch-level submits do not increment it; direct-call transient retries do.
+    attempts_submitted: int = 0
 
 
 @dataclass
@@ -257,6 +331,66 @@ class DrawingBatch:
     @property
     def all_file_ids(self) -> list[str]:
         return [fid for s in self.slots for fid in s.file_ids]
+
+
+def _take_slot_upload_ids(slots: list[_Slot]) -> list[str]:
+    """Take cleanup ownership for every still-owned upload exactly once."""
+    claimed: list[str] = []
+    for slot in slots:
+        if slot.upload_ownership_transferred:
+            continue
+        manifest = slot.reusable_upload
+        if manifest is not None:
+            claimed.extend(manifest.release_ids())
+        elif slot.file_ids:
+            # Backward/defensive path for a slot built without a manifest.
+            claimed.extend(slot.file_ids)
+        slot.upload_ownership_transferred = True
+    return claimed
+
+
+def _finish_digest_uploads(
+    batch: DrawingBatch,
+    *,
+    client: Any,
+    reusable_upload_sink: list[ReusableSheetUpload] | None,
+    cleanup_in_background: bool,
+    on_log: LogCallback | None,
+) -> None:
+    """Transfer safe uploads to critique, deleting every unclaimed remainder.
+
+    This is called only after all digest batches that reference the files are
+    terminal or confirmed canceled.  A submitted slot can then transfer its
+    manifest to the run-local critique sink without changing the uploaded
+    content.  Slots not accepted by the sink retain cleanup ownership here.
+    """
+    if reusable_upload_sink is not None:
+        for slot in batch.submitted_slots:
+            if slot.upload_ownership_transferred:
+                continue
+            manifest = slot.reusable_upload
+            if manifest is None or not manifest.available:
+                continue
+            try:
+                reusable_upload_sink.append(manifest)
+            except Exception as exc:  # noqa: BLE001 - optimization is advisory
+                _log.warning(
+                    "digest upload reuse staging failed for %s: %s",
+                    slot.ref.display_label, summarize_exc(exc),
+                )
+                continue
+            # Ownership now lives exclusively in the sink.  Keep ``file_ids``
+            # as lifecycle history, but make every later cleanup path skip it.
+            slot.upload_ownership_transferred = True
+
+    leftovers = _take_slot_upload_ids(batch.slots)
+    if leftovers:
+        _release_uploaded_files(
+            client,
+            leftovers,
+            in_background=cleanup_in_background,
+            on_log=on_log,
+        )
 
 
 def _batch_item_error_text(result_obj: Any) -> str:
@@ -462,6 +596,7 @@ def _rescue_failed_items_sync(
                 # timeout (some model overrides carry even lower non-streaming
                 # caps). Streaming lifts that ceiling; ``get_final_message()``
                 # returns the same Message shape ``create`` would have.
+                slot.attempts_submitted += 1
                 with client.beta.messages.stream(
                     **params, betas=[FILES_API_BETA]
                 ) as stream:
@@ -500,14 +635,18 @@ def _rescue_failed_items_sync(
                 break
         if message is None:
             continue  # the sheet keeps its batch-round error
-        digest = _digest_from_message(slot, message, cache=cache)
+        digest = _digest_from_message(
+            slot, message, cache=cache, transport="REAL_TIME",
+            attempt_number=slot.attempts_submitted,
+            request_or_custom_id=request_id_of(message) or (slot.custom_id or ""),
+        )
         # This sheet was digested by a synchronous real-time call, not the Batches
         # API, so it is billed at the full rate — mark it so the usage ledger does
         # not apply the 50% batch discount to it (Phase 23B pricing correctness).
         digest.rescued = True
         # Even an empty-digest result is fresher provenance than the batch
         # error it replaces, and its stop_reason names what happened.
-        results[slot.index] = digest
+        _replace_result_with_attempt_history(results, slot.index, digest)
         if digest.error is None:
             recovered += 1
             _log.info(
@@ -622,6 +761,11 @@ def _recover_via_batch_resubmit(
             sleep(backoff)
             continue
         retry_id = _get(mb, "id")
+        # The batch submission was accepted; each item now has one additional
+        # Messages attempt. A rejected batch-level submit above is not billable
+        # per item and intentionally does not advance this counter.
+        for slot, _params in pending:
+            slot.attempts_submitted += 1
         _log.info(
             "batch-resubmit round %d submitted: id=%s items=%d request_id=%s",
             round_no, retry_id, len(reqs), request_id_of(mb),
@@ -682,7 +826,7 @@ def _recover_via_batch_resubmit(
             digest = _parse_item(slot, res, cache=cache)
             # Fresher provenance than the error it replaces, even if still empty
             # — and a batch digest, so no ``rescued`` full-rate flag.
-            results[slot.index] = digest
+            _replace_result_with_attempt_history(results, slot.index, digest)
             if digest.error is None:
                 recovered += 1
                 continue
@@ -864,6 +1008,8 @@ def _resubmit_failed_items(
         _rescue_remaining(retry)
         return True
     retry_id = _get(mb, "id")
+    for slot, _params in retry:
+        slot.attempts_submitted += 1
     _log.info(
         "follow-up batch submitted: id=%s items=%d request_id=%s",
         retry_id, len(reqs), request_id_of(mb),
@@ -925,7 +1071,7 @@ def _resubmit_failed_items(
         digest = _parse_item(slot, res, cache=cache)
         if digest.error is None:
             recovered += 1
-        results[slot.index] = digest
+        _replace_result_with_attempt_history(results, slot.index, digest)
         # An item still failing retryably after BOTH batch rounds is the batch
         # backend itself erroring — hand it to the direct-call rescue. Passing
         # the follow-up round's params keeps the empty-at-max_tokens cap
@@ -1038,6 +1184,7 @@ def submit_drawing_batch(
                 f"[{slot.index + 1}/{total}] Inlining {sheet.ref.display_label} "
                 "(Files API unavailable)"
             )
+        slot.attempts_submitted += 1
         slot.digest = digest_sheet(
             sheet,
             client=client,
@@ -1054,6 +1201,10 @@ def submit_drawing_batch(
         # prices it real-time, not at the batch rate (Phase 23B).
         if not slot.digest.cached:
             slot.digest.rescued = True
+            _attach_usage_attempt(
+                slot.digest, transport="REAL_TIME",
+                attempt_number=slot.attempts_submitted,
+            )
         slots.append(slot)
         verb = "Inlined" if slot.digest.ok else "Inline digest failed for"
         _log.debug(
@@ -1063,7 +1214,7 @@ def submit_drawing_batch(
         if progress is not None:
             progress(slot.index + 1, total or 0, f"{verb} {sheet.ref.display_label}")
 
-    for index, sheet in enumerate(rendered_sheets):
+    for index, sheet in enumerate(iter_prefetched_sheets(rendered_sheets)):
         image_est = estimate_image_tokens_total(sheet.image_sizes, model=model)
         slot = _Slot(
             index=index, ref=sheet.ref, image_estimate=image_est,
@@ -1236,7 +1387,14 @@ def submit_drawing_batch(
         custom_id = f"sheet__{index}"
         slot.custom_id = custom_id
         slot.cache_key = cache_key
-        slot.file_ids = upload.file_ids
+        slot.file_ids = list(upload.file_ids)
+        slot.reusable_upload = ReusableSheetUpload(
+            ref=sheet.ref,
+            rows=getattr(sheet, "rows", 0),
+            cols=getattr(sheet, "cols", 0),
+            content=list(upload.content),
+            file_ids=list(upload.file_ids),
+        )
         slot.params = build_digest_request_params(
             upload.content,
             model=model,
@@ -1265,7 +1423,7 @@ def submit_drawing_batch(
             # them — delete every one before re-raising so a submit failure never
             # leaks remote files (DA-034). Mirrors the critique batch's submit
             # guard; ``delete_files`` is best-effort and never itself raises.
-            leaked = [fid for s in slots for fid in s.file_ids]
+            leaked = _take_slot_upload_ids(slots)
             _log.warning(
                 "drawing batch submit failed; deleting %d uploaded file(s)",
                 len(leaked),
@@ -1273,6 +1431,9 @@ def submit_drawing_batch(
             delete_files(client, leaked)
             raise
         batch_id = _get(mb, "id")
+        for s in slots:
+            if s.custom_id is not None:
+                s.attempts_submitted = 1
         # Record the batch id + the custom_id → sheet map up front. This is the
         # rosetta stone for reading the rest of the run: a later "item sheet__3
         # FAILED" line, or a lookup of the batch in the Anthropic console, maps
@@ -1397,7 +1558,15 @@ def _poll_until_terminal(
         sleep(_progressive_interval(elapsed))
 
 
-def _digest_from_message(slot: _Slot, message: Any, *, cache: Any) -> SheetDigest:
+def _digest_from_message(
+    slot: _Slot,
+    message: Any,
+    *,
+    cache: Any,
+    transport: str = "BATCH",
+    attempt_number: int | None = None,
+    request_or_custom_id: str = "",
+) -> SheetDigest:
     """Parse one Messages-API response into the slot's :class:`SheetDigest`.
 
     Shared by the batch item parse (:func:`_parse_item`) and the direct-call
@@ -1406,6 +1575,9 @@ def _digest_from_message(slot: _Slot, message: Any, *, cache: Any) -> SheetDiges
     """
     raw_text = _message_text(message)
     in_tok, out_tok = _message_usage(message)
+    usage = _get(message, "usage")
+    cache_read_tok = int(_get(usage, "cache_read_input_tokens", 0) or 0)
+    cache_write_tok = int(_get(usage, "cache_creation_input_tokens", 0) or 0)
     stop = _get(message, "stop_reason")
     error = None if raw_text else f"empty digest (stop_reason={stop!r})"
     # Same transport-agnostic split as the real-time path: prose (findings block
@@ -1425,7 +1597,7 @@ def _digest_from_message(slot: _Slot, message: Any, *, cache: Any) -> SheetDiges
                 "created_ts": time.time(),
             },
         )
-    return SheetDigest(
+    digest = SheetDigest(
         ref=slot.ref,
         text=text,
         input_tokens=in_tok,
@@ -1435,6 +1607,19 @@ def _digest_from_message(slot: _Slot, message: Any, *, cache: Any) -> SheetDiges
         error=error,
         findings=findings,
         findings_note=findings_note,
+        cache_read_tokens=cache_read_tok,
+        cache_write_tokens=cache_write_tok,
+    )
+    return _attach_usage_attempt(
+        digest,
+        transport=transport,
+        attempt_number=(
+            max(1, slot.attempts_submitted)
+            if attempt_number is None else attempt_number
+        ),
+        request_or_custom_id=(
+            request_or_custom_id or (slot.custom_id or "") or request_id_of(message)
+        ),
     )
 
 
@@ -1469,7 +1654,11 @@ def _parse_item(slot: _Slot, result: Any, *, cache: Any) -> SheetDigest:
             error=item_error,
         )
     message = _get(rr, "message")
-    digest = _digest_from_message(slot, message, cache=cache)
+    digest = _digest_from_message(
+        slot, message, cache=cache,
+        attempt_number=max(1, slot.attempts_submitted),
+        request_or_custom_id=slot.custom_id or request_id_of(message),
+    )
     if digest.error is not None:
         _log.warning(
             "item %s (%s): empty digest (stop_reason=%r)",
@@ -1496,12 +1685,17 @@ def collect_drawing_batch(
     cleanup_in_background: bool = False,
     retry_failed_items: bool = False,
     recovery_transport: str = RECOVERY_DIRECT,
+    reusable_upload_sink: list[ReusableSheetUpload] | None = None,
 ) -> list[SheetDigest]:
     """Poll the batch to completion and assemble per-sheet digests in page order.
 
     Cache hits / upload failures are already resolved on their slots. Submitted
     items are polled, collected, parsed, and (on success) written to the cache;
-    the uploaded files are then deleted. ``cleanup_in_background`` runs that final
+    the uploaded files are then deleted. When ``reusable_upload_sink`` is supplied,
+    terminal/canceled digest uploads transfer to that run-local sink instead so a
+    later critique cache miss can reference the exact same uploaded pixels. Any
+    manifest the critique does not adopt remains the sink owner's cleanup
+    responsibility. ``cleanup_in_background`` runs any final
     delete on a daemon thread so the digests return immediately instead of
     stalling behind a long, silent file-by-file cleanup (see
     :func:`_release_uploaded_files`); left ``False`` (the default) the delete is
@@ -1583,8 +1777,9 @@ def collect_drawing_batch(
                 for result in client.messages.batches.results(batch.batch_id):
                     raw[_get(result, "custom_id")] = result
                 for slot in submitted:
-                    results[slot.index] = _parse_item(
-                        slot, raw.get(slot.custom_id), cache=cache
+                    _replace_result_with_attempt_history(
+                        results, slot.index,
+                        _parse_item(slot, raw.get(slot.custom_id), cache=cache),
                     )
                 files_released = True
                 if retry_failed_items:
@@ -1600,10 +1795,11 @@ def collect_drawing_batch(
                         recovery_transport=recovery_transport,
                     )
                 if files_released:
-                    _release_uploaded_files(
-                        client,
-                        batch.all_file_ids,
-                        in_background=cleanup_in_background,
+                    _finish_digest_uploads(
+                        batch,
+                        client=client,
+                        reusable_upload_sink=reusable_upload_sink,
+                        cleanup_in_background=cleanup_in_background,
                         on_log=on_log,
                     )
             except Exception:  # noqa: BLE001 - clean up before propagating (DA-034)
@@ -1614,11 +1810,10 @@ def collect_drawing_batch(
                 # unconditionally; do so best-effort, then re-raise (unchanged
                 # control flow — collect raised here before this guard too, just
                 # leakily).
+                leaked = _take_slot_upload_ids(batch.slots)
                 _release_uploaded_files(
-                    client,
-                    batch.all_file_ids,
-                    in_background=cleanup_in_background,
-                    on_log=on_log,
+                    client, leaked,
+                    in_background=cleanup_in_background, on_log=on_log,
                 )
                 raise
         else:
@@ -1722,10 +1917,11 @@ def collect_drawing_batch(
             if canceled:
                 # The canceled batch can no longer need the uploaded files,
                 # and anything the rescue produced is already in hand.
-                _release_uploaded_files(
-                    client,
-                    batch.all_file_ids,
-                    in_background=cleanup_in_background,
+                _finish_digest_uploads(
+                    batch,
+                    client=client,
+                    reusable_upload_sink=reusable_upload_sink,
+                    cleanup_in_background=cleanup_in_background,
                     on_log=on_log,
                 )
 

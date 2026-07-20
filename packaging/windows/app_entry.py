@@ -16,6 +16,7 @@ so the smoke step can read the outcome regardless.
 """
 from __future__ import annotations
 
+import multiprocessing
 import os
 import sys
 
@@ -70,4 +71,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # Required by PyInstaller before a frozen executable creates spawned worker
+    # processes. Without this dispatch hook, a child can relaunch the GUI entry
+    # point recursively instead of entering multiprocessing's worker bootstrap.
+    multiprocessing.freeze_support()
     raise SystemExit(main())

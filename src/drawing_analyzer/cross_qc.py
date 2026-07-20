@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -61,6 +62,11 @@ from .digest import (
     scan_structured_blocks,
 )
 from .models import ConflictLeg, Finding, NumericClaim, source_page_key
+from .stage_cache import (
+    get_stage_cache_entry,
+    put_stage_cache_entry,
+    stage_cache_key,
+)
 from .auditors.references import detect_sheet_id
 from .auditors.sheet_ids import fold_text
 
@@ -79,6 +85,23 @@ MAX_FACTS_PER_RECONCILE = 400
 # Cap each sheet's text layer in the prompt (the digest already summarizes it). The
 # omitted characters are counted and surfaced (DA-028) — never silently dropped.
 _TEXT_LAYER_BUDGET = 4_000
+_CROSS_QC_CACHE_CONTRACT = 1
+DEFAULT_CROSS_QC_WORKERS = 3
+_CROSS_QC_WORKERS_ENV = "DRAWING_ANALYZER_CROSS_QC_WORKERS"
+
+
+def _resolve_cross_qc_workers(max_workers: int | None, total: int) -> int:
+    """Resolve a quota-safe worker count, clamped to the independent work."""
+    if max_workers is None:
+        raw = os.environ.get(_CROSS_QC_WORKERS_ENV)
+        if raw and raw.strip():
+            try:
+                max_workers = int(raw.strip())
+            except ValueError:
+                max_workers = DEFAULT_CROSS_QC_WORKERS
+        else:
+            max_workers = DEFAULT_CROSS_QC_WORKERS
+    return min(max(1, int(max_workers)), max(1, int(total)))
 
 
 def cross_qc_model() -> str:
@@ -258,6 +281,7 @@ class CrossQCResult:
     text_chars_included: int = 0
     text_chars_omitted: int = 0
     budget_degraded: bool = False
+    cached: bool = False
 
 
 # --------------------------------------------------------------------------- #
@@ -759,6 +783,7 @@ def _reconcile_facts(
     manifest: list[tuple], facts: list[CrossQCFact], entry_by_handle: dict, *,
     client: Any, model: str, max_retries: int, sleep: Any,
     preamble: str = "",
+    max_workers: int | None = None,
 ) -> tuple[list[Finding], list[NumericClaim], int, int, bool]:
     """Reconcile all facts, comparing across groups when they overflow one call.
 
@@ -783,37 +808,49 @@ def _reconcile_facts(
 
     half = max(1, MAX_FACTS_PER_RECONCILE // 2)
     groups = [facts[i:i + half] for i in range(0, len(facts), half)]
-    all_f: list[Finding] = []
-    all_c: list[NumericClaim] = []
-    tot_in = tot_out = 0
-    completed = True
-    calls = 0
+    pair_inputs: list[list[CrossQCFact]] = []
     for i in range(len(groups)):
         for j in range(i + 1, len(groups)):
-            if calls >= _MAX_RECONCILE_PAIR_CALLS:
-                completed = False
-                _log.warning(
-                    "cross-qc reconcile: %d group(s) exceed the %d pair-call cap; "
-                    "some cross-group pairs were not compared",
-                    len(groups), _MAX_RECONCILE_PAIR_CALLS,
-                )
-                break
-            union = groups[i] + groups[j]          # ≤ MAX_FACTS_PER_RECONCILE
-            f, c, in_t, out_t, err = _reconcile_call(
+            pair_inputs.append(groups[i] + groups[j])  # ≤ MAX_FACTS_PER_RECONCILE
+
+    completed = len(pair_inputs) <= _MAX_RECONCILE_PAIR_CALLS
+    if not completed:
+        _log.warning(
+            "cross-qc reconcile: %d group(s) exceed the %d pair-call cap; "
+            "some cross-group pairs were not compared",
+            len(groups), _MAX_RECONCILE_PAIR_CALLS,
+        )
+        pair_inputs = pair_inputs[:_MAX_RECONCILE_PAIR_CALLS]
+
+    def _run_pair(union: list[CrossQCFact]):
+        try:
+            return _reconcile_call(
                 manifest, union, entry_by_handle,
                 client=client, model=model, max_retries=max_retries, sleep=sleep,
                 preamble=preamble,
             )
-            calls += 1
-            tot_in += in_t
-            tot_out += out_t
-            if err is not None:
-                completed = False
-            all_f.extend(f)
-            all_c.extend(c)
-        else:
-            continue
-        break
+        except Exception as exc:  # noqa: BLE001 - preserve additive semantics
+            return [], [], 0, 0, _clean_error(exc)
+
+    workers = _resolve_cross_qc_workers(max_workers, len(pair_inputs))
+    if workers == 1:
+        pair_results = [_run_pair(union) for union in pair_inputs]
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            # ``map`` returns in input order even when requests finish out of
+            # order, so finding/claim assembly remains deterministic.
+            pair_results = list(pool.map(_run_pair, pair_inputs))
+
+    all_f: list[Finding] = []
+    all_c: list[NumericClaim] = []
+    tot_in = tot_out = 0
+    for f, c, in_t, out_t, err in pair_results:
+        tot_in += in_t
+        tot_out += out_t
+        if err is not None:
+            completed = False
+        all_f.extend(f)
+        all_c.extend(c)
     return all_f, all_c, tot_in, tot_out, completed
 
 
@@ -876,6 +913,104 @@ def _dedup_claims(claims: list[NumericClaim]) -> list[NumericClaim]:
     return out
 
 
+def _cross_qc_cache_key(entries: list[tuple], *, model: str, preamble: str) -> str:
+    """Key the full request and host-side binding contract for cross-QC."""
+    cache_inputs: list[dict[str, Any]] = []
+    for sheet_id, digest_text, text_layer, geom in entries:
+        ref = geom.ref
+        cache_inputs.append({
+            "sheet_id": sheet_id,
+            "digest_text": digest_text,
+            "text_layer": text_layer,
+            # These fields are not model-visible, but they determine the host-owned
+            # identity and tile binding of every parsed finding/claim.
+            "source_name": str(getattr(ref, "source_name", "") or ""),
+            "source_id": str(getattr(ref, "source_id", "") or ""),
+            "page_index": int(getattr(ref, "page_index", 0) or 0),
+            "rows": int(getattr(geom, "rows", 0) or 0),
+            "cols": int(getattr(geom, "cols", 0) or 0),
+        })
+    return stage_cache_key(
+        "cross_qc",
+        model=model,
+        prompt={
+            "whole_set": cross_qc_system_prompt(),
+            "map": cross_qc_map_system_prompt(),
+            "reconcile": CROSS_QC_RECONCILE_SYSTEM_PROMPT,
+        },
+        inputs={"identity_preamble": preamble, "sheets": cache_inputs},
+        params={
+            "contract": _CROSS_QC_CACHE_CONTRACT,
+            "max_tokens": DEFAULT_CROSS_QC_MAX_TOKENS,
+            "max_findings": DEFAULT_CROSS_QC_MAX_FINDINGS,
+            "single_call_sheets": MAX_SHEETS_SINGLE_CALL,
+            "map_max_facts": DEFAULT_MAP_MAX_FACTS,
+            "reconcile_max_facts": MAX_FACTS_PER_RECONCILE,
+            "reconcile_pair_cap": _MAX_RECONCILE_PAIR_CALLS,
+            "text_layer_budget": _TEXT_LAYER_BUDGET,
+            "adaptive_thinking": model_supports_adaptive_thinking(model),
+        },
+    )
+
+
+def _cross_qc_from_cache(payload: dict) -> CrossQCResult | None:
+    """Defensively reconstruct a complete cached result."""
+    try:
+        findings_raw = payload.get("findings")
+        claims_raw = payload.get("claims")
+        if not isinstance(findings_raw, list) or not isinstance(claims_raw, list):
+            return None
+        findings = [Finding.from_dict(v) for v in findings_raw if isinstance(v, dict)]
+        claims = [NumericClaim.from_dict(v) for v in claims_raw if isinstance(v, dict)]
+        result = CrossQCResult(
+            findings=findings,
+            claims=claims,
+            shards_planned=int(payload.get("shards_planned", 0) or 0),
+            shards_completed=int(payload.get("shards_completed", 0) or 0),
+            reconciliation_required=bool(payload.get("reconciliation_required", False)),
+            reconciliation_completed=bool(payload.get("reconciliation_completed", False)),
+            facts_collected=int(payload.get("facts_collected", 0) or 0),
+            complete=bool(payload.get("complete", False)),
+            text_chars_total=int(payload.get("text_chars_total", 0) or 0),
+            text_chars_included=int(payload.get("text_chars_included", 0) or 0),
+            text_chars_omitted=int(payload.get("text_chars_omitted", 0) or 0),
+            budget_degraded=bool(payload.get("budget_degraded", False)),
+            cached=True,
+        )
+    except (TypeError, ValueError):
+        return None
+    # Only fully successful results are ever admitted.  Recheck on read so a
+    # hand-edited/corrupt entry cannot turn a PARTIAL review into COMPLETE.
+    if not result.complete or result.budget_degraded:
+        return None
+    return result
+
+
+def _put_cross_qc_cache(cache: Any, key: str, result: CrossQCResult) -> None:
+    """Admit only a complete, non-degraded cross-QC result."""
+    if result.error is not None or not result.complete or result.budget_degraded:
+        return
+    put_stage_cache_entry(
+        cache,
+        key,
+        stage="cross_qc",
+        payload={
+            "findings": [f.to_dict() for f in result.findings],
+            "claims": [c.to_dict() for c in result.claims],
+            "shards_planned": result.shards_planned,
+            "shards_completed": result.shards_completed,
+            "reconciliation_required": result.reconciliation_required,
+            "reconciliation_completed": result.reconciliation_completed,
+            "facts_collected": result.facts_collected,
+            "complete": result.complete,
+            "text_chars_total": result.text_chars_total,
+            "text_chars_included": result.text_chars_included,
+            "text_chars_omitted": result.text_chars_omitted,
+            "budget_degraded": result.budget_degraded,
+        },
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Orchestration
 # --------------------------------------------------------------------------- #
@@ -890,6 +1025,8 @@ def cross_sheet_qc(
     max_retries: int = DEFAULT_DIGEST_MAX_RETRIES,
     sleep: Any = time.sleep,
     identity: Any = None,
+    cache: Any = None,
+    max_workers: int | None = None,
 ) -> CrossQCResult:
     """Hunt cross-sheet conflicts over the set's digests + text layers.
 
@@ -919,6 +1056,17 @@ def cross_sheet_qc(
 
     if len(entries) < MIN_SHEETS_FOR_CROSS_QC:
         return CrossQCResult(skipped=True)
+
+    cache_key = _cross_qc_cache_key(entries, model=model, preamble=preamble)
+    cached_payload = get_stage_cache_entry(cache, cache_key, stage="cross_qc")
+    if cached_payload is not None:
+        cached_result = _cross_qc_from_cache(cached_payload)
+        if cached_result is not None:
+            _log.info(
+                "cross-qc: cache hit (%d finding(s), %d claim(s))",
+                len(cached_result.findings), len(cached_result.claims),
+            )
+            return cached_result
 
     # Whole-set sheet-id map (first detection wins on a collision; warn).
     sheet_map: dict[str, Any] = {}
@@ -957,7 +1105,7 @@ def cross_sheet_qc(
             "cross-qc: %d conflict finding(s) across %d sheet(s), 1 call",
             len(deduped), len(entries),
         )
-        return CrossQCResult(
+        result = CrossQCResult(
             findings=deduped, claims=_dedup_claims(claims),
             input_tokens=in_tok, output_tokens=out_tok, error=err,
             shards_planned=1, shards_completed=0 if err else 1,
@@ -965,6 +1113,8 @@ def cross_sheet_qc(
             text_chars_total=budget.total, text_chars_included=budget.included,
             text_chars_omitted=budget.omitted, budget_degraded=budget.degraded,
         )
+        _put_cross_qc_cache(cache, cache_key, result)
+        return result
 
     # ---- Large set: map → reconcile. ----
     shards = _shard_by_discipline(entries)
@@ -990,12 +1140,29 @@ def cross_sheet_qc(
     total_in = total_out = 0
     errors: list[str] = []
     shards_completed = 0
-    for shard in shards:
-        f, c, facts, in_tok, out_tok, err = _map_call(
-            shard, entry_by_handle, handle_by_key, discipline_by_handle,
-            client=client, model=model, max_retries=max_retries, sleep=sleep, budget=budget,
-            preamble=preamble,
-        )
+    def _run_map(shard: list[tuple]):
+        local_budget = _Budget()
+        try:
+            return (*_map_call(
+                shard, entry_by_handle, handle_by_key, discipline_by_handle,
+                client=client, model=model, max_retries=max_retries, sleep=sleep,
+                budget=local_budget, preamble=preamble,
+            ), local_budget)
+        except Exception as exc:  # noqa: BLE001 - one shard never sinks the pass
+            return [], [], [], 0, 0, _clean_error(exc), local_budget
+
+    workers = _resolve_cross_qc_workers(max_workers, len(shards))
+    if workers == 1:
+        map_results = [_run_map(shard) for shard in shards]
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            # Deterministic input-order fold; only execution is parallel.
+            map_results = list(pool.map(_run_map, shards))
+
+    for f, c, facts, in_tok, out_tok, err, local_budget in map_results:
+        budget.total += local_budget.total
+        budget.included += local_budget.included
+        budget.omitted += local_budget.omitted
         total_in += in_tok
         total_out += out_tok
         if err is not None:
@@ -1020,6 +1187,7 @@ def cross_sheet_qc(
             manifest, all_facts, entry_by_handle,
             client=client, model=model, max_retries=max_retries, sleep=sleep,
             preamble=preamble,
+            max_workers=max_workers,
         )
         total_in += r_in
         total_out += r_out
@@ -1047,7 +1215,7 @@ def cross_sheet_qc(
         "ok" if reconciliation_completed else "incomplete", len(all_facts),
         "" if not budget.degraded else f"; budget degraded ({budget.omitted} chars omitted)",
     )
-    return CrossQCResult(
+    result = CrossQCResult(
         findings=deduped,
         claims=_dedup_claims(all_claims),
         input_tokens=total_in,
@@ -1064,3 +1232,5 @@ def cross_sheet_qc(
         text_chars_omitted=budget.omitted,
         budget_degraded=budget.degraded,
     )
+    _put_cross_qc_cache(cache, cache_key, result)
+    return result

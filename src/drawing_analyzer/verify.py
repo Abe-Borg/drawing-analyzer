@@ -35,10 +35,11 @@ import re
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
 
-from .core.api_config import REVIEW_MODEL_DEFAULT
+from .core.api_config import VERIFICATION_MODEL_DEFAULT
 from .diagnostics import get_logger
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
@@ -52,6 +53,11 @@ from .digest import (
     _tolerant_json_object,
 )
 from .models import EvidenceArtifact, Finding, Verification, source_page_key
+from .stage_cache import (
+    get_stage_cache_entry,
+    put_stage_cache_entry,
+    stage_cache_key,
+)
 
 _log = get_logger()
 
@@ -70,6 +76,9 @@ _CONTEXT_MIN_H_PT = 250.0
 
 # Verifications that never happen here (already trusted / nothing to look at).
 _TERMINAL_STATUSES = frozenset({"DETERMINISTIC"})
+_CACHEABLE_MODEL_STATUSES = frozenset({"VERIFIED", "REJECTED", "UNCERTAIN"})
+_VERIFY_CACHE_STAGE = "verify_single"
+_VERIFY_CROSS_CACHE_STAGE = "verify_cross"
 
 _VERDICT_MAP = {
     "CONFIRMED": "VERIFIED",
@@ -83,12 +92,18 @@ _FATAL_STATUSES = frozenset({401, 403})
 
 
 def default_verify_model() -> str:
-    """Model for the verification pass — Opus 4.8 by default (owner preference),
-    overridable via ``DRAWING_ANALYZER_VERIFY_MODEL``."""
-    override = os.environ.get("DRAWING_ANALYZER_VERIFY_MODEL")
-    if override and override.strip():
-        return override.strip()
-    return REVIEW_MODEL_DEFAULT
+    """Resolve the model used by the crop-verification pass.
+
+    ``VERIFICATION_MODEL_DEFAULT`` is the centralized Sonnet-first policy and
+    honors ``DRAWING_ANALYZER_VERIFICATION_MODEL`` when configuration is loaded.
+    ``DRAWING_ANALYZER_VERIFY_MODEL`` predates that centralized name; keep it as
+    a higher-precedence compatibility alias so existing deployments do not
+    silently change models.
+    """
+    legacy_override = os.environ.get("DRAWING_ANALYZER_VERIFY_MODEL")
+    if legacy_override and legacy_override.strip():
+        return legacy_override.strip()
+    return VERIFICATION_MODEL_DEFAULT
 
 
 VERIFY_SYSTEM_PROMPT = """\
@@ -152,6 +167,24 @@ def context_rect(
     return [nx0, ny0, nx1, ny1]
 
 
+def _parse_verdict_with_validity(text: str) -> tuple[str, str, bool]:
+    """Return ``(status, note, valid_model_verdict)``.
+
+    The public parser intentionally degrades malformed output to ``UNCERTAIN``.
+    Caching must distinguish that failure from a valid ``NOT_VISIBLE`` verdict,
+    because only the latter is a complete reusable result.
+    """
+    obj = _tolerant_json_object(text)
+    if not isinstance(obj, dict):
+        return "UNCERTAIN", "unparseable verdict", False
+    raw = str(obj.get("verdict", "")).strip().upper()
+    note = str(obj.get("note", "")).strip()[:200]
+    mapped = _VERDICT_MAP.get(raw)
+    if mapped is None:
+        return "UNCERTAIN", note or f"unrecognized verdict {raw!r}", False
+    return mapped, note, True
+
+
 def parse_verdict(text: str) -> tuple[str, str]:
     """Map a model verdict response to ``(verification_status, note)``.
 
@@ -159,15 +192,8 @@ def parse_verdict(text: str) -> tuple[str, str]:
     verdict degrades to ``UNCERTAIN`` (never ``REJECTED`` — we must not cloud a
     finding as wrong on a garbled answer) and is logged by the caller.
     """
-    obj = _tolerant_json_object(text)
-    if not isinstance(obj, dict):
-        return "UNCERTAIN", "unparseable verdict"
-    raw = str(obj.get("verdict", "")).strip().upper()
-    note = str(obj.get("note", "")).strip()[:200]
-    mapped = _VERDICT_MAP.get(raw)
-    if mapped is None:
-        return "UNCERTAIN", note or f"unrecognized verdict {raw!r}"
-    return mapped, note
+    status, note, _valid = _parse_verdict_with_validity(text)
+    return status, note
 
 
 def _build_request(finding: Finding, crop_png: bytes, model: str) -> dict[str, Any]:
@@ -193,6 +219,133 @@ def _build_request(finding: Finding, crop_png: bytes, model: str) -> dict[str, A
         "system": VERIFY_SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": content}],
     }
+
+
+def _cacheable_request_content(
+    request: dict[str, Any], crop_sha256s: list[str],
+) -> list[dict[str, Any]]:
+    """Canonicalize the exact model-visible content without persisting images."""
+    content = ((request.get("messages") or [{}])[0].get("content") or [])
+    out: list[dict[str, Any]] = []
+    image_index = 0
+    for block in content:
+        if not isinstance(block, dict):
+            # Current request builders emit dictionaries only. Keeping an
+            # explicit marker makes a future unexpected shape miss safely.
+            out.append({"type": "unsupported", "python_type": type(block).__name__})
+            continue
+        if block.get("type") == "image":
+            sha = crop_sha256s[image_index] if image_index < len(crop_sha256s) else ""
+            source = block.get("source") if isinstance(block.get("source"), dict) else {}
+            out.append({
+                "type": "image",
+                "media_type": source.get("media_type", "image/png"),
+                "sha256": sha,
+            })
+            image_index += 1
+        else:
+            # Text blocks are already JSON-shaped and small; retain every field
+            # so a wording or future request-shape change invalidates the entry.
+            out.append(dict(block))
+    return out
+
+
+def _computation_cache_metadata(finding: Finding) -> dict[str, Any]:
+    verification = finding.verification
+    return {
+        "computation_method": str(
+            getattr(verification, "computation_method", "") or ""
+        ),
+        "operand_origin": str(getattr(verification, "operand_origin", "") or ""),
+    }
+
+
+def _single_verify_cache_key(
+    finding: Finding,
+    sheet: Any,
+    crop_png: bytes,
+    crop_rect: list[float] | None,
+    *,
+    dpi: int,
+    model: str,
+) -> str:
+    """Key every model-visible and source/geometry-shaping single-crop input."""
+    crop_sha = hashlib.sha256(crop_png).hexdigest()
+    request = _build_request(finding, crop_png, model)
+    sheet_ref = getattr(sheet, "ref", None)
+    anchor = finding.anchor
+    return stage_cache_key(
+        _VERIFY_CACHE_STAGE,
+        model=model,
+        prompt={"version": VERIFY_PROMPT_VERSION, "system": VERIFY_SYSTEM_PROMPT},
+        inputs={
+            "request_content": _cacheable_request_content(request, [crop_sha]),
+            "finding": {
+                "text": finding.text,
+                "source_quote": finding.source_quote,
+                "category": finding.category,
+                "severity": finding.severity,
+                "sheet_id": finding.sheet_id,
+                "source_id": finding.source_id,
+                "source_name": finding.source_name,
+                "page_index": int(finding.page_index),
+                "source_page_key": list(source_page_key(finding)),
+                "anchor_status": getattr(anchor, "status", ""),
+                "anchor_method": getattr(anchor, "method", ""),
+                "anchor_rect": list(anchor.rect_pdf) if anchor and anchor.rect_pdf else None,
+                "computation": _computation_cache_metadata(finding),
+            },
+            "resolved_sheet": {
+                "source_id": getattr(sheet_ref, "source_id", "") or "",
+                "source_name": getattr(sheet_ref, "source_name", "") or "",
+                "page_index": int(getattr(sheet_ref, "page_index", 0) or 0),
+                "page_count": int(getattr(sheet_ref, "page_count", 0) or 0),
+            },
+            "crop_rect": list(crop_rect) if crop_rect is not None else None,
+            "dpi": int(dpi),
+            "crop_sha256": crop_sha,
+        },
+        params={
+            "max_tokens": DEFAULT_VERIFY_MAX_TOKENS,
+            "verdict_map": dict(sorted(_VERDICT_MAP.items())),
+        },
+    )
+
+
+def _verification_from_cache_payload(
+    payload: dict | None,
+    artifacts: list[EvidenceArtifact],
+) -> Verification | None:
+    """Strictly admit only complete terminal model verdict payloads."""
+    if not isinstance(payload, dict) or payload.get("valid_model_verdict") is not True:
+        return None
+    status = str(payload.get("status", "") or "")
+    note = payload.get("note", "")
+    if status not in _CACHEABLE_MODEL_STATUSES or not isinstance(note, str):
+        return None
+    return Verification(status=status, note=note[:200], evidence=list(artifacts))
+
+
+def _cache_verification(
+    cache: Any,
+    key: str,
+    *,
+    stage: str,
+    verification: Verification,
+) -> None:
+    """Persist only a valid terminal model verdict, never evidence paths."""
+    if verification.status not in _CACHEABLE_MODEL_STATUSES:
+        return
+    put_stage_cache_entry(
+        cache,
+        key,
+        stage=stage,
+        payload={
+            "valid_model_verdict": True,
+            "status": verification.status,
+            "note": verification.note,
+        },
+    )
 
 
 CropRenderer = Callable[
@@ -365,12 +518,13 @@ def _verify_one(
     max_retries: int,
     sleep: Any,
     fatal: threading.Event,
-) -> tuple[Verification, int, int]:
+) -> tuple[Verification, int, int, bool]:
     """One verify call (runs on the pool). Never raises.
 
-    Always returns ``(verification, input_tokens, output_tokens)`` — tokens are 0
-    on a failure path. The verdict carries the exact evidence ``artifacts`` that
-    were sent (the crop it judged), so the saved trail matches the request.
+    Always returns ``(verification, input_tokens, output_tokens, cacheable)``.
+    Tokens are 0 and ``cacheable`` is false on a failure path. The verdict carries
+    the exact evidence ``artifacts`` that were sent (the crop it judged), so the
+    saved trail matches the request.
     """
     kwargs = _build_request(finding, crop_png, model)
     attempt = 0
@@ -386,22 +540,30 @@ def _verify_one(
             note = _clean_error(exc)
             if _error_status(exc) in _FATAL_STATUSES:
                 fatal.set()
-                return Verification(status="SKIPPED", note=note, evidence=list(artifacts)), 0, 0
+                return Verification(status="SKIPPED", note=note, evidence=list(artifacts)), 0, 0, False
             # Permanent, non-fatal (e.g. 400): keep the finding but stay uncertain.
             _log.warning("verify finding %s failed: %s", finding.id, note)
-            return Verification(status="UNCERTAIN", note=note, evidence=list(artifacts)), 0, 0
+            return Verification(status="UNCERTAIN", note=note, evidence=list(artifacts)), 0, 0, False
 
-    status, note = parse_verdict(_message_text(resp))
+    status, note, valid_model_verdict = _parse_verdict_with_validity(_message_text(resp))
     in_tok, out_tok = _message_usage(resp)
     if note == "unparseable verdict" or note.startswith("unrecognized verdict"):
         _log.info("verify finding %s: %s", finding.id, note)
-    return Verification(status=status, note=note, evidence=list(artifacts)), in_tok, out_tok
+    return (
+        Verification(status=status, note=note, evidence=list(artifacts)),
+        in_tok,
+        out_tok,
+        valid_model_verdict,
+    )
 
 
 class VerifyResult:
     """Lightweight tally of a verification pass."""
 
-    __slots__ = ("verified", "rejected", "uncertain", "skipped", "input_tokens", "output_tokens")
+    __slots__ = (
+        "verified", "rejected", "uncertain", "skipped",
+        "input_tokens", "output_tokens", "cache_hits", "cache_misses", "api_calls",
+    )
 
     def __init__(self) -> None:
         self.verified = 0
@@ -410,6 +572,9 @@ class VerifyResult:
         self.skipped = 0
         self.input_tokens = 0
         self.output_tokens = 0
+        self.cache_hits = 0
+        self.cache_misses = 0
+        self.api_calls = 0
 
     def _count(self, status: str) -> None:
         attr = {
@@ -446,6 +611,7 @@ def verify_findings(
     sleep: Any = time.sleep,
     progress: Callable[[int, int, str], None] | None = None,
     crop_renderer: CropRenderer | None = None,
+    cache: Any = None,
 ) -> VerifyResult:
     """Verify each anchored, non-deterministic finding (mutates ``verification``).
 
@@ -491,25 +657,15 @@ def verify_findings(
     if not items:
         return result
 
-    if client is None:
-        try:
-            from .client import get_client as _get_client
-
-            client = _get_client()
-        except Exception as exc:  # noqa: BLE001 - no key etc. -> skip the whole pass
-            note = _clean_error(exc)
-            for f, _s, _r, _d in items:
-                f.verification = Verification(status="SKIPPED", note=note)
-                result._count("SKIPPED")
-            _log.warning("verification skipped (client unavailable): %s", note)
-            return result
-
     renderer = crop_renderer or _default_crop_renderer
     workers = _resolve_workers(max_workers, len(items))
     fatal = threading.Event()
     total = len(items)
     done = 0
     used_evidence_names: set[str] = set()
+    resolved_client = client
+    client_resolution_attempted = client is not None
+    client_unavailable_note = ""
     # id(finding) -> (sheet, crop_rect, dpi) so the yielded crop can be tagged with
     # the geometry it came from when its EvidenceArtifact is built.
     meta = {id(f): (sheet, rect, dpi) for (f, sheet, rect, dpi) in items}
@@ -521,9 +677,14 @@ def verify_findings(
             nonlocal done
             finished, _ = wait(in_flight, return_when=FIRST_COMPLETED)
             for fut in finished:
-                finding, dir_name = in_flight.pop(fut)
-                verification, in_tok, out_tok = fut.result()
+                finding, dir_name, cache_key = in_flight.pop(fut)
+                verification, in_tok, out_tok, cacheable = fut.result()
                 finding.verification = verification
+                if cacheable and cache_key:
+                    _cache_verification(
+                        cache, cache_key, stage=_VERIFY_CACHE_STAGE,
+                        verification=verification,
+                    )
                 # Save the audit trail (request.json) once the verdict is known.
                 _write_evidence_request(evidence_dir, dir_name, finding, verification, model)
                 result._count(verification.status)
@@ -537,14 +698,6 @@ def verify_findings(
         try:
             for finding, crop_png in renderer(items):
                 handled.add(id(finding))
-                if fatal.is_set():
-                    # A fatal failure already surfaced: skip the rest without calling.
-                    finding.verification = Verification(
-                        status="SKIPPED", note="verification aborted (auth failure)"
-                    )
-                    result._count("SKIPPED")
-                    done += 1
-                    continue
                 if crop_png is None:
                     finding.verification = Verification(
                         status="SKIPPED", note="crop render failed"
@@ -572,13 +725,70 @@ def verify_findings(
                     result._count("SKIPPED")
                     done += 1
                     continue
+                artifacts = [artifact] if artifact is not None else []
+                cache_key = ""
+                if cache is not None:
+                    cache_key = _single_verify_cache_key(
+                        finding, sheet, crop_png, crop_rect,
+                        dpi=dpi_used, model=model,
+                    )
+                    payload = get_stage_cache_entry(
+                        cache, cache_key, stage=_VERIFY_CACHE_STAGE,
+                    )
+                    cached = _verification_from_cache_payload(payload, artifacts)
+                    if cached is not None:
+                        finding.verification = cached
+                        _write_evidence_request(
+                            evidence_dir, dir_name, finding, cached, model,
+                        )
+                        result._count(cached.status)
+                        result.cache_hits += 1
+                        done += 1
+                        if progress is not None:
+                            progress(done, total, f"Verifying finding {done}/{total}")
+                        continue
+                    result.cache_misses += 1
+
+                # A cached verdict remains usable after an auth failure, but an
+                # uncached request must not be submitted once the pass is doomed.
+                if fatal.is_set():
+                    finding.verification = Verification(
+                        status="SKIPPED", note="verification aborted (auth failure)",
+                        evidence=artifacts,
+                    )
+                    result._count("SKIPPED")
+                    done += 1
+                    continue
+
+                if resolved_client is None and not client_resolution_attempted:
+                    client_resolution_attempted = True
+                    try:
+                        from .client import get_client as _get_client
+
+                        resolved_client = _get_client()
+                    except Exception as exc:  # noqa: BLE001 - no key etc. -> skip misses
+                        client_unavailable_note = _clean_error(exc)
+                        _log.warning(
+                            "verification skipped (client unavailable): %s",
+                            client_unavailable_note,
+                        )
+                if resolved_client is None:
+                    finding.verification = Verification(
+                        status="SKIPPED",
+                        note=client_unavailable_note or "verification client unavailable",
+                        evidence=artifacts,
+                    )
+                    result._count("SKIPPED")
+                    done += 1
+                    continue
                 fut = executor.submit(
                     _verify_one, finding, crop_png,
-                    [artifact] if artifact is not None else [],
-                    client=client, model=model, max_retries=max_retries,
+                    artifacts,
+                    client=resolved_client, model=model, max_retries=max_retries,
                     sleep=sleep, fatal=fatal,
                 )
-                in_flight[fut] = (finding, dir_name)
+                result.api_calls += 1
+                in_flight[fut] = (finding, dir_name, cache_key)
                 while len(in_flight) >= workers:
                     _collect_one()
         except Exception as exc:  # noqa: BLE001 - a renderer error must not sink the pass (I-3)
@@ -654,12 +864,58 @@ def _build_dual_request(finding: Finding, labeled_crops: list, model: str) -> di
     }
 
 
-def _verify_cross_one(
+def _cross_verify_cache_key(
+    finding: Finding,
+    request: dict[str, Any],
+    legs: list[dict[str, Any]],
+    *,
+    model: str,
+) -> str:
+    """Key the exact ordered dual-crop request and every source/geometry input."""
+    crop_hashes = [str(leg.get("crop_sha256", "")) for leg in legs]
+    return stage_cache_key(
+        _VERIFY_CROSS_CACHE_STAGE,
+        model=model,
+        prompt={"version": VERIFY_PROMPT_VERSION, "system": VERIFY_SYSTEM_PROMPT},
+        inputs={
+            "request_content": _cacheable_request_content(request, crop_hashes),
+            "finding": {
+                "text": finding.text,
+                "source_quote": finding.source_quote,
+                "category": finding.category,
+                "severity": finding.severity,
+                "sheet_id": finding.sheet_id,
+                "source_id": finding.source_id,
+                "source_name": finding.source_name,
+                "page_index": int(finding.page_index),
+                "computation": _computation_cache_metadata(finding),
+            },
+            # Ordered exactly as images appear in the model request.
+            "legs": legs,
+        },
+        params={
+            "max_tokens": DEFAULT_VERIFY_MAX_TOKENS,
+            "verdict_map": dict(sorted(_VERDICT_MAP.items())),
+        },
+    )
+
+
+@dataclass
+class _PreparedCrossVerification:
+    """Fully rendered/saved cross-finding request, safe for a model worker."""
+
+    finding: Finding
+    kwargs: dict[str, Any]
+    artifacts: list[EvidenceArtifact]
+    dir_name: str
+    cache_key: str
+
+
+def _prepare_cross_one(
     finding: Finding, lookup: dict, ambiguous: set, *,
-    client: Any, model: str, evidence_dir: Path | None, dpi: int,
-    max_retries: int, sleep: Any, used: set,
-) -> tuple[Verification, int, int]:
-    """Render the primary + each anchored leg's crop and ask one verdict. Never raises.
+    model: str, evidence_dir: Path | None, dpi: int, used: set,
+) -> tuple[Verification | None, _PreparedCrossVerification | None]:
+    """Sequentially render and save every leg before any worker call begins.
 
     DA-016: every leg crop is saved and hashed *before* it is sent, and only saved
     crops are sent — so the evidence trail (one PNG per leg + ``request.json``)
@@ -668,10 +924,12 @@ def _verify_cross_one(
     the finding degrades to ``SKIPPED`` with a precise missing-leg reason (§16.6).
     """
     dir_name = _reserve_evidence_dir(finding, used)
-    # (leg_index, source_page_key, page_index, anchor_rect, sheet_id, quote, source_id, source_name)
+    # (leg_index, source_page_key, page_index, anchor_rect, sheet_id, quote,
+    #  source_id, source_name, anchor_status, anchor_method)
     legs: list[tuple] = [(
         0, source_page_key(finding), finding.page_index, finding.anchor.rect_pdf,
         finding.sheet_id, finding.source_quote, finding.source_id, finding.source_name,
+        finding.anchor.status, finding.anchor.method,
     )]
     li = 1
     for leg in finding.also_on:
@@ -679,12 +937,16 @@ def _verify_cross_one(
             legs.append((
                 li, source_page_key(leg), leg.page_index, leg.anchor.rect_pdf,
                 leg.sheet_id, leg.source_quote, leg.source_id, leg.source_name,
+                leg.anchor.status, leg.anchor.method,
             ))
             li += 1
 
     missing: list[str] = []
-    plans: list[tuple] = []   # (leg_index, sheet, page_index, anchor_rect, crop_rect, sid, quote, src_id, src_name)
-    for leg_index, key, page_index, rect, sid, quote, src_id, src_name in legs:
+    plans: list[tuple] = []
+    for (
+        leg_index, key, page_index, rect, sid, quote, src_id, src_name,
+        anchor_status, anchor_method,
+    ) in legs:
         if key in ambiguous:
             missing.append(f"{sid} (ambiguous)")
             continue
@@ -695,19 +957,25 @@ def _verify_cross_one(
         pw = float(getattr(sheet, "page_width_pt", 0.0) or 0.0)
         ph = float(getattr(sheet, "page_height_pt", 0.0) or 0.0)
         crop_rect = context_rect(rect, pw, ph)
-        plans.append((leg_index, sheet, page_index, rect, crop_rect, sid, quote, src_id, src_name))
+        plans.append((
+            leg_index, sheet, page_index, rect, crop_rect, sid, quote,
+            src_id, src_name, key, anchor_status, anchor_method,
+        ))
 
     if len(plans) < 2:
         note = f"cross-sheet crops unavailable (resolved {len(plans)} of {len(legs)} legs)"
         if missing:
             note += " (missing: " + ", ".join(missing) + ")"
-        return Verification(status="SKIPPED", note=note), 0, 0
+        return Verification(status="SKIPPED", note=note), None
 
     crops = _render_leg_crops([(p[1].ref.pdf_path, p[2], p[4]) for p in plans], dpi)
 
-    kept: list[tuple] = []    # (label, crop_png, artifact_or_None)
+    kept: list[tuple] = []    # (label, crop_png, artifact_or_None, cache_leg)
     for i, plan in enumerate(plans):
-        leg_index, sheet, page_index, anchor_rect, crop_rect, sid, quote, src_id, src_name = plan
+        (
+            leg_index, sheet, page_index, anchor_rect, crop_rect, sid, quote,
+            src_id, src_name, key, anchor_status, anchor_method,
+        ) = plan
         crop = crops[i]
         label = f"Sheet {sid} crop" + (f' (quoted "{quote.strip()}")' if quote.strip() else "") + ":"
         if crop is None:
@@ -722,24 +990,60 @@ def _verify_cross_one(
             # Requested but not durably saved — don't send this leg (§16.6).
             missing.append(f"{sid} (evidence not saved)")
             continue
-        kept.append((label, crop, artifact))
+        sheet_ref = getattr(sheet, "ref", None)
+        cache_leg = {
+            "leg_index": int(leg_index),
+            "label": label,
+            "sheet_id": sid,
+            "source_id": src_id,
+            "source_name": src_name,
+            "page_index": int(page_index),
+            "source_page_key": list(key),
+            "anchor_status": anchor_status,
+            "anchor_method": anchor_method,
+            "anchor_rect": list(anchor_rect) if anchor_rect else None,
+            "crop_rect": list(crop_rect) if crop_rect else None,
+            "dpi": int(dpi),
+            "crop_sha256": hashlib.sha256(crop).hexdigest(),
+            "resolved_sheet": {
+                "source_id": getattr(sheet_ref, "source_id", "") or "",
+                "source_name": getattr(sheet_ref, "source_name", "") or "",
+                "page_index": int(getattr(sheet_ref, "page_index", 0) or 0),
+                "page_count": int(getattr(sheet_ref, "page_count", 0) or 0),
+            },
+        }
+        kept.append((label, crop, artifact, cache_leg))
 
     if len(kept) < 2:
         note = f"cross-sheet evidence incomplete: {len(kept)} crop(s) available; need >=2"
         if missing:
             note += " (missing: " + ", ".join(missing) + ")"
-        return Verification(status="SKIPPED", note=note), 0, 0
+        return Verification(status="SKIPPED", note=note), None
 
-    artifacts = [a for (_l, _c, a) in kept if a is not None]
+    artifacts = [a for (_l, _c, a, _leg) in kept if a is not None]
     for order, art in enumerate(artifacts, 1):
         art.request_order = order   # position in the request actually sent
 
-    labeled = [(label, crop) for (label, crop, _a) in kept]
+    labeled = [(label, crop) for (label, crop, _a, _leg) in kept]
     kwargs = _build_dual_request(finding, labeled, model)
+    cache_key = _cross_verify_cache_key(
+        finding, kwargs, [leg for (_l, _c, _a, leg) in kept], model=model,
+    )
+    return None, _PreparedCrossVerification(
+        finding=finding, kwargs=kwargs, artifacts=artifacts, dir_name=dir_name,
+        cache_key=cache_key,
+    )
+
+
+def _call_prepared_cross(
+    prepared: _PreparedCrossVerification, *,
+    client: Any, max_retries: int, sleep: Any,
+) -> tuple[Verification, int, int, bool]:
+    """Run only the independent model call; rendering has already completed."""
     attempt = 0
     while True:
         try:
-            resp = client.messages.create(**kwargs)
+            resp = client.messages.create(**prepared.kwargs)
             break
         except Exception as exc:  # noqa: BLE001 - degrade, never raise
             if _is_transient_error(exc) and attempt < max_retries:
@@ -747,16 +1051,40 @@ def _verify_cross_one(
                 attempt += 1
                 continue
             note = _clean_error(exc)
-            _log.warning("cross-verify finding %s failed: %s", finding.id, note)
-            v = Verification(status="UNCERTAIN", note=note, evidence=artifacts)
-            _write_evidence_request(evidence_dir, dir_name, finding, v, model)
-            return v, 0, 0
+            _log.warning(
+                "cross-verify finding %s failed: %s", prepared.finding.id, note
+            )
+            v = Verification(
+                status="UNCERTAIN", note=note, evidence=prepared.artifacts
+            )
+            return v, 0, 0, False
 
-    status, note = parse_verdict(_message_text(resp))
+    status, note, valid_model_verdict = _parse_verdict_with_validity(_message_text(resp))
     in_tok, out_tok = _message_usage(resp)
-    v = Verification(status=status, note=note, evidence=artifacts)
-    _write_evidence_request(evidence_dir, dir_name, finding, v, model)
-    return v, in_tok, out_tok
+    v = Verification(status=status, note=note, evidence=prepared.artifacts)
+    return v, in_tok, out_tok, valid_model_verdict
+
+
+def _verify_cross_one(
+    finding: Finding, lookup: dict, ambiguous: set, *,
+    client: Any, model: str, evidence_dir: Path | None, dpi: int,
+    max_retries: int, sleep: Any, used: set,
+) -> tuple[Verification, int, int]:
+    """Compatibility wrapper for a single sequential cross verification."""
+    immediate, prepared = _prepare_cross_one(
+        finding, lookup, ambiguous, model=model, evidence_dir=evidence_dir,
+        dpi=dpi, used=used,
+    )
+    if immediate is not None:
+        return immediate, 0, 0
+    assert prepared is not None
+    verification, in_tok, out_tok, _cacheable = _call_prepared_cross(
+        prepared, client=client, max_retries=max_retries, sleep=sleep,
+    )
+    _write_evidence_request(
+        evidence_dir, prepared.dir_name, finding, verification, model,
+    )
+    return verification, in_tok, out_tok
 
 
 def verify_cross_findings(
@@ -768,15 +1096,20 @@ def verify_cross_findings(
     evidence_dir: Path | None = None,
     dpi: int = 300,
     max_retries: int = DEFAULT_DIGEST_MAX_RETRIES,
+    max_workers: int | None = None,
     sleep: Any = time.sleep,
     progress: Callable[[int, int, str], None] | None = None,
+    cache: Any = None,
 ) -> VerifyResult:
     """Verify cross-sheet findings with **one crop per leg in a single call** (Phase
     13), so the verifier sees every side and can actually judge the conflict —
     unlike the single-crop pass, which for a cross-sheet claim can only say
     NOT_VISIBLE. Only findings with an anchored primary *and* >=1 anchored leg are
-    handled (the rest fall to the single-crop pass or stay SKIPPED). Sequential
-    (cross findings are few); never raises (I-3)."""
+    handled (the rest fall to the single-crop pass or stay SKIPPED). Crop
+    rendering and evidence persistence remain sequential; only the independent
+    model calls use the existing bounded worker policy. Results are attached and
+    progress emitted in input order, independent of completion order. Never
+    raises (I-3)."""
     result = VerifyResult()
     dual = [f for f in findings if _has_anchored_legs(f)]
     if not dual:
@@ -784,33 +1117,118 @@ def verify_cross_findings(
     model = model or default_verify_model()
     lookup, ambiguous = _sheet_lookup(sheets)
 
-    if client is None:
+    total = len(dual)
+    used: set = set()
+    outcomes: list[tuple[Verification, int, int] | None] = [None] * total
+    all_prepared: dict[int, _PreparedCrossVerification] = {}
+    misses_by_index: dict[int, _PreparedCrossVerification] = {}
+
+    # PyMuPDF-backed crop rendering stays on the calling thread, in deterministic
+    # finding order. Only after every request's exact evidence is stable do model
+    # calls enter the worker pool.
+    for index, finding in enumerate(dual):
+        immediate, prepared = _prepare_cross_one(
+            finding, lookup, ambiguous, model=model,
+            evidence_dir=evidence_dir, dpi=dpi, used=used,
+        )
+        if immediate is not None:
+            outcomes[index] = (immediate, 0, 0)
+        elif prepared is not None:
+            all_prepared[index] = prepared
+            cached: Verification | None = None
+            if cache is not None:
+                payload = get_stage_cache_entry(
+                    cache, prepared.cache_key, stage=_VERIFY_CROSS_CACHE_STAGE,
+                )
+                cached = _verification_from_cache_payload(
+                    payload, prepared.artifacts,
+                )
+                if cached is not None:
+                    result.cache_hits += 1
+                else:
+                    result.cache_misses += 1
+            if cached is not None:
+                outcomes[index] = (cached, 0, 0)
+            else:
+                misses_by_index[index] = prepared
+
+    resolved_client = client
+    if misses_by_index and resolved_client is None:
         try:
             from .client import get_client as _get_client
 
-            client = _get_client()
-        except Exception as exc:  # noqa: BLE001 - no key etc. → skip the pass
+            resolved_client = _get_client()
+        except Exception as exc:  # noqa: BLE001 - cache hits remain usable
             note = _clean_error(exc)
-            for f in dual:
-                f.verification = Verification(status="SKIPPED", note=note)
-                result._count("SKIPPED")
             _log.warning("cross-verification skipped (client unavailable): %s", note)
-            return result
+            for index, prepared in misses_by_index.items():
+                outcomes[index] = (
+                    Verification(
+                        status="SKIPPED", note=note,
+                        evidence=prepared.artifacts,
+                    ),
+                    0,
+                    0,
+                )
 
-    used: set = set()
-    total = len(dual)
-    for i, f in enumerate(dual, 1):
-        verification, in_tok, out_tok = _verify_cross_one(
-            f, lookup, ambiguous, client=client, model=model,
-            evidence_dir=evidence_dir, dpi=dpi, max_retries=max_retries,
-            sleep=sleep, used=used,
-        )
+    workers = _resolve_workers(max_workers, max(1, len(misses_by_index)))
+    if misses_by_index and resolved_client is not None:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            submitted = [
+                (
+                    index,
+                    prepared,
+                    executor.submit(
+                        _call_prepared_cross, prepared, client=resolved_client,
+                        max_retries=max_retries, sleep=sleep,
+                    ),
+                )
+                for index, prepared in misses_by_index.items()
+            ]
+            result.api_calls += len(submitted)
+            # Futures are resolved in input order for deterministic attachment;
+            # they were all submitted first, so their API calls still overlap.
+            for index, prepared, future in submitted:
+                try:
+                    verification, in_tok, out_tok, cacheable = future.result()
+                    outcomes[index] = (verification, in_tok, out_tok)
+                    if cacheable:
+                        _cache_verification(
+                            cache, prepared.cache_key,
+                            stage=_VERIFY_CROSS_CACHE_STAGE,
+                            verification=verification,
+                        )
+                except Exception as exc:  # noqa: BLE001 - defensive, never sink QC
+                    note = _clean_error(exc)
+                    _log.warning(
+                        "cross-verify finding %s worker failed: %s",
+                        prepared.finding.id, note,
+                    )
+                    outcomes[index] = (
+                        Verification(
+                            status="UNCERTAIN", note=note,
+                            evidence=prepared.artifacts,
+                        ),
+                        0,
+                        0,
+                    )
+
+    for index, f in enumerate(dual):
+        outcome = outcomes[index]
+        if outcome is None:  # defensive: preparation should always resolve one path
+            outcome = (Verification(status="SKIPPED", note="cross verification unavailable"), 0, 0)
+        verification, in_tok, out_tok = outcome
+        prepared = all_prepared.get(index)
+        if prepared is not None:
+            _write_evidence_request(
+                evidence_dir, prepared.dir_name, f, verification, model,
+            )
         f.verification = verification
         result._count(verification.status)
         result.input_tokens += in_tok
         result.output_tokens += out_tok
         if progress is not None:
-            progress(i, total, f"Verifying conflict {i}/{total}")
+            progress(index + 1, total, f"Verifying conflict {index + 1}/{total}")
 
     _log.info(
         "cross-verification: %d verified, %d rejected, %d uncertain, %d skipped",

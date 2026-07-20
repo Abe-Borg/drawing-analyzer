@@ -41,7 +41,13 @@ from __future__ import annotations
 import copy
 from typing import Any, Iterable
 
-from .critique import _is_duplicate, _most_severe, _normalize, _severity_rank
+from .critique import (
+    _is_duplicate,
+    _most_severe,
+    _normalize,
+    _norm_tokens,
+    _severity_rank,
+)
 from .diagnostics import get_logger
 from .models import (
     CONFIDENCE_NOT_APPLICABLE,
@@ -149,6 +155,16 @@ class Ledger:
         # member wins — the live object would otherwise erase the earlier member's
         # signature from this history. Runtime-only; never serialized.
         self._members: dict[int, list[Finding]] = {}
+        # Conservative per-sheet candidate indexes.  Every duplicate accepted by
+        # ``_is_duplicate`` either shares at least one normalized content token
+        # (its text-overlap branches) or the exact normalized source quote (its
+        # geometry branch).  Indexing those signals avoids comparing a new item
+        # with every unrelated finding while the unchanged final predicate below
+        # remains the authority.  Indexes retain every folded member's signals so
+        # complete-link history cannot become undiscoverable after a representative
+        # bundle changes.
+        self._token_index: dict[tuple[str, int], dict[str, set[int]]] = {}
+        self._quote_index: dict[tuple[str, int], dict[str, set[int]]] = {}
         self._state = OPEN
         self.post_seal_adds = 0
         self.merge_trace: list[dict] = []   # debug/run-metadata merge record (§12.2)
@@ -180,6 +196,40 @@ class Ledger:
 
     # ------------------------------------------------------------------ add
 
+    @staticmethod
+    def _candidate_signals(finding: Finding) -> tuple[set[str], str]:
+        tokens = _norm_tokens(finding.text or "") | _norm_tokens(
+            finding.source_quote or ""
+        )
+        return tokens, _normalize(finding.source_quote or "")
+
+    def _candidate_entries(
+        self, key: tuple[str, int], finding: Finding, bucket: list[Finding]
+    ) -> list[Finding]:
+        tokens, quote = self._candidate_signals(finding)
+        if not tokens and not quote:
+            return bucket
+        ids: set[int] = set()
+        token_index = self._token_index.get(key, {})
+        for token in tokens:
+            ids.update(token_index.get(token, ()))
+        if quote:
+            ids.update(self._quote_index.get(key, {}).get(quote, ()))
+        # Preserve historical bucket order: the first complete-link match still
+        # wins, independent of dict/set ordering (I-7).
+        return [entry for entry in bucket if id(entry) in ids]
+
+    def _index_member(
+        self, key: tuple[str, int], survivor: Finding, member: Finding
+    ) -> None:
+        tokens, quote = self._candidate_signals(member)
+        sid = id(survivor)
+        token_index = self._token_index.setdefault(key, {})
+        for token in tokens:
+            token_index.setdefault(token, set()).add(sid)
+        if quote:
+            self._quote_index.setdefault(key, {}).setdefault(quote, set()).add(sid)
+
     def add(self, findings: Iterable[Finding], source: str = "") -> None:
         """Ingest ``findings``, tagging provenance and merging duplicates.
 
@@ -199,7 +249,7 @@ class Ledger:
             # duplicate of ``finding`` (not merely the representative).
             existing = next(
                 (
-                    e for e in bucket
+                    e for e in self._candidate_entries(key, finding, bucket)
                     if all(_is_duplicate(finding, m) for m in self._members.get(id(e), (e,)))
                 ),
                 None,
@@ -208,6 +258,7 @@ class Ledger:
                 # Snapshot the incoming member BEFORE the merge mutates the survivor,
                 # so the complete-link history keeps every member's original signature.
                 self._members.setdefault(id(existing), []).append(copy.deepcopy(finding))
+                self._index_member(key, existing, finding)
                 _merge_into(existing, finding, self.merge_trace)
                 continue
             if self.sealed:
@@ -223,6 +274,7 @@ class Ledger:
             self._entries.append(finding)
             bucket.append(finding)
             self._members[id(finding)] = [copy.deepcopy(finding)]
+            self._index_member(key, finding, finding)
 
     # --------------------------------------------------------- seal / number
 
@@ -436,6 +488,35 @@ def reconcile_post_anchor(ledger: "Ledger") -> int:
         group.sort(key=_grounding_quality, reverse=True)
         survivors: list[Finding] = []
         members: dict[int, list[Finding]] = {}
+        token_index: dict[str, set[int]] = {}
+        quote_index: dict[str, set[int]] = {}
+
+        def _signals(finding: Finding) -> tuple[set[str], str]:
+            return (
+                _norm_tokens(finding.text or "")
+                | _norm_tokens(finding.source_quote or ""),
+                _normalize(finding.source_quote or ""),
+            )
+
+        def _index(survivor: Finding, member: Finding) -> None:
+            tokens, quote = _signals(member)
+            sid = id(survivor)
+            for token in tokens:
+                token_index.setdefault(token, set()).add(sid)
+            if quote:
+                quote_index.setdefault(quote, set()).add(sid)
+
+        def _candidates(finding: Finding) -> list[Finding]:
+            tokens, quote = _signals(finding)
+            if not tokens and not quote:
+                return survivors
+            ids: set[int] = set()
+            for token in tokens:
+                ids.update(token_index.get(token, ()))
+            if quote:
+                ids.update(quote_index.get(quote, ()))
+            return [survivor for survivor in survivors if id(survivor) in ids]
+
         for e in group:
             # Complete-link, like the ingest pass (§12.1): fold only into a survivor
             # whose EVERY already-folded member duplicates ``e``, so a signature-less
@@ -443,17 +524,22 @@ def reconcile_post_anchor(ledger: "Ledger") -> int:
             # M-102). ``e`` is worse-or-equal (best-first sort), so ``_merge_into``
             # keeps the survivor's bundle and never mutates its recorded members.
             match = next(
-                (s for s in survivors if all(_is_duplicate(e, m) for m in members[id(s)])),
+                (
+                    s for s in _candidates(e)
+                    if all(_is_duplicate(e, m) for m in members[id(s)])
+                ),
                 None,
             )
             if match is not None:
                 members[id(match)].append(e)
+                _index(match, e)
                 _merge_into(match, e, ledger.merge_trace)
                 ledger.drop_entry(e)
                 folded += 1
             else:
                 survivors.append(e)
                 members[id(e)] = [e]
+                _index(e, e)
     if folded:
         _log.info("post-anchor reconciliation folded %d duplicate finding(s)", folded)
     return folded

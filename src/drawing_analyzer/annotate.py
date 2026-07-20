@@ -79,7 +79,11 @@ receipt-derived coverage status/tally, and the reviewed-PDF paths.
 from __future__ import annotations
 
 import itertools
+import multiprocessing
+import os
+import pickle
 import uuid
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Iterator
@@ -106,6 +110,10 @@ _log = get_logger()
 
 # The annot author — provenance is unmistakable in the Markups List.
 DEFAULT_AUTHOR = "Drawing Analyzer (AI review)"
+DEFAULT_ANNOTATE_WORKERS = 2
+MAX_ANNOTATE_WORKERS = 4
+_ANNOTATE_WORKERS_ENV = "DRAWING_ANALYZER_ANNOTATE_WORKERS"
+_PROCESS_POOL_EXECUTOR = ProcessPoolExecutor
 # The index/appendix page label — same provenance rule. ASCII hyphen, not an
 # em-dash: insert_text's Base-14 fonts have no U+2014 glyph.
 INDEX_PAGE_LABEL = "AI DRAFT REVIEW - FINDINGS INDEX"
@@ -282,6 +290,30 @@ class _DrawUnit:
 
     finding: Finding
     placement: MarkupPlacement
+
+
+@dataclass
+class _ReviewedPdfJob:
+    """One source-local reviewed-PDF write, safe to pickle into a worker."""
+
+    pdf_path: Path
+    pairs: list[tuple[Finding, MarkupPlacement]]
+    out_path: Path
+    output_name: str
+    run_id: str
+    author: str
+    sheet_meta: dict[int, dict] | None
+    audit_stats: dict | None
+    include_appendix: bool
+
+
+@dataclass
+class _ReviewedPdfOutcome:
+    """Pickle-safe worker result; exception text is retained only for the log."""
+
+    receipts: list[MarkupReceipt]
+    error_type: str = ""
+    error_detail: str = ""
 
 
 def _scope_of(finding: Finding, leg_id: str) -> str:
@@ -1916,6 +1948,181 @@ def _annotate_units(
     return _reconcile_pdf(out, placements, run_id)
 
 
+def _execute_reviewed_pdf_job(job: _ReviewedPdfJob) -> _ReviewedPdfOutcome:
+    """Run one source-local write without allowing its failure to stop siblings."""
+    try:
+        receipts = _annotate_units(
+            job.pdf_path,
+            job.pairs,
+            job.out_path,
+            run_id=job.run_id,
+            author=job.author,
+            sheet_meta=job.sheet_meta,
+            audit_stats=job.audit_stats,
+            include_appendix=job.include_appendix,
+        )
+        return _ReviewedPdfOutcome(receipts=receipts)
+    except Exception as exc:  # noqa: BLE001 - source failures are non-fatal
+        return _ReviewedPdfOutcome(
+            receipts=[], error_type=type(exc).__name__, error_detail=str(exc)
+        )
+
+
+# A spawned process imports this module afresh, so a test-time monkeypatch or an
+# injected local callable would silently disappear in the child.  Remember every
+# module-local function that the writer can call and fall back to the exact old
+# in-process path if any of them has been replaced.  This also keeps fault-
+# injection tests honest (for example, a monkeypatched ``_add_cloud`` must run).
+_PROCESS_WORKER_FUNCTIONS = {
+    name: value
+    for name, value in globals().items()
+    if getattr(value, "__module__", None) == __name__
+    and getattr(value, "__code__", None) is not None
+}
+_PROCESS_WORKER_PYMUPDF_OPEN = pymupdf.open
+
+
+def _resolve_annotate_workers(max_workers: int | None, total: int) -> int:
+    """Resolve the bounded process count for independent source-PDF writes."""
+    if max_workers is None:
+        raw = os.environ.get(_ANNOTATE_WORKERS_ENV)
+        if raw:
+            try:
+                max_workers = int(raw.strip())
+            except ValueError:
+                max_workers = DEFAULT_ANNOTATE_WORKERS
+        else:
+            max_workers = DEFAULT_ANNOTATE_WORKERS
+    return min(
+        max(1, int(max_workers)),
+        MAX_ANNOTATE_WORKERS,
+        max(1, int(total)),
+    )
+
+
+def _process_worker_dependencies_pristine() -> bool:
+    """Whether a fresh spawned interpreter will execute the same writer code."""
+    if pymupdf.open is not _PROCESS_WORKER_PYMUPDF_OPEN:
+        return False
+    return all(
+        globals().get(name) is original
+        for name, original in _PROCESS_WORKER_FUNCTIONS.items()
+    )
+
+
+def _reviewed_pdf_jobs_are_picklable(jobs: list[_ReviewedPdfJob]) -> bool:
+    """Preflight every payload before any worker can create an output file."""
+    for job in jobs:
+        try:
+            pickle.dumps(job, protocol=pickle.HIGHEST_PROTOCOL)
+        except Exception as exc:  # noqa: BLE001 - custom payload => old safe path
+            _log.warning(
+                "reviewed-PDF payload for %s is not process-safe; "
+                "writing sequentially: %s",
+                job.pdf_path.name,
+                exc,
+            )
+            return False
+    return True
+
+
+def _future_failure_outcome(exc: Exception) -> _ReviewedPdfOutcome:
+    return _ReviewedPdfOutcome(
+        receipts=[], error_type=type(exc).__name__, error_detail=str(exc)
+    )
+
+
+def _run_reviewed_pdf_jobs(
+    jobs: list[_ReviewedPdfJob], *, max_workers: int | None
+) -> list[_ReviewedPdfOutcome]:
+    """Execute independent source jobs and return outcomes in input order.
+
+    PyMuPDF documents never cross a thread or process boundary: each spawned
+    worker opens, writes, closes, and reconciles one source using plain pickled
+    model data.  The parent retains all routing and artifact bookkeeping.
+    """
+    workers = _resolve_annotate_workers(max_workers, len(jobs))
+    if len(jobs) < 2 or workers == 1 or not _process_worker_dependencies_pristine():
+        return [_execute_reviewed_pdf_job(job) for job in jobs]
+    if not _reviewed_pdf_jobs_are_picklable(jobs):
+        return [_execute_reviewed_pdf_job(job) for job in jobs]
+
+    # ``spawn`` is intentional even on platforms whose default is ``fork``:
+    # inheriting PyMuPDF / MuPDF process state is not a safe isolation boundary.
+    context = multiprocessing.get_context("spawn")
+    try:
+        pool = _PROCESS_POOL_EXECUTOR(max_workers=workers, mp_context=context)
+    except Exception as exc:  # noqa: BLE001 - unavailable pool => safe old path
+        _log.warning(
+            "reviewed-PDF process pool unavailable; writing sequentially: %s", exc
+        )
+        return [_execute_reviewed_pdf_job(job) for job in jobs]
+
+    outcomes: list[_ReviewedPdfOutcome | None] = [None] * len(jobs)
+    futures: list[tuple[int, Any]] = []
+    output_absent_before = [not job.out_path.exists() for job in jobs]
+    future_failures: dict[int, _ReviewedPdfOutcome] = {}
+    first_unscheduled = len(jobs)
+    try:
+        for index, job in enumerate(jobs):
+            try:
+                futures.append((index, pool.submit(_execute_reviewed_pdf_job, job)))
+            except Exception as exc:  # noqa: BLE001 - keep other sources viable
+                first_unscheduled = index
+                _log.warning(
+                    "could not schedule reviewed-PDF worker for %s: %s",
+                    job.pdf_path.name,
+                    exc,
+                )
+                break
+
+        # Read futures in source order.  Workers still run concurrently, while
+        # receipts and output paths remain independent of completion timing.
+        for index, future in futures:
+            try:
+                outcomes[index] = future.result()
+            except Exception as exc:  # noqa: BLE001 - one source never sinks peers
+                future_failures[index] = _future_failure_outcome(exc)
+    finally:
+        try:
+            pool.shutdown(wait=True)
+        except Exception as exc:  # noqa: BLE001 - completed outcomes stay usable
+            _log.warning("could not cleanly stop reviewed-PDF workers: %s", exc)
+
+    # An executor / worker-boot failure is an optimization failure, not a review
+    # failure.  If the job began with no output and still created none, the old
+    # direct path is safe and preserves quality.  Once any output path exists it
+    # may be partial, so never rerun blindly; retain an honest FAILED outcome.
+    for index, failure in future_failures.items():
+        if output_absent_before[index] and not jobs[index].out_path.exists():
+            _log.warning(
+                "reviewed-PDF worker failed before creating %s; retrying "
+                "sequentially: %s",
+                jobs[index].output_name,
+                failure.error_detail or failure.error_type,
+            )
+            outcomes[index] = _execute_reviewed_pdf_job(jobs[index])
+        else:
+            outcomes[index] = failure
+
+    # If executor submission itself failed part-way through, only the sources
+    # that were never submitted use the old direct path.  Submitted jobs are
+    # never repeated, so a partial pool failure cannot double-write an artifact.
+    for index in range(first_unscheduled, len(jobs)):
+        outcomes[index] = _execute_reviewed_pdf_job(jobs[index])
+
+    return [
+        outcome
+        if outcome is not None
+        else _ReviewedPdfOutcome(
+            receipts=[],
+            error_type="ProcessPoolError",
+            error_detail="worker produced no terminal outcome",
+        )
+        for outcome in outcomes
+    ]
+
+
 def annotate_pdf(
     pdf_path: Path | str,
     findings: Iterable[Finding],
@@ -2000,6 +2207,7 @@ def write_reviewed_pdfs(
     include_appendix: bool = False,
     artifact_run_id: str | None = None,
     skip_source_ids: "set[str] | None" = None,
+    max_workers: int | None = None,
 ) -> MarkupRunResult:
     """Write one ``<stem>_reviewed.pdf`` per source with QC content, receipt-backed.
 
@@ -2025,6 +2233,12 @@ def write_reviewed_pdfs(
     unique; when two inputs share a stem, the colliding ones are disambiguated by
     their ``source_id`` (``<stem>__SRC-0002_reviewed.pdf``) — a deterministic,
     source-identifying suffix, not an order-dependent ``_2`` (§10.4).
+
+    Independent sources are written in isolated spawned processes (never
+    PyMuPDF threads), bounded by ``max_workers`` or
+    ``DRAWING_ANALYZER_ANNOTATE_WORKERS`` (default 2, hard cap 4). A one-source
+    run, ``max_workers=1``, or an injected writer callable uses the original
+    in-process path. Results are always folded in input-source order.
     """
     run_id = artifact_run_id or new_artifact_run_id()
     skip = set(skip_source_ids or [])
@@ -2096,6 +2310,7 @@ def write_reviewed_pdfs(
 
     used_names: set[str] = set()
     done_keys: set[str] = set()          # a source's units are written exactly once
+    jobs: list[_ReviewedPdfJob] = []
     for pdf_path in pdf_paths:
         sid = path_to_sid.get(str(pdf_path), "")
         key = sid or f"name::{pdf_path.name}"
@@ -2125,24 +2340,43 @@ def write_reviewed_pdfs(
             **meta_by_name.get(pdf_path.name, {}),
             **meta_by_source_id.get(sid, {}),   # source-id meta wins per page
         }
-        try:
-            receipts = _annotate_units(
-                pdf_path, pairs, out, run_id=run_id, author=author,
-                sheet_meta=sheet_meta or None,
-                audit_stats=audit_stats, include_appendix=include_appendix,
-            )
-        except Exception as exc:  # noqa: BLE001 - a source-level failure is non-fatal
+        jobs.append(_ReviewedPdfJob(
+            pdf_path=pdf_path,
+            pairs=pairs,
+            out_path=out,
+            output_name=name,
+            run_id=run_id,
+            author=author,
+            sheet_meta=sheet_meta or None,
+            audit_stats=audit_stats,
+            include_appendix=include_appendix,
+        ))
+
+    outcomes = _run_reviewed_pdf_jobs(jobs, max_workers=max_workers)
+    for job, outcome in zip(jobs, outcomes):
+        name = job.output_name
+        out = job.out_path
+        if outcome.error_type:
             # Receipt error carries only the exception TYPE (the raw message may
-            # embed an absolute source/temp path); full detail → private log.
-            _log.warning("could not write reviewed PDF for %s: %s", pdf_path.name, exc)
+            # embed an absolute source/temp path); full detail goes to the log.
+            _log.warning(
+                "could not write reviewed PDF for %s: %s",
+                job.pdf_path.name,
+                outcome.error_detail or outcome.error_type,
+            )
             receipts = [
-                MarkupReceipt(u.placement, "FAILED", output_pdf=name,
-                              error=f"reviewed-PDF write failed ({type(exc).__name__})")
-                for u in units
+                MarkupReceipt(
+                    placement,
+                    "FAILED",
+                    output_pdf=name,
+                    error=f"reviewed-PDF write failed ({outcome.error_type})",
+                )
+                for _, placement in job.pairs
             ]
             all_receipts.extend(receipts)
             continue
 
+        receipts = outcome.receipts
         # A source whose placements did not all succeed is labeled INCOMPLETE so it
         # is never mistaken for a complete reviewed set (§13.6).
         incomplete = any(not r.ok for r in receipts)

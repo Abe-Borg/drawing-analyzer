@@ -149,14 +149,50 @@ def test_drawing_estimate_no_focus_is_unchanged():
     )
 
 
-def test_drawing_estimate_batch_halves_cost():
-    full = estimate_drawing_set_cost(10, file_count=2, model=OPUS, batch=False)
-    batch = estimate_drawing_set_cost(10, file_count=2, model=OPUS, batch=True)
-    # Same token math; only the per-token rate is halved by the Batch discount.
+def test_drawing_estimate_batch_halves_digest_cost_only():
+    full = estimate_drawing_set_cost(
+        10, file_count=2, model=OPUS, batch=False, synthesize=False
+    )
+    batch = estimate_drawing_set_cost(
+        10, file_count=2, model=OPUS, batch=True, synthesize=False
+    )
+    # With no synchronous text pass, only the digest remains and halves exactly.
     assert batch.input_tokens == full.input_tokens
     assert batch.output_tokens == full.output_tokens
     assert batch.batch is True and full.batch is False
     assert batch.total_cost == pytest.approx(full.total_cost * BATCH_DISCOUNT)
+
+
+def test_drawing_estimate_batch_keeps_synthesis_at_realtime_rate():
+    without = estimate_drawing_set_cost(
+        10, model=OPUS, batch=True, synthesize=False
+    )
+    with_synthesis = estimate_drawing_set_cost(
+        10, model=OPUS, batch=True, synthesize=True
+    )
+    synth_input = 10 * OUT_PER_SHEET + PROMPT_PER_SHEET
+    expected_delta = estimate_request_cost(
+        synth_input, SYNTH_OUT, model=OPUS, batch=False
+    )
+    assert with_synthesis.total_cost - without.total_cost == pytest.approx(expected_delta)
+
+
+def test_drawing_estimate_batch_keeps_focus_report_at_realtime_rate():
+    # Compare against a digest-only estimate whose output includes the same
+    # focus sections; the remaining delta is the synchronous focus report.
+    focused = estimate_drawing_set_cost(
+        10, model=OPUS, batch=True, synthesize=False, focus=True
+    )
+    digest_input = focused.image_tokens + 10 * PROMPT_PER_SHEET
+    digest_output = 10 * (OUT_PER_SHEET + FOCUS_PER_SHEET)
+    digest_cost = estimate_request_cost(
+        digest_input, digest_output, model=OPUS, batch=True
+    )
+    focus_input = digest_output + PROMPT_PER_SHEET
+    focus_cost = estimate_request_cost(
+        focus_input, FOCUS_OUT, model=OPUS, batch=False
+    )
+    assert focused.total_cost == pytest.approx(digest_cost + focus_cost)
 
 
 def test_image_token_estimate_uses_the_raster_upper_bound():
@@ -184,6 +220,7 @@ def test_format_prompt_batch_mode_notes_batch_and_latency():
     msg = format_drawing_cost_prompt(est)
     assert "8 drawing sheet(s)" in msg
     assert "Batch" in msg  # names the batch submission + rate
+    assert "synchronous text passes are full rate" in msg
     assert "Nothing is sent until you confirm" in msg
     assert "Proceed" in msg
 
@@ -220,6 +257,45 @@ def test_exhaustive_estimate_carries_transport_and_prompt_reflects_it():
     rt_msg = format_exhaustive_cost_prompt(rt_est)
     assert "4–6 minutes per sheet" in rt_msg
     assert "no queue" in rt_msg.lower()
+
+
+def test_exhaustive_estimate_shows_realtime_synthesis_and_focus():
+    est = estimate_exhaustive_run_cost(6, model=OPUS, batch=True, focus=True)
+    by_stage = {c.stage: c for c in est.components}
+    assert by_stage["Digest"].transport == "batch"
+    assert by_stage["Synthesis"].transport == "real-time"
+    assert by_stage["Focus report"].transport == "real-time"
+
+
+def test_exhaustive_hybrid_prices_digest_realtime_and_critique_batch():
+    hybrid = estimate_exhaustive_run_cost(
+        6, model=OPUS, batch=False, critique_batch=True,
+    )
+    by_stage = {c.stage: c for c in hybrid.components}
+    assert by_stage["Digest"].transport == "real-time"
+    assert by_stage["Critique ×2 (per sheet)"].transport == "batch"
+    assert hybrid.batch is False and hybrid.critique_batch is True
+    assert "Hybrid mode" in format_exhaustive_cost_prompt(hybrid)
+
+
+def test_exhaustive_legacy_transport_argument_still_controls_both_reads():
+    economy = estimate_exhaustive_run_cost(2, model=OPUS, batch=True)
+    fast = estimate_exhaustive_run_cost(2, model=OPUS, batch=False)
+    assert economy.critique_batch is True
+    assert fast.critique_batch is False
+
+
+def test_exhaustive_estimate_prices_actual_verification_model():
+    sonnet = "claude-sonnet-4-6"
+    est = estimate_exhaustive_run_cost(
+        10, model=OPUS, verification_model=sonnet
+    )
+    verify = {c.stage: c for c in est.components}["Verification"]
+    expected = estimate_request_cost(
+        verify.input_tokens, verify.output_tokens, model=sonnet, batch=False
+    )
+    assert verify.cost == pytest.approx(expected)
+    assert "Sonnet 4.6" in verify.note
 
 
 # --------------------------------------------------------------------------- #

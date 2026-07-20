@@ -1110,6 +1110,14 @@ def test_collect_retries_empty_max_tokens_digest_with_raised_cap():
     first_cap = client.create_calls[0]["requests"][0]["params"]["max_tokens"]
     retry_cap = client.create_calls[1]["requests"][0]["params"]["max_tokens"]
     assert retry_cap == min(first_cap * 2, batch_digest.MAX_TOKENS_RETRY_CEILING)
+    attempts = digests[0].usage_attempts
+    assert [a.attempt_number for a in attempts] == [1, 2]
+    assert [a.transport for a in attempts] == ["BATCH", "BATCH"]
+    # The empty first response was still billable and must survive replacement
+    # by the successful raised-cap retry.
+    assert [(a.input_tokens, a.output_tokens) for a in attempts] == [
+        (100, 50), (100, 20),
+    ]
 
 
 def test_collect_does_not_resubmit_permanently_rejected_items():
@@ -1330,6 +1338,11 @@ def test_rescue_raises_the_cap_again_after_two_empty_max_tokens_rounds():
     assert followup == min(base * 2, batch_digest.MAX_TOKENS_RETRY_CEILING)
     assert rescued == min(followup * 2, batch_digest.MAX_TOKENS_RETRY_CEILING)
     assert rescued > followup
+    attempts = digests[0].usage_attempts
+    assert [a.attempt_number for a in attempts] == [1, 2, 3]
+    assert [a.transport for a in attempts] == ["BATCH", "BATCH", "REAL_TIME"]
+    assert sum(a.input_tokens for a in attempts) == 290
+    assert sum(a.output_tokens for a in attempts) == 125
 
 
 def test_followup_submit_failure_falls_back_to_direct_calls():
@@ -2012,6 +2025,39 @@ def test_pipeline_use_batch_combines_digests(tmp_path):
     assert ctx.total_input_tokens == 200  # 2 sheets × 100
     assert len(client.create_calls) == 1  # one batch for the set
     assert progress[-1] == (2, 2, "Done")
+
+
+def test_pipeline_batch_retry_ledger_keeps_each_billable_attempt(tmp_path):
+    pymupdf = pytest.importorskip("pymupdf")
+    from drawing_analyzer.pipeline import extract_drawing_context
+
+    doc = pymupdf.open()
+    page = doc.new_page(width=792, height=612)
+    page.insert_text((72, 72), "SHEET M-101 RETRY ACCOUNTING")
+    path = tmp_path / "retry.pdf"
+    doc.save(str(path))
+    doc.close()
+
+    empty = FakeBatchResult(
+        custom_id="sheet__0",
+        result=FakeBatchResultEnvelope(
+            type="succeeded",
+            message=FakeMessage(content=[], stop_reason="max_tokens"),
+        ),
+    )
+    client = _FakeClient(_flaky_then_ok({"sheet__0": empty}))
+    ctx = extract_drawing_context(
+        [path], client=client, rows=2, cols=2, use_batch=True,
+    )
+
+    digest_records = [
+        r for r in ctx.run_usage.records if r.stage_family == "digest"
+    ]
+    assert len(digest_records) == 2
+    assert [r.attempt_number for r in digest_records] == [1, 2]
+    assert [r.transport for r in digest_records] == ["BATCH", "BATCH"]
+    assert ctx.total_input_tokens == 200
+    assert ctx.total_output_tokens == 70
 
 
 # --------------------------------------------------------------------------- #

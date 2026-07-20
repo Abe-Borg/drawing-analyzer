@@ -23,6 +23,7 @@ from drawing_analyzer.help_content import (
     HelpDocument,
     HelpSection,
     help_document,
+    processing_transports,
     transport_hint,
 )
 
@@ -243,6 +244,21 @@ def test_transport_hint_realtime_gives_time_and_price() -> None:
     assert "4–6 minutes" in hint
     assert "$3–5" in hint
     assert "no queue" in hint.lower()  # real-time's whole point is skipping it
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [("Economy", (True, True)), ("Hybrid", (False, True)), ("Fast", (False, False))],
+)
+def test_processing_modes_resolve_digest_and_critique_transport(mode, expected) -> None:
+    assert processing_transports(mode) == expected
+
+
+def test_processing_mode_hints_explain_the_actual_queue_boundary() -> None:
+    assert "lowest" in transport_hint("Economy").lower()
+    hybrid = transport_hint("Hybrid").lower()
+    assert "initial" in hybrid and "critique" in hybrid and "queue" in hybrid
+    assert "fastest" in transport_hint("Fast").lower()
 
 
 def test_how_it_works_covers_the_cost_time_story() -> None:

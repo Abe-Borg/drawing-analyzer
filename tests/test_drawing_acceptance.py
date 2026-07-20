@@ -370,10 +370,10 @@ def test_acceptance_cached_rerun_freezes_digest_api_and_reproduces(tmp_path):
         )
 
     assert _fingerprint(second) == _fingerprint(first)
-    # Verification is intentionally *stateless* — it re-checks each run rather
-    # than caching a verdict — so the digest cache, not the verify pass, is what
-    # this step pins. The verifier ran again on the re-run.
-    assert client.verify_calls == 2
+    # Exact verification results are cached with the finding, source geometry,
+    # crop bytes, prompt, and model in the key.  The unchanged re-run therefore
+    # reproduces the verdict without another verifier call.
+    assert client.verify_calls == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -1107,10 +1107,10 @@ def test_gauntlet_warm_and_mutated_runs(tmp_path, monkeypatch):
     ctx1 = _run(c1, tmp_path / "qc1")
     assert ctx1.qc_status == "COMPLETE"
     renders_cold = renders["n"]
-    # Cold real-time runs render each readable sheet twice: once for the digest
-    # and once for the critique reads (the batch path shares one upload instead;
-    # the level-1 caches erase both on a warm run).
-    assert renders_cold == 10
+    # The cold real-time path spools each exact digest render for critique, so
+    # each readable sheet is rasterized once.  Level-1 caches erase even that
+    # work on the unchanged warm run.
+    assert renders_cold == 5
     assert sum(c1.digest_calls.values()) == 5
     assert sum(c1.critique_calls.values()) == 10   # 5 sheets x 2 reads
 
@@ -1126,8 +1126,9 @@ def test_gauntlet_warm_and_mutated_runs(tmp_path, monkeypatch):
         recs = [r for r in ctx2.run_usage.records if r.stage_family == family]
         assert recs and all(r.transport == "CACHE" and r.cache_hit for r in recs)
         assert all(r.input_tokens == 0 and r.output_tokens == 0 for r in recs)
-    # Verification is deliberately stateless — it re-checked this run.
-    assert c2.verify_calls > 0
+    # Exact verification entries are content-addressed through the source crop,
+    # finding, prompt, and model, so the unchanged run makes no verifier calls.
+    assert c2.verify_calls == 0
     # Cached findings were rebound to the current run's source identities (the
     # set-level synthesis note alone carries none, by design) and the whole
     # semantic output (incl. QC numbering) is stable.
@@ -1155,7 +1156,9 @@ def test_gauntlet_warm_and_mutated_runs(tmp_path, monkeypatch):
     # Only the mutated source misses the cache…
     assert c3.digest_calls == {G.Q_CQ_LEG: 1}
     assert c3.critique_calls == {G.Q_CQ_LEG: 2}
-    assert renders["n"] == 2                       # one digest + one critique render
+    # The mutated page is rendered once; critique consumes the exact digest
+    # render from the run-local spool.
+    assert renders["n"] == 1
     # …and the NEW visual/text state is what reached analysis.
     assert any("REV 2 ISSUED FOR CONSTRUCTION" in t for t in c3.digest_request_texts)
     # The other sheets served from cache; the run still reconciles cleanly.

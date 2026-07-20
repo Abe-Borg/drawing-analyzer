@@ -17,7 +17,9 @@ from __future__ import annotations
 import os
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
+from functools import wraps
 from pathlib import Path
+import threading
 from typing import Any, Callable
 
 from .core.api_config import REVIEW_MODEL_DEFAULT
@@ -96,6 +98,39 @@ DEFAULT_DIGEST_WORKERS = 4
 EXHAUSTIVE_QC_COMPLETENESS_GATE_OPEN = True
 
 _log = get_logger()
+
+
+_stage_executor_state = threading.local()
+
+
+def _with_stage_executor_cleanup(fn):
+    """Guarantee per-run background executors cannot outlive any return/raise."""
+    @wraps(fn)
+    def _wrapped(*args, **kwargs):
+        parent = getattr(_stage_executor_state, "executors", None)
+        active: list[ThreadPoolExecutor] = []
+        _stage_executor_state.executors = active
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            for executor in reversed(active):
+                executor.shutdown(wait=True)
+            _stage_executor_state.executors = parent
+
+    return _wrapped
+
+
+def _register_stage_executor(executor: ThreadPoolExecutor) -> None:
+    active = getattr(_stage_executor_state, "executors", None)
+    if active is not None:
+        active.append(executor)
+
+
+def _close_stage_executor(executor: ThreadPoolExecutor) -> None:
+    active = getattr(_stage_executor_state, "executors", None)
+    if active is not None and executor in active:
+        active.remove(executor)
+    executor.shutdown(wait=True)
 
 
 def _digest_transport(*, cached: bool, rescued: bool, use_batch: bool) -> str:
@@ -193,6 +228,44 @@ def _resolve_workers(max_workers: int | None, total: int) -> int:
     return min(max(1, int(max_workers)), max(1, total))
 
 
+def _stage_overlap_enabled(
+    *,
+    max_workers: int | None,
+    total: int,
+    client: Any,
+    cache: Any,
+) -> bool:
+    """Whether independent set-level calls may overlap in this run.
+
+    ``max_workers=1`` remains an end-to-end sequential contract. Operators can
+    also disable overlap without changing other concurrency through
+    ``DRAWING_ANALYZER_STAGE_OVERLAP=0``. Persistent ``DigestCache`` instances
+    are thread-safe; unknown injected cache implementations are kept sequential.
+    Real Anthropic SDK clients are safe to share across these synchronous calls.
+    Arbitrary injected clients stay sequential because test/library fakes often
+    consume ordered response queues; ``DRAWING_ANALYZER_STAGE_OVERLAP=1`` is the
+    explicit opt-in for a known-thread-safe custom client. A deferred production
+    client is safe when an API key is present because the caller resolves one
+    shared SDK client before starting any futures.
+    """
+    raw = os.environ.get("DRAWING_ANALYZER_STAGE_OVERLAP")
+    token = raw.strip().lower() if raw is not None else ""
+    if token in {"0", "false", "no", "off"}:
+        return False
+    if _resolve_workers(max_workers, total) <= 1:
+        return False
+    if cache is not None:
+        from .digest_cache import DigestCache
+
+        if not isinstance(cache, DigestCache):
+            return False
+    if token in {"1", "true", "yes", "on"}:
+        return True
+    if client is None:
+        return bool(os.environ.get("ANTHROPIC_API_KEY"))
+    return client.__class__.__module__.startswith("anthropic")
+
+
 # Truthy tokens for the batch-default env var (mirrors the disable-token
 # convention used elsewhere; anything else — or unset — resolves to False).
 _BATCH_ENV_TRUE = frozenset({"1", "true", "yes", "on"})
@@ -205,9 +278,9 @@ def _resolve_use_batch(use_batch: bool | None) -> bool:
     ``True``; a test passes whichever it needs). Only when the caller leaves it
     unspecified (``None``) does the env var decide, defaulting to real-time
     (``False``) so behavior is byte-identical to before this knob existed. The
-    Batch API is ~50% cheaper for identical output, so a library operator can opt
-    every run into it globally — ``DRAWING_ANALYZER_USE_BATCH=1`` — without editing
-    a single call site (L1).
+    Batch API is ~50% cheaper for the same model, prompt, inputs, and review
+    contract, so a library operator can opt every run into it globally —
+    ``DRAWING_ANALYZER_USE_BATCH=1`` — without editing a single call site (L1).
     """
     if use_batch is not None:
         return bool(use_batch)
@@ -215,6 +288,17 @@ def _resolve_use_batch(use_batch: bool | None) -> bool:
     if raw is None:
         return False
     return raw.strip().lower() in _BATCH_ENV_TRUE
+
+
+def _transport_plan_name(digest_batch: bool, critique_batch: bool) -> str:
+    """Stable journal/UI name for independent digest and critique transports."""
+    if digest_batch and critique_batch:
+        return "economy"
+    if not digest_batch and critique_batch:
+        return "hybrid"
+    if not digest_batch and not critique_batch:
+        return "fast"
+    return "custom-batch-digest"
 
 
 def _resolve_save_tiles(save_tile_artifacts: bool | None) -> bool:
@@ -494,6 +578,7 @@ def _rendered_stream(
     only: "set[tuple[str, int]] | None" = None,
     on_page_error: "Any" = None,
     tile_sink: "Any" = None,
+    render_sink: "Any" = None,
 ) -> "Any":
     """Stream :class:`RenderedSheet`, capturing each sheet's lightweight geometry.
 
@@ -521,6 +606,17 @@ def _rendered_stream(
             # PNG bytes exist on both transports — the batch path discards the
             # rendered sheet after upload. The sink absorbs its own errors (I-3).
             tile_sink(rendered)
+        if render_sink is not None:
+            # Run-local exact-image handoff (digest -> critique).  The sink is
+            # advisory: a failed spool write must never affect the digest, and
+            # the critique will simply fall back to rendering this page again.
+            try:
+                render_sink(rendered)
+            except Exception as exc:  # noqa: BLE001 - performance cache only
+                _log.warning(
+                    "render reuse staging failed for %s: %s",
+                    rendered.ref.display_label, exc,
+                )
         yield rendered
 
 
@@ -567,6 +663,7 @@ def _digest_sheets_concurrent(
     only: "set[tuple[str, int]] | None" = None,
     on_page_error: "Any" = None,
     tile_sink: "Any" = None,
+    render_sink: "Any" = None,
 ) -> list[SheetDigest]:
     """Real-time path: render sequentially, digest on a bounded thread pool.
 
@@ -610,7 +707,7 @@ def _digest_sheets_concurrent(
             _rendered_stream(
                 paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
                 geometry_sink=geometry_sink, only=only, on_page_error=on_page_error,
-                tile_sink=tile_sink,
+                tile_sink=tile_sink, render_sink=render_sink,
             )
         ):
             in_flight.add(executor.submit(_run, index, rendered))
@@ -644,6 +741,7 @@ def _digest_sheets_via_batch(
     geometry_sink: list | None = None,
     only: "set[tuple[str, int]] | None" = None,
     tile_sink: "Any" = None,
+    reusable_upload_sink: "list[Any] | None" = None,
 ) -> list[SheetDigest]:
     """Batch path: render-stream → Files-API upload → one Message Batch.
 
@@ -718,6 +816,7 @@ def _digest_sheets_via_batch(
         cleanup_in_background=True,
         retry_failed_items=True,
         recovery_transport=RECOVERY_BATCH,
+        reusable_upload_sink=reusable_upload_sink,
     )
 
 
@@ -804,7 +903,9 @@ def _api_environment_fingerprint() -> str:
     return f"sdk=anthropic-{sdk_version} base_url={base_url}"
 
 
-def _journal_environment(*, model: str, use_batch: bool) -> dict:
+def _journal_environment(
+    *, model: str, use_batch: bool, critique_use_batch: bool | None = None,
+) -> dict:
     """The §18.2 environment/version identity block for the run journal.
 
     Everything a later reader needs to know *which* code analyzed the set: the
@@ -829,9 +930,10 @@ def _journal_environment(*, model: str, use_batch: bool) -> dict:
         renderer = _renderer_environment_fingerprint()
     except Exception:  # noqa: BLE001 - identity is informational, never fatal
         renderer = "unavailable"
+    critique_batch = use_batch if critique_use_batch is None else critique_use_batch
     return collect_environment(
         model=model,
-        transport="batch" if use_batch else "real-time",
+        transport=_transport_plan_name(use_batch, critique_batch),
         renderer=renderer,
         api=_api_environment_fingerprint(),
         digest_prompt=str(DIGEST_PROMPT_VERSION)[:12],
@@ -973,6 +1075,8 @@ def _run_critique_stage(
     use_batch: bool = False,
     on_log: LogCallback | None = None,
     on_status: StatusCallback | None = None,
+    render_spool: Any = None,
+    reusable_uploads: "list[Any] | None" = None,
 ) -> tuple[list[Finding], list[NumericClaim], list[str]]:
     """Critique every sheet (Phase 11): self-consistent critique, cached two ways.
 
@@ -1098,6 +1202,128 @@ def _run_critique_stage(
             progress(total, total, f"Critiquing sheet {done}/{total}")
 
     miss_total = total if only is None else len(only)
+
+    def _rendered_for_critique():
+        """Yield critique inputs in page order, reusing exact digest work.
+
+        Batch runs adopt terminal digest uploads; real-time runs pop byte-exact
+        renders from the local spool. A cache hit, mismatched grid, unavailable
+        manifest, or failed spool write falls back to the historical renderer.
+        The merge follows ``list_sheets`` order regardless of reuse availability.
+        """
+        ordered_refs = list_sheets(paths)
+        target = (
+            set(only)
+            if only is not None
+            else {_refkey(ref) for ref in ordered_refs}
+        )
+        order_index = {_refkey(ref): index for index, ref in enumerate(ordered_refs)}
+
+        def _one_page_fallback(expected: tuple[str, int]):
+            """Render one failed staged/reusable page without misassigning another."""
+            for candidate in iter_rendered_sheets(
+                paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
+                only={expected},
+            ):
+                if _refkey(candidate.ref) == expected:
+                    return candidate
+            return None
+
+        def _ordered_inputs(provided: dict[tuple[str, int], Any], load_provided):
+            """Merge provided inputs and fresh renders with O(1) lookahead.
+
+            ``iter_rendered_sheets`` may skip a pathological page. Keeping a
+            later render pending prevents that skip from shifting every later
+            result onto the wrong source reference.
+            """
+            fresh_keys = target - set(provided)
+            fresh_iter = iter(iter_rendered_sheets(
+                paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
+                only=fresh_keys,
+            ))
+            pending = None
+
+            def _take_fresh(expected: tuple[str, int]):
+                nonlocal pending
+                while True:
+                    if pending is None:
+                        try:
+                            pending = next(fresh_iter)
+                        except StopIteration:
+                            return None
+                    candidate_key = _refkey(pending.ref)
+                    if candidate_key == expected:
+                        candidate = pending
+                        pending = None
+                        return candidate
+                    candidate_index = order_index.get(candidate_key)
+                    if (
+                        candidate_index is not None
+                        and candidate_index > order_index.get(expected, candidate_index)
+                    ):
+                        # The expected page was skipped; retain this later page
+                        # for its own turn rather than assigning it incorrectly.
+                        return None
+                    # A duplicate/out-of-target/earlier render cannot serve any
+                    # remaining expected key.
+                    pending = None
+
+            for ref in ordered_refs:
+                key = _refkey(ref)
+                if key not in target:
+                    continue
+                if key in provided:
+                    item = load_provided(key, provided[key])
+                    if item is None:
+                        item = _one_page_fallback(key)
+                else:
+                    item = _take_fresh(key)
+                if item is not None:
+                    yield item
+
+        if use_batch:
+            reusable_by_ref: dict[tuple[str, int], Any] = {}
+            for reusable in reusable_uploads or []:
+                key = _refkey(reusable.ref)
+                if (
+                    key in target
+                    and key not in reusable_by_ref
+                    and int(getattr(reusable, "rows", -1)) == rows
+                    and int(getattr(reusable, "cols", -1)) == cols
+                    and bool(getattr(reusable, "available", False))
+                ):
+                    reusable_by_ref[key] = reusable
+
+            def _load_reusable(_key, reusable):
+                return reusable if bool(getattr(reusable, "available", False)) else None
+
+            yield from _ordered_inputs(reusable_by_ref, _load_reusable)
+            return
+
+        if render_spool is not None:
+            try:
+                spooled = {
+                    key: True for key in target if key in render_spool
+                }
+            except Exception as exc:  # noqa: BLE001 - optimization is advisory
+                _log.warning("render reuse inventory failed; rerendering: %s", exc)
+                spooled = {}
+
+            def _load_spooled(key, _present):
+                try:
+                    rendered = render_spool.pop(key)
+                except Exception as exc:  # noqa: BLE001 - one-page fallback below
+                    _log.warning("render reuse load failed for %s: %s", key, exc)
+                    return None
+                if rendered is not None and _refkey(rendered.ref) == key:
+                    return rendered
+                return None
+
+            yield from _ordered_inputs(spooled, _load_spooled)
+            return
+
+        yield from _ordered_inputs({}, lambda _key, item: item)
+
     if miss_total > 0 and use_batch:
         # Batch path (Phase 23C): each uncached sheet uploads once and both
         # self-consistency reads ride ONE Message Batch referencing the shared
@@ -1107,9 +1333,7 @@ def _run_critique_stage(
         from .batch_critique import collect_critique_batch, submit_critique_batch
 
         batch = submit_critique_batch(
-            iter_rendered_sheets(
-                paths, rows=rows, cols=cols, overlap_frac=overlap_frac, only=only
-            ),
+            _rendered_for_critique(),
             client=client, cache=cache, model=model, runs=runs, profiles=profiles,
             progress=progress, total=miss_total, on_status=on_status,
         )
@@ -1136,9 +1360,7 @@ def _run_critique_stage(
                         continue
                     _ingest_miss(res, ref)
 
-            for rendered in iter_rendered_sheets(
-                paths, rows=rows, cols=cols, overlap_frac=overlap_frac, only=only
-            ):
+            for rendered in _rendered_for_critique():
                 in_flight[executor.submit(
                     critique_sheet_self_consistent,
                     rendered, client=client, cache=cache, profiles=profiles,
@@ -1291,15 +1513,24 @@ def _run_qc_stages(
                 ledger, sheets, geometries, client=client,
                 synthesis_text=synthesis_text,
                 focus_findings_to_markups=focus_findings_to_markups,
+                cache=cache,
             )
             # The straggler-structuring call's usage — an independent record, never
             # folded into (and overwritten by) the verification counters (§15.6).
-            _record_usage(
-                run_usage, family="harvest", instance="prose_harvest",
-                model=harvest_model(),
-                input_tokens=hres.input_tokens, output_tokens=hres.output_tokens,
-                terminal_status="PARTIAL" if hres.missing else "COMPLETE",
-            )
+            if hres.api_calls or not hres.cache_hits:
+                _record_usage(
+                    run_usage, family="harvest", instance="prose_harvest",
+                    model=harvest_model(),
+                    input_tokens=hres.input_tokens, output_tokens=hres.output_tokens,
+                    terminal_status="PARTIAL" if hres.missing else "COMPLETE",
+                )
+            if hres.cache_hits:
+                _record_usage(
+                    run_usage, family="harvest", instance="prose_harvest_cache",
+                    model=harvest_model(), transport="CACHE", cache_hit=True,
+                    parent="prose_harvest",
+                    terminal_status="PARTIAL" if hres.missing else "COMPLETE",
+                )
             # §14.9 / §18.4: keep the carry-through accounting for run.log and
             # run_manifest.json (it was previously discarded with the result).
             # The dict's keys are defined ONCE, at the producer (HarvestResult
@@ -1489,13 +1720,20 @@ def _run_qc_stages(
         try:
             vres = _run_verify(
                 all_findings, geometries, client=client,
-                evidence_dir=evidence_dir, progress=_verify_progress,
+                evidence_dir=evidence_dir, progress=_verify_progress, cache=cache,
             )
-            _record_usage(
-                run_usage, family="verify", instance="verify",
-                model=verify_model,
-                input_tokens=vres.input_tokens, output_tokens=vres.output_tokens,
-            )
+            if vres.api_calls or not vres.cache_hits:
+                _record_usage(
+                    run_usage, family="verify", instance="verify",
+                    model=verify_model,
+                    input_tokens=vres.input_tokens, output_tokens=vres.output_tokens,
+                )
+            if vres.cache_hits:
+                _record_usage(
+                    run_usage, family="verify", instance="verify_cache",
+                    model=verify_model, transport="CACHE", cache_hit=True,
+                    parent="verify",
+                )
             _log.info(
                 "verification: %d verified, %d rejected, %d uncertain, %d skipped",
                 vres.verified, vres.rejected, vres.uncertain, vres.skipped,
@@ -1515,13 +1753,20 @@ def _run_qc_stages(
 
             cres = verify_cross_findings(
                 all_findings, geometries, client=client,
-                evidence_dir=evidence_dir, progress=_verify_progress,
+                evidence_dir=evidence_dir, progress=_verify_progress, cache=cache,
             )
-            _record_usage(
-                run_usage, family="verify", instance="verify_cross",
-                model=verify_model, parent="verify",
-                input_tokens=cres.input_tokens, output_tokens=cres.output_tokens,
-            )
+            if cres.api_calls or not cres.cache_hits:
+                _record_usage(
+                    run_usage, family="verify", instance="verify_cross",
+                    model=verify_model, parent="verify",
+                    input_tokens=cres.input_tokens, output_tokens=cres.output_tokens,
+                )
+            if cres.cache_hits:
+                _record_usage(
+                    run_usage, family="verify", instance="verify_cross_cache",
+                    model=verify_model, transport="CACHE", cache_hit=True,
+                    parent="verify_cross",
+                )
             if cres.verified or cres.rejected or cres.uncertain or cres.skipped:
                 _log.info(
                     "cross-verification: %d verified, %d rejected, %d uncertain, %d skipped",
@@ -1625,6 +1870,8 @@ def _run_qc_stages(
                             model=inv_model,
                             input_tokens=rec.input_tokens,
                             output_tokens=rec.output_tokens,
+                            cache_read_tokens=rec.cache_read_tokens,
+                            cache_write_tokens=rec.cache_write_tokens,
                             terminal_status=(
                                 "COMPLETE" if rec.outcome != "error" else "FAILED"
                             ),
@@ -1946,6 +2193,7 @@ def _tally_line(
     return line
 
 
+@_with_stage_executor_cleanup
 def extract_drawing_context(
     pdf_paths: list[Path],
     *,
@@ -1964,6 +2212,7 @@ def extract_drawing_context(
     synthesize: bool | None = None,
     synthesis_model: str | None = None,
     use_batch: bool | None = None,
+    critique_use_batch: bool | None = None,
     on_log: LogCallback | None = None,
     on_status: StatusCallback | None = None,
     focus: str | None = None,
@@ -2029,6 +2278,13 @@ def extract_drawing_context(
     thread; the cross-sheet synthesis still runs as one synchronous text-only
     call afterward. Caching, page ordering, and per-sheet error capture behave
     identically to the real-time path.
+
+    ``critique_use_batch`` selects the exhaustive review's two critique reads
+    independently. It defaults to the resolved ``use_batch`` value for backward
+    compatibility. ``use_batch=False, critique_use_batch=True`` is Hybrid mode:
+    immediate digests followed by half-rate queued critique; both true is Economy
+    and both false is Fast. Model, prompt, coverage, and output contracts do not
+    change with transport.
 
     ``focus`` (optional, at the operator's discretion) is a free-text per-run
     focus — e.g. *"I am particularly interested in the rooms, and what types of
@@ -2139,6 +2395,9 @@ def extract_drawing_context(
     # DRAWING_ANALYZER_USE_BATCH env opt-in; else real-time. Done before the
     # configuration + journal so every downstream reader sees the same value.
     use_batch = _resolve_use_batch(use_batch)
+    critique_use_batch = (
+        use_batch if critique_use_batch is None else bool(critique_use_batch)
+    )
 
     # Normalize the run options into one immutable configuration (§15.1): the
     # single place ``qc_markups=True`` becomes the exhaustive stack, ``reference_audit``
@@ -2161,6 +2420,7 @@ def extract_drawing_context(
         ink_rejected=ink_rejected,
         focus_findings_to_markups=focus_findings_to_markups,
         use_batch=use_batch,
+        critique_use_batch=critique_use_batch,
         save_tile_artifacts=_resolve_save_tiles(save_tile_artifacts),
     )
 
@@ -2191,12 +2451,16 @@ def extract_drawing_context(
         + ([qc_work_dir] if qc_work_dir is not None else [])
         + [Path.home()]
     )
-    journal.set_environment(_journal_environment(model=model, use_batch=use_batch))
+    journal.set_environment(_journal_environment(
+        model=model,
+        use_batch=use_batch,
+        critique_use_batch=critique_use_batch,
+    ))
     journal.emit(
         "RUN_START",
         files=len(pdf_paths),
         model=model,
-        transport="batch" if use_batch else "real-time",
+        transport=_transport_plan_name(use_batch, critique_use_batch),
         cache=bool(cache is not None),
         grid=f"{rows}x{cols}",
         mode=(
@@ -2220,16 +2484,18 @@ def extract_drawing_context(
 
     # Cost nudge (L1): the exhaustive stack reads each sheet's imagery three times
     # (digest + two critique reads), so running it real-time is the single most
-    # expensive configuration. The Batch API is ~50% cheaper for byte-identical
-    # output, so surface the opportunity once at run start rather than letting it
-    # stay a silent trap. Purely advisory — no behavior change; a real-time run may
+    # expensive configuration. The Batch API is ~50% cheaper for the same
+    # model/prompt/input/review contract, so surface the opportunity once at run
+    # start rather than letting it stay a silent trap. Purely advisory — no
+    # behavior change; a real-time run may
     # be a deliberate latency choice, so this only informs.
-    if config.exhaustive_qc and not use_batch:
+    if config.exhaustive_qc and not use_batch and not critique_use_batch:
         _batch_hint = (
-            "Running the exhaustive QC stack in real-time — the most expensive "
-            "mode. The Batch API is ~50% cheaper for identical output: pass "
+            "Running the exhaustive QC stack in Fast mode — the most expensive "
+            "transport. Economy is ~50% cheaper for identical review inputs and "
+            "outputs: pass "
             "use_batch=True (or set DRAWING_ANALYZER_USE_BATCH=1) if the batch "
-            "turnaround (usually minutes) is acceptable."
+            "turnaround (often hours, sometimes overnight) is acceptable."
         )
         _log.warning(_batch_hint)
         journal.emit("COST_HINT", level="WARNING", hint=_batch_hint)
@@ -2433,6 +2699,33 @@ def extract_drawing_context(
                     f"failed to stage {rendered.ref.display_label}: {exc}"
                 )
 
+    # A real-time exhaustive run used to discard every digest render and open /
+    # extract / rasterize the PDF a second time for critique.  Spool the exact
+    # already-compressed PNGs to a private temporary directory instead.  This is
+    # deliberately run-local (the durable digest/critique caches remain the
+    # correctness boundary) and only enabled when critique will consume it.
+    render_spool = None
+    render_sink = None
+    reusable_uploads = (
+        [] if config.run_critique and use_batch and critique_use_batch else None
+    )
+    if config.run_critique and not use_batch:
+        try:
+            from .render_spool import RenderedSheetSpool
+
+            render_spool = RenderedSheetSpool()
+
+            def render_sink(rendered: Any) -> None:
+                if not render_spool.put(_refkey(rendered.ref), rendered):
+                    _log.warning(
+                        "render reuse staging unavailable for %s; critique will rerender",
+                        rendered.ref.display_label,
+                    )
+        except Exception as exc:  # noqa: BLE001 - optimization is never required
+            _log.warning("render reuse spool unavailable; critique will rerender: %s", exc)
+            render_spool = None
+            render_sink = None
+
     miss_sheets: list[SheetDigest] = []
     if miss_total > 0:
         if use_batch:
@@ -2444,6 +2737,7 @@ def extract_drawing_context(
                 on_status=on_status, focus=focus or None,
                 specs_text=specs_text or None,
                 geometry_sink=geometry_sink, only=only, tile_sink=tile_sink,
+                reusable_upload_sink=reusable_uploads,
             )
         else:
             miss_sheets = _digest_sheets_concurrent(
@@ -2453,7 +2747,7 @@ def extract_drawing_context(
                 progress=progress, total=miss_total, max_workers=max_workers,
                 focus=focus or None, specs_text=specs_text or None,
                 geometry_sink=geometry_sink, only=only, tile_sink=tile_sink,
-                on_page_error=_on_page_error,
+                on_page_error=_on_page_error, render_sink=render_sink,
             )
 
     # Store each miss's result under its level-1 key too (store-under-both), so a
@@ -2507,8 +2801,6 @@ def extract_drawing_context(
         # record carries the cache-hit metadata but zero billed tokens. A fresh
         # digest records its actual reported usage (billable even if it errored).
         cached = bool(getattr(sd, "cached", False))
-        if not cached:
-            img_tok += sd.image_token_estimate
         sheet_transport = _digest_transport(
             cached=cached, rescued=bool(getattr(sd, "rescued", False)),
             use_batch=use_batch,
@@ -2518,19 +2810,50 @@ def extract_drawing_context(
         # run_manifest.json (Phase 26A §18.4), and an absolute path in a
         # ``stage_instance`` would leak the user's directory layout (§10.4).
         skey = source_page_key(sd.ref)
-        _record_usage(
-            run_usage, family="digest",
-            instance=f"digest:{skey[0]}:p{skey[1]}",
-            model=model,
-            transport=sheet_transport,
-            input_tokens=0 if cached else sd.input_tokens,
-            output_tokens=0 if cached else sd.output_tokens,
-            cache_read_tokens=0 if cached else getattr(sd, "cache_read_tokens", 0),
-            cache_write_tokens=0 if cached else getattr(sd, "cache_write_tokens", 0),
-            cache_hit=cached,
-            parse_success=(sd.error is None),
-            terminal_status="FAILED" if sd.error else "COMPLETE",
-        )
+        usage_attempts = list(getattr(sd, "usage_attempts", ()) or ())
+        if usage_attempts and not cached:
+            # Batch recovery can produce more than one billable response for a
+            # sheet (for example, an empty max_tokens response followed by a
+            # raised-cap retry, possibly ending in a real-time rescue). Preserve
+            # each response as its own record so Batch and real-time rates are
+            # applied independently. The runtime-only metadata is deliberately
+            # absent on cache hits and never enters cache serialization.
+            img_tok += sd.image_token_estimate * len(usage_attempts)
+            for usage_attempt in usage_attempts:
+                _record_usage(
+                    run_usage, family="digest",
+                    instance=f"digest:{skey[0]}:p{skey[1]}",
+                    model=model,
+                    transport=getattr(usage_attempt, "transport", sheet_transport),
+                    input_tokens=getattr(usage_attempt, "input_tokens", 0),
+                    output_tokens=getattr(usage_attempt, "output_tokens", 0),
+                    cache_read_tokens=getattr(usage_attempt, "cache_read_tokens", 0),
+                    cache_write_tokens=getattr(usage_attempt, "cache_write_tokens", 0),
+                    parse_success=bool(getattr(usage_attempt, "parse_success", True)),
+                    terminal_status=getattr(
+                        usage_attempt, "terminal_status", "COMPLETE"
+                    ),
+                    attempt=int(getattr(usage_attempt, "attempt_number", 1) or 1),
+                    request_id=getattr(
+                        usage_attempt, "request_or_custom_id", ""
+                    ),
+                )
+        else:
+            if not cached:
+                img_tok += sd.image_token_estimate
+            _record_usage(
+                run_usage, family="digest",
+                instance=f"digest:{skey[0]}:p{skey[1]}",
+                model=model,
+                transport=sheet_transport,
+                input_tokens=0 if cached else sd.input_tokens,
+                output_tokens=0 if cached else sd.output_tokens,
+                cache_read_tokens=0 if cached else getattr(sd, "cache_read_tokens", 0),
+                cache_write_tokens=0 if cached else getattr(sd, "cache_write_tokens", 0),
+                cache_hit=cached,
+                parse_success=(sd.error is None),
+                terminal_status="FAILED" if sd.error else "COMPLETE",
+            )
         if sd.error:
             errors.append(f"{sd.ref.display_label}: {sd.error}")
         # One journal event per sheet, in deterministic page order (§18.2):
@@ -2573,6 +2896,68 @@ def extract_drawing_context(
         failed=len(sheets) - ok_sheets,
         cached=sum(1 for s in sheets if s.cached),
     )
+
+    # Independent text-only set stages can spend their network latency behind
+    # identity → planning → critique. Their results are deliberately *not*
+    # ingested here: usage, errors, StageResults, and output fields are recorded
+    # later at the same deterministic stage positions as the sequential path.
+    stage_executor: ThreadPoolExecutor | None = None
+    synthesis_future = None
+    focus_future = None
+    cross_future = None
+    has_background_stage = bool(
+        config.run_synthesis or focus or config.run_cross_qc
+    )
+    overlap_stages = has_background_stage and _stage_overlap_enabled(
+        max_workers=max_workers, total=total, client=client, cache=cache,
+    )
+    if overlap_stages:
+        # ``extract_drawing_context`` normally receives ``client=None`` from the
+        # GUI. Resolve exactly one SDK client on the calling thread so concurrent
+        # stages never race the process-wide lazy client factory.
+        if client is None:
+            try:
+                from .client import get_client as _get_client
+
+                client = _get_client()
+            except Exception as exc:  # cache-only/offline runs stay sequential
+                overlap_stages = False
+                _log.debug("set-stage overlap unavailable: %s", exc)
+
+    if overlap_stages:
+        stage_executor = ThreadPoolExecutor(
+            max_workers=3, thread_name_prefix="set-stage",
+        )
+        _register_stage_executor(stage_executor)
+        if config.run_synthesis:
+            if progress is not None:
+                progress(total, total, "Synthesizing set overview")
+            journal.emit("STAGE_START", stage="synthesis", sheets=total)
+            _log.info("synthesis: starting cross-sheet overview")
+
+            def _run_synthesis_call():
+                from .synthesis import synthesize_drawing_set
+
+                return synthesize_drawing_set(
+                    sheets, client=client, model=synthesis_model, cache=cache,
+                )
+
+            synthesis_future = stage_executor.submit(_run_synthesis_call)
+
+        if focus:
+            if progress is not None:
+                progress(total, total, "Generating focus report")
+            journal.emit("STAGE_START", stage="focus")
+            _log.info("focus report: starting set-level pass")
+
+            def _run_focus_call():
+                from .focus import generate_focus_report
+
+                return generate_focus_report(
+                    sheets, focus, client=client, model=focus_model, cache=cache,
+                )
+
+            focus_future = stage_executor.submit(_run_focus_call)
 
     # Set identity (Phase A §20.1): the "which specialist am I?" pass — one
     # text-only call over the digests + text layers that detects the set's
@@ -2643,6 +3028,21 @@ def extract_drawing_context(
                 confidence=set_identity_obj.confidence or "unstated",
             )
     _finish_stage(stage_results, journal, identity_stage)
+
+    if stage_executor is not None and config.run_cross_qc:
+        if progress is not None:
+            progress(total, total, "Cross-sheet QC")
+        journal.emit("STAGE_START", stage="cross_qc", sheets=total)
+
+        def _run_cross_qc_call():
+            from .cross_qc import cross_sheet_qc
+
+            return cross_sheet_qc(
+                sheets, sheet_geometries, client=client,
+                identity=set_identity_obj, cache=cache,
+            )
+
+        cross_future = stage_executor.submit(_run_cross_qc_call)
 
     # Review plan (Phase A §20.2): the model authors THIS set's specialist
     # checklist from the identity + digests. Injected below through the existing
@@ -2723,27 +3123,47 @@ def extract_drawing_context(
     # the report / run manifest, and a requested profile that could not be resolved
     # (a name that vanished / is unreadable after selection) is surfaced as a
     # PARTIAL profile-application stage rather than silently dropped.
-    from .profiles import resolve_profiles, snapshot_profiles
-
-    resolved_profiles = resolve_profiles(profiles)
     # Phase A (§20.2): the model-authored plan profiles are injected AFTER the
     # user's own selections — the human's checklist keeps its exact order and
     # prompt position; the plan is purely additive at the end. They are only
     # injected when the critique (their sole consumer) actually runs; an
     # explicitly-authored-but-unconsumed plan still exports its markdown.
+    requested_profiles = list(profiles or [])
+    requested_count = len(requested_profiles)
+    resolved_profiles: list = []
+    profile_snapshots: list = []
+    profile_resolution_error: Exception | None = None
+    try:
+        from .profiles import resolve_profiles, snapshot_profiles
+
+        resolved_profiles = resolve_profiles(requested_profiles)
+        profile_snapshots = snapshot_profiles(resolved_profiles)
+    except Exception as exc:  # noqa: BLE001 - additive; critique still runs generic
+        profile_resolution_error = exc
+        _log.warning("review-profile resolution failed: %s", exc)
+
     injected_plan_profiles = list(plan_profiles) if config.run_critique else []
     all_profiles = resolved_profiles + injected_plan_profiles
-    profile_snapshots = snapshot_profiles(resolved_profiles)
     if injected_plan_profiles:
-        from .review_planner import plan_snapshots
+        try:
+            from .review_planner import plan_snapshots
 
-        profile_snapshots = profile_snapshots + plan_snapshots(injected_plan_profiles)
-    requested_count = len(list(profiles or []))
+            profile_snapshots = profile_snapshots + plan_snapshots(
+                injected_plan_profiles
+            )
+        except Exception as exc:  # noqa: BLE001 - profiles remain usable
+            profile_resolution_error = profile_resolution_error or exc
+            _log.warning("review-plan profile snapshot failed: %s", exc)
     profile_stage = StageResult(stage="profiles", expected=config.run_critique)
     if config.run_critique:
         profile_stage.items_in = requested_count
         profile_stage.items_out = len(resolved_profiles)
-        if not resolved_profiles:
+        if profile_resolution_error is not None:
+            message = str(profile_resolution_error)
+            profile_stage.status = "PARTIAL" if resolved_profiles else "FAILED"
+            profile_stage.errors.append(message)
+            errors.append(f"Review profiles: {message}")
+        elif not resolved_profiles:
             # No applicable/selected profile — generic critique still runs (§3.3).
             profile_stage.status = "SKIPPED_VALID"
         elif len(resolved_profiles) < requested_count:
@@ -2774,7 +3194,9 @@ def extract_drawing_context(
                 client=client, cache=cache, progress=progress, total=total,
                 max_workers=max_workers, run_usage=run_usage,
                 profiles=all_profiles, snapshot_by_path=snapshot_by_path,
-                use_batch=use_batch, on_log=on_log, on_status=on_status,
+                use_batch=critique_use_batch, on_log=on_log, on_status=on_status,
+                render_spool=render_spool,
+                reusable_uploads=reusable_uploads,
             )
             numeric_claims.extend(c_claims)
             critique_stage.items_out = len(critique_findings)
@@ -2801,6 +3223,38 @@ def extract_drawing_context(
             critique_stage.status = "FAILED"
             critique_stage.errors.append(str(exc))
             _log.warning("critique stage failed: %s", exc)
+        finally:
+            if render_spool is not None:
+                render_spool.close()
+                render_spool = None
+            if reusable_uploads:
+                # Cache hits, grid mismatches, and any sheet not reached after
+                # an additive critique failure still belong to the pipeline.
+                # Adopted manifests return no IDs, so every remote file has one
+                # and only one cleanup owner.
+                try:
+                    cleanup_client = client
+                    if cleanup_client is None:
+                        from .client import get_client as _get_client
+
+                        cleanup_client = _get_client()
+                    unclaimed_ids = [
+                        file_id
+                        for reusable in reusable_uploads
+                        for file_id in reusable.release_ids()
+                    ]
+                    if unclaimed_ids:
+                        from .batch_digest import _release_uploaded_files
+
+                        _release_uploaded_files(
+                            cleanup_client, unclaimed_ids,
+                            in_background=True, on_log=on_log,
+                        )
+                except Exception as cleanup_exc:  # noqa: BLE001 - stage is additive
+                    _log.warning(
+                        "retained digest-upload cleanup failed: %s", cleanup_exc,
+                    )
+                reusable_uploads.clear()
     _finish_stage(stage_results, journal, critique_stage)
 
     # Cross-sheet QC pass (Phase 13): a deliberate whole-set conflict hunt over the
@@ -2810,14 +3264,20 @@ def extract_drawing_context(
     cross_findings: list[Finding] = []
     cross_stage = StageResult(stage="cross_qc", expected=config.run_cross_qc)
     if config.run_cross_qc:
-        if progress is not None:
-            progress(total, total, "Cross-sheet QC")
-        journal.emit("STAGE_START", stage="cross_qc", sheets=total)
+        if cross_future is None:
+            if progress is not None:
+                progress(total, total, "Cross-sheet QC")
+            journal.emit("STAGE_START", stage="cross_qc", sheets=total)
         try:
             from .cross_qc import cross_qc_model, cross_sheet_qc
 
-            cross_res = cross_sheet_qc(
-                sheets, sheet_geometries, client=client, identity=set_identity_obj,
+            cross_res = (
+                cross_future.result()
+                if cross_future is not None
+                else cross_sheet_qc(
+                    sheets, sheet_geometries, client=client,
+                    identity=set_identity_obj, cache=cache,
+                )
             )
             cross_findings = cross_res.findings
             numeric_claims.extend(cross_res.claims)
@@ -2830,6 +3290,8 @@ def extract_drawing_context(
                 run_usage, family="cross_qc", instance="cross_qc",
                 model=cross_qc_model(),
                 input_tokens=cross_res.input_tokens, output_tokens=cross_res.output_tokens,
+                transport="CACHE" if getattr(cross_res, "cached", False) else "REAL_TIME",
+                cache_hit=bool(getattr(cross_res, "cached", False)),
                 terminal_status="COMPLETE" if cross_complete else "PARTIAL",
             )
             cross_stage.items_out = len(cross_findings)
@@ -2864,40 +3326,64 @@ def extract_drawing_context(
     synthesis_text = ""
     synthesis_stage = StageResult(stage="synthesis", expected=config.run_synthesis)
     if config.run_synthesis:
-        if progress is not None:
-            progress(total, total, "Synthesizing set overview")
-        journal.emit("STAGE_START", stage="synthesis", sheets=total)
+        if synthesis_future is None:
+            if progress is not None:
+                progress(total, total, "Synthesizing set overview")
+            journal.emit("STAGE_START", stage="synthesis", sheets=total)
+            _log.info("synthesis: starting cross-sheet overview")
         from .synthesis import (
             MIN_SHEETS_FOR_SYNTHESIS,
             default_synthesis_model,
             synthesize_drawing_set,
         )
 
-        _log.info("synthesis: starting cross-sheet overview")
-        result = synthesize_drawing_set(sheets, client=client, model=synthesis_model)
-        if result.ok:
-            synthesis_text = result.text
-            synthesis_stage.status = "COMPLETE"
-            # The synthesis call is billed, so its usage is recorded (§15.6).
-            _record_usage(
-                run_usage, family="synthesis", instance="synthesis",
-                model=synthesis_model or default_synthesis_model(),
-                input_tokens=result.input_tokens, output_tokens=result.output_tokens,
+        try:
+            result = (
+                synthesis_future.result()
+                if synthesis_future is not None
+                else synthesize_drawing_set(
+                    sheets, client=client, model=synthesis_model, cache=cache,
+                )
             )
-            _log.info(
-                "synthesis: ok (input=%d output=%d tok)",
-                result.input_tokens, result.output_tokens,
-            )
-        elif result.error and len([s for s in sheets if s.ok]) >= MIN_SHEETS_FOR_SYNTHESIS:
-            # A genuine failure (not the "too few sheets" skip) is worth surfacing.
-            errors.append(f"Cross-sheet synthesis: {result.error}")
+        except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
+            errors.append(f"Cross-sheet synthesis: {exc}")
             synthesis_stage.status = "FAILED"
-            synthesis_stage.errors.append(str(result.error))
-            _log.warning("synthesis: failed: %s", result.error)
+            synthesis_stage.errors.append(str(exc))
+            _log.warning("synthesis: failed: %s", exc)
         else:
-            # Fewer than two readable sheets — an applicable, valid skip (§3.3).
-            synthesis_stage.status = "SKIPPED_VALID"
-            _log.info("synthesis: skipped (<%d readable sheet(s))", MIN_SHEETS_FOR_SYNTHESIS)
+            if result.ok:
+                synthesis_text = result.text
+                synthesis_stage.status = "COMPLETE"
+                # The synthesis call is billed, so its usage is recorded (§15.6).
+                _record_usage(
+                    run_usage, family="synthesis", instance="synthesis",
+                    model=synthesis_model or default_synthesis_model(),
+                    input_tokens=result.input_tokens, output_tokens=result.output_tokens,
+                    transport=(
+                        "CACHE" if getattr(result, "cached", False) else "REAL_TIME"
+                    ),
+                    cache_hit=bool(getattr(result, "cached", False)),
+                )
+                _log.info(
+                    "synthesis: ok (input=%d output=%d tok)",
+                    result.input_tokens, result.output_tokens,
+                )
+            elif (
+                result.error
+                and len([s for s in sheets if s.ok]) >= MIN_SHEETS_FOR_SYNTHESIS
+            ):
+                # A genuine failure (not the "too few sheets" skip) is worth surfacing.
+                errors.append(f"Cross-sheet synthesis: {result.error}")
+                synthesis_stage.status = "FAILED"
+                synthesis_stage.errors.append(str(result.error))
+                _log.warning("synthesis: failed: %s", result.error)
+            else:
+                # Fewer than two readable sheets — an applicable, valid skip (§3.3).
+                synthesis_stage.status = "SKIPPED_VALID"
+                _log.info(
+                    "synthesis: skipped (<%d readable sheet(s))",
+                    MIN_SHEETS_FOR_SYNTHESIS,
+                )
     _finish_stage(stage_results, journal, synthesis_stage)
 
     # Set-level focus report (one text-only call; independent of synthesis).
@@ -2905,50 +3391,72 @@ def extract_drawing_context(
     # per-sheet digests plus any synthesis — ships exactly as it would have.
     focus_report_text = ""
     if focus:
-        if progress is not None:
-            progress(total, total, "Generating focus report")
+        if focus_future is None:
+            if progress is not None:
+                progress(total, total, "Generating focus report")
+            _log.info("focus report: starting set-level pass")
+            journal.emit("STAGE_START", stage="focus")
         from .focus import (
             MIN_SHEETS_FOR_FOCUS,
             default_focus_model,
             generate_focus_report,
         )
 
-        _log.info("focus report: starting set-level pass")
-        journal.emit("STAGE_START", stage="focus")
-        fresult = generate_focus_report(
-            sheets, focus, client=client, model=focus_model
-        )
-        if fresult.ok:
-            focus_report_text = fresult.text
-            # The focus call is billed, so its usage is recorded (§15.6).
-            _record_usage(
-                run_usage, family="focus", instance="focus",
-                model=focus_model or default_focus_model(),
-                input_tokens=fresult.input_tokens, output_tokens=fresult.output_tokens,
+        focus_status = "FAILED"
+        try:
+            fresult = (
+                focus_future.result()
+                if focus_future is not None
+                else generate_focus_report(
+                    sheets, focus, client=client, model=focus_model, cache=cache,
+                )
             )
-            _log.info(
-                "focus report: ok (input=%d output=%d tok)",
-                fresult.input_tokens, fresult.output_tokens,
-            )
-        elif fresult.error and len([s for s in sheets if s.ok]) >= MIN_SHEETS_FOR_FOCUS:
-            errors.append(f"Focus report: {fresult.error}")
-            _log.warning("focus report: failed: %s", fresult.error)
+        except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
+            errors.append(f"Focus report: {exc}")
+            _log.warning("focus report: failed: %s", exc)
         else:
-            _log.info(
-                "focus report: skipped (<%d readable sheet(s))", MIN_SHEETS_FOR_FOCUS
-            )
+            if fresult.ok:
+                focus_report_text = fresult.text
+                focus_status = "COMPLETE"
+                # The focus call is billed, so its usage is recorded (§15.6).
+                _record_usage(
+                    run_usage, family="focus", instance="focus",
+                    model=focus_model or default_focus_model(),
+                    input_tokens=fresult.input_tokens, output_tokens=fresult.output_tokens,
+                    transport=(
+                        "CACHE" if getattr(fresult, "cached", False) else "REAL_TIME"
+                    ),
+                    cache_hit=bool(getattr(fresult, "cached", False)),
+                )
+                _log.info(
+                    "focus report: ok (input=%d output=%d tok)",
+                    fresult.input_tokens, fresult.output_tokens,
+                )
+            elif (
+                fresult.error
+                and len([s for s in sheets if s.ok]) >= MIN_SHEETS_FOR_FOCUS
+            ):
+                errors.append(f"Focus report: {fresult.error}")
+                _log.warning("focus report: failed: %s", fresult.error)
+            else:
+                focus_status = "SKIPPED_VALID"
+                _log.info(
+                    "focus report: skipped (<%d readable sheet(s))",
+                    MIN_SHEETS_FOR_FOCUS,
+                )
         # The focus report is additive (no StageResult of its own); its journal
         # end-event still records the outcome for the trace.
         journal.emit(
             "STAGE_END", stage="focus",
-            level="INFO" if fresult.ok else "WARNING",
-            status=(
-                "COMPLETE" if fresult.ok
-                else "FAILED" if fresult.error
-                and len([s for s in sheets if s.ok]) >= MIN_SHEETS_FOR_FOCUS
-                else "SKIPPED_VALID"
-            ),
+            level="INFO" if focus_status == "COMPLETE" else "WARNING",
+            status=focus_status,
         )
+
+    if stage_executor is not None:
+        # All submitted background stages have been collected above. Waiting here
+        # is normally a no-op and ensures no worker outlives the run/client/cache.
+        _close_stage_executor(stage_executor)
+        stage_executor = None
 
     # Ledger pipeline (Part III): ingest every channel into the findings ledger,
     # harvest the prose (exhaustive only), anchor, number, then verify → citation

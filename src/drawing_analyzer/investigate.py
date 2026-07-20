@@ -46,8 +46,10 @@ from typing import Any, Callable, Iterable
 from .core.api_config import (
     PHASE_INVESTIGATION,
     VERIFICATION_ESCALATION_MODEL,
+    _cache_control_block,
     apply_effort_config,
     apply_thinking_config,
+    cache_policy_for,
     phase_output_cap,
     system_prompt_with_cache,
     tools_with_cache,
@@ -55,6 +57,7 @@ from .core.api_config import (
 from .diagnostics import get_logger
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
+    _get,
     _clean_error,
     _error_status,
     _image_block,
@@ -520,6 +523,8 @@ class _InvestigationOutcome:
     rounds: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
     fatal: bool = False
     note: str = ""
     tool_trace: list = field(default_factory=list)
@@ -561,6 +566,56 @@ def _build_initial_content(
 _BUDGET_EXHAUSTED_TEXT = (
     "Evidence budget exhausted — respond now with ONLY the JSON verdict object."
 )
+
+
+def _messages_with_cache_breakpoints(messages: list[dict]) -> list[dict]:
+    """Copy a conversation and cache its stable evidence prefixes.
+
+    Investigation already caches its static system prompt and tool schemas.  The
+    expensive part within one finding, however, is the initial user turn: finding
+    context plus the 300-DPI evidence image.  That turn is byte-identical on every
+    tool round.  Mark its final block on every request, and also mark the newest
+    user/tool-result turn so the API can extend the cached conversation prefix as
+    evidence accumulates.
+
+    Only the first and latest cacheable user turns are marked.  Together with the
+    system and tools breakpoints this stays within Anthropic's four-breakpoint
+    request limit.  The canonical ``messages`` history is never mutated, so cache
+    metadata cannot leak into warm-verdict serialization or tool execution.
+    """
+    if not cache_policy_for(PHASE_INVESTIGATION).caches_anything:
+        return messages
+
+    cacheable: list[tuple[int, int]] = []
+    copied: list[dict] = []
+    for message_index, message in enumerate(messages):
+        cloned = dict(message)
+        raw_content = message.get("content")
+        if not isinstance(raw_content, list):
+            copied.append(cloned)
+            continue
+        content = [dict(block) if isinstance(block, dict) else block
+                   for block in raw_content]
+        # Start clean when a caller passes an already-decorated history.
+        for block in content:
+            if isinstance(block, dict):
+                block.pop("cache_control", None)
+        cloned["content"] = content
+        copied.append(cloned)
+        if message.get("role") == "user":
+            for block_index in range(len(content) - 1, -1, -1):
+                if isinstance(content[block_index], dict):
+                    cacheable.append((message_index, block_index))
+                    break
+
+    if not cacheable:
+        return copied
+    selected = {cacheable[0], cacheable[-1]}
+    for message_index, block_index in selected:
+        copied[message_index]["content"][block_index][
+            "cache_control"
+        ] = _cache_control_block()
+    return copied
 
 
 def _investigate_one(
@@ -621,7 +676,7 @@ def _investigate_one(
             "system": system_prompt_with_cache(
                 INVESTIGATE_SYSTEM_PROMPT, phase=PHASE_INVESTIGATION
             ),
-            "messages": messages,
+            "messages": _messages_with_cache_breakpoints(messages),
         }
         if tool_round < max_rounds:
             kwargs["tools"] = tools_with_cache(list(tools), phase=PHASE_INVESTIGATION)
@@ -645,8 +700,13 @@ def _investigate_one(
                 return out
 
         tin, tout = _message_usage(resp)
+        usage = _get(resp, "usage")
+        cache_read = int(_get(usage, "cache_read_input_tokens", 0) or 0)
+        cache_write = int(_get(usage, "cache_creation_input_tokens", 0) or 0)
         out.input_tokens += tin
         out.output_tokens += tout
+        out.cache_read_tokens += cache_read
+        out.cache_write_tokens += cache_write
         stop = str(getattr(resp, "stop_reason", "") or "")
         content = list(getattr(resp, "content", None) or [])
 
@@ -912,6 +972,8 @@ class InvestigationRecord:
     rounds: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
     cached: bool = False
 
 
@@ -926,6 +988,8 @@ class InvestigateResult:
     skipped_over_budget: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
     fatal: bool = False
     errors: list = field(default_factory=list)
     per_finding: list = field(default_factory=list)
@@ -1057,10 +1121,14 @@ def investigate_findings(
         )
         result.input_tokens += outcome.input_tokens
         result.output_tokens += outcome.output_tokens
+        result.cache_read_tokens += outcome.cache_read_tokens
+        result.cache_write_tokens += outcome.cache_write_tokens
         record = InvestigationRecord(
             qc_id=finding.qc_id or "", outcome=outcome.outcome,
             rounds=outcome.rounds, input_tokens=outcome.input_tokens,
             output_tokens=outcome.output_tokens,
+            cache_read_tokens=outcome.cache_read_tokens,
+            cache_write_tokens=outcome.cache_write_tokens,
         )
         result.per_finding.append(record)
         if outcome.outcome == "concluded":

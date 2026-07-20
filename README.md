@@ -294,12 +294,13 @@ PDFs → list sheets → render (overview + 6×6 tiles) + extract vector text la
   a sheet with an *empty* text layer (scanned or pasted-raster) instead renders at
   **1992 px**, because there the pixels are the only information channel; such
   sheets are flagged in the run and (later) badged in the report.
-- **Batch mode** (`use_batch=True`, the GUI default) digests every uncached sheet
+- **Economy mode** (`use_batch=True`, the GUI default) digests every uncached sheet
   through the Message Batches API, uploading images via the Files API so no request
-  body approaches the 32 MB limit. ~50% cheaper than real time, for byte-identical
-  output. In the GUI the *Processing → Real-time mode* checkbox switches
-  transports per run (off = batch; the cost preview and confirm dialog reprice
-  to match). A library caller can opt every run into it globally with
+  body approaches the 32 MB limit. It uses the same models, prompts, inputs, and
+  review contract at roughly 50% of the real-time token rate. In the GUI,
+  *Processing* offers **Economy**, **Hybrid**, and **Fast**;
+  the cost preview and confirmation dialog reprice every paid stage to match.
+  A library caller can opt every run into Batch globally with
   `DRAWING_ANALYZER_USE_BATCH=1` — no call-site edits — while an explicit
   `use_batch=` argument always wins. If the Files API is
   unavailable for your key/workspace (uploads return `404`), each affected sheet
@@ -311,7 +312,10 @@ PDFs → list sheets → render (overview + 6×6 tiles) + extract vector text la
   The uploaded files are released on every exit — a fully-collected batch, a
   confirmed cancel, or an unexpected collection error (best-effort cancel, then
   release); a batch this run can't cancel keeps its files to expire server-side.
-- **Real-time mode** (`use_batch=False`) digests sheets concurrently on a bounded
+- **Hybrid mode** uses real-time digests (`use_batch=False`) and Batch critique
+  (`critique_use_batch=True`). Standard analysis therefore starts immediately;
+  exhaustive QC can still wait for its two critique reads in the shared queue.
+- **Fast mode** (`use_batch=False`, `critique_use_batch=False`) digests sheets concurrently on a bounded
   thread pool while rendering stays sequential (PyMuPDF is not thread-safe).
   Running the **exhaustive** stack real-time is the most expensive configuration
   (three full Opus reads per sheet), so the run logs a one-time nudge toward
@@ -333,12 +337,13 @@ non-goal:
   + 36 tiles is the dominant re-run cost (~4.5 s/sheet; ~2.5 min for a 33-sheet
   set). A digest is deterministic given the rendered images, so before rendering
   the pipeline computes a **level-1 key** from cheap page access alone and, on a
-  hit, serves the cached digest **without rendering**. The level-1 identity keys on
-  the **whole source file's content hash** (`content_sha256`, computed once per
-  source) — so *any* byte change re-keys, including page **rotation**, the
-  **CropBox**, and a rendered **annotation** (the earlier per-page fingerprint
-  hashed only content streams + page dimensions and could serve a stale digest
-  after a 180° flip, a same-size re-crop, or an added markup) — plus the render
+  hit, serves the cached digest **without rendering**. The level-1 identity uses a
+  conservative **page dependency hash** rooted in the source `content_sha256`:
+  content streams, forms, images, fonts, inherited page attributes, rendered
+  annotations/appearance streams, and relevant document rendering globals. An
+  edit to one page therefore rekeys that page while unchanged siblings keep their
+  hits. If dependency isolation is ever ambiguous, it safely falls back to the
+  whole-source hash (a possible false miss, never a stale hit). It also includes the render
   config (grid / overlap / target / blank-suppression), the canonical
   **coordinate-space version**, and the **renderer environment** (OS + PyMuPDF/MuPDF
   build, so a cache copied between installations misses rather than serving pixels
@@ -356,6 +361,30 @@ non-goal:
   re-issued with backoff; ambiguous connection/timeout errors left to the SDK's
   idempotent retries), so a lost response still can't orphan a stored file, and
   the first hard failure stops the sheet's remaining uploads.
+- **Exact paid-stage reuse.** Successful synthesis, focus, cross-sheet QC,
+  prose-structuring, verification, and investigation results are content-addressed
+  over their complete model-visible inputs, prompts, models, and output-shaping
+  parameters. A warm identical run makes zero calls for those stages; partial,
+  malformed, degraded, or unsaved-evidence results are never admitted.
+- **Render/upload reuse within a run.** Real-time digest renders are spooled and
+  consumed byte-for-byte by critique instead of rasterizing the same page again.
+  Economy-mode digest uploads transfer ownership to critique, which changes only
+  the final task instruction and reuses the same remote file IDs; every ID still
+  has exactly one cleanup owner. Batch rendering also looks ahead by one sheet so
+  the next page can render while the current page uploads, with a hard two-sheet
+  memory bound and original-order assembly.
+- **Scalable persistent cache.** The legacy whole-file JSON store migrates in
+  place to transactional SQLite/WAL storage (the configured filename remains
+  compatible). Reads and upserts touch one row instead of rewriting every cached
+  drawing, concurrent app instances coordinate through SQLite, and a corrupt row
+  degrades to one cache miss instead of losing the store.
+- **Bounded deterministic fan-out.** Independent cross-QC shards, prose
+  stragglers, and verification calls run on small configurable pools. PDF crop
+  rendering/evidence persistence stays serialized; independent source-PDF markup
+  writers use isolated spawned processes. Independent set-level synthesis, focus,
+  and cross-QC calls also overlap the identity/planning/critique path when the real
+  SDK client is in use. Results still fold back in input order, so completion timing
+  cannot reorder the exported review.
 - **Blank-tile suppression.** A tile whose pixmap is **pixel-uniform** (a truly
   empty crop of a sparse sheet) carries no information, so it is dropped before
   upload and disclosed to the model (*"Tiles omitted as completely blank: …"*).
@@ -374,9 +403,9 @@ non-goal:
 Note: the digest cache's schema version folds into every key, so a change to what
 is stored or how a sheet is identified **invalidates every pre-existing entry
 once**; the first run after upgrading re-digests each sheet, then caches as before.
-It was bumped for the two-level key and blank-tile suppression, and again when the
-level-1 identity moved to the whole-source content hash (so a previously-served
-stale digest after a rotation / re-crop / added annotation is no longer possible).
+It was bumped for the two-level key and blank-tile suppression, for the safe
+whole-source identity, and again for conservative page-local dependency hashing
+(so sibling pages survive unrelated edits without reintroducing stale hits).
 
 **Cost of the exhaustive critique.** A plain digest is roughly $0.4–0.6/sheet
 real-time (~half that via Batches). Turning on the [critique pass](#critique-pass-the-reviewer)
@@ -1175,12 +1204,16 @@ runs.
 | `DRAWING_ANALYZER_NAMING_DOMINANT_MIN_FREQ` | `2` | Naming auditor: occurrences that make a tag "established" vocabulary. |
 | `DRAWING_ANALYZER_NAMING_DRIFT_MAX_FREQ` | `2` | Naming auditor: a tag is only flagged as drift when this rare. |
 | `DRAWING_ANALYZER_PROFILES_DIR` | `~/.drawing_analyzer/profiles` | User review-profile directory (wins over packaged profiles on name). |
-| `DRAWING_ANALYZER_USE_BATCH` | off | Opt every run into the Message Batches transport (~50% cheaper, identical output) without editing call sites. An explicit `use_batch=` argument still wins. |
+| `DRAWING_ANALYZER_USE_BATCH` | off | Opt every run into the Message Batches transport (~50% token-rate discount with the same model/prompt/review contract) without editing call sites. An explicit `use_batch=` argument still wins. |
 | `DRAWING_ANALYZER_MAX_WORKERS` | `4` | Real-time digest concurrency (`1` = sequential). |
+| `DRAWING_ANALYZER_STAGE_OVERLAP` | auto | Overlap independent set-level calls for the real SDK client; `0` disables it and `1` explicitly opts a thread-safe custom client in. `DRAWING_ANALYZER_MAX_WORKERS=1` remains fully sequential. |
 | `DRAWING_ANALYZER_UPLOAD_WORKERS` | `6` | Files-API image-upload concurrency per sheet (`1` = sequential). |
+| `DRAWING_ANALYZER_CROSS_QC_WORKERS` | `3` | Independent cross-QC map/reconcile calls; results still fold deterministically. |
+| `DRAWING_ANALYZER_HARVEST_WORKERS` | `4` | Independent prose-straggler structuring calls. |
+| `DRAWING_ANALYZER_ANNOTATE_WORKERS` | `2` | Independent source-PDF markup processes (`1` disables process fan-out; hard cap 4). |
 | `DRAWING_ANALYZER_SUPPRESS_NEAR_BLANK` | off | Also drop near-blank tiles (PNG-byte threshold), not just pixel-uniform ones. |
 | `DRAWING_ANALYZER_NEAR_BLANK_MAX_BYTES` | `3072` | Near-blank PNG-byte threshold (only when the above is on). |
-| `DRAWING_ANALYZER_CACHE_PATH` | `~/.drawing_analyzer/drawing_digest_cache.json` | On-disk digest cache. |
+| `DRAWING_ANALYZER_CACHE_PATH` | `~/.drawing_analyzer/drawing_digest_cache.json` | On-disk SQLite/WAL cache (legacy filename retained; old JSON migrates automatically). |
 | `DRAWING_ANALYZER_CACHE_PERSIST` | on | Disable to keep the cache in-memory only. |
 | `DRAWING_ANALYZER_DIAGNOSTICS` | on | Set `0`/`false` to disable the rotating `drawing_analyzer.log` diagnostics file the GUI writes. |
 | `DRAWING_ANALYZER_DISABLE_UPDATE_CHECK` | off | Set truthy to turn off the desktop app's daily update check and "Check for Updates" button (locked-down deployments). |

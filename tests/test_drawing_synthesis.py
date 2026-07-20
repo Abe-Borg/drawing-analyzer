@@ -160,6 +160,45 @@ def test_synthesis_retries_transient_then_succeeds():
     assert calls["n"] == 2 and slept == [2.0]
 
 
+def test_synthesis_warm_cache_skips_api_and_billed_tokens():
+    from drawing_analyzer.digest_cache import DigestCache
+
+    cache = DigestCache(None, persist=False)
+    client = _FakeClient(lambda _kw: FakeMessage(
+        content=[FakeTextBlock(text="cached set overview")],
+        usage=FakeUsage(input_tokens=321, output_tokens=45),
+    ))
+    sheets = [_digest("a", "plan"), _digest("b", "schedule")]
+
+    cold = synthesize_drawing_set(sheets, client=client, model=OPUS, cache=cache)
+    warm = synthesize_drawing_set(sheets, client=client, model=OPUS, cache=cache)
+
+    assert cold.ok and cold.cached is False
+    assert warm.ok and warm.cached is True
+    assert warm.text == cold.text
+    assert warm.input_tokens == 0 and warm.output_tokens == 0
+    assert len(client.calls) == 1
+
+
+def test_synthesis_cache_misses_when_a_digest_changes():
+    from drawing_analyzer.digest_cache import DigestCache
+
+    cache = DigestCache(None, persist=False)
+    client = _FakeClient(lambda _kw: FakeMessage(
+        content=[FakeTextBlock(text="overview")],
+        usage=FakeUsage(input_tokens=10, output_tokens=2),
+    ))
+    synthesize_drawing_set(
+        [_digest("a", "plan"), _digest("b", "schedule")],
+        client=client, model=OPUS, cache=cache,
+    )
+    changed = synthesize_drawing_set(
+        [_digest("a", "plan revised"), _digest("b", "schedule")],
+        client=client, model=OPUS, cache=cache,
+    )
+    assert changed.cached is False and len(client.calls) == 2
+
+
 # --------------------------------------------------------------------------- #
 # pipeline integration (renders a synthetic PDF; needs PyMuPDF)
 # --------------------------------------------------------------------------- #

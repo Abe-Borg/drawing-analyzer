@@ -7,7 +7,9 @@ beta headers, web-search tool configuration, and request-shape policy
 Model identifiers may be overridden via env vars:
     DRAWING_ANALYZER_MODEL                — review (default Opus 4.8).
     DRAWING_ANALYZER_VERIFICATION_MODEL          — verification initial pass
-                                              (default Sonnet 4.6).
+                                               (default Sonnet 4.6).
+    DRAWING_ANALYZER_VERIFY_MODEL                — legacy verification alias;
+                                               takes precedence when set.
     DRAWING_ANALYZER_VERIFICATION_ESCALATION_MODEL — escalation (default Opus 4.8).
     DRAWING_ANALYZER_INVESTIGATION_MODEL  — the agentic investigation loop
                                               (default: the escalation model).

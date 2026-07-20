@@ -6,12 +6,18 @@ PyMuPDF, no network, no on-disk default cache (tests inject their own
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
+import sqlite3
 from pathlib import Path
 
+import drawing_analyzer.digest_cache as digest_cache_module
 from drawing_analyzer.digest import DIGEST_PROMPT_VERSION, digest_sheet
 from drawing_analyzer.digest_cache import (
+    _DB_FORMAT_VERSION,
+    _SCHEMA_VERSION,
     DigestCache,
+    critique_cache_key,
     default_cache_path,
     digest_cache_key,
     digest_cache_key_level1,
@@ -206,6 +212,255 @@ def test_persistence_toggle(monkeypatch):
     assert persistence_enabled() is False
     monkeypatch.setenv("DRAWING_ANALYZER_CACHE_PERSIST", "1")
     assert persistence_enabled() is True
+
+
+def test_legacy_json_migrates_in_place_without_losing_current_schema_entries(tmp_path):
+    path = tmp_path / "legacy-cache.json"
+    path.write_text(
+        json.dumps(
+            {
+                "_schema_version": _SCHEMA_VERSION,
+                "entries": {
+                    "digest-key": {"text": "legacy digest", "findings": []},
+                    "critique-key": {"text": "legacy critique", "completed_runs": 2},
+                    "invalid-row": ["not", "a", "dict"],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cache = DigestCache(path, persist=True)
+    try:
+        assert cache.get("digest-key") == {"text": "legacy digest", "findings": []}
+        assert cache.get("critique-key") == {
+            "text": "legacy critique",
+            "completed_runs": 2,
+        }
+        assert cache.get("invalid-row") is None
+        assert cache.stats()["size"] == 2
+        assert cache._connection.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+    finally:
+        cache.close()
+
+    # The configured filename is preserved even when it still ends in .json;
+    # its contents are now the scalable SQLite store.
+    assert path.read_bytes().startswith(b"SQLite format 3\x00")
+    reopened = DigestCache(path, persist=True)
+    try:
+        assert reopened.get("digest-key")["text"] == "legacy digest"
+    finally:
+        reopened.close()
+
+
+def test_failed_legacy_migration_is_atomic_and_serves_original_in_memory(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "legacy-cache.json"
+    path.write_text(
+        json.dumps(
+            {
+                "_schema_version": _SCHEMA_VERSION,
+                "entries": {"k": {"text": "still available"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    original = path.read_bytes()
+
+    def _fail_replace(_source, _target):
+        raise OSError("simulated atomic replace failure")
+
+    monkeypatch.setattr(digest_cache_module.os, "replace", _fail_replace)
+    cache = DigestCache(path, persist=True)  # migration failure must not escape
+    try:
+        assert cache.get("k") == {"text": "still available"}
+    finally:
+        cache.close()
+
+    assert path.read_bytes() == original
+    assert list(tmp_path.glob(".drawing_digest_cache.*.sqlite3.tmp")) == []
+    assert list(tmp_path.glob(".*.migration.lock")) == []
+
+
+def test_concurrent_instances_migrate_once_and_do_not_lose_writes(tmp_path):
+    path = tmp_path / "shared-cache.json"
+    path.write_text(
+        json.dumps(
+            {
+                "_schema_version": _SCHEMA_VERSION,
+                "entries": {"legacy": {"text": "seed"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    workers = 8
+    writes_per_worker = 20
+
+    def _write(worker: int) -> bool:
+        cache = DigestCache(path, persist=True)
+        try:
+            saw_seed = cache.get("legacy") == {"text": "seed"}
+            for item in range(writes_per_worker):
+                cache.put(
+                    f"worker-{worker}:{item}",
+                    {"worker": worker, "item": item},
+                )
+            return saw_seed
+        finally:
+            cache.close()
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        assert all(pool.map(_write, range(workers)))
+
+    reopened = DigestCache(path, persist=True)
+    try:
+        assert reopened.stats()["size"] == 1 + workers * writes_per_worker
+        for worker in range(workers):
+            for item in range(writes_per_worker):
+                assert reopened.get(f"worker-{worker}:{item}") == {
+                    "worker": worker,
+                    "item": item,
+                }
+    finally:
+        reopened.close()
+
+
+def test_failed_row_serialization_does_not_replace_durable_value(tmp_path):
+    path = tmp_path / "cache.json"
+    cache = DigestCache(path, persist=True)
+    sentinel = object()
+    try:
+        cache.put("k", {"version": "durable"})
+        cache.put("k", {"version": sentinel})  # JSON serialization fails
+
+        # The current run retains its newly computed result in the fallback
+        # overlay, but the committed SQLite row remains intact and parseable.
+        assert cache.get("k")["version"] is sentinel
+        assert cache.stats()["size"] == 1
+
+        reader = DigestCache(path, persist=True)
+        try:
+            assert reader.get("k") == {"version": "durable"}
+        finally:
+            reader.close()
+    finally:
+        cache.close()
+
+
+def test_transient_write_failure_is_retried_by_next_successful_put(tmp_path):
+    path = tmp_path / "cache.json"
+    cache = DigestCache(path, persist=True)
+    blocker = sqlite3.connect(path, timeout=0, isolation_level=None)
+    try:
+        # Force this cache instance's first transaction to fail immediately
+        # instead of waiting for the normal 30-second busy timeout.
+        cache._connection.execute("PRAGMA busy_timeout=1")
+        blocker.execute("BEGIN IMMEDIATE")
+        cache.put("held-back", {"text": "computed while busy"})
+        assert cache.get("held-back") == {"text": "computed while busy"}
+
+        blocker.rollback()
+        cache.put("next", {"text": "flush trigger"})
+    finally:
+        try:
+            blocker.rollback()
+        except sqlite3.Error:
+            pass
+        blocker.close()
+        cache.close()
+
+    reopened = DigestCache(path, persist=True)
+    try:
+        assert reopened.get("held-back") == {"text": "computed while busy"}
+        assert reopened.get("next") == {"text": "flush trigger"}
+    finally:
+        reopened.close()
+
+
+def test_storage_or_content_schema_mismatch_invalidates_all_rows(tmp_path):
+    for mismatch in ("storage", "content"):
+        path = tmp_path / f"{mismatch}.json"
+        cache = DigestCache(path, persist=True)
+        cache.put("digest", {"text": "stale"})
+        cache.put("critique", {"text": "also stale"})
+        cache.close()
+
+        with sqlite3.connect(path) as raw:
+            if mismatch == "storage":
+                raw.execute(f"PRAGMA user_version={_DB_FORMAT_VERSION + 1}")
+            else:
+                raw.execute(
+                    "UPDATE cache_metadata SET value = ? WHERE name = ?",
+                    (str(_SCHEMA_VERSION - 1), "cache_schema_version"),
+                )
+
+        reopened = DigestCache(path, persist=True)
+        try:
+            assert reopened.get("digest") is None
+            assert reopened.get("critique") is None
+            assert reopened.stats()["size"] == 0
+            assert (
+                reopened._connection.execute("PRAGMA user_version").fetchone()[0]
+                == _DB_FORMAT_VERSION
+            )
+            assert reopened._connection.execute(
+                "SELECT value FROM cache_metadata WHERE name = ?",
+                ("cache_schema_version",),
+            ).fetchone() == (str(_SCHEMA_VERSION),)
+        finally:
+            reopened.close()
+
+
+def test_digest_and_critique_namespaces_coexist_in_persistent_store(tmp_path):
+    sheet = _sheet()
+    digest_key = _key(sheet)
+    critique_key = critique_cache_key(
+        sheet,
+        model=OPUS,
+        prompt_version="critique-v1",
+        max_tokens=16000,
+        effort="high",
+        use_thinking=True,
+        runs=2,
+    )
+    assert digest_key != critique_key
+
+    path = tmp_path / "cache.json"
+    cache = DigestCache(path, persist=True)
+    cache.put(digest_key, {"stage": "digest"})
+    cache.put(critique_key, {"stage": "critique"})
+    cache.close()
+
+    reopened = DigestCache(path, persist=True)
+    try:
+        assert reopened.get(digest_key) == {"stage": "digest"}
+        assert reopened.get(critique_key) == {"stage": "critique"}
+        assert reopened.stats()["size"] == 2
+    finally:
+        reopened.close()
+
+
+def test_one_corrupt_sqlite_row_is_a_miss_without_poisoning_other_rows(tmp_path):
+    path = tmp_path / "cache.json"
+    cache = DigestCache(path, persist=True)
+    cache.put("good", {"text": "valid"})
+    cache.close()
+
+    with sqlite3.connect(path) as raw:
+        raw.execute(
+            "INSERT INTO cache_entries(cache_key, value_json) VALUES (?, ?)",
+            ("bad", "{not valid json"),
+        )
+
+    reopened = DigestCache(path, persist=True)
+    try:
+        assert reopened.get("bad") is None
+        assert reopened.get("good") == {"text": "valid"}
+        assert reopened.stats()["size"] == 1  # corrupt row was removed
+    finally:
+        reopened.close()
 
 
 # --------------------------------------------------------------------------- #

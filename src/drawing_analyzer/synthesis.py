@@ -33,6 +33,11 @@ from .digest import (
     _message_usage,
     _retry_backoff_seconds,
 )
+from .stage_cache import (
+    get_stage_cache_entry,
+    put_stage_cache_entry,
+    stage_cache_key,
+)
 
 # A concise overview needs far less room than a per-sheet transcription.
 DEFAULT_SYNTHESIS_MAX_TOKENS = 8_000
@@ -40,6 +45,7 @@ DEFAULT_SYNTHESIS_MAX_TOKENS = 8_000
 DEFAULT_SYNTHESIS_EFFORT = "high"
 # Fewer than this many readable sheets and there is nothing to reconcile.
 MIN_SHEETS_FOR_SYNTHESIS = 2
+_SYNTHESIS_CACHE_CONTRACT = 1
 
 
 def default_synthesis_model() -> str:
@@ -118,6 +124,7 @@ class SynthesisResult:
     output_tokens: int = 0
     model_used: str = ""
     error: str | None = None
+    cached: bool = False
 
     @property
     def ok(self) -> bool:
@@ -134,6 +141,7 @@ def synthesize_drawing_set(
     effort: str | None = DEFAULT_SYNTHESIS_EFFORT,
     max_retries: int = DEFAULT_DIGEST_MAX_RETRIES,
     sleep: Any = time.sleep,
+    cache: Any = None,
 ) -> SynthesisResult:
     """Reconcile per-sheet digests into one set-level overview (text-only call).
 
@@ -150,6 +158,33 @@ def synthesize_drawing_set(
             error=f"insufficient readable sheets for synthesis ({len(ok_sheets)})",
         )
 
+    user_text = build_synthesis_user_text(ok_sheets)
+    thinking_enabled = bool(
+        use_thinking and model_supports_adaptive_thinking(model)
+    )
+    effective_effort = effort if effort and model_supports_effort(model) else None
+    cache_key = stage_cache_key(
+        "synthesis",
+        model=model,
+        prompt=SYNTHESIS_SYSTEM_PROMPT,
+        inputs={"user_text": user_text},
+        params={
+            "contract": _SYNTHESIS_CACHE_CONTRACT,
+            "max_tokens": int(max_tokens),
+            "thinking": thinking_enabled,
+            "effort": effective_effort or "",
+        },
+    )
+    cached_entry = get_stage_cache_entry(cache, cache_key, stage="synthesis")
+    if cached_entry is not None:
+        cached_text = cached_entry.get("text")
+        if isinstance(cached_text, str) and cached_text.strip():
+            return SynthesisResult(
+                text=cached_text,
+                model_used=model,
+                cached=True,
+            )
+
     if client is None:
         from .client import get_client as _get_client
 
@@ -160,13 +195,13 @@ def synthesize_drawing_set(
         "max_tokens": max_tokens,
         "system": SYNTHESIS_SYSTEM_PROMPT,
         "messages": [
-            {"role": "user", "content": build_synthesis_user_text(ok_sheets)}
+            {"role": "user", "content": user_text}
         ],
     }
-    if use_thinking and model_supports_adaptive_thinking(model):
+    if thinking_enabled:
         kwargs["thinking"] = {"type": "adaptive"}
-    if effort and model_supports_effort(model):
-        kwargs["output_config"] = {"effort": effort}
+    if effective_effort:
+        kwargs["output_config"] = {"effort": effective_effort}
 
     attempt = 0
     while True:
@@ -183,10 +218,18 @@ def synthesize_drawing_set(
     text = _message_text(resp)
     in_tok, out_tok = _message_usage(resp)
     error = None if text else "empty synthesis result"
-    return SynthesisResult(
+    result = SynthesisResult(
         text=text,
         input_tokens=in_tok,
         output_tokens=out_tok,
         model_used=model,
         error=error,
     )
+    if result.ok:
+        put_stage_cache_entry(
+            cache,
+            cache_key,
+            stage="synthesis",
+            payload={"text": result.text},
+        )
+    return result
