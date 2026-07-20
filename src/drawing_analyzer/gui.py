@@ -271,6 +271,10 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         # "About"), keyed by HelpDocument.key so a second click re-focuses the
         # existing window instead of stacking a duplicate.
         self._help_windows: dict[str, ctk.CTkToplevel] = {}
+        # Resizable pop-out editor for the per-run focus box (see
+        # _open_focus_popout); focus_popout_box is None whenever it's closed.
+        self._focus_popout: ctk.CTkToplevel | None = None
+        self.focus_popout_box: ctk.CTkTextbox | None = None
         # Self-update checker (Windows desktop build). The last-check date and
         # any "skipped" version persist in the app config dir; the network
         # fetch/download always runs off the UI thread. See core/updates.py and
@@ -458,23 +462,37 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 "“the rooms, and what types of plumbing fixtures each has”. "
                 "You always get the standard digest; a focus adds a Focus "
                 "Report on top. Changing the focus re-analyzes sheets (cached "
-                "results from other focuses don't apply)."
+                "results from other focuses don't apply). Click “Expand” to "
+                "edit in a larger, resizable window."
             ),
             font=ctk.CTkFont(family="Segoe UI", size=11),
             text_color=COLORS["text_muted"],
             wraplength=740,
             justify="left",
         ).pack(anchor="w")
+        focus_box_row = ctk.CTkFrame(focus_row, fg_color="transparent")
+        focus_box_row.pack(fill="x", pady=(4, 0))
         self.focus_box = ctk.CTkTextbox(
-            focus_row, height=56, fg_color=COLORS["bg_input"],
+            focus_box_row, height=56, fg_color=COLORS["bg_input"],
             border_color=COLORS["border"], border_width=2,
             text_color=COLORS["text_primary"],
             font=ctk.CTkFont(family="Segoe UI", size=12), wrap="word",
         )
-        self.focus_box.pack(fill="x", pady=(4, 0))
+        self.focus_box.pack(side="left", fill="x", expand=True)
         # Keep the cost line live as the focus toggles between empty/non-empty
-        # (a focus adds the focus-report pass to the estimate).
-        self.focus_box.bind("<KeyRelease>", lambda _e: self._refresh_summary())
+        # (a focus adds the focus-report pass to the estimate); also mirrors
+        # into the pop-out editor below when it's open.
+        self.focus_box.bind(
+            "<KeyRelease>", lambda _e: self._sync_focus_boxes(self.focus_box)
+        )
+        self.focus_expand_btn = ctk.CTkButton(
+            focus_box_row, text="Expand", width=70, height=28,
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            fg_color=COLORS["bg_card"], hover_color=COLORS["border"],
+            border_width=1, border_color=COLORS["border"],
+            text_color=COLORS["text_secondary"], command=self._open_focus_popout,
+        )
+        self.focus_expand_btn.pack(side="left", padx=(6, 0))
 
         # Project specifications (optional) — the real project spec documents
         # for this run, distinct from "Per-run focus" above: this is
@@ -1341,6 +1359,107 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         except Exception:  # noqa: BLE001 - a widget hiccup must not break refresh
             return ""
 
+    def _open_focus_popout(self) -> None:
+        """Open (or re-focus) a larger, resizable editor for the focus text.
+
+        Mirrors the header textbox live in both directions via
+        ``_sync_focus_boxes``: typing in either box updates the other, so
+        ``_current_focus`` — which only ever reads the header ``focus_box`` —
+        stays correct without needing to know a pop-out exists.
+        """
+        existing = self._focus_popout
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            existing.focus_force()
+            return
+
+        win = ctk.CTkToplevel(self)
+        self._focus_popout = win
+        win.title("Per-run focus")
+        win.configure(fg_color=COLORS["bg_dark"])
+        win.geometry("640x420")
+        win.minsize(420, 260)
+        win.transient(self)
+        win.bind("<Escape>", lambda _e: self._close_focus_popout())
+        win.protocol("WM_DELETE_WINDOW", self._close_focus_popout)
+
+        card = ctk.CTkFrame(win, fg_color=COLORS["bg_card"], corner_radius=8)
+        card.pack(fill="both", expand=True, padx=12, pady=12)
+        ctk.CTkLabel(
+            card, text="Per-run focus",
+            font=ctk.CTkFont(family="Segoe UI", size=15, weight="bold"),
+            text_color=COLORS["text_primary"],
+        ).pack(anchor="w", padx=14, pady=(14, 6))
+
+        # Bottom bar first so the textbox fills the space between it and the
+        # header (pack reserves the bottom before the expand widget claims
+        # the rest) — mirrors _open_help_modal's layout.
+        bottom = ctk.CTkFrame(card, fg_color="transparent")
+        bottom.pack(side="bottom", fill="x", padx=14, pady=(6, 14))
+        ctk.CTkButton(
+            bottom, text="Done", width=100, height=32,
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+            fg_color=COLORS["accent"], hover_color=COLORS["accent_hover"],
+            command=self._close_focus_popout,
+        ).pack(side="right")
+
+        self.focus_popout_box = ctk.CTkTextbox(
+            card, fg_color=COLORS["bg_input"],
+            border_color=COLORS["border"], border_width=2,
+            text_color=COLORS["text_primary"],
+            font=ctk.CTkFont(family="Segoe UI", size=13), wrap="word",
+        )
+        self.focus_popout_box.pack(fill="both", expand=True, padx=14, pady=(0, 4))
+        self.focus_popout_box.insert("1.0", self._current_focus())
+        self.focus_popout_box.bind(
+            "<KeyRelease>",
+            lambda _e: self._sync_focus_boxes(self.focus_popout_box),
+        )
+        if self._busy:
+            self.focus_popout_box.configure(state="disabled")
+        self.focus_popout_box.focus_set()
+
+    def _close_focus_popout(self) -> None:
+        """Destroy the focus pop-out, if open (no-op otherwise)."""
+        win = self._focus_popout
+        self._focus_popout = None
+        self.focus_popout_box = None
+        if win is not None and win.winfo_exists():
+            win.destroy()
+
+    def _sync_focus_boxes(self, source) -> None:
+        """Mirror ``source``'s text into whichever other focus box exists.
+
+        Called from both the header box's and the pop-out's ``<KeyRelease>``
+        so the two always agree, whichever one the operator is typing in.
+        """
+        try:
+            text = source.get("1.0", "end-1c")
+        except Exception:  # noqa: BLE001 - a widget hiccup must not break typing
+            return
+        for box in (self.focus_box, self.focus_popout_box):
+            if box is None or box is source:
+                continue
+            try:
+                box.delete("1.0", "end")
+                box.insert("1.0", text)
+            except Exception:  # noqa: BLE001 - a widget hiccup must not break typing
+                pass
+        self._refresh_summary()
+
+    def _set_focus_editable(self, enabled: bool) -> None:
+        """Enable/disable the focus box, its Expand button, and the pop-out.
+
+        One call covers all three surfaces so a run's start/finish never
+        leaves the pop-out editable while the header box (and everything
+        that reads it) is locked, or vice versa.
+        """
+        state = "normal" if enabled else "disabled"
+        self.focus_box.configure(state=state)
+        self.focus_expand_btn.configure(state=state)
+        if self.focus_popout_box is not None:
+            self.focus_popout_box.configure(state=state)
+
     def _on_transport_toggle(self) -> None:
         # Keep the muted hint under the Processing checkbox in sync with the
         # chosen transport, then refresh the cost summary (whose rate also
@@ -1506,7 +1625,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self.html_btn.configure(state="disabled")
         self.reviewed_btn.configure(state="disabled")
         self.export_btn.configure(state="disabled")
-        self.focus_box.configure(state="disabled")
+        self._set_focus_editable(False)
         self.upload_specs_btn.configure(state="disabled")
         self._clear_log()
         self._log(
@@ -1664,7 +1783,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._ctx = ctx
         self.analyze_btn.configure(state="normal", text="Analyze Drawings")
         self.clear_btn.configure(state="normal")
-        self.focus_box.configure(state="normal")
+        self._set_focus_editable(True)
         self.upload_specs_btn.configure(state="normal")
         has_text = bool(ctx.combined_text.strip())
         if has_text:
@@ -1859,7 +1978,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._busy = False
         self.analyze_btn.configure(state="normal", text="Analyze Drawings")
         self.clear_btn.configure(state="normal")
-        self.focus_box.configure(state="normal")
+        self._set_focus_editable(True)
         self.upload_specs_btn.configure(state="normal")
         self._log(f"Analysis failed: {message}", level="error")
         self._set_progress_text(f"Failed: {message}", color=COLORS["error"])
