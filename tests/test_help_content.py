@@ -278,6 +278,38 @@ def test_runtime_transparency_states_the_limits() -> None:
     assert "engineer of record" in text
 
 
+def test_runtime_transparency_discloses_the_full_outbound_inventory() -> None:
+    """The 'what leaves' list must not understate what actually leaves.
+
+    Two things are easy to omit and were: the source PDF's *basename* rides
+    every request (``SheetRef.display_label`` is spliced into the digest and
+    critique framing, and the batch path names its uploads from it), and the
+    text layer is capped at ``render.SHEET_TEXT_MAX_CHARS`` with a
+    ``[TRUNCATED]`` marker rather than sent whole. An inventory that claims to
+    be exact has to say both.
+    """
+    from drawing_analyzer.render import SHEET_TEXT_MAX_CHARS
+
+    text = _all_text(RUNTIME_TRANSPARENCY)
+    assert f"{SHEET_TEXT_MAX_CHARS:,}" in text
+    assert "[TRUNCATED]" in text
+    assert "file name" in text.lower()
+    # The precise distinction: the name travels, the path does not.
+    assert "never the folder" in text.lower()
+
+
+def test_runtime_transparency_prices_a_standard_run_correctly() -> None:
+    """Set identity and the review plan ride the QC stack, not a standard run.
+
+    ``resolve_run_configuration`` leaves ``run_identity``/``run_review_plan``
+    false unless critique/citation/qc_markups asked for them, so a no-QC run
+    bills the digest alone (plus the focus report when a focus is supplied).
+    """
+    text = _all_text(RUNTIME_TRANSPARENCY).lower()
+    assert "pays for exactly one thing" in text
+    assert "do not run otherwise" in text
+
+
 def test_runtime_transparency_never_promises_an_offline_mode() -> None:
     """The deterministic auditors are zero-API; the run they ride on is not.
 

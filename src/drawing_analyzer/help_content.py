@@ -440,10 +440,16 @@ _HOW_IT_WORKS = HelpDocument(
             "Text-layer grounding",
             _para(
                 "Before rasterizing, each sheet's vector text layer is lifted losslessly "
-                "and spliced into the prompt verbatim, ahead of the images, as the source "
-                "of truth for exact strings — tags, schedule values, note numbers, sheet "
+                "and spliced into the prompt ahead of the images, as the source of truth "
+                "for exact strings — tags, schedule values, note numbers, sheet "
                 "references. Vector text can't misread a digit the way OCR of a "
                 "low-resolution embedded raster can."
+            ),
+            _bullet(
+                "It is sent as-is up to 15,000 characters per sheet — ample for a dense "
+                "E-size sheet. A sheet that exceeds it is clipped and explicitly marked "
+                "[TRUNCATED] rather than silently shortened, and its images are still sent "
+                "whole."
             ),
         ),
         _section(
@@ -805,6 +811,7 @@ WHAT HAPPENS                    WHO       PAID?
 list sheets, render tiles       your PC   free
 lift the vector text layer      your PC   free
 sheet digest   (1 call/sheet)   Anthropic paid
+focus report   (1 call/set)     Anthropic paid
 set identity + review plan      Anthropic paid
 critique       (2 calls/sheet)  Anthropic paid
 cross-sheet QC (1 call/set)     Anthropic paid
@@ -895,8 +902,19 @@ RUNTIME_TRANSPARENCY = HelpDocument(
                 "emailing the PDF."
             ),
             _bullet(
-                "The sheet's text layer, verbatim — the same text you get from selecting "
-                "all in a PDF reader."
+                "The sheet's text layer — the PDF's own selectable text, sent as-is, up to "
+                "15,000 characters per sheet. That comfortably holds a dense E-size sheet; "
+                "a pathological one (a huge embedded schedule) is cut at the limit and "
+                "marked [TRUNCATED], so the model knows it is reading a clipped text layer "
+                "rather than a complete one. The images are never truncated — the sheet is "
+                "still read whole either way."
+            ),
+            _bullet(
+                "The file name of each PDF and which page this sheet is — every request is "
+                "framed with something like “M-101.pdf (page 3/12)”, and the batch path "
+                "names its uploads from the same label. Only the bare name travels, never "
+                "the folder it came from. If your file names carry a client or a project "
+                "you would rather not send, rename the copies before loading them."
             ),
             _bullet(
                 "The text of any spec documents you attached, and the focus sentence you "
@@ -911,9 +929,10 @@ RUNTIME_TRANSPARENCY = HelpDocument(
                 "is what tells Anthropic whose account to bill."
             ),
             _para(
-                "What is NOT in the request: your file paths, your folder structure, your "
-                "machine name, your identity, your other projects, or anything from any "
-                "drawing you did not load into this run."
+                "What is NOT in the request: the path to your files (only the bare file "
+                "name travels, never the folder structure around it), your machine name, "
+                "your identity, your other projects, or anything from any drawing you did "
+                "not load into this run."
             ),
         ),
         _section(
@@ -976,8 +995,10 @@ RUNTIME_TRANSPARENCY = HelpDocument(
                 "works with no network, and produces the same answer every time."
             ),
             _para(
-                "A standard run without QC uses only the first two paid rows. Ticking "
-                "Deterministic audit only adds no paid rows at all."
+                "A standard run without QC pays for exactly one thing: the per-sheet "
+                "digest — plus the focus report, and only if you typed a focus. Set "
+                "identity and the review plan belong to the QC stack and do not run "
+                "otherwise, and ticking Deterministic audit only adds no paid rows at all."
             ),
         ),
         _section(
