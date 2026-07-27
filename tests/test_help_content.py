@@ -19,6 +19,9 @@ import pytest
 from drawing_analyzer.help_content import (
     GET_API_KEY,
     HELP_DOCUMENTS,
+    PRE_MAX_WIDTH,
+    RUNTIME_TRANSPARENCY,
+    STANDALONE_DOCUMENTS,
     HelpBlock,
     HelpDocument,
     HelpSection,
@@ -28,6 +31,38 @@ from drawing_analyzer.help_content import (
 )
 
 _GUI_PATH = Path(__file__).resolve().parent.parent / "src" / "drawing_analyzer" / "gui.py"
+
+_ALL_DOCUMENTS = (*HELP_DOCUMENTS, *STANDALONE_DOCUMENTS)
+
+_BLOCK_KINDS = {"para", "bullet", "link", "pre", "modal"}
+
+
+def _assert_well_formed(doc: HelpDocument) -> None:
+    """The structural contract every rendered document must satisfy."""
+    assert isinstance(doc, HelpDocument)
+    assert doc.title.strip()
+    assert doc.button_label.strip()
+    assert doc.intro.strip()
+    assert doc.sections, "a modal with no sections would render blank"
+    for section in doc.sections:
+        assert isinstance(section, HelpSection)
+        assert section.heading.strip()
+        assert section.blocks, f"section {section.heading!r} has no content"
+        for block in section.blocks:
+            assert isinstance(block, HelpBlock)
+            assert block.kind in _BLOCK_KINDS
+            assert block.text.strip()
+            if block.kind == "link":
+                assert block.href and block.href.startswith("https://")
+                assert block.doc_key is None
+            elif block.kind == "modal":
+                # Every hand-off must resolve, or the link is a dead end.
+                assert block.doc_key, "a modal block must name a target document"
+                assert help_document(block.doc_key) is not None
+                assert block.href is None
+            else:
+                assert block.href is None
+                assert block.doc_key is None
 
 
 # --------------------------------------------------------------------------
@@ -56,29 +91,27 @@ def test_keys_are_unique() -> None:
     assert len(keys) == len(set(keys))
 
 
-@pytest.mark.parametrize("doc", HELP_DOCUMENTS, ids=lambda d: d.key)
+@pytest.mark.parametrize("doc", _ALL_DOCUMENTS, ids=lambda d: d.key)
 def test_document_is_well_formed(doc: HelpDocument) -> None:
     """Every doc has a title, intro, sections, and non-empty, valid blocks."""
-    assert isinstance(doc, HelpDocument)
-    assert doc.title.strip()
-    assert doc.button_label.strip()
-    assert doc.intro.strip()
-    assert doc.sections, "a modal with no sections would render blank"
+    _assert_well_formed(doc)
+
+
+@pytest.mark.parametrize("doc", _ALL_DOCUMENTS, ids=lambda d: d.key)
+def test_pre_blocks_fit_the_panel(doc: HelpDocument) -> None:
+    """``pre`` blocks are never re-wrapped, so an over-wide line is clipped."""
     for section in doc.sections:
-        assert isinstance(section, HelpSection)
-        assert section.heading.strip()
-        assert section.blocks, f"section {section.heading!r} has no content"
         for block in section.blocks:
-            assert isinstance(block, HelpBlock)
-            assert block.kind in {"para", "bullet", "link"}
-            assert block.text.strip()
-            if block.kind == "link":
-                assert block.href and block.href.startswith("https://")
-            else:
-                assert block.href is None
+            if block.kind != "pre":
+                continue
+            for line in block.text.splitlines():
+                assert len(line) <= PRE_MAX_WIDTH, (
+                    f"{doc.key}/{section.heading}: pre line is {len(line)} chars "
+                    f"(max {PRE_MAX_WIDTH}): {line!r}"
+                )
 
 
-@pytest.mark.parametrize("doc", HELP_DOCUMENTS, ids=lambda d: d.key)
+@pytest.mark.parametrize("doc", _ALL_DOCUMENTS, ids=lambda d: d.key)
 def test_documents_are_frozen(doc: HelpDocument) -> None:
     """Content is immutable data (frozen dataclasses)."""
     with pytest.raises(Exception):
@@ -91,15 +124,22 @@ def test_help_document_lookup() -> None:
         help_document("does_not_exist")
 
 
-def test_about_links_to_linkedin() -> None:
-    """The About modal carries exactly one link block, pointing at the author."""
-    links = [
-        block
+def test_about_links_to_the_author_source_and_licence() -> None:
+    """About points at the author, and at the two things that back its claims.
+
+    The AGPL story is only checkable if the source and the licence text are
+    reachable from the panel that makes the claim, so both links are required
+    alongside the author credit.
+    """
+    hrefs = [
+        block.href
         for section in help_document("about").sections
         for block in section.blocks
         if block.kind == "link"
     ]
-    assert [link.href for link in links] == ["https://www.linkedin.com/in/abrahamborg/"]
+    assert "https://www.linkedin.com/in/abrahamborg/" in hrefs
+    assert "https://github.com/abe-borg/drawing-analyzer" in hrefs
+    assert "https://www.gnu.org/licenses/agpl-3.0.html" in hrefs
 
 
 def test_about_states_the_version() -> None:
@@ -122,24 +162,7 @@ def test_get_api_key_is_not_a_header_modal() -> None:
 
 def test_get_api_key_is_well_formed() -> None:
     """Same structural contract as the header modals so the renderer is happy."""
-    doc = GET_API_KEY
-    assert isinstance(doc, HelpDocument)
-    assert doc.title.strip()
-    assert doc.button_label.strip()
-    assert doc.intro.strip()
-    assert doc.sections, "a modal with no sections would render blank"
-    for section in doc.sections:
-        assert isinstance(section, HelpSection)
-        assert section.heading.strip()
-        assert section.blocks, f"section {section.heading!r} has no content"
-        for block in section.blocks:
-            assert isinstance(block, HelpBlock)
-            assert block.kind in {"para", "bullet", "link"}
-            assert block.text.strip()
-            if block.kind == "link":
-                assert block.href and block.href.startswith("https://")
-            else:
-                assert block.href is None
+    _assert_well_formed(GET_API_KEY)
 
 
 def test_get_api_key_lookup_and_content() -> None:
@@ -166,6 +189,138 @@ def test_get_api_key_links_to_the_console() -> None:
 def test_get_api_key_is_frozen() -> None:
     with pytest.raises(Exception):
         GET_API_KEY.title = "mutated"  # type: ignore[misc]
+
+
+# --------------------------------------------------------------------------
+# Runtime transparency — the "I'm not convinced" deep dive reached from the
+# foot of "Why trust it?".
+# --------------------------------------------------------------------------
+
+
+def test_runtime_transparency_is_standalone_and_reachable() -> None:
+    """Not a header button, but resolvable by key and registered as standalone."""
+    assert RUNTIME_TRANSPARENCY.key not in {d.key for d in HELP_DOCUMENTS}
+    assert RUNTIME_TRANSPARENCY in STANDALONE_DOCUMENTS
+    assert help_document("runtime_transparency") is RUNTIME_TRANSPARENCY
+
+
+def test_why_trust_it_links_to_the_runtime_briefing() -> None:
+    """The 'I'm not convinced' hand-off exists, is last, and targets the briefing."""
+    doc = help_document("why_trust_it")
+    modal_blocks = [
+        block
+        for section in doc.sections
+        for block in section.blocks
+        if block.kind == "modal"
+    ]
+    assert len(modal_blocks) == 1
+    assert modal_blocks[0].doc_key == "runtime_transparency"
+    assert "not convinced" in modal_blocks[0].text.lower()
+    # It sits at the very bottom of the panel, as the closing offer.
+    assert doc.sections[-1].blocks[-1] is modal_blocks[0]
+
+
+def test_runtime_transparency_covers_the_runtime_surface() -> None:
+    """The briefing names the real mechanisms, not just reassurance.
+
+    These needles are the load-bearing claims a skeptical reader came for: the
+    single network destination, the model line-up, the agentic tool set and its
+    caps, the offline-only mode, and the artifacts that make it checkable.
+    """
+    text = _all_text(RUNTIME_TRANSPARENCY).lower()
+    for needle in [
+        # Where data goes, and where it doesn't.
+        "api.anthropic.com",
+        "github.com",
+        "telemetry",
+        "authorization header",
+        # The model line-up. Opus does the deep reads (including cross-sheet
+        # QC, which routes through the review model, NOT the Sonnet
+        # cross-check default in core.api_config); Sonnet takes the first
+        # verification look. No Haiku triage stage runs in this pipeline.
+        "opus 4.8",
+        "sonnet 4.6",
+        # The agentic surface and its bounds.
+        "crop_region",
+        "find_text",
+        "view_sheet",
+        "read-only",
+        "cannot run code",
+        # Stage mechanics.
+        "message batches",
+        "web_search",
+        "zero api calls",
+        "sha-256",
+        "sessionstorage",
+        # Honest limits.
+        "no warranty",
+        "probabilistic",
+    ]:
+        assert needle.lower() in text, f"runtime briefing should mention {needle!r}"
+
+
+def test_runtime_transparency_has_diagrams_and_outbound_links() -> None:
+    """It ships the promised visuals and a way out to the primary sources."""
+    blocks = [b for s in RUNTIME_TRANSPARENCY.sections for b in s.blocks]
+    pres = [b for b in blocks if b.kind == "pre"]
+    assert len(pres) >= 3, "the briefing's visuals are part of the deliverable"
+    hrefs = [b.href for b in blocks if b.kind == "link"]
+    assert any("github.com/abe-borg/drawing-analyzer" in h for h in hrefs)
+    assert any("anthropic.com" in h or "anthropic.com/" in h for h in hrefs)
+    assert all(h.startswith("https://") for h in hrefs)
+
+
+def test_runtime_transparency_states_the_limits() -> None:
+    """It must not read as marketing: the 'what this is not' section is required."""
+    headings = [s.heading.lower() for s in RUNTIME_TRANSPARENCY.sections]
+    assert any("what this is not" in h for h in headings)
+    text = _all_text(RUNTIME_TRANSPARENCY).lower()
+    assert "engineer of record" in text
+
+
+def test_runtime_transparency_discloses_the_full_outbound_inventory() -> None:
+    """The 'what leaves' list must not understate what actually leaves.
+
+    Two things are easy to omit and were: the source PDF's *basename* rides
+    every request (``SheetRef.display_label`` is spliced into the digest and
+    critique framing, and the batch path names its uploads from it), and the
+    text layer is capped at ``render.SHEET_TEXT_MAX_CHARS`` with a
+    ``[TRUNCATED]`` marker rather than sent whole. An inventory that claims to
+    be exact has to say both.
+    """
+    from drawing_analyzer.render import SHEET_TEXT_MAX_CHARS
+
+    text = _all_text(RUNTIME_TRANSPARENCY)
+    assert f"{SHEET_TEXT_MAX_CHARS:,}" in text
+    assert "[TRUNCATED]" in text
+    assert "file name" in text.lower()
+    # The precise distinction: the name travels, the path does not.
+    assert "never the folder" in text.lower()
+
+
+def test_runtime_transparency_prices_a_standard_run_correctly() -> None:
+    """Set identity and the review plan ride the QC stack, not a standard run.
+
+    ``resolve_run_configuration`` leaves ``run_identity``/``run_review_plan``
+    false unless critique/citation/qc_markups asked for them, so a no-QC run
+    bills the digest alone (plus the focus report when a focus is supplied).
+    """
+    text = _all_text(RUNTIME_TRANSPARENCY).lower()
+    assert "pays for exactly one thing" in text
+    assert "do not run otherwise" in text
+
+
+def test_runtime_transparency_never_promises_an_offline_mode() -> None:
+    """The deterministic auditors are zero-API; the run they ride on is not.
+
+    ``reference_audit=True`` adds the offline auditor battery *on top of* a
+    normal run, and a normal run still digests every sheet through the API.
+    Reading that checkbox as an air-gapped mode is exactly the mistake this
+    panel exists to prevent, so the disclaimer is pinned here.
+    """
+    text = _all_text(RUNTIME_TRANSPARENCY).lower()
+    assert "no fully offline mode" in text
+    assert "there is no offline mode" in text
 
 
 # --------------------------------------------------------------------------
@@ -337,6 +492,24 @@ def test_gui_imports_and_wires_get_api_key_guide() -> None:
     assert "self._open_help_modal(GET_API_KEY)" in source
 
 
+def test_gui_can_resolve_a_modal_hand_off_target() -> None:
+    """gui.py imports help_document so a ``modal`` block's key can be looked up."""
+    tree = _gui_module_ast()
+    imported = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "help_content"
+        for alias in node.names
+    }
+    assert "help_document" in imported
+    source = _GUI_PATH.read_text(encoding="utf-8")
+    assert "on_modal_link=" in source
+    # The child is opened against the panel it was launched from, so the grab
+    # can be handed back when it closes.
+    assert "parent=win" in source
+    assert "self._help_parents" in source
+
+
 def test_build_ui_makes_activity_log_collapsible() -> None:
     """The activity log is wrapped in an expand-mode CollapsibleSection.
 
@@ -424,11 +597,15 @@ class _FakeWidget:
         self.master = master
         self.kw = kw
         self.bound: list[str] = []
+        # Bound callbacks by sequence, so a test can actually *fire* a click
+        # (used to drive the help modals' link / modal hand-off blocks).
+        self.handlers: dict = {}
         # pack geometry state, so tests can assert how a widget was packed and
         # whether it is currently mapped (used by the CollapsibleSection tests).
         self.pack_kwargs: dict = {}
         self.mapped = False
         _FakeWidget.created.append((type(self).__name__, kw))
+        _FakeWidget.instances.append(self)
 
     def pack(self, *a, **k):
         self.pack_kwargs = k
@@ -442,9 +619,15 @@ class _FakeWidget:
     def configure(self, *a, **k):
         return self
 
-    def bind(self, sequence=None, *a, **k):
+    def bind(self, sequence=None, func=None, *a, **k):
         self.bound.append(sequence)
+        if func is not None:
+            self.handlers[sequence] = func
         return self
+
+    def fire(self, sequence, event=None):
+        """Invoke a bound handler the way tkinter would on a real click."""
+        return self.handlers[sequence](event)
 
     def winfo_exists(self):
         return True
@@ -453,6 +636,7 @@ class _FakeWidget:
 @contextlib.contextmanager
 def _fake_gui_toolkit():
     _FakeWidget.created = []
+    _FakeWidget.instances = []
 
     tk = types.ModuleType("tkinter")
 
@@ -510,7 +694,7 @@ def _fake_gui_toolkit():
                 sys.modules[name] = mod
 
 
-@pytest.mark.parametrize("doc", HELP_DOCUMENTS, ids=lambda d: d.key)
+@pytest.mark.parametrize("doc", _ALL_DOCUMENTS, ids=lambda d: d.key)
 def test_render_help_body_visits_every_block(doc: HelpDocument) -> None:
     with _fake_gui_toolkit() as (gui_module, ctk):
         body = ctk.CTkScrollableFrame()
@@ -528,3 +712,64 @@ def test_render_help_body_visits_every_block(doc: HelpDocument) -> None:
         1 for s in doc.sections for b in s.blocks if b.kind == "bullet"
     )
     assert bullet_marks == expected_bullets
+
+
+def test_render_help_body_keeps_pre_blocks_unwrapped() -> None:
+    """A diagram must render monospace and with NO wraplength, or it shears."""
+    with _fake_gui_toolkit() as (gui_module, ctk):
+        body = ctk.CTkScrollableFrame()
+        _FakeWidget.created = []
+        gui_module.DrawingAnalyzerApp._render_help_body(body, RUNTIME_TRANSPARENCY)
+
+    pre_texts = {
+        b.text for s in RUNTIME_TRANSPARENCY.sections for b in s.blocks if b.kind == "pre"
+    }
+    rendered = [
+        kw for name, kw in _FakeWidget.created
+        if name == "CTkLabel" and kw.get("text") in pre_texts
+    ]
+    assert len(rendered) == len(pre_texts)
+    for kw in rendered:
+        assert kw.get("wraplength") is None, "a wrapped diagram is a broken diagram"
+        assert kw.get("font", {}).get("family") == "Consolas"
+
+
+def test_render_help_body_wires_the_modal_hand_off() -> None:
+    """Clicking 'I'm not convinced' invokes the callback with the target key."""
+    opened: list[str] = []
+    with _fake_gui_toolkit() as (gui_module, ctk):
+        body = ctk.CTkScrollableFrame()
+        _FakeWidget.created = []
+        gui_module.DrawingAnalyzerApp._render_help_body(
+            body, help_document("why_trust_it"), on_modal_link=opened.append
+        )
+        # The modal block is the only bound Button-1 label that isn't a web link.
+        link_texts = {
+            b.text
+            for s in help_document("why_trust_it").sections
+            for b in s.blocks
+            if b.kind == "modal"
+        }
+        widgets = [
+            w for w in _FakeWidget.instances
+            if getattr(w, "kw", {}).get("text") in link_texts
+        ]
+        assert len(widgets) == 1
+        assert "<Button-1>" in widgets[0].bound
+        widgets[0].fire("<Button-1>")
+
+    assert opened == ["runtime_transparency"]
+
+
+def test_render_help_body_modal_block_is_inert_without_a_callback() -> None:
+    """The content-only path still renders the label, just not clickable."""
+    with _fake_gui_toolkit() as (gui_module, ctk):
+        body = ctk.CTkScrollableFrame()
+        _FakeWidget.created = []
+        gui_module.DrawingAnalyzerApp._render_help_body(
+            body, help_document("why_trust_it")
+        )
+        modal_text = help_document("why_trust_it").sections[-1].blocks[-1].text
+        widgets = [w for w in _FakeWidget.instances if w.kw.get("text") == modal_text]
+        assert len(widgets) == 1
+        assert widgets[0].bound == []

@@ -57,6 +57,7 @@ from .help_content import (
     PROCESSING_MODE_HYBRID,
     PROCESSING_MODES,
     HelpDocument,
+    help_document,
     processing_transports,
     transport_hint,
 )
@@ -277,9 +278,15 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         # unchanged, env-supplied key).
         self._persisted_key = self._initial_key
         # Open help modals ("How to use" / "How it works" / "Why trust it?" /
-        # "About"), keyed by HelpDocument.key so a second click re-focuses the
+        # "About", plus the standalone API-key and runtime-transparency
+        # panels), keyed by HelpDocument.key so a second click re-focuses the
         # existing window instead of stacking a duplicate.
         self._help_windows: dict[str, ctk.CTkToplevel] = {}
+        # A help modal opened *from another help modal* (the "I'm not
+        # convinced" link) records its opener here, so closing the child hands
+        # the application-modal grab back to its parent instead of leaving the
+        # still-visible parent ungrabbed.
+        self._help_parents: dict[str, ctk.CTkToplevel] = {}
         # Resizable pop-out editor for the per-run focus box (see
         # _open_focus_popout); focus_popout_box is None whenever it's closed.
         self._focus_popout: ctk.CTkToplevel | None = None
@@ -821,12 +828,18 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 command=lambda d=doc: self._open_help_modal(d),
             ).pack(side="left", padx=(6, 0))
 
-    def _open_help_modal(self, doc: HelpDocument) -> None:
+    def _open_help_modal(self, doc: HelpDocument, parent=None) -> None:
         """Open (or re-focus) the scrollable modal for one help document.
 
         The content is pure data from :mod:`help_content`; this method only
         renders it. Re-clicking a button whose window is already open lifts and
         focuses that window rather than stacking a duplicate.
+
+        ``parent`` is the help modal this one was opened *from* (the "I'm not
+        convinced" hand-off out of "Why trust it?"). It makes the child
+        transient to the panel that spawned it and lets
+        :meth:`_close_help_modal` return the modal grab to that parent, so
+        closing the deep-dive leaves the panel behind it usable again.
         """
         existing = self._help_windows.get(doc.key)
         if existing is not None and existing.winfo_exists():
@@ -834,13 +847,23 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             existing.focus_force()
             return
 
-        win = ctk.CTkToplevel(self)
+        owner = parent if (parent is not None and parent.winfo_exists()) else self
+        win = ctk.CTkToplevel(owner)
         self._help_windows[doc.key] = win
+        if owner is not self:
+            self._help_parents[doc.key] = owner
         win.title(doc.title)
         win.configure(fg_color=COLORS["bg_dark"])
-        win.geometry("720x640")
-        win.minsize(520, 400)
-        win.transient(self)
+        # Panels carrying pre-formatted blocks (the runtime-transparency
+        # diagrams and tables) are rendered verbatim and never re-wrapped, so
+        # they open wider — a narrow window would clip them rather than reflow.
+        if any(b.kind == "pre" for s in doc.sections for b in s.blocks):
+            win.geometry("880x760")
+            win.minsize(620, 420)
+        else:
+            win.geometry("720x640")
+            win.minsize(520, 400)
+        win.transient(owner)
         win.bind("<Escape>", lambda _e: self._close_help_modal(doc.key))
         win.protocol("WM_DELETE_WINDOW", lambda: self._close_help_modal(doc.key))
         # Grabbing input before the toplevel is viewable raises on some
@@ -876,11 +899,22 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
 
         body = ctk.CTkScrollableFrame(card, fg_color=COLORS["bg_dark"], corner_radius=6)
         body.pack(fill="both", expand=True, padx=12, pady=(0, 8))
-        self._render_help_body(body, doc)
+        self._render_help_body(
+            body,
+            doc,
+            on_modal_link=lambda key: self._open_help_modal(
+                help_document(key), parent=win
+            ),
+        )
 
     @staticmethod
-    def _render_help_body(body, doc: HelpDocument) -> None:
-        """Render each section's heading, paragraphs, and bullets into ``body``."""
+    def _render_help_body(body, doc: HelpDocument, on_modal_link=None) -> None:
+        """Render each section's heading, paragraphs, and bullets into ``body``.
+
+        ``on_modal_link`` receives the ``doc_key`` of a ``modal`` block when
+        the reader clicks it; when it is ``None`` (the content-only test path)
+        such a block still renders, just as inert text.
+        """
         wrap = 610
         for section in doc.sections:
             ctk.CTkLabel(
@@ -915,6 +949,38 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                         "<Button-1>",
                         lambda _e, url=block.href: webbrowser.open(url),
                     )
+                elif block.kind == "pre":
+                    # Verbatim monospace: NO wraplength, so the ASCII diagrams
+                    # and tables keep their alignment. help_content bounds the
+                    # line length (PRE_MAX_WIDTH) and the modal opens wider
+                    # when a doc contains one of these. Breathing room comes
+                    # from pack's ipadx/ipady — CTkLabel forwards a constructor
+                    # `padx`/`pady` straight into its internal tkinter.Label,
+                    # which already sets both, and the duplicate raises.
+                    ctk.CTkLabel(
+                        body, text=block.text,
+                        font=ctk.CTkFont(family="Consolas", size=11),
+                        text_color=COLORS["text_secondary"],
+                        fg_color=COLORS["bg_card"], corner_radius=6,
+                        justify="left", anchor="w",
+                    ).pack(anchor="w", padx=10, pady=(6, 6), ipadx=12, ipady=8)
+                elif block.kind == "modal" and block.doc_key:
+                    # A hand-off to another help document. Rendered like a web
+                    # link but routed back through _open_help_modal, so the
+                    # panel relationship lives in the content, not in gui.py.
+                    jump = ctk.CTkLabel(
+                        body, text=block.text,
+                        font=ctk.CTkFont(family="Segoe UI", size=12, underline=True),
+                        text_color=COLORS["accent_glow"],
+                        wraplength=wrap, justify="left",
+                        cursor="hand2" if on_modal_link else "",
+                    )
+                    jump.pack(anchor="w", padx=10, pady=(4, 2))
+                    if on_modal_link is not None:
+                        jump.bind(
+                            "<Button-1>",
+                            lambda _e, key=block.doc_key: on_modal_link(key),
+                        )
                 else:
                     ctk.CTkLabel(
                         body, text=block.text,
@@ -933,8 +999,14 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             pass
 
     def _close_help_modal(self, key: str) -> None:
-        """Release the grab and destroy a help modal, forgetting its handle."""
+        """Release the grab and destroy a help modal, forgetting its handle.
+
+        When the modal was opened from another one, the grab is handed back to
+        that parent — otherwise closing the child would leave the still-open
+        panel behind it visible but not accepting input.
+        """
         win = self._help_windows.pop(key, None)
+        parent = self._help_parents.pop(key, None)
         if win is None:
             return
         try:
@@ -945,6 +1017,12 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             win.destroy()
         except Exception:  # pragma: no cover - platform dependent
             pass
+        if parent is not None:
+            try:
+                if parent.winfo_exists():
+                    self._grab_help_modal(parent)
+            except Exception:  # pragma: no cover - platform dependent
+                pass
 
     # --------------------------------------------------------------- api key
 
