@@ -6,7 +6,30 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Runtime-transparency panel ("I'm not convinced").** A link at the foot of
+  *Why trust it?* opens an in-depth briefing for the security- or
+  trust-conscious reader: the single network destination, exactly what leaves
+  the machine and what never does, which model runs which stage, a free/paid
+  breakdown of every stage, the agentic investigation loop's three read-only
+  tools and its hard caps, the citation check's server-side search and source
+  blocklist, prompt-injection containment, what the model is structurally not
+  allowed to decide, honest limits, and how to verify each claim. Includes
+  ASCII diagrams and links to the source, `SECURITY.md`, and Anthropic's
+  privacy/trust pages. Help content gains two block kinds — `pre` (verbatim
+  monospace) and `modal` (a hand-off to another help document).
+
 ### Changed
+
+- Brought the four header help modals back in sync with the pipeline: the
+  set-identity / model-authored-review-plan stages, prose harvest, edition
+  audit, per-severity markup layers, the reviewed-copy guarantee, and the
+  `run.log` / `run_manifest.json` record are now described; *How to use* covers
+  the focus pop-out editor, the review-profile panel, processing modes, tile
+  export, and the embedded-key opt-in. Corrected the claim that *Deterministic
+  audit only* makes a run offline — the auditors are zero-API, the run they
+  ride on is not.
 
 - Replaced whole-file JSON cache rewrites with transactional SQLite/WAL row
   storage and automatic in-place legacy migration.
