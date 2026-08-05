@@ -523,9 +523,9 @@ def test_budget_env_overrides(monkeypatch):
 
 
 def test_investigation_model_env_override(monkeypatch):
-    assert investigation_model() == "claude-opus-4-8"  # the escalation tier
-    monkeypatch.setenv("DRAWING_ANALYZER_INVESTIGATION_MODEL", "claude-sonnet-4-6")
-    assert investigation_model() == "claude-sonnet-4-6"
+    assert investigation_model() == "claude-opus-5"  # the escalation tier
+    monkeypatch.setenv("DRAWING_ANALYZER_INVESTIGATION_MODEL", "claude-sonnet-5")
+    assert investigation_model() == "claude-sonnet-5"
 
 
 def test_system_prompt_and_tools_ride_every_request():
@@ -693,7 +693,7 @@ def test_cache_key_sensitivity(tmp_path):
     assert not _live_ran()                                   # identical → hit
     assert _live_ran(fingerprint="fp2")                      # set content changed
     assert _live_ran(max_rounds=3)                           # budget rides the key
-    assert _live_ran(model="claude-sonnet-4-6")              # model rides the key
+    assert _live_ran(model="claude-sonnet-5")              # model rides the key
 
 
 def test_cache_disabled_without_a_fingerprint(tmp_path):

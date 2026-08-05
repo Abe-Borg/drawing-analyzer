@@ -392,6 +392,9 @@ def test_report_with_key_default_prompts_and_never_writes_the_key():
     assert hr.CHAT_MODEL_DEFAULT in doc
     assert "api.anthropic.com/v1/messages" in doc
     assert "web_search_20260209" in doc and "web_fetch_20260209" in doc
+    # The default chat model must actually accept web fetch — the tool string
+    # being present in the (gated) JS says nothing on its own.
+    assert '"webFetch": true' in doc
     # ...but the key literal appears NOWHERE, and the config carries no apiKey.
     assert key not in doc
     assert '"apiKey"' not in doc
@@ -1284,6 +1287,41 @@ def test_a11y_attributes_present():
     assert "setAttribute('aria-pressed'" in hr._JS
     assert "setAttribute('aria-expanded'" in hr._JS
     assert "setAttribute('aria-sort'" in hr._JS
+
+
+def test_chat_config_gates_web_fetch_on_model_capability(monkeypatch):
+    """The widget must not send web_fetch to a model that rejects it.
+
+    Web fetch is not universal across current models — Opus 5 supports web
+    search but not web fetch — and an unsupported server tool is a 400 that
+    fails the whole request, so the widget would break on every question
+    rather than degrading. The emitted config resolves the capability
+    host-side; buildRequest only pushes the tool when it is true.
+    """
+    monkeypatch.setattr(hr, "CHAT_MODEL_DEFAULT", "claude-opus-5")
+    doc = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW, api_key="k")
+    assert '"webFetch": false' in doc
+
+    monkeypatch.setattr(hr, "CHAT_MODEL_DEFAULT", "claude-sonnet-5")
+    doc = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW, api_key="k")
+    assert '"webFetch": true' in doc
+
+
+def test_chat_default_model_supports_everything_the_widget_sends():
+    """Guard the constraint api_config documents for the chat model.
+
+    The widget unconditionally uses adaptive thinking and web search, and
+    sends web fetch when available. This is the test that would have caught
+    pointing the chat default at a model without web fetch.
+    """
+    from drawing_analyzer.core.api_config import model_capabilities
+
+    caps = model_capabilities(hr.CHAT_MODEL_DEFAULT)
+    assert caps.supports_web_fetch, (
+        f"{hr.CHAT_MODEL_DEFAULT} cannot use web fetch; the report assistant "
+        "is documented to need it"
+    )
+    assert caps.supports_adaptive_thinking
 
 
 # --------------------------------------------------------------------------- #

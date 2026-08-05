@@ -8,8 +8,9 @@ from __future__ import annotations
 
 from drawing_analyzer.core.tokenizer import estimate_image_tokens, estimate_image_tokens_total
 
-OPUS = "claude-opus-4-8"
+OPUS = "claude-opus-5"
 SONNET = "claude-sonnet-4-6"
+SONNET_5 = "claude-sonnet-5"
 
 
 def test_opus_matches_published_cost_table():
@@ -26,10 +27,21 @@ def test_opus_caps_at_4784():
 
 
 def test_sonnet_caps_at_1568():
-    # Sonnet resizes to a 1568 px long edge and caps tokens at 1568.
+    # Sonnet 4.6 resizes to a 1568 px long edge and caps tokens at 1568.
     assert estimate_image_tokens(2000, 1500, model=SONNET) == 1568
     # Below native resolution, it uses the raw formula.
     assert estimate_image_tokens(1000, 1000, model=SONNET) == 1334
+
+
+def test_sonnet_5_reads_at_the_high_resolution_tier():
+    # Sonnet 5 is the first Sonnet-tier model on the hi-res tier, so it must
+    # NOT inherit Sonnet 4.6's 1568 cap. Gating this on Opus family membership
+    # (the old behavior) under-estimated every Sonnet 5 image ~3x.
+    assert estimate_image_tokens(2000, 1500, model=SONNET_5) == 4000
+    assert estimate_image_tokens(8000, 8000, model=SONNET_5) == 4784
+    assert estimate_image_tokens(2000, 1500, model=SONNET_5) == estimate_image_tokens(
+        2000, 1500, model=OPUS
+    )
 
 
 def test_unknown_model_uses_conservative_default_caps():

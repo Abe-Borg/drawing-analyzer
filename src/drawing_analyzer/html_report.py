@@ -102,7 +102,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from .core.api_config import CHAT_MODEL_DEFAULT
+from .core.api_config import CHAT_MODEL_DEFAULT, model_capabilities
 
 # --------------------------------------------------------------------------- #
 # Report trust boundary (Phase 17, DA-011).
@@ -2501,6 +2501,14 @@ def _chat_bootstrap_html(
     embedding = bool(embed_key and api_key)
     config: dict[str, Any] = {
         "model": CHAT_MODEL_DEFAULT,
+        # Whether the configured chat model accepts the ``web_fetch_*`` server
+        # tool. Web fetch is NOT universal across current models — Opus 5
+        # supports web search but not web fetch — and sending it to a model
+        # without it is a 400 that fails the whole request. Resolved host-side
+        # from the capability registry and handed to the browser so
+        # ``buildRequest`` can omit the tool instead of breaking every question
+        # when someone overrides DRAWING_ANALYZER_CHAT_MODEL.
+        "webFetch": model_capabilities(CHAT_MODEL_DEFAULT).supports_web_fetch,
         "title": title,
         "generated": generated,
         "sources": list(source_names),
@@ -3094,6 +3102,12 @@ _CHAT_JS = r"""
   // and because `history` must stay a byte-clean Messages API array: a display
   // key smuggled into a message would be rejected on the next request.
   var displays = [];
+  // Bumped whenever the thread is replaced wholesale — "New chat", or loading a
+  // transcript. A turn already in flight captures the value it started under;
+  // aborting it only makes its promise reject *later*, by which time `history`
+  // may belong to a different conversation. Without this, that late cleanup
+  // would pop a turn off the freshly loaded thread and persist the damage.
+  var turnGen = 0;
 
   // Custom tools are executed *in this browser* by the dispatch table below
   // (unlike web_search/web_fetch, which are Anthropic server tools). When
@@ -3111,8 +3125,16 @@ _CHAT_JS = r"""
     };
     if(noTools){ req.tool_choice = {type: 'none'}; return req; }
     req.tools = [
-      {type: 'web_search_20260209', name: 'web_search', max_uses: 15},
-      {type: 'web_fetch_20260209', name: 'web_fetch', max_uses: 15},
+      {type: 'web_search_20260209', name: 'web_search', max_uses: 15}
+    ];
+    // web_fetch only when the configured model actually supports it (CFG.webFetch,
+    // resolved host-side from the capability registry). Opus 5 supports web search
+    // but not web fetch, and sending an unsupported server tool is a 400 that fails
+    // the request outright — so this degrades to search-only rather than breaking.
+    if(CFG.webFetch){
+      req.tools.push({type: 'web_fetch_20260209', name: 'web_fetch', max_uses: 15});
+    }
+    req.tools.push(
       {name: 'scroll_to_report',
        description: 'Scroll the on-page report to a section, sheet, or QC finding and briefly ' +
          'highlight it for the reader. Use this to point the user at something specific in the ' +
@@ -3167,7 +3189,7 @@ _CHAT_JS = r"""
        input_schema: {type: 'object', properties: {
          expression: {type: 'string', description: 'The arithmetic expression to evaluate.'}
        }, required: ['expression']}}
-    ];
+    );
     return req;
   }
 
@@ -3486,6 +3508,7 @@ _CHAT_JS = r"""
   });
   closeBtn.addEventListener('click', function(){ panel.hidden = true; fab.hidden = false; });
   clearBtn.addEventListener('click', function(){
+    turnGen++;                       // retire any in-flight turn's cleanup
     if(aborter) aborter.abort();
     history = [];
     displays = [];
@@ -4082,16 +4105,28 @@ _CHAT_JS = r"""
   // budget trimmer mid-exchange — would make the next question the SECOND
   // consecutive user turn, which the Messages API rejects outright. Drop the
   // unanswered tail so a loaded conversation is always resumable.
+  function hasToolUse(m){
+    return !!(m && Array.isArray(m.content) && m.content.some(function(b){
+      return b && b.type === 'tool_use';
+    }));
+  }
   function dropUnansweredTail(turns){
     var end = turns.length;
     while(end > 0){
       var m = turns[end - 1] && turns[end - 1].message;
-      if(m && m.role === 'assistant') break;
+      // An assistant turn is a valid resume point only if it left NO tool call
+      // outstanding. The API requires the very next user turn to answer every
+      // tool_use, so ending on one makes the follow-up question a 400 — and a
+      // turn stopped between the tool call and the answer leaves exactly that
+      // shape (assistant(tool_use) → user(tool_result) → nothing). Rewind past
+      // the whole unfinished exchange, not just the trailing user turn.
+      if(m && m.role === 'assistant' && !hasToolUse(m)) break;
       end--;
     }
     return turns.slice(0, end);
   }
   function adoptTranscript(data, hint){
+    turnGen++;                       // retire any in-flight turn's cleanup
     if(aborter) aborter.abort();
     clearPendingSelection();
     clearTermHighlight();
@@ -4186,6 +4221,7 @@ _CHAT_JS = r"""
   // opts       : {retryValue, excerpt, onCommit}
   function runTurn(apiContent, displayText, opts){
     opts = opts || {};
+    var gen = turnGen;   // the thread this turn belongs to (see turnGen)
     if(startersRow) startersRow.style.display = 'none';  // chips give way to the thread
     history.push({role: 'user', content: apiContent});
     // The selected excerpt shows as a collapsible disclosure under the typed
@@ -4243,6 +4279,10 @@ _CHAT_JS = r"""
     }
 
     step(0, 0).catch(function(err){
+      // This turn's thread was replaced while it was in flight (that is what
+      // aborted it). Everything below edits the *current* conversation, which
+      // is no longer this one — leave it alone.
+      if(gen !== turnGen) return;
       var aborted = err && (err.name === 'AbortError' || err.code === 20);
       if(!pushed){
         history.pop();               // keep history consistent for the next question
@@ -4257,6 +4297,10 @@ _CHAT_JS = r"""
         addMsg('da-err', scrubSecrets(msg));
       }
     }).then(function(){
+      // Superseded thread (see the catch above): unlock the composer for the
+      // conversation that replaced this one, but touch nothing else — in
+      // particular do not re-save, which would overwrite the new transcript.
+      if(gen !== turnGen){ setStreaming(false); return; }
       if(!bubble.childNodes.length) bubble.remove(); // nothing ever rendered
       if(pushed && opts.onCommit) opts.onCommit();   // e.g. clear the pending selection
       setStreaming(false);

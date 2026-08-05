@@ -193,7 +193,7 @@ def test_stage_durations_pair_start_and_end_events():
 
 
 def test_collect_environment_reports_versions_without_pymupdf_import():
-    env = collect_environment(model="claude-opus-4-8")
+    env = collect_environment(model="claude-opus-5")
     assert set(env) >= {"os", "python", "app", "pymupdf", "anthropic_sdk", "model"}
     # Values are strings and already sanitized.
     assert all(isinstance(v, str) for v in env.values())
@@ -223,7 +223,7 @@ def test_render_without_journal_still_produces_a_log():
 
 def test_render_includes_header_events_and_outputs():
     journal = RunJournal(run_id="RUN-render-test")
-    journal.set_environment(collect_environment(model="claude-opus-4-8"))
+    journal.set_environment(collect_environment(model="claude-opus-5"))
     journal.emit("RUN_START", files=1)
     journal.emit("RUN_END", status="NOT_REQUESTED")
     journal.finish("NOT_REQUESTED")
@@ -238,7 +238,7 @@ def test_render_includes_header_events_and_outputs():
     assert "run.log — this file" in text
     assert "run_manifest.json — written after this log" in text
     # §18.2: environment identity in the header.
-    assert "python=" in text and "model=claude-opus-4-8" in text
+    assert "python=" in text and "model=claude-opus-5" in text
 
 
 def test_render_outcome_lines_match_gui_three_state():

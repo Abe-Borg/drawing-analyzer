@@ -26,7 +26,7 @@ from drawing_analyzer.digest_cache import (
 from drawing_analyzer.models import ImageTile, RenderedSheet, SheetRef
 from tests.fixtures.fake_anthropic import FakeMessage, FakeTextBlock, FakeUsage
 
-OPUS = "claude-opus-4-8"
+OPUS = "claude-opus-5"
 
 
 def _sheet(
@@ -88,7 +88,7 @@ def test_key_changes_with_content_model_and_params():
     base = _key(_sheet())
     assert _key(_sheet(overview=b"DIFFERENT")) != base       # page content
     assert _key(_sheet(tiles=(b"T0", b"T9"))) != base        # a tile changed
-    assert _key(_sheet(), model="claude-sonnet-4-6") != base  # model swap
+    assert _key(_sheet(), model="claude-sonnet-5") != base  # model swap
     assert _key(_sheet(), prompt_version="other") != base     # prompt edit
     assert _key(_sheet(), max_tokens=8000) != base
     assert _key(_sheet(), effort="low") != base
@@ -136,7 +136,7 @@ def test_level1_key_changes_with_render_identity_and_params():
     assert _l1(identity="pymupdf=1.29.0|rows=6|cols=6|page=abc") != base  # engine ver
     assert _l1(identity="pymupdf=1.28.0|rows=2|cols=2|page=abc") != base  # grid/target
     # The same request params as the level-2 key re-key it too.
-    assert _l1(model="claude-sonnet-4-6") != base
+    assert _l1(model="claude-sonnet-5") != base
     assert _l1(prompt_version="other") != base
     assert _l1(max_tokens=8000) != base
     assert _l1(effort="low") != base
@@ -489,7 +489,7 @@ def test_digest_sheet_cache_miss_on_model_change():
 
     digest_sheet(_sheet(), client=client, model=OPUS, cache=cache)
     # Different model → different key → another API call.
-    sd = digest_sheet(_sheet(), client=client, model="claude-sonnet-4-6", cache=cache)
+    sd = digest_sheet(_sheet(), client=client, model="claude-sonnet-5", cache=cache)
     assert sd.cached is False
     assert client.calls == 2
 

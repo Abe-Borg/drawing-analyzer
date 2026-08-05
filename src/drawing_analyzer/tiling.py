@@ -14,7 +14,7 @@ swapped without touching the tiling math.
 Why these numbers
 -----------------
 Claude's vision path caps each image at a per-model token budget *and* a max
-long-edge in pixels (Opus 4.8: 4784 tokens / 2576 px; other models: 1568 /
+long-edge in pixels (Opus 5 / Sonnet 5: 4784 tokens / 2576 px; older models: 1568 /
 1568). Critically, sending **more than 20 images in one request** drops the
 *hard* per-image dimension cap to 2000 px on the long edge, and an image that
 **exceeds** that cap is **rejected** (HTTP 400 ``invalid_request_error``), not

@@ -1,6 +1,6 @@
 """Persistent, content-keyed cache for per-sheet drawing digests.
 
-A digest is the dominant cost in the drawing pipeline — one Opus 4.8 vision
+A digest is the dominant cost in the drawing pipeline — one Opus 5 vision
 request per sheet (image tokens + minutes of latency). The result is
 deterministic given the rendered sheet images + the model + the digest prompt +
 the request params, so re-running a set (after editing one sheet, or just

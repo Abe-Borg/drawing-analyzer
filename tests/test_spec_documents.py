@@ -36,7 +36,7 @@ from drawing_analyzer.spec_documents import (
 )
 from tests.fixtures.fake_anthropic import FakeMessage, FakeTextBlock, FakeUsage
 
-OPUS = "claude-opus-4-8"
+OPUS = "claude-opus-5"
 BEAM_SPEC = "All structural steel beams shall be W12x26 minimum, per AISC 360."
 
 

@@ -3,7 +3,7 @@
 Extract structured information from a set of construction-drawing PDFs using Claude
 vision. Each PDF page is treated as one *sheet*; every sheet is rendered to an
 overview image plus a 6×6 grid of high-resolution tiles — **and its vector text
-layer is extracted and sent verbatim alongside the images** — to Claude Opus 4.8
+layer is extracted and sent verbatim alongside the images** — to Claude Opus 5
 in a single vision request, which returns a structured text **digest** of the sheet
 (sheet number, discipline, equipment, tags, notes, schedules, etc.). An optional
 cross-sheet **synthesis** pass reconciles tags and conflicts across the set, and an
@@ -33,7 +33,8 @@ zero-friction, double-click-and-ask file, tick **Embed API key in HTML report**
 shows a red *"don't share this file"* warning, and you should treat the file like a
 credential (a runtime "forget" cannot remove an embedded key — only regenerating or
 deleting the file can). Pass `include_chat=False` to omit the assistant entirely.
-The chat model defaults to Opus 4.8 and can be overridden with
+The chat model defaults to Sonnet 5 — it needs the web-fetch server tool, which
+Opus 5 does not support — and can be overridden with
 `DRAWING_ANALYZER_CHAT_MODEL`.
 
 **Conversations are kept.** The thread auto-saves in your browser for that
@@ -532,7 +533,7 @@ time — is a deferred follow-up; today the reuse is within the critique's two r
 `critique=True` is still more expensive than a plain digest (see
 [Performance](#performance)), just no longer double-priced. It is additive and
 non-fatal: a failure is recorded and the standard deliverable ships — a critique
-batch that can't be collected degrades those sheets' critique, never the digest. The model defaults to Opus 4.8
+batch that can't be collected degrades those sheets' critique, never the digest. The model defaults to Opus 5
 (`DRAWING_ANALYZER_CRITIQUE_MODEL`); the run count is `DRAWING_ANALYZER_CRITIQUE_RUNS`
 (default 2; set 1 to disable self-consistency).
 
@@ -685,7 +686,7 @@ more `also_on` legs on the other sheets in the conflict, each resolved to its ow
 sheet (via the set's title-block sheet-ids). The markup writer then clouds
 **both** sheets — each cloud's popup cross-references the other (*"Conflicts with
 F-A-01-1: 'COLO 1'"*) — so a reviewer opening either drawing sees the conflict and
-where its counterpart lives. The model defaults to Opus 4.8
+where its counterpart lives. The model defaults to Opus 5
 (`DRAWING_ANALYZER_CROSS_QC_MODEL`).
 
 A cross-sheet conflict can't be judged from one sheet's crop, so these findings
@@ -782,7 +783,7 @@ thread-safe) while the small verify calls run on a bounded pool; a per-finding
 failure degrades that finding to `UNCERTAIN`, and a fatal auth failure marks the
 rest `SKIPPED` — the run always completes. Each call is tiny (one ~1–2k-token
 crop image + a short prompt), on the order of $0.01–0.03 per finding. The model
-defaults to Opus 4.8, overridable with `DRAWING_ANALYZER_VERIFY_MODEL`.
+defaults to Sonnet 5, overridable with `DRAWING_ANALYZER_VERIFY_MODEL`.
 
 ### The investigation loop (Phase C)
 
@@ -805,7 +806,7 @@ requests per finding (default 6) and `DRAWING_ANALYZER_INVESTIGATION_MAX_FINDING
 investigations per run (default 10, severity-first). At the budget the host
 forces a final text-only answer, and a finding that still can't be decided
 **stays UNCERTAIN — a budget cap or a garbled reply can never mark a finding
-wrong**. Runs on the escalation model (Opus 4.8) by default, overridable with
+wrong**. Runs on the escalation model (Opus 5) by default, overridable with
 `DRAWING_ANALYZER_INVESTIGATION_MODEL`. Concluded verdicts cache
 content-addressed against a whole-set content fingerprint; a warm re-run
 *replays* the tool trace (re-render + hash-compare, zero API calls) so the
@@ -1191,21 +1192,21 @@ runs.
 | Variable | Default | Effect |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | — | Required (or paste the key into the GUI). |
-| `DRAWING_ANALYZER_MODEL` | Opus 4.8 | Vision model for per-sheet digests. |
-| `DRAWING_ANALYZER_SYNTHESIS_MODEL` | Opus 4.8 | Cross-sheet synthesis model (text-only). |
-| `DRAWING_ANALYZER_FOCUS_MODEL` | Opus 4.8 | Focus-report model (text-only). |
-| `DRAWING_ANALYZER_VERIFY_MODEL` | Opus 4.8 | Per-finding verification model (crop + short prompt). |
-| `DRAWING_ANALYZER_INVESTIGATION_MODEL` | escalation model (Opus 4.8) | The Phase C investigation loop's model (multi-turn, vision + tools). |
+| `DRAWING_ANALYZER_MODEL` | Opus 5 | Vision model for per-sheet digests. |
+| `DRAWING_ANALYZER_SYNTHESIS_MODEL` | Opus 5 | Cross-sheet synthesis model (text-only). |
+| `DRAWING_ANALYZER_FOCUS_MODEL` | Opus 5 | Focus-report model (text-only). |
+| `DRAWING_ANALYZER_VERIFY_MODEL` | Sonnet 5 | Per-finding verification model (crop + short prompt). |
+| `DRAWING_ANALYZER_INVESTIGATION_MODEL` | escalation model (Opus 5) | The Phase C investigation loop's model (multi-turn, vision + tools). |
 | `DRAWING_ANALYZER_INVESTIGATION_MAX_ROUNDS` | `6` | Evidence requests per investigation before the forced text-only close (rides the verdict-cache key). |
 | `DRAWING_ANALYZER_INVESTIGATION_MAX_FINDINGS` | `10` | UNCERTAIN findings investigated per run (severity-first; the excess is disclosed as a stage warning). |
-| `DRAWING_ANALYZER_CRITIQUE_MODEL` | Opus 4.8 | Critique-pass vision model (`critique=True`). |
-| `DRAWING_ANALYZER_CROSS_QC_MODEL` | Opus 4.8 | Cross-sheet QC model, text-only (`cross_qc=True`). |
-| `DRAWING_ANALYZER_CITATION_MODEL` | Opus 4.8 | Citation-check model, with web search (`citation_check=True`). |
-| `DRAWING_ANALYZER_IDENTITY_MODEL` | Opus 4.8 | Set-identity model, text-only (Phase A). |
-| `DRAWING_ANALYZER_REVIEW_PLAN_MODEL` | Opus 4.8 | Review-plan authoring model, text-only (Phase A). |
+| `DRAWING_ANALYZER_CRITIQUE_MODEL` | Opus 5 | Critique-pass vision model (`critique=True`). |
+| `DRAWING_ANALYZER_CROSS_QC_MODEL` | Opus 5 | Cross-sheet QC model, text-only (`cross_qc=True`). |
+| `DRAWING_ANALYZER_CITATION_MODEL` | Opus 5 | Citation-check model, with web search (`citation_check=True`). |
+| `DRAWING_ANALYZER_IDENTITY_MODEL` | Opus 5 | Set-identity model, text-only (Phase A). |
+| `DRAWING_ANALYZER_REVIEW_PLAN_MODEL` | Opus 5 | Review-plan authoring model, text-only (Phase A). |
 | `DRAWING_ANALYZER_MAX_PLAN_ITEMS` | `60` | Total item cap on the model-authored review plan. |
-| `DRAWING_ANALYZER_HARVEST_MODEL` | Opus 4.8 | Prose-harvest structuring model (one small call per straggler). |
-| `DRAWING_ANALYZER_CHAT_MODEL` | Opus 4.8 | The HTML report's in-browser **Ask AI** assistant (needs current-generation web-search / thinking support). |
+| `DRAWING_ANALYZER_HARVEST_MODEL` | Opus 5 | Prose-harvest structuring model (one small call per straggler). |
+| `DRAWING_ANALYZER_CHAT_MODEL` | Sonnet 5 | The HTML report's in-browser **Ask AI** assistant. Needs adaptive thinking plus the web-search **and web-fetch** server tools; web fetch is unavailable on Opus 5, so a model without it degrades the widget to search-only. |
 | `DRAWING_ANALYZER_WEB_SEARCH_TOOL_TYPE` | `web_search_20260209` | Server-side web-search tool type string (survives an API rename). |
 | `DRAWING_ANALYZER_WEB_SEARCH_MAX_USES` | `5` | Per-request web-search budget for citation checks (rides the verdict-cache key). |
 | `DRAWING_ANALYZER_CITATION_TTL_DAYS` | `30` | Citation verdict-cache TTL; `0` disables the cache (no read, no write). |

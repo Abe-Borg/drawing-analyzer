@@ -865,3 +865,118 @@ def test_beforeunload_is_silent_once_the_transcript_is_saved(page, tmp_path):
         "(() => { var e = new Event('beforeunload', {cancelable:true});"
         " window.dispatchEvent(e); return e.defaultPrevented; })()"
     ) is False
+
+
+def test_stopping_mid_tool_loop_leaves_a_resumable_transcript(page, tmp_path):
+    # A turn stopped between a tool call and its answer leaves
+    # assistant(tool_use) -> user(tool_result) -> nothing. Trimming only the
+    # trailing user turn would keep the dangling tool_use, and the next question
+    # (a plain user turn, not a tool_result) is a 400 from the API. The whole
+    # unfinished exchange has to be rewound.
+    page.on("dialog", lambda d: d.accept())
+    _load(page, _chat_doc(), tmp_path, queue=[_text_turn("first answer.")])
+    _ask_and_settle(page, "first question", expect="first answer.")
+
+    transcript = json.loads(page.evaluate(
+        """() => {
+          for (var i = 0; i < localStorage.length; i++) {
+            var k = localStorage.key(i);
+            if (k.indexOf('da-chat-tx-') === 0) return localStorage.getItem(k);
+          }
+        }"""
+    ))
+    # Splice on the shape a stopped tool loop leaves behind.
+    transcript["turns"] += [
+        {"message": {"role": "user", "content": "second question"},
+         "display": {"text": "second question", "excerpt": ""}},
+        {"message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "hung", "name": "calculate",
+             "input": {"expression": "1+1"}}]},
+         "display": {"notes": ["⏹ Stopped."]}},
+        {"message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "hung", "content": "2"}]}},
+    ]
+    path = tmp_path / "stopped.json"
+    path.write_text(json.dumps(transcript), encoding="utf-8")
+
+    page.set_input_files("#da-chat-load-input", str(path))   # panel already open
+    page.wait_for_function(
+        "() => document.getElementById('da-chat-msgs').textContent"
+        ".indexOf('second question') === -1", timeout=5000,
+    )
+
+    page.fill("#da-chat-input", "third question")
+    page.click("#da-chat-send")
+    _wait_turn(page)
+    messages = page.evaluate("window.__REQ")[-1]["messages"]
+    # Strict alternation, and no tool_use left waiting for a tool_result.
+    assert [m["role"] for m in messages] == ["user", "assistant", "user"]
+    assert not any(
+        isinstance(b, dict) and b.get("type") == "tool_use"
+        for m in messages if isinstance(m.get("content"), list)
+        for b in m["content"]
+    )
+    assert messages[-1]["content"] == "third question"
+
+
+def test_loading_mid_stream_does_not_corrupt_the_loaded_thread(page, tmp_path):
+    # Aborting an in-flight turn only makes its promise reject later. If that
+    # late cleanup still edits `history`, it pops a turn off the conversation
+    # that replaced it — and then saves the damage.
+    page.on("dialog", lambda d: d.accept())
+    doc = _chat_doc()
+    _load(page, doc, tmp_path)
+    report_id = json.loads(
+        doc[doc.index(">", doc.index('id="da-chat-config"')) + 1:
+            doc.index("</script>", doc.index('id="da-chat-config"'))]
+    )["reportId"]
+    transcript = {
+        "kind": "drawing_analyzer_chat_transcript", "schema_version": 1,
+        "report": {"report_id": report_id}, "saved_at": "x", "truncated": False,
+        "turns": [
+            {"message": {"role": "user", "content": "loaded question"},
+             "display": {"text": "loaded question", "excerpt": ""}},
+            {"message": {"role": "assistant",
+                         "content": [{"type": "text", "text": "loaded answer"}]},
+             "display": {"notes": []}},
+        ],
+    }
+    path = tmp_path / "loaded.json"
+    path.write_text(json.dumps(transcript), encoding="utf-8")
+
+    # A turn that hangs until aborted. The stub must honour opts.signal the way
+    # real fetch does — a promise that merely never settles would leave the old
+    # turn's cleanup un-run, and the race being tested here lives in that cleanup.
+    page.evaluate(
+        """() => {
+          window.fetch = function(url, opts){
+            return new Promise(function(_resolve, reject){
+              var sig = opts && opts.signal;
+              if(sig) sig.addEventListener('abort', function(){
+                var e = new Error('aborted'); e.name = 'AbortError'; reject(e);
+              });
+            });
+          };
+        }"""
+    )
+    page.click("#da-chat-fab")
+    page.fill("#da-chat-input", "in-flight question")
+    page.click("#da-chat-send")
+    page.wait_for_function(
+        "() => { var b = document.getElementById('da-chat-send'); return b && b.disabled; }",
+        timeout=5000,
+    )
+    page.set_input_files("#da-chat-load-input", str(path))
+    page.wait_for_function(
+        "() => document.getElementById('da-chat-msgs').textContent.indexOf('loaded answer') !== -1",
+        timeout=5000,
+    )
+    page.wait_for_timeout(400)   # give the aborted turn's cleanup time to fire
+
+    # The loaded conversation is intact, on screen and in storage.
+    assert "loaded question" in page.eval_on_selector("#da-chat-msgs", "el => el.textContent")
+    assert "in-flight question" not in page.eval_on_selector(
+        "#da-chat-msgs", "el => el.textContent")
+    saved = _stored(page)
+    assert [t["message"]["role"] for t in saved["turns"]] == ["user", "assistant"]
+    assert saved["turns"][0]["display"]["text"] == "loaded question"

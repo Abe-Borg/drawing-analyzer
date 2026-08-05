@@ -128,10 +128,10 @@ def test_builder_cache_prefix_flag_default_off():
 
     # Default (what the parallel batch path uses) must NOT cache — parallel items
     # would each cache-WRITE the same prefix, making a batch strictly costlier.
-    off = build_critique_request_params(list(content), model="claude-opus-4-8")
+    off = build_critique_request_params(list(content), model="claude-opus-5")
     assert all("cache_control" not in b for b in off["messages"][0]["content"])
 
-    on = build_critique_request_params(list(content), model="claude-opus-4-8", cache_prefix=True)
+    on = build_critique_request_params(list(content), model="claude-opus-5", cache_prefix=True)
     blocks = on["messages"][0]["content"]
     assert "cache_control" in blocks[-1]
     assert all("cache_control" not in b for b in blocks[:-1])
