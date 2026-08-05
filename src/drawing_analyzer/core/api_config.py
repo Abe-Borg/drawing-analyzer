@@ -16,7 +16,8 @@ Model identifiers may be overridden via env vars:
     DRAWING_ANALYZER_TRIAGE_MODEL                — verification triage
                                               (default Haiku 4.5).
     DRAWING_ANALYZER_CHAT_MODEL           — the in-report Q&A assistant
-                                              (default Opus 5).
+                                              (default Sonnet 5; needs web
+                                              fetch, which Opus 5 lacks).
 """
 from __future__ import annotations
 
@@ -64,9 +65,21 @@ TRIAGE_MODEL_DEFAULT = os.environ.get("DRAWING_ANALYZER_TRIAGE_MODEL", MODEL_HAI
 # The Q&A assistant embedded in the HTML report (html_report.py) calls the API
 # directly from the reader's browser. It needs a model that supports the
 # `web_search_20260209` / `web_fetch_20260209` server tools and adaptive
-# thinking, i.e. the current Opus/Sonnet generation — overriding this to an
-# older model will break the widget's requests.
-CHAT_MODEL_DEFAULT = os.environ.get("DRAWING_ANALYZER_CHAT_MODEL", MODEL_OPUS_5)
+# thinking.
+#
+# This is why chat is the one role that does NOT default to Opus 5: web fetch is
+# not available on Opus 5 (Anthropic's Opus 5 migration guide lists it as one of
+# two exceptions to Opus 4.8 feature parity, alongside Priority Tier). Sending
+# the tool anyway is a 400, which would break the widget on every question.
+# Sonnet 5 supports both server tools plus adaptive thinking, and is cheaper —
+# which matters more here than elsewhere, since this call is billed to the
+# report *reader's* key, not the run's.
+#
+# The requirement is enforced, not just documented: ``supports_web_fetch`` in
+# the capability registry gates the emitted tool list (html_report.py), so an
+# override to a model without web fetch degrades to search-only rather than
+# 400-ing, and a test asserts this default keeps both capabilities.
+CHAT_MODEL_DEFAULT = os.environ.get("DRAWING_ANALYZER_CHAT_MODEL", MODEL_SONNET_5)
 
 
 # Opus family membership. This set answers exactly one question — "is this
@@ -310,6 +323,14 @@ class ModelCapabilities:
     # edge, up to 4784 tokens) rather than the standard 1568px/1568-token
     # tier. Consumed by ``core.tokenizer`` for vision-cost estimates.
     supports_hires_vision: bool = False
+    # Whether the model accepts the ``web_fetch_*`` server tool. NOT implied by
+    # web-search support or by generation: Opus 5 supports web search but not
+    # web fetch (one of the two documented exceptions to its otherwise-complete
+    # Opus 4.8 feature parity), while Sonnet 5 supports both. Sending the tool
+    # to a model without it is a 400 that kills the whole request, so any
+    # caller assembling a tool list must gate on this. Default ``False`` so an
+    # unregistered model never has the tool sent on its behalf.
+    supports_web_fetch: bool = False
 
 
 # Profiles verified against Anthropic's models overview and effort reference.
@@ -326,6 +347,10 @@ _MODEL_CAPABILITIES: dict[str, ModelCapabilities] = {
         context_window=1_000_000,
         supported_effort_levels=_EFFORT_LEVELS_FULL,
         supports_hires_vision=True,
+        # Web fetch is NOT available on Opus 5 — one of the two documented
+        # exceptions to its Opus 4.8 feature parity (the other is Priority
+        # Tier). Web *search* is supported; only fetch is excluded.
+        supports_web_fetch=False,
     ),
     MODEL_SONNET_5: ModelCapabilities(
         # Sonnet 5 is the first Sonnet-tier model to match Opus on all three
@@ -338,6 +363,7 @@ _MODEL_CAPABILITIES: dict[str, ModelCapabilities] = {
         context_window=1_000_000,
         supported_effort_levels=_EFFORT_LEVELS_FULL,
         supports_hires_vision=True,
+        supports_web_fetch=True,
     ),
     MODEL_OPUS_48: ModelCapabilities(
         supports_adaptive_thinking=True,
@@ -346,6 +372,7 @@ _MODEL_CAPABILITIES: dict[str, ModelCapabilities] = {
         context_window=1_000_000,
         supported_effort_levels=_EFFORT_LEVELS_FULL,
         supports_hires_vision=True,
+        supports_web_fetch=True,
     ),
     MODEL_SONNET_46: ModelCapabilities(
         supports_adaptive_thinking=True,
@@ -358,6 +385,7 @@ _MODEL_CAPABILITIES: dict[str, ModelCapabilities] = {
         # ``xhigh`` at submit with a 400.
         supported_effort_levels=_EFFORT_LEVELS_NO_XHIGH,
         supports_hires_vision=False,
+        supports_web_fetch=True,
     ),
     MODEL_HAIKU_45: ModelCapabilities(
         # Anthropic models overview lists Haiku 4.5 without adaptive
@@ -371,6 +399,7 @@ _MODEL_CAPABILITIES: dict[str, ModelCapabilities] = {
         # keeps request shapes safe across model swaps (e.g. triage).
         supported_effort_levels=frozenset(),
         supports_hires_vision=False,
+        supports_web_fetch=False,
     ),
 }
 
@@ -386,6 +415,7 @@ _DEFAULT_CAPABILITIES = ModelCapabilities(
     context_window=200_000,
     supported_effort_levels=frozenset(),
     supports_hires_vision=False,
+    supports_web_fetch=False,
 )
 
 

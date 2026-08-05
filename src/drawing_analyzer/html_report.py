@@ -79,7 +79,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from .core.api_config import CHAT_MODEL_DEFAULT
+from .core.api_config import CHAT_MODEL_DEFAULT, model_capabilities
 
 # --------------------------------------------------------------------------- #
 # Report trust boundary (Phase 17, DA-011).
@@ -2434,6 +2434,14 @@ def _chat_bootstrap_html(
     embedding = bool(embed_key and api_key)
     config: dict[str, Any] = {
         "model": CHAT_MODEL_DEFAULT,
+        # Whether the configured chat model accepts the ``web_fetch_*`` server
+        # tool. Web fetch is NOT universal across current models — Opus 5
+        # supports web search but not web fetch — and sending it to a model
+        # without it is a 400 that fails the whole request. Resolved host-side
+        # from the capability registry and handed to the browser so
+        # ``buildRequest`` can omit the tool instead of breaking every question
+        # when someone overrides DRAWING_ANALYZER_CHAT_MODEL.
+        "webFetch": model_capabilities(CHAT_MODEL_DEFAULT).supports_web_fetch,
         "title": title,
         "generated": generated,
         "sources": list(source_names),
@@ -2997,8 +3005,16 @@ _CHAT_JS = r"""
     };
     if(noTools){ req.tool_choice = {type: 'none'}; return req; }
     req.tools = [
-      {type: 'web_search_20260209', name: 'web_search', max_uses: 15},
-      {type: 'web_fetch_20260209', name: 'web_fetch', max_uses: 15},
+      {type: 'web_search_20260209', name: 'web_search', max_uses: 15}
+    ];
+    // web_fetch only when the configured model actually supports it (CFG.webFetch,
+    // resolved host-side from the capability registry). Opus 5 supports web search
+    // but not web fetch, and sending an unsupported server tool is a 400 that fails
+    // the request outright — so this degrades to search-only rather than breaking.
+    if(CFG.webFetch){
+      req.tools.push({type: 'web_fetch_20260209', name: 'web_fetch', max_uses: 15});
+    }
+    req.tools.push(
       {name: 'scroll_to_report',
        description: 'Scroll the on-page report to a section, sheet, or QC finding and briefly ' +
          'highlight it for the reader. Use this to point the user at something specific in the ' +
@@ -3053,7 +3069,7 @@ _CHAT_JS = r"""
        input_schema: {type: 'object', properties: {
          expression: {type: 'string', description: 'The arithmetic expression to evaluate.'}
        }, required: ['expression']}}
-    ];
+    );
     return req;
   }
 

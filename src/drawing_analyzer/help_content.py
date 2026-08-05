@@ -971,14 +971,14 @@ RUNTIME_TRANSPARENCY = HelpDocument(
             ),
             _bullet(
                 "Claude Opus 5 — reading the sheets, the critique, working out the set's "
-                "identity, writing the review plan, the cross-sheet conflict hunt, the "
-                "investigation loop, and the report's Ask-AI assistant. The "
-                "deep-reasoning work."
+                "identity, writing the review plan, the cross-sheet conflict hunt, and the "
+                "investigation loop. The deep-reasoning work."
             ),
             _bullet(
                 "Claude Sonnet 5 — the first verification look at each finding. Smaller, "
                 "faster and cheaper, because the question is narrow: does this one thing "
-                "hold in this one crop?"
+                "hold in this one crop? It also runs the report's Ask-AI assistant, which "
+                "needs to fetch web pages — a thing Opus 5 cannot do."
             ),
             _bullet(
                 "Escalation is one-way and upward. A finding the smaller model could not "

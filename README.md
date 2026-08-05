@@ -33,7 +33,8 @@ zero-friction, double-click-and-ask file, tick **Embed API key in HTML report**
 shows a red *"don't share this file"* warning, and you should treat the file like a
 credential (a runtime "forget" cannot remove an embedded key — only regenerating or
 deleting the file can). Pass `include_chat=False` to omit the assistant entirely.
-The chat model defaults to Opus 5 and can be overridden with
+The chat model defaults to Sonnet 5 — it needs the web-fetch server tool, which
+Opus 5 does not support — and can be overridden with
 `DRAWING_ANALYZER_CHAT_MODEL`.
 
 See [SECURITY.md](SECURITY.md) for the report's trust boundary (all model output is
@@ -1194,7 +1195,7 @@ runs.
 | `DRAWING_ANALYZER_REVIEW_PLAN_MODEL` | Opus 5 | Review-plan authoring model, text-only (Phase A). |
 | `DRAWING_ANALYZER_MAX_PLAN_ITEMS` | `60` | Total item cap on the model-authored review plan. |
 | `DRAWING_ANALYZER_HARVEST_MODEL` | Opus 5 | Prose-harvest structuring model (one small call per straggler). |
-| `DRAWING_ANALYZER_CHAT_MODEL` | Opus 5 | The HTML report's in-browser **Ask AI** assistant (needs current-generation web-search / thinking support). |
+| `DRAWING_ANALYZER_CHAT_MODEL` | Sonnet 5 | The HTML report's in-browser **Ask AI** assistant. Needs adaptive thinking plus the web-search **and web-fetch** server tools; web fetch is unavailable on Opus 5, so a model without it degrades the widget to search-only. |
 | `DRAWING_ANALYZER_WEB_SEARCH_TOOL_TYPE` | `web_search_20260209` | Server-side web-search tool type string (survives an API rename). |
 | `DRAWING_ANALYZER_WEB_SEARCH_MAX_USES` | `5` | Per-request web-search budget for citation checks (rides the verdict-cache key). |
 | `DRAWING_ANALYZER_CITATION_TTL_DAYS` | `30` | Citation verdict-cache TTL; `0` disables the cache (no read, no write). |

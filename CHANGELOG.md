@@ -22,10 +22,16 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- **Moved the pipeline defaults to Claude Opus 5 and Claude Sonnet 5.** Review,
-  escalation, and the report's Ask-AI assistant now run on `claude-opus-5`;
-  first-pass verification and cross-check run on `claude-sonnet-5`. Triage stays
-  on Haiku 4.5. Opus 4.8 and Sonnet 4.6 remain fully registered, so pinning one
+- **Moved the pipeline defaults to Claude Opus 5 and Claude Sonnet 5.** Review
+  and escalation now run on `claude-opus-5`; first-pass verification, cross-check,
+  and the report's Ask-AI assistant run on `claude-sonnet-5`. Triage stays
+  on Haiku 4.5. The assistant is the one role that deliberately does *not* take
+  Opus 5: web fetch is unavailable on Opus 5 (one of two documented exceptions to
+  its Opus 4.8 feature parity), and the widget needs it to read a linked page.
+  `supports_web_fetch` joins the capability registry and gates the tool list the
+  report emits, so overriding `DRAWING_ANALYZER_CHAT_MODEL` to a model without
+  web fetch now degrades the widget to search-only instead of failing every
+  question with a 400. Opus 4.8 and Sonnet 4.6 remain fully registered, so pinning one
   through a `DRAWING_ANALYZER_*_MODEL` variable still gets full capabilities
   rather than the conservative unknown-model fallback. Opus 5 is priced
   identically to Opus 4.8 ($5/$25 per MTok), so the estimator's Opus figures are
