@@ -2662,6 +2662,30 @@ _CHAT_CSS = """
   font-size:10px; background:var(--accent-soft); border-radius:4px; padding:1px 4px;
   margin-left:2px; vertical-align:super;
 }
+/* Arrival motion. The answer body is revealed a character at a time by the
+   pacer (see "smooth reveal" in the script), so these only soften the things
+   that genuinely appear all at once: a bubble, a tool chip, the waiting dots
+   that stand in for the answer until the first token lands. */
+@keyframes da-rise{from{opacity:0; transform:translateY(6px)} to{opacity:1; transform:none}}
+.da-msg{animation:da-rise .22s ease-out both}
+.da-tool{animation:da-rise .18s ease-out both}
+.da-wait{display:flex; gap:5px; align-items:center; height:19px}
+.da-wait i{
+  width:6px; height:6px; border-radius:50%; background:var(--muted);
+  animation:da-bounce 1.25s ease-in-out infinite;
+}
+.da-wait i:nth-child(2){animation-delay:.16s}
+.da-wait i:nth-child(3){animation-delay:.32s}
+@keyframes da-bounce{
+  0%,75%,100%{opacity:.25; transform:translateY(0)}
+  38%{opacity:.85; transform:translateY(-3px)}
+}
+/* A reader who asked the OS for less motion gets the plain instant path — and
+   the script reads the same query to turn the paced reveal off wholesale. */
+@media (prefers-reduced-motion: reduce){
+  .da-msg,.da-tool,.da-wait i{animation:none}
+  .da-wait i{opacity:.45}
+}
 /* markdown inside answers reuses .block's look, scoped smaller */
 .da-md p{margin:6px 0}
 .da-md ul,.da-md ol{margin:6px 0; padding-left:20px}
@@ -3651,7 +3675,28 @@ _CHAT_JS = r"""
   });
 
   function nearBottom(){ return msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight < 60; }
-  function scrollDown(force){ if(force || nearBottom()) msgs.scrollTop = msgs.scrollHeight; }
+  // Whether the pane is still tailing the answer. It has to be a sticky flag set
+  // from real scroll events rather than a distance test taken at paint time: the
+  // eased follow below is *itself* briefly far from the bottom when a burst of
+  // text lands, so a distance test would read that as "the reader scrolled away"
+  // and switch the follow off mid-answer.
+  var follow = true, lastAuto = -1;
+  function goBottom(){
+    msgs.scrollTop = msgs.scrollHeight;
+    lastAuto = msgs.scrollTop;
+  }
+  msgs.addEventListener('scroll', function(){
+    if(Math.abs(msgs.scrollTop - lastAuto) < 1.5) return;   // our own write, not the reader's
+    follow = nearBottom();
+  });
+  // `force` is for discrete events (a new bubble, a loaded transcript): jump and
+  // re-arm the follow. Everything else defers to the reader — and while the
+  // pacer is running it defers to the rAF loop, which is already easing there.
+  function scrollDown(force){
+    if(force){ follow = true; goBottom(); return; }
+    if(!follow || pacing) return;
+    goBottom();
+  }
   function addMsg(cls, text){
     var div = document.createElement('div');
     div.className = 'da-msg ' + cls;
@@ -3675,6 +3720,222 @@ _CHAT_JS = r"""
     note(bubble, text);
     var d = displays[displays.length - 1];
     if(d && d.notes) d.notes.push(text);
+  }
+
+  // ------------------------------------------------------------ smooth reveal
+  // Deltas do not arrive smoothly. The API hands over 40 characters at once,
+  // stalls 300ms, then hands over 120 — so painting each burst the moment it
+  // lands is what made answers read as jerky and sudden, and re-rendering the
+  // whole answer on each burst made long ones flicker as well. The network is
+  // therefore decoupled from the display: text accumulates in the block, and a
+  // single rAF loop walks `st.shown` toward it at a rate proportional to how far
+  // behind it is (an exponential ease — quick when it has ground to make up,
+  // gliding as it catches up), repaints only the part that changed, and eases
+  // the scroll on the same clock.
+  //
+  // Only the live stream is paced. Replay (and a reader who asked the OS for
+  // reduced motion) keeps `pace` false and takes the original instant path, so
+  // a restored transcript still renders in one synchronous pass.
+  var REDUCE_MOTION = false;
+  try {
+    REDUCE_MOTION = !!(window.matchMedia &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  } catch(e){}
+
+  var CATCH_MS = 260;         // close the gap to the live text over this window
+  var CLOSE_MS = 110;         // ...and this much faster once the block is closed
+  var MIN_CPS = 45;           // so the last few characters never crawl
+  var MAX_CPS = 2400;         // sanity bound on a pathological single-burst block
+  var pacing = false;         // an rAF loop is live (scrollDown defers to it)
+
+  function blockText(b){
+    if(!b) return '';
+    if(b.type === 'text') return b.text || '';
+    if(b.type === 'thinking') return b.thinking || '';
+    return '';
+  }
+  function isPaced(b){ return !!b && (b.type === 'text' || b.type === 'thinking'); }
+
+  // Is any paced block still holding back text, or waiting to be finalized?
+  function pacePending(st){
+    for(var i = 0; i < st.blocks.length; i++){
+      if(isPaced(st.blocks[i]) && !st.done[i]) return true;
+    }
+    return false;
+  }
+
+  function paceEnsure(st, bubble){
+    if(!st.pace || st.raf) return;
+    pacing = true;
+    st.last = 0;
+    st.raf = requestAnimationFrame(function(t){ paceFrame(st, bubble, t); });
+  }
+
+  function paceFrame(st, bubble, now){
+    st.raf = 0;
+    // Clamped so a backgrounded tab returning after seconds resumes with a
+    // normal-sized step instead of dumping the whole backlog in one frame.
+    var dt = st.last ? Math.min(now - st.last, 100) : 16;
+    st.last = now;
+    var busy = paceStep(st, bubble, dt);
+    var pull = paceScroll(dt);
+    if(busy || pull){
+      st.raf = requestAnimationFrame(function(t){ paceFrame(st, bubble, t); });
+      return;
+    }
+    pacing = false;
+    paceSettle(st);
+  }
+
+  // One frame of reveal. Blocks are walked in index order and a block finalizes
+  // only once every earlier one has, so citation numbering keeps the order the
+  // model streamed in (I-7) even though the reveal is time-based.
+  function paceStep(st, bubble, dt){
+    var busy = false, canFinal = true;
+    for(var i = 0; i < st.blocks.length; i++){
+      var b = st.blocks[i];
+      if(!isPaced(b) || st.done[i]) continue;
+      var full = blockText(b).length;
+      var shown = st.shown[i] || 0;
+      if(shown < full){
+        var win = st.closed[i] ? CLOSE_MS : CATCH_MS;
+        var cps = Math.max(MIN_CPS, Math.min(MAX_CPS, (full - shown) * 1000 / win));
+        shown = Math.min(full, shown + cps * dt / 1000);
+        st.shown[i] = shown;
+        if(b.type === 'text') paintText(st, i);
+        else touchThinking(st, i, bubble, blockText(b).slice(0, Math.floor(shown)));
+        busy = true;
+      }
+      if(canFinal && st.closed[i] && shown >= full){
+        st.done[i] = true;
+        finishBlock(st, i, bubble);   // authoritative full render + citation chips
+      } else {
+        if(st.closed[i]) busy = true;  // closed, but waiting its turn to finalize
+        canFinal = false;
+      }
+    }
+    return busy;
+  }
+
+  // Follow the answer as it grows instead of teleporting to the bottom on every
+  // repaint. Returns whether it still has distance to cover, so the loop stays
+  // alive long enough to land exactly at the bottom.
+  function paceScroll(dt){
+    if(!follow) return false;
+    var delta = msgs.scrollHeight - msgs.clientHeight - msgs.scrollTop;
+    if(delta <= 0.5) return false;
+    var k = 1 - Math.pow(1 - 0.18, dt / 16);     // ~18% per 16ms, frame-rate independent
+    msgs.scrollTop += Math.max(delta * k, Math.min(delta, 0.6));
+    lastAuto = msgs.scrollTop;
+    return true;
+  }
+
+  function paceSettle(st){
+    if(pacePending(st)) return;
+    var waiting = st.waiters;
+    st.waiters = [];
+    waiting.forEach(function(f){ f(); });
+  }
+
+  // Every block is closed by definition once the HTTP stream ends, so this both
+  // seals them and resolves when the last buffered character is on screen. A
+  // `hard` flush (abort, mid-stream error) skips the reveal and commits
+  // everything received — text that arrived is never hidden, it just stops
+  // being animated.
+  function paceFlush(st, bubble, hard){
+    var i, b;
+    if(!st.pace) return Promise.resolve();
+    for(i = 0; i < st.blocks.length; i++) if(st.blocks[i]) st.closed[i] = true;
+    if(hard){
+      if(st.raf){ cancelAnimationFrame(st.raf); st.raf = 0; }
+      pacing = false;
+      for(i = 0; i < st.blocks.length; i++){
+        b = st.blocks[i];
+        if(!isPaced(b) || st.done[i]) continue;
+        st.shown[i] = blockText(b).length;
+        if(b.type === 'thinking') touchThinking(st, i, bubble, blockText(b));
+        st.done[i] = true;
+        finishBlock(st, i, bubble);
+      }
+      paceSettle(st);
+      return Promise.resolve();
+    }
+    if(!pacePending(st)) return Promise.resolve();
+    paceEnsure(st, bubble);
+    return new Promise(function(res){ st.waiters.push(res); });
+  }
+
+  // Repaint block `i` at its currently revealed length. Everything up to the
+  // last *safe* block boundary is rendered once and then left alone; only the
+  // short live tail after it is rebuilt. Rebuilding the whole answer on every
+  // frame is what made a long table or list flicker and drop frames — and it
+  // threw away the reader's text selection each time.
+  function paintText(st, i){
+    var el = st.els[i];
+    if(!el) return;
+    var vis = blockText(st.blocks[i]).slice(0, Math.floor(st.shown[i] || 0));
+    var head = st.head[i] || (st.head[i] = {src: 0, nodes: 0});
+    var cut = stablePrefix(vis, head.src);
+    if(cut > head.src){
+      truncateTo(el, head.nodes);
+      renderMdInto(el, vis.slice(head.src, cut), 0);
+      head.src = cut;
+      head.nodes = el.childNodes.length;
+    }
+    truncateTo(el, head.nodes);
+    renderMdInto(el, vis.slice(head.src), 0);
+  }
+
+  function truncateTo(el, n){
+    while(el.childNodes.length > n) el.removeChild(el.lastChild);
+  }
+
+  // How much of `md` can be committed to the DOM permanently: the offset of the
+  // last blank line that is outside a code fence and separates two blocks which
+  // cannot merge. Committing a prefix is only sound where
+  // render(A) + render(B) === render(A + B), so a boundary is refused whenever
+  // either side is a list item, a blockquote or an indented continuation —
+  // those fuse across a blank line into ONE list or quote, and splitting them
+  // would silently produce two. Refusing just means that stretch keeps being
+  // re-rendered as the tail, which is correct, only cheaper later.
+  var PACE_CONT_RE = /^(\s*([-*+]|\d+[.)])\s|\s*>|\s\s)/;
+  function stablePrefix(md, from){
+    var lines = md.split('\n');
+    var starts = [], pos = 0, i;
+    for(i = 0; i < lines.length; i++){ starts.push(pos); pos += lines[i].length + 1; }
+    var cut = from, fence = false, prev = -1;
+    for(i = 0; i < lines.length; i++){
+      var line = lines[i];
+      if(line.trim().indexOf('```') === 0){ fence = !fence; prev = i; continue; }
+      if(fence){ if(line.trim()) prev = i; continue; }
+      if(line.trim()){ prev = i; continue; }
+      if(prev === -1) continue;                        // leading blanks
+      var next = -1;
+      for(var j = i + 1; j < lines.length; j++){ if(lines[j].trim()){ next = j; break; } }
+      if(next === -1) break;                           // trailing blanks: nothing to commit yet
+      if(PACE_CONT_RE.test(lines[prev]) || PACE_CONT_RE.test(lines[next])) continue;
+      if(starts[next] > cut) cut = starts[next];
+    }
+    return cut;
+  }
+
+  // The stand-in for an answer that has not started arriving yet. Without it the
+  // bubble sits empty through the whole time-to-first-token and then fills all
+  // at once — the most disorienting jump of the lot. Re-armed for every request
+  // in a turn, so the pause after a tool call is covered too.
+  function showWaiting(bubble){
+    if(!bubble) return;
+    clearWaiting(bubble);
+    var w = document.createElement('div');
+    w.className = 'da-wait';
+    for(var i = 0; i < 3; i++) w.appendChild(document.createElement('i'));
+    bubble.appendChild(w);
+    scrollDown();
+  }
+  function clearWaiting(bubble){
+    if(!bubble) return;
+    var w = bubble.querySelector(':scope > .da-wait');
+    if(w) w.remove();
   }
 
   // ------------------------------------------------------------- SSE plumbing
@@ -3701,6 +3962,7 @@ _CHAT_JS = r"""
   // One POST + SSE read. Appends UI into `bubble`, returns {blocks, stopReason}.
   function streamOnce(bubble, noTools){
     aborter = new AbortController();
+    showWaiting(bubble);   // covers every round's wait, not just the first
     return fetch(API_URL, {
       method: 'POST',
       signal: aborter.signal,
@@ -3730,7 +3992,12 @@ _CHAT_JS = r"""
       }
       var st = {
         buf: '', blocks: [], partial: {}, stopReason: null,
-        els: {}, think: null, mdDirty: {}, mdTimers: {}, toolChips: {}, citeUrls: {}, citeCount: 0
+        els: {}, think: null, mdDirty: {}, mdTimers: {}, toolChips: {}, citeUrls: {}, citeCount: 0,
+        // paced reveal (see "smooth reveal"): shown = characters on screen,
+        // closed = content_block_stop seen, done = finishBlock has run, head =
+        // committed-prefix bookkeeping for the incremental repaint.
+        pace: !REDUCE_MOTION, shown: [], closed: [], done: [], head: [],
+        raf: 0, last: 0, waiters: []
       };
       var reader = resp.body.getReader();
       var decoder = new TextDecoder();
@@ -3744,7 +4011,21 @@ _CHAT_JS = r"""
           return pump();
         });
       }
-      return pump();
+      // Resolve on the *displayed* answer, not the received one: the turn is
+      // only finished once the reveal has caught up. It trails the last delta by
+      // about CLOSE_MS, so the tool loop and the composer unlock are unaffected
+      // — but the composer can never re-enable while text is still arriving on
+      // screen, and a caller that inspects the DOM afterwards sees all of it.
+      return pump().then(function(){
+        return paceFlush(st, bubble, false).then(function(){ return st; });
+      }, function(err){
+        // Abort and mid-stream failure: stop animating and commit everything
+        // that did arrive — text that reached the browser is never hidden, it
+        // just stops being revealed — so the caller's error path ("⏹ Stopped.")
+        // appends to a settled bubble.
+        paceFlush(st, bubble, true);
+        throw err;
+      });
     });
   }
 
@@ -3757,10 +4038,12 @@ _CHAT_JS = r"""
       if(!b || !d) return;
       if(d.type === 'text_delta'){
         b.text = (b.text || '') + d.text;
-        touchText(st, ev.index);
+        if(st.pace) paceEnsure(st, bubble);   // the rAF loop owns the repaint
+        else touchText(st, ev.index);
       } else if(d.type === 'thinking_delta'){
         b.thinking = (b.thinking || '') + d.thinking;
-        touchThinking(st, ev.index, bubble, b.thinking);
+        if(st.pace) paceEnsure(st, bubble);
+        else touchThinking(st, ev.index, bubble, b.thinking);
       } else if(d.type === 'input_json_delta'){
         st.partial[ev.index] = (st.partial[ev.index] || '') + d.partial_json;
       } else if(d.type === 'signature_delta'){
@@ -3769,7 +4052,15 @@ _CHAT_JS = r"""
         (b.citations = b.citations || []).push(d.citation);
       }
     } else if(ev.type === 'content_block_stop'){
-      finishBlock(st, ev.index, bubble);
+      // A paced block finalizes from inside the reveal loop, the moment its last
+      // buffered character is on screen — otherwise the authoritative render and
+      // its citation chips would land ahead of the text they belong to.
+      if(st.pace && isPaced(st.blocks[ev.index])){
+        st.closed[ev.index] = true;
+        paceEnsure(st, bubble);
+      } else {
+        finishBlock(st, ev.index, bubble);
+      }
     } else if(ev.type === 'message_delta'){
       if(ev.delta && ev.delta.stop_reason) st.stopReason = ev.delta.stop_reason;
     } else if(ev.type === 'error'){
@@ -3781,6 +4072,7 @@ _CHAT_JS = r"""
 
   function startBlockUI(st, index, bubble){
     var b = st.blocks[index];
+    clearWaiting(bubble);        // real content has started; drop the stand-in
     if(b.type === 'text'){
       var div = document.createElement('div');
       div.className = 'da-md';
@@ -3823,10 +4115,17 @@ _CHAT_JS = r"""
       bubble.appendChild(wrap);
       el = st.els[index] = body;
     }
+    // The panel is a fixed-height scroller, so keep its own view on the newest
+    // line — unless the reader has scrolled back up inside it to read something.
+    var tail = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
     el.textContent = textNow;
+    if(tail) el.scrollTop = el.scrollHeight;
     scrollDown();
   }
 
+  // The unpaced fallback (reduced motion): a plain 90ms debounce onto a full
+  // re-render. The paced path never reaches here — paintText repaints it
+  // incrementally from the rAF loop instead.
   function touchText(st, index){
     if(st.mdDirty[index]) return;
     st.mdDirty[index] = true;
@@ -4031,8 +4330,12 @@ _CHAT_JS = r"""
   // through linkEl's https-only policy.
   function replayAssistant(blocks, errById, notes){
     var bubble = addMsg('da-ai');
+    // pace:false — a restored turn is already complete, so it renders in one
+    // synchronous pass. Revealing saved text character by character would make
+    // loading a transcript slower than the conversation was to begin with.
     var st = {blocks: blocks, els: {}, toolChips: {}, citeUrls: {}, citeCount: 0,
-              partial: {}, mdDirty: {}, mdTimers: {}};
+              partial: {}, mdDirty: {}, mdTimers: {}, pace: false,
+              shown: [], closed: [], done: [], head: [], waiters: []};
     blocks.forEach(function(b, i){
       if(!b || typeof b !== 'object') return;
       startBlockUI(st, i, bubble);
@@ -4297,6 +4600,7 @@ _CHAT_JS = r"""
         addMsg('da-err', scrubSecrets(msg));
       }
     }).then(function(){
+      clearWaiting(bubble);   // settled one way or another: never leave it spinning
       // Superseded thread (see the catch above): unlock the composer for the
       // conversation that replaced this one, but touch nothing else — in
       // particular do not re-save, which would overwrite the new transcript.
@@ -4304,7 +4608,11 @@ _CHAT_JS = r"""
       if(!bubble.childNodes.length) bubble.remove(); // nothing ever rendered
       if(pushed && opts.onCommit) opts.onCommit();   // e.g. clear the pending selection
       setStreaming(false);
-      scrollDown(true);
+      // Deliberately NOT forced: the final render can change the bubble's
+      // height, so settle to the bottom for a reader who was following — but a
+      // reader who scrolled up mid-answer to re-read something stays put
+      // instead of being yanked down the moment the answer lands.
+      scrollDown();
       // The one place every turn settles — completed, stopped, or failed — so
       // it is the one place the transcript needs saving. A turn that left no
       // history entry saves nothing, which is right: what cannot be replayed is

@@ -1037,6 +1037,23 @@ def test_chat_js_builds_dom_and_validates_urls():
     assert "scrubSecrets" in js
 
 
+def test_chat_js_paces_the_answer_reveal():
+    """The streamed answer is revealed on an rAF clock rather than painted as
+    each burst of deltas lands. Behaviour is covered in
+    ``tests/test_report_chat_smoothness.py`` (needs a browser); this keeps the
+    pieces from being dropped on a machine that cannot run it."""
+    js = hr._CHAT_JS
+    assert "requestAnimationFrame" in js and "paceFrame" in js
+    # The incremental repaint and the boundary rule it depends on.
+    assert "function paintText" in js and "function stablePrefix" in js
+    # Eased autoscroll with a sticky follow flag, not a scrollTop teleport.
+    assert "function paceScroll" in js
+    # The reduced-motion opt-out, and the debounced fallback it falls back to.
+    assert "prefers-reduced-motion" in js and "function touchText" in js
+    # Time-to-first-token placeholder.
+    assert "function showWaiting" in js and "function clearWaiting" in js
+
+
 # --------------------------------------------------------------------------- #
 # Content-Security-Policy (defense in depth).
 # --------------------------------------------------------------------------- #
