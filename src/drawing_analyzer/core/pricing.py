@@ -2,7 +2,7 @@
 
 A small, dependency-free pricing table so the app can show a spend estimate
 before launching an expensive run (e.g. the drawing-analysis cost-confirm
-dialog). Rates are USD per million tokens, verified on 2026-07-20. Image/vision
+dialog). Rates are USD per million tokens, verified on 2026-08-05. Image/vision
 input is billed as ordinary input tokens, so no separate image rate is needed;
 the Batch API bills at 50% of standard, exposed via the ``batch=`` flag.
 
@@ -20,7 +20,7 @@ from decimal import Decimal
 # pricing (§15.7). Rates drift — re-verify against the official pricing page and
 # bump this date before a release; the GUI/report surface it so a stale figure is
 # never presented as authoritative.
-PRICING_EFFECTIVE_DATE = "2026-07-20"
+PRICING_EFFECTIVE_DATE = "2026-08-05"
 
 # Batch API bills at half of standard, per Anthropic's published pricing.
 BATCH_DISCOUNT = 0.5
@@ -43,7 +43,16 @@ class ModelPrice:
 
 # Keyed by the bare model id. A dated/fast/-suffixed variant resolves via the
 # startswith fallback in ``price_for`` (e.g. "claude-haiku-4-5-20251001").
+#
+# Sonnet 5 is quoted at its LIST rate ($3/$15), not the introductory $2/$10
+# that Anthropic applies through 2026-08-31. This module has one rate per
+# model and no date awareness — deliberately, since I-7 keeps time-dependence
+# out of assembly — so quoting list means the pre-run estimate runs slightly
+# high until the intro window closes and is exact afterwards. Over-stating a
+# user-facing cost figure is the safe direction, and it needs no dated edit.
 MODEL_PRICING: dict[str, ModelPrice] = {
+    "claude-opus-5": ModelPrice(5.00, 25.00, "Opus 5"),
+    "claude-sonnet-5": ModelPrice(3.00, 15.00, "Sonnet 5"),
     "claude-opus-4-8": ModelPrice(5.00, 25.00, "Opus 4.8"),
     "claude-opus-4-7": ModelPrice(5.00, 25.00, "Opus 4.7"),
     "claude-opus-4-6": ModelPrice(5.00, 25.00, "Opus 4.6"),
@@ -76,7 +85,7 @@ def price_for(model: str) -> ModelPrice | None:
 
 
 def friendly_model_name(model: str) -> str:
-    """Human-friendly label (``"Opus 4.8"``) for dialogs; falls back to the id."""
+    """Human-friendly label (``"Opus 5"``) for dialogs; falls back to the id."""
     price = price_for(model)
     return price.label if price is not None else model
 

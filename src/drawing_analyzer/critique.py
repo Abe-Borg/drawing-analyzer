@@ -106,7 +106,7 @@ def run_checklists(profiles: list[Profile] | None, runs: int) -> list[str]:
 # Back-compat alias for the private spelling used before Phase 23C made it public.
 _run_checklists = run_checklists
 
-# Critique shares the digest's output-shaping defaults: Opus 4.8, adaptive
+# Critique shares the digest's output-shaping defaults: Opus 5, adaptive
 # thinking, effort high, 16k max_tokens (full coverage, deliberate reasoning).
 DEFAULT_CRITIQUE_MAX_TOKENS = DEFAULT_DIGEST_MAX_TOKENS
 DEFAULT_CRITIQUE_EFFORT = DEFAULT_DIGEST_EFFORT

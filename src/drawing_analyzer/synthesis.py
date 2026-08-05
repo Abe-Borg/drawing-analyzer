@@ -49,7 +49,7 @@ _SYNTHESIS_CACHE_CONTRACT = 1
 
 
 def default_synthesis_model() -> str:
-    """Model for the synthesis pass — Opus 4.8 by default (best coordination
+    """Model for the synthesis pass — Opus 5 by default (best coordination
     reasoning), overridable via ``DRAWING_ANALYZER_SYNTHESIS_MODEL``."""
     override = os.environ.get("DRAWING_ANALYZER_SYNTHESIS_MODEL")
     if override and override.strip():

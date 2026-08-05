@@ -238,8 +238,8 @@ def test_runtime_transparency_covers_the_runtime_surface() -> None:
         # QC, which routes through the review model, NOT the Sonnet
         # cross-check default in core.api_config); Sonnet takes the first
         # verification look. No Haiku triage stage runs in this pipeline.
-        "opus 4.8",
-        "sonnet 4.6",
+        "opus 5",
+        "sonnet 5",
         # The agentic surface and its bounds.
         "crop_region",
         "find_text",
@@ -346,7 +346,7 @@ def doc_blocks(section: HelpSection):
         # How to use — the operator's actual workflow surfaces.
         ("how_to_use", ["API key", "Analyze", "focus", "QC Markups", "Export All", "HTML Report"]),
         # How it works — the real pipeline vocabulary.
-        ("how_it_works", ["sheet", "text layer", "tiles", "Opus 4.8", "Batch", "synthesis"]),
+        ("how_it_works", ["sheet", "text layer", "tiles", "Opus 5", "Batch", "synthesis"]),
         # Why trust it — the trust mechanisms that exist in the code.
         (
             "why_trust_it",

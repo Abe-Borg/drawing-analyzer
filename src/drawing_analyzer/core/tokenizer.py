@@ -5,9 +5,9 @@ Uses tiktoken with cl100k_base for approximate preflight estimates.
 These counts are used for guardrails, not exact billing.
 
 Token limits (v2.3.0):
-    - Claude Opus 4.8 context window: 1,000,000 tokens
-    - Opus 4.8 max output: 128,000 tokens
-    - Sonnet 4.6 max output: 64,000 tokens
+    - Claude Opus 5 context window: 1,000,000 tokens
+    - Opus 5 max output: 128,000 tokens
+    - Sonnet 5 max output: 128,000 tokens
     - Per-spec recommended input limit: 500,000 tokens
       (practical limit — individual specs are reviewed one at a time)
     - Cross-check recommended input limit: ~822,000 tokens
@@ -36,7 +36,7 @@ _log = logging.getLogger(__name__)
 # Model limits
 # ---------------------------------------------------------------------------
 
-# Claude Opus 4.8 context window (1M tokens, no beta header required).
+# Claude Opus 5 context window (1M tokens, no beta header required).
 MAX_CONTEXT_TOKENS = 1_000_000
 
 
@@ -61,7 +61,7 @@ PROJECT_CONTEXT_MAX_TOKENS = 100_000
 # Cross-check limits (v2.2.0)
 # ---------------------------------------------------------------------------
 
-# Cross-check uses Sonnet 4.6 with full spec content and adaptive thinking.
+# Cross-check uses Sonnet 5 with full spec content and adaptive thinking.
 # With thinking enabled, thinking tokens + text output share the max_tokens budget.
 # We keep a 128K output reserve (matches the api_config cross-check cap before
 # the per-model clamp) so the input budget stays stable across model changes.
@@ -103,6 +103,16 @@ _DEFAULT_LOCAL_SAFETY_FACTOR = 1.20  # unknown models — widest margin
 _LOCAL_SAFETY_FACTORS: dict[str, float] = {
     # Opus / Sonnet share Claude's main tokenizer; the cl100k_base
     # undercount is small but non-zero.
+    #
+    # Opus 5 and Sonnet 5 both use the tokenizer introduced with Opus 4.7,
+    # the same one Opus 4.8 uses, so they carry Opus 4.8's factor. Note this
+    # pads the *ratio* to cl100k, not the absolute count: for identical text
+    # Sonnet 5 emits roughly 30% more Claude tokens than Sonnet 4.6 because
+    # of that tokenizer change, which is exactly why its budget must not be
+    # estimated with a Sonnet-4.6-era assumption. The authoritative number
+    # remains the ``count_tokens`` preflight; this table is the fallback gate.
+    "claude-opus-5": 1.10,
+    "claude-sonnet-5": 1.10,
     "claude-opus-4-8": 1.10,
     "claude-sonnet-4-6": 1.10,
     # Haiku 4.5 tokenization tends to undercount cl100k a bit more on
@@ -182,20 +192,20 @@ def count_tokens(text: str) -> int:
 #   * Standard tier (Sonnet 4.6 / Haiku 4.5 / unknown): up to 1568 tokens,
 #     long edge <= 1568 px.
 #
-# Which models are high-resolution is a moving roster (as of the 2026-07 docs
-# re-verification it had grown beyond Opus to include Sonnet 5 / Fable 5 / Mythos
-# 5). Rather than track that whole list, ``_image_caps_for_model`` keys the
-# hi-res tier off the Opus whitelist alone: this tool digests only with Opus 4.8
-# (a locked product decision), so that is exact for every model it actually
-# runs, and any other model falls to the standard tier — a safe under-estimate,
-# never an over-run of the request. These are local *estimates* for budgeting
-# (mirroring the documented formula); the authoritative number is still
-# Anthropic's ``count_tokens`` endpoint, which accepts image/document blocks like
-# any other content.
+# Which models are high-resolution is a moving roster that no longer follows
+# family lines — Sonnet 5 reads at the hi-res tier while Sonnet 4.6 does not.
+# ``_image_caps_for_model`` therefore reads the per-model
+# ``supports_hires_vision`` flag from the api_config capability registry
+# rather than testing Opus membership, which would under-estimate every
+# Sonnet 5 image by a factor of ~3. An unregistered model falls to the
+# standard tier — a safe under-estimate, never an over-run of the request.
+# These are local *estimates* for budgeting (mirroring the documented
+# formula); the authoritative number is still Anthropic's ``count_tokens``
+# endpoint, which accepts image/document blocks like any other content.
 
 _IMAGE_TOKEN_DIVISOR = 750
 
-_IMAGE_TOKEN_CAP_HIRES = 4784      # Opus 4.7 / 4.8
+_IMAGE_TOKEN_CAP_HIRES = 4784      # Opus 5 / Sonnet 5 / Opus 4.8 / Opus 4.7
 _IMAGE_LONG_EDGE_HIRES = 2576
 _IMAGE_TOKEN_CAP_DEFAULT = 1568    # Sonnet 4.6 / Haiku 4.5 / unknown
 _IMAGE_LONG_EDGE_DEFAULT = 1568
@@ -204,14 +214,14 @@ _IMAGE_LONG_EDGE_DEFAULT = 1568
 def _image_caps_for_model(model: str | None) -> tuple[int, int]:
     """Return ``(token_cap, long_edge_cap_px)`` for ``model``.
 
-    Reads the Opus high-resolution tier from the api_config whitelist so the
-    capability source of truth stays single. Imported lazily to avoid any
-    import-order coupling at module load.
+    Reads the per-model high-resolution flag from the api_config capability
+    registry so the capability source of truth stays single. Imported lazily
+    to avoid any import-order coupling at module load.
     """
     try:
-        from .api_config import OPUS_MODELS
+        from .api_config import model_capabilities
 
-        if model in OPUS_MODELS:
+        if model and model_capabilities(model).supports_hires_vision:
             return _IMAGE_TOKEN_CAP_HIRES, _IMAGE_LONG_EDGE_HIRES
     except Exception:  # pragma: no cover - defensive; fall back to safe default
         pass
