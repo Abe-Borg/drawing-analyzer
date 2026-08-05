@@ -578,6 +578,187 @@ def test_resize_grips_cover_all_eight_edges(page, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# Expandable ask box: it grows with what you type, the ▲ toggle and the grip
+# drag pin a height the reader picked (and it survives a reload), and the cap
+# never lets the box swallow the transcript it shares the panel with.
+# --------------------------------------------------------------------------- #
+
+
+def _open_panel(page, tmp_path):
+    doc = hr.build_html_report(
+        _findings_ctx(), source_names=["a.pdf"], now=NOW, api_key=KEY, embed_api_key=True
+    )
+    page.set_viewport_size({"width": 1400, "height": 1000})
+    _load(page, doc, tmp_path)
+    page.click("#da-chat-fab")
+    page.wait_for_selector("#da-chat-panel", state="visible", timeout=3000)
+
+
+def _box_h(page):
+    return page.evaluate(
+        "() => document.getElementById('da-chat-input').getBoundingClientRect().height"
+    )
+
+
+def _row_h(page, el_id):
+    return page.evaluate(
+        "id => document.getElementById(id).getBoundingClientRect().height", el_id
+    )
+
+
+def _drag_grip(page, dy):
+    box = page.locator("#da-compose-grip").bounding_box()
+    assert box, "the compose grip should be laid out and grabbable"
+    cx, cy = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+    page.mouse.move(cx, cy)
+    page.mouse.down()
+    page.mouse.move(cx, cy + dy, steps=12)   # cross the 3px drag threshold
+    page.mouse.up()
+
+
+def test_ask_box_grows_with_typed_text_and_snaps_back(page, tmp_path):
+    _open_panel(page, tmp_path)
+    start = _box_h(page)
+
+    page.fill("#da-chat-input", "\n".join("line %d" % i for i in range(8)))
+    grown = _box_h(page)
+    assert grown > start + 40, (
+        "the box should grow with the text (%.0f -> %.0f)" % (start, grown))
+
+    # Auto-grow is symmetric: emptying it returns to the two-row default.
+    page.fill("#da-chat-input", "back to one line")
+    assert abs(_box_h(page) - start) <= 1
+
+
+def test_expand_toggle_grows_the_box_then_hands_it_back(page, tmp_path):
+    _open_panel(page, tmp_path)
+    start = _box_h(page)
+
+    page.click("#da-chat-expand")
+    tall = _box_h(page)
+    assert tall > start + 100, "the toggle should jump the box to its cap"
+    assert page.get_attribute("#da-chat-expand", "aria-expanded") == "true"
+    assert "Shrink" in (page.get_attribute("#da-chat-expand", "aria-label") or "")
+
+    # Expanded is a PIN: typing no longer resizes it.
+    page.fill("#da-chat-input", "one line")
+    assert abs(_box_h(page) - tall) <= 1
+
+    page.click("#da-chat-expand")
+    assert page.get_attribute("#da-chat-expand", "aria-expanded") == "false"
+    assert abs(_box_h(page) - start) <= 2, "collapsing hands the box back to auto-grow"
+
+
+@pytest.mark.parametrize("embed_key", [True, False])
+@pytest.mark.parametrize("viewport", [(1400, 1000), (1200, 620), (1000, 520)])
+def test_expanded_box_never_swallows_the_transcript(page, tmp_path, embed_key, viewport):
+    # The panel is a flex column whose header / key form / foot do not shrink,
+    # and it clips its own overflow — so a cap taken from a constant pushes the
+    # footer clean out of the panel as soon as the key form is on screen or the
+    # window is short. Both are covered here.
+    doc = hr.build_html_report(
+        _findings_ctx(), source_names=["a.pdf"], now=NOW,
+        api_key=(KEY if embed_key else None), embed_api_key=embed_key,
+    )
+    page.set_viewport_size({"width": viewport[0], "height": viewport[1]})
+    _load(page, doc, tmp_path)
+    page.click("#da-chat-fab")
+    page.wait_for_selector("#da-chat-panel", state="visible", timeout=3000)
+    page.click("#da-chat-expand")
+
+    geom = page.evaluate(
+        """() => {
+          var r = function(id){ return document.getElementById(id).getBoundingClientRect(); };
+          return {panel: r('da-chat-panel'), msgs: r('da-chat-msgs'), key: r('da-chat-key'),
+                  foot: document.querySelector('.da-chat-foot').getBoundingClientRect()};
+        }"""
+    )
+    assert geom["msgs"]["height"] >= 80, "the transcript must keep a readable slice"
+    # The last two rows staying inside proves nothing was pushed out of the clip.
+    assert geom["foot"]["bottom"] <= geom["panel"]["bottom"] + 1
+    assert geom["key"]["bottom"] <= geom["panel"]["bottom"] + 1
+
+
+def test_a_fixed_row_growing_reclamps_an_already_expanded_box(page, tmp_path):
+    # The cap is measured from the fixed rows, so it goes stale the moment one of
+    # them changes height on its own — and the box was already clamped against
+    # the old measurement. The key row is the one that moves at runtime: the
+    # compact "key set" line, the taller entry form, and a status message of one
+    # to three lines are all the same row. Forget key swaps all three at once;
+    # a 401 rejection takes the identical path (forgetKey + revealKeyForm).
+    doc = hr.build_html_report(
+        _findings_ctx(), source_names=["a.pdf"], now=NOW, api_key=None, embed_api_key=False
+    )
+    page.set_viewport_size({"width": 1200, "height": 640})
+    _load(page, doc, tmp_path)
+    page.click("#da-chat-fab")
+    page.wait_for_selector("#da-chat-panel", state="visible", timeout=3000)
+    page.fill("#da-chat-key-input", KEY)
+    page.click("#da-chat-key-save")
+
+    # Reload into the resting state: a key is held, so the row is the compact
+    # "key set" line with no status under it — the smallest it ever is.
+    page.reload()
+    page.click("#da-chat-fab")
+    page.wait_for_selector("#da-chat-key-set", state="visible", timeout=3000)
+    page.click("#da-chat-expand")
+    expanded, key_before = _box_h(page), _row_h(page, "da-chat-key")
+
+    page.click("#da-chat-forget")
+    page.wait_for_selector("#da-chat-key-form", state="visible", timeout=3000)
+
+    grew = _row_h(page, "da-chat-key") - key_before
+    assert grew > 0, "the entry form plus its status is taller than the key-set line"
+    geom = page.evaluate(
+        """() => {
+          var r = function(id){ return document.getElementById(id).getBoundingClientRect(); };
+          return {panel: r('da-chat-panel'), msgs: r('da-chat-msgs'), key: r('da-chat-key'),
+                  foot: document.querySelector('.da-chat-foot').getBoundingClientRect()};
+        }"""
+    )
+    assert abs((expanded - _box_h(page)) - grew) <= 1, (
+        "the box must hand back exactly what the key row took (%.0fpx)" % grew)
+    assert geom["msgs"]["height"] >= 80, "the transcript floor still holds"
+    assert geom["foot"]["bottom"] <= geom["panel"]["bottom"] + 1
+    assert geom["key"]["bottom"] <= geom["panel"]["bottom"] + 1
+
+
+def test_grip_drag_resizes_the_box_and_the_height_survives_a_reload(page, tmp_path):
+    _open_panel(page, tmp_path)
+    start = _box_h(page)
+
+    _drag_grip(page, -110)                    # drag the grip up = taller
+    dragged = _box_h(page)
+    assert dragged > start + 80, (
+        "dragging the grip up should grow the box (%.0f -> %.0f)" % (start, dragged))
+
+    page.reload()
+    page.click("#da-chat-fab")
+    page.wait_for_selector("#da-chat-panel", state="visible", timeout=3000)
+    assert abs(_box_h(page) - dragged) <= 2, "the dragged height should be remembered"
+
+    # Double-clicking the grip is the reset — back to auto-grow, and it stays
+    # reset across a reload (the stored height is dropped, not just ignored).
+    page.dblclick("#da-compose-grip")
+    assert abs(_box_h(page) - start) <= 2
+    page.reload()
+    page.click("#da-chat-fab")
+    page.wait_for_selector("#da-chat-panel", state="visible", timeout=3000)
+    assert abs(_box_h(page) - start) <= 2
+
+
+def test_sending_snaps_the_grown_box_back_to_its_default(page, tmp_path):
+    _open_panel(page, tmp_path)
+    start = _box_h(page)
+    page.fill("#da-chat-input", "\n".join("line %d" % i for i in range(8)))
+    assert _box_h(page) > start + 40
+
+    page.click("#da-chat-send")
+    _finish(page)
+    assert abs(_box_h(page) - start) <= 1, "an emptied box returns to two rows"
+
+
+# --------------------------------------------------------------------------- #
 # Transcript persistence: the conversation auto-saves per report, replays
 # faithfully, and round-trips through a JSON file. Verified in a real browser
 # because localStorage, blob downloads, and the file picker only exist there.
@@ -1302,3 +1483,57 @@ def test_loading_a_transcript_resets_the_usage_counter(page, tmp_path):
         timeout=5000,
     )
     assert page.eval_on_selector("#da-chat-usage", "el => el.hidden") is True
+
+
+def test_the_usage_readout_appearing_reclamps_the_ask_box(page, tmp_path):
+    # Same class of bug as test_a_fixed_row_growing_reclamps_an_already_expanded_box,
+    # via a different row. The footer is one of the fixed rows composeCap()
+    # measures, and the usage readout un-hides inside it after the FIRST answer —
+    # so a box expanded against the readout-less footer holds a stale height the
+    # moment the first question lands, and the transcript absorbs the difference.
+    stream = _sse([
+        {"type": "message_start", "message": {"usage": {
+            "input_tokens": 120, "cache_read_input_tokens": 40000,
+            "cache_creation_input_tokens": 0}}},
+        {"type": "content_block_start", "index": 0,
+         "content_block": {"type": "text", "text": ""}},
+        {"type": "content_block_delta", "index": 0,
+         "delta": {"type": "text_delta", "text": "answered."}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+         "usage": {"output_tokens": 250}},
+    ])
+    page.set_viewport_size({"width": 1200, "height": 640})
+    _load(page, _chat_doc(), tmp_path, queue=[stream])
+    page.click("#da-chat-fab")
+    page.wait_for_selector("#da-chat-panel", state="visible", timeout=3000)
+    page.click("#da-chat-expand")
+    expanded = _box_h(page)
+    foot_before = page.evaluate(
+        "() => document.querySelector('.da-chat-foot').getBoundingClientRect().height"
+    )
+
+    page.fill("#da-chat-input", "what are the conflicts?")
+    page.click("#da-chat-send")
+    _finish(page)
+
+    assert page.eval_on_selector("#da-chat-usage", "el => el.hidden") is False
+    foot_after = page.evaluate(
+        "() => document.querySelector('.da-chat-foot').getBoundingClientRect().height"
+    )
+    grew = foot_after - foot_before
+    assert grew > 0, "the readout should make the footer taller"
+
+    geom = page.evaluate(
+        """() => {
+          var r = function(sel){ return document.querySelector(sel).getBoundingClientRect(); };
+          return {panel: r('#da-chat-panel'), msgs: r('#da-chat-msgs'),
+                  foot: r('.da-chat-foot')};
+        }"""
+    )
+    # Sending resets an auto-grown box, so assert the invariants rather than an
+    # exact hand-back: nothing may be pushed out of the panel's clipped overflow.
+    assert _box_h(page) <= expanded + 1
+    assert geom["msgs"]["height"] >= 80, "the transcript floor still holds"
+    assert geom["foot"]["bottom"] <= geom["panel"]["bottom"] + 1, (
+        "the footer must stay inside the panel once the readout appears")

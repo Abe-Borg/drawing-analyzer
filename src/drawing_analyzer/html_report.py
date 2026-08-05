@@ -48,6 +48,14 @@ widget says exactly that. Pass ``include_chat=False`` to omit the widget (and
 every network reference) entirely. The *Python* module still performs no
 network I/O.
 
+**The ask box is expandable.** It opens at two rows and grows with what you
+type, up to a cap that always leaves the transcript a readable slice of the
+panel. The grip above it drags to any height and the ▲/▼ toggle jumps to the cap
+and back; either one pins the height (auto-grow stops) until a double-click on
+the grip hands it back. The pinned height persists in ``localStorage``
+(``da-chat-h``) and is re-clamped — never overwritten — when the panel shrinks,
+so borrowed space is returned when the panel grows again.
+
 **Transcript persistence.** The conversation is durable, two ways — nothing is
 ever sent anywhere for either.
 
@@ -2616,6 +2624,13 @@ _CHAT_HTML = """
     <div id="da-chat-key-status" class="da-key-status" aria-live="polite"></div>
   </div>
   <div class="da-chat-compose">
+    <div class="da-compose-grip" id="da-compose-grip"
+         title="Drag to resize the message box — double-click to fit what you type">
+      <span class="da-compose-grip-line" aria-hidden="true"></span>
+      <button id="da-chat-expand" type="button" class="da-compose-expand"
+              aria-expanded="false" aria-label="Expand the message box"
+              title="Expand the message box">▲</button>
+    </div>
     <textarea id="da-chat-input" rows="2" placeholder="Ask about this report…"></textarea>
     <button id="da-chat-send" type="button">Send</button>
     <button id="da-chat-stop" type="button" hidden>Stop</button>
@@ -2646,9 +2661,14 @@ _CHAT_CSS = """
 /* The head carries five controls; the model chip is the only elastic item, so
    it collapses first (min-width:0 lets a flex item shrink past its text) and
    wrap is the last resort at the 320px minimum panel width. */
+/* `flex:0 0 auto` here and on the other fixed rows (#da-chat-key, .da-chat-foot,
+   #da-sel-chip) is load-bearing, not decoration: composeCap() measures them to
+   decide how tall the ask box may be, and that arithmetic is only sound while
+   the transcript is the ONE row that gives. Let a fixed row shrink under
+   pressure and the measurement chases itself. */
 .da-chat-head{
   display:flex; align-items:center; gap:8px; padding:10px 12px; flex-wrap:wrap;
-  border-bottom:1px solid var(--line); background:#fbfcfe;
+  flex:0 0 auto; border-bottom:1px solid var(--line); background:#fbfcfe;
 }
 .da-chat-title{font-weight:700; font-size:14px; flex:1 1 auto; min-width:0}
 .da-chat-head .ghost-btn{flex:0 0 auto}
@@ -2710,6 +2730,30 @@ _CHAT_CSS = """
   font-size:10px; background:var(--accent-soft); border-radius:4px; padding:1px 4px;
   margin-left:2px; vertical-align:super;
 }
+/* Arrival motion. The answer body is revealed a character at a time by the
+   pacer (see "smooth reveal" in the script), so these only soften the things
+   that genuinely appear all at once: a bubble, a tool chip, the waiting dots
+   that stand in for the answer until the first token lands. */
+@keyframes da-rise{from{opacity:0; transform:translateY(6px)} to{opacity:1; transform:none}}
+.da-msg{animation:da-rise .22s ease-out both}
+.da-tool{animation:da-rise .18s ease-out both}
+.da-wait{display:flex; gap:5px; align-items:center; height:19px}
+.da-wait i{
+  width:6px; height:6px; border-radius:50%; background:var(--muted);
+  animation:da-bounce 1.25s ease-in-out infinite;
+}
+.da-wait i:nth-child(2){animation-delay:.16s}
+.da-wait i:nth-child(3){animation-delay:.32s}
+@keyframes da-bounce{
+  0%,75%,100%{opacity:.25; transform:translateY(0)}
+  38%{opacity:.85; transform:translateY(-3px)}
+}
+/* A reader who asked the OS for less motion gets the plain instant path — and
+   the script reads the same query to turn the paced reveal off wholesale. */
+@media (prefers-reduced-motion: reduce){
+  .da-msg,.da-tool,.da-wait i{animation:none}
+  .da-wait i{opacity:.45}
+}
 /* markdown inside answers reuses .block's look, scoped smaller */
 .da-md p{margin:6px 0}
 .da-md ul,.da-md ol{margin:6px 0; padding-left:20px}
@@ -2725,14 +2769,31 @@ _CHAT_CSS = """
 .da-md th{background:#f3f5f9; font-weight:600}
 .da-md blockquote{margin:6px 0; padding:4px 10px; border-left:3px solid var(--line); color:var(--muted)}
 .da-md a{text-decoration:underline}
+/* The ask box is expandable. `flex-wrap` + a full-width first item gives the
+   grip a row of its own above the textarea + Send; the ▲ toggle rides at the
+   right end of that row. JS owns the textarea's height (auto-grow, drag, and
+   toggle all write `style.height`), so the browser's own corner grip stays off
+   — two resize mechanisms writing the same property would fight. */
 .da-chat-compose{
-  display:flex; gap:8px; padding:10px 12px; border-top:1px solid var(--line);
-  background:#fbfcfe; align-items:flex-end;
+  display:flex; flex-wrap:wrap; gap:8px; padding:7px 12px 10px;
+  border-top:1px solid var(--line); background:#fbfcfe; align-items:flex-end;
 }
+.da-compose-grip{
+  flex:1 0 100%; position:relative; display:flex; align-items:center;
+  justify-content:center; height:14px; margin-bottom:-4px;
+  cursor:ns-resize; touch-action:none;
+}
+.da-compose-grip-line{width:38px; height:3px; border-radius:2px; background:#c5ccd8}
+.da-compose-grip:hover .da-compose-grip-line{background:var(--accent)}
+.da-compose-expand{
+  position:absolute; right:0; top:0; height:14px; padding:0 5px; border:none;
+  background:none; color:var(--muted); cursor:pointer; font-size:9px; line-height:14px;
+}
+.da-compose-expand:hover{color:var(--accent)}
 #da-chat-input{
   flex:1 1 auto; resize:none; border:1px solid var(--line); border-radius:8px;
   padding:8px 10px; font:13.5px/1.4 inherit; color:var(--ink); background:#fff;
-  font-family:inherit;
+  font-family:inherit; overflow-y:auto; min-width:0;
 }
 #da-chat-input:focus{outline:none; border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft)}
 #da-chat-send,#da-chat-stop{
@@ -2743,7 +2804,7 @@ _CHAT_CSS = """
 #da-chat-stop{background:var(--conflict)}
 .da-chat-foot{
   font-size:10.5px; color:var(--muted); padding:6px 12px 9px; background:#fbfcfe;
-  border-top:1px solid var(--line);
+  border-top:1px solid var(--line); flex:0 0 auto;
 }
 .da-key-warn{color:var(--conflict); font-weight:700}
 /* Session token/cost readout. Its own line so it never crowds the key notice. */
@@ -2758,7 +2819,7 @@ _CHAT_CSS = """
 /* ---- reader-supplied API-key entry ---- */
 #da-chat-key{
   padding:9px 12px; border-top:1px solid var(--line); background:#fbfcfe;
-  display:flex; flex-direction:column; gap:6px;
+  display:flex; flex-direction:column; gap:6px; flex:0 0 auto;
 }
 #da-chat-key[hidden],#da-chat-key-form[hidden],#da-chat-key-set[hidden]{display:none}
 .da-key-row{display:flex; gap:6px; align-items:center}
@@ -2797,7 +2858,7 @@ body.da-dragging, body.da-dragging *{user-select:none !important}
 }
 #da-sel-pop:hover{filter:brightness(1.08)}
 #da-sel-chip{
-  display:flex; align-items:center; gap:8px; margin:0 12px; padding:6px 10px;
+  display:flex; align-items:center; gap:8px; margin:0 12px; padding:6px 10px; flex:0 0 auto;
   background:var(--accent-soft); border:1px solid var(--line); border-radius:8px;
   font-size:12px; color:var(--ink);
 }
@@ -3680,7 +3741,14 @@ _CHAT_JS = r"""
     if(!usageEl) return;
     var total = sessionUsage.input + sessionUsage.output
       + sessionUsage.cacheRead + sessionUsage.cacheWrite;
-    if(!total){ usageEl.hidden = true; return; }
+    // The readout lives in the footer, which is one of the fixed panel rows
+    // composeCap() measures — so appearing after the first question, or vanishing
+    // on New chat, changes the ask box's ceiling. paintCompose() re-clamps it, the
+    // same way renderKeyUi()/setKeyStatus() do for the key row; without it a box
+    // expanded against the old footer keeps a stale height and eats the
+    // transcript's floor. It no-ops until the composer exists, which matters
+    // because replayTranscript() can call this during init.
+    if(!total){ usageEl.hidden = true; paintCompose(); return; }
     var parts = [
       fmtTokens(sessionUsage.cacheRead) + ' cached read',
       fmtTokens(sessionUsage.cacheWrite) + ' written',
@@ -3700,6 +3768,7 @@ _CHAT_JS = r"""
     }
     usageEl.textContent = parts.join(' · ');
     usageEl.hidden = false;
+    paintCompose();
   }
 
   fab.addEventListener('click', function(){
@@ -3783,14 +3852,26 @@ _CHAT_JS = r"""
   // old window.prompt). renderKeyUi() settles the row to its resting state; in
   // embedded mode the whole row is hidden — the embedded key is authoritative
   // and mutually exclusive with manual entry (mirrors the CFG.apiKey guards).
-  function setKeyStatus(msg){ if(keyStatus) keyStatus.textContent = msg || ''; }
+  // Both of these change the height of a FIXED panel row — the entry form is
+  // taller than the "key set" line, and a status message adds one to three more
+  // lines — so both end by re-clamping the ask box (see composeCap: its ceiling
+  // is measured from these rows, and goes stale the moment one of them moves).
+  // The live case is an expanded box clamped against the compact row, with
+  // Change key or a 401 swapping the tall form back in underneath it.
+  function setKeyStatus(msg){
+    if(keyStatus) keyStatus.textContent = msg || '';
+    paintCompose();
+  }
   function renderKeyUi(){
     if(!keyRow) return;
-    if(CFG.apiKey){ keyRow.hidden = true; return; }   // embedded: no manual entry
-    keyRow.hidden = false;
-    var have = haveKey();
-    if(keyForm) keyForm.hidden = have;
-    if(keySet) keySet.hidden = !have;
+    if(CFG.apiKey){ keyRow.hidden = true; }           // embedded: no manual entry
+    else {
+      keyRow.hidden = false;
+      var have = haveKey();
+      if(keyForm) keyForm.hidden = have;
+      if(keySet) keySet.hidden = !have;
+    }
+    paintCompose();
   }
   // Force the entry form open (the replacement for window.prompt): used when a
   // send is attempted with no key and when a key is rejected (401).
@@ -3853,7 +3934,28 @@ _CHAT_JS = r"""
   });
 
   function nearBottom(){ return msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight < 60; }
-  function scrollDown(force){ if(force || nearBottom()) msgs.scrollTop = msgs.scrollHeight; }
+  // Whether the pane is still tailing the answer. It has to be a sticky flag set
+  // from real scroll events rather than a distance test taken at paint time: the
+  // eased follow below is *itself* briefly far from the bottom when a burst of
+  // text lands, so a distance test would read that as "the reader scrolled away"
+  // and switch the follow off mid-answer.
+  var follow = true, lastAuto = -1;
+  function goBottom(){
+    msgs.scrollTop = msgs.scrollHeight;
+    lastAuto = msgs.scrollTop;
+  }
+  msgs.addEventListener('scroll', function(){
+    if(Math.abs(msgs.scrollTop - lastAuto) < 1.5) return;   // our own write, not the reader's
+    follow = nearBottom();
+  });
+  // `force` is for discrete events (a new bubble, a loaded transcript): jump and
+  // re-arm the follow. Everything else defers to the reader — and while the
+  // pacer is running it defers to the rAF loop, which is already easing there.
+  function scrollDown(force){
+    if(force){ follow = true; goBottom(); return; }
+    if(!follow || pacing) return;
+    goBottom();
+  }
   function addMsg(cls, text){
     var div = document.createElement('div');
     div.className = 'da-msg ' + cls;
@@ -3879,6 +3981,242 @@ _CHAT_JS = r"""
     if(d && d.notes) d.notes.push(text);
   }
 
+  // ------------------------------------------------------------ smooth reveal
+  // Deltas do not arrive smoothly. The API hands over 40 characters at once,
+  // stalls 300ms, then hands over 120 — so painting each burst the moment it
+  // lands is what made answers read as jerky and sudden, and re-rendering the
+  // whole answer on each burst made long ones flicker as well. The network is
+  // therefore decoupled from the display: text accumulates in the block, and a
+  // single rAF loop walks `st.shown` toward it at a rate proportional to how far
+  // behind it is (an exponential ease — quick when it has ground to make up,
+  // gliding as it catches up), repaints only the part that changed, and eases
+  // the scroll on the same clock.
+  //
+  // Only the live stream is paced. Replay (and a reader who asked the OS for
+  // reduced motion) keeps `pace` false and takes the original instant path, so
+  // a restored transcript still renders in one synchronous pass.
+  var REDUCE_MOTION = false;
+  try {
+    REDUCE_MOTION = !!(window.matchMedia &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  } catch(e){}
+
+  var CATCH_MS = 260;         // close the gap to the live text over this window
+  var CLOSE_MS = 110;         // ...and this much faster once the block is closed
+  var MIN_CPS = 45;           // so the last few characters never crawl
+  var MAX_CPS = 2400;         // sanity bound on a pathological single-burst block
+  // Per-frame ceilings. A stalled frame (GC pause, a tab coming back) arrives
+  // with a large dt and a large backlog, and without these the catch-up would
+  // land as exactly the dump this whole mechanism exists to avoid. 64 chars a
+  // frame is still ~3800/s at 60fps — far faster than any model streams — so
+  // they bite only on the pathological frame, never on the normal one.
+  var MAX_FRAME_CHARS = 64;
+  var MAX_FRAME_EASE = 0.4;
+  var DRAIN_BACKSTOP_MS = 5000;
+  var pacing = false;         // an rAF loop is live (scrollDown defers to it)
+
+  function blockText(b){
+    if(!b) return '';
+    if(b.type === 'text') return b.text || '';
+    if(b.type === 'thinking') return b.thinking || '';
+    return '';
+  }
+  function isPaced(b){ return !!b && (b.type === 'text' || b.type === 'thinking'); }
+
+  // Is any paced block still holding back text, or waiting to be finalized?
+  function pacePending(st){
+    for(var i = 0; i < st.blocks.length; i++){
+      if(isPaced(st.blocks[i]) && !st.done[i]) return true;
+    }
+    return false;
+  }
+
+  function paceEnsure(st, bubble){
+    if(!st.pace || st.raf) return;
+    pacing = true;
+    st.last = 0;
+    st.raf = requestAnimationFrame(function(t){ paceFrame(st, bubble, t); });
+  }
+
+  function paceFrame(st, bubble, now){
+    st.raf = 0;
+    // Clamped so a backgrounded tab returning after seconds resumes with a
+    // normal-sized step instead of dumping the whole backlog in one frame.
+    var dt = st.last ? Math.min(now - st.last, 100) : 16;
+    st.last = now;
+    var busy = paceStep(st, bubble, dt);
+    var pull = paceScroll(dt);
+    if(busy || pull){
+      st.raf = requestAnimationFrame(function(t){ paceFrame(st, bubble, t); });
+      return;
+    }
+    pacing = false;
+    paceSettle(st);
+  }
+
+  // One frame of reveal. Blocks are walked in index order and a block finalizes
+  // only once every earlier one has, so citation numbering keeps the order the
+  // model streamed in (I-7) even though the reveal is time-based.
+  function paceStep(st, bubble, dt){
+    var busy = false, canFinal = true;
+    for(var i = 0; i < st.blocks.length; i++){
+      var b = st.blocks[i];
+      if(!isPaced(b) || st.done[i]) continue;
+      var full = blockText(b).length;
+      var shown = st.shown[i] || 0;
+      if(shown < full){
+        var win = st.closed[i] ? CLOSE_MS : CATCH_MS;
+        var cps = Math.max(MIN_CPS, Math.min(MAX_CPS, (full - shown) * 1000 / win));
+        shown = Math.min(full, shown + Math.min(cps * dt / 1000, MAX_FRAME_CHARS));
+        st.shown[i] = shown;
+        if(b.type === 'text') paintText(st, i);
+        else touchThinking(st, i, bubble, blockText(b).slice(0, Math.floor(shown)));
+        busy = true;
+      }
+      if(canFinal && st.closed[i] && shown >= full){
+        st.done[i] = true;
+        finishBlock(st, i, bubble);   // authoritative full render + citation chips
+      } else {
+        if(st.closed[i]) busy = true;  // closed, but waiting its turn to finalize
+        canFinal = false;
+      }
+    }
+    return busy;
+  }
+
+  // Follow the answer as it grows instead of teleporting to the bottom on every
+  // repaint. Returns whether it still has distance to cover, so the loop stays
+  // alive long enough to land exactly at the bottom.
+  function paceScroll(dt){
+    if(!follow) return false;
+    var delta = msgs.scrollHeight - msgs.clientHeight - msgs.scrollTop;
+    if(delta <= 0.5) return false;
+    // ~18% per 16ms, frame-rate independent, capped so a stalled frame eases
+    // rather than snapping.
+    var k = Math.min(MAX_FRAME_EASE, 1 - Math.pow(1 - 0.18, dt / 16));
+    msgs.scrollTop += Math.max(delta * k, Math.min(delta, 0.6));
+    lastAuto = msgs.scrollTop;
+    return true;
+  }
+
+  function paceSettle(st){
+    if(pacePending(st)) return;
+    var waiting = st.waiters;
+    st.waiters = [];
+    waiting.forEach(function(f){ f(); });
+  }
+
+  // Every block is closed by definition once the HTTP stream ends, so this both
+  // seals them and resolves when the last buffered character is on screen. A
+  // `hard` flush (abort, mid-stream error) skips the reveal and commits
+  // everything received — text that arrived is never hidden, it just stops
+  // being animated.
+  function paceFlush(st, bubble, hard){
+    var i, b;
+    if(!st.pace) return Promise.resolve();
+    for(i = 0; i < st.blocks.length; i++) if(st.blocks[i]) st.closed[i] = true;
+    if(hard){
+      if(st.raf){ cancelAnimationFrame(st.raf); st.raf = 0; }
+      pacing = false;
+      for(i = 0; i < st.blocks.length; i++){
+        b = st.blocks[i];
+        if(!isPaced(b) || st.done[i]) continue;
+        st.shown[i] = blockText(b).length;
+        if(b.type === 'thinking') touchThinking(st, i, bubble, blockText(b));
+        st.done[i] = true;
+        finishBlock(st, i, bubble);
+      }
+      paceSettle(st);
+      return Promise.resolve();
+    }
+    if(!pacePending(st)) return Promise.resolve();
+    paceEnsure(st, bubble);
+    return new Promise(function(res){
+      st.waiters.push(res);
+      // rAF does not fire in a backgrounded tab, so the reveal — and with it the
+      // turn — would hang until the reader came back: composer locked, and the
+      // transcript unsaved if they closed the tab meanwhile. A timer still fires
+      // there, so it commits what arrived instead. A normal drain finishes in
+      // ~CLOSE_MS, well inside this, so it never fires in practice.
+      setTimeout(function(){
+        if(pacePending(st)) paceFlush(st, bubble, true);
+      }, DRAIN_BACKSTOP_MS);
+    });
+  }
+
+  // Repaint block `i` at its currently revealed length. Everything up to the
+  // last *safe* block boundary is rendered once and then left alone; only the
+  // short live tail after it is rebuilt. Rebuilding the whole answer on every
+  // frame is what made a long table or list flicker and drop frames — and it
+  // threw away the reader's text selection each time.
+  function paintText(st, i){
+    var el = st.els[i];
+    if(!el) return;
+    var vis = blockText(st.blocks[i]).slice(0, Math.floor(st.shown[i] || 0));
+    var head = st.head[i] || (st.head[i] = {src: 0, nodes: 0});
+    var cut = stablePrefix(vis, head.src);
+    if(cut > head.src){
+      truncateTo(el, head.nodes);
+      renderMdInto(el, vis.slice(head.src, cut), 0);
+      head.src = cut;
+      head.nodes = el.childNodes.length;
+    }
+    truncateTo(el, head.nodes);
+    renderMdInto(el, vis.slice(head.src), 0);
+  }
+
+  function truncateTo(el, n){
+    while(el.childNodes.length > n) el.removeChild(el.lastChild);
+  }
+
+  // How much of `md` can be committed to the DOM permanently: the offset of the
+  // last blank line that is outside a code fence and separates two blocks which
+  // cannot merge. Committing a prefix is only sound where
+  // render(A) + render(B) === render(A + B), so a boundary is refused whenever
+  // either side is a list item, a blockquote or an indented continuation —
+  // those fuse across a blank line into ONE list or quote, and splitting them
+  // would silently produce two. Refusing just means that stretch keeps being
+  // re-rendered as the tail, which is correct, only cheaper later.
+  var PACE_CONT_RE = /^(\s*([-*+]|\d+[.)])\s|\s*>|\s\s)/;
+  function stablePrefix(md, from){
+    var lines = md.split('\n');
+    var starts = [], pos = 0, i;
+    for(i = 0; i < lines.length; i++){ starts.push(pos); pos += lines[i].length + 1; }
+    var cut = from, fence = false, prev = -1;
+    for(i = 0; i < lines.length; i++){
+      var line = lines[i];
+      if(line.trim().indexOf('```') === 0){ fence = !fence; prev = i; continue; }
+      if(fence){ if(line.trim()) prev = i; continue; }
+      if(line.trim()){ prev = i; continue; }
+      if(prev === -1) continue;                        // leading blanks
+      var next = -1;
+      for(var j = i + 1; j < lines.length; j++){ if(lines[j].trim()){ next = j; break; } }
+      if(next === -1) break;                           // trailing blanks: nothing to commit yet
+      if(PACE_CONT_RE.test(lines[prev]) || PACE_CONT_RE.test(lines[next])) continue;
+      if(starts[next] > cut) cut = starts[next];
+    }
+    return cut;
+  }
+
+  // The stand-in for an answer that has not started arriving yet. Without it the
+  // bubble sits empty through the whole time-to-first-token and then fills all
+  // at once — the most disorienting jump of the lot. Re-armed for every request
+  // in a turn, so the pause after a tool call is covered too.
+  function showWaiting(bubble){
+    if(!bubble) return;
+    clearWaiting(bubble);
+    var w = document.createElement('div');
+    w.className = 'da-wait';
+    for(var i = 0; i < 3; i++) w.appendChild(document.createElement('i'));
+    bubble.appendChild(w);
+    scrollDown();
+  }
+  function clearWaiting(bubble){
+    if(!bubble) return;
+    var w = bubble.querySelector(':scope > .da-wait');
+    if(w) w.remove();
+  }
+
   // ------------------------------------------------------------- SSE plumbing
   function sseEvents(text, state, onEvent){
     state.buf += text;
@@ -3899,10 +4237,14 @@ _CHAT_JS = r"""
   }
 
   var streaming = false, aborter = null;
+  // The in-flight request's reveal state, so Stop can end the animation as well
+  // as the download. Cleared as soon as the turn's stream settles.
+  var activeStream = null;
 
   // One POST + SSE read. Appends UI into `bubble`, returns {blocks, stopReason}.
   function streamOnce(bubble, noTools){
     aborter = new AbortController();
+    showWaiting(bubble);   // covers every round's wait, not just the first
     return fetch(API_URL, {
       method: 'POST',
       signal: aborter.signal,
@@ -3936,8 +4278,14 @@ _CHAT_JS = r"""
         // the message_delta branch: that event reports a cumulative total, so the
         // running figure is what makes summing across rounds correct.
         outputCounted: 0,
-        els: {}, think: null, mdDirty: {}, mdTimers: {}, toolChips: {}, citeUrls: {}, citeCount: 0
+        els: {}, think: null, mdDirty: {}, mdTimers: {}, toolChips: {}, citeUrls: {}, citeCount: 0,
+        // paced reveal (see "smooth reveal"): shown = characters on screen,
+        // closed = content_block_stop seen, done = finishBlock has run, head =
+        // committed-prefix bookkeeping for the incremental repaint.
+        pace: !REDUCE_MOTION, shown: [], closed: [], done: [], head: [],
+        raf: 0, last: 0, waiters: []
       };
+      activeStream = {st: st, bubble: bubble};
       var reader = resp.body.getReader();
       var decoder = new TextDecoder();
       function pump(){
@@ -3950,7 +4298,25 @@ _CHAT_JS = r"""
           return pump();
         });
       }
-      return pump();
+      // Resolve on the *displayed* answer, not the received one: the turn is
+      // only finished once the reveal has caught up. It trails the last delta by
+      // about CLOSE_MS, so the tool loop and the composer unlock are unaffected
+      // — but the composer can never re-enable while text is still arriving on
+      // screen, and a caller that inspects the DOM afterwards sees all of it.
+      return pump().then(function(){
+        return paceFlush(st, bubble, false).then(function(){
+          activeStream = null;
+          return st;
+        });
+      }, function(err){
+        activeStream = null;
+        // Abort and mid-stream failure: stop animating and commit everything
+        // that did arrive — text that reached the browser is never hidden, it
+        // just stops being revealed — so the caller's error path ("⏹ Stopped.")
+        // appends to a settled bubble.
+        paceFlush(st, bubble, true);
+        throw err;
+      });
     });
   }
 
@@ -3963,10 +4329,12 @@ _CHAT_JS = r"""
       if(!b || !d) return;
       if(d.type === 'text_delta'){
         b.text = (b.text || '') + d.text;
-        touchText(st, ev.index);
+        if(st.pace) paceEnsure(st, bubble);   // the rAF loop owns the repaint
+        else touchText(st, ev.index);
       } else if(d.type === 'thinking_delta'){
         b.thinking = (b.thinking || '') + d.thinking;
-        touchThinking(st, ev.index, bubble, b.thinking);
+        if(st.pace) paceEnsure(st, bubble);
+        else touchThinking(st, ev.index, bubble, b.thinking);
       } else if(d.type === 'input_json_delta'){
         st.partial[ev.index] = (st.partial[ev.index] || '') + d.partial_json;
       } else if(d.type === 'signature_delta'){
@@ -3975,7 +4343,15 @@ _CHAT_JS = r"""
         (b.citations = b.citations || []).push(d.citation);
       }
     } else if(ev.type === 'content_block_stop'){
-      finishBlock(st, ev.index, bubble);
+      // A paced block finalizes from inside the reveal loop, the moment its last
+      // buffered character is on screen — otherwise the authoritative render and
+      // its citation chips would land ahead of the text they belong to.
+      if(st.pace && isPaced(st.blocks[ev.index])){
+        st.closed[ev.index] = true;
+        paceEnsure(st, bubble);
+      } else {
+        finishBlock(st, ev.index, bubble);
+      }
     } else if(ev.type === 'message_start'){
       // Input-side counters arrive once per round, on message_start.
       var u = ev.message && ev.message.usage;
@@ -4008,6 +4384,7 @@ _CHAT_JS = r"""
 
   function startBlockUI(st, index, bubble){
     var b = st.blocks[index];
+    clearWaiting(bubble);        // real content has started; drop the stand-in
     if(b.type === 'text'){
       var div = document.createElement('div');
       div.className = 'da-md';
@@ -4050,10 +4427,17 @@ _CHAT_JS = r"""
       bubble.appendChild(wrap);
       el = st.els[index] = body;
     }
+    // The panel is a fixed-height scroller, so keep its own view on the newest
+    // line — unless the reader has scrolled back up inside it to read something.
+    var tail = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
     el.textContent = textNow;
+    if(tail) el.scrollTop = el.scrollHeight;
     scrollDown();
   }
 
+  // The unpaced fallback (reduced motion): a plain 90ms debounce onto a full
+  // re-render. The paced path never reaches here — paintText repaints it
+  // incrementally from the rAF loop instead.
   function touchText(st, index){
     if(st.mdDirty[index]) return;
     st.mdDirty[index] = true;
@@ -4258,8 +4642,12 @@ _CHAT_JS = r"""
   // through linkEl's https-only policy.
   function replayAssistant(blocks, errById, notes){
     var bubble = addMsg('da-ai');
+    // pace:false — a restored turn is already complete, so it renders in one
+    // synchronous pass. Revealing saved text character by character would make
+    // loading a transcript slower than the conversation was to begin with.
     var st = {blocks: blocks, els: {}, toolChips: {}, citeUrls: {}, citeCount: 0,
-              partial: {}, mdDirty: {}, mdTimers: {}};
+              partial: {}, mdDirty: {}, mdTimers: {}, pace: false,
+              shown: [], closed: [], done: [], head: [], waiters: []};
     blocks.forEach(function(b, i){
       if(!b || typeof b !== 'object') return;
       startBlockUI(st, i, bubble);
@@ -4521,7 +4909,10 @@ _CHAT_JS = r"""
       if(!pushed){
         history.pop();               // keep history consistent for the next question
         displays.pop();              // ...and displays index-aligned with it
-        if(!aborted) input.value = (opts.retryValue !== undefined ? opts.retryValue : displayText);
+        if(!aborted){
+          input.value = (opts.retryValue !== undefined ? opts.retryValue : displayText);
+          paintCompose();     // a restored question re-sizes the box it came from
+        }
       }
       if(aborted){
         turnNote(bubble, '⏹ Stopped.');
@@ -4531,6 +4922,7 @@ _CHAT_JS = r"""
         addMsg('da-err', scrubSecrets(msg));
       }
     }).then(function(){
+      clearWaiting(bubble);   // settled one way or another: never leave it spinning
       // Superseded thread (see the catch above): unlock the composer for the
       // conversation that replaced this one, but touch nothing else — in
       // particular do not re-save, which would overwrite the new transcript.
@@ -4539,7 +4931,11 @@ _CHAT_JS = r"""
       if(pushed && opts.onCommit) opts.onCommit();   // e.g. clear the pending selection
       setStreaming(false);
       renderUsage();   // every round of this turn has now been counted
-      scrollDown(true);
+      // Deliberately NOT forced: the final render can change the bubble's
+      // height, so settle to the bottom for a reader who was following — but a
+      // reader who scrolled up mid-answer to re-read something stays put
+      // instead of being yanked down the moment the answer lands.
+      scrollDown();
       // The one place every turn settles — completed, stopped, or failed — so
       // it is the one place the transcript needs saving. A turn that left no
       // history entry saves nothing, which is right: what cannot be replayed is
@@ -4557,6 +4953,7 @@ _CHAT_JS = r"""
       return;
     }
     input.value = '';
+    paintCompose();          // an auto-grown box snaps back once it is emptied
     if(hasSel){
       var ex = pendingSel.text;
       var api = 'The user selected this excerpt from the report:\n<excerpt>\n' + ex + '\n</excerpt>\n\n' +
@@ -4569,10 +4966,154 @@ _CHAT_JS = r"""
     }
   }
   sendBtn.addEventListener('click', send);
-  stopBtn.addEventListener('click', function(){ if(aborter) aborter.abort(); });
+  // Stop has to end the *reveal* as well as the download. A response can be
+  // fully received while the reveal is still catching up, and abort() does
+  // nothing to a finished fetch — so without this, Stop would sit inert for the
+  // length of the drain. Hard-flushing commits everything that arrived and lets
+  // the turn settle at once.
+  stopBtn.addEventListener('click', function(){
+    if(aborter) aborter.abort();
+    if(activeStream) paceFlush(activeStream.st, activeStream.bubble, true);
+  });
   input.addEventListener('keydown', function(e){
     if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); send(); }
   });
+
+  // ------------------------------------------------------- expandable ask box
+  // The composer opens at two rows and grows with what you type, up to a cap
+  // that always leaves the transcript a readable slice of the panel. Two
+  // explicit controls override that: the grip above it drags to any height, and
+  // ▲/▼ jumps to the cap and back. Either one PINS the height (`composeWant`) —
+  // auto-grow stops until the reader double-clicks the grip to hand it back.
+  // The pinned height persists in localStorage beside the panel geometry, and
+  // is re-clamped (never overwritten) whenever the panel gets smaller, so a
+  // narrow window borrows the space and giving it back restores the full box.
+  var COMPOSE_KEY = 'da-chat-h';
+  var COMPOSE_MAX = 460;     // past this the box is a text editor, not a question
+  var MSGS_FLOOR = 90;       // the transcript never gets squeezed below this
+  var composeWant = null;    // px the reader asked for; null → auto-grow
+  var gripEl = document.getElementById('da-compose-grip');
+  var expandBtn = document.getElementById('da-chat-expand');
+  var composeEl = document.querySelector('.da-chat-compose');
+
+  function composeMetrics(){
+    // Computed style, not a measured rect: this has to answer while the panel is
+    // still display:none (the height is restored before the first open).
+    var cs = window.getComputedStyle(input);
+    var line = parseFloat(cs.lineHeight);
+    if(!isFinite(line) || line <= 0) line = 19;
+    var pad = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+    var border = (parseFloat(cs.borderTopWidth) || 0) + (parseFloat(cs.borderBottomWidth) || 0);
+    return {line: line, pad: pad, border: border};
+  }
+  // The floor is the two rows the box has always opened at — resizing it made it
+  // taller on demand, never slimmer than it was.
+  function composeMin(){
+    var m = composeMetrics();
+    return Math.round(2 * m.line + m.pad + m.border);
+  }
+  // The ceiling is MEASURED, not guessed: the panel is a flex column whose other
+  // rows (header, the key form when the reader supplies their own key, the foot)
+  // do not shrink, so a cap taken from a constant overflows them straight out of
+  // the panel's `overflow:hidden` the moment one of them is taller than assumed.
+  // Whatever those rows actually occupy right now, plus a readable floor for the
+  // transcript, is what the box may not take.
+  function composeCap(){
+    var panelH = panel.getBoundingClientRect().height;
+    // A hidden panel measures 0 — fall back to half the CSS default height
+    // (72vh), so a height restored before the first open survives to be
+    // re-clamped against real measurements when the panel opens.
+    if(!panelH) return Math.max(composeMin(), Math.min(window.innerHeight * 0.36, COMPOSE_MAX));
+    var used = 0;
+    Array.prototype.forEach.call(panel.children, function(el){
+      // Skip the two flex items whose size is the question (the transcript
+      // absorbs the change; the composer is what we are sizing) and the resize
+      // handles, which are absolutely positioned and take no flow space.
+      if(el === composeEl || el === msgs || el.classList.contains('da-rz')) return;
+      used += el.getBoundingClientRect().height;
+    });
+    // The composer's own padding, grip row, and row gap ride along with it.
+    var chrome = composeEl.getBoundingClientRect().height - input.getBoundingClientRect().height;
+    var room = Math.min(panelH - used - chrome - MSGS_FLOOR, COMPOSE_MAX);
+    return Math.max(composeMin(), room);
+  }
+  function fitCompose(cap){
+    // box-sizing is border-box but scrollHeight is not: add the border back or
+    // the box lands 2px short and the text scrolls under its own bottom edge.
+    input.style.height = 'auto';   // shrink first, or scrollHeight only ever grows
+    var h = input.scrollHeight + composeMetrics().border;
+    input.style.height = Math.min(Math.max(h, composeMin()), cap) + 'px';
+  }
+  // The one place the box's height is written — from the text when auto-growing,
+  // from `composeWant` when pinned, always clamped to what the panel can spare.
+  // Callable from anywhere, including the key-row code that runs before this
+  // block initializes: until `composeEl` is assigned there is nothing to paint.
+  function paintCompose(){
+    if(!composeEl) return;
+    var cap = composeCap();
+    if(composeWant === null) fitCompose(cap);
+    else input.style.height = Math.max(composeMin(), Math.min(composeWant, cap)) + 'px';
+    if(!expandBtn) return;
+    var atCap = composeWant !== null && composeWant >= cap - 1;
+    var label = atCap ? 'Shrink the message box' : 'Expand the message box';
+    expandBtn.textContent = atCap ? '▼' : '▲';
+    expandBtn.setAttribute('aria-expanded', atCap ? 'true' : 'false');
+    expandBtn.setAttribute('aria-label', label);
+    expandBtn.title = label;
+  }
+  function setComposeH(px){
+    composeWant = Math.max(composeMin(), Math.min(Math.round(px), composeCap()));
+    paintCompose();
+    try { localStorage.setItem(COMPOSE_KEY, String(composeWant)); } catch(e){}
+  }
+  function resetComposeH(){
+    composeWant = null;
+    try { localStorage.removeItem(COMPOSE_KEY); } catch(e){}
+    paintCompose();
+  }
+  input.addEventListener('input', paintCompose);
+  if(expandBtn){
+    expandBtn.addEventListener('click', function(){
+      var cap = composeCap();
+      if(composeWant !== null && composeWant >= cap - 1) resetComposeH();
+      else setComposeH(cap);
+      input.focus();
+    });
+  }
+  if(gripEl){
+    gripEl.addEventListener('pointerdown', function(e){
+      if(e.target && e.target.closest && e.target.closest('button')) return;  // ▲ is not a handle
+      var sy = e.clientY, base = input.getBoundingClientRect().height, began = false;
+      function onMove(ev){
+        var dy = sy - ev.clientY;                        // drag up = taller
+        if(!began){
+          if(Math.abs(dy) < 3) return;                   // threshold → lets dblclick fire
+          began = true;
+          document.body.classList.add('da-dragging');
+        }
+        ev.preventDefault();
+        setComposeH(base + dy);
+      }
+      function onUp(ev){
+        try { gripEl.releasePointerCapture(ev.pointerId); } catch(x){}
+        gripEl.removeEventListener('pointermove', onMove);
+        gripEl.removeEventListener('pointerup', onUp);
+        gripEl.removeEventListener('pointercancel', onUp);
+        document.body.classList.remove('da-dragging');
+      }
+      try { gripEl.setPointerCapture(e.pointerId); } catch(x){}
+      gripEl.addEventListener('pointermove', onMove);
+      gripEl.addEventListener('pointerup', onUp);
+      gripEl.addEventListener('pointercancel', onUp);
+    });
+    gripEl.addEventListener('dblclick', resetComposeH);
+  }
+  (function(){
+    var stored = NaN;
+    try { stored = parseFloat(localStorage.getItem(COMPOSE_KEY) || ''); } catch(e){}
+    if(isFinite(stored) && stored > 0) composeWant = Math.max(composeMin(), stored);
+    paintCompose();
+  })();
 
   // Starter prompts: deterministic, run-tailored questions from the inert
   // #da-starters block (built server-side by _starter_prompts). Each chip fills
@@ -4592,6 +5133,7 @@ _CHAT_JS = r"""
       b.addEventListener('click', function(){
         if(streaming) return;
         input.value = q;
+        paintCompose();   // send() clears it again, but not if it bails on the key
         send();
       });
       startersRow.appendChild(b);
@@ -4641,11 +5183,12 @@ _CHAT_JS = r"""
   function writeGeo(g){
     panel.style.left = g.left + 'px'; panel.style.top = g.top + 'px';
     panel.style.width = g.w + 'px'; panel.style.height = g.h + 'px';
+    paintCompose();   // the panel just changed height — re-clamp the ask box to it
   }
   function applyGeom(){
-    if(isMobile()){ stripInline(); return; }   // media query owns the bottom sheet
+    if(isMobile()){ stripInline(); paintCompose(); return; }  // media query owns the bottom sheet
     var g = loadGeo();
-    if(!g){ stripInline(); return; }            // never moved → CSS default
+    if(!g){ stripInline(); paintCompose(); return; }          // never moved → CSS default
     enterCustom(); var c = clampGeo(g); writeGeo(c); saveGeo(c);
   }
 
@@ -4804,6 +5347,7 @@ _CHAT_JS = r"""
     clearSelHighlight();
     var chip = document.getElementById('da-sel-chip');
     if(chip) chip.remove();
+    paintCompose();   // another fixed row gone — the ask box may take its space
   }
 
   if(reportEl){

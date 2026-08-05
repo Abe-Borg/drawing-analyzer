@@ -1246,6 +1246,13 @@ RUNTIME_TRANSPARENCY = HelpDocument(
                 "remove the key."
             ),
             _bullet(
+                "The box you type in is expandable. It grows as you type, the small bar "
+                "above it drags to any height, and the arrow at its right jumps it to "
+                "full height and back -- so a long question or a pasted spec paragraph "
+                "does not have to be written through a two-line slot. The size you pick "
+                "is remembered; double-click the bar to go back to growing on its own."
+            ),
+            _bullet(
                 "Because the panel runs on your key, its spend never appears in the "
                 "run's cost figures — so the footer keeps a running token count for the "
                 "conversation and an estimated dollar cost beside it. The estimate is a "
