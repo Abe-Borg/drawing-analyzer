@@ -1253,6 +1253,18 @@ RUNTIME_TRANSPARENCY = HelpDocument(
                 "is remembered; double-click the bar to go back to growing on its own."
             ),
             _bullet(
+                "Because the panel runs on your key, its spend never appears in the "
+                "run's cost figures — so the footer keeps a running token count for the "
+                "conversation and an estimated dollar cost beside it. The estimate is a "
+                "range, not a bill: cached input is billed at a fraction of the normal "
+                "rate and the API does not report which cache tier a given write used."
+            ),
+            _bullet(
+                "The report text is sent once and then re-read from Anthropic's prompt "
+                "cache for an hour, so a long question-and-answer session costs a small "
+                "fraction of asking the same questions in separate sessions."
+            ),
+            _bullet(
                 "The conversation is kept for you. It saves into that browser's local "
                 "storage for that report, so a refresh or reopening the file does not "
                 "lose it, and New chat erases it. Save writes it to a JSON file you "
