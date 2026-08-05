@@ -1324,6 +1324,52 @@ def test_chat_config_gates_web_fetch_on_model_capability(monkeypatch):
     assert '"webFetch": true' in doc
 
 
+def test_chat_output_and_context_ceilings_come_from_the_registry(monkeypatch):
+    """The widget gets the model's OWN limits, not a house-imposed budget.
+
+    Two separate numbers, both hard API facts rather than policy: ``maxTokens``
+    is the per-answer output ceiling (over it is a 400; under it is a truncated
+    answer the reader pays for twice), and ``contextWindow`` is what the footer
+    readout measures the thread against. Both must track
+    ``DRAWING_ANALYZER_CHAT_MODEL`` — an unregistered id falls to the
+    conservative defaults rather than requesting a ceiling that does not exist.
+    """
+    from drawing_analyzer.core.api_config import model_capabilities
+
+    caps = model_capabilities(hr.CHAT_MODEL_DEFAULT)
+    doc = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW, api_key="k")
+    assert f'"maxTokens": {caps.max_output_tokens}' in doc
+    assert f'"contextWindow": {caps.context_window}' in doc
+    # The default chat model is a full-ceiling one; a silent drop to the
+    # unknown-model fallback would halve every answer's headroom.
+    assert caps.max_output_tokens == 128_000
+    assert caps.context_window == 1_000_000
+
+    # Haiku 4.5 genuinely tops out lower on both axes — sending 128k there is a
+    # 400, so the emitted config has to follow the model, not the default.
+    monkeypatch.setattr(hr, "CHAT_MODEL_DEFAULT", "claude-haiku-4-5")
+    doc = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW, api_key="k")
+    assert '"maxTokens": 64000' in doc
+    assert '"contextWindow": 200000' in doc
+
+    # An id the registry has never heard of degrades instead of guessing high.
+    monkeypatch.setattr(hr, "CHAT_MODEL_DEFAULT", "some-unregistered-model")
+    doc = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW, api_key="k")
+    assert '"maxTokens": 64000' in doc
+    assert '"contextWindow": 200000' in doc
+
+
+def test_chat_widget_carries_no_hardcoded_output_ceiling():
+    """The request's ``max_tokens`` must be the config value, not a literal.
+
+    A number typed into the JS is invisible to the capability registry and
+    silently outlives every model upgrade; this is the regression that put a
+    16k cap on a 128k model.
+    """
+    doc = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW, api_key="k")
+    assert "max_tokens: CFG.maxTokens" in doc
+
+
 def test_chat_default_model_supports_everything_the_widget_sends():
     """Guard the constraint api_config documents for the chat model.
 

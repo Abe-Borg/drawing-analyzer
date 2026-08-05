@@ -8,6 +8,35 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **The Ask-AI assistant is no longer rationed, and shows how full it is.** The
+  chat had a hardcoded 16,000-token answer ceiling — an eighth of what the
+  configured model actually serves — so a long answer stopped mid-sentence and
+  the reader's only recourse was to ask again and pay twice. It now requests the
+  model's own maximum (128k on the default), resolved host-side from the
+  capability registry so it follows `DRAWING_ANALYZER_CHAT_MODEL` instead of
+  outliving it; the input side was already untrimmed and stays that way — the
+  report goes over verbatim and the transcript accumulates untouched.
+
+  Since nothing is trimmed, the context window is the one budget a long
+  conversation can exhaust, and the failure is abrupt: the request that exceeds
+  it is rejected outright, mid-thread. The chat footer now carries a **context
+  readout** beside the cost one — how much of the model's window the live thread
+  occupies, with a meter and a plain-language warning at 70% and 90% ("nearly
+  full, start a New chat"). The two are deliberately separate readouts: the cost
+  line accumulates across every round of every question (spend), while the
+  context line is a snapshot of what the next request will carry (occupancy),
+  and cached tokens count toward it — they still fill the window, they are
+  merely billed cheaper. Both come from the API's own usage numbers rather than
+  a local estimate, so both stay honest and both stay silent until there is
+  something measured to report.
+
+  And if a thread does reach the ceiling, the answer now says so. Generated
+  tokens count toward the window too, so a long conversation can stop
+  mid-sentence with `model_context_window_exceeded` — a different stop reason
+  from `max_tokens`, and one the widget used to let fall through silently,
+  committing the cut-off answer and replaying it from the transcript as though
+  it were complete. It gets its own note now, naming *New chat* as the remedy.
+
 - **Ask-AI conversations are kept.** The report's chat used to live only in the
   tab's memory: a refresh, a close, or a mis-clicked *New chat* destroyed it, and
   the only way out was *Save as PDF* — a picture of the conversation, not data.
