@@ -70,6 +70,15 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and a reader who *does* scroll up mid-answer keeps their place, including when
   the turn finishes.
 
+  Because the reveal can still be catching up after the response has finished
+  downloading, three things bound that window: **Stop** ends the reveal as well
+  as the download (`abort()` does nothing to a finished fetch, so it would
+  otherwise sit inert for the length of the drain), a timer backstop settles the
+  turn if animation frames stop arriving at all — a backgrounded tab fires none,
+  which would leave the composer locked and the transcript unsaved — and
+  per-frame ceilings keep the frame that returns from a stall from landing as
+  exactly the dump the pacing exists to avoid.
+
   What renders is unchanged: the final DOM is byte-identical to before, restored
   transcripts still replay in one synchronous pass, and `prefers-reduced-motion`
   opts out of the pacing entirely and keeps the original instant path.

@@ -3746,6 +3746,14 @@ _CHAT_JS = r"""
   var CLOSE_MS = 110;         // ...and this much faster once the block is closed
   var MIN_CPS = 45;           // so the last few characters never crawl
   var MAX_CPS = 2400;         // sanity bound on a pathological single-burst block
+  // Per-frame ceilings. A stalled frame (GC pause, a tab coming back) arrives
+  // with a large dt and a large backlog, and without these the catch-up would
+  // land as exactly the dump this whole mechanism exists to avoid. 64 chars a
+  // frame is still ~3800/s at 60fps — far faster than any model streams — so
+  // they bite only on the pathological frame, never on the normal one.
+  var MAX_FRAME_CHARS = 64;
+  var MAX_FRAME_EASE = 0.4;
+  var DRAIN_BACKSTOP_MS = 5000;
   var pacing = false;         // an rAF loop is live (scrollDown defers to it)
 
   function blockText(b){
@@ -3800,7 +3808,7 @@ _CHAT_JS = r"""
       if(shown < full){
         var win = st.closed[i] ? CLOSE_MS : CATCH_MS;
         var cps = Math.max(MIN_CPS, Math.min(MAX_CPS, (full - shown) * 1000 / win));
-        shown = Math.min(full, shown + cps * dt / 1000);
+        shown = Math.min(full, shown + Math.min(cps * dt / 1000, MAX_FRAME_CHARS));
         st.shown[i] = shown;
         if(b.type === 'text') paintText(st, i);
         else touchThinking(st, i, bubble, blockText(b).slice(0, Math.floor(shown)));
@@ -3824,7 +3832,9 @@ _CHAT_JS = r"""
     if(!follow) return false;
     var delta = msgs.scrollHeight - msgs.clientHeight - msgs.scrollTop;
     if(delta <= 0.5) return false;
-    var k = 1 - Math.pow(1 - 0.18, dt / 16);     // ~18% per 16ms, frame-rate independent
+    // ~18% per 16ms, frame-rate independent, capped so a stalled frame eases
+    // rather than snapping.
+    var k = Math.min(MAX_FRAME_EASE, 1 - Math.pow(1 - 0.18, dt / 16));
     msgs.scrollTop += Math.max(delta * k, Math.min(delta, 0.6));
     lastAuto = msgs.scrollTop;
     return true;
@@ -3862,7 +3872,17 @@ _CHAT_JS = r"""
     }
     if(!pacePending(st)) return Promise.resolve();
     paceEnsure(st, bubble);
-    return new Promise(function(res){ st.waiters.push(res); });
+    return new Promise(function(res){
+      st.waiters.push(res);
+      // rAF does not fire in a backgrounded tab, so the reveal — and with it the
+      // turn — would hang until the reader came back: composer locked, and the
+      // transcript unsaved if they closed the tab meanwhile. A timer still fires
+      // there, so it commits what arrived instead. A normal drain finishes in
+      // ~CLOSE_MS, well inside this, so it never fires in practice.
+      setTimeout(function(){
+        if(pacePending(st)) paceFlush(st, bubble, true);
+      }, DRAIN_BACKSTOP_MS);
+    });
   }
 
   // Repaint block `i` at its currently revealed length. Everything up to the
@@ -3958,6 +3978,9 @@ _CHAT_JS = r"""
   }
 
   var streaming = false, aborter = null;
+  // The in-flight request's reveal state, so Stop can end the animation as well
+  // as the download. Cleared as soon as the turn's stream settles.
+  var activeStream = null;
 
   // One POST + SSE read. Appends UI into `bubble`, returns {blocks, stopReason}.
   function streamOnce(bubble, noTools){
@@ -3999,6 +4022,7 @@ _CHAT_JS = r"""
         pace: !REDUCE_MOTION, shown: [], closed: [], done: [], head: [],
         raf: 0, last: 0, waiters: []
       };
+      activeStream = {st: st, bubble: bubble};
       var reader = resp.body.getReader();
       var decoder = new TextDecoder();
       function pump(){
@@ -4017,8 +4041,12 @@ _CHAT_JS = r"""
       // — but the composer can never re-enable while text is still arriving on
       // screen, and a caller that inspects the DOM afterwards sees all of it.
       return pump().then(function(){
-        return paceFlush(st, bubble, false).then(function(){ return st; });
+        return paceFlush(st, bubble, false).then(function(){
+          activeStream = null;
+          return st;
+        });
       }, function(err){
+        activeStream = null;
         // Abort and mid-stream failure: stop animating and commit everything
         // that did arrive — text that reached the browser is never hidden, it
         // just stops being revealed — so the caller's error path ("⏹ Stopped.")
@@ -4642,7 +4670,15 @@ _CHAT_JS = r"""
     }
   }
   sendBtn.addEventListener('click', send);
-  stopBtn.addEventListener('click', function(){ if(aborter) aborter.abort(); });
+  // Stop has to end the *reveal* as well as the download. A response can be
+  // fully received while the reveal is still catching up, and abort() does
+  // nothing to a finished fetch — so without this, Stop would sit inert for the
+  // length of the drain. Hard-flushing commits everything that arrived and lets
+  // the turn settle at once.
+  stopBtn.addEventListener('click', function(){
+    if(aborter) aborter.abort();
+    if(activeStream) paceFlush(activeStream.st, activeStream.bubble, true);
+  });
   input.addEventListener('keydown', function(e){
     if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); send(); }
   });
