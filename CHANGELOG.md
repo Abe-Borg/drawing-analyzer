@@ -43,6 +43,46 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The Ask-AI answer now streams smoothly instead of arriving in lurches.**
+  Model deltas do not arrive evenly — the API hands over a lump of text, stalls,
+  then hands over another — and the report painted each burst the moment it
+  landed. A representative answer reached the screen in **7 repaints of ~120
+  characters**, and because each repaint grew the pane by more than the 60px
+  "near the bottom" threshold, the autoscroll decided the reader had scrolled
+  away and stopped following, leaving one **611px snap** to the bottom when the
+  turn ended. Both are gone. Text now accumulates off-screen and a single
+  `requestAnimationFrame` loop reveals it at a rate proportional to how far
+  behind the display is — quick when it has ground to make up, easing as it
+  catches up — which turns the same answer into **110 frames averaging 8
+  characters**, and eases the scroll on the same clock (~6px per frame, no jump
+  over 18px). Time-to-first-token, previously an empty grey bubble, gets an
+  animated placeholder, re-armed after each tool call.
+
+  Two supporting changes. The repaint is now incremental: markdown up to the
+  last *safe* block boundary is rendered once and left alone, and only the short
+  live tail is rebuilt per frame — so a long table or list no longer has its DOM
+  destroyed and rebuilt eleven times a second, and a reader's text selection
+  survives. A boundary counts as safe only where
+  `render(A) + render(B) === render(A + B)`, which rules out splitting a list or
+  blockquote that fuses across a blank line. And the autoscroll's follow state is
+  now a sticky flag driven by real scroll events rather than a distance test, so
+  the eased follow can no longer mistake its own lag for the reader taking over —
+  and a reader who *does* scroll up mid-answer keeps their place, including when
+  the turn finishes.
+
+  Because the reveal can still be catching up after the response has finished
+  downloading, three things bound that window: **Stop** ends the reveal as well
+  as the download (`abort()` does nothing to a finished fetch, so it would
+  otherwise sit inert for the length of the drain), a timer backstop settles the
+  turn if animation frames stop arriving at all — a backgrounded tab fires none,
+  which would leave the composer locked and the transcript unsaved — and
+  per-frame ceilings keep the frame that returns from a stall from landing as
+  exactly the dump the pacing exists to avoid.
+
+  What renders is unchanged: the final DOM is byte-identical to before, restored
+  transcripts still replay in one synchronous pass, and `prefers-reduced-motion`
+  opts out of the pacing entirely and keeps the original instant path.
+
 - **Moved the pipeline defaults to Claude Opus 5 and Claude Sonnet 5.** Review
   and escalation now run on `claude-opus-5`; first-pass verification, cross-check,
   and the report's Ask-AI assistant run on `claude-sonnet-5`. Triage stays
