@@ -30,7 +30,7 @@ from drawing_analyzer.verify import (
     verify_findings,
 )
 
-OPUS = "claude-opus-4-8"
+OPUS = "claude-opus-5"
 PAGE_W, PAGE_H = 800.0, 600.0
 
 

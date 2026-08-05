@@ -456,7 +456,7 @@ def test_reconcile_pairs_overlap_but_fold_in_pair_order(monkeypatch):
 
     monkeypatch.setattr(X, "_reconcile_call", fake_reconcile)
     findings, _claims, in_tok, out_tok, completed = X._reconcile_facts(
-        [], facts, {}, client=object(), model="claude-opus-4-8", max_retries=0,
+        [], facts, {}, client=object(), model="claude-opus-5", max_retries=0,
         sleep=_NOOP, max_workers=3,
     )
 

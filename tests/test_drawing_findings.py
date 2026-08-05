@@ -23,7 +23,7 @@ from drawing_analyzer.digest_cache import DigestCache
 from drawing_analyzer.models import ImageTile, RenderedSheet, SheetRef
 from tests.fixtures.fake_anthropic import FakeMessage, FakeTextBlock, FakeUsage
 
-OPUS = "claude-opus-4-8"
+OPUS = "claude-opus-5"
 
 
 def _ref(source="M-101.pdf", page=0):

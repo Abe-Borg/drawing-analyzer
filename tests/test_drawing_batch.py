@@ -27,7 +27,7 @@ from tests.fixtures.fake_anthropic import (
     batch_errored_result,
 )
 
-OPUS = "claude-opus-4-8"
+OPUS = "claude-opus-5"
 NOSLEEP = lambda _s: None  # noqa: E731 - tests never actually wait on the poll
 
 

@@ -22,7 +22,7 @@ from drawing_analyzer.cost import (
     format_exhaustive_cost_prompt,
 )
 
-OPUS = "claude-opus-4-8"
+OPUS = "claude-opus-5"
 
 
 # --------------------------------------------------------------------------- #
@@ -32,6 +32,7 @@ OPUS = "claude-opus-4-8"
 
 def test_price_for_exact_and_unknown():
     assert price_for(OPUS) == MODEL_PRICING[OPUS]
+    assert price_for("claude-sonnet-5").input_per_mtok == 3.0
     assert price_for("claude-sonnet-4-6").input_per_mtok == 3.0
     assert price_for("claude-haiku-4-5").output_per_mtok == 5.0
     assert price_for("totally-made-up") is None
@@ -41,7 +42,8 @@ def test_price_for_exact_and_unknown():
 def test_price_for_resolves_suffixed_variant():
     # Dated / fast variants (delimited by "-") resolve to the base model's price.
     assert price_for("claude-haiku-4-5-20251001") == MODEL_PRICING["claude-haiku-4-5"]
-    assert price_for("claude-opus-4-8-fast") == MODEL_PRICING[OPUS]
+    assert price_for("claude-opus-5-fast") == MODEL_PRICING[OPUS]
+    assert price_for("claude-opus-4-8-fast") == MODEL_PRICING["claude-opus-4-8"]
 
 
 def test_price_for_requires_delimiter_not_bare_prefix():
@@ -49,10 +51,13 @@ def test_price_for_requires_delimiter_not_bare_prefix():
     # price — only a "-"-delimited variant resolves (Codex P2).
     assert price_for("claude-opus-4-80") is None
     assert price_for("claude-opus-4-8x") is None
+    assert price_for("claude-opus-50") is None
+    assert price_for("claude-sonnet-51") is None
 
 
 def test_friendly_model_name():
-    assert friendly_model_name(OPUS) == "Opus 4.8"
+    assert friendly_model_name(OPUS) == "Opus 5"
+    assert friendly_model_name("claude-sonnet-5") == "Sonnet 5"
     assert friendly_model_name("claude-sonnet-4-6") == "Sonnet 4.6"
     assert friendly_model_name("mystery") == "mystery"  # falls back to the id
 
@@ -119,7 +124,7 @@ def test_format_prompt_includes_scale_cost_and_proceed():
     msg = format_drawing_cost_prompt(est)
     assert "8 drawing sheet(s)" in msg
     assert "from 3 file(s)" in msg
-    assert "Opus 4.8" in msg
+    assert "Opus 5" in msg
     assert "$" in msg
     assert "Proceed" in msg
 
@@ -286,7 +291,7 @@ def test_exhaustive_legacy_transport_argument_still_controls_both_reads():
 
 
 def test_exhaustive_estimate_prices_actual_verification_model():
-    sonnet = "claude-sonnet-4-6"
+    sonnet = "claude-sonnet-5"
     est = estimate_exhaustive_run_cost(
         10, model=OPUS, verification_model=sonnet
     )
@@ -295,7 +300,7 @@ def test_exhaustive_estimate_prices_actual_verification_model():
         verify.input_tokens, verify.output_tokens, model=sonnet, batch=False
     )
     assert verify.cost == pytest.approx(expected)
-    assert "Sonnet 4.6" in verify.note
+    assert "Sonnet 5" in verify.note
 
 
 # --------------------------------------------------------------------------- #

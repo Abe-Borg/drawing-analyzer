@@ -32,7 +32,7 @@ from drawing_analyzer.focus import (
 from drawing_analyzer.models import ImageTile, RenderedSheet, SheetRef
 from tests.fixtures.fake_anthropic import FakeMessage, FakeTextBlock, FakeUsage
 
-OPUS = "claude-opus-4-8"
+OPUS = "claude-opus-5"
 ROOMS_FOCUS = "the rooms, and what types of plumbing fixtures each has"
 
 
@@ -210,8 +210,8 @@ def test_default_focus_model_env_override(monkeypatch):
 
     monkeypatch.delenv("DRAWING_ANALYZER_FOCUS_MODEL", raising=False)
     assert default_focus_model() == REVIEW_MODEL_DEFAULT
-    monkeypatch.setenv("DRAWING_ANALYZER_FOCUS_MODEL", "claude-sonnet-4-6")
-    assert default_focus_model() == "claude-sonnet-4-6"
+    monkeypatch.setenv("DRAWING_ANALYZER_FOCUS_MODEL", "claude-sonnet-5")
+    assert default_focus_model() == "claude-sonnet-5"
 
 
 def test_build_focus_user_text_includes_focus_and_each_sheet():

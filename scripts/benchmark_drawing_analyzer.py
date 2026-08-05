@@ -112,7 +112,7 @@ class _Blocks:
 
     class Message:
         stop_reason = "end_turn"
-        model = "claude-opus-4-8"
+        model = "claude-opus-5"
 
         def __init__(self, text: str, i: int, o: int) -> None:
             self.content = [_Blocks.Text(text)]

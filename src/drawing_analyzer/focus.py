@@ -56,7 +56,7 @@ _FOCUS_CACHE_CONTRACT = 1
 
 
 def default_focus_model() -> str:
-    """Model for the focus-report pass — Opus 4.8 by default, overridable via
+    """Model for the focus-report pass — Opus 5 by default, overridable via
     ``DRAWING_ANALYZER_FOCUS_MODEL``."""
     override = os.environ.get("DRAWING_ANALYZER_FOCUS_MODEL")
     if override and override.strip():

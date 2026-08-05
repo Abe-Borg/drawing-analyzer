@@ -24,7 +24,7 @@ from drawing_analyzer.digest import (
 from drawing_analyzer.models import ImageTile, RenderedSheet, SheetRef
 from tests.fixtures.fake_anthropic import FakeMessage, FakeTextBlock, FakeUsage
 
-OPUS = "claude-opus-4-8"
+OPUS = "claude-opus-5"
 
 
 # --------------------------------------------------------------------------- #
@@ -484,7 +484,7 @@ def test_pipeline_level1_cache_skips_render_on_second_run(tmp_path, monkeypatch)
     # the sheets render again — the cache stays correct, not just fast.
     renders["n"] = 0
     extract_drawing_context(
-        [path], client=client, rows=2, cols=2, cache=cache, model="claude-sonnet-4-6"
+        [path], client=client, rows=2, cols=2, cache=cache, model="claude-sonnet-5"
     )
     assert renders["n"] == 2
 

@@ -139,7 +139,7 @@ def test_request_uses_critique_system_and_task_instruction():
 
 
 def test_build_request_params_attaches_thinking_and_effort_for_opus():
-    params = build_critique_request_params([], model="claude-opus-4-8")
+    params = build_critique_request_params([], model="claude-opus-5")
     assert params["system"] == critique_system_prompt()
     assert params["thinking"] == {"type": "adaptive"}
     assert params["output_config"] == {"effort": "high"}

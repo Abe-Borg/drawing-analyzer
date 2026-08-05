@@ -7,7 +7,7 @@ Design:
 
 - **One sheet per request.** Each PDF page is a sheet; each sheet is rendered to
   an overview image plus a 6x6 grid of high-resolution tiles and sent to Claude
-  Opus 4.8 in a *single* vision request, so the model sees the whole sheet at
+  Opus 5 in a *single* vision request, so the model sees the whole sheet at
   once (coherence beats the marginal resolution gain of splitting a sheet across
   calls).
 - **No sheet limit.** Sheets are processed independently and their text digests

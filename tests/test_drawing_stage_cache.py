@@ -22,7 +22,7 @@ class _MemoryCache:
 def _key(**changes):
     args = {
         "stage": "synthesis",
-        "model": "claude-opus-4-8",
+        "model": "claude-opus-5",
         "prompt": {"system": "review"},
         "inputs": {"sheets": ["A", "B"]},
         "params": {"max_tokens": 8000},
@@ -38,7 +38,7 @@ def test_stage_key_is_canonical_and_invalidates_every_contract_axis():
         inputs={"sheets": ["A", "B"]},
         params={"max_tokens": 8000},
     )
-    assert baseline != _key(model="claude-sonnet-4-6")
+    assert baseline != _key(model="claude-sonnet-5")
     assert baseline != _key(prompt={"system": "revised review"})
     assert baseline != _key(inputs={"sheets": ["A", "C"]})
     assert baseline != _key(params={"max_tokens": 4000})

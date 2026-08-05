@@ -22,7 +22,7 @@ from drawing_analyzer.synthesis import (
 )
 from tests.fixtures.fake_anthropic import FakeMessage, FakeTextBlock, FakeUsage
 
-OPUS = "claude-opus-4-8"
+OPUS = "claude-opus-5"
 
 
 def _digest(name: str, text: str, error: str | None = None) -> SheetDigest:
@@ -51,9 +51,9 @@ class _FakeClient:
 
 def test_default_synthesis_model_is_opus(monkeypatch):
     monkeypatch.delenv("DRAWING_ANALYZER_SYNTHESIS_MODEL", raising=False)
-    assert default_synthesis_model() == REVIEW_MODEL_DEFAULT  # Opus 4.8
-    monkeypatch.setenv("DRAWING_ANALYZER_SYNTHESIS_MODEL", "claude-sonnet-4-6")
-    assert default_synthesis_model() == "claude-sonnet-4-6"
+    assert default_synthesis_model() == REVIEW_MODEL_DEFAULT  # Opus 5
+    monkeypatch.setenv("DRAWING_ANALYZER_SYNTHESIS_MODEL", "claude-sonnet-5")
+    assert default_synthesis_model() == "claude-sonnet-5"
 
 
 # --------------------------------------------------------------------------- #

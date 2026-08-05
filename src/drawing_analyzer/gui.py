@@ -355,7 +355,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             text=(
                 "Drop construction drawing PDFs "
                 "(one or many; multi-sheet PDFs are split page-by-page). "
-                "Each sheet is read by Claude Opus 4.8 and summarized to text."
+                "Each sheet is read by Claude Opus 5 and summarized to text."
             ),
             font=ctk.CTkFont(family="Segoe UI", size=12),
             text_color=COLORS["text_secondary"],

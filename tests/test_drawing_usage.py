@@ -24,7 +24,7 @@ from drawing_analyzer.cost import (
 )
 from drawing_analyzer.models import RunUsage, UsageRecord
 
-_OPUS = "claude-opus-4-8"
+_OPUS = "claude-opus-5"
 
 
 # --------------------------------------------------------------------------- #

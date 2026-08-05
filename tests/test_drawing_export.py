@@ -589,7 +589,7 @@ def test_run_log_and_manifest_leak_no_secret_or_absolute_path(tmp_path):
     ctx = _make_ctx()
     ctx.errors = [f"digest failed: x-api-key: {_FAKE_KEY} at {tmp_path}/private/M-101.pdf"]
     journal = RunJournal(run_id="RUN-leaktest")
-    journal.set_environment(collect_environment(model="claude-opus-4-8"))
+    journal.set_environment(collect_environment(model="claude-opus-5"))
     journal.emit("API_ERROR", stage="digest", detail=f"401 {_FAKE_KEY}")
     journal.finish("NOT_REQUESTED")
     ctx.run_journal = journal

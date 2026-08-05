@@ -29,7 +29,7 @@ The set's **adopted editions** are harvested offline from the sheet text layers
 prompt so the model can judge both the adopted and the current edition.
 
 Tool type: ``web_search_20260209`` — the current server-side web-search variant
-for Opus 4.8 (verified against the API docs at implementation time; the basic
+for Opus 5 (verified against the API docs at implementation time; the basic
 ``web_search_20250305`` serves older models). Overridable via
 ``DRAWING_ANALYZER_WEB_SEARCH_TOOL_TYPE`` so an API rename never needs a code
 change. Server-tool turns can stop with ``pause_turn`` (the server-side loop hit

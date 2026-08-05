@@ -22,6 +22,38 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Moved the pipeline defaults to Claude Opus 5 and Claude Sonnet 5.** Review
+  and escalation now run on `claude-opus-5`; first-pass verification, cross-check,
+  and the report's Ask-AI assistant run on `claude-sonnet-5`. Triage stays
+  on Haiku 4.5. The assistant is the one role that deliberately does *not* take
+  Opus 5: web fetch is unavailable on Opus 5 (one of two documented exceptions to
+  its Opus 4.8 feature parity), and the widget needs it to read a linked page.
+  `supports_web_fetch` joins the capability registry and gates the tool list the
+  report emits, so overriding `DRAWING_ANALYZER_CHAT_MODEL` to a model without
+  web fetch now degrades the widget to search-only instead of failing every
+  question with a 400. Opus 4.8 and Sonnet 4.6 remain fully registered, so pinning one
+  through a `DRAWING_ANALYZER_*_MODEL` variable still gets full capabilities
+  rather than the conservative unknown-model fallback. Opus 5 is priced
+  identically to Opus 4.8 ($5/$25 per MTok), so the estimator's Opus figures are
+  unchanged; Sonnet 5 is quoted at its $3/$15 list rate rather than the
+  introductory $2/$10 that runs through 2026-08-31, which over-states rather than
+  under-states a pre-run estimate.
+- **Model capability decisions now read from the capability registry rather than
+  Opus family membership.** Sonnet 5 is the first Sonnet-tier model to match Opus
+  on the 128k output ceiling, the `xhigh` effort level, and the high-resolution
+  (2576 px / 4784-token) vision tier, so the old `model in OPUS_MODELS` tests
+  would have silently downgraded every Sonnet 5 request on all three axes.
+  `ModelCapabilities` gains a per-model `supported_effort_levels` roster (a
+  boolean could not express "accepts `max` but not `xhigh`", which is exactly
+  Sonnet 4.6) and a `supports_hires_vision` flag; `OPUS_MODELS` is now used only
+  to identify the verification escalation tier, which is a routing decision
+  rather than a capability. This also corrects Sonnet 4.6's registered output
+  ceiling, which had been carrying Sonnet 4.5's 64k value.
+- Cached digests, critiques, and stage results from Opus 4.8 / Sonnet 4.6 runs
+  will not be reused, because the model id is part of every content-addressed
+  cache key. The first run after upgrading re-reads the set at full cost; no
+  cache schema version was bumped, so older entries remain on disk and are still
+  served if you pin a previous model.
 - Brought the four header help modals back in sync with the pipeline: the
   set-identity / model-authored-review-plan stages, prose harvest, edition
   audit, per-severity markup layers, the reviewed-copy guarantee, and the

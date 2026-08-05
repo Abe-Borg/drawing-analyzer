@@ -34,7 +34,7 @@ from tests.fixtures.fake_anthropic import (
     FakeUsage,
 )
 
-OPUS = "claude-opus-4-8"
+OPUS = "claude-opus-5"
 NOSLEEP = lambda _s: None  # noqa: E731 - tests never wait on the poll
 IMAGES_PER_SHEET = 5  # overview + 2x2 tiles
 

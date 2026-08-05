@@ -1,6 +1,6 @@
 """Per-sheet vision digest: one rendered drawing sheet -> structured text.
 
-Each sheet is sent to Claude Opus 4.8 in a *single* request carrying the
+Each sheet is sent to Claude Opus 5 in a *single* request carrying the
 overview image plus all grid tiles, so the model reads the whole sheet at once.
 The model auto-detects the sheet number and discipline from the title block and
 emits a structured text digest suitable for splicing into the spec reviewer's
@@ -51,7 +51,7 @@ _log = get_logger()
 DEFAULT_DIGEST_MAX_TOKENS = 16_000
 
 # Effort for the read. "high" is intelligence-appropriate for dense drawings and
-# is accepted by both Opus and Sonnet (so a model override never 400s on it).
+# is accepted by every effort-capable model (so an override never 400s on it).
 DEFAULT_DIGEST_EFFORT = "high"
 
 # App-level retries layered ON TOP of the Anthropic SDK's own per-call retries.
@@ -590,7 +590,7 @@ def build_digest_request_params(
     real-time path (:func:`digest_sheet`) and the batch path
     (:mod:`drawing_analyzer.batch_digest`), so the two can't drift on model /
     thinking / effort. ``thinking`` and ``output_config`` are attached only when
-    the model supports them (Opus 4.8 supports both; an unknown override
+    the model supports them (Opus 5 supports both; an unknown override
     silently omits them, never producing an API-rejected request). ``focus``
     (an optional per-run operator focus) and ``specs_text`` (optional uploaded
     project specifications) ride only on the system prompt, so the user
