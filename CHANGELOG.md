@@ -8,6 +8,27 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Ask-AI conversations are kept.** The report's chat used to live only in the
+  tab's memory: a refresh, a close, or a mis-clicked *New chat* destroyed it, and
+  the only way out was *Save as PDF* — a picture of the conversation, not data.
+  The thread now **auto-saves to the browser** under a key scoped to that report
+  and replays on load, so reopening the file picks up where you left off, and
+  **Save** / **Load** write and read a `chat_history.json`
+  (`drawing_analyzer_chat_transcript`, schema v1) that can sit beside
+  `report.html` in the export folder. Replay is faithful — questions, answers,
+  reasoning, tool steps and citations all come back, and the excerpt disclosure
+  stays distinct from the wrapped prompt actually sent — and a loaded transcript
+  is a *resumable* conversation: its `turns[].message` array is the verbatim
+  Messages API history, so the next question continues the thread. *New chat*
+  erases the stored copy.
+
+  A transcript never carries an API key (the whole document is scrubbed of
+  `sk-ant-…` before any write, and the schema has no key field), and a loaded
+  one is treated as hostile input: rendered through the same text-node-only path
+  as streamed model output, with tool calls drawn as labels and never executed.
+  Saving and loading are same-document operations, so the report's
+  Content-Security-Policy is unchanged and `connect-src` stays Anthropic-only.
+
 - **Runtime-transparency panel ("I'm not convinced").** A link at the foot of
   *Why trust it?* opens an in-depth briefing for the security- or
   trust-conscious reader: the single network destination, exactly what leaves
@@ -54,6 +75,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cache key. The first run after upgrading re-reads the set at full cost; no
   cache schema version was bumped, so older entries remain on disk and are still
   served if you pin a previous model.
+
+- The report chat's `beforeunload` warning now fires **only** when the
+  conversation could not be persisted (quota exhausted, private mode, storage
+  disabled). With the thread surviving a reload, warning on every close was a
+  prompt for a loss that no longer happens.
 - Brought the four header help modals back in sync with the pipeline: the
   set-identity / model-authored-review-plan stages, prose harvest, edition
   audit, per-severity markup layers, the reviewed-copy guarantee, and the

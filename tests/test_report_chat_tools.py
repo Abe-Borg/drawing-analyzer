@@ -13,6 +13,7 @@ from __future__ import annotations
 import glob
 import json
 import os
+import pathlib
 from datetime import datetime
 
 import pytest
@@ -516,3 +517,466 @@ def test_resize_grips_cover_all_eight_edges(page, tmp_path):
                 cls + ": " + edge + " edge moved " + str(round(got, 1))
                 + "px, expected " + str(want) + "px (pinned edges must not move)"
             )
+
+
+# --------------------------------------------------------------------------- #
+# Transcript persistence: the conversation auto-saves per report, replays
+# faithfully, and round-trips through a JSON file. Verified in a real browser
+# because localStorage, blob downloads, and the file picker only exist there.
+# --------------------------------------------------------------------------- #
+
+
+def _wait_turn(page, *, expect=None):
+    """Wait for a turn to settle.
+
+    ``_finish`` watches the Send button's disabled→enabled flip, which a turn
+    that completes inside one poll interval can slip through. This waits for the
+    settled state itself instead, so it cannot race a fast canned stream.
+    """
+    page.wait_for_function(
+        "() => { var b = document.getElementById('da-chat-send');"
+        " return b && !b.disabled && document.querySelector('.da-user'); }",
+        timeout=15000,
+    )
+    if expect:
+        page.wait_for_function(
+            "t => document.getElementById('da-chat-msgs').textContent.indexOf(t) !== -1",
+            arg=expect, timeout=10000,
+        )
+    page.wait_for_timeout(150)
+
+
+def _ask_and_settle(page, question, *, expect=None):
+    page.click("#da-chat-fab")
+    page.fill("#da-chat-input", question)
+    page.click("#da-chat-send")
+    _wait_turn(page, expect=expect)
+
+
+def _stored(page):
+    """The auto-saved transcript for the loaded report, or None."""
+    raw = page.evaluate(
+        """() => {
+          for (var i = 0; i < localStorage.length; i++) {
+            var k = localStorage.key(i);
+            if (k.indexOf('da-chat-tx-') === 0) return localStorage.getItem(k);
+          }
+          return null;
+        }"""
+    )
+    return json.loads(raw) if raw else None
+
+
+def _chat_doc():
+    return hr.build_html_report(
+        _findings_ctx(), source_names=["a.pdf"], now=NOW, api_key=KEY, embed_api_key=True
+    )
+
+
+def test_conversation_survives_a_reload(page, tmp_path):
+    # The whole point of the feature: a refresh used to destroy the thread.
+    _load(page, _chat_doc(), tmp_path, queue=[_text_turn("VAV-3 has no clearance shown.")])
+    _ask_and_settle(page, "what are the conflicts?")
+
+    saved = _stored(page)
+    assert saved is not None
+    assert saved["kind"] == "drawing_analyzer_chat_transcript"
+    assert saved["schema_version"] == 1
+    # The stored messages are API-clean: a stray display key would be rejected
+    # on the next request, so it must never ride inside the message.
+    for turn in saved["turns"]:
+        assert set(turn["message"]) == {"role", "content"}
+    assert saved["turns"][0]["display"]["text"] == "what are the conflicts?"
+
+    page.reload()
+    page.click("#da-chat-fab")
+    assert "what are the conflicts?" in page.eval_on_selector(".da-user", "el => el.textContent")
+    assert "VAV-3 has no clearance shown." in page.eval_on_selector(".da-ai", "el => el.textContent")
+    assert "Restored your previous conversation" in page.eval_on_selector(
+        "#da-chat-msgs", "el => el.textContent")
+    # Replay is pure rendering — nothing was re-sent to the API.
+    assert page.evaluate("window.__REQ.length") == 0
+    # The starter chips gave way to the restored thread.
+    assert page.eval_on_selector("#da-starters-row", "el => el.style.display") == "none"
+
+    # ...and the restored history is genuinely resumable.
+    page.fill("#da-chat-input", "and the second one?")
+    page.click("#da-chat-send")
+    _wait_turn(page)
+    sent = page.evaluate("window.__REQ")[0]["messages"]
+    assert sent[0]["content"] == "what are the conflicts?"
+    assert sent[1]["role"] == "assistant"
+    assert sent[-1]["content"] == "and the second one?"
+    assert page.evaluate("window.__pwned") is False
+
+
+def test_new_chat_clears_the_stored_transcript(page, tmp_path):
+    _load(page, _chat_doc(), tmp_path, queue=[_text_turn("answered.")])
+    _ask_and_settle(page, "a question")
+    assert _stored(page) is not None
+
+    page.click("#da-chat-clear")           # "New chat" is the eraser
+    assert _stored(page) is None
+
+    page.reload()
+    page.click("#da-chat-fab")
+    assert page.eval_on_selector_all(".da-user, .da-ai", "els => els.length") == 0
+    page.wait_for_selector(".da-starter", timeout=3000)   # chips are back
+
+
+def test_replayed_excerpt_keeps_display_and_api_content_apart(page, tmp_path):
+    # The excerpt flow deliberately shows less than it sends; persistence must
+    # not collapse the two into one.
+    ctx = _Ctx(
+        sheets=[_Sheet(_Ref("a.pdf", 0, 1),
+                       text="**Scope**\n- UNIQUEPHRASE alpha bravo charlie delta")],
+        combined_text="# Digest\n\nnothing special",
+    )
+    doc = hr.build_html_report(
+        ctx, source_names=["a.pdf"], now=NOW, api_key=KEY, embed_api_key=True
+    )
+    _load(page, doc, tmp_path)
+    page.evaluate(
+        """() => {
+          var el = Array.from(document.querySelectorAll('main.content li, main.content p'))
+            .find(n => n.textContent.indexOf('UNIQUEPHRASE') !== -1);
+          var r = document.createRange(); r.selectNodeContents(el);
+          var s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+          document.querySelector('main.content').dispatchEvent(new MouseEvent('mouseup', {bubbles:true}));
+        }"""
+    )
+    page.wait_for_selector("#da-sel-pop", timeout=3000)
+    page.click("#da-sel-pop")
+    page.wait_for_selector("#da-sel-chip", timeout=3000)
+    page.fill("#da-chat-input", "explain this")
+    page.click("#da-chat-send")
+    _wait_turn(page)
+
+    page.reload()
+    page.click("#da-chat-fab")
+    user_txt = page.eval_on_selector(".da-user", "el => el.textContent")
+    assert "explain this" in user_txt
+    assert "about selected excerpt" in user_txt
+    assert "UNIQUEPHRASE" in user_txt          # inside the disclosure
+    assert "<excerpt>" not in user_txt          # ...but never as the question line
+
+    # The API side kept the full wrapped prompt.
+    page.fill("#da-chat-input", "and now?")
+    page.click("#da-chat-send")
+    _wait_turn(page)
+    first = page.evaluate("window.__REQ")[0]["messages"][0]["content"]
+    assert "<excerpt>" in first and "UNIQUEPHRASE" in first
+
+
+def test_replay_does_not_rerun_report_driving_tools(page, tmp_path):
+    # A recorded filter_report/highlight_term must render as a settled chip, not
+    # execute — re-running a past conversation's calls would silently hijack the
+    # page the reader just opened.
+    _load(page, _chat_doc(), tmp_path,
+          queue=[_one_tool_round("ft", "filter_report", '{"search":"zznomatchzz"}'),
+                 _text_turn("nothing matched.")])
+    _ask_and_settle(page, "search zznomatchzz")
+    assert page.eval_on_selector("#search", "el => el.value") == "zznomatchzz"
+
+    page.reload()
+    page.click("#da-chat-fab")
+    # The report is untouched by the replay...
+    assert page.eval_on_selector("#search", "el => el.value") == ""
+    assert page.evaluate("window.__REQ.length") == 0
+    # ...but the tool chip still shows the call and its recorded outcome.
+    chips = page.eval_on_selector_all(".da-tool", "els => els.map(e => e.textContent)")
+    assert any("zznomatchzz" in c for c in chips), chips
+    assert page.eval_on_selector_all(".da-tool-done", "els => els.length") == 1
+    assert page.eval_on_selector_all(".da-tool-err", "els => els.length") == 0
+
+
+def test_replayed_tool_chip_shows_a_recorded_failure(page, tmp_path):
+    _load(page, _chat_doc(), tmp_path,
+          queue=[_one_tool_round("bad", "no_such_tool", "{}"), _text_turn("sorry.")])
+    _ask_and_settle(page, "call a broken tool")
+    page.reload()
+    page.click("#da-chat-fab")
+    assert page.eval_on_selector_all(".da-tool-err", "els => els.length") == 1
+
+
+def test_save_json_downloads_a_valid_transcript(page, tmp_path):
+    # Forces the download fallback (headless Chromium exposes showSaveFilePicker
+    # but cannot show one), which is also the path every non-Chromium reader takes.
+    page.add_init_script("window.showSaveFilePicker = undefined;")
+    _load(page, _chat_doc(), tmp_path, queue=[_text_turn("answered.")])
+    _ask_and_settle(page, "a question")
+
+    with page.expect_download(timeout=5000) as dl:
+        page.click("#da-chat-save")
+    download = dl.value
+    assert download.suggested_filename == "chat_history.json"
+    payload = json.loads(pathlib.Path(download.path()).read_text(encoding="utf-8"))
+    assert payload["kind"] == "drawing_analyzer_chat_transcript"
+    assert payload["schema_version"] == 1
+    assert payload["report"]["report_id"] == _stored(page)["report"]["report_id"]
+    assert payload["turns"][0]["display"]["text"] == "a question"
+    assert set(payload["turns"][0]["message"]) == {"role", "content"}
+
+
+def test_save_json_uses_the_file_picker_when_the_browser_offers_one(page, tmp_path):
+    # The picker is what lets the reader drop the file straight into the export
+    # folder beside report.html; a plain download can only reach Downloads.
+    page.add_init_script(
+        """
+        window.__PICKED = null;
+        window.showSaveFilePicker = function(opts){
+          window.__PICKED = opts;
+          return Promise.resolve({createWritable: function(){
+            return Promise.resolve({
+              write: function(t){ window.__WROTE = t; },
+              close: function(){}
+            });
+          }});
+        };
+        """
+    )
+    _load(page, _chat_doc(), tmp_path, queue=[_text_turn("answered.")])
+    _ask_and_settle(page, "a question")
+    page.click("#da-chat-save")
+    page.wait_for_function("() => window.__WROTE", timeout=5000)
+
+    assert page.evaluate("window.__PICKED.suggestedName") == "chat_history.json"
+    payload = json.loads(page.evaluate("window.__WROTE"))
+    assert payload["kind"] == "drawing_analyzer_chat_transcript"
+    assert payload["turns"][0]["display"]["text"] == "a question"
+
+
+def test_load_json_restores_and_resumes(page, tmp_path):
+    page.on("dialog", lambda d: d.accept())
+    doc = _chat_doc()
+    _load(page, doc, tmp_path, queue=[_text_turn("answered.")])
+    report_id = json.loads(
+        doc[doc.index(">", doc.index('id="da-chat-config"')) + 1:
+            doc.index("</script>", doc.index('id="da-chat-config"'))]
+    )["reportId"]
+
+    transcript = {
+        "kind": "drawing_analyzer_chat_transcript",
+        "schema_version": 1,
+        "report": {"report_id": report_id, "title": "t", "generated": "g",
+                   "sources": ["a.pdf"], "model": "m"},
+        "saved_at": "2026-07-14T08:00:00.000Z",
+        "truncated": False,
+        "turns": [
+            {"message": {"role": "user", "content": "earlier question"},
+             "display": {"text": "earlier question", "excerpt": ""}},
+            {"message": {"role": "assistant",
+                         "content": [{"type": "text", "text": "earlier **answer**"}]},
+             "display": {"notes": []}},
+        ],
+    }
+    path = tmp_path / "chat_history.json"
+    path.write_text(json.dumps(transcript), encoding="utf-8")
+
+    page.click("#da-chat-fab")
+    page.set_input_files("#da-chat-load-input", str(path))
+    page.wait_for_selector(".da-user", timeout=5000)
+    assert "earlier question" in page.eval_on_selector(".da-user", "el => el.textContent")
+    # Markdown in a loaded answer renders through the same safe-DOM path.
+    assert page.eval_on_selector_all(".da-ai strong", "els => els.length") == 1
+
+    page.fill("#da-chat-input", "follow up")
+    page.click("#da-chat-send")
+    _wait_turn(page)
+    sent = page.evaluate("window.__REQ")[0]["messages"]
+    assert sent[0]["content"] == "earlier question"
+    assert sent[-1]["content"] == "follow up"
+
+
+def test_load_rejects_a_file_that_is_not_a_transcript(page, tmp_path):
+    page.on("dialog", lambda d: d.accept())
+    _load(page, _chat_doc(), tmp_path)
+    page.click("#da-chat-fab")
+
+    bad = tmp_path / "not_a_transcript.json"
+    bad.write_text(json.dumps({"kind": "something_else"}), encoding="utf-8")
+    page.set_input_files("#da-chat-load-input", str(bad))
+    page.wait_for_selector(".da-err", timeout=5000)
+    assert "not a Drawing Analyzer chat transcript" in page.eval_on_selector(
+        ".da-err", "el => el.textContent")
+    assert page.eval_on_selector_all(".da-user, .da-ai", "els => els.length") == 0
+    assert _stored(page) is None
+
+
+def test_load_drops_an_unanswered_trailing_turn(page, tmp_path):
+    # A transcript ending on a user turn would make the next question the second
+    # consecutive user turn — a 400 from the API. It must be trimmed on load.
+    page.on("dialog", lambda d: d.accept())
+    _load(page, _chat_doc(), tmp_path, queue=[_text_turn("ok.")])
+    transcript = {
+        "kind": "drawing_analyzer_chat_transcript", "schema_version": 1,
+        "report": {"report_id": "deadbeefdeadbeef"}, "saved_at": "x", "truncated": False,
+        "turns": [
+            {"message": {"role": "user", "content": "answered one"},
+             "display": {"text": "answered one", "excerpt": ""}},
+            {"message": {"role": "assistant", "content": [{"type": "text", "text": "yes"}]},
+             "display": {"notes": []}},
+            {"message": {"role": "user", "content": "never answered"},
+             "display": {"text": "never answered", "excerpt": ""}},
+        ],
+    }
+    path = tmp_path / "trailing.json"
+    path.write_text(json.dumps(transcript), encoding="utf-8")
+    page.click("#da-chat-fab")
+    page.set_input_files("#da-chat-load-input", str(path))
+    page.wait_for_selector(".da-user", timeout=5000)
+
+    page.fill("#da-chat-input", "next")
+    page.click("#da-chat-send")
+    _wait_turn(page)
+    roles = [m["role"] for m in page.evaluate("window.__REQ")[0]["messages"]]
+    assert roles == ["user", "assistant", "user"]     # strict alternation preserved
+
+
+def test_storage_failure_degrades_without_breaking_the_turn(page, tmp_path):
+    # Quota exhausted / storage disabled must never cost the reader an answer.
+    page.add_init_script(
+        "window.addEventListener('DOMContentLoaded', function(){"
+        " localStorage.setItem = function(){ var e = new Error('quota');"
+        " e.name = 'QuotaExceededError'; throw e; }; });"
+    )
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    _load(page, _chat_doc(), tmp_path, queue=[_text_turn("still answered.")])
+    _ask_and_settle(page, "a question")
+
+    assert errors == []
+    assert "still answered." in page.eval_on_selector("#da-chat-msgs", "el => el.textContent")
+    assert "too large for your browser" in page.eval_on_selector(
+        "#da-chat-msgs", "el => el.textContent")
+    # ...and the unload warning comes back on, because now there IS something to lose.
+    assert page.evaluate(
+        "(() => { var e = new Event('beforeunload', {cancelable:true});"
+        " window.dispatchEvent(e); return e.defaultPrevented; })()"
+    ) is True
+
+
+def test_beforeunload_is_silent_once_the_transcript_is_saved(page, tmp_path):
+    # With the conversation persisted there is nothing to lose, and a warning on
+    # every close just trains readers to click through it.
+    _load(page, _chat_doc(), tmp_path, queue=[_text_turn("answered.")])
+    _ask_and_settle(page, "a question")
+    assert page.evaluate(
+        "(() => { var e = new Event('beforeunload', {cancelable:true});"
+        " window.dispatchEvent(e); return e.defaultPrevented; })()"
+    ) is False
+
+
+def test_stopping_mid_tool_loop_leaves_a_resumable_transcript(page, tmp_path):
+    # A turn stopped between a tool call and its answer leaves
+    # assistant(tool_use) -> user(tool_result) -> nothing. Trimming only the
+    # trailing user turn would keep the dangling tool_use, and the next question
+    # (a plain user turn, not a tool_result) is a 400 from the API. The whole
+    # unfinished exchange has to be rewound.
+    page.on("dialog", lambda d: d.accept())
+    _load(page, _chat_doc(), tmp_path, queue=[_text_turn("first answer.")])
+    _ask_and_settle(page, "first question", expect="first answer.")
+
+    transcript = json.loads(page.evaluate(
+        """() => {
+          for (var i = 0; i < localStorage.length; i++) {
+            var k = localStorage.key(i);
+            if (k.indexOf('da-chat-tx-') === 0) return localStorage.getItem(k);
+          }
+        }"""
+    ))
+    # Splice on the shape a stopped tool loop leaves behind.
+    transcript["turns"] += [
+        {"message": {"role": "user", "content": "second question"},
+         "display": {"text": "second question", "excerpt": ""}},
+        {"message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "hung", "name": "calculate",
+             "input": {"expression": "1+1"}}]},
+         "display": {"notes": ["⏹ Stopped."]}},
+        {"message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "hung", "content": "2"}]}},
+    ]
+    path = tmp_path / "stopped.json"
+    path.write_text(json.dumps(transcript), encoding="utf-8")
+
+    page.set_input_files("#da-chat-load-input", str(path))   # panel already open
+    page.wait_for_function(
+        "() => document.getElementById('da-chat-msgs').textContent"
+        ".indexOf('second question') === -1", timeout=5000,
+    )
+
+    page.fill("#da-chat-input", "third question")
+    page.click("#da-chat-send")
+    _wait_turn(page)
+    messages = page.evaluate("window.__REQ")[-1]["messages"]
+    # Strict alternation, and no tool_use left waiting for a tool_result.
+    assert [m["role"] for m in messages] == ["user", "assistant", "user"]
+    assert not any(
+        isinstance(b, dict) and b.get("type") == "tool_use"
+        for m in messages if isinstance(m.get("content"), list)
+        for b in m["content"]
+    )
+    assert messages[-1]["content"] == "third question"
+
+
+def test_loading_mid_stream_does_not_corrupt_the_loaded_thread(page, tmp_path):
+    # Aborting an in-flight turn only makes its promise reject later. If that
+    # late cleanup still edits `history`, it pops a turn off the conversation
+    # that replaced it — and then saves the damage.
+    page.on("dialog", lambda d: d.accept())
+    doc = _chat_doc()
+    _load(page, doc, tmp_path)
+    report_id = json.loads(
+        doc[doc.index(">", doc.index('id="da-chat-config"')) + 1:
+            doc.index("</script>", doc.index('id="da-chat-config"'))]
+    )["reportId"]
+    transcript = {
+        "kind": "drawing_analyzer_chat_transcript", "schema_version": 1,
+        "report": {"report_id": report_id}, "saved_at": "x", "truncated": False,
+        "turns": [
+            {"message": {"role": "user", "content": "loaded question"},
+             "display": {"text": "loaded question", "excerpt": ""}},
+            {"message": {"role": "assistant",
+                         "content": [{"type": "text", "text": "loaded answer"}]},
+             "display": {"notes": []}},
+        ],
+    }
+    path = tmp_path / "loaded.json"
+    path.write_text(json.dumps(transcript), encoding="utf-8")
+
+    # A turn that hangs until aborted. The stub must honour opts.signal the way
+    # real fetch does — a promise that merely never settles would leave the old
+    # turn's cleanup un-run, and the race being tested here lives in that cleanup.
+    page.evaluate(
+        """() => {
+          window.fetch = function(url, opts){
+            return new Promise(function(_resolve, reject){
+              var sig = opts && opts.signal;
+              if(sig) sig.addEventListener('abort', function(){
+                var e = new Error('aborted'); e.name = 'AbortError'; reject(e);
+              });
+            });
+          };
+        }"""
+    )
+    page.click("#da-chat-fab")
+    page.fill("#da-chat-input", "in-flight question")
+    page.click("#da-chat-send")
+    page.wait_for_function(
+        "() => { var b = document.getElementById('da-chat-send'); return b && b.disabled; }",
+        timeout=5000,
+    )
+    page.set_input_files("#da-chat-load-input", str(path))
+    page.wait_for_function(
+        "() => document.getElementById('da-chat-msgs').textContent.indexOf('loaded answer') !== -1",
+        timeout=5000,
+    )
+    page.wait_for_timeout(400)   # give the aborted turn's cleanup time to fire
+
+    # The loaded conversation is intact, on screen and in storage.
+    assert "loaded question" in page.eval_on_selector("#da-chat-msgs", "el => el.textContent")
+    assert "in-flight question" not in page.eval_on_selector(
+        "#da-chat-msgs", "el => el.textContent")
+    saved = _stored(page)
+    assert [t["message"]["role"] for t in saved["turns"]] == ["user", "assistant"]
+    assert saved["turns"][0]["display"]["text"] == "loaded question"

@@ -77,6 +77,32 @@ The report is a single self-contained file. Its security rests on four layers:
 - The key literal never appears in the default HTML, in rendered chat text, or
   in logs. Request headers are never logged.
 
+### Saved conversations
+
+- The conversation **auto-saves to your browser's local storage**, under a key
+  scoped to that report, so a refresh or reopen no longer loses it. **New chat**
+  erases the stored copy. Nothing is uploaded — this is the same machine, in the
+  browser's own profile directory.
+- **A transcript never contains an API key.** The serializer scrubs `sk-ant-…`
+  from the entire document before it is written, and the schema has no key field
+  at any depth — so a key you paste into the chat box, or one the model echoes
+  back, is redacted in both the stored copy and any saved file.
+- **Know this about `file://`:** a double-clicked report shares one local-storage
+  origin with *every other local HTML file* you open in that browser. Scoping the
+  key per report stops reports from overwriting each other, but it is not an
+  isolation boundary — another local page you open could read a stored
+  transcript. Use **New chat** when that matters, or serve the report over
+  `https://` where each origin is genuinely separate.
+- **Save** writes the conversation to a JSON file you choose (the file picker
+  lets you place it next to `report.html`); **Load** reads one back. A saved
+  transcript holds the full conversation — your questions, the model's answers,
+  the report excerpts quoted into them, and any web-search results — so treat it
+  like the report itself.
+- A **loaded transcript is treated as hostile input**, exactly like streamed
+  model output: it is rendered through the same text-node-only path with the
+  same https-only link policy, and any tool call recorded in it is drawn as a
+  label, never executed.
+
 ## Persistent API-key storage (GUI)
 
 Saving a key for future sessions uses an **OS-secured credential store** —
@@ -114,6 +140,11 @@ accordingly:
   display filenames, configuration, stage statuses, usage, and artifact hashes.
   Sanitized at emit time (keys redacted, absolute paths reduced to basenames)
   but still descriptive of the project — treat like the rest of the export.
+- `chat_history.json` — only if you save one from the report's assistant. It is
+  written by your browser, not by the export, so it is **not** listed or hashed
+  in `run_manifest.json`: the manifest inventories what the export itself wrote
+  and is sealed before any conversation happens. A transcript sitting in an
+  export folder is expected to exceed the manifest, not evidence of tampering.
 
 The Ask-AI assistant sends the report context and your question to Anthropic.
 The verification, citation, and QC stages send their described crops and claims

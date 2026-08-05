@@ -1322,3 +1322,126 @@ def test_chat_default_model_supports_everything_the_widget_sends():
         "is documented to need it"
     )
     assert caps.supports_adaptive_thinking
+
+
+# --------------------------------------------------------------------------- #
+# Transcript persistence — the Ask-AI conversation survives a reload and can be
+# saved to / loaded from a JSON file (schema v1).
+# --------------------------------------------------------------------------- #
+
+
+def test_report_id_is_deterministic_and_scoped_to_the_run():
+    import json
+
+    def _report_id(doc: str) -> str:
+        return json.loads(_script_block_body(doc, "da-chat-config"))["reportId"]
+
+    first = _report_id(hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW))
+    again = _report_id(hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW))
+    # Same run → same id, so a reloaded report finds the conversation it saved.
+    assert first == again
+    assert len(first) == 16 and all(c in "0123456789abcdef" for c in first)
+
+    # Anything that makes it a *different* report gives a different key, so two
+    # reports in one browser can never read each other's transcript.
+    later = _report_id(hr.build_html_report(
+        _make_ctx(), source_names=[SRC], now=datetime(2026, 6, 7, 7, 3, 0)))
+    other_src = _report_id(hr.build_html_report(
+        _make_ctx(), source_names=["Other_Set.pdf"], now=NOW))
+    assert later != first
+    assert other_src != first
+
+
+def test_report_id_separates_runs_inside_the_same_minute():
+    # `generated` only resolves to the minute, so the run id is what keeps two
+    # analyses of the same set from sharing a transcript key.
+    import json
+    from types import SimpleNamespace
+
+    def _report_id(ctx) -> str:
+        doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
+        return json.loads(_script_block_body(doc, "da-chat-config"))["reportId"]
+
+    a, b = _make_ctx(), _make_ctx()
+    a.run_journal = SimpleNamespace(run_id="RUN-aaaaaaaaaaaa")
+    b.run_journal = SimpleNamespace(run_id="RUN-bbbbbbbbbbbb")
+    assert _report_id(a) != _report_id(b)
+    # A context with no journal still yields a stable id (the fixtures' case).
+    assert _report_id(_make_ctx()) == _report_id(_make_ctx())
+
+
+def test_transcript_controls_present_by_default():
+    doc = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW)
+    assert 'id="da-chat-save"' in doc
+    assert 'id="da-chat-load"' in doc
+    assert 'id="da-chat-load-input"' in doc
+    assert 'accept="application/json,.json"' in doc
+    # The Save-as-PDF transcript must not carry the new controls into the print.
+    assert "body.da-print-chat #da-chat-save" in doc
+    assert "body.da-print-chat #da-chat-load" in doc
+
+
+def test_transcript_controls_absent_without_chat():
+    doc = hr.build_html_report(
+        _make_ctx(), source_names=[SRC], now=NOW, include_chat=False
+    )
+    for needle in ('id="da-chat-save"', 'id="da-chat-load"',
+                   'id="da-chat-load-input"', "reportId", "da-chat-tx-"):
+        assert needle not in doc
+
+
+def test_chat_js_persists_transcripts_and_scrubs_them():
+    js = hr._CHAT_JS
+    # The stored document is the documented schema...
+    assert "drawing_analyzer_chat_transcript" in js
+    assert "var TX_SCHEMA = 1;" in js
+    assert "'da-chat-tx-' + (CFG.reportId" in js
+    # ...replay drives the same renderers as streaming (no forked renderer)...
+    assert "function replayAssistant" in js and "function renderUserBubble" in js
+    assert "startBlockUI(st, i, bubble)" in js and "finishBlock(st, i, bubble)" in js
+    # ...and every write goes through the secret scrubber.
+    assert "scrubSecrets(JSON.stringify(payload))" in js
+
+
+def test_transcript_serializer_never_touches_key_material():
+    # Structural guarantee: the code that builds a transcript cannot read the
+    # key, so no bug in the scrubber can leak one from this path.
+    js = hr._CHAT_JS
+    body = js[js.index("function transcriptPayload"): js.index("function renderUserBubble")]
+    for forbidden in ("CFG.apiKey", "apiKey", "KEY_STORE", "sessionStorage"):
+        assert forbidden not in body
+
+
+def test_replay_never_dispatches_recorded_tool_calls():
+    # A loaded transcript is untrusted input; replaying a recorded tool_use must
+    # render a chip, never call runTool/TOOLS (which drive the reader's page).
+    js = hr._CHAT_JS
+    start = js.index("function replayAssistant")
+    body = js[start: js.index("function replayTranscript")]
+    assert "runTool(" not in body
+    assert "TOOLS[" not in body
+
+
+def test_csp_policy_is_unchanged_by_transcript_persistence():
+    # Saving/loading a transcript is same-document work — no request is made, so
+    # the policy must come out byte-identical. Pin the whole string: a widened
+    # connect-src or a stray blob:/data: source would otherwise slip through.
+    import re
+
+    doc = hr.build_html_report(_make_ctx(), source_names=[SRC], now=NOW)
+    policy = re.search(
+        r'<meta http-equiv="Content-Security-Policy" content="([^"]+)">', doc
+    ).group(1)
+    directives = dict(
+        (d.strip().split(" ", 1) + [""])[:2] for d in policy.split(";") if d.strip()
+    )
+    assert directives["default-src"] == "'none'"
+    assert directives["connect-src"] == "https://api.anthropic.com"
+    assert directives["img-src"] == "'self' file: data:"
+    assert directives["base-uri"] == "'none'"
+    assert directives["form-action"] == "'none'"
+    assert directives["object-src"] == "'none'"
+    assert set(directives) == {
+        "default-src", "script-src", "style-src", "img-src",
+        "connect-src", "base-uri", "form-action", "object-src",
+    }
