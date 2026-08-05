@@ -2624,9 +2624,14 @@ _CHAT_CSS = """
 /* The head carries five controls; the model chip is the only elastic item, so
    it collapses first (min-width:0 lets a flex item shrink past its text) and
    wrap is the last resort at the 320px minimum panel width. */
+/* `flex:0 0 auto` here and on the other fixed rows (#da-chat-key, .da-chat-foot,
+   #da-sel-chip) is load-bearing, not decoration: composeCap() measures them to
+   decide how tall the ask box may be, and that arithmetic is only sound while
+   the transcript is the ONE row that gives. Let a fixed row shrink under
+   pressure and the measurement chases itself. */
 .da-chat-head{
   display:flex; align-items:center; gap:8px; padding:10px 12px; flex-wrap:wrap;
-  border-bottom:1px solid var(--line); background:#fbfcfe;
+  flex:0 0 auto; border-bottom:1px solid var(--line); background:#fbfcfe;
 }
 .da-chat-title{font-weight:700; font-size:14px; flex:1 1 auto; min-width:0}
 .da-chat-head .ghost-btn{flex:0 0 auto}
@@ -2727,7 +2732,7 @@ _CHAT_CSS = """
 #da-chat-stop{background:var(--conflict)}
 .da-chat-foot{
   font-size:10.5px; color:var(--muted); padding:6px 12px 9px; background:#fbfcfe;
-  border-top:1px solid var(--line);
+  border-top:1px solid var(--line); flex:0 0 auto;
 }
 .da-key-warn{color:var(--conflict); font-weight:700}
 #da-chat-forget{
@@ -2739,7 +2744,7 @@ _CHAT_CSS = """
 /* ---- reader-supplied API-key entry ---- */
 #da-chat-key{
   padding:9px 12px; border-top:1px solid var(--line); background:#fbfcfe;
-  display:flex; flex-direction:column; gap:6px;
+  display:flex; flex-direction:column; gap:6px; flex:0 0 auto;
 }
 #da-chat-key[hidden],#da-chat-key-form[hidden],#da-chat-key-set[hidden]{display:none}
 .da-key-row{display:flex; gap:6px; align-items:center}
@@ -2778,7 +2783,7 @@ body.da-dragging, body.da-dragging *{user-select:none !important}
 }
 #da-sel-pop:hover{filter:brightness(1.08)}
 #da-sel-chip{
-  display:flex; align-items:center; gap:8px; margin:0 12px; padding:6px 10px;
+  display:flex; align-items:center; gap:8px; margin:0 12px; padding:6px 10px; flex:0 0 auto;
   background:var(--accent-soft); border:1px solid var(--line); border-radius:8px;
   font-size:12px; color:var(--ink);
 }
@@ -3613,14 +3618,26 @@ _CHAT_JS = r"""
   // old window.prompt). renderKeyUi() settles the row to its resting state; in
   // embedded mode the whole row is hidden — the embedded key is authoritative
   // and mutually exclusive with manual entry (mirrors the CFG.apiKey guards).
-  function setKeyStatus(msg){ if(keyStatus) keyStatus.textContent = msg || ''; }
+  // Both of these change the height of a FIXED panel row — the entry form is
+  // taller than the "key set" line, and a status message adds one to three more
+  // lines — so both end by re-clamping the ask box (see composeCap: its ceiling
+  // is measured from these rows, and goes stale the moment one of them moves).
+  // The live case is an expanded box clamped against the compact row, with
+  // Change key or a 401 swapping the tall form back in underneath it.
+  function setKeyStatus(msg){
+    if(keyStatus) keyStatus.textContent = msg || '';
+    paintCompose();
+  }
   function renderKeyUi(){
     if(!keyRow) return;
-    if(CFG.apiKey){ keyRow.hidden = true; return; }   // embedded: no manual entry
-    keyRow.hidden = false;
-    var have = haveKey();
-    if(keyForm) keyForm.hidden = have;
-    if(keySet) keySet.hidden = !have;
+    if(CFG.apiKey){ keyRow.hidden = true; }           // embedded: no manual entry
+    else {
+      keyRow.hidden = false;
+      var have = haveKey();
+      if(keyForm) keyForm.hidden = have;
+      if(keySet) keySet.hidden = !have;
+    }
+    paintCompose();
   }
   // Force the entry form open (the replacement for window.prompt): used when a
   // send is attempted with no key and when a key is rejected (401).
@@ -4419,7 +4436,7 @@ _CHAT_JS = r"""
     // A hidden panel measures 0 — fall back to half the CSS default height
     // (72vh), so a height restored before the first open survives to be
     // re-clamped against real measurements when the panel opens.
-    if(!panelH || !composeEl) return Math.max(composeMin(), Math.min(window.innerHeight * 0.36, COMPOSE_MAX));
+    if(!panelH) return Math.max(composeMin(), Math.min(window.innerHeight * 0.36, COMPOSE_MAX));
     var used = 0;
     Array.prototype.forEach.call(panel.children, function(el){
       // Skip the two flex items whose size is the question (the transcript
@@ -4442,7 +4459,10 @@ _CHAT_JS = r"""
   }
   // The one place the box's height is written — from the text when auto-growing,
   // from `composeWant` when pinned, always clamped to what the panel can spare.
+  // Callable from anywhere, including the key-row code that runs before this
+  // block initializes: until `composeEl` is assigned there is nothing to paint.
   function paintCompose(){
+    if(!composeEl) return;
     var cap = composeCap();
     if(composeWant === null) fitCompose(cap);
     else input.style.height = Math.max(composeMin(), Math.min(composeWant, cap)) + 'px';
@@ -4733,6 +4753,7 @@ _CHAT_JS = r"""
     clearSelHighlight();
     var chip = document.getElementById('da-sel-chip');
     if(chip) chip.remove();
+    paintCompose();   // another fixed row gone — the ask box may take its space
   }
 
   if(reportEl){

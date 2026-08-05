@@ -542,6 +542,12 @@ def _box_h(page):
     )
 
 
+def _row_h(page, el_id):
+    return page.evaluate(
+        "id => document.getElementById(id).getBoundingClientRect().height", el_id
+    )
+
+
 def _drag_grip(page, dy):
     box = page.locator("#da-compose-grip").bounding_box()
     assert box, "the compose grip should be laid out and grabbable"
@@ -611,6 +617,50 @@ def test_expanded_box_never_swallows_the_transcript(page, tmp_path, embed_key, v
     )
     assert geom["msgs"]["height"] >= 80, "the transcript must keep a readable slice"
     # The last two rows staying inside proves nothing was pushed out of the clip.
+    assert geom["foot"]["bottom"] <= geom["panel"]["bottom"] + 1
+    assert geom["key"]["bottom"] <= geom["panel"]["bottom"] + 1
+
+
+def test_a_fixed_row_growing_reclamps_an_already_expanded_box(page, tmp_path):
+    # The cap is measured from the fixed rows, so it goes stale the moment one of
+    # them changes height on its own — and the box was already clamped against
+    # the old measurement. The key row is the one that moves at runtime: the
+    # compact "key set" line, the taller entry form, and a status message of one
+    # to three lines are all the same row. Forget key swaps all three at once;
+    # a 401 rejection takes the identical path (forgetKey + revealKeyForm).
+    doc = hr.build_html_report(
+        _findings_ctx(), source_names=["a.pdf"], now=NOW, api_key=None, embed_api_key=False
+    )
+    page.set_viewport_size({"width": 1200, "height": 640})
+    _load(page, doc, tmp_path)
+    page.click("#da-chat-fab")
+    page.wait_for_selector("#da-chat-panel", state="visible", timeout=3000)
+    page.fill("#da-chat-key-input", KEY)
+    page.click("#da-chat-key-save")
+
+    # Reload into the resting state: a key is held, so the row is the compact
+    # "key set" line with no status under it — the smallest it ever is.
+    page.reload()
+    page.click("#da-chat-fab")
+    page.wait_for_selector("#da-chat-key-set", state="visible", timeout=3000)
+    page.click("#da-chat-expand")
+    expanded, key_before = _box_h(page), _row_h(page, "da-chat-key")
+
+    page.click("#da-chat-forget")
+    page.wait_for_selector("#da-chat-key-form", state="visible", timeout=3000)
+
+    grew = _row_h(page, "da-chat-key") - key_before
+    assert grew > 0, "the entry form plus its status is taller than the key-set line"
+    geom = page.evaluate(
+        """() => {
+          var r = function(id){ return document.getElementById(id).getBoundingClientRect(); };
+          return {panel: r('da-chat-panel'), msgs: r('da-chat-msgs'), key: r('da-chat-key'),
+                  foot: document.querySelector('.da-chat-foot').getBoundingClientRect()};
+        }"""
+    )
+    assert abs((expanded - _box_h(page)) - grew) <= 1, (
+        "the box must hand back exactly what the key row took (%.0fpx)" % grew)
+    assert geom["msgs"]["height"] >= 80, "the transcript floor still holds"
     assert geom["foot"]["bottom"] <= geom["panel"]["bottom"] + 1
     assert geom["key"]["bottom"] <= geom["panel"]["bottom"] + 1
 
