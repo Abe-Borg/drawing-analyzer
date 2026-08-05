@@ -252,6 +252,10 @@ def test_runtime_transparency_covers_the_runtime_surface() -> None:
         "zero api calls",
         "sha-256",
         "sessionstorage",
+        # Saved conversations: where they live, and the file:// caveat that
+        # makes the per-report scoping a separation and not a wall.
+        "local storage",
+        "new chat erases",
         # Honest limits.
         "no warranty",
         "probabilistic",

@@ -233,14 +233,17 @@ def _ask(page, question="attack me"):
     page.click("#da-chat-fab")
     page.fill("#da-chat-input", question)
     page.click("#da-chat-send")
-    # Streaming disables Send; wait for it to re-enable (turn finished).
+    # Wait for the *settled* state rather than the transient disabled→enabled
+    # flip: wait_for_function's own setup can outlast a fast canned stream, and
+    # watching for `disabled` then misses it and times out (a real flake under a
+    # loaded machine). The user bubble is created synchronously by the send, so
+    # "bubble present AND Send re-enabled" means exactly "a turn ran and
+    # finished" — and it holds on the error paths, where the empty assistant
+    # bubble is removed again.
     page.wait_for_function(
-        "() => { var b=document.getElementById('da-chat-send');"
-        " return b && b.disabled; }", timeout=5000
-    )
-    page.wait_for_function(
-        "() => { var b=document.getElementById('da-chat-send');"
-        " return b && !b.disabled; }", timeout=10000
+        "() => { var b = document.getElementById('da-chat-send');"
+        " return b && !b.disabled && document.querySelector('.da-user'); }",
+        timeout=15000,
     )
     page.wait_for_timeout(150)  # let any trailing debounced render settle
 
@@ -511,3 +514,171 @@ def test_csp_blocks_injected_inline_script(page, tmp_path):
     page.wait_for_timeout(50)
     assert page.evaluate("window.__pwned") is False
     assert page.evaluate("window.__csp.length") > 0, "a CSP violation should be recorded"
+
+
+# --------------------------------------------------------------------------- #
+# 5. Transcript persistence: a saved conversation is a new place model output
+#    and reader input come to rest, and a new channel they come back in through.
+#    Both directions are held to the same rules as the live stream.
+# --------------------------------------------------------------------------- #
+
+
+def _plain_ctx() -> _Ctx:
+    return _Ctx(sheets=[_Sheet(_Ref("a.pdf", 0, 1), text="x")], combined_text="x")
+
+
+def _report_id_of(doc: str) -> str:
+    start = doc.index('id="da-chat-config"')
+    body = doc[doc.index(">", start) + 1: doc.index("</script>", start)]
+    return json.loads(body)["reportId"]
+
+
+def test_saved_transcript_never_carries_key_material(page, tmp_path):
+    # A reader can paste a key into the chat box, and the model can echo one
+    # back. Neither may reach durable storage.
+    doc = hr.build_html_report(_plain_ctx(), source_names=["a.pdf"], now=NOW)
+    page.add_init_script(
+        "window.__SSE = " + json.dumps(_sse([
+            {"type": "content_block_start", "index": 0,
+             "content_block": {"type": "text", "text": ""}},
+            {"type": "content_block_delta", "index": 0,
+             "delta": {"type": "text_delta",
+                       "text": "you sent sk-ant-ECHOED222 back to me"}},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "message_delta", "index": 0, "delta": {"stop_reason": "end_turn"}},
+        ])) + ";"
+    )
+    page.add_init_script(_FETCH_STUB)
+    _load(page, doc, tmp_path)
+
+    page.click("#da-chat-fab")        # opens the panel; _ask would re-click it
+    page.fill("#da-chat-key-input", "sk-ant-SESSIONKEY111")
+    page.click("#da-chat-key-save")
+    page.fill("#da-chat-input", "is sk-ant-PASTED000 a valid key?")
+    page.click("#da-chat-send")
+    page.wait_for_function(
+        "() => { var b = document.getElementById('da-chat-send');"
+        " return b && !b.disabled && document.querySelector('.da-user'); }",
+        timeout=10000,
+    )
+    page.wait_for_timeout(200)
+
+    stored = page.evaluate(
+        """() => {
+          for (var i = 0; i < localStorage.length; i++) {
+            var k = localStorage.key(i);
+            if (k.indexOf('da-chat-tx-') === 0) return localStorage.getItem(k);
+          }
+          return null;
+        }"""
+    )
+    assert stored, "the conversation should have been saved"
+    for secret in ("sk-ant-PASTED000", "sk-ant-ECHOED222", "sk-ant-SESSIONKEY111"):
+        assert secret not in stored, f"{secret} reached durable storage"
+    assert "sk-ant-[redacted]" in stored
+    # The key the reader actually authenticated with is not in the document at all.
+    assert "apiKey" not in stored
+
+
+def test_loaded_transcript_is_inert(page, tmp_path):
+    # A transcript file is untrusted input from outside the report. Every hostile
+    # payload must render as text through the same safe-DOM path as a stream.
+    doc = hr.build_html_report(_plain_ctx(), source_names=["a.pdf"], now=NOW)
+    transcript = {
+        "kind": "drawing_analyzer_chat_transcript",
+        "schema_version": 1,
+        "report": {"report_id": _report_id_of(doc), "title": _ATTACKS["filename"]},
+        "saved_at": "2026-07-14T08:00:00.000Z",
+        "truncated": False,
+        "turns": [
+            {"message": {"role": "user", "content": _ATTACKS["text"]},
+             "display": {"text": _ATTACKS["text"], "excerpt": _ATTACKS["quote"]}},
+            {"message": {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": _ATTACKS["text"]},
+                {"type": "text", "text": _ATTACKS["text"] + " [link](javascript:window.__pwned=1)",
+                 "citations": [{"url": "javascript:window.__pwned=1", "title": "evil"},
+                               {"url": "https://good.example/ref", "title": "ok"}]},
+                {"type": "tool_use", "id": "t1", "name": "highlight_term",
+                 "input": {"term": _ATTACKS["sheet_id"]}},
+            ]},
+             "display": {"notes": [_ATTACKS["error"]]}},
+            {"message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": _ATTACKS["text"]}]}},
+            {"message": {"role": "assistant",
+                         "content": [{"type": "text", "text": "done"}]},
+             "display": {"notes": []}},
+        ],
+    }
+    path = tmp_path / "hostile.json"
+    path.write_text(json.dumps(transcript), encoding="utf-8")
+
+    _load(page, doc, tmp_path)
+    page.click("#da-chat-fab")
+    page.set_input_files("#da-chat-load-input", str(path))
+    page.wait_for_selector(".da-ai", timeout=5000)
+
+    assert page.evaluate("window.__pwned") is False, "loaded transcript executed"
+    assert page.evaluate(
+        "!!document.querySelector('#da-chat-msgs script, #da-chat-msgs iframe,"
+        " #da-chat-msgs svg, #da-chat-msgs img')"
+    ) is False
+    assert page.evaluate(
+        "() => Array.from(document.querySelectorAll('a'))"
+        ".every(a => a.protocol !== 'javascript:')"
+    )
+    # The safe citation still renders; the hostile one produced no anchor at all.
+    assert page.query_selector(".da-ai a[href='https://good.example/ref']") is not None
+    # The break-out text is visible as inert text, proving it was escaped.
+    assert "window.__pwned=1" in page.eval_on_selector("#da-chat-msgs", "el => el.textContent")
+    assert page.evaluate("window.__csp") == []
+
+
+def test_loaded_transcript_does_not_execute_client_tools(page, tmp_path):
+    # Recorded tool calls are rendered as chips, never dispatched — otherwise
+    # "open a JSON file" would let a transcript drive the reader's report.
+    doc = hr.build_html_report(_plain_ctx(), source_names=["a.pdf"], now=NOW)
+    transcript = {
+        "kind": "drawing_analyzer_chat_transcript",
+        "schema_version": 1,
+        "report": {"report_id": _report_id_of(doc)},
+        "saved_at": "x", "truncated": False,
+        "turns": [
+            {"message": {"role": "user", "content": "do it"},
+             "display": {"text": "do it", "excerpt": ""}},
+            {"message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "f1", "name": "filter_report",
+                 "input": {"search": "zznomatchzz", "high_only": True}},
+            ]}, "display": {"notes": []}},
+            {"message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "f1", "content": "0 of 1"}]}},
+            {"message": {"role": "assistant",
+                         "content": [{"type": "text", "text": "filtered"}]},
+             "display": {"notes": []}},
+        ],
+    }
+    path = tmp_path / "tools.json"
+    path.write_text(json.dumps(transcript), encoding="utf-8")
+
+    _load(page, doc, tmp_path)
+    page.click("#da-chat-fab")
+    page.set_input_files("#da-chat-load-input", str(path))
+    page.wait_for_selector(".da-tool", timeout=5000)
+
+    assert page.eval_on_selector("#search", "el => el.value") == ""
+    assert page.eval_on_selector_all("main.content .hidden", "els => els.length") == 0
+    assert page.evaluate("window.__pwned") is False
+
+
+def test_transcript_controls_hidden_in_pdf_transcript_export(page, tmp_path):
+    # Mirrors the key-field rule: the printed transcript is the conversation,
+    # not the chrome around it.
+    doc = hr.build_html_report(
+        _plain_ctx(), source_names=["a.pdf"], now=NOW,
+        api_key="sk-ant-fake-not-real", embed_api_key=True,
+    )
+    _load(page, doc, tmp_path)
+    page.click("#da-chat-fab")
+    page.evaluate("document.body.classList.add('da-print-chat')")
+    page.emulate_media(media="print")
+    for control in ("#da-chat-save", "#da-chat-load", "#da-chat-export"):
+        assert page.is_visible(control) is False, f"{control} should not print"

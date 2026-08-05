@@ -1246,6 +1246,20 @@ RUNTIME_TRANSPARENCY = HelpDocument(
                 "remove the key."
             ),
             _bullet(
+                "The conversation is kept for you. It saves into that browser's local "
+                "storage for that report, so a refresh or reopening the file does not "
+                "lose it, and New chat erases it. Save writes it to a JSON file you "
+                "choose and Load reads one back, so a conversation can live beside the "
+                "report or go to a colleague. None of that is uploaded anywhere."
+            ),
+            _bullet(
+                "A saved conversation never contains your API key: anything shaped like "
+                "a key is redacted from the whole document before it is written, and the "
+                "file format has no field for one. A conversation you load back in is "
+                "treated as untrusted -- rendered as text like any model output, and any "
+                "tool call recorded in it is shown as a label, never re-run."
+            ),
+            _bullet(
                 "The model's answers are inserted as text nodes, never as markup, and "
                 "every link is validated to be an absolute https URL before it becomes "
                 "clickable. The page also carries a content-security policy that pins the "
@@ -1270,6 +1284,14 @@ RUNTIME_TRANSPARENCY = HelpDocument(
                 "Cache — analysis results are cached in a file under your home folder, "
                 "keyed by the content of each sheet. Editing a sheet re-analyzes only that "
                 "sheet. Deleting the file loses nothing but money."
+            ),
+            _bullet(
+                "Chat transcripts — the report's assistant keeps your conversation in "
+                "that browser's local storage for that report, and Save writes a JSON "
+                "copy wherever you choose. Both stay on this machine; New chat erases "
+                "the stored one. Note that a report opened straight off disk shares one "
+                "local-storage area with every other local page in that browser, so the "
+                "per-report key separates conversations but does not wall them off."
             ),
             _bullet(
                 "API key — stored in your operating system's credential manager (Windows "

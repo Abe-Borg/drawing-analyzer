@@ -47,12 +47,35 @@ widget says exactly that. Pass ``include_chat=False`` to omit the widget (and
 every network reference) entirely. The *Python* module still performs no
 network I/O.
 
-**Transcript persistence.** The conversation lives only in the tab's memory
-(nothing is written to disk or a server), so a **Save as PDF** control
-reformats the already-rendered message DOM for print and hands off to the
-browser's native print dialog (no new script, host, or dependency — "Save as
-PDF" is just a print destination there). A ``beforeunload`` handler warns
-before a refresh, close, or navigation silently drops that history.
+**Transcript persistence.** The conversation is durable, two ways — nothing is
+ever sent anywhere for either.
+
+- It **auto-saves to the browser's ``localStorage``** after every turn, under a
+  key scoped to this report (``da-chat-tx-<reportId>``; see
+  :func:`_report_identity`), and is replayed on load. A refresh, a close, or a
+  reopened file no longer destroys the thread. **New chat** is the eraser: it
+  clears the stored copy too. The scoping is load-bearing — a double-clicked
+  report shares one ``file://`` storage origin with every other local page.
+- **Save** writes a ``drawing_analyzer_chat_transcript`` JSON document (schema
+  v1) through the file picker where the browser offers one — so it can sit next
+  to ``report.html`` in the export folder — and falls back to an ordinary
+  download otherwise. **Load** reads one back. Its ``turns[].message`` array is
+  the verbatim Messages API history, so a loaded transcript is a *resumable*
+  conversation, not a screenshot; display-only state (the excerpt disclosure,
+  closing notes) rides beside the message, never inside it.
+
+Two honest limits. The browser copy is capped (quota is shared across every
+local page), and past the cap the oldest exchanges are dropped and the widget
+says so; the saved *file* is never trimmed. And a turn aborted before any
+content reached ``history`` leaves text on screen that the transcript does not
+contain — ``history`` is the replayable truth, and the transcript follows it.
+
+**Save as PDF** is unchanged: it reformats the already-rendered message DOM for
+print and hands off to the browser's native print dialog (no new script, host,
+or dependency — "Save as PDF" is just a print destination there). The
+``beforeunload`` handler now fires **only** when persistence actually failed
+(quota, private mode, storage disabled); warning on every close once the thread
+survives would just train readers to click through it.
 
 **Security boundary.** All model output and every run-derived value (filenames,
 titles, errors, quotes…) is treated as hostile — see the trust-boundary note
@@ -99,6 +122,12 @@ from .core.api_config import CHAT_MODEL_DEFAULT
 #   - Browser side: the widget builds DOM via createElement/textContent only
 #     (no innerHTML/insertAdjacentHTML/document.write with model data), and
 #     every link goes through one URL validator (absolute https only).
+#   - A *loaded transcript* is untrusted input from outside the report, so it
+#     travels the same path: replay drives the very renderers streaming uses,
+#     and a recorded tool_use is drawn as a chip, never dispatched to TOOLS
+#     (otherwise "open a JSON file" would let a file drive the reader's page).
+#     Serialization scrubs the whole document through scrubSecrets, and the
+#     schema carries no key field at any depth.
 #   - Defense in depth: a Content-Security-Policy <meta> allows exactly the
 #     two inline scripts by SHA-256 hash, connects only to the Anthropic API
 #     (when the assistant is enabled), and forbids objects/base/forms.
@@ -512,6 +541,11 @@ def _csp_meta(*, script_sources: list[str], chat_enabled: bool) -> str:
     fixed set of generated ``style=`` attributes (table alignment); CSS
     carries no script here. The exact policy is exercised against ``file://``
     in the Phase 17B headless-Chromium suite.
+
+    Saving and loading a chat transcript adds **no** directive: a file input and
+    an ``<a download href="blob:…">`` click are same-document operations, not
+    fetches, so ``connect-src`` stays Anthropic-only. A test pins the whole
+    policy string so a future widening cannot slip in unnoticed.
     """
     hashes = " ".join(f"'{_script_hash(source)}'" for source in script_sources)
     connect = "https://api.anthropic.com" if chat_enabled else "'none'"
@@ -1557,6 +1591,7 @@ def build_html_report(
             title=title,
             generated=now.strftime("%Y-%m-%d %H:%M"),
             source_names=source_names,
+            run_id=str(getattr(getattr(ctx, "run_journal", None), "run_id", "") or ""),
         )
         chat_script = f"<script>{_CHAT_JS}</script>\n"
         script_sources.append(_CHAT_JS)
@@ -2410,9 +2445,37 @@ def _starters_data_block(
     )
 
 
+def _report_identity(
+    *, title: str, generated: str, source_names: list[str], run_id: str = ""
+) -> str:
+    """A stable, run-scoped id for this report — the transcript store's key.
+
+    Derived from the report's own identity (title + generation stamp + source
+    display names + the run id when the context carries one), so it is
+    **deterministic** for a given run — the single-file report and the folder
+    export built from the same context get the same id, because they describe
+    the same conversation — and **distinct across runs**, so two reports open in
+    the same browser can never read each other's saved transcript. The run id is
+    what carries that second half: ``generated`` only resolves to the minute, so
+    re-analyzing one set twice in quick succession would otherwise collide.
+
+    Namespacing matters more than it looks: a double-clicked report shares one
+    ``file://`` local-storage origin with every other local page, so an unscoped
+    key would have reports overwriting each other's history.
+
+    Sources are joined on ``\\x00``, which cannot occur in a filename, so no
+    combination of names can collide by concatenation. This is an identity
+    handle, not a secret and not an integrity check: it contains nothing the
+    report does not already display, and nothing is trusted on its strength.
+    """
+    parts = ["da-report/v1", title, generated, run_id, *source_names]
+    raw = "\x00".join(str(p) for p in parts).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
 def _chat_bootstrap_html(
     *, api_key: str, embed_key: bool, title: str, generated: str,
-    source_names: list[str],
+    source_names: list[str], run_id: str = "",
 ) -> str:
     """The chat widget's markup + its JSON config block (model, run info, key).
 
@@ -2430,6 +2493,10 @@ def _chat_bootstrap_html(
     prompt mode; in embedded mode it truthfully explains that the credential
     lives in the file itself and only regenerating/deleting the file removes
     it).
+
+    ``reportId`` (:func:`_report_identity`) is the stable, run-scoped handle the
+    transcript store keys on — it is what lets a reloaded report find *its own*
+    saved conversation and ignore every other report's.
     """
     embedding = bool(embed_key and api_key)
     config: dict[str, Any] = {
@@ -2437,6 +2504,9 @@ def _chat_bootstrap_html(
         "title": title,
         "generated": generated,
         "sources": list(source_names),
+        "reportId": _report_identity(
+            title=title, generated=generated, source_names=source_names, run_id=run_id
+        ),
     }
     if embedding:
         config["apiKey"] = api_key
@@ -2474,10 +2544,13 @@ _CHAT_HTML = """
   <header class="da-chat-head">
     <span class="da-chat-title">Report Q&amp;A</span>
     <span class="da-chat-model" id="da-chat-model"></span>
-    <button id="da-chat-export" type="button" class="ghost-btn" title="Save this conversation as a PDF via your browser's print dialog">Save as PDF</button>
+    <button id="da-chat-export" type="button" class="ghost-btn" title="Save this conversation as a PDF via your browser's print dialog">PDF</button>
+    <button id="da-chat-save" type="button" class="ghost-btn" title="Save this conversation as a JSON file — keep it beside the report and load it back later">Save</button>
+    <button id="da-chat-load" type="button" class="ghost-btn" title="Load a previously saved conversation and carry on asking questions">Load</button>
     <button id="da-chat-clear" type="button" class="ghost-btn">New chat</button>
     <button id="da-chat-close" type="button" aria-label="Close">×</button>
   </header>
+  <input id="da-chat-load-input" type="file" accept="application/json,.json" hidden aria-hidden="true" tabindex="-1">
   <div id="da-chat-print-head"></div>
   <div id="da-chat-msgs">
     <div class="da-msg da-hint">Ask anything about this drawing set. Answers are grounded in
@@ -2525,13 +2598,22 @@ _CHAT_CSS = """
   box-shadow:0 12px 40px rgba(15,25,45,.25);
 }
 #da-chat-panel[hidden]{display:none}
+/* The head carries five controls; the model chip is the only elastic item, so
+   it collapses first (min-width:0 lets a flex item shrink past its text) and
+   wrap is the last resort at the 320px minimum panel width. */
 .da-chat-head{
-  display:flex; align-items:center; gap:8px; padding:10px 12px;
+  display:flex; align-items:center; gap:8px; padding:10px 12px; flex-wrap:wrap;
   border-bottom:1px solid var(--line); background:#fbfcfe;
 }
-.da-chat-title{font-weight:700; font-size:14px}
+.da-chat-title{font-weight:700; font-size:14px; flex:1 1 auto; min-width:0}
+.da-chat-head .ghost-btn{flex:0 0 auto}
+/* The five controls fill the top row, so the model/capability line takes a row
+   of its own (order last + a full-width basis forces the break). Sharing the
+   row would crush it to an ellipsis, and which model answered — and whether it
+   can search — is exactly what a reader checking the answer wants to see. */
 .da-chat-model{
-  font-size:11px; color:var(--muted); flex:1 1 auto; overflow:hidden;
+  order:9; flex:1 0 100%; margin:-4px 0 0;
+  font-size:11px; color:var(--muted); min-width:0; overflow:hidden;
   text-overflow:ellipsis; white-space:nowrap;
 }
 #da-chat-close{
@@ -2691,6 +2773,8 @@ body.da-dragging, body.da-dragging *{user-select:none !important}
   }
   body.da-print-chat .da-rz{display:none !important}
   body.da-print-chat #da-chat-export,
+  body.da-print-chat #da-chat-save,
+  body.da-print-chat #da-chat-load,
   body.da-print-chat #da-chat-clear,
   body.da-print-chat #da-chat-close,
   body.da-print-chat #da-chat-forget,
@@ -2726,6 +2810,29 @@ _CHAT_JS = r"""
   var rawEl = document.getElementById('raw-md');
   var REPORT = rawEl ? rawEl.textContent : '';
   var KEY_STORE = 'da-api-key';
+
+  // ------------------------------------------------------ transcript storage
+  // The conversation used to live only in this tab: a refresh, a close, or a
+  // stray "New chat" destroyed it. It is now auto-saved to localStorage under a
+  // key scoped to THIS report (CFG.reportId — see _report_identity), and can be
+  // written to / read from a JSON file so it can sit beside report.html in the
+  // export folder. The stored document is the same shape either way; see
+  // transcriptPayload() for the schema.
+  var TX_KIND = 'drawing_analyzer_chat_transcript';
+  var TX_SCHEMA = 1;
+  var TX_NAME = 'chat_history.json';
+  var TX_KEY = 'da-chat-tx-' + (CFG.reportId || 'report');
+  // localStorage quotas are ~5MB of UTF-16 per origin, and a double-clicked
+  // report shares ONE file:// origin with every other local page — so a fat
+  // transcript does not just risk its own quota, it crowds out every other
+  // report on the machine. Stay a good neighbour and cap well short. The FILE
+  // export is never capped; only the browser copy is quota-bound.
+  var TX_MAX_CHARS = 500000;
+  // Flipped false when an auto-save fails (quota, private mode, storage off).
+  // It is the ONLY thing the beforeunload warning keys on now: with persistence
+  // working there is nothing to lose, so warning on every close would be noise.
+  var persistedOk = true;
+  var quotaWarned = false;
 
   // Key resolution: an embedded key (opt-in) wins; otherwise the reader enters
   // one in the in-panel field (renderKeyUi / revealKeyForm / saveKeyFromInput,
@@ -2980,6 +3087,13 @@ _CHAT_JS = r"""
     ];
   }
   var history = [];   // alternating {role, content}; assistant content = raw API blocks
+  // Parallel to `history`, one slot per message: {text, excerpt} for a turn the
+  // READER typed, null for everything else (assistant turns, tool_result turns).
+  // It exists because display text and API content deliberately diverge — the
+  // excerpt flow sends a wrapped <excerpt> prompt but shows only the question —
+  // and because `history` must stay a byte-clean Messages API array: a display
+  // key smuggled into a message would be rejected on the next request.
+  var displays = [];
 
   // Custom tools are executed *in this browser* by the dispatch table below
   // (unlike web_search/web_fetch, which are Anthropic server tools). When
@@ -3350,6 +3464,9 @@ _CHAT_JS = r"""
   var closeBtn = document.getElementById('da-chat-close');
   var clearBtn = document.getElementById('da-chat-clear');
   var exportBtn = document.getElementById('da-chat-export');
+  var saveBtn = document.getElementById('da-chat-save');
+  var loadBtn = document.getElementById('da-chat-load');
+  var loadInput = document.getElementById('da-chat-load-input');
   var printHead = document.getElementById('da-chat-print-head');
   var forgetBtn = document.getElementById('da-chat-forget');
   var startersRow = document.getElementById('da-starters-row');
@@ -3363,16 +3480,41 @@ _CHAT_JS = r"""
   var keyStatus = document.getElementById('da-chat-key-status');
   document.getElementById('da-chat-model').textContent = CFG.model + ' · web search · thinking';
 
-  fab.addEventListener('click', function(){ panel.hidden = false; fab.hidden = true; applyGeom(); input.focus(); });
+  fab.addEventListener('click', function(){
+    panel.hidden = false; fab.hidden = true; applyGeom(); input.focus();
+    scrollDown(true);   // a restored thread opens at its end, not its beginning
+  });
   closeBtn.addEventListener('click', function(){ panel.hidden = true; fab.hidden = false; });
   clearBtn.addEventListener('click', function(){
     if(aborter) aborter.abort();
     history = [];
+    displays = [];
+    dropStoredTranscript();    // "New chat" is the eraser — the stored copy goes too
     clearPendingSelection();   // drop any pending excerpt + its highlight
     clearTermHighlight();      // and any highlight_term paint
     while(msgs.children.length > 1) msgs.removeChild(msgs.lastChild); // keep the hint
     if(startersRow) startersRow.style.display = '';  // bring the chips back
   });
+
+  if(saveBtn) saveBtn.addEventListener('click', saveTranscriptFile);
+  if(loadBtn && loadInput){
+    loadBtn.addEventListener('click', function(){
+      loadInput.value = '';   // so re-picking the same file still fires `change`
+      loadInput.click();
+    });
+    loadInput.addEventListener('change', function(){
+      var f = loadInput.files && loadInput.files[0];
+      if(!f) return;
+      if(f.size > 16 * 1024 * 1024){
+        addMsg('da-err', 'That file is too large to be a chat transcript.');
+        return;
+      }
+      var reader = new FileReader();
+      reader.onload = function(){ loadTranscriptText(String(reader.result || '')); };
+      reader.onerror = function(){ addMsg('da-err', 'Could not read that file.'); };
+      reader.readAsText(f);
+    });
+  }
 
   // "Save as PDF": the transcript never leaves the browser or touches a server —
   // this reformats the panel for print (see the body.da-print-chat rules) and
@@ -3397,11 +3539,15 @@ _CHAT_JS = r"""
     document.body.classList.remove('da-print-chat');
   });
 
-  // Refresh/close/navigate would silently drop the whole conversation (it
-  // lives only in this tab's memory — see `history` below), so warn once
-  // there is anything to lose. Browsers ignore custom text here and show
-  // their own generic confirmation; that's a platform restriction, not a bug.
+  // The conversation is auto-saved (see saveTranscript), so a refresh or close
+  // normally loses nothing and must not be nagged about — a warning that fires
+  // every time teaches readers to click straight through it. This fires only
+  // when persistence actually failed (quota, private mode, storage disabled),
+  // which is the one case where closing really does destroy the thread.
+  // Browsers ignore custom text here and show their own generic confirmation;
+  // that's a platform restriction, not a bug.
   window.addEventListener('beforeunload', function(e){
+    if(persistedOk) return;
     if(!msgs.querySelector('.da-user, .da-ai')) return;
     e.preventDefault();
     e.returnValue = '';
@@ -3497,6 +3643,15 @@ _CHAT_JS = r"""
     d.textContent = text;
     parent.appendChild(d);
     scrollDown();
+  }
+  // A note that belongs to the assistant turn just committed ("⏹ Stopped.",
+  // "(Answer truncated…)", a refusal). Recorded on that turn's display slot so a
+  // restored transcript still shows why an answer ends where it does — an
+  // aborted answer that silently looks complete on reload would be a lie.
+  function turnNote(bubble, text){
+    note(bubble, text);
+    var d = displays[displays.length - 1];
+    if(d && d.notes) d.notes.push(text);
   }
 
   // ------------------------------------------------------------- SSE plumbing
@@ -3735,6 +3890,289 @@ _CHAT_JS = r"""
     scrollDown();
   }
 
+  // ----------------------------------------------------- transcript: shape
+  // One JSON document, the same whether it lands in localStorage or in a file:
+  //
+  //   {schema_version, kind, report:{report_id,title,generated,sources,model},
+  //    saved_at, truncated, turns:[{message, display?}, ...]}
+  //
+  // `turns[i].message` is the VERBATIM Messages API message, so
+  // history = turns.map(t => t.message) restores an array that can be POSTed
+  // again — a loaded transcript is a resumable conversation, not a screenshot.
+  // `display` rides alongside (never inside) the message, because display and
+  // API content deliberately diverge, and it says which kind of turn this is:
+  //   {text, excerpt}  a turn the reader typed  → a da-user bubble
+  //   {notes: [...]}   an assistant turn        → a da-ai bubble + any closing
+  //                                               notes ("⏹ Stopped." etc.)
+  //   absent           a tool_result turn       → history only, no bubble
+  function transcriptPayload(){
+    var turns = [];
+    for(var i = 0; i < history.length; i++){
+      var turn = {message: history[i]};
+      if(displays[i]) turn.display = displays[i];
+      turns.push(turn);
+    }
+    return {
+      schema_version: TX_SCHEMA,
+      kind: TX_KIND,
+      report: {
+        report_id: CFG.reportId || '',
+        title: CFG.title || '',
+        generated: CFG.generated || '',
+        sources: (CFG.sources || []).slice(),
+        model: CFG.model || ''
+      },
+      saved_at: new Date().toISOString(),
+      truncated: false,
+      turns: turns
+    };
+  }
+
+  // Serialize to a JSON string. Always scrubbed of key material: a reader can
+  // paste a key into the box and an error echo can carry one, and neither may
+  // reach durable storage. A `limit` of 0 means "no cap" (the file export).
+  // Trimming drops the OLDEST turns and always resumes at the next reader turn,
+  // so the survivors start a well-formed exchange — never a dangling
+  // tool_result answering a tool_use that was just dropped. Returns null when
+  // there was a conversation but none of it fits.
+  function isReaderTurn(turn){
+    return !!(turn && turn.display && typeof turn.display.text === 'string');
+  }
+  function serializeTranscript(limit){
+    var payload = transcriptPayload();
+    var text = scrubSecrets(JSON.stringify(payload));
+    if(!limit) return text;
+    while(text.length > limit && payload.turns.length){
+      var i = 1;
+      while(i < payload.turns.length && !isReaderTurn(payload.turns[i])) i++;
+      payload.turns = i >= payload.turns.length ? [] : payload.turns.slice(i);
+      payload.truncated = true;
+      text = scrubSecrets(JSON.stringify(payload));
+    }
+    if(!payload.turns.length && history.length) return null;
+    return text;
+  }
+
+  // ---------------------------------------------------- transcript: storage
+  function dropStoredTranscript(){
+    try { localStorage.removeItem(TX_KEY); } catch(e){}
+    persistedOk = true;   // nothing outstanding to lose
+  }
+  // Said once per session, not once per turn: a reader who has hit the ceiling
+  // needs to know their safety net is gone, not to be told again every message.
+  function warnNotPersisted(){
+    persistedOk = false;
+    if(quotaWarned) return;
+    quotaWarned = true;
+    addMsg('da-hint', 'This conversation is too large for your browser to keep automatically. '
+      + 'Use "Save" to keep a JSON copy — otherwise it will be lost when this tab closes.');
+  }
+  function saveTranscript(){
+    if(!history.length){ dropStoredTranscript(); return; }
+    try {
+      var text = serializeTranscript(TX_MAX_CHARS);
+      if(text === null){ warnNotPersisted(); return; }
+      localStorage.setItem(TX_KEY, text);
+      persistedOk = true;
+    } catch(e){
+      // Quota, private mode, storage disabled — never fatal, but the unload
+      // warning comes back on so the reader is told before it is lost.
+      try { localStorage.removeItem(TX_KEY); } catch(e2){}
+      warnNotPersisted();
+    }
+  }
+
+  // ----------------------------------------------------- transcript: replay
+  // The reader's own turn: bubble + the collapsed excerpt disclosure. Shared by
+  // the live path (runTurn) and replay so there is exactly one implementation.
+  function renderUserBubble(displayText, excerpt){
+    var userBubble = addMsg('da-user', displayText);
+    if(excerpt){
+      var d = document.createElement('details');
+      d.className = 'da-userctx';
+      var sm = document.createElement('summary');
+      sm.textContent = '↳ about selected excerpt';
+      var bd = document.createElement('div');
+      bd.textContent = excerpt;
+      d.appendChild(sm); d.appendChild(bd);
+      userBubble.appendChild(d);
+    }
+    return userBubble;
+  }
+
+  // Re-render a saved assistant turn by driving the SAME renderers the stream
+  // uses (startBlockUI → finishBlock), off a synthetic streaming state. Forking
+  // them would duplicate ~120 lines that must stay inside the DA-011 safe-DOM
+  // rules — restored model text is exactly as untrusted as streamed model text,
+  // so it has to travel the same path: createElement/textContent only, links
+  // through linkEl's https-only policy.
+  function replayAssistant(blocks, errById, notes){
+    var bubble = addMsg('da-ai');
+    var st = {blocks: blocks, els: {}, toolChips: {}, citeUrls: {}, citeCount: 0,
+              partial: {}, mdDirty: {}, mdTimers: {}};
+    blocks.forEach(function(b, i){
+      if(!b || typeof b !== 'object') return;
+      startBlockUI(st, i, bubble);
+      // thinking gets its element lazily from the first delta while streaming;
+      // replay has the whole text already, so hand it over directly.
+      if(b.type === 'thinking' && b.thinking) touchThinking(st, i, bubble, String(b.thinking));
+      finishBlock(st, i, bubble);
+    });
+    blocks.forEach(function(b){
+      if(b && b.type === 'tool_use' && b.id && (b.id in errById)) markToolChip(st, b.id, errById[b.id]);
+    });
+    (notes || []).forEach(function(t){ note(bubble, String(t)); });
+    if(!bubble.childNodes.length) bubble.remove();
+    return bubble;
+  }
+
+  // A replayed client tool must NEVER re-execute: filter_report,
+  // scroll_to_report and highlight_term drive the page the reader is looking
+  // at, and re-running a PAST conversation's calls on load would silently
+  // hijack their view. The chip's outcome is derived instead, from the
+  // tool_result blocks in the turn that answered it.
+  function toolErrorsAfter(turns, index){
+    var out = {};
+    var next = turns[index + 1];
+    var content = next && next.message && next.message.content;
+    if(!Array.isArray(content)) return out;
+    content.forEach(function(b){
+      if(b && b.type === 'tool_result' && b.tool_use_id) out[b.tool_use_id] = !!b.is_error;
+    });
+    return out;
+  }
+
+  function replayTranscript(turns){
+    if(startersRow) startersRow.style.display = 'none';
+    history = [];
+    displays = [];
+    turns.forEach(function(turn, i){
+      var m = turn && turn.message;
+      if(!m || (m.role !== 'user' && m.role !== 'assistant')) return;
+      if(m.role === 'assistant'){
+        var notes = (turn.display && Array.isArray(turn.display.notes)) ? turn.display.notes : [];
+        replayAssistant(Array.isArray(m.content) ? m.content : [], toolErrorsAfter(turns, i), notes);
+        history.push(m);
+        displays.push({notes: notes.slice()});
+        return;
+      }
+      var d = turn.display;
+      if(d && typeof d.text === 'string'){
+        var shown = {text: d.text, excerpt: String(d.excerpt || '')};
+        renderUserBubble(shown.text, shown.excerpt);
+        history.push(m);
+        displays.push(shown);
+      } else {
+        history.push(m);      // a tool_result turn: part of the API history,
+        displays.push(null);  // never a bubble
+      }
+    });
+    scrollDown(true);
+  }
+
+  // --------------------------------------------- transcript: validate & adopt
+  function transcriptProblem(data){
+    if(!data || typeof data !== 'object' || Array.isArray(data)) return 'that is not a Drawing Analyzer transcript.';
+    if(data.kind !== TX_KIND) return 'that file is not a Drawing Analyzer chat transcript.';
+    if(data.schema_version !== TX_SCHEMA) return 'that transcript was written by a different version of this report.';
+    if(!Array.isArray(data.turns)) return 'that transcript has no conversation in it.';
+    return '';
+  }
+  // A transcript that ends on a user turn — hand-edited, or truncated by the
+  // budget trimmer mid-exchange — would make the next question the SECOND
+  // consecutive user turn, which the Messages API rejects outright. Drop the
+  // unanswered tail so a loaded conversation is always resumable.
+  function dropUnansweredTail(turns){
+    var end = turns.length;
+    while(end > 0){
+      var m = turns[end - 1] && turns[end - 1].message;
+      if(m && m.role === 'assistant') break;
+      end--;
+    }
+    return turns.slice(0, end);
+  }
+  function adoptTranscript(data, hint){
+    if(aborter) aborter.abort();
+    clearPendingSelection();
+    clearTermHighlight();
+    while(msgs.children.length > 1) msgs.removeChild(msgs.lastChild);
+    replayTranscript(dropUnansweredTail(data.turns));
+    if(hint) addMsg('da-hint', hint);
+    saveTranscript();
+  }
+
+  function restoreFromStorage(){
+    var text = null;
+    try { text = localStorage.getItem(TX_KEY); } catch(e){ return; }
+    if(!text) return;
+    var data = null;
+    try { data = JSON.parse(text); } catch(e){ dropStoredTranscript(); return; }
+    // A stored transcript is only ever adopted for the report that wrote it.
+    if(transcriptProblem(data) || String((data.report || {}).report_id || '') !== String(CFG.reportId || '')){
+      dropStoredTranscript();
+      return;
+    }
+    var turns = dropUnansweredTail(data.turns);
+    if(!turns.length) return;
+    replayTranscript(turns);
+    addMsg('da-hint', 'Restored your previous conversation from this browser.'
+      + (data.truncated ? ' The oldest messages were dropped to fit the browser storage limit.' : '')
+      + ' "New chat" clears it; "Save" writes it to a file you can keep beside the report.');
+  }
+
+  // ------------------------------------------------- transcript: file in/out
+  function downloadTranscript(text){
+    var url = URL.createObjectURL(new Blob([text], {type: 'application/json'}));
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = TX_NAME;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 0);
+  }
+  // "Save": showSaveFilePicker (where offered) lets the reader drop the file
+  // straight into the export folder next to report.html; everything else — and
+  // any refusal short of an explicit cancel — falls back to a plain download.
+  // Both are same-document operations: no request is made, so the report's
+  // connect-src policy is neither used nor weakened.
+  function saveTranscriptFile(){
+    if(!history.length){ addMsg('da-hint', 'Nothing to save yet — ask a question first.'); return; }
+    var text = serializeTranscript(0);
+    if(typeof window.showSaveFilePicker !== 'function'){ downloadTranscript(text); return; }
+    window.showSaveFilePicker({
+      suggestedName: TX_NAME,
+      types: [{description: 'Chat transcript', accept: {'application/json': ['.json']}}]
+    }).then(function(handle){
+      return handle.createWritable().then(function(w){
+        return Promise.resolve(w.write(text)).then(function(){ return w.close(); });
+      });
+    }).then(function(){
+      addMsg('da-hint', 'Conversation saved. Use "Load" to pick it up again later.');
+    }, function(err){
+      if(err && err.name === 'AbortError') return;   // reader cancelled the picker
+      downloadTranscript(text);
+    });
+  }
+
+  function loadTranscriptText(text){
+    var data = null;
+    try { data = JSON.parse(text); }
+    catch(e){ addMsg('da-err', 'Could not load that file — it is not valid JSON.'); return; }
+    var problem = transcriptProblem(data);
+    if(problem){ addMsg('da-err', 'Could not load: ' + problem); return; }
+    if(history.length && !window.confirm('Replace the conversation currently open?')) return;
+    var rep = data.report || {};
+    var foreign = String(rep.report_id || '') !== String(CFG.reportId || '');
+    if(foreign && !window.confirm(
+        'That transcript was saved from a different report'
+        + (rep.title ? ' (' + rep.title + ')' : '')
+        + '. The assistant answers from THIS report, so the conversation may not line up. Load it anyway?')) return;
+    adoptTranscript(data, foreign
+      ? 'Loaded a transcript from a different report — the answers below were grounded in that report, not this one.'
+      : 'Conversation loaded. Ask a follow-up to carry on where you left off.');
+  }
+
   // ------------------------------------------------------------ turn driver
   function setStreaming(on){
     streaming = on;
@@ -3750,20 +4188,12 @@ _CHAT_JS = r"""
     opts = opts || {};
     if(startersRow) startersRow.style.display = 'none';  // chips give way to the thread
     history.push({role: 'user', content: apiContent});
-    var userBubble = addMsg('da-user', displayText);
-    if(opts.excerpt){
-      // The selected excerpt as a collapsible disclosure under the typed
-      // question (textContent — never HTML): the transcript stays readable while
-      // the model still receives the full excerpt in apiContent.
-      var d = document.createElement('details');
-      d.className = 'da-userctx';
-      var sm = document.createElement('summary');
-      sm.textContent = '↳ about selected excerpt';
-      var bd = document.createElement('div');
-      bd.textContent = opts.excerpt;
-      d.appendChild(sm); d.appendChild(bd);
-      userBubble.appendChild(d);
-    }
+    // The selected excerpt shows as a collapsible disclosure under the typed
+    // question (textContent — never HTML): the transcript stays readable while
+    // the model still receives the full excerpt in apiContent. Recording it in
+    // `displays` is what lets a reload rebuild that same split.
+    displays.push({text: displayText, excerpt: opts.excerpt || ''});
+    renderUserBubble(displayText, opts.excerpt || '');
     var bubble = addMsg('da-ai');
     setStreaming(true);
     var pushed = false; // any assistant content committed to history yet?
@@ -3778,7 +4208,11 @@ _CHAT_JS = r"""
         var blocks = st.blocks.filter(function(b){ return !!b; });
         // Commit the assistant turn (incl. any tool_use blocks) BEFORE answering
         // tools, so history is always assistant(tool_use) → user(tool_result).
-        if(blocks.length){ history.push({role: 'assistant', content: blocks}); pushed = true; }
+        if(blocks.length){
+          history.push({role: 'assistant', content: blocks});
+          displays.push({notes: []});   // keeps displays index-aligned with history
+          pushed = true;
+        }
         if(st.stopReason === 'pause_turn' && round < MAX_CONTINUATIONS){
           return step(round + 1, toolRound); // server tool loop paused — resume
         }
@@ -3797,12 +4231,13 @@ _CHAT_JS = r"""
               });
             })).then(function(results){
               history.push({role: 'user', content: results});
+              displays.push(null);   // a tool_result turn is history, never a bubble
               return step(round, toolRound + 1);
             });
           }
         }
-        if(st.stopReason === 'refusal') note(bubble, 'The model declined to answer this request.');
-        else if(st.stopReason === 'max_tokens') note(bubble, '(Answer truncated — output limit reached.)');
+        if(st.stopReason === 'refusal') turnNote(bubble, 'The model declined to answer this request.');
+        else if(st.stopReason === 'max_tokens') turnNote(bubble, '(Answer truncated — output limit reached.)');
         else if(!st.stopReason) throw new Error('The stream ended unexpectedly — check your connection and try again.');
       });
     }
@@ -3811,10 +4246,11 @@ _CHAT_JS = r"""
       var aborted = err && (err.name === 'AbortError' || err.code === 20);
       if(!pushed){
         history.pop();               // keep history consistent for the next question
+        displays.pop();              // ...and displays index-aligned with it
         if(!aborted) input.value = (opts.retryValue !== undefined ? opts.retryValue : displayText);
       }
       if(aborted){
-        note(bubble, '⏹ Stopped.');
+        turnNote(bubble, '⏹ Stopped.');
       } else {
         var msg = (err && err.message) || 'Request failed.';
         if(err instanceof TypeError) msg = 'Could not reach api.anthropic.com — the assistant needs an internet connection.';
@@ -3825,6 +4261,11 @@ _CHAT_JS = r"""
       if(pushed && opts.onCommit) opts.onCommit();   // e.g. clear the pending selection
       setStreaming(false);
       scrollDown(true);
+      // The one place every turn settles — completed, stopped, or failed — so
+      // it is the one place the transcript needs saving. A turn that left no
+      // history entry saves nothing, which is right: what cannot be replayed is
+      // not a transcript.
+      saveTranscript();
     });
   }
 
@@ -4088,5 +4529,10 @@ _CHAT_JS = r"""
   });
   window.addEventListener('scroll', hideSelPop, true);   // fixed popover would go stale
   window.addEventListener('resize', hideSelPop);
+
+  // Last thing in the widget: every element handle and helper above is bound by
+  // now, so a restored thread can render into a fully-wired panel. Wrapped
+  // because a corrupt stored value must never stop the assistant from starting.
+  try { restoreFromStorage(); } catch(e){ dropStoredTranscript(); }
 })();
 """

@@ -36,6 +36,17 @@ deleting the file can). Pass `include_chat=False` to omit the assistant entirely
 The chat model defaults to Opus 4.8 and can be overridden with
 `DRAWING_ANALYZER_CHAT_MODEL`.
 
+**Conversations are kept.** The thread auto-saves in your browser for that
+report, so a refresh, a close, or reopening the file later picks up where you
+left off (**New chat** clears it). **Save** writes the conversation to a
+`chat_history.json` you choose — put it next to `report.html` in the export
+folder, archive it, or hand it to a colleague — and **Load** reads one back and
+lets you carry on asking questions from where it ended. The transcript is data,
+not a picture: the questions, the answers, the reasoning, the tool steps and the
+citations all come back. Your API key is never part of it (any `sk-ant-…` in the
+conversation is redacted before anything is written), and nothing is uploaded —
+saving and loading happen entirely on your machine.
+
 See [SECURITY.md](SECURITY.md) for the report's trust boundary (all model output is
 treated as hostile and can never execute), API-key handling, secret redaction in
 logs, and what project data each artifact and the Ask-AI assistant contains.
