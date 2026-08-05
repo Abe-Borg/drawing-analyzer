@@ -1205,3 +1205,100 @@ def test_usage_readout_reports_cache_activity(page, tmp_path):
     # "New chat" owns the counter along with the thread.
     page.click("#da-chat-clear")
     assert page.eval_on_selector("#da-chat-usage", "el => el.hidden") is True
+
+
+def test_output_tokens_are_not_double_counted_across_message_deltas(page, tmp_path):
+    # message_delta reports output_tokens CUMULATIVELY for the message, and a
+    # message may emit more than one. Summing each event's figure would read
+    # 50-then-120 as 170; the honest total is 120.
+    stream = _sse([
+        {"type": "message_start", "message": {"usage": {
+            "input_tokens": 10, "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0}}},
+        {"type": "content_block_start", "index": 0,
+         "content_block": {"type": "text", "text": ""}},
+        {"type": "content_block_delta", "index": 0,
+         "delta": {"type": "text_delta", "text": "answered."}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_delta", "delta": {}, "usage": {"output_tokens": 50}},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+         "usage": {"output_tokens": 120}},
+    ])
+    _load(page, _chat_doc(), tmp_path, queue=[stream])
+    _ask(page, "what are the conflicts?")
+
+    text = page.eval_on_selector("#da-chat-usage", "el => el.textContent")
+    assert "120 out" in text, text
+    assert "170 out" not in text, text
+
+
+def test_output_tokens_still_sum_across_rounds(page, tmp_path):
+    # Each round is its own message, so the per-message cumulative figures must
+    # still add up across a tool loop — the fix above must not clamp to a max.
+    def round_with_output(frames, out):
+        return _sse(frames + [{"type": "message_delta",
+                               "delta": {"stop_reason": frames[-1].get("_stop", "end_turn")},
+                               "usage": {"output_tokens": out}}])
+
+    tool_round = _sse([
+        {"type": "content_block_start", "index": 0,
+         "content_block": {"type": "tool_use", "id": "q1", "name": "query_findings", "input": {}}},
+        {"type": "content_block_delta", "index": 0,
+         "delta": {"type": "input_json_delta", "partial_json": '{"severity":"high"}'}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_delta", "delta": {"stop_reason": "tool_use"},
+         "usage": {"output_tokens": 30}},
+    ])
+    text_round = _sse([
+        {"type": "content_block_start", "index": 0,
+         "content_block": {"type": "text", "text": ""}},
+        {"type": "content_block_delta", "index": 0,
+         "delta": {"type": "text_delta", "text": "one finding."}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+         "usage": {"output_tokens": 45}},
+    ])
+    _load(page, _chat_doc(), tmp_path, queue=[tool_round, text_round])
+    _ask(page, "how many high severity findings?")
+
+    text = page.eval_on_selector("#da-chat-usage", "el => el.textContent")
+    assert "75 out" in text, text
+
+
+def test_loading_a_transcript_resets_the_usage_counter(page, tmp_path):
+    # The counter belongs to the thread. Loading a saved conversation over one you
+    # already spent tokens on must not keep charging the abandoned thread's spend
+    # to the new one.
+    stream = _sse([
+        {"type": "message_start", "message": {"usage": {
+            "input_tokens": 500, "cache_read_input_tokens": 9000,
+            "cache_creation_input_tokens": 0}}},
+        {"type": "content_block_start", "index": 0,
+         "content_block": {"type": "text", "text": ""}},
+        {"type": "content_block_delta", "index": 0,
+         "delta": {"type": "text_delta", "text": "answered."}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+         "usage": {"output_tokens": 250}},
+    ])
+    _load(page, _chat_doc(), tmp_path, queue=[stream])
+    _ask_and_settle(page, "what are the conflicts?")
+    assert page.eval_on_selector("#da-chat-usage", "el => el.hidden") is False
+
+    # Hand the widget a valid transcript for this same report, as Load would.
+    saved = _stored(page)
+    assert saved is not None
+    # Replacing a non-empty thread asks for confirmation; Playwright dismisses
+    # dialogs by default, which would silently abort the load.
+    page.on("dialog", lambda d: d.accept())
+    page.set_input_files(
+        "#da-chat-load-input",
+        files=[{"name": "chat.json", "mimeType": "application/json",
+                "buffer": json.dumps(saved).encode()}],
+    )
+    page.wait_for_function(
+        "() => document.getElementById('da-chat-msgs').textContent"
+        ".indexOf('Conversation loaded') !== -1",
+        timeout=5000,
+    )
+    assert page.eval_on_selector("#da-chat-usage", "el => el.hidden") is True

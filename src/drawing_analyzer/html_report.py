@@ -3932,6 +3932,10 @@ _CHAT_JS = r"""
       }
       var st = {
         buf: '', blocks: [], partial: {}, stopReason: null,
+        // Output tokens already folded into sessionUsage for THIS message. See
+        // the message_delta branch: that event reports a cumulative total, so the
+        // running figure is what makes summing across rounds correct.
+        outputCounted: 0,
         els: {}, think: null, mdDirty: {}, mdTimers: {}, toolChips: {}, citeUrls: {}, citeCount: 0
       };
       var reader = resp.body.getReader();
@@ -3982,7 +3986,19 @@ _CHAT_JS = r"""
       }
     } else if(ev.type === 'message_delta'){
       if(ev.delta && ev.delta.stop_reason) st.stopReason = ev.delta.stop_reason;
-      if(ev.usage && ev.usage.output_tokens) sessionUsage.output += ev.usage.output_tokens;
+      // usage.output_tokens here is CUMULATIVE for this message, not a per-event
+      // increment, and a message may emit more than one message_delta. Adding
+      // each event's figure would double-count (deltas of 50 then 100 would read
+      // as 150). But sessionUsage spans every round of every question, and each
+      // round is its own message — so neither plain assignment nor plain addition
+      // is right: fold in only what this message has not contributed yet.
+      if(ev.usage && typeof ev.usage.output_tokens === 'number'){
+        var seen = ev.usage.output_tokens;
+        if(seen > st.outputCounted){
+          sessionUsage.output += seen - st.outputCounted;
+          st.outputCounted = seen;
+        }
+      }
     } else if(ev.type === 'error'){
       var err = new Error((ev.error && ev.error.message) || 'stream error');
       err.mid_stream = true;
@@ -4280,6 +4296,13 @@ _CHAT_JS = r"""
     if(startersRow) startersRow.style.display = 'none';
     history = [];
     displays = [];
+    // The counter belongs to the thread, exactly like `history` and `displays` —
+    // so it is cleared at the one place a thread is replaced wholesale, which
+    // covers Load (via adoptTranscript) and the restore-from-storage path alike.
+    // Loading a transcript over a conversation you had already spent tokens on
+    // would otherwise keep charging the abandoned thread's spend to the new one.
+    sessionUsage = {input: 0, output: 0, cacheRead: 0, cacheWrite: 0};
+    renderUsage();
     turns.forEach(function(turn, i){
       var m = turn && turn.message;
       if(!m || (m.role !== 'user' && m.role !== 'assistant')) return;
