@@ -1388,6 +1388,125 @@ def test_usage_readout_reports_cache_activity(page, tmp_path):
     assert page.eval_on_selector("#da-chat-usage", "el => el.hidden") is True
 
 
+def test_request_asks_for_the_models_full_output_ceiling(page, tmp_path):
+    # A truncated answer is a wrong answer the reader buys twice, so the widget
+    # never imposes a budget below what the model serves. The number comes from
+    # the capability registry via CFG, which is what keeps it correct across a
+    # DRAWING_ANALYZER_CHAT_MODEL override.
+    from drawing_analyzer.core.api_config import model_capabilities
+
+    _load(page, _chat_doc(), tmp_path, queue=[_text_turn("answered.")])
+    _ask(page, "what are the conflicts?")
+
+    ceiling = model_capabilities(hr.CHAT_MODEL_DEFAULT).max_output_tokens
+    assert page.evaluate("window.__REQ")[0]["max_tokens"] == ceiling
+    assert ceiling == 128_000
+
+
+def test_context_readout_measures_the_thread_against_the_window(page, tmp_path):
+    # Distinct from the cost readout: this is occupancy right now, not spend to
+    # date, and the cached leg counts — cached tokens still fill the window, they
+    # are only billed cheaper. 120 + 40000 + 8000 prompt + 250 out = 48,370.
+    stream = _sse([
+        {"type": "message_start", "message": {"usage": {
+            "input_tokens": 120, "cache_read_input_tokens": 40000,
+            "cache_creation_input_tokens": 8000}}},
+        {"type": "content_block_start", "index": 0,
+         "content_block": {"type": "text", "text": ""}},
+        {"type": "content_block_delta", "index": 0,
+         "delta": {"type": "text_delta", "text": "answered."}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+         "usage": {"output_tokens": 250}},
+    ])
+    _load(page, _chat_doc(), tmp_path, queue=[stream])
+
+    # Nothing measured yet, so nothing claimed.
+    assert page.eval_on_selector("#da-chat-context", "el => el.hidden") is True
+    _ask(page, "what are the conflicts?")
+
+    assert page.eval_on_selector("#da-chat-context", "el => el.hidden") is False
+    text = page.eval_on_selector("#da-chat-context-text", "el => el.textContent")
+    assert "48.4k" in text, text          # 48,370 tokens occupied
+    assert "1M" in text, text             # ...of the model's window
+    assert "(5%)" in text, text
+    assert page.eval_on_selector("#da-chat-context", "el => el.dataset.tier") == "ok"
+    width = page.eval_on_selector("#da-chat-context-fill", "el => el.style.width")
+    assert width.startswith("4.8"), width
+
+    # "New chat" empties the thread, so it occupies nothing again.
+    page.click("#da-chat-clear")
+    assert page.eval_on_selector("#da-chat-context", "el => el.hidden") is True
+
+
+def test_context_readout_is_a_snapshot_not_a_running_total(page, tmp_path):
+    """Two questions must not read as the sum of both prompts.
+
+    The whole point of the counter is "how full is the window now", and each
+    request re-sends the report plus the transcript — so the second round's own
+    prompt already contains the first. Accumulating would double-count the
+    report and race to a false ceiling.
+    """
+    def _round(prompt, out):
+        return _sse([
+            {"type": "message_start", "message": {"usage": {
+                "input_tokens": prompt, "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0}}},
+            {"type": "content_block_start", "index": 0,
+             "content_block": {"type": "text", "text": ""}},
+            {"type": "content_block_delta", "index": 0,
+             "delta": {"type": "text_delta", "text": "ok."}},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+             "usage": {"output_tokens": out}},
+        ])
+
+    _load(page, _chat_doc(), tmp_path, queue=[_round(100000, 500), _round(140000, 500)])
+    _ask(page, "first question")
+    first = page.eval_on_selector("#da-chat-context-text", "el => el.textContent")
+    assert "100.5k" in first, first
+
+    page.fill("#da-chat-input", "second question")
+    page.click("#da-chat-send")
+    _finish(page)
+    second = page.eval_on_selector("#da-chat-context-text", "el => el.textContent")
+    assert "140.5k" in second, second     # the round's own prompt, not 240.5k
+
+    # The cumulative counter beside it still sums, which is what makes the two
+    # readouts worth having separately.
+    assert "240k in" in page.eval_on_selector("#da-chat-usage", "el => el.textContent")
+
+
+def test_context_readout_warns_as_the_window_fills(page, tmp_path):
+    # The overrun is abrupt — the request that exceeds the window is rejected
+    # outright — so the reader gets the nudge before it happens, not after.
+    def _round(prompt):
+        return _sse([
+            {"type": "message_start", "message": {"usage": {
+                "input_tokens": prompt, "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0}}},
+            {"type": "content_block_start", "index": 0,
+             "content_block": {"type": "text", "text": ""}},
+            {"type": "content_block_delta", "index": 0,
+             "delta": {"type": "text_delta", "text": "ok."}},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+             "usage": {"output_tokens": 0}},
+        ])
+
+    _load(page, _chat_doc(), tmp_path, queue=[_round(750_000), _round(930_000)])
+    _ask(page, "a long thread")
+    assert page.eval_on_selector("#da-chat-context", "el => el.dataset.tier") == "near"
+    assert "filling up" in page.eval_on_selector("#da-chat-context-text", "el => el.textContent")
+
+    page.fill("#da-chat-input", "a longer one")
+    page.click("#da-chat-send")
+    _finish(page)
+    assert page.eval_on_selector("#da-chat-context", "el => el.dataset.tier") == "full"
+    text = page.eval_on_selector("#da-chat-context-text", "el => el.textContent")
+    assert "New chat" in text, text
+
+
 def test_output_tokens_are_not_double_counted_across_message_deltas(page, tmp_path):
     # message_delta reports output_tokens CUMULATIVELY for the message, and a
     # message may emit more than one. Summing each event's figure would read

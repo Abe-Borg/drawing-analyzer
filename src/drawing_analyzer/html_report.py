@@ -36,6 +36,28 @@ sent with a 1h prompt-cache breakpoint so follow-up questions re-read the
 (large) report at cache prices for an hour; a second, rolling breakpoint on the
 conversation keeps prior tool rounds cheap too.
 
+**Nothing is rationed.** The assistant is given the configured model's own
+limits, resolved host-side from the capability registry into the emitted config:
+``maxTokens`` is the model's full synchronous output ceiling (128k on the
+default), never a smaller house budget — a truncated answer is a wrong answer the
+reader pays for twice — and the input side is never trimmed at all: the report
+goes over verbatim and the transcript accumulates untouched. Both numbers follow
+``DRAWING_ANALYZER_CHAT_MODEL``, because exceeding a model's real ceiling is a
+400 that kills the request. The output size is safe only because the widget
+streams; a non-streaming request that large would hit an HTTP timeout.
+
+Since nothing is trimmed, the window is the one budget a long thread can exhaust
+— and the overrun is abrupt (the request that exceeds it is rejected outright),
+so the footer carries a **context readout** beside the cost one: how much of
+``contextWindow`` the live thread occupies, with a meter and a warning tier at
+70% and 90%. The two readouts answer different questions and are deliberately
+separate — the cost line accumulates across every round of every question
+(spend), while the context line is a snapshot of the newest round's prompt plus
+its answer (occupancy), which is what the *next* request will carry. Both are
+measured from the API's own usage numbers, so both stay silent until the first
+answer lands; a loaded transcript reads blank until its next question, because
+the occupancy of a thread this browser has never sent is not yet known.
+
 **Key handling.** By default the key is **not** written into the file — even
 when the caller has one: the widget asks the reader for a key on first use and
 keeps it only in the browser tab's ``sessionStorage`` (the **Forget key**
@@ -2524,7 +2546,8 @@ def _chat_bootstrap_html(
     # feature is omitted wholesale — a half-supported pair would break the Deep
     # toggle on exactly the questions a reader escalated. ``None`` means the
     # widget sends no ``output_config`` at all, which is always safe.
-    effort_levels = model_capabilities(CHAT_MODEL_DEFAULT).supported_effort_levels
+    caps = model_capabilities(CHAT_MODEL_DEFAULT)
+    effort_levels = caps.supported_effort_levels
     effort: dict[str, str] | None = (
         {"standard": EFFORT_MEDIUM, "deep": EFFORT_HIGH}
         if {EFFORT_MEDIUM, EFFORT_HIGH} <= effort_levels
@@ -2539,6 +2562,22 @@ def _chat_bootstrap_html(
     config: dict[str, Any] = {
         "model": CHAT_MODEL_DEFAULT,
         "effort": effort,
+        # The widget is never given an output budget smaller than the model can
+        # actually serve: an answer cut off at an arbitrary ceiling is a wrong
+        # answer, and the reader's only recourse is to ask again and pay twice.
+        # The number comes from the capability registry rather than a constant
+        # because it is a hard API limit — over the model's ceiling is a 400
+        # that kills the request, and an override of DRAWING_ANALYZER_CHAT_MODEL
+        # can move it (Haiku 4.5 tops out at 64k, an unregistered id falls to
+        # the conservative default). Safe at this size only because the widget
+        # streams: a non-streaming request this large would hit an HTTP timeout.
+        "maxTokens": caps.max_output_tokens,
+        # The model's *input* ceiling, for the context readout in the footer.
+        # Nothing host-side trims what the widget sends — the report goes over
+        # verbatim and the transcript accumulates untouched — so this number is
+        # the only limit in play, and showing the thread against it is what
+        # tells a reader whether the next question still fits.
+        "contextWindow": caps.context_window,
         "rates": (
             {"in": price.input_per_mtok, "out": price.output_per_mtok}
             if price
@@ -2551,7 +2590,7 @@ def _chat_bootstrap_html(
         # from the capability registry and handed to the browser so
         # ``buildRequest`` can omit the tool instead of breaking every question
         # when someone overrides DRAWING_ANALYZER_CHAT_MODEL.
-        "webFetch": model_capabilities(CHAT_MODEL_DEFAULT).supports_web_fetch,
+        "webFetch": caps.supports_web_fetch,
         "title": title,
         "generated": generated,
         "sources": list(source_names),
@@ -2636,6 +2675,11 @@ _CHAT_HTML = """
     <button id="da-chat-stop" type="button" hidden>Stop</button>
   </div>
   <div class="da-chat-foot" id="da-chat-foot"><span>__CHAT_FOOT__</span>
+    <span class="da-chat-context" id="da-chat-context" hidden
+          title="How much of the model's context window this conversation currently occupies. The report and every earlier question are re-sent with each new one, so this grows as the thread does.">
+      <span class="da-ctx-text" id="da-chat-context-text"></span>
+      <span class="da-ctx-bar" aria-hidden="true"><span class="da-ctx-fill" id="da-chat-context-fill"></span></span>
+    </span>
     <span class="da-chat-usage" id="da-chat-usage" hidden></span>
     <button id="da-chat-forget" type="button" title="Remove the API key stored in this browser tab">Forget key</button></div>
 </section>
@@ -2810,6 +2854,28 @@ _CHAT_CSS = """
 /* Session token/cost readout. Its own line so it never crowds the key notice. */
 .da-chat-usage{display:block; margin-top:3px; font-variant-numeric:tabular-nums}
 .da-chat-usage[hidden]{display:none}
+/* Context-window readout: text + a meter, on its own line above the cost line.
+   It answers a different question from the cost readout (how full is the window
+   *now*, not what has this thread cost in total), so it gets its own row rather
+   than another segment on an already-crowded line. The bar is `aria-hidden` and
+   purely redundant with the text beside it — the percentage is the accessible
+   value, the bar is the at-a-glance one. */
+.da-chat-context{display:flex; align-items:center; gap:6px; margin-top:3px;
+  font-variant-numeric:tabular-nums}
+.da-chat-context[hidden]{display:none}
+.da-ctx-text{flex:0 0 auto; white-space:nowrap}
+.da-ctx-bar{
+  flex:1 1 auto; min-width:40px; max-width:120px; height:4px; border-radius:999px;
+  background:var(--line); overflow:hidden;
+}
+.da-ctx-fill{display:block; height:100%; width:0; background:var(--accent); border-radius:999px}
+/* Two tiers of warning, because the failure they predict is abrupt: the request
+   that overruns the window is rejected outright, not degraded. `near` is the
+   nudge to start a new chat; `full` is past the point where one reliably helps. */
+.da-chat-context[data-tier="near"] .da-ctx-fill{background:#b8860b}
+.da-chat-context[data-tier="near"] .da-ctx-text{color:#8a6508; font-weight:600}
+.da-chat-context[data-tier="full"] .da-ctx-fill{background:var(--conflict)}
+.da-chat-context[data-tier="full"] .da-ctx-text{color:var(--conflict); font-weight:700}
 #da-chat-forget{
   border:1px solid var(--line); background:#fff; color:var(--muted);
   font-size:10px; border-radius:6px; padding:2px 7px; margin-left:6px;
@@ -3238,6 +3304,17 @@ _CHAT_JS = r"""
   // here.
   var sessionUsage = {input: 0, output: 0, cacheRead: 0, cacheWrite: 0};
 
+  // Context-window occupancy, which is a DIFFERENT quantity from the totals
+  // above: `sessionUsage` accumulates forever (it is spend), while this is a
+  // snapshot of how much of the model's window the live thread fills right now.
+  // `prompt` is the last round's whole prompt — input + BOTH cache legs, because
+  // cached tokens still occupy the window, they are merely billed at a discount
+  // — and `output` is that round's answer, which the transcript carries into the
+  // next request. Rounds within one turn only grow, so the newest message_start
+  // is both the latest and the largest, and assignment (not accumulation) is
+  // what keeps this a snapshot.
+  var contextUsage = {prompt: 0, output: 0};
+
   // ------------------------------------------------- rolling history cache
   // Cache-control block types that are safe to stamp. Deliberately excludes
   // thinking/redacted_thinking blocks, which must be echoed back byte-exact.
@@ -3301,7 +3378,14 @@ _CHAT_JS = r"""
   function buildRequest(noTools){
     var req = {
       model: CFG.model,
-      max_tokens: 16000,
+      // The model's own ceiling, resolved host-side from the capability registry
+      // (CFG.maxTokens) — never a smaller house limit. A truncated answer is a
+      // wrong answer the reader has to buy twice, and the model already sizes
+      // its response to the question; the ceiling is a backstop, not a budget.
+      // Requesting more than the model serves is a 400, hence the registry
+      // rather than a constant, and the literal is only a floor for a config
+      // written by an older build that has no `maxTokens` key.
+      max_tokens: CFG.maxTokens || 16000,
       system: systemBlocks(),
       thinking: {type: 'adaptive', display: 'summarized'},
       messages: messagesForRequest(),
@@ -3713,6 +3797,9 @@ _CHAT_JS = r"""
   var deepLabel = document.getElementById('da-chat-deep');
   var deepToggle = document.getElementById('da-chat-deep-input');
   var usageEl = document.getElementById('da-chat-usage');
+  var contextEl = document.getElementById('da-chat-context');
+  var contextTextEl = document.getElementById('da-chat-context-text');
+  var contextFillEl = document.getElementById('da-chat-context-fill');
   var keyRow = document.getElementById('da-chat-key');
   var keyForm = document.getElementById('da-chat-key-form');
   var keySet = document.getElementById('da-chat-key-set');
@@ -3737,7 +3824,46 @@ _CHAT_JS = r"""
     if(n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k';
     return String(n);
   }
+  // How full the model's context window is *now*. The report is re-sent verbatim
+  // with every question and the transcript never gets trimmed on the way out, so
+  // a long thread walks toward the ceiling — and the overrun is abrupt, not
+  // graceful: the request that exceeds the window is rejected outright. This is
+  // the reader's only warning, and the answer to it is "New chat".
+  //
+  // Reported against the window, not against `max_tokens`: those are separate
+  // budgets (`max_tokens` caps one answer's output and is already pinned to the
+  // model's ceiling), and it is the input side that accumulates.
+  //
+  // Silent until the first answer lands, because the figure comes from the API's
+  // own usage numbers rather than a local estimate — the honest thing to show
+  // before there is a measurement is nothing. That also means a *loaded*
+  // transcript reads blank until its next question, which is correct: the
+  // occupancy of a thread we have never sent is not yet known.
+  function renderContext(){
+    if(!contextEl || !contextTextEl || !contextFillEl) return;
+    var win = Number(CFG.contextWindow) || 0;
+    var used = contextUsage.prompt + contextUsage.output;
+    if(!win || used <= 0){ contextEl.hidden = true; return; }
+    var frac = used / win;
+    var pct = Math.min(100, frac * 100);
+    // A thread can only fill the window it was measured against, so >100% is not
+    // reachable here — but clamp anyway rather than paint a bar out of its track.
+    contextFillEl.style.width = pct.toFixed(1) + '%';
+    contextEl.setAttribute('data-tier', frac >= 0.9 ? 'full' : (frac >= 0.7 ? 'near' : 'ok'));
+    // Round toward the alarming side: 0.4% reads as "<1%" rather than "0%", which
+    // would look like the counter is broken, and 89.6% reads as 90 rather than
+    // rounding down into a tier the colour has already left.
+    var shown = pct > 0 && pct < 1 ? '<1' : String(Math.round(pct));
+    contextTextEl.textContent = 'Context ' + fmtTokens(used) + ' / ' + fmtTokens(win)
+      + ' (' + shown + '%)'
+      + (frac >= 0.9 ? ' — nearly full, start a New chat'
+         : (frac >= 0.7 ? ' — filling up' : ''));
+    contextEl.hidden = false;
+  }
   function renderUsage(){
+    // Both readouts live in the footer that composeCap() measures, so they are
+    // painted together and paintCompose() below re-clamps for both at once.
+    renderContext();
     if(!usageEl) return;
     var total = sessionUsage.input + sessionUsage.output
       + sessionUsage.cacheRead + sessionUsage.cacheWrite;
@@ -3782,6 +3908,7 @@ _CHAT_JS = r"""
     history = [];
     displays = [];
     sessionUsage = {input: 0, output: 0, cacheRead: 0, cacheWrite: 0};
+    contextUsage = {prompt: 0, output: 0};   // the emptied thread occupies nothing
     renderUsage();             // back to hidden — the counter belongs to the thread
     dropStoredTranscript();    // "New chat" is the eraser — the stored copy goes too
     clearPendingSelection();   // drop any pending excerpt + its highlight
@@ -4359,6 +4486,12 @@ _CHAT_JS = r"""
         sessionUsage.input      += u.input_tokens || 0;
         sessionUsage.cacheRead  += u.cache_read_input_tokens || 0;
         sessionUsage.cacheWrite += u.cache_creation_input_tokens || 0;
+        // Snapshot, not a sum (see `contextUsage`): this round's prompt IS the
+        // current occupancy, and the answer that will extend it starts from zero.
+        contextUsage.prompt = (u.input_tokens || 0)
+          + (u.cache_read_input_tokens || 0)
+          + (u.cache_creation_input_tokens || 0);
+        contextUsage.output = 0;
       }
     } else if(ev.type === 'message_delta'){
       if(ev.delta && ev.delta.stop_reason) st.stopReason = ev.delta.stop_reason;
@@ -4374,6 +4507,9 @@ _CHAT_JS = r"""
           sessionUsage.output += seen - st.outputCounted;
           st.outputCounted = seen;
         }
+        // The cumulative shape that makes the counter above awkward is exactly
+        // what the snapshot wants: this round's answer so far, assigned.
+        if(seen > contextUsage.output) contextUsage.output = seen;
       }
     } else if(ev.type === 'error'){
       var err = new Error((ev.error && ev.error.message) || 'stream error');
@@ -4690,6 +4826,11 @@ _CHAT_JS = r"""
     // Loading a transcript over a conversation you had already spent tokens on
     // would otherwise keep charging the abandoned thread's spend to the new one.
     sessionUsage = {input: 0, output: 0, cacheRead: 0, cacheWrite: 0};
+    // Same reasoning for the occupancy snapshot, plus one of its own: the
+    // incoming thread has never been sent from here, so the only honest reading
+    // is "not measured yet" — carrying the previous thread's figure across would
+    // describe a conversation that is no longer open.
+    contextUsage = {prompt: 0, output: 0};
     renderUsage();
     turns.forEach(function(turn, i){
       var m = turn && turn.message;
