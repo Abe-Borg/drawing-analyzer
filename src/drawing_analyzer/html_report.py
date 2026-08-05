@@ -58,6 +58,14 @@ measured from the API's own usage numbers, so both stay silent until the first
 answer lands; a loaded transcript reads blank until its next question, because
 the occupancy of a thread this browser has never sent is not yet known.
 
+If a thread does reach the ceiling, generated tokens count toward the window
+too, so the answer stops mid-sentence with ``model_context_window_exceeded`` —
+a *different* stop reason from ``max_tokens`` (nothing about the request was too
+small; the conversation is simply too long) and so a different note, naming
+**New chat** as the remedy. Every stop reason that cuts an answer short gets a
+note recorded on the turn, not just drawn on screen, so a restored transcript
+never shows a truncated answer as a complete one.
+
 **Key handling.** By default the key is **not** written into the file — even
 when the caller has one: the widget asks the reader for a key on first use and
 keeps it only in the browser tab's ``sessionStorage`` (the **Forget key**
@@ -5037,6 +5045,25 @@ _CHAT_JS = r"""
         }
         if(st.stopReason === 'refusal') turnNote(bubble, 'The model declined to answer this request.');
         else if(st.stopReason === 'max_tokens') turnNote(bubble, '(Answer truncated — output limit reached.)');
+        // The OTHER way an answer gets cut off, and the one the context gauge in
+        // the footer exists to predict: generated tokens count toward the context
+        // window too, so a thread near the ceiling can stop mid-sentence having
+        // filled it. Distinct from `max_tokens` — nothing about this request was
+        // too small, the conversation is simply too long — so it needs its own
+        // note and its own remedy. It is truthy, so without this branch it fell
+        // through all three and the cut-off answer was committed and replayed
+        // from the transcript looking complete.
+        //
+        // Raising max_tokens to the model's ceiling is what put this within
+        // reach: the old 16k cap could only ever add 16k to the window. The fix
+        // is to report the stop, NOT to shrink max_tokens back down against the
+        // remaining window — that would restore the rationing this widget just
+        // shed, and the browser could not size it anyway (the prompt's token
+        // count first arrives on message_start, after the request is gone).
+        else if(st.stopReason === 'model_context_window_exceeded'){
+          turnNote(bubble, '(Answer cut off — this conversation has filled the '
+            + "model's context window. Start a New chat to continue.)");
+        }
         else if(!st.stopReason) throw new Error('The stream ended unexpectedly — check your connection and try again.');
       });
     }

@@ -30,6 +30,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a local estimate, so both stay honest and both stay silent until there is
   something measured to report.
 
+  And if a thread does reach the ceiling, the answer now says so. Generated
+  tokens count toward the window too, so a long conversation can stop
+  mid-sentence with `model_context_window_exceeded` — a different stop reason
+  from `max_tokens`, and one the widget used to let fall through silently,
+  committing the cut-off answer and replaying it from the transcript as though
+  it were complete. It gets its own note now, naming *New chat* as the remedy.
+
 - **Ask-AI conversations are kept.** The report's chat used to live only in the
   tab's memory: a refresh, a close, or a mis-clicked *New chat* destroyed it, and
   the only way out was *Save as PDF* — a picture of the conversation, not data.

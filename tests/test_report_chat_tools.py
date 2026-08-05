@@ -1439,6 +1439,49 @@ def test_context_readout_measures_the_thread_against_the_window(page, tmp_path):
     assert page.eval_on_selector("#da-chat-context", "el => el.hidden") is True
 
 
+def test_a_window_exhausted_answer_says_so_and_the_note_survives_a_reload(page, tmp_path):
+    """The other way an answer gets cut off, and the one the gauge predicts.
+
+    Generated tokens count toward the context window, so a long thread can stop
+    mid-sentence having filled it. ``model_context_window_exceeded`` is truthy,
+    so before it had a branch of its own it fell past the refusal / max_tokens /
+    no-stop-reason arms and the cut-off answer was committed silently — and
+    replayed from the transcript looking complete, which is the one thing
+    ``turnNote`` exists to prevent.
+    """
+    stream = _sse([
+        {"type": "message_start", "message": {"usage": {
+            "input_tokens": 980000, "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0}}},
+        {"type": "content_block_start", "index": 0,
+         "content_block": {"type": "text", "text": ""}},
+        {"type": "content_block_delta", "index": 0,
+         "delta": {"type": "text_delta", "text": "The riser diagram on M-5"}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_delta",
+         "delta": {"stop_reason": "model_context_window_exceeded"},
+         "usage": {"output_tokens": 12000}},
+    ])
+    _load(page, _chat_doc(), tmp_path, queue=[stream])
+    _ask(page, "walk me through every sheet")
+
+    notes = page.eval_on_selector_all(".da-note", "els => els.map(e => e.textContent)")
+    assert any("filled the model's context window" in n for n in notes), notes
+    assert any("New chat" in n for n in notes), notes
+    # It is NOT the output-cap message: nothing about the request was too small.
+    assert not any("output limit reached" in n for n in notes), notes
+    # And the gauge agrees the window is full rather than contradicting the note.
+    assert page.eval_on_selector("#da-chat-context", "el => el.dataset.tier") == "full"
+
+    # The note rides the transcript, so a reload does not resurrect the answer as
+    # a complete one. (`_stored` reads the auto-saved browser copy.)
+    saved = _stored(page)
+    assert saved is not None
+    assistant = [t for t in saved["turns"] if t["message"]["role"] == "assistant"]
+    assert assistant, saved
+    assert any("context window" in n for n in assistant[-1]["display"]["notes"]), assistant[-1]
+
+
 def test_context_readout_is_a_snapshot_not_a_running_total(page, tmp_path):
     """Two questions must not read as the sum of both prompts.
 
