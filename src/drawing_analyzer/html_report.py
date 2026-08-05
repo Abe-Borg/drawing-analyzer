@@ -47,6 +47,14 @@ widget says exactly that. Pass ``include_chat=False`` to omit the widget (and
 every network reference) entirely. The *Python* module still performs no
 network I/O.
 
+**The ask box is expandable.** It opens at two rows and grows with what you
+type, up to a cap that always leaves the transcript a readable slice of the
+panel. The grip above it drags to any height and the ▲/▼ toggle jumps to the cap
+and back; either one pins the height (auto-grow stops) until a double-click on
+the grip hands it back. The pinned height persists in ``localStorage``
+(``da-chat-h``) and is re-clamped — never overwritten — when the panel shrinks,
+so borrowed space is returned when the panel grows again.
+
 **Transcript persistence.** The conversation is durable, two ways — nothing is
 ever sent anywhere for either.
 
@@ -2580,6 +2588,13 @@ _CHAT_HTML = """
     <div id="da-chat-key-status" class="da-key-status" aria-live="polite"></div>
   </div>
   <div class="da-chat-compose">
+    <div class="da-compose-grip" id="da-compose-grip"
+         title="Drag to resize the message box — double-click to fit what you type">
+      <span class="da-compose-grip-line" aria-hidden="true"></span>
+      <button id="da-chat-expand" type="button" class="da-compose-expand"
+              aria-expanded="false" aria-label="Expand the message box"
+              title="Expand the message box">▲</button>
+    </div>
     <textarea id="da-chat-input" rows="2" placeholder="Ask about this report…"></textarea>
     <button id="da-chat-send" type="button">Send</button>
     <button id="da-chat-stop" type="button" hidden>Stop</button>
@@ -2677,14 +2692,31 @@ _CHAT_CSS = """
 .da-md th{background:#f3f5f9; font-weight:600}
 .da-md blockquote{margin:6px 0; padding:4px 10px; border-left:3px solid var(--line); color:var(--muted)}
 .da-md a{text-decoration:underline}
+/* The ask box is expandable. `flex-wrap` + a full-width first item gives the
+   grip a row of its own above the textarea + Send; the ▲ toggle rides at the
+   right end of that row. JS owns the textarea's height (auto-grow, drag, and
+   toggle all write `style.height`), so the browser's own corner grip stays off
+   — two resize mechanisms writing the same property would fight. */
 .da-chat-compose{
-  display:flex; gap:8px; padding:10px 12px; border-top:1px solid var(--line);
-  background:#fbfcfe; align-items:flex-end;
+  display:flex; flex-wrap:wrap; gap:8px; padding:7px 12px 10px;
+  border-top:1px solid var(--line); background:#fbfcfe; align-items:flex-end;
 }
+.da-compose-grip{
+  flex:1 0 100%; position:relative; display:flex; align-items:center;
+  justify-content:center; height:14px; margin-bottom:-4px;
+  cursor:ns-resize; touch-action:none;
+}
+.da-compose-grip-line{width:38px; height:3px; border-radius:2px; background:#c5ccd8}
+.da-compose-grip:hover .da-compose-grip-line{background:var(--accent)}
+.da-compose-expand{
+  position:absolute; right:0; top:0; height:14px; padding:0 5px; border:none;
+  background:none; color:var(--muted); cursor:pointer; font-size:9px; line-height:14px;
+}
+.da-compose-expand:hover{color:var(--accent)}
 #da-chat-input{
   flex:1 1 auto; resize:none; border:1px solid var(--line); border-radius:8px;
   padding:8px 10px; font:13.5px/1.4 inherit; color:var(--ink); background:#fff;
-  font-family:inherit;
+  font-family:inherit; overflow-y:auto; min-width:0;
 }
 #da-chat-input:focus{outline:none; border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft)}
 #da-chat-send,#da-chat-stop{
@@ -4287,7 +4319,10 @@ _CHAT_JS = r"""
       if(!pushed){
         history.pop();               // keep history consistent for the next question
         displays.pop();              // ...and displays index-aligned with it
-        if(!aborted) input.value = (opts.retryValue !== undefined ? opts.retryValue : displayText);
+        if(!aborted){
+          input.value = (opts.retryValue !== undefined ? opts.retryValue : displayText);
+          paintCompose();     // a restored question re-sizes the box it came from
+        }
       }
       if(aborted){
         turnNote(bubble, '⏹ Stopped.');
@@ -4322,6 +4357,7 @@ _CHAT_JS = r"""
       return;
     }
     input.value = '';
+    paintCompose();          // an auto-grown box snaps back once it is emptied
     if(hasSel){
       var ex = pendingSel.text;
       var api = 'The user selected this excerpt from the report:\n<excerpt>\n' + ex + '\n</excerpt>\n\n' +
@@ -4338,6 +4374,139 @@ _CHAT_JS = r"""
   input.addEventListener('keydown', function(e){
     if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); send(); }
   });
+
+  // ------------------------------------------------------- expandable ask box
+  // The composer opens at two rows and grows with what you type, up to a cap
+  // that always leaves the transcript a readable slice of the panel. Two
+  // explicit controls override that: the grip above it drags to any height, and
+  // ▲/▼ jumps to the cap and back. Either one PINS the height (`composeWant`) —
+  // auto-grow stops until the reader double-clicks the grip to hand it back.
+  // The pinned height persists in localStorage beside the panel geometry, and
+  // is re-clamped (never overwritten) whenever the panel gets smaller, so a
+  // narrow window borrows the space and giving it back restores the full box.
+  var COMPOSE_KEY = 'da-chat-h';
+  var COMPOSE_MAX = 460;     // past this the box is a text editor, not a question
+  var MSGS_FLOOR = 90;       // the transcript never gets squeezed below this
+  var composeWant = null;    // px the reader asked for; null → auto-grow
+  var gripEl = document.getElementById('da-compose-grip');
+  var expandBtn = document.getElementById('da-chat-expand');
+  var composeEl = document.querySelector('.da-chat-compose');
+
+  function composeMetrics(){
+    // Computed style, not a measured rect: this has to answer while the panel is
+    // still display:none (the height is restored before the first open).
+    var cs = window.getComputedStyle(input);
+    var line = parseFloat(cs.lineHeight);
+    if(!isFinite(line) || line <= 0) line = 19;
+    var pad = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+    var border = (parseFloat(cs.borderTopWidth) || 0) + (parseFloat(cs.borderBottomWidth) || 0);
+    return {line: line, pad: pad, border: border};
+  }
+  // The floor is the two rows the box has always opened at — resizing it made it
+  // taller on demand, never slimmer than it was.
+  function composeMin(){
+    var m = composeMetrics();
+    return Math.round(2 * m.line + m.pad + m.border);
+  }
+  // The ceiling is MEASURED, not guessed: the panel is a flex column whose other
+  // rows (header, the key form when the reader supplies their own key, the foot)
+  // do not shrink, so a cap taken from a constant overflows them straight out of
+  // the panel's `overflow:hidden` the moment one of them is taller than assumed.
+  // Whatever those rows actually occupy right now, plus a readable floor for the
+  // transcript, is what the box may not take.
+  function composeCap(){
+    var panelH = panel.getBoundingClientRect().height;
+    // A hidden panel measures 0 — fall back to half the CSS default height
+    // (72vh), so a height restored before the first open survives to be
+    // re-clamped against real measurements when the panel opens.
+    if(!panelH || !composeEl) return Math.max(composeMin(), Math.min(window.innerHeight * 0.36, COMPOSE_MAX));
+    var used = 0;
+    Array.prototype.forEach.call(panel.children, function(el){
+      // Skip the two flex items whose size is the question (the transcript
+      // absorbs the change; the composer is what we are sizing) and the resize
+      // handles, which are absolutely positioned and take no flow space.
+      if(el === composeEl || el === msgs || el.classList.contains('da-rz')) return;
+      used += el.getBoundingClientRect().height;
+    });
+    // The composer's own padding, grip row, and row gap ride along with it.
+    var chrome = composeEl.getBoundingClientRect().height - input.getBoundingClientRect().height;
+    var room = Math.min(panelH - used - chrome - MSGS_FLOOR, COMPOSE_MAX);
+    return Math.max(composeMin(), room);
+  }
+  function fitCompose(cap){
+    // box-sizing is border-box but scrollHeight is not: add the border back or
+    // the box lands 2px short and the text scrolls under its own bottom edge.
+    input.style.height = 'auto';   // shrink first, or scrollHeight only ever grows
+    var h = input.scrollHeight + composeMetrics().border;
+    input.style.height = Math.min(Math.max(h, composeMin()), cap) + 'px';
+  }
+  // The one place the box's height is written — from the text when auto-growing,
+  // from `composeWant` when pinned, always clamped to what the panel can spare.
+  function paintCompose(){
+    var cap = composeCap();
+    if(composeWant === null) fitCompose(cap);
+    else input.style.height = Math.max(composeMin(), Math.min(composeWant, cap)) + 'px';
+    if(!expandBtn) return;
+    var atCap = composeWant !== null && composeWant >= cap - 1;
+    var label = atCap ? 'Shrink the message box' : 'Expand the message box';
+    expandBtn.textContent = atCap ? '▼' : '▲';
+    expandBtn.setAttribute('aria-expanded', atCap ? 'true' : 'false');
+    expandBtn.setAttribute('aria-label', label);
+    expandBtn.title = label;
+  }
+  function setComposeH(px){
+    composeWant = Math.max(composeMin(), Math.min(Math.round(px), composeCap()));
+    paintCompose();
+    try { localStorage.setItem(COMPOSE_KEY, String(composeWant)); } catch(e){}
+  }
+  function resetComposeH(){
+    composeWant = null;
+    try { localStorage.removeItem(COMPOSE_KEY); } catch(e){}
+    paintCompose();
+  }
+  input.addEventListener('input', paintCompose);
+  if(expandBtn){
+    expandBtn.addEventListener('click', function(){
+      var cap = composeCap();
+      if(composeWant !== null && composeWant >= cap - 1) resetComposeH();
+      else setComposeH(cap);
+      input.focus();
+    });
+  }
+  if(gripEl){
+    gripEl.addEventListener('pointerdown', function(e){
+      if(e.target && e.target.closest && e.target.closest('button')) return;  // ▲ is not a handle
+      var sy = e.clientY, base = input.getBoundingClientRect().height, began = false;
+      function onMove(ev){
+        var dy = sy - ev.clientY;                        // drag up = taller
+        if(!began){
+          if(Math.abs(dy) < 3) return;                   // threshold → lets dblclick fire
+          began = true;
+          document.body.classList.add('da-dragging');
+        }
+        ev.preventDefault();
+        setComposeH(base + dy);
+      }
+      function onUp(ev){
+        try { gripEl.releasePointerCapture(ev.pointerId); } catch(x){}
+        gripEl.removeEventListener('pointermove', onMove);
+        gripEl.removeEventListener('pointerup', onUp);
+        gripEl.removeEventListener('pointercancel', onUp);
+        document.body.classList.remove('da-dragging');
+      }
+      try { gripEl.setPointerCapture(e.pointerId); } catch(x){}
+      gripEl.addEventListener('pointermove', onMove);
+      gripEl.addEventListener('pointerup', onUp);
+      gripEl.addEventListener('pointercancel', onUp);
+    });
+    gripEl.addEventListener('dblclick', resetComposeH);
+  }
+  (function(){
+    var stored = NaN;
+    try { stored = parseFloat(localStorage.getItem(COMPOSE_KEY) || ''); } catch(e){}
+    if(isFinite(stored) && stored > 0) composeWant = Math.max(composeMin(), stored);
+    paintCompose();
+  })();
 
   // Starter prompts: deterministic, run-tailored questions from the inert
   // #da-starters block (built server-side by _starter_prompts). Each chip fills
@@ -4357,6 +4526,7 @@ _CHAT_JS = r"""
       b.addEventListener('click', function(){
         if(streaming) return;
         input.value = q;
+        paintCompose();   // send() clears it again, but not if it bails on the key
         send();
       });
       startersRow.appendChild(b);
@@ -4406,11 +4576,12 @@ _CHAT_JS = r"""
   function writeGeo(g){
     panel.style.left = g.left + 'px'; panel.style.top = g.top + 'px';
     panel.style.width = g.w + 'px'; panel.style.height = g.h + 'px';
+    paintCompose();   // the panel just changed height — re-clamp the ask box to it
   }
   function applyGeom(){
-    if(isMobile()){ stripInline(); return; }   // media query owns the bottom sheet
+    if(isMobile()){ stripInline(); paintCompose(); return; }  // media query owns the bottom sheet
     var g = loadGeo();
-    if(!g){ stripInline(); return; }            // never moved → CSS default
+    if(!g){ stripInline(); paintCompose(); return; }          // never moved → CSS default
     enterCustom(); var c = clampGeo(g); writeGeo(c); saveGeo(c);
   }
 
