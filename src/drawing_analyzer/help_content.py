@@ -1246,6 +1246,13 @@ RUNTIME_TRANSPARENCY = HelpDocument(
                 "remove the key."
             ),
             _bullet(
+                "The box you type in is expandable. It grows as you type, the small bar "
+                "above it drags to any height, and the arrow at its right jumps it to "
+                "full height and back -- so a long question or a pasted spec paragraph "
+                "does not have to be written through a two-line slot. The size you pick "
+                "is remembered; double-click the bar to go back to growing on its own."
+            ),
+            _bullet(
                 "The conversation is kept for you. It saves into that browser's local "
                 "storage for that report, so a refresh or reopening the file does not "
                 "lose it, and New chat erases it. Save writes it to a JSON file you "
