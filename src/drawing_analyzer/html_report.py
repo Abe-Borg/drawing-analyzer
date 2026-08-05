@@ -32,8 +32,9 @@ questions about the results. It calls the Anthropic Messages API **directly from
 the reader's browser** (no server), grounded in the very report text already
 embedded in the page (the ``#raw-md`` block), with streaming, adaptive thinking,
 and the server-side web search / web fetch tools enabled. The report block is
-sent with a prompt-cache breakpoint so follow-up questions re-read the (large)
-report at cache prices.
+sent with a 1h prompt-cache breakpoint so follow-up questions re-read the
+(large) report at cache prices for an hour; a second, rolling breakpoint on the
+conversation keeps prior tool rounds cheap too.
 
 **Key handling.** By default the key is **not** written into the file — even
 when the caller has one: the widget asks the reader for a key on first use and
@@ -102,7 +103,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from .core.api_config import CHAT_MODEL_DEFAULT, model_capabilities
+from .core.api_config import (
+    CHAT_MODEL_DEFAULT,
+    EFFORT_HIGH,
+    EFFORT_MEDIUM,
+    model_capabilities,
+)
+from .core.pricing import price_for
 
 # --------------------------------------------------------------------------- #
 # Report trust boundary (Phase 17, DA-011).
@@ -2137,9 +2144,13 @@ _JS = r"""
 # the browser (the API's CORS opt-in header
 # `anthropic-dangerous-direct-browser-access` makes that possible).
 # Request shape: streaming, adaptive thinking with summarized display, the
-# server-side web_search/web_fetch tools, and a prompt-cache breakpoint on the
-# report block so every question after the first re-reads the report at cache
-# prices.
+# server-side web_search/web_fetch tools, and two prompt-cache breakpoints — a
+# 1h one on the report block so every question in the next hour re-reads the
+# report at cache prices, and a rolling 5-minute one at the end of the
+# conversation so each tool round re-reads prior rounds at cache prices too.
+# Caching is a prefix match (tools -> system -> messages), so `systemBlocks()`
+# must stay byte-identical across a session and the tool list must not change
+# between requests; both are load-bearing, not incidental.
 # --------------------------------------------------------------------------- #
 
 
@@ -2499,8 +2510,32 @@ def _chat_bootstrap_html(
     saved conversation and ignore every other report's.
     """
     embedding = bool(embed_key and api_key)
+    # Effort levels the widget will actually send, resolved here because the
+    # browser cannot see the capability whitelist and an unsupported level is a
+    # 400 that fails the whole request. Both levels must be accepted or the
+    # feature is omitted wholesale — a half-supported pair would break the Deep
+    # toggle on exactly the questions a reader escalated. ``None`` means the
+    # widget sends no ``output_config`` at all, which is always safe.
+    effort_levels = model_capabilities(CHAT_MODEL_DEFAULT).supported_effort_levels
+    effort: dict[str, str] | None = (
+        {"standard": EFFORT_MEDIUM, "deep": EFFORT_HIGH}
+        if {EFFORT_MEDIUM, EFFORT_HIGH} <= effort_levels
+        else None
+    )
+    # Rates for the widget's own cost readout, taken from the pricing table so the
+    # figure tracks PRICING_EFFECTIVE_DATE instead of drifting. The widget runs on
+    # the reader's key, so none of its spend reaches the run's usage ledger or its
+    # manifest — this readout is the only place that cost is ever visible.
+    # ``None`` when the model has no pricing row; the widget then shows tokens only.
+    price = price_for(CHAT_MODEL_DEFAULT)
     config: dict[str, Any] = {
         "model": CHAT_MODEL_DEFAULT,
+        "effort": effort,
+        "rates": (
+            {"in": price.input_per_mtok, "out": price.output_per_mtok}
+            if price
+            else None
+        ),
         # Whether the configured chat model accepts the ``web_fetch_*`` server
         # tool. Web fetch is NOT universal across current models — Opus 5
         # supports web search but not web fetch — and sending it to a model
@@ -2552,6 +2587,7 @@ _CHAT_HTML = """
   <header class="da-chat-head">
     <span class="da-chat-title">Report Q&amp;A</span>
     <span class="da-chat-model" id="da-chat-model"></span>
+    <label id="da-chat-deep" hidden title="Use a larger reasoning budget for this question (slower, costs more)"><input id="da-chat-deep-input" type="checkbox"> Deep</label>
     <button id="da-chat-export" type="button" class="ghost-btn" title="Save this conversation as a PDF via your browser's print dialog">PDF</button>
     <button id="da-chat-save" type="button" class="ghost-btn" title="Save this conversation as a JSON file — keep it beside the report and load it back later">Save</button>
     <button id="da-chat-load" type="button" class="ghost-btn" title="Load a previously saved conversation and carry on asking questions">Load</button>
@@ -2585,6 +2621,7 @@ _CHAT_HTML = """
     <button id="da-chat-stop" type="button" hidden>Stop</button>
   </div>
   <div class="da-chat-foot" id="da-chat-foot"><span>__CHAT_FOOT__</span>
+    <span class="da-chat-usage" id="da-chat-usage" hidden></span>
     <button id="da-chat-forget" type="button" title="Remove the API key stored in this browser tab">Forget key</button></div>
 </section>
 """
@@ -2624,6 +2661,17 @@ _CHAT_CSS = """
   font-size:11px; color:var(--muted); min-width:0; overflow:hidden;
   text-overflow:ellipsis; white-space:nowrap;
 }
+/* Sits with the buttons on the top row, not on the model line: it is a control
+   the reader sets per question, not status text. Hidden entirely when the
+   configured model does not accept both effort levels (CFG.effort is null),
+   so it never offers a toggle that would 400 the request. */
+#da-chat-deep{
+  flex:0 0 auto; display:inline-flex; align-items:center; gap:3px;
+  font-size:10.5px; color:var(--muted); cursor:pointer; white-space:nowrap;
+  border:1px solid var(--line); border-radius:6px; padding:2px 7px; background:#fff;
+}
+#da-chat-deep[hidden]{display:none}
+#da-chat-deep input{margin:0; cursor:pointer}
 #da-chat-close{
   border:none; background:none; font-size:20px; line-height:1; cursor:pointer;
   color:var(--muted); padding:2px 6px;
@@ -2698,6 +2746,9 @@ _CHAT_CSS = """
   border-top:1px solid var(--line);
 }
 .da-key-warn{color:var(--conflict); font-weight:700}
+/* Session token/cost readout. Its own line so it never crowds the key notice. */
+.da-chat-usage{display:block; margin-top:3px; font-variant-numeric:tabular-nums}
+.da-chat-usage[hidden]{display:none}
 #da-chat-forget{
   border:1px solid var(--line); background:#fff; color:var(--muted);
   font-size:10px; border-radius:6px; padding:2px 7px; margin-left:6px;
@@ -3084,14 +3135,25 @@ _CHAT_JS = r"""
       '- Use web_search / web_fetch for outside knowledge (codes, standards, manufacturer or product ' +
       'data, definitions) or when the user asks you to — not for questions the report already answers.\n' +
       '- Write for a construction / MEP engineering reader: concise, specific, markdown formatting, ' +
-      'tables for enumerable facts.';
+      'tables for enumerable facts.\n' +
+      '- Answer at the length the question needs. A lookup gets a sentence or two; save the long ' +
+      'form for questions that genuinely require it. Do not restate the question or recap what ' +
+      'you are about to do.';
     return [
       {type: 'text', text: preamble},
       // The report is byte-identical on every request, so this breakpoint lets
       // every question after the first read it from the prompt cache.
+      //
+      // 1h TTL, not the 5-minute default: the report never changes for the life
+      // of the page, but a reader pauses well past five minutes between
+      // questions, and an expiry means re-writing the WHOLE report at 1.25x.
+      // The 1h write costs 2x instead, is paid once, and every question in the
+      // next hour then reads the report at 0.1x. The 2x write needs three reads
+      // to beat the 5-minute tier's 1.25x, which any real reading session clears
+      // — and the 5-minute tier loses outright the moment one pause runs long.
       {type: 'text',
        text: '=== FULL REPORT (verbatim) ===\n\n' + (REPORT || '(no report text was embedded)'),
-       cache_control: {type: 'ephemeral'}}
+       cache_control: {type: 'ephemeral', ttl: '1h'}}
     ];
   }
   var history = [];   // alternating {role, content}; assistant content = raw API blocks
@@ -3109,6 +3171,67 @@ _CHAT_JS = r"""
   // would pop a turn off the freshly loaded thread and persist the damage.
   var turnGen = 0;
 
+  // Session token totals, accumulated across every round of every question. The
+  // widget runs on the READER's key, so none of this reaches the run's usage
+  // ledger or its manifest — this counter is the only cost signal that exists
+  // here.
+  var sessionUsage = {input: 0, output: 0, cacheRead: 0, cacheWrite: 0};
+
+  // ------------------------------------------------- rolling history cache
+  // Cache-control block types that are safe to stamp. Deliberately excludes
+  // thinking/redacted_thinking blocks, which must be echoed back byte-exact.
+  var STAMPABLE = {text: 1, tool_use: 1, tool_result: 1, image: 1, document: 1};
+
+  // The messages array for one request: `history`, with a rolling cache
+  // breakpoint stamped at the end.
+  //
+  // The report block's breakpoint caches tools+system; this second one caches
+  // the conversation so far, so each tool round and each later question re-reads
+  // prior rounds at 0.1x instead of full price. Tool results are large and live
+  // in `history` forever, so without this, question 8 still pays full freight for
+  // question 1's web-search results. Re-stamping every round also keeps
+  // consecutive breakpoints within the API's 20-block lookback window, which a
+  // tool-heavy turn would otherwise blow past (the stamp would then find no
+  // prior entry and silently miss).
+  //
+  // The default 5-minute TTL is right here, unlike the report block: history is
+  // re-read seconds later during tool rounds, so the cheaper 1.25x write beats a
+  // 2x write on content that churns every turn.
+  //
+  // Only user turns are stamped: on a `pause_turn` resume the last message is an
+  // assistant turn that may end in a thinking block, and the previous user
+  // breakpoint still covers everything before it.
+  //
+  // COPY-ON-STAMP, never in place. `history` is serialized verbatim into the
+  // saved transcript (localStorage and the Save file), so mutating it here would
+  // (a) persist a transient cache marker and (b) rewrite a plain-string content
+  // — the shape `runTurn` stores for a typed question — into a block array,
+  // changing the transcript's durable format for a wire-only concern. Cloning the
+  // one message, its content array, and the one stamped block keeps `history`
+  // exactly as the transcript wants it while the request still carries the marker.
+  function messagesForRequest(){
+    if(!history.length) return history;
+    var i = history.length - 1;
+    var last = history[i];
+    if(last.role !== 'user') return history;
+    // A plain-string content cannot carry cache_control; the API accepts either
+    // shape, so the request-side copy is normalized to blocks.
+    var blocks = (typeof last.content === 'string')
+      ? [{type: 'text', text: last.content}]
+      : (Array.isArray(last.content) ? last.content.slice() : null);
+    if(!blocks) return history;
+    for(var k = blocks.length - 1; k >= 0; k--){
+      var b = blocks[k];
+      if(b && STAMPABLE[b.type]){
+        blocks[k] = Object.assign({}, b, {cache_control: {type: 'ephemeral'}});
+        var out = history.slice();
+        out[i] = {role: last.role, content: blocks};
+        return out;
+      }
+    }
+    return history;
+  }
+
   // Custom tools are executed *in this browser* by the dispatch table below
   // (unlike web_search/web_fetch, which are Anthropic server tools). When
   // noTools is set — the final forced-closure turn once the tool-round budget
@@ -3120,19 +3243,33 @@ _CHAT_JS = r"""
       max_tokens: 16000,
       system: systemBlocks(),
       thinking: {type: 'adaptive', display: 'summarized'},
-      messages: history,
+      messages: messagesForRequest(),
       stream: true
     };
-    if(noTools){ req.tool_choice = {type: 'none'}; return req; }
+    // Effort defaults to `high` server-side, and thinking tokens bill at the
+    // output rate. Most report questions are grounded retrieval over text already
+    // in context, which the standard tier covers at a fraction of the thinking
+    // tokens; the reader escalates per question with the Deep toggle. CFG.effort
+    // is resolved host-side from the capability registry (null when the configured
+    // model does not accept both levels), because the browser cannot see it and
+    // an unsupported effort level is a 400 that fails the whole request.
+    //
+    // Changing effort mid-session invalidates only the messages tier, never the
+    // cached tools+system prefix, so toggling Deep never re-writes the report.
+    if(CFG.effort){
+      req.output_config = {
+        effort: (deepToggle && deepToggle.checked) ? CFG.effort.deep : CFG.effort.standard
+      };
+    }
     req.tools = [
-      {type: 'web_search_20260209', name: 'web_search', max_uses: 15}
+      {type: 'web_search_20260209', name: 'web_search', max_uses: 4}
     ];
     // web_fetch only when the configured model actually supports it (CFG.webFetch,
     // resolved host-side from the capability registry). Opus 5 supports web search
     // but not web fetch, and sending an unsupported server tool is a 400 that fails
     // the request outright — so this degrades to search-only rather than breaking.
     if(CFG.webFetch){
-      req.tools.push({type: 'web_fetch_20260209', name: 'web_fetch', max_uses: 15});
+      req.tools.push({type: 'web_fetch_20260209', name: 'web_fetch', max_uses: 4});
     }
     req.tools.push(
       {name: 'scroll_to_report',
@@ -3158,7 +3295,10 @@ _CHAT_JS = r"""
          status: {type: 'string', description: 'e.g. VERIFIED, UNANCHORED, REJECTED (substring match).'},
          sheet: {type: 'string', description: 'Sheet label substring, e.g. "M-501".'},
          text: {type: 'string', description: 'Substring to match in the finding text or quote.'},
-         limit: {type: 'integer', description: 'Max findings to return (default 50, cap 100).'}
+         limit: {type: 'integer', description: 'Max findings to return (default 50, cap 100).'},
+         compact: {type: 'boolean', description: 'Omit the text and quote fields, returning only ' +
+           'id, sheet, category, severity and status. Use this for counting, scanning, or ' +
+           'filtering — request the full form only when you need to quote a finding.'}
        }}},
       {name: 'filter_report',
        description: 'Change what the report shows on the page by driving its search box, the ' +
@@ -3190,6 +3330,12 @@ _CHAT_JS = r"""
          expression: {type: 'string', description: 'The arithmetic expression to evaluate.'}
        }, required: ['expression']}}
     );
+    // tool_choice alone forces the text close. Do NOT drop `tools` — tool
+    // definitions render at prompt position 0, so removing them invalidates the
+    // whole cached prefix (report included) for this request, which is the single
+    // most expensive thing this widget could do. Changing tool_choice invalidates
+    // only the messages tier, leaving tools+system cached.
+    if(noTools) req.tool_choice = {type: 'none'};
     return req;
   }
 
@@ -3284,8 +3430,17 @@ _CHAT_JS = r"""
       return true;
     });
     var cap = Math.max(1, Math.min(input.limit || 50, 100));
-    return JSON.stringify({total: out.length, returned: Math.min(out.length, cap),
-      findings: out.slice(0, cap)});
+    var rows = out.slice(0, cap);
+    // A compact row is roughly a fifth the tokens of a full one, and because the
+    // result is appended to `history` it is re-sent on every subsequent round and
+    // question — so the saving compounds across the session, not just this call.
+    if(input.compact){
+      rows = rows.map(function(f){
+        return {id: f.id, sheet: f.sheet, category: f.category,
+                severity: f.severity, status: f.status};
+      });
+    }
+    return JSON.stringify({total: out.length, returned: rows.length, findings: rows});
   }
 
   function toolFilter(input){
@@ -3492,6 +3647,11 @@ _CHAT_JS = r"""
   var printHead = document.getElementById('da-chat-print-head');
   var forgetBtn = document.getElementById('da-chat-forget');
   var startersRow = document.getElementById('da-starters-row');
+  // buildRequest reads deepToggle; `var` hoisting inside this IIFE covers the
+  // reference regardless of where the lookup runs.
+  var deepLabel = document.getElementById('da-chat-deep');
+  var deepToggle = document.getElementById('da-chat-deep-input');
+  var usageEl = document.getElementById('da-chat-usage');
   var keyRow = document.getElementById('da-chat-key');
   var keyForm = document.getElementById('da-chat-key-form');
   var keySet = document.getElementById('da-chat-key-set');
@@ -3501,6 +3661,46 @@ _CHAT_JS = r"""
   var keyChange = document.getElementById('da-chat-key-change');
   var keyStatus = document.getElementById('da-chat-key-status');
   document.getElementById('da-chat-model').textContent = CFG.model + ' · web search · thinking';
+  // Only offer the Deep toggle when the host resolved a usable effort pair.
+  if(deepLabel && CFG.effort) deepLabel.hidden = false;
+
+  // Session token/cost readout. The dollar figure is an ESTIMATE and is labelled
+  // as one: cache reads bill at ~0.1x input and writes at 1.25x (5-minute) or 2x
+  // (1-hour), and `cache_creation_input_tokens` does not say which TTL produced
+  // it — with both TTLs in play here that is a band, not a figure. So the cost is
+  // shown as a range and the raw token counts sit beside it, which is what makes
+  // the number honest and what makes a regression visible: if cacheWrite is large
+  // on every question, the report block is not being cached.
+  function fmtTokens(n){
+    if(n >= 1000000) return (n / 1000000).toFixed(1).replace(/\.0$/, '') + 'M';
+    if(n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k';
+    return String(n);
+  }
+  function renderUsage(){
+    if(!usageEl) return;
+    var total = sessionUsage.input + sessionUsage.output
+      + sessionUsage.cacheRead + sessionUsage.cacheWrite;
+    if(!total){ usageEl.hidden = true; return; }
+    var parts = [
+      fmtTokens(sessionUsage.cacheRead) + ' cached read',
+      fmtTokens(sessionUsage.cacheWrite) + ' written',
+      fmtTokens(sessionUsage.input) + ' in',
+      fmtTokens(sessionUsage.output) + ' out'
+    ];
+    if(CFG.rates && CFG.rates.in && CFG.rates.out){
+      var base = (sessionUsage.input / 1e6) * CFG.rates.in
+        + (sessionUsage.output / 1e6) * CFG.rates.out
+        + (sessionUsage.cacheRead / 1e6) * CFG.rates.in * 0.1;
+      var lo = base + (sessionUsage.cacheWrite / 1e6) * CFG.rates.in * 1.25;
+      var hi = base + (sessionUsage.cacheWrite / 1e6) * CFG.rates.in * 2;
+      var span = (lo.toFixed(2) === hi.toFixed(2))
+        ? '$' + lo.toFixed(2)
+        : '$' + lo.toFixed(2) + '-' + hi.toFixed(2);
+      parts.push('est. ' + span);
+    }
+    usageEl.textContent = parts.join(' · ');
+    usageEl.hidden = false;
+  }
 
   fab.addEventListener('click', function(){
     panel.hidden = false; fab.hidden = true; applyGeom(); input.focus();
@@ -3512,6 +3712,8 @@ _CHAT_JS = r"""
     if(aborter) aborter.abort();
     history = [];
     displays = [];
+    sessionUsage = {input: 0, output: 0, cacheRead: 0, cacheWrite: 0};
+    renderUsage();             // back to hidden — the counter belongs to the thread
     dropStoredTranscript();    // "New chat" is the eraser — the stored copy goes too
     clearPendingSelection();   // drop any pending excerpt + its highlight
     clearTermHighlight();      // and any highlight_term paint
@@ -3770,8 +3972,17 @@ _CHAT_JS = r"""
       }
     } else if(ev.type === 'content_block_stop'){
       finishBlock(st, ev.index, bubble);
+    } else if(ev.type === 'message_start'){
+      // Input-side counters arrive once per round, on message_start.
+      var u = ev.message && ev.message.usage;
+      if(u){
+        sessionUsage.input      += u.input_tokens || 0;
+        sessionUsage.cacheRead  += u.cache_read_input_tokens || 0;
+        sessionUsage.cacheWrite += u.cache_creation_input_tokens || 0;
+      }
     } else if(ev.type === 'message_delta'){
       if(ev.delta && ev.delta.stop_reason) st.stopReason = ev.delta.stop_reason;
+      if(ev.usage && ev.usage.output_tokens) sessionUsage.output += ev.usage.output_tokens;
     } else if(ev.type === 'error'){
       var err = new Error((ev.error && ev.error.message) || 'stream error');
       err.mid_stream = true;
@@ -4304,6 +4515,7 @@ _CHAT_JS = r"""
       if(!bubble.childNodes.length) bubble.remove(); // nothing ever rendered
       if(pushed && opts.onCommit) opts.onCommit();   // e.g. clear the pending selection
       setStreaming(false);
+      renderUsage();   // every round of this turn has now been counted
       scrollDown(true);
       // The one place every turn settles — completed, stopped, or failed — so
       // it is the one place the transcript needs saving. A turn that left no
@@ -4416,7 +4628,14 @@ _CHAT_JS = r"""
 
   function startGesture(e, mode){
     if(isMobile()) return;
-    if(mode === 'move' && e.target && e.target.closest && e.target.closest('button')) return;
+    // The header doubles as the drag handle, and this gesture calls
+    // setPointerCapture — which routes the pointerup to the header, so a control
+    // in the header would never see its own click. Every interactive element
+    // there must be exempt, not just <button>: the Deep toggle is a <label>
+    // wrapping a checkbox and was silently unclickable when this listed buttons
+    // alone.
+    if(mode === 'move' && e.target && e.target.closest
+       && e.target.closest('button, input, label, select, textarea, a')) return;
     var el = e.currentTarget;
     var sx = e.clientX, sy = e.clientY, began = false, base = null;
     function onMove(ev){

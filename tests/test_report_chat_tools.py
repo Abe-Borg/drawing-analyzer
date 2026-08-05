@@ -99,6 +99,32 @@ _FETCH_STUB = """
 """
 
 
+def _sent_text(message):
+    """The text of a sent message, whichever container shape it arrived in.
+
+    The rolling history cache breakpoint normalizes the *last* user turn to a
+    block array on the way out (a plain string cannot carry ``cache_control``),
+    so a request's final message is blocks while earlier ones stay strings.
+    These assertions are about the text that reached the model, not the box it
+    travelled in.
+    """
+    content = message["content"]
+    if isinstance(content, str):
+        return content
+    return "".join(b.get("text", "") for b in content if b.get("type") == "text")
+
+
+def _cache_marked(messages):
+    """Every (message index, block index) in `messages` carrying a cache_control."""
+    return [
+        (i, j)
+        for i, m in enumerate(messages)
+        if isinstance(m.get("content"), list)
+        for j, b in enumerate(m["content"])
+        if isinstance(b, dict) and b.get("cache_control")
+    ]
+
+
 def _text_turn(text: str) -> str:
     return _sse([
         {"type": "content_block_start", "index": 0,
@@ -110,8 +136,30 @@ def _text_turn(text: str) -> str:
     ])
 
 
+# Latches "a turn started" the instant the Send button is disabled. setStreaming()
+# assigns `.disabled`, which reflects to the content attribute, so a MutationObserver
+# on that attribute fires as a microtask right after the click handler — well before
+# Playwright's next poll, and regardless of how fast the stubbed turn then completes.
+_TURN_LATCH = """
+(function(){
+  window.__TURN_STARTED = false;
+  function install(){
+    var b = document.getElementById('da-chat-send');
+    if(!b) return;
+    new MutationObserver(function(){
+      if(b.disabled) window.__TURN_STARTED = true;
+    }).observe(b, {attributes: true, attributeFilter: ['disabled']});
+  }
+  if(document.readyState === 'loading'){
+    document.addEventListener('DOMContentLoaded', install);
+  } else { install(); }
+})();
+"""
+
+
 def _load(page, doc, tmp_path, *, queue=None):
     page.add_init_script(_FETCH_STUB)
+    page.add_init_script(_TURN_LATCH)
     page.add_init_script("window.__SSE_END = " + json.dumps(_text_turn("done.")) + ";")
     page.add_init_script(
         "window.__SSE_QUEUE = " + json.dumps(list(queue or [])) + ";"
@@ -123,16 +171,23 @@ def _load(page, doc, tmp_path, *, queue=None):
 
 
 def _finish(page):
-    # Streaming disables Send; wait for the whole (possibly multi-round) turn.
-    page.wait_for_function(
-        "() => { var b=document.getElementById('da-chat-send'); return b && b.disabled; }",
-        timeout=5000,
-    )
+    # Streaming disables Send, and setStreaming(false) runs exactly once when the
+    # whole (possibly multi-round) turn settles — so "disabled then enabled" is the
+    # right shape. But "disabled" is TRANSIENT: with a stubbed fetch the entire turn
+    # can start and finish between two polls of wait_for_function, and waiting to
+    # *observe* it flakes. __TURN_STARTED latches on the first disable via a
+    # MutationObserver (installed at load, before any turn), so the start signal
+    # survives however fast the turn completes.
+    page.wait_for_function("() => window.__TURN_STARTED === true", timeout=5000)
     page.wait_for_function(
         "() => { var b=document.getElementById('da-chat-send'); return b && !b.disabled; }",
         timeout=10000,
     )
     page.wait_for_timeout(120)
+    # Re-arm for the next turn. Every turn in these tests is followed by exactly
+    # one _finish, so clearing here keeps the flag per-turn without every call
+    # site having to snapshot a counter first.
+    page.evaluate("() => { window.__TURN_STARTED = false; }")
 
 
 def _ask(page, question):
@@ -331,7 +386,12 @@ def test_tool_loop_forces_text_close_when_budget_exhausted(page, tmp_path):
     reqs = page.evaluate("window.__REQ")
     # The final request disabled tools so the model had to answer in text.
     assert reqs[-1].get("tool_choice", {}).get("type") == "none"
-    assert "tools" not in reqs[-1]
+    # Tools stay in the payload: tool definitions render at prompt position 0, so
+    # dropping them would invalidate the entire cached prefix — the report block
+    # included — for this request. tool_choice:none is what forces the text close,
+    # and it invalidates only the messages tier.
+    assert reqs[-1].get("tools"), "tool definitions must survive the forced close"
+    assert reqs[-1]["tools"] == reqs[0]["tools"], "tool list must be byte-stable"
     assert page.evaluate("window.__pwned") is False
 
 
@@ -377,8 +437,7 @@ def test_selection_becomes_excerpt_in_request_not_transcript(page, tmp_path):
 
     # The API request embedded the excerpt (fenced), not just the typed question.
     reqs = page.evaluate("window.__REQ")
-    sent = reqs[0]["messages"][-1]["content"]
-    assert isinstance(sent, str)
+    sent = _sent_text(reqs[0]["messages"][-1])
     assert "<excerpt>" in sent and "UNIQUEPHRASE" in sent and "explain this" in sent
 
     # The transcript bubble shows the typed question + a disclosure — the raw
@@ -418,8 +477,7 @@ def test_starter_chip_click_sends_that_question_and_hides_the_row(page, tmp_path
 
     # Clicking sent the chip's text verbatim as the user turn (no excerpt wrapper).
     reqs = page.evaluate("window.__REQ")
-    sent = reqs[0]["messages"][-1]["content"]
-    assert sent == first
+    assert _sent_text(reqs[0]["messages"][-1]) == first
     # The visible user bubble shows it, and the chip row is hidden for the thread.
     assert first in page.eval_on_selector(".da-user", "el => el.textContent")
     assert page.evaluate(
@@ -606,7 +664,7 @@ def test_conversation_survives_a_reload(page, tmp_path):
     sent = page.evaluate("window.__REQ")[0]["messages"]
     assert sent[0]["content"] == "what are the conflicts?"
     assert sent[1]["role"] == "assistant"
-    assert sent[-1]["content"] == "and the second one?"
+    assert _sent_text(sent[-1]) == "and the second one?"
     assert page.evaluate("window.__pwned") is False
 
 
@@ -785,7 +843,7 @@ def test_load_json_restores_and_resumes(page, tmp_path):
     _wait_turn(page)
     sent = page.evaluate("window.__REQ")[0]["messages"]
     assert sent[0]["content"] == "earlier question"
-    assert sent[-1]["content"] == "follow up"
+    assert _sent_text(sent[-1]) == "follow up"
 
 
 def test_load_rejects_a_file_that_is_not_a_transcript(page, tmp_path):
@@ -916,7 +974,7 @@ def test_stopping_mid_tool_loop_leaves_a_resumable_transcript(page, tmp_path):
         for m in messages if isinstance(m.get("content"), list)
         for b in m["content"]
     )
-    assert messages[-1]["content"] == "third question"
+    assert _sent_text(messages[-1]) == "third question"
 
 
 def test_loading_mid_stream_does_not_corrupt_the_loaded_thread(page, tmp_path):
@@ -980,3 +1038,170 @@ def test_loading_mid_stream_does_not_corrupt_the_loaded_thread(page, tmp_path):
     saved = _stored(page)
     assert [t["message"]["role"] for t in saved["turns"]] == ["user", "assistant"]
     assert saved["turns"][0]["display"]["text"] == "loaded question"
+
+
+# --------------------------------------------------------------------------- #
+# 9. Prompt-cache strategy. Caching is a prefix match (tools -> system ->
+#    messages), so these assertions guard the two things that make it work: the
+#    system blocks must be byte-stable for the life of the page, and the rolling
+#    history breakpoint must advance instead of piling up.
+# --------------------------------------------------------------------------- #
+
+
+def test_report_block_uses_one_hour_ttl(page, tmp_path):
+    # The report never changes for the life of the page, but a reader pauses well
+    # past the default 5-minute TTL between questions — and an expiry re-writes
+    # the whole report.
+    _load(page, _chat_doc(), tmp_path, queue=[_text_turn("answered.")])
+    _ask(page, "what are the conflicts?")
+
+    system = page.evaluate("window.__REQ")[0]["system"]
+    assert system[-1]["text"].startswith("=== FULL REPORT")
+    assert system[-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+    # Exactly one breakpoint in the system tier — the preamble must not carry one.
+    assert [b for b in system if b.get("cache_control")] == [system[-1]]
+
+
+def test_system_blocks_are_byte_stable_across_turns(page, tmp_path):
+    # The single most valuable guard on the whole caching strategy: anything
+    # interpolated into systemBlocks() that varies per turn (a timestamp, a
+    # counter, the question itself) silently invalidates the report block on
+    # every request, and nothing else in the suite would notice.
+    _load(page, _chat_doc(), tmp_path,
+          queue=[_text_turn("first answer."), _text_turn("second answer.")])
+    _ask(page, "what are the conflicts?")
+    page.fill("#da-chat-input", "and the second one?")
+    page.click("#da-chat-send")
+    _finish(page)
+
+    reqs = page.evaluate("window.__REQ")
+    assert len(reqs) == 2
+    assert reqs[0]["system"] == reqs[1]["system"], "systemBlocks() must be byte-stable"
+    # Tools render at position 0, ahead of system — a change there invalidates
+    # the report block too.
+    assert reqs[0]["tools"] == reqs[1]["tools"], "tool list must be byte-stable"
+
+
+def test_history_breakpoint_rolls_forward(page, tmp_path):
+    # One rolling breakpoint, always on the newest user turn. Two would burn the
+    # 4-per-request budget; a stationary one would fall outside the API's 20-block
+    # lookback window during a tool-heavy turn and silently stop matching.
+    _load(page, _chat_doc(), tmp_path,
+          queue=[_one_tool_round("q1", "query_findings", '{"severity":"high"}'),
+                 _text_turn("one high-severity finding.")])
+    _ask(page, "how many high severity findings?")
+
+    reqs = page.evaluate("window.__REQ")
+    assert len(reqs) == 2, "expected a tool round then a text close"
+    first, second = _cache_marked(reqs[0]["messages"]), _cache_marked(reqs[1]["messages"])
+    assert len(first) == 1, first
+    assert len(second) == 1, second
+    # Round 2 appended the assistant turn + the tool_result turn, so the marker
+    # must have moved onto that newer user turn.
+    assert second[0][0] > first[0][0], (first, second)
+    # And it always lands on the last message, which is always a user turn.
+    assert second[0][0] == len(reqs[1]["messages"]) - 1
+    assert reqs[1]["messages"][second[0][0]]["role"] == "user"
+
+
+def test_history_marker_never_reaches_the_saved_transcript(page, tmp_path):
+    # `history` is serialized verbatim into the transcript, so the wire-only cache
+    # marker must be stamped on a copy — otherwise a transient breakpoint becomes
+    # part of a durable, user-savable document.
+    _load(page, _chat_doc(), tmp_path, queue=[_text_turn("answered.")])
+    _ask_and_settle(page, "what are the conflicts?")
+
+    saved = _stored(page)
+    assert saved is not None
+    for turn in saved["turns"]:
+        content = turn["message"]["content"]
+        if isinstance(content, list):
+            assert not any(b.get("cache_control") for b in content), turn
+    # The reader's typed question also keeps its plain-string shape on disk.
+    assert saved["turns"][0]["message"]["content"] == "what are the conflicts?"
+
+
+def test_effort_is_sent_and_the_deep_toggle_escalates_it(page, tmp_path):
+    _load(page, _chat_doc(), tmp_path,
+          queue=[_text_turn("standard."), _text_turn("deep.")])
+    _ask(page, "a routine lookup")
+    page.check("#da-chat-deep-input")
+    page.fill("#da-chat-input", "something much harder")
+    page.click("#da-chat-send")
+    _finish(page)
+
+    reqs = page.evaluate("window.__REQ")
+    assert reqs[0]["output_config"] == {"effort": "medium"}
+    assert reqs[1]["output_config"] == {"effort": "high"}
+    # Escalating effort must not disturb the cached tools+system prefix.
+    assert reqs[0]["system"] == reqs[1]["system"]
+    assert reqs[0]["tools"] == reqs[1]["tools"]
+
+
+def test_effort_omitted_when_the_model_lacks_the_levels(page, tmp_path, monkeypatch):
+    # DRAWING_ANALYZER_CHAT_MODEL can point at anything; an unsupported effort
+    # level is a 400 that kills the request, so the host gates on the registry.
+    monkeypatch.setattr(hr, "CHAT_MODEL_DEFAULT", "some-unregistered-model")
+    _load(page, _chat_doc(), tmp_path, queue=[_text_turn("answered.")])
+    _ask(page, "what are the conflicts?")
+
+    assert "output_config" not in page.evaluate("window.__REQ")[0]
+    # ...and the toggle that would set it is not offered.
+    assert page.eval_on_selector("#da-chat-deep", "el => el.hidden") is True
+
+
+def test_query_findings_compact_omits_text_and_quote(page, tmp_path):
+    _load(page, _chat_doc(), tmp_path,
+          queue=[_one_tool_round("qf", "query_findings", '{"compact":true}'),
+                 _text_turn("counted.")])
+    _ask(page, "how many findings are there?")
+
+    reqs = page.evaluate("window.__REQ")
+    payload = [b["content"] for b in reqs[1]["messages"][-1]["content"]
+               if b.get("type") == "tool_result"][0]
+    rows = json.loads(payload)["findings"]
+    assert rows, payload
+    for row in rows:
+        assert set(row) == {"id", "sheet", "category", "severity", "status"}
+
+
+def test_server_tool_budgets_are_modest(page, tmp_path):
+    # Every server-tool result lands in `history` permanently and is re-sent on
+    # every later round and question, so the per-turn budget is a running cost.
+    _load(page, _chat_doc(), tmp_path, queue=[_text_turn("answered.")])
+    _ask(page, "what does the code say?")
+
+    tools = page.evaluate("window.__REQ")[0]["tools"]
+    for t in tools:
+        if t.get("type", "").startswith(("web_search", "web_fetch")):
+            assert t["max_uses"] <= 5, t
+
+
+def test_usage_readout_reports_cache_activity(page, tmp_path):
+    # The widget runs on the reader's key, so nothing reaches RunUsage — this
+    # footer is the only place its cost is ever visible.
+    stream = _sse([
+        {"type": "message_start", "message": {"usage": {
+            "input_tokens": 120, "cache_read_input_tokens": 40000,
+            "cache_creation_input_tokens": 0}}},
+        {"type": "content_block_start", "index": 0,
+         "content_block": {"type": "text", "text": ""}},
+        {"type": "content_block_delta", "index": 0,
+         "delta": {"type": "text_delta", "text": "answered."}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+         "usage": {"output_tokens": 250}},
+    ])
+    _load(page, _chat_doc(), tmp_path, queue=[stream])
+    _ask(page, "what are the conflicts?")
+
+    assert page.eval_on_selector("#da-chat-usage", "el => el.hidden") is False
+    text = page.eval_on_selector("#da-chat-usage", "el => el.textContent")
+    assert "40k cached read" in text, text
+    assert "0 written" in text, text
+    assert "250 out" in text, text
+    assert "est. $" in text, text
+
+    # "New chat" owns the counter along with the thread.
+    page.click("#da-chat-clear")
+    assert page.eval_on_selector("#da-chat-usage", "el => el.hidden") is True
