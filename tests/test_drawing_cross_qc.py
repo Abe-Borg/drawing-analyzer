@@ -457,7 +457,7 @@ def test_reconcile_pairs_overlap_but_fold_in_pair_order(monkeypatch):
     monkeypatch.setattr(X, "_reconcile_call", fake_reconcile)
     findings, _claims, in_tok, out_tok, completed = X._reconcile_facts(
         [], facts, {}, client=object(), model="claude-opus-5", max_retries=0,
-        sleep=_NOOP, max_workers=3,
+        sleep=_NOOP, budget=X._Budget(), max_workers=3,
     )
 
     assert max_active == 3 and completed is True
@@ -774,3 +774,28 @@ def test_pipeline_without_cross_qc_is_unchanged(tmp_path):
     )
     assert client.cross_calls == 0
     assert [f for f in ctx.findings if f.also_on] == []
+
+
+def test_findings_cap_is_counted_and_marks_the_run_degraded():
+    """A truncated response must not report itself complete.
+
+    The per-sheet text budget has always been loss-aware; the findings cap was
+    not, so 80 conflicts silently became 60 with `complete=True`.
+    """
+    budget = X._Budget()
+    many = [
+        Finding(sheet_id="M-101", source_name="a.pdf", page_index=0,
+                category="conflict", severity="low", text=f"c{i}", source_quote=f"c{i}")
+        for i in range(X.DEFAULT_CROSS_QC_MAX_FINDINGS + 20)
+    ]
+
+    kept = X._cap_findings(many, budget)
+
+    assert len(kept) == X.DEFAULT_CROSS_QC_MAX_FINDINGS
+    assert budget.findings_omitted == 20
+    assert budget.degraded is True          # the run can no longer claim complete
+
+    # Under the cap nothing is counted and the run stays clean.
+    clean = X._Budget()
+    assert X._cap_findings(many[:5], clean) == many[:5]
+    assert clean.findings_omitted == 0 and clean.degraded is False

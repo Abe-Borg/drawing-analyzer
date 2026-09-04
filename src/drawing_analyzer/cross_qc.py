@@ -29,7 +29,11 @@ trusted dual-anchor finding.
 
 **Loss-aware budgeting (§16.2, DA-028).** Each sheet's text layer is capped, but the
 omission is *counted and surfaced* (``text_chars_omitted`` / ``budget_degraded``),
-never a silent slice.
+never a silent slice. The same now holds for the per-response findings cap
+(``findings_omitted``): a response carrying more conflicts than
+``DEFAULT_CROSS_QC_MAX_FINDINGS`` used to be truncated with no counter and still
+reported ``complete``, which on a large set — where cross-sheet coordination
+conflicts matter most — is indistinguishable from a set that simply had fewer.
 
 Additive and non-fatal (I-3): a failure is recorded and the standard deliverable
 ships. PDF-engine-free (I-5) — it reads the already-extracted geometry/text.
@@ -280,6 +284,7 @@ class CrossQCResult:
     text_chars_total: int = 0
     text_chars_included: int = 0
     text_chars_omitted: int = 0
+    findings_omitted: int = 0
     budget_degraded: bool = False
     cached: bool = False
 
@@ -525,10 +530,15 @@ class _Budget:
     total: int = 0
     included: int = 0
     omitted: int = 0
+    # Findings discarded because one response exceeded
+    # ``DEFAULT_CROSS_QC_MAX_FINDINGS``. Counted for the same reason omitted
+    # characters are: a cap that silently drops conflicts on a large set is
+    # indistinguishable, downstream, from a set that simply had fewer.
+    findings_omitted: int = 0
 
     @property
     def degraded(self) -> bool:
-        return self.omitted > 0
+        return self.omitted > 0 or self.findings_omitted > 0
 
 
 def _budgeted_text_layer(text_layer: str, budget: _Budget) -> str:
@@ -542,6 +552,28 @@ def _budgeted_text_layer(text_layer: str, budget: _Budget) -> str:
     budget.omitted += len(text_layer) - _TEXT_LAYER_BUDGET
     kept = text_layer[:_TEXT_LAYER_BUDGET]
     return kept + f"\n[TRUNCATED {len(text_layer) - _TEXT_LAYER_BUDGET} chars]"
+
+
+def _cap_findings(findings: list[Finding], budget: _Budget) -> list[Finding]:
+    """Apply the per-response findings cap, **counting** whatever it discards.
+
+    The per-sheet text budget has always been loss-aware; this cap was not. A
+    response carrying 80 cross-sheet conflicts was truncated to 60 with no
+    counter, no ``budget_degraded``, and ``complete=True`` — so a reviewer on a
+    large set, exactly where coordination conflicts matter most, could not tell
+    a clean run from a truncated one. Now the loss is recorded and the run
+    reports itself incomplete, the same as any other dropped input.
+    """
+    if len(findings) <= DEFAULT_CROSS_QC_MAX_FINDINGS:
+        return findings
+    budget.findings_omitted += len(findings) - DEFAULT_CROSS_QC_MAX_FINDINGS
+    _log.warning(
+        "cross-qc: response carried %d finding(s); the per-response cap of %d "
+        "dropped %d. The run is reported incomplete.",
+        len(findings), DEFAULT_CROSS_QC_MAX_FINDINGS,
+        len(findings) - DEFAULT_CROSS_QC_MAX_FINDINGS,
+    )
+    return findings[:DEFAULT_CROSS_QC_MAX_FINDINGS]
 
 
 def _identity_preamble(identity: Any) -> str:
@@ -676,8 +708,6 @@ def _one_cross_qc_call(
     findings: list[Finding] = []
     dropped = 0
     for item in obj.get("findings") or []:
-        if len(findings) >= DEFAULT_CROSS_QC_MAX_FINDINGS:
-            break
         f = _validate_cross_item(item, sheet_map)
         if f is None:
             dropped += 1
@@ -685,7 +715,7 @@ def _one_cross_qc_call(
         findings.append(f)
     if dropped:
         _log.info("cross-qc parse: dropped %d unplaceable/invalid finding(s)", dropped)
-    return findings, parse_numeric_claims(raw), in_tok, out_tok, None
+    return _cap_findings(findings, budget), parse_numeric_claims(raw), in_tok, out_tok, None
 
 
 def _map_call(
@@ -706,10 +736,10 @@ def _map_call(
     if obj is None:
         claims = _resolve_claim_handles(parse_numeric_claims(raw), entry_by_handle)
         return [], claims, [], in_tok, out_tok, _NO_FINDINGS_OBJECT
-    findings = [
+    findings = _cap_findings([
         f for item in (obj.get("findings") or [])
         if (f := _finding_from_handles(item, entry_by_handle)) is not None
-    ][:DEFAULT_CROSS_QC_MAX_FINDINGS]
+    ], budget)
     claims = _resolve_claim_handles(parse_numeric_claims(raw), entry_by_handle)
     facts = _parse_facts(obj, entry_by_handle, discipline_by_handle)
     return findings, claims, facts, in_tok, out_tok, None
@@ -751,7 +781,7 @@ def _parse_facts(
 
 def _reconcile_call(
     manifest: list[tuple], facts: list[CrossQCFact], entry_by_handle: dict, *,
-    client: Any, model: str, max_retries: int, sleep: Any,
+    client: Any, model: str, max_retries: int, sleep: Any, budget: _Budget,
     preamble: str = "",
 ) -> tuple[list[Finding], list[NumericClaim], int, int, str | None]:
     """One reconciliation call comparing ``facts`` across the whole manifest."""
@@ -766,10 +796,10 @@ def _reconcile_call(
     if obj is None:
         claims = _resolve_claim_handles(parse_numeric_claims(raw), entry_by_handle)
         return [], claims, in_tok, out_tok, _NO_FINDINGS_OBJECT
-    findings = [
+    findings = _cap_findings([
         f for item in (obj.get("findings") or [])
         if (f := _finding_from_handles(item, entry_by_handle)) is not None
-    ][:DEFAULT_CROSS_QC_MAX_FINDINGS]
+    ], budget)
     claims = _resolve_claim_handles(parse_numeric_claims(raw), entry_by_handle)
     return findings, claims, in_tok, out_tok, None
 
@@ -781,7 +811,7 @@ _MAX_RECONCILE_PAIR_CALLS = 64
 
 def _reconcile_facts(
     manifest: list[tuple], facts: list[CrossQCFact], entry_by_handle: dict, *,
-    client: Any, model: str, max_retries: int, sleep: Any,
+    client: Any, model: str, max_retries: int, sleep: Any, budget: _Budget,
     preamble: str = "",
     max_workers: int | None = None,
 ) -> tuple[list[Finding], list[NumericClaim], int, int, bool]:
@@ -802,7 +832,7 @@ def _reconcile_facts(
         f, c, i, o, err = _reconcile_call(
             manifest, facts, entry_by_handle,
             client=client, model=model, max_retries=max_retries, sleep=sleep,
-            preamble=preamble,
+            budget=budget, preamble=preamble,
         )
         return f, c, i, o, err is None
 
@@ -827,7 +857,7 @@ def _reconcile_facts(
             return _reconcile_call(
                 manifest, union, entry_by_handle,
                 client=client, model=model, max_retries=max_retries, sleep=sleep,
-                preamble=preamble,
+                budget=budget, preamble=preamble,
             )
         except Exception as exc:  # noqa: BLE001 - preserve additive semantics
             return [], [], 0, 0, _clean_error(exc)
@@ -974,6 +1004,7 @@ def _cross_qc_from_cache(payload: dict) -> CrossQCResult | None:
             text_chars_total=int(payload.get("text_chars_total", 0) or 0),
             text_chars_included=int(payload.get("text_chars_included", 0) or 0),
             text_chars_omitted=int(payload.get("text_chars_omitted", 0) or 0),
+            findings_omitted=int(payload.get("findings_omitted", 0) or 0),
             budget_degraded=bool(payload.get("budget_degraded", False)),
             cached=True,
         )
@@ -1006,6 +1037,7 @@ def _put_cross_qc_cache(cache: Any, key: str, result: CrossQCResult) -> None:
             "text_chars_total": result.text_chars_total,
             "text_chars_included": result.text_chars_included,
             "text_chars_omitted": result.text_chars_omitted,
+            "findings_omitted": result.findings_omitted,
             "budget_degraded": result.budget_degraded,
         },
     )
@@ -1111,7 +1143,9 @@ def cross_sheet_qc(
             shards_planned=1, shards_completed=0 if err else 1,
             complete=err is None and not budget.degraded,
             text_chars_total=budget.total, text_chars_included=budget.included,
-            text_chars_omitted=budget.omitted, budget_degraded=budget.degraded,
+            text_chars_omitted=budget.omitted,
+            findings_omitted=budget.findings_omitted,
+            budget_degraded=budget.degraded,
         )
         _put_cross_qc_cache(cache, cache_key, result)
         return result
@@ -1186,7 +1220,7 @@ def cross_sheet_qc(
         r_find, r_claims, r_in, r_out, completed = _reconcile_facts(
             manifest, all_facts, entry_by_handle,
             client=client, model=model, max_retries=max_retries, sleep=sleep,
-            preamble=preamble,
+            budget=budget, preamble=preamble,
             max_workers=max_workers,
         )
         total_in += r_in
@@ -1230,6 +1264,7 @@ def cross_sheet_qc(
         text_chars_total=budget.total,
         text_chars_included=budget.included,
         text_chars_omitted=budget.omitted,
+        findings_omitted=budget.findings_omitted,
         budget_degraded=budget.degraded,
     )
     _put_cross_qc_cache(cache, cache_key, result)
