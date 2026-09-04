@@ -270,6 +270,22 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   still counts only response-bearing attempts, so an abandoned round cannot
   inflate it.
 
+- **A refused storage write no longer discards the reader's key.** Browsers that
+  block site data (private mode, storage off, quota full) throw from
+  `sessionStorage.setItem`, and key resolution re-read storage to find the key
+  just typed — so it vanished. On a key-less report that reopened the entry form
+  forever; on a report carrying its own key, resolution fell through to that one
+  while the panel said the reader's was in use. The reader's key is now held in
+  memory with persistence best-effort, and the status line says which of the two
+  actually happened.
+
+- **Abandoned recovery rounds survive on a sheet recovery never resolves.** A
+  sheet whose primary batch terminated with a retryable error — so it already
+  held a result — and whose every recovery round was then abandoned kept its
+  abandoned-attempt records stuck on the slot, because only a `None` result was
+  drained at the end of collect. The manifest then omitted exactly the abandoned
+  batches that explain the run's wall clock. Retained results are drained too.
+
 ### Security
 
 - **`pypdf` 6.14.2 → 6.16.2**, clearing six advisories that landed against the
