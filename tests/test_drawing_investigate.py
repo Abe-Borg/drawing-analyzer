@@ -819,3 +819,51 @@ def test_task_budget_rejection_degrades_instead_of_killing_the_stage():
         assert finding.verification.status == "VERIFIED"
     finally:
         inv._task_budget_available = True
+
+
+def test_fallback_verdict_is_not_cached_under_the_budgeted_key(tmp_path):
+    """A verdict reached WITHOUT a task budget must not be replayed later, on a
+    host where the beta works, as though it had been reached with one.
+
+    The key carries the configured budget, so caching the fallback's conclusion
+    under it would contradict the invariant that a verdict reached under a
+    different budget is a different verdict.
+    """
+    from drawing_analyzer.digest_cache import DigestCache
+    import drawing_analyzer.investigate as inv
+
+    class _Status400(Exception):
+        status_code = 400
+
+    class _RejectsBeta(_LoopClient):
+        @property
+        def beta(self):
+            raise _Status400("output_config.task_budget: unsupported beta")
+
+    inv._task_budget_available = True
+    try:
+        cache = DigestCache(None, persist=False)
+        client = _RejectsBeta(_confirm_responder)
+        _cached_run(client, cache, tmp_path / "a")
+        assert inv._task_budget_available is False      # latched off mid-finding
+
+        # The finding that discovered the fallback ran under a request shape the
+        # key does not describe, so it was not admitted: a re-run goes live.
+        second = _RejectsBeta(_confirm_responder)
+        _cached_run(second, cache, tmp_path / "b")
+        assert second.calls, "the fallback conclusion must not have been cached"
+    finally:
+        inv._task_budget_available = True
+
+
+def test_effective_task_budget_reports_what_a_request_would_carry():
+    import drawing_analyzer.investigate as inv
+
+    inv._task_budget_available = True
+    try:
+        assert inv.effective_task_budget() == inv.investigation_task_budget()
+        inv._task_budget_available = False
+        # Zero once latched off: the key must describe the request actually sent.
+        assert inv.effective_task_budget() == 0
+    finally:
+        inv._task_budget_available = True

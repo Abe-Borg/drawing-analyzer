@@ -153,6 +153,17 @@ def investigation_task_budget() -> int:
     return max(20_000, value)
 
 
+def effective_task_budget() -> int:
+    """The budget a request issued *right now* would actually carry.
+
+    Zero once the beta has been found unavailable and the loop has latched onto
+    the plain transport. The cache key uses this rather than the configured
+    value: a verdict reached without a budget must not be replayed later, on a
+    host where the beta works, as though it had been reached with one.
+    """
+    return investigation_task_budget() if _task_budget_available else 0
+
+
 def investigation_model() -> str:
     """Model for the investigation loop — the escalation tier by default,
     overridable via ``DRAWING_ANALYZER_INVESTIGATION_MODEL``."""
@@ -1181,7 +1192,7 @@ def investigate_findings(
                 _payload_hash(finding, set_fingerprint),
                 model=model, prompt_version=INVESTIGATE_PROMPT_VERSION,
                 max_rounds=max_rounds,
-                task_budget=investigation_task_budget(),
+                task_budget=effective_task_budget(),
             )
             entry = cache.get(cache_key)
             if entry is not None and _replay_cached(
@@ -1204,6 +1215,10 @@ def investigate_findings(
                 ))
                 continue
         result.investigated += 1
+        # The fallback can latch mid-investigation, on the very finding that
+        # discovers the beta is unavailable. That one ran under a request shape
+        # the key does not describe, so it must not be admitted.
+        budget_state_before = _task_budget_available
         outcome = _investigate_one(
             finding, sheet, client=client, model=model, tools=tools,
             sheet_id_map=sheet_id_map, all_sheets=sheets, sheet_index=sheet_index,
@@ -1236,6 +1251,7 @@ def investigate_findings(
             # can verify — never a budget-capped, garbled, or errored outcome.
             if (
                 cache_key is not None
+                and budget_state_before == _task_budget_available
                 and outcome.tool_trace
                 and all(step.get("sha256") for step in outcome.tool_trace)
             ):

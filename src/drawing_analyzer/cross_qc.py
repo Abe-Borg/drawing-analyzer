@@ -89,7 +89,12 @@ MAX_FACTS_PER_RECONCILE = 400
 # Cap each sheet's text layer in the prompt (the digest already summarizes it). The
 # omitted characters are counted and surfaced (DA-028) — never silently dropped.
 _TEXT_LAYER_BUDGET = 4_000
-_CROSS_QC_CACHE_CONTRACT = 1
+# Bumped to 2: entries written before the findings cap became loss-aware were
+# stored as ``complete`` after a silent truncation and carry no
+# ``findings_omitted``. Reading them back would default that to 0 and hand a
+# truncated run a clean bill of health forever on warm re-runs, which is the
+# exact failure the accounting was added to end.
+_CROSS_QC_CACHE_CONTRACT = 2
 DEFAULT_CROSS_QC_WORKERS = 3
 _CROSS_QC_WORKERS_ENV = "DRAWING_ANALYZER_CROSS_QC_WORKERS"
 
@@ -552,6 +557,22 @@ def _budgeted_text_layer(text_layer: str, budget: _Budget) -> str:
     budget.omitted += len(text_layer) - _TEXT_LAYER_BUDGET
     kept = text_layer[:_TEXT_LAYER_BUDGET]
     return kept + f"\n[TRUNCATED {len(text_layer) - _TEXT_LAYER_BUDGET} chars]"
+
+
+def _fold_budget(aggregate: _Budget, local: _Budget) -> _Budget:
+    """Fold one shard's budget into the run's aggregate.
+
+    Every counter, not just the text ones. The sharded path is the >40-sheet
+    path — exactly the large sets whose responses are most likely to hit the
+    findings cap — so dropping ``findings_omitted`` here loses the count on the
+    runs that need it most and lets a truncated run still report ``complete``.
+    One function so a future counter cannot be half-folded.
+    """
+    aggregate.total += local.total
+    aggregate.included += local.included
+    aggregate.omitted += local.omitted
+    aggregate.findings_omitted += local.findings_omitted
+    return aggregate
 
 
 def _cap_findings(findings: list[Finding], budget: _Budget) -> list[Finding]:
@@ -1194,9 +1215,7 @@ def cross_sheet_qc(
             map_results = list(pool.map(_run_map, shards))
 
     for f, c, facts, in_tok, out_tok, err, local_budget in map_results:
-        budget.total += local_budget.total
-        budget.included += local_budget.included
-        budget.omitted += local_budget.omitted
+        _fold_budget(budget, local_budget)
         total_in += in_tok
         total_out += out_tok
         if err is not None:

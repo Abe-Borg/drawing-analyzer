@@ -799,3 +799,38 @@ def test_findings_cap_is_counted_and_marks_the_run_degraded():
     clean = X._Budget()
     assert X._cap_findings(many[:5], clean) == many[:5]
     assert clean.findings_omitted == 0 and clean.degraded is False
+
+
+def test_shard_path_aggregates_omitted_findings(monkeypatch):
+    """The sharded path is the >40-sheet path — exactly the large sets whose
+    responses are most likely to hit the cap. Folding only the text counters
+    into the aggregate budget lost the finding count and let a truncated run
+    report itself complete."""
+    aggregate = X._Budget()
+    for local in (X._Budget(total=10, included=10, omitted=0, findings_omitted=7),
+                  X._Budget(total=20, included=15, omitted=5, findings_omitted=3)):
+        X._fold_budget(aggregate, local)          # the production folding
+
+    assert (aggregate.total, aggregate.included, aggregate.omitted) == (30, 25, 5)
+    assert aggregate.findings_omitted == 10
+    assert aggregate.degraded is True
+
+    # A shard that drops findings but omits no characters must still degrade the
+    # run — the case the text-only folding missed entirely.
+    text_clean = X._fold_budget(X._Budget(), X._Budget(findings_omitted=1))
+    assert text_clean.omitted == 0 and text_clean.degraded is True
+
+
+def test_cross_qc_cache_contract_invalidates_pre_accounting_entries(monkeypatch):
+    """Entries written before the findings cap became loss-aware were stored as
+    complete after a silent truncation and carry no `findings_omitted`. Reading
+    one back would default that to 0 and certify a truncated run forever."""
+    geom = _geom("a.pdf", "M-101")
+    entries = [("M-101", "digest", "text", geom)]
+    assert X._CROSS_QC_CACHE_CONTRACT >= 2, "bumped past the pre-accounting entries"
+    current = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")
+
+    monkeypatch.setattr(X, "_CROSS_QC_CACHE_CONTRACT", 1)
+    legacy = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")
+
+    assert current != legacy, "the contract must ride the key"
