@@ -270,6 +270,17 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   still counts only response-bearing attempts, so an abandoned round cannot
   inflate it.
 
+### Security
+
+- **`pypdf` 6.14.2 → 6.16.2**, clearing six advisories that landed against the
+  pinned version since the last release (PYSEC-2026-3655, PYSEC-2026-3656,
+  GHSA-jp53-mhqp-8xcg, GHSA-23w6-3w8w-8484, GHSA-763m-79hh-57f2,
+  GHSA-fc8x-2rww-xw9m) and were failing the CI dependency audit. `pypdf` backs
+  spec-document text extraction (`spec_documents.py`), which reads untrusted
+  PDFs, so this is a live exposure rather than a lint. Only `PdfReader`,
+  `is_encrypted`, `decrypt` and `pages` are used — all unchanged across the
+  bump. Pinned in both `requirements.txt` and `requirements-release.lock`.
+
 ## [1.1.0] - 2026-07-18
 
 A usability-focused release: the standalone GUI is now more compact and
