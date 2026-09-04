@@ -1302,24 +1302,32 @@ def test_history_marker_never_reaches_the_saved_transcript(page, tmp_path):
     assert saved["turns"][0]["message"]["content"] == "what are the conflicts?"
 
 
-def test_effort_is_sent_and_the_deep_toggle_escalates_it(page, tmp_path):
+def test_effort_is_constant_high_across_the_session(page, tmp_path):
+    """One fixed effort level, not a reader-facing choice.
+
+    This was a standard/deep pair behind a "Deep" checkbox. Asking a reader to
+    predict, before seeing the answer, whether their question deserves more
+    reasoning is a question they cannot answer — and a constant also keeps the
+    messages cache tier intact, which flipping the toggle invalidated.
+    """
     _load(page, _chat_doc(), tmp_path,
-          queue=[_text_turn("standard."), _text_turn("deep.")])
+          queue=[_text_turn("first."), _text_turn("second.")])
     _ask(page, "a routine lookup")
-    page.check("#da-chat-deep-input")
     page.fill("#da-chat-input", "something much harder")
     page.click("#da-chat-send")
     _finish(page)
 
     reqs = page.evaluate("window.__REQ")
-    assert reqs[0]["output_config"] == {"effort": "medium"}
+    assert reqs[0]["output_config"] == {"effort": "high"}
     assert reqs[1]["output_config"] == {"effort": "high"}
-    # Escalating effort must not disturb the cached tools+system prefix.
+    # The cached tools+system prefix is identical across questions.
     assert reqs[0]["system"] == reqs[1]["system"]
     assert reqs[0]["tools"] == reqs[1]["tools"]
+    # The toggle is gone from the DOM entirely.
+    assert page.query_selector("#da-chat-deep") is None
 
 
-def test_effort_omitted_when_the_model_lacks_the_levels(page, tmp_path, monkeypatch):
+def test_effort_omitted_when_the_model_lacks_the_level(page, tmp_path, monkeypatch):
     # DRAWING_ANALYZER_CHAT_MODEL can point at anything; an unsupported effort
     # level is a 400 that kills the request, so the host gates on the registry.
     monkeypatch.setattr(hr, "CHAT_MODEL_DEFAULT", "some-unregistered-model")
@@ -1327,8 +1335,6 @@ def test_effort_omitted_when_the_model_lacks_the_levels(page, tmp_path, monkeypa
     _ask(page, "what are the conflicts?")
 
     assert "output_config" not in page.evaluate("window.__REQ")[0]
-    # ...and the toggle that would set it is not offered.
-    assert page.eval_on_selector("#da-chat-deep", "el => el.hidden") is True
 
 
 def test_query_findings_compact_omits_text_and_quote(page, tmp_path):
@@ -1346,16 +1352,31 @@ def test_query_findings_compact_omits_text_and_quote(page, tmp_path):
         assert set(row) == {"id", "sheet", "category", "severity", "status"}
 
 
-def test_server_tool_budgets_are_modest(page, tmp_path):
+def test_server_tool_budgets_and_source_policy(page, tmp_path):
     # Every server-tool result lands in `history` permanently and is re-sent on
-    # every later round and question, so the per-turn budget is a running cost.
+    # every later round and question, so the per-request budget is a running
+    # cost — and note it IS per request: each client-tool round issues a fresh
+    # one, so the effective ceiling per question is max_uses x rounds.
     _load(page, _chat_doc(), tmp_path, queue=[_text_turn("answered.")])
     _ask(page, "what does the code say?")
 
-    tools = page.evaluate("window.__REQ")[0]["tools"]
-    for t in tools:
-        if t.get("type", "").startswith(("web_search", "web_fetch")):
-            assert t["max_uses"] <= 5, t
+    tools = {t["name"]: t for t in page.evaluate("window.__REQ")[0]["tools"]
+             if t.get("type", "").startswith(("web_search", "web_fetch"))}
+
+    # Search is the cheap half; a code-compliance question routinely needs
+    # several queries to reach the governing edition's text.
+    assert tools["web_search"]["max_uses"] == 8
+    # Fetch is the expensive half: each one pulls page text into a context that
+    # already holds the whole report.
+    assert tools["web_fetch"]["max_uses"] == 4
+    assert tools["web_fetch"]["max_content_tokens"] == 40000
+    assert tools["web_fetch"]["citations"] == {"enabled": True}
+
+    # Both carry the shared source-quality blocklist. A code answer grounded on
+    # a forum post is worse than no answer.
+    for name, tool in tools.items():
+        blocked = tool.get("blocked_domains") or []
+        assert "reddit.com" in blocked and "wikipedia.org" in blocked, name
 
 
 def test_usage_readout_reports_cache_activity(page, tmp_path):
@@ -1427,9 +1448,11 @@ def test_context_readout_measures_the_thread_against_the_window(page, tmp_path):
 
     assert page.eval_on_selector("#da-chat-context", "el => el.hidden") is False
     text = page.eval_on_selector("#da-chat-context-text", "el => el.textContent")
-    assert "48.4k" in text, text          # 48,370 tokens occupied
+    # The readout leads with what is LEFT: the number a reader acts on is whether
+    # the next question still fits, not how much has been spent. 1M - 48,370.
+    assert "951.6k" in text, text
     assert "1M" in text, text             # ...of the model's window
-    assert "(5%)" in text, text
+    assert "5% used" in text, text        # the spent side stays, as a percentage
     assert page.eval_on_selector("#da-chat-context", "el => el.dataset.tier") == "ok"
     width = page.eval_on_selector("#da-chat-context-fill", "el => el.style.width")
     assert width.startswith("4.8"), width
@@ -1507,13 +1530,14 @@ def test_context_readout_is_a_snapshot_not_a_running_total(page, tmp_path):
     _load(page, _chat_doc(), tmp_path, queue=[_round(100000, 500), _round(140000, 500)])
     _ask(page, "first question")
     first = page.eval_on_selector("#da-chat-context-text", "el => el.textContent")
-    assert "100.5k" in first, first
+    assert "899.5k" in first, first       # 1M - 100,500 left
 
     page.fill("#da-chat-input", "second question")
     page.click("#da-chat-send")
     _finish(page)
     second = page.eval_on_selector("#da-chat-context-text", "el => el.textContent")
-    assert "140.5k" in second, second     # the round's own prompt, not 240.5k
+    # Left over after the round's OWN prompt (140,500), not the sum of both.
+    assert "859.5k" in second, second     # 1M - 140,500, not 1M - 240,500
 
     # The cumulative counter beside it still sums, which is what makes the two
     # readouts worth having separately.
