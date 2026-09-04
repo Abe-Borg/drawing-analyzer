@@ -259,8 +259,18 @@ _ASSUMED_CROSS_QC_OUTPUT_TOKENS = 2_000
 _ASSUMED_PROSE_STRAGGLER_INPUT_TOKENS = 1_500     # one small structuring allowance
 _ASSUMED_PROSE_STRAGGLER_OUTPUT_TOKENS = 500
 _ASSUMED_VERIFY_INPUT_TOKENS_PER_FINDING = 1_500  # a high-DPI crop + prompt
-_ASSUMED_VERIFY_OUTPUT_TOKENS_PER_FINDING = 150
+# The verdict itself is ~150 tokens, but verification now runs adaptive thinking
+# at medium effort and thinking bills at the OUTPUT rate — so an estimate built
+# on the visible answer alone under-states this stage several-fold.
+_ASSUMED_VERIFY_OUTPUT_TOKENS_PER_FINDING = 1_400
 _ASSUMED_CITATION_INPUT_TOKENS_PER_CLAIM = 2_000  # web-search prompt + tool results
+# The citation check can now open a cited section with web_fetch, not just read
+# search snippets. Fetched page text lands in the request as ordinary input
+# tokens (web_fetch itself carries no per-use surcharge), and a code-publisher
+# page is large — so the input side is no longer dominated by the prompt. An
+# allowance for roughly one fetched page per claim; the tool's own
+# max_content_tokens caps the worst case well above this.
+_ASSUMED_CITATION_FETCH_TOKENS_PER_CLAIM = 8_000
 _ASSUMED_CITATION_OUTPUT_TOKENS_PER_CLAIM = 400
 _ASSUMED_WEB_SEARCHES_PER_CLAIM = 2
 # Phase A planning stages — one text-only call each. Identity reads a budgeted
@@ -281,12 +291,11 @@ _CLAIMS_PER_SHEET_HIGH = 1.0
 # UNCERTAIN after verification, on the (Opus) escalation model. Each turn
 # re-sends the conversation, so the per-round input allowance dominates
 # (history replay + one new crop per turn). Capped at the per-run default
-# budget (10 findings) — the cap the stage itself enforces.
+# budget — the cap the stage itself enforces, which scales with the set.
 _UNCERTAIN_FINDINGS_FRACTION = 0.2
 _ASSUMED_INVESTIGATE_ROUNDS = 3
 _ASSUMED_INVESTIGATE_INPUT_TOKENS_PER_ROUND = 6_000
 _ASSUMED_INVESTIGATE_OUTPUT_TOKENS_PER_ROUND = 300
-_INVESTIGATE_MAX_FINDINGS_QUOTED = 10
 
 
 @dataclass(frozen=True)
@@ -360,6 +369,16 @@ def estimate_exhaustive_run_cost(
     """
     if critique_batch is None:
         critique_batch = batch
+    # Three stages deliberately run on Sonnet 5 rather than the review model, so
+    # pricing them all at ``model`` over-states the estimate. Resolved from the
+    # stages themselves rather than restated, so an env override is priced too.
+    from .citation_check import citation_model as _citation_model
+    from .prose_harvest import harvest_model as _harvest_model
+    from .set_identity import default_identity_model as _identity_model
+
+    identity_model = _identity_model()
+    harvest_model = _harvest_model()
+    citation_model = _citation_model()
     if verification_model is None:
         # Resolve through the same function as the runtime verifier, including
         # the legacy compatibility override.
@@ -417,8 +436,9 @@ def estimate_exhaustive_run_cost(
         "Set identity",
         _ASSUMED_IDENTITY_INPUT_TOKENS_BASE
         + sheet_count * _ASSUMED_IDENTITY_INPUT_TOKENS_PER_SHEET,
-        _ASSUMED_IDENTITY_OUTPUT_TOKENS, model=model, batch=False,
-        note="one text call — disciplines/jurisdiction/adopted codes",
+        _ASSUMED_IDENTITY_OUTPUT_TOKENS, model=identity_model, batch=False,
+        note=f"one text call with {friendly_model_name(identity_model)} — "
+             "disciplines/jurisdiction/adopted codes",
     ))
     components.append(_component(
         "Model review plan",
@@ -451,8 +471,9 @@ def estimate_exhaustive_run_cost(
     # Prose harvest — a small straggler-structuring allowance.
     components.append(_component(
         "Prose harvest", _ASSUMED_PROSE_STRAGGLER_INPUT_TOKENS,
-        _ASSUMED_PROSE_STRAGGLER_OUTPUT_TOKENS, model=model, batch=False,
-        note="occasional straggler structuring",
+        _ASSUMED_PROSE_STRAGGLER_OUTPUT_TOKENS, model=harvest_model, batch=False,
+        note=f"occasional straggler structuring with "
+             f"{friendly_model_name(harvest_model)}",
     ))
 
     # Verification & citation scale with volume — quoted as a low–high band below.
@@ -471,16 +492,25 @@ def estimate_exhaustive_run_cost(
         from .core.pricing import WEB_SEARCH_COST_PER_USE
         search_cost = float(WEB_SEARCH_COST_PER_USE) * n * _ASSUMED_WEB_SEARCHES_PER_CLAIM
         return _component(
-            "Citation checks", n * _ASSUMED_CITATION_INPUT_TOKENS_PER_CLAIM,
-            n * _ASSUMED_CITATION_OUTPUT_TOKENS_PER_CLAIM, model=model, batch=False,
-            extra_cost=search_cost, note=f"~{n} unique claim(s) × web search",
+            "Citation checks",
+            n * (_ASSUMED_CITATION_INPUT_TOKENS_PER_CLAIM
+                 + _ASSUMED_CITATION_FETCH_TOKENS_PER_CLAIM),
+            n * _ASSUMED_CITATION_OUTPUT_TOKENS_PER_CLAIM,
+            model=citation_model, batch=False,
+            extra_cost=search_cost,
+            note=(f"~{n} unique claim(s) × web search + page fetch with "
+                  f"{friendly_model_name(citation_model)}"),
         )
 
     def _investigate(findings: float) -> CostComponent:
         from .core.api_config import VERIFICATION_ESCALATION_MODEL
 
+        # The stage's own per-run cap, which scales with the set — quoting a
+        # flat 10 here under-stated a large set several-fold.
+        from .investigate import investigation_max_findings
+
         n = min(max(0, round(findings * _UNCERTAIN_FINDINGS_FRACTION)),
-                _INVESTIGATE_MAX_FINDINGS_QUOTED)
+                investigation_max_findings(sheet_count))
         rounds = n * _ASSUMED_INVESTIGATE_ROUNDS
         return _component(
             "Investigation",

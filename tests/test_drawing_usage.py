@@ -239,13 +239,18 @@ def test_exhaustive_estimate_planning_stages_are_realtime_and_scale_gently():
 
 def test_exhaustive_estimate_investigation_band_is_capped_and_realtime():
     # Phase C: the investigation band scales with the finding volume but never
-    # quotes past the stage's own per-run budget (10 findings by default).
+    # quotes past the stage's own per-run budget — which itself now scales with
+    # the set, so a flat quote would under-state a large set several-fold.
+    from drawing_analyzer.investigate import investigation_max_findings
+
     small = {c.stage: c for c in estimate_exhaustive_run_cost(2).components}
     large = {c.stage: c for c in estimate_exhaustive_run_cost(500).components}
     inv_small, inv_large = small["Investigation"], large["Investigation"]
     assert inv_small.transport == "real-time" and inv_large.transport == "real-time"
     assert inv_large.input_tokens >= inv_small.input_tokens
-    assert "~10 uncertain finding(s)" in inv_large.note      # capped at the budget
+    # Capped at the stage's own ceiling for a set that large.
+    assert f"~{investigation_max_findings(500)} uncertain finding(s)" in inv_large.note
+    assert "~40 uncertain finding(s)" in inv_large.note      # the hard ceiling
     # It rides the low/high totals: an estimate without it would be smaller.
     est = estimate_exhaustive_run_cost(10)
     assert est.low_cost is not None and est.low_cost <= est.high_cost

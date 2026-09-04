@@ -44,12 +44,18 @@ class ModelPrice:
 # Keyed by the bare model id. A dated/fast/-suffixed variant resolves via the
 # startswith fallback in ``price_for`` (e.g. "claude-haiku-4-5-20251001").
 #
-# Sonnet 5 is quoted at its LIST rate ($3/$15), not the introductory $2/$10
-# that Anthropic applies through 2026-08-31. This module has one rate per
+# Sonnet 5 is quoted at its LIST rate ($3/$15). This module has one rate per
 # model and no date awareness — deliberately, since I-7 keeps time-dependence
-# out of assembly — so quoting list means the pre-run estimate runs slightly
-# high until the intro window closes and is exact afterwards. Over-stating a
-# user-facing cost figure is the safe direction, and it needs no dated edit.
+# out of assembly.
+#
+# NOTE (needs a human check): the introductory $2/$10 window this comment used
+# to describe ran through 2026-08-31 and has now closed, so list *should* be the
+# live rate — but that has not been re-verified against the published pricing
+# page, and ``PRICING_EFFECTIVE_DATE`` above still reads 2026-08-05. Sonnet 5
+# now prices three stages (identity, prose harvest, citation) plus the report
+# chat's readout, so it carries more weight in the estimate than it used to.
+# Re-verify and bump the date; over-stating a user-facing cost figure is the
+# safe direction in the meantime.
 MODEL_PRICING: dict[str, ModelPrice] = {
     "claude-opus-5": ModelPrice(5.00, 25.00, "Opus 5"),
     "claude-sonnet-5": ModelPrice(3.00, 15.00, "Sonnet 5"),
