@@ -78,7 +78,21 @@ batches (bounded rounds + collection budget, `_recover_via_batch_resubmit`), so
 a run **never silently drops to full-rate real-time calls**; when the rounds/
 budget are spent, unreached sheets keep a clean retriable batch error. The
 legacy full-rate direct-call rescue (`_rescue_failed_items_sync`) is the
-`RECOVERY_DIRECT` default kept only for direct callers/tests.
+`RECOVERY_DIRECT` default kept only for direct callers/tests. The stall watch is
+**tiered** (`_stall_timeout_seconds`): 25 min on the primary batch ("is it
+moving at all?" — a healthy 39-sheet batch lands in ~10 min), 60 min on every
+resubmission after it ("deep queue or sick backend?"); a flat hour on the first
+watch once cost a real run two frozen hours for ~25 min of work.
+`DRAWING_ANALYZER_BATCH_STALL_TIMEOUT_MIN` overrides **both** tiers with one
+value. A queued batch is never silent: `_poll_until_terminal` emits a 5-minute
+heartbeat (elapsed, items done, time left on the watch) to the log and `on_log`,
+and the progress line carries elapsed minutes. Every abandoned batch appends a
+**non-billable** `DigestUsageAttempt` (`billable=False`,
+`terminal_status="ABANDONED_*"`, zero tokens) per sheet via
+`_mark_batch_abandoned`, parked on the `_Slot` until the real digest absorbs it
+— so §15.6 sees every attempt while the image-token estimate still counts only
+response-bearing ones. Each slot records `served_by`, so the collect log names
+both the submitted batch and the one that actually served the digests.
 
 **QC stack** (each stage optional and independently cached):
 
@@ -186,6 +200,24 @@ legacy full-rate direct-call rescue (`_rescue_failed_items_sync`) is the
   (`tile_artifacts.py`) and exports a `tiles/` folder with mirrored per-tile
   notes; it bypasses the level-1 render skip so tiles exist on warm runs, while
   the level-2 (PNG-keyed) cache still serves the digests with zero API calls.
+
+**HTML report (`html_report.py`).** `_finding_display_status` folds anchor +
+verification into one chip, and keeps `UNCERTAIN` ("a verifier looked and could
+not settle") distinct from `UNVERIFIED` / *Not checked* ("no verification stage
+ran") — the state of every finding on a standard run; collapsing them once
+labelled all 287 findings of a clean 39-sheet run "Uncertain". `_STATUS_RANK`
+must stay **integer-valued** (the browser sorts it through `parseInt`).
+Findings quoting the same verbatim text carry a `data-repeat-key`
+(`_repeat_key`: sha256 of the case/whitespace-normalized quote, so it is stable
+per I-7 and never puts quote text in an attribute) and collapse behind the first
+row in the browser — **display only**: the ledger, exports, markups and the badge
+total keep every finding (§18.6), and the grouping recomputes after every
+sort/filter so a follower never outlives its lead. Journal timestamps render
+through `_local_stamp` in the same clock as the report header (the raw UTC value
+beside a local header read as a report predating its own run). In the chat
+widget a **reader-supplied key outranks the embedded one** — the key row renders
+in both modes, since hiding it billed every shared report's questions to its
+author and left a rotated-key report dead.
 
 `core/` is a shared kernel (model ids + env overrides in `api_config.py`, key
 store, pricing, tokenizer). `reference_audit.py` is a back-compat shim over

@@ -1711,12 +1711,105 @@ def test_zero_progress_batch_stalls_before_the_elapsed_bound(monkeypatch):
 
     assert digests[0].ok
     assert client.cancel_calls == ["batch_abc"]
-    # Gave up at the stall window (1h of frozen counts), NOT the elapsed
-    # bound: 7 polls × 600s ≈ 70 min, a fraction of the ~98k-second budget.
-    assert len(client.retrieve_calls) == 7
+    # Gave up at the FIRST-watch stall window (25 min of frozen counts), NOT
+    # the elapsed bound: 4 polls × 600s = 30 min, a fraction of the
+    # ~98k-second budget.
+    assert len(client.retrieve_calls) == 4
     assert clock["t"] < 10_000
     assert any(level == "warning" and "no progress" in msg for level, msg in logs)
     assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids)
+
+
+def test_long_poll_emits_a_heartbeat_at_info_and_to_the_activity_log(monkeypatch):
+    # The poll itself only logs at DEBUG, so a frozen batch used to emit
+    # NOTHING at INFO between submit and the stall warning — a silent wait in
+    # which the run looks dead. The heartbeat names elapsed time, how many
+    # items are done, and when the watch will give up.
+    clock = {"t": 0.0}
+    monkeypatch.setattr(batch_digest.time, "monotonic", lambda: clock["t"])
+    client = _FakeClient(_succeed)
+    _install_batches(client, _NeverEndingBatches(client, clock, tick=600.0))
+
+    batch = submit_drawing_batch(
+        iter([_make_sheet(0)]), client=client, model=OPUS, total=1
+    )
+    logs: list[tuple[str, str]] = []
+    collect_drawing_batch(
+        batch, client=client, sleep=NOSLEEP, retry_failed_items=True,
+        max_elapsed_seconds=100_000,
+        on_log=lambda msg, level="info": logs.append((level, msg)),
+    )
+
+    beats = [msg for _lvl, msg in logs if "still in_progress after" in msg]
+    assert beats, logs
+    assert "0 sheet(s) done" in beats[0]
+    # The wait reads as bounded, not open-ended.
+    assert any("giving up on it in" in msg for msg in beats)
+
+
+def test_progress_line_reports_elapsed_minutes_while_a_batch_waits(monkeypatch):
+    # A frozen "Analyzing 0/1 sheet(s)" reads as a hung app; the elapsed clock
+    # is what makes it read as a queue.
+    clock = {"t": 0.0}
+    monkeypatch.setattr(batch_digest.time, "monotonic", lambda: clock["t"])
+    client = _FakeClient(_succeed)
+    _install_batches(client, _NeverEndingBatches(client, clock, tick=600.0))
+
+    batch = submit_drawing_batch(
+        iter([_make_sheet(0)]), client=client, model=OPUS, total=1
+    )
+    seen: list[str] = []
+    collect_drawing_batch(
+        batch, client=client, sleep=NOSLEEP, retry_failed_items=True,
+        max_elapsed_seconds=100_000,
+        progress=lambda done, total, text: seen.append(text),
+    )
+
+    waiting = [t for t in seen if "batch in_progress" in t]
+    assert waiting, seen
+    assert "m elapsed)" in waiting[-1]
+    assert any("10m elapsed" in t or "20m elapsed" in t for t in waiting), waiting
+
+
+def test_stall_window_is_shorter_on_the_first_watch_than_on_later_ones():
+    # The primary batch is watched on the short tier (is it moving at all?);
+    # every resubmission that follows gets the full hour (is the queue deep, or
+    # is the backend sick?). A flat hour on the first watch is what let a real
+    # run burn two frozen hours before its third batch landed in 589s.
+    assert (
+        batch_digest.DEFAULT_FIRST_BATCH_STALL_TIMEOUT_SECONDS
+        < batch_digest.DEFAULT_BATCH_STALL_TIMEOUT_SECONDS
+    )
+    assert batch_digest._stall_timeout_seconds(first_watch=True) == (
+        batch_digest.DEFAULT_FIRST_BATCH_STALL_TIMEOUT_SECONDS
+    )
+    assert batch_digest._stall_timeout_seconds(first_watch=False) == (
+        batch_digest.DEFAULT_BATCH_STALL_TIMEOUT_SECONDS
+    )
+
+
+def test_stall_window_env_override_applies_to_every_watch(monkeypatch):
+    # An operator who names a threshold means it for the whole run — tiering
+    # around an explicit setting would make it unpredictable.
+    monkeypatch.setenv("DRAWING_ANALYZER_BATCH_STALL_TIMEOUT_MIN", "12")
+    assert batch_digest._stall_timeout_seconds(first_watch=True) == 720.0
+    assert batch_digest._stall_timeout_seconds(first_watch=False) == 720.0
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "abc", "0", "-5"])
+def test_stall_window_env_override_ignores_junk(monkeypatch, raw):
+    # Malformed or non-positive values fall back to the tiered defaults rather
+    # than raising or arming a zero-length watch that abandons the first batch
+    # on its first poll.
+    monkeypatch.setenv("DRAWING_ANALYZER_BATCH_STALL_TIMEOUT_MIN", raw)
+    assert batch_digest._stall_timeout_seconds(first_watch=True) == (
+        batch_digest.DEFAULT_FIRST_BATCH_STALL_TIMEOUT_SECONDS
+    )
+
+
+def test_stall_window_env_override_is_floored_at_one_minute(monkeypatch):
+    monkeypatch.setenv("DRAWING_ANALYZER_BATCH_STALL_TIMEOUT_MIN", "0.1")
+    assert batch_digest._stall_timeout_seconds(first_watch=True) == 60.0
 
 
 def test_primary_poll_failure_rescues_directly_and_retains_files():
@@ -1860,6 +1953,66 @@ def test_stalled_batch_recovers_via_fresh_batch_not_realtime(monkeypatch):
     assert len(client.create_calls) == 2  # primary submit + one resubmission
     assert any("resubmitting" in msg.lower() for _lvl, msg in logs)
     assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids)
+
+
+def test_recovered_run_names_the_batch_that_served_the_digests(monkeypatch, caplog):
+    # After recovery the submitted batch and the serving batch differ, and a
+    # log line naming only the submitted id sends anyone tracing the run to a
+    # canceled batch that holds none of its results.
+    clock = {"t": 0.0}
+    monkeypatch.setattr(batch_digest.time, "monotonic", lambda: clock["t"])
+    client = _FakeClient(_succeed)
+    _install_batches(client, _StallFirstThenBatchOk(client, clock, tick=600.0))
+
+    batch = submit_drawing_batch(
+        iter([_make_sheet(0)]), client=client, model=OPUS, total=1
+    )
+    with caplog.at_level("INFO", logger=diagnostics.LOGGER_NAME):
+        collect_drawing_batch(
+            batch, client=client, sleep=NOSLEEP, retry_failed_items=True,
+            recovery_transport=batch_digest.RECOVERY_BATCH,
+            max_elapsed_seconds=100_000,
+        )
+
+    done = [r for r in caplog.messages if r.startswith("batch collect done")]
+    assert len(done) == 1
+    # The abandoned primary is still named (as the submission), but the line
+    # also says which batch the digests actually came from.
+    assert "submitted batch id=batch_1" in done[0]
+    assert "served by batch_2" in done[0]
+
+
+def test_abandoned_batch_leaves_a_nonbillable_attempt_on_every_sheet(monkeypatch):
+    # §15.6: every attempt lands in the ledger. A batch given up on mid-flight
+    # produced no response, so it carries zero tokens and is marked
+    # non-billable — but it must not vanish, or two abandoned hours look like
+    # a single clean batch in the run manifest.
+    clock = {"t": 0.0}
+    monkeypatch.setattr(batch_digest.time, "monotonic", lambda: clock["t"])
+    client = _FakeClient(_succeed)
+    _install_batches(client, _StallFirstThenBatchOk(client, clock, tick=600.0))
+
+    batch = submit_drawing_batch(
+        iter([_make_sheet(0)]), client=client, model=OPUS, total=1
+    )
+    digests = collect_drawing_batch(
+        batch, client=client, sleep=NOSLEEP, retry_failed_items=True,
+        recovery_transport=batch_digest.RECOVERY_BATCH,
+        max_elapsed_seconds=100_000,
+    )
+
+    attempts = list(getattr(digests[0], "usage_attempts", ()) or ())
+    abandoned = [a for a in attempts if not a.billable]
+    answered = [a for a in attempts if a.billable]
+    assert len(abandoned) == 1, attempts
+    assert abandoned[0].terminal_status == "ABANDONED_STALLED"
+    assert abandoned[0].transport == "BATCH"
+    assert abandoned[0].request_or_custom_id == "batch_1"
+    # Zero tokens: nothing came back, so nothing was billed.
+    assert (abandoned[0].input_tokens, abandoned[0].output_tokens) == (0, 0)
+    # The abandoned record precedes the response that finally landed.
+    assert attempts.index(abandoned[0]) < attempts.index(answered[0])
+    assert len(answered) == 1 and answered[0].billable
 
 
 def test_batch_backend_outage_recovers_via_fresh_batch_not_realtime():
@@ -2101,3 +2254,92 @@ def test_batch_digest_from_message_caches_findings():
     from drawing_analyzer.digest import findings_from_cache
     reconstructed = findings_from_cache(cache.get("batch-key-1"), ref)
     assert len(reconstructed) == 1 and reconstructed[0].category == "conflict"
+
+
+class _TerminalPrimaryThenAlwaysStall(_FakeBatches):
+    """The primary batch ENDS with a retryable per-item error; every batch
+    resubmitted for that item then stalls forever.
+
+    The shape Codex flagged: because the primary terminated, the sheet already
+    holds a (failed) result, so the collect-tail's None-branch never runs for it
+    — and if every recovery round is abandoned, nothing else drains the slot's
+    abandoned-attempt records either.
+    """
+
+    def __init__(self, client, clock, tick):
+        super().__init__(client)
+        self._clock = clock
+        self._tick = tick
+        self._n = 0
+        self._primary_id: str | None = None
+
+    def create(self, *, requests, betas=None):
+        self._c.create_calls.append({"requests": list(requests), "betas": betas})
+        self._c.submitted = list(requests)
+        self._n += 1
+        bid = f"batch_{self._n}"
+        if self._primary_id is None:
+            self._primary_id = bid
+        return _Obj(id=bid)
+
+    def retrieve(self, batch_id):
+        self._c.retrieve_calls.append(batch_id)
+        n = len(self._c.submitted)
+        if batch_id == self._primary_id:      # terminates, with one bad item
+            return _Obj(
+                processing_status="ended",
+                request_counts=_Obj(
+                    succeeded=n - 1, errored=1, canceled=0, expired=0, processing=0
+                ),
+            )
+        self._clock["t"] += self._tick        # every resubmission freezes
+        return _Obj(
+            processing_status="in_progress",
+            request_counts=_Obj(
+                succeeded=0, errored=0, canceled=0, expired=0, processing=n
+            ),
+        )
+
+
+def test_abandoned_recovery_rounds_survive_on_a_sheet_recovery_never_resolves(
+    monkeypatch,
+):
+    # Regression: a sheet whose PRIMARY batch terminated (so it already holds a
+    # failed result) and whose every recovery round was then abandoned kept its
+    # abandoned-attempt records stuck on the slot — the collect tail only
+    # drained them onto a None result. The manifest then omitted precisely the
+    # abandoned batches that explain the run's wall clock.
+    clock = {"t": 0.0}
+    monkeypatch.setattr(batch_digest.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setenv("DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS", "2")
+    client = _FakeClient(
+        _flaky_then_ok(
+            {"sheet__0": batch_errored_result("sheet__0", error_message="Internal Server Error")}
+        )
+    )
+    _install_batches(client, _TerminalPrimaryThenAlwaysStall(client, clock, tick=600.0))
+
+    batch = submit_drawing_batch(
+        iter([_make_sheet(0), _make_sheet(1)]), client=client, model=OPUS, total=2
+    )
+    digests = collect_drawing_batch(
+        batch, client=client, sleep=NOSLEEP, retry_failed_items=True,
+        recovery_transport=batch_digest.RECOVERY_BATCH,
+        max_elapsed_seconds=100_000,
+    )
+
+    # Sheet 0 never resolved — it keeps the primary batch's error.
+    assert digests[0].error is not None
+    # …and still accounts for every abandoned recovery batch.
+    attempts = list(getattr(digests[0], "usage_attempts", ()) or [])
+    abandoned = [a for a in attempts if not a.billable]
+    assert len(abandoned) == 2, attempts        # both bounded rounds
+    assert all(a.terminal_status == "ABANDONED_STALLED" for a in abandoned)
+    assert all(a.input_tokens == 0 and a.output_tokens == 0 for a in abandoned)
+    # Distinct batch ids: two separate attempts, not one recorded twice.
+    assert len({a.request_or_custom_id for a in abandoned}) == 2
+    # The slot is drained exactly once — no double-counting.
+    assert all(not s.abandoned_attempts for s in batch.slots)
+    # The healthy sheet is unaffected.
+    assert digests[1].ok
+    assert not [a for a in (getattr(digests[1], "usage_attempts", ()) or []) if not a.billable]

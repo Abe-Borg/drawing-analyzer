@@ -8,6 +8,49 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A report reader can now use their own API key.** The chat's key field was
+  hard-hidden whenever a report was generated with `embed_api_key=True`, on the
+  theory that the embedded key was authoritative. In practice that made a shared
+  review deliverable bill every question to whoever generated it, and made a
+  report whose embedded key had since been rotated permanently unusable — a 401
+  told the reader to "regenerate the report", which is the one thing a reader is
+  not able to do.
+
+  The embedded key is now a **default, not a lock**. A key the reader saves is
+  checked first and wins for their browser tab; **Use my own key** opens the
+  field and **Use the report's key** hands it back; **Forget key** clears the
+  reader's key and says plainly that the file's own credential is still in the
+  file and still what the next question will use. A 401 on the embedded key now
+  routes the reader to the field instead of to a dead end. Verified end to end
+  in headless Chromium.
+
+- **Repeated quotes collapse in the findings table.** A general note printed on
+  every plan sheet becomes one ledger finding *per sheet* — correctly, since
+  fifteen sheets carrying the note are fifteen places to check, which is why the
+  ledger's dedup is same-sheet scoped (§12). But fifteen identical rows are
+  noise: on a real 39-sheet fire-protection set, **190 of 287 findings shared a
+  quote with another**, `INCOMING FIRE SERVICE REFER TO CIVIL AND PLUMBING` was
+  raised fifteen times, and `PRELIMINARY` eighteen.
+
+  Rows quoting the same verbatim text now collapse behind the first one, which
+  grows a `+N more sheets` control that expands the group in place. Display
+  only: the ledger, the exports, the markups and the badge total keep every
+  finding (§18.6). The grouping recomputes after every sort and filter, so a
+  collapsed row is never stranded without a lead; search still reaches a
+  collapsed row; the assistant's *show me* still scrolls to one; and **Group
+  repeated quotes** turns it off.
+
+- **A batch that sits in the queue now says so.** The poll only logged at DEBUG,
+  so a frozen batch emitted nothing at INFO between submit and the stall warning
+  and the GUI held a motionless `Analyzing 0/39 sheet(s)` — an hour in which a
+  working run is indistinguishable from a hung one. A heartbeat every five
+  minutes now reports elapsed time, items done, and how long the watch will keep
+  waiting, to both the log and the GUI activity list, and the progress line
+  carries the elapsed clock.
+
+- **`DRAWING_ANALYZER_BATCH_STALL_TIMEOUT_MIN`** sets the stall window directly,
+  in minutes, applying to every watch in the run.
+
 - **The Ask-AI assistant is no longer rationed, and shows how full it is.** The
   chat had a hardcoded 16,000-token answer ceiling — an eighth of what the
   configured model actually serves — so a long answer stopped mid-sentence and
@@ -71,6 +114,34 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   monospace) and `modal` (a hand-off to another help document).
 
 ### Changed
+
+- **The batch stall watch is tiered: 25 minutes on the first batch, 60 after.**
+  A healthy 39-sheet drawing batch lands in about ten minutes, so a flat
+  one-hour window was far more patience than the first watch needs. One real run
+  spent **two consecutive frozen hours** — 14:55 and 15:55, each abandoned at
+  exactly 60 minutes with zero items completed — before its third batch finished
+  in 589 s: 2 h 16 m of wall clock for roughly 25 minutes of work.
+
+  The first watch now asks the cheap question ("is this batch moving at all?")
+  on a 25-minute window; every resubmission after it asks the expensive one
+  ("deep queue, or sick backend?") and keeps the full hour, since churning out
+  another batch is the costly answer. Recovery is otherwise unchanged: still
+  bounded rounds, still on the batch transport, still never a silent drop to
+  full-rate real-time calls.
+
+- **`Not checked` is now distinct from `Uncertain` on a finding.** Both states
+  collapsed to the amber `Uncertain` chip, so a standard run — where
+  `verification` is `NOT_REQUESTED` and no verifier has looked at anything —
+  presented **every one of its 287 findings as an inconclusive verdict**.
+  `Uncertain` now means a verifier examined the finding and could not settle it;
+  `Not checked` (grey) means no verification stage ran for it. The status column
+  sorts the new state just below `Uncertain`.
+
+- **Sonnet 5 is priced at $2/$10 per MTok.** The table carried the $3/$15 list
+  rate on the assumption that the $2/$10 launch pricing was introductory through
+  2026-08-31. Anthropic has since made $2/$10 the standard price and canceled
+  the scheduled increase, so the hedge was over-stating every Sonnet-tier
+  estimate by 50%. `PRICING_EFFECTIVE_DATE` is now `2026-09-04`.
 
 - **The Ask-AI answer now streams smoothly instead of arriving in lurches.**
   Model deltas do not arrive evenly — the API hands over a lump of text, stalls,
@@ -172,6 +243,59 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   model/retry usage now records each billable transport attempt separately.
 - Accelerated exact anchoring and ledger de-duplication with indexed candidates,
   and moved Export All work off the GUI thread.
+
+### Fixed
+
+- **The run record no longer looks like it predates its own run.** Journal
+  timestamps were stringified straight from their UTC-aware values
+  (`2026-09-03 21:51:33.048120+00:00`) directly beneath a local-time header
+  (`2026-09-03 18:59`) — two zones and two precisions in one panel, reading as a
+  report written two hours before the run it describes. Both now render in the
+  reader's own clock, to the second, with the offset spelled out. The panel also
+  gained a **Wall clock** line, which is what makes a queued run legible at a
+  glance.
+
+- **The collect log named the wrong batch.** `batch collect done` reported the
+  *submitted* batch id, so after a stalled primary was abandoned and recovered
+  it pointed anyone tracing the run at a canceled batch holding none of its
+  results. It now names both the batch that was submitted and the one that
+  actually served the digests.
+
+- **Abandoned batch attempts reach the usage ledger.** §15.6 wants every API
+  call/attempt recorded, but a batch given up on mid-flight left no trace at
+  all: two abandoned hours were invisible in `run_manifest.json`, which showed
+  only the single batch that worked. Each abandoned batch now appends one
+  zero-token, **non-billable** record per sheet (`ABANDONED_STALLED` and
+  friends). Costs and derived totals are unmoved, and the image-token estimate
+  still counts only response-bearing attempts, so an abandoned round cannot
+  inflate it.
+
+- **A refused storage write no longer discards the reader's key.** Browsers that
+  block site data (private mode, storage off, quota full) throw from
+  `sessionStorage.setItem`, and key resolution re-read storage to find the key
+  just typed — so it vanished. On a key-less report that reopened the entry form
+  forever; on a report carrying its own key, resolution fell through to that one
+  while the panel said the reader's was in use. The reader's key is now held in
+  memory with persistence best-effort, and the status line says which of the two
+  actually happened.
+
+- **Abandoned recovery rounds survive on a sheet recovery never resolves.** A
+  sheet whose primary batch terminated with a retryable error — so it already
+  held a result — and whose every recovery round was then abandoned kept its
+  abandoned-attempt records stuck on the slot, because only a `None` result was
+  drained at the end of collect. The manifest then omitted exactly the abandoned
+  batches that explain the run's wall clock. Retained results are drained too.
+
+### Security
+
+- **`pypdf` 6.14.2 → 6.16.2**, clearing six advisories that landed against the
+  pinned version since the last release (PYSEC-2026-3655, PYSEC-2026-3656,
+  GHSA-jp53-mhqp-8xcg, GHSA-23w6-3w8w-8484, GHSA-763m-79hh-57f2,
+  GHSA-fc8x-2rww-xw9m) and were failing the CI dependency audit. `pypdf` backs
+  spec-document text extraction (`spec_documents.py`), which reads untrusted
+  PDFs, so this is a live exposure rather than a lint. Only `PdfReader`,
+  `is_encrypted`, `decrypt` and `pages` are used — all unchanged across the
+  bump. Pinned in both `requirements.txt` and `requirements-release.lock`.
 
 ## [1.1.0] - 2026-07-18
 

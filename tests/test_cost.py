@@ -32,7 +32,11 @@ OPUS = "claude-opus-5"
 
 def test_price_for_exact_and_unknown():
     assert price_for(OPUS) == MODEL_PRICING[OPUS]
-    assert price_for("claude-sonnet-5").input_per_mtok == 3.0
+    # Sonnet 5 is $2/$10 — the launch "introductory" rate that Anthropic made
+    # standard; the scheduled 2026-09-01 rise to $3/$15 was canceled. Sonnet 4.6
+    # keeps the older $3/$15, so the two must not be asserted together.
+    assert price_for("claude-sonnet-5").input_per_mtok == 2.0
+    assert price_for("claude-sonnet-5").output_per_mtok == 10.0
     assert price_for("claude-sonnet-4-6").input_per_mtok == 3.0
     assert price_for("claude-haiku-4-5").output_per_mtok == 5.0
     assert price_for("totally-made-up") is None

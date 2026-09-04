@@ -2818,7 +2818,15 @@ def extract_drawing_context(
             # each response as its own record so Batch and real-time rates are
             # applied independently. The runtime-only metadata is deliberately
             # absent on cache hits and never enters cache serialization.
-            img_tok += sd.image_token_estimate * len(usage_attempts)
+            #
+            # Attempts marked non-billable were submitted but never answered —
+            # a batch abandoned mid-flight. They are recorded (§15.6 wants every
+            # attempt) but carry no tokens, so the image estimate must count
+            # only the responses that actually came back; multiplying it by
+            # abandoned rounds would invent image tokens nobody was charged for.
+            img_tok += sd.image_token_estimate * sum(
+                1 for a in usage_attempts if getattr(a, "billable", True)
+            )
             for usage_attempt in usage_attempts:
                 _record_usage(
                     run_usage, family="digest",
