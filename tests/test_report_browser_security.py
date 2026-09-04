@@ -457,7 +457,7 @@ def test_key_field_toggle_masks_and_unmasks(page, tmp_path):
     assert page.eval_on_selector("#da-chat-key-input", "el => el.type") == "password"
 
 
-def test_embedded_key_hides_manual_entry(page, tmp_path):
+def _embedded_key_report(tmp_path, page):
     doc = hr.build_html_report(
         _Ctx(sheets=[_Sheet(_Ref("a.pdf", 0, 1), text="x")], combined_text="x"),
         source_names=["a.pdf"], now=NOW,
@@ -465,12 +465,89 @@ def test_embedded_key_hides_manual_entry(page, tmp_path):
     )
     page.add_init_script("window.__SSE = " + json.dumps(_malicious_stream()) + ";")
     page.add_init_script(_FETCH_STUB)
-    _load(page, doc, tmp_path)
+    return _load(page, doc, tmp_path)
+
+
+def test_embedded_key_is_a_default_the_reader_can_override(page, tmp_path):
+    # The embedded key runs the panel out of the box, but the entry row is
+    # OFFERED, not hidden. Hiding it meant a shared report billed every question
+    # to whoever generated it, with no way for the reader to use their own key.
+    _embedded_key_report(tmp_path, page)
     _ask(page, "hi")   # opens the panel + sends using the embedded key
-    # Manual entry stays hidden throughout (the embedded key is authoritative).
-    assert page.eval_on_selector("#da-chat-key", "el => el.hidden") is True
-    assert page.is_visible("#da-chat-key-input") is False
     assert page.evaluate("window.__pwned") is False
+
+    # The row is present and says which key is in play, with the swap offered.
+    assert page.eval_on_selector("#da-chat-key", "el => el.hidden") is False
+    assert "embedded in this report" in page.inner_text("#da-chat-key-set-label")
+    assert page.inner_text("#da-chat-key-change").strip() == "Use my own key"
+    # Nothing to switch back TO yet, so that control stays hidden.
+    assert page.eval_on_selector("#da-chat-key-author", "el => el.hidden") is True
+    # The tall entry form is not in the way until asked for.
+    assert page.is_visible("#da-chat-key-input") is False
+
+
+def test_reader_key_overrides_the_embedded_one_and_can_be_handed_back(page, tmp_path):
+    _embedded_key_report(tmp_path, page)
+    page.click("#da-chat-fab")
+
+    # "Use my own key" opens the field; saving a key takes precedence.
+    page.click("#da-chat-key-change")
+    assert page.is_visible("#da-chat-key-input")
+    page.fill("#da-chat-key-input", "sk-ant-readers-own-key")
+    page.click("#da-chat-key-save")
+
+    assert page.evaluate("sessionStorage.getItem('da-api-key')") == "sk-ant-readers-own-key"
+    assert "Using your API key" in page.inner_text("#da-chat-key-set-label")
+    # The field never keeps the secret in the DOM.
+    assert page.input_value("#da-chat-key-input") == ""
+    # Now there IS something to hand back to.
+    assert page.eval_on_selector("#da-chat-key-author", "el => el.hidden") is False
+
+    # Handing it back drops the reader's key and falls through to the file's.
+    page.click("#da-chat-key-author")
+    assert page.evaluate("sessionStorage.getItem('da-api-key')") is None
+    assert "embedded in this report" in page.inner_text("#da-chat-key-set-label")
+    assert page.eval_on_selector("#da-chat-key-author", "el => el.hidden") is True
+
+
+def test_forget_key_does_not_claim_to_have_removed_the_embedded_one(page, tmp_path):
+    # Clearing the reader's key while the FILE still carries one must say so:
+    # the credential in the HTML survives and is what the next question uses.
+    _embedded_key_report(tmp_path, page)
+    page.click("#da-chat-fab")
+    page.click("#da-chat-key-change")
+    page.fill("#da-chat-key-input", "sk-ant-readers-own-key")
+    page.click("#da-chat-key-save")
+
+    page.click("#da-chat-forget")
+    assert page.evaluate("sessionStorage.getItem('da-api-key')") is None
+    note = page.inner_text("#da-chat-msgs")
+    assert "removed from this browser tab" in note
+    assert "cannot remove that one" in note
+    # And the panel is still usable — it fell back rather than going dead.
+    assert "embedded in this report" in page.inner_text("#da-chat-key-set-label")
+
+
+def test_reader_key_survives_a_key_less_report_as_before(page, tmp_path):
+    # The default (no embedded key) path is unchanged: enter a key, it is kept
+    # in sessionStorage only, and Forget really does clear everything.
+    doc = hr.build_html_report(
+        _Ctx(sheets=[_Sheet(_Ref("a.pdf", 0, 1), text="x")], combined_text="x"),
+        source_names=["a.pdf"], now=NOW,
+    )
+    _load(page, doc, tmp_path)
+    page.click("#da-chat-fab")
+    assert page.is_visible("#da-chat-key-input")
+    page.fill("#da-chat-key-input", "sk-ant-readers-own-key")
+    page.click("#da-chat-key-save")
+    assert page.evaluate("sessionStorage.getItem('da-api-key')") == "sk-ant-readers-own-key"
+    # No embedded key to fall back to, so the swap control stays hidden.
+    assert page.eval_on_selector("#da-chat-key-author", "el => el.hidden") is True
+
+    page.click("#da-chat-forget")
+    assert page.evaluate("sessionStorage.getItem('da-api-key')") is None
+    assert "removed from this browser tab" in page.inner_text("#da-chat-msgs")
+    assert page.is_visible("#da-chat-key-input")   # field re-opens
 
 
 def test_key_field_hidden_in_pdf_transcript_export(page, tmp_path):
@@ -682,3 +759,123 @@ def test_transcript_controls_hidden_in_pdf_transcript_export(page, tmp_path):
     page.emulate_media(media="print")
     for control in ("#da-chat-save", "#da-chat-load", "#da-chat-export"):
         assert page.is_visible(control) is False, f"{control} should not print"
+
+
+# --------------------------------------------------------------------------- #
+# 7. Repeat grouping: the DISPLAY collapses duplicate quotes; the ledger and the
+#    counts do not. No finding may be lost behind the collapse.
+# --------------------------------------------------------------------------- #
+
+
+_REPEAT_QUOTE = "CONTRACTOR SHALL COORDINATE WITH PLUMBING AND CIVIL."
+
+
+def _repeats_ctx(n_repeats=4):
+    """One distinct finding plus ``n_repeats`` sharing a single verbatim quote."""
+    findings = [
+        Finding(
+            sheet_id="F-A-01", source_name="a.pdf", page_index=0,
+            category="conflict", severity="high",
+            text="A one-off conflict", source_quote="ONLY ONCE",
+            anchor=Anchor(status="EXACT"), verification=Verification(status="SKIPPED"),
+        )
+    ]
+    for i in range(n_repeats):
+        findings.append(Finding(
+            sheet_id="F-D-%02d" % i, source_name="a.pdf", page_index=0,
+            category="coordination", severity="medium",
+            text="Coordinate with plumbing on sheet %d" % i,
+            source_quote=_REPEAT_QUOTE,
+            anchor=Anchor(status="EXACT"), verification=Verification(status="SKIPPED"),
+        ))
+    return _Ctx(
+        sheets=[_Sheet(_Ref("a.pdf", 0, 1), text="x")], combined_text="x",
+        findings=findings,
+    )
+
+
+def _visible_rows(page):
+    return page.eval_on_selector_all(
+        ".finding-row",
+        "els => els.filter(e => !e.classList.contains('hidden')"
+        " && !e.classList.contains('repeat-hidden')).length",
+    )
+
+
+def test_repeated_quotes_collapse_by_default_without_changing_the_total(page, tmp_path):
+    # A general note printed on every plan sheet is one real finding per sheet,
+    # but N identical rows are unreadable. The rows collapse; the badge total
+    # stays the full count (§18.6 — the display never rewrites the ledger).
+    doc = hr.build_html_report(_repeats_ctx(4), source_names=["a.pdf"], now=NOW)
+    _load(page, doc, tmp_path)
+    assert page.eval_on_selector_all(".finding-row", "els => els.length") == 5
+    assert _visible_rows(page) == 2          # the one-off + one lead for the group
+    assert "5 finding(s)" in page.inner_text("#findings .badge-findings")
+    assert "3 repeated quotes collapsed into 1 group" in page.inner_text(
+        "#findings-group-note"
+    )
+    assert "showing 2 of 5" in page.inner_text("#findings-shown")
+
+
+def test_collapsed_repeats_expand_in_place_and_collapse_again(page, tmp_path):
+    doc = hr.build_html_report(_repeats_ctx(4), source_names=["a.pdf"], now=NOW)
+    _load(page, doc, tmp_path)
+    btn = page.locator(".repeat-toggle:not([hidden])")
+    assert btn.count() == 1
+    assert "+3 more sheets" in btn.inner_text()
+
+    btn.click()
+    assert _visible_rows(page) == 5
+    assert page.locator(".repeat-toggle:not([hidden])").inner_text() == "hide 3 repeats"
+
+    page.locator(".repeat-toggle:not([hidden])").click()
+    assert _visible_rows(page) == 2
+
+
+def test_grouping_can_be_turned_off_entirely(page, tmp_path):
+    doc = hr.build_html_report(_repeats_ctx(4), source_names=["a.pdf"], now=NOW)
+    _load(page, doc, tmp_path)
+    page.click("#findings-group-toggle")
+    assert _visible_rows(page) == 5
+    assert page.inner_text("#findings-group-note").strip() == ""
+    page.click("#findings-group-toggle")
+    assert _visible_rows(page) == 2
+
+
+def test_grouping_recomputes_after_a_sort_so_no_follower_outlives_its_lead(page, tmp_path):
+    # The lead of a group is whatever the reader's current sort put first. If
+    # grouping were baked in at render time, sorting would strand followers with
+    # no visible lead to expand them.
+    doc = hr.build_html_report(_repeats_ctx(4), source_names=["a.pdf"], now=NOW)
+    _load(page, doc, tmp_path)
+    page.click("#findings th[data-sort='sheet']")
+    assert _visible_rows(page) == 2
+    assert page.locator(".repeat-toggle:not([hidden])").count() == 1
+    # Whatever now leads the group is itself visible.
+    assert page.eval_on_selector_all(
+        ".repeat-toggle:not([hidden])",
+        "els => els.every(e => !e.closest('.finding-row')"
+        ".classList.contains('repeat-hidden'))",
+    ) is True
+    page.click("#findings th[data-sort='sheet']")   # flip direction
+    assert _visible_rows(page) == 2
+
+
+def test_search_reaches_a_finding_hidden_behind_its_group_lead(page, tmp_path):
+    # Collapsing must never make a finding unfindable: a search that matches
+    # only a follower promotes it to lead of the surviving set.
+    doc = hr.build_html_report(_repeats_ctx(4), source_names=["a.pdf"], now=NOW)
+    _load(page, doc, tmp_path)
+    page.fill("#search", "plumbing on sheet 3")
+    page.wait_for_timeout(200)
+    assert _visible_rows(page) == 1
+    row = page.locator(".finding-row:not(.hidden):not(.repeat-hidden)")
+    assert "sheet 3" in row.inner_text()
+
+
+def test_a_set_with_no_repeats_never_shows_the_grouping_control(page, tmp_path):
+    doc = hr.build_html_report(_repeats_ctx(0), source_names=["a.pdf"], now=NOW)
+    _load(page, doc, tmp_path)
+    assert page.locator("#findings-group-toggle").count() == 0
+    assert page.locator(".repeat-toggle").count() == 0
+    assert _visible_rows(page) == 1

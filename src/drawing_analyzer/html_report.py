@@ -74,9 +74,16 @@ safe to share and the key never touches disk. Pass ``embed_api_key=True`` (with
 a key) to bake the key into the HTML instead (zero-friction: double-click and
 ask) — the file must then never be shared, and the report carries a **red
 warning** saying so; a runtime "forget" cannot remove an embedded key, and the
-widget says exactly that. Pass ``include_chat=False`` to omit the widget (and
-every network reference) entirely. The *Python* module still performs no
-network I/O.
+widget says exactly that.
+
+An embedded key is the author's **default, not a lock**. The key field renders
+in both modes, and a key the reader saves outranks the embedded one for their
+tab — so a report that was shared anyway does not bill every question to
+whoever generated it, and a report whose embedded key has since been rotated
+stays usable instead of 401-ing with no way forward.
+
+Pass ``include_chat=False`` to omit the widget (and every network reference)
+entirely. The *Python* module still performs no network I/O.
 
 **The ask box is expandable.** It opens at two rows and grows with what you
 type, up to a cap that always leaves the transcript a readable slice of the
@@ -620,14 +627,24 @@ _FINDING_STATUS_CHIP: dict[str, tuple[str, str]] = {
     "VERIFIED": ("Verified", "verified"),
     "DETERMINISTIC": ("Deterministic", "deterministic"),
     "UNCERTAIN": ("Uncertain", "uncertain"),
+    "UNVERIFIED": ("Not checked", "unverified"),
     "UNANCHORED": ("Unanchored", "unanchored"),
     "REJECTED": ("Rejected", "rejected"),
 }
 _SEVERITY_RANK = {"high": 3, "medium": 2, "low": 1}
 # Column-sort rank for the status chip (higher sorts first descending).
+# ``UNVERIFIED`` sorts just under ``UNCERTAIN``: a finding a verifier looked at
+# and could not settle is a stronger signal than one nothing ever looked at.
+# Integers only — the browser reads this back through ``parseInt``, which would
+# floor a fractional rank into a neighbour's slot.
 _STATUS_RANK = {
-    "VERIFIED": 5, "DETERMINISTIC": 4, "UNCERTAIN": 3, "UNANCHORED": 2, "REJECTED": 1,
+    "VERIFIED": 6, "DETERMINISTIC": 5, "UNCERTAIN": 4, "UNVERIFIED": 3,
+    "UNANCHORED": 2, "REJECTED": 1,
 }
+# The two states that mean "no verifier has confirmed this", for the callers
+# that treat them alike (starter prompts, chat guidance). They are still
+# distinct chips — see :func:`_finding_display_status`.
+_UNCONFIRMED_STATUSES = ("UNANCHORED", "UNCERTAIN", "UNVERIFIED")
 
 
 def _finding_display_status(f: Any) -> str:
@@ -635,8 +652,16 @@ def _finding_display_status(f: Any) -> str:
 
     Priority: a ``REJECTED`` verdict wins (never clouded), then the trusted
     ``DETERMINISTIC`` auditors, then a model ``VERIFIED``; an unanchored non-empty
-    quote surfaces as ``UNANCHORED`` (the hallucination signal); everything else
-    anchored-but-unconfirmed (``UNCERTAIN`` / ``SKIPPED``) reads as ``UNCERTAIN``.
+    quote surfaces as ``UNANCHORED`` (the hallucination signal).
+
+    The remaining anchored findings split by whether verification actually ran.
+    ``SKIPPED`` — the state on every finding of a standard run, where the
+    verification stage is ``NOT_REQUESTED`` — reads as ``UNVERIFIED`` ("Not
+    checked"); an anchored finding a verifier *did* examine without reaching a
+    verdict reads as ``UNCERTAIN``. Collapsing the two (as this did) labelled
+    all 287 findings of a standard 39-sheet run "Uncertain", which reads as a
+    verifier's inconclusive judgement rather than the truth: nothing had looked
+    at them yet.
     """
     v = getattr(getattr(f, "verification", None), "status", "") or "SKIPPED"
     a = getattr(getattr(f, "anchor", None), "status", "") or "UNANCHORED"
@@ -648,6 +673,8 @@ def _finding_display_status(f: Any) -> str:
         return "VERIFIED"
     if a == "UNANCHORED":
         return "UNANCHORED"
+    if v == "SKIPPED":
+        return "UNVERIFIED"
     return "UNCERTAIN"
 
 
@@ -756,6 +783,27 @@ def _pdf_deep_link(pdf_links: "dict[str, dict] | None", qc_id: str) -> str:
     return f"{quote(pdf)}#page={page}"
 
 
+def _repeat_key(f: Any) -> str:
+    """A stable key for findings raised off the SAME verbatim text.
+
+    A general note printed on every plan sheet becomes one finding per sheet,
+    and correctly so — the ledger's dedup is same-sheet scoped (§12) because
+    fifteen sheets carrying the same note really are fifteen places to check.
+    But a reader meeting fifteen identical rows is reading noise: in a real
+    39-sheet set, 190 of 287 findings shared a quote with another, and
+    "PRELIMINARY" alone was raised eighteen times.
+
+    So the LEDGER keeps them separate and the REPORT groups them for display.
+    The key is a hash of the case- and whitespace-normalized quote, so it is
+    deterministic across runs (I-7) and never carries quote text into an
+    attribute. An empty quote gets no key — nothing to group on.
+    """
+    quote = " ".join((getattr(f, "source_quote", "") or "").split()).lower()
+    if not quote:
+        return ""
+    return hashlib.sha256(quote.encode("utf-8")).hexdigest()[:12]
+
+
 def _finding_row_html(
     f: Any,
     card_index: int | None,
@@ -763,9 +811,10 @@ def _finding_row_html(
     link_evidence: bool,
     ambiguous: frozenset[str] = frozenset(),
     pdf_links: "dict[str, dict] | None" = None,
+    repeat_key: str = "",
 ) -> str:
     status = _finding_display_status(f)
-    label, cls = _FINDING_STATUS_CHIP.get(status, ("Uncertain", "uncertain"))
+    label, cls = _FINDING_STATUS_CHIP.get(status, ("Not checked", "unverified"))
     category = getattr(f, "category", "") or "other"
     severity = (getattr(f, "severity", "") or "").lower()
     sev_rank = _SEVERITY_RANK.get(severity, 0)
@@ -886,12 +935,20 @@ def _finding_row_html(
                 f'rel="noopener noreferrer"><img class="evidence-thumb" src="{src}" '
                 f'alt="{alt}" loading="lazy"></a>'
             )
+    # Only rows that actually have a twin carry a repeat key; the button is
+    # rendered inert and is shown/labelled by the browser, because how many
+    # siblings a group has depends on what the current filters left visible.
+    repeat_attr = f' data-repeat-key="{_esc_attr(repeat_key)}"' if repeat_key else ""
+    repeat_btn = (
+        '<button type="button" class="repeat-toggle" hidden aria-expanded="false"></button>'
+        if repeat_key else ""
+    )
     return (
         f'<tr class="finding-row" data-category="{_esc_attr(category)}" '
         f'data-severity="{sev_rank}" data-status="{status}" '
-        f'data-status-rank="{_STATUS_RANK.get(status, 0)}">'
+        f'data-status-rank="{_STATUS_RANK.get(status, 0)}"{repeat_attr}>'
         f'<td class="fcol-qcid">{qc_cell}</td>'
-        f'<td class="fcol-sheet">{sheet_cell}</td>'
+        f'<td class="fcol-sheet">{sheet_cell}{repeat_btn}</td>'
         f'<td class="fcol-cat">{html.escape(category)}</td>'
         f'<td class="fcol-sev sev-{html.escape(severity or "none")}">'
         f'{html.escape(severity or "—")}</td>'
@@ -928,13 +985,25 @@ def _findings_card(
         sev = _SEVERITY_RANK.get((getattr(f, "severity", "") or "").lower(), 0)
         return (-sev, -_STATUS_RANK.get(_finding_display_status(f), 0))
 
+    # A quote seen on exactly one finding is not a repeat, so it gets no key —
+    # that keeps the grouping machinery entirely out of the way of a set whose
+    # findings are all distinct.
+    key_counts: dict[str, int] = {}
+    for f in findings:
+        rk = _repeat_key(f)
+        if rk:
+            key_counts[rk] = key_counts.get(rk, 0) + 1
+    repeated = {k for k, n in key_counts.items() if n > 1}
+
     rows = []
     for f in sorted(findings, key=_key):
         ref_key = _finding_sheet_key(f, int(getattr(f, "page_index", 0) or 0))
+        rk = _repeat_key(f)
         rows.append(
             _finding_row_html(
                 f, index.get(ref_key), link_evidence=link_evidence, ambiguous=ambiguous,
                 pdf_links=pdf_links,
+                repeat_key=rk if rk in repeated else "",
             )
         )
 
@@ -959,6 +1028,17 @@ def _findings_card(
         '<p class="findings-hint muted">Click a column header to sort · click a '
         "sheet to jump to it · use the filter chips and search on the left.</p>"
     )
+    # The grouping control only ships when there is something to group; a set
+    # with no repeated quotes never sees it. Default ON — a set where two thirds
+    # of the rows restate the same note is unreadable ungrouped — and the
+    # collapsed rows are one click away, never removed.
+    group_ctl = (
+        '<p class="findings-hint findings-group-line"><button type="button" '
+        'id="findings-group-toggle" class="chip chip-active" aria-pressed="true">'
+        "Group repeated quotes</button> "
+        '<span class="muted" id="findings-group-note"></span></p>'
+        if repeated else ""
+    )
     checks = _audit_checks_line(ctx)
     tally = _ledger_tally_line(ctx)
     return _card(
@@ -969,7 +1049,9 @@ def _findings_card(
             f'<span class="badge badge-findings">{len(findings)} finding(s)</span>'
         ),
         status="findings",
-        body_html=f'<div class="findings-body">{hint}{tally}{checks}{table}</div>',
+        body_html=(
+            f'<div class="findings-body">{hint}{group_ctl}{tally}{checks}{table}</div>'
+        ),
     )
 
 
@@ -1359,6 +1441,50 @@ def _stage_table_html(ctx: Any) -> str:
     )
 
 
+def _local_stamp(value: Any) -> str:
+    """Render a journal timestamp in the reader's own clock.
+
+    The journal keeps UTC-aware datetimes, and stringifying one put
+    ``2026-09-03 21:51:33.048120+00:00`` in a panel headed by a local-time
+    ``2026-09-03 18:59`` — two zones and two precisions side by side, which
+    reads as a report generated nearly two hours before the run it describes.
+    An aware value is converted to the machine's local zone (the same clock the
+    header already uses) and rendered to the second with its offset kept, so the
+    line stays unambiguous; a naive or non-datetime value is passed through.
+
+    Display only: ``run_manifest.json`` keeps the exact UTC values, and the
+    local zone here is the one the header has always used, so this introduces
+    no time-dependence that I-7 did not already carry.
+    """
+    if not isinstance(value, datetime):
+        return str(value)
+    local = value.astimezone() if value.tzinfo is not None else value
+    stamp = local.strftime("%Y-%m-%d %H:%M:%S")
+    offset = local.strftime("%z")
+    return f"{stamp} (UTC{offset[:3]}:{offset[3:]})" if offset else stamp
+
+
+def _run_duration(started: Any, ended: Any) -> str:
+    """``1h 24m`` for a run's wall clock, or ``""`` when it can't be computed.
+
+    Worth a line of its own: a run whose batches sat queued can take hours of
+    wall clock for minutes of work, and until this was shown the only way to
+    see it was to subtract two timestamps in two different zones.
+    """
+    if not isinstance(started, datetime) or not isinstance(ended, datetime):
+        return ""
+    if (started.tzinfo is None) != (ended.tzinfo is None):
+        return ""  # can't subtract naive from aware
+    seconds = (ended - started).total_seconds()
+    if seconds < 0:
+        return ""
+    hours, rem = divmod(int(seconds), 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m {secs}s" if minutes else f"{secs}s"
+
+
 def _run_record_html(ctx: Any) -> str:
     """The run-record pointer (Phase 26B, §18.6): the journal's identity plus
     where the full per-run record lives. Duck-typed off ``ctx.run_journal``
@@ -1373,10 +1499,13 @@ def _run_record_html(ctx: Any) -> str:
     items = [f"<li>Run ID: <code>{html.escape(run_id)}</code></li>"]
     started = getattr(journal, "started_at", None)
     if started is not None:
-        items.append(f"<li>Started: {html.escape(str(started))}</li>")
+        items.append(f"<li>Started: {html.escape(_local_stamp(started))}</li>")
     ended = getattr(journal, "ended_at", None)
     if ended is not None:
-        items.append(f"<li>Ended: {html.escape(str(ended))}</li>")
+        items.append(f"<li>Ended: {html.escape(_local_stamp(ended))}</li>")
+    elapsed = _run_duration(started, ended)
+    if elapsed:
+        items.append(f"<li>Wall clock: {html.escape(elapsed)}</li>")
     final = str(getattr(journal, "final_status", "") or "")
     if final:
         items.append(f"<li>Final status: {html.escape(final)}</li>")
@@ -1884,6 +2013,17 @@ mark{background:#ffe9a8; color:inherit; padding:0 1px; border-radius:2px}
 
 /* QC Findings table */
 .findings-hint{font-size:12px; margin:2px 0 10px}
+.findings-group-line{display:flex; align-items:center; gap:8px; flex-wrap:wrap}
+/* A repeat collapsed behind its lead. Separate from .hidden (which the filters
+   own) so the two never fight over the same class. */
+.finding-row.repeat-hidden{display:none}
+.repeat-toggle{
+  display:inline-block; margin-left:6px; padding:1px 6px; font-size:11px;
+  font-family:inherit; line-height:1.6; white-space:nowrap; cursor:pointer;
+  color:var(--muted); background:#f1f3f6; border:1px solid var(--line);
+  border-radius:999px;
+}
+.repeat-toggle:hover{color:var(--fg); border-color:var(--muted)}
 .findings-wrap{overflow-x:auto}
 .findings-table{border-collapse:collapse; width:100%; font-size:13px}
 .findings-table th,.findings-table td{
@@ -1924,6 +2064,7 @@ mark{background:#ffe9a8; color:inherit; padding:0 1px; border-radius:2px}
 .fchip-verified{background:#e7f6ee; color:var(--ok)}
 .fchip-deterministic{background:#e7eefb; color:#2f5fd0}
 .fchip-uncertain{background:#fbf3df; color:var(--coord)}
+.fchip-unverified{background:#f1f3f6; color:var(--muted); border:1px solid #dde1e7}
 .fchip-unanchored{background:#fff; color:var(--conflict); border:1px solid var(--conflict)}
 .fchip-rejected{background:#eef0f3; color:var(--muted); text-decoration:line-through}
 
@@ -1962,9 +2103,18 @@ _JS = r"""
   var findingRows = findingsCard ?
     Array.prototype.slice.call(findingsCard.querySelectorAll('.finding-row')) : [];
   var findingsShown = document.getElementById('findings-shown');
+  var groupToggle = document.getElementById('findings-group-toggle');
+  var groupNote = document.getElementById('findings-group-note');
   var ISSUE = ['coordination','conflict'];
   var activeFilter = 'all';
   var highOnly = false;   // DA-025: severity toggle, independent of the chips
+  // Repeat grouping: one general note printed on fifteen sheets is fifteen real
+  // ledger findings and fifteen places to check, but fifteen identical table
+  // rows are noise. The ledger is untouched; this collapses the display, and
+  // only ever HIDES rows behind a control that restores them — no finding is
+  // ever dropped, and the badge total stays the full count (§18.6).
+  var groupRepeats = !!groupToggle;   // on by default when the control shipped
+  var expandedGroups = {};            // repeat key -> true while expanded
 
   function activeCategories(){
     if(activeFilter === 'all') return null;          // null => every category
@@ -1975,6 +2125,74 @@ _JS = r"""
   function tocFor(id){
     for(var i=0;i<toc.length;i++){ if(toc[i].getAttribute('data-target')===id) return toc[i]; }
     return null;
+  }
+
+  // Collapse runs of findings that quote the SAME text. Runs over the rows the
+  // filters left visible, in current DOM (i.e. current sort) order, so the lead
+  // of a group is always whatever the reader's sort put first and a follower
+  // never outlives its lead. Returns how many rows it hid, so the "showing K of
+  // N" line counts what is actually on screen.
+  function applyRepeatGrouping(){
+    if(!findingRows.length) return 0;
+    var rows = findingsCard ?
+      Array.prototype.slice.call(findingsCard.querySelectorAll('.finding-row')) : [];
+    var leads = {}, members = {}, hidden = 0;
+    rows.forEach(function(row){
+      var btn = row.querySelector('.repeat-toggle');
+      if(btn) btn.hidden = true;
+      row.classList.remove('repeat-hidden');
+      if(row.classList.contains('hidden')) return;   // filtered out already
+      var key = row.getAttribute('data-repeat-key');
+      if(!key || !groupRepeats) return;
+      if(!leads[key]){ leads[key] = row; members[key] = 0; return; }
+      members[key]++;
+      if(!expandedGroups[key]){ row.classList.add('repeat-hidden'); hidden++; }
+    });
+    var groups = 0;
+    Object.keys(leads).forEach(function(key){
+      var extra = members[key] || 0;
+      if(extra <= 0) return;                          // group of one after filtering
+      groups++;
+      var btn = leads[key].querySelector('.repeat-toggle');
+      if(!btn) return;
+      var open = !!expandedGroups[key];
+      btn.hidden = false;
+      btn.textContent = open ? ('hide ' + extra + ' repeat' + (extra === 1 ? '' : 's'))
+                             : ('+' + extra + ' more sheet' + (extra === 1 ? '' : 's'));
+      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      btn.title = open ? 'Collapse the other sheets quoting this same text'
+                       : 'Show the other findings quoting this same text';
+    });
+    if(groupNote){
+      groupNote.textContent = hidden
+        ? hidden + ' repeated quote' + (hidden === 1 ? '' : 's') + ' collapsed into '
+            + groups + ' group' + (groups === 1 ? '' : 's')
+        : '';
+    }
+    return hidden;
+  }
+
+  // Expand/collapse one group in place. Delegated, because the buttons live on
+  // whichever row currently leads a group and that changes with every sort.
+  if(findingsCard){
+    findingsCard.addEventListener('click', function(e){
+      var btn = e.target.closest ? e.target.closest('.repeat-toggle') : null;
+      if(!btn) return;
+      var row = btn.closest('.finding-row');
+      var key = row ? row.getAttribute('data-repeat-key') : '';
+      if(!key) return;
+      if(expandedGroups[key]) delete expandedGroups[key]; else expandedGroups[key] = true;
+      apply();
+    });
+  }
+  if(groupToggle){
+    groupToggle.addEventListener('click', function(){
+      groupRepeats = !groupRepeats;
+      groupToggle.classList.toggle('chip-active', groupRepeats);
+      groupToggle.setAttribute('aria-pressed', groupRepeats ? 'true' : 'false');
+      if(!groupRepeats) expandedGroups = {};   // ungrouped: nothing is "expanded"
+      apply();
+    });
   }
 
   // The findings table filters by row, not by .block: every finding is itself an
@@ -1993,6 +2211,9 @@ _JS = r"""
       row.classList.toggle('hidden', !show);
       if(show) shown++;
     });
+    // Repeat grouping runs on whatever the filters left standing, so the row
+    // that leads a group is always the first one currently visible.
+    shown -= applyRepeatGrouping();
     // §18.6: filters never change the static totals — the badge keeps the full
     // count; this live line only says what the current filters are showing.
     if(findingsShown){
@@ -2449,7 +2670,7 @@ def _starter_prompts(
 
         # 6. Unverified / unanchored findings — the hallucination signal.
         if any(
-            _finding_display_status(f) in ("UNANCHORED", "UNCERTAIN")
+            _finding_display_status(f) in _UNCONFIRMED_STATUSES
             for f in findings
         ):
             add("Which findings could not be verified against the drawings?")
@@ -2538,10 +2759,15 @@ def _chat_bootstrap_html(
     key is present; otherwise it is left out and the widget asks the reader for
     one at first use (kept in ``sessionStorage``, never in the file). The footer
     reflects which mode is active — a red warning when the key is embedded —
-    and carries the **Forget key** control (clears the tab's stored key in
-    prompt mode; in embedded mode it truthfully explains that the credential
-    lives in the file itself and only regenerating/deleting the file removes
-    it).
+    and carries the **Forget key** control (clears the tab's stored key; when
+    the file also embeds one it truthfully says the reader's key is gone but
+    the file's own credential remains, and that only regenerating/deleting the
+    file removes that).
+
+    An embedded key is a DEFAULT, never a lock: the entry row renders in both
+    modes so a reader can put their own key in for their tab (it outranks the
+    embedded one), which is what makes a shared report usable without billing
+    its author — and usable at all once the author's key has been rotated.
 
     ``reportId`` (:func:`_report_identity`) is the stable, run-scoped handle the
     transcript store keys on — it is what lets a reloaded report find *its own*
@@ -2614,7 +2840,8 @@ def _chat_bootstrap_html(
             "AI-generated answers — verify against the drawings. "
             '<span class="da-key-warn">This file embeds your API key in clear '
             "text; don't share it. Removing the key requires regenerating (or "
-            "deleting) the file.</span>"
+            "deleting) the file.</span> A reader can override it with their own "
+            "key for their tab."
         )
     else:
         foot = (
@@ -2665,8 +2892,10 @@ _CHAT_HTML = """
       </div>
     </div>
     <div id="da-chat-key-set" hidden>
-      <span class="da-key-set-label">API key set for this browser tab.</span>
+      <span class="da-key-set-label" id="da-chat-key-set-label">API key set for this browser tab.</span>
       <button id="da-chat-key-change" type="button" class="ghost-btn">Change key</button>
+      <button id="da-chat-key-author" type="button" class="ghost-btn" hidden
+              title="Go back to the API key this report was generated with">Use the report's key</button>
     </div>
     <div id="da-chat-key-status" class="da-key-status" aria-live="polite"></div>
   </div>
@@ -3032,25 +3261,33 @@ _CHAT_JS = r"""
   // one in the in-panel field (renderKeyUi / revealKeyForm / saveKeyFromInput,
   // below) and the value is kept only in this tab's sessionStorage — never
   // written back into the file and never persisted to disk (no localStorage).
-  // ensureKey() is a pure lookup now (no window.prompt); a missing key surfaces
-  // the field. forgetKey() drops a stored/rejected key (but keeps an embedded
-  // one) and re-opens the field.
+  // ensureKey() is a pure lookup (no window.prompt); a missing key surfaces the
+  // field. forgetKey() drops the reader's stored key and falls back to whatever
+  // remains.
+  //
+  // THE READER'S OWN KEY WINS. An embedded key is the report author's
+  // convenience default, not a lock: this used to hide the entry row outright
+  // whenever CFG.apiKey was set, so anyone the report was shared with had no
+  // way to ask a question on their own account — every answer billed the
+  // author, and a report whose embedded key had been rotated was simply dead.
+  // sessionStorage is checked first so "use my own key" is always available,
+  // and clearing it falls back to the embedded key rather than to nothing.
   function storedKey(){
     try { var k = sessionStorage.getItem(KEY_STORE); return (k && k.trim()) ? k.trim() : null; }
     catch(e){ return null; }
   }
-  var apiKey = (CFG.apiKey || '').trim() || null;
-  function haveKey(){ return !!(apiKey || storedKey()); }
+  function embeddedKey(){ return (CFG.apiKey || '').trim() || null; }
+  // True while the key in play came from the reader, not from the file.
+  function usingOwnKey(){ return !!storedKey(); }
+  var apiKey = storedKey() || embeddedKey();
+  function haveKey(){ return !!(storedKey() || embeddedKey()); }
   function ensureKey(){
-    if(apiKey) return apiKey;
-    var k = storedKey();
-    if(k){ apiKey = k; return apiKey; }
-    return null;
+    apiKey = storedKey() || embeddedKey();
+    return apiKey;
   }
   function forgetKey(){
-    if(CFG.apiKey){ apiKey = CFG.apiKey.trim() || null; return; }
-    apiKey = null;
     try { sessionStorage.removeItem(KEY_STORE); } catch(e){}
+    apiKey = embeddedKey();          // may be null: then the field re-opens
     renderKeyUi();
   }
 
@@ -3436,7 +3673,9 @@ _CHAT_JS = r"""
       {name: 'query_findings',
        description: 'Search the structured QC findings ledger — the machine-checked findings ' +
          'with their id, sheet, category, severity, status (VERIFIED/DETERMINISTIC/UNCERTAIN/' +
-         'UNANCHORED/REJECTED) and source quote. A cross-sheet finding also carries "also_on" ' +
+         'UNVERIFIED/UNANCHORED/REJECTED — UNVERIFIED means no verification stage ran for it, ' +
+         'UNCERTAIN means one ran and could not settle it) and source quote. A cross-sheet ' +
+         'finding also carries "also_on" ' +
          '(the other sheet ids it spans); a code finding may carry "refs" (the cited section ' +
          'numbers) and "citation" (the web-search check status/verdict). The prose report does ' +
          'NOT contain this structured data, so use this for questions about specific findings, ' +
@@ -3543,7 +3782,17 @@ _CHAT_JS = r"""
         var c = rows[i].querySelector('.fcol-qcid');
         if(c && c.textContent.trim().toUpperCase() === qc){ el = rows[i]; break; }
       }
-      if(el){ expandCard(document.getElementById('findings')); }
+      if(el){
+        expandCard(document.getElementById('findings'));
+        // A finding collapsed behind its repeat lead still has to be reachable
+        // when the assistant points at it by id — reveal its group first.
+        if(el.classList.contains('repeat-hidden')){
+          var lead = el.parentNode.querySelector(
+            '.finding-row[data-repeat-key="' + el.getAttribute('data-repeat-key') + '"] .repeat-toggle:not([hidden])'
+          );
+          if(lead) lead.click();
+        }
+      }
     }
     if(!el){
       var cards = Array.prototype.slice.call(document.querySelectorAll('.card'));
@@ -3815,6 +4064,8 @@ _CHAT_JS = r"""
   var keyToggle = document.getElementById('da-chat-key-toggle');
   var keySave = document.getElementById('da-chat-key-save');
   var keyChange = document.getElementById('da-chat-key-change');
+  var keyAuthor = document.getElementById('da-chat-key-author');
+  var keySetLabel = document.getElementById('da-chat-key-set-label');
   var keyStatus = document.getElementById('da-chat-key-status');
   document.getElementById('da-chat-model').textContent = CFG.model + ' · web search · thinking';
   // Only offer the Deep toggle when the host resolved a usable effort pair.
@@ -3984,13 +4235,18 @@ _CHAT_JS = r"""
 
   // ------------------------------------------------------- reader key entry UI
   // The reader supplies their own key in the in-panel field (this replaces the
-  // old window.prompt). renderKeyUi() settles the row to its resting state; in
-  // embedded mode the whole row is hidden — the embedded key is authoritative
-  // and mutually exclusive with manual entry (mirrors the CFG.apiKey guards).
-  // Both of these change the height of a FIXED panel row — the entry form is
-  // taller than the "key set" line, and a status message adds one to three more
-  // lines — so both end by re-clamping the ask box (see composeCap: its ceiling
-  // is measured from these rows, and goes stale the moment one of them moves).
+  // old window.prompt). renderKeyUi() settles the row to its resting state.
+  //
+  // The row is shown in EVERY mode. With a key embedded it reads as a default
+  // the reader may override — "Use my own key" swaps in the entry form, and
+  // once they save one, "Use the report's key" swaps back — because a shared
+  // report otherwise bills every question to whoever generated it, and a report
+  // whose embedded key was rotated could not be used at all.
+  //
+  // These all change the height of a FIXED panel row — the entry form is taller
+  // than the "key set" line, and a status message adds one to three more lines —
+  // so each ends by re-clamping the ask box (see composeCap: its ceiling is
+  // measured from these rows, and goes stale the moment one of them moves).
   // The live case is an expanded box clamped against the compact row, with
   // Change key or a 401 swapping the tall form back in underneath it.
   function setKeyStatus(msg){
@@ -3999,19 +4255,29 @@ _CHAT_JS = r"""
   }
   function renderKeyUi(){
     if(!keyRow) return;
-    if(CFG.apiKey){ keyRow.hidden = true; }           // embedded: no manual entry
-    else {
-      keyRow.hidden = false;
-      var have = haveKey();
-      if(keyForm) keyForm.hidden = have;
-      if(keySet) keySet.hidden = !have;
+    keyRow.hidden = false;
+    var own = usingOwnKey();
+    var have = haveKey();
+    if(keyForm) keyForm.hidden = have;
+    if(keySet) keySet.hidden = !have;
+    if(keySetLabel){
+      keySetLabel.textContent = own
+        ? 'Using your API key — kept only in this browser tab.'
+        : "Using the API key embedded in this report by its author.";
+    }
+    // Offered only when there is something to fall back TO and the reader has
+    // moved off it; without an embedded key "the report's key" means nothing.
+    if(keyAuthor) keyAuthor.hidden = !(own && embeddedKey());
+    if(keyChange){
+      keyChange.textContent = own ? 'Change key' : 'Use my own key';
     }
     paintCompose();
   }
   // Force the entry form open (the replacement for window.prompt): used when a
-  // send is attempted with no key and when a key is rejected (401).
+  // send is attempted with no key, when a key is rejected (401), and when the
+  // reader asks to supply their own.
   function revealKeyForm(reason){
-    if(!keyRow || CFG.apiKey) return;
+    if(!keyRow) return;
     keyRow.hidden = false;
     if(keySet) keySet.hidden = true;
     if(keyForm) keyForm.hidden = false;
@@ -4022,8 +4288,8 @@ _CHAT_JS = r"""
     if(!keyInput) return;
     var v = (keyInput.value || '').trim();
     if(!v){ setKeyStatus('Enter your Anthropic API key to use the assistant.'); keyInput.focus(); return; }
-    apiKey = v;
     try { sessionStorage.setItem(KEY_STORE, v); } catch(e){}
+    apiKey = ensureKey();                       // stored key now outranks any embedded one
     keyInput.value = '';                        // never keep the secret in the DOM
     if(keyInput.type !== 'password'){           // re-mask if it had been revealed
       keyInput.type = 'password';
@@ -4048,6 +4314,12 @@ _CHAT_JS = r"""
     keyInput.focus();
   });
   if(keyChange) keyChange.addEventListener('click', function(){ revealKeyForm(''); });
+  // Back to the author's embedded key: drop the reader's stored one and let
+  // resolution fall through. forgetKey() already does exactly that.
+  if(keyAuthor) keyAuthor.addEventListener('click', function(){
+    forgetKey();
+    setKeyStatus('Back to the API key embedded in this report.');
+  });
   renderKeyUi();
 
   // "Forget key": clears BOTH the in-memory copy and the tab's sessionStorage,
@@ -4055,14 +4327,25 @@ _CHAT_JS = r"""
   // action can truthfully delete — the credential is part of the HTML file — so
   // say exactly that instead of pretending.
   if(forgetBtn) forgetBtn.addEventListener('click', function(){
-    if(CFG.apiKey){
+    var hadOwn = usingOwnKey();
+    forgetKey();                                // drops sessionStorage; re-resolves
+    if(hadOwn && embeddedKey()){
+      // The reader's key is genuinely gone from this tab, but the file's own
+      // credential is still there and is what the panel falls back to. Say
+      // both halves — claiming a clean sweep would be a lie about a secret.
+      setKeyStatus("Your key was removed from this tab. Questions now use the key embedded in this report.");
+      addMsg('da-hint', 'Your API key was removed from this browser tab. This report also embeds ' +
+        'its author\'s key in the HTML file itself, which is what questions will now use — ' +
+        'a runtime clear cannot remove that one. Use "Use my own key" to switch back.');
+      return;
+    }
+    if(embeddedKey()){
       addMsg('da-err',
         'This report was generated with the API key embedded in the HTML file itself. ' +
         'A runtime clear cannot remove it from the file — regenerate the report without ' +
         'the embed option (or delete this file) to withdraw the credential.');
       return;
     }
-    forgetKey();                                // drops memory + sessionStorage, re-opens the field
     setKeyStatus('Key removed from this tab. Enter a key above to ask another question.');
     addMsg('da-hint', 'API key forgotten — removed from this browser tab (memory and sessionStorage). ' +
       'Enter a key in the field above to ask another question.');
@@ -4395,12 +4678,23 @@ _CHAT_JS = r"""
         return resp.json().catch(function(){ return {}; }).then(function(body){
           var msg = (body && body.error && body.error.message) || ('HTTP ' + resp.status);
           if(resp.status === 401){
-            forgetKey();
-            if(CFG.apiKey){
-              msg = 'The API key embedded in this report was rejected (401). Regenerate the report with a valid key.';
-            } else {
+            // WHICH key was rejected decides the recovery, so read that before
+            // forgetKey() clears the reader's. A rejected embedded key is no
+            // longer a dead end: the reader can supply their own, which is the
+            // only route left once the author's key has been rotated.
+            var rejectedOwn = usingOwnKey();
+            if(rejectedOwn) forgetKey();
+            if(rejectedOwn && embeddedKey()){
+              msg = 'Your API key was rejected (401). Falling back to the key embedded in this report — ' +
+                'or enter a different key above and resend.';
+              revealKeyForm('Your API key was rejected (401). Enter a different key and resend.');
+            } else if(rejectedOwn){
               msg = 'That API key was rejected (401). Enter a different key above and resend.';
               revealKeyForm('That API key was rejected (401). Enter a different key and resend.');
+            } else {
+              msg = 'The API key embedded in this report was rejected (401) — it may have been rotated. ' +
+                'Enter your own key above to keep asking questions.';
+              revealKeyForm('The key embedded in this report was rejected (401). Enter your own key to continue.');
             }
           }
           if(resp.status === 429) msg = 'Rate limited by the API (429) — wait a moment and try again. ' + msg;

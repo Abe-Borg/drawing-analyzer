@@ -56,7 +56,8 @@ returned nothing but "not collected" errors even though every upload and
 request in hand was valid. When per-item recovery is enabled
 (``retry_failed_items``), the primary poll now holds back a slice of the
 collection budget (:func:`_rescue_reserve_seconds`), gives up on a batch whose
-request counts haven't moved for :data:`DEFAULT_BATCH_STALL_TIMEOUT_SECONDS`
+request counts haven't moved for the stall window (:func:`_stall_timeout_seconds`
+— shorter on the primary batch than on the resubmissions that follow it)
 ("stalled"), best-effort cancels the abandoned batch (its results will never
 be read, so left running it only burns quota and pins the uploaded files), and
 recovers every unresolved sheet through the same ``recovery_transport`` — the
@@ -121,15 +122,30 @@ DEFAULT_MAX_CONSECUTIVE_POLL_ERRORS = 10
 
 # Give-up threshold for a batch showing NO per-item progress. Anthropic's
 # guidance is that most batches complete within 1h (24h worst case), and this
-# app's healthy drawing batches land in minutes — while the two real stuck
-# batches sat at ``processing=N`` with zero completions from submit to the 4h
-# bound. One hour of completely frozen request counts separates the two
-# cleanly: patient enough for a deep queue under load (any completion resets
-# the timer), early enough to leave most of the collection budget for the
-# direct-call rescue. The stall watch runs only when the caller opted into
-# recovery (``retry_failed_items``): without a recovery path, giving up early
-# would just lose the sheets sooner.
+# app's healthy drawing batches land in minutes — while the real stuck batches
+# sat at ``processing=N`` with zero completions from submit to the 4h bound.
+# Completely frozen request counts separate the two (any completion resets the
+# timer). The stall watch runs only when the caller opted into recovery
+# (``retry_failed_items``): without a recovery path, giving up early would just
+# lose the sheets sooner.
+#
+# The threshold is TIERED, because the first watch and the later ones answer
+# different questions. The first asks "is this batch moving at all?", and a
+# healthy 39-sheet batch answers in ~10 minutes, so 25 minutes is already 2-3x
+# the healthy time — a 39-sheet run once spent two consecutive frozen hours
+# under a flat 60-minute watch before its third batch landed in 589s, and all
+# of that was dead wall-clock. Once a resubmission is in flight the question
+# changes to "is the queue deep or is the backend sick?", where churning out
+# another batch is the expensive answer, so later watches keep the full hour.
+DEFAULT_FIRST_BATCH_STALL_TIMEOUT_SECONDS = 25 * 60
 DEFAULT_BATCH_STALL_TIMEOUT_SECONDS = 60 * 60
+
+# Cadence for the "still waiting" heartbeat during a long poll. The poll itself
+# only logs at DEBUG, so at INFO a stalled batch used to emit NOTHING between
+# submit and the stall warning — a silent hour in which the run looks dead to
+# anyone reading the log or watching the GUI's activity list. The heartbeat is
+# the one line that says the wait is deliberate and bounded.
+DEFAULT_POLL_HEARTBEAT_SECONDS = 5 * 60
 
 # Slice of the collection budget held back from the primary poll when recovery
 # is enabled, so a batch that runs the poll's full bound without terminating
@@ -240,6 +256,14 @@ class DigestUsageAttempt:
     terminal_status: str = "COMPLETE"
     attempt_number: int = 1
     request_or_custom_id: str = ""
+    # False for an attempt that was SUBMITTED but never produced a response —
+    # a batch abandoned mid-flight (stalled, unpollable, canceled). §15.6 wants
+    # every attempt in the ledger, and leaving these out is what made two
+    # abandoned hours invisible in a real run's manifest. They carry zero
+    # tokens, so they price at zero; the flag exists because the image-token
+    # estimate is charged per *response-bearing* attempt and must not be
+    # multiplied by attempts that never came back.
+    billable: bool = True
 
 
 def _attach_usage_attempt(
@@ -270,16 +294,69 @@ def _attach_usage_attempt(
 
 def _replace_result_with_attempt_history(
     results: list,
-    index: int,
+    slot: "_Slot",
     digest: SheetDigest,
 ) -> None:
-    """Replace a recovery result while retaining earlier billable responses."""
-    previous = results[index]
+    """Replace a recovery result while retaining every earlier attempt.
+
+    Three histories merge here, oldest first: responses already recorded on the
+    result being replaced, the non-billable records of any batch abandoned
+    under this slot since (drained from the slot so they are recorded exactly
+    once), and this digest's own response.
+    """
+    previous = results[slot.index]
     prior = list(getattr(previous, "usage_attempts", ()) or ()) if previous else []
+    abandoned = _drain_abandoned_attempts(slot)
     current = list(getattr(digest, "usage_attempts", ()) or ())
-    if prior or current:
-        setattr(digest, "usage_attempts", prior + current)
-    results[index] = digest
+    merged = prior + abandoned + current
+    if merged:
+        setattr(digest, "usage_attempts", merged)
+    results[slot.index] = digest
+
+
+def _drain_abandoned_attempts(slot: "_Slot") -> list[DigestUsageAttempt]:
+    """Take the slot's pending abandoned-attempt records, emptying the slot."""
+    pending = list(getattr(slot, "abandoned_attempts", ()) or ())
+    if pending:
+        slot.abandoned_attempts = []
+    return pending
+
+
+def _served_batch_ids(batch: "DrawingBatch") -> list[str]:
+    """Batch ids that actually served digests, in first-served order."""
+    seen: list[str] = []
+    for slot in batch.slots:
+        served = getattr(slot, "served_by", "") or ""
+        if served and served not in seen:
+            seen.append(served)
+    return seen
+
+
+def _mark_batch_abandoned(
+    slots: "list[_Slot]",
+    *,
+    batch_id: str,
+    status: str,
+) -> None:
+    """Record one non-billable attempt per sheet a batch was abandoned under.
+
+    Called wherever a submitted batch is given up on — stalled, unpollable, or
+    canceled — so the run manifest shows the attempts that were made and thrown
+    away rather than only the one that eventually worked. Zero tokens, so the
+    records price at zero and no derived total moves.
+    """
+    for slot in slots:
+        if slot.custom_id is None:
+            continue
+        attempts = list(getattr(slot, "abandoned_attempts", ()) or [])
+        attempts.append(DigestUsageAttempt(
+            transport="BATCH",
+            terminal_status=f"ABANDONED_{status.upper()}",
+            attempt_number=max(1, int(slot.attempts_submitted or 1)),
+            request_or_custom_id=batch_id,
+            billable=False,
+        ))
+        slot.abandoned_attempts = attempts
 
 
 @dataclass
@@ -298,6 +375,13 @@ class _Slot:
     custom_id: str | None = None
     cache_key: str | None = None
     file_ids: list[str] = field(default_factory=list)
+    # Non-billable records for batches abandoned under this slot, held here
+    # until the sheet's real digest lands and absorbs them (§15.6).
+    abandoned_attempts: list = field(default_factory=list)
+    # The batch whose results this sheet was finally parsed from. Differs from
+    # the submitted batch whenever recovery resubmitted the sheet, which is
+    # exactly when naming only the submitted id misleads.
+    served_by: str = ""
     # The exact request params this slot was submitted with. Kept so a
     # retryable per-item failure can be resubmitted verbatim (the file_id
     # references stay valid until cleanup) without re-rendering or
@@ -640,13 +724,16 @@ def _rescue_failed_items_sync(
             attempt_number=slot.attempts_submitted,
             request_or_custom_id=request_id_of(message) or (slot.custom_id or ""),
         )
+        # Not a batch at all — say so rather than crediting some batch id with
+        # a digest a full-rate direct call produced.
+        slot.served_by = "direct-call rescue"
         # This sheet was digested by a synchronous real-time call, not the Batches
         # API, so it is billed at the full rate — mark it so the usage ledger does
         # not apply the 50% batch discount to it (Phase 23B pricing correctness).
         digest.rescued = True
         # Even an empty-digest result is fresher provenance than the batch
         # error it replaces, and its stop_reason names what happened.
-        _replace_result_with_attempt_history(results, slot.index, digest)
+        _replace_result_with_attempt_history(results, slot, digest)
         if digest.error is None:
             recovered += 1
             _log.info(
@@ -677,6 +764,36 @@ def _max_batch_resubmit_rounds() -> int:
         except ValueError:
             pass
     return DEFAULT_MAX_BATCH_RESUBMIT_ROUNDS
+
+
+def _stall_timeout_seconds(*, first_watch: bool) -> float:
+    """Resolve a stall-watch timeout in seconds (env override > tiered default).
+
+    ``first_watch`` selects the shorter threshold used on the primary batch;
+    every later watch (a follow-up batch, a resubmission round) gets the full
+    hour. See :data:`DEFAULT_FIRST_BATCH_STALL_TIMEOUT_SECONDS` for why the two
+    differ.
+
+    ``DRAWING_ANALYZER_BATCH_STALL_TIMEOUT_MIN`` overrides **both** tiers with
+    one value in minutes: an operator who names a threshold means it for the
+    whole run, and silently tiering around an explicit choice would make the
+    setting unpredictable. A malformed or non-positive value falls back to the
+    tiered defaults rather than raising, and any override is floored at one
+    minute — a zero-length watch would abandon the first batch on its first poll.
+    """
+    raw = os.environ.get("DRAWING_ANALYZER_BATCH_STALL_TIMEOUT_MIN")
+    if raw and raw.strip():
+        try:
+            minutes = float(raw.strip())
+        except ValueError:
+            minutes = 0.0
+        if minutes > 0:
+            return max(60.0, minutes * 60.0)
+    return float(
+        DEFAULT_FIRST_BATCH_STALL_TIMEOUT_SECONDS
+        if first_watch
+        else DEFAULT_BATCH_STALL_TIMEOUT_SECONDS
+    )
 
 
 def _recover_via_batch_resubmit(
@@ -789,6 +906,9 @@ def _recover_via_batch_resubmit(
             # batch may still be running — the files can't be released yet.
             if not _cancel_batch(client, retry_id, on_log=on_log):
                 files_safe = False
+            _mark_batch_abandoned(
+                [slot for slot, _ in pending], batch_id=retry_id, status=status,
+            )
             if on_log is not None:
                 on_log(
                     f"Resubmitted batch {status} (id={retry_id}); "
@@ -824,9 +944,10 @@ def _recover_via_batch_resubmit(
                 still.append((slot, params))
                 continue
             digest = _parse_item(slot, res, cache=cache)
+            slot.served_by = retry_id
             # Fresher provenance than the error it replaces, even if still empty
             # — and a batch digest, so no ``rescued`` full-rate flag.
-            _replace_result_with_attempt_history(results, slot.index, digest)
+            _replace_result_with_attempt_history(results, slot, digest)
             if digest.error is None:
                 recovered += 1
                 continue
@@ -912,7 +1033,7 @@ def _resubmit_failed_items(
             client=client, cache=cache, progress=progress,
             on_log=on_log, sleep=sleep,
             max_elapsed_seconds=remaining,
-            stall_timeout_seconds=DEFAULT_BATCH_STALL_TIMEOUT_SECONDS,
+            stall_timeout_seconds=_stall_timeout_seconds(first_watch=False),
         )
         _log.info(
             "batch-resubmit recovery recovered %d/%d failed sheet(s)",
@@ -1024,7 +1145,7 @@ def _resubmit_failed_items(
         on_log=on_log,
         sleep=sleep,
         max_elapsed_seconds=max_elapsed_seconds,
-        stall_timeout_seconds=DEFAULT_BATCH_STALL_TIMEOUT_SECONDS,
+        stall_timeout_seconds=_stall_timeout_seconds(first_watch=False),
     )
     if status not in ("ended", "failed", "expired", "canceled"):
         if status in ("poll_failed", "stalled"):
@@ -1036,6 +1157,9 @@ def _resubmit_failed_items(
             # landed — an uncanceled batch may still be running and
             # referencing them.
             canceled = _cancel_batch(client, retry_id, on_log=on_log)
+            _mark_batch_abandoned(
+                [slot for slot, _ in retry], batch_id=retry_id, status=status,
+            )
             if on_log is not None:
                 on_log(
                     f"Follow-up batch {status} (id={retry_id}); "
@@ -1069,9 +1193,10 @@ def _resubmit_failed_items(
             rescue.append((slot, params))
             continue
         digest = _parse_item(slot, res, cache=cache)
+        slot.served_by = retry_id
         if digest.error is None:
             recovered += 1
-        _replace_result_with_attempt_history(results, slot.index, digest)
+        _replace_result_with_attempt_history(results, slot, digest)
         # An item still failing retryably after BOTH batch rounds is the batch
         # backend itself erroring — hand it to the direct-call rescue. Passing
         # the follow-up round's params keeps the empty-at-max_tokens cap
@@ -1479,6 +1604,10 @@ def _poll_until_terminal(
     consecutive_errors = 0
     last_done = -1  # the first successful poll always registers as progress
     progressed_at = started
+    # Heartbeat clock. Seeded at ``started`` so the first line lands one full
+    # interval in, not immediately: a batch that lands in its first few minutes
+    # (the healthy case) should stay quiet.
+    beat_at = started
     while True:
         elapsed = time.monotonic() - started
         if elapsed > max_elapsed_seconds:
@@ -1528,13 +1657,43 @@ def _poll_until_terminal(
         )
         if progress is not None:
             done = min(total, cached_done + done_in_batch)
-            progress(done, total, f"Analyzing {done}/{total} sheet(s) — batch {status}")
+            # Elapsed minutes ride the progress line so a queued batch is
+            # visibly *waiting* rather than visibly stuck: without it the GUI
+            # holds a frozen "Analyzing 0/39 sheet(s) — batch in_progress" for
+            # as long as the queue is deep, which reads as a hung app.
+            progress(
+                done, total,
+                f"Analyzing {done}/{total} sheet(s) — batch {status} "
+                f"({elapsed / 60:.0f}m elapsed)",
+            )
         if status in ("ended", "failed", "expired", "canceled"):
             _log.info(
                 "batch %s reached terminal status=%s after %.0fs",
                 batch_id, status, elapsed,
             )
             return status
+        # Periodic "still waiting" line, at INFO and in the GUI activity log.
+        # Emitted on cadence regardless of progress, so a batch that is slowly
+        # completing items also reports in; the frozen case is the one that
+        # matters, and there the line names how long the stall watch will keep
+        # waiting so the wait reads as bounded rather than open-ended.
+        now = time.monotonic()
+        if now - beat_at >= DEFAULT_POLL_HEARTBEAT_SECONDS:
+            beat_at = now
+            stall_note = ""
+            if stall_timeout_seconds is not None and done_in_batch <= last_done:
+                left = stall_timeout_seconds - (now - progressed_at)
+                stall_note = f"; giving up on it in {max(0.0, left) / 60:.0f} min"
+            _log.info(
+                "batch %s still %s after %.0f min: %d/%d item(s) done%s",
+                batch_id, status, elapsed / 60, done_in_batch,
+                _get(counts, "processing", 0) + done_in_batch, stall_note,
+            )
+            if on_log is not None:
+                on_log(
+                    f"Drawing batch still {status} after {elapsed / 60:.0f} min "
+                    f"({done_in_batch} sheet(s) done){stall_note}"
+                )
         if done_in_batch > last_done:
             last_done = done_in_batch
             progressed_at = time.monotonic()
@@ -1718,8 +1877,8 @@ def collect_drawing_batch(
     the failure that used to return an entire run of "not collected" errors
     after the full elapsed bound. The primary poll then holds back a rescue
     reserve from ``max_elapsed_seconds`` (:func:`_rescue_reserve_seconds`)
-    and watches for a stall (no per-item progress for
-    :data:`DEFAULT_BATCH_STALL_TIMEOUT_SECONDS`); a batch that stalls,
+    and watches for a stall (no per-item progress for the window
+    :func:`_stall_timeout_seconds` resolves); a batch that stalls,
     detaches, or can't be polled is best-effort canceled and every submitted
     sheet digested through the recovery transport, with the uploaded files
     released only when the cancel landed. All recovery stages run within this
@@ -1759,7 +1918,7 @@ def collect_drawing_batch(
             poll_budget = max_elapsed_seconds - _rescue_reserve_seconds(
                 max_elapsed_seconds
             )
-            stall_timeout = DEFAULT_BATCH_STALL_TIMEOUT_SECONDS
+            stall_timeout = _stall_timeout_seconds(first_watch=True)
         status = _poll_until_terminal(
             client,
             batch.batch_id,
@@ -1777,8 +1936,9 @@ def collect_drawing_batch(
                 for result in client.messages.batches.results(batch.batch_id):
                     raw[_get(result, "custom_id")] = result
                 for slot in submitted:
+                    slot.served_by = batch.batch_id
                     _replace_result_with_attempt_history(
-                        results, slot.index,
+                        results, slot,
                         _parse_item(slot, raw.get(slot.custom_id), cache=cache),
                     )
                 files_released = True
@@ -1843,6 +2003,10 @@ def collect_drawing_batch(
                     for slot in submitted
                     if results[slot.index] is None and slot.params is not None
                 ]
+                _mark_batch_abandoned(
+                    [slot for slot, _ in rescue],
+                    batch_id=batch.batch_id, status=status,
+                )
                 if rescue:
                     remaining = max_elapsed_seconds - (
                         time.monotonic() - collect_started
@@ -1864,7 +2028,7 @@ def collect_drawing_batch(
                             client=client, cache=cache, progress=progress,
                             on_log=on_log, sleep=sleep,
                             max_elapsed_seconds=remaining,
-                            stall_timeout_seconds=DEFAULT_BATCH_STALL_TIMEOUT_SECONDS,
+                            stall_timeout_seconds=_stall_timeout_seconds(first_watch=False),
                         )
                         _log.info(
                             "batch-resubmit recovery recovered %d/%d sheet(s) "
@@ -1925,20 +2089,39 @@ def collect_drawing_batch(
                     on_log=on_log,
                 )
 
-    ref_by_index = {s.index: s.ref for s in batch.slots}
+    slot_by_index = {s.index: s for s in batch.slots}
     for i, digest in enumerate(results):
         if digest is None:  # defensive — every slot resolves above
             _log.error("slot %d produced no digest result (defensive backfill)", i)
-            results[i] = SheetDigest(
-                ref=ref_by_index.get(i, batch.slots[0].ref if batch.slots else None),
+            slot = slot_by_index.get(i)
+            backfill = SheetDigest(
+                ref=(
+                    slot.ref if slot is not None
+                    else (batch.slots[0].ref if batch.slots else None)
+                ),
                 text="",
                 error="sheet produced no digest result",
             )
+            # Even a sheet nothing resolved keeps the record of the batches
+            # abandoned under it; otherwise the attempts vanish precisely in
+            # the run that most needs to account for them.
+            if slot is not None:
+                pending = _drain_abandoned_attempts(slot)
+                if pending:
+                    setattr(backfill, "usage_attempts", pending)
+            results[i] = backfill
 
     final = [r for r in results if r is not None]
     ok = sum(1 for r in final if r.error is None and (r.text or "").strip())
+    # Name the batch that actually served these digests, not just the one first
+    # submitted: after a stalled primary is abandoned and recovered, the two
+    # differ, and reporting the submitted id sends anyone tracing the run to a
+    # canceled batch that holds none of its results.
+    served = _served_batch_ids(batch)
     _log.info(
-        "batch collect done: %d/%d sheet(s) ok, %d failed (batch id=%s)",
+        "batch collect done: %d/%d sheet(s) ok, %d failed "
+        "(submitted batch id=%s, served by %s)",
         ok, len(final), len(final) - ok, batch.batch_id,
+        ", ".join(served) if served else batch.batch_id,
     )
     return final
