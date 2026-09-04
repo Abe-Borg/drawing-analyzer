@@ -178,6 +178,50 @@ def test_rescued_batch_digest_is_priced_real_time():
     assert _digest_transport(cached=True, rescued=True, use_batch=True) == "CACHE"
 
 
+def test_abandoned_attempt_records_are_free():
+    # A batch abandoned mid-flight is recorded (§15.6 wants every attempt) but
+    # answered nothing: zero tokens in, zero dollars out. The record exists to
+    # explain the wall clock, never to move a total.
+    from drawing_analyzer.batch_digest import DigestUsageAttempt
+
+    abandoned = DigestUsageAttempt(
+        transport="BATCH", terminal_status="ABANDONED_STALLED", billable=False,
+    )
+    assert abandoned.billable is False
+    assert (abandoned.input_tokens, abandoned.output_tokens) == (0, 0)
+    assert DigestUsageAttempt().billable is True  # responses stay billable
+
+    usage = RunUsage()
+    usage.add(UsageRecord(
+        stage_family="digest", stage_instance="digest:SRC-0001:p0", model=_OPUS,
+        transport="BATCH", terminal_status="ABANDONED_STALLED",
+        estimated_cost=usage_record_cost(
+            model=_OPUS, input_tokens=0, output_tokens=0, batch=True,
+        ),
+    ))
+    assert usage.total_input_tokens == 0
+    assert usage.total_estimated_cost == Decimal("0")
+
+
+def test_image_estimate_counts_only_answered_attempts():
+    # The image estimate is charged per *response-bearing* attempt. Counting an
+    # abandoned round would invent image tokens nobody was billed for — the
+    # 39-sheet run that burned two abandoned batches would have tripled its
+    # reported image tokens.
+    from drawing_analyzer.batch_digest import DigestUsageAttempt
+
+    attempts = [
+        DigestUsageAttempt(transport="BATCH", billable=False,
+                           terminal_status="ABANDONED_STALLED"),
+        DigestUsageAttempt(transport="BATCH", billable=False,
+                           terminal_status="ABANDONED_STALLED"),
+        DigestUsageAttempt(transport="BATCH", input_tokens=90, output_tokens=25),
+    ]
+    billable = sum(1 for a in attempts if getattr(a, "billable", True))
+    assert billable == 1
+    assert 1_000 * billable == 1_000  # one sheet's images, billed once
+
+
 # --------------------------------------------------------------------------- #
 # Exhaustive cost preview (§15.7)
 # --------------------------------------------------------------------------- #

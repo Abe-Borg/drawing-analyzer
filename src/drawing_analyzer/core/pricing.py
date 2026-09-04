@@ -2,7 +2,7 @@
 
 A small, dependency-free pricing table so the app can show a spend estimate
 before launching an expensive run (e.g. the drawing-analysis cost-confirm
-dialog). Rates are USD per million tokens, verified on 2026-08-05. Image/vision
+dialog). Rates are USD per million tokens, verified on 2026-09-04. Image/vision
 input is billed as ordinary input tokens, so no separate image rate is needed;
 the Batch API bills at 50% of standard, exposed via the ``batch=`` flag.
 
@@ -20,7 +20,7 @@ from decimal import Decimal
 # pricing (§15.7). Rates drift — re-verify against the official pricing page and
 # bump this date before a release; the GUI/report surface it so a stale figure is
 # never presented as authoritative.
-PRICING_EFFECTIVE_DATE = "2026-08-05"
+PRICING_EFFECTIVE_DATE = "2026-09-04"
 
 # Batch API bills at half of standard, per Anthropic's published pricing.
 BATCH_DISCOUNT = 0.5
@@ -44,21 +44,22 @@ class ModelPrice:
 # Keyed by the bare model id. A dated/fast/-suffixed variant resolves via the
 # startswith fallback in ``price_for`` (e.g. "claude-haiku-4-5-20251001").
 #
-# Sonnet 5 is quoted at its LIST rate ($3/$15). This module has one rate per
-# model and no date awareness — deliberately, since I-7 keeps time-dependence
-# out of assembly.
+# Sonnet 5 is $2/$10. That figure launched as introductory pricing advertised
+# through 2026-08-31, and this table previously carried the $3/$15 list rate on
+# the assumption the increase would land on 2026-09-01. It did not: Anthropic
+# made $2/$10 the standard price and canceled the scheduled increase, so the
+# hedge now over-states every Sonnet estimate by 50%. This module has one rate
+# per model and no date awareness — deliberately, since I-7 keeps
+# time-dependence out of assembly — so the table simply carries the standing
+# price and ``PRICING_EFFECTIVE_DATE`` says when it was last checked.
 #
-# NOTE (needs a human check): the introductory $2/$10 window this comment used
-# to describe ran through 2026-08-31 and has now closed, so list *should* be the
-# live rate — but that has not been re-verified against the published pricing
-# page, and ``PRICING_EFFECTIVE_DATE`` above still reads 2026-08-05. Sonnet 5
-# now prices three stages (identity, prose harvest, citation) plus the report
-# chat's readout, so it carries more weight in the estimate than it used to.
-# Re-verify and bump the date; over-stating a user-facing cost figure is the
-# safe direction in the meantime.
+# Weight note: Sonnet 5 now prices three pipeline stages (set identity, prose
+# harvest, citation) plus the report chat's own readout, so this row moves the
+# estimate more than it used to — the 50% over-statement the hedge caused was
+# correspondingly worse.
 MODEL_PRICING: dict[str, ModelPrice] = {
     "claude-opus-5": ModelPrice(5.00, 25.00, "Opus 5"),
-    "claude-sonnet-5": ModelPrice(3.00, 15.00, "Sonnet 5"),
+    "claude-sonnet-5": ModelPrice(2.00, 10.00, "Sonnet 5"),
     "claude-opus-4-8": ModelPrice(5.00, 25.00, "Opus 4.8"),
     "claude-opus-4-7": ModelPrice(5.00, 25.00, "Opus 4.7"),
     "claude-opus-4-6": ModelPrice(5.00, 25.00, "Opus 4.6"),

@@ -32,7 +32,17 @@ zero-friction, double-click-and-ask file, tick **Embed API key in HTML report**
 (GUI) or pass `embed_api_key=True` — the key is then baked into the HTML, the report
 shows a red *"don't share this file"* warning, and you should treat the file like a
 credential (a runtime "forget" cannot remove an embedded key — only regenerating or
-deleting the file can). Pass `include_chat=False` to omit the assistant entirely.
+deleting the file can).
+
+**An embedded key is a default, not a lock.** The key field is present in both
+modes, and a key the *reader* saves takes precedence over the embedded one for
+their browser tab — so a report that got shared anyway does not bill every
+question to whoever generated it, and a report whose embedded key has since been
+rotated stays usable (a 401 on the embedded key points the reader at the field
+instead of telling them to regenerate a report they cannot regenerate). **Use my
+own key** opens the field, **Use the report's key** hands it back, and **Forget
+key** clears the reader's key while saying plainly that the file's own credential
+is still in the file. Pass `include_chat=False` to omit the assistant entirely.
 The chat model defaults to Sonnet 5 — it needs the web-fetch server tool, which
 Opus 5 does not support — and can be overridden with
 `DRAWING_ANALYZER_CHAT_MODEL`. It runs at a fixed `high` reasoning effort: there
@@ -202,9 +212,27 @@ GUI) makes a large set easy to navigate:
 - **QC Findings card** (when a QC run produced findings) — a pinned, **sortable**
   table (ID, sheet, category, severity, status, finding, quote). Each row carries a
   color-coded **status chip** — `Verified` (green), `Deterministic` (blue),
-  `Uncertain` (amber), `Unanchored` (red outline), `Rejected` (struck grey) — and
-  links to the sheet it sits on. The chips honour the filter chips and **⚠ Issues
-  only**; folder exports also thumbnail the verifier's evidence crop on each row.
+  `Uncertain` (amber), `Not checked` (grey), `Unanchored` (red outline), `Rejected`
+  (struck grey) — and links to the sheet it sits on. The chips honour the filter
+  chips and **⚠ Issues only**; folder exports also thumbnail the verifier's
+  evidence crop on each row.
+
+  `Uncertain` and `Not checked` are **different claims**. `Uncertain` means a
+  verifier examined the finding and could not settle it; `Not checked` means no
+  verification stage ran for it — the state of *every* finding on a standard run,
+  where `verification` is `NOT_REQUESTED`. Collapsing the two would report a
+  clean standard run as several hundred inconclusive verdicts.
+- **Grouped repeats** — a general note printed on every plan sheet is one real
+  ledger finding *per sheet*, and correctly so: fifteen sheets carrying the same
+  note are fifteen places to check. But fifteen identical table rows are noise —
+  in one 39-sheet fire-protection set, 190 of 287 findings shared a quote with
+  another, and `PRELIMINARY` alone was raised eighteen times. Rows quoting the
+  same verbatim text therefore **collapse behind the first one**, which grows a
+  `+N more sheets` control that expands the group in place. This is display only:
+  the ledger, the exports, the markups and the badge total keep every finding
+  (§18.6), the grouping recomputes after every sort and filter (so a collapsed
+  row is never stranded without a lead), search still reaches a collapsed row,
+  and **Group repeated quotes** turns the whole thing off.
 - **Search** — live full-text filter across every sheet. When a QC run captured
   the sheets' **raw text layers**, search runs over what each *sheet* actually
   says (a collapsed *Sheet text layer* block per sheet), not only what the digest
@@ -1255,6 +1283,8 @@ runs.
 | `DRAWING_ANALYZER_NAMING_DRIFT_MAX_FREQ` | `2` | Naming auditor: a tag is only flagged as drift when this rare. |
 | `DRAWING_ANALYZER_PROFILES_DIR` | `~/.drawing_analyzer/profiles` | User review-profile directory (wins over packaged profiles on name). |
 | `DRAWING_ANALYZER_USE_BATCH` | off | Opt every run into the Message Batches transport (~50% token-rate discount with the same model/prompt/review contract) without editing call sites. An explicit `use_batch=` argument still wins. |
+| `DRAWING_ANALYZER_BATCH_STALL_TIMEOUT_MIN` | `25` first watch, `60` after | Minutes of **completely frozen** batch request counts before the batch is abandoned and its sheets resubmitted. Setting this applies one value to every watch (see [Stuck batches](#stuck-batches-and-the-stall-watch)). |
+| `DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS` | `4` | Fresh batches the recovery transport will submit for the sheets a stuck batch left unresolved, before the run keeps a clean retriable batch error. |
 | `DRAWING_ANALYZER_MAX_WORKERS` | `4` | Real-time digest concurrency (`1` = sequential). |
 | `DRAWING_ANALYZER_STAGE_OVERLAP` | auto | Overlap independent set-level calls for the real SDK client; `0` disables it and `1` explicitly opts a thread-safe custom client in. `DRAWING_ANALYZER_MAX_WORKERS=1` remains fully sequential. |
 | `DRAWING_ANALYZER_UPLOAD_WORKERS` | `6` | Files-API image-upload concurrency per sheet (`1` = sequential). |
@@ -1292,6 +1322,46 @@ before its reviewed PDF is written. If a source file **changes on disk mid-run**
 its anchors were computed from the earlier revision and would land on the wrong
 content — and the run tells you which file changed and that a re-run is needed.
 The other files are marked up normally.
+
+### Stuck batches and the stall watch
+
+The Message Batches API is asynchronous and occasionally *sticks*: a submitted
+batch sits at `processing=N` with **zero** completions, sometimes for hours,
+while every upload and request in hand is perfectly valid. A healthy 39-sheet
+drawing batch lands in ~10 minutes, so a batch that has not completed a single
+item is the signal.
+
+The poll therefore watches for **completely frozen** request counts — any
+completion resets the timer — and, when the caller opted into recovery, gives up
+on a frozen batch, best-effort cancels it (an abandoned batch left running only
+burns quota and pins the uploaded files), and resubmits its sheets as a **fresh
+batch** on the same still-uploaded `file_id`s. Recovery never silently drops to
+full-rate real-time calls, so a stuck run keeps the ~50% batch discount.
+
+The window is **tiered**, because the first watch and the later ones ask
+different questions:
+
+| Watch | Window | The question |
+|---|---|---|
+| The primary batch | **25 min** | Is this batch moving *at all*? |
+| Every resubmission after it | **60 min** | Is the queue deep, or is the backend sick? |
+
+A flat hour on the first watch is expensive: one real 39-sheet run burned two
+consecutive frozen hours before its third batch completed in 589 s — 2 h 16 m of
+wall clock for ~25 min of work. Set `DRAWING_ANALYZER_BATCH_STALL_TIMEOUT_MIN`
+to apply one window to every watch (an operator who names a threshold means it
+for the whole run); `DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS` bounds how many
+fresh batches recovery will try before the sheets keep a clean retriable error.
+
+While a batch is queued the run is **not** silent: a heartbeat every five
+minutes reports elapsed time, items done, and how long the watch will keep
+waiting, in both the diagnostics log and the GUI activity list, and the progress
+line carries the elapsed clock — so a deep queue reads as a queue rather than a
+hung app. Every abandoned batch is recorded in the usage ledger as a
+**non-billable** attempt (`ABANDONED_*`, zero tokens), so `run_manifest.json`
+accounts for the attempts a run made and threw away, and the collect log names
+both the batch that was *submitted* and the batch that actually *served* the
+digests.
 
 ## Testing
 
