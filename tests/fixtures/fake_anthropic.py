@@ -27,6 +27,8 @@ plain-dict code paths (batch retrieval can return either form).
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import json
 from dataclasses import dataclass, field
 from typing import Any
@@ -445,3 +447,47 @@ def add_stream(messages_obj: Any) -> Any:
     create = messages_obj.create
     messages_obj.stream = lambda **kwargs: FinalMessageStream(create(**kwargs))
     return messages_obj
+
+
+class _BetaMessagesProxy:
+    """``client.beta.messages`` over an existing fake ``messages`` object.
+
+    The investigation loop reaches for ``client.beta.messages.stream(...)`` so it
+    can pass ``betas=[...]`` alongside an advisory ``output_config.task_budget``.
+    The beta namespace is a transport detail, not a different conversation, so
+    this routes straight back to the same ``create`` and records the same kwargs
+    — ``betas`` is dropped, exactly as the wire header it becomes.
+    """
+
+    def __init__(self, messages: Any) -> None:
+        self._messages = messages
+
+    def create(self, **kwargs: Any) -> Any:
+        kwargs.pop("betas", None)
+        return self._messages.create(**kwargs)
+
+    def stream(self, **kwargs: Any) -> FinalMessageStream:
+        kwargs.pop("betas", None)
+        return FinalMessageStream(self._messages.create(**kwargs))
+
+
+class BetaClientMixin:
+    """Give a fake client a ``beta.messages`` backed by its own ``messages``.
+
+    The setter matters: a plain ``@property`` is a data descriptor and would
+    shadow — and refuse — a fake that assigns its own ``self.beta`` (the batch
+    fakes do, for ``beta.messages.batches`` and ``beta.files``). An explicit
+    override therefore wins, so this is safe to mix into any fake client.
+    """
+
+    _beta_override: Any = None
+
+    @property
+    def beta(self) -> Any:
+        if self._beta_override is not None:
+            return self._beta_override
+        return SimpleNamespace(messages=_BetaMessagesProxy(self.messages))
+
+    @beta.setter
+    def beta(self, value: Any) -> None:
+        self._beta_override = value

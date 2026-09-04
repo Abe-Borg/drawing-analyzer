@@ -463,6 +463,7 @@ def investigation_cache_key(
     model: str,
     prompt_version: str,
     max_rounds: int,
+    task_budget: int = 0,
 ) -> str:
     """Content-address one investigation's *concluded* verdict (Phase C).
 
@@ -487,6 +488,10 @@ def investigation_cache_key(
         f"model={model or ''}",
         f"prompt={prompt_version or ''}",
         f"max_rounds={int(max_rounds)}",
+        # The advisory token budget changes how far one investigation may reason
+        # before it must conclude, so a verdict reached under a different budget
+        # is a different verdict.
+        f"task_budget={int(task_budget)}",
         f"payload={payload_hash or ''}",
     ):
         h.update(part.encode("utf-8"))

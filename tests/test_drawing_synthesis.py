@@ -20,7 +20,7 @@ from drawing_analyzer.synthesis import (
     default_synthesis_model,
     synthesize_drawing_set,
 )
-from tests.fixtures.fake_anthropic import StreamingMessagesMixin, FakeMessage, FakeTextBlock, FakeUsage
+from tests.fixtures.fake_anthropic import BetaClientMixin, StreamingMessagesMixin, FakeMessage, FakeTextBlock, FakeUsage
 
 OPUS = "claude-opus-5"
 
@@ -32,7 +32,7 @@ def _digest(name: str, text: str, error: str | None = None) -> SheetDigest:
     return SheetDigest(ref=ref, text=text, error=error)
 
 
-class _FakeClient:
+class _FakeClient(BetaClientMixin):
     def __init__(self, responder):
         self.calls: list[dict] = []
 
@@ -231,7 +231,7 @@ def _routing_client(pymupdf_calls: list):
             usage=FakeUsage(input_tokens=100, output_tokens=20),
         )
 
-    class _C:
+    class _C(BetaClientMixin):
         def __init__(self):
             class _M(StreamingMessagesMixin):
                 def create(_s, **kw):
@@ -288,7 +288,7 @@ def test_pipeline_synthesis_failure_falls_back(tmp_path):
             return FakeMessage(content=[], stop_reason="max_tokens")  # empty -> error
         return FakeMessage(content=[FakeTextBlock(text="digest body")])
 
-    class _C:
+    class _C(BetaClientMixin):
         def __init__(self):
             class _M(StreamingMessagesMixin):
                 def create(_s, **kw):

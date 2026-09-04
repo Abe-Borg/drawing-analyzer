@@ -20,7 +20,7 @@ from drawing_analyzer.anchor import resolve_conflict_legs
 from drawing_analyzer.cross_qc import cross_sheet_qc, cross_qc_system_prompt
 from drawing_analyzer.digest import SheetDigest
 from drawing_analyzer.models import ConflictLeg, Finding, SheetGeometry, SheetRef, source_page_key
-from tests.fixtures.fake_anthropic import StreamingMessagesMixin, FakeMessage, FakeTextBlock, FakeUsage
+from tests.fixtures.fake_anthropic import BetaClientMixin, StreamingMessagesMixin, FakeMessage, FakeTextBlock, FakeUsage
 
 _NOOP = lambda *_a, **_k: None  # noqa: E731
 W, H = 792.0, 612.0
@@ -57,7 +57,7 @@ def test_every_cross_qc_prompt_requests_recommended_action():
     assert "recommended_action" in X.CROSS_QC_RECONCILE_SYSTEM_PROMPT
 
 
-class _CrossClient:
+class _CrossClient(BetaClientMixin):
     """Returns a scripted cross-QC findings block; counts calls."""
 
     def __init__(self, findings_per_call):
@@ -98,7 +98,7 @@ def test_system_prompt_and_between_sheets_mandate():
     assert "claims" in sysp        # Phase 14: numeric-claim transcription
 
 
-class _ClaimsCrossClient:
+class _ClaimsCrossClient(BetaClientMixin):
     """Returns a fixed cross-QC findings+claims block."""
 
     def __init__(self, claims):
@@ -228,7 +228,7 @@ def _geom_txt(source, sid, text):
     )
 
 
-class _MapReconcileClient:
+class _MapReconcileClient(BetaClientMixin):
     """Content-aware fake for the sharded map→reconcile path.
 
     Map calls (handle-labeled shard prompts) emit one grounded fact per sheet handle
@@ -665,7 +665,7 @@ def test_cross_finding_clouds_both_sheets_with_cross_reference(tmp_path):
     assert any("F-D-01-1" in c for c in contents)
 
 
-class _PipelineClient:
+class _PipelineClient(BetaClientMixin):
     """digest + cross-QC + verify. Cross-QC returns one COLO conflict."""
 
     def __init__(self, *, verify_verdict="NOT_VISIBLE"):

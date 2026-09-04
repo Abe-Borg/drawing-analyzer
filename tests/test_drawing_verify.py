@@ -29,7 +29,7 @@ from drawing_analyzer.verify import (
     verify_cross_findings,
     verify_findings,
 )
-from tests.fixtures.fake_anthropic import StreamingMessagesMixin
+from tests.fixtures.fake_anthropic import BetaClientMixin, StreamingMessagesMixin
 
 OPUS = "claude-opus-5"
 PAGE_W, PAGE_H = 800.0, 600.0
@@ -59,7 +59,7 @@ class _FakeResp:
         self.usage = _FakeUsage()
 
 
-class _FakeClient:
+class _FakeClient(BetaClientMixin):
     """Scripts a verdict by matching a marker embedded in the finding text."""
 
     def __init__(self, script: dict[str, str], *, default='{"verdict":"NOT_VISIBLE"}'):
@@ -316,7 +316,7 @@ def test_verify_cache_never_admits_malformed_or_api_failure():
         assert result.cache_hits == 0 and result.api_calls == 1
     assert len(malformed_client.calls) == 2
 
-    class _FailureClient:
+    class _FailureClient(BetaClientMixin):
         def __init__(self):
             self.calls = 0
 
@@ -406,7 +406,7 @@ def test_verify_skips_when_crop_render_fails():
 def test_verify_retries_transient_then_succeeds(tmp_path):
     state = {"n": 0}
 
-    class _Retry:
+    class _Retry(BetaClientMixin):
         def __init__(self):
             class _M(StreamingMessagesMixin):
                 def create(_s, **kw):
@@ -423,7 +423,7 @@ def test_verify_retries_transient_then_succeeds(tmp_path):
 
 
 def test_verify_permanent_error_is_uncertain_not_fatal():
-    class _Boom:
+    class _Boom(BetaClientMixin):
         def __init__(self):
             class _M(StreamingMessagesMixin):
                 def create(_s, **kw):
@@ -436,7 +436,7 @@ def test_verify_permanent_error_is_uncertain_not_fatal():
 
 
 def test_verify_fatal_auth_skips_remaining():
-    class _Auth:
+    class _Auth(BetaClientMixin):
         def __init__(self):
             self.calls = 0
 
@@ -578,7 +578,7 @@ def test_verify_empty_when_nothing_verifiable():
 def test_verify_runs_concurrently():
     barrier = threading.Barrier(3, timeout=8)
 
-    class _Barriered:
+    class _Barriered(BetaClientMixin):
         def __init__(self):
             class _M(StreamingMessagesMixin):
                 def create(_s, **kw):
@@ -603,7 +603,7 @@ def test_cross_verify_model_calls_concurrent_but_render_and_attach_ordered(monke
 
     monkeypatch.setattr("drawing_analyzer.verify._render_leg_crops", fake_render)
 
-    class _Barriered:
+    class _Barriered(BetaClientMixin):
         def __init__(self):
             class _M(StreamingMessagesMixin):
                 def create(_s, **_kw):

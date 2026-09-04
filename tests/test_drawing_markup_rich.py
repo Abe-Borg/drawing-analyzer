@@ -218,7 +218,7 @@ from drawing_analyzer.citation_check import (  # noqa: E402
     harvest_code_editions,
     web_search_tool,
 )
-from tests.fixtures.fake_anthropic import StreamingMessagesMixin, FakeMessage, FakeTextBlock, FakeUsage  # noqa: E402
+from tests.fixtures.fake_anthropic import BetaClientMixin, StreamingMessagesMixin, FakeMessage, FakeTextBlock, FakeUsage  # noqa: E402
 
 
 class _Geom:
@@ -307,7 +307,7 @@ def test_server_web_search_requests_reader_is_shape_tolerant():
     ) is None
 
 
-class _CitationClient:
+class _CitationClient(BetaClientMixin):
     """Scripted responses; captures request kwargs.
 
     ``routes`` (an ordered list of ``(substring, text)``) routes by REQUEST BODY —
@@ -665,7 +665,7 @@ def test_check_citations_no_refs_is_a_noop():
 import re as _re  # noqa: E402
 
 
-class _PerClaimClient:
+class _PerClaimClient(BetaClientMixin):
     """A content-aware fake: echoes each claim handle in the request with a status.
 
     ``status_for(handle, body)`` decides the per-claim verdict from the REQUEST BODY

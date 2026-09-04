@@ -30,6 +30,7 @@ from tests.fixtures.fake_anthropic import (  # noqa: E402
     FakeToolUseBlock,
     FakeUsage,
 )
+from tests.fixtures.fake_anthropic import BetaClientMixin
 
 
 def _make_pdf(path: Path) -> Path:
@@ -105,7 +106,7 @@ def _system_text(system) -> str:
     return system or ""
 
 
-class _RoutingClient:
+class _RoutingClient(BetaClientMixin):
     """One fake client that answers digest, verify, citation, and synthesis calls.
 
     ``investigate_mode`` scripts the Phase C loop when an UNCERTAIN finding
@@ -521,7 +522,7 @@ def test_verify_disabled_still_anchors_and_marks(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-class _CountingClient:
+class _CountingClient(BetaClientMixin):
     """Fake client that counts calls per stage and answers each with valid output."""
 
     def __init__(self, findings: list[dict]):
@@ -977,7 +978,7 @@ def test_combined_text_has_no_findings_block(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-class _ProseRoutingClient:
+class _ProseRoutingClient(BetaClientMixin):
     """Digest with a prose Coordination item beyond its JSON block; the harvest's
     structuring call gets garbage (forcing the degraded path); verify confirms."""
 
@@ -1075,7 +1076,7 @@ def test_verified_only_mode_gates_and_tallies_gated(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-class _ClaimsRoutingClient:
+class _ClaimsRoutingClient(BetaClientMixin):
     """Answers digest and critique calls; the critique emits a numeric claim."""
 
     def __init__(self, claims: list[dict]):
@@ -1142,7 +1143,7 @@ def _make_clean_pdf(path: Path, sheet_id: str) -> Path:
     return path
 
 
-class _SetLevelRoutingClient:
+class _SetLevelRoutingClient(BetaClientMixin):
     """Two clean sheets; the cross-sheet synthesis reports a conflict that names no
     in-set sheet — the §14.8 set-level case. Digest/critique find nothing else."""
 
@@ -1204,7 +1205,7 @@ def test_set_level_synthesis_conflict_routes_to_review_notes_pdf(tmp_path):
     assert not any(e.startswith("Prose harvest:") for e in ctx.errors)
 
 
-class _SourceAndSetLevelClient:
+class _SourceAndSetLevelClient(BetaClientMixin):
     """Two sheets: the digest reports a real finding on each sheet (→ a source
     reviewed PDF), and the synthesis reports a conflict naming no in-set sheet
     (→ a set-level note)."""

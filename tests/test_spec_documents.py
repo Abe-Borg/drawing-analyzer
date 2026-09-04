@@ -34,7 +34,7 @@ from drawing_analyzer.spec_documents import (
     extract_spec_documents,
     extract_spec_text,
 )
-from tests.fixtures.fake_anthropic import StreamingMessagesMixin, FakeMessage, FakeTextBlock, FakeUsage
+from tests.fixtures.fake_anthropic import BetaClientMixin, StreamingMessagesMixin, FakeMessage, FakeTextBlock, FakeUsage
 
 OPUS = "claude-opus-5"
 BEAM_SPEC = "All structural steel beams shall be W12x26 minimum, per AISC 360."
@@ -70,7 +70,7 @@ def _make_sheet(rows: int = 2, cols: int = 2) -> RenderedSheet:
     )
 
 
-class _FakeClient:
+class _FakeClient(BetaClientMixin):
     def __init__(self, responder):
         self.calls: list[dict] = []
 
@@ -553,7 +553,7 @@ def _routing_client(calls: list, *, findings: list[dict]):
             usage=FakeUsage(input_tokens=100, output_tokens=20),
         )
 
-    class _C:
+    class _C(BetaClientMixin):
         def __init__(self):
             class _M(StreamingMessagesMixin):
                 def create(_s, **kw):

@@ -21,7 +21,7 @@ from drawing_analyzer.digest import (
 )
 from drawing_analyzer.digest_cache import DigestCache
 from drawing_analyzer.models import ImageTile, RenderedSheet, SheetRef
-from tests.fixtures.fake_anthropic import StreamingMessagesMixin, FakeMessage, FakeTextBlock, FakeUsage
+from tests.fixtures.fake_anthropic import BetaClientMixin, StreamingMessagesMixin, FakeMessage, FakeTextBlock, FakeUsage
 
 OPUS = "claude-opus-5"
 
@@ -317,7 +317,7 @@ def _sheet(rows=2, cols=2):
                          sheet_text="VAV-3 serves Rm 120")
 
 
-class _FakeClient:
+class _FakeClient(BetaClientMixin):
     def __init__(self, responder):
         self.calls = []
 

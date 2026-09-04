@@ -25,7 +25,7 @@ from drawing_analyzer.set_identity import (
     parse_identity_text,
     union_regex_editions,
 )
-from tests.fixtures.fake_anthropic import StreamingMessagesMixin, FakeMessage, FakeTextBlock, FakeUsage
+from tests.fixtures.fake_anthropic import BetaClientMixin, StreamingMessagesMixin, FakeMessage, FakeTextBlock, FakeUsage
 
 
 # --------------------------------------------------------------------------- #
@@ -79,7 +79,7 @@ def _identity_reply(payload: dict | None = None) -> str:
     return "```json\n" + json.dumps(payload or _PAYLOAD) + "\n```"
 
 
-class _FakeClient:
+class _FakeClient(BetaClientMixin):
     """Answers every call with a fixed reply; records requests."""
 
     def __init__(self, reply_text: str):
@@ -97,7 +97,7 @@ class _FakeClient:
         self.messages = _Msgs()
 
 
-class _RaisingClient:
+class _RaisingClient(BetaClientMixin):
     def __init__(self, exc: Exception | None = None):
         self._exc = exc or RuntimeError("permanent failure")
         outer = self

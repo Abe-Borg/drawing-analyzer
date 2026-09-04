@@ -28,7 +28,7 @@ from drawing_analyzer.prose_harvest import (
     extract_synthesis_conflicts,
     harvest_prose,
 )
-from tests.fixtures.fake_anthropic import StreamingMessagesMixin, FakeMessage, FakeTextBlock, FakeUsage
+from tests.fixtures.fake_anthropic import BetaClientMixin, StreamingMessagesMixin, FakeMessage, FakeTextBlock, FakeUsage
 
 
 def _ref(source="a.pdf", page=0):
@@ -208,7 +208,7 @@ _FIVE_ITEM_DIGEST = """Sheet F-D-01-1 - Fire Protection - Demand
 def _structuring_client(reply_texts):
     """Scripted client for the harvest's structuring calls."""
 
-    class _Client:
+    class _Client(BetaClientMixin):
         def __init__(self):
             self.calls = 0
             outer = self
@@ -328,7 +328,7 @@ def test_harvest_structuring_overlaps_across_pages_and_ingests_in_item_order():
     max_active = 0
     lock = threading.Lock()
 
-    class _ParallelClient:
+    class _ParallelClient(BetaClientMixin):
         def __init__(self):
             outer = self
 
@@ -436,7 +436,7 @@ def test_harvest_parallel_page_chains_match_sequential_results_and_order():
         _Geom(page=1, words=[_titleblock_word("F-D-01-1")]),
     ]
 
-    class _PromptClient:
+    class _PromptClient(BetaClientMixin):
         def __init__(self, *, delay_page_zero=False):
             self.calls: list[str] = []
             self.barrier = threading.Barrier(2) if delay_page_zero else None

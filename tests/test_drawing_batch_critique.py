@@ -27,6 +27,7 @@ from drawing_analyzer.models import (
     SheetRef,
 )
 from tests.fixtures.fake_anthropic import (
+    BetaClientMixin,
     FinalMessageStream,
     FakeBatchResult,
     FakeBatchResultEnvelope,

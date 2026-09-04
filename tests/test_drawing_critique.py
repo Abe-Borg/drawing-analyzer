@@ -38,7 +38,7 @@ from drawing_analyzer.review_planner import PLANNER_SYSTEM_PROMPT
 from drawing_analyzer.set_identity import IDENTITY_SYSTEM_PROMPT
 from drawing_analyzer.models import Anchor, Finding, ImageTile, RenderedSheet, SheetRef
 from drawing_analyzer.verify import VERIFY_SYSTEM_PROMPT
-from tests.fixtures.fake_anthropic import StreamingMessagesMixin, FakeMessage, FakeTextBlock, FakeUsage
+from tests.fixtures.fake_anthropic import BetaClientMixin, StreamingMessagesMixin, FakeMessage, FakeTextBlock, FakeUsage
 
 _NOOP = lambda *_a, **_k: None  # noqa: E731 - injectable no-op sleep
 
@@ -83,7 +83,7 @@ class _StatusError(Exception):
         self.status_code = status_code
 
 
-class _CritiqueClient:
+class _CritiqueClient(BetaClientMixin):
     """Scripted critique client. ``script`` items are findings-lists (success)
     or Exception instances (raised). Indexed by *attempt* so a raised item is
     consumed like a real failed call."""
@@ -403,7 +403,7 @@ def test_self_consistent_cached_second_time():
 # --- Numeric claims (Phase 14) ---------------------------------------------- #
 
 
-class _ClaimsClient:
+class _ClaimsClient(BetaClientMixin):
     """Returns a fixed findings+claims block for every critique call."""
 
     def __init__(self, claims):
@@ -503,7 +503,7 @@ def test_distinct_absences_do_not_over_merge_on_boilerplate():
     assert len(dup) == 1 and dup[0].reproduced is True
 
 
-class _EmptyBodyClient:
+class _EmptyBodyClient(BetaClientMixin):
     """Every critique call returns an empty body (e.g. thinking ate the budget)."""
 
     def __init__(self):
@@ -559,7 +559,7 @@ def test_partial_run_is_returned_but_not_cached():
 # --------------------------------------------------------------------------- #
 
 
-class _RawCritiqueClient:
+class _RawCritiqueClient(BetaClientMixin):
     """Scripted critique client returning RAW response bodies (str) or Exceptions,
     so a test can drive a malformed / truncated / prose-only reply the well-formed
     ``_CritiqueClient`` never produces."""
@@ -819,7 +819,7 @@ _C2 = {"sheet_id": "F-D-01-1", "category": "code", "severity": "medium",
        "source_quote": "165 PSI", "tile": [1, 1]}
 
 
-class _PipelineClient:
+class _PipelineClient(BetaClientMixin):
     """Routes digest / critique / verify. Critique run 1 = [D, C2], run 2 = [D],
     so D is reproduced (and also raised by the digest) while C2 is a singleton."""
 

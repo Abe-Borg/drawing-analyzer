@@ -22,7 +22,7 @@ from drawing_analyzer.digest import (
     digest_sheet,
 )
 from drawing_analyzer.models import ImageTile, RenderedSheet, SheetRef
-from tests.fixtures.fake_anthropic import StreamingMessagesMixin, FakeMessage, FakeTextBlock, FakeUsage
+from tests.fixtures.fake_anthropic import BetaClientMixin, StreamingMessagesMixin, FakeMessage, FakeTextBlock, FakeUsage
 
 OPUS = "claude-opus-5"
 
@@ -42,7 +42,7 @@ class _Msgs(StreamingMessagesMixin):
         return self._responder(kwargs)
 
 
-class _FakeClient:
+class _FakeClient(BetaClientMixin):
     def __init__(self, responder):
         self.messages = _Msgs(responder)
 

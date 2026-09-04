@@ -1833,6 +1833,9 @@ def _run_qc_stages(
         else:
             from .investigate import investigate_findings as _run_investigate
             from .investigate import investigation_model
+            from .investigate import (
+                investigation_max_findings as _investigation_max_findings,
+            )
 
             _emit("STAGE_START", stage="investigation", candidates=len(uncertain))
             inv_model = investigation_model()
@@ -1879,9 +1882,14 @@ def _run_qc_stages(
                 investigate_stage.items_in = len(uncertain)
                 investigate_stage.items_out = ires.verified + ires.rejected
                 if ires.skipped_over_budget:
+                    # Name the budget: it now scales with the set, so "beyond the
+                    # budget" alone leaves a reviewer unable to tell whether to
+                    # raise DRAWING_ANALYZER_INVESTIGATION_MAX_FINDINGS.
+                    budget = _investigation_max_findings(len(geometries))
                     investigate_stage.warnings.append(
                         f"{ires.skipped_over_budget} UNCERTAIN finding(s) beyond "
-                        "the per-run investigation budget were not investigated"
+                        f"the per-run investigation budget ({budget} for "
+                        f"{len(geometries)} sheet(s)) were not investigated"
                     )
                 if ires.errors or ires.fatal:
                     # An investigation the config required could not run; the
