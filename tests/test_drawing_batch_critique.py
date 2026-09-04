@@ -27,6 +27,8 @@ from drawing_analyzer.models import (
     SheetRef,
 )
 from tests.fixtures.fake_anthropic import (
+    BetaClientMixin,
+    FinalMessageStream,
     FakeBatchResult,
     FakeBatchResultEnvelope,
     FakeMessage,
@@ -134,7 +136,11 @@ class _FakeClient:
         self.files = _FakeFiles()
         batches = _FakeBatches(self)
         self.beta = _Obj(files=self.files, messages=_Obj(batches=batches))
-        self.messages = _Obj(batches=batches, create=self._messages_create)
+        self.messages = _Obj(
+            batches=batches,
+            create=self._messages_create,
+            stream=lambda **kw: FinalMessageStream(self._messages_create(**kw)),
+        )
 
     def _messages_create(self, **kwargs):
         self.messages_create_calls.append(kwargs)

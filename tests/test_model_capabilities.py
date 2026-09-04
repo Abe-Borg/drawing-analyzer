@@ -34,8 +34,25 @@ def test_pipeline_defaults_are_the_current_generation():
     assert api.VERIFICATION_MODEL_DEFAULT == SONNET_5
     # Chat is deliberately NOT Opus 5 — see the web-fetch tests below.
     assert api.CHAT_MODEL_DEFAULT == SONNET_5
-    # Haiku 4.5 is still the current Haiku — triage is unchanged.
-    assert api.TRIAGE_MODEL_DEFAULT == HAIKU
+
+
+def test_stages_that_deliberately_run_on_sonnet():
+    """Three stages are Sonnet-by-default, each for a stated reason. Pin them so
+    a well-meaning "upgrade everything to the flagship" cannot silently regress
+    the citation check's capabilities."""
+    from drawing_analyzer.citation_check import citation_model
+    from drawing_analyzer.prose_harvest import harvest_model
+    from drawing_analyzer.set_identity import default_identity_model
+
+    # Citation is a CAPABILITY choice, not a cost one: web_fetch does not exist
+    # on Opus 5, so an Opus citation check can only read search snippets.
+    assert citation_model() == SONNET_5
+    assert api.model_capabilities(SONNET_5).supports_web_fetch is True
+    assert api.model_capabilities(OPUS_5).supports_web_fetch is False
+    # Advisory-only, with a deterministic regex backstop.
+    assert default_identity_model() == SONNET_5
+    # Pure structuring of one prose item.
+    assert harvest_model() == SONNET_5
 
 
 def test_previous_generation_stays_registered_as_a_valid_override():
@@ -116,7 +133,8 @@ def test_every_emitted_effort_level_is_one_the_model_accepts():
         api.PHASE_VERIFICATION_RETRY,
         api.PHASE_VERIFICATION_CONTINUATION,
         api.PHASE_INVESTIGATION,
-        api.PHASE_TRIAGE,
+        api.PHASE_HARVEST,
+        api.PHASE_CITATION,
     ]
     for model, caps in api._MODEL_CAPABILITIES.items():
         for phase in phases:

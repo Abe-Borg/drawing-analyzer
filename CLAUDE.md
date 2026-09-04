@@ -102,7 +102,8 @@ both the submitted batch and the one that actually served the digests.
   (disciplines, sheet→discipline map, jurisdiction, language, units, adopted
   codes with evidence quotes; the regex edition harvest unions in as
   `origin="regex"` — the backstop the model can't argue away). **Advisory only**:
-  consumers take `SetIdentity | None` and never gate a finding on it.
+  consumers take `SetIdentity | None` and never gate a finding on it — which,
+  with the regex backstop, is why this stage runs on **Sonnet 5**.
   `review_planner.py` — one text-only call authoring the per-discipline review
   checklist (bounded host-side: ≤60 items via `DRAWING_ANALYZER_MAX_PLAN_ITEMS`,
   overlong items dropped-never-truncated; every code-based item must name
@@ -132,8 +133,8 @@ both the submitted batch and the one that actually served the digests.
   so a code/tag/voltage/RFI/dimension never becomes a sheet finding);
   `prose_harvest.py` (mirrors prose Coordination/Conflict items,
   synthesis conflicts, and opted-in focus items into findings — match first,
-  one small structuring call for stragglers, degraded sheet-level entry on
-  failure).
+  one small structuring call for stragglers on **Sonnet 5** at `EFFORT_LOW`,
+  degraded sheet-level entry on failure).
 - ***`ledger.py` is the exclusive findings container*** (Part III §16): every
   channel ingests into it with source tags. Dedup is conservative and lossless
   (Phase 20 §12): a tile/rect overlap is never sufficient — merges need semantic
@@ -161,23 +162,33 @@ both the submitted batch and the one that actually served the digests.
   citing finding's quote — an identical quote would collide in Pass B).
 - *Disposition:* `anchor.py` (quote → PDF rect, tiered
   EXACT/FUZZY/TILE/UNANCHORED — UNANCHORED is the hallucination signal) →
-  `verify.py` (high-DPI crop re-check → VERIFIED/REJECTED/UNCERTAIN) →
+  `verify.py` (high-DPI crop re-check → VERIFIED/REJECTED/UNCERTAIN; adaptive
+  thinking at medium effort inside an 8k envelope — thinking shares the
+  `max_tokens` budget with the answer, and the old 1k cap fit neither, so
+  verdicts came back empty and degraded to UNCERTAIN) →
   `investigate.py` (Phase C: a host-driven client-tool loop escalating each
   anchored UNCERTAIN verdict — the model requests evidence via `crop_region`
   / zero-API `find_text` / `view_sheet`, every image saved-before-send into
   the finding's evidence dir with an `investigation.json` trace; strictly
   sequential (I-5), budget-capped per finding (`…_INVESTIGATION_MAX_ROUNDS`,
-  default 6) and per run (`…_MAX_FINDINGS`, 10, severity-first) with the
+  default 6) and per run (`…_MAX_FINDINGS`, severity-first, **scaled to the set**
+  — 10 + one per 4 sheets, ceiling 40, an explicit env value pinning it) with the
   assistant turn committed before its tools are answered, every tool_use id
   answered in ONE user turn, and a forced no-tools text close at the cap so a
   run never dangles; a capped/garbled outcome stays UNCERTAIN — never
   REJECTED — and is a designed stage COMPLETE; it only ever UPDATES
   `finding.verification` in place (legal post-seal); concluded verdicts cache
   in `stage=investigation` keyed on finding identity + a whole-set content
-  fingerprint + model/prompt/budget, complete-only admission, and a warm hit
+  fingerprint + model/prompt/round-budget/task-budget, complete-only admission,
+  and a warm hit
   deterministically REPLAYS the tool trace with sha-compare so evidence bytes
   are recreated and warm output stays byte-identical, no TTL) →
-  `citation_check.py` (server-side web-search per unique code ref) →
+  `citation_check.py` (**Sonnet 5**: server-side `web_search` + `web_fetch` per
+  unique code ref — web fetch is unavailable on Opus 5, so an Opus citation
+  check can only read search snippets rather than the section text; both tools
+  carry the shared source-quality blocklist, and the resolved tool set rides
+  the verdict cache key because what the model was allowed to do is part of
+  what its answer means) →
   `annotate.py` (§18 gating + Phase 21 receipts: every entry gets ink except
   REJECTED/gated, which get reconciled index rows; rect-less entries become
   margin callouts **packed into visually-clear bands** — validated against words,
@@ -263,6 +274,22 @@ example is parked at `docs/examples/fire_protection.md`.
   exact visible label (`"r1c1"`); `tiling.parse_tile_label` converts it to the
   canonical **zero-based** internal `[row, col]`. A legacy `tile` array is accepted
   only as explicit zero-based, bounds-checked — never guessed to be 1-based.
+- **Thinking is always explicit; never omitted (§C).** On Opus 5 and Sonnet 5 an
+  *omitted* `thinking` key runs adaptive thinking — it does not disable it — and
+  thinking draws from the same `max_tokens` envelope as the answer. Three stages
+  once relied on omission meaning "off" and starved their own output. Every
+  request builder therefore states `thinking` and `effort` explicitly, resolved
+  through the `core.api_config` phase registry (which also applies the
+  model-ceiling clamp). A phase that wants shallow work registers `EFFORT_LOW`;
+  it does **not** send `{"type": "disabled"}`, which risks leaking reasoning tags
+  into a response the host parses as JSON.
+- **Above ~21k `max_tokens`, streaming is mandatory, not preferred.** The SDK
+  refuses a non-streaming `create` whose cap implies >10 minutes of output with a
+  client-side `ValueError`, before any HTTP request. `digest.stream_message` is
+  the single place that knows this; digest / critique / review-plan / synthesis /
+  focus all go through it. Batch items never stream and are unaffected. A cap
+  raise without the matching streaming conversion is a hard failure, including
+  via the batch→real-time fallbacks in `batch_digest`/`batch_critique`.
 - **Additive serialization:** `Finding.to_dict`/`from_dict` must default new
   fields cleanly so cached payloads from older runs still load.
 - **Ledger coverage is artifact-backed (Phase 21, DA-007):** on markup runs every

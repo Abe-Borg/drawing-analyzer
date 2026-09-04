@@ -151,8 +151,8 @@ from urllib.parse import quote
 from .core.api_config import (
     CHAT_MODEL_DEFAULT,
     EFFORT_HIGH,
-    EFFORT_MEDIUM,
     model_capabilities,
+    web_search_blocked_domains,
 )
 from .core.pricing import price_for
 
@@ -2774,18 +2774,20 @@ def _chat_bootstrap_html(
     saved conversation and ignore every other report's.
     """
     embedding = bool(embed_key and api_key)
-    # Effort levels the widget will actually send, resolved here because the
-    # browser cannot see the capability whitelist and an unsupported level is a
-    # 400 that fails the whole request. Both levels must be accepted or the
-    # feature is omitted wholesale — a half-supported pair would break the Deep
-    # toggle on exactly the questions a reader escalated. ``None`` means the
-    # widget sends no ``output_config`` at all, which is always safe.
+    # The effort level the widget sends, resolved here because the browser cannot
+    # see the capability whitelist and an unsupported level is a 400 that fails
+    # the whole request. ``None`` means the widget sends no ``output_config`` at
+    # all, which is always safe.
+    #
+    # One fixed level, not a reader-facing choice. This was a standard/deep pair
+    # behind a "Deep" checkbox; asking a reader to predict, before seeing the
+    # answer, whether their question deserves more reasoning is a question they
+    # cannot answer — and the wrong default is the one that quietly under-answers.
+    # A constant also keeps the prompt cache intact: effort rides the request, so
+    # toggling it mid-session invalidated the messages tier on every flip.
     caps = model_capabilities(CHAT_MODEL_DEFAULT)
-    effort_levels = caps.supported_effort_levels
-    effort: dict[str, str] | None = (
-        {"standard": EFFORT_MEDIUM, "deep": EFFORT_HIGH}
-        if {EFFORT_MEDIUM, EFFORT_HIGH} <= effort_levels
-        else None
+    effort: str | None = (
+        EFFORT_HIGH if EFFORT_HIGH in caps.supported_effort_levels else None
     )
     # Rates for the widget's own cost readout, taken from the pricing table so the
     # figure tracks PRICING_EFFECTIVE_DATE instead of drifting. The widget runs on
@@ -2825,6 +2827,10 @@ def _chat_bootstrap_html(
         # ``buildRequest`` can omit the tool instead of breaking every question
         # when someone overrides DRAWING_ANALYZER_CHAT_MODEL.
         "webFetch": caps.supports_web_fetch,
+        # The source-quality blocklist lives in Python (api_config) and is handed
+        # over rather than restated in JS, so the widget and the pipeline's
+        # citation check cannot drift into two different policies.
+        "blockedDomains": web_search_blocked_domains(),
         "title": title,
         "generated": generated,
         "sources": list(source_names),
@@ -2869,7 +2875,6 @@ _CHAT_HTML = """
   <header class="da-chat-head">
     <span class="da-chat-title">Report Q&amp;A</span>
     <span class="da-chat-model" id="da-chat-model"></span>
-    <label id="da-chat-deep" hidden title="Use a larger reasoning budget for this question (slower, costs more)"><input id="da-chat-deep-input" type="checkbox"> Deep</label>
     <button id="da-chat-export" type="button" class="ghost-btn" title="Save this conversation as a PDF via your browser's print dialog">PDF</button>
     <button id="da-chat-save" type="button" class="ghost-btn" title="Save this conversation as a JSON file — keep it beside the report and load it back later">Save</button>
     <button id="da-chat-load" type="button" class="ghost-btn" title="Load a previously saved conversation and carry on asking questions">Load</button>
@@ -2913,7 +2918,7 @@ _CHAT_HTML = """
   </div>
   <div class="da-chat-foot" id="da-chat-foot"><span>__CHAT_FOOT__</span>
     <span class="da-chat-context" id="da-chat-context" hidden
-          title="How much of the model's context window this conversation currently occupies. The report and every earlier question are re-sent with each new one, so this grows as the thread does.">
+          title="How much of the model's context window is still free for this conversation. The report and every earlier question are re-sent with each new one, so this shrinks as the thread grows.">
       <span class="da-ctx-text" id="da-chat-context-text"></span>
       <span class="da-ctx-bar" aria-hidden="true"><span class="da-ctx-fill" id="da-chat-context-fill"></span></span>
     </span>
@@ -2962,17 +2967,6 @@ _CHAT_CSS = """
   font-size:11px; color:var(--muted); min-width:0; overflow:hidden;
   text-overflow:ellipsis; white-space:nowrap;
 }
-/* Sits with the buttons on the top row, not on the model line: it is a control
-   the reader sets per question, not status text. Hidden entirely when the
-   configured model does not accept both effort levels (CFG.effort is null),
-   so it never offers a toggle that would 400 the request. */
-#da-chat-deep{
-  flex:0 0 auto; display:inline-flex; align-items:center; gap:3px;
-  font-size:10.5px; color:var(--muted); cursor:pointer; white-space:nowrap;
-  border:1px solid var(--line); border-radius:6px; padding:2px 7px; background:#fff;
-}
-#da-chat-deep[hidden]{display:none}
-#da-chat-deep input{margin:0; cursor:pointer}
 #da-chat-close{
   border:none; background:none; font-size:20px; line-height:1; cursor:pointer;
   color:var(--muted); padding:2px 6px;
@@ -3646,30 +3640,39 @@ _CHAT_JS = r"""
       messages: messagesForRequest(),
       stream: true
     };
-    // Effort defaults to `high` server-side, and thinking tokens bill at the
-    // output rate. Most report questions are grounded retrieval over text already
-    // in context, which the standard tier covers at a fraction of the thinking
-    // tokens; the reader escalates per question with the Deep toggle. CFG.effort
-    // is resolved host-side from the capability registry (null when the configured
-    // model does not accept both levels), because the browser cannot see it and
-    // an unsupported effort level is a 400 that fails the whole request.
-    //
-    // Changing effort mid-session invalidates only the messages tier, never the
-    // cached tools+system prefix, so toggling Deep never re-writes the report.
+    // One fixed effort level, resolved host-side from the capability registry
+    // (null when the configured model does not accept it) because the browser
+    // cannot see it and an unsupported level is a 400 that fails the request.
+    // Constant on purpose: it keeps the messages cache tier intact for the whole
+    // session, which a per-question toggle did not.
     if(CFG.effort){
-      req.output_config = {
-        effort: (deepToggle && deepToggle.checked) ? CFG.effort.deep : CFG.effort.standard
-      };
+      req.output_config = {effort: CFG.effort};
     }
+    // `max_uses` is a PER-REQUEST budget, not per question. Each client-tool
+    // round below issues a fresh request (see `step`), so a question that takes
+    // several rounds gets this allowance again on each one — the effective
+    // ceiling is max_uses x rounds, not max_uses.
+    //
+    // blocked_domains carries the same source-quality policy the pipeline's
+    // citation check uses, handed over from Python so the two cannot drift. A
+    // code answer grounded on a forum post is worse than no answer.
     req.tools = [
-      {type: 'web_search_20260209', name: 'web_search', max_uses: 4}
+      {type: 'web_search_20260209', name: 'web_search', max_uses: 8,
+       blocked_domains: CFG.blockedDomains || []}
     ];
     // web_fetch only when the configured model actually supports it (CFG.webFetch,
     // resolved host-side from the capability registry). Opus 5 supports web search
     // but not web fetch, and sending an unsupported server tool is a 400 that fails
     // the request outright — so this degrades to search-only rather than breaking.
+    //
+    // Kept at 4 while search goes to 8: each fetch pulls up to max_content_tokens
+    // of page text into a context that already holds the whole report, so fetches
+    // are the expensive half of the pair.
     if(CFG.webFetch){
-      req.tools.push({type: 'web_fetch_20260209', name: 'web_fetch', max_uses: 4});
+      req.tools.push({type: 'web_fetch_20260209', name: 'web_fetch', max_uses: 4,
+                      blocked_domains: CFG.blockedDomains || [],
+                      citations: {enabled: true},
+                      max_content_tokens: 40000});
     }
     req.tools.push(
       {name: 'scroll_to_report',
@@ -4059,10 +4062,6 @@ _CHAT_JS = r"""
   var printHead = document.getElementById('da-chat-print-head');
   var forgetBtn = document.getElementById('da-chat-forget');
   var startersRow = document.getElementById('da-starters-row');
-  // buildRequest reads deepToggle; `var` hoisting inside this IIFE covers the
-  // reference regardless of where the lookup runs.
-  var deepLabel = document.getElementById('da-chat-deep');
-  var deepToggle = document.getElementById('da-chat-deep-input');
   var usageEl = document.getElementById('da-chat-usage');
   var contextEl = document.getElementById('da-chat-context');
   var contextTextEl = document.getElementById('da-chat-context-text');
@@ -4078,8 +4077,6 @@ _CHAT_JS = r"""
   var keySetLabel = document.getElementById('da-chat-key-set-label');
   var keyStatus = document.getElementById('da-chat-key-status');
   document.getElementById('da-chat-model').textContent = CFG.model + ' · web search · thinking';
-  // Only offer the Deep toggle when the host resolved a usable effort pair.
-  if(deepLabel && CFG.effort) deepLabel.hidden = false;
 
   // Session token/cost readout. The dollar figure is an ESTIMATE and is labelled
   // as one: cache reads bill at ~0.1x input and writes at 1.25x (5-minute) or 2x
@@ -4123,8 +4120,13 @@ _CHAT_JS = r"""
     // would look like the counter is broken, and 89.6% reads as 90 rather than
     // rounding down into a tier the colour has already left.
     var shown = pct > 0 && pct < 1 ? '<1' : String(Math.round(pct));
-    contextTextEl.textContent = 'Context ' + fmtTokens(used) + ' / ' + fmtTokens(win)
-      + ' (' + shown + '%)'
+    // Lead with what is LEFT, not what is spent. The number the reader acts on is
+    // whether the next question still fits; "412k / 1M (41%)" makes them do the
+    // subtraction, and the bar already carries the spent-so-far picture. The
+    // percentage stays, as the at-a-glance version of the same fact.
+    var left = Math.max(0, win - used);
+    contextTextEl.textContent = fmtTokens(left) + ' of ' + fmtTokens(win)
+      + ' context left (' + shown + '% used)'
       + (frac >= 0.9 ? ' — nearly full, start a New chat'
          : (frac >= 0.7 ? ' — filling up' : ''));
     contextEl.hidden = false;

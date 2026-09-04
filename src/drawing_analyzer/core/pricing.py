@@ -52,6 +52,11 @@ class ModelPrice:
 # per model and no date awareness — deliberately, since I-7 keeps
 # time-dependence out of assembly — so the table simply carries the standing
 # price and ``PRICING_EFFECTIVE_DATE`` says when it was last checked.
+#
+# Weight note: Sonnet 5 now prices three pipeline stages (set identity, prose
+# harvest, citation) plus the report chat's own readout, so this row moves the
+# estimate more than it used to — the 50% over-statement the hedge caused was
+# correspondingly worse.
 MODEL_PRICING: dict[str, ModelPrice] = {
     "claude-opus-5": ModelPrice(5.00, 25.00, "Opus 5"),
     "claude-sonnet-5": ModelPrice(2.00, 10.00, "Sonnet 5"),

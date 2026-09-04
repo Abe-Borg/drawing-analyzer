@@ -27,6 +27,8 @@ plain-dict code paths (batch retrieval can return either form).
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import json
 from dataclasses import dataclass, field
 from typing import Any
@@ -366,3 +368,126 @@ def _to_dict(obj: Any) -> Any:
             out[field_name] = _to_dict(getattr(obj, field_name))
         return out
     return obj
+
+
+# ---------------------------------------------------------------------------
+# Streaming transport shim
+# ---------------------------------------------------------------------------
+#
+# The digest, critique, review-plan, synthesis and focus stages issue their
+# requests through ``client.messages.stream(...)`` rather than ``.create(...)``:
+# above roughly 21k ``max_tokens`` the SDK refuses a non-streaming call outright
+# (a client-side ValueError, before any HTTP request), and those stages now run
+# at 32k-64k. See ``drawing_analyzer.digest.stream_message``.
+#
+# A fake client therefore needs a ``messages.stream`` as well as a
+# ``messages.create``. Rather than hand-writing a context manager in every test
+# module, a fake ``messages`` object inherits :class:`StreamingMessagesMixin`
+# and gets one that routes straight back through its own ``create`` — so the
+# recorded kwargs, the scripted responses and the raised exceptions are
+# identical on both transports, which is exactly the equivalence the streaming
+# conversion needs to hold.
+
+
+class FinalMessageStream:
+    """Context-manager stand-in for the SDK's streaming response object."""
+
+    def __init__(self, message: Any) -> None:
+        self._message = message
+
+    def __enter__(self) -> "FinalMessageStream":
+        return self
+
+    def __exit__(self, *exc_info: Any) -> bool:
+        return False
+
+    def get_final_message(self) -> Any:
+        return self._message
+
+
+class _StreamDescriptor:
+    """Resolve ``create`` against whatever ``stream`` was reached through.
+
+    Fake ``messages`` objects come in two shapes in this suite: an *instance*
+    with a normal ``def create(self, ...)``, and a bare nested ``class messages``
+    with a ``@staticmethod create`` that callers use unbound. A plain method
+    would only serve the first. Binding at access time serves both.
+    """
+
+    def __get__(self, obj: Any, objtype: Any = None) -> Any:
+        target = obj if obj is not None else objtype
+
+        def stream(**kwargs: Any) -> FinalMessageStream:
+            return FinalMessageStream(target.create(**kwargs))
+
+        return stream
+
+
+class StreamingMessagesMixin:
+    """Give a fake ``messages`` object a ``stream()`` backed by its ``create()``.
+
+    Mix in *before* the fake's own base so ``stream`` is inherited::
+
+        class _Msgs(StreamingMessagesMixin):
+            def create(self, **kwargs): ...
+
+        class messages(StreamingMessagesMixin):     # used unbound
+            @staticmethod
+            def create(**kwargs): ...
+    """
+
+    stream = _StreamDescriptor()
+
+
+def add_stream(messages_obj: Any) -> Any:
+    """Attach a ``stream`` to an already-built fake ``messages`` object.
+
+    For fakes assembled from plain namespaces/lambdas rather than a class.
+    """
+    create = messages_obj.create
+    messages_obj.stream = lambda **kwargs: FinalMessageStream(create(**kwargs))
+    return messages_obj
+
+
+class _BetaMessagesProxy:
+    """``client.beta.messages`` over an existing fake ``messages`` object.
+
+    The investigation loop reaches for ``client.beta.messages.stream(...)`` so it
+    can pass ``betas=[...]`` alongside an advisory ``output_config.task_budget``.
+    The beta namespace is a transport detail, not a different conversation, so
+    this routes straight back to the same ``create`` and records the same kwargs
+    — ``betas`` is dropped, exactly as the wire header it becomes.
+    """
+
+    def __init__(self, messages: Any) -> None:
+        self._messages = messages
+
+    def create(self, **kwargs: Any) -> Any:
+        kwargs.pop("betas", None)
+        return self._messages.create(**kwargs)
+
+    def stream(self, **kwargs: Any) -> FinalMessageStream:
+        kwargs.pop("betas", None)
+        return FinalMessageStream(self._messages.create(**kwargs))
+
+
+class BetaClientMixin:
+    """Give a fake client a ``beta.messages`` backed by its own ``messages``.
+
+    The setter matters: a plain ``@property`` is a data descriptor and would
+    shadow — and refuse — a fake that assigns its own ``self.beta`` (the batch
+    fakes do, for ``beta.messages.batches`` and ``beta.files``). An explicit
+    override therefore wins, so this is safe to mix into any fake client.
+    """
+
+    _beta_override: Any = None
+
+    @property
+    def beta(self) -> Any:
+        if self._beta_override is not None:
+            return self._beta_override
+        return SimpleNamespace(messages=_BetaMessagesProxy(self.messages))
+
+    @beta.setter
+    def beta(self, value: Any) -> None:
+        self._beta_override = value

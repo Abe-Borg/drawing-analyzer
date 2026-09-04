@@ -24,11 +24,13 @@ from drawing_analyzer.set_identity import IDENTITY_SYSTEM_PROMPT  # noqa: E402
 from drawing_analyzer.synthesis import SYNTHESIS_SYSTEM_PROMPT  # noqa: E402
 from drawing_analyzer.verify import VERIFY_SYSTEM_PROMPT  # noqa: E402
 from tests.fixtures.fake_anthropic import (  # noqa: E402
+    StreamingMessagesMixin,
     FakeMessage,
     FakeTextBlock,
     FakeToolUseBlock,
     FakeUsage,
 )
+from tests.fixtures.fake_anthropic import BetaClientMixin
 
 
 def _make_pdf(path: Path) -> Path:
@@ -104,7 +106,7 @@ def _system_text(system) -> str:
     return system or ""
 
 
-class _RoutingClient:
+class _RoutingClient(BetaClientMixin):
     """One fake client that answers digest, verify, citation, and synthesis calls.
 
     ``investigate_mode`` scripts the Phase C loop when an UNCERTAIN finding
@@ -163,7 +165,7 @@ class _RoutingClient:
                     text=f'{{"verdict":"{final}","note":"investigated look"}}')],
                 usage=FakeUsage(input_tokens=60, output_tokens=12))
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(_self, **kw):
                 system = _system_text(kw.get("system", ""))
                 if system == INVESTIGATE_SYSTEM_PROMPT:
@@ -520,7 +522,7 @@ def test_verify_disabled_still_anchors_and_marks(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-class _CountingClient:
+class _CountingClient(BetaClientMixin):
     """Fake client that counts calls per stage and answers each with valid output."""
 
     def __init__(self, findings: list[dict]):
@@ -533,7 +535,7 @@ class _CountingClient:
         digest_text = prose + "\n\n" + _digest_block(findings)
         calls = self.calls
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(_self, **kw):
                 s = _system_text(kw.get("system", ""))
                 if s == INVESTIGATE_SYSTEM_PROMPT:
@@ -845,7 +847,7 @@ def test_pipeline_prices_investigation_prompt_cache_tokens(tmp_path):
     )
     create = client.messages.create
 
-    class _CacheUsageMessages:
+    class _CacheUsageMessages(StreamingMessagesMixin):
         def create(self, **kwargs):
             response = create(**kwargs)
             if _system_text(kwargs.get("system", "")) == INVESTIGATE_SYSTEM_PROMPT:
@@ -976,7 +978,7 @@ def test_combined_text_has_no_findings_block(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-class _ProseRoutingClient:
+class _ProseRoutingClient(BetaClientMixin):
     """Digest with a prose Coordination item beyond its JSON block; the harvest's
     structuring call gets garbage (forcing the degraded path); verify confirms."""
 
@@ -994,7 +996,7 @@ class _ProseRoutingClient:
 
         from drawing_analyzer.prose_harvest import HARVEST_SYSTEM_PROMPT
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(_self, **kw):
                 system = kw.get("system", "")
                 if system == HARVEST_SYSTEM_PROMPT:
@@ -1074,7 +1076,7 @@ def test_verified_only_mode_gates_and_tallies_gated(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-class _ClaimsRoutingClient:
+class _ClaimsRoutingClient(BetaClientMixin):
     """Answers digest and critique calls; the critique emits a numeric claim."""
 
     def __init__(self, claims: list[dict]):
@@ -1084,7 +1086,7 @@ class _ClaimsRoutingClient:
         digest_text = prose + "\n\n" + _digest_block([])
         critique_text = "```json\n" + json.dumps({"findings": [], "claims": claims}) + "\n```"
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(_self, **kw):
                 system = kw.get("system", "")
                 if system.startswith(CRITIQUE_SYSTEM_PROMPT):
@@ -1141,7 +1143,7 @@ def _make_clean_pdf(path: Path, sheet_id: str) -> Path:
     return path
 
 
-class _SetLevelRoutingClient:
+class _SetLevelRoutingClient(BetaClientMixin):
     """Two clean sheets; the cross-sheet synthesis reports a conflict that names no
     in-set sheet — the §14.8 set-level case. Digest/critique find nothing else."""
 
@@ -1154,7 +1156,7 @@ class _SetLevelRoutingClient:
             "with the schedule and no single sheet in the set resolves which governs."
         )
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(_self, **kw):
                 system = kw.get("system", "")
                 if system == SYNTHESIS_SYSTEM_PROMPT:
@@ -1203,7 +1205,7 @@ def test_set_level_synthesis_conflict_routes_to_review_notes_pdf(tmp_path):
     assert not any(e.startswith("Prose harvest:") for e in ctx.errors)
 
 
-class _SourceAndSetLevelClient:
+class _SourceAndSetLevelClient(BetaClientMixin):
     """Two sheets: the digest reports a real finding on each sheet (→ a source
     reviewed PDF), and the synthesis reports a conflict naming no in-set sheet
     (→ a set-level note)."""
@@ -1218,7 +1220,7 @@ class _SourceAndSetLevelClient:
         synth_text = ("Overview.\n\nThe specified fire pump conflicts with the schedule "
                       "and no single sheet in the set resolves which governs.")
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(_self, **kw):
                 system = kw.get("system", "")
                 if system == SYNTHESIS_SYSTEM_PROMPT:
@@ -1432,7 +1434,7 @@ def test_gate_open_never_masks_a_degraded_required_stage(tmp_path):
             super().__init__([_VAV_FINDING])
             inner = self.messages
 
-            class _Msgs:
+            class _Msgs(StreamingMessagesMixin):
                 def create(_self, **kw):
                     if str(kw.get("system", "")).startswith(CITATION_SYSTEM_PROMPT):
                         return FakeMessage(

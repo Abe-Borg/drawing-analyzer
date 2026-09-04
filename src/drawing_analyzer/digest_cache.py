@@ -416,29 +416,40 @@ def citation_cache_key(
     *,
     model: str,
     prompt_version: str,
-    max_uses: int,
+    request_shape: Any,
 ) -> str:
     """Content-address one *citation request chunk*'s verdicts (Phase B).
 
     ``payload_hash`` is the sha256 of the exact request payload — the ref
     string, the chunk's normalized claim texts in request order, and the
     editions/jurisdiction context lines — so an identity change, a reworded
-    claim, or different chunking all miss. ``max_uses`` (the per-request
-    web-search budget) and the prompt version ride the key: verdicts searched
-    under a different budget or prompt are different verdicts. Same
-    namespace-isolation rationale as :func:`identity_cache_key` — the
+    claim, or different chunking all miss.
+
+    ``request_shape`` carries everything else that can change a verdict without
+    changing the payload: the **resolved tool set** (types, names, and their
+    budgets), the output cap, and the thinking/effort configuration. It
+    replaces an earlier bare ``max_uses`` field, which keyed only the
+    web-search budget and left the tool *list* invisible — so granting the
+    model a new capability such as ``web_fetch`` would have silently replayed
+    verdicts reached without it. What the model was allowed to do is part of
+    what its answer means.
+
+    Same namespace-isolation rationale as :func:`identity_cache_key` — the
     ``stage=citation`` tag means no ``_SCHEMA_VERSION`` bump. Entries carry a
     ``checked_at`` timestamp the CALLER compares against its TTL (this module
     stays time-blind; the I-7 carve-out is documented in
     :mod:`drawing_analyzer.citation_check`).
     """
+    shape = json.dumps(
+        request_shape, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+    )
     h = hashlib.sha256()
     for part in (
         f"schema={_SCHEMA_VERSION}",
         "stage=citation",
         f"model={model or ''}",
         f"prompt={prompt_version or ''}",
-        f"max_uses={int(max_uses)}",
+        f"shape={shape}",
         f"payload={payload_hash or ''}",
     ):
         h.update(part.encode("utf-8"))
@@ -452,6 +463,7 @@ def investigation_cache_key(
     model: str,
     prompt_version: str,
     max_rounds: int,
+    task_budget: int = 0,
 ) -> str:
     """Content-address one investigation's *concluded* verdict (Phase C).
 
@@ -476,6 +488,10 @@ def investigation_cache_key(
         f"model={model or ''}",
         f"prompt={prompt_version or ''}",
         f"max_rounds={int(max_rounds)}",
+        # The advisory token budget changes how far one investigation may reason
+        # before it must conclude, so a verdict reached under a different budget
+        # is a different verdict.
+        f"task_budget={int(task_budget)}",
         f"payload={payload_hash or ''}",
     ):
         h.update(part.encode("utf-8"))

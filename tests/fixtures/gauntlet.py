@@ -58,6 +58,8 @@ from drawing_analyzer.set_identity import IDENTITY_SYSTEM_PROMPT
 from drawing_analyzer.synthesis import SYNTHESIS_SYSTEM_PROMPT
 from drawing_analyzer.verify import VERIFY_SYSTEM_PROMPT
 from tests.fixtures.fake_anthropic import (
+    BetaClientMixin,
+    StreamingMessagesMixin,
     FakeMessage,
     FakeTextBlock,
     FakeToolUseBlock,
@@ -385,7 +387,7 @@ class SheetScript:
     read2: tuple[list[dict], list[dict]] = ((), ())
 
 
-class ScriptedQCClient:
+class ScriptedQCClient(BetaClientMixin):
     """One fake client answering the entire exhaustive stack, deterministically.
 
     ``sabotage`` selects a §19.1 failure-injection mode:
@@ -455,7 +457,7 @@ class ScriptedQCClient:
 
         outer = self
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(_self, **kw):  # noqa: ANN001, ANN202
                 return outer._route(kw)
 

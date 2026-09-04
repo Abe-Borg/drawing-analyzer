@@ -56,6 +56,7 @@ from .digest import (
     _message_text,
     _message_usage,
     _retry_backoff_seconds,
+    stream_message,
     build_user_content,
     claims_from_cache,
     findings_from_cache,
@@ -108,7 +109,10 @@ _run_checklists = run_checklists
 
 # Critique shares the digest's output-shaping defaults: Opus 5, adaptive
 # thinking, effort high, 16k max_tokens (full coverage, deliberate reasoning).
-DEFAULT_CRITIQUE_MAX_TOKENS = DEFAULT_DIGEST_MAX_TOKENS
+# Decoupled from the digest cap: the critique is a second full-coverage read of
+# the same images and deserves its own envelope, not whatever the digest is set
+# to this week. Same 64k reasoning as digest (see DEFAULT_DIGEST_MAX_TOKENS).
+DEFAULT_CRITIQUE_MAX_TOKENS = 64_000
 DEFAULT_CRITIQUE_EFFORT = DEFAULT_DIGEST_EFFORT
 DEFAULT_CRITIQUE_MAX_RETRIES = DEFAULT_DIGEST_MAX_RETRIES
 
@@ -959,7 +963,7 @@ def _critique_read(
     attempt = 0
     while True:
         try:
-            resp = client.messages.create(**kwargs)
+            resp = stream_message(client, kwargs)
             break
         except Exception as exc:  # noqa: BLE001 - report, don't sink the set
             if _is_transient_error(exc) and attempt < max_retries:

@@ -27,7 +27,7 @@ from drawing_analyzer.review_planner import (
     render_item,
     sanitize_plans,
 )
-from tests.fixtures.fake_anthropic import FakeMessage, FakeTextBlock, FakeUsage
+from tests.fixtures.fake_anthropic import BetaClientMixin, StreamingMessagesMixin, FakeMessage, FakeTextBlock, FakeUsage
 
 
 def _ref(i: int) -> SheetRef:
@@ -75,12 +75,12 @@ def _reply(payload: dict | None = None) -> str:
     return "```json\n" + json.dumps(payload or _PLANS_PAYLOAD) + "\n```"
 
 
-class _FakeClient:
+class _FakeClient(BetaClientMixin):
     def __init__(self, reply_text: str):
         self.calls: list[dict] = []
         outer = self
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(_self, **kw):
                 outer.calls.append(kw)
                 return FakeMessage(
@@ -279,8 +279,8 @@ def test_author_review_plan_counts_dropped_items():
 
 
 def test_author_review_plan_never_raises():
-    class _Boom:
-        class messages:  # noqa: N801 - fake namespace
+    class _Boom(BetaClientMixin):
+        class messages(StreamingMessagesMixin):  # noqa: N801 - fake namespace
             @staticmethod
             def create(**kw):
                 raise RuntimeError("permanent")

@@ -32,6 +32,7 @@ from .digest import (
     _message_text,
     _message_usage,
     _retry_backoff_seconds,
+    stream_message,
 )
 from .stage_cache import (
     get_stage_cache_entry,
@@ -40,7 +41,7 @@ from .stage_cache import (
 )
 
 # A concise overview needs far less room than a per-sheet transcription.
-DEFAULT_SYNTHESIS_MAX_TOKENS = 8_000
+DEFAULT_SYNTHESIS_MAX_TOKENS = 32_000
 # Deep reconciliation reasoning; "high" is accepted by Opus and Sonnet alike.
 DEFAULT_SYNTHESIS_EFFORT = "high"
 # Fewer than this many readable sheets and there is nothing to reconcile.
@@ -206,7 +207,7 @@ def synthesize_drawing_set(
     attempt = 0
     while True:
         try:
-            resp = client.messages.create(**kwargs)
+            resp = stream_message(client, kwargs)
             break
         except Exception as exc:  # noqa: BLE001 - report, fall back to per-sheet
             if _is_transient_error(exc) and attempt < max_retries:

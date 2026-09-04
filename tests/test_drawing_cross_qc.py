@@ -20,7 +20,7 @@ from drawing_analyzer.anchor import resolve_conflict_legs
 from drawing_analyzer.cross_qc import cross_sheet_qc, cross_qc_system_prompt
 from drawing_analyzer.digest import SheetDigest
 from drawing_analyzer.models import ConflictLeg, Finding, SheetGeometry, SheetRef, source_page_key
-from tests.fixtures.fake_anthropic import FakeMessage, FakeTextBlock, FakeUsage
+from tests.fixtures.fake_anthropic import BetaClientMixin, StreamingMessagesMixin, FakeMessage, FakeTextBlock, FakeUsage
 
 _NOOP = lambda *_a, **_k: None  # noqa: E731
 W, H = 792.0, 612.0
@@ -57,7 +57,7 @@ def test_every_cross_qc_prompt_requests_recommended_action():
     assert "recommended_action" in X.CROSS_QC_RECONCILE_SYSTEM_PROMPT
 
 
-class _CrossClient:
+class _CrossClient(BetaClientMixin):
     """Returns a scripted cross-QC findings block; counts calls."""
 
     def __init__(self, findings_per_call):
@@ -66,7 +66,7 @@ class _CrossClient:
         self.calls = 0
         outer = self
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(self, **kw):  # noqa: ANN001, ANN202
                 i = min(outer.calls, len(outer._script) - 1)
                 outer.calls += 1
@@ -98,14 +98,14 @@ def test_system_prompt_and_between_sheets_mandate():
     assert "claims" in sysp        # Phase 14: numeric-claim transcription
 
 
-class _ClaimsCrossClient:
+class _ClaimsCrossClient(BetaClientMixin):
     """Returns a fixed cross-QC findings+claims block."""
 
     def __init__(self, claims):
         self._text = "```json\n" + json.dumps({"findings": [], "claims": claims}) + "\n```"
         outer = self
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(self, **kw):  # noqa: ANN001, ANN202
                 return FakeMessage(
                     content=[FakeTextBlock(text=outer._text)],
@@ -228,7 +228,7 @@ def _geom_txt(source, sid, text):
     )
 
 
-class _MapReconcileClient:
+class _MapReconcileClient(BetaClientMixin):
     """Content-aware fake for the sharded map→reconcile path.
 
     Map calls (handle-labeled shard prompts) emit one grounded fact per sheet handle
@@ -244,7 +244,7 @@ class _MapReconcileClient:
         self._map_claim = map_claim
         outer = self
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(self, **kw):  # noqa: ANN001, ANN202
                 system = kw.get("system", "")
                 body = kw["messages"][0]["content"][0]["text"]
@@ -457,7 +457,7 @@ def test_reconcile_pairs_overlap_but_fold_in_pair_order(monkeypatch):
     monkeypatch.setattr(X, "_reconcile_call", fake_reconcile)
     findings, _claims, in_tok, out_tok, completed = X._reconcile_facts(
         [], facts, {}, client=object(), model="claude-opus-5", max_retries=0,
-        sleep=_NOOP, max_workers=3,
+        sleep=_NOOP, budget=X._Budget(), max_workers=3,
     )
 
     assert max_active == 3 and completed is True
@@ -665,7 +665,7 @@ def test_cross_finding_clouds_both_sheets_with_cross_reference(tmp_path):
     assert any("F-D-01-1" in c for c in contents)
 
 
-class _PipelineClient:
+class _PipelineClient(BetaClientMixin):
     """digest + cross-QC + verify. Cross-QC returns one COLO conflict."""
 
     def __init__(self, *, verify_verdict="NOT_VISIBLE"):
@@ -675,7 +675,7 @@ class _PipelineClient:
         self.verify_image_counts = []
         outer = self
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(self, **kw):  # noqa: ANN001, ANN202
                 system = kw.get("system", "")
                 if system == VERIFY_SYSTEM_PROMPT:
@@ -774,3 +774,63 @@ def test_pipeline_without_cross_qc_is_unchanged(tmp_path):
     )
     assert client.cross_calls == 0
     assert [f for f in ctx.findings if f.also_on] == []
+
+
+def test_findings_cap_is_counted_and_marks_the_run_degraded():
+    """A truncated response must not report itself complete.
+
+    The per-sheet text budget has always been loss-aware; the findings cap was
+    not, so 80 conflicts silently became 60 with `complete=True`.
+    """
+    budget = X._Budget()
+    many = [
+        Finding(sheet_id="M-101", source_name="a.pdf", page_index=0,
+                category="conflict", severity="low", text=f"c{i}", source_quote=f"c{i}")
+        for i in range(X.DEFAULT_CROSS_QC_MAX_FINDINGS + 20)
+    ]
+
+    kept = X._cap_findings(many, budget)
+
+    assert len(kept) == X.DEFAULT_CROSS_QC_MAX_FINDINGS
+    assert budget.findings_omitted == 20
+    assert budget.degraded is True          # the run can no longer claim complete
+
+    # Under the cap nothing is counted and the run stays clean.
+    clean = X._Budget()
+    assert X._cap_findings(many[:5], clean) == many[:5]
+    assert clean.findings_omitted == 0 and clean.degraded is False
+
+
+def test_shard_path_aggregates_omitted_findings(monkeypatch):
+    """The sharded path is the >40-sheet path — exactly the large sets whose
+    responses are most likely to hit the cap. Folding only the text counters
+    into the aggregate budget lost the finding count and let a truncated run
+    report itself complete."""
+    aggregate = X._Budget()
+    for local in (X._Budget(total=10, included=10, omitted=0, findings_omitted=7),
+                  X._Budget(total=20, included=15, omitted=5, findings_omitted=3)):
+        X._fold_budget(aggregate, local)          # the production folding
+
+    assert (aggregate.total, aggregate.included, aggregate.omitted) == (30, 25, 5)
+    assert aggregate.findings_omitted == 10
+    assert aggregate.degraded is True
+
+    # A shard that drops findings but omits no characters must still degrade the
+    # run — the case the text-only folding missed entirely.
+    text_clean = X._fold_budget(X._Budget(), X._Budget(findings_omitted=1))
+    assert text_clean.omitted == 0 and text_clean.degraded is True
+
+
+def test_cross_qc_cache_contract_invalidates_pre_accounting_entries(monkeypatch):
+    """Entries written before the findings cap became loss-aware were stored as
+    complete after a silent truncation and carry no `findings_omitted`. Reading
+    one back would default that to 0 and certify a truncated run forever."""
+    geom = _geom("a.pdf", "M-101")
+    entries = [("M-101", "digest", "text", geom)]
+    assert X._CROSS_QC_CACHE_CONTRACT >= 2, "bumped past the pre-accounting entries"
+    current = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")
+
+    monkeypatch.setattr(X, "_CROSS_QC_CACHE_CONTRACT", 1)
+    legacy = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")
+
+    assert current != legacy, "the contract must ride the key"

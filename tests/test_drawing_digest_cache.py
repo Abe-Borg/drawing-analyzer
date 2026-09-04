@@ -24,7 +24,7 @@ from drawing_analyzer.digest_cache import (
     persistence_enabled,
 )
 from drawing_analyzer.models import ImageTile, RenderedSheet, SheetRef
-from tests.fixtures.fake_anthropic import FakeMessage, FakeTextBlock, FakeUsage
+from tests.fixtures.fake_anthropic import BetaClientMixin, StreamingMessagesMixin, FakeMessage, FakeTextBlock, FakeUsage
 
 OPUS = "claude-opus-5"
 
@@ -46,12 +46,12 @@ def _sheet(
     )
 
 
-class _CountingClient:
+class _CountingClient(BetaClientMixin):
     def __init__(self, responder):
         self.calls = 0
         self._responder = responder
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(_self, **kw):
                 self.calls += 1
                 return self._responder(kw)

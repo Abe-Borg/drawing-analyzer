@@ -34,9 +34,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from .core.api_config import (
-    REVIEW_MODEL_DEFAULT,
+    MODEL_SONNET_5,
     model_supports_adaptive_thinking,
     model_supports_effort,
+    output_cap_for_model,
 )
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
@@ -52,7 +53,9 @@ from .digest import (
 from .models import AdoptedCode, SetIdentity, source_page_key
 
 # Extraction/classification, not deep reasoning — cheaper than synthesis's "high".
-DEFAULT_IDENTITY_MAX_TOKENS = 4_000
+# Adaptive thinking shares this envelope with the answer, and the identity pass
+# reasons over a 200k-char corpus before emitting a bounded object.
+DEFAULT_IDENTITY_MAX_TOKENS = 8_000
 DEFAULT_IDENTITY_EFFORT = "medium"
 
 # Corpus budget (chars). Every sheet contributes its digest head (the set-wide
@@ -83,12 +86,19 @@ _CONFIDENCE_LEVELS = ("high", "medium", "low")
 
 
 def default_identity_model() -> str:
-    """Model for the identity pass — the review model by default, overridable
-    via ``DRAWING_ANALYZER_IDENTITY_MODEL``."""
+    """Model for the identity pass — Sonnet 5 by default, overridable via
+    ``DRAWING_ANALYZER_IDENTITY_MODEL``.
+
+    Structured extraction over a budgeted text corpus, and **advisory only**:
+    consumers take ``SetIdentity | None`` and never gate a finding on it, while
+    the regex edition harvest unions in as the backstop the model cannot argue
+    away. A deterministic safety net already covers the failure mode, so the
+    flagship's judgment is not what this pass is buying.
+    """
     override = os.environ.get("DRAWING_ANALYZER_IDENTITY_MODEL")
     if override and override.strip():
         return override.strip()
-    return REVIEW_MODEL_DEFAULT
+    return MODEL_SONNET_5
 
 
 IDENTITY_SYSTEM_PROMPT = """\
@@ -485,7 +495,7 @@ def identify_set(
 
     kwargs: dict[str, Any] = {
         "model": model,
-        "max_tokens": max_tokens,
+        "max_tokens": output_cap_for_model(model, requested=max_tokens),
         "system": IDENTITY_SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": user_text}],
     }

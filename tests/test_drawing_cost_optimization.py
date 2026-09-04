@@ -30,7 +30,7 @@ from drawing_analyzer.pipeline import (
     _transport_plan_name,
     extract_drawing_context,
 )
-from tests.fixtures.fake_anthropic import FakeMessage, FakeTextBlock, FakeUsage
+from tests.fixtures.fake_anthropic import BetaClientMixin, StreamingMessagesMixin, FakeMessage, FakeTextBlock, FakeUsage
 
 _NOOP = lambda *_a, **_k: None  # noqa: E731 - injectable no-op sleep
 
@@ -67,7 +67,7 @@ def _read_message(*, cache_read=0, cache_write=0) -> FakeMessage:
     )
 
 
-class _CapturingCritiqueClient:
+class _CapturingCritiqueClient(BetaClientMixin):
     """Captures every request; returns a valid empty read whose usage carries the
     given cache tokens (to exercise the L2 breakpoint + accounting)."""
 
@@ -75,7 +75,7 @@ class _CapturingCritiqueClient:
         self.captured: list[dict] = []
         outer = self
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(self, **kw):  # noqa: ANN001, ANN202
                 outer.captured.append(kw)
                 return _read_message(cache_read=cache_read, cache_write=cache_write)

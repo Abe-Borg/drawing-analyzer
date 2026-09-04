@@ -13,8 +13,15 @@ Model identifiers may be overridden via env vars:
     DRAWING_ANALYZER_VERIFICATION_ESCALATION_MODEL — escalation (default Opus 5).
     DRAWING_ANALYZER_INVESTIGATION_MODEL  — the agentic investigation loop
                                               (default: the escalation model).
-    DRAWING_ANALYZER_TRIAGE_MODEL                — verification triage
-                                              (default Haiku 4.5).
+    DRAWING_ANALYZER_IDENTITY_MODEL       — the set-identity harvest
+                                              (default Sonnet 5; advisory-only,
+                                              with a regex edition backstop).
+    DRAWING_ANALYZER_HARVEST_MODEL        — the prose-straggler structuring call
+                                              (default Sonnet 5; pure
+                                              structuring at low effort).
+    DRAWING_ANALYZER_CITATION_MODEL       — the citation check (default
+                                              Sonnet 5; needs web fetch, which
+                                              Opus 5 lacks).
     DRAWING_ANALYZER_CHAT_MODEL           — the in-report Q&A assistant
                                               (default Sonnet 5; needs web
                                               fetch, which Opus 5 lacks).
@@ -56,11 +63,6 @@ VERIFICATION_MODEL_DEFAULT = os.environ.get(
 VERIFICATION_ESCALATION_MODEL = os.environ.get(
     "DRAWING_ANALYZER_VERIFICATION_ESCALATION_MODEL", MODEL_OPUS_5
 )
-
-# Verification triage pre-pass (triage.classify_findings_with_haiku) decides
-# whether a finding can be locally resolved or needs web verification. The
-# task is shallow classification over short inputs; Haiku fits.
-TRIAGE_MODEL_DEFAULT = os.environ.get("DRAWING_ANALYZER_TRIAGE_MODEL", MODEL_HAIKU_45)
 
 # The Q&A assistant embedded in the HTML report (html_report.py) calls the API
 # directly from the reader's browser. It needs a model that supports the
@@ -123,12 +125,21 @@ BATCH_MAX_OUTPUT_TOKENS = 300_000
 REVIEW_OUTPUT_CAP = 128_000              # baseline review cap
 REVIEW_OUTPUT_CAP_BATCH_EXTENDED = 300_000  # batch-only, with 300k beta header
 CROSS_CHECK_OUTPUT_CAP = 96_000       # cross-check needs more than verify
-# Verdicts are 1-2 sentences per the verifier system prompt; 16k is a
-# fail-fast guard, not a billing knob (you pay only for actual output).
-VERIFICATION_OUTPUT_CAP = 16_000
-# Triage emits a small array of {index, classification, reason}; 8k is more
-# than enough even for a 50-finding chunk.
-HAIKU_TRIAGE_OUTPUT_CAP = 8_000
+# Verdicts are 1-2 sentences per the verifier system prompt — but adaptive
+# thinking draws from this same envelope, so the cap has to cover the reasoning
+# as well as the answer. (The old 1k verify cap did not, which is what starved
+# the verdict and produced empty bodies.) A fail-fast guard, not a billing knob:
+# you pay only for actual output.
+VERIFICATION_OUTPUT_CAP = 8_000
+# The investigation loop's turns are small individually (a tool request or a
+# short verdict), but it reasons across accumulated evidence; keep its own
+# envelope rather than sharing the verification cap.
+INVESTIGATION_OUTPUT_CAP = 16_000
+# One prose straggler structured into a Finding. Small output, but adaptive
+# thinking shares the envelope — 800 tokens could not fit both.
+HARVEST_OUTPUT_CAP = 8_000
+# A per-reference citation verdict, after server-side search/fetch rounds.
+CITATION_OUTPUT_CAP = 8_000
 
 # Token threshold above which a review uses the larger batch cap.
 LARGE_REVIEW_INPUT_THRESHOLD = 200_000
@@ -143,7 +154,8 @@ PHASE_VERIFICATION = "verification"
 PHASE_VERIFICATION_RETRY = "verification_retry"
 PHASE_VERIFICATION_CONTINUATION = "verification_continuation"
 PHASE_INVESTIGATION = "investigation"
-PHASE_TRIAGE = "triage"
+PHASE_HARVEST = "harvest"
+PHASE_CITATION = "citation"
 
 
 def output_cap_for_model(model: str, *, requested: int) -> int:
@@ -158,11 +170,10 @@ def output_cap_for_model(model: str, *, requested: int) -> int:
     return min(requested, model_capabilities(model).max_output_tokens)
 
 
-# Single registry of per-phase output budgets so verification
-# retry/continuation and triage all resolve through the same lookup. Each
-# phase declares its desired cap; ``phase_output_cap`` clamps that to the
-# selected model's ceiling. The phase helpers below stay as thin wrappers
-# so callers can keep their existing imports.
+# Single registry of per-phase output budgets so every phase resolves through
+# one lookup. Each phase declares its desired cap; ``phase_output_cap`` clamps
+# that to the selected model's ceiling. The phase helpers below stay as thin
+# wrappers so callers can keep their existing imports.
 #
 # Verification retry/continuation reuse the verification cap by default —
 # the verdict envelope is unchanged across retries, so granting more output
@@ -174,10 +185,9 @@ _PHASE_OUTPUT_BUDGET: dict[str, int] = {
     PHASE_VERIFICATION: VERIFICATION_OUTPUT_CAP,
     PHASE_VERIFICATION_RETRY: VERIFICATION_OUTPUT_CAP,
     PHASE_VERIFICATION_CONTINUATION: VERIFICATION_OUTPUT_CAP,
-    # Investigation turns are small (a tool request or a short verdict); the
-    # verification cap is the right envelope, registered explicitly.
-    PHASE_INVESTIGATION: VERIFICATION_OUTPUT_CAP,
-    PHASE_TRIAGE: HAIKU_TRIAGE_OUTPUT_CAP,
+    PHASE_INVESTIGATION: INVESTIGATION_OUTPUT_CAP,
+    PHASE_HARVEST: HARVEST_OUTPUT_CAP,
+    PHASE_CITATION: CITATION_OUTPUT_CAP,
 }
 
 
@@ -185,18 +195,16 @@ def phase_output_cap(phase: str, *, model: str) -> int:
     """Return the centralized per-phase max_tokens budget for ``model``.
 
     Every phase resolves its output cap here so review, batch review,
-    cross-check, verification, verification retry, verification continuation,
-    and triage all share one registry. Unknown phases fall back to the
-    verification cap, the most conservative value in the registry — a future
-    phase that forgets to register loses headroom instead of accidentally
-    inheriting the 128k review cap.
+    cross-check, verification (+ retry/continuation), investigation, harvest,
+    and citation all share one registry — and all get the model-ceiling clamp
+    in :func:`output_cap_for_model` for free, which a hardcoded module constant
+    does not. Unknown phases fall back to the verification cap, the most
+    conservative value in the registry — a future phase that forgets to
+    register loses headroom instead of accidentally inheriting the 128k
+    review cap.
     """
     requested = _PHASE_OUTPUT_BUDGET.get(phase, VERIFICATION_OUTPUT_CAP)
     return output_cap_for_model(model, requested=requested)
-
-
-def triage_max_tokens(*, model: str = TRIAGE_MODEL_DEFAULT) -> int:
-    return phase_output_cap(PHASE_TRIAGE, model=model)
 
 
 def review_max_tokens(*, model: str = REVIEW_MODEL_DEFAULT, allow_extended_output: bool = False) -> int:
@@ -396,7 +404,7 @@ _MODEL_CAPABILITIES: dict[str, ModelCapabilities] = {
         context_window=200_000,
         # The Anthropic effort docs omit Haiku 4.5 from every effort level.
         # An empty roster means ``output_config`` is left off entirely, which
-        # keeps request shapes safe across model swaps (e.g. triage).
+        # keeps request shapes safe across model swaps.
         supported_effort_levels=frozenset(),
         supports_hires_vision=False,
         supports_web_fetch=False,
@@ -498,24 +506,22 @@ def model_supports_extended_output_beta(model: str) -> bool:
     return model_capabilities(model).supports_extended_output_beta
 
 
-# Phase identifiers (declared above so the phase→budget registry can use
-# them) gate per-phase request decisions. ``_PHASES_NO_THINKING`` is the
-# extension point for phases that should never request thinking regardless
-# of model capability — currently only the Haiku triage classifier, which
-# is a shallow batch-classification pass.
-_PHASES_NO_THINKING: frozenset[str] = frozenset({PHASE_TRIAGE})
-
-
 def thinking_config_for(*, model: str, phase: str) -> dict | None:
     """Return the ``thinking`` request parameter for ``(model, phase)``.
 
-    Returns ``None`` when the parameter should be omitted entirely —
-    either the phase opts out, or the model does not support adaptive
-    thinking. Callers should branch on ``is None``; the Anthropic API
-    rejects ``thinking=null``.
+    Returns ``None`` only when the model does not support adaptive thinking.
+    Callers should branch on ``is None``; the Anthropic API rejects
+    ``thinking=null``.
+
+    There is deliberately no "this phase opts out of thinking" escape hatch.
+    On Opus 5 and Sonnet 5, *omitting* ``thinking`` runs adaptive thinking
+    anyway (a behavior change from Opus 4.8/4.7, where omitting meant off), so
+    an opt-out list bought nothing but the illusion of one — and Anthropic
+    advises lowering ``effort`` over sending ``{"type": "disabled"}``, which
+    can leak reasoning tags into a response we parse as JSON. A phase that
+    wants cheap, shallow work registers ``EFFORT_LOW`` in
+    :data:`_PHASE_DEFAULT_EFFORT` instead.
     """
-    if phase in _PHASES_NO_THINKING:
-        return None
     if not model_supports_adaptive_thinking(model):
         return None
     return {"type": "adaptive"}
@@ -578,16 +584,16 @@ def apply_thinking_config(kwargs: dict, *, model: str, phase: str) -> dict:
 # - Opus verification (i.e. escalation): high.
 # - Deep review (PHASE_REVIEW, PHASE_CROSS_CHECK): xhigh, clamped to high on
 #   any model whose roster lacks it (Sonnet 4.6 and older).
-# - Triage (Haiku): omit (Haiku does not support effort).
+# - Harvest: low. Structuring one prose item into a Finding is formatting, not
+#   judgment; low effort is the cheap setting that keeps thinking *on* (see
+#   :func:`thinking_config_for` on why we never send ``{"type": "disabled"}``).
+# - Citation: medium. Web research plus a short verdict.
 # - Unknown model: omit.
 #
 # The EFFORT_* level names are defined further up, next to the capability
 # registry that references them.
 
-# Phases whose request paths route through ``output_config.effort``. Triage
-# is intentionally omitted — it defaults to Haiku which does not support
-# effort, and the workload is a small classification pass that does not
-# benefit from elevated effort.
+# Phases whose request paths route through ``output_config.effort``.
 _PHASE_DEFAULT_EFFORT: dict[str, str] = {
     PHASE_REVIEW: EFFORT_XHIGH,
     PHASE_CROSS_CHECK: EFFORT_XHIGH,
@@ -598,6 +604,8 @@ _PHASE_DEFAULT_EFFORT: dict[str, str] = {
     # Opus by default); it sets its level here rather than joining
     # _VERIFICATION_PHASES, whose model-aware branch would override it.
     PHASE_INVESTIGATION: EFFORT_HIGH,
+    PHASE_HARVEST: EFFORT_LOW,
+    PHASE_CITATION: EFFORT_MEDIUM,
 }
 
 # Verification phases get the model-aware bump: Opus on verification is
@@ -637,8 +645,7 @@ def effort_config_for(*, model: str, phase: str) -> dict | None:
     Returns ``None`` (i.e. "omit the field") when:
 
     - the model does not support effort (Haiku, unknown / future models),
-    - the phase has no registered default (triage — defaults to Haiku,
-      which already short-circuits above).
+    - the phase has no registered default.
 
     Otherwise returns ``{"effort": <level>}`` where the level is ``high``
     for Opus on a verification phase (the escalation tier) or the phase
@@ -688,9 +695,9 @@ def apply_effort_config(kwargs: dict, *, model: str, phase: str) -> dict:
 # Each phase declares whether its system prompt and tool list are stable /
 # large / repeated enough to benefit from caching. Caching is enabled for
 # high-value phases (review, batch review, cross-check, verification +
-# retry/continuation) and disabled for triage where the prompt is below
-# the Anthropic cache minimum (2048 tokens for Haiku) so a cache write
-# would be paid for nothing.
+# retry/continuation, investigation). A phase whose prompt sits below the
+# Anthropic cache minimum should disable it here rather than pay for a cache
+# write that can never be read.
 
 
 @dataclass(frozen=True)
@@ -722,10 +729,6 @@ _PHASE_CACHE_POLICY: dict[str, CachePolicy] = {
     # of every multi-turn investigation, so both breakpoints pay back within a
     # single stage run.
     PHASE_INVESTIGATION: CachePolicy(cache_system=True, cache_tools=True),
-    # Triage: ~375-token system prompt called in batches of up to 20,
-    # below the 2048-token Haiku cache minimum so repeated calls cannot
-    # hit. Skip caching to avoid the cache-write cost.
-    PHASE_TRIAGE: CachePolicy(cache_system=False, cache_tools=False),
 }
 
 
@@ -781,8 +784,7 @@ def tools_with_cache(tools: list[dict], *, phase: str | None = None) -> list[dic
     invalidates only the tools-level cache entry.
 
     ``phase`` selects the per-phase policy. When the policy disables tool
-    caching for the phase (e.g. triage where the prompt is below the cache
-    minimum), the tool list is returned unchanged.
+    caching for the phase, the tool list is returned unchanged.
     """
     if not tools:
         return tools
@@ -899,9 +901,31 @@ def web_search_max_uses_for_severity(severity: str | None) -> int:
     return _SEVERITY_MAX_USES.get(sev, DEFAULT_VERIFICATION_MAX_USES)
 
 
-def build_web_search_tool(*, max_uses: int = DEFAULT_VERIFICATION_MAX_USES) -> dict:
+WEB_SEARCH_TOOL_TYPE = "web_search_20260209"
+
+
+def web_search_blocked_domains() -> list[str]:
+    """The shared source-quality blocklist, as a fresh list.
+
+    Exposed so non-Python consumers (the HTML report's in-browser chat widget)
+    can be handed the same policy instead of duplicating it.
+    """
+    return list(_WEB_SEARCH_BLOCKED_DOMAINS)
+
+
+def build_web_search_tool(
+    *,
+    max_uses: int = DEFAULT_VERIFICATION_MAX_USES,
+    tool_type: str = WEB_SEARCH_TOOL_TYPE,
+) -> dict:
+    """Build the server-side web-search tool with the shared blocklist applied.
+
+    ``tool_type`` is overridable so a caller can pin a different dated variant
+    (the citation check exposes this via ``DRAWING_ANALYZER_WEB_SEARCH_TOOL_TYPE``)
+    without losing the domain policy.
+    """
     return {
-        "type": "web_search_20260209",
+        "type": tool_type,
         "name": "web_search",
         "blocked_domains": list(_WEB_SEARCH_BLOCKED_DOMAINS),
         "max_uses": max_uses,
@@ -941,7 +965,15 @@ DEFAULT_VERIFICATION_MAX_FETCHES = 3
 WEB_FETCH_MAX_CONTENT_TOKENS = 50_000
 
 
-def build_web_fetch_tool(*, max_uses: int = DEFAULT_VERIFICATION_MAX_FETCHES) -> dict:
+WEB_FETCH_TOOL_TYPE = "web_fetch_20260209"
+
+
+def build_web_fetch_tool(
+    *,
+    max_uses: int = DEFAULT_VERIFICATION_MAX_FETCHES,
+    max_content_tokens: int = WEB_FETCH_MAX_CONTENT_TOKENS,
+    tool_type: str = WEB_FETCH_TOOL_TYPE,
+) -> dict:
     """Build the web_fetch server-tool dict for a verification request.
 
     Tool type pinned to ``web_fetch_20260209`` per Anthropic's web-fetch
@@ -959,12 +991,12 @@ def build_web_fetch_tool(*, max_uses: int = DEFAULT_VERIFICATION_MAX_FETCHES) ->
     search is a domain we won't fetch either.
     """
     return {
-        "type": "web_fetch_20260209",
+        "type": tool_type,
         "name": "web_fetch",
         "blocked_domains": list(_WEB_SEARCH_BLOCKED_DOMAINS),
         "max_uses": max_uses,
         "citations": {"enabled": True},
-        "max_content_tokens": WEB_FETCH_MAX_CONTENT_TOKENS,
+        "max_content_tokens": int(max_content_tokens),
     }
 
 

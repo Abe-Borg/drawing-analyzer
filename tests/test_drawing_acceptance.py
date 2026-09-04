@@ -56,6 +56,8 @@ from drawing_analyzer.review_planner import PLANNER_SYSTEM_PROMPT  # noqa: E402
 from drawing_analyzer.set_identity import IDENTITY_SYSTEM_PROMPT  # noqa: E402
 from drawing_analyzer.verify import VERIFY_SYSTEM_PROMPT  # noqa: E402
 from tests.fixtures.fake_anthropic import (  # noqa: E402
+    BetaClientMixin,
+    StreamingMessagesMixin,
     FakeMessage,
     FakeTextBlock,
     FakeUsage,
@@ -121,7 +123,7 @@ def _joined_text(messages: list) -> str:
     return "\n".join(parts)
 
 
-class _AcceptanceClient:
+class _AcceptanceClient(BetaClientMixin):
     """Routes digest + verify by system prompt over the acceptance set.
 
     A digest whose sheet text mentions ``VAV-3`` (the seeded vector sheet)
@@ -136,7 +138,7 @@ class _AcceptanceClient:
         self.raster_placeholder_seen = False
         outer = self
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(self, **kw):  # noqa: ANN001, ANN202
                 system = kw.get("system", "")
                 text = _joined_text(kw.get("messages", []))
@@ -1425,7 +1427,7 @@ def _ls_geom(source: str, sid: str, note: str = "") -> SheetGeometry:
     )
 
 
-class _ShardOracleClient:
+class _ShardOracleClient(BetaClientMixin):
     """Map calls emit one grounded fact per handle; the reconcile call reports the
     seeded conflict ONLY when both its sheets' handles are present in the request
     body — proving the cross-group comparison genuinely happened."""
@@ -1436,7 +1438,7 @@ class _ShardOracleClient:
         self._conflict = conflict
         outer = self
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(self, **kw):  # noqa: ANN001, ANN202
                 system = kw.get("system", "")
                 body = kw["messages"][0]["content"][0]["text"]
@@ -1572,7 +1574,7 @@ def test_acceptance_failed_shard_holds_cross_qc_partial():
             inner = self.messages
             outer = self
 
-            class _Msgs:
+            class _Msgs(StreamingMessagesMixin):
                 def create(_self, **kw):  # noqa: ANN001, ANN202
                     system = kw.get("system", "")
                     if not system.startswith(X.CROSS_QC_RECONCILE_SYSTEM_PROMPT[:60]):

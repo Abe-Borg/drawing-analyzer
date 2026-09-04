@@ -61,7 +61,20 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-from .core.api_config import REVIEW_MODEL_DEFAULT
+from .core.api_config import (
+    CITATION_OUTPUT_CAP,
+    MODEL_SONNET_5,
+    PHASE_CITATION,
+    WEB_SEARCH_TOOL_TYPE,
+    apply_effort_config,
+    apply_thinking_config,
+    build_web_fetch_tool,
+    build_web_search_tool,
+    effort_config_for,
+    model_capabilities,
+    phase_output_cap,
+    thinking_config_for,
+)
 from .diagnostics import get_logger
 from .digest import (
     _FENCE_RE,
@@ -84,12 +97,24 @@ from .models import (
 
 _log = get_logger()
 
-DEFAULT_CITATION_MAX_TOKENS = 4_000
+DEFAULT_CITATION_MAX_TOKENS = CITATION_OUTPUT_CAP
 DEFAULT_CITATION_MAX_RETRIES = 2
 # The server-side loop can stop with pause_turn; resume at most this many times.
 _MAX_PAUSE_RESUMES = 3
-# Bound the web searches one citation check may run.
-_WEB_SEARCH_MAX_USES = 5
+# Bound the web searches one citation check may run. A code-compliance question
+# ("does NFPA 13 2025 8.15.1.2 actually say this?") routinely needs several
+# queries to find the governing edition's text; 5 was tight enough that the
+# model regularly ran out mid-investigation.
+_WEB_SEARCH_MAX_USES = 10
+# Full-page fetches per request. Deliberately lower than the search budget:
+# each fetch pulls up to ``_WEB_FETCH_MAX_CONTENT_TOKENS`` of page text into the
+# request, and one or two authoritative pages is the point — more is the model
+# spinning rather than converging.
+_WEB_FETCH_MAX_USES = 4
+# Truncation ceiling on one fetched page. Code-publisher pages are large; 40k
+# leaves room for the model to find its clause without letting a single fetch
+# dominate the request.
+_WEB_FETCH_MAX_CONTENT_TOKENS = 40_000
 # Bounded concurrency — citation checks are few but each runs server-side searches.
 _MAX_WORKERS = 4
 # Claims per request. A reference with more distinct claims is split into this many
@@ -97,14 +122,22 @@ _MAX_WORKERS = 4
 # ``finding_texts[:3]`` truncation that dropped the 4th+ claim from the request.
 _MAX_CLAIMS_PER_REQUEST = 8
 
-_DEFAULT_WEB_SEARCH_TOOL_TYPE = "web_search_20260209"
+_DEFAULT_WEB_SEARCH_TOOL_TYPE = WEB_SEARCH_TOOL_TYPE
 
 _VALID_VERDICTS = frozenset({"CHECKED_SUPPORTS", "CHECKED_MISMATCH"})
 
 
 def citation_model() -> str:
-    """The citation-check model (``DRAWING_ANALYZER_CITATION_MODEL``, else Opus)."""
-    return os.environ.get("DRAWING_ANALYZER_CITATION_MODEL") or REVIEW_MODEL_DEFAULT
+    """The citation-check model (``DRAWING_ANALYZER_CITATION_MODEL``, else Sonnet 5).
+
+    Sonnet 5 rather than the review flagship, and this is a capability choice
+    before it is a cost one: ``web_fetch`` is **not available on Opus 5**, so an
+    Opus citation check can only ever read search *snippets*. Sonnet 5 can open
+    the cited section and read it. For "does this code section say what the
+    drawing claims", that is the difference between a plausible verdict and a
+    defensible one — and it costs less.
+    """
+    return os.environ.get("DRAWING_ANALYZER_CITATION_MODEL") or MODEL_SONNET_5
 
 
 def web_search_max_uses() -> int:
@@ -123,13 +156,83 @@ def web_search_max_uses() -> int:
     return value if value >= 1 else _WEB_SEARCH_MAX_USES
 
 
+def web_fetch_max_uses() -> int:
+    """Per-request web-fetch bound (``DRAWING_ANALYZER_WEB_FETCH_MAX_USES``)."""
+    raw = os.environ.get("DRAWING_ANALYZER_WEB_FETCH_MAX_USES", "")
+    try:
+        value = int(raw.strip())
+    except (ValueError, AttributeError):
+        return _WEB_FETCH_MAX_USES
+    return value if value >= 1 else _WEB_FETCH_MAX_USES
+
+
 def web_search_tool() -> dict:
-    """The server-side web-search tool definition for the citation call."""
+    """The server-side web-search tool definition for the citation call.
+
+    Built through :func:`~drawing_analyzer.core.api_config.build_web_search_tool`
+    so the shared source-quality blocklist applies. A code verdict grounded on a
+    forum post is worse than no verdict; the blocklist is what keeps the search
+    on publishers and AHJs. The dated tool type stays overridable via
+    ``DRAWING_ANALYZER_WEB_SEARCH_TOOL_TYPE`` so an API rename does not need a
+    release.
+    """
     tool_type = (
         os.environ.get("DRAWING_ANALYZER_WEB_SEARCH_TOOL_TYPE")
         or _DEFAULT_WEB_SEARCH_TOOL_TYPE
     )
-    return {"type": tool_type, "name": "web_search", "max_uses": web_search_max_uses()}
+    return build_web_search_tool(max_uses=web_search_max_uses(), tool_type=tool_type)
+
+
+def citation_tools(model: str) -> list[dict]:
+    """The resolved server-tool list for one citation request.
+
+    ``web_fetch`` rides alongside ``web_search`` **only when the selected model
+    supports it** — sending it to a model that does not (Opus 5) is a 400 that
+    fails the whole request, so an override degrades to search-only rather than
+    breaking every citation check. Search always stays enabled: web fetch can
+    only retrieve URLs a prior search surfaced in the same request, so fetch
+    without search can do nothing.
+    """
+    tools = [web_search_tool()]
+    if model_capabilities(model).supports_web_fetch:
+        tools.append(
+            build_web_fetch_tool(
+                max_uses=web_fetch_max_uses(),
+                max_content_tokens=_WEB_FETCH_MAX_CONTENT_TOKENS,
+            )
+        )
+    return tools
+
+
+def _citation_request_shape(model: str) -> dict[str, Any]:
+    """Everything about the request, other than its payload, that shapes a verdict.
+
+    Rides the cache key. What the model was *allowed to do* is part of what its
+    answer means: a verdict reached from search snippets alone is not the same
+    verdict as one reached after reading the section text, so the resolved tool
+    set — names, types and budgets — keys the entry alongside the output cap and
+    the thinking/effort configuration. Keying only the search budget (as this
+    did before ``web_fetch`` existed here) would have let a warm run silently
+    replay pre-fetch verdicts while reporting the new capability.
+
+    The blocklist is deliberately excluded: it is large, shared, and narrows
+    *sources* rather than changing what the model may do, so folding it in would
+    invalidate every cached verdict on an unrelated domain-list edit.
+    """
+    return {
+        "max_tokens": phase_output_cap(PHASE_CITATION, model=model),
+        "thinking": thinking_config_for(model=model, phase=PHASE_CITATION),
+        "effort": effort_config_for(model=model, phase=PHASE_CITATION),
+        "tools": [
+            {
+                "type": t.get("type"),
+                "name": t.get("name"),
+                "max_uses": t.get("max_uses"),
+                "max_content_tokens": t.get("max_content_tokens"),
+            }
+            for t in citation_tools(model)
+        ],
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -723,11 +826,16 @@ def _check_one(
     for _resume in range(_MAX_PAUSE_RESUMES + 1):
         kwargs: dict[str, Any] = {
             "model": model,
-            "max_tokens": DEFAULT_CITATION_MAX_TOKENS,
+            "max_tokens": phase_output_cap(PHASE_CITATION, model=model),
             "system": CITATION_SYSTEM_PROMPT,
             "messages": messages,
-            "tools": [web_search_tool()],
+            "tools": citation_tools(model),
         }
+        # Explicit, never implicit: an omitted ``thinking`` key runs adaptive on
+        # the current models, and the old 4k cap had to cover that reasoning as
+        # well as the verdict.
+        apply_thinking_config(kwargs, model=model, phase=PHASE_CITATION)
+        apply_effort_config(kwargs, model=model, phase=PHASE_CITATION)
         attempt = 0
         while True:
             try:
@@ -947,7 +1055,7 @@ def check_citations(
             ),
             model=model,
             prompt_version=CITATION_PROMPT_VERSION,
-            max_uses=web_search_max_uses(),
+            request_shape=_citation_request_shape(model),
         )
 
     def _fresh_cached_entry(key: str, handled: list) -> dict | None:
