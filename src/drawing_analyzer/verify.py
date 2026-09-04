@@ -39,7 +39,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
 
-from .core.api_config import VERIFICATION_MODEL_DEFAULT
+from .core.api_config import (
+    PHASE_VERIFICATION,
+    VERIFICATION_MODEL_DEFAULT,
+    VERIFICATION_OUTPUT_CAP,
+    apply_effort_config,
+    apply_thinking_config,
+    phase_output_cap,
+)
 from .diagnostics import get_logger
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
@@ -61,8 +68,17 @@ from .stage_cache import (
 
 _log = get_logger()
 
-# Small classification call: one crop image + a short prompt.
-DEFAULT_VERIFY_MAX_TOKENS = 1_000
+# One crop image + a short prompt, answered with a 1-2 sentence JSON verdict.
+#
+# The output itself is tiny, but adaptive thinking draws from the SAME
+# ``max_tokens`` envelope as the answer — and on Opus 5 / Sonnet 5 thinking runs
+# whether or not the request asks for it (omitting the key does not disable it).
+# The previous 1k cap therefore had to fit the reasoning *and* the verdict, and
+# frequently fit neither: an empty body parses as no verdict, which degrades to
+# UNCERTAIN and pushes the finding into the far more expensive investigation
+# loop for no reason. Resolved from the central phase registry so the cap also
+# gets the model-ceiling clamp.
+DEFAULT_VERIFY_MAX_TOKENS = VERIFICATION_OUTPUT_CAP
 
 # Stamped into every evidence request.json so a saved trail is attributable to the
 # prompt/model that produced its verdict (bump on any verify-prompt change).
@@ -213,11 +229,31 @@ def _build_request(finding: Finding, crop_png: bytes, model: str) -> dict[str, A
             "verdict object only."
         )},
     ]
-    return {
+    kwargs: dict[str, Any] = {
         "model": model,
-        "max_tokens": DEFAULT_VERIFY_MAX_TOKENS,
+        "max_tokens": phase_output_cap(PHASE_VERIFICATION, model=model),
         "system": VERIFY_SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": content}],
+    }
+    # Explicit, never implicit: on Opus 5 / Sonnet 5 an omitted ``thinking`` key
+    # runs adaptive anyway, so saying nothing is not the same as saying no.
+    apply_thinking_config(kwargs, model=model, phase=PHASE_VERIFICATION)
+    apply_effort_config(kwargs, model=model, phase=PHASE_VERIFICATION)
+    return kwargs
+
+
+def _request_shape_params(request: dict[str, Any]) -> dict[str, Any]:
+    """The request-shape knobs that can change a verdict, for the cache key.
+
+    Derived from the built request rather than restated from constants, so a
+    future change to the cap, the thinking mode, or the effort level cannot
+    silently serve verdicts reached under the old shape.
+    """
+    return {
+        "max_tokens": int(request.get("max_tokens") or 0),
+        "thinking": request.get("thinking"),
+        "output_config": request.get("output_config"),
+        "verdict_map": dict(sorted(_VERDICT_MAP.items())),
     }
 
 
@@ -305,10 +341,7 @@ def _single_verify_cache_key(
             "dpi": int(dpi),
             "crop_sha256": crop_sha,
         },
-        params={
-            "max_tokens": DEFAULT_VERIFY_MAX_TOKENS,
-            "verdict_map": dict(sorted(_VERDICT_MAP.items())),
-        },
+        params=_request_shape_params(request),
     )
 
 
@@ -856,12 +889,15 @@ def _build_dual_request(finding: Finding, labeled_crops: list, model: str) -> di
         "conflict as described, CONTRADICTED if they are actually consistent, "
         "NOT_VISIBLE if the crops don't show enough to tell."
     )})
-    return {
+    kwargs: dict[str, Any] = {
         "model": model,
-        "max_tokens": DEFAULT_VERIFY_MAX_TOKENS,
+        "max_tokens": phase_output_cap(PHASE_VERIFICATION, model=model),
         "system": VERIFY_SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": content}],
     }
+    apply_thinking_config(kwargs, model=model, phase=PHASE_VERIFICATION)
+    apply_effort_config(kwargs, model=model, phase=PHASE_VERIFICATION)
+    return kwargs
 
 
 def _cross_verify_cache_key(
@@ -893,10 +929,7 @@ def _cross_verify_cache_key(
             # Ordered exactly as images appear in the model request.
             "legs": legs,
         },
-        params={
-            "max_tokens": DEFAULT_VERIFY_MAX_TOKENS,
-            "verdict_map": dict(sorted(_VERDICT_MAP.items())),
-        },
+        params=_request_shape_params(request),
     )
 
 

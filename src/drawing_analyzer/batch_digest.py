@@ -72,7 +72,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from .core.api_config import REVIEW_MODEL_DEFAULT
+from .core.api_config import REVIEW_MODEL_DEFAULT, output_cap_for_model
 from .core.tokenizer import estimate_image_tokens_total
 from .diagnostics import get_logger, request_id_of, summarize_exc
 from .digest import (
@@ -422,15 +422,21 @@ _PERMANENT_ITEM_ERROR_TYPES = frozenset(
 )
 
 # Output-cap ceiling for the empty-at-max_tokens resubmission. Batch items
-# never stream, so the ~16k non-streaming-timeout rationale behind
-# ``DEFAULT_DIGEST_MAX_TOKENS`` doesn't bind inside a batch; 64k stays within
-# every whitelisted model's hard output ceiling, and output is billed by
-# actual tokens, so the extra headroom costs nothing unless the sheet uses it.
-# The direct-call rescue can carry this raised cap too because it STREAMS its
-# request (see ``_rescue_failed_items_sync``) — the SDK refuses a plain
-# non-streaming ``create`` whose cap implies >10 minutes of output (a
-# client-side ValueError at ~21k tokens under the default timeout).
-MAX_TOKENS_RETRY_CEILING = 64_000
+# never stream, so the non-streaming-timeout rationale doesn't bind inside a
+# batch, and output is billed by actual tokens, so the extra headroom costs
+# nothing unless the sheet uses it. The direct-call rescue can carry this raised
+# cap too because it STREAMS its request (see ``_rescue_failed_items_sync``) —
+# the SDK refuses a plain non-streaming ``create`` whose cap implies >10 minutes
+# of output (a client-side ValueError at ~21k tokens under the default timeout).
+#
+# This MUST stay above ``DEFAULT_DIGEST_MAX_TOKENS``: the retry below doubles
+# the failed cap and clamps to this value, so a ceiling at or below the starting
+# cap would resubmit at *the exact cap that just came back empty* — a silent
+# no-op dressed as a retry. At a 64k digest cap, 64k here would have done
+# precisely that. The per-model clamp is applied at the retry site rather than
+# here, because the real ceiling depends on which model the item was sent to
+# (an unregistered override resolves to ``MAX_OUTPUT_TOKENS_UNKNOWN``).
+MAX_TOKENS_RETRY_CEILING = 128_000
 
 
 def _item_retry_params(
@@ -474,7 +480,15 @@ def _item_retry_params(
         and digest.stop_reason == "max_tokens"
     ):
         old = int(params.get("max_tokens") or DEFAULT_DIGEST_MAX_TOKENS)
-        return {**params, "max_tokens": min(old * 2, MAX_TOKENS_RETRY_CEILING)}
+        raised = min(old * 2, MAX_TOKENS_RETRY_CEILING)
+        # Clamp to what the item's own model can actually serve: an
+        # unregistered ``DRAWING_ANALYZER_MODEL`` override resolves to the
+        # conservative 64k ceiling, and asking above it is a rejected request
+        # rather than a retry.
+        raised = output_cap_for_model(str(params.get("model") or ""), requested=raised)
+        if raised <= old:
+            return None            # no headroom left to grant; not a retry
+        return {**params, "max_tokens": raised}
     return None
 
 

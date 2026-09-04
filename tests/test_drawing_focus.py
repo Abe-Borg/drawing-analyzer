@@ -30,7 +30,7 @@ from drawing_analyzer.focus import (
     generate_focus_report,
 )
 from drawing_analyzer.models import ImageTile, RenderedSheet, SheetRef
-from tests.fixtures.fake_anthropic import FakeMessage, FakeTextBlock, FakeUsage
+from tests.fixtures.fake_anthropic import StreamingMessagesMixin, FakeMessage, FakeTextBlock, FakeUsage
 
 OPUS = "claude-opus-5"
 ROOMS_FOCUS = "the rooms, and what types of plumbing fixtures each has"
@@ -40,7 +40,7 @@ class _FakeClient:
     def __init__(self, responder):
         self.calls: list[dict] = []
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(_self, **kw):
                 self.calls.append(kw)
                 return responder(kw)
@@ -416,7 +416,7 @@ def _routing_client(calls: list, *, focus_text="FOCUS REPORT: Room 101 → WC-1"
 
     class _C:
         def __init__(self):
-            class _M:
+            class _M(StreamingMessagesMixin):
                 def create(_s, **kw):
                     return responder(kw)
 
@@ -481,7 +481,7 @@ def test_pipeline_focus_report_failure_ships_digests(tmp_path):
 
     class _C:
         def __init__(self):
-            class _M:
+            class _M(StreamingMessagesMixin):
                 def create(_s, **kw):
                     return responder(kw)
 

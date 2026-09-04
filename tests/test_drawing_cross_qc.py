@@ -20,7 +20,7 @@ from drawing_analyzer.anchor import resolve_conflict_legs
 from drawing_analyzer.cross_qc import cross_sheet_qc, cross_qc_system_prompt
 from drawing_analyzer.digest import SheetDigest
 from drawing_analyzer.models import ConflictLeg, Finding, SheetGeometry, SheetRef, source_page_key
-from tests.fixtures.fake_anthropic import FakeMessage, FakeTextBlock, FakeUsage
+from tests.fixtures.fake_anthropic import StreamingMessagesMixin, FakeMessage, FakeTextBlock, FakeUsage
 
 _NOOP = lambda *_a, **_k: None  # noqa: E731
 W, H = 792.0, 612.0
@@ -66,7 +66,7 @@ class _CrossClient:
         self.calls = 0
         outer = self
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(self, **kw):  # noqa: ANN001, ANN202
                 i = min(outer.calls, len(outer._script) - 1)
                 outer.calls += 1
@@ -105,7 +105,7 @@ class _ClaimsCrossClient:
         self._text = "```json\n" + json.dumps({"findings": [], "claims": claims}) + "\n```"
         outer = self
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(self, **kw):  # noqa: ANN001, ANN202
                 return FakeMessage(
                     content=[FakeTextBlock(text=outer._text)],
@@ -244,7 +244,7 @@ class _MapReconcileClient:
         self._map_claim = map_claim
         outer = self
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(self, **kw):  # noqa: ANN001, ANN202
                 system = kw.get("system", "")
                 body = kw["messages"][0]["content"][0]["text"]
@@ -675,7 +675,7 @@ class _PipelineClient:
         self.verify_image_counts = []
         outer = self
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(self, **kw):  # noqa: ANN001, ANN202
                 system = kw.get("system", "")
                 if system == VERIFY_SYSTEM_PROMPT:

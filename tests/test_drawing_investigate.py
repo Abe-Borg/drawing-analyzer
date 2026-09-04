@@ -29,6 +29,7 @@ from drawing_analyzer.models import (
     source_page_key,
 )
 from tests.fixtures.fake_anthropic import (
+    StreamingMessagesMixin,
     FakeMessage,
     FakeTextBlock,
     FakeToolUseBlock,
@@ -102,7 +103,7 @@ class _LoopClient:
         self.calls: list[dict] = []
         outer = self
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(self, **kw):  # noqa: ANN001, ANN202
                 outer.calls.append(kw)
                 return responder(kw, len(outer.calls))

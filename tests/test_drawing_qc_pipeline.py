@@ -24,6 +24,7 @@ from drawing_analyzer.set_identity import IDENTITY_SYSTEM_PROMPT  # noqa: E402
 from drawing_analyzer.synthesis import SYNTHESIS_SYSTEM_PROMPT  # noqa: E402
 from drawing_analyzer.verify import VERIFY_SYSTEM_PROMPT  # noqa: E402
 from tests.fixtures.fake_anthropic import (  # noqa: E402
+    StreamingMessagesMixin,
     FakeMessage,
     FakeTextBlock,
     FakeToolUseBlock,
@@ -163,7 +164,7 @@ class _RoutingClient:
                     text=f'{{"verdict":"{final}","note":"investigated look"}}')],
                 usage=FakeUsage(input_tokens=60, output_tokens=12))
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(_self, **kw):
                 system = _system_text(kw.get("system", ""))
                 if system == INVESTIGATE_SYSTEM_PROMPT:
@@ -533,7 +534,7 @@ class _CountingClient:
         digest_text = prose + "\n\n" + _digest_block(findings)
         calls = self.calls
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(_self, **kw):
                 s = _system_text(kw.get("system", ""))
                 if s == INVESTIGATE_SYSTEM_PROMPT:
@@ -845,7 +846,7 @@ def test_pipeline_prices_investigation_prompt_cache_tokens(tmp_path):
     )
     create = client.messages.create
 
-    class _CacheUsageMessages:
+    class _CacheUsageMessages(StreamingMessagesMixin):
         def create(self, **kwargs):
             response = create(**kwargs)
             if _system_text(kwargs.get("system", "")) == INVESTIGATE_SYSTEM_PROMPT:
@@ -994,7 +995,7 @@ class _ProseRoutingClient:
 
         from drawing_analyzer.prose_harvest import HARVEST_SYSTEM_PROMPT
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(_self, **kw):
                 system = kw.get("system", "")
                 if system == HARVEST_SYSTEM_PROMPT:
@@ -1084,7 +1085,7 @@ class _ClaimsRoutingClient:
         digest_text = prose + "\n\n" + _digest_block([])
         critique_text = "```json\n" + json.dumps({"findings": [], "claims": claims}) + "\n```"
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(_self, **kw):
                 system = kw.get("system", "")
                 if system.startswith(CRITIQUE_SYSTEM_PROMPT):
@@ -1154,7 +1155,7 @@ class _SetLevelRoutingClient:
             "with the schedule and no single sheet in the set resolves which governs."
         )
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(_self, **kw):
                 system = kw.get("system", "")
                 if system == SYNTHESIS_SYSTEM_PROMPT:
@@ -1218,7 +1219,7 @@ class _SourceAndSetLevelClient:
         synth_text = ("Overview.\n\nThe specified fire pump conflicts with the schedule "
                       "and no single sheet in the set resolves which governs.")
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(_self, **kw):
                 system = kw.get("system", "")
                 if system == SYNTHESIS_SYSTEM_PROMPT:
@@ -1432,7 +1433,7 @@ def test_gate_open_never_masks_a_degraded_required_stage(tmp_path):
             super().__init__([_VAV_FINDING])
             inner = self.messages
 
-            class _Msgs:
+            class _Msgs(StreamingMessagesMixin):
                 def create(_self, **kw):
                     if str(kw.get("system", "")).startswith(CITATION_SYSTEM_PROMPT):
                         return FakeMessage(

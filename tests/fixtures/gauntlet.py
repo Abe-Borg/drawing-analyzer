@@ -58,6 +58,7 @@ from drawing_analyzer.set_identity import IDENTITY_SYSTEM_PROMPT
 from drawing_analyzer.synthesis import SYNTHESIS_SYSTEM_PROMPT
 from drawing_analyzer.verify import VERIFY_SYSTEM_PROMPT
 from tests.fixtures.fake_anthropic import (
+    StreamingMessagesMixin,
     FakeMessage,
     FakeTextBlock,
     FakeToolUseBlock,
@@ -455,7 +456,7 @@ class ScriptedQCClient:
 
         outer = self
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(_self, **kw):  # noqa: ANN001, ANN202
                 return outer._route(kw)
 

@@ -38,7 +38,7 @@ from drawing_analyzer.review_planner import PLANNER_SYSTEM_PROMPT
 from drawing_analyzer.set_identity import IDENTITY_SYSTEM_PROMPT
 from drawing_analyzer.models import Anchor, Finding, ImageTile, RenderedSheet, SheetRef
 from drawing_analyzer.verify import VERIFY_SYSTEM_PROMPT
-from tests.fixtures.fake_anthropic import FakeMessage, FakeTextBlock, FakeUsage
+from tests.fixtures.fake_anthropic import StreamingMessagesMixin, FakeMessage, FakeTextBlock, FakeUsage
 
 _NOOP = lambda *_a, **_k: None  # noqa: E731 - injectable no-op sleep
 
@@ -95,7 +95,7 @@ class _CritiqueClient:
         self.captured = []
         outer = self
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(self, **kw):  # noqa: ANN001, ANN202
                 idx = outer.attempts
                 outer.attempts += 1
@@ -413,7 +413,7 @@ class _ClaimsClient:
         self.calls = 0
         outer = self
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(self, **kw):  # noqa: ANN001, ANN202
                 outer.calls += 1
                 return FakeMessage(
@@ -510,7 +510,7 @@ class _EmptyBodyClient:
         self.calls = 0
         outer = self
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(self, **kw):  # noqa: ANN001, ANN202
                 outer.calls += 1
                 return FakeMessage(
@@ -569,7 +569,7 @@ class _RawCritiqueClient:
         self.attempts = 0
         outer = self
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(self, **kw):  # noqa: ANN001, ANN202
                 idx = outer.attempts
                 outer.attempts += 1
@@ -832,7 +832,7 @@ class _PipelineClient:
         self.critique_had_checklist = False
         outer = self
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(self, **kw):  # noqa: ANN001, ANN202
                 system = kw.get("system", "")
                 if system == VERIFY_SYSTEM_PROMPT:

@@ -26,6 +26,7 @@ from drawing_analyzer.source_registry import (
     check_work_disk,
     content_sha256,
 )
+from tests.fixtures.fake_anthropic import StreamingMessagesMixin
 
 
 def _pdf(path: Path, *, pages: int = 1, name_text: str = "SHEET") -> Path:
@@ -241,7 +242,7 @@ def _fake_digest_client(text="Sheet M-101 - Plan\nVAV-3 serves Room 120."):
     from tests.fixtures.fake_anthropic import FakeMessage, FakeTextBlock, FakeUsage
 
     class _Client:
-        class messages:
+        class messages(StreamingMessagesMixin):
             @staticmethod
             def create(**kw):
                 return FakeMessage(content=[FakeTextBlock(text=text)],

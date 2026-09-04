@@ -25,7 +25,7 @@ from drawing_analyzer.set_identity import (
     parse_identity_text,
     union_regex_editions,
 )
-from tests.fixtures.fake_anthropic import FakeMessage, FakeTextBlock, FakeUsage
+from tests.fixtures.fake_anthropic import StreamingMessagesMixin, FakeMessage, FakeTextBlock, FakeUsage
 
 
 # --------------------------------------------------------------------------- #
@@ -86,7 +86,7 @@ class _FakeClient:
         self.calls: list[dict] = []
         outer = self
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(_self, **kw):
                 outer.calls.append(kw)
                 return FakeMessage(
@@ -102,7 +102,7 @@ class _RaisingClient:
         self._exc = exc or RuntimeError("permanent failure")
         outer = self
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(_self, **kw):
                 raise outer._exc
 

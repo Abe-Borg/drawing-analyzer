@@ -366,3 +366,82 @@ def _to_dict(obj: Any) -> Any:
             out[field_name] = _to_dict(getattr(obj, field_name))
         return out
     return obj
+
+
+# ---------------------------------------------------------------------------
+# Streaming transport shim
+# ---------------------------------------------------------------------------
+#
+# The digest, critique, review-plan, synthesis and focus stages issue their
+# requests through ``client.messages.stream(...)`` rather than ``.create(...)``:
+# above roughly 21k ``max_tokens`` the SDK refuses a non-streaming call outright
+# (a client-side ValueError, before any HTTP request), and those stages now run
+# at 32k-64k. See ``drawing_analyzer.digest.stream_message``.
+#
+# A fake client therefore needs a ``messages.stream`` as well as a
+# ``messages.create``. Rather than hand-writing a context manager in every test
+# module, a fake ``messages`` object inherits :class:`StreamingMessagesMixin`
+# and gets one that routes straight back through its own ``create`` — so the
+# recorded kwargs, the scripted responses and the raised exceptions are
+# identical on both transports, which is exactly the equivalence the streaming
+# conversion needs to hold.
+
+
+class FinalMessageStream:
+    """Context-manager stand-in for the SDK's streaming response object."""
+
+    def __init__(self, message: Any) -> None:
+        self._message = message
+
+    def __enter__(self) -> "FinalMessageStream":
+        return self
+
+    def __exit__(self, *exc_info: Any) -> bool:
+        return False
+
+    def get_final_message(self) -> Any:
+        return self._message
+
+
+class _StreamDescriptor:
+    """Resolve ``create`` against whatever ``stream`` was reached through.
+
+    Fake ``messages`` objects come in two shapes in this suite: an *instance*
+    with a normal ``def create(self, ...)``, and a bare nested ``class messages``
+    with a ``@staticmethod create`` that callers use unbound. A plain method
+    would only serve the first. Binding at access time serves both.
+    """
+
+    def __get__(self, obj: Any, objtype: Any = None) -> Any:
+        target = obj if obj is not None else objtype
+
+        def stream(**kwargs: Any) -> FinalMessageStream:
+            return FinalMessageStream(target.create(**kwargs))
+
+        return stream
+
+
+class StreamingMessagesMixin:
+    """Give a fake ``messages`` object a ``stream()`` backed by its ``create()``.
+
+    Mix in *before* the fake's own base so ``stream`` is inherited::
+
+        class _Msgs(StreamingMessagesMixin):
+            def create(self, **kwargs): ...
+
+        class messages(StreamingMessagesMixin):     # used unbound
+            @staticmethod
+            def create(**kwargs): ...
+    """
+
+    stream = _StreamDescriptor()
+
+
+def add_stream(messages_obj: Any) -> Any:
+    """Attach a ``stream`` to an already-built fake ``messages`` object.
+
+    For fakes assembled from plain namespaces/lambdas rather than a class.
+    """
+    create = messages_obj.create
+    messages_obj.stream = lambda **kwargs: FinalMessageStream(create(**kwargs))
+    return messages_obj

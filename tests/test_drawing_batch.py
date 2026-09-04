@@ -15,10 +15,12 @@ import pytest
 
 from drawing_analyzer import batch_digest, diagnostics
 from drawing_analyzer.batch_digest import collect_drawing_batch, submit_drawing_batch
+from drawing_analyzer.digest import SheetDigest
 from drawing_analyzer.digest_cache import DigestCache
 from drawing_analyzer.file_upload import FILES_API_BETA, upload_sheet_images
 from drawing_analyzer.models import ImageTile, RenderedSheet, SheetRef
 from tests.fixtures.fake_anthropic import (
+    FinalMessageStream,
     FakeBatchResult,
     FakeBatchResultEnvelope,
     FakeMessage,
@@ -164,7 +166,11 @@ class _FakeClient:
             files=self.files,
             messages=_Obj(batches=batches, stream=self._beta_messages_stream),
         )
-        self.messages = _Obj(batches=batches, create=self._messages_create)
+        self.messages = _Obj(
+            batches=batches,
+            create=self._messages_create,
+            stream=lambda **kw: FinalMessageStream(self._messages_create(**kw)),
+        )
 
     def _messages_create(self, **kwargs):
         self.messages_create_calls.append(kwargs)
@@ -1314,6 +1320,12 @@ def test_rescue_raises_the_cap_again_after_two_empty_max_tokens_rounds():
     # Empty-at-max_tokens in BOTH rounds: the follow-up already ran at 2x, so
     # the direct rescue must double from the follow-up's cap (4x, bounded by
     # the ceiling) instead of re-proposing the cap that just came back empty.
+    #
+    # The starting cap is pinned explicitly rather than inherited from
+    # DEFAULT_DIGEST_MAX_TOKENS: what is under test is the successive doubling,
+    # and at the production default (64k) only ONE doubling fits under the 128k
+    # ceiling, so the default would silently stop exercising the second round.
+    # The no-headroom case has its own test below.
     def responder(req):
         return FakeBatchResult(
             custom_id=req["custom_id"],
@@ -1325,7 +1337,8 @@ def test_rescue_raises_the_cap_again_after_two_empty_max_tokens_rounds():
 
     client = _FakeClient(responder)
     batch = submit_drawing_batch(
-        iter([_make_sheet(0)]), client=client, model=OPUS, total=1
+        iter([_make_sheet(0)]), client=client, model=OPUS, total=1,
+        max_tokens=16_000,
     )
     digests = collect_drawing_batch(
         batch, client=client, sleep=NOSLEEP, retry_failed_items=True
@@ -1343,6 +1356,33 @@ def test_rescue_raises_the_cap_again_after_two_empty_max_tokens_rounds():
     assert [a.transport for a in attempts] == ["BATCH", "BATCH", "REAL_TIME"]
     assert sum(a.input_tokens for a in attempts) == 290
     assert sum(a.output_tokens for a in attempts) == 125
+
+
+def test_empty_at_max_tokens_stops_retrying_once_the_ceiling_is_reached():
+    """At the model ceiling there is no headroom left to grant, so the retry must
+    stand down rather than resubmit the exact cap that just came back empty.
+
+    Before the digest cap moved to 64k this could not happen; now a single
+    doubling reaches the 128k ceiling, and ``min(old * 2, CEILING)`` would
+    otherwise re-propose ``old`` forever — a no-op dressed as a retry.
+    """
+    from drawing_analyzer.batch_digest import _Slot, _item_retry_params
+
+    sheet = _make_sheet(0)
+    slot = _Slot(index=0, ref=sheet.ref, image_estimate=0)
+    params = {"model": OPUS, "max_tokens": batch_digest.MAX_TOKENS_RETRY_CEILING}
+    empty = SheetDigest(
+        ref=sheet.ref, text="", error="empty digest", stop_reason="max_tokens",
+    )
+    # ``_item_retry_params`` reads the inner envelope, not the outer result.
+    result = FakeBatchResultEnvelope(type="succeeded", message=None)
+    assert _item_retry_params(slot, result, empty, params=params) is None
+
+    # One step below the ceiling there IS headroom, and it is granted.
+    below = {**params, "max_tokens": batch_digest.MAX_TOKENS_RETRY_CEILING // 2}
+    raised = _item_retry_params(slot, result, empty, params=below)
+    assert raised is not None
+    assert raised["max_tokens"] == batch_digest.MAX_TOKENS_RETRY_CEILING
 
 
 def test_followup_submit_failure_falls_back_to_direct_calls():

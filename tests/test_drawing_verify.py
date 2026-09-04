@@ -29,6 +29,7 @@ from drawing_analyzer.verify import (
     verify_cross_findings,
     verify_findings,
 )
+from tests.fixtures.fake_anthropic import StreamingMessagesMixin
 
 OPUS = "claude-opus-5"
 PAGE_W, PAGE_H = 800.0, 600.0
@@ -66,7 +67,7 @@ class _FakeClient:
         self._script = script
         self._default = default
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(_self, **kw):
                 self.calls.append(kw)
                 probe = kw["messages"][0]["content"][0]["text"]
@@ -319,7 +320,7 @@ def test_verify_cache_never_admits_malformed_or_api_failure():
         def __init__(self):
             self.calls = 0
 
-            class _Messages:
+            class _Messages(StreamingMessagesMixin):
                 def create(_self, **_kw):
                     self.calls += 1
                     raise _StatusError(400, "bad request")
@@ -407,7 +408,7 @@ def test_verify_retries_transient_then_succeeds(tmp_path):
 
     class _Retry:
         def __init__(self):
-            class _M:
+            class _M(StreamingMessagesMixin):
                 def create(_s, **kw):
                     state["n"] += 1
                     if state["n"] == 1:
@@ -424,7 +425,7 @@ def test_verify_retries_transient_then_succeeds(tmp_path):
 def test_verify_permanent_error_is_uncertain_not_fatal():
     class _Boom:
         def __init__(self):
-            class _M:
+            class _M(StreamingMessagesMixin):
                 def create(_s, **kw):
                     raise _StatusError(400, "bad request")
             self.messages = _M()
@@ -439,7 +440,7 @@ def test_verify_fatal_auth_skips_remaining():
         def __init__(self):
             self.calls = 0
 
-            class _M:
+            class _M(StreamingMessagesMixin):
                 def create(_s, **kw):
                     self.calls += 1
                     raise _StatusError(403, "forbidden")
@@ -579,7 +580,7 @@ def test_verify_runs_concurrently():
 
     class _Barriered:
         def __init__(self):
-            class _M:
+            class _M(StreamingMessagesMixin):
                 def create(_s, **kw):
                     barrier.wait()   # only releases if 3 calls are in flight at once
                     return _FakeResp('{"verdict":"CONFIRMED"}')
@@ -604,7 +605,7 @@ def test_cross_verify_model_calls_concurrent_but_render_and_attach_ordered(monke
 
     class _Barriered:
         def __init__(self):
-            class _M:
+            class _M(StreamingMessagesMixin):
                 def create(_s, **_kw):
                     model_threads.append(threading.get_ident())
                     barrier.wait()
@@ -736,6 +737,24 @@ def test_verify_request_shape_has_image_and_system():
     kw = client.calls[0]
     assert kw["model"] == OPUS
     assert kw["system"] == VERIFY_SYSTEM_PROMPT
-    assert "thinking" not in kw                     # verification thinking is OFF
     blocks = kw["messages"][0]["content"]
     assert any(b.get("type") == "image" for b in blocks)
+
+
+def test_verify_states_its_thinking_and_effort_explicitly():
+    """Verification must never leave ``thinking`` to the default.
+
+    This test previously asserted ``"thinking" not in kw`` on the belief that an
+    absent key meant thinking was off. It does not: on Opus 5 and Sonnet 5 an
+    omitted ``thinking`` runs adaptive thinking anyway. The old request therefore
+    *did* think — inside a 1,000-token cap it also had to fit the verdict in,
+    which is how verifications came back empty and degraded to UNCERTAIN.
+    """
+    client = _FakeClient({}, default='{"verdict":"CONFIRMED"}')
+    _run([_finding("conf")], client=client)
+    kw = client.calls[0]
+    assert kw["thinking"] == {"type": "adaptive"}
+    # Opus on a verification phase is the escalation tier -> high.
+    assert kw["output_config"] == {"effort": "high"}
+    # The envelope has to cover the reasoning as well as the verdict.
+    assert kw["max_tokens"] == 8_000

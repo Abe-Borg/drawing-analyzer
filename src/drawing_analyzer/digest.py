@@ -45,10 +45,17 @@ from .tiling import parse_tile_label
 
 _log = get_logger()
 
-# Room for adaptive thinking plus a thorough per-sheet digest; stays at/under the
-# ~16k non-streaming-safe ceiling so a single sheet completes well within the
-# SDK request timeout.
-DEFAULT_DIGEST_MAX_TOKENS = 16_000
+# Room for adaptive thinking plus a thorough per-sheet digest.
+#
+# The old 16k value was not a judgment about how much a sheet needs — it was the
+# ceiling imposed by NOT streaming (the SDK refuses a non-streaming ``create``
+# whose cap implies >10 min of output, at roughly 21k). The real-time path now
+# streams via :func:`stream_message`, so the cap can be sized for the work
+# instead: a dense E-size sheet's digest plus the adaptive thinking that shares
+# this envelope. Output is billed by actual tokens, so the headroom costs
+# nothing unless a sheet uses it; 64k rather than the 128k model ceiling keeps a
+# fail-fast guard against a runaway read.
+DEFAULT_DIGEST_MAX_TOKENS = 64_000
 
 # Effort for the read. "high" is intelligence-appropriate for dense drawings and
 # is accepted by every effort-capable model (so an override never 400s on it).
@@ -681,6 +688,27 @@ def _message_usage(resp: Any) -> tuple[int, int]:
         int(_get(usage, "input_tokens", 0) or 0),
         int(_get(usage, "output_tokens", 0) or 0),
     )
+
+
+def stream_message(client: Any, kwargs: dict[str, Any]) -> Any:
+    """Issue one Messages request over the **streaming** transport.
+
+    Streaming is not a preference above ~21k ``max_tokens``, it is the only
+    option: the SDK refuses a non-streaming ``create`` whose cap implies more
+    than ten minutes of output, raising a client-side ``ValueError`` before any
+    HTTP request is made. Every stage that can now emit 32k-64k (digest,
+    critique, review plan, synthesis, focus) goes through here, so there is one
+    place that knows this and one place to change.
+
+    ``get_final_message()`` returns the same ``Message`` shape ``create`` would
+    have, so callers — and the ``_message_text`` / ``_message_usage`` readers,
+    which filter on block ``type`` and therefore skip the thinking blocks that
+    now lead the content list — are unchanged. This mirrors the batch rescue
+    path in :mod:`drawing_analyzer.batch_digest`, which has streamed for exactly
+    this reason since the empty-at-``max_tokens`` retry started raising caps.
+    """
+    with client.messages.stream(**kwargs) as stream:
+        return stream.get_final_message()
 
 
 def _server_web_search_requests(resp: Any) -> int | None:
@@ -1406,7 +1434,7 @@ def digest_sheet(
     attempt = 0
     while True:
         try:
-            resp = client.messages.create(**kwargs)
+            resp = stream_message(client, kwargs)
             break
         except Exception as exc:  # noqa: BLE001 - report, don't sink the whole set
             if _is_transient_error(exc) and attempt < max_retries:

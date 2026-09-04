@@ -38,7 +38,16 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-from .core.api_config import REVIEW_MODEL_DEFAULT
+from .core.api_config import (
+    HARVEST_OUTPUT_CAP,
+    MODEL_SONNET_5,
+    PHASE_HARVEST,
+    apply_effort_config,
+    apply_thinking_config,
+    effort_config_for,
+    phase_output_cap,
+    thinking_config_for,
+)
 from .critique import _token_overlap
 from .diagnostics import get_logger
 from .digest import (
@@ -77,8 +86,15 @@ _log = get_logger()
 # Mechanism 2's match threshold (§17): token overlap ≥ 0.7 against a same-sheet
 # ledger entry's text or quote.
 _MATCH_OVERLAP = 0.7
-# The structuring call (mechanism 3): small, thinking off, tolerant-parsed.
-DEFAULT_HARVEST_MAX_TOKENS = 800
+# The structuring call (mechanism 3): small, low-effort, tolerant-parsed.
+#
+# The old 800-token cap paired with a comment claiming "thinking off" — but the
+# request never set ``thinking`` at all, and on Opus 5 / Sonnet 5 an omitted key
+# runs adaptive thinking rather than disabling it. Reasoning and answer shared
+# 800 tokens, so a straggler that needed any thought at all came back empty and
+# fell through to the degraded sheet-level entry. Thinking is now explicit and
+# cheap (EFFORT_LOW, registered for PHASE_HARVEST) with an envelope that fits it.
+DEFAULT_HARVEST_MAX_TOKENS = HARVEST_OUTPUT_CAP
 DEFAULT_HARVEST_MAX_RETRIES = 2
 # The sheet text layer sent with a structuring call (a straggler needs context,
 # not the whole sheet).
@@ -118,8 +134,13 @@ _CONFLICT_SIGNALS = (
 
 
 def harvest_model() -> str:
-    """The structuring-call model (``DRAWING_ANALYZER_HARVEST_MODEL``, else Opus)."""
-    return os.environ.get("DRAWING_ANALYZER_HARVEST_MODEL") or REVIEW_MODEL_DEFAULT
+    """The structuring-call model (``DRAWING_ANALYZER_HARVEST_MODEL``, else Sonnet 5).
+
+    Turning one prose sentence into a structured ``Finding`` is formatting, not
+    judgment: the item has already been found, and the host re-binds it to its
+    sheet afterwards. Sonnet 5 covers it at a fraction of the flagship's cost.
+    """
+    return os.environ.get("DRAWING_ANALYZER_HARVEST_MODEL") or MODEL_SONNET_5
 
 
 # --------------------------------------------------------------------------- #
@@ -365,8 +386,11 @@ def _structure_item(
         },
         params={
             "contract": _HARVEST_CACHE_CONTRACT,
-            "max_tokens": DEFAULT_HARVEST_MAX_TOKENS,
+            "max_tokens": phase_output_cap(PHASE_HARVEST, model=model),
             "text_cap": _HARVEST_TEXT_CAP,
+            # Thinking/effort change the structured result, so they key it.
+            "thinking": thinking_config_for(model=model, phase=PHASE_HARVEST),
+            "effort": effort_config_for(model=model, phase=PHASE_HARVEST),
         },
     )
     cached_entry = get_stage_cache_entry(
@@ -390,10 +414,14 @@ def _structure_item(
 
     kwargs: dict[str, Any] = {
         "model": model,
-        "max_tokens": DEFAULT_HARVEST_MAX_TOKENS,
+        "max_tokens": phase_output_cap(PHASE_HARVEST, model=model),
         "system": HARVEST_SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": user}],
     }
+    # Explicit, never implicit: an omitted ``thinking`` key runs adaptive on the
+    # current models. Low effort is the cheap setting that keeps it on.
+    apply_thinking_config(kwargs, model=model, phase=PHASE_HARVEST)
+    apply_effort_config(kwargs, model=model, phase=PHASE_HARVEST)
     attempt = 0
     while True:
         try:

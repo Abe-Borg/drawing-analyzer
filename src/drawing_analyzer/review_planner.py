@@ -46,13 +46,14 @@ from .digest import (
     _message_text,
     _message_usage,
     _retry_backoff_seconds,
+    stream_message,
     _tolerant_json_object,
     scan_structured_blocks,
 )
 from .models import ProfileSnapshot
 from .profiles import Profile
 
-DEFAULT_PLAN_MAX_TOKENS = 8_000
+DEFAULT_PLAN_MAX_TOKENS = 32_000
 DEFAULT_PLAN_EFFORT = "high"          # judgment work — what WOULD a specialist check?
 
 # Host-enforced bounds on the authored plan (the model's output is never
@@ -489,7 +490,7 @@ def author_review_plan(
     attempt = 0
     while True:
         try:
-            resp = client.messages.create(**kwargs)
+            resp = stream_message(client, kwargs)
             break
         except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
             if _is_transient_error(exc) and attempt < max_retries:

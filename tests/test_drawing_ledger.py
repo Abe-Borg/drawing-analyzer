@@ -28,7 +28,7 @@ from drawing_analyzer.prose_harvest import (
     extract_synthesis_conflicts,
     harvest_prose,
 )
-from tests.fixtures.fake_anthropic import FakeMessage, FakeTextBlock, FakeUsage
+from tests.fixtures.fake_anthropic import StreamingMessagesMixin, FakeMessage, FakeTextBlock, FakeUsage
 
 
 def _ref(source="a.pdf", page=0):
@@ -213,7 +213,7 @@ def _structuring_client(reply_texts):
             self.calls = 0
             outer = self
 
-            class _Msgs:
+            class _Msgs(StreamingMessagesMixin):
                 def create(self, **kw):  # noqa: ANN001, ANN202
                     i = min(outer.calls, len(reply_texts) - 1)
                     outer.calls += 1
@@ -332,7 +332,7 @@ def test_harvest_structuring_overlaps_across_pages_and_ingests_in_item_order():
         def __init__(self):
             outer = self
 
-            class _Msgs:
+            class _Msgs(StreamingMessagesMixin):
                 def create(self, **kw):  # noqa: ANN001, ANN202
                     nonlocal active, max_active
                     user = kw["messages"][0]["content"]
@@ -442,7 +442,7 @@ def test_harvest_parallel_page_chains_match_sequential_results_and_order():
             self.barrier = threading.Barrier(2) if delay_page_zero else None
             outer = self
 
-            class _Msgs:
+            class _Msgs(StreamingMessagesMixin):
                 def create(self, **kw):  # noqa: ANN001, ANN202
                     user = kw["messages"][0]["content"]
                     if page_zero_first in user:

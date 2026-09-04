@@ -37,6 +37,7 @@ from .digest import (
     _message_text,
     _message_usage,
     _retry_backoff_seconds,
+    stream_message,
 )
 from .stage_cache import (
     get_stage_cache_entry,
@@ -46,7 +47,7 @@ from .stage_cache import (
 
 # A focused answer needs less room than a full per-sheet transcription, but can
 # legitimately be long (e.g. a room-by-room fixture table for a large campus).
-DEFAULT_FOCUS_MAX_TOKENS = 8_000
+DEFAULT_FOCUS_MAX_TOKENS = 32_000
 # Deep cross-sheet assembly reasoning; "high" is accepted by Opus and Sonnet.
 DEFAULT_FOCUS_EFFORT = "high"
 # Unlike synthesis (which reconciles ACROSS sheets and needs >=2), a focus
@@ -218,7 +219,7 @@ def generate_focus_report(
     attempt = 0
     while True:
         try:
-            resp = client.messages.create(**kwargs)
+            resp = stream_message(client, kwargs)
             break
         except Exception as exc:  # noqa: BLE001 - report, ship the digests anyway
             if _is_transient_error(exc) and attempt < max_retries:

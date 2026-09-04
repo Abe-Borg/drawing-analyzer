@@ -218,7 +218,7 @@ from drawing_analyzer.citation_check import (  # noqa: E402
     harvest_code_editions,
     web_search_tool,
 )
-from tests.fixtures.fake_anthropic import FakeMessage, FakeTextBlock, FakeUsage  # noqa: E402
+from tests.fixtures.fake_anthropic import StreamingMessagesMixin, FakeMessage, FakeTextBlock, FakeUsage  # noqa: E402
 
 
 class _Geom:
@@ -244,13 +244,47 @@ def test_web_search_tool_type_is_current_and_overridable(monkeypatch):
 def test_web_search_max_uses_is_bounded_and_overridable(monkeypatch):
     from drawing_analyzer.citation_check import web_search_max_uses
 
-    assert web_search_tool()["max_uses"] == 5
+    assert web_search_tool()["max_uses"] == 10
     monkeypatch.setenv("DRAWING_ANALYZER_WEB_SEARCH_MAX_USES", "9")
     assert web_search_max_uses() == 9 and web_search_tool()["max_uses"] == 9
     monkeypatch.setenv("DRAWING_ANALYZER_WEB_SEARCH_MAX_USES", "0")
-    assert web_search_max_uses() == 5                    # sub-1 -> default
+    assert web_search_max_uses() == 10                   # sub-1 -> default
     monkeypatch.setenv("DRAWING_ANALYZER_WEB_SEARCH_MAX_USES", "lots")
-    assert web_search_max_uses() == 5                    # junk -> default
+    assert web_search_max_uses() == 10                   # junk -> default
+
+
+def test_web_fetch_max_uses_is_bounded_and_overridable(monkeypatch):
+    from drawing_analyzer.citation_check import web_fetch_max_uses
+
+    assert web_fetch_max_uses() == 4
+    monkeypatch.setenv("DRAWING_ANALYZER_WEB_FETCH_MAX_USES", "2")
+    assert web_fetch_max_uses() == 2
+    monkeypatch.setenv("DRAWING_ANALYZER_WEB_FETCH_MAX_USES", "0")
+    assert web_fetch_max_uses() == 4                     # sub-1 -> default
+    monkeypatch.setenv("DRAWING_ANALYZER_WEB_FETCH_MAX_USES", "lots")
+    assert web_fetch_max_uses() == 4                     # junk -> default
+
+
+def test_citation_tools_gate_web_fetch_on_model_capability():
+    """web_fetch is a 400 on a model that lacks it (Opus 5), so the tool list
+    must degrade to search-only rather than break every citation check."""
+    from drawing_analyzer.citation_check import citation_tools
+    from drawing_analyzer.core.api_config import MODEL_OPUS_5, MODEL_SONNET_5
+
+    sonnet = [t["name"] for t in citation_tools(MODEL_SONNET_5)]
+    opus = [t["name"] for t in citation_tools(MODEL_OPUS_5)]
+    assert sonnet == ["web_search", "web_fetch"]
+    assert opus == ["web_search"]                        # no web_fetch on Opus 5
+
+
+def test_citation_tools_carry_the_shared_source_blocklist():
+    """A code verdict grounded on a forum post is worse than no verdict."""
+    from drawing_analyzer.citation_check import citation_tools
+    from drawing_analyzer.core.api_config import MODEL_SONNET_5
+
+    for tool in citation_tools(MODEL_SONNET_5):
+        blocked = tool.get("blocked_domains") or []
+        assert "reddit.com" in blocked and "wikipedia.org" in blocked
 
 
 def test_server_web_search_requests_reader_is_shape_tolerant():
@@ -290,7 +324,7 @@ class _CitationClient:
         self.captured = []
         outer = self
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(self, **kw):  # noqa: ANN001, ANN202
                 outer.captured.append(kw)
                 body = kw["messages"][0]["content"]
@@ -645,7 +679,7 @@ class _PerClaimClient:
         self.captured: list[dict] = []
         outer = self
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(self, **kw):  # noqa: ANN001, ANN202
                 outer.captured.append(kw)
                 body = kw["messages"][0]["content"]
