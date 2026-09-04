@@ -2110,6 +2110,22 @@ def collect_drawing_batch(
                 if pending:
                     setattr(backfill, "usage_attempts", pending)
             results[i] = backfill
+            continue
+        # A slot can also end with a NON-null result and undrained attempts: the
+        # primary batch reached a terminal status and left this sheet a retryable
+        # error, then every recovery round was abandoned, so no later
+        # _replace_result_with_attempt_history ran to absorb them. Drain here too
+        # or the manifest omits exactly the abandoned batches that explain the
+        # run's wall clock. These happened after the retained response, so they
+        # append.
+        slot = slot_by_index.get(i)
+        if slot is not None:
+            pending = _drain_abandoned_attempts(slot)
+            if pending:
+                setattr(
+                    digest, "usage_attempts",
+                    list(getattr(digest, "usage_attempts", ()) or []) + pending,
+                )
 
     final = [r for r in results if r is not None]
     ok = sum(1 for r in final if r.error is None and (r.text or "").strip())

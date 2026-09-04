@@ -3277,15 +3277,25 @@ _CHAT_JS = r"""
     catch(e){ return null; }
   }
   function embeddedKey(){ return (CFG.apiKey || '').trim() || null; }
+  // The reader's key lives HERE, in memory; sessionStorage is only where it
+  // survives a reload. Some browsers refuse to store at all (private mode, site
+  // data blocked, storage full) and throw from setItem — so re-reading storage
+  // to find the key just typed would silently discard it. On a key-less report
+  // that reopens the form forever without ever sending; on an embedded-key
+  // report it is worse, because resolution falls back to the *author's* key
+  // while the panel says the reader's key is in use, quietly billing the wrong
+  // person. Memory is authoritative, persistence is best-effort.
+  var readerKey = storedKey();
   // True while the key in play came from the reader, not from the file.
-  function usingOwnKey(){ return !!storedKey(); }
-  var apiKey = storedKey() || embeddedKey();
-  function haveKey(){ return !!(storedKey() || embeddedKey()); }
+  function usingOwnKey(){ return !!readerKey; }
+  var apiKey = readerKey || embeddedKey();
+  function haveKey(){ return !!(readerKey || embeddedKey()); }
   function ensureKey(){
-    apiKey = storedKey() || embeddedKey();
+    apiKey = readerKey || embeddedKey();
     return apiKey;
   }
   function forgetKey(){
+    readerKey = null;
     try { sessionStorage.removeItem(KEY_STORE); } catch(e){}
     apiKey = embeddedKey();          // may be null: then the field re-opens
     renderKeyUi();
@@ -4288,17 +4298,26 @@ _CHAT_JS = r"""
     if(!keyInput) return;
     var v = (keyInput.value || '').trim();
     if(!v){ setKeyStatus('Enter your Anthropic API key to use the assistant.'); keyInput.focus(); return; }
-    try { sessionStorage.setItem(KEY_STORE, v); } catch(e){}
-    apiKey = ensureKey();                       // stored key now outranks any embedded one
+    readerKey = v;                              // in memory first — see storedKey()
+    var persisted = true;
+    try { sessionStorage.setItem(KEY_STORE, v); } catch(e){ persisted = false; }
+    apiKey = ensureKey();                       // reader's key outranks any embedded one
     keyInput.value = '';                        // never keep the secret in the DOM
     if(keyInput.type !== 'password'){           // re-mask if it had been revealed
       keyInput.type = 'password';
       if(keyToggle){ keyToggle.textContent = 'Show'; keyToggle.setAttribute('aria-pressed', 'false'); }
     }
     renderKeyUi();
+    // Say where the key actually went. Claiming sessionStorage when the write
+    // was refused would promise a persistence the reader will not get.
+    var where = persisted
+      ? 'kept only in this browser tab (sessionStorage)'
+      : 'kept in memory for this page only — this browser refused to store it, '
+        + 'so a reload will ask again';
     setKeyStatus(/^sk-ant-/.test(v)
-      ? 'Key saved — kept only in this browser tab (sessionStorage).'
-      : 'Key saved. Note: that does not look like an Anthropic key (they usually start with "sk-ant-").');
+      ? 'Key saved — ' + where + '.'
+      : 'Key saved — ' + where + '. Note: that does not look like an Anthropic '
+        + 'key (they usually start with "sk-ant-").');
     if(input){ try { input.focus(); } catch(e){} }
   }
   if(keySave) keySave.addEventListener('click', saveKeyFromInput);

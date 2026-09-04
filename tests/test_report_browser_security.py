@@ -879,3 +879,94 @@ def test_a_set_with_no_repeats_never_shows_the_grouping_control(page, tmp_path):
     assert page.locator("#findings-group-toggle").count() == 0
     assert page.locator(".repeat-toggle").count() == 0
     assert _visible_rows(page) == 1
+
+
+# --------------------------------------------------------------------------- #
+# 8. Storage refusal: a browser that will not persist the key must not lose it,
+#    and must never silently fall back to the author's key while claiming the
+#    reader's is in use.
+# --------------------------------------------------------------------------- #
+
+
+_BREAK_SESSION_STORAGE = """
+(function(){
+  // Private mode / blocked site data: reads work, writes throw. This is the
+  // shape that used to discard the key the reader had just typed.
+  var real = window.sessionStorage.setItem.bind(window.sessionStorage);
+  window.__stored = null;
+  Storage.prototype.setItem = function(k, v){
+    if(k === 'da-api-key') throw new DOMException('QuotaExceededError');
+    return real(k, v);
+  };
+})();
+"""
+
+
+def test_entered_key_survives_a_browser_that_refuses_to_store_it(page, tmp_path):
+    doc = hr.build_html_report(
+        _Ctx(sheets=[_Sheet(_Ref("a.pdf", 0, 1), text="x")], combined_text="x"),
+        source_names=["a.pdf"], now=NOW,
+    )
+    page.add_init_script(_BREAK_SESSION_STORAGE)
+    _load(page, doc, tmp_path)
+    page.click("#da-chat-fab")
+    page.fill("#da-chat-key-input", "sk-ant-readers-own-key")
+    page.click("#da-chat-key-save")
+
+    # The write was refused, but the key is held in memory and the panel is
+    # usable — it must not drop back to the "enter a key" form.
+    assert page.evaluate("sessionStorage.getItem('da-api-key')") is None
+    assert page.is_visible("#da-chat-key-input") is False
+    assert "API key set" in page.inner_text("#da-chat-key-set-label") or \
+        "Using your API key" in page.inner_text("#da-chat-key-set-label")
+    # And it says so honestly rather than promising sessionStorage.
+    status = page.inner_text("#da-chat-key-status")
+    assert "refused to store it" in status
+    assert "sessionStorage" not in status
+
+
+def test_storage_refusal_never_silently_bills_the_report_author(page, tmp_path):
+    # The dangerous half: with an embedded key present, discarding the reader's
+    # key let resolution fall back to the AUTHOR's while the panel claimed the
+    # reader's key was in use — quietly billing the wrong person.
+    doc = hr.build_html_report(
+        _Ctx(sheets=[_Sheet(_Ref("a.pdf", 0, 1), text="x")], combined_text="x"),
+        source_names=["a.pdf"], now=NOW,
+        api_key="sk-ant-fake-not-real", embed_api_key=True,
+    )
+    page.add_init_script(_BREAK_SESSION_STORAGE)
+    page.add_init_script("window.__SSE = " + json.dumps(_malicious_stream()) + ";")
+    page.add_init_script(_FETCH_STUB)
+    # Capture the key the request actually carries. This has to wrap the stub,
+    # which replaces window.fetch wholesale — installing it first would leave
+    # the capture dead and the assertion vacuous.
+    page.add_init_script("""
+      window.__sentKey = null;
+      var stubbed = window.fetch;
+      window.fetch = function(url, opts){
+        try { window.__sentKey = (opts && opts.headers && opts.headers['x-api-key']) || null; } catch(e){}
+        return stubbed.apply(this, arguments);
+      };
+    """)
+    _load(page, doc, tmp_path)
+    page.click("#da-chat-fab")
+    page.click("#da-chat-key-change")
+    page.fill("#da-chat-key-input", "sk-ant-readers-own-key")
+    page.click("#da-chat-key-save")
+
+    assert "Using your API key" in page.inner_text("#da-chat-key-set-label")
+    # The claim on screen and the key on the wire must agree. The panel is
+    # already open, so send directly rather than through _ask (which opens it).
+    page.fill("#da-chat-input", "hi")
+    page.click("#da-chat-send")
+    page.wait_for_function(
+        "() => { var b = document.getElementById(\'da-chat-send\');"
+        " return b && !b.disabled && document.querySelector(\'.da-user\'); }",
+        timeout=15000,
+    )
+    assert page.evaluate("window.__sentKey") == "sk-ant-readers-own-key"
+    assert page.evaluate("window.__pwned") is False
+
+    # Handing it back still works with storage broken.
+    page.click("#da-chat-key-author")
+    assert "embedded in this report" in page.inner_text("#da-chat-key-set-label")

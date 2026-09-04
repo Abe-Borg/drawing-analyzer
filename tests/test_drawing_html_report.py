@@ -464,8 +464,10 @@ def test_reader_can_supply_their_own_key_even_when_one_is_embedded():
     assert "Use my own key" in doc
     # The row is no longer hard-hidden on the embedded branch.
     assert "keyRow.hidden = true" not in doc
-    # A stored key outranks the embedded one.
-    assert "storedKey() || embeddedKey()" in doc
+    # The reader's key outranks the embedded one, and is held in memory so a
+    # browser that refuses to persist it cannot silently discard it.
+    assert "readerKey || embeddedKey()" in doc
+    assert "var readerKey = storedKey();" in doc
     # The footer still warns, and now says an override is possible.
     assert "da-key-warn" in doc
     assert "override it with their own" in doc

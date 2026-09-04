@@ -2254,3 +2254,92 @@ def test_batch_digest_from_message_caches_findings():
     from drawing_analyzer.digest import findings_from_cache
     reconstructed = findings_from_cache(cache.get("batch-key-1"), ref)
     assert len(reconstructed) == 1 and reconstructed[0].category == "conflict"
+
+
+class _TerminalPrimaryThenAlwaysStall(_FakeBatches):
+    """The primary batch ENDS with a retryable per-item error; every batch
+    resubmitted for that item then stalls forever.
+
+    The shape Codex flagged: because the primary terminated, the sheet already
+    holds a (failed) result, so the collect-tail's None-branch never runs for it
+    — and if every recovery round is abandoned, nothing else drains the slot's
+    abandoned-attempt records either.
+    """
+
+    def __init__(self, client, clock, tick):
+        super().__init__(client)
+        self._clock = clock
+        self._tick = tick
+        self._n = 0
+        self._primary_id: str | None = None
+
+    def create(self, *, requests, betas=None):
+        self._c.create_calls.append({"requests": list(requests), "betas": betas})
+        self._c.submitted = list(requests)
+        self._n += 1
+        bid = f"batch_{self._n}"
+        if self._primary_id is None:
+            self._primary_id = bid
+        return _Obj(id=bid)
+
+    def retrieve(self, batch_id):
+        self._c.retrieve_calls.append(batch_id)
+        n = len(self._c.submitted)
+        if batch_id == self._primary_id:      # terminates, with one bad item
+            return _Obj(
+                processing_status="ended",
+                request_counts=_Obj(
+                    succeeded=n - 1, errored=1, canceled=0, expired=0, processing=0
+                ),
+            )
+        self._clock["t"] += self._tick        # every resubmission freezes
+        return _Obj(
+            processing_status="in_progress",
+            request_counts=_Obj(
+                succeeded=0, errored=0, canceled=0, expired=0, processing=n
+            ),
+        )
+
+
+def test_abandoned_recovery_rounds_survive_on_a_sheet_recovery_never_resolves(
+    monkeypatch,
+):
+    # Regression: a sheet whose PRIMARY batch terminated (so it already holds a
+    # failed result) and whose every recovery round was then abandoned kept its
+    # abandoned-attempt records stuck on the slot — the collect tail only
+    # drained them onto a None result. The manifest then omitted precisely the
+    # abandoned batches that explain the run's wall clock.
+    clock = {"t": 0.0}
+    monkeypatch.setattr(batch_digest.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setenv("DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS", "2")
+    client = _FakeClient(
+        _flaky_then_ok(
+            {"sheet__0": batch_errored_result("sheet__0", error_message="Internal Server Error")}
+        )
+    )
+    _install_batches(client, _TerminalPrimaryThenAlwaysStall(client, clock, tick=600.0))
+
+    batch = submit_drawing_batch(
+        iter([_make_sheet(0), _make_sheet(1)]), client=client, model=OPUS, total=2
+    )
+    digests = collect_drawing_batch(
+        batch, client=client, sleep=NOSLEEP, retry_failed_items=True,
+        recovery_transport=batch_digest.RECOVERY_BATCH,
+        max_elapsed_seconds=100_000,
+    )
+
+    # Sheet 0 never resolved — it keeps the primary batch's error.
+    assert digests[0].error is not None
+    # …and still accounts for every abandoned recovery batch.
+    attempts = list(getattr(digests[0], "usage_attempts", ()) or [])
+    abandoned = [a for a in attempts if not a.billable]
+    assert len(abandoned) == 2, attempts        # both bounded rounds
+    assert all(a.terminal_status == "ABANDONED_STALLED" for a in abandoned)
+    assert all(a.input_tokens == 0 and a.output_tokens == 0 for a in abandoned)
+    # Distinct batch ids: two separate attempts, not one recorded twice.
+    assert len({a.request_or_custom_id for a in abandoned}) == 2
+    # The slot is drained exactly once — no double-counting.
+    assert all(not s.abandoned_attempts for s in batch.slots)
+    # The healthy sheet is unaffected.
+    assert digests[1].ok
+    assert not [a for a in (getattr(digests[1], "usage_attempts", ()) or []) if not a.billable]
