@@ -112,6 +112,21 @@ class _LoopClient(BetaClientMixin):
         self.messages = _Msgs()
 
 
+def _tools_callable(kw: dict) -> bool:
+    """Whether this request actually lets the model call a tool.
+
+    The loop forces its text-only close with ``tool_choice: {"type": "none"}``
+    while keeping the tool list in place, so a fake that merely checked for a
+    ``tools`` key would go on offering tool calls past the round budget.
+    """
+    if not kw.get("tools"):
+        return False
+    choice = kw.get("tool_choice")
+    if isinstance(choice, dict) and choice.get("type") == "none":
+        return False
+    return True
+
+
 def _tool_use(name="crop_region", tool_input=None, block_id="toolu_1"):
     return FakeMessage(
         content=[FakeToolUseBlock(
@@ -366,7 +381,7 @@ def test_multiple_tool_uses_in_one_turn_are_all_answered_together():
 
 def test_budget_cap_forces_a_no_tools_close_and_stays_uncertain():
     def responder(kw, _n):
-        if "tools" in kw:
+        if _tools_callable(kw):
             return _tool_use(block_id=f"toolu_{_n}")
         return FakeMessage(content=[FakeTextBlock(text="I still cannot decide")],
                            stop_reason="end_turn", usage=FakeUsage())
@@ -379,10 +394,30 @@ def test_budget_cap_forces_a_no_tools_close_and_stays_uncertain():
     assert v.investigated is True and v.investigation_rounds == 2
     assert res.budget_capped == 1 and res.still_uncertain == 1
     final_kw = client.calls[-1]
-    assert "tools" not in final_kw                 # the forced text-only close
+    # The close withdraws tool *permission* and keeps the tool list, so the
+    # turn carrying the largest accumulated prefix still reads the cached
+    # tools+system tiers; dropping `tools` would invalidate all three.
+    assert final_kw["tool_choice"] == {"type": "none"}
+    assert final_kw["tools"], "the tool list must stay for the cached prefix"
     budget_turn = final_kw["messages"][-1]["content"]
     assert any(isinstance(b, dict) and b.get("type") == "text"
                and "budget exhausted" in b["text"].lower() for b in budget_turn)
+
+
+def test_every_pre_cap_turn_offers_tools_and_never_pins_tool_choice():
+    """Permission is withdrawn only at the cap — never before it."""
+    def responder(kw, _n):
+        if _tools_callable(kw):
+            return _tool_use(block_id=f"toolu_{_n}")
+        return FakeMessage(content=[FakeTextBlock(text='{"verdict":"NOT_VISIBLE","note":"n"}')],
+                           stop_reason="end_turn", usage=FakeUsage())
+
+    client = _LoopClient(responder)
+    _run_one(client, max_rounds=3)
+    assert all(kw.get("tools") for kw in client.calls)      # never dropped
+    pre_cap = client.calls[:-1]
+    assert all("tool_choice" not in kw for kw in pre_cap)
+    assert client.calls[-1]["tool_choice"] == {"type": "none"}
 
 
 def test_garbled_verdict_stays_uncertain_never_rejected():
@@ -650,7 +685,7 @@ def test_cache_never_admits_capped_or_garbled_outcomes(tmp_path):
     from drawing_analyzer.digest_cache import DigestCache
 
     def _never(kw, _n):
-        if "tools" in kw:
+        if _tools_callable(kw):
             return _tool_use()
         return FakeMessage(content=[FakeTextBlock(text="still unsure")],
                            stop_reason="end_turn", usage=FakeUsage())

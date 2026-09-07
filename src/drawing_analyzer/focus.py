@@ -94,6 +94,12 @@ the section header. Use short subsections / bullets / tables as fits the focus.\
 """.format(focus_header=FOCUS_SECTION_HEADER)
 
 
+# Corpus budget (chars) for the per-sheet digests in the user turn. Matches
+# synthesis / set_identity / review_planner so one set's stages agree on how
+# much text a single call may carry; overflow drops whole sheets from the end
+# and is counted, never silent (cf. DA-028).
+_TOTAL_BUDGET = 200_000
+
 _FOCUS_TASK_INSTRUCTION = (
     "Above are the operator's focus and the per-sheet digests for the entire "
     "set. Now produce the focus report per your instructions — answer the "
@@ -102,13 +108,28 @@ _FOCUS_TASK_INSTRUCTION = (
 )
 
 
-def build_focus_user_text(focus: str, ok_sheets: list[SheetDigest]) -> str:
+@dataclass(frozen=True)
+class FocusPrompt:
+    """The assembled user turn plus what the budget had to leave out."""
+
+    text: str
+    sheets_omitted: int = 0
+    chars_omitted: int = 0
+
+
+def build_focus_user_text(focus: str, ok_sheets: list[SheetDigest]) -> FocusPrompt:
     """Assemble the user turn: the focus, every readable digest, then the task.
 
     Only ``ok`` sheets are included (a failed sheet has no text); each is fenced
     with its sheet label so the report can cite sheets. The focus appears first
     (framing) and is restated by the task instruction last, so the bulk of the
     digests sits between question framing and the ask.
+
+    Overflow past :data:`_TOTAL_BUDGET` drops whole sheets from the end and
+    counts what it dropped — loss-aware, never a silent slice (cf. DA-028).
+    The omission is also disclosed in the prompt itself, because a focus
+    report that silently answers from part of the set reads exactly like one
+    that answered from all of it.
     """
     parts: list[str] = [
         "The operator's focus for this run:",
@@ -119,12 +140,34 @@ def build_focus_user_text(focus: str, ok_sheets: list[SheetDigest]) -> str:
         "",
     ]
     total = len(ok_sheets)
+    used = 0
+    sheets_omitted = 0
+    chars_omitted = 0
     for i, sd in enumerate(ok_sheets, start=1):
-        parts.append(f"===== Sheet {i}/{total}: {sd.ref.display_label} =====")
-        parts.append(sd.text.strip())
+        header = f"===== Sheet {i}/{total}: {sd.ref.display_label} ====="
+        body = sd.text.strip()
+        cost = len(header) + len(body)
+        if used + cost > _TOTAL_BUDGET and used > 0:
+            sheets_omitted += 1
+            chars_omitted += cost
+            continue
+        used += cost
+        parts.append(header)
+        parts.append(body)
+        parts.append("")
+    if sheets_omitted:
+        parts.append(
+            f"[{sheets_omitted} further sheet(s) omitted from this prompt for "
+            f"length. Say so in the report if the focus asks about coverage "
+            f"the omitted sheets could have carried.]"
+        )
         parts.append("")
     parts.append(_FOCUS_TASK_INSTRUCTION)
-    return "\n".join(parts)
+    return FocusPrompt(
+        text="\n".join(parts),
+        sheets_omitted=sheets_omitted,
+        chars_omitted=chars_omitted,
+    )
 
 
 @dataclass
@@ -137,6 +180,10 @@ class FocusReportResult:
     model_used: str = ""
     error: str | None = None
     cached: bool = False
+    # Loss accounting for the prompt budget (DA-028): how many sheets the
+    # user turn could not carry, and how many characters that cost.
+    sheets_omitted: int = 0
+    chars_omitted: int = 0
 
     @property
     def ok(self) -> bool:
@@ -171,7 +218,8 @@ def generate_focus_report(
             error=f"insufficient readable sheets for focus report ({len(ok_sheets)})",
         )
 
-    user_text = build_focus_user_text(focus, ok_sheets)
+    prompt = build_focus_user_text(focus, ok_sheets)
+    user_text = prompt.text
     thinking_enabled = bool(
         use_thinking and model_supports_adaptive_thinking(model)
     )
@@ -196,6 +244,8 @@ def generate_focus_report(
                 text=cached_text,
                 model_used=model,
                 cached=True,
+                sheets_omitted=prompt.sheets_omitted,
+                chars_omitted=prompt.chars_omitted,
             )
 
     if client is None:
@@ -226,7 +276,11 @@ def generate_focus_report(
                 sleep(_retry_backoff_seconds(attempt))
                 attempt += 1
                 continue
-            return FocusReportResult(text="", model_used=model, error=_clean_error(exc))
+            return FocusReportResult(
+                text="", model_used=model, error=_clean_error(exc),
+                sheets_omitted=prompt.sheets_omitted,
+                chars_omitted=prompt.chars_omitted,
+            )
 
     text = _message_text(resp)
     in_tok, out_tok = _message_usage(resp)
@@ -237,6 +291,8 @@ def generate_focus_report(
         output_tokens=out_tok,
         model_used=model,
         error=error,
+        sheets_omitted=prompt.sheets_omitted,
+        chars_omitted=prompt.chars_omitted,
     )
     if result.ok:
         put_stage_cache_entry(

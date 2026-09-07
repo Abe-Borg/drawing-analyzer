@@ -112,6 +112,22 @@ def _raster_pdf(path: Path) -> Path:
 # --------------------------------------------------------------------------- #
 
 
+def _system_text(system) -> str:
+    """Normalize a request's ``system`` payload to plain text.
+
+    A system prompt is a plain string on most stages but a cache-block list
+    on the stages that carry a ``cache_control`` breakpoint (investigation,
+    citation, and any digest carrying uploaded specs), so a fake that calls
+    ``.startswith`` on the raw value crashes the moment a stage starts
+    caching its prefix.
+    """
+    if isinstance(system, list):
+        return "".join(
+            b.get("text", "") if isinstance(b, dict) else str(b) for b in system
+        )
+    return str(system or "")
+
+
 def _joined_text(messages: list) -> str:
     """All text blocks of a Messages request, concatenated (images ignored)."""
     parts: list[str] = []
@@ -140,7 +156,7 @@ class _AcceptanceClient(BetaClientMixin):
 
         class _Msgs(StreamingMessagesMixin):
             def create(self, **kw):  # noqa: ANN001, ANN202
-                system = kw.get("system", "")
+                system = _system_text(kw.get("system", ""))
                 text = _joined_text(kw.get("messages", []))
                 if system == VERIFY_SYSTEM_PROMPT:
                     outer.verify_calls += 1
@@ -1440,7 +1456,7 @@ class _ShardOracleClient(BetaClientMixin):
 
         class _Msgs(StreamingMessagesMixin):
             def create(self, **kw):  # noqa: ANN001, ANN202
-                system = kw.get("system", "")
+                system = _system_text(kw.get("system", ""))
                 body = kw["messages"][0]["content"][0]["text"]
                 if system.startswith(X.CROSS_QC_RECONCILE_SYSTEM_PROMPT[:60]):
                     outer.reconcile_calls += 1
@@ -1576,7 +1592,7 @@ def test_acceptance_failed_shard_holds_cross_qc_partial():
 
             class _Msgs(StreamingMessagesMixin):
                 def create(_self, **kw):  # noqa: ANN001, ANN202
-                    system = kw.get("system", "")
+                    system = _system_text(kw.get("system", ""))
                     if not system.startswith(X.CROSS_QC_RECONCILE_SYSTEM_PROMPT[:60]):
                         if outer.map_calls == 0:       # sabotage the first shard
                             outer.map_calls += 1

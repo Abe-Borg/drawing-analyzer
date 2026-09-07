@@ -90,6 +90,12 @@ schedule row; point to the sheet that carries it.
 section header. Use short subsections / bullets."""
 
 
+# Corpus budget (chars) for the per-sheet digests in the user turn. Matches
+# set_identity / review_planner so one set's stages agree on how much text a
+# single call may carry; overflow drops whole sheets from the end and is
+# counted, never silent (cf. DA-028).
+_TOTAL_BUDGET = 200_000
+
 _SYNTHESIS_TASK_INSTRUCTION = (
     "Above are the per-sheet digests for the entire set. Now produce the "
     "set-level overview per your instructions — emphasize cross-sheet "
@@ -97,23 +103,59 @@ _SYNTHESIS_TASK_INSTRUCTION = (
 )
 
 
-def build_synthesis_user_text(ok_sheets: list[SheetDigest]) -> str:
+@dataclass(frozen=True)
+class SynthesisPrompt:
+    """The assembled user turn plus what the budget had to leave out."""
+
+    text: str
+    sheets_omitted: int = 0
+    chars_omitted: int = 0
+
+
+def build_synthesis_user_text(ok_sheets: list[SheetDigest]) -> SynthesisPrompt:
     """Assemble the user-turn text: every readable sheet's digest, then the task.
 
     Only ``ok`` sheets are included (a failed sheet has no text); each is fenced
     with its sheet label so the model can cite sheet numbers in conflicts.
+
+    Overflow past :data:`_TOTAL_BUDGET` drops whole sheets from the end and
+    counts what it dropped — loss-aware, never a silent slice (cf. DA-028), and
+    the same discipline set_identity / review_planner / cross_qc already apply.
+    A sheet is kept or dropped whole: half a digest would invite conflicts
+    against text the model cannot see.
     """
     parts: list[str] = [
         "Per-sheet digests for the set follow (one block per sheet):",
         "",
     ]
     total = len(ok_sheets)
+    used = 0
+    sheets_omitted = 0
+    chars_omitted = 0
     for i, sd in enumerate(ok_sheets, start=1):
-        parts.append(f"===== Sheet {i}/{total}: {sd.ref.display_label} =====")
-        parts.append(sd.text.strip())
+        header = f"===== Sheet {i}/{total}: {sd.ref.display_label} ====="
+        body = sd.text.strip()
+        cost = len(header) + len(body)
+        if used + cost > _TOTAL_BUDGET and used > 0:
+            sheets_omitted += 1
+            chars_omitted += cost
+            continue
+        used += cost
+        parts.append(header)
+        parts.append(body)
+        parts.append("")
+    if sheets_omitted:
+        parts.append(
+            f"[{sheets_omitted} further sheet(s) omitted from this prompt for "
+            f"length; the overview below covers only the sheets shown.]"
+        )
         parts.append("")
     parts.append(_SYNTHESIS_TASK_INSTRUCTION)
-    return "\n".join(parts)
+    return SynthesisPrompt(
+        text="\n".join(parts),
+        sheets_omitted=sheets_omitted,
+        chars_omitted=chars_omitted,
+    )
 
 
 @dataclass
@@ -126,6 +168,10 @@ class SynthesisResult:
     model_used: str = ""
     error: str | None = None
     cached: bool = False
+    # Loss accounting for the prompt budget (DA-028): how many sheets the
+    # user turn could not carry, and how many characters that cost.
+    sheets_omitted: int = 0
+    chars_omitted: int = 0
 
     @property
     def ok(self) -> bool:
@@ -159,7 +205,8 @@ def synthesize_drawing_set(
             error=f"insufficient readable sheets for synthesis ({len(ok_sheets)})",
         )
 
-    user_text = build_synthesis_user_text(ok_sheets)
+    prompt = build_synthesis_user_text(ok_sheets)
+    user_text = prompt.text
     thinking_enabled = bool(
         use_thinking and model_supports_adaptive_thinking(model)
     )
@@ -184,6 +231,8 @@ def synthesize_drawing_set(
                 text=cached_text,
                 model_used=model,
                 cached=True,
+                sheets_omitted=prompt.sheets_omitted,
+                chars_omitted=prompt.chars_omitted,
             )
 
     if client is None:
@@ -214,7 +263,11 @@ def synthesize_drawing_set(
                 sleep(_retry_backoff_seconds(attempt))
                 attempt += 1
                 continue
-            return SynthesisResult(text="", model_used=model, error=_clean_error(exc))
+            return SynthesisResult(
+                text="", model_used=model, error=_clean_error(exc),
+                sheets_omitted=prompt.sheets_omitted,
+                chars_omitted=prompt.chars_omitted,
+            )
 
     text = _message_text(resp)
     in_tok, out_tok = _message_usage(resp)
@@ -225,6 +278,8 @@ def synthesize_drawing_set(
         output_tokens=out_tok,
         model_used=model,
         error=error,
+        sheets_omitted=prompt.sheets_omitted,
+        chars_omitted=prompt.chars_omitted,
     )
     if result.ok:
         put_stage_cache_entry(

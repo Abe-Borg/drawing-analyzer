@@ -332,6 +332,23 @@ def _system_text(system) -> str:
     return str(system or "")
 
 
+def _tools_callable(kw: dict) -> bool:
+    """Whether this request actually lets the model call a tool.
+
+    The investigation loop forces its text-only close by withdrawing
+    *permission* (``tool_choice: {"type": "none"}``) rather than the tool
+    list, so that the closing turn still reads the cached tools+system
+    prefix. A fake that only checked for the presence of ``tools`` would
+    therefore keep offering tool calls after the round budget was spent.
+    """
+    if not kw.get("tools"):
+        return False
+    choice = kw.get("tool_choice")
+    if isinstance(choice, dict) and choice.get("type") == "none":
+        return False
+    return True
+
+
 def _joined_text(messages: list) -> str:
     parts: list[str] = []
     for m in messages or []:
@@ -452,7 +469,7 @@ class ScriptedQCClient(BetaClientMixin):
         self.plan_calls = 0
         self.plan_request_texts: list[str] = []
         self.investigate_calls = 0
-        # (request text, image bytes, whether tools were offered) per turn.
+        # (request text, image bytes, whether a tool call was permitted) per turn.
         self.investigate_requests: list[tuple[str, list[bytes], bool]] = []
 
         outer = self
@@ -560,7 +577,7 @@ class ScriptedQCClient(BetaClientMixin):
 
     def _investigate(self, kw: dict, text: str) -> FakeMessage:
         self.investigate_calls += 1
-        tools_present = bool(kw.get("tools"))
+        tools_present = _tools_callable(kw)
         self.investigate_requests.append(
             (text, _image_bytes(kw.get("messages", [])), tools_present)
         )

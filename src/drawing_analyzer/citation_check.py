@@ -73,7 +73,9 @@ from .core.api_config import (
     effort_config_for,
     model_capabilities,
     phase_output_cap,
+    system_prompt_with_cache,
     thinking_config_for,
+    tools_with_cache,
 )
 from .diagnostics import get_logger
 from .digest import (
@@ -827,9 +829,17 @@ def _check_one(
         kwargs: dict[str, Any] = {
             "model": model,
             "max_tokens": phase_output_cap(PHASE_CITATION, model=model),
-            "system": CITATION_SYSTEM_PROMPT,
+            "system": system_prompt_with_cache(
+                CITATION_SYSTEM_PROMPT, phase=PHASE_CITATION
+            ),
             "messages": messages,
-            "tools": citation_tools(model),
+            # The system prompt and the two web-tool definitions (which embed
+            # the shared blocklist twice) are byte-identical across every
+            # citation in a run, so they are a cache prefix, not a per-call
+            # payload. ``_citation_request_shape`` reads the *unwrapped*
+            # ``citation_tools(model)``, so adding breakpoints here does not
+            # move the verdict cache key.
+            "tools": tools_with_cache(citation_tools(model), phase=PHASE_CITATION),
         }
         # Explicit, never implicit: an omitted ``thinking`` key runs adaptive on
         # the current models, and the old 4k cap had to cover that reasoning as

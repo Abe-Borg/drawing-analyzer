@@ -50,6 +50,10 @@ from .digest import (
     DEFAULT_DIGEST_EFFORT,
     DEFAULT_DIGEST_MAX_RETRIES,
     DEFAULT_DIGEST_MAX_TOKENS,
+    _SHEET_TEXT_LAYER_CLOSE,
+    _SHEET_TEXT_LAYER_HEADER,
+    _SHEET_TEXT_LAYER_OPEN,
+    _SHEET_TEXT_LAYER_RASTER_PLACEHOLDER,
     _clean_error,
     _get,
     _is_transient_error,
@@ -222,7 +226,12 @@ compute or "fix" the numbers — report them as printed and let the reviewer's \
 calculation catch any error. Put nothing but the JSON object inside the block."""
 
 # Folded into the critique cache key so any edit to the persona, the task line,
-# or the findings instruction re-critiques rather than serving a stale read.
+# the findings instruction, or the shared sheet-text-layer framing re-critiques
+# rather than serving a stale read. The text-layer constants live in digest.py
+# but reach the model through the *shared* user-content builder this module
+# also calls, so they belong in this hash too — without them an edit to that
+# framing re-keyed the digest cache while silently replaying warm critiques
+# taken under the old wording.
 CRITIQUE_PROMPT_VERSION = hashlib.sha256(
     (
         CRITIQUE_SYSTEM_PROMPT
@@ -230,6 +239,14 @@ CRITIQUE_PROMPT_VERSION = hashlib.sha256(
         + _CRITIQUE_TASK_INSTRUCTION
         + "\x00"
         + _CRITIQUE_FINDINGS_INSTRUCTION
+        + "\x00"
+        + _SHEET_TEXT_LAYER_HEADER
+        + "\x00"
+        + _SHEET_TEXT_LAYER_RASTER_PLACEHOLDER
+        + "\x00"
+        + _SHEET_TEXT_LAYER_OPEN
+        + "\x00"
+        + _SHEET_TEXT_LAYER_CLOSE
     ).encode("utf-8")
 ).hexdigest()[:16]
 

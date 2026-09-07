@@ -106,6 +106,22 @@ def _system_text(system) -> str:
     return system or ""
 
 
+def _tools_callable(kw: dict) -> bool:
+    """Whether this request actually lets the model call a tool.
+
+    The investigation loop forces its text-only close by withdrawing
+    permission (``tool_choice: {"type": "none"}``) while keeping the tool
+    list in the request, so the closing turn still reads the cached
+    tools+system prefix.
+    """
+    if not kw.get("tools"):
+        return False
+    choice = kw.get("tool_choice")
+    if isinstance(choice, dict) and choice.get("type") == "none":
+        return False
+    return True
+
+
 class _RoutingClient(BetaClientMixin):
     """One fake client that answers digest, verify, citation, and synthesis calls.
 
@@ -131,7 +147,7 @@ class _RoutingClient(BetaClientMixin):
         def _investigate(kw):
             self.investigate_calls += 1
             self.investigate_requests.append(kw)
-            tools_present = bool(kw.get("tools"))
+            tools_present = _tools_callable(kw)
             answered = any(
                 isinstance(b, dict) and b.get("type") == "tool_result"
                 for m in kw.get("messages", [])
@@ -428,8 +444,14 @@ def test_pipeline_budget_capped_investigation_stays_uncertain(tmp_path, monkeypa
     assert v.status == "UNCERTAIN"                     # never REJECTED on a cap
     assert "investigated 2 round(s) without conclusion" in v.note
     assert v.investigated is True and v.investigation_rounds == 2
-    # The host forced the text-only close: a request WITHOUT tools was made.
-    assert any(not kw.get("tools") for kw in client.investigate_requests)
+    # The host forced the text-only close by withdrawing permission, NOT by
+    # dropping the tool list — the closing turn keeps its cached tools+system
+    # prefix (dropping `tools` would invalidate all three cache tiers on the
+    # turn carrying the largest accumulated prefix).
+    closes = [kw for kw in client.investigate_requests if not _tools_callable(kw)]
+    assert closes, "the host never forced a tool-free close"
+    assert all(kw.get("tools") for kw in closes)
+    assert all(kw["tool_choice"] == {"type": "none"} for kw in closes)
     # Budget exhaustion is the designed outcome of a bounded loop — the stage
     # is COMPLETE and the run stays a clean COMPLETE.
     stages = {s.stage: s.status for s in ctx.stage_results}
@@ -1436,7 +1458,7 @@ def test_gate_open_never_masks_a_degraded_required_stage(tmp_path):
 
             class _Msgs(StreamingMessagesMixin):
                 def create(_self, **kw):
-                    if str(kw.get("system", "")).startswith(CITATION_SYSTEM_PROMPT):
+                    if _system_text(kw.get("system", "")).startswith(CITATION_SYSTEM_PROMPT):
                         return FakeMessage(
                             content=[FakeTextBlock(text='{"assessments":[]}')],
                             usage=FakeUsage(input_tokens=1, output_tokens=1),

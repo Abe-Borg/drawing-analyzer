@@ -12,6 +12,7 @@ import pytest
 
 from drawing_analyzer.core.api_config import REVIEW_MODEL_DEFAULT
 from drawing_analyzer.digest import DIGEST_SYSTEM_PROMPT, SheetDigest
+from drawing_analyzer import synthesis
 from drawing_analyzer.models import SheetRef
 from drawing_analyzer.synthesis import (
     SYNTHESIS_SYSTEM_PROMPT,
@@ -63,11 +64,35 @@ def test_default_synthesis_model_is_opus(monkeypatch):
 
 def test_build_synthesis_user_text_includes_each_sheet():
     sheets = [_digest("M-101", "VAV-3 plan"), _digest("M-501", "VAV-3 schedule row")]
-    text = build_synthesis_user_text(sheets)
+    prompt = build_synthesis_user_text(sheets)
+    text = prompt.text
     assert "Sheet 1/2: M-101.pdf" in text
     assert "Sheet 2/2: M-501.pdf" in text
     assert "VAV-3 plan" in text and "VAV-3 schedule row" in text
     assert text.rstrip().endswith("conflicts, and cite the sheet numbers involved.")
+    assert prompt.sheets_omitted == 0 and prompt.chars_omitted == 0
+
+
+def test_synthesis_prompt_budget_drops_whole_sheets_and_counts_the_loss(monkeypatch):
+    """Overflow is loss-aware, never a silent slice (DA-028)."""
+    monkeypatch.setattr(synthesis, "_TOTAL_BUDGET", 400)
+    sheets = [_digest(f"M-{i:03d}", "x" * 300) for i in range(1, 5)]
+    prompt = build_synthesis_user_text(sheets)
+    assert prompt.sheets_omitted == 3 and prompt.chars_omitted > 0
+    # The first sheet is kept whole — a half-digest would invite conflicts
+    # against text the model cannot see.
+    assert "Sheet 1/4: M-001.pdf" in prompt.text
+    assert "Sheet 4/4: M-004.pdf" not in prompt.text
+    assert "3 further sheet(s) omitted" in prompt.text
+    # The task instruction still lands last, after the omission notice.
+    assert prompt.text.rstrip().endswith("cite the sheet numbers involved.")
+
+
+def test_synthesis_prompt_budget_never_drops_the_only_sheet(monkeypatch):
+    monkeypatch.setattr(synthesis, "_TOTAL_BUDGET", 10)
+    prompt = build_synthesis_user_text([_digest("M-101", "y" * 5_000)])
+    assert prompt.sheets_omitted == 0
+    assert "y" * 5_000 in prompt.text
 
 
 # --------------------------------------------------------------------------- #

@@ -140,6 +140,9 @@ INVESTIGATION_OUTPUT_CAP = 16_000
 HARVEST_OUTPUT_CAP = 8_000
 # A per-reference citation verdict, after server-side search/fetch rounds.
 CITATION_OUTPUT_CAP = 8_000
+# The cross-sheet conflict hunt: a bounded findings/claims block per call
+# (whole-set, shard map, or reconcile), not a long-form document.
+CROSS_QC_OUTPUT_CAP = 16_000
 
 # Token threshold above which a review uses the larger batch cap.
 LARGE_REVIEW_INPUT_THRESHOLD = 200_000
@@ -156,6 +159,7 @@ PHASE_VERIFICATION_CONTINUATION = "verification_continuation"
 PHASE_INVESTIGATION = "investigation"
 PHASE_HARVEST = "harvest"
 PHASE_CITATION = "citation"
+PHASE_CROSS_QC = "cross_qc"
 
 
 def output_cap_for_model(model: str, *, requested: int) -> int:
@@ -188,6 +192,7 @@ _PHASE_OUTPUT_BUDGET: dict[str, int] = {
     PHASE_INVESTIGATION: INVESTIGATION_OUTPUT_CAP,
     PHASE_HARVEST: HARVEST_OUTPUT_CAP,
     PHASE_CITATION: CITATION_OUTPUT_CAP,
+    PHASE_CROSS_QC: CROSS_QC_OUTPUT_CAP,
 }
 
 
@@ -564,13 +569,18 @@ def apply_thinking_config(kwargs: dict, *, model: str, phase: str) -> dict:
 #
 # Scope note: the two ``xhigh`` entries below (PHASE_REVIEW,
 # PHASE_CROSS_CHECK) are inherited from the spec-review lineage and have no
-# call site in the drawing pipeline today — every live stage (digest,
-# critique, identity, plan, synthesis, focus) passes its own explicit
-# ``high``/``medium`` straight to ``model_supports_effort``, and the only
-# :func:`apply_effort_config` consumer is the investigation loop at ``high``.
-# So moving these phases onto Sonnet 5 does not, by itself, change any
-# request or any bill. The clamp is kept correct rather than deleted because
-# it is what makes those defaults safe to wire up later, on whichever model.
+# call site in the drawing pipeline today — several live stages (digest,
+# critique, identity, plan, synthesis, focus) still pass their own explicit
+# ``high``/``medium`` straight to ``model_supports_effort``, while the
+# :func:`apply_effort_config` consumers are the investigation loop
+# (``high``), harvest (``low``), citation (``medium``) and cross-sheet QC
+# (``high``). So moving the two orphaned phases onto Sonnet 5 does not, by
+# itself, change any request or any bill. The clamp is kept correct rather
+# than deleted because it is what makes those defaults safe to wire up
+# later, on whichever model. PHASE_CROSS_QC is deliberately its own phase
+# rather than a reuse of PHASE_CROSS_CHECK: the two differ in both output
+# budget (16k vs 96k) and lineage, and conflating them would silently
+# re-budget one when the other is tuned.
 #
 # Effort is a request-policy decision, not a prompt one. Centralizing it
 # here keeps every request site (review / batch review / cross-check /
@@ -606,6 +616,12 @@ _PHASE_DEFAULT_EFFORT: dict[str, str] = {
     PHASE_INVESTIGATION: EFFORT_HIGH,
     PHASE_HARVEST: EFFORT_LOW,
     PHASE_CITATION: EFFORT_MEDIUM,
+    # Cross-sheet QC: high — the same level its sibling stages (digest,
+    # critique, synthesis, focus, plan) pass explicitly, and the level the API
+    # already applies when the field is omitted. Registering it changes no
+    # request today; it makes the value explicit and tunable in one place,
+    # which is what §C asks for.
+    PHASE_CROSS_QC: EFFORT_HIGH,
 }
 
 # Verification phases get the model-aware bump: Opus on verification is
