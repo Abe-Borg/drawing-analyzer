@@ -35,6 +35,7 @@ from typing import Any
 
 from .core.api_config import (
     MODEL_SONNET_5,
+    call_with_refusal_fallback,
     model_supports_adaptive_thinking,
     model_supports_effort,
     output_cap_for_model,
@@ -507,7 +508,7 @@ def identify_set(
     attempt = 0
     while True:
         try:
-            resp = client.messages.create(**kwargs)
+            resp = call_with_refusal_fallback(client, kwargs, model=model, method="create")
             break
         except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
             if _is_transient_error(exc) and attempt < max_retries:
