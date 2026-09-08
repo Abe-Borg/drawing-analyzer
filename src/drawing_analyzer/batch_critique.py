@@ -81,7 +81,6 @@ from .diagnostics import get_logger, summarize_exc
 from .digest import _get
 from .digest_cache import critique_cache_key
 from .file_upload import (
-    FILES_API_BETA,
     ReusableSheetUpload,
     delete_files,
     iter_prefetched_sheets,
@@ -371,7 +370,7 @@ def submit_critique_batch(
 
                 client = _get_client()
             try:
-                mb = client.beta.messages.batches.create(requests=reqs, betas=[FILES_API_BETA])
+                mb = client.messages.batches.create(requests=reqs)
             except Exception as exc:  # noqa: BLE001 - additive/non-fatal (I-3), see below
                 # DA-034: the uploads are already remote but no batch will ever
                 # reference them — delete every one so a submit failure never leaks

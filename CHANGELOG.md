@@ -4,6 +4,46 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project aims to
 adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Every real-time Opus 5 call now opts into Anthropic's server-side refusal
+  fallback.** Opus 5's elevated safety classifiers can decline a request
+  outright (`stop_reason="refusal"`, a normal HTTP 200) — a construction-
+  drawing review is unlikely to trip them, but an unrecovered false positive
+  would silently drop that sheet or finding's coverage with no distinguishing
+  signal from any other empty response. `digest.stream_message` (digest,
+  critique, review plan, synthesis, focus, and the batch direct-call rescue),
+  `verify.py`'s escalation calls, and the investigation loop now attach
+  `fallbacks: "default"` via a new `core.api_config.call_with_refusal_fallback`,
+  which routes the request through `client.beta.messages` and — mirroring the
+  investigation loop's own task-budget self-healing — turns the feature off
+  process-wide the first time a platform rejects the beta/parameter, so a
+  deployment without it enabled degrades gracefully instead of breaking every
+  subsequent Opus 5 call. Never touches batch-submitted traffic (the Batches
+  API rejects the parameter). Opt out entirely via
+  `DRAWING_ANALYZER_REFUSAL_FALLBACK=0`. New tests in
+  `tests/test_refusal_fallback.py`.
+
+### Changed
+
+- **Upgraded the `anthropic` SDK from 0.97 to 1.4** (the 0.x → 1.x major
+  version). The HTTP transport moved from `httpx`/`httpcore` to the
+  maintained fork `httpx2`/`httpcore2` — nothing in this codebase imports
+  `httpx` directly, so this was transparent. The Files API and Message
+  Batches are now GA: uploads, deletes, and batch creation move off
+  `client.beta.files` / `client.beta.messages.batches` (and drop the
+  `files-api-2025-04-14` beta header, which the retired beta namespace no
+  longer needs) onto the stable `client.files` / `client.messages.batches`
+  namespace, with no behavior change. `requirements.txt` and
+  `requirements-release.lock` were regenerated against the new pin (also
+  picking up routine bumps to `pymupdf`, `pypdf`, `tiktoken`, and other
+  transitive dependencies); `distro` dropped out as an `anthropic` dependency
+  and `truststore` was added. No other breaking change in the 1.x migration
+  guide (Text Completions, `temperature`/`top_p`/`top_k`, `with_raw_response`,
+  Bedrock region handling, ...) touches this codebase.
+
 ## [1.2.0] - 2026-09-04
 
 ### Added

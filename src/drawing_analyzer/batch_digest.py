@@ -91,6 +91,7 @@ from .digest import (
     build_digest_request_params,
     digest_sheet,
     findings_from_cache,
+    stream_message,
     focus_cache_fragment,
     normalize_focus,
     normalize_specs_text,
@@ -99,7 +100,6 @@ from .digest import (
 )
 from .digest_cache import digest_cache_key
 from .file_upload import (
-    FILES_API_BETA,
     ReusableSheetUpload,
     delete_files,
     iter_prefetched_sheets,
@@ -652,8 +652,8 @@ def _rescue_failed_items_sync(
     batch rounds while the same run's ~300 Files-API uploads had just succeeded
     — the batch backend was the sick component, and the follow-up batch rode it
     straight back into the same failure. Each still-retryable item is re-issued
-    here as one synchronous, *streamed* Messages call
-    (``client.beta.messages.stream``) carrying the item's exact request params
+    here as one synchronous, *streamed* Messages call (:func:`~drawing_analyzer.digest.stream_message`)
+    carrying the item's exact request params
     (the uploaded ``file_id`` references are still alive — cleanup runs only
     after recovery), so batch processing is bypassed entirely. Costs the 50%
     batch discount for just the rescued sheets — the same trade the 404 inline
@@ -685,20 +685,17 @@ def _rescue_failed_items_sync(
         message = None
         while True:
             try:
-                # Streamed rather than a plain ``create``: the rescue may
-                # carry a raised max_tokens cap (up to
-                # ``MAX_TOKENS_RETRY_CEILING``) for an empty-at-max_tokens
-                # item, and the SDK refuses a non-streaming call whose cap
-                # implies >10 minutes of output — a client-side ValueError,
-                # before any HTTP request, at ~21k tokens under the default
-                # timeout (some model overrides carry even lower non-streaming
-                # caps). Streaming lifts that ceiling; ``get_final_message()``
-                # returns the same Message shape ``create`` would have.
+                # Streamed rather than a plain ``create`` (via the shared
+                # ``stream_message``, which also applies the Opus 5 refusal
+                # fallback — see its docstring): the rescue may carry a raised
+                # max_tokens cap (up to ``MAX_TOKENS_RETRY_CEILING``) for an
+                # empty-at-max_tokens item, and the SDK refuses a non-streaming
+                # call whose cap implies >10 minutes of output — a client-side
+                # ValueError, before any HTTP request, at ~21k tokens under the
+                # default timeout (some model overrides carry even lower
+                # non-streaming caps).
                 slot.attempts_submitted += 1
-                with client.beta.messages.stream(
-                    **params, betas=[FILES_API_BETA]
-                ) as stream:
-                    message = stream.get_final_message()
+                message = stream_message(client, params)
                 break
             except Exception as exc:  # noqa: BLE001 - retried if transient; else the batch error stands
                 if _is_transient_error(exc) and attempt < DEFAULT_DIGEST_MAX_RETRIES:
@@ -875,9 +872,7 @@ def _recover_via_batch_resubmit(
                 f"(recovery round {round_no}/{max_rounds})"
             )
         try:
-            mb = client.beta.messages.batches.create(
-                requests=reqs, betas=[FILES_API_BETA]
-            )
+            mb = client.messages.batches.create(requests=reqs)
         except Exception as exc:  # noqa: BLE001 - recovery is best-effort; batch errors stand
             # The backend rejecting even the submit is itself a sick-backend
             # signal — back off (within budget) and let the next round retry,
@@ -1131,7 +1126,7 @@ def _resubmit_failed_items(
         on_log(f"Retrying {len(retry)} failed sheet(s) in a follow-up batch")
     reqs = [{"custom_id": s.custom_id, "params": p} for s, p in retry]
     try:
-        mb = client.beta.messages.batches.create(requests=reqs, betas=[FILES_API_BETA])
+        mb = client.messages.batches.create(requests=reqs)
     except Exception as exc:  # noqa: BLE001 - recovery is best-effort; unrescued errors stand
         # The batch backend rejecting even the submit is the strongest signal
         # yet that batch processing is the sick component — skip straight to
@@ -1556,7 +1551,7 @@ def submit_drawing_batch(
     batch_id: str | None = None
     if reqs:
         try:
-            mb = client.beta.messages.batches.create(requests=reqs, betas=[FILES_API_BETA])
+            mb = client.messages.batches.create(requests=reqs)
         except Exception:  # noqa: BLE001 - clean up before propagating (DA-034)
             # The images are already uploaded but no batch will ever reference
             # them — delete every one before re-raising so a submit failure never

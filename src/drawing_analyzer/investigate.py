@@ -50,6 +50,7 @@ from .core.api_config import (
     apply_effort_config,
     apply_thinking_config,
     cache_policy_for,
+    call_with_refusal_fallback,
     phase_output_cap,
     system_prompt_with_cache,
     tools_with_cache,
@@ -229,11 +230,14 @@ def _investigation_message(client: Any, kwargs: dict, *, task_budget: int) -> An
     if task_budget and _task_budget_available:
         config = dict(kwargs.get("output_config") or {})
         config["task_budget"] = {"type": "tokens", "total": int(task_budget)}
+        budgeted = {**kwargs, "output_config": config, "betas": [TASK_BUDGET_BETA]}
         try:
-            with client.beta.messages.stream(
-                **{**kwargs, "output_config": config}, betas=[TASK_BUDGET_BETA]
-            ) as stream:
-                return stream.get_final_message()
+            # Also opts into (and self-heals) the Opus 5 refusal fallback —
+            # see call_with_refusal_fallback — orthogonally to the task-budget
+            # rejection handled below.
+            return call_with_refusal_fallback(
+                client, budgeted, model=str(kwargs.get("model", "")), method="stream"
+            )
         except Exception as exc:  # noqa: BLE001 - re-raised unless budget-specific
             if not _is_task_budget_rejection(exc):
                 raise

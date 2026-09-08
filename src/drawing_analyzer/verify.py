@@ -45,6 +45,7 @@ from .core.api_config import (
     VERIFICATION_OUTPUT_CAP,
     apply_effort_config,
     apply_thinking_config,
+    call_with_refusal_fallback,
     phase_output_cap,
 )
 from .diagnostics import get_logger
@@ -563,7 +564,7 @@ def _verify_one(
     attempt = 0
     while True:
         try:
-            resp = client.messages.create(**kwargs)
+            resp = call_with_refusal_fallback(client, kwargs, model=model, method="create")
             break
         except Exception as exc:  # noqa: BLE001 - degrade the finding, never raise
             if _is_transient_error(exc) and attempt < max_retries:
@@ -1073,10 +1074,16 @@ def _call_prepared_cross(
     client: Any, max_retries: int, sleep: Any,
 ) -> tuple[Verification, int, int, bool]:
     """Run only the independent model call; rendering has already completed."""
+    # The refusal fallback is applied inside ``call_with_refusal_fallback``,
+    # not when ``prepared.kwargs`` was built: it must not leak into
+    # ``_cross_verify_cache_key``, which was computed from the pre-fallback
+    # kwargs (I-6 cache correctness).
+    kwargs = prepared.kwargs
+    model = str(kwargs.get("model", ""))
     attempt = 0
     while True:
         try:
-            resp = client.messages.create(**prepared.kwargs)
+            resp = call_with_refusal_fallback(client, kwargs, model=model, method="create")
             break
         except Exception as exc:  # noqa: BLE001 - degrade, never raise
             if _is_transient_error(exc) and attempt < max_retries:
