@@ -3369,7 +3369,21 @@ def extract_drawing_context(
         else:
             if result.ok:
                 synthesis_text = result.text
-                synthesis_stage.status = "COMPLETE"
+                # DA-028, mirroring the cross-QC budget path: sheets the prompt
+                # budget could not carry are sheets this overview never saw, so
+                # the stage is PARTIAL rather than a clean COMPLETE. The text
+                # still ships (additive, I-3) — it is just not a whole-set read.
+                omitted = int(getattr(result, "sheets_omitted", 0) or 0)
+                if omitted:
+                    synthesis_stage.warnings.append(
+                        f"prompt budget degraded: {omitted} sheet(s) / "
+                        f"{int(getattr(result, 'chars_omitted', 0) or 0)} char(s) omitted"
+                    )
+                    _log.warning(
+                        "synthesis: prompt budget omitted %d sheet(s) — "
+                        "the overview does not cover the whole set", omitted,
+                    )
+                synthesis_stage.status = "PARTIAL" if omitted else "COMPLETE"
                 # The synthesis call is billed, so its usage is recorded (§15.6).
                 _record_usage(
                     run_usage, family="synthesis", instance="synthesis",
@@ -3433,7 +3447,20 @@ def extract_drawing_context(
         else:
             if fresult.ok:
                 focus_report_text = fresult.text
-                focus_status = "COMPLETE"
+                # DA-028: same rule as synthesis above — a report assembled from
+                # part of the set is not a COMPLETE answer to the operator's
+                # focus, and the journal is where that is recorded (the focus
+                # pass has no StageResult of its own).
+                f_omitted = int(getattr(fresult, "sheets_omitted", 0) or 0)
+                focus_status = "PARTIAL" if f_omitted else "COMPLETE"
+                if f_omitted:
+                    errors.append(
+                        f"Focus report: prompt budget omitted {f_omitted} sheet(s); "
+                        "the report does not cover the whole set"
+                    )
+                    _log.warning(
+                        "focus report: prompt budget omitted %d sheet(s)", f_omitted,
+                    )
                 # The focus call is billed, so its usage is recorded (§15.6).
                 _record_usage(
                     run_usage, family="focus", instance="focus",

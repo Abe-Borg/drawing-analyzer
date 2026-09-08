@@ -83,9 +83,32 @@ def test_synthesis_prompt_budget_drops_whole_sheets_and_counts_the_loss(monkeypa
     # against text the model cannot see.
     assert "Sheet 1/4: M-001.pdf" in prompt.text
     assert "Sheet 4/4: M-004.pdf" not in prompt.text
-    assert "3 further sheet(s) omitted" in prompt.text
+    assert "The last 3 sheet(s)" in prompt.text
     # The task instruction still lands last, after the omission notice.
     assert prompt.text.rstrip().endswith("cite the sheet numbers involved.")
+
+
+def test_synthesis_prompt_budget_drops_a_contiguous_tail(monkeypatch):
+    """A later small sheet never jumps the queue past an omitted larger one.
+
+    Taking whichever remaining sheets happen to fit would leave the corpus
+    with holes and silently reprioritize the set, so the notice ("the last N
+    sheets") would no longer describe what was actually dropped.
+    """
+    monkeypatch.setattr(synthesis, "_TOTAL_BUDGET", 400)
+    sheets = [
+        _digest("M-001", "a" * 300),   # fits
+        _digest("M-002", "b" * 900),   # does not fit -> stop here
+        _digest("M-003", "c" * 10),    # would fit, must NOT be included
+    ]
+    prompt = build_synthesis_user_text(sheets)
+    assert "M-001.pdf" in prompt.text
+    assert "M-002.pdf" not in prompt.text
+    assert "M-003.pdf" not in prompt.text
+    assert prompt.sheets_omitted == 2
+    # The loss count covers the whole dropped tail, not just the sheet that
+    # happened to trip the budget.
+    assert prompt.chars_omitted > 900
 
 
 def test_synthesis_prompt_budget_never_drops_the_only_sheet(monkeypatch):
@@ -285,6 +308,31 @@ def test_pipeline_synthesize_prepends_overview(tmp_path):
     # Synthesis tokens are folded into the run totals (2*100 digests + 300 synth).
     assert ctx.total_input_tokens == 500
     assert ctx.errors == []
+
+
+def test_pipeline_marks_a_budget_degraded_synthesis_partial(tmp_path, monkeypatch):
+    """A synthesis that could not see the whole set is not a clean COMPLETE.
+
+    Mirrors the cross-QC budget path (DA-028): the overview still ships
+    (additive, I-3), but the stage records the loss and holds at PARTIAL so
+    the run's status and manifest cannot claim a whole-set read.
+    """
+    pymupdf = pytest.importorskip("pymupdf")
+    from drawing_analyzer.pipeline import extract_drawing_context
+
+    # Small enough that the second sheet's digest cannot fit.
+    monkeypatch.setattr(synthesis, "_TOTAL_BUDGET", 60)
+    path = _make_pdf(pymupdf, tmp_path / "set.pdf", pages=2)
+    ctx = extract_drawing_context(
+        [path], client=_routing_client([]), rows=2, cols=2, synthesize=True
+    )
+
+    stage = next(s for s in ctx.stage_results if s.stage == "synthesis")
+    assert stage.status == "PARTIAL"
+    assert any("budget degraded" in w for w in stage.warnings)
+    # The deliverable still ships — the stage is degraded, not failed (I-3).
+    assert ctx.synthesis_text
+    assert "Drawing Set Overview" in ctx.combined_text
 
 
 def test_pipeline_no_synthesis_by_default(tmp_path):

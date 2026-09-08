@@ -28,6 +28,7 @@ from .core.api_config import (
     model_supports_adaptive_thinking,
     model_supports_effort,
 )
+from .core.tokenizer import CROSS_CHECK_RECOMMENDED_MAX
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
     FOCUS_SECTION_HEADER,
@@ -94,11 +95,15 @@ the section header. Use short subsections / bullets / tables as fits the focus.\
 """.format(focus_header=FOCUS_SECTION_HEADER)
 
 
-# Corpus budget (chars) for the per-sheet digests in the user turn. Matches
-# synthesis / set_identity / review_planner so one set's stages agree on how
-# much text a single call may carry; overflow drops whole sheets from the end
-# and is counted, never silent (cf. DA-028).
-_TOTAL_BUDGET = 200_000
+# Corpus budget (chars) for the per-sheet digests in the user turn. Same
+# derivation and rationale as synthesis.py: this stage sends the actual
+# deliverable input rather than a sampled corpus, so the budget is a safety
+# rail against pathological input, sized from the tokenizer's single-call
+# headroom (context window - output reserve - overhead), not set_identity's
+# slice budget. Overflow drops a contiguous tail, is counted, and is disclosed
+# both in the prompt and on the result (DA-028).
+_CHARS_PER_TOKEN = 3      # conservative: digest text tokenizes denser than prose
+_TOTAL_BUDGET = CROSS_CHECK_RECOMMENDED_MAX * _CHARS_PER_TOKEN
 
 _FOCUS_TASK_INSTRUCTION = (
     "Above are the operator's focus and the per-sheet digests for the entire "
@@ -125,7 +130,7 @@ def build_focus_user_text(focus: str, ok_sheets: list[SheetDigest]) -> FocusProm
     (framing) and is restated by the task instruction last, so the bulk of the
     digests sits between question framing and the ask.
 
-    Overflow past :data:`_TOTAL_BUDGET` drops whole sheets from the end and
+    Overflow past :data:`_TOTAL_BUDGET` drops a contiguous tail of sheets and
     counts what it dropped — loss-aware, never a silent slice (cf. DA-028).
     The omission is also disclosed in the prompt itself, because a focus
     report that silently answers from part of the set reads exactly like one
@@ -143,23 +148,31 @@ def build_focus_user_text(focus: str, ok_sheets: list[SheetDigest]) -> FocusProm
     used = 0
     sheets_omitted = 0
     chars_omitted = 0
+
+    def _block(index: int, sd: SheetDigest) -> tuple[str, str]:
+        return f"===== Sheet {index}/{total}: {sd.ref.display_label} =====", sd.text.strip()
+
     for i, sd in enumerate(ok_sheets, start=1):
-        header = f"===== Sheet {i}/{total}: {sd.ref.display_label} ====="
-        body = sd.text.strip()
+        header, body = _block(i, sd)
         cost = len(header) + len(body)
         if used + cost > _TOTAL_BUDGET and used > 0:
-            sheets_omitted += 1
-            chars_omitted += cost
-            continue
+            # Stop at the first sheet that does not fit, and drop everything
+            # after it, so what reaches the model is a contiguous prefix rather
+            # than whichever later sheets happened to be small enough.
+            for j, dropped in enumerate(ok_sheets[i - 1:], start=i):
+                d_header, d_body = _block(j, dropped)
+                sheets_omitted += 1
+                chars_omitted += len(d_header) + len(d_body)
+            break
         used += cost
         parts.append(header)
         parts.append(body)
         parts.append("")
     if sheets_omitted:
         parts.append(
-            f"[{sheets_omitted} further sheet(s) omitted from this prompt for "
-            f"length. Say so in the report if the focus asks about coverage "
-            f"the omitted sheets could have carried.]"
+            f"[The last {sheets_omitted} sheet(s) of the set were omitted from "
+            f"this prompt for length. Say so in the report if the focus asks "
+            f"about coverage those sheets could have carried.]"
         )
         parts.append("")
     parts.append(_FOCUS_TASK_INSTRUCTION)

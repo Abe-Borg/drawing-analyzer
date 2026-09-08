@@ -24,6 +24,7 @@ from .core.api_config import (
     model_supports_adaptive_thinking,
     model_supports_effort,
 )
+from .core.tokenizer import CROSS_CHECK_RECOMMENDED_MAX
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
     SheetDigest,
@@ -90,11 +91,21 @@ schedule row; point to the sheet that carries it.
 section header. Use short subsections / bullets."""
 
 
-# Corpus budget (chars) for the per-sheet digests in the user turn. Matches
-# set_identity / review_planner so one set's stages agree on how much text a
-# single call may carry; overflow drops whole sheets from the end and is
-# counted, never silent (cf. DA-028).
-_TOTAL_BUDGET = 200_000
+# Corpus budget (chars) for the per-sheet digests in the user turn.
+#
+# Deliberately NOT set_identity's 200k slice budget. That stage samples the set
+# (digest heads + windows), so a dropped slice degrades its answer gracefully.
+# This stage sends the actual deliverable input: a sheet dropped here is a sheet
+# the cross-sheet read cannot reason about at all, so every omission is a hole
+# in the overview. The budget is therefore a safety rail against pathological
+# input, not a routine limiter — sized from the tokenizer's own single-call
+# headroom (context window - output reserve - overhead), the same derivation
+# that governs the other "send everything in one call" shape in this codebase.
+# Overflow drops a contiguous tail and is counted and surfaced, never silent
+# (DA-028); the pipeline holds the stage at PARTIAL when it bites.
+_CHARS_PER_TOKEN = 3      # conservative: digest text (tags, numbers, schedule
+                          # values) tokenizes denser than English prose (~4)
+_TOTAL_BUDGET = CROSS_CHECK_RECOMMENDED_MAX * _CHARS_PER_TOKEN
 
 _SYNTHESIS_TASK_INSTRUCTION = (
     "Above are the per-sheet digests for the entire set. Now produce the "
@@ -118,7 +129,7 @@ def build_synthesis_user_text(ok_sheets: list[SheetDigest]) -> SynthesisPrompt:
     Only ``ok`` sheets are included (a failed sheet has no text); each is fenced
     with its sheet label so the model can cite sheet numbers in conflicts.
 
-    Overflow past :data:`_TOTAL_BUDGET` drops whole sheets from the end and
+    Overflow past :data:`_TOTAL_BUDGET` drops a contiguous tail of sheets and
     counts what it dropped — loss-aware, never a silent slice (cf. DA-028), and
     the same discipline set_identity / review_planner / cross_qc already apply.
     A sheet is kept or dropped whole: half a digest would invite conflicts
@@ -132,22 +143,32 @@ def build_synthesis_user_text(ok_sheets: list[SheetDigest]) -> SynthesisPrompt:
     used = 0
     sheets_omitted = 0
     chars_omitted = 0
+
+    def _block(index: int, sd: SheetDigest) -> tuple[str, str]:
+        return f"===== Sheet {index}/{total}: {sd.ref.display_label} =====", sd.text.strip()
+
     for i, sd in enumerate(ok_sheets, start=1):
-        header = f"===== Sheet {i}/{total}: {sd.ref.display_label} ====="
-        body = sd.text.strip()
+        header, body = _block(i, sd)
         cost = len(header) + len(body)
         if used + cost > _TOTAL_BUDGET and used > 0:
-            sheets_omitted += 1
-            chars_omitted += cost
-            continue
+            # Stop at the first sheet that does not fit, and drop everything
+            # after it. Skipping this one to squeeze in a later, smaller sheet
+            # would quietly reprioritize the set and leave the notice below
+            # describing a corpus with holes in it.
+            for j, dropped in enumerate(ok_sheets[i - 1:], start=i):
+                d_header, d_body = _block(j, dropped)
+                sheets_omitted += 1
+                chars_omitted += len(d_header) + len(d_body)
+            break
         used += cost
         parts.append(header)
         parts.append(body)
         parts.append("")
     if sheets_omitted:
         parts.append(
-            f"[{sheets_omitted} further sheet(s) omitted from this prompt for "
-            f"length; the overview below covers only the sheets shown.]"
+            f"[The last {sheets_omitted} sheet(s) of the set were omitted from "
+            f"this prompt for length; the overview below covers only the "
+            f"sheets shown above.]"
         )
         parts.append("")
     parts.append(_SYNTHESIS_TASK_INSTRUCTION)

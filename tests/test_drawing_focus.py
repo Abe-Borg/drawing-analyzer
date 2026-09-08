@@ -238,10 +238,26 @@ def test_focus_prompt_budget_drops_whole_sheets_and_discloses_the_gap(monkeypatc
     assert prompt.sheets_omitted == 3 and prompt.chars_omitted > 0
     assert "Sheet 1/4: P-001.pdf" in prompt.text
     assert "Sheet 4/4: P-004.pdf" not in prompt.text
-    assert "3 further sheet(s) omitted" in prompt.text
+    assert "The last 3 sheet(s)" in prompt.text
     # The focus still frames the turn at both ends.
     assert ROOMS_FOCUS in prompt.text
     assert prompt.text.rstrip().endswith("citing the sheet for each fact.")
+
+
+def test_focus_prompt_budget_drops_a_contiguous_tail(monkeypatch):
+    """A later small sheet never jumps the queue past an omitted larger one."""
+    monkeypatch.setattr(focus, "_TOTAL_BUDGET", 400)
+    sheets = [
+        _digest("P-001", "a" * 300),   # fits
+        _digest("P-002", "b" * 900),   # does not fit -> stop here
+        _digest("P-003", "c" * 10),    # would fit, must NOT be included
+    ]
+    prompt = build_focus_user_text(ROOMS_FOCUS, sheets)
+    assert "P-001.pdf" in prompt.text
+    assert "P-002.pdf" not in prompt.text
+    assert "P-003.pdf" not in prompt.text
+    assert prompt.sheets_omitted == 2
+    assert prompt.chars_omitted > 900
 
 
 # --------------------------------------------------------------------------- #
