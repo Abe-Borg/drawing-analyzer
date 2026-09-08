@@ -33,11 +33,15 @@ _OPUS = "claude-opus-5"
 
 
 def _rec(family, instance, i, o, **kw):
+    # ``model`` defaults to Opus but is overridable, so a test can build the
+    # mixed-model ledger a real run produces (verification on Sonnet, the prose
+    # harvest on Haiku, ...) rather than a single-model fiction.
+    model = kw.pop("model", _OPUS)
     return UsageRecord(
-        stage_family=family, stage_instance=instance, model=_OPUS,
+        stage_family=family, stage_instance=instance, model=model,
         input_tokens=i, output_tokens=o,
         estimated_cost=usage_record_cost(
-            model=_OPUS, input_tokens=i, output_tokens=o,
+            model=model, input_tokens=i, output_tokens=o,
             billable_tool_uses=kw.get("billable_tool_uses"),
             batch=(kw.get("transport") == "BATCH"),
         ),
@@ -100,6 +104,76 @@ def test_run_usage_to_dict_round_trips_totals():
     d = ru.to_dict()
     assert d["total_input_tokens"] == 500 and d["total_output_tokens"] == 80
     assert "digest" in d["by_family"] and len(d["records"]) == 1
+    assert _OPUS in d["by_model"]
+
+
+# --------------------------------------------------------------------------- #
+# Per-model rollup
+# --------------------------------------------------------------------------- #
+
+
+def test_by_model_separates_stages_that_share_a_family_name():
+    """The axis a model-routing comparison needs.
+
+    Two runs differing only in ``DRAWING_ANALYZER_CRITIQUE_MODEL`` are
+    indistinguishable in a family rollup — the family names are identical in
+    both — so the per-record model had to be aggregated somewhere.
+    """
+    sonnet = "claude-sonnet-5"
+    ru = RunUsage()
+    ru.add(_rec("digest", "digest_1", 1000, 100))                    # Opus
+    ru.add(_rec("critique", "critique_1", 2000, 200, model=sonnet))
+    ru.add(_rec("critique", "critique_2", 2000, 200, model=sonnet))
+
+    by_model = ru.by_model()
+    assert set(by_model) == {_OPUS, sonnet}
+    assert by_model[_OPUS]["input_tokens"] == 1000
+    assert by_model[_OPUS]["calls"] == 1
+    assert by_model[sonnet]["input_tokens"] == 4000
+    assert by_model[sonnet]["calls"] == 2
+    # Sonnet 5 input is $2/MTok against Opus 5's $5, so 4x the tokens still
+    # costs less than 2x here — the whole point of being able to see this.
+    assert by_model[sonnet]["estimated_cost"] < by_model[_OPUS]["estimated_cost"] * 3
+
+
+def test_by_model_and_by_family_agree_on_call_count():
+    """Both rollups partition the same records — neither may drop any."""
+    ru = RunUsage()
+    ru.add(_rec("digest", "digest_1", 100, 10))
+    ru.add(_rec("critique", "critique_1", 200, 20, model="claude-sonnet-5"))
+    ru.add(_rec("verify", "verify_1", 50, 5, model="claude-sonnet-5"))
+
+    fam_calls = sum(g["calls"] for g in ru.by_family().values())
+    model_calls = sum(g["calls"] for g in ru.by_model().values())
+    assert fam_calls == model_calls == len(ru.records) == 3
+
+
+def test_by_model_groups_a_modelless_record_rather_than_dropping_it():
+    """A record with no model must still be counted, or the rollup won't reconcile."""
+    ru = RunUsage()
+    ru.add(_rec("digest", "digest_1", 100, 10))
+    ru.add(UsageRecord(
+        stage_family="digest", stage_instance="digest_2", model="",
+        transport="CACHE", cache_hit=True, estimated_cost=Decimal("0"),
+    ))
+    by_model = ru.by_model()
+    assert "" in by_model
+    assert by_model[""]["calls"] == 1 and by_model[""]["cache_hits"] == 1
+    assert sum(g["calls"] for g in by_model.values()) == len(ru.records)
+
+
+def test_by_model_inherits_the_unpriced_rule():
+    """An unpriced billable record makes its model's cost None, not a partial sum."""
+    ru = RunUsage()
+    ru.add(_rec("digest", "digest_1", 500, 80))
+    ru.add(UsageRecord(
+        stage_family="critique", stage_instance="critique_1",
+        model="some-new-unpriced-model", input_tokens=300, output_tokens=20,
+        estimated_cost=None,
+    ))
+    by_model = ru.by_model()
+    assert by_model["some-new-unpriced-model"]["estimated_cost"] is None
+    assert by_model[_OPUS]["estimated_cost"] is not None
 
 
 def test_total_is_none_when_a_billable_record_is_unpriced():
@@ -148,13 +222,71 @@ def test_real_time_vs_batch_rate_per_record():
 
 
 def test_cache_read_write_and_web_search_pricing():
-    # cache read = 0.1x input, cache write = 1.25x input (per Mtok).
+    # cache read = 0.1x input, default (5-minute) cache write = 1.25x input.
     cr = usage_record_cost(model=_OPUS, cache_read_tokens=1_000_000)
     cw = usage_record_cost(model=_OPUS, cache_write_tokens=1_000_000)
     assert cr == Decimal("0.5") and cw == Decimal("6.25")
     # web search billed per use, NOT batch-discounted.
     ws = usage_record_cost(model=_OPUS, billable_tool_uses={"web_search": 4}, batch=True)
     assert ws == Decimal("4") * WEB_SEARCH_COST_PER_USE
+
+
+def test_one_hour_cache_write_is_priced_at_2x_not_1_25x():
+    """A ``ttl: "1h"`` breakpoint costs 2x base input, not the 5-minute 1.25x.
+
+    ``api_config._cache_control_block`` requests the 1-hour TTL, so any stage
+    routed through its breakpoint helpers (today the investigation loop) writes
+    at 2x. Pricing every write at 1.25x under-reported those records by 60%.
+    """
+    five_min = usage_record_cost(model=_OPUS, cache_write_tokens=1_000_000)
+    one_hour = usage_record_cost(
+        model=_OPUS, cache_write_tokens=1_000_000, cache_write_ttl="1h"
+    )
+    assert five_min == Decimal("6.25")   # 5.00 x 1.25
+    assert one_hour == Decimal("10.00")  # 5.00 x 2.00
+    # An unset or unrecognized ttl resolves to the conservative 5-minute rate
+    # rather than silently inheriting 2x.
+    assert usage_record_cost(
+        model=_OPUS, cache_write_tokens=1_000_000, cache_write_ttl=None
+    ) == five_min
+    assert usage_record_cost(
+        model=_OPUS, cache_write_tokens=1_000_000, cache_write_ttl="30m"
+    ) == five_min
+    # The batch discount stacks on top of the TTL multiplier.
+    assert usage_record_cost(
+        model=_OPUS, cache_write_tokens=1_000_000, cache_write_ttl="1h", batch=True
+    ) == Decimal("5.00")
+
+
+def test_cache_write_ttl_comes_from_the_policy_that_builds_the_breakpoint(monkeypatch):
+    """The ledger's TTL is read from the same policy the request builder uses.
+
+    Every registered phase currently caches, so all of them write at the 1-hour
+    rate. The ``None`` branch is still live for a phase whose policy disables
+    caching — it must report "no cache written" rather than a rate, or the
+    pricer would invent a write cost for a request that never made one.
+    """
+    from drawing_analyzer.core import api_config as api
+
+    assert api.cache_write_ttl_for(api.PHASE_INVESTIGATION) == "1h"
+    assert api.cache_write_ttl_for(api.PHASE_HARVEST) == "1h"
+
+    monkeypatch.setitem(
+        api._PHASE_CACHE_POLICY, "uncached_phase",
+        api.CachePolicy(cache_system=False, cache_tools=False),
+    )
+    assert api.cache_write_ttl_for("uncached_phase") is None
+
+
+def test_a_five_minute_breakpoint_stage_is_not_priced_at_the_one_hour_rate():
+    """digest/critique attach a plain ``{"type": "ephemeral"}`` — 5 minutes.
+
+    They pass no ``cache_write_ttl`` at all, so the default must land on the
+    1.25x rate. Getting this backwards would over-report the two stages that
+    dominate the bill.
+    """
+    plain = usage_record_cost(model=_OPUS, cache_write_tokens=1_000_000)
+    assert plain == Decimal("6.25")  # 5.00 x 1.25, not x 2.00
 
 
 def test_unknown_model_returns_none_but_keeps_tool_charge():

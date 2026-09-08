@@ -19,6 +19,41 @@ ANTHROPIC_API_KEY=... python scripts/benchmark_drawing_analyzer.py \
 
 `--check` turns the mechanical gates below into hard failures (nonzero exit).
 
+### A/B-ing a cost lever against quality
+
+```bash
+# Price both arms first — spends nothing
+python scripts/ab_sweep_drawing_analyzer.py --pdf setA/M-101.pdf \
+    --variant DRAWING_ANALYZER_CRITIQUE_MODEL=claude-sonnet-5 --estimate
+
+# Then run it (billable, both arms cold)
+ANTHROPIC_API_KEY=... python scripts/ab_sweep_drawing_analyzer.py \
+    --pdf setA/M-101.pdf --pdf setA/E-201.pdf \
+    --variant DRAWING_ANALYZER_TILE_TARGET_PX=1240 --out ab_out
+```
+
+The hermetic suite cannot answer whether a cheaper configuration still finds the
+same defects — the §19.1 gauntlet routes canned responses by system-prompt
+identity and never reads the model id, so a model swap changes nothing it
+returns. This harness runs the same set twice, cold on both arms, with one
+variable changed, and reports cost against **three signals that need no ground
+truth**:
+
+| Signal | Regression looks like |
+|---|---|
+| Anchor tier mix (EXACT/FUZZY/TILE/**UNANCHORED**) | UNANCHORED share rises — the documented hallucination signal |
+| Verification verdict mix (VERIFIED/REJECTED/UNCERTAIN) | REJECTED share rises — more false positives |
+| Self-consistency (REPRODUCED/SINGLETON) | REPRODUCED share falls — the two reads agree less |
+
+It also flags the quiet failure: a large drop in **finding count** at a flat
+VERIFIED share, which reads as "cheaper and cleaner" on every other line while
+actually meaning real defects went unseen.
+
+A clean screen is **not an approval** — it means the screen found nothing. One
+run of one set cannot establish that a change is safe. Each arm runs in a
+subprocess because `REVIEW_MODEL_DEFAULT` binds at *import* in
+`core.api_config`, so setting `DRAWING_ANALYZER_MODEL` in-process has no effect.
+
 ## Scenarios (§19.7)
 
 | # | Scenario | Mode | Harness scenario id |
@@ -74,9 +109,22 @@ Judgement (owner-reviewed against the previous release's recorded medians):
   upload for both critique reads (Phase 23C); warm runs skip both renders via
   the level-1 caches (Phase 19B). Budget accordingly when comparing cold
   medians across transports.
-- Verification is deliberately stateless: it re-runs (and re-bills) on every
-  exhaustive run, including warm ones. The digest/critique caches are the
-  warm-run savings; verify/citation/cross/synthesis are not cached.
+- **Every model stage caches, not just digest/critique.** Verification caches
+  through `stage_cache` (`verify._VERIFY_CACHE_STAGE` / `_VERIFY_CROSS_CACHE_STAGE`),
+  as do cross-QC, synthesis, focus and prose harvest; identity, review plan,
+  investigation and citation each own a `DigestCache` namespace (the citation
+  verdict cache carries a TTL, `DRAWING_ANALYZER_CITATION_TTL_DAYS`, default 30
+  days). So a warm exhaustive re-run should show near-zero API calls across the
+  board — not just on the two vision stages. An earlier revision of this note
+  said verification was stateless and re-billed every run; that stopped being
+  true when the stage cache landed, and a warm run that *does* re-bill
+  verification is now a cache-correctness bug worth chasing, not expected
+  behavior.
+- **Cache-write cost depends on the requested TTL.** A `ttl: "1h"` breakpoint
+  costs 2x base input; the default 5-minute entry costs 1.25x. The ledger
+  records which was requested per record (`UsageRecord.cache_write_ttl`), so a
+  run manifest's cache-write spend can be reconciled against the breakpoints the
+  stages actually asked for.
 
 ## Record
 

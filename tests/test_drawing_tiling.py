@@ -137,6 +137,147 @@ def test_zoom_for_rect_hits_target_long_edge():
     assert tiling.zoom_for_rect(500, 1000, 2000) == pytest.approx(2.0)
 
 
+# --------------------------------------------------------------------------- #
+# Vector render-target override (measurement knob, default off)
+# --------------------------------------------------------------------------- #
+
+_MANY = 37  # the real 6x6 grid + overview
+
+
+def test_override_changes_only_the_vector_many_image_target(monkeypatch):
+    monkeypatch.setenv(tiling.TILE_TARGET_PX_ENV, "1240")
+
+    # Vector, >20 images: the swept value.
+    assert tiling.target_long_edge_px(_MANY, is_raster=False) == 1240
+    # Raster is NOT overridable — with no text layer the pixels are the only
+    # channel, and keeping it fixed preserves raster >= vector, which the cost
+    # estimate's upper-bound claim depends on.
+    assert tiling.target_long_edge_px(_MANY, is_raster=True) == tiling.TARGET_LONG_EDGE_PX_RASTER
+    # <=20 images is a different regime (oversized images are downscaled, not
+    # rejected) and is not where the payload problem lives.
+    assert tiling.target_long_edge_px(10) == tiling.TARGET_LONG_EDGE_PX_FEW_IMAGES
+
+
+def test_override_is_read_per_call_not_captured_at_import(monkeypatch):
+    """The trap that makes DRAWING_ANALYZER_MODEL ineffective after import.
+
+    A module-level ``os.environ.get`` would freeze the first value the process
+    ever saw, so a sweep that sets the variable between runs in one process
+    would silently measure the same target twice.
+    """
+    assert tiling.target_long_edge_px(_MANY) == tiling.TARGET_LONG_EDGE_PX_DEFAULT
+    monkeypatch.setenv(tiling.TILE_TARGET_PX_ENV, "1400")
+    assert tiling.target_long_edge_px(_MANY) == 1400
+    monkeypatch.setenv(tiling.TILE_TARGET_PX_ENV, "1100")
+    assert tiling.target_long_edge_px(_MANY) == 1100
+    monkeypatch.delenv(tiling.TILE_TARGET_PX_ENV)
+    assert tiling.target_long_edge_px(_MANY) == tiling.TARGET_LONG_EDGE_PX_DEFAULT
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "abc", "1560px", "-500", "1.5e3", "0x400"])
+def test_invalid_override_falls_back_to_the_default(monkeypatch, raw):
+    monkeypatch.setenv(tiling.TILE_TARGET_PX_ENV, raw)
+    assert tiling.target_long_edge_px(_MANY) == tiling.TARGET_LONG_EDGE_PX_DEFAULT
+
+
+def test_override_is_clamped_under_the_hard_rejection_cap(monkeypatch):
+    """No setting of this variable may construct a request the API rejects.
+
+    A >20-image request whose long edge exceeds 2000 px is rejected outright —
+    not downscaled — so an operator typo of "2000" (or "20000") must not be able
+    to fail every sheet in a set. The ceiling is the same margin-under-cap the
+    raster target uses, because the rasterizer rounds a clipped pixmap up.
+    """
+    ceiling = tiling.MANY_IMAGES_LONG_EDGE_CAP_PX - tiling._MANY_IMAGES_RENDER_MARGIN_PX
+    for typo in ("2000", "2576", "20000"):
+        monkeypatch.setenv(tiling.TILE_TARGET_PX_ENV, typo)
+        assert tiling.target_long_edge_px(_MANY) == ceiling
+    # ...and a floor, so a fat-fingered small value still renders a legible crop.
+    monkeypatch.setenv(tiling.TILE_TARGET_PX_ENV, "1")
+    assert tiling.target_long_edge_px(_MANY) == tiling._MIN_TILE_TARGET_PX
+
+
+@pytest.mark.parametrize("target_px", [1100, 1240, 1400, 1560, 1992])
+def test_swept_target_never_renders_over_the_hard_cap(monkeypatch, target_px):
+    """The rounding guard must hold at every value a sweep can select.
+
+    Same arithmetic as ``test_rendered_tile_never_exceeds_hard_cap_under_rounding``,
+    run against the override rather than the two fixed constants.
+    """
+    monkeypatch.setenv(tiling.TILE_TARGET_PX_ENV, str(target_px))
+    effective = tiling.target_long_edge_px(_MANY, is_raster=False)
+    cap = tiling.MANY_IMAGES_LONG_EDGE_CAP_PX
+    for page_w, page_h in [(E_W, E_H), (E_H, E_W), (3024.0, 3024.0), (2448.0, 3168.0)]:
+        for rect in tiling.tile_rects(page_w, page_h, rows=6, cols=6, overlap_frac=0.08):
+            zoom = tiling.zoom_for_rect(rect.width, rect.height, effective)
+            assert _mupdf_round_pixels(rect.x0, rect.width, zoom) <= cap
+            assert _mupdf_round_pixels(rect.y0, rect.height, zoom) <= cap
+        zoom = tiling.zoom_for_rect(page_w, page_h, effective)
+        assert _mupdf_round_pixels(0.0, page_w, zoom) <= cap
+        assert _mupdf_round_pixels(0.0, page_h, zoom) <= cap
+
+
+def test_lower_target_cuts_image_tokens_quadratically(monkeypatch):
+    """Why this knob is the highest-leverage number in the bill.
+
+    Image cost is pixel area over 750, so halving the long edge quarters the
+    tokens. The sweep values are chosen against this curve.
+    """
+    from drawing_analyzer.core.tokenizer import estimate_image_tokens
+
+    def sheet_tokens(target: int) -> int:
+        monkeypatch.setenv(tiling.TILE_TARGET_PX_ENV, str(target))
+        effective = tiling.target_long_edge_px(_MANY, is_raster=False)
+        total = 0
+        for rect in tiling.tile_rects(E_W, E_H, rows=6, cols=6, overlap_frac=0.08):
+            zoom = tiling.zoom_for_rect(rect.width, rect.height, effective)
+            total += estimate_image_tokens(
+                round(rect.width * zoom), round(rect.height * zoom),
+                model="claude-opus-5",
+            )
+        zoom = tiling.zoom_for_rect(E_W, E_H, effective)
+        return total + estimate_image_tokens(
+            round(E_W * zoom), round(E_H * zoom), model="claude-opus-5"
+        )
+
+    at_1560 = sheet_tokens(1560)
+    at_1240 = sheet_tokens(1240)
+    # (1240/1560)^2 ~= 0.63, so expect roughly a 37% cut, not a 21% one.
+    assert 0.60 < at_1240 / at_1560 < 0.66
+
+
+def test_changed_target_invalidates_the_level_1_cache_identity(monkeypatch):
+    """A sweep must re-render, or the two arms compare the same images.
+
+    The render identity carries ``target=``, so this falls out of the existing
+    design — but it is the precondition for an honest A/B, so it is asserted
+    rather than assumed.
+    """
+    import pymupdf
+
+    from drawing_analyzer.render import sheet_render_identity
+
+    doc = pymupdf.open()
+    page = doc.new_page(width=E_W, height=E_H)
+    page.insert_text((72, 144), "M-101 MECHANICAL PLAN")
+
+    def identity() -> str:
+        return sheet_render_identity(
+            doc[0], page_index=0, page_count=1, content_sha256="deadbeef",
+            rows=6, cols=6, overlap_frac=0.08,
+        )
+
+    baseline = identity()
+    monkeypatch.setenv(tiling.TILE_TARGET_PX_ENV, "1240")
+    swept = identity()
+    monkeypatch.delenv(tiling.TILE_TARGET_PX_ENV)
+
+    assert swept != baseline
+    assert "target=1240" in swept
+    assert identity() == baseline  # and it comes back when the sweep ends
+    doc.close()
+
+
 def test_invalid_grid_and_dimensions_raise():
     with pytest.raises(ValueError):
         tiling.tile_rects(E_W, E_H, rows=0, cols=6)

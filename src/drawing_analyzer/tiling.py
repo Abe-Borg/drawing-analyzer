@@ -55,6 +55,7 @@ rasterizes or serializes the pixmap.
 """
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -102,6 +103,55 @@ TARGET_LONG_EDGE_PX_FEW_IMAGES = 2576
 # The >20-images rule is a hard threshold in the vision docs.
 MANY_IMAGES_THRESHOLD = 20
 
+# ---------------------------------------------------------------------------
+# Vector render-target override (measurement knob, default off)
+# ---------------------------------------------------------------------------
+#
+# Image tokens scale with the SQUARE of effective resolution — a tile's cost is
+# its pixel area over 750 — and the tiles ride the digest plus both critique
+# reads, so the vector target is the single highest-leverage number in the app's
+# bill. On a 34x44" sheet at the 6x6 grid: 1560 px is ~197 DPI and ~92.9k image
+# tokens/sheet; 1400 px is ~19% fewer, 1240 px ~37% fewer, 1100 px ~50% fewer.
+#
+# Whether any of those hold up is a QUALITY question this module cannot answer,
+# so the default is unchanged and this exists only to make a sweep runnable
+# without editing code. Two properties matter:
+#
+#   * Read PER CALL, never captured at import. A module-level
+#     ``os.environ.get`` would freeze the first value the process ever saw,
+#     which is precisely the trap that makes ``DRAWING_ANALYZER_MODEL``
+#     ineffective after ``core.api_config`` is imported.
+#   * Clamped to the same margin-under-cap the raster target uses. The API
+#     REJECTS (does not downscale) a >20-image request whose long edge exceeds
+#     2000 px, and the rasterizer rounds a clipped pixmap up to whole pixels, so
+#     an operator typo of 2000 must not be able to produce a 2001 px tile and
+#     fail every sheet in a set.
+#
+# A changed target invalidates the digest/critique caches on its own — the
+# level-1 render identity carries ``target=`` and the level-2 keys hash the PNG
+# bytes — so a sweep re-renders honestly with no schema bump.
+TILE_TARGET_PX_ENV = "DRAWING_ANALYZER_TILE_TARGET_PX"
+# Below this a tile stops being a legible crop of a drawing and the comparison
+# stops being meaningful; the floor exists to catch a fat-fingered value, not to
+# express a quality opinion.
+_MIN_TILE_TARGET_PX = 400
+
+
+def _vector_target_override() -> int | None:
+    """The operator's vector long-edge target, or ``None`` when unset/invalid.
+
+    Silently ignores a non-numeric value (same tolerance as the other env knobs
+    in this codebase) and clamps a valid one into
+    ``[_MIN_TILE_TARGET_PX, MANY_IMAGES_LONG_EDGE_CAP_PX - margin]`` so no
+    setting of this variable can construct a request the API will reject.
+    """
+    raw = os.environ.get(TILE_TARGET_PX_ENV)
+    if not raw or not raw.strip().isdigit():
+        return None
+    value = int(raw.strip())
+    ceiling = MANY_IMAGES_LONG_EDGE_CAP_PX - _MANY_IMAGES_RENDER_MARGIN_PX
+    return max(_MIN_TILE_TARGET_PX, min(value, ceiling))
+
 
 @dataclass(frozen=True)
 class TileRect:
@@ -140,9 +190,20 @@ def target_long_edge_px(total_images: int, *, is_raster: bool = False) -> int:
     are the only information channel. At <=20 images an oversized image is
     downscaled rather than rejected, so the full Opus native long edge
     (``TARGET_LONG_EDGE_PX_FEW_IMAGES``) is safe.
+
+    ``DRAWING_ANALYZER_TILE_TARGET_PX`` overrides the *vector* target only (see
+    :func:`_vector_target_override`). The raster target is deliberately not
+    overridable: on a sheet with no text layer the pixels are the only channel,
+    so trading resolution there trades data, and keeping it fixed also preserves
+    ``raster >= vector``, which ``pipeline.estimate_image_tokens_for_set`` relies
+    on to stay a true upper bound. The <=20-image target is likewise untouched —
+    that regime is not where the payload problem lives.
     """
     if total_images > MANY_IMAGES_THRESHOLD:
-        return TARGET_LONG_EDGE_PX_RASTER if is_raster else TARGET_LONG_EDGE_PX_DEFAULT
+        if is_raster:
+            return TARGET_LONG_EDGE_PX_RASTER
+        override = _vector_target_override()
+        return TARGET_LONG_EDGE_PX_DEFAULT if override is None else override
     return TARGET_LONG_EDGE_PX_FEW_IMAGES
 
 

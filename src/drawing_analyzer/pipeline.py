@@ -22,7 +22,11 @@ from pathlib import Path
 import threading
 from typing import Any, Callable
 
-from .core.api_config import REVIEW_MODEL_DEFAULT
+from .core.api_config import (
+    PHASE_INVESTIGATION,
+    REVIEW_MODEL_DEFAULT,
+    cache_write_ttl_for,
+)
 from .core.tokenizer import estimate_image_tokens
 from .diagnostics import get_logger
 from . import tiling
@@ -167,6 +171,7 @@ def _record_usage(
     parent: "str | None" = None,
     attempt: int = 1,
     request_id: str = "",
+    cache_write_ttl: "str | None" = None,
 ) -> UsageRecord:
     """Build a priced :class:`UsageRecord` and append it to the run's usage ledger.
 
@@ -174,6 +179,12 @@ def _record_usage(
     so no stage can overwrite another's counters. ``estimated_cost`` is priced at
     the record's own rate class (batch vs real-time, cache read/write, tool uses);
     a ``CACHE`` transport passes zero token counts, so its token cost is zero.
+
+    ``cache_write_ttl`` names the TTL the stage's cache breakpoint requested, so
+    a 1-hour write is priced at 2x base input rather than the 5-minute 1.25x.
+    Stages that attach a plain ``{"type": "ephemeral"}`` breakpoint (digest,
+    critique) leave it ``None``; stages that route through
+    ``api_config``'s breakpoint helpers pass ``cache_write_ttl_for(phase)``.
     """
     from .core.pricing import usage_record_cost
 
@@ -185,6 +196,7 @@ def _record_usage(
         cache_write_tokens=cache_write_tokens,
         billable_tool_uses=billable_tool_uses,
         batch=(transport == "BATCH"),
+        cache_write_ttl=cache_write_ttl,
     )
     return run_usage.add(
         UsageRecord(
@@ -205,6 +217,7 @@ def _record_usage(
             billing_rate_class=transport.lower(),
             request_or_custom_id=request_id,
             estimated_cost=cost,
+            cache_write_ttl=cache_write_ttl,
         )
     )
 
@@ -579,6 +592,7 @@ def _rendered_stream(
     on_page_error: "Any" = None,
     tile_sink: "Any" = None,
     render_sink: "Any" = None,
+    journal: "Any" = None,
 ) -> "Any":
     """Stream :class:`RenderedSheet`, capturing each sheet's lightweight geometry.
 
@@ -594,11 +608,30 @@ def _rendered_stream(
     for cached sheets is captured separately during the pre-scan, so when ``only``
     is in play the caller passes a :class:`_GeometryOmissionSink` (which merges
     render-time facts into the prescan records instead of appending duplicates).
+
+    ``journal`` (optional) receives one ``SHEET_RENDERED`` event per sheet
+    carrying its render telemetry — image count, PNG byte spread, long edge.
+    This is the only point where the PNG bytes exist on both transports, and
+    the numbers are what a near-blank byte threshold (or a render-target change)
+    has to be chosen against. Emission is best-effort: telemetry must never sink
+    a render (I-3).
     """
     for rendered in iter_rendered_sheets(
         paths, rows=rows, cols=cols, overlap_frac=overlap_frac, only=only,
         on_page_error=on_page_error,
     ):
+        if journal is not None:
+            try:
+                journal.emit(
+                    "SHEET_RENDERED",
+                    sheet=rendered.ref.display_label,
+                    **rendered.render_telemetry().to_dict(),
+                )
+            except Exception as exc:  # noqa: BLE001 - observability only (I-3)
+                _log.debug(
+                    "render telemetry emit failed for %s: %s",
+                    rendered.ref.display_label, exc,
+                )
         if geometry_sink is not None:
             geometry_sink.append(SheetGeometry.from_rendered(rendered))
         if tile_sink is not None:
@@ -664,6 +697,7 @@ def _digest_sheets_concurrent(
     on_page_error: "Any" = None,
     tile_sink: "Any" = None,
     render_sink: "Any" = None,
+    journal: "Any" = None,
 ) -> list[SheetDigest]:
     """Real-time path: render sequentially, digest on a bounded thread pool.
 
@@ -707,7 +741,7 @@ def _digest_sheets_concurrent(
             _rendered_stream(
                 paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
                 geometry_sink=geometry_sink, only=only, on_page_error=on_page_error,
-                tile_sink=tile_sink, render_sink=render_sink,
+                tile_sink=tile_sink, render_sink=render_sink, journal=journal,
             )
         ):
             in_flight.add(executor.submit(_run, index, rendered))
@@ -742,6 +776,7 @@ def _digest_sheets_via_batch(
     only: "set[tuple[str, int]] | None" = None,
     tile_sink: "Any" = None,
     reusable_upload_sink: "list[Any] | None" = None,
+    journal: "Any" = None,
 ) -> list[SheetDigest]:
     """Batch path: render-stream → Files-API upload → one Message Batch.
 
@@ -774,6 +809,7 @@ def _digest_sheets_via_batch(
         _rendered_stream(
             paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
             geometry_sink=geometry_sink, only=only, tile_sink=tile_sink,
+            journal=journal,
         ),
         client=client,
         model=model,
@@ -1875,6 +1911,10 @@ def _run_qc_stages(
                             output_tokens=rec.output_tokens,
                             cache_read_tokens=rec.cache_read_tokens,
                             cache_write_tokens=rec.cache_write_tokens,
+                            # The investigation loop caches its system prompt and
+                            # tool list through api_config's breakpoint helpers,
+                            # which request a 1-hour TTL — a 2x write, not 1.25x.
+                            cache_write_ttl=cache_write_ttl_for(PHASE_INVESTIGATION),
                             terminal_status=(
                                 "COMPLETE" if rec.outcome != "error" else "FAILED"
                             ),
@@ -2745,7 +2785,7 @@ def extract_drawing_context(
                 on_status=on_status, focus=focus or None,
                 specs_text=specs_text or None,
                 geometry_sink=geometry_sink, only=only, tile_sink=tile_sink,
-                reusable_upload_sink=reusable_uploads,
+                reusable_upload_sink=reusable_uploads, journal=journal,
             )
         else:
             miss_sheets = _digest_sheets_concurrent(
@@ -2756,6 +2796,7 @@ def extract_drawing_context(
                 focus=focus or None, specs_text=specs_text or None,
                 geometry_sink=geometry_sink, only=only, tile_sink=tile_sink,
                 on_page_error=_on_page_error, render_sink=render_sink,
+                journal=journal,
             )
 
     # Store each miss's result under its level-1 key too (store-under-both), so a
