@@ -213,9 +213,25 @@ def _usage_summary(ctx) -> dict:
         fam: {"input": g["input_tokens"], "output": g["output_tokens"]}
         for fam, g in (ru.by_family() if ru else {}).items()
     }
+    # Per-model rollup as well as per-family. Without it two reports from
+    # different model configurations are indistinguishable — the family names
+    # are the same in both — which makes the report useless for the one
+    # comparison it would most obviously be used for.
+    models = {
+        m: {
+            "input": g["input_tokens"],
+            "output": g["output_tokens"],
+            "calls": g["calls"],
+            "estimated_cost_usd": (
+                None if g["estimated_cost"] is None else float(g["estimated_cost"])
+            ),
+        }
+        for m, g in (ru.by_model() if ru else {}).items()
+    }
     cost = ctx.total_estimated_cost
     return {
         "families": fams,
+        "models": models,
         "total_input_tokens": ctx.total_input_tokens,
         "total_output_tokens": ctx.total_output_tokens,
         "cache_hits": ru.cache_hits if ru else 0,
@@ -393,14 +409,36 @@ def _live_scenarios(pdfs: list[Path], repeats: int, exhaustive: bool) -> list[di
 # --------------------------------------------------------------------------- #
 
 
+def _stage_model_configuration() -> dict:
+    """Which model every stage will run on, resolved the way the pipeline does.
+
+    Recorded in the report because it is the variable most likely to differ
+    between two runs a reader is comparing, and it was previously absent
+    entirely: ``collect_environment()`` was called with no model at all, and the
+    usage rollup was keyed only by stage family. Two reports produced under
+    different ``DRAWING_ANALYZER_*_MODEL`` settings were byte-comparable and
+    said nothing about why their costs differed.
+    """
+    from drawing_analyzer.core.api_config import REVIEW_MODEL_DEFAULT
+    from drawing_analyzer.cost import resolve_stage_models
+
+    return {
+        k: v for k, v in vars(resolve_stage_models(model=REVIEW_MODEL_DEFAULT)).items()
+    }
+
+
 def _environment() -> dict:
     from drawing_analyzer.run_journal import collect_environment
 
-    env = dict(collect_environment())
+    models = _stage_model_configuration()
+    # ``collect_environment`` takes **extra; the pipeline already passes model
+    # identity that way, and the benchmark had simply never done so.
+    env = dict(collect_environment(model=models.get("digest", "")))
     env.update({
         "python": platform.python_version(),
         "platform": platform.platform(),
         "machine": platform.machine(),
+        "stage_models": models,
     })
     return env
 

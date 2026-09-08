@@ -11,7 +11,7 @@ import math
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 @dataclass(frozen=True)
@@ -299,6 +299,96 @@ class RenderedSheet:
         sizes = [(self.overview.width_px, self.overview.height_px)]
         sizes.extend((t.width_px, t.height_px) for t in self.tiles)
         return sizes
+
+    def render_telemetry(self) -> "RenderTelemetry":
+        """Summarize what this sheet actually costs to send.
+
+        Derived from the bytes already in hand, so it adds no rendering work —
+        this is the one moment the PNG bytes exist on both transports (the batch
+        path discards the rendered sheet right after upload).
+
+        The point of recording it is the near-blank suppression threshold, which
+        is an absolute PNG byte count picked without data
+        (``DRAWING_ANALYZER_NEAR_BLANK_MAX_BYTES``, default 3072). Choosing it
+        honestly needs the byte distribution of real sheets, and nothing logged
+        tile sizes before: the render path logged only the suppressed-tile count,
+        and byte sizes appeared solely on Files-API retry paths.
+
+        Tiles dropped by the strict pixel-uniform check are NOT represented in
+        ``tile_png_bytes``: that check runs on the Pixmap before ``tobytes("png")``,
+        so those tiles have no byte size at all. Counting them as zero would
+        skew the very histogram this exists to produce, so they are reported
+        only as ``tiles_omitted``.
+        """
+        tile_bytes = [len(t.png_bytes) for t in self.tiles]
+        overview_bytes = len(self.overview.png_bytes)
+        long_edges = [max(w, h) for w, h in self.image_sizes]
+        return RenderTelemetry(
+            images_sent=1 + len(self.tiles),
+            tiles_omitted=len(self.omitted_tiles),
+            overview_png_bytes=overview_bytes,
+            tile_png_bytes=tile_bytes,
+            png_bytes_total=overview_bytes + sum(tile_bytes),
+            max_long_edge_px=max(long_edges) if long_edges else 0,
+            is_raster=self.is_raster,
+        )
+
+
+@dataclass(frozen=True)
+class RenderTelemetry:
+    """What one rendered sheet costs to send: image count, sizes, PNG bytes.
+
+    Built by :meth:`RenderedSheet.render_telemetry`. Pure data — no PyMuPDF, no
+    I/O — so it can be journalled, asserted on, and aggregated across a run
+    without holding the images themselves.
+
+    ``tile_png_bytes`` is in grid order and covers only the tiles actually sent;
+    see the method's docstring for why pixel-uniform suppressed tiles are absent
+    rather than zero.
+    """
+
+    images_sent: int
+    tiles_omitted: int
+    overview_png_bytes: int
+    tile_png_bytes: list[int]
+    png_bytes_total: int
+    max_long_edge_px: int
+    is_raster: bool = False
+
+    @property
+    def tile_byte_spread(self) -> "tuple[int, int, int] | None":
+        """``(min, median, max)`` tile PNG bytes, or ``None`` when no tiles were sent.
+
+        The median (rather than the mean) because the distribution this exists to
+        describe is heavily right-skewed: a handful of dense title-block and
+        schedule tiles sit orders of magnitude above a mostly-empty plan tile,
+        and a mean would sit above nearly every tile in the set — useless for
+        picking a "this tile is nearly empty" threshold.
+        """
+        if not self.tile_png_bytes:
+            return None
+        ordered = sorted(self.tile_png_bytes)
+        return ordered[0], ordered[len(ordered) // 2], ordered[-1]
+
+    def to_dict(self) -> dict:
+        """Journal-friendly summary. Omits the per-tile list (bounded line width).
+
+        The spread is what a reader needs to choose a byte threshold; the full
+        per-tile list stays available on the object for a caller that wants to
+        build a real histogram.
+        """
+        spread = self.tile_byte_spread
+        return {
+            "images_sent": self.images_sent,
+            "tiles_omitted": self.tiles_omitted,
+            "png_bytes_total": self.png_bytes_total,
+            "overview_png_bytes": self.overview_png_bytes,
+            "tile_bytes_min": None if spread is None else spread[0],
+            "tile_bytes_median": None if spread is None else spread[1],
+            "tile_bytes_max": None if spread is None else spread[2],
+            "max_long_edge_px": self.max_long_edge_px,
+            "layer": "raster" if self.is_raster else "vector",
+        }
 
 
 @dataclass
@@ -2051,18 +2141,19 @@ class RunUsage:
         priced = [r.estimated_cost for r in self.records if r.estimated_cost is not None]
         return sum(priced, Decimal("0")) if priced else None
 
-    def by_family(self) -> "dict[str, dict]":
-        """Per-``stage_family`` rollup: input/output tokens, cost, call + cache-hit counts.
+    def _rollup(self, key: "Callable[[UsageRecord], str]") -> "dict[str, dict]":
+        """Group records by ``key``: tokens, cost, call + cache-hit counts.
 
-        A family's ``estimated_cost`` is ``None`` when any of its records is billable
-        but unpriced (same rule as the grand total) so a partial figure is never
-        shown as if it were the family's full cost.
+        A group's ``estimated_cost`` is ``None`` when any of its records is
+        billable but unpriced (same rule as the grand total) so a partial figure
+        is never shown as if it were the group's full cost.
         """
         out: dict[str, dict] = {}
         unpriced: set[str] = set()
         for r in self.records:
+            k = key(r)
             g = out.setdefault(
-                r.stage_family,
+                k,
                 {"input_tokens": 0, "output_tokens": 0, "calls": 0, "cache_hits": 0,
                  "estimated_cost": None},
             )
@@ -2072,12 +2163,33 @@ class RunUsage:
             if r.cache_hit:
                 g["cache_hits"] += 1
             if self._billable_but_unpriced(r):
-                unpriced.add(r.stage_family)
+                unpriced.add(k)
             elif r.estimated_cost is not None:
                 g["estimated_cost"] = (g["estimated_cost"] or Decimal("0")) + r.estimated_cost
-        for fam in unpriced:
-            out[fam]["estimated_cost"] = None
+        for k in unpriced:
+            out[k]["estimated_cost"] = None
         return out
+
+    def by_family(self) -> "dict[str, dict]":
+        """Per-``stage_family`` rollup: input/output tokens, cost, call + cache-hit counts."""
+        return self._rollup(lambda r: r.stage_family)
+
+    def by_model(self) -> "dict[str, dict]":
+        """Per-``model`` rollup, same shape as :meth:`by_family`.
+
+        Every record already carries the model its stage resolved to, and that
+        survives into ``run_manifest.json`` — but nothing aggregated it, so a run's
+        spend could not be attributed to a model without re-reading the raw
+        records. That is exactly the axis a model-routing comparison needs: two
+        runs differing only in ``DRAWING_ANALYZER_CRITIQUE_MODEL`` are otherwise
+        indistinguishable in a family rollup, because the family names are the
+        same in both.
+
+        A record with no model (a ``CACHE``-served hit recorded before the model
+        was known, say) groups under ``""`` rather than being dropped, so the
+        rollup's call count still reconciles against ``len(records)``.
+        """
+        return self._rollup(lambda r: r.model or "")
 
     def to_dict(self) -> dict:
         cost = self.total_estimated_cost
@@ -2092,6 +2204,15 @@ class RunUsage:
                 fam: {**g, "estimated_cost": None if g["estimated_cost"] is None
                       else str(g["estimated_cost"])}
                 for fam, g in self.by_family().items()
+            },
+            # Same rollup keyed by model. The per-record model was already in
+            # ``records`` below, but a reader comparing two runs had to
+            # re-aggregate it by hand; a family rollup alone cannot tell two
+            # model configurations apart, since the family names are identical.
+            "by_model": {
+                m: {**g, "estimated_cost": None if g["estimated_cost"] is None
+                    else str(g["estimated_cost"])}
+                for m, g in self.by_model().items()
             },
             "records": [r.to_dict() for r in self.records],
         }

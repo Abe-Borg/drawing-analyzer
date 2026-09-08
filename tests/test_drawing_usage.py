@@ -33,11 +33,15 @@ _OPUS = "claude-opus-5"
 
 
 def _rec(family, instance, i, o, **kw):
+    # ``model`` defaults to Opus but is overridable, so a test can build the
+    # mixed-model ledger a real run produces (verification on Sonnet, the prose
+    # harvest on Haiku, ...) rather than a single-model fiction.
+    model = kw.pop("model", _OPUS)
     return UsageRecord(
-        stage_family=family, stage_instance=instance, model=_OPUS,
+        stage_family=family, stage_instance=instance, model=model,
         input_tokens=i, output_tokens=o,
         estimated_cost=usage_record_cost(
-            model=_OPUS, input_tokens=i, output_tokens=o,
+            model=model, input_tokens=i, output_tokens=o,
             billable_tool_uses=kw.get("billable_tool_uses"),
             batch=(kw.get("transport") == "BATCH"),
         ),
@@ -100,6 +104,76 @@ def test_run_usage_to_dict_round_trips_totals():
     d = ru.to_dict()
     assert d["total_input_tokens"] == 500 and d["total_output_tokens"] == 80
     assert "digest" in d["by_family"] and len(d["records"]) == 1
+    assert _OPUS in d["by_model"]
+
+
+# --------------------------------------------------------------------------- #
+# Per-model rollup
+# --------------------------------------------------------------------------- #
+
+
+def test_by_model_separates_stages_that_share_a_family_name():
+    """The axis a model-routing comparison needs.
+
+    Two runs differing only in ``DRAWING_ANALYZER_CRITIQUE_MODEL`` are
+    indistinguishable in a family rollup — the family names are identical in
+    both — so the per-record model had to be aggregated somewhere.
+    """
+    sonnet = "claude-sonnet-5"
+    ru = RunUsage()
+    ru.add(_rec("digest", "digest_1", 1000, 100))                    # Opus
+    ru.add(_rec("critique", "critique_1", 2000, 200, model=sonnet))
+    ru.add(_rec("critique", "critique_2", 2000, 200, model=sonnet))
+
+    by_model = ru.by_model()
+    assert set(by_model) == {_OPUS, sonnet}
+    assert by_model[_OPUS]["input_tokens"] == 1000
+    assert by_model[_OPUS]["calls"] == 1
+    assert by_model[sonnet]["input_tokens"] == 4000
+    assert by_model[sonnet]["calls"] == 2
+    # Sonnet 5 input is $2/MTok against Opus 5's $5, so 4x the tokens still
+    # costs less than 2x here — the whole point of being able to see this.
+    assert by_model[sonnet]["estimated_cost"] < by_model[_OPUS]["estimated_cost"] * 3
+
+
+def test_by_model_and_by_family_agree_on_call_count():
+    """Both rollups partition the same records — neither may drop any."""
+    ru = RunUsage()
+    ru.add(_rec("digest", "digest_1", 100, 10))
+    ru.add(_rec("critique", "critique_1", 200, 20, model="claude-sonnet-5"))
+    ru.add(_rec("verify", "verify_1", 50, 5, model="claude-sonnet-5"))
+
+    fam_calls = sum(g["calls"] for g in ru.by_family().values())
+    model_calls = sum(g["calls"] for g in ru.by_model().values())
+    assert fam_calls == model_calls == len(ru.records) == 3
+
+
+def test_by_model_groups_a_modelless_record_rather_than_dropping_it():
+    """A record with no model must still be counted, or the rollup won't reconcile."""
+    ru = RunUsage()
+    ru.add(_rec("digest", "digest_1", 100, 10))
+    ru.add(UsageRecord(
+        stage_family="digest", stage_instance="digest_2", model="",
+        transport="CACHE", cache_hit=True, estimated_cost=Decimal("0"),
+    ))
+    by_model = ru.by_model()
+    assert "" in by_model
+    assert by_model[""]["calls"] == 1 and by_model[""]["cache_hits"] == 1
+    assert sum(g["calls"] for g in by_model.values()) == len(ru.records)
+
+
+def test_by_model_inherits_the_unpriced_rule():
+    """An unpriced billable record makes its model's cost None, not a partial sum."""
+    ru = RunUsage()
+    ru.add(_rec("digest", "digest_1", 500, 80))
+    ru.add(UsageRecord(
+        stage_family="critique", stage_instance="critique_1",
+        model="some-new-unpriced-model", input_tokens=300, output_tokens=20,
+        estimated_cost=None,
+    ))
+    by_model = ru.by_model()
+    assert by_model["some-new-unpriced-model"]["estimated_cost"] is None
+    assert by_model[_OPUS]["estimated_cost"] is not None
 
 
 def test_total_is_none_when_a_billable_record_is_unpriced():

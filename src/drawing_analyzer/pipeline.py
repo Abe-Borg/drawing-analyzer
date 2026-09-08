@@ -592,6 +592,7 @@ def _rendered_stream(
     on_page_error: "Any" = None,
     tile_sink: "Any" = None,
     render_sink: "Any" = None,
+    journal: "Any" = None,
 ) -> "Any":
     """Stream :class:`RenderedSheet`, capturing each sheet's lightweight geometry.
 
@@ -607,11 +608,30 @@ def _rendered_stream(
     for cached sheets is captured separately during the pre-scan, so when ``only``
     is in play the caller passes a :class:`_GeometryOmissionSink` (which merges
     render-time facts into the prescan records instead of appending duplicates).
+
+    ``journal`` (optional) receives one ``SHEET_RENDERED`` event per sheet
+    carrying its render telemetry — image count, PNG byte spread, long edge.
+    This is the only point where the PNG bytes exist on both transports, and
+    the numbers are what a near-blank byte threshold (or a render-target change)
+    has to be chosen against. Emission is best-effort: telemetry must never sink
+    a render (I-3).
     """
     for rendered in iter_rendered_sheets(
         paths, rows=rows, cols=cols, overlap_frac=overlap_frac, only=only,
         on_page_error=on_page_error,
     ):
+        if journal is not None:
+            try:
+                journal.emit(
+                    "SHEET_RENDERED",
+                    sheet=rendered.ref.display_label,
+                    **rendered.render_telemetry().to_dict(),
+                )
+            except Exception as exc:  # noqa: BLE001 - observability only (I-3)
+                _log.debug(
+                    "render telemetry emit failed for %s: %s",
+                    rendered.ref.display_label, exc,
+                )
         if geometry_sink is not None:
             geometry_sink.append(SheetGeometry.from_rendered(rendered))
         if tile_sink is not None:
@@ -677,6 +697,7 @@ def _digest_sheets_concurrent(
     on_page_error: "Any" = None,
     tile_sink: "Any" = None,
     render_sink: "Any" = None,
+    journal: "Any" = None,
 ) -> list[SheetDigest]:
     """Real-time path: render sequentially, digest on a bounded thread pool.
 
@@ -720,7 +741,7 @@ def _digest_sheets_concurrent(
             _rendered_stream(
                 paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
                 geometry_sink=geometry_sink, only=only, on_page_error=on_page_error,
-                tile_sink=tile_sink, render_sink=render_sink,
+                tile_sink=tile_sink, render_sink=render_sink, journal=journal,
             )
         ):
             in_flight.add(executor.submit(_run, index, rendered))
@@ -755,6 +776,7 @@ def _digest_sheets_via_batch(
     only: "set[tuple[str, int]] | None" = None,
     tile_sink: "Any" = None,
     reusable_upload_sink: "list[Any] | None" = None,
+    journal: "Any" = None,
 ) -> list[SheetDigest]:
     """Batch path: render-stream → Files-API upload → one Message Batch.
 
@@ -787,6 +809,7 @@ def _digest_sheets_via_batch(
         _rendered_stream(
             paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
             geometry_sink=geometry_sink, only=only, tile_sink=tile_sink,
+            journal=journal,
         ),
         client=client,
         model=model,
@@ -2754,7 +2777,7 @@ def extract_drawing_context(
                 on_status=on_status, focus=focus or None,
                 specs_text=specs_text or None,
                 geometry_sink=geometry_sink, only=only, tile_sink=tile_sink,
-                reusable_upload_sink=reusable_uploads,
+                reusable_upload_sink=reusable_uploads, journal=journal,
             )
         else:
             miss_sheets = _digest_sheets_concurrent(
@@ -2765,6 +2788,7 @@ def extract_drawing_context(
                 focus=focus or None, specs_text=specs_text or None,
                 geometry_sink=geometry_sink, only=only, tile_sink=tile_sink,
                 on_page_error=_on_page_error, render_sink=render_sink,
+                journal=journal,
             )
 
     # Store each miss's result under its level-1 key too (store-under-both), so a
