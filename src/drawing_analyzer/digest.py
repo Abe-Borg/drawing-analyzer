@@ -20,6 +20,7 @@ from typing import Any, Callable
 
 from .core.api_config import (
     REVIEW_MODEL_DEFAULT,
+    call_with_refusal_fallback,
     model_supports_adaptive_thinking,
     model_supports_effort,
 )
@@ -706,9 +707,16 @@ def stream_message(client: Any, kwargs: dict[str, Any]) -> Any:
     now lead the content list — are unchanged. This mirrors the batch rescue
     path in :mod:`drawing_analyzer.batch_digest`, which has streamed for exactly
     this reason since the empty-at-``max_tokens`` retry started raising caps.
+
+    Opus 5 requests additionally opt into the server-side refusal fallback,
+    self-healing if the platform rejects it (:func:`call_with_refusal_fallback`)
+    — a plain read of ``kwargs["model"]``, so every caller (digest, critique,
+    review plan, synthesis, focus, the batch rescue) gets it for free without
+    touching its own request-building code.
     """
-    with client.messages.stream(**kwargs) as stream:
-        return stream.get_final_message()
+    return call_with_refusal_fallback(
+        client, kwargs, model=str(kwargs.get("model", "")), method="stream"
+    )
 
 
 def _server_web_search_requests(resp: Any) -> int | None:

@@ -1,8 +1,10 @@
 """Batch-mode drawing digest tests (Files-API upload + Message Batches).
 
-Hermetic: a fake client provides ``.beta.files.upload/delete``,
-``.beta.messages.batches.create``, and ``.messages.batches.retrieve/results``,
-so the whole submit → poll → collect path runs without PyMuPDF or the network.
+Hermetic: a fake client provides ``.files.upload/delete``,
+``.messages.batches.create``, and ``.messages.batches.retrieve/results`` (the
+Files API and Message Batches are GA, so production calls the stable
+namespace; ``.beta.*`` mirrors are kept on the fake only for back-compat), so
+the whole submit → poll → collect path runs without PyMuPDF or the network.
 One end-to-end pipeline test renders a synthetic PDF and is skipped when PyMuPDF
 is absent.
 """
@@ -17,7 +19,7 @@ from drawing_analyzer import batch_digest, diagnostics
 from drawing_analyzer.batch_digest import collect_drawing_batch, submit_drawing_batch
 from drawing_analyzer.digest import SheetDigest
 from drawing_analyzer.digest_cache import DigestCache
-from drawing_analyzer.file_upload import FILES_API_BETA, upload_sheet_images
+from drawing_analyzer.file_upload import upload_sheet_images
 from drawing_analyzer.models import ImageTile, RenderedSheet, SheetRef
 from tests.fixtures.fake_anthropic import (
     BetaClientMixin,
@@ -51,6 +53,44 @@ def _sequential_uploads_by_default(monkeypatch):
 class _Obj:
     def __init__(self, **kw):
         self.__dict__.update(kw)
+
+
+def _rescue_params(model: str) -> dict:
+    """Minimal request params shaped like a real batch item's: they must carry
+    a ``file_id``-referenced image block so the fake's ``messages.stream``
+    dispatcher (see :func:`_references_file_id`) recognizes a direct-call
+    rescue rather than the inline-base64 fallback."""
+    return {
+        "model": model,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "file", "file_id": "file_0"}}
+                ],
+            }
+        ],
+    }
+
+
+def _without_fallback_keys(params: dict) -> dict:
+    """Drop the Opus 5 refusal-fallback keys ``stream_message`` attaches, so a
+    rescue call's params can be compared against the original request body."""
+    return {k: v for k, v in params.items() if k not in ("betas", "fallbacks")}
+
+
+def _references_file_id(kwargs: dict) -> bool:
+    """True when a ``messages.create``/``.stream`` call carries a ``file_id``-
+    referenced image block (the batch/rescue transport), as opposed to inline
+    base64 (the real-time/inline-fallback transport)."""
+    for message in kwargs.get("messages", []):
+        for block in message.get("content", []) or []:
+            if not isinstance(block, dict):
+                continue
+            source = block.get("source")
+            if isinstance(source, dict) and source.get("type") == "file":
+                return True
+    return False
 
 
 class _FakeFiles:
@@ -110,7 +150,7 @@ class _FakeBatches:
     def create(self, *, requests, betas=None):
         if getattr(self._c, "create_raises", None) is not None:
             raise self._c.create_raises
-        self._c.create_calls.append({"requests": list(requests), "betas": betas})
+        self._c.create_calls.append({"requests": list(requests)})
         self._c.submitted = list(requests)
         return _Obj(id="batch_abc")
 
@@ -163,23 +203,39 @@ class _FakeClient:
         self.rescue_calls: list[dict] = []
         self.files = _FakeFiles()
         batches = _FakeBatches(self)
+        # Files API + Message Batches are GA: production calls the stable
+        # ``.files`` / ``.messages.batches`` / ``.messages.stream`` namespace
+        # (no ``betas=``) for everything in this module. ``.beta.*`` is kept
+        # only as a back-compat mirror onto the same fakes.
         self.beta = _Obj(
             files=self.files,
-            messages=_Obj(batches=batches, stream=self._beta_messages_stream),
+            messages=_Obj(batches=batches, stream=self._messages_stream),
         )
         self.messages = _Obj(
             batches=batches,
             create=self._messages_create,
-            stream=lambda **kw: FinalMessageStream(self._messages_create(**kw)),
+            stream=self._messages_stream,
         )
 
     def _messages_create(self, **kwargs):
         self.messages_create_calls.append(kwargs)
         return self.inline_responder(kwargs)
 
-    def _beta_messages_stream(self, *, betas=None, **kwargs):
-        self.rescue_calls.append({"betas": betas, "params": kwargs})
-        return _FakeStreamManager(self.rescue_responder, kwargs)
+    def _messages_stream(self, *, betas=None, **kwargs):
+        """Dispatch ``client.messages.stream(...)`` by what the call carries.
+
+        Both the direct-call rescue (batch item params, ``file_id``-referenced
+        images) and the inline-base64 fallback (:func:`digest_sheet`, via
+        :func:`drawing_analyzer.digest.stream_message`) now go through this one
+        stable method — the Files-API beta namespace they used to split across
+        is gone. The fake tells them apart the same way the two transports
+        actually differ: a rescue call's content still references an uploaded
+        ``file_id``; an inline call embeds base64 image bytes instead.
+        """
+        if _references_file_id(kwargs):
+            self.rescue_calls.append({"betas": betas, "params": kwargs})
+            return _FakeStreamManager(self.rescue_responder, kwargs)
+        return FinalMessageStream(self._messages_create(**kwargs))
 
 
 class _FakeStreamManager:
@@ -601,9 +657,8 @@ def test_batch_happy_path_parses_all_sheets():
     assert digests[0].text == "digest body for sheet__0"
     assert digests[0].input_tokens == 100 and digests[0].output_tokens == 20
     assert digests[0].image_token_estimate > 0
-    # One batch, created on the beta namespace with the Files-API beta header.
+    # One batch, created on the stable (GA) Message Batches namespace.
     assert len(client.create_calls) == 1
-    assert client.create_calls[0]["betas"] == [FILES_API_BETA]
     # 3 sheets × 5 images uploaded, all deleted after a successful collect.
     assert len(client.files.uploaded_ids) == 15
     assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids)
@@ -1089,7 +1144,6 @@ def test_collect_resubmits_server_errored_items_in_followup_batch():
         if r["custom_id"] == "sheet__0"
     )
     assert retry_reqs[0]["params"] == first_params
-    assert client.create_calls[1]["betas"] == [FILES_API_BETA]
     # Every uploaded image was still released exactly once, after the retry.
     assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids)
 
@@ -1218,10 +1272,14 @@ def test_collect_rescues_batch_backend_outage_via_direct_calls():
 
     assert all(d.ok for d in digests)
     assert len(client.create_calls) == 1  # systemic failure: no doomed follow-up
-    assert [c["params"] for c in client.rescue_calls] == [
+    # Byte-same content as the original batch item, plus the Opus 5
+    # refusal-fallback params ``stream_message`` attaches on top.
+    assert [_without_fallback_keys(c["params"]) for c in client.rescue_calls] == [
         r["params"] for r in client.create_calls[0]["requests"]
     ]
-    assert all(c["betas"] == [FILES_API_BETA] for c in client.rescue_calls)
+    assert all(
+        c["params"].get("fallbacks") == "default" for c in client.rescue_calls
+    )
     # The rescued digests carry the direct calls' usage, and the files were
     # still released exactly once, after the rescue.
     assert all(d.input_tokens == 90 and d.output_tokens == 25 for d in digests)
@@ -1519,7 +1577,7 @@ def test_rescue_respects_exhausted_budget():
     ref = _make_sheet(0).ref
     slot = batch_digest._Slot(
         index=0, ref=ref, image_estimate=5, custom_id="sheet__0",
-        params={"model": OPUS},
+        params=_rescue_params(OPUS),
     )
     failed = batch_digest.SheetDigest(
         ref=ref, text="", error="api_error: Internal Server Error"
@@ -1549,7 +1607,7 @@ def test_rescue_stops_instead_of_sleeping_past_the_budget():
     slots = [
         batch_digest._Slot(
             index=i, ref=ref, image_estimate=5, custom_id=f"sheet__{i}",
-            params={"model": OPUS},
+            params=_rescue_params(OPUS),
         )
         for i, ref in enumerate([ref0, ref1])
     ]

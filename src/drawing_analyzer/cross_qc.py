@@ -47,7 +47,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .core.api_config import REVIEW_MODEL_DEFAULT, model_supports_adaptive_thinking
+from .core.api_config import (
+    REVIEW_MODEL_DEFAULT,
+    call_with_refusal_fallback,
+    model_supports_adaptive_thinking,
+)
 from .diagnostics import get_logger
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
@@ -694,7 +698,7 @@ def _call(
     attempt = 0
     while True:
         try:
-            resp = client.messages.create(**kwargs)
+            resp = call_with_refusal_fallback(client, kwargs, model=model, method="create")
             break
         except Exception as exc:  # noqa: BLE001 - report, don't sink the run
             if _is_transient_error(exc) and attempt < max_retries:
