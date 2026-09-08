@@ -80,7 +80,7 @@ from .pipeline import (
     extract_drawing_context,
 )
 
-__version__ = "1.3.0"
+__version__ = "1.3.0rc1"
 
 __all__ = [
     "AdoptedCode",
