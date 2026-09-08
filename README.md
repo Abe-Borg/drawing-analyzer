@@ -1440,7 +1440,10 @@ when the recorded acceptance evidence says so (Phase 27, §19.9). The pieces:
   byte-compile, import isolation, the full hermetic suite (including the trust
   gauntlet), the secret scan, the browser exploit suite (when Playwright is
   installed), and a wheel/sdist build + clean-venv install smoke — and prints a
-  PASS/FAIL table. CI runs the same gates per push.
+  PASS/FAIL table. CI runs the same gates per push. Every pytest gate deselects
+  the `network` marker in the child it spawns, so the run stays hermetic even
+  on a machine with a real `ANTHROPIC_API_KEY` exported — the billable canary
+  below only ever runs when you ask for it by name.
 - **Live API canary (opt-in, billable):**
   `ANTHROPIC_API_KEY=... python -m pytest -m network -rs -s tests/test_live_api_canary.py`
   verifies the live request schemas, critique structured-output compliance, the

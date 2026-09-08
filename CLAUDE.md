@@ -10,14 +10,19 @@ python -m pytest             # full suite — hermetic: no API key, no network
 python -m pytest tests/test_drawing_ledger.py                # one file
 python -m pytest tests/test_drawing_ledger.py::test_name     # one test
 drawing-analyzer             # launch the GUI   (or: python -m drawing_analyzer)
-python scripts/run_acceptance.py   # Phase 27 automated release gates (PASS/FAIL table)
+python scripts/run_acceptance.py   # Phase 27 release gates (PASS/FAIL; hermetic — never the canary)
 ```
 
 Python 3.11+. No linter/formatter is configured (CI runs ruff **correctness
 classes only** — E9/F63/F7/F82). The `network` pytest marker is reserved for
 tests that need real API access (the Phase 27 live canary,
 `tests/test_live_api_canary.py`); everything that runs by default uses the
-fakes in `tests/fixtures/fake_anthropic.py`. The §19.1 trust-gauntlet oracle
+fakes in `tests/fixtures/fake_anthropic.py`. `conftest` skips `network` tests
+only when no real key is set and `pyproject.toml` sets no default exclusion, so
+**any entry point that spawns pytest must deselect the marker itself**:
+`run_acceptance.py` routes every gate through `_pytest_cmd()`, which ANDs
+`not network` into the child's `-m`, and `tests/test_run_acceptance.py` fails if
+a bare `"pytest"` argv literal reappears anywhere else in that script. The §19.1 trust-gauntlet oracle
 set + all-stage scripted client live in `tests/fixtures/gauntlet.py`; release
 docs (Windows/viewer/Excel manual scripts, benchmark record, §19.9 checklist)
 live in `docs/`; `requirements-release.lock` pins release builds.

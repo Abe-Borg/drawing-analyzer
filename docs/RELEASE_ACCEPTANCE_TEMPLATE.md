@@ -34,6 +34,7 @@ the release commit. All must pass.
 - [ ] Dependency license / AGPL-notice audit clean (`scripts/check_licenses.py`).
 - [ ] Wheel/sdist build + twine check + clean-venv install smoke green (packaged profiles present; installed version == `__version__`) — CI `build`.
 - [ ] Branch protection names `test`, `browser-security`, `security-gates`, `build` as required checks (admin console — record who verified).
+- [ ] Acceptance run was hermetic: every pytest gate deselected the `network` marker, so section 1 billed no live canary call (`tests/test_run_acceptance.py` pins this; the run needs no key-stripping wrapper).
 
 ## 2. Live API canary (§19.3 — opt-in, billable)
 
