@@ -19,6 +19,41 @@ ANTHROPIC_API_KEY=... python scripts/benchmark_drawing_analyzer.py \
 
 `--check` turns the mechanical gates below into hard failures (nonzero exit).
 
+### A/B-ing a cost lever against quality
+
+```bash
+# Price both arms first — spends nothing
+python scripts/ab_sweep_drawing_analyzer.py --pdf setA/M-101.pdf \
+    --variant DRAWING_ANALYZER_CRITIQUE_MODEL=claude-sonnet-5 --estimate
+
+# Then run it (billable, both arms cold)
+ANTHROPIC_API_KEY=... python scripts/ab_sweep_drawing_analyzer.py \
+    --pdf setA/M-101.pdf --pdf setA/E-201.pdf \
+    --variant DRAWING_ANALYZER_TILE_TARGET_PX=1240 --out ab_out
+```
+
+The hermetic suite cannot answer whether a cheaper configuration still finds the
+same defects — the §19.1 gauntlet routes canned responses by system-prompt
+identity and never reads the model id, so a model swap changes nothing it
+returns. This harness runs the same set twice, cold on both arms, with one
+variable changed, and reports cost against **three signals that need no ground
+truth**:
+
+| Signal | Regression looks like |
+|---|---|
+| Anchor tier mix (EXACT/FUZZY/TILE/**UNANCHORED**) | UNANCHORED share rises — the documented hallucination signal |
+| Verification verdict mix (VERIFIED/REJECTED/UNCERTAIN) | REJECTED share rises — more false positives |
+| Self-consistency (REPRODUCED/SINGLETON) | REPRODUCED share falls — the two reads agree less |
+
+It also flags the quiet failure: a large drop in **finding count** at a flat
+VERIFIED share, which reads as "cheaper and cleaner" on every other line while
+actually meaning real defects went unseen.
+
+A clean screen is **not an approval** — it means the screen found nothing. One
+run of one set cannot establish that a change is safe. Each arm runs in a
+subprocess because `REVIEW_MODEL_DEFAULT` binds at *import* in
+`core.api_config`, so setting `DRAWING_ANALYZER_MODEL` in-process has no effect.
+
 ## Scenarios (§19.7)
 
 | # | Scenario | Mode | Harness scenario id |
