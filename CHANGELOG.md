@@ -6,7 +6,78 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-09-08
+
 ### Added
+
+- **The run now records what a sheet costs to send.** Each rendered sheet emits
+  a `SHEET_RENDERED` journal event carrying its image count, PNG byte spread
+  (min / median / max) and long edge — captured in `_rendered_stream`, the one
+  point where the PNG bytes exist on both transports, since the batch path
+  discards the rendered sheet immediately after upload. Nothing logged tile
+  sizes before: the render path logged only the count of suppressed tiles, and
+  byte sizes appeared solely on Files-API retry paths. That left the near-blank
+  suppression threshold (`DRAWING_ANALYZER_NEAR_BLANK_MAX_BYTES`, default 3072)
+  a guess with no way to check it against real sheets.
+
+  The spread is a **median**, not a mean: one dense schedule tile among mostly
+  empty plan tiles is the normal shape of a drawing, so a mean sits above nearly
+  every tile and is useless for picking a "nearly empty" threshold. Tiles dropped
+  by the strict pixel-uniform check are reported as a *count*, never as zero
+  bytes — they are discarded before `tobytes("png")` and have no size, and
+  counting them as zero would skew exactly the distribution the telemetry exists
+  to produce. Emission is best-effort: observability never sinks a render (I-3).
+
+- **`DRAWING_ANALYZER_TILE_TARGET_PX` — a render-resolution sweep knob, default
+  unchanged.** Image tokens scale with the *square* of effective resolution, and
+  the tiles ride the digest plus both critique reads, so the vector render target
+  is the highest-leverage single number in the bill. Measured on a real rendered
+  E-size sheet: 1560 px (the default) = 62,479 image tokens, 1400 px = 50,332,
+  1240 px = 39,508 (−37%), 1100 px = 31,085 (−50%).
+
+  Whether a lower target still reads the drawing is a quality question the
+  hermetic fixtures cannot answer, so **the default is unchanged** and this
+  exists only to make a sweep runnable without editing code. Read per call rather
+  than captured at import (a module-level `os.environ.get` would freeze the first
+  value the process saw), and clamped to `[400, 1992]` so no setting can breach
+  the API's hard 2000 px many-image cap — a request over it is *rejected*, not
+  downscaled. The rounding guard is now asserted at every value a sweep can
+  select, not just the two fixed constants. Raster sheets are deliberately not
+  overridable: with no text layer the pixels are the only channel.
+
+- **`scripts/ab_sweep_drawing_analyzer.py` — A/B a cost lever against quality on
+  a real drawing set.** The trust gauntlet routes canned responses by
+  system-prompt identity and never reads the model id, so a model swap changes
+  nothing it returns; it answers "did this break the contract", not "did this
+  hurt findings quality". And a real permit set rarely has a ground-truth finding
+  list.
+
+  Three signals already in the pipeline need no oracle, and the harness reports
+  all three: the **anchor tier mix** (UNANCHORED is the documented hallucination
+  signal), the **verification verdict mix** (a rising REJECTED share is more
+  false positives), and **self-consistency** (the critique already records
+  REPRODUCED / SINGLETON, so the reproduced rate is an agreement score between
+  two independent reads). It also screens for the quiet failure the rates alone
+  miss — a large drop in finding count at a flat VERIFIED share, which reads as
+  "cheaper and cleaner" on every other line while meaning real defects went
+  unseen. A clean screen is reported as *"the screen found nothing"*, never as an
+  approval.
+
+  Each arm runs in a subprocess, which is necessary rather than tidy:
+  `REVIEW_MODEL_DEFAULT` is an `os.environ.get` evaluated at module scope and
+  bound as a second name by fourteen modules, so setting
+  `DRAWING_ANALYZER_MODEL` in-process has no effect. Both arms get a private
+  cache so both run cold; `--estimate` prices them at the transport they will
+  actually run on before anything is spent.
+
+- **`RunUsage.by_model()`**, beside the existing `by_family()` and surfaced into
+  `run_manifest.json`. Every usage record already carried the model its stage
+  resolved to, but nothing aggregated it — and a per-family rollup cannot tell
+  two model configurations apart, because the family names are identical in
+  both. The benchmark harness now also records the resolved stage-model
+  configuration in its environment block; it previously called
+  `collect_environment()` with no model at all, so two reports from different
+  configurations were indistinguishable from their contents.
 
 - **Every real-time Opus 5 call now opts into Anthropic's server-side refusal
   fallback.** Opus 5's elevated safety classifiers can decline a request
@@ -43,6 +114,51 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and `truststore` was added. No other breaking change in the 1.x migration
   guide (Text Completions, `temperature`/`top_p`/`top_k`, `with_raw_response`,
   Bedrock region handling, ...) touches this codebase.
+
+- **The pre-run cost estimate resolves every stage's model, not just
+  verification's.** `estimate_exhaustive_run_cost` priced nine of its eleven
+  components at the single `model` argument, so any stage not on the review
+  model was mis-quoted — on critique, the largest line in the dialog, by 1.67x.
+  A new `resolve_stage_models()` resolves all eleven through the same functions
+  the runtime itself calls (so a `DRAWING_ANALYZER_*_MODEL` override is priced
+  where it will really run), and the confirmation header names each model the
+  run will touch instead of claiming one model does all the work. The resolver
+  is reused by the benchmark and the sweep harness.
+
+### Fixed
+
+- **A 1-hour cache write is priced at 2x base input, not 1.25x.**
+  `core.pricing` carried a single `CACHE_WRITE_MULTIPLIER = 1.25`, which is the
+  *5-minute* rate, while `api_config._cache_control_block` requests
+  `ttl: "1h"`. Every stage reaching that breakpoint — today the investigation
+  loop, via `system_prompt_with_cache` / `tools_with_cache` — therefore had its
+  cache writes under-reported by 60% in an append-only ledger the run manifest
+  publishes as fact. The multiplier is now split
+  (`CACHE_WRITE_MULTIPLIER_5M` / `_1H`), the requested TTL is threaded from the
+  call site through `_record_usage`, and it is recorded on `UsageRecord` so a
+  stored ledger stays re-priceable. The digest and critique breakpoints emit a
+  plain `{"type": "ephemeral"}` and correctly stay on the 1.25x rate.
+
+- **An unpriced stage no longer silently drops out of the exhaustive cost
+  total.** `_total()` filtered out components with `cost=None` and summed the
+  rest, publishing the remaining stages as if they were the whole run. The stage
+  most likely to be unpriced is the one behind
+  `DRAWING_ANALYZER_CRITIQUE_MODEL` — both the documented cost lever and the
+  single largest component — so the failure landed precisely on the
+  configuration someone experimenting with model routing would reach for first:
+  pointing critique at a model absent from `MODEL_PRICING` quoted
+  "$20.83 – $25.92" for a 40-sheet run whose critique line alone is ~$37, with
+  nothing marking the figure partial. An unknown price now means "no dollar
+  figure", never "a smaller dollar figure", matching
+  `estimate_drawing_set_cost` and `RunUsage.total_estimated_cost`; the
+  unavailable message names the stage responsible.
+
+- **`docs/PERFORMANCE_AND_COST_VALIDATION.md` no longer claims verification is
+  uncached.** It has cached through `stage_cache` since `_VERIFY_CACHE_STAGE`
+  landed, as have cross-QC, synthesis, focus and the prose harvest, so a warm
+  exhaustive re-run should show near-zero API calls across the board — and a
+  warm run that *does* re-bill verification is now a cache-correctness bug worth
+  chasing rather than expected behavior.
 
 ## [1.2.0] - 2026-09-04
 
