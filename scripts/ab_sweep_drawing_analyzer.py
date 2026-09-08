@@ -342,6 +342,26 @@ def _parse_env(spec: str) -> dict[str, str]:
     return out
 
 
+def resolve_transport() -> tuple[bool, bool]:
+    """``(digest_batch, critique_batch)`` for the *current* environment.
+
+    Resolved through the pipeline's own helper rather than restated, so the
+    estimate and the run can never disagree about which rate applies. That
+    disagreement is not hypothetical: quoting the estimator's ``batch=True``
+    default against a run that resolves to real-time under-states the two
+    stages that dominate the bill by half, which is the opposite of what a
+    pre-spend check is for.
+
+    Both default to real-time; ``DRAWING_ANALYZER_USE_BATCH`` opts in, and
+    critique follows the digest transport unless a caller splits them (the GUI's
+    Hybrid mode), which this harness does not.
+    """
+    from drawing_analyzer.pipeline import _resolve_use_batch
+
+    use_batch = _resolve_use_batch(None)
+    return use_batch, use_batch
+
+
 def _run_arm_in_process(pdfs: list[Path], out_path: Path, *, exhaustive: bool) -> None:
     """Execute one arm and write its summary. Runs inside the child process."""
     from drawing_analyzer.client import get_client
@@ -349,6 +369,8 @@ def _run_arm_in_process(pdfs: list[Path], out_path: Path, *, exhaustive: bool) -
     from drawing_analyzer.core.api_config import REVIEW_MODEL_DEFAULT
     from drawing_analyzer.digest_cache import DigestCache
     from drawing_analyzer.pipeline import extract_drawing_context
+
+    use_batch, critique_use_batch = resolve_transport()
 
     with TemporaryDirectory(prefix="da-ab-arm-") as tmp:
         # A private cache per arm. Both arms are therefore cold, which is the
@@ -362,11 +384,19 @@ def _run_arm_in_process(pdfs: list[Path], out_path: Path, *, exhaustive: bool) -
             cache=cache,
             qc_markups=exhaustive,
             reference_audit=exhaustive,
+            # Passed explicitly, at the value the runtime would have resolved
+            # anyway, so the summary can record the transport it was actually
+            # billed at and the estimate can be checked against it.
+            use_batch=use_batch,
+            critique_use_batch=critique_use_batch,
         )
         summary = summarize_run(ctx)
 
     summary["stage_models"] = vars(resolve_stage_models(model=REVIEW_MODEL_DEFAULT))
     summary["tile_target_px"] = os.environ.get("DRAWING_ANALYZER_TILE_TARGET_PX", "")
+    summary["transport"] = {
+        "digest_batch": use_batch, "critique_batch": critique_use_batch,
+    }
     out_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
 
@@ -403,23 +433,28 @@ def _estimate(pdfs: list[Path], arms: list[tuple[str, dict]], *, exhaustive: boo
     saved = dict(os.environ)
     try:
         for label, env in arms:
-            os.environ.update(env)
+            os.environ.clear()
+            os.environ.update({**saved, **env})
+            # The transport the arm will actually run on, not the estimator's
+            # default. Both default to real-time; quoting the batch rate here
+            # would halve the two stages that dominate the bill.
+            use_batch, critique_batch = resolve_transport()
+            transport = "batch" if use_batch else "real-time"
             if exhaustive:
                 est = estimate_exhaustive_run_cost(
                     sheets, file_count=len(pdfs), model=REVIEW_MODEL_DEFAULT,
+                    batch=use_batch, critique_batch=critique_batch,
                 )
                 lo, hi = est.low_cost, est.high_cost
                 money = "unavailable" if lo is None else f"${lo:,.2f} – ${hi:,.2f}"
             else:
                 est = estimate_drawing_set_cost(
                     sheets, file_count=len(pdfs), model=REVIEW_MODEL_DEFAULT,
-                    batch=True,
+                    batch=use_batch,
                 )
                 money = ("unavailable" if est.total_cost is None
                          else f"${est.total_cost:,.2f}")
-            print(f"  {label:<10}{money}")
-            os.environ.clear()
-            os.environ.update(saved)
+            print(f"  {label:<10}{money:<24}({transport})")
     finally:
         os.environ.clear()
         os.environ.update(saved)
@@ -453,9 +488,14 @@ def main(argv: list[str] | None = None) -> int:
 
     base_env = _parse_env(args.baseline)
     var_env = _parse_env(args.variant)
-    if not var_env:
-        ap.error("--variant must change at least one variable, else the arms "
-                 "are identical and the comparison is meaningless")
+    # Compare the effective environments, not just "is the variant non-empty".
+    # ``--baseline X=1 --variant X=1`` is two identical billable runs, and an
+    # empty variant is only the most obvious way to ask for one. What decides
+    # the arms is the env each process ends up with, so that is what is checked.
+    if {**os.environ, **base_env} == {**os.environ, **var_env}:
+        ap.error("--baseline and --variant resolve to the same environment, so "
+                 "both arms would run identically and the comparison would "
+                 "measure nothing. Change at least one variable in --variant.")
 
     missing = [p for p in args.pdf if not p.exists()]
     if missing:

@@ -281,10 +281,119 @@ def test_parse_env_rejects_a_bare_name():
         _parse_env("JUST_A_NAME")
 
 
-def test_identical_arms_are_rejected():
-    """Two identical arms measure nothing; the CLI must refuse rather than bill."""
+@pytest.mark.parametrize("baseline,variant", [
+    ("", ""),                                        # both defaults
+    ("DRAWING_ANALYZER_TILE_TARGET_PX=1240",
+     "DRAWING_ANALYZER_TILE_TARGET_PX=1240"),        # same non-empty mapping
+    ("A=1,B=2", "B=2,A=1"),                          # same mapping, written differently
+])
+def test_identical_arms_are_rejected(baseline, variant):
+    """Two identical arms measure nothing; the CLI must refuse rather than bill.
+
+    Checking only "is the variant mapping empty" let the second and third cases
+    through — two identical, billable runs whose diff is guaranteed to be noise.
+    What decides an arm is the environment its process ends up with, so that is
+    what is compared.
+    """
     from ab_sweep_drawing_analyzer import main
 
     with pytest.raises(SystemExit) as e:
-        main(["--pdf", "x.pdf", "--baseline", "", "--variant", ""])
+        main(["--pdf", "x.pdf", "--baseline", baseline, "--variant", variant])
     assert e.value.code != 0
+
+
+def test_differing_arms_are_accepted_past_the_equality_guard(monkeypatch, tmp_path):
+    """The guard must not block a genuine sweep."""
+    from ab_sweep_drawing_analyzer import main
+
+    pdf = tmp_path / "set.pdf"
+    pdf.write_bytes(b"%PDF-1.7\n")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    # Past the equality guard, the next gate is the missing-key check (exit 2),
+    # which proves the arms were accepted as different without billing anything.
+    assert main([
+        "--pdf", str(pdf), "--baseline", "",
+        "--variant", "DRAWING_ANALYZER_TILE_TARGET_PX=1240",
+    ]) == 2
+
+
+# --------------------------------------------------------------------------- #
+# Transport resolution
+# --------------------------------------------------------------------------- #
+
+
+def test_transport_matches_the_runtime_default(monkeypatch):
+    """--estimate must price the transport the arms will actually run on.
+
+    ``extract_drawing_context`` defaults to REAL-TIME when the caller passes no
+    ``use_batch`` and the env var is unset, while the exhaustive estimator
+    defaults to ``batch=True``. Quoting the estimator's default against a
+    real-time run under-states digest and critique — the two stages that are
+    91% of the bill — by half, in the one place whose whole job is to say what
+    a run will cost before you commit to it.
+    """
+    from ab_sweep_drawing_analyzer import resolve_transport
+    from drawing_analyzer.pipeline import _resolve_use_batch
+
+    monkeypatch.delenv("DRAWING_ANALYZER_USE_BATCH", raising=False)
+    assert resolve_transport() == (False, False)
+    assert resolve_transport()[0] == _resolve_use_batch(None)
+
+    monkeypatch.setenv("DRAWING_ANALYZER_USE_BATCH", "1")
+    assert resolve_transport() == (True, True)
+    assert resolve_transport()[0] == _resolve_use_batch(None)
+
+    # Critique follows the digest transport; this harness never splits them.
+    for value in ("0", "false", "off", ""):
+        monkeypatch.setenv("DRAWING_ANALYZER_USE_BATCH", value)
+        digest, critique = resolve_transport()
+        assert digest is critique is False
+
+
+def test_estimate_prices_real_time_by_default_not_batch(monkeypatch, capsys, tmp_path):
+    """End-to-end: the printed estimate follows the resolved transport."""
+    from ab_sweep_drawing_analyzer import main
+
+    pdf = tmp_path / "set.pdf"
+    pdf.write_bytes(b"%PDF-1.7\n")
+    monkeypatch.delenv("DRAWING_ANALYZER_USE_BATCH", raising=False)
+    monkeypatch.setattr(
+        "drawing_analyzer.render.list_sheets", lambda pdfs: [object()] * 10
+    )
+
+    main(["--pdf", str(pdf), "--variant", "DRAWING_ANALYZER_TILE_TARGET_PX=1240",
+          "--estimate"])
+    real_time = capsys.readouterr().out
+    assert "(real-time)" in real_time
+    assert "(batch)" not in real_time
+
+    monkeypatch.setenv("DRAWING_ANALYZER_USE_BATCH", "1")
+    main(["--pdf", str(pdf), "--variant", "DRAWING_ANALYZER_TILE_TARGET_PX=1240",
+          "--estimate"])
+    batched = capsys.readouterr().out
+    assert "(batch)" in batched
+
+    # And the batch quote is materially cheaper than the real-time one — proof
+    # the flag reached the estimator rather than just the label.
+    def first_dollar(text: str) -> float:
+        import re
+        return float(re.search(r"\$([\d,]+\.\d\d)", text).group(1).replace(",", ""))
+
+    assert first_dollar(batched) < first_dollar(real_time)
+
+
+def test_estimate_does_not_leak_arm_env_into_the_parent(monkeypatch, tmp_path):
+    """Pricing an arm sets its env temporarily; the parent must be restored."""
+    from ab_sweep_drawing_analyzer import main
+
+    pdf = tmp_path / "set.pdf"
+    pdf.write_bytes(b"%PDF-1.7\n")
+    monkeypatch.setenv("DRAWING_ANALYZER_TILE_TARGET_PX", "1560")
+    monkeypatch.setattr(
+        "drawing_analyzer.render.list_sheets", lambda pdfs: [object()] * 2
+    )
+
+    main(["--pdf", str(pdf), "--variant", "DRAWING_ANALYZER_TILE_TARGET_PX=1100",
+          "--estimate"])
+    import os as _os
+    assert _os.environ["DRAWING_ANALYZER_TILE_TARGET_PX"] == "1560"
