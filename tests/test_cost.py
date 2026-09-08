@@ -307,6 +307,86 @@ def test_exhaustive_estimate_prices_actual_verification_model():
     assert "Sonnet 5" in verify.note
 
 
+def test_exhaustive_estimate_prices_actual_critique_model(monkeypatch):
+    """Critique is the largest component; it must be priced at its own model.
+
+    The estimate used to price nine of eleven components at the single ``model``
+    argument, so a critique routed to Sonnet 5 was quoted at Opus 5 rates — an
+    over-quote on the biggest line in the dialog.
+    """
+    sonnet = "claude-sonnet-5"
+    monkeypatch.setenv("DRAWING_ANALYZER_CRITIQUE_MODEL", sonnet)
+    est = estimate_exhaustive_run_cost(10, model=OPUS)
+    crit = {c.stage: c for c in est.components}["Critique ×2 (per sheet)"]
+    expected = estimate_request_cost(
+        crit.input_tokens, crit.output_tokens, model=sonnet, batch=est.critique_batch
+    )
+    assert crit.cost == pytest.approx(expected)
+    # And the quote is genuinely cheaper than the same run on the review model.
+    monkeypatch.delenv("DRAWING_ANALYZER_CRITIQUE_MODEL")
+    on_opus = {c.stage: c for c in estimate_exhaustive_run_cost(10, model=OPUS).components}
+    assert crit.cost < on_opus["Critique ×2 (per sheet)"].cost
+
+
+def test_stage_models_resolve_through_the_runtime_resolvers(monkeypatch):
+    """A ``DRAWING_ANALYZER_*_MODEL`` override reaches the estimate."""
+    from drawing_analyzer.cost import resolve_stage_models
+
+    monkeypatch.setenv("DRAWING_ANALYZER_SYNTHESIS_MODEL", "claude-haiku-4-5")
+    monkeypatch.setenv("DRAWING_ANALYZER_CROSS_QC_MODEL", "claude-sonnet-5")
+    models = resolve_stage_models(model=OPUS)
+    assert models.synthesis == "claude-haiku-4-5"
+    assert models.cross_qc == "claude-sonnet-5"
+    assert models.digest == OPUS  # the threaded review model stands in for digest
+    # ``distinct`` is first-appearance order with no repeats — it drives the
+    # header sentence, so a duplicate would read as a stutter.
+    assert len(models.distinct) == len(set(models.distinct))
+    assert models.distinct[0] == OPUS
+
+
+def test_exhaustive_prompt_names_every_model_the_run_touches():
+    """The header must not claim one model does all the work."""
+    est = estimate_exhaustive_run_cost(10, model=OPUS)
+    header = format_exhaustive_cost_prompt(est).splitlines()[0]
+    assert "Opus 5" in header
+    assert "Sonnet 5" in header  # identity / harvest / citation / verification
+
+
+def test_exhaustive_total_is_none_when_any_stage_is_unpriced(monkeypatch):
+    """An unpriced stage must void the total, never quietly drop out of it.
+
+    Dropping it publishes the sum of the *remaining* stages as if it were the
+    run's cost. The stage most likely to be unpriced is the one behind
+    ``DRAWING_ANALYZER_CRITIQUE_MODEL`` — both the advertised cost lever and the
+    largest single component — so the failure mode is a confident, badly
+    under-stated number on exactly the configuration a user is experimenting
+    with. Measured before the fix: ~$21 quoted for a 40-sheet run whose critique
+    line alone is ~$37. Same rule as ``estimate_drawing_set_cost`` and
+    ``RunUsage.total_estimated_cost``.
+    """
+    monkeypatch.setenv("DRAWING_ANALYZER_CRITIQUE_MODEL", "claude-some-future-model")
+    est = estimate_exhaustive_run_cost(40, model=OPUS)
+
+    crit = {c.stage: c for c in est.components}["Critique ×2 (per sheet)"]
+    assert crit.cost is None                 # the component itself is unpriced
+    assert crit.input_tokens > 0             # ...but its token scale still shows
+    assert est.low_cost is None and est.high_cost is None
+
+    # And the message names which stage, so the reader is not sent looking at
+    # the review model when an env var redirected some other stage.
+    msg = format_exhaustive_cost_prompt(est)
+    assert "unavailable" in msg
+    assert "Critique ×2 (per sheet)" in msg
+
+
+def test_exhaustive_total_survives_when_every_stage_is_priced():
+    """The guard must not void a perfectly normal estimate."""
+    est = estimate_exhaustive_run_cost(40, model=OPUS)
+    assert all(c.cost is not None for c in est.components)
+    assert est.low_cost is not None and est.low_cost > 0
+    assert est.low_cost <= est.high_cost
+
+
 # --------------------------------------------------------------------------- #
 # spec_chars pricing — the specs block's transport-dependent cost
 # --------------------------------------------------------------------------- #
