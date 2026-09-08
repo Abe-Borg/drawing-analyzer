@@ -458,8 +458,10 @@ def estimate_exhaustive_run_cost(
     are quoted as a low–high band because their volume tracks the finding /
     unique-claim count. Verification is priced with the same independently
     configurable model the runtime verifier resolves.
-    A component whose model price is unknown contributes ``None`` and drops out of
-    the numeric total (the caller shows scale without a dollar figure).
+    A component whose model price is unknown carries ``cost=None`` and makes
+    ``low_cost``/``high_cost`` ``None`` too — the caller then shows token scale
+    without a dollar figure. It must NOT be dropped from the sum: publishing the
+    remaining stages as the run's total under-quotes it while looking complete.
 
     ``spec_chars`` (uploaded project specifications) only affects the Digest
     component — the specs block is digest-only (see ``digest.py``), never sent
@@ -641,8 +643,23 @@ def estimate_exhaustive_run_cost(
     # sum the *fixed* stages once and swap in the low vs high volume variants — so
     # the band is exactly the finding/citation-count spread and low_cost <= high_cost.
     def _total(variants: list[CostComponent]) -> float | None:
-        known = [c.cost for c in components + variants if c.cost is not None]
-        return sum(known) if known else None
+        """Sum every component, or ``None`` if any one of them is unpriced.
+
+        An unpriced component must make the whole total unavailable, not drop
+        out of it. Dropping it publishes the sum of the *remaining* stages as if
+        it were the run's cost — and the stage most likely to be unpriced is the
+        one behind ``DRAWING_ANALYZER_CRITIQUE_MODEL``, which is both the
+        advertised cost lever and the single largest component. Pointing that at
+        a model this table does not know quoted ~$21 for a 40-sheet run whose
+        critique line alone is ~$37, with nothing in the output to say the
+        figure was partial.
+
+        This matches ``estimate_drawing_set_cost`` above and
+        ``RunUsage.total_estimated_cost``: an unknown price means "no dollar
+        figure", never "a smaller dollar figure".
+        """
+        priced = [c.cost for c in components + variants]
+        return None if any(c is None for c in priced) else sum(priced)
 
     low_cost = _total([low_verify, low_investigate, low_citation])
     high_cost = _total([high_verify, high_investigate, high_citation])
@@ -696,7 +713,18 @@ def format_exhaustive_cost_prompt(est: ExhaustiveCostEstimate) -> str:
             "cached sheets cost nothing.",
         ]
     else:
-        lines += ["", "Estimated total: unavailable for this model."]
+        # Name the stages whose model this table cannot price. The old wording
+        # ("unavailable for this model") pointed at the review model even when
+        # the unpriced stage was one an env var had redirected elsewhere, which
+        # sent the reader looking in the wrong place.
+        unpriced = [c.stage for c in est.components if c.cost is None]
+        which = f" ({', '.join(unpriced)})" if unpriced else ""
+        lines += [
+            "",
+            f"Estimated total: unavailable — no published price for the model "
+            f"behind {'these stages' if len(unpriced) > 1 else 'this stage'}"
+            f"{which}. The per-stage rows above still show the token scale.",
+        ]
     if est.batch and est.critique_batch:
         lines += [
             "",
