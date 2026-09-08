@@ -12,7 +12,7 @@ key, which is an environment accident a future gate could lose. These tests
 pin that property three ways:
 
 1. every gate's constructed argv deselects ``network`` (no suite is run here);
-2. the deselection survives a real-looking key in the environment;
+2. the deselection survives a key being present in the environment;
 3. the marker expression is *actually valid pytest syntax that deselects* —
    an argv assertion alone would pass a typo like ``"not netwrok"``, which
    silently matches nothing and would run the canary. This one narrow
@@ -35,8 +35,13 @@ import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SCRIPT = _REPO_ROOT / "scripts" / "run_acceptance.py"
-# Obvious sentinel: never a usable credential, and clearly fake in any log.
-_FAKE_KEY = "sk-ant-FAKE-not-a-real-key-do-not-use"
+# A non-placeholder value for ANTHROPIC_API_KEY, deliberately **not**
+# credential-shaped. ``scripts/scan_secrets.py`` flags ``sk-ant-`` followed by
+# 30+ characters, so a realistic-looking sentinel fails the repo's own secret
+# scan (it did, on the first push of this file). Mirror the convention in
+# ``tests/conftest.py::_PLACEHOLDER_KEY`` instead: the tests below only need a
+# value that differs from that placeholder, never one shaped like a real key.
+_FAKE_KEY = "not-a-real-key-do-not-use-wp01"
 
 
 def _load_script():
@@ -118,7 +123,7 @@ def test_every_gate_that_spawns_pytest_deselects_network(script, recorded):
 
 
 # --------------------------------------------------------------------------- #
-# 2. A real-looking key in the environment changes nothing
+# 2. A key present in the environment changes nothing
 # --------------------------------------------------------------------------- #
 
 
