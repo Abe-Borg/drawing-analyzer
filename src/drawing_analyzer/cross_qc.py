@@ -48,9 +48,15 @@ from pathlib import Path
 from typing import Any
 
 from .core.api_config import (
+    CROSS_QC_OUTPUT_CAP,
+    PHASE_CROSS_QC,
     REVIEW_MODEL_DEFAULT,
+    apply_effort_config,
+    apply_thinking_config,
     call_with_refusal_fallback,
+    effort_config_for,
     model_supports_adaptive_thinking,
+    phase_output_cap,
 )
 from .diagnostics import get_logger
 from .digest import (
@@ -84,7 +90,7 @@ _log = get_logger()
 MAX_SHEETS_SINGLE_CALL = 40
 # Nothing to compare across with fewer than two readable sheets.
 MIN_SHEETS_FOR_CROSS_QC = 2
-DEFAULT_CROSS_QC_MAX_TOKENS = 16_000
+DEFAULT_CROSS_QC_MAX_TOKENS = CROSS_QC_OUTPUT_CAP
 DEFAULT_CROSS_QC_MAX_FINDINGS = 60
 # Per-shard cap on the compact facts a map call emits (bounds the reconcile input).
 DEFAULT_MAP_MAX_FACTS = 40
@@ -688,12 +694,18 @@ def _call(
     """One cross-QC model call → ``(raw_text, in, out, error)``. Never raises."""
     kwargs: dict[str, Any] = {
         "model": model,
-        "max_tokens": DEFAULT_CROSS_QC_MAX_TOKENS,
+        "max_tokens": phase_output_cap(PHASE_CROSS_QC, model=model),
         "system": system,
         "messages": [{"role": "user", "content": [{"type": "text", "text": user_text}]}],
     }
-    if model_supports_adaptive_thinking(model):
-        kwargs["thinking"] = {"type": "adaptive"}
+    # Thinking and effort are both stated explicitly (§C). An omitted
+    # ``thinking`` key runs adaptive anyway on the current models, and an
+    # omitted ``effort`` silently inherits the API default rather than a value
+    # this stage chose — which left cross-sheet conflict detection, the
+    # highest-severity finding channel, as the one call site whose reasoning
+    # depth nothing here controlled.
+    apply_thinking_config(kwargs, model=model, phase=PHASE_CROSS_QC)
+    apply_effort_config(kwargs, model=model, phase=PHASE_CROSS_QC)
 
     attempt = 0
     while True:
@@ -1004,6 +1016,11 @@ def _cross_qc_cache_key(entries: list[tuple], *, model: str, preamble: str) -> s
             "reconcile_pair_cap": _MAX_RECONCILE_PAIR_CALLS,
             "text_layer_budget": _TEXT_LAYER_BUDGET,
             "adaptive_thinking": model_supports_adaptive_thinking(model),
+            # The resolved effort rides the key for the same reason the
+            # thinking flag does: what the model was allowed to spend is part
+            # of what its answer means, so a re-tuned level must not replay
+            # verdicts reached under the old one.
+            "effort": (effort_config_for(model=model, phase=PHASE_CROSS_QC) or {}).get("effort", ""),
         },
     )
 

@@ -23,8 +23,11 @@ Turn discipline (ported from the report chat widget's loop): the assistant
 turn is committed to history *before* its tools are answered; every
 ``tool_use`` id is answered in ONE user turn; when the round budget is
 exhausted the budget notice rides that final tool-result turn and later
-requests carry no ``tools`` key at all — a run can never terminate on a
-dangling tool request.
+requests withdraw tool permission with ``tool_choice: {"type": "none"}``
+while keeping the tool list in place — a run can never terminate on a
+dangling tool request, and the closing turn (the one carrying the largest
+accumulated prefix) still reads the tools+system cache instead of rebuilding
+it, which dropping ``tools`` outright would have forced.
 
 Evidence discipline (§16.6): every image is saved under the finding's evidence
 directory *before* it is sent (continuing the verify pass's directory and
@@ -96,7 +99,7 @@ _INVESTIGATION_SHEETS_PER_EXTRA = 4
 _MAX_INVESTIGATIONS_CEILING = 40
 # Advisory token budget handed to the model for one investigation (Anthropic
 # minimum: 20,000). Unlike the round cap — which the host enforces by
-# withdrawing the tools — this is a countdown the model can actually see while
+# withdrawing tool permission — this is a countdown the model can actually see while
 # generating, so it paces itself and lands a conclusion instead of being cut
 # off mid-thought and left UNCERTAIN.
 _DEFAULT_TASK_BUDGET_TOKENS = 40_000
@@ -218,8 +221,9 @@ def _is_task_budget_rejection(exc: Exception) -> bool:
 def _investigation_message(client: Any, kwargs: dict, *, task_budget: int) -> Any:
     """One investigation turn, carrying the advisory task budget when possible.
 
-    The round cap is enforced host-side by withdrawing the tools, which the model
-    only learns about after the fact. A task budget is the same bound expressed
+    The round cap is enforced host-side by withdrawing tool permission
+    (``tool_choice: {"type": "none"}``), which the model only learns about
+    after the fact. A task budget is the same bound expressed
     where the model can act on it: a countdown it sees while generating, so it
     converges instead of being cut off mid-thought and left UNCERTAIN.
 
@@ -782,8 +786,17 @@ def _investigate_one(
             ),
             "messages": _messages_with_cache_breakpoints(messages),
         }
-        if tool_round < max_rounds:
-            kwargs["tools"] = tools_with_cache(list(tools), phase=PHASE_INVESTIGATION)
+        # The tool list stays in every request, including the forced close.
+        # Tool definitions render at prompt position 0, so *dropping* them
+        # invalidates the tools, system and messages cache tiers for exactly
+        # the turn whose accumulated prefix is largest. Withdrawing permission
+        # via ``tool_choice`` instead invalidates only the messages tier and
+        # leaves tools+system cached, with identical effect on the model: it
+        # cannot call a tool either way. (Same reasoning, same mechanism, as
+        # the report chat widget's own no-tools close.)
+        kwargs["tools"] = tools_with_cache(list(tools), phase=PHASE_INVESTIGATION)
+        if tool_round >= max_rounds:
+            kwargs["tool_choice"] = {"type": "none"}
         apply_thinking_config(kwargs, model=model, phase=PHASE_INVESTIGATION)
         apply_effort_config(kwargs, model=model, phase=PHASE_INVESTIGATION)
 

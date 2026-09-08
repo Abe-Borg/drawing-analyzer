@@ -24,6 +24,7 @@ from .core.api_config import (
     model_supports_adaptive_thinking,
     model_supports_effort,
 )
+from .core.tokenizer import CROSS_CHECK_RECOMMENDED_MAX
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
     SheetDigest,
@@ -90,6 +91,22 @@ schedule row; point to the sheet that carries it.
 section header. Use short subsections / bullets."""
 
 
+# Corpus budget (chars) for the per-sheet digests in the user turn.
+#
+# Deliberately NOT set_identity's 200k slice budget. That stage samples the set
+# (digest heads + windows), so a dropped slice degrades its answer gracefully.
+# This stage sends the actual deliverable input: a sheet dropped here is a sheet
+# the cross-sheet read cannot reason about at all, so every omission is a hole
+# in the overview. The budget is therefore a safety rail against pathological
+# input, not a routine limiter — sized from the tokenizer's own single-call
+# headroom (context window - output reserve - overhead), the same derivation
+# that governs the other "send everything in one call" shape in this codebase.
+# Overflow drops a contiguous tail and is counted and surfaced, never silent
+# (DA-028); the pipeline holds the stage at PARTIAL when it bites.
+_CHARS_PER_TOKEN = 3      # conservative: digest text (tags, numbers, schedule
+                          # values) tokenizes denser than English prose (~4)
+_TOTAL_BUDGET = CROSS_CHECK_RECOMMENDED_MAX * _CHARS_PER_TOKEN
+
 _SYNTHESIS_TASK_INSTRUCTION = (
     "Above are the per-sheet digests for the entire set. Now produce the "
     "set-level overview per your instructions — emphasize cross-sheet "
@@ -97,23 +114,69 @@ _SYNTHESIS_TASK_INSTRUCTION = (
 )
 
 
-def build_synthesis_user_text(ok_sheets: list[SheetDigest]) -> str:
+@dataclass(frozen=True)
+class SynthesisPrompt:
+    """The assembled user turn plus what the budget had to leave out."""
+
+    text: str
+    sheets_omitted: int = 0
+    chars_omitted: int = 0
+
+
+def build_synthesis_user_text(ok_sheets: list[SheetDigest]) -> SynthesisPrompt:
     """Assemble the user-turn text: every readable sheet's digest, then the task.
 
     Only ``ok`` sheets are included (a failed sheet has no text); each is fenced
     with its sheet label so the model can cite sheet numbers in conflicts.
+
+    Overflow past :data:`_TOTAL_BUDGET` drops a contiguous tail of sheets and
+    counts what it dropped — loss-aware, never a silent slice (cf. DA-028), and
+    the same discipline set_identity / review_planner / cross_qc already apply.
+    A sheet is kept or dropped whole: half a digest would invite conflicts
+    against text the model cannot see.
     """
     parts: list[str] = [
         "Per-sheet digests for the set follow (one block per sheet):",
         "",
     ]
     total = len(ok_sheets)
+    used = 0
+    sheets_omitted = 0
+    chars_omitted = 0
+
+    def _block(index: int, sd: SheetDigest) -> tuple[str, str]:
+        return f"===== Sheet {index}/{total}: {sd.ref.display_label} =====", sd.text.strip()
+
     for i, sd in enumerate(ok_sheets, start=1):
-        parts.append(f"===== Sheet {i}/{total}: {sd.ref.display_label} =====")
-        parts.append(sd.text.strip())
+        header, body = _block(i, sd)
+        cost = len(header) + len(body)
+        if used + cost > _TOTAL_BUDGET and used > 0:
+            # Stop at the first sheet that does not fit, and drop everything
+            # after it. Skipping this one to squeeze in a later, smaller sheet
+            # would quietly reprioritize the set and leave the notice below
+            # describing a corpus with holes in it.
+            for j, dropped in enumerate(ok_sheets[i - 1:], start=i):
+                d_header, d_body = _block(j, dropped)
+                sheets_omitted += 1
+                chars_omitted += len(d_header) + len(d_body)
+            break
+        used += cost
+        parts.append(header)
+        parts.append(body)
+        parts.append("")
+    if sheets_omitted:
+        parts.append(
+            f"[The last {sheets_omitted} sheet(s) of the set were omitted from "
+            f"this prompt for length; the overview below covers only the "
+            f"sheets shown above.]"
+        )
         parts.append("")
     parts.append(_SYNTHESIS_TASK_INSTRUCTION)
-    return "\n".join(parts)
+    return SynthesisPrompt(
+        text="\n".join(parts),
+        sheets_omitted=sheets_omitted,
+        chars_omitted=chars_omitted,
+    )
 
 
 @dataclass
@@ -126,6 +189,10 @@ class SynthesisResult:
     model_used: str = ""
     error: str | None = None
     cached: bool = False
+    # Loss accounting for the prompt budget (DA-028): how many sheets the
+    # user turn could not carry, and how many characters that cost.
+    sheets_omitted: int = 0
+    chars_omitted: int = 0
 
     @property
     def ok(self) -> bool:
@@ -159,7 +226,8 @@ def synthesize_drawing_set(
             error=f"insufficient readable sheets for synthesis ({len(ok_sheets)})",
         )
 
-    user_text = build_synthesis_user_text(ok_sheets)
+    prompt = build_synthesis_user_text(ok_sheets)
+    user_text = prompt.text
     thinking_enabled = bool(
         use_thinking and model_supports_adaptive_thinking(model)
     )
@@ -184,6 +252,8 @@ def synthesize_drawing_set(
                 text=cached_text,
                 model_used=model,
                 cached=True,
+                sheets_omitted=prompt.sheets_omitted,
+                chars_omitted=prompt.chars_omitted,
             )
 
     if client is None:
@@ -214,7 +284,11 @@ def synthesize_drawing_set(
                 sleep(_retry_backoff_seconds(attempt))
                 attempt += 1
                 continue
-            return SynthesisResult(text="", model_used=model, error=_clean_error(exc))
+            return SynthesisResult(
+                text="", model_used=model, error=_clean_error(exc),
+                sheets_omitted=prompt.sheets_omitted,
+                chars_omitted=prompt.chars_omitted,
+            )
 
     text = _message_text(resp)
     in_tok, out_tok = _message_usage(resp)
@@ -225,6 +299,8 @@ def synthesize_drawing_set(
         output_tokens=out_tok,
         model_used=model,
         error=error,
+        sheets_omitted=prompt.sheets_omitted,
+        chars_omitted=prompt.chars_omitted,
     )
     if result.ok:
         put_stage_cache_entry(
