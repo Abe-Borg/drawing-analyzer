@@ -981,6 +981,13 @@ RUNTIME_TRANSPARENCY = HelpDocument(
                 "needs to fetch web pages — a thing Opus 5 cannot do."
             ),
             _bullet(
+                "Claude Haiku 4.5 — the prose harvest's structuring call. By the time it "
+                "runs, the item has already been picked out and checked against the "
+                "ledger; all that is left is restating one sentence in the findings "
+                "format. That is formatting, not judgment, so it goes to the smallest "
+                "model."
+            ),
+            _bullet(
                 "Escalation is one-way and upward. A finding the smaller model could not "
                 "settle does not get left at the cheap answer — worst severity first, it "
                 "goes to the Opus-driven investigation loop below."

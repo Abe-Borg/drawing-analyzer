@@ -74,9 +74,22 @@ Judgement (owner-reviewed against the previous release's recorded medians):
   upload for both critique reads (Phase 23C); warm runs skip both renders via
   the level-1 caches (Phase 19B). Budget accordingly when comparing cold
   medians across transports.
-- Verification is deliberately stateless: it re-runs (and re-bills) on every
-  exhaustive run, including warm ones. The digest/critique caches are the
-  warm-run savings; verify/citation/cross/synthesis are not cached.
+- **Every model stage caches, not just digest/critique.** Verification caches
+  through `stage_cache` (`verify._VERIFY_CACHE_STAGE` / `_VERIFY_CROSS_CACHE_STAGE`),
+  as do cross-QC, synthesis, focus and prose harvest; identity, review plan,
+  investigation and citation each own a `DigestCache` namespace (the citation
+  verdict cache carries a TTL, `DRAWING_ANALYZER_CITATION_TTL_DAYS`, default 30
+  days). So a warm exhaustive re-run should show near-zero API calls across the
+  board — not just on the two vision stages. An earlier revision of this note
+  said verification was stateless and re-billed every run; that stopped being
+  true when the stage cache landed, and a warm run that *does* re-bill
+  verification is now a cache-correctness bug worth chasing, not expected
+  behavior.
+- **Cache-write cost depends on the requested TTL.** A `ttl: "1h"` breakpoint
+  costs 2x base input; the default 5-minute entry costs 1.25x. The ledger
+  records which was requested per record (`UsageRecord.cache_write_ttl`), so a
+  run manifest's cache-write spend can be reconciled against the breakpoints the
+  stages actually asked for.
 
 ## Record
 

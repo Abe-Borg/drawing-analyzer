@@ -2,7 +2,7 @@
 
 A small, dependency-free pricing table so the app can show a spend estimate
 before launching an expensive run (e.g. the drawing-analysis cost-confirm
-dialog). Rates are USD per million tokens, verified on 2026-08-05. Image/vision
+dialog). Rates are USD per million tokens, verified on 2026-09-08. Image/vision
 input is billed as ordinary input tokens, so no separate image rate is needed;
 the Batch API bills at 50% of standard, exposed via the ``batch=`` flag.
 
@@ -20,14 +20,47 @@ from decimal import Decimal
 # pricing (§15.7). Rates drift — re-verify against the official pricing page and
 # bump this date before a release; the GUI/report surface it so a stale figure is
 # never presented as authoritative.
-PRICING_EFFECTIVE_DATE = "2026-08-05"
+PRICING_EFFECTIVE_DATE = "2026-09-08"
 
-# Batch API bills at half of standard, per Anthropic's published pricing.
+# Batch API bills at half of standard, per Anthropic's published pricing. The
+# caching multipliers below stack with it (Anthropic pricing, "These multipliers
+# stack with other pricing modifiers, including the Batch API discount").
 BATCH_DISCOUNT = 0.5
-# Prompt-caching multipliers on the base *input* rate (Anthropic standard 5-min
-# TTL): a cache write costs 1.25x input, a cache read 0.1x input.
-CACHE_WRITE_MULTIPLIER = 1.25
+# Prompt-caching multipliers on the base *input* rate. A cache READ is 0.1x on
+# every model this app can select. A cache WRITE depends on the requested TTL —
+# 1.25x for the default 5-minute entry, 2x for a ``ttl: "1h"`` entry — so the
+# two are separate constants and the write rate is chosen per record by
+# :func:`cache_write_multiplier`.
+#
+# This distinction is not academic here: ``api_config._cache_control_block``
+# emits ``{"type": "ephemeral", "ttl": "1h"}``, so any stage reaching it (today
+# the investigation loop, via ``system_prompt_with_cache`` / ``tools_with_cache``)
+# writes at 2x. Pricing every write at 1.25x under-reported those records by 60%
+# in a ledger the run manifest publishes as fact.
+CACHE_WRITE_MULTIPLIER_5M = 1.25
+CACHE_WRITE_MULTIPLIER_1H = 2.00
+# Back-compat alias for the default (5-minute) write rate. Retained because
+# external callers and older cached payloads reference the original name.
+CACHE_WRITE_MULTIPLIER = CACHE_WRITE_MULTIPLIER_5M
 CACHE_READ_MULTIPLIER = 0.10
+
+# Cache TTL tokens accepted by :func:`cache_write_multiplier`. These mirror the
+# ``cache_control["ttl"]`` values the request builders emit; an absent ttl means
+# the API default (5 minutes).
+CACHE_TTL_5M = "5m"
+CACHE_TTL_1H = "1h"
+
+
+def cache_write_multiplier(ttl: str | None) -> float:
+    """Return the cache-write multiplier on base input for ``ttl``.
+
+    ``None`` (or any unrecognized value) resolves to the 5-minute rate, which is
+    what the API applies when ``cache_control`` carries no explicit ``ttl``.
+    Only ``"1h"`` selects the 2x rate — deliberately an exact match rather than a
+    prefix test, so a future ttl this table does not know about is priced at the
+    conservative-for-the-user 1.25x instead of silently inheriting 2x.
+    """
+    return CACHE_WRITE_MULTIPLIER_1H if ttl == CACHE_TTL_1H else CACHE_WRITE_MULTIPLIER_5M
 # Server-side web-search tool: USD per billable search (Anthropic: $10 / 1,000).
 WEB_SEARCH_COST_PER_USE = Decimal("0.01")
 
@@ -44,15 +77,18 @@ class ModelPrice:
 # Keyed by the bare model id. A dated/fast/-suffixed variant resolves via the
 # startswith fallback in ``price_for`` (e.g. "claude-haiku-4-5-20251001").
 #
-# Sonnet 5 is quoted at its LIST rate ($3/$15), not the introductory $2/$10
-# that Anthropic applies through 2026-08-31. This module has one rate per
-# model and no date awareness — deliberately, since I-7 keeps time-dependence
-# out of assembly — so quoting list means the pre-run estimate runs slightly
-# high until the intro window closes and is exact afterwards. Over-stating a
-# user-facing cost figure is the safe direction, and it needs no dated edit.
+# Sonnet 5 is $2/$10. It launched at that rate as introductory pricing through
+# 2026-08-31, and this table previously quoted the $3/$15 list rate that was
+# scheduled to replace it — deliberately over-stating, since over-quoting a
+# user-facing cost figure is the safe direction. That scheduled increase was
+# subsequently cancelled: Anthropic's pricing page now states the $2/$10 rate
+# "is now the standard price. The previously scheduled increase to $3/$15 per
+# million input/output tokens on September 1, 2026 will not occur." So $2/$10
+# is the list rate, with no date-dependence for this module to model (which
+# keeps I-7 satisfied — there is nothing time-varying left here).
 MODEL_PRICING: dict[str, ModelPrice] = {
     "claude-opus-5": ModelPrice(5.00, 25.00, "Opus 5"),
-    "claude-sonnet-5": ModelPrice(3.00, 15.00, "Sonnet 5"),
+    "claude-sonnet-5": ModelPrice(2.00, 10.00, "Sonnet 5"),
     "claude-opus-4-8": ModelPrice(5.00, 25.00, "Opus 4.8"),
     "claude-opus-4-7": ModelPrice(5.00, 25.00, "Opus 4.7"),
     "claude-opus-4-6": ModelPrice(5.00, 25.00, "Opus 4.6"),
@@ -122,6 +158,7 @@ def usage_record_cost(
     cache_write_tokens: int = 0,
     billable_tool_uses: "dict | None" = None,
     batch: bool = False,
+    cache_write_ttl: str | None = None,
 ) -> "Decimal | None":
     """USD cost of one usage record, priced by its own rate class (§6.3 / §15.7).
 
@@ -132,6 +169,13 @@ def usage_record_cost(
     search) are billed per use and are **not** batch-discounted. A ``CACHE``-served
     record passes all-zero token counts, so its token cost is zero; only its
     (rare) tool uses, if any, would carry a charge.
+
+    ``cache_write_ttl`` selects the write rate for ``cache_write_tokens``: pass
+    ``"1h"`` for a record whose request carried ``cache_control["ttl"] == "1h"``
+    (2x base input), and leave it ``None`` for the default 5-minute entry
+    (1.25x). Defaulting to the 5-minute rate keeps every existing caller correct
+    — the digest and critique breakpoints emit a plain ``{"type": "ephemeral"}``
+    — while letting the ``api_config`` 1-hour path price itself honestly.
     """
     price = price_for(model)
     tool_uses = billable_tool_uses or {}
@@ -147,6 +191,8 @@ def usage_record_cost(
         (Decimal(int(input_tokens)) / million) * inp
         + (Decimal(int(output_tokens)) / million) * out
         + (Decimal(int(cache_read_tokens)) / million) * inp * Decimal(str(CACHE_READ_MULTIPLIER))
-        + (Decimal(int(cache_write_tokens)) / million) * inp * Decimal(str(CACHE_WRITE_MULTIPLIER))
+        + (Decimal(int(cache_write_tokens)) / million)
+        * inp
+        * Decimal(str(cache_write_multiplier(cache_write_ttl)))
     ) * factor
     return token_cost + tool_cost

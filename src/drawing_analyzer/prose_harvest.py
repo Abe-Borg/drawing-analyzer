@@ -38,7 +38,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-from .core.api_config import REVIEW_MODEL_DEFAULT
+from .core.api_config import MODEL_HAIKU_45
 from .critique import _token_overlap
 from .diagnostics import get_logger
 from .digest import (
@@ -118,8 +118,25 @@ _CONFLICT_SIGNALS = (
 
 
 def harvest_model() -> str:
-    """The structuring-call model (``DRAWING_ANALYZER_HARVEST_MODEL``, else Opus)."""
-    return os.environ.get("DRAWING_ANALYZER_HARVEST_MODEL") or REVIEW_MODEL_DEFAULT
+    """The structuring-call model (``DRAWING_ANALYZER_HARVEST_MODEL``, else Haiku).
+
+    Mechanism 3 is the only place this model is used, and it is not a judgment
+    call: mechanisms 1 and 2 have already decided the item is a genuine prose QC
+    item and failed to match it to an existing ledger entry, so the request asks
+    the model to restate one short, already-selected sentence as a structured
+    ``Finding``. It runs with no thinking, no effort, an 800-token cap
+    (:data:`DEFAULT_HARVEST_MAX_TOKENS`) and a tolerant parser, and a failure
+    degrades to a sheet-level entry rather than dropping the item (I-3).
+    Reformatting a supplied sentence is squarely Haiku 4.5 work; the review
+    model's judgment buys nothing here and it was the last stage still paying
+    Opus rates for pure structuring.
+
+    This is a small line in a run — well under 1% — so the point is fit, not
+    savings. ``DRAWING_ANALYZER_HARVEST_MODEL`` still overrides, and the model
+    is folded into the stage cache key, so an override re-harvests rather than
+    serving an entry produced by a different model.
+    """
+    return os.environ.get("DRAWING_ANALYZER_HARVEST_MODEL") or MODEL_HAIKU_45
 
 
 # --------------------------------------------------------------------------- #

@@ -313,14 +313,112 @@ class ExhaustiveCostEstimate:
     critique_batch: bool = True
     verified_effective_date: str = PRICING_EFFECTIVE_DATE
     spec_chars: int = 0  # uploaded project-specifications char count, if any
+    # Which model each stage resolved to. ``None`` only for an estimate built by
+    # an older caller; the field is additive and defaulted so stored payloads and
+    # third-party constructions keep loading.
+    stage_models: "StageModels | None" = None
+
+
+@dataclass(frozen=True)
+class StageModels:
+    """The model each priced stage will actually run on.
+
+    Resolved through the *same* functions the runtime uses (``critique_model()``,
+    ``harvest_model()``, ...), so a ``DRAWING_ANALYZER_*_MODEL`` override — or a
+    stage whose default simply is not the review model, as the prose harvest's is
+    not — is priced at the rate that will really be billed. Before this existed
+    the estimate priced nine of eleven components at one ``model`` argument, so
+    moving any stage off the review model silently over- or under-quoted the
+    pre-run dialog by that stage's whole share.
+    """
+
+    digest: str
+    critique: str
+    identity: str
+    review_plan: str
+    synthesis: str
+    focus: str
+    cross_qc: str
+    harvest: str
+    citation: str
+    verification: str
+    investigation: str
+
+    @property
+    def distinct(self) -> list[str]:
+        """Every model this run will touch, in first-appearance order."""
+        seen: list[str] = []
+        for m in (
+            self.digest, self.critique, self.identity, self.review_plan,
+            self.synthesis, self.focus, self.cross_qc, self.harvest,
+            self.citation, self.verification, self.investigation,
+        ):
+            if m and m not in seen:
+                seen.append(m)
+        return seen
+
+
+def resolve_stage_models(
+    *, model: str, verification_model: str | None = None,
+) -> StageModels:
+    """Resolve every stage's model the way the pipeline will at run time.
+
+    Imports are deferred to call time for two reasons: the resolvers read the
+    environment on every call (so resolving at import would freeze a stale
+    answer), and it keeps this module's import graph shallow — the same reason
+    the verification model was already resolved lazily here.
+
+    ``model`` is the review model the caller supplies (the GUI passes
+    ``REVIEW_MODEL_DEFAULT``) and stands in for the digest, whose model is a
+    threaded parameter rather than an env-var resolver.
+    """
+    from .citation_check import citation_model
+    from .critique import critique_model
+    from .cross_qc import cross_qc_model
+    from .focus import default_focus_model
+    from .investigate import investigation_model
+    from .prose_harvest import harvest_model
+    from .review_planner import default_review_plan_model
+    from .set_identity import default_identity_model
+    from .synthesis import default_synthesis_model
+    from .verify import default_verify_model
+
+    return StageModels(
+        digest=model,
+        critique=critique_model(),
+        identity=default_identity_model(),
+        review_plan=default_review_plan_model(),
+        synthesis=default_synthesis_model(),
+        focus=default_focus_model(),
+        cross_qc=cross_qc_model(),
+        harvest=harvest_model(),
+        citation=citation_model(),
+        verification=verification_model or default_verify_model(),
+        investigation=investigation_model(),
+    )
+
+
+def _stage_note(note: str, *, stage_model: str, primary: str) -> str:
+    """Append the stage's model to its note when it diverges from ``primary``.
+
+    Mirrors how the Verification row has always named its model, so a reader of
+    the cost dialog can see *why* one line is cheaper than its token count
+    suggests. A stage on the primary model reads unchanged.
+    """
+    if not stage_model or stage_model == primary:
+        return note
+    label = friendly_model_name(stage_model)
+    return f"{note} — on {label}" if note else f"on {label}"
 
 
 def _component(
     stage: str, input_tokens: int, output_tokens: int, *, model: str, batch: bool,
-    extra_cost: float = 0.0, note: str = "",
+    extra_cost: float = 0.0, note: str = "", primary_model: str | None = None,
 ) -> CostComponent:
     base = estimate_request_cost(input_tokens, output_tokens, model=model, batch=batch)
     cost = None if base is None else base + extra_cost
+    if primary_model is not None:
+        note = _stage_note(note, stage_model=model, primary=primary_model)
     return CostComponent(
         stage=stage, input_tokens=input_tokens, output_tokens=output_tokens,
         cost=cost, transport="batch" if batch else "real-time", note=note,
@@ -360,12 +458,15 @@ def estimate_exhaustive_run_cost(
     """
     if critique_batch is None:
         critique_batch = batch
-    if verification_model is None:
-        # Resolve through the same function as the runtime verifier, including
-        # the legacy compatibility override.
-        from .verify import default_verify_model
-
-        verification_model = default_verify_model()
+    # Every stage's model, resolved through the functions the runtime itself
+    # calls — including the verifier's legacy compatibility override. ``model``
+    # stands in for the digest, whose model is a threaded parameter rather than
+    # an env-var resolver. An explicit ``verification_model`` still wins, which
+    # is what the existing callers and tests pass.
+    stage_models = resolve_stage_models(
+        model=model, verification_model=verification_model,
+    )
+    verification_model = stage_models.verification
 
     per_sheet_images = estimate_image_tokens_for_set(1, rows=rows, cols=cols, model=model)
     components: list[CostComponent] = []
@@ -401,13 +502,15 @@ def estimate_exhaustive_run_cost(
         synth_input = digest_output + _ASSUMED_PROMPT_TOKENS_PER_SHEET
         components.append(_component(
             "Synthesis", synth_input, _ASSUMED_SYNTHESIS_OUTPUT_TOKENS,
-            model=model, batch=False, note="one text-only set overview",
+            model=stage_models.synthesis, batch=False,
+            note="one text-only set overview", primary_model=model,
         ))
     if focus and sheet_count >= 1:
         focus_input = digest_output + _ASSUMED_PROMPT_TOKENS_PER_SHEET
         components.append(_component(
             "Focus report", focus_input, _ASSUMED_FOCUS_OUTPUT_TOKENS,
-            model=model, batch=False, note="one text-only focused summary",
+            model=stage_models.focus, batch=False,
+            note="one text-only focused summary", primary_model=model,
         ))
 
     # Phase A planning stages — one text-only real-time call each: the set
@@ -417,15 +520,17 @@ def estimate_exhaustive_run_cost(
         "Set identity",
         _ASSUMED_IDENTITY_INPUT_TOKENS_BASE
         + sheet_count * _ASSUMED_IDENTITY_INPUT_TOKENS_PER_SHEET,
-        _ASSUMED_IDENTITY_OUTPUT_TOKENS, model=model, batch=False,
+        _ASSUMED_IDENTITY_OUTPUT_TOKENS, model=stage_models.identity, batch=False,
         note="one text call — disciplines/jurisdiction/adopted codes",
+        primary_model=model,
     ))
     components.append(_component(
         "Model review plan",
         _ASSUMED_PLAN_INPUT_TOKENS_BASE
         + sheet_count * _ASSUMED_PLAN_INPUT_TOKENS_PER_SHEET,
-        _ASSUMED_PLAN_OUTPUT_TOKENS, model=model, batch=False,
+        _ASSUMED_PLAN_OUTPUT_TOKENS, model=stage_models.review_plan, batch=False,
         note="one text call — the authored review checklist",
+        primary_model=model,
     ))
 
     # Critique — two adversarial reads per sheet. In a ``use_batch`` run both reads
@@ -434,10 +539,11 @@ def estimate_exhaustive_run_cost(
     crit_in = 2 * sheet_count * (per_sheet_images + _ASSUMED_PROMPT_TOKENS_PER_SHEET)
     crit_out = 2 * sheet_count * _ASSUMED_CRITIQUE_OUTPUT_TOKENS_PER_READ
     components.append(_component(
-        "Critique ×2 (per sheet)", crit_in, crit_out, model=model,
-        batch=critique_batch,
+        "Critique ×2 (per sheet)", crit_in, crit_out,
+        model=stage_models.critique, batch=critique_batch,
         note="two full reads per sheet"
         + (" — one shared upload, Batch rate" if critique_batch else " — real-time"),
+        primary_model=model,
     ))
 
     # Cross-sheet QC — one (or a few sharded) text passes over all the digests.
@@ -445,14 +551,15 @@ def estimate_exhaustive_run_cost(
         cross_in = sheet_count * _ASSUMED_OUTPUT_TOKENS_PER_SHEET + _ASSUMED_PROMPT_TOKENS_PER_SHEET
         components.append(_component(
             "Cross-sheet QC", cross_in, _ASSUMED_CROSS_QC_OUTPUT_TOKENS,
-            model=model, batch=False, note="text-only whole-set pass",
+            model=stage_models.cross_qc, batch=False,
+            note="text-only whole-set pass", primary_model=model,
         ))
 
     # Prose harvest — a small straggler-structuring allowance.
     components.append(_component(
         "Prose harvest", _ASSUMED_PROSE_STRAGGLER_INPUT_TOKENS,
-        _ASSUMED_PROSE_STRAGGLER_OUTPUT_TOKENS, model=model, batch=False,
-        note="occasional straggler structuring",
+        _ASSUMED_PROSE_STRAGGLER_OUTPUT_TOKENS, model=stage_models.harvest,
+        batch=False, note="occasional straggler structuring", primary_model=model,
     ))
 
     # Verification & citation scale with volume — quoted as a low–high band below.
@@ -472,23 +579,27 @@ def estimate_exhaustive_run_cost(
         search_cost = float(WEB_SEARCH_COST_PER_USE) * n * _ASSUMED_WEB_SEARCHES_PER_CLAIM
         return _component(
             "Citation checks", n * _ASSUMED_CITATION_INPUT_TOKENS_PER_CLAIM,
-            n * _ASSUMED_CITATION_OUTPUT_TOKENS_PER_CLAIM, model=model, batch=False,
+            n * _ASSUMED_CITATION_OUTPUT_TOKENS_PER_CLAIM,
+            model=stage_models.citation, batch=False,
             extra_cost=search_cost, note=f"~{n} unique claim(s) × web search",
+            primary_model=model,
         )
 
     def _investigate(findings: float) -> CostComponent:
-        from .core.api_config import VERIFICATION_ESCALATION_MODEL
-
         n = min(max(0, round(findings * _UNCERTAIN_FINDINGS_FRACTION)),
                 _INVESTIGATE_MAX_FINDINGS_QUOTED)
         rounds = n * _ASSUMED_INVESTIGATE_ROUNDS
+        # The escalation tier resolves through ``investigation_model()``, which
+        # honours DRAWING_ANALYZER_INVESTIGATION_MODEL before falling back to
+        # the escalation constant this used to read directly.
         return _component(
             "Investigation",
             rounds * _ASSUMED_INVESTIGATE_INPUT_TOKENS_PER_ROUND,
             rounds * _ASSUMED_INVESTIGATE_OUTPUT_TOKENS_PER_ROUND,
-            model=VERIFICATION_ESCALATION_MODEL, batch=False,
+            model=stage_models.investigation, batch=False,
             note=f"~{n} uncertain finding(s) × ~{_ASSUMED_INVESTIGATE_ROUNDS}-turn "
-                 "evidence loop",
+                 f"evidence loop with "
+                 f"{friendly_model_name(stage_models.investigation)}",
         )
 
     low_verify = _verify(sheet_count * _FINDINGS_PER_SHEET_LOW)
@@ -513,15 +624,28 @@ def estimate_exhaustive_run_cost(
         sheet_count=sheet_count, file_count=file_count, model=model,
         components=components, low_cost=low_cost, high_cost=high_cost,
         batch=batch, critique_batch=critique_batch, spec_chars=spec_chars,
+        stage_models=stage_models,
     )
 
 
 def format_exhaustive_cost_prompt(est: ExhaustiveCostEstimate) -> str:
     """Human-readable confirmation for an exhaustive QC run (§15.7)."""
     where = f" from {est.file_count} file(s)" if est.file_count else ""
+    # Name every model the run will touch, not just the review model. Stages do
+    # not all share one model (verification and the report chat sit on Sonnet,
+    # the prose harvest on Haiku), so a single-model sentence here misattributed
+    # work the per-stage rows below already price correctly.
+    if est.stage_models is not None:
+        used = [friendly_model_name(m) for m in est.stage_models.distinct]
+    else:
+        used = [friendly_model_name(est.model)]
+    if len(used) == 1:
+        with_models = used[0]
+    else:
+        with_models = f"{', '.join(used[:-1])} and {used[-1]} (per stage, below)"
     lines = [
         f"About to run the FULL exhaustive QC review on {est.sheet_count} sheet(s)"
-        f"{where} with {friendly_model_name(est.model)} — digest, set identity + "
+        f"{where} with {with_models} — digest, set identity + "
         "model review plan, two critique reads per sheet, cross-sheet QC, "
         "deterministic auditors, prose harvest, verification, the uncertain-"
         "finding investigation loop, and citation checks.",

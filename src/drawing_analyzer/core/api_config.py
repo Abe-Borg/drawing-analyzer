@@ -60,6 +60,15 @@ VERIFICATION_ESCALATION_MODEL = os.environ.get(
 # Verification triage pre-pass (triage.classify_findings_with_haiku) decides
 # whether a finding can be locally resolved or needs web verification. The
 # task is shallow classification over short inputs; Haiku fits.
+#
+# NOT WIRED IN THIS REPO. There is no triage module and no call site — this
+# constant, its ``DRAWING_ANALYZER_TRIAGE_MODEL`` override, ``PHASE_TRIAGE``,
+# ``HAIKU_TRIAGE_OUTPUT_CAP`` and ``triage_max_tokens`` are all inherited from
+# the spec-review lineage this module was factored out of. Setting the env var
+# changes nothing about a drawing run. Kept (rather than deleted) because this
+# module is the intended home for request policy and the phase plumbing is what
+# would make a triage stage cheap to add; do not read its presence as evidence
+# that a triage pass runs.
 TRIAGE_MODEL_DEFAULT = os.environ.get("DRAWING_ANALYZER_TRIAGE_MODEL", MODEL_HAIKU_45)
 
 # The Q&A assistant embedded in the HTML report (html_report.py) calls the API
@@ -494,6 +503,13 @@ def model_supports_extended_output_beta(model: str) -> bool:
     registry rather than testing ``model in OPUS_MODELS``: Opus 5, Opus 4.8,
     Sonnet 5, and Sonnet 4.6 all support the ``output-300k-2026-03-24`` beta
     on Message Batches, which a family-style check would wrongly exclude.
+
+    NOT WIRED: no production caller today (only ``tests/test_model_capabilities.py``).
+    The drawing pipeline never requests extended output — ``review_max_tokens``'s
+    ``allow_extended_output`` path has no caller either, and the batch digest
+    submits at the ordinary 16k per-sheet cap. This predicate is what a future
+    caller should gate on, and ``assert_extended_output_allowed`` is the fail-fast
+    guard that pairs with it.
     """
     return model_capabilities(model).supports_extended_output_beta
 
@@ -740,6 +756,15 @@ def cache_policy_for(phase: str | None) -> CachePolicy:
     return _PHASE_CACHE_POLICY.get(phase, _DEFAULT_PHASE_CACHE_POLICY)
 
 
+# The TTL every cache breakpoint in THIS module requests. Exported so the usage
+# ledger can price those writes at the right rate: a 1-hour write costs 2x base
+# input, not the 1.25x of a default 5-minute entry (see ``core.pricing``). Note
+# the digest and critique builders emit their own plain ``{"type": "ephemeral"}``
+# blocks and are therefore on the 5-minute rate — this constant describes the
+# api_config path only.
+CACHE_BREAKPOINT_TTL = "1h"
+
+
 def _cache_control_block() -> dict:
     """Return the standard 1-hour ephemeral cache_control block.
 
@@ -749,7 +774,19 @@ def _cache_control_block() -> dict:
     the second wave of a batch verification cycle, where the same system
     prompt is sent hundreds of times.
     """
-    return {"type": "ephemeral", "ttl": "1h"}
+    return {"type": "ephemeral", "ttl": CACHE_BREAKPOINT_TTL}
+
+
+def cache_write_ttl_for(phase: str | None) -> str | None:
+    """Return the cache-write TTL a ``phase`` will actually request, or ``None``.
+
+    ``None`` means "this phase writes no cache through this module", which is
+    also the correct value to hand the pricer when no breakpoint was attached.
+    Callers pass the result straight to ``core.pricing.usage_record_cost`` so a
+    stage's reported ``cache_creation_input_tokens`` are priced at the rate the
+    request actually asked for, rather than the 5-minute default.
+    """
+    return CACHE_BREAKPOINT_TTL if cache_policy_for(phase).caches_anything else None
 
 
 def system_prompt_with_cache(prompt: str, *, phase: str | None = None):

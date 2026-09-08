@@ -148,13 +148,54 @@ def test_real_time_vs_batch_rate_per_record():
 
 
 def test_cache_read_write_and_web_search_pricing():
-    # cache read = 0.1x input, cache write = 1.25x input (per Mtok).
+    # cache read = 0.1x input, default (5-minute) cache write = 1.25x input.
     cr = usage_record_cost(model=_OPUS, cache_read_tokens=1_000_000)
     cw = usage_record_cost(model=_OPUS, cache_write_tokens=1_000_000)
     assert cr == Decimal("0.5") and cw == Decimal("6.25")
     # web search billed per use, NOT batch-discounted.
     ws = usage_record_cost(model=_OPUS, billable_tool_uses={"web_search": 4}, batch=True)
     assert ws == Decimal("4") * WEB_SEARCH_COST_PER_USE
+
+
+def test_one_hour_cache_write_is_priced_at_2x_not_1_25x():
+    """A ``ttl: "1h"`` breakpoint costs 2x base input, not the 5-minute 1.25x.
+
+    ``api_config._cache_control_block`` requests the 1-hour TTL, so any stage
+    routed through its breakpoint helpers (today the investigation loop) writes
+    at 2x. Pricing every write at 1.25x under-reported those records by 60%.
+    """
+    five_min = usage_record_cost(model=_OPUS, cache_write_tokens=1_000_000)
+    one_hour = usage_record_cost(
+        model=_OPUS, cache_write_tokens=1_000_000, cache_write_ttl="1h"
+    )
+    assert five_min == Decimal("6.25")   # 5.00 x 1.25
+    assert one_hour == Decimal("10.00")  # 5.00 x 2.00
+    # An unset or unrecognized ttl resolves to the conservative 5-minute rate
+    # rather than silently inheriting 2x.
+    assert usage_record_cost(
+        model=_OPUS, cache_write_tokens=1_000_000, cache_write_ttl=None
+    ) == five_min
+    assert usage_record_cost(
+        model=_OPUS, cache_write_tokens=1_000_000, cache_write_ttl="30m"
+    ) == five_min
+    # The batch discount stacks on top of the TTL multiplier.
+    assert usage_record_cost(
+        model=_OPUS, cache_write_tokens=1_000_000, cache_write_ttl="1h", batch=True
+    ) == Decimal("5.00")
+
+
+def test_investigation_phase_reports_the_one_hour_ttl():
+    """The ledger's TTL comes from the same policy that builds the breakpoint."""
+    from drawing_analyzer.core.api_config import (
+        PHASE_INVESTIGATION,
+        PHASE_TRIAGE,
+        cache_write_ttl_for,
+    )
+
+    # Investigation caches system prompt + tools through api_config → 1h.
+    assert cache_write_ttl_for(PHASE_INVESTIGATION) == "1h"
+    # Triage's policy caches nothing, so it writes no cache to price.
+    assert cache_write_ttl_for(PHASE_TRIAGE) is None
 
 
 def test_unknown_model_returns_none_but_keeps_tool_charge():

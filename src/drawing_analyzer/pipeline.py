@@ -22,7 +22,11 @@ from pathlib import Path
 import threading
 from typing import Any, Callable
 
-from .core.api_config import REVIEW_MODEL_DEFAULT
+from .core.api_config import (
+    PHASE_INVESTIGATION,
+    REVIEW_MODEL_DEFAULT,
+    cache_write_ttl_for,
+)
 from .core.tokenizer import estimate_image_tokens
 from .diagnostics import get_logger
 from . import tiling
@@ -167,6 +171,7 @@ def _record_usage(
     parent: "str | None" = None,
     attempt: int = 1,
     request_id: str = "",
+    cache_write_ttl: "str | None" = None,
 ) -> UsageRecord:
     """Build a priced :class:`UsageRecord` and append it to the run's usage ledger.
 
@@ -174,6 +179,12 @@ def _record_usage(
     so no stage can overwrite another's counters. ``estimated_cost`` is priced at
     the record's own rate class (batch vs real-time, cache read/write, tool uses);
     a ``CACHE`` transport passes zero token counts, so its token cost is zero.
+
+    ``cache_write_ttl`` names the TTL the stage's cache breakpoint requested, so
+    a 1-hour write is priced at 2x base input rather than the 5-minute 1.25x.
+    Stages that attach a plain ``{"type": "ephemeral"}`` breakpoint (digest,
+    critique) leave it ``None``; stages that route through
+    ``api_config``'s breakpoint helpers pass ``cache_write_ttl_for(phase)``.
     """
     from .core.pricing import usage_record_cost
 
@@ -185,6 +196,7 @@ def _record_usage(
         cache_write_tokens=cache_write_tokens,
         billable_tool_uses=billable_tool_uses,
         batch=(transport == "BATCH"),
+        cache_write_ttl=cache_write_ttl,
     )
     return run_usage.add(
         UsageRecord(
@@ -205,6 +217,7 @@ def _record_usage(
             billing_rate_class=transport.lower(),
             request_or_custom_id=request_id,
             estimated_cost=cost,
+            cache_write_ttl=cache_write_ttl,
         )
     )
 
@@ -1872,6 +1885,10 @@ def _run_qc_stages(
                             output_tokens=rec.output_tokens,
                             cache_read_tokens=rec.cache_read_tokens,
                             cache_write_tokens=rec.cache_write_tokens,
+                            # The investigation loop caches its system prompt and
+                            # tool list through api_config's breakpoint helpers,
+                            # which request a 1-hour TTL — a 2x write, not 1.25x.
+                            cache_write_ttl=cache_write_ttl_for(PHASE_INVESTIGATION),
                             terminal_status=(
                                 "COMPLETE" if rec.outcome != "error" else "FAILED"
                             ),

@@ -34,7 +34,10 @@ def test_pipeline_defaults_are_the_current_generation():
     assert api.VERIFICATION_MODEL_DEFAULT == SONNET_5
     # Chat is deliberately NOT Opus 5 — see the web-fetch tests below.
     assert api.CHAT_MODEL_DEFAULT == SONNET_5
-    # Haiku 4.5 is still the current Haiku — triage is unchanged.
+    # Haiku 4.5 is still the current Haiku. Note this constant is NOT wired to
+    # anything in this repo — there is no triage stage and no call site — so it
+    # pins a value the drawing pipeline never reads. Kept as a regression guard
+    # for the day a triage pass is added; see the note on TRIAGE_MODEL_DEFAULT.
     assert api.TRIAGE_MODEL_DEFAULT == HAIKU
 
 

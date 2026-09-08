@@ -32,7 +32,11 @@ OPUS = "claude-opus-5"
 
 def test_price_for_exact_and_unknown():
     assert price_for(OPUS) == MODEL_PRICING[OPUS]
-    assert price_for("claude-sonnet-5").input_per_mtok == 3.0
+    # Sonnet 5 is $2/$10. It launched at that rate as introductory pricing
+    # through 2026-08-31; the scheduled increase to $3/$15 was cancelled, so
+    # $2/$10 is now the standard rate. Sonnet 4.6 remains at the older $3/$15.
+    assert price_for("claude-sonnet-5").input_per_mtok == 2.0
+    assert price_for("claude-sonnet-5").output_per_mtok == 10.0
     assert price_for("claude-sonnet-4-6").input_per_mtok == 3.0
     assert price_for("claude-haiku-4-5").output_per_mtok == 5.0
     assert price_for("totally-made-up") is None
@@ -301,6 +305,69 @@ def test_exhaustive_estimate_prices_actual_verification_model():
     )
     assert verify.cost == pytest.approx(expected)
     assert "Sonnet 5" in verify.note
+
+
+def test_exhaustive_estimate_prices_actual_critique_model(monkeypatch):
+    """Critique is the largest component; it must be priced at its own model.
+
+    The estimate used to price nine of eleven components at the single ``model``
+    argument, so a critique routed to Sonnet 5 was quoted at Opus 5 rates — an
+    over-quote on the biggest line in the dialog.
+    """
+    sonnet = "claude-sonnet-5"
+    monkeypatch.setenv("DRAWING_ANALYZER_CRITIQUE_MODEL", sonnet)
+    est = estimate_exhaustive_run_cost(10, model=OPUS)
+    crit = {c.stage: c for c in est.components}["Critique ×2 (per sheet)"]
+    expected = estimate_request_cost(
+        crit.input_tokens, crit.output_tokens, model=sonnet, batch=est.critique_batch
+    )
+    assert crit.cost == pytest.approx(expected)
+    assert "Sonnet 5" in crit.note
+    # And the quote is genuinely cheaper than the same run on the review model.
+    monkeypatch.delenv("DRAWING_ANALYZER_CRITIQUE_MODEL")
+    on_opus = {c.stage: c for c in estimate_exhaustive_run_cost(10, model=OPUS).components}
+    assert crit.cost < on_opus["Critique ×2 (per sheet)"].cost
+
+
+def test_exhaustive_estimate_prices_harvest_at_its_own_default():
+    """Prose harvest defaults to Haiku, not the review model — price it there."""
+    from drawing_analyzer.prose_harvest import harvest_model
+
+    est = estimate_exhaustive_run_cost(10, model=OPUS)
+    harvest = {c.stage: c for c in est.components}["Prose harvest"]
+    expected = estimate_request_cost(
+        harvest.input_tokens, harvest.output_tokens,
+        model=harvest_model(), batch=False,
+    )
+    assert harvest.cost == pytest.approx(expected)
+    assert "Haiku 4.5" in harvest.note
+
+
+def test_exhaustive_prompt_names_every_model_the_run_touches():
+    """The header must not claim one model does all the work."""
+    est = estimate_exhaustive_run_cost(10, model=OPUS)
+    header = format_exhaustive_cost_prompt(est).splitlines()[0]
+    # Opus does the deep reads, Sonnet the first verification look, Haiku the
+    # harvest's structuring call — all three are real spend in this run.
+    assert "Opus 5" in header
+    assert "Sonnet 5" in header
+    assert "Haiku 4.5" in header
+
+
+def test_stage_models_resolve_through_the_runtime_resolvers(monkeypatch):
+    """A ``DRAWING_ANALYZER_*_MODEL`` override reaches the estimate."""
+    from drawing_analyzer.cost import resolve_stage_models
+
+    monkeypatch.setenv("DRAWING_ANALYZER_SYNTHESIS_MODEL", "claude-haiku-4-5")
+    monkeypatch.setenv("DRAWING_ANALYZER_CROSS_QC_MODEL", "claude-sonnet-5")
+    models = resolve_stage_models(model=OPUS)
+    assert models.synthesis == "claude-haiku-4-5"
+    assert models.cross_qc == "claude-sonnet-5"
+    assert models.digest == OPUS  # the threaded review model stands in for digest
+    # ``distinct`` is first-appearance order with no repeats — it drives the
+    # header sentence, so a duplicate would read as a stutter.
+    assert len(models.distinct) == len(set(models.distinct))
+    assert models.distinct[0] == OPUS
 
 
 # --------------------------------------------------------------------------- #

@@ -1963,6 +1963,13 @@ class UsageRecord:
     billing_rate_class: str = ""
     request_or_custom_id: str = ""
     estimated_cost: "Decimal | None" = None
+    # TTL the request asked for on its cache breakpoint, when it wrote one:
+    # ``"1h"`` (2x base input) or ``None`` for the API-default 5-minute entry
+    # (1.25x). Recorded rather than inferred so a reader can tell *why* a record's
+    # cache-write cost is what it is, and so re-pricing a stored ledger stays
+    # possible. Defaults to ``None``, which is both the common case and the
+    # rate every pre-existing record was priced at.
+    cache_write_ttl: "str | None" = None
 
     def to_dict(self) -> dict:
         return {
@@ -1983,6 +1990,7 @@ class UsageRecord:
             "billing_rate_class": self.billing_rate_class,
             "request_or_custom_id": self.request_or_custom_id,
             "estimated_cost": None if self.estimated_cost is None else str(self.estimated_cost),
+            "cache_write_ttl": self.cache_write_ttl,
         }
 
 
