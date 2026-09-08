@@ -23,7 +23,7 @@ execution order — see §4.1 for the mapping.
 | 6 | The cross-QC **contract bump is removed** from the tail fix, and the evidence fingerprint becomes conditional | The bump was provably unnecessary for that change and would discard every stored cross-QC result (§2.3) |
 | 7 | The GUI package shrinks to a **measured confirmation-time scan**; the background-worker design is deferred | Image tokens are scale-invariant, so the principal correction needs an aspect ratio and one boolean per page (§2.6) |
 | 8 | The A/B **estimate-only child process is retained**; the in-process alternative was evaluated and rejected | Per-stage resolvers fall back to the import-bound `REVIEW_MODEL_DEFAULT`, so in-process env mutation fixes one stage and silently leaves four stale (§2.4) |
-| 9 | R-04 (text-budget truncation) moves ahead of R-01/R-02; its free half becomes WP-02 | It bounds review *quality*, not cost, and its first step needs no paid calls |
+| 9 | R-04 (text-budget truncation) moves ahead of R-01/R-02; its zero-call half becomes WP-02 §7.1 | It bounds review *quality*, not cost, and its first step needs no paid calls |
 | 10 | Documentation item 14 now names its target precisely; two other documentation items were dropped as already satisfied | §2.4, §12 |
 
 Two claims made during review were themselves wrong and are recorded so they are
@@ -31,6 +31,20 @@ not re-litigated: the stale investigation-eligibility comment **does** exist
 (`core/api_config.py`, line 57 — an earlier search missed the `core/` package),
 and cross-QC's model input is the digest prose **plus** the budgeted text layer,
 not the 4,000-character text layer alone.
+
+A second review pass on this revision found four further defects in it, all
+confirmed against the code and folded in here:
+
+| # | Defect in the first draft of revision 2 | Correction |
+|---|---|---|
+| 11 | The location route reached per-shard map findings only. Reconcile-produced findings — the cross-shard path the sharded design exists for — are built from the response with no access to the originating facts, and the reconcile output contract carries no tile | §8.4 Part 2: a host-side `(handle, normalized quote) → fact` join, using the verbatim-quote guarantee the reconcile prompt already imposes |
+| 12 | Retaining a tile does not produce a TILE anchor. `_anchor_one` falls back to the tile only when the quote is **blank**; a non-empty unmatched quote — exactly the scanned and hybrid case — returns `quote_not_found` and never consults its tile | §8.4 Part 3: a tile fallback scoped to the explicitly reduced-trust state, with the hallucination signal preserved everywhere else |
+| 13 | WP-02 was declared zero-call while requiring the grounding discard rate, which no stored artifact retains — the drops happen before `CrossQCResult` is built | §7 split into a zero-call tier (§7.1) and one explicitly budgeted instrumented run (§7.2) |
+| 14 | §2.6 claimed the ≤20-image branch is not scale-invariant | It is. Scale invariance follows from long-edge normalization in **both** regimes; what differs is *aspect* sensitivity — 20.27% spread at 6×6/1560, 0.00% at 3×3/2576 |
+
+Items 11 and 12 mattered most: together they meant the recommended fix would have
+admitted recovered findings into the same unverifiable dead end this revision
+added WP-03B to escape.
 
 ## 1. Outcome and scope
 
@@ -84,10 +98,10 @@ instructions from this document.
 | Work | Decision | Reason |
 |---|---|---|
 | Exclude network tests in the acceptance runner itself | **Implement first** | The only path in this document that spends money without consent |
-| Free coverage/truncation/locatability diagnostics | **Implement second** | Costs nothing and sizes every remaining evidence decision |
+| Coverage/truncation/locatability diagnostics | **Implement second** | Sizes every remaining evidence decision. §7.1 is zero-call; the discard rate (§7.2) needs one budgeted run |
 | Separate full source text from prompt text; fix sharded tail grounding | Implement (WP-03A) | Concrete conditional loss of valid evidence; cache-preserving |
 | Admit textless / hybrid / unmatched visual evidence and give it a location | Implement (WP-03B) | Larger loss than the tail case; requires cache invalidation |
-| Request `tile_label` on the sharded map/reconcile path | Implement inside WP-03B | Without a location a recovered finding can never be verified (§2.2) |
+| Give sharded findings a location and let the resolver use it (§8.4, three parts) | Implement inside WP-03B | Without all three, a recovered finding can never be verified (§2.2) |
 | Bump `_CROSS_QC_CACHE_CONTRACT` for the tail fix | **Do not** | Provably unnecessary; discards valid stored results (§2.3) |
 | Add the evidence fingerprint unconditionally to the cross-QC key | **Do not** | Changes every key, which is the invalidation it was meant to avoid. Include it conditionally (§2.3) |
 | Correct A/B estimate/runtime model mismatch via an estimate-only child process | Implement | Per-stage resolvers fall back to an import-bound default; an in-process fix is incomplete (§2.4) |
@@ -206,8 +220,18 @@ every downstream check requires an anchor:
 - The sharded map and reconcile prompts never request a tile. `tile_label` is
   requested only in the whole-set prompt (line 173), and only
   `_validate_cross_item` resolves it (`_resolve_tile`, line 386).
-- `anchor._anchor_one` therefore reaches `_tile_anchor(None, …)` and returns
-  `UNANCHORED, method="no_quote_no_tile"` (`anchor.py`, line 338).
+- Reconcile-produced findings — the cross-shard path the sharded design exists
+  for (DA-015) — are built by `_reconcile_call` from the **response** items via
+  `_finding_from_handles(item, entry_by_handle)`, with no access to the
+  originating facts, and `CROSS_QC_RECONCILE_SYSTEM_PROMPT` (line 216) specifies
+  an output contract with no tile. A location stored on a fact is discarded
+  before the finding is built.
+- `anchor._anchor_one` (line 339) calls `_tile_anchor` **only when
+  `source_quote` is blank**, returning `UNANCHORED,
+  method="no_quote_no_tile"` when no tile was reported (`anchor.py`, line 338).
+  A **non-empty** quote that matches nothing — precisely the scanned and hybrid
+  case — falls through EXACT/FUZZY to `UNANCHORED,
+  method="quote_not_found"` (line 356) and never consults its tile at all.
 - Cross-sheet verification requires an anchored primary **and** at least one
   anchored leg (`verify._has_anchored_legs`, line 144).
 - Investigation requires `anchor.rect_pdf is not None`
@@ -218,8 +242,10 @@ crop-verified, never investigated, and — per the §18 markup rules — placed 
 margin callout with no ink on the drawing. That is arguably worse than dropping
 it, because it presents an unverifiable claim as a review result.
 
-The consequence for WP-03B: the fix must **obtain a usable evidence location**,
-not merely relax the acceptance test. §8.4 specifies the recommended route.
+The consequence for WP-03B: the fix must **obtain a usable evidence location**
+and make the resolver able to use it, not merely relax the acceptance test. The
+last two bullets are why a tile on the map path alone is insufficient — §8.4
+specifies all three required parts.
 
 ### 2.3 Cache reachability: what actually needs invalidating
 
@@ -418,7 +444,7 @@ investigation, citation, retries, and local result-cache hits. Use them as
 arithmetic cross-checks, not production regression fixtures requiring exact
 agreement with rasterizer rounding.
 
-### 2.6 Image tokens are scale-invariant under the shipping policy
+### 2.6 Image tokens are scale-invariant; aspect sensitivity depends on the regime
 
 `tiling.zoom_for_rect()` normalizes every rectangle's **long edge** to the render
 target, so estimated pixel dimensions — and therefore token counts — are a
@@ -426,12 +452,25 @@ function of aspect ratio, grid, overlap, target, and model tier. **Physical page
 size does not enter.** ANSI E 34×44 and US letter 8.5×11 share an aspect ratio
 and both compute to exactly 92,871 tokens at 6×6 / 8% / 1560.
 
-This holds strictly in the shipping >20-image regime, where the largest possible
-image (a square at 1560) is 3,245 tokens, below the 4,784 hi-resolution cap. It
-does **not** hold in the ≤20-image branch, where a 2576-pixel long edge puts most
-images at the cap: an E-size sheet at 3×3 costs 10 × 4,784 = 47,840 tokens
-regardless of shape. Cost in that regime is essentially image count. R-03 must
-account for both regimes separately.
+Scale invariance follows from long-edge normalization alone, so it holds in
+**both** target regimes. What changes between them is **aspect-ratio
+sensitivity**, because of token-cap clamping:
+
+| Regime | Same aspect, different physical size | Different aspect (34×44 vs square) |
+|---|---|---:|
+| >20 images @ 1560 (shipping) | identical — 92,871 either way | 92,871 vs 116,481 — **20.27%** spread |
+| ≤20 images @ 2576 | identical — 47,840 either way | 47,840 vs 47,840 — **0.00%** spread |
+
+In the shipping >20-image regime the largest possible image (a square at 1560) is
+3,245 tokens, below the 4,784 hi-resolution cap, so nothing clamps and aspect
+ratio drives the number. In the ≤20-image branch a 2576-pixel long edge puts
+essentially every image at the cap, so aspect ratio washes out entirely and cost
+reduces to image count: an E-size sheet at 3×3 costs 10 × 4,784 = 47,840 tokens
+whatever its shape.
+
+Do not state this as "the ≤20 branch is not scale-invariant" — it is. R-03 must
+model the two regimes separately because their *aspect* behavior differs, not
+their scale behavior.
 
 Decomposing the current preview's ~1.9× overstatement for a vector E-size sheet:
 
@@ -513,7 +552,7 @@ passing baseline.
 |---|---|---|---|
 | WP-00 | Baseline, reproduction, interface agreement | None | Integrator |
 | WP-01 | Acceptance-runner network exclusion | WP-00 | Integrator |
-| WP-02 | Free coverage/truncation/locatability diagnostics | WP-00 | Evidence agent |
+| WP-02 | Coverage/truncation/locatability diagnostics (§7.1 zero-call, §7.2 one budgeted run) | WP-00 | Evidence agent |
 | WP-03A | Tail evidence text + sharded tail grounding (cache-preserving) | WP-02 | Evidence agent |
 | WP-03B | Visual-evidence recovery: textless/hybrid/missing quote + location | WP-03A | Evidence agent |
 | WP-04 | A/B process parity and immediate cost-copy fixes | WP-00 | Harness/cost agent |
@@ -623,10 +662,18 @@ package ships on its own, ahead of everything else.
 
 ## 7. WP-02: measure evidence coverage before engineering against it
 
-Zero API calls. Local inspection and existing diagnostics only. This package
-sizes WP-03A and WP-03B and feeds R-04.
+This package sizes WP-03A and WP-03B and feeds R-04. It has **two tiers**, and
+they must not be conflated:
 
-### 7.1 What to count
+- **§7.1 — zero-call.** Derivable from PDFs on disk and from artifacts an
+  existing run already exported. No API call, no budget approval.
+- **§7.2 — one instrumented run.** The grounding **discard rate** cannot be
+  recovered from any existing artifact (see below), so measuring it requires new
+  counters plus one explicitly budgeted sharded run.
+
+Do the zero-call tier first and see how much of the decision it already settles.
+
+### 7.1 What to count — zero-call tier
 
 Over an approved representative set (see §14.1 for composition), record per sheet
 and per set:
@@ -641,27 +688,53 @@ and per set:
    how many sheets are individually over the 4,000-character budget.
 4. Whether the set takes the sharded path (retained readable entries > 40) and
    the retained-entry count.
-5. On a sharded run, **locatability**: how many returned legs and facts carry a
-   quote, how many of those quotes match extracted text, and how many findings
-   end `UNANCHORED`. This is the number that decides whether the §8.4 location
-   route is sufficient.
+5. **Surviving-finding locatability**, from an existing run's exported findings:
+   the anchor-tier distribution (EXACT / FUZZY / TILE / UNANCHORED) on
+   cross-sheet findings, and how many carry a quote at all. This is derivable
+   because it describes findings that were *kept*.
 6. Existing coverage and completeness fields already produced by the run
    (`budget_degraded`, `text_chars_omitted`, `findings_omitted`,
-   `coverage_status`).
+   `facts_collected`, `coverage_status`).
 
-Most of this is already emitted or derivable from `RunJournal`, `CrossQCResult`
-and the manifests. Prefer reading existing outputs to adding new instrumentation;
-where a counter is genuinely missing, add a count-only journal field — never raw
-text, never an absolute path.
+All of the above is derivable from PDFs on disk plus `RunJournal`,
+`CrossQCResult` and the manifests of a run that already happened. Prefer reading
+existing outputs to adding instrumentation; where a counter is genuinely missing,
+add a count-only journal field — never raw text, never an absolute path.
 
-### 7.2 Deliverable
+### 7.2 The discard rate needs one instrumented run
+
+The number that most directly sizes WP-03B — how many legs and facts the model
+returned that were **dropped** for failing grounding, and how many of those had
+no quote at all — cannot be recovered from any stored artifact.
+`_finding_from_handles` and `_parse_facts` discard items before `CrossQCResult`
+is constructed; the result retains only accepted findings plus the aggregate
+`facts_collected`, and the stage cache stores only parsed results. No existing
+counter distinguishes "the model returned nothing" from "the host dropped it."
+
+So this tier is explicitly **not** zero-call:
+
+1. Add count-only counters at both discard sites, separating: quote absent,
+   quote present but unmatched, and handle unresolved. Counts and reasons only —
+   never the quote text.
+2. Run **one** sharded cross-QC pass over the approved set, on an explicitly
+   approved budget, with a cold local result cache. State the expected cost from
+   the corrected estimator before running it.
+3. Record the discard rate by sheet classification (vector / textless / hybrid).
+
+Reuse the run from §7.1 if one is being commissioned anyway rather than
+commissioning a second. If no budget is approved, narrow the deliverable to the
+§7.1 tier and say plainly that the discard rate is unmeasured — do not present a
+surviving-finding distribution as if it were the discard rate.
+
+### 7.3 Deliverable
 
 A short measured report: frequency of each grounding trigger by sheet type, the
-hybrid population, and the locatability distribution. It converts §2.1's
-severity assessment from inference to measurement and tells WP-03B whether the
-tile route covers the observed cases.
+hybrid population, the surviving-finding anchor-tier distribution, and — if the
+§7.2 run was approved — the discard rate. It converts §2.1's severity assessment
+from inference to measurement and tells WP-03B whether the §8.4 location route
+covers the observed cases. Label which tier each number came from.
 
-Do not gate WP-03A on this report. Run WP-02 first because it is free and
+Do not gate WP-03A on this report. Run the §7.1 tier first because it is free and
 informative, but the tail fix is justified independently by the reproduction in
 §2.1.
 
@@ -761,13 +834,15 @@ Trust rules, per requirement 3.9:
 
 ### 8.4 WP-03B: give recovered evidence a location
 
-Per §2.2, admission without a location is a dead end. Recommended route,
-smallest change that reaches verification:
+Per §2.2, admission without a location is a dead end. The route below has
+**three** required parts. Landing only the first leaves the principal cross-shard
+path exactly as unlocatable as it is today.
+
+**Part 1 — carry a tile on the map path.**
 
 1. Request `tile_label` per fact and per leg in the sharded **map** prompt, in
    the same self-describing form the whole-set prompt already uses (line 173).
-2. Add a tile field to `CrossQCFact` and carry it through `_reconcile_facts` so a
-   location survives reconciliation.
+2. Add a tile field to `CrossQCFact`.
 3. Resolve it with the existing `digest._resolve_tile(item, rows, cols)` against
    **that leg's own sheet's** grid, exactly as `_validate_cross_item` does at
    line 386. `_resolve_tile` prefers `tile_label`, bounds-checks through
@@ -775,13 +850,60 @@ smallest change that reaches verification:
    degrades to today's `UNANCHORED` rather than to a wrong rectangle.
 4. Stop hardcoding `tile=None` in `_finding_from_handles` (lines 482, 491).
 
+**Part 2 — carry it across reconciliation.** Part 1 alone does not reach the
+cross-shard findings, which are the whole reason the sharded design exists
+(DA-015). `_reconcile_call` builds its findings with
+`_finding_from_handles(item, entry_by_handle)` from the **response** items and
+has no access to the originating `CrossQCFact` objects, and
+`CROSS_QC_RECONCILE_SYSTEM_PROMPT` (line 216) specifies an output contract of
+`{sheet_handle, category, severity, text, recommended_action, source_quote,
+also_on: [{sheet_handle, source_quote}], refs}` — no tile. A tile stored on a
+fact is therefore discarded before the finding is built.
+
+Preferred remedy, **host-side lookup**: build a `(handle, normalized
+exact_quote) → CrossQCFact` map for the facts sent in each reconcile request and
+resolve each returned leg's tile from it. The reconcile prompt already requires
+that "both quotes must come verbatim from the facts," so the join key is
+deterministic and the model cannot invent a location. Normalize the quote with
+the existing `_norm_for_match` so the join tolerates the same cosmetic variation
+grounding already tolerates. A lookup miss yields no tile and today's behavior —
+never a guessed rectangle.
+
+Fallback, only if WP-02 or a pilot shows a high lookup-miss rate: extend the
+reconcile output contract to carry `tile_label` per leg and resolve it with
+`_resolve_tile` as in Part 1. This is second choice because it lets the model
+supply a location rather than deriving one from evidence it already committed to.
+
+**Part 3 — let the anchor resolver use the tile.** Parts 1 and 2 still do not
+produce a TILE anchor for the case WP-03B targets. `anchor._anchor_one`
+(line 339) calls `_tile_anchor` **only when `source_quote` is blank**; a
+non-empty quote that matches nothing falls through EXACT/FUZZY and returns
+`UNANCHORED, method="quote_not_found"` (line 356) — deliberately, as the
+hallucination signal. The scanned and hybrid cases supply a non-empty quote that
+cannot match, so they land in exactly that branch.
+
+`_anchor_one` therefore needs the finding's evidence-trust state (§8.3) and must
+distinguish two cases that look identical to it today:
+
+- **Textual evidence unavailable** for this quote's sheet or region — no text
+  check was possible, so an unmatched quote is not evidence of fabrication. Fall
+  back to the reported tile, at TILE tier, and record the reduced trust.
+- **Not matched on text-bearing evidence** — the quote should have been findable
+  and was not. Keep `UNANCHORED, method="quote_not_found"`. This is the existing
+  hallucination signal and must not weaken.
+
+Do not implement this as a global relaxation of `quote_not_found`. The digest,
+critique and whole-set cross-QC paths must keep today's behavior exactly; the
+tile fallback is admissible only for a leg the host has explicitly marked
+reduced-trust because no textual check was possible.
+
 Consequences to verify, not assume:
 
-- An unmatched or unavailable-text quote now anchors at **TILE** tier — coarse
-  but honest, the same contract `_tile_anchor` already documents.
+- A reduced-trust quote anchors at **TILE** tier — coarse but honest, the same
+  contract `_tile_anchor` already documents.
 - TILE anchoring satisfies `verify._has_anchored_legs` and
   `investigate._candidates`, so the dual-crop check and the investigation loop
-  become reachable for these findings.
+  become reachable for these findings. Assert against those functions.
 - This route never consults `is_raster`, so it covers scanned sheets, hybrid
   sheets, and ordinary text-match misses uniformly — which is why it is preferred
   over a raster-classification carve-out.
@@ -789,12 +911,15 @@ Consequences to verify, not assume:
   WP-03B's invalidation automatically (§2.3).
 - It adds a small amount of model output per fact and creates a new opportunity
   for a wrong-but-in-bounds tile. Quantify the second with WP-02's locatability
-  baseline and the negative regressions in §8.6.
+  baseline and the negative regressions in §8.7.
+- Fabricated quotes on text-bearing sheets must still be `UNANCHORED` after the
+  change. This is the regression that proves Part 3 did not become a blanket
+  relaxation.
 
 If WP-02's locatability data shows the model routinely omits tiles on the sharded
 path, record that and propose an alternative in a follow-up rather than
 back-filling a guessed location. **Never** synthesize a rectangle the model did
-not report.
+not report, and never derive one from a quote the host could not join to a fact.
 
 ### 8.5 Cache design
 
@@ -895,13 +1020,29 @@ acceptance tests.
     anchors at TILE tier and is accepted by `verify._has_anchored_legs` and
     `investigate._candidates`. Assert against those functions, not a copy of
     their conditions.
-16. **Bad tile degrades safely:** an out-of-range or malformed `tile_label`
+16. **Cross-shard findings are locatable too:** a fact carrying a tile survives
+    `_reconcile_facts` and the reconcile response into the finding built by
+    `_finding_from_handles`. A test that only exercises per-shard map findings
+    does not satisfy this case, and is the exact gap §8.4 Part 2 exists to
+    close.
+17. **Reconcile lookup is evidence-derived:** a returned leg whose quote does not
+    join to any sent fact gets no tile and stays `UNANCHORED`. A reconcile
+    response inventing a handle/quote pair cannot acquire a location.
+18. **Anchor fallback is scoped, not blanket:** a non-empty unmatched quote on a
+    leg marked *textual evidence unavailable* anchors at TILE tier; the same
+    unmatched quote on text-bearing evidence still returns `UNANCHORED,
+    method="quote_not_found"`. Assert both halves — the second is what proves
+    §8.4 Part 3 did not weaken the hallucination signal.
+19. **Other paths keep today's anchoring exactly:** digest, critique and
+    whole-set cross-QC findings with unmatched quotes are `UNANCHORED` before
+    and after the change.
+20. **Bad tile degrades safely:** an out-of-range or malformed `tile_label`
     yields `None`, `UNANCHORED`, and the existing disclosure — never a wrong
     rectangle.
-17. **Trust is visible:** a finding surviving on reduced-trust legs alone is
+21. **Trust is visible:** a finding surviving on reduced-trust legs alone is
     distinguishable in the ledger, report and markup, and its unavailability
     reason is disclosed.
-18. **Old cached results do not replay:** a set that was cacheable before the
+22. **Old cached results do not replay:** a set that was cacheable before the
     change (short text, textless sheets, non-degraded) recomputes after it.
     Assert the invalidation mechanism actually in use.
 
@@ -1197,10 +1338,14 @@ cache behavior. Retain per-stage model attribution for exhaustive mode.
 ### 10.5 Test matrix
 
 - Default vector E/D/B/A shapes and non-square aspect ratios.
-- **Scale invariance:** two pages of the same aspect ratio and different physical
-  size produce identical image-token estimates in the >20-image regime.
-- **The ≤20-image regime is not scale-invariant:** most images clamp to the
-  model token cap; assert that branch separately.
+- **Scale invariance holds in both regimes:** two pages of the same aspect ratio
+  and different physical size produce identical image-token estimates at 6×6 /
+  1560 **and** at 3×3 / 2576. Do not assert the ≤20 branch is scale-sensitive —
+  it is not (§2.6).
+- **Aspect sensitivity differs by regime:** at 6×6 / 1560, 34×44 and a square
+  page differ by about 20%; at 3×3 / 2576 they are identical because every image
+  clamps to the model token cap. Assert the small-grid branch on its target, its
+  cap clamping, and its image count instead.
 - Raster sheet classification; unknown classification fallback.
 - 6×6, 5×5, 3×3, and 2×2 grids, including the ≤20-image target branch.
 - Overlap zero, shipping overlap, and an explicit experimental overlap.
@@ -1510,7 +1655,9 @@ itself require dependency changes.
 - [ ] The acceptance runner cannot reach the network with a real key present, and
       a regression guards it.
 - [ ] Coverage/truncation/locatability were measured before the evidence fix was
-      finalized, and the measurement is recorded.
+      finalized, and the measurement is recorded, with each number labelled by
+      tier — zero-call (§7.1) or the instrumented run (§7.2). A
+      surviving-finding distribution is not reported as a discard rate.
 - [ ] The original tail-evidence failure was demonstrated before the fix.
 - [ ] Textless, hybrid, and missing-quote failures were demonstrated before the
       fix, and the hybrid case does not pass merely because `is_raster` is true.
@@ -1518,6 +1665,13 @@ itself require dependency changes.
       textual grounding.
 - [ ] A recovered finding is locatable and actually reaches
       `verify._has_anchored_legs` and `investigate._candidates`.
+- [ ] **Cross-shard** (reconcile-produced) findings are locatable, not only
+      per-shard map findings, and their tile is derived from a host-side join to
+      the sent facts rather than supplied by the model.
+- [ ] The tile fallback in `_anchor_one` applies **only** to legs explicitly
+      marked reduced-trust; an unmatched quote on text-bearing evidence still
+      returns `quote_not_found`, and digest/critique/whole-set anchoring is
+      unchanged.
 - [ ] An unquoted leg is never more trusted than an unmatched one.
 - [ ] Reduced-trust findings are visibly distinguished everywhere they appear.
 - [ ] All cold, prescan, and spool paths carry the new field.
@@ -1571,9 +1725,9 @@ The immediate corrective release can complete without a paid experiment. The
 packages below are subsequent research decisions, not hidden release blockers.
 Reuse the improved A/B harness and existing benchmark/release record process.
 
-**Order changed in revision 2:** R-04's free half is now WP-02 and runs first;
-its paid half precedes R-01 and R-02, because it bounds review quality rather
-than cost.
+**Order changed in revision 2:** R-04's zero-call half is now WP-02 §7.1 and runs
+first; its measured half precedes R-01 and R-02, because it bounds review quality
+rather than cost.
 
 ### 14.1 Common experiment protocol
 
@@ -1617,10 +1771,11 @@ optimization study look successful.
 
 ### 14.2 R-04: text budget and evidence coverage (**now first**)
 
-WP-02 supplies the free half: how often truncation occurs, by sheet type, plus
-the textless/hybrid population and the locatability distribution. The paid half
-inspects what was actually lost and whether a larger model text budget recovers
-it.
+WP-02 §7.1 supplies the zero-call half: how often truncation occurs, by sheet
+type, plus the textless/hybrid population and the surviving-finding anchor-tier
+distribution. WP-02 §7.2 adds the discard rate from one instrumented run. The
+remaining paid work inspects what was actually lost and whether a larger model
+text budget recovers it.
 
 WP-03 fixes host validation without increasing model prompts. A larger cap is a
 separate experiment. Any move of full evidence into identity/citation/model
@@ -1640,8 +1795,8 @@ equivalent evidence content.
 
 ### 14.3 R-01: Sonnet digest with Opus critique
 
-Priority: first model-cost experiment after tooling is trustworthy and R-04's
-free half is in hand.
+Priority: first model-cost experiment after tooling is trustworthy and WP-02's
+measurements are in hand.
 
 Use existing routing. In the environment-based harness, set the global digest
 default to Sonnet and explicitly keep critique and cross-QC on Opus before the
@@ -1787,7 +1942,8 @@ evidence.
 ### Evidence implementer (WP-02, WP-03A, WP-03B)
 
 Measure first: truncation frequency, the textless/hybrid population, and
-locatability. Then land WP-03A — full host evidence with explicit
+locatability — the zero-call tier (§7.1) unconditionally, and the discard rate
+(§7.2) if a run is budgeted; never report the first as if it were the second. Then land WP-03A — full host evidence with explicit
 unavailable/empty semantics, the two sharded validation paths, and a
 **conditional** cache field that preserves every existing key with **no contract
 bump**. Then land WP-03B — the three-state evidence outcome, the closed
