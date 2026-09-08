@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 
 from drawing_analyzer.investigate import (
     INVESTIGATE_SYSTEM_PROMPT,
@@ -29,6 +30,8 @@ from drawing_analyzer.models import (
     source_page_key,
 )
 from tests.fixtures.fake_anthropic import (
+    BetaClientMixin,
+    StreamingMessagesMixin,
     FakeMessage,
     FakeTextBlock,
     FakeToolUseBlock,
@@ -95,19 +98,34 @@ def _executor(tmp_path=None, sheet=None, sheet_id_map=None, finding=None,
     )
 
 
-class _LoopClient:
+class _LoopClient(BetaClientMixin):
     """create() delegates to ``responder(kw, call_no)``; captures every request."""
 
     def __init__(self, responder):
         self.calls: list[dict] = []
         outer = self
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(self, **kw):  # noqa: ANN001, ANN202
                 outer.calls.append(kw)
                 return responder(kw, len(outer.calls))
 
         self.messages = _Msgs()
+
+
+def _tools_callable(kw: dict) -> bool:
+    """Whether this request actually lets the model call a tool.
+
+    The loop forces its text-only close with ``tool_choice: {"type": "none"}``
+    while keeping the tool list in place, so a fake that merely checked for a
+    ``tools`` key would go on offering tool calls past the round budget.
+    """
+    if not kw.get("tools"):
+        return False
+    choice = kw.get("tool_choice")
+    if isinstance(choice, dict) and choice.get("type") == "none":
+        return False
+    return True
 
 
 def _tool_use(name="crop_region", tool_input=None, block_id="toolu_1"):
@@ -364,7 +382,7 @@ def test_multiple_tool_uses_in_one_turn_are_all_answered_together():
 
 def test_budget_cap_forces_a_no_tools_close_and_stays_uncertain():
     def responder(kw, _n):
-        if "tools" in kw:
+        if _tools_callable(kw):
             return _tool_use(block_id=f"toolu_{_n}")
         return FakeMessage(content=[FakeTextBlock(text="I still cannot decide")],
                            stop_reason="end_turn", usage=FakeUsage())
@@ -377,10 +395,30 @@ def test_budget_cap_forces_a_no_tools_close_and_stays_uncertain():
     assert v.investigated is True and v.investigation_rounds == 2
     assert res.budget_capped == 1 and res.still_uncertain == 1
     final_kw = client.calls[-1]
-    assert "tools" not in final_kw                 # the forced text-only close
+    # The close withdraws tool *permission* and keeps the tool list, so the
+    # turn carrying the largest accumulated prefix still reads the cached
+    # tools+system tiers; dropping `tools` would invalidate all three.
+    assert final_kw["tool_choice"] == {"type": "none"}
+    assert final_kw["tools"], "the tool list must stay for the cached prefix"
     budget_turn = final_kw["messages"][-1]["content"]
     assert any(isinstance(b, dict) and b.get("type") == "text"
                and "budget exhausted" in b["text"].lower() for b in budget_turn)
+
+
+def test_every_pre_cap_turn_offers_tools_and_never_pins_tool_choice():
+    """Permission is withdrawn only at the cap — never before it."""
+    def responder(kw, _n):
+        if _tools_callable(kw):
+            return _tool_use(block_id=f"toolu_{_n}")
+        return FakeMessage(content=[FakeTextBlock(text='{"verdict":"NOT_VISIBLE","note":"n"}')],
+                           stop_reason="end_turn", usage=FakeUsage())
+
+    client = _LoopClient(responder)
+    _run_one(client, max_rounds=3)
+    assert all(kw.get("tools") for kw in client.calls)      # never dropped
+    pre_cap = client.calls[:-1]
+    assert all("tool_choice" not in kw for kw in pre_cap)
+    assert client.calls[-1]["tool_choice"] == {"type": "none"}
 
 
 def test_garbled_verdict_stays_uncertain_never_rejected():
@@ -648,7 +686,7 @@ def test_cache_never_admits_capped_or_garbled_outcomes(tmp_path):
     from drawing_analyzer.digest_cache import DigestCache
 
     def _never(kw, _n):
-        if "tools" in kw:
+        if _tools_callable(kw):
             return _tool_use()
         return FakeMessage(content=[FakeTextBlock(text="still unsure")],
                            stop_reason="end_turn", usage=FakeUsage())
@@ -696,6 +734,23 @@ def test_cache_key_sensitivity(tmp_path):
     assert _live_ran(model="claude-sonnet-5")              # model rides the key
 
 
+def test_task_budget_rides_the_cache_key(tmp_path, monkeypatch):
+    """A verdict reached under a different token budget is a different verdict."""
+    from drawing_analyzer.digest_cache import DigestCache
+
+    cache = DigestCache(None, persist=False)
+    _cached_run(_LoopClient(_confirm_responder), cache, tmp_path / "a")
+
+    client = _LoopClient(_confirm_responder)
+    _cached_run(client, cache, tmp_path / "b")
+    assert not client.calls                                  # identical -> hit
+
+    monkeypatch.setenv("DRAWING_ANALYZER_INVESTIGATION_TASK_BUDGET", "60000")
+    client = _LoopClient(_confirm_responder)
+    _cached_run(client, cache, tmp_path / "c")
+    assert client.calls                                      # budget changed -> miss
+
+
 def test_cache_disabled_without_a_fingerprint(tmp_path):
     from drawing_analyzer.digest_cache import DigestCache
 
@@ -733,3 +788,147 @@ def test_investigate_findings_never_raises_on_hostile_inputs():
         sleep=lambda *_: None, render_fn=_render_fn,
     )
     assert res.investigated == 0 and res.errors
+
+
+# --------------------------------------------------------------------------- #
+# Per-run budget scaling and the advisory task budget
+# --------------------------------------------------------------------------- #
+
+
+def test_investigation_budget_scales_with_set_size(monkeypatch):
+    """A flat cap is generous on a 20-sheet set and severe on a 200-sheet one."""
+    from drawing_analyzer.investigate import investigation_max_findings
+
+    monkeypatch.delenv("DRAWING_ANALYZER_INVESTIGATION_MAX_FINDINGS", raising=False)
+    assert investigation_max_findings(0) == 10               # base
+    assert investigation_max_findings(20) == 15
+    assert investigation_max_findings(100) == 35
+    # Bounded: each investigation is a multi-turn vision loop on the escalation
+    # model, so a huge set must not open an unbounded number of them.
+    assert investigation_max_findings(10_000) == 40
+
+    # An operator who names a number means it, at any set size.
+    monkeypatch.setenv("DRAWING_ANALYZER_INVESTIGATION_MAX_FINDINGS", "3")
+    assert investigation_max_findings(10_000) == 3
+
+
+def test_task_budget_is_sent_with_the_beta_and_respects_the_minimum(monkeypatch):
+    from drawing_analyzer.investigate import TASK_BUDGET_BETA, investigation_task_budget
+
+    # Anthropic's documented floor is 20k; a smaller request is lifted to it.
+    monkeypatch.setenv("DRAWING_ANALYZER_INVESTIGATION_TASK_BUDGET", "5000")
+    assert investigation_task_budget() == 20_000
+    monkeypatch.delenv("DRAWING_ANALYZER_INVESTIGATION_TASK_BUDGET", raising=False)
+    assert investigation_task_budget() == 40_000
+
+    client = _LoopClient(_confirm_responder)
+    _run_one(client)
+    sent = client.calls[0]["output_config"]
+    assert sent["task_budget"] == {"type": "tokens", "total": 40_000}
+    assert sent["effort"] == "high"                          # effort is preserved
+    assert TASK_BUDGET_BETA == "task-budgets-2026-03-13"
+
+
+def test_task_budget_rejection_degrades_instead_of_killing_the_stage():
+    """An org without the beta would otherwise 400 on every turn — which on an
+    additive, non-fatal stage (I-3) means investigations silently stop happening
+    rather than degrade. The first budget-specific 400 turns the feature off for
+    the process; the host-side round cap still bounds each investigation."""
+    import drawing_analyzer.investigate as inv
+
+    class _Status400(Exception):
+        status_code = 400
+
+    class _Rejects400(_LoopClient):
+        # Rejects only a request that actually carries the task-budget beta —
+        # the Opus 5 refusal-fallback beta (``apply_refusal_fallback``) rides
+        # every request regardless and must keep working once task budgets
+        # degrade, so a blanket ``.beta`` rejection would over-fire here.
+        @property
+        def beta(self):
+            base = super().beta
+
+            class _Msgs:
+                def stream(self, **kw):
+                    if "task-budgets-2026-03-13" in (kw.get("betas") or []):
+                        raise _Status400("output_config.task_budget: unsupported beta")
+                    return base.messages.stream(**kw)
+
+                def create(self, **kw):
+                    return base.messages.create(**kw)
+
+            return SimpleNamespace(messages=_Msgs())
+
+    inv._task_budget_available = True
+    try:
+        client = _Rejects400(_confirm_responder)
+        res, finding = _run_one(client)
+        # The stage still produced a verdict, over the plain streaming transport.
+        assert client.calls, "fell back to the non-beta transport"
+        assert inv._task_budget_available is False           # latched off
+        assert "task_budget" not in (client.calls[0].get("output_config") or {})
+        assert finding.verification.status == "VERIFIED"
+    finally:
+        inv._task_budget_available = True
+
+
+def test_fallback_verdict_is_not_cached_under_the_budgeted_key(tmp_path):
+    """A verdict reached WITHOUT a task budget must not be replayed later, on a
+    host where the beta works, as though it had been reached with one.
+
+    The key carries the configured budget, so caching the fallback's conclusion
+    under it would contradict the invariant that a verdict reached under a
+    different budget is a different verdict.
+    """
+    from drawing_analyzer.digest_cache import DigestCache
+    import drawing_analyzer.investigate as inv
+
+    class _Status400(Exception):
+        status_code = 400
+
+    class _RejectsBeta(_LoopClient):
+        # Rejects only a request that actually carries the task-budget beta —
+        # see the identical fake in
+        # test_task_budget_rejection_degrades_instead_of_killing_the_stage.
+        @property
+        def beta(self):
+            base = super().beta
+
+            class _Msgs:
+                def stream(self, **kw):
+                    if "task-budgets-2026-03-13" in (kw.get("betas") or []):
+                        raise _Status400("output_config.task_budget: unsupported beta")
+                    return base.messages.stream(**kw)
+
+                def create(self, **kw):
+                    return base.messages.create(**kw)
+
+            return SimpleNamespace(messages=_Msgs())
+
+    inv._task_budget_available = True
+    try:
+        cache = DigestCache(None, persist=False)
+        client = _RejectsBeta(_confirm_responder)
+        _cached_run(client, cache, tmp_path / "a")
+        assert inv._task_budget_available is False      # latched off mid-finding
+
+        # The finding that discovered the fallback ran under a request shape the
+        # key does not describe, so it was not admitted: a re-run goes live.
+        second = _RejectsBeta(_confirm_responder)
+        _cached_run(second, cache, tmp_path / "b")
+        assert second.calls, "the fallback conclusion must not have been cached"
+    finally:
+        inv._task_budget_available = True
+
+
+def test_effective_task_budget_reports_what_a_request_would_carry():
+    import drawing_analyzer.investigate as inv
+
+    inv._task_budget_available = True
+    try:
+        assert inv.effective_task_budget() == inv.investigation_task_budget()
+        inv._task_budget_available = False
+        # Zero once latched off: the key must describe the request actually sent.
+        assert inv.effective_task_budget() == 0
+    finally:
+        inv._task_budget_available = True

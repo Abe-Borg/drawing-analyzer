@@ -32,10 +32,25 @@ zero-friction, double-click-and-ask file, tick **Embed API key in HTML report**
 (GUI) or pass `embed_api_key=True` — the key is then baked into the HTML, the report
 shows a red *"don't share this file"* warning, and you should treat the file like a
 credential (a runtime "forget" cannot remove an embedded key — only regenerating or
-deleting the file can). Pass `include_chat=False` to omit the assistant entirely.
+deleting the file can).
+
+**An embedded key is a default, not a lock.** The key field is present in both
+modes, and a key the *reader* saves takes precedence over the embedded one for
+their browser tab — so a report that got shared anyway does not bill every
+question to whoever generated it, and a report whose embedded key has since been
+rotated stays usable (a 401 on the embedded key points the reader at the field
+instead of telling them to regenerate a report they cannot regenerate). **Use my
+own key** opens the field, **Use the report's key** hands it back, and **Forget
+key** clears the reader's key while saying plainly that the file's own credential
+is still in the file. Pass `include_chat=False` to omit the assistant entirely.
 The chat model defaults to Sonnet 5 — it needs the web-fetch server tool, which
 Opus 5 does not support — and can be overridden with
-`DRAWING_ANALYZER_CHAT_MODEL`.
+`DRAWING_ANALYZER_CHAT_MODEL`. It runs at a fixed `high` reasoning effort: there
+is deliberately no per-question "deep" switch, because asking a reader to
+predict, before seeing the answer, whether their question deserves more
+reasoning is a question they cannot answer. The footer meter reports how much
+context is **left**, since the only question it exists to answer is whether the
+next question still fits.
 
 **Conversations are kept.** The thread auto-saves in your browser for that
 report, so a refresh, a close, or reopening the file later picks up where you
@@ -197,9 +212,27 @@ GUI) makes a large set easy to navigate:
 - **QC Findings card** (when a QC run produced findings) — a pinned, **sortable**
   table (ID, sheet, category, severity, status, finding, quote). Each row carries a
   color-coded **status chip** — `Verified` (green), `Deterministic` (blue),
-  `Uncertain` (amber), `Unanchored` (red outline), `Rejected` (struck grey) — and
-  links to the sheet it sits on. The chips honour the filter chips and **⚠ Issues
-  only**; folder exports also thumbnail the verifier's evidence crop on each row.
+  `Uncertain` (amber), `Not checked` (grey), `Unanchored` (red outline), `Rejected`
+  (struck grey) — and links to the sheet it sits on. The chips honour the filter
+  chips and **⚠ Issues only**; folder exports also thumbnail the verifier's
+  evidence crop on each row.
+
+  `Uncertain` and `Not checked` are **different claims**. `Uncertain` means a
+  verifier examined the finding and could not settle it; `Not checked` means no
+  verification stage ran for it — the state of *every* finding on a standard run,
+  where `verification` is `NOT_REQUESTED`. Collapsing the two would report a
+  clean standard run as several hundred inconclusive verdicts.
+- **Grouped repeats** — a general note printed on every plan sheet is one real
+  ledger finding *per sheet*, and correctly so: fifteen sheets carrying the same
+  note are fifteen places to check. But fifteen identical table rows are noise —
+  in one 39-sheet fire-protection set, 190 of 287 findings shared a quote with
+  another, and `PRELIMINARY` alone was raised eighteen times. Rows quoting the
+  same verbatim text therefore **collapse behind the first one**, which grows a
+  `+N more sheets` control that expands the group in place. This is display only:
+  the ledger, the exports, the markups and the badge total keep every finding
+  (§18.6), the grouping recomputes after every sort and filter (so a collapsed
+  row is never stranded without a lead), search still reaches a collapsed row,
+  and **Group repeated quotes** turns the whole thing off.
 - **Search** — live full-text filter across every sheet. When a QC run captured
   the sheets' **raw text layers**, search runs over what each *sheet* actually
   says (a collapsed *Sheet text layer* block per sheet), not only what the digest
@@ -554,7 +587,10 @@ harvest is always unioned in as a backstop, so a stated edition can never be
 argued away. The identity is **advisory**: it steers the stages below but never
 gates or suppresses a finding; a wrong detection is visible (not laundered) in
 `set_identity.json`, the run manifest, and the combined text's *Set Identity*
-section.
+section. The identity call runs on Sonnet 5 by default
+(`DRAWING_ANALYZER_IDENTITY_MODEL`): it is structured extraction, it is
+**advisory only** — nothing gates a finding on it — and the deterministic regex
+edition harvest is the backstop the model cannot argue away.
 
 **Model-authored review plan.** From the identity + digest heads, a second
 text-only call authors the per-discipline checklist a specialist for *this* set
@@ -562,8 +598,8 @@ would apply — one-line "flag X when Y" items in the exact review-profile style
 bounded host-side (≤60 items by default, `DRAWING_ANALYZER_MAX_PLAN_ITEMS`).
 Every code-based item must name its code + section + edition inline and never
 invent a section number: the critique echoes those refs into the findings, and
-the **citation check verifies them by web search** — the plan's code claims are
-never trusted, they are checked. The plan is injected through the profile
+the **citation check verifies them against the published section text** — the
+plan's code claims are never trusted, they are checked. The plan is injected through the profile
 machinery below (after any user checklists), snapshotted with
 `source="model"`, exported as `review_plan.md`, and cached content-addressed so
 warm re-runs rebuild it byte-identically (keeping the critique cache hot).
@@ -677,9 +713,13 @@ shard-and-union would miss it). The model sees only request-local **opaque
 handles** in the sharded path — never source identity — and every fact/leg quote is
 validated against the retained source text before it is trusted, so an ungrounded
 quote never becomes a dual-anchor finding. Each sheet's text layer is budgeted with
-the omission **counted and surfaced** (never a silent truncation); a failed shard,
-a failed reconciliation, or a degraded budget holds the stage at `PARTIAL` while
-its findings stay usable.
+the omission **counted and surfaced** (never a silent truncation) — and so is the
+per-response findings cap: a response carrying more conflicts than the cap used
+to be truncated with no counter and still report itself complete, which on a
+large set (exactly where coordination conflicts matter most) is
+indistinguishable from a set that simply had fewer. A failed shard, a failed
+reconciliation, or a degraded budget holds the stage at `PARTIAL` while its
+findings stay usable.
 
 Its findings carry **dual anchors**: a primary anchor on one sheet plus one or
 more `also_on` legs on the other sheets in the conflict, each resolved to its own
@@ -781,9 +821,17 @@ finding status:
 The pass is additive and non-fatal: crops render sequentially (PyMuPDF is not
 thread-safe) while the small verify calls run on a bounded pool; a per-finding
 failure degrades that finding to `UNCERTAIN`, and a fatal auth failure marks the
-rest `SKIPPED` — the run always completes. Each call is tiny (one ~1–2k-token
-crop image + a short prompt), on the order of $0.01–0.03 per finding. The model
-defaults to Sonnet 5, overridable with `DRAWING_ANALYZER_VERIFY_MODEL`.
+rest `SKIPPED` — the run always completes. Each call sends one ~1–2k-token crop
+image and a short prompt. The model defaults to Sonnet 5, overridable with
+`DRAWING_ANALYZER_VERIFY_MODEL`.
+
+The verdict itself is one or two sentences, but the call runs **adaptive
+thinking at medium effort** — judging whether a crop supports a finding is a
+reasoning task, and thinking draws from the same output envelope as the answer.
+(It always did: omitting the `thinking` parameter does not disable thinking on
+the current models. The pass previously ran with a 1,000-token cap that had to
+fit both, so verdicts came back empty and degraded to `UNCERTAIN`, pushing
+findings into the far more expensive investigation loop for no reason.)
 
 ### The investigation loop (Phase C)
 
@@ -803,7 +851,14 @@ solid verified cloud; a contradiction removes the ink.
 
 The loop is hard-bounded: `DRAWING_ANALYZER_INVESTIGATION_MAX_ROUNDS` evidence
 requests per finding (default 6) and `DRAWING_ANALYZER_INVESTIGATION_MAX_FINDINGS`
-investigations per run (default 10, severity-first). At the budget the host
+investigations per run, severity-first. That per-run budget **scales with the
+set** (10 plus one per 4 sheets, capped at 40): a flat number is generous on a
+20-sheet permit set and severe on a 200-sheet one, which simply has more
+UNCERTAIN findings worth resolving.
+
+Each investigation also carries an **advisory task budget** — a token countdown
+the model can see while it works, so it converges on an answer rather than being
+cut off mid-thought when the host withdraws its tools. At the budget the host
 forces a final text-only answer, and a finding that still can't be decided
 **stays UNCERTAIN — a budget cap or a garbled reply can never mark a finding
 wrong**. Runs on the escalation model (Opus 5) by default, overridable with
@@ -985,9 +1040,18 @@ Findings often cite code sections (`refs`), and citations have a failure mode of
 their own: a drawing citing **2016-era numbering under a 2019 basis** (the
 prototype found exactly that — NFPA 13's Table 13.2.1 became §4.3.1.7 in the 2019
 renumbering). The drawing set can't validate its own citations, so
-`citation_check=True` adds **web-search-backed model calls** (the API's server-side
-`web_search` tool): does this section — in the edition the set adopts *and* in the
-current edition — actually support the finding citing it?
+`citation_check=True` adds **web-backed model calls** (the API's server-side
+`web_search` **and `web_fetch`** tools): does this section — in the edition the
+set adopts *and* in the current edition — actually support the finding citing it?
+
+Web fetch matters here more than the search does. With search alone the model
+answers from result *snippets*; with fetch it can open the publisher's page and
+read the section text before ruling. That is why this stage runs on **Sonnet 5**
+rather than the review flagship — web fetch is not available on Opus 5 — and it
+is cheaper besides. Both tools carry a shared source-quality blocklist, so a
+code verdict is never grounded on a forum post or another assistant's output.
+Fetch can only retrieve URLs a prior search surfaced in the same request, so the
+model cannot reach a page it invented.
 
 The check is **claim-complete**: a verdict attaches to a finding only if that
 finding's claim was in the request that produced it. Every distinct claim for a
@@ -1198,17 +1262,19 @@ runs.
 | `DRAWING_ANALYZER_VERIFY_MODEL` | Sonnet 5 | Per-finding verification model (crop + short prompt). |
 | `DRAWING_ANALYZER_INVESTIGATION_MODEL` | escalation model (Opus 5) | The Phase C investigation loop's model (multi-turn, vision + tools). |
 | `DRAWING_ANALYZER_INVESTIGATION_MAX_ROUNDS` | `6` | Evidence requests per investigation before the forced text-only close (rides the verdict-cache key). |
-| `DRAWING_ANALYZER_INVESTIGATION_MAX_FINDINGS` | `10` | UNCERTAIN findings investigated per run (severity-first; the excess is disclosed as a stage warning). |
+| `DRAWING_ANALYZER_INVESTIGATION_TASK_BUDGET` | `40000` | Advisory token budget handed to the model per investigation, so it paces itself instead of being cut off at the round cap. Anthropic's 20,000 floor is enforced; rides the verdict-cache key. |
+| `DRAWING_ANALYZER_INVESTIGATION_MAX_FINDINGS` | scales with the set | UNCERTAIN findings investigated per run (severity-first; the excess is disclosed as a stage warning). Defaults to `10 + one per 4 sheets`, capped at `40`; setting this pins an absolute number at any set size. |
 | `DRAWING_ANALYZER_CRITIQUE_MODEL` | Opus 5 | Critique-pass vision model (`critique=True`). |
 | `DRAWING_ANALYZER_CROSS_QC_MODEL` | Opus 5 | Cross-sheet QC model, text-only (`cross_qc=True`). |
-| `DRAWING_ANALYZER_CITATION_MODEL` | Opus 5 | Citation-check model, with web search (`citation_check=True`). |
-| `DRAWING_ANALYZER_IDENTITY_MODEL` | Opus 5 | Set-identity model, text-only (Phase A). |
+| `DRAWING_ANALYZER_CITATION_MODEL` | Sonnet 5 | Citation-check model, with web search **and web fetch** (`citation_check=True`). Sonnet rather than the review flagship is a capability choice: web fetch is unavailable on Opus 5, so an Opus citation check can only read search snippets rather than the cited section's text. A model without web fetch degrades to search-only. |
+| `DRAWING_ANALYZER_IDENTITY_MODEL` | Sonnet 5 | Set-identity model, text-only (Phase A). Advisory-only, with the regex edition harvest as a backstop, so it does not need the flagship. |
 | `DRAWING_ANALYZER_REVIEW_PLAN_MODEL` | Opus 5 | Review-plan authoring model, text-only (Phase A). |
 | `DRAWING_ANALYZER_MAX_PLAN_ITEMS` | `60` | Total item cap on the model-authored review plan. |
-| `DRAWING_ANALYZER_HARVEST_MODEL` | Opus 5 | Prose-harvest structuring model (one small call per straggler). |
+| `DRAWING_ANALYZER_HARVEST_MODEL` | Sonnet 5 | Prose-harvest structuring model (one small call per straggler, at low effort). |
 | `DRAWING_ANALYZER_CHAT_MODEL` | Sonnet 5 | The HTML report's in-browser **Ask AI** assistant. Needs adaptive thinking plus the web-search **and web-fetch** server tools; web fetch is unavailable on Opus 5, so a model without it degrades the widget to search-only. |
 | `DRAWING_ANALYZER_WEB_SEARCH_TOOL_TYPE` | `web_search_20260209` | Server-side web-search tool type string (survives an API rename). |
-| `DRAWING_ANALYZER_WEB_SEARCH_MAX_USES` | `5` | Per-request web-search budget for citation checks (rides the verdict-cache key). |
+| `DRAWING_ANALYZER_WEB_SEARCH_MAX_USES` | `10` | Per-request web-search budget for citation checks (rides the verdict-cache key). |
+| `DRAWING_ANALYZER_WEB_FETCH_MAX_USES` | `4` | Per-request web-fetch budget for citation checks. Lower than the search budget by design: each fetch pulls up to 40k tokens of page text into the request. Rides the verdict-cache key. |
 | `DRAWING_ANALYZER_CITATION_TTL_DAYS` | `30` | Citation verdict-cache TTL; `0` disables the cache (no read, no write). |
 | `DRAWING_ANALYZER_MARKUP_APPENDIX` | off | Append the "checked and consistent" page to reviewed PDFs. |
 | `DRAWING_ANALYZER_CRITIQUE_RUNS` | `2` | Critique self-consistency reads to merge (`1` disables it). |
@@ -1217,6 +1283,8 @@ runs.
 | `DRAWING_ANALYZER_NAMING_DRIFT_MAX_FREQ` | `2` | Naming auditor: a tag is only flagged as drift when this rare. |
 | `DRAWING_ANALYZER_PROFILES_DIR` | `~/.drawing_analyzer/profiles` | User review-profile directory (wins over packaged profiles on name). |
 | `DRAWING_ANALYZER_USE_BATCH` | off | Opt every run into the Message Batches transport (~50% token-rate discount with the same model/prompt/review contract) without editing call sites. An explicit `use_batch=` argument still wins. |
+| `DRAWING_ANALYZER_BATCH_STALL_TIMEOUT_MIN` | `25` first watch, `60` after | Minutes of **completely frozen** batch request counts before the batch is abandoned and its sheets resubmitted. Setting this applies one value to every watch (see [Stuck batches](#stuck-batches-and-the-stall-watch)). |
+| `DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS` | `4` | Fresh batches the recovery transport will submit for the sheets a stuck batch left unresolved, before the run keeps a clean retriable batch error. |
 | `DRAWING_ANALYZER_MAX_WORKERS` | `4` | Real-time digest concurrency (`1` = sequential). |
 | `DRAWING_ANALYZER_STAGE_OVERLAP` | auto | Overlap independent set-level calls for the real SDK client; `0` disables it and `1` explicitly opts a thread-safe custom client in. `DRAWING_ANALYZER_MAX_WORKERS=1` remains fully sequential. |
 | `DRAWING_ANALYZER_UPLOAD_WORKERS` | `6` | Files-API image-upload concurrency per sheet (`1` = sequential). |
@@ -1255,6 +1323,46 @@ before its reviewed PDF is written. If a source file **changes on disk mid-run**
 its anchors were computed from the earlier revision and would land on the wrong
 content — and the run tells you which file changed and that a re-run is needed.
 The other files are marked up normally.
+
+### Stuck batches and the stall watch
+
+The Message Batches API is asynchronous and occasionally *sticks*: a submitted
+batch sits at `processing=N` with **zero** completions, sometimes for hours,
+while every upload and request in hand is perfectly valid. A healthy 39-sheet
+drawing batch lands in ~10 minutes, so a batch that has not completed a single
+item is the signal.
+
+The poll therefore watches for **completely frozen** request counts — any
+completion resets the timer — and, when the caller opted into recovery, gives up
+on a frozen batch, best-effort cancels it (an abandoned batch left running only
+burns quota and pins the uploaded files), and resubmits its sheets as a **fresh
+batch** on the same still-uploaded `file_id`s. Recovery never silently drops to
+full-rate real-time calls, so a stuck run keeps the ~50% batch discount.
+
+The window is **tiered**, because the first watch and the later ones ask
+different questions:
+
+| Watch | Window | The question |
+|---|---|---|
+| The primary batch | **25 min** | Is this batch moving *at all*? |
+| Every resubmission after it | **60 min** | Is the queue deep, or is the backend sick? |
+
+A flat hour on the first watch is expensive: one real 39-sheet run burned two
+consecutive frozen hours before its third batch completed in 589 s — 2 h 16 m of
+wall clock for ~25 min of work. Set `DRAWING_ANALYZER_BATCH_STALL_TIMEOUT_MIN`
+to apply one window to every watch (an operator who names a threshold means it
+for the whole run); `DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS` bounds how many
+fresh batches recovery will try before the sheets keep a clean retriable error.
+
+While a batch is queued the run is **not** silent: a heartbeat every five
+minutes reports elapsed time, items done, and how long the watch will keep
+waiting, in both the diagnostics log and the GUI activity list, and the progress
+line carries the elapsed clock — so a deep queue reads as a queue rather than a
+hung app. Every abandoned batch is recorded in the usage ledger as a
+**non-billable** attempt (`ABANDONED_*`, zero tokens), so `run_manifest.json`
+accounts for the attempts a run made and threw away, and the collect log names
+both the batch that was *submitted* and the batch that actually *served* the
+digests.
 
 ## Testing
 

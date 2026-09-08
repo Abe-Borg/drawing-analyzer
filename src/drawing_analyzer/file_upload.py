@@ -35,14 +35,6 @@ from .models import ImageTile, RenderedSheet
 
 _log = get_logger()
 
-# Files API beta header. Current/recognized per Anthropic's Files API docs; the
-# SDK sets it automatically on ``client.beta.files.*`` calls. It must also be
-# attached to the message/batch that *references* a file_id — for the batch path
-# that is the ``betas=`` arg on ``client.beta.messages.batches.create``. An
-# *unrecognized* anthropic-beta value is rejected with HTTP 400, so this is the
-# one current value, attached only where a file_id is actually used.
-FILES_API_BETA = "files-api-2025-04-14"
-
 # App-level retries for a single Files-API image upload, layered ON TOP of the
 # SDK's own per-call retries — same rationale as the per-sheet digest (see
 # digest.py). Under load the Files API returns a transient
@@ -108,14 +100,12 @@ INLINE_FALLBACK_UPLOAD_STATUSES = frozenset({404})
 
 # Operator-facing diagnosis per run-fatal status. The 404 text exists because
 # the per-request error ("HTTP 404: Not found") is uniquely unhelpful there.
-# The pinned SDK *does* post to ``/v1/files`` with the required
-# ``anthropic-beta: files-api-2025-04-14`` header on every
-# ``client.beta.files.upload`` call (verified against the 0.97.x resource), and
-# the call still comes back with an Anthropic ``request_id`` — so a 404 there is
-# the server declining the route, not a malformed request. In practice that is
-# the Files API not being enabled for the key/workspace, an
-# ``ANTHROPIC_BASE_URL``/proxy override that doesn't forward /v1/files (or strips
-# the beta header), or a different installed ``anthropic`` package than the
+# The Files API is GA (``client.files.upload``, no beta header) and the pinned
+# SDK posts straight to ``/v1/files``, and the call still comes back with an
+# Anthropic ``request_id`` — so a 404 there is the server declining the route,
+# not a malformed request. In practice that is the Files API not being enabled
+# for the key/workspace, an ``ANTHROPIC_BASE_URL``/proxy override that doesn't
+# forward /v1/files, or a different installed ``anthropic`` package than the
 # pinned one. The run no longer dies on it — it inlines the images as base64
 # instead (see ``INLINE_FALLBACK_UPLOAD_STATUSES``) — but the diagnosis is still
 # logged so the underlying misconfiguration stays visible.
@@ -125,9 +115,8 @@ _RUN_FATAL_UPLOAD_HINTS = {
     404: (
         "the Files API is not answering /v1/files for this key — most often it "
         "is not enabled on the workspace, or an ANTHROPIC_BASE_URL/proxy "
-        "override is not forwarding /v1/files (or is stripping the "
-        "'anthropic-beta: files-api-2025-04-14' header), or the installed "
-        "anthropic SDK differs from the pinned version"
+        "override is not forwarding /v1/files, or the installed anthropic SDK "
+        "differs from the pinned version"
     ),
 }
 
@@ -401,7 +390,7 @@ def upload_sheet_images(
             if aborted.is_set():
                 return position, None
             try:
-                uploaded = client.beta.files.upload(
+                uploaded = client.files.upload(
                     file=(name, image.png_bytes, "image/png")
                 )
                 break
@@ -496,7 +485,7 @@ def upload_sheet_images(
 
 def delete_files(client: Any, file_ids: list[str]) -> None:
     """Best-effort delete uploaded files; never raises (cleanup is advisory)."""
-    files = getattr(getattr(client, "beta", None), "files", None)
+    files = getattr(client, "files", None)
     deleter = getattr(files, "delete", None)
     if deleter is None:
         return

@@ -447,6 +447,57 @@ def test_report_key_entry_ui_present_when_not_embedded():
     assert '"apiKey"' not in doc             # no key material in the file
 
 
+def test_reader_can_supply_their_own_key_even_when_one_is_embedded():
+    # An embedded key is the author's default, not a lock. Hiding the entry row
+    # whenever CFG.apiKey was set meant a shared report billed every question to
+    # whoever generated it, and a report whose embedded key had been rotated was
+    # simply dead. The row ships in embedded mode too.
+    doc = hr.build_html_report(
+        _make_ctx(), source_names=[SRC], now=NOW,
+        api_key="sk-ant-test-123", embed_api_key=True,
+    )
+    assert 'id="da-chat-key-input"' in doc
+    assert 'id="da-chat-key-save"' in doc
+    # The switch back to the author's key exists, and the swap is offered.
+    assert 'id="da-chat-key-author"' in doc
+    assert "Use the report&#x27;s key" in doc or "Use the report's key" in doc
+    assert "Use my own key" in doc
+    # The row is no longer hard-hidden on the embedded branch.
+    assert "keyRow.hidden = true" not in doc
+    # The reader's key outranks the embedded one, and is held in memory so a
+    # browser that refuses to persist it cannot silently discard it.
+    assert "readerKey || embeddedKey()" in doc
+    assert "var readerKey = storedKey();" in doc
+    # The footer still warns, and now says an override is possible.
+    assert "da-key-warn" in doc
+    assert "override it with their own" in doc
+
+
+def test_rejected_embedded_key_points_the_reader_at_their_own_key():
+    # A 401 on the embedded key used to be a dead end ("regenerate the
+    # report"), which a reader who is not the author cannot do. Now it routes
+    # them to the entry field instead.
+    doc = hr.build_html_report(
+        _make_ctx(), source_names=[SRC], now=NOW,
+        api_key="sk-ant-test-123", embed_api_key=True,
+    )
+    assert "it may have been rotated" in doc
+    assert "Enter your own key above to keep asking questions." in doc
+    # The rejected-key branch reads WHICH key failed before clearing anything.
+    assert "var rejectedOwn = usingOwnKey();" in doc
+
+
+def test_forget_key_is_honest_about_what_it_can_and_cannot_remove():
+    # Forgetting the reader's key when the file also embeds one must not claim
+    # a clean sweep: the file's credential survives and is what gets used next.
+    doc = hr.build_html_report(
+        _make_ctx(), source_names=[SRC], now=NOW,
+        api_key="sk-ant-test-123", embed_api_key=True,
+    )
+    assert "a runtime clear cannot remove that one" in doc
+    assert "A runtime clear cannot remove it from the file" in doc
+
+
 def test_chat_config_cannot_break_out_of_its_script_tag():
     # Every `<` in any config value (e.g. a hostile source filename) is emitted
     # as the JSON string escape `\u003c`, so no value can close the JSON
@@ -725,14 +776,45 @@ def _findings_ctx(findings=None, reference=None, geometries=None):
 
 def test_finding_display_status_priority():
     # REJECTED wins; DETERMINISTIC and VERIFIED next; an unanchored non-empty
-    # quote reads UNANCHORED; anchored-but-unconfirmed collapses to UNCERTAIN.
+    # quote reads UNANCHORED. The two anchored-but-unconfirmed cases stay
+    # DISTINCT: a verifier that ran and could not settle reads UNCERTAIN, one
+    # that never ran reads UNVERIFIED.
     f = hr._finding_display_status
     assert f(_finding(verify_status="REJECTED")) == "REJECTED"
     assert f(_finding(verify_status="DETERMINISTIC")) == "DETERMINISTIC"
     assert f(_finding(verify_status="VERIFIED")) == "VERIFIED"
     assert f(_finding(anchor_status="UNANCHORED", verify_status="SKIPPED")) == "UNANCHORED"
     assert f(_finding(anchor_status="EXACT", verify_status="UNCERTAIN")) == "UNCERTAIN"
-    assert f(_finding(anchor_status="EXACT", verify_status="SKIPPED")) == "UNCERTAIN"
+    assert f(_finding(anchor_status="EXACT", verify_status="SKIPPED")) == "UNVERIFIED"
+
+
+def test_standard_run_findings_read_not_checked_not_uncertain():
+    # A standard run leaves verification NOT_REQUESTED, so every finding lands
+    # on the SKIPPED verdict. Labelling those "Uncertain" (as this once did for
+    # all 287 findings of a real 39-sheet run) claims a verifier weighed them
+    # and could not decide; "Not checked" is what actually happened.
+    ctx = _findings_ctx(findings=[
+        _finding(severity="high", anchor_status="EXACT", verify_status="SKIPPED"),
+        _finding(text="second", severity="low", anchor_status="FUZZY",
+                 verify_status="SKIPPED"),
+    ])
+    html_doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
+    assert 'data-status="UNVERIFIED"' in html_doc
+    assert ">Not checked<" in html_doc
+    assert 'data-status="UNCERTAIN"' not in html_doc
+    # The chip needs a real style, not the browser default.
+    assert ".fchip-unverified{" in html_doc
+
+
+def test_status_ranks_are_integers_the_browser_can_sort():
+    # The status column sorts on data-status-rank, which the browser reads with
+    # parseInt — a fractional rank would floor into a neighbour's slot and make
+    # two distinct statuses sort identically.
+    assert all(isinstance(v, int) for v in hr._STATUS_RANK.values())
+    assert len(set(hr._STATUS_RANK.values())) == len(hr._STATUS_RANK)
+    assert set(hr._STATUS_RANK) == set(hr._FINDING_STATUS_CHIP)
+    # A verifier's inconclusive verdict outranks "nothing looked at it".
+    assert hr._STATUS_RANK["UNCERTAIN"] > hr._STATUS_RANK["UNVERIFIED"]
 
 
 def test_findings_card_renders_table_chips_and_sheet_link():
@@ -1207,11 +1289,59 @@ def test_run_record_details_renders_journal_and_manifest_pointer():
     doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
     assert "Run record" in doc
     assert "a3f9c2d871e4" in doc
-    assert "2026-06-07 07:00:00" in doc          # started_at via str()
+    assert "2026-06-07 07:00:00" in doc          # naive value passes through
     assert "Final status: PARTIAL" in doc
+    assert "Wall clock: 2m 0s" in doc
     # The exported per-run record is named for the operator.
     assert "run.log" in doc and "run_manifest.json" in doc
     assert "written into every export folder" in doc
+
+
+def test_run_record_renders_utc_journal_times_in_the_readers_clock():
+    # The journal keeps UTC; the report header is local. Printing the raw UTC
+    # value next to a local header made a 2h16m run look like a report written
+    # two hours before the run it describes.
+    from datetime import timedelta, timezone
+
+    class _Journal:
+        run_id = "RUN-2bedbbd86509"
+        started_at = datetime(2026, 9, 3, 21, 51, 33, 48120, tzinfo=timezone.utc)
+        ended_at = datetime(2026, 9, 4, 0, 7, 9, 778437, tzinfo=timezone.utc)
+        final_status = "COMPLETE"
+
+    ctx = _make_ctx()
+    ctx.run_journal = _Journal()
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
+    # Microseconds are gone and the offset is spelled out, whatever the host
+    # zone (a UTC host renders "(UTC+00:00)" — that form is the point).
+    assert ".048120" not in doc
+    assert "21:51:33.048120+00:00" not in doc
+    assert f"Started: {hr._local_stamp(_Journal.started_at)}" in doc
+    assert f"Ended: {hr._local_stamp(_Journal.ended_at)}" in doc
+    assert "(UTC" in doc
+    # The wall clock the operator actually waited through.
+    assert "Wall clock: 2h 15m" in doc
+
+    # An aware value is moved into the host's own zone, not printed as UTC.
+    fixed = datetime(2026, 9, 3, 21, 51, 33, tzinfo=timezone(timedelta(hours=-7)))
+    assert hr._local_stamp(fixed) == fixed.astimezone().strftime(
+        "%Y-%m-%d %H:%M:%S"
+    ) + " (UTC" + fixed.astimezone().strftime("%z")[:3] + ":" + (
+        fixed.astimezone().strftime("%z")[3:]
+    ) + ")"
+
+
+def test_run_duration_declines_to_guess_on_mismatched_or_odd_input():
+    from datetime import timezone
+
+    aware = datetime(2026, 9, 3, 21, 0, 0, tzinfo=timezone.utc)
+    naive = datetime(2026, 9, 3, 21, 0, 0)
+    assert hr._run_duration(aware, naive) == ""      # can't subtract the two
+    assert hr._run_duration(naive, aware) == ""
+    assert hr._run_duration(None, aware) == ""
+    assert hr._run_duration(aware, aware) == "0s"
+    # A clock that went backwards is a bug, not a negative duration to print.
+    assert hr._run_duration(aware, aware.replace(hour=20)) == ""
 
 
 def test_no_run_record_details_without_a_journal():
@@ -1508,3 +1638,59 @@ def test_csp_policy_is_unchanged_by_transcript_persistence():
         "default-src", "script-src", "style-src", "img-src",
         "connect-src", "base-uri", "form-action", "object-src",
     }
+
+
+# --------------------------------------------------------------------------- #
+# Repeat grouping (display only — the ledger keeps every finding)
+# --------------------------------------------------------------------------- #
+
+
+def test_repeat_key_is_quote_normalized_and_deterministic():
+    # Same text, different casing/whitespace → same group. Deterministic across
+    # runs (I-7): the key is a hash of the normalized quote, never the quote.
+    a = _finding(quote="CONTRACTOR SHALL COORDINATE  WITH\nPLUMBING.")
+    b = _finding(quote="contractor shall coordinate with plumbing.")
+    c = _finding(quote="A completely different note.")
+    assert hr._repeat_key(a) == hr._repeat_key(b)
+    assert hr._repeat_key(a) != hr._repeat_key(c)
+    assert hr._repeat_key(a) == hr._repeat_key(a)      # stable
+    # An empty quote has nothing to group on.
+    assert hr._repeat_key(_finding(quote="")) == ""
+    assert hr._repeat_key(_finding(quote="   \n ")) == ""
+
+
+def _findings_table(doc: str) -> str:
+    """Just the findings table markup — the page's JS mentions the same
+    attribute names, so a whole-document substring check proves nothing."""
+    start = doc.index('<table class="findings-table">')
+    return doc[start: doc.index("</table>", start)]
+
+
+def test_repeated_quotes_get_a_group_key_and_a_grouping_control():
+    ctx = _findings_ctx(findings=[
+        _finding(text="one", quote="SAME NOTE"),
+        _finding(text="two", quote="same   note"),
+        _finding(text="three", quote="A DIFFERENT NOTE"),
+    ])
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
+    table = _findings_table(doc)
+    key = hr._repeat_key(_finding(quote="SAME NOTE"))
+    assert table.count(f'data-repeat-key="{key}"') == 2
+    # The lone finding is not part of any group.
+    assert table.count('data-repeat-key="') == 2
+    assert table.count('class="repeat-toggle"') == 2
+    assert 'id="findings-group-toggle"' in doc
+    # The static total is still every finding (§18.6).
+    assert "3 finding(s)" in doc
+
+
+def test_no_grouping_machinery_when_every_quote_is_distinct():
+    ctx = _findings_ctx(findings=[
+        _finding(text="one", quote="FIRST NOTE"),
+        _finding(text="two", quote="SECOND NOTE"),
+    ])
+    doc = hr.build_html_report(ctx, source_names=[SRC], now=NOW)
+    table = _findings_table(doc)
+    assert 'data-repeat-key="' not in table
+    assert 'class="repeat-toggle"' not in table
+    assert 'id="findings-group-toggle"' not in doc

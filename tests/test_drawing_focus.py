@@ -22,6 +22,7 @@ from drawing_analyzer.digest import (
     focus_cache_fragment,
     normalize_focus,
 )
+from drawing_analyzer import focus
 from drawing_analyzer.digest_cache import DigestCache, digest_cache_key
 from drawing_analyzer.focus import (
     FOCUS_REPORT_SYSTEM_PROMPT,
@@ -30,17 +31,17 @@ from drawing_analyzer.focus import (
     generate_focus_report,
 )
 from drawing_analyzer.models import ImageTile, RenderedSheet, SheetRef
-from tests.fixtures.fake_anthropic import FakeMessage, FakeTextBlock, FakeUsage
+from tests.fixtures.fake_anthropic import BetaClientMixin, StreamingMessagesMixin, FakeMessage, FakeTextBlock, FakeUsage
 
 OPUS = "claude-opus-5"
 ROOMS_FOCUS = "the rooms, and what types of plumbing fixtures each has"
 
 
-class _FakeClient:
+class _FakeClient(BetaClientMixin):
     def __init__(self, responder):
         self.calls: list[dict] = []
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(_self, **kw):
                 self.calls.append(kw)
                 return responder(kw)
@@ -219,12 +220,44 @@ def test_build_focus_user_text_includes_focus_and_each_sheet():
         _digest("P-101", "Rooms 101-104; WC-1, LAV-2 in each"),
         _digest("P-501", "fixture schedule: WC-1 wall-hung, LAV-2 counter"),
     ]
-    text = build_focus_user_text(ROOMS_FOCUS, sheets)
+    prompt = build_focus_user_text(ROOMS_FOCUS, sheets)
+    text = prompt.text
     assert ROOMS_FOCUS in text
     assert "Sheet 1/2: P-101.pdf" in text
     assert "Sheet 2/2: P-501.pdf" in text
     assert "WC-1" in text and "LAV-2" in text
     assert text.rstrip().endswith("citing the sheet for each fact.")
+    assert prompt.sheets_omitted == 0 and prompt.chars_omitted == 0
+
+
+def test_focus_prompt_budget_drops_whole_sheets_and_discloses_the_gap(monkeypatch):
+    """Overflow is loss-aware (DA-028) and disclosed in the prompt itself."""
+    monkeypatch.setattr(focus, "_TOTAL_BUDGET", 400)
+    sheets = [_digest(f"P-{i:03d}", "x" * 300) for i in range(1, 5)]
+    prompt = build_focus_user_text(ROOMS_FOCUS, sheets)
+    assert prompt.sheets_omitted == 3 and prompt.chars_omitted > 0
+    assert "Sheet 1/4: P-001.pdf" in prompt.text
+    assert "Sheet 4/4: P-004.pdf" not in prompt.text
+    assert "The last 3 sheet(s)" in prompt.text
+    # The focus still frames the turn at both ends.
+    assert ROOMS_FOCUS in prompt.text
+    assert prompt.text.rstrip().endswith("citing the sheet for each fact.")
+
+
+def test_focus_prompt_budget_drops_a_contiguous_tail(monkeypatch):
+    """A later small sheet never jumps the queue past an omitted larger one."""
+    monkeypatch.setattr(focus, "_TOTAL_BUDGET", 400)
+    sheets = [
+        _digest("P-001", "a" * 300),   # fits
+        _digest("P-002", "b" * 900),   # does not fit -> stop here
+        _digest("P-003", "c" * 10),    # would fit, must NOT be included
+    ]
+    prompt = build_focus_user_text(ROOMS_FOCUS, sheets)
+    assert "P-001.pdf" in prompt.text
+    assert "P-002.pdf" not in prompt.text
+    assert "P-003.pdf" not in prompt.text
+    assert prompt.sheets_omitted == 2
+    assert prompt.chars_omitted > 900
 
 
 # --------------------------------------------------------------------------- #
@@ -414,9 +447,9 @@ def _routing_client(calls: list, *, focus_text="FOCUS REPORT: Room 101 → WC-1"
             usage=FakeUsage(input_tokens=100, output_tokens=20),
         )
 
-    class _C:
+    class _C(BetaClientMixin):
         def __init__(self):
-            class _M:
+            class _M(StreamingMessagesMixin):
                 def create(_s, **kw):
                     return responder(kw)
 
@@ -479,9 +512,9 @@ def test_pipeline_focus_report_failure_ships_digests(tmp_path):
             return FakeMessage(content=[], stop_reason="max_tokens")  # empty -> error
         return FakeMessage(content=[FakeTextBlock(text="digest body")])
 
-    class _C:
+    class _C(BetaClientMixin):
         def __init__(self):
-            class _M:
+            class _M(StreamingMessagesMixin):
                 def create(_s, **kw):
                     return responder(kw)
 

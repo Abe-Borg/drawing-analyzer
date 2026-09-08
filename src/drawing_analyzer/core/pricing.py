@@ -77,15 +77,19 @@ class ModelPrice:
 # Keyed by the bare model id. A dated/fast/-suffixed variant resolves via the
 # startswith fallback in ``price_for`` (e.g. "claude-haiku-4-5-20251001").
 #
-# Sonnet 5 is $2/$10. It launched at that rate as introductory pricing through
-# 2026-08-31, and this table previously quoted the $3/$15 list rate that was
-# scheduled to replace it — deliberately over-stating, since over-quoting a
-# user-facing cost figure is the safe direction. That scheduled increase was
-# subsequently cancelled: Anthropic's pricing page now states the $2/$10 rate
-# "is now the standard price. The previously scheduled increase to $3/$15 per
-# million input/output tokens on September 1, 2026 will not occur." So $2/$10
-# is the list rate, with no date-dependence for this module to model (which
-# keeps I-7 satisfied — there is nothing time-varying left here).
+# Sonnet 5 is $2/$10. That figure launched as introductory pricing advertised
+# through 2026-08-31, and this table previously carried the $3/$15 list rate on
+# the assumption the increase would land on 2026-09-01. It did not: Anthropic
+# made $2/$10 the standard price and canceled the scheduled increase, so the
+# hedge now over-states every Sonnet estimate by 50%. This module has one rate
+# per model and no date awareness — deliberately, since I-7 keeps
+# time-dependence out of assembly — so the table simply carries the standing
+# price and ``PRICING_EFFECTIVE_DATE`` says when it was last checked.
+#
+# Weight note: Sonnet 5 now prices three pipeline stages (set identity, prose
+# harvest, citation) plus the report chat's own readout, so this row moves the
+# estimate more than it used to — the 50% over-statement the hedge caused was
+# correspondingly worse.
 MODEL_PRICING: dict[str, ModelPrice] = {
     "claude-opus-5": ModelPrice(5.00, 25.00, "Opus 5"),
     "claude-sonnet-5": ModelPrice(2.00, 10.00, "Sonnet 5"),

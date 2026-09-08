@@ -12,6 +12,7 @@ import pytest
 
 from drawing_analyzer.core.api_config import REVIEW_MODEL_DEFAULT
 from drawing_analyzer.digest import DIGEST_SYSTEM_PROMPT, SheetDigest
+from drawing_analyzer import synthesis
 from drawing_analyzer.models import SheetRef
 from drawing_analyzer.synthesis import (
     SYNTHESIS_SYSTEM_PROMPT,
@@ -20,7 +21,7 @@ from drawing_analyzer.synthesis import (
     default_synthesis_model,
     synthesize_drawing_set,
 )
-from tests.fixtures.fake_anthropic import FakeMessage, FakeTextBlock, FakeUsage
+from tests.fixtures.fake_anthropic import BetaClientMixin, StreamingMessagesMixin, FakeMessage, FakeTextBlock, FakeUsage
 
 OPUS = "claude-opus-5"
 
@@ -32,11 +33,11 @@ def _digest(name: str, text: str, error: str | None = None) -> SheetDigest:
     return SheetDigest(ref=ref, text=text, error=error)
 
 
-class _FakeClient:
+class _FakeClient(BetaClientMixin):
     def __init__(self, responder):
         self.calls: list[dict] = []
 
-        class _Msgs:
+        class _Msgs(StreamingMessagesMixin):
             def create(_self, **kw):
                 self.calls.append(kw)
                 return responder(kw)
@@ -63,11 +64,58 @@ def test_default_synthesis_model_is_opus(monkeypatch):
 
 def test_build_synthesis_user_text_includes_each_sheet():
     sheets = [_digest("M-101", "VAV-3 plan"), _digest("M-501", "VAV-3 schedule row")]
-    text = build_synthesis_user_text(sheets)
+    prompt = build_synthesis_user_text(sheets)
+    text = prompt.text
     assert "Sheet 1/2: M-101.pdf" in text
     assert "Sheet 2/2: M-501.pdf" in text
     assert "VAV-3 plan" in text and "VAV-3 schedule row" in text
     assert text.rstrip().endswith("conflicts, and cite the sheet numbers involved.")
+    assert prompt.sheets_omitted == 0 and prompt.chars_omitted == 0
+
+
+def test_synthesis_prompt_budget_drops_whole_sheets_and_counts_the_loss(monkeypatch):
+    """Overflow is loss-aware, never a silent slice (DA-028)."""
+    monkeypatch.setattr(synthesis, "_TOTAL_BUDGET", 400)
+    sheets = [_digest(f"M-{i:03d}", "x" * 300) for i in range(1, 5)]
+    prompt = build_synthesis_user_text(sheets)
+    assert prompt.sheets_omitted == 3 and prompt.chars_omitted > 0
+    # The first sheet is kept whole — a half-digest would invite conflicts
+    # against text the model cannot see.
+    assert "Sheet 1/4: M-001.pdf" in prompt.text
+    assert "Sheet 4/4: M-004.pdf" not in prompt.text
+    assert "The last 3 sheet(s)" in prompt.text
+    # The task instruction still lands last, after the omission notice.
+    assert prompt.text.rstrip().endswith("cite the sheet numbers involved.")
+
+
+def test_synthesis_prompt_budget_drops_a_contiguous_tail(monkeypatch):
+    """A later small sheet never jumps the queue past an omitted larger one.
+
+    Taking whichever remaining sheets happen to fit would leave the corpus
+    with holes and silently reprioritize the set, so the notice ("the last N
+    sheets") would no longer describe what was actually dropped.
+    """
+    monkeypatch.setattr(synthesis, "_TOTAL_BUDGET", 400)
+    sheets = [
+        _digest("M-001", "a" * 300),   # fits
+        _digest("M-002", "b" * 900),   # does not fit -> stop here
+        _digest("M-003", "c" * 10),    # would fit, must NOT be included
+    ]
+    prompt = build_synthesis_user_text(sheets)
+    assert "M-001.pdf" in prompt.text
+    assert "M-002.pdf" not in prompt.text
+    assert "M-003.pdf" not in prompt.text
+    assert prompt.sheets_omitted == 2
+    # The loss count covers the whole dropped tail, not just the sheet that
+    # happened to trip the budget.
+    assert prompt.chars_omitted > 900
+
+
+def test_synthesis_prompt_budget_never_drops_the_only_sheet(monkeypatch):
+    monkeypatch.setattr(synthesis, "_TOTAL_BUDGET", 10)
+    prompt = build_synthesis_user_text([_digest("M-101", "y" * 5_000)])
+    assert prompt.sheets_omitted == 0
+    assert "y" * 5_000 in prompt.text
 
 
 # --------------------------------------------------------------------------- #
@@ -231,9 +279,9 @@ def _routing_client(pymupdf_calls: list):
             usage=FakeUsage(input_tokens=100, output_tokens=20),
         )
 
-    class _C:
+    class _C(BetaClientMixin):
         def __init__(self):
-            class _M:
+            class _M(StreamingMessagesMixin):
                 def create(_s, **kw):
                     return responder(kw)
 
@@ -262,6 +310,31 @@ def test_pipeline_synthesize_prepends_overview(tmp_path):
     assert ctx.errors == []
 
 
+def test_pipeline_marks_a_budget_degraded_synthesis_partial(tmp_path, monkeypatch):
+    """A synthesis that could not see the whole set is not a clean COMPLETE.
+
+    Mirrors the cross-QC budget path (DA-028): the overview still ships
+    (additive, I-3), but the stage records the loss and holds at PARTIAL so
+    the run's status and manifest cannot claim a whole-set read.
+    """
+    pymupdf = pytest.importorskip("pymupdf")
+    from drawing_analyzer.pipeline import extract_drawing_context
+
+    # Small enough that the second sheet's digest cannot fit.
+    monkeypatch.setattr(synthesis, "_TOTAL_BUDGET", 60)
+    path = _make_pdf(pymupdf, tmp_path / "set.pdf", pages=2)
+    ctx = extract_drawing_context(
+        [path], client=_routing_client([]), rows=2, cols=2, synthesize=True
+    )
+
+    stage = next(s for s in ctx.stage_results if s.stage == "synthesis")
+    assert stage.status == "PARTIAL"
+    assert any("budget degraded" in w for w in stage.warnings)
+    # The deliverable still ships — the stage is degraded, not failed (I-3).
+    assert ctx.synthesis_text
+    assert "Drawing Set Overview" in ctx.combined_text
+
+
 def test_pipeline_no_synthesis_by_default(tmp_path):
     pymupdf = pytest.importorskip("pymupdf")
     from drawing_analyzer.pipeline import extract_drawing_context
@@ -288,9 +361,9 @@ def test_pipeline_synthesis_failure_falls_back(tmp_path):
             return FakeMessage(content=[], stop_reason="max_tokens")  # empty -> error
         return FakeMessage(content=[FakeTextBlock(text="digest body")])
 
-    class _C:
+    class _C(BetaClientMixin):
         def __init__(self):
-            class _M:
+            class _M(StreamingMessagesMixin):
                 def create(_s, **kw):
                     return responder(kw)
 

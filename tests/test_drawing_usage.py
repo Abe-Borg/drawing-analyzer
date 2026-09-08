@@ -258,18 +258,35 @@ def test_one_hour_cache_write_is_priced_at_2x_not_1_25x():
     ) == Decimal("5.00")
 
 
-def test_investigation_phase_reports_the_one_hour_ttl():
-    """The ledger's TTL comes from the same policy that builds the breakpoint."""
-    from drawing_analyzer.core.api_config import (
-        PHASE_INVESTIGATION,
-        PHASE_TRIAGE,
-        cache_write_ttl_for,
-    )
+def test_cache_write_ttl_comes_from_the_policy_that_builds_the_breakpoint(monkeypatch):
+    """The ledger's TTL is read from the same policy the request builder uses.
 
-    # Investigation caches system prompt + tools through api_config → 1h.
-    assert cache_write_ttl_for(PHASE_INVESTIGATION) == "1h"
-    # Triage's policy caches nothing, so it writes no cache to price.
-    assert cache_write_ttl_for(PHASE_TRIAGE) is None
+    Every registered phase currently caches, so all of them write at the 1-hour
+    rate. The ``None`` branch is still live for a phase whose policy disables
+    caching — it must report "no cache written" rather than a rate, or the
+    pricer would invent a write cost for a request that never made one.
+    """
+    from drawing_analyzer.core import api_config as api
+
+    assert api.cache_write_ttl_for(api.PHASE_INVESTIGATION) == "1h"
+    assert api.cache_write_ttl_for(api.PHASE_HARVEST) == "1h"
+
+    monkeypatch.setitem(
+        api._PHASE_CACHE_POLICY, "uncached_phase",
+        api.CachePolicy(cache_system=False, cache_tools=False),
+    )
+    assert api.cache_write_ttl_for("uncached_phase") is None
+
+
+def test_a_five_minute_breakpoint_stage_is_not_priced_at_the_one_hour_rate():
+    """digest/critique attach a plain ``{"type": "ephemeral"}`` — 5 minutes.
+
+    They pass no ``cache_write_ttl`` at all, so the default must land on the
+    1.25x rate. Getting this backwards would over-report the two stages that
+    dominate the bill.
+    """
+    plain = usage_record_cost(model=_OPUS, cache_write_tokens=1_000_000)
+    assert plain == Decimal("6.25")  # 5.00 x 1.25, not x 2.00
 
 
 def test_unknown_model_returns_none_but_keeps_tool_charge():
@@ -291,6 +308,50 @@ def test_rescued_batch_digest_is_priced_real_time():
     assert _digest_transport(cached=False, rescued=False, use_batch=False) == "REAL_TIME"
     # A cache hit always wins (zero billed tokens) regardless of the other flags.
     assert _digest_transport(cached=True, rescued=True, use_batch=True) == "CACHE"
+
+
+def test_abandoned_attempt_records_are_free():
+    # A batch abandoned mid-flight is recorded (§15.6 wants every attempt) but
+    # answered nothing: zero tokens in, zero dollars out. The record exists to
+    # explain the wall clock, never to move a total.
+    from drawing_analyzer.batch_digest import DigestUsageAttempt
+
+    abandoned = DigestUsageAttempt(
+        transport="BATCH", terminal_status="ABANDONED_STALLED", billable=False,
+    )
+    assert abandoned.billable is False
+    assert (abandoned.input_tokens, abandoned.output_tokens) == (0, 0)
+    assert DigestUsageAttempt().billable is True  # responses stay billable
+
+    usage = RunUsage()
+    usage.add(UsageRecord(
+        stage_family="digest", stage_instance="digest:SRC-0001:p0", model=_OPUS,
+        transport="BATCH", terminal_status="ABANDONED_STALLED",
+        estimated_cost=usage_record_cost(
+            model=_OPUS, input_tokens=0, output_tokens=0, batch=True,
+        ),
+    ))
+    assert usage.total_input_tokens == 0
+    assert usage.total_estimated_cost == Decimal("0")
+
+
+def test_image_estimate_counts_only_answered_attempts():
+    # The image estimate is charged per *response-bearing* attempt. Counting an
+    # abandoned round would invent image tokens nobody was billed for — the
+    # 39-sheet run that burned two abandoned batches would have tripled its
+    # reported image tokens.
+    from drawing_analyzer.batch_digest import DigestUsageAttempt
+
+    attempts = [
+        DigestUsageAttempt(transport="BATCH", billable=False,
+                           terminal_status="ABANDONED_STALLED"),
+        DigestUsageAttempt(transport="BATCH", billable=False,
+                           terminal_status="ABANDONED_STALLED"),
+        DigestUsageAttempt(transport="BATCH", input_tokens=90, output_tokens=25),
+    ]
+    billable = sum(1 for a in attempts if getattr(a, "billable", True))
+    assert billable == 1
+    assert 1_000 * billable == 1_000  # one sheet's images, billed once
 
 
 # --------------------------------------------------------------------------- #
@@ -354,13 +415,18 @@ def test_exhaustive_estimate_planning_stages_are_realtime_and_scale_gently():
 
 def test_exhaustive_estimate_investigation_band_is_capped_and_realtime():
     # Phase C: the investigation band scales with the finding volume but never
-    # quotes past the stage's own per-run budget (10 findings by default).
+    # quotes past the stage's own per-run budget — which itself now scales with
+    # the set, so a flat quote would under-state a large set several-fold.
+    from drawing_analyzer.investigate import investigation_max_findings
+
     small = {c.stage: c for c in estimate_exhaustive_run_cost(2).components}
     large = {c.stage: c for c in estimate_exhaustive_run_cost(500).components}
     inv_small, inv_large = small["Investigation"], large["Investigation"]
     assert inv_small.transport == "real-time" and inv_large.transport == "real-time"
     assert inv_large.input_tokens >= inv_small.input_tokens
-    assert "~10 uncertain finding(s)" in inv_large.note      # capped at the budget
+    # Capped at the stage's own ceiling for a set that large.
+    assert f"~{investigation_max_findings(500)} uncertain finding(s)" in inv_large.note
+    assert "~40 uncertain finding(s)" in inv_large.note      # the hard ceiling
     # It rides the low/high totals: an estimate without it would be smaller.
     est = estimate_exhaustive_run_cost(10)
     assert est.low_cost is not None and est.low_cost <= est.high_cost

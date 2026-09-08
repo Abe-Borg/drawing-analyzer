@@ -23,8 +23,11 @@ Turn discipline (ported from the report chat widget's loop): the assistant
 turn is committed to history *before* its tools are answered; every
 ``tool_use`` id is answered in ONE user turn; when the round budget is
 exhausted the budget notice rides that final tool-result turn and later
-requests carry no ``tools`` key at all — a run can never terminate on a
-dangling tool request.
+requests withdraw tool permission with ``tool_choice: {"type": "none"}``
+while keeping the tool list in place — a run can never terminate on a
+dangling tool request, and the closing turn (the one carrying the largest
+accumulated prefix) still reads the tools+system cache instead of rebuilding
+it, which dropping ``tools`` outright would have forced.
 
 Evidence discipline (§16.6): every image is saved under the finding's evidence
 directory *before* it is sent (continuing the verify pass's directory and
@@ -50,6 +53,7 @@ from .core.api_config import (
     apply_effort_config,
     apply_thinking_config,
     cache_policy_for,
+    call_with_refusal_fallback,
     phase_output_cap,
     system_prompt_with_cache,
     tools_with_cache,
@@ -66,6 +70,7 @@ from .digest import (
     _message_usage,
     _retry_backoff_seconds,
     _tolerant_json_object,
+    stream_message,
 )
 from .models import Finding, Verification, source_page_key
 from .verify import (
@@ -80,10 +85,25 @@ from .verify import (
 _log = get_logger()
 
 # Bump on any prompt/tool-contract change (rides the cache key in Phase C4).
-INVESTIGATE_PROMPT_VERSION = "investigate-v1"
+INVESTIGATE_PROMPT_VERSION = "investigate-v2"
 
 _DEFAULT_MAX_ROUNDS = 6
+# Per-run investigation budget, scaled to the size of the set rather than a
+# flat number. A flat 10 is a sensible cap on a 20-sheet permit set and a
+# severe one on a 200-sheet data-center set, where there are simply more
+# UNCERTAIN findings worth resolving. Base + one per SHEETS_PER_EXTRA sheets,
+# hard-capped so a huge set cannot open an unbounded number of multi-turn
+# vision loops.
 _DEFAULT_MAX_INVESTIGATIONS = 10
+_INVESTIGATION_SHEETS_PER_EXTRA = 4
+_MAX_INVESTIGATIONS_CEILING = 40
+# Advisory token budget handed to the model for one investigation (Anthropic
+# minimum: 20,000). Unlike the round cap — which the host enforces by
+# withdrawing tool permission — this is a countdown the model can actually see while
+# generating, so it paces itself and lands a conclusion instead of being cut
+# off mid-thought and left UNCERTAIN.
+_DEFAULT_TASK_BUDGET_TOKENS = 40_000
+TASK_BUDGET_BETA = "task-budgets-2026-03-13"
 _MAX_PAUSE_RESUMES = 3
 _VIEW_SHEET_DPI = 150
 _MAX_CROP_DPI = 300
@@ -111,11 +131,41 @@ def investigation_max_rounds() -> int:
     return _env_int("DRAWING_ANALYZER_INVESTIGATION_MAX_ROUNDS", _DEFAULT_MAX_ROUNDS)
 
 
-def investigation_max_findings() -> int:
-    """Investigations per run (env-tunable, min 1)."""
-    return _env_int(
-        "DRAWING_ANALYZER_INVESTIGATION_MAX_FINDINGS", _DEFAULT_MAX_INVESTIGATIONS
+def investigation_max_findings(sheet_count: int = 0) -> int:
+    """Investigations per run, scaled to ``sheet_count`` (env override wins).
+
+    ``DRAWING_ANALYZER_INVESTIGATION_MAX_FINDINGS`` is an absolute answer when
+    set — an operator who names a number means it, at any set size. Otherwise
+    the budget grows with the set: a 200-sheet set has roughly ten times the
+    UNCERTAIN findings of a 20-sheet one, and a flat cap silently skipped the
+    tail. Bounded by :data:`_MAX_INVESTIGATIONS_CEILING` because each
+    investigation is a multi-turn vision loop on the escalation model.
+    """
+    raw = os.environ.get("DRAWING_ANALYZER_INVESTIGATION_MAX_FINDINGS")
+    if raw is not None:
+        return _env_int("DRAWING_ANALYZER_INVESTIGATION_MAX_FINDINGS",
+                        _DEFAULT_MAX_INVESTIGATIONS)
+    scaled = _DEFAULT_MAX_INVESTIGATIONS + max(0, int(sheet_count)) // _INVESTIGATION_SHEETS_PER_EXTRA
+    return min(scaled, _MAX_INVESTIGATIONS_CEILING)
+
+
+def investigation_task_budget() -> int:
+    """Advisory per-investigation token budget (env-tunable, Anthropic min 20k)."""
+    value = _env_int(
+        "DRAWING_ANALYZER_INVESTIGATION_TASK_BUDGET", _DEFAULT_TASK_BUDGET_TOKENS
     )
+    return max(20_000, value)
+
+
+def effective_task_budget() -> int:
+    """The budget a request issued *right now* would actually carry.
+
+    Zero once the beta has been found unavailable and the loop has latched onto
+    the plain transport. The cache key uses this rather than the configured
+    value: a verdict reached without a budget must not be replayed later, on a
+    host where the beta works, as though it had been reached with one.
+    """
+    return investigation_task_budget() if _task_budget_available else 0
 
 
 def investigation_model() -> str:
@@ -145,6 +195,63 @@ When you can decide — or when told the budget is exhausted — respond with \
 ONLY a JSON object and nothing else:
 {"verdict": "CONFIRMED" | "CONTRADICTED" | "NOT_VISIBLE", "note": "<= 25 words \
 on what you actually saw"}"""
+
+
+# Whether this process may still send the advisory task budget. The beta is
+# documented for Opus 5, but an org without it enabled would get a 400 on every
+# turn — which, on a stage designed to be additive and non-fatal (I-3), would
+# silently disable investigations altogether rather than degrade. So the first
+# such rejection turns the feature off for the process and the run continues on
+# the plain streaming transport, with the host-side round cap still enforcing a
+# bound. Only a budget-specific rejection flips it; transient errors re-raise to
+# the caller's existing retry.
+_task_budget_available = True
+
+_TASK_BUDGET_REJECTION_MARKERS = ("task_budget", "task-budgets", "output_config")
+
+
+def _is_task_budget_rejection(exc: Exception) -> bool:
+    """True for a 400 that names the task budget or its beta, not a transient blip."""
+    if _error_status(exc) != 400:
+        return False
+    text = str(exc).lower()
+    return any(marker in text for marker in _TASK_BUDGET_REJECTION_MARKERS)
+
+
+def _investigation_message(client: Any, kwargs: dict, *, task_budget: int) -> Any:
+    """One investigation turn, carrying the advisory task budget when possible.
+
+    The round cap is enforced host-side by withdrawing tool permission
+    (``tool_choice: {"type": "none"}``), which the model only learns about
+    after the fact. A task budget is the same bound expressed
+    where the model can act on it: a countdown it sees while generating, so it
+    converges instead of being cut off mid-thought and left UNCERTAIN.
+
+    Requires the streaming transport (and so the beta namespace, which carries
+    the ``betas`` argument).
+    """
+    global _task_budget_available
+    if task_budget and _task_budget_available:
+        config = dict(kwargs.get("output_config") or {})
+        config["task_budget"] = {"type": "tokens", "total": int(task_budget)}
+        budgeted = {**kwargs, "output_config": config, "betas": [TASK_BUDGET_BETA]}
+        try:
+            # Also opts into (and self-heals) the Opus 5 refusal fallback —
+            # see call_with_refusal_fallback — orthogonally to the task-budget
+            # rejection handled below.
+            return call_with_refusal_fallback(
+                client, budgeted, model=str(kwargs.get("model", "")), method="stream"
+            )
+        except Exception as exc:  # noqa: BLE001 - re-raised unless budget-specific
+            if not _is_task_budget_rejection(exc):
+                raise
+            _task_budget_available = False
+            _log.warning(
+                "investigation: task budgets unavailable (%s); continuing without "
+                "them. The per-finding round cap still bounds each investigation.",
+                _clean_error(exc),
+            )
+    return stream_message(client, kwargs)
 
 
 def investigation_tools() -> list[dict]:
@@ -667,6 +774,7 @@ def _investigate_one(
 
     tool_round = 0
     pause_count = 0
+    task_budget = investigation_task_budget()
     hard_stop = max_rounds + _MAX_PAUSE_RESUMES + 3   # backstop, never hit normally
 
     for _iteration in range(hard_stop):
@@ -678,15 +786,26 @@ def _investigate_one(
             ),
             "messages": _messages_with_cache_breakpoints(messages),
         }
-        if tool_round < max_rounds:
-            kwargs["tools"] = tools_with_cache(list(tools), phase=PHASE_INVESTIGATION)
+        # The tool list stays in every request, including the forced close.
+        # Tool definitions render at prompt position 0, so *dropping* them
+        # invalidates the tools, system and messages cache tiers for exactly
+        # the turn whose accumulated prefix is largest. Withdrawing permission
+        # via ``tool_choice`` instead invalidates only the messages tier and
+        # leaves tools+system cached, with identical effect on the model: it
+        # cannot call a tool either way. (Same reasoning, same mechanism, as
+        # the report chat widget's own no-tools close.)
+        kwargs["tools"] = tools_with_cache(list(tools), phase=PHASE_INVESTIGATION)
+        if tool_round >= max_rounds:
+            kwargs["tool_choice"] = {"type": "none"}
         apply_thinking_config(kwargs, model=model, phase=PHASE_INVESTIGATION)
         apply_effort_config(kwargs, model=model, phase=PHASE_INVESTIGATION)
 
         attempt = 0
         while True:
             try:
-                resp = client.messages.create(**kwargs)
+                resp = _investigation_message(
+                    client, kwargs, task_budget=task_budget
+                )
                 break
             except Exception as exc:  # noqa: BLE001 - degrade, never raise (I-3)
                 if _is_transient_error(exc) and attempt < max_retries:
@@ -1039,7 +1158,7 @@ def investigate_findings(
     max_rounds = max_rounds if max_rounds is not None else investigation_max_rounds()
     max_investigations = (
         max_investigations if max_investigations is not None
-        else investigation_max_findings()
+        else investigation_max_findings(len(sheets))
     )
     render_fn = render_fn or _default_render_fn
 
@@ -1090,6 +1209,7 @@ def investigate_findings(
                 _payload_hash(finding, set_fingerprint),
                 model=model, prompt_version=INVESTIGATE_PROMPT_VERSION,
                 max_rounds=max_rounds,
+                task_budget=effective_task_budget(),
             )
             entry = cache.get(cache_key)
             if entry is not None and _replay_cached(
@@ -1112,6 +1232,10 @@ def investigate_findings(
                 ))
                 continue
         result.investigated += 1
+        # The fallback can latch mid-investigation, on the very finding that
+        # discovers the beta is unavailable. That one ran under a request shape
+        # the key does not describe, so it must not be admitted.
+        budget_state_before = _task_budget_available
         outcome = _investigate_one(
             finding, sheet, client=client, model=model, tools=tools,
             sheet_id_map=sheet_id_map, all_sheets=sheets, sheet_index=sheet_index,
@@ -1144,6 +1268,7 @@ def investigate_findings(
             # can verify — never a budget-capped, garbled, or errored outcome.
             if (
                 cache_key is not None
+                and budget_state_before == _task_budget_available
                 and outcome.tool_trace
                 and all(step.get("sha256") for step in outcome.tool_trace)
             ):

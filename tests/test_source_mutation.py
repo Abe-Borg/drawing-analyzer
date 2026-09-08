@@ -19,6 +19,7 @@ from drawing_analyzer.source_registry import (
     content_sha256,
     detect_mutations,
 )
+from tests.fixtures.fake_anthropic import BetaClientMixin, StreamingMessagesMixin
 
 
 def _pdf(path: Path, text: str = "ORIGINAL", *, pages: int = 1) -> Path:
@@ -111,8 +112,8 @@ def test_pipeline_skips_markup_for_mutated_source(tmp_path, monkeypatch):
         }]})
         return "Sheet\nprose.\n\n```json\n" + block + "\n```"
 
-    class _Client:
-        class messages:
+    class _Client(BetaClientMixin):
+        class messages(StreamingMessagesMixin):
             @staticmethod
             def create(**kw):
                 return FakeMessage(
@@ -179,8 +180,8 @@ def test_mutated_middle_source_does_not_misassign_ink(tmp_path, monkeypatch):
         return FakeMessage(content=[FakeTextBlock(text="p\n\n```json\n" + block + "\n```")],
                            usage=FakeUsage(input_tokens=10, output_tokens=5))
 
-    class _Client:
-        class messages:
+    class _Client(BetaClientMixin):
+        class messages(StreamingMessagesMixin):
             create = staticmethod(_client_text)
 
     def _tampered_inspect(paths):
@@ -218,8 +219,8 @@ def test_mutated_source_with_zero_findings_is_incomplete(tmp_path, monkeypatch):
     good = _pdf(tmp_path / "good" / "M-101.pdf", "VAV-3 SERVES ROOM 120")
     victim = _pdf(tmp_path / "victim" / "E-201.pdf", "PANEL LP-1 FEEDS ROOM 200")
 
-    class _EmptyClient:      # a digest that finds nothing on any sheet
-        class messages:
+    class _EmptyClient(BetaClientMixin):      # a digest that finds nothing on any sheet
+        class messages(StreamingMessagesMixin):
             @staticmethod
             def create(**kw):
                 return FakeMessage(

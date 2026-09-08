@@ -1869,6 +1869,9 @@ def _run_qc_stages(
         else:
             from .investigate import investigate_findings as _run_investigate
             from .investigate import investigation_model
+            from .investigate import (
+                investigation_max_findings as _investigation_max_findings,
+            )
 
             _emit("STAGE_START", stage="investigation", candidates=len(uncertain))
             inv_model = investigation_model()
@@ -1919,9 +1922,14 @@ def _run_qc_stages(
                 investigate_stage.items_in = len(uncertain)
                 investigate_stage.items_out = ires.verified + ires.rejected
                 if ires.skipped_over_budget:
+                    # Name the budget: it now scales with the set, so "beyond the
+                    # budget" alone leaves a reviewer unable to tell whether to
+                    # raise DRAWING_ANALYZER_INVESTIGATION_MAX_FINDINGS.
+                    budget = _investigation_max_findings(len(geometries))
                     investigate_stage.warnings.append(
                         f"{ires.skipped_over_budget} UNCERTAIN finding(s) beyond "
-                        "the per-run investigation budget were not investigated"
+                        f"the per-run investigation budget ({budget} for "
+                        f"{len(geometries)} sheet(s)) were not investigated"
                     )
                 if ires.errors or ires.fatal:
                     # An investigation the config required could not run; the
@@ -2859,7 +2867,15 @@ def extract_drawing_context(
             # each response as its own record so Batch and real-time rates are
             # applied independently. The runtime-only metadata is deliberately
             # absent on cache hits and never enters cache serialization.
-            img_tok += sd.image_token_estimate * len(usage_attempts)
+            #
+            # Attempts marked non-billable were submitted but never answered —
+            # a batch abandoned mid-flight. They are recorded (§15.6 wants every
+            # attempt) but carry no tokens, so the image estimate must count
+            # only the responses that actually came back; multiplying it by
+            # abandoned rounds would invent image tokens nobody was charged for.
+            img_tok += sd.image_token_estimate * sum(
+                1 for a in usage_attempts if getattr(a, "billable", True)
+            )
             for usage_attempt in usage_attempts:
                 _record_usage(
                     run_usage, family="digest",
@@ -3394,7 +3410,21 @@ def extract_drawing_context(
         else:
             if result.ok:
                 synthesis_text = result.text
-                synthesis_stage.status = "COMPLETE"
+                # DA-028, mirroring the cross-QC budget path: sheets the prompt
+                # budget could not carry are sheets this overview never saw, so
+                # the stage is PARTIAL rather than a clean COMPLETE. The text
+                # still ships (additive, I-3) — it is just not a whole-set read.
+                omitted = int(getattr(result, "sheets_omitted", 0) or 0)
+                if omitted:
+                    synthesis_stage.warnings.append(
+                        f"prompt budget degraded: {omitted} sheet(s) / "
+                        f"{int(getattr(result, 'chars_omitted', 0) or 0)} char(s) omitted"
+                    )
+                    _log.warning(
+                        "synthesis: prompt budget omitted %d sheet(s) — "
+                        "the overview does not cover the whole set", omitted,
+                    )
+                synthesis_stage.status = "PARTIAL" if omitted else "COMPLETE"
                 # The synthesis call is billed, so its usage is recorded (§15.6).
                 _record_usage(
                     run_usage, family="synthesis", instance="synthesis",
@@ -3458,7 +3488,20 @@ def extract_drawing_context(
         else:
             if fresult.ok:
                 focus_report_text = fresult.text
-                focus_status = "COMPLETE"
+                # DA-028: same rule as synthesis above — a report assembled from
+                # part of the set is not a COMPLETE answer to the operator's
+                # focus, and the journal is where that is recorded (the focus
+                # pass has no StageResult of its own).
+                f_omitted = int(getattr(fresult, "sheets_omitted", 0) or 0)
+                focus_status = "PARTIAL" if f_omitted else "COMPLETE"
+                if f_omitted:
+                    errors.append(
+                        f"Focus report: prompt budget omitted {f_omitted} sheet(s); "
+                        "the report does not cover the whole set"
+                    )
+                    _log.warning(
+                        "focus report: prompt budget omitted %d sheet(s)", f_omitted,
+                    )
                 # The focus call is billed, so its usage is recorded (§15.6).
                 _record_usage(
                     run_usage, family="focus", instance="focus",

@@ -981,11 +981,13 @@ RUNTIME_TRANSPARENCY = HelpDocument(
                 "needs to fetch web pages — a thing Opus 5 cannot do."
             ),
             _bullet(
-                "Claude Haiku 4.5 — the prose harvest's structuring call. By the time it "
-                "runs, the item has already been picked out and checked against the "
-                "ledger; all that is left is restating one sentence in the findings "
-                "format. That is formatting, not judgment, so it goes to the smallest "
-                "model."
+                "Sonnet 5 also runs three stages outright: the set-identity read "
+                "(advisory only, with a deterministic regex backstop), the prose "
+                "harvest's structuring call (the item is already found — all that "
+                "is left is restating one sentence in the findings format), and "
+                "the citation check. That last one is a capability choice rather "
+                "than a cost one: checking a code citation needs to fetch the page, "
+                "which Opus 5 cannot do."
             ),
             _bullet(
                 "Escalation is one-way and upward. A finding the smaller model could not "

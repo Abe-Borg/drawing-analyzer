@@ -28,6 +28,7 @@ from .core.api_config import (
     model_supports_adaptive_thinking,
     model_supports_effort,
 )
+from .core.tokenizer import CROSS_CHECK_RECOMMENDED_MAX
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
     FOCUS_SECTION_HEADER,
@@ -37,6 +38,7 @@ from .digest import (
     _message_text,
     _message_usage,
     _retry_backoff_seconds,
+    stream_message,
 )
 from .stage_cache import (
     get_stage_cache_entry,
@@ -46,7 +48,7 @@ from .stage_cache import (
 
 # A focused answer needs less room than a full per-sheet transcription, but can
 # legitimately be long (e.g. a room-by-room fixture table for a large campus).
-DEFAULT_FOCUS_MAX_TOKENS = 8_000
+DEFAULT_FOCUS_MAX_TOKENS = 32_000
 # Deep cross-sheet assembly reasoning; "high" is accepted by Opus and Sonnet.
 DEFAULT_FOCUS_EFFORT = "high"
 # Unlike synthesis (which reconciles ACROSS sheets and needs >=2), a focus
@@ -93,6 +95,16 @@ the section header. Use short subsections / bullets / tables as fits the focus.\
 """.format(focus_header=FOCUS_SECTION_HEADER)
 
 
+# Corpus budget (chars) for the per-sheet digests in the user turn. Same
+# derivation and rationale as synthesis.py: this stage sends the actual
+# deliverable input rather than a sampled corpus, so the budget is a safety
+# rail against pathological input, sized from the tokenizer's single-call
+# headroom (context window - output reserve - overhead), not set_identity's
+# slice budget. Overflow drops a contiguous tail, is counted, and is disclosed
+# both in the prompt and on the result (DA-028).
+_CHARS_PER_TOKEN = 3      # conservative: digest text tokenizes denser than prose
+_TOTAL_BUDGET = CROSS_CHECK_RECOMMENDED_MAX * _CHARS_PER_TOKEN
+
 _FOCUS_TASK_INSTRUCTION = (
     "Above are the operator's focus and the per-sheet digests for the entire "
     "set. Now produce the focus report per your instructions — answer the "
@@ -101,13 +113,28 @@ _FOCUS_TASK_INSTRUCTION = (
 )
 
 
-def build_focus_user_text(focus: str, ok_sheets: list[SheetDigest]) -> str:
+@dataclass(frozen=True)
+class FocusPrompt:
+    """The assembled user turn plus what the budget had to leave out."""
+
+    text: str
+    sheets_omitted: int = 0
+    chars_omitted: int = 0
+
+
+def build_focus_user_text(focus: str, ok_sheets: list[SheetDigest]) -> FocusPrompt:
     """Assemble the user turn: the focus, every readable digest, then the task.
 
     Only ``ok`` sheets are included (a failed sheet has no text); each is fenced
     with its sheet label so the report can cite sheets. The focus appears first
     (framing) and is restated by the task instruction last, so the bulk of the
     digests sits between question framing and the ask.
+
+    Overflow past :data:`_TOTAL_BUDGET` drops a contiguous tail of sheets and
+    counts what it dropped — loss-aware, never a silent slice (cf. DA-028).
+    The omission is also disclosed in the prompt itself, because a focus
+    report that silently answers from part of the set reads exactly like one
+    that answered from all of it.
     """
     parts: list[str] = [
         "The operator's focus for this run:",
@@ -118,12 +145,42 @@ def build_focus_user_text(focus: str, ok_sheets: list[SheetDigest]) -> str:
         "",
     ]
     total = len(ok_sheets)
+    used = 0
+    sheets_omitted = 0
+    chars_omitted = 0
+
+    def _block(index: int, sd: SheetDigest) -> tuple[str, str]:
+        return f"===== Sheet {index}/{total}: {sd.ref.display_label} =====", sd.text.strip()
+
     for i, sd in enumerate(ok_sheets, start=1):
-        parts.append(f"===== Sheet {i}/{total}: {sd.ref.display_label} =====")
-        parts.append(sd.text.strip())
+        header, body = _block(i, sd)
+        cost = len(header) + len(body)
+        if used + cost > _TOTAL_BUDGET and used > 0:
+            # Stop at the first sheet that does not fit, and drop everything
+            # after it, so what reaches the model is a contiguous prefix rather
+            # than whichever later sheets happened to be small enough.
+            for j, dropped in enumerate(ok_sheets[i - 1:], start=i):
+                d_header, d_body = _block(j, dropped)
+                sheets_omitted += 1
+                chars_omitted += len(d_header) + len(d_body)
+            break
+        used += cost
+        parts.append(header)
+        parts.append(body)
+        parts.append("")
+    if sheets_omitted:
+        parts.append(
+            f"[The last {sheets_omitted} sheet(s) of the set were omitted from "
+            f"this prompt for length. Say so in the report if the focus asks "
+            f"about coverage those sheets could have carried.]"
+        )
         parts.append("")
     parts.append(_FOCUS_TASK_INSTRUCTION)
-    return "\n".join(parts)
+    return FocusPrompt(
+        text="\n".join(parts),
+        sheets_omitted=sheets_omitted,
+        chars_omitted=chars_omitted,
+    )
 
 
 @dataclass
@@ -136,6 +193,10 @@ class FocusReportResult:
     model_used: str = ""
     error: str | None = None
     cached: bool = False
+    # Loss accounting for the prompt budget (DA-028): how many sheets the
+    # user turn could not carry, and how many characters that cost.
+    sheets_omitted: int = 0
+    chars_omitted: int = 0
 
     @property
     def ok(self) -> bool:
@@ -170,7 +231,8 @@ def generate_focus_report(
             error=f"insufficient readable sheets for focus report ({len(ok_sheets)})",
         )
 
-    user_text = build_focus_user_text(focus, ok_sheets)
+    prompt = build_focus_user_text(focus, ok_sheets)
+    user_text = prompt.text
     thinking_enabled = bool(
         use_thinking and model_supports_adaptive_thinking(model)
     )
@@ -195,6 +257,8 @@ def generate_focus_report(
                 text=cached_text,
                 model_used=model,
                 cached=True,
+                sheets_omitted=prompt.sheets_omitted,
+                chars_omitted=prompt.chars_omitted,
             )
 
     if client is None:
@@ -218,14 +282,18 @@ def generate_focus_report(
     attempt = 0
     while True:
         try:
-            resp = client.messages.create(**kwargs)
+            resp = stream_message(client, kwargs)
             break
         except Exception as exc:  # noqa: BLE001 - report, ship the digests anyway
             if _is_transient_error(exc) and attempt < max_retries:
                 sleep(_retry_backoff_seconds(attempt))
                 attempt += 1
                 continue
-            return FocusReportResult(text="", model_used=model, error=_clean_error(exc))
+            return FocusReportResult(
+                text="", model_used=model, error=_clean_error(exc),
+                sheets_omitted=prompt.sheets_omitted,
+                chars_omitted=prompt.chars_omitted,
+            )
 
     text = _message_text(resp)
     in_tok, out_tok = _message_usage(resp)
@@ -236,6 +304,8 @@ def generate_focus_report(
         output_tokens=out_tok,
         model_used=model,
         error=error,
+        sheets_omitted=prompt.sheets_omitted,
+        chars_omitted=prompt.chars_omitted,
     )
     if result.ok:
         put_stage_cache_entry(
