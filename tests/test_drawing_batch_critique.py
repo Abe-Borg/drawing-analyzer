@@ -1,8 +1,10 @@
 """Batch-mode critique tests (Files-API upload reuse + Message Batches, Phase 23C).
 
-Hermetic: a fake client provides ``.beta.files.upload/delete``,
-``.beta.messages.batches.create``, ``.messages.batches.retrieve/results/cancel``,
-and ``.messages.create`` (the real-time fallback), so the whole submit → poll →
+Hermetic: a fake client provides ``.files.upload/delete``,
+``.messages.batches.create``, ``.messages.batches.retrieve/results/cancel``,
+and ``.messages.create`` (the real-time fallback) — the Files API and Message
+Batches are GA, so production calls the stable namespace; ``.beta.*`` mirrors
+are kept on the fake only for back-compat — so the whole submit → poll →
 collect path — and every DA-034 cleanup exit — runs without PyMuPDF or the
 network. The critique responder returns a real findings block, so a batched read
 is parsed by the exact same code a real-time read is.
@@ -83,7 +85,7 @@ class _FakeBatches:
     def create(self, *, requests, betas=None):
         if self._c.create_raises is not None:
             raise self._c.create_raises
-        self._c.create_calls.append({"requests": list(requests), "betas": betas})
+        self._c.create_calls.append({"requests": list(requests)})
         self._c.submitted = list(requests)
         return _Obj(id="batch_crit")
 
@@ -135,14 +137,21 @@ class _FakeClient:
         self.messages_create_calls: list[dict] = []
         self.files = _FakeFiles()
         batches = _FakeBatches(self)
-        self.beta = _Obj(files=self.files, messages=_Obj(batches=batches))
+        # Files API + Message Batches are GA (production calls the stable
+        # namespace); ``.beta.messages.stream`` is kept as a mirror because
+        # ``digest.stream_message`` routes the Opus 5 refusal-fallback params
+        # (see ``apply_refusal_fallback``) through the beta client namespace.
+        stream = lambda **kw: FinalMessageStream(self._messages_create(**kw))  # noqa: E731
+        self.beta = _Obj(files=self.files, messages=_Obj(batches=batches, stream=stream))
         self.messages = _Obj(
             batches=batches,
             create=self._messages_create,
-            stream=lambda **kw: FinalMessageStream(self._messages_create(**kw)),
+            stream=stream,
         )
 
     def _messages_create(self, **kwargs):
+        kwargs.pop("betas", None)
+        kwargs.pop("fallbacks", None)
         self.messages_create_calls.append(kwargs)
         return (self.inline_responder or _crit_message)(kwargs)
 
@@ -242,9 +251,8 @@ def test_two_custom_ids_per_uncached_sheet():
 
     ids = [r["custom_id"] for r in client.submitted]
     assert ids == ["sheet__0__r1", "sheet__0__r2", "sheet__1__r1", "sheet__1__r2"]
-    # The batch was created once, with the Files-API beta attached.
+    # The batch was created once, on the stable (GA) Message Batches namespace.
     assert len(client.create_calls) == 1
-    assert client.create_calls[0]["betas"] == ["files-api-2025-04-14"]
 
 
 def test_one_upload_per_sheet_feeds_both_reads():

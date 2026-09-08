@@ -44,6 +44,7 @@ from .core.api_config import (
     PHASE_HARVEST,
     apply_effort_config,
     apply_thinking_config,
+    call_with_refusal_fallback,
     effort_config_for,
     phase_output_cap,
     thinking_config_for,
@@ -425,7 +426,7 @@ def _structure_item(
     attempt = 0
     while True:
         try:
-            resp = client.messages.create(**kwargs)
+            resp = call_with_refusal_fallback(client, kwargs, model=model, method="create")
             break
         except Exception as exc:  # noqa: BLE001 - degrade, never raise
             if _is_transient_error(exc) and attempt < max_retries:

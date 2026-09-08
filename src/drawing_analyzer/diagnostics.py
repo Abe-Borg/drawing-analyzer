@@ -18,7 +18,7 @@ Design (standard "library" logging pattern):
   file and no stderr noise.
 - The GUI calls :func:`configure_file_logging` once at startup. With
   ``DRAWING_ANALYZER_DEBUG`` truthy it also attaches the same handler to the
-  ``anthropic`` / ``httpx`` loggers at DEBUG, so the file additionally captures
+  ``anthropic`` / ``httpx2`` loggers at DEBUG, so the file additionally captures
   the SDK's wire-level request/response lines — the real status codes,
   request-ids, and retry attempts behind a 503/500.
 
@@ -139,7 +139,12 @@ _logger.setLevel(logging.DEBUG)
 
 # Loggers the SDK emits under; we attach our file handler to these only in debug
 # mode so the trace can include raw HTTP attempts/retries behind a transient 5xx.
-_SDK_LOGGER_NAMES = ("anthropic", "httpx", "httpcore")
+# ``anthropic`` 1.x moved its HTTP transport from ``httpx``/``httpcore`` to the
+# maintained fork ``httpx2``/``httpcore2`` (same behavior, new logger names) —
+# both generations are listed so debug capture works whichever is installed.
+# ``httpcore2`` logs under dotted child names (``httpcore2.http11``, ...); a
+# handler on the bare ``httpcore2`` parent still catches them via propagation.
+_SDK_LOGGER_NAMES = ("anthropic", "httpx", "httpcore", "httpx2", "httpcore2")
 
 _configured = False
 _log_path: Path | None = None

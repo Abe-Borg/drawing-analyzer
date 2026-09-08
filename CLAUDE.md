@@ -290,6 +290,22 @@ example is parked at `docs/examples/fire_protection.md`.
   focus all go through it. Batch items never stream and are unaffected. A cap
   raise without the matching streaming conversion is a hard failure, including
   via the batch→real-time fallbacks in `batch_digest`/`batch_critique`.
+- **Every real-time Opus 5 call opts into the server-side refusal fallback.**
+  Opus 5's elevated safety classifiers can decline a request outright
+  (`stop_reason="refusal"`, HTTP 200); `core.api_config.call_with_refusal_fallback`
+  attaches `fallbacks: "default"` (beta `server-side-fallback-2026-07-01`) for
+  every Opus-5-routed real-time call — `digest.stream_message` (digest, critique,
+  the batch direct-call rescue), `verify.py`'s escalation calls, and the
+  investigation loop — and re-routes through `client.beta.messages`. The
+  parameter is rejected on the Batches API, so this never touches the bulk
+  batch-submitted review traffic. Opus 4.8, the documented cyber-refusal
+  fallback target, is registered in `_MODEL_CAPABILITIES` with identical
+  effort/thinking/output-cap/hi-res-vision support and identical $5/$25
+  pricing to Opus 5, so a fallback changes nothing about request shape or
+  billing. Self-healing, mirroring investigation's own `_task_budget_available`
+  latch: a 400 naming the fallback beta/parameter turns the feature off for the
+  rest of the process (`_refusal_fallback_available`) rather than permanently
+  breaking every subsequent Opus 5 call on a platform that doesn't support it.
 - **Additive serialization:** `Finding.to_dict`/`from_dict` must default new
   fields cleanly so cached payloads from older runs still load.
 - **Ledger coverage is artifact-backed (Phase 21, DA-007):** on markup runs every

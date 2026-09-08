@@ -70,6 +70,7 @@ from .core.api_config import (
     apply_thinking_config,
     build_web_fetch_tool,
     build_web_search_tool,
+    call_with_refusal_fallback,
     effort_config_for,
     model_capabilities,
     phase_output_cap,
@@ -849,7 +850,7 @@ def _check_one(
         attempt = 0
         while True:
             try:
-                resp = client.messages.create(**kwargs)
+                resp = call_with_refusal_fallback(client, kwargs, model=model, method="create")
                 break
             except Exception as exc:  # noqa: BLE001 - degrade, never raise
                 if _is_transient_error(exc) and attempt < max_retries:

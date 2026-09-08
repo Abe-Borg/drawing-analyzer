@@ -53,6 +53,7 @@ from .core.api_config import (
     REVIEW_MODEL_DEFAULT,
     apply_effort_config,
     apply_thinking_config,
+    call_with_refusal_fallback,
     effort_config_for,
     model_supports_adaptive_thinking,
     phase_output_cap,
@@ -709,7 +710,7 @@ def _call(
     attempt = 0
     while True:
         try:
-            resp = client.messages.create(**kwargs)
+            resp = call_with_refusal_fallback(client, kwargs, model=model, method="create")
             break
         except Exception as exc:  # noqa: BLE001 - report, don't sink the run
             if _is_transient_error(exc) and attempt < max_retries:

@@ -25,13 +25,17 @@ Model identifiers may be overridden via env vars:
     DRAWING_ANALYZER_CHAT_MODEL           — the in-report Q&A assistant
                                               (default Sonnet 5; needs web
                                               fetch, which Opus 5 lacks).
+    DRAWING_ANALYZER_REFUSAL_FALLBACK     — the Opus 5 server-side refusal
+                                              fallback (default on; any falsy
+                                              value disables it — see
+                                              apply_refusal_fallback).
 """
 from __future__ import annotations
 
 import logging
 import os
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Any, Iterable
 
 _log = logging.getLogger(__name__)
 
@@ -1130,3 +1134,147 @@ def extract_cache_diagnostics(message) -> dict | None:
         except Exception:
             return None
     return None
+
+
+# ---------------------------------------------------------------------------
+# Refusal fallback (Opus 5 elevated safety classifiers)
+# ---------------------------------------------------------------------------
+#
+# Claude Opus 5 ships with elevated cybersecurity safeguards whose classifiers
+# can decline a request outright — HTTP 200, ``stop_reason="refusal"`` — rather
+# than erroring. A construction-drawing review is unlikely to trip them, but an
+# unrecovered false positive would silently drop that sheet/finding's coverage
+# (I-1) with no distinguishing signal from any other empty/garbled response.
+# Anthropic recommends every Opus 5 caller opt into ``fallbacks: "default"``,
+# which re-runs a declined request server-side on the recommended substitute
+# (cyber-category refusals route to Opus 4.8) inside the same call — sticky for
+# the rest of that turn, billed at the serving model's own rate. Opus 4.8 is
+# registered in ``_MODEL_CAPABILITIES`` with the exact same effort / thinking /
+# output-cap / hi-res-vision support and the exact same $5/$25-per-MTok pricing
+# as Opus 5, and nothing downstream branches on ``response.model`` — so a
+# fallback changes nothing about this app's request shape, capabilities, or
+# billing; it only recovers a call that would otherwise come back empty.
+#
+# Real-time (non-batch) calls only: the parameter is rejected outright on the
+# Message Batches API, which is how the standard review path submits its bulk
+# of Opus 5 traffic (Phase 23A) — so this only ever applies where a caller
+# already uses the synchronous/streaming transport: the inline Files-API-outage
+# fallback and the direct-call batch rescue (:mod:`drawing_analyzer.batch_digest`,
+# via :func:`drawing_analyzer.digest.stream_message`), verification escalation,
+# and the investigation loop.
+REFUSAL_FALLBACK_BETA = "server-side-fallback-2026-07-01"
+
+ENV_REFUSAL_FALLBACK = "DRAWING_ANALYZER_REFUSAL_FALLBACK"
+
+# Whether this process may still request the refusal fallback. Not every
+# platform/org is guaranteed to have the beta enabled (self-hosted or
+# third-party deployments in particular — the array-form fallback is
+# documented as unavailable on Bedrock/Vertex/Foundry), and unlike the
+# investigation loop's own task budgets, digest/critique/verification are not
+# optional QC add-ons — they are the core deliverable. A rejection must never
+# be allowed to turn every subsequent Opus 5 call into a permanent failure, so
+# (mirroring investigate.py's ``_task_budget_available`` latch) the first
+# fallback-specific rejection turns the feature off for the rest of the
+# process and every call reverts to the plain (non-beta) transport.
+_refusal_fallback_available = True
+
+_REFUSAL_FALLBACK_REJECTION_MARKERS = ("fallback", REFUSAL_FALLBACK_BETA)
+
+
+def refusal_fallback_enabled() -> bool:
+    """Whether to attach the Opus 5 refusal-fallback parameter. Default ON.
+
+    Opt out via ``DRAWING_ANALYZER_REFUSAL_FALLBACK`` set to a falsy value —
+    an operator debugging a raw refusal (rather than its recovered fallback)
+    is the only expected reason to disable this. Also off once
+    :data:`_refusal_fallback_available` has latched off for the process.
+    """
+    if not _refusal_fallback_available:
+        return False
+    raw = os.environ.get(ENV_REFUSAL_FALLBACK)
+    if raw is None:
+        return True
+    return raw.strip().lower() not in _DISABLE_TOKENS
+
+
+def _is_refusal_fallback_rejection(exc: Exception) -> bool:
+    """True for a 400 that plausibly names the refusal-fallback beta/parameter.
+
+    A 400 is a definitive "this request shape is invalid" signal — never a
+    transient 429/5xx a caller's own retry loop already handles — so, mirroring
+    :func:`~drawing_analyzer.investigate._is_task_budget_rejection`, checking
+    the status plus a loose text marker is enough to catch the expected case
+    (a platform without ``server-side-fallback-2026-07-01`` enabled) without
+    needing the exact wording of every implementation's error message.
+    """
+    status = getattr(exc, "status_code", None)
+    if status != 400:
+        return False
+    text = str(exc).lower()
+    return any(marker.lower() in text for marker in _REFUSAL_FALLBACK_REJECTION_MARKERS)
+
+
+def apply_refusal_fallback(kwargs: dict, *, model: str) -> dict:
+    """Return ``kwargs`` with the Opus 5 refusal-fallback parameter attached.
+
+    Returns ``kwargs`` unchanged (the same object, no copy) when ``model`` is
+    not Opus 5 or the feature is disabled — callers branch on ``"betas" in
+    kwargs`` (see :func:`messages_namespace`) to decide whether the request
+    needs the beta client namespace. Merges into an existing ``betas`` list
+    rather than overwriting it, so a caller that already attached a beta
+    (investigation's ``task-budgets-2026-03-13``) keeps it.
+    """
+    if model != MODEL_OPUS_5 or not refusal_fallback_enabled():
+        return kwargs
+    betas = list(kwargs.get("betas") or [])
+    if REFUSAL_FALLBACK_BETA not in betas:
+        betas.append(REFUSAL_FALLBACK_BETA)
+    out = dict(kwargs)
+    out["betas"] = betas
+    out["fallbacks"] = "default"
+    return out
+
+
+def messages_namespace(client: Any, kwargs: dict):
+    """Return ``client.beta.messages`` when ``kwargs`` carries betas, else
+    ``client.messages``. Pairs with :func:`apply_refusal_fallback` so a call
+    site never has to branch on the model itself to pick a namespace."""
+    if kwargs.get("betas"):
+        return client.beta.messages
+    return client.messages
+
+
+def call_with_refusal_fallback(client: Any, kwargs: dict, *, model: str, method: str) -> Any:
+    """Issue one Messages request, opting Opus 5 into the refusal fallback and
+    self-healing if the platform rejects the beta/parameter itself.
+
+    ``method`` is ``"create"`` (returns the ``Message`` directly) or
+    ``"stream"`` (the context manager is entered and exited here, so callers
+    get a plain ``Message`` either way — see :func:`~drawing_analyzer.digest.stream_message`).
+    On a fallback-specific 400 (:func:`_is_refusal_fallback_rejection`), the
+    feature latches off for the process (see :data:`_refusal_fallback_available`)
+    and the exact same call is re-issued once without it. Any other exception
+    (transient or not) propagates unchanged to the caller's own retry loop.
+    """
+    global _refusal_fallback_available
+    attempted = apply_refusal_fallback(kwargs, model=model)
+    try:
+        return _dispatch_messages(client, attempted, method)
+    except Exception as exc:
+        if attempted is kwargs or not _is_refusal_fallback_rejection(exc):
+            raise
+        _refusal_fallback_available = False
+        _log.warning(
+            "refusal fallback unavailable (%s); continuing without it for the "
+            "rest of this process.",
+            exc,
+        )
+        return _dispatch_messages(client, kwargs, method)
+
+
+def _dispatch_messages(client: Any, kwargs: dict, method: str) -> Any:
+    namespace = messages_namespace(client, kwargs)
+    if method == "create":
+        return namespace.create(**kwargs)
+    with namespace.stream(**kwargs) as stream:
+        return stream.get_final_message()

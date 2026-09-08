@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 
 from drawing_analyzer.investigate import (
     INVESTIGATE_SYSTEM_PROMPT,
@@ -839,9 +840,24 @@ def test_task_budget_rejection_degrades_instead_of_killing_the_stage():
         status_code = 400
 
     class _Rejects400(_LoopClient):
+        # Rejects only a request that actually carries the task-budget beta —
+        # the Opus 5 refusal-fallback beta (``apply_refusal_fallback``) rides
+        # every request regardless and must keep working once task budgets
+        # degrade, so a blanket ``.beta`` rejection would over-fire here.
         @property
         def beta(self):
-            raise _Status400("output_config.task_budget: unsupported beta")
+            base = super().beta
+
+            class _Msgs:
+                def stream(self, **kw):
+                    if "task-budgets-2026-03-13" in (kw.get("betas") or []):
+                        raise _Status400("output_config.task_budget: unsupported beta")
+                    return base.messages.stream(**kw)
+
+                def create(self, **kw):
+                    return base.messages.create(**kw)
+
+            return SimpleNamespace(messages=_Msgs())
 
     inv._task_budget_available = True
     try:
@@ -871,9 +887,23 @@ def test_fallback_verdict_is_not_cached_under_the_budgeted_key(tmp_path):
         status_code = 400
 
     class _RejectsBeta(_LoopClient):
+        # Rejects only a request that actually carries the task-budget beta —
+        # see the identical fake in
+        # test_task_budget_rejection_degrades_instead_of_killing_the_stage.
         @property
         def beta(self):
-            raise _Status400("output_config.task_budget: unsupported beta")
+            base = super().beta
+
+            class _Msgs:
+                def stream(self, **kw):
+                    if "task-budgets-2026-03-13" in (kw.get("betas") or []):
+                        raise _Status400("output_config.task_budget: unsupported beta")
+                    return base.messages.stream(**kw)
+
+                def create(self, **kw):
+                    return base.messages.create(**kw)
+
+            return SimpleNamespace(messages=_Msgs())
 
     inv._task_budget_available = True
     try:

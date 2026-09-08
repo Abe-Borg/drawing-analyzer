@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "AGPL-3.0-or-later" }
 dependencies = [
-    "anthropic>=0.97,<0.98",
+    "anthropic>=1.4,<1.5",
     "pymupdf",
     "tiktoken",
     "platformdirs",
