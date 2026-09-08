@@ -443,13 +443,34 @@ def _environment() -> dict:
     return env
 
 
+def _render_stage_models(stage_models: dict) -> str:
+    """One line, grouped by model, so a config difference is visible at a glance."""
+    if not stage_models:
+        return "Models: (not recorded)"
+    grouped: dict[str, list[str]] = {}
+    for stage, model in stage_models.items():
+        grouped.setdefault(model, []).append(stage)
+    return "Models: " + "; ".join(
+        f"{model} → {', '.join(stages)}" for model, stages in grouped.items()
+    )
+
+
 def _render_md(report: dict) -> str:
     lines = [
         "# Drawing Analyzer benchmark report",
         "",
         f"Generated: {report['generated_at']}  |  mode: {report['mode']}",
         "",
-        "Environment: " + ", ".join(f"{k}={v}" for k, v in sorted(report["environment"].items())),
+        "Environment: " + ", ".join(
+            f"{k}={v}" for k, v in sorted(report["environment"].items())
+            if k != "stage_models"
+        ),
+        "",
+        # Rendered on its own line, grouped model -> stages, because the flat
+        # dict is eleven entries wide and unreadable inline. The full mapping
+        # stays in the JSON; this is the human summary, and it is the variable
+        # most likely to differ between two reports being compared.
+        _render_stage_models(report["environment"].get("stage_models") or {}),
         "",
         "| scenario | median wall (s) | walls (s) | notes |",
         "|---|---:|---|---|",

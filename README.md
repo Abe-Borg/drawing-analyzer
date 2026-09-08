@@ -1225,6 +1225,7 @@ runs.
 | `DRAWING_ANALYZER_ANNOTATE_WORKERS` | `2` | Independent source-PDF markup processes (`1` disables process fan-out; hard cap 4). |
 | `DRAWING_ANALYZER_SUPPRESS_NEAR_BLANK` | off | Also drop near-blank tiles (PNG-byte threshold), not just pixel-uniform ones. |
 | `DRAWING_ANALYZER_NEAR_BLANK_MAX_BYTES` | `3072` | Near-blank PNG-byte threshold (only when the above is on). |
+| `DRAWING_ANALYZER_TILE_TARGET_PX` | `1560` | **Measurement knob.** Vector-sheet tile long edge, in pixels. Image tokens scale with the *square* of this, and the tiles ride the digest plus both critique reads, so it is the single highest-leverage number in the bill: `1400` ≈ −19% image tokens per sheet, `1240` ≈ −37%, `1100` ≈ −50%. Whether a lower value still reads the drawing is a quality question — sweep it against a real set before changing anything, and note that a changed target re-renders (it invalidates the digest/critique caches by design). Raster sheets are unaffected: with no text layer the pixels are the only channel. Clamped to `[400, 1992]` so no value can breach the API's hard 2000 px many-image cap. |
 | `DRAWING_ANALYZER_CACHE_PATH` | `~/.drawing_analyzer/drawing_digest_cache.json` | On-disk SQLite/WAL cache (legacy filename retained; old JSON migrates automatically). |
 | `DRAWING_ANALYZER_CACHE_PERSIST` | on | Disable to keep the cache in-memory only. |
 | `DRAWING_ANALYZER_DIAGNOSTICS` | on | Set `0`/`false` to disable the rotating `drawing_analyzer.log` diagnostics file the GUI writes. |
