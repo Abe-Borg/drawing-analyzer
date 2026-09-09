@@ -43,7 +43,7 @@ from __future__ import annotations
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -271,6 +271,119 @@ class CrossQCFact:
 
 
 @dataclass
+class CrossQCDiscardCounts:
+    """Why the host dropped model-returned legs and facts (WP-02 §7.2).
+
+    Purely observational: **counts and reasons only, never quote text**, and
+    nothing here feeds ``complete`` or ``budget_degraded``. It exists because no
+    stored artifact could answer the question that sizes WP-03B — how much of
+    what the model returned did the host throw away, and for which reason?
+    ``_finding_from_handles`` and ``_parse_facts`` discard before
+    :class:`CrossQCResult` is built, so a run that kept 3 findings and a run that
+    kept 3 after dropping 40 ungrounded legs were indistinguishable downstream.
+
+    The three grounding triggers of §2.1 map onto these fields directly:
+
+    - ``legs_ungrounded_quote`` / ``facts_ungrounded_quote`` — a real quote the
+      host could not re-find. Split by whether the target sheet had **any**
+      extractable text, because a textless sheet can never satisfy the check
+      (trigger 2) while a text-bearing sheet failing it is either past the
+      15,000-character cap (trigger 1), inside a raster region of a hybrid
+      sheet, or a genuine hallucination.
+    - ``legs_accepted_without_quote`` — trigger 3, the trust-by-omission
+      population: ``_finding_from_handles`` guards with ``if quote and not
+      _grounded(...)``, so a leg carrying no quote is accepted unchecked. This
+      is an *acceptance* count, not a discard, and is the one number here that
+      counts evidence being trusted rather than dropped.
+    """
+
+    legs_unresolved_handle: int = 0
+    legs_ungrounded_quote_textless_sheet: int = 0
+    legs_ungrounded_quote_text_bearing_sheet: int = 0
+    legs_accepted_without_quote: int = 0
+    legs_accepted_grounded: int = 0
+    findings_dropped_under_two_legs: int = 0
+    facts_unresolved_handle: int = 0
+    facts_no_quote: int = 0
+    facts_ungrounded_quote_textless_sheet: int = 0
+    facts_ungrounded_quote_text_bearing_sheet: int = 0
+    facts_accepted: int = 0
+    # portable sheet key -> {counter name: count}. Same counter names as above.
+    by_sheet: dict = field(default_factory=dict)
+
+    def _counter_names(self) -> list[str]:
+        return [f.name for f in fields(self) if f.name != "by_sheet"]
+
+    def bump(self, name: str, geom: Any = None) -> None:
+        """Increment one counter, run-level and (when known) per sheet."""
+        setattr(self, name, getattr(self, name) + 1)
+        if geom is None:
+            return
+        key = sheet_counter_key(geom)
+        if not key:
+            return
+        self.by_sheet.setdefault(key, {})
+        self.by_sheet[key][name] = self.by_sheet[key].get(name, 0) + 1
+
+    def merge(self, other: "CrossQCDiscardCounts") -> None:
+        """Fold another counter set in (shards accumulate into the run total)."""
+        for name in self._counter_names():
+            setattr(self, name, getattr(self, name) + getattr(other, name))
+        for key, counters in (other.by_sheet or {}).items():
+            dest = self.by_sheet.setdefault(key, {})
+            for name, n in counters.items():
+                dest[name] = dest.get(name, 0) + n
+
+    def to_dict(self) -> dict:
+        out = {name: getattr(self, name) for name in self._counter_names()}
+        out["by_sheet"] = {k: dict(v) for k, v in sorted(self.by_sheet.items())}
+        return out
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "CrossQCDiscardCounts":
+        d = d or {}
+        known = {f.name for f in fields(cls)} - {"by_sheet"}
+        obj = cls(**{k: int(v or 0) for k, v in d.items() if k in known})
+        raw = d.get("by_sheet")
+        if isinstance(raw, dict):
+            obj.by_sheet = {
+                str(k): {str(n): int(c or 0) for n, c in v.items()}
+                for k, v in raw.items() if isinstance(v, dict)
+            }
+        return obj
+
+
+def sheet_counter_key(geom: Any) -> str:
+    """A portable ``"SRC-0001:p0"`` key for one sheet — never a path.
+
+    Mirrors the usage ledger's ``stage_instance`` convention so a manifest
+    reader can join these counts against §7.1's per-sheet classification.
+    Falls back to the source *basename* stem when no source id was assigned;
+    ``""`` when even that is unavailable, which simply skips attribution.
+    """
+    ref = getattr(geom, "ref", None)
+    if ref is None:
+        return ""
+    source = str(getattr(ref, "source_id", "") or "").strip()
+    if not source:
+        source = Path(str(getattr(ref, "source_name", "") or "")).stem
+    if not source:
+        return ""
+    return f"{source}:p{int(getattr(ref, 'page_index', 0) or 0)}"
+
+
+def _sheet_is_textless(geom: Any) -> bool:
+    """True when the sheet offers no extractable text to ground a quote against.
+
+    Not ``is_raster``: a *hybrid* sheet has words (so ``is_raster`` is False) and
+    can still hold a pasted raster detail whose text is absent from the layer.
+    This asks the narrower, decidable question — was there any text at all to
+    match? — and leaves the hybrid split to the §7.1 tile analysis.
+    """
+    return not (getattr(geom, "sheet_text", "") or "").strip()
+
+
+@dataclass
 class CrossQCResult:
     """The outcome of the cross-sheet QC pass.
 
@@ -302,6 +415,9 @@ class CrossQCResult:
     findings_omitted: int = 0
     budget_degraded: bool = False
     cached: bool = False
+    # WP-02 §7.2. ``None`` = not recorded (a result cached before this existed),
+    # which is not the same as "nothing was discarded".
+    discards: "CrossQCDiscardCounts | None" = None
 
 
 # --------------------------------------------------------------------------- #
@@ -425,7 +541,11 @@ def _action(item: dict) -> str:
     return action.strip()[:300]
 
 
-def _finding_from_handles(item: Any, entry_by_handle: dict[str, tuple]) -> Finding | None:
+def _finding_from_handles(
+    item: Any,
+    entry_by_handle: dict[str, tuple],
+    counts: "CrossQCDiscardCounts | None" = None,
+) -> Finding | None:
     """Build a dual-anchored :class:`Finding` from a handle-keyed item (map/reconcile).
 
     Resolves each opaque ``sheet_handle`` against the request manifest (an unknown
@@ -456,16 +576,30 @@ def _finding_from_handles(item: Any, entry_by_handle: dict[str, tuple]) -> Findi
     for handle, quote in refs_raw:
         entry = entry_by_handle.get(_norm_id(handle))   # case/whitespace-insensitive
         if entry is None:                    # unknown handle → unbound
+            if counts is not None:           # no geom: run-level only
+                counts.bump("legs_unresolved_handle")
             continue
         sheet_id, geom = entry
         key = source_page_key(geom.ref)
-        if key in seen_sheets:
+        if key in seen_sheets:               # dedup, not a discard
             continue
         if quote and not _grounded(quote, getattr(geom, "sheet_text", "") or ""):
+            if counts is not None:           # WP-02 §7.2: why, not just how many
+                counts.bump(
+                    "legs_ungrounded_quote_textless_sheet" if _sheet_is_textless(geom)
+                    else "legs_ungrounded_quote_text_bearing_sheet", geom)
             continue                         # ungrounded quote → not a trusted leg
+        if counts is not None:
+            # Trigger 3: the guard above short-circuits on an empty quote, so a
+            # quoteless leg is trusted without any check at all.
+            counts.bump(
+                "legs_accepted_grounded" if quote else "legs_accepted_without_quote",
+                geom)
         seen_sheets.add(key)
         resolved.append((sheet_id, quote, geom))
     if len(resolved) < 2:
+        if counts is not None:               # a finding spans sheets: run-level
+            counts.bump("findings_dropped_under_two_legs")
         return None
 
     (p_sid, p_quote, pgeom), *legs = resolved
@@ -759,7 +893,7 @@ def _map_call(
     shard: list[tuple], entry_by_handle: dict, handle_by_key: dict,
     discipline_by_handle: dict, *,
     client: Any, model: str, max_retries: int, sleep: Any, budget: _Budget,
-    preamble: str = "",
+    preamble: str = "", counts: "CrossQCDiscardCounts | None" = None,
 ) -> tuple[list[Finding], list[NumericClaim], list[CrossQCFact], int, int, str | None]:
     """One shard-map call → local findings + claims + grounded facts (handle-keyed)."""
     raw, in_tok, out_tok, err = _call(
@@ -775,15 +909,16 @@ def _map_call(
         return [], claims, [], in_tok, out_tok, _NO_FINDINGS_OBJECT
     findings = _cap_findings([
         f for item in (obj.get("findings") or [])
-        if (f := _finding_from_handles(item, entry_by_handle)) is not None
+        if (f := _finding_from_handles(item, entry_by_handle, counts)) is not None
     ], budget)
     claims = _resolve_claim_handles(parse_numeric_claims(raw), entry_by_handle)
-    facts = _parse_facts(obj, entry_by_handle, discipline_by_handle)
+    facts = _parse_facts(obj, entry_by_handle, discipline_by_handle, counts)
     return findings, claims, facts, in_tok, out_tok, None
 
 
 def _parse_facts(
-    obj: dict, entry_by_handle: dict, discipline_by_handle: dict
+    obj: dict, entry_by_handle: dict, discipline_by_handle: dict,
+    counts: "CrossQCDiscardCounts | None" = None,
 ) -> list[CrossQCFact]:
     """Validate + build :class:`CrossQCFact` s from a map response's ``facts`` array.
 
@@ -798,11 +933,23 @@ def _parse_facts(
         handle = str(item.get("sheet_handle", "") or "").strip()
         entry = entry_by_handle.get(_norm_id(handle))   # case/whitespace-insensitive
         if entry is None:
+            if counts is not None:           # no geom: run-level only
+                counts.bump("facts_unresolved_handle")
             continue
         sheet_id, geom = entry
         exact_quote = _quote(item.get("exact_quote", ""))
-        if not exact_quote or not _grounded(exact_quote, getattr(geom, "sheet_text", "") or ""):
+        if not exact_quote:
+            if counts is not None:
+                counts.bump("facts_no_quote", geom)
             continue
+        if not _grounded(exact_quote, getattr(geom, "sheet_text", "") or ""):
+            if counts is not None:           # WP-02 §7.2: why, not just how many
+                counts.bump(
+                    "facts_ungrounded_quote_textless_sheet" if _sheet_is_textless(geom)
+                    else "facts_ungrounded_quote_text_bearing_sheet", geom)
+            continue
+        if counts is not None:
+            counts.bump("facts_accepted", geom)
         out.append(CrossQCFact(
             sheet_handle=handle,
             sheet_id=sheet_id,
@@ -819,7 +966,7 @@ def _parse_facts(
 def _reconcile_call(
     manifest: list[tuple], facts: list[CrossQCFact], entry_by_handle: dict, *,
     client: Any, model: str, max_retries: int, sleep: Any, budget: _Budget,
-    preamble: str = "",
+    preamble: str = "", counts: "CrossQCDiscardCounts | None" = None,
 ) -> tuple[list[Finding], list[NumericClaim], int, int, str | None]:
     """One reconciliation call comparing ``facts`` across the whole manifest."""
     raw, in_tok, out_tok, err = _call(
@@ -835,7 +982,7 @@ def _reconcile_call(
         return [], claims, in_tok, out_tok, _NO_FINDINGS_OBJECT
     findings = _cap_findings([
         f for item in (obj.get("findings") or [])
-        if (f := _finding_from_handles(item, entry_by_handle)) is not None
+        if (f := _finding_from_handles(item, entry_by_handle, counts)) is not None
     ], budget)
     claims = _resolve_claim_handles(parse_numeric_claims(raw), entry_by_handle)
     return findings, claims, in_tok, out_tok, None
@@ -849,7 +996,7 @@ _MAX_RECONCILE_PAIR_CALLS = 64
 def _reconcile_facts(
     manifest: list[tuple], facts: list[CrossQCFact], entry_by_handle: dict, *,
     client: Any, model: str, max_retries: int, sleep: Any, budget: _Budget,
-    preamble: str = "",
+    preamble: str = "", counts: "CrossQCDiscardCounts | None" = None,
     max_workers: int | None = None,
 ) -> tuple[list[Finding], list[NumericClaim], int, int, bool]:
     """Reconcile all facts, comparing across groups when they overflow one call.
@@ -869,7 +1016,7 @@ def _reconcile_facts(
         f, c, i, o, err = _reconcile_call(
             manifest, facts, entry_by_handle,
             client=client, model=model, max_retries=max_retries, sleep=sleep,
-            budget=budget, preamble=preamble,
+            budget=budget, preamble=preamble, counts=counts,
         )
         return f, c, i, o, err is None
 
@@ -890,14 +1037,19 @@ def _reconcile_facts(
         pair_inputs = pair_inputs[:_MAX_RECONCILE_PAIR_CALLS]
 
     def _run_pair(union: list[CrossQCFact]):
+        # A per-task counter merged in the single-threaded fold below, mirroring
+        # how each shard gets its own ``_Budget``: these pair calls run on a
+        # thread pool, and ``+=`` on a shared counter across threads would lose
+        # increments.
+        local_counts = CrossQCDiscardCounts()
         try:
-            return _reconcile_call(
+            return (*_reconcile_call(
                 manifest, union, entry_by_handle,
                 client=client, model=model, max_retries=max_retries, sleep=sleep,
-                budget=budget, preamble=preamble,
-            )
+                budget=budget, preamble=preamble, counts=local_counts,
+            ), local_counts)
         except Exception as exc:  # noqa: BLE001 - preserve additive semantics
-            return [], [], 0, 0, _clean_error(exc)
+            return [], [], 0, 0, _clean_error(exc), local_counts
 
     workers = _resolve_cross_qc_workers(max_workers, len(pair_inputs))
     if workers == 1:
@@ -911,9 +1063,11 @@ def _reconcile_facts(
     all_f: list[Finding] = []
     all_c: list[NumericClaim] = []
     tot_in = tot_out = 0
-    for f, c, in_t, out_t, err in pair_results:
+    for f, c, in_t, out_t, err, local_counts in pair_results:
         tot_in += in_t
         tot_out += out_t
+        if counts is not None:
+            counts.merge(local_counts)
         if err is not None:
             completed = False
         all_f.extend(f)
@@ -1049,6 +1203,9 @@ def _cross_qc_from_cache(payload: dict) -> CrossQCResult | None:
             findings_omitted=int(payload.get("findings_omitted", 0) or 0),
             budget_degraded=bool(payload.get("budget_degraded", False)),
             cached=True,
+            discards=(CrossQCDiscardCounts.from_dict(raw_discards)
+                      if isinstance(raw_discards := payload.get("discards"), dict)
+                      else None),
         )
     except (TypeError, ValueError):
         return None
@@ -1081,6 +1238,10 @@ def _put_cross_qc_cache(cache: Any, key: str, result: CrossQCResult) -> None:
             "text_chars_omitted": result.text_chars_omitted,
             "findings_omitted": result.findings_omitted,
             "budget_degraded": result.budget_degraded,
+            # ``None`` stays absent so an older entry reads back as "not
+            # recorded" rather than as a zeroed counter set.
+            **({"discards": result.discards.to_dict()}
+               if result.discards is not None else {}),
         },
     )
 
@@ -1210,6 +1371,11 @@ def cross_sheet_qc(
         discipline_by_handle[handle] = disc
         manifest.append((handle, sheet_id, disc))
 
+    # WP-02 §7.2: run-level discard counters. Only the sharded path grounds
+    # quotes host-side (``_validate_cross_item`` on the whole-set path performs no
+    # grounding at all), so this stays ``None`` there — "not measured", never a
+    # misleading all-zero "nothing was discarded".
+    discards = CrossQCDiscardCounts()
     all_findings: list[Finding] = []
     all_claims: list[NumericClaim] = []
     all_facts: list[CrossQCFact] = []
@@ -1218,14 +1384,15 @@ def cross_sheet_qc(
     shards_completed = 0
     def _run_map(shard: list[tuple]):
         local_budget = _Budget()
+        local_counts = CrossQCDiscardCounts()
         try:
             return (*_map_call(
                 shard, entry_by_handle, handle_by_key, discipline_by_handle,
                 client=client, model=model, max_retries=max_retries, sleep=sleep,
-                budget=local_budget, preamble=preamble,
-            ), local_budget)
+                budget=local_budget, preamble=preamble, counts=local_counts,
+            ), local_budget, local_counts)
         except Exception as exc:  # noqa: BLE001 - one shard never sinks the pass
-            return [], [], [], 0, 0, _clean_error(exc), local_budget
+            return [], [], [], 0, 0, _clean_error(exc), local_budget, local_counts
 
     workers = _resolve_cross_qc_workers(max_workers, len(shards))
     if workers == 1:
@@ -1235,8 +1402,9 @@ def cross_sheet_qc(
             # Deterministic input-order fold; only execution is parallel.
             map_results = list(pool.map(_run_map, shards))
 
-    for f, c, facts, in_tok, out_tok, err, local_budget in map_results:
+    for f, c, facts, in_tok, out_tok, err, local_budget, local_counts in map_results:
         _fold_budget(budget, local_budget)
+        discards.merge(local_counts)
         total_in += in_tok
         total_out += out_tok
         if err is not None:
@@ -1260,7 +1428,7 @@ def cross_sheet_qc(
         r_find, r_claims, r_in, r_out, completed = _reconcile_facts(
             manifest, all_facts, entry_by_handle,
             client=client, model=model, max_retries=max_retries, sleep=sleep,
-            budget=budget, preamble=preamble,
+            budget=budget, preamble=preamble, counts=discards,
             max_workers=max_workers,
         )
         total_in += r_in
@@ -1306,6 +1474,7 @@ def cross_sheet_qc(
         text_chars_omitted=budget.omitted,
         findings_omitted=budget.findings_omitted,
         budget_degraded=budget.degraded,
+        discards=discards,
     )
     _put_cross_qc_cache(cache, cache_key, result)
     return result

@@ -582,6 +582,10 @@ def build_run_manifest(
             "total": len(findings) + len(reference),
         },
         "prose_accounting": dict(getattr(ctx, "prose_accounting", None) or {}),
+        # WP-02 §7.2. Counts and portable sheet keys only — no quote text, no
+        # path. Absent/empty means the measurement was not taken (cross-QC did
+        # not run, or ran on the whole-set path, which does no host grounding).
+        "cross_qc_discards": dict(getattr(ctx, "cross_qc_discards", None) or {}),
         "evidence": evidence_summary(findings + reference),
         "markup_coverage": _receipt_summary(ctx),
         "errors": [

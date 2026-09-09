@@ -265,6 +265,12 @@ class RenderedSheet:
     - ``is_raster`` — ``True`` when ``words`` is empty (a scanned / pasted-raster
       sheet). Drives the higher raster render target, a prompt disclosure line,
       and a report badge.
+    - ``text_chars_total`` — the length of the text layer **before** the
+      ``sheet_text`` cap. A count, never the text: with only the capped string
+      every truncated sheet reports ``SHEET_TEXT_MAX_CHARS``, so a
+      15,100-character sheet is indistinguishable from a 60,000-character one —
+      which is exactly what sizing the truncation problem needs (WP-02 §7.1
+      item 1). ``None`` = not recorded, which is not the same as zero.
     - ``omitted_tiles`` — grid positions dropped by blank-tile suppression
       (populated later; empty by default).
     - ``overlap_frac`` — the fractional tile overlap the sheet was rendered with,
@@ -283,6 +289,7 @@ class RenderedSheet:
     sheet_text: str = ""
     words: list[Any] = field(default_factory=list)
     is_raster: bool = False
+    text_chars_total: "int | None" = None
     omitted_tiles: list[tuple[int, int]] = field(default_factory=list)
     overlap_frac: float = 0.08  # mirrors tiling.DEFAULT_OVERLAP_FRAC
     # Canonical geometry + transforms (Phase 19). ``page_width_pt`` /
@@ -415,6 +422,9 @@ class SheetGeometry:
     words: list[Any] = field(default_factory=list)
     sheet_text: str = ""
     is_raster: bool = False
+    # Length of the text layer before the ``sheet_text`` cap — a count, never the
+    # text; see :class:`RenderedSheet`. ``None`` = not recorded, not zero.
+    text_chars_total: "int | None" = None
     # PAGE_VIEW_V2 geometry + transforms (Phase 19); see :class:`RenderedSheet`.
     geometry: "PageGeometry | None" = None
     # Phase 26A (§18.2): how many blank tiles the render omitted for this sheet
@@ -435,6 +445,7 @@ class SheetGeometry:
             words=rendered.words,
             sheet_text=rendered.sheet_text,
             is_raster=rendered.is_raster,
+            text_chars_total=rendered.text_chars_total,
             geometry=rendered.geometry,
             omitted_tile_count=len(rendered.omitted_tiles or []),
         )
