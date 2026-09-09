@@ -447,3 +447,159 @@ def test_spec_chars_unknown_model_with_zero_spec_chars_stays_none():
     # that forgot to also check `total_cost is None` would coerce it to 0.0.
     est = estimate_drawing_set_cost(5, model="mystery-model", spec_chars=0)
     assert est.total_cost is None
+
+
+# --------------------------------------------------------------------------- #
+# WP-04 §9.2 — the dialog copy must describe the transport it is pricing
+# --------------------------------------------------------------------------- #
+#
+# The arithmetic was already right: ``_specs_cost_contribution`` prices the
+# batch branch as ordinary batch input and says so in its own docstring. Only
+# the operator-facing sentence was wrong — it promised a ~0.1x prompt-cache read
+# on every transport — and it was wrong in the operator's favour, which is the
+# direction that gets noticed on the invoice rather than in review. So these
+# tests pin the copy AND pin that the priced totals did not move: a "fix" that
+# changed a number here would be correcting arithmetic the plan established is
+# already correct.
+
+
+def _dialog(*, batch: bool, spec_chars: int = 40_000) -> str:
+    return format_drawing_cost_prompt(
+        estimate_drawing_set_cost(10, file_count=1, model=OPUS, batch=batch,
+                                  spec_chars=spec_chars)
+    )
+
+
+def _exhaustive_dialog(*, batch: bool, critique_batch: bool,
+                       spec_chars: int = 40_000) -> str:
+    return format_exhaustive_cost_prompt(
+        estimate_exhaustive_run_cost(10, file_count=1, model=OPUS, batch=batch,
+                                     critique_batch=critique_batch,
+                                     spec_chars=spec_chars)
+    )
+
+
+def test_batch_dialog_does_not_promise_a_cache_discount_on_specifications():
+    """§9.3 case 8. The batch path sets no breakpoint, so nothing is cached."""
+    text = _dialog(batch=True)
+    assert "ordinary batch input" in text
+    assert "0.1x" not in text
+    assert "cached after the first" not in text
+
+
+def test_real_time_dialog_describes_specification_caching_as_conditional():
+    """Parallel workers and expiry can both force additional writes."""
+    text = _dialog(batch=False)
+    assert "0.1x" in text                      # the discount is still real
+    assert "usually cached" in text            # ...but not guaranteed
+    assert "write rate" in text                # and the exception is named
+
+
+def test_exhaustive_dialog_matches_the_digest_transport_in_every_mode():
+    """Including Hybrid, where the digest is real-time and critique is batched.
+
+    Specifications ride the DIGEST prompt only, so the sentence must follow
+    ``batch``, not ``critique_batch``. Hybrid is the mode where those disagree,
+    and a naive implementation keyed on the wrong one is only visible here.
+    """
+    economy = _exhaustive_dialog(batch=True, critique_batch=True)
+    hybrid = _exhaustive_dialog(batch=False, critique_batch=True)
+    fast = _exhaustive_dialog(batch=False, critique_batch=False)
+
+    assert "ordinary batch input" in economy
+    for text in (hybrid, fast):
+        assert "usually cached" in text
+        assert "ordinary batch input" not in text
+    # Hybrid still describes its own critique transport correctly.
+    assert "Hybrid mode" in hybrid
+
+
+def test_no_dialog_claims_the_image_allowance_bounds_the_invoice():
+    """The image figure is a per-model worst case; the text riding with it isn't.
+
+    ``_ASSUMED_PROMPT_TOKENS_PER_SHEET`` is a flat 800/sheet, so a text-heavy
+    set is under-counted on the one axis the image worst case does not cover.
+    "Slightly-high estimate" read as a ceiling, which it never was.
+    """
+    for text in (_dialog(batch=True), _dialog(batch=False),
+                 _exhaustive_dialog(batch=True, critique_batch=True),
+                 _exhaustive_dialog(batch=False, critique_batch=False)):
+        assert "slightly-high" not in text
+        assert "not a cap" in text
+
+
+def test_dialogs_distinguish_a_local_cache_hit_from_a_provider_cache_read():
+    """"Cached sheets cost nothing" was two different caches in one sentence.
+
+    A local ``DigestCache`` hit skips that sheet's own model call. It does not
+    make the run free: on an exhaustive run, cross-QC, verification, citation
+    and the rest still bill in full.
+    """
+    for text in (_dialog(batch=True), _dialog(batch=False)):
+        assert "cost nothing" not in text
+        assert "local result cache" in text
+    exhaustive = _exhaustive_dialog(batch=False, critique_batch=False)
+    assert "cost nothing" not in exhaustive
+
+
+def test_no_dialog_claims_the_qc_stages_always_bill():
+    """A warm re-run is cheaper but rarely free — and never "every stage bills".
+
+    Every QC stage caches independently and returns without a provider call on a
+    hit: identity (``set_identity`` ~483), review plan (~459), cross-QC (~1505),
+    synthesis, focus, critique and per-finding verification. Saying they all
+    still bill overstates a warm re-run as badly as "cached sheets cost nothing"
+    understated it — the first version of this fix traded one false claim for
+    its mirror image.
+
+    What is actually true, and what a reviewer needs: the caches are per stage,
+    so a digest hit implies nothing about the rest; and the set-level stages key
+    on the WHOLE set, so the common case — one sheet added to a set reviewed
+    last week — hits the digest cache for every old sheet and still re-runs
+    identity, the review plan, synthesis and cross-sheet QC in full.
+    """
+    for text in (_dialog(batch=True), _dialog(batch=False),
+                 _exhaustive_dialog(batch=True, critique_batch=True),
+                 _exhaustive_dialog(batch=False, critique_batch=False)):
+        assert "still bills normally" not in text
+        assert "still run and still bill" not in text
+        assert "caches separately" in text
+        assert "whole set" in text
+
+
+def test_the_copy_fix_moved_no_price():
+    """§9.3 case 8, second half. Wording only — every total is unchanged.
+
+    Values captured from the estimator before the copy edit. If one of these
+    moves, someone "corrected" arithmetic the plan established is already
+    correct (§2.4), and the batch/real-time relationship below is the property
+    that would silently invert.
+    """
+    assert estimate_drawing_set_cost(
+        10, file_count=1, model=OPUS, batch=True, spec_chars=40_000
+    ).total_cost == pytest.approx(5.10, abs=0.005)
+    assert estimate_drawing_set_cost(
+        10, file_count=1, model=OPUS, batch=False, spec_chars=40_000
+    ).total_cost == pytest.approx(9.65, abs=0.005)
+
+    ex = estimate_exhaustive_run_cost(10, file_count=1, model=OPUS, batch=True,
+                                      critique_batch=True, spec_chars=40_000)
+    assert ex.low_cost == pytest.approx(14.88, abs=0.005)
+    assert ex.high_cost == pytest.approx(16.26, abs=0.005)
+
+
+def test_a_dialog_without_specifications_says_nothing_about_them():
+    """The transport branch must not leak into a run that uploaded no specs."""
+    for batch in (True, False):
+        text = _dialog(batch=batch, spec_chars=0)
+        assert "Project specifications" not in text
+        assert "ordinary batch input" not in text
+
+
+def test_the_confirmation_question_is_unchanged():
+    """§9.2: keep the existing pre-send confirmation behavior."""
+    assert _dialog(batch=True).rstrip().endswith("Proceed with the analysis?")
+    assert _exhaustive_dialog(batch=True, critique_batch=True).rstrip().endswith(
+        "Proceed with the exhaustive review?"
+    )
+    assert "Nothing is sent until you confirm." in _dialog(batch=False)

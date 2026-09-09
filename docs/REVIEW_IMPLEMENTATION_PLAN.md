@@ -340,12 +340,19 @@ regression.
   `REVIEW_MODEL_DEFAULT` at module scope, and the per-stage resolvers fall back
   to that binding — `critique.py` line 129 is
   `os.environ.get("DRAWING_ANALYZER_CRITIQUE_MODEL") or REVIEW_MODEL_DEFAULT`,
-  and cross-QC, synthesis and focus follow the same shape. Re-reading the
-  environment for the digest model alone yields a corrected digest estimate
-  beside four stale fallback-dependent stages, while the execution child resolves
-  all five correctly. That is a worse failure than the current one, because it
-  looks fixed. The estimate-only child process is retained for this reason.
-  `resolve_transport()` is already re-read per arm and is already correct.
+  and cross-QC, synthesis, focus **and the review planner**
+  (`review_planner.default_review_plan_model`) follow the same shape — **five**
+  fallback-dependent stages, not the four counted here originally; the planner
+  was missed. Re-reading the environment for the digest model alone yields a
+  corrected digest estimate beside five stale stages, while the execution child
+  resolves all six correctly. That is a worse failure than the current one,
+  because it looks fixed. The estimate-only child process is retained for this
+  reason. `resolve_transport()` is already re-read per arm and is already
+  correct.
+  **Measured before the fix (WP-04):** a 10-sheet exhaustive run priced with
+  `DRAWING_ANALYZER_MODEL=claude-sonnet-5` quoted **$28.59** — byte-identical to
+  the Opus baseline — against a true **$11.60**. The estimator was not imprecise
+  about the variant; it never priced the variant.
 - `os.environ.clear()` inside the live parent process (line 436) should be
   removed on its own merits regardless of which estimate design lands.
 - The same-configuration guard compares whole environment dictionaries
@@ -1174,10 +1181,21 @@ obtains a provider client.
 The in-process alternative — re-reading the environment for the model inside the
 arm loop — was evaluated during review and **rejected**: per-stage resolvers fall
 back to the import-bound `REVIEW_MODEL_DEFAULT` (`critique.py` line 129 and the
-same shape in cross-QC, synthesis and focus), so it corrects the digest estimate
-and silently leaves four fallback-dependent stages on the parent's model while
-execution resolves all of them correctly. Record this reasoning in the code
-comment so it is not "simplified" back later.
+same shape in cross-QC, synthesis, focus **and the review planner** — five
+stages, one more than first counted), so it corrects the digest estimate and
+silently leaves all five on the parent's model while execution resolves all six
+correctly. Record this reasoning in the code comment so it is not "simplified"
+back later.
+
+**A test of this cannot run in-process.** The failure mode *is* the import
+binding, so a test that never crosses a process boundary cannot tell a correct
+fix from the rejected one. Worse, it can pass the rejected design outright: if
+nothing in the pytest session has imported `api_config` yet, an in-process
+estimator that sets the environment before that first import binds the *variant*
+model correctly by accident. Running one test file in isolation is enough to hit
+that. Every such test must therefore force the parent's binding first and assert
+the precondition, so it measures the boundary rather than the order the suite
+happened to import things in.
 
 Reuse shared arm configuration resolution for estimation and execution. It should
 describe resolved stage models, digest/critique transports, grid, overlap, target
@@ -1219,7 +1237,16 @@ In `cost.format_drawing_cost_prompt()` and `format_exhaustive_cost_prompt()` —
   allowance.
 - Distinguish local result-cache hits from provider prompt-cache reads. A local
   cache hit avoids that model call; it does not guarantee every other stage is
-  free.
+  free. **Nor is the opposite true** — the first attempt at this fix replaced
+  "cached sheets cost nothing" with "every other stage still bills", which is
+  the same error mirrored: every QC stage caches independently and returns
+  without a provider call on a hit (identity, review plan, cross-QC, synthesis,
+  focus, critique, per-finding verification). The accurate statement has two
+  halves, and needs both: the caches are per stage, so a digest hit implies
+  nothing about the rest; and identity, the review plan, synthesis and cross-QC
+  key on the **whole set**, so the common case — one sheet added to a set
+  reviewed last week — hits the digest cache for every old sheet and still
+  re-runs those four in full.
 - Keep the existing pre-send confirmation behavior and actual transport selection
   unchanged.
 
@@ -1230,9 +1257,14 @@ Extend `tests/test_ab_sweep.py` and `tests/test_cost.py`:
 1. Baseline global model and variant global model resolve differently in estimate
    children, matching execution children.
 2. **A variant that sets only the global model resolves every fallback-dependent
-   stage — critique, cross-QC, synthesis, focus — to the variant model in both
-   the estimate child and the execution child.** This is the regression that an
-   in-process fix passes for the digest and fails for the rest.
+   stage — critique, cross-QC, synthesis, focus, review plan — to the variant
+   model in both the estimate child and the execution child.** This is the
+   regression that an in-process fix passes for the digest and fails for the
+   rest. Assert the negative half too: a stage with its own non-fallback default
+   (investigation) must *not* move, or the test would pass by resolving
+   everything to the variant model. Compare against a fresh process that
+   resolves the models independently, not against the script's own helper —
+   otherwise a bug in the helper makes both sides agree.
 3. Sonnet digest plus explicit Opus critique and cross-QC overrides shows those
    exact stage models in both modes.
 4. Batch/real-time environment changes match actual arm transport.
@@ -1247,7 +1279,19 @@ Extend `tests/test_ab_sweep.py` and `tests/test_cost.py`:
 9. Paths containing spaces work on Windows; no test depends on a particular user
    directory.
 10. Output never exposes an environment secret; use obvious fake sentinel strings
-    in tests.
+    in tests. Redact by variable **name**, not by value shape: a credential that
+    does not look like one must still be covered, and the sentinel in the test
+    must not itself be credential-shaped or it fails the repo's secret scan.
+11. Estimation and execution describe the arm through **one** resolver. Assert it
+    structurally (both children call it), not by comparing two hand-maintained
+    field lists — two copies agreeing today is exactly the state that drifts.
+12. A tile target outside the clamp range reports both the typed value and the
+    effective one. An arm priced at a silently clamped target, while the operator
+    believes the typed one, is a comparison of something other than what they
+    asked for.
+13. A child that exits 0 with unparseable output is an error, not a free arm.
+    Exit-code checking alone leaves a `$0.00` path open, and `$0.00` is an
+    invitation to spend — the one thing this mode exists to prevent.
 
 Do not use live calls to validate process/model resolution. A child can report
 its resolved configuration and estimate as JSON without running the pipeline.
