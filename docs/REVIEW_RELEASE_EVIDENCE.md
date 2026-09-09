@@ -5,6 +5,12 @@ which are complete and merged. It records what
 changed, what was measured, what was verified, and — at least as importantly —
 what was **not**, so nobody has to infer a claim from an absence.
 
+The plan these packages came from has been retired now that they are complete;
+it remains in git history at `168f4ec`, and the work that had *not* been done —
+the measurement packages and the standing prohibitions — moved to
+`docs/MEASUREMENT_PACKAGES.md`. Section numbers below refer to **this**
+document.
+
 Two rules govern every number below. Nothing measured with a hermetic fake
 client is presented as a cost or quality improvement; those fakes answer by
 system-prompt identity and never read the model id, so a model swap changes
@@ -41,12 +47,12 @@ than partial.
 
 ## 2. Test evidence
 
-### 2.1 Focused groups (§13.1)
+### 2.1 Focused groups
 
-Run on the WP-08 base. The plan's PowerShell examples are given for a Windows
-venv; the Linux equivalents were run here and the `test_ab_findings_diff.py`,
+Run on the WP-08 base. The groups were specified as PowerShell commands for a
+Windows venv; the Linux equivalents were run here and the `test_ab_findings_diff.py`,
 `test_cost_geometry.py` and `test_cost_confirmation_scan.py` suites were added to
-the groups they belong to, since they postdate the plan's lists.
+the groups they belong to, since they postdate the original lists.
 
 | group | suites | result |
 |---|---|---|
@@ -181,12 +187,12 @@ budget degradation and cache ineligibility.
 
 | measurement | result | where |
 |---|---|---|
-| Confirmation-time cost scan vs. reuse | fresh scan of 120 dense sheets **6,896 ms**, up to **22,457 ms** waiting behind the preflight lock, vs **0.4 ms** deriving from geometry the preflight already built | WP-05 §10.3 — this overturned the plan's own default design |
+| Confirmation-time cost scan vs. reuse | fresh scan of 120 dense sheets **6,896 ms**, up to **22,457 ms** waiting behind the preflight lock, vs **0.4 ms** deriving from geometry the preflight already built | WP-05 — the measurement overturned the design that had been specified for it |
 | Scan cost driver | tracks **word count** (~15 ms / 1k words), not sheet count | same |
 | Image tokens vs render target (>20-image regime) | quadratic: 1400 px = 0.806×, 1240 px = 0.632×, 1100 px = 0.498× of the 1560 px default, on an E-size vector sheet at 6×6 | WP-07, re-measured after review |
 | Image tokens vs physical page size | invariant: 48×36 in, 24×18 in and 12×9 in all cost 90,276 tokens | same |
 | Conservative allowance vs measured geometry | ~1.9× overstatement on a vector E-size sheet | WP-05 |
-| Estimator vs renderer pixel sizing | pixel-exact on 18/20 shape/grid combinations; the plan's rounding rule differed by +0.15% | WP-05a |
+| Estimator vs renderer pixel sizing | pixel-exact on 18/20 shape/grid combinations; the whole-pixel rounding rule that had been specified differed by +0.15% | WP-05a |
 | Attached spec block, real-time vs batch | ~11 copies vs ~50 across 100 sheets (1.25× write + 0.1× per sheet, vs 0.5× per sheet) | WP-07, re-measured after review |
 
 ---
@@ -197,19 +203,19 @@ Recorded as open, not as passed.
 
 | item | status | what it needs |
 |---|---|---|
-| §7.2 grounding **discard rate** | **not measured** | One instrumented run over a set with >40 readable sheets including scanned/vendor as-built pages. Requires a named dataset and an approved budget; nothing has billed. The zero-call §7.1 coverage scan is not a substitute and is not reported as one. |
+| Grounding **discard rate** (instrumented run) | **not measured** | One instrumented run over a set with >40 readable sheets including scanned/vendor as-built pages. Requires a named dataset and an approved budget; nothing has billed. The zero-call coverage scan (`scripts/measure_evidence_coverage.py`) is not a substitute and is not reported as one. |
 | Dense-fixture memory / scaling | **not measured** | The 8-sheet benchmark checks mechanical regressions only. WP-03's dense-text measurement needs its own fixture, page count, repeated timings and peak retained memory recorded separately. |
 | Windows manual GUI acceptance | **not run** | `docs/WINDOWS_ACCEPTANCE.md` / `docs/WINDOWS_MANUAL_ACCEPTANCE.md`, on real Windows. This session is Linux. |
 | Live API canary | **not run** | Billable, opt-in, deliberately excluded from the gates. |
 | `scripts/measure_scan_time.py` on real sets | **not run** | Zero cost, but wants real hyperscale sets rather than synthetic pages. |
-| R-01 … R-06 measurement packages | **not started** | Subsequent research decisions, not release blockers (§14). |
+| R-01 … R-06 measurement packages | **not started** | Subsequent research decisions, not release blockers — see `docs/MEASUREMENT_PACKAGES.md`. |
 
 `PRICING_EFFECTIVE_DATE` is unchanged. It moves only after the rate table is
 verified against official pricing — not because documentation is newer.
 
 ---
 
-## 7. Independent review checklist (§13.2)
+## 7. Independent review checklist
 
 Worked item by item. "Verified" means a named test or a reading of the current
 code, not an inference from the plan.
@@ -217,7 +223,7 @@ code, not an inference from the plan.
 | # | item | status |
 |---|---|---|
 | 1 | Acceptance runner cannot reach the network with a real key present, and a regression guards it | **Verified** — `run_acceptance.py` routes every gate through `_pytest_cmd()`, which ANDs `not network`; `tests/test_run_acceptance.py` fails if a bare `"pytest"` argv literal reappears |
-| 2 | Coverage/truncation/locatability measured before the fix, each number labelled by tier; a surviving-finding distribution is not reported as a discard rate | **Partial** — the zero-call §7.1 tier is implemented and labelled (`scripts/measure_evidence_coverage.py`, which states in its own output what it cannot see). The §7.2 instrumented tier is **not measured** (§6) |
+| 2 | Coverage/truncation/locatability measured before the fix, each number labelled by tier; a surviving-finding distribution is not reported as a discard rate | **Partial** — the zero-call tier is implemented and labelled (`scripts/measure_evidence_coverage.py`, which states in its own output what it cannot see). The instrumented discard-rate tier is **not measured** (§6) |
 | 3 | The original tail-evidence failure was demonstrated before the fix | **Verified** — `tests/test_evidence_tail.py` |
 | 4 | Textless, hybrid and missing-quote failures demonstrated; the hybrid case does not pass merely because `is_raster` is true | **Verified** — `tests/test_evidence_visual.py`; the hybrid case is asked of the reported **tile** (`_tile_has_words`), and a sheet-level answer is explicitly insufficient |
 | 5 | Real evidence survives; fabricated or wrong-sheet evidence still fails grounding | **Verified** — `NOT_MATCHED_IN_TEXT` remains a discard |
@@ -234,7 +240,7 @@ code, not an inference from the plan.
 | 16 | Estimates and execution resolve identical stage models — including fallback-dependent stages under a global-model variant — transport and geometry | **Verified** — both children cross the same process boundary through `resolve_arm_configuration`; `tests/test_ab_sweep.py` pins it |
 | 17 | Image counts are model-tier aware; pricing distinguishes input, output, cache and batch | **Verified** — per-model caps; `usage_axes` separates transport, cache read/write and outcome |
 | 18 | Estimates never present partial known prices as a complete total, or a planning bound as a guarantee | **Verified** — `RunUsage.is_billable_but_unpriced` counts cache tokens (the defect that let a $5.00 total hide 180k cache tokens); `_BASIS_MEASURED` / `_BASIS_CONSERVATIVE` label the basis and neither claims a maximum |
-| 19 | The confirmation-time scan's duration and lock-wait were measured, and any escalation to a background worker is justified by that measurement | **Verified** — §5; the measurement overturned the plan's own design, and no background worker was built |
+| 19 | The confirmation-time scan's duration and lock-wait were measured, and any escalation to a background worker is justified by that measurement | **Verified** — §5; the measurement overturned the design that had been specified, and no background worker was built |
 | 20 | GUI preview scanning cannot freeze interaction or race analysis PDF access, and coordinates with the profile preflight | **Verified by construction, not on Windows** — one preflight walk, generation guard, `sources_fingerprint` re-checked at consumption. `gui.py` cannot be imported here or in CI (no tkinter), so this is code reading plus the non-GUI units; the Windows manual record remains open (§6) |
 | 21 | A/B records expose unmatched/ambiguous findings, incomplete arms, and evidence-trust composition | **Verified** — WP-06b: three matching tiers, `comparison_status`, `comparison_validity`, `evidence_trust` |
 | 22 | Finding counts and agreement rates are not asserted to prove recall | **Verified** — a count drop is a review requirement; `screen_result` has no value meaning approved |

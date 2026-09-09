@@ -27,8 +27,8 @@ The immediate corrective release can complete without a paid experiment. The
 packages below are subsequent research decisions, not hidden release blockers.
 Reuse the improved A/B harness and existing benchmark/release record process.
 
-**Order changed in revision 2:** R-04's zero-call half is now WP-02 §7.1 and runs
-first; its measured half precedes R-01 and R-02, because it bounds review quality
+**Ordering:** R-04's zero-call half is `scripts/measure_evidence_coverage.py`,
+which is implemented and runs first; its measured half precedes R-01 and R-02, because it bounds review quality
 rather than cost.
 
 ### 1.1 Common experiment protocol
@@ -73,9 +73,11 @@ optimization study look successful.
 
 ### 1.2 R-04: text budget and evidence coverage (**now first**)
 
-WP-02 §7.1 supplies the zero-call half: how often truncation occurs, by sheet
-type, plus the textless/hybrid population and the surviving-finding anchor-tier
-distribution. WP-02 §7.2 adds the discard rate from one instrumented run. The
+`scripts/measure_evidence_coverage.py` supplies the zero-call half — how often
+truncation occurs, by sheet type, plus the textless/hybrid population and the
+surviving-finding anchor-tier distribution — and states in its own output what
+it cannot see. The **discard rate** needs one instrumented run and is the only
+item here that bills; it has never been run. The
 remaining paid work inspects what was actually lost and whether a larger model
 text budget recovers it.
 
@@ -88,7 +90,8 @@ semantics; do not infer adoption from every code citation in a newly exposed
 tail.
 
 Remember that cross-QC's input is the digest prose **plus** the budgeted text
-layer (§2.1). The 4,000-character budget bounds direct source-text evidence, not
+layer (README, "Host evidence vs. prompt text"). The 4,000-character budget
+bounds direct source-text evidence, not
 the stage's whole information input; frame the experiment accordingly.
 
 Do not infer "25× cheaper per unit of information" from a text-vs-image token
@@ -104,8 +107,12 @@ Use existing routing. In the environment-based harness, set the global digest
 default to Sonnet and explicitly keep critique and cross-QC on Opus before the
 child imports application modules. Resolve and compare every other stage too; if
 another stage inherits the global default, pin it so the experiment remains
-digest-only (this is exactly the fallback chain of §2.4 — WP-04's regression 2
-proves the harness reports it honestly). The public `model=` parameter is another
+digest-only. This is the `REVIEW_MODEL_DEFAULT` fallback chain: five stage
+resolvers read `os.environ.get(<their own var>) or REVIEW_MODEL_DEFAULT`, which
+binds at *import*, so setting `DRAWING_ANALYZER_MODEL` in the parent moves none
+of them (docs/PERFORMANCE_AND_COST_VALIDATION.md, on why `--estimate` crosses a
+process boundary). `tests/test_ab_sweep.py` pins that the harness reports it
+honestly. The public `model=` parameter is another
 valid entry point.
 
 Measure digest transcription, digest-origin findings, downstream cross-QC
@@ -134,8 +141,9 @@ Priority: after R-04/R-01/R-02 measurements; requires its own design review.
 
 Do not call this low risk merely because page rectangles remain covered. A
 letter-size PDF may be a reduced large-format drawing; physical DPI alone is
-insufficient evidence of legibility — and per §2.6 physical size does not enter
-the token estimate at all, so a cost model cannot be used as a legibility proxy.
+insufficient evidence of legibility — and physical page size does not enter the
+token estimate at all (docs/PERFORMANCE_AND_COST_VALIDATION.md, "Two
+image-token regimes": same aspect ratio, same tokens at any physical size), so a cost model cannot be used as a legibility proxy.
 
 Both target regimes must be modeled. In the >20-image regime cost scales with
 aspect ratio and target; in the ≤20-image regime most images clamp to the model
@@ -152,7 +160,9 @@ already carry per-sheet rows/cols/overlap; preserve those contracts rather than
 rebuilding them. Define changed-sheet cache invalidation and prove unchanged
 E-size sheets retain compatible keys if their requests are identical.
 
-Use the corrected mixed-set arithmetic in §2.5 as a hypothesis. Actual savings
+As a hypothesis, use the real-time exhaustive image arithmetic: one digest read
+at full price, plus a critique cache write at 1.25x and a critique cache read at
+0.1x, is **2.35 full-price reads** per sheet, not three. Actual savings
 require the real sheet mix, suppression, and usage. No adaptive default is
 included in the immediate work.
 
@@ -199,7 +209,9 @@ restructure the pipeline around the original brief's 27% claim.
 - Do not add a capped-text grounding check to the ≤40-entry whole-set path; that
   imports the truncation defect into the common case.
 - Do not bump a cache contract counter and add a new hashed key field for the
-  same change — either alone invalidates everything (§2.3).
+  same change — either alone invalidates everything (REVIEW_RELEASE_EVIDENCE.md
+  §4 records which mechanism each evidence change actually used, and why the
+  contract counter is not the record of either).
 - Do not change two identical critique reads into digest-plus-critique while
   retaining the same confidence label semantics.
 - Do not replace all `except Exception` guards with `except BaseException`, or
@@ -215,7 +227,7 @@ restructure the pipeline around the original brief's 27% claim.
   dimensional. Compression can affect transport or quality, which are different
   questions.
 - Do not treat a physical page size as a legibility or cost signal on its own
-  (§2.6).
+  (docs/PERFORMANCE_AND_COST_VALIDATION.md, "Two image-token regimes").
 - Do not shrink the overview or lower output caps as an unmeasured cost fix.
 - Do not broadly rename defaults, remove unused compatibility APIs, split the
   GUI/report generators, or add a build system as incidental cleanup.
