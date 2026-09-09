@@ -72,6 +72,11 @@ _SCHEMA_VERSION = 8
 _DB_FORMAT_VERSION = 1
 _SQLITE_HEADER = b"SQLite format 3\x00"
 _BUSY_TIMEOUT_SECONDS = 30.0
+#: Backoffs for re-opening a database whose first open lost the schema-lock
+#: race (see :meth:`DigestCache._load`). Short and bounded on purpose: the
+#: alternative to a successful retry is re-billing every sheet, but a genuinely
+#: broken database must not stall a run either — worst case here is ~0.6 s.
+_OPEN_RETRY_DELAYS = (0.05, 0.15, 0.4)
 _INIT_LOCK_TIMEOUT_SECONDS = 30.0
 _STALE_INIT_LOCK_SECONDS = 10 * 60.0
 
@@ -887,15 +892,55 @@ class DigestCache:
     # -- persistence -------------------------------------------------------
 
     def _load(self) -> None:
+        """Open the persistent store, degrading rather than aborting (I-3).
+
+        The two failures below look alike and are not, and collapsing them
+        silently emptied caches that were intact on disk:
+
+        * **Migration did not happen.** The artifact is still legacy JSON, so
+          reading it is exactly right — that is what the fallback is for.
+        * **Migration happened and the open lost a race.** The artifact is now
+          a SQLite database. Handing it to :func:`_read_legacy_json` parses
+          database bytes as JSON, which returns ``{}`` by design, and the
+          instance then serves an EMPTY cache for the rest of the run — every
+          sheet re-digested at full vision price against a cache sitting right
+          there. That is what the single ``except`` used to do.
+
+        The second case is *transient*: :func:`_open_database` finishes in
+        :func:`_ensure_database_schema`, which takes ``BEGIN IMMEDIATE``, so
+        with several instances opening at once somebody loses that write lock.
+        POSIX advisory locking usually absorbs it inside ``busy_timeout``;
+        Windows share-mode locking does not, which is why this surfaced there
+        first. It is worth a short retry rather than a degrade, because the
+        thing being given up on is the whole cache.
+
+        A database that genuinely will not open still degrades to in-memory —
+        bounded by :data:`_OPEN_RETRY_DELAYS`, never blocking a run — but it is
+        never reported as a *successful* load of an empty legacy file.
+        """
         assert self._path is not None
         try:
             _prepare_database_path(self._path)
             self._connection = _open_database(self._path)
+            return
         except Exception:
-            # Missing permissions, a failed atomic migration, or a malformed
-            # database must not abort analysis.  If the original artifact is a
-            # valid legacy JSON cache, continue serving it in memory this run.
-            self._entries = _read_legacy_json(self._path)
+            pass
+
+        if _is_sqlite_database(self._path):
+            for delay in _OPEN_RETRY_DELAYS:
+                time.sleep(delay)
+                try:
+                    self._connection = _open_database(self._path)
+                    return
+                except Exception:
+                    continue
+            # Out of retries: in-memory for this run. Deliberately NOT
+            # ``_read_legacy_json`` — the artifact is a database, and reading it
+            # as JSON would dress an empty dict up as a successful load.
+            return
+
+        # Still legacy JSON, so the migration is what failed. Serve it.
+        self._entries = _read_legacy_json(self._path)
 
 
 _default_cache: DigestCache | None = None

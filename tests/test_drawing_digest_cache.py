@@ -525,3 +525,121 @@ def test_digest_sheet_no_cache_when_none():
     sd = digest_sheet(_sheet(), client=client, model=OPUS)  # cache=None
     assert sd.ok and sd.cached is False
     assert client.calls == 1
+
+
+def test_a_lost_open_race_after_migration_does_not_empty_the_cache(tmp_path, monkeypatch):
+    """The defect the Windows concurrency test keeps catching, made deterministic.
+
+    ``_load`` wraps two very different failures in one ``except``: migration
+    failing, and the *open* failing once migration has already succeeded. In the
+    second case the artifact is no longer JSON — it is a SQLite database — so
+    ``_read_legacy_json`` parses database bytes, returns ``{}`` by design, and
+    the instance serves an EMPTY cache for the whole run. Every sheet is then
+    re-digested at full vision price against a cache that is sitting right
+    there, intact, on disk.
+
+    ``_open_database`` ends in ``_ensure_database_schema``, which takes
+    ``BEGIN IMMEDIATE``. With several instances opening at once somebody loses
+    that write lock. POSIX advisory locking usually absorbs it inside
+    ``busy_timeout``; Windows share-mode locking does not, which is why
+    ``test_concurrent_instances_migrate_once_and_do_not_lose_writes`` fails
+    there and passes here. That makes it a poor regression guard: it goes green
+    on Linux whether the bug is present or not.
+
+    So this forces the exact sequence instead of racing for it — migrate, then
+    fail the next open once — and asserts the seeded entry survives. It fails on
+    any platform when the fallback is wrong, and needs no threads.
+    """
+    path = tmp_path / "shared-cache.json"
+    path.write_text(
+        json.dumps(
+            {"_schema_version": _SCHEMA_VERSION, "entries": {"legacy": {"text": "seed"}}}
+        ),
+        encoding="utf-8",
+    )
+
+    # Migrate for real, so the artifact on disk is a database from here on.
+    warm = DigestCache(path, persist=True)
+    try:
+        assert warm.get("legacy") == {"text": "seed"}
+    finally:
+        warm.close()
+    assert digest_cache_module._is_sqlite_database(path), "migration did not happen"
+
+    real_open = digest_cache_module._open_database
+    failures = {"left": 1}
+
+    def _flaky_open(target):
+        if failures["left"]:
+            failures["left"] -= 1
+            # What a lost BEGIN IMMEDIATE actually raises.
+            raise sqlite3.OperationalError("database is locked")
+        return real_open(target)
+
+    monkeypatch.setattr(digest_cache_module, "_open_database", _flaky_open)
+
+    cache = DigestCache(path, persist=True)
+    try:
+        assert cache.get("legacy") == {"text": "seed"}, (
+            "a transient open failure emptied a cache that is intact on disk"
+        )
+    finally:
+        cache.close()
+
+
+def test_a_genuinely_unreadable_database_still_degrades_quietly(tmp_path, monkeypatch):
+    """The other half: never turn a retry into a hang or a crash.
+
+    When the database really cannot be opened, the run must still ship — I-3 —
+    with an in-memory cache rather than an exception. What it must NOT do is
+    report the legacy JSON reading of a SQLite file, which is ``{}`` dressed up
+    as a successful load.
+    """
+    path = tmp_path / "shared-cache.json"
+    path.write_text(
+        json.dumps(
+            {"_schema_version": _SCHEMA_VERSION, "entries": {"legacy": {"text": "seed"}}}
+        ),
+        encoding="utf-8",
+    )
+    warm = DigestCache(path, persist=True)
+    warm.close()
+
+    def _always_fails(_target):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(digest_cache_module, "_open_database", _always_fails)
+
+    cache = DigestCache(path, persist=True)
+    try:
+        assert cache.get("legacy") is None          # nothing served, nothing invented
+        cache.put("fresh", {"text": "x"})           # and the run still works
+        assert cache.get("fresh") == {"text": "x"}
+    finally:
+        cache.close()
+
+
+def test_a_failed_migration_still_serves_the_legacy_json(tmp_path, monkeypatch):
+    """The case the fallback was written for, which must keep working.
+
+    If migration itself fails the artifact is still legacy JSON, and reading it
+    is exactly right. A fix for the post-migration case must not cost us this.
+    """
+    path = tmp_path / "shared-cache.json"
+    path.write_text(
+        json.dumps(
+            {"_schema_version": _SCHEMA_VERSION, "entries": {"legacy": {"text": "seed"}}}
+        ),
+        encoding="utf-8",
+    )
+
+    def _no_migration(_target):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(digest_cache_module, "_prepare_database_path", _no_migration)
+
+    cache = DigestCache(path, persist=True)
+    try:
+        assert cache.get("legacy") == {"text": "seed"}
+    finally:
+        cache.close()

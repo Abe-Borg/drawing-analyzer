@@ -8,6 +8,44 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A lost open race could silently empty an intact digest cache.**
+  `DigestCache._load` wrapped two different failures in one `except`:
+
+  ```python
+  try:
+      _prepare_database_path(self._path)      # migrate legacy JSON -> SQLite
+      self._connection = _open_database(self._path)
+  except Exception:
+      self._entries = _read_legacy_json(self._path)
+  ```
+
+  When migration **succeeded** and the open then failed, the artifact was no
+  longer JSON — it was a database. `_read_legacy_json` parsed database bytes,
+  returned `{}` by design, and the instance served an **empty cache** for the
+  rest of the run: every sheet re-digested at full vision price against a cache
+  sitting intact on disk.
+
+  The failure is transient. `_open_database` finishes in
+  `_ensure_database_schema`, which takes `BEGIN IMMEDIATE`, so with several
+  instances opening at once somebody loses that write lock. POSIX advisory
+  locking usually absorbs it inside `busy_timeout`; Windows share-mode locking
+  does not, which is why `test_concurrent_instances_migrate_once_and_do_not_lose_writes`
+  failed intermittently on the Windows CI job and never on Linux.
+
+  `_load` now separates the cases: still-JSON means migration failed and the
+  legacy read is right; already-a-database means the open lost a race, so it
+  retries briefly (`_OPEN_RETRY_DELAYS`, ~0.6 s worst case) and, if the database
+  truly will not open, degrades to in-memory for that run — never reporting the
+  legacy reading of a SQLite file as a successful load.
+
+  Three deterministic tests replace the coin flip. The concurrency test was a
+  poor guard precisely because it passes on Linux whether or not the bug is
+  present; the new ones force the sequence (migrate, then fail one open) and
+  fail on any platform. They cover the lost race, a genuinely unopenable
+  database, and the failed-migration case the fallback was written for.
+
+### Fixed
+
 - **The release benchmark was measuring nothing, and its failures read like app
   regressions (WP-08).** `scripts/benchmark_drawing_analyzer.py --check` asserts
   that a warm run makes zero digest calls and rasterizes nothing, and that
