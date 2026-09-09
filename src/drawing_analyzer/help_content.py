@@ -1054,6 +1054,18 @@ RUNTIME_TRANSPARENCY = HelpDocument(
                 "material. They are treated as ground truth to check the drawings against; "
                 "the app does not modify them and does not produce a separate spec report."
             ),
+            _para(
+                "Attaching specs costs money per sheet, and how much depends on the "
+                "processing mode. Real-time modes put the spec text behind a prompt-cache "
+                "breakpoint, so the first sheet or two pay a write premium and every sheet "
+                "after that reads it back at about a tenth of the rate. Economy (batch) "
+                "mode sets no breakpoint - sheets are submitted in parallel, so a "
+                "breakpoint would buy the write premium with nothing yet written to read - "
+                "so every sheet bills the whole spec block as ordinary input, at the "
+                "batch discount. On a large set that is the difference between paying for "
+                "the specs roughly once and paying for them once per sheet, so the cost "
+                "preview prices the two paths differently and says which one it used."
+            ),
         ),
         _section(
             "Processing mode — the same review, sent differently",

@@ -388,11 +388,13 @@ PDFs → list sheets → render (overview + 6×6 tiles) + extract vector text la
 - **Fast mode** (`use_batch=False`, `critique_use_batch=False`) digests sheets concurrently on a bounded
   thread pool while rendering stays sequential (PyMuPDF is not thread-safe).
   Running the **exhaustive** stack real-time is the most expensive configuration
-  (three full Opus reads per sheet), so the run logs a one-time nudge toward
-  batch. When you do stay real-time, the two self-consistency **critique** reads
-  cache their shared image prefix so the second read bills those ~90k image tokens
-  at ~0.1× — identical tokens in, so findings are unchanged (see the cost note
-  below).
+  (three vision reads per sheet), so the run logs a one-time nudge toward batch.
+  Three vision reads is **not** three full-price image reads: the two
+  self-consistency **critique** reads are byte-identical in their image prefix,
+  so the second bills those ~90k image tokens at the cache-read multiplier
+  (~0.1×) — identical tokens in, so findings are unchanged (see the cost note
+  below). What a run cost is what its usage records say it cost; multiplying one
+  read's price by three quotes a configuration nobody ran.
 - **Caching** is content-keyed per sheet, so re-running a set after editing one
   sheet only re-pays vision for the changed sheet. It is now **two-level** — a
   cheap *pre-render* key recognizes an unchanged sheet before rasterizing, so a
@@ -1492,6 +1494,42 @@ when the recorded acceptance evidence says so (Phase 27, §19.9). The pieces:
   no searchable text, `[NO QUOTE TO CHECK]` where the AI named no quote to look
   for. A quote that fails to match text the sheet's own region *does* have is
   unchanged: that stays the hallucination signal.
+
+  Grounding therefore has **three** outcomes, not two, and the third is the one
+  a boolean used to swallow:
+
+  | outcome | meaning | what happens |
+  |---|---|---|
+  | `TEXT_GROUNDED` | re-found in the sheet's source text | full trust |
+  | `NOT_MATCHED_IN_TEXT` | should have been findable, was not | dropped — the hallucination signal |
+  | `TEXT_EVIDENCE_UNAVAILABLE` | no text existed to check, or no quote was given | admitted at reduced trust, labelled, still verified |
+
+  Collapsing the last two into "not grounded" is what made a scanned sheet — and
+  the pasted raster region of a *hybrid* sheet, which has words and so cannot be
+  identified by `is_raster` — look like a sheet full of invented quotes. The
+  question is asked of the **reported tile**, not the whole sheet: one selectable
+  title block would otherwise answer "yes, there was text" for a detail pasted in
+  as pixels, and the recovery would never fire on a real page.
+- **Recovered evidence costs more downstream, by design.** Findings that used to
+  be dropped now survive into the later stages, and those stages bill. A
+  reduced-trust finding is anchored to its reported tile precisely so the crop
+  re-check and the investigation loop can still look at it — so a set with
+  scanned or hybrid sheets can show more verification calls, more investigation
+  rounds, and a higher total than the same set produced before, with nothing
+  having gone wrong. That is the trade: the alternative was dropping real
+  findings silently.
+- **What each evidence change did to the cross-QC cache, and why they differ.**
+  Recovering quotes past the prompt cap added the uncapped text's digest to the
+  cache key **only for a sheet that is actually truncated** — for every other
+  sheet the evidence equals the text already in the key, so those keys stayed
+  byte-identical and no stored result was thrown away. Admitting visual evidence
+  changed what a cached entry *means*, so every entry had to go; that
+  invalidation comes from the edited map prompt, which rides every cross-QC key,
+  rather than from a second mechanism bolted on beside it. Note that
+  `_CROSS_QC_CACHE_CONTRACT` sits at 2 for an unrelated reason — entries written
+  before the findings cap became loss-aware were stored as `complete` after a
+  silent truncation — so that number is not the record of either evidence
+  change.
 - **Evidence coverage (zero API calls):**
   `python scripts/measure_evidence_coverage.py --pdf SET.pdf [--export-dir DIR]`
   scans a set without rendering or calling the API and reports how much evidence

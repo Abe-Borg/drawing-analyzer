@@ -53,10 +53,23 @@ MODEL_OPUS_48 = "claude-opus-4-8"
 MODEL_SONNET_46 = "claude-sonnet-4-6"
 MODEL_HAIKU_45 = "claude-haiku-4-5"
 
-# Review runs on the current Opus flagship; verification routes through
-# Sonnet first and reserves Opus for escalation on CRITICAL/HIGH UNVERIFIED
-# findings. Defaults track the newest generation (Opus 5 / Sonnet 5). Override
-# any of these via the matching ``DRAWING_ANALYZER_*_MODEL`` env var.
+# Review runs on the current Opus flagship; verification runs on Sonnet for
+# every finding it checks. Defaults track the newest generation (Opus 5 /
+# Sonnet 5). Override any of these via the matching ``DRAWING_ANALYZER_*_MODEL``
+# env var.
+#
+# WP-07 §12.13: this comment used to say verification "reserves Opus for
+# escalation on CRITICAL/HIGH UNVERIFIED findings". Three things were wrong
+# with that, and together they described a stage that does not exist.
+# ``verify.py`` resolves one model — ``default_verify_model()`` →
+# ``VERIFICATION_MODEL_DEFAULT`` — and never escalates; the escalation tier
+# below is consumed by ``investigate.py`` (and priced by ``cost.py``), not by
+# verification. Investigation's trigger is an **anchored UNCERTAIN** verdict at
+# any severity, ordered severity-first inside a per-run budget, not a severity
+# threshold. And ``UNVERIFIED`` is not one of :data:`VERIFICATION_STATUSES` at
+# all — the statuses are VERIFIED / REJECTED / UNCERTAIN / DETERMINISTIC /
+# SKIPPED. A reader tuning cost from this comment would have looked for a
+# severity gate that was never there.
 REVIEW_MODEL_DEFAULT = os.environ.get("DRAWING_ANALYZER_MODEL", MODEL_OPUS_5)
 CROSS_CHECK_MODEL_DEFAULT = MODEL_SONNET_5
 VERIFICATION_MODEL_DEFAULT = os.environ.get(

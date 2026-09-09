@@ -135,7 +135,15 @@ of every artifact), written **last** in the §18.4 non-circular order (artifacts
 `digest.py` (prompt + tolerant findings-block parser), or `batch_digest.py`
 (Message Batches + Files APIs, ~50% cheaper) → `digest_cache.py` (two-level
 content-keyed cache — a hit skips rendering entirely and restores parsed
-findings for free). Batch recovery of a stuck/backend-sick batch stays on the
+findings for free). The critique does **not** re-rasterize what the digest
+already rendered: `render_spool.py` spools the digest's already-compressed PNG
+bytes to a private temp dir and rebuilds the same `RenderedSheet` byte-for-byte
+(nothing resized, recompressed or filtered), and the batch path adopts the
+digest's terminal uploads instead. A second render is the per-page **fallback**
+— an unspooled page (a digest cache hit rendered nothing), a grid mismatch, an
+unavailable manifest, a failed spool read/write — and `_one_page_fallback`
+re-renders exactly the page that failed without misassigning another. Run-local
+and advisory: a failed spool write just leaves the key absent (I-3). Batch recovery of a stuck/backend-sick batch stays on the
 batch transport for the pipeline (`recovery_transport=RECOVERY_BATCH`): a
 stalled batch is canceled and its unresolved sheets resubmitted as fresh
 batches (bounded rounds + collection budget, `_recover_via_batch_resubmit`), so
@@ -433,8 +441,13 @@ example is parked at `docs/examples/fire_protection.md`.
   (`stop_reason="refusal"`, HTTP 200); `core.api_config.call_with_refusal_fallback`
   attaches `fallbacks: "default"` (beta `server-side-fallback-2026-07-01`) for
   every Opus-5-routed real-time call — `digest.stream_message` (digest, critique,
-  the batch direct-call rescue), `verify.py`'s escalation calls, and the
-  investigation loop — and re-routes through `client.beta.messages`. The
+  the batch direct-call rescue), `verify.py`'s crop re-check calls, and the
+  investigation loop — and re-routes through `client.beta.messages`. (These are
+  not "escalation" calls: `verify.py` resolves one model,
+  `VERIFICATION_MODEL_DEFAULT`, and never escalates. The wrapper is applied
+  because a verification call *can* be Opus-routed via
+  `DRAWING_ANALYZER_VERIFICATION_MODEL`, not because a second tier exists.
+  `VERIFICATION_ESCALATION_MODEL` belongs to `investigate.py`, WP-07 §12.13.) The
   parameter is rejected on the Batches API, so this never touches the bulk
   batch-submitted review traffic. Opus 4.8, the documented cyber-refusal
   fallback target, is registered in `_MODEL_CAPABILITIES` with identical

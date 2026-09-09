@@ -73,8 +73,20 @@ def _specs_cost_contribution(
       the first response lands and the cache becomes readable, so more than
       one sheet may pay the write price) — that multi-writer case makes the
       real number *more* expensive than this single-write estimate, not
-      less, so it's a genuine (if usually small) understatement rather than
-      the "slightly high" bias the rest of this module aims for.
+      less, so it is a genuine (if usually small) understatement.
+
+    WP-07 §12.6: the last clause used to appeal to "the 'slightly high' bias
+    the rest of this module aims for". There is no such module-wide bias to
+    appeal to, and describing one invited the reader to treat every figure here
+    as a ceiling. What this module has is two explicitly-labelled bases, and
+    which one produced a number is stated in the output
+    (:data:`_BASIS_MEASURED` / :data:`_BASIS_CONSERVATIVE`): the conservative
+    allowance IS deliberately high — every image a square at the raster target,
+    at the model cap — while the shape-aware path prices each page from its
+    measured geometry and aims at the real figure, not above it. Neither is a
+    guaranteed maximum. Assumed-token constants, retries, how many findings a
+    set turns out to have, and this function's own single-write assumption all
+    move the invoice in both directions.
     """
     if spec_chars <= 0 or sheet_count <= 0:
         return 0, 0.0

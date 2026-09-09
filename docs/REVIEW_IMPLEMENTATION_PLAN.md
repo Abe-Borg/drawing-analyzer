@@ -1819,6 +1819,43 @@ examples separately from observed runs. Do not update `PRICING_EFFECTIVE_DATE`
 just because this document is newer; change it only after verifying the actual
 rate table against official pricing.
 
+### 12.1 Implementation notes (WP-07, recorded after the documentation pass)
+
+Every item was checked against the current code before being written up. Two of
+this section's own statements did not survive that check, and one class of item
+turned out to be already satisfied.
+
+**Item 13 was understated.** The stale comment did not merely misdescribe the
+escalation trigger; it named a stage that does not exist. `verify.py` resolves
+one model (`default_verify_model()` → `VERIFICATION_MODEL_DEFAULT`) and never
+escalates — `VERIFICATION_ESCALATION_MODEL` is consumed by `investigate.py` and
+priced by `cost.py`. Investigation's trigger is an **anchored UNCERTAIN** verdict
+at any severity, ordered severity-first within a per-run budget, not a
+CRITICAL/HIGH threshold. And `UNVERIFIED` is not one of `VERIFICATION_STATUSES`
+at all. The same confusion had propagated into `CLAUDE.md`'s refusal-fallback
+bullet ("`verify.py`'s escalation calls"), which is corrected with it.
+
+**Item 2's cache claim was imprecise.** "WP-03B invalidated them" is true in
+effect but wrong about the mechanism, and the mechanism is what a maintainer
+needs. Invalidation came from the **edited map prompt**, which rides every
+cross-QC cache key — deliberately one mechanism, not a contract bump beside it.
+`_CROSS_QC_CACHE_CONTRACT` is at 2 for an unrelated earlier reason (entries
+stored as `complete` after a silent truncation, before the findings cap became
+loss-aware), so a reader who attributes the 2 to the evidence work will
+mis-date it. The README now says so explicitly.
+
+**Four items needed no change, and that was verified rather than assumed.**
+Item 1 (three text representations with explicit consumers, `words` included) is
+already in `README.md`. Item 12 was satisfied when the harness work landed. Item
+8 is documented in `docs/PERFORMANCE_AND_COST_VALIDATION.md`, fallback chain and
+all. Item 16 found no stale predecessor-product terminology anywhere in the
+tree. Item 7 was half-satisfied: the cost dialog already priced the batch spec
+path correctly and said so; only the help text was silent, so only the help text
+changed.
+
+`PRICING_EFFECTIVE_DATE` is deliberately untouched, per this section's own
+instruction: this document being newer is not evidence about the rate table.
+
 ## 13. WP-08: integration, review, and acceptance
 
 ### 13.1 Focused test groups

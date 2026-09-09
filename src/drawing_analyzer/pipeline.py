@@ -3174,8 +3174,17 @@ def extract_drawing_context(
     # Critique pass (Phase 11): a second, adversarial full-coverage read per sheet
     # whose only job is finding problems, run self-consistently (twice) and merged.
     # Additive and non-fatal; its findings pool with the digest findings in the QC
-    # stage below. Re-renders each sheet (the digest images are gone by now), so
-    # it runs before the QC stages that consume the pooled findings.
+    # stage below, so it runs before the QC stages that consume them.
+    #
+    # WP-07 §12.14: this used to say "re-renders each sheet (the digest images are
+    # gone by now)". They are not gone. ``render_spool`` keeps the digest's
+    # already-compressed PNG bytes on disk and reconstructs the same
+    # ``RenderedSheet`` byte-for-byte, and the batch path adopts the digest's
+    # terminal uploads instead. A second rasterization is now the FALLBACK, not
+    # the rule: it happens per page when the spool has no entry for it (a digest
+    # cache hit rendered nothing), when the grid does not match, when the manifest
+    # is unavailable, or when a spool read/write failed — every one of which
+    # degrades to the historical renderer for that page alone.
     critique_findings: list[Finding] = []
     # Numeric claims (Phase 14) transcribed by the critique / cross-sheet QC passes,
     # pooled and handed to the deterministic arithmetic auditor below.
