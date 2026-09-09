@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """WP-02 §7.1 — measure evidence coverage over a drawing set. Zero API calls.
 
-Sizes the three grounding failures of `docs/REVIEW_IMPLEMENTATION_PLAN.md` §2.1
-before anything is engineered against them, using only PDFs on disk and (when
+Sizes the three grounding failures the evidence work was built against — the
+prompt cap, textless sheets, and the pasted raster region of a hybrid sheet
+(README, "Host evidence vs. prompt text" and "Evidence the host cannot check") — using only PDFs on disk and (when
 given) artifacts a run already exported. No model call, no key, no budget
 approval, no rasterization: the page scan is the existing pre-render pass
 (`render.iter_sheet_prescan`), which lifts the text layer and page size from

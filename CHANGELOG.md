@@ -6,6 +6,29 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Removed
+
+- **`docs/REVIEW_IMPLEMENTATION_PLAN.md` retired.** Its implementation packages
+  (WP-00 … WP-08) are complete and merged; what they changed is in this
+  changelog, and what was verified is in `docs/REVIEW_RELEASE_EVIDENCE.md`. A
+  2,300-line plan describing work that is done reads as current intent to the
+  next person who opens it.
+
+  Two parts did not retire with it and were preserved in
+  `docs/MEASUREMENT_PACKAGES.md`: the **measurement packages** (R-01 … R-06),
+  which have never been run and still need approved drawing sets and a budget,
+  along with the experiment protocol that keeps them honest; and the **standing
+  prohibitions**, each recording a shortcut rejected for a reason usually
+  discovered the expensive way.
+
+  Five files cited the plan by section number — `measure_evidence_coverage.py`,
+  three evidence/geometry test modules, and the release-evidence doc. Rather
+  than leaving dangling references, each now points at the live documentation
+  for the same fact (the README's grounding sections, the performance doc's
+  image-token regimes, `models.sheet_evidence_text`). A citation to a deleted
+  file is worse than none: it tells a reader there is an explanation and then
+  fails to produce it. The plan remains in git history at `168f4ec`.
+
 ### Fixed
 
 - **A lost open race could silently empty an intact digest cache.**
