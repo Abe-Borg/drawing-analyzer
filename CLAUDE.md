@@ -156,6 +156,51 @@ both the submitted batch and the one that actually served the digests.
   the capped text — and `_cross_qc_cache_key` adds an `evidence_sha256` **only
   for a truncated sheet**, so every untruncated key stays byte-identical and no
   stored result was discarded (hence no `_CROSS_QC_CACHE_CONTRACT` bump).
+  Grounding is **three-state** (WP-03B §8.3, `classify_quote_evidence`), not a
+  boolean: `TEXT_GROUNDED` / `NOT_MATCHED_IN_TEXT` / `TEXT_EVIDENCE_UNAVAILABLE`.
+  Collapsing the last two was the §2.1 trigger-2 bug — a scanned sheet, or the
+  pasted raster region of a *hybrid* one (which has words, so `is_raster` is
+  False and cannot identify it), can never satisfy a text check, and treating
+  that silence as refutation dropped every leg **and every fact**, excluding the
+  sheet from cross-shard reconciliation entirely. The question is asked of the
+  **reported tile**, not the sheet (`_tile_has_words`): `render.py` fills
+  `full_sheet_text` from `page.get_text()`, so one selectable title block — which
+  every real hybrid sheet has — makes the sheet-level answer "yes" and sends
+  every quote off the pasted detail back to `NOT_MATCHED_IN_TEXT`, i.e. the
+  hybrid recovery never fires on a real page. So the tile is resolved **before**
+  classification at both call sites, and an *unknown* tile answers "there was
+  text" — absence of a location is not evidence of pixels, and the other default
+  would launder every unlocatable bad quote into admission. Those are now admitted at
+  reduced trust carrying `Finding.evidence_state` / `ConflictLeg.evidence_state`;
+  a quote unmatched on text the sheet *does* have stays a discard, the
+  hallucination signal. An absent quote is `TEXT_EVIDENCE_UNAVAILABLE`, never
+  implicitly grounded (trigger 3, closed).
+  Reduced trust must **reach verification**, so the location travels in three
+  parts: the shard-map prompt requests `tile_label` per fact and leg
+  (`CrossQCFact.tile`, resolved on that leg's own grid); `fact_tile_lookup`
+  rejoins a reconciled leg to its originating fact by `(handle, normalized
+  quote)` — the reconcile contract carries no tile, and the model never supplies
+  the location, it is *derived* from evidence already committed to. That key is
+  **not unique** (one sheet, two "150 gpm" facts, two tiles), and a collision
+  loses rather than picks: keeping the first would hand the second occurrence a
+  rectangle that still anchors and still passes the region test, laundering a
+  guess into a location the reviewer is sent to. Disagreement drops the key
+  order-independently; only unanimity resolves. And
+  `anchor._anchor_one` falls back to that tile **only** for
+  `TEXT_EVIDENCE_UNAVAILABLE`, so TILE anchoring makes
+  `verify._has_anchored_legs` and `investigate._candidates` reachable. Every
+  other path keeps `quote_not_found`. Reduced trust is visible in the markup and
+  the report (a note on the quote cell, not a new status chip — `_STATUS_RANK`
+  drives the browser sort and evidence trust is an orthogonal axis), and the
+  *reason* is chosen per finding by `models.reduced_trust_reason`, because
+  `TEXT_EVIDENCE_UNAVAILABLE` covers two situations a reviewer must not be told
+  are one: no text to search (`[NO TEXT TO CHECK]`) and no quote to search *for*
+  (`[NO QUOTE TO CHECK]`). Saying "no searchable text on this sheet" to someone
+  looking at selectable text discredits every true caveat beside it. A trust
+  label belongs to **its own quote**: `evidence_state` rides the atomic grounding
+  bundle through a ledger merge, and `annotate._units_for_finding` gives each
+  per-leg mark that leg's state rather than the parent's — a conflict can be
+  text-grounded on one sheet and read off a raster detail on the other.
   Cross-QC also carries **count-only discard counters** on the sharded path
   (`CrossQCDiscardCounts`, WP-02 §7.2): how many legs/facts the host dropped and
   why — unresolved handle, quote absent, quote present but unmatched, split by
