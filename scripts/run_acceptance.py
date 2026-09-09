@@ -12,15 +12,19 @@ the opt-in live canary (``pytest -m network tests/test_live_api_canary.py``).
 
 Gates (in order):
   1. byte-compile        python -m compileall -q src
-  2. import isolation    pytest tests/test_import_isolation.py   (I-5)
-  3. hermetic suite      pytest  (includes the §19.1/§19.2 trust gauntlet)
+  2. import isolation    pytest -m "not network" tests/test_import_isolation.py
+  3. hermetic suite      pytest -m "not network"  (incl. §19.1/§19.2 gauntlet)
   4. secret scan         scripts/scan_secrets.py                 (§19.8)
-  5. browser security    pytest -m browser   (SKIP if Playwright absent)
+  5. browser security    pytest -m "(browser) and not network"
+                         (SKIP if Playwright absent)
   6. build + install     wheel/sdist build, clean-venv install, import +
                          packaged-profiles smoke  (SKIP with --fast)
 
-Exit code 0 only when every non-skipped gate passes. Pure stdlib,
-Windows-safe (pathlib + sys.executable, no shell utilities).
+Every pytest gate deselects the ``network`` marker in the child it spawns, so
+an acceptance run is hermetic whatever environment it inherits (see
+:data:`_NETWORK_DESELECT`). Exit code 0 only when every non-skipped gate
+passes. Pure stdlib, Windows-safe (pathlib + sys.executable, no shell
+utilities).
 """
 from __future__ import annotations
 
@@ -35,9 +39,48 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
+def _echo(cmd: list[str]) -> str:
+    """Render a command copy-pasteably: quote any argument containing a space.
+
+    A marker expression such as ``not network`` is one argv element; printing it
+    bare read as two arguments and did not survive a copy-paste.
+    """
+    return " ".join(f'"{a}"' if " " in a else a for a in cmd)
+
+
 def _run(cmd: list[str], **kw) -> int:
-    print(f"\n$ {' '.join(cmd)}", flush=True)
+    print(f"\n$ {_echo(cmd)}", flush=True)
     return subprocess.run(cmd, cwd=REPO_ROOT, **kw).returncode
+
+
+# The §19.3 live canary (``tests/test_live_api_canary.py``) is opt-in and must
+# NEVER run as part of an acceptance check: it makes real, billed API calls.
+# ``tests/conftest.py`` skips ``network`` tests only when no real key is set,
+# and ``pyproject.toml`` sets no default marker exclusion — so a gate that
+# spawns a bare ``pytest`` while a real ``ANTHROPIC_API_KEY`` happens to be
+# exported would bill the account during a release gate. Deselecting the marker
+# in the child we spawn is the property that makes this safe; an absent key is
+# an environment accident a future gate could lose. Run the canary through its
+# own documented invocation instead:
+#
+#     ANTHROPIC_API_KEY=sk-ant-... pytest -m network tests/test_live_api_canary.py
+_NETWORK_DESELECT = "not network"
+
+
+def _pytest_cmd(*args: str, select: str = "") -> list[str]:
+    """Build the argv for a hermetic ``pytest`` child.
+
+    **Every** pytest gate goes through here, so a future gate cannot forget the
+    deselection — ``tests/test_run_acceptance.py`` fails if a bare ``"pytest"``
+    argv literal reappears anywhere else in this file.
+
+    ``select`` is a gate's own marker expression; it is ANDed with the
+    deselection rather than replacing it. Passing ``-m`` on the command line
+    also takes precedence over ``PYTEST_ADDOPTS``, so an operator environment
+    cannot re-enable the canary underneath us.
+    """
+    marker = f"({select}) and {_NETWORK_DESELECT}" if select else _NETWORK_DESELECT
+    return [sys.executable, "-m", "pytest", "-q", "-m", marker, *args]
 
 
 def gate_compileall() -> str:
@@ -45,12 +88,12 @@ def gate_compileall() -> str:
 
 
 def gate_import_isolation() -> str:
-    rc = _run([sys.executable, "-m", "pytest", "-q", "tests/test_import_isolation.py"])
+    rc = _run(_pytest_cmd("tests/test_import_isolation.py"))
     return "PASS" if rc == 0 else "FAIL"
 
 
 def gate_hermetic_suite() -> str:
-    return "PASS" if _run([sys.executable, "-m", "pytest", "-q"]) == 0 else "FAIL"
+    return "PASS" if _run(_pytest_cmd()) == 0 else "FAIL"
 
 
 def gate_secret_scan() -> str:
@@ -62,7 +105,10 @@ def gate_browser_security() -> str:
     if importlib.util.find_spec("playwright") is None:
         return "SKIP (playwright not installed; pip install -e '.[browsertest]' " \
                "&& python -m playwright install chromium)"
-    rc = _run([sys.executable, "-m", "pytest", "-q", "-m", "browser"])
+    # Selection is unchanged in practice: no test carries both markers, so
+    # ``(browser) and not network`` collects exactly what ``browser`` did. The
+    # deselection rides along so the property holds for every gate uniformly.
+    rc = _run(_pytest_cmd(select="browser"))
     return "PASS" if rc == 0 else "FAIL"
 
 
@@ -141,7 +187,8 @@ def main() -> int:
         return 1
     print("RESULT: automated gates PASS. Complete the manual acceptance records")
     print("(docs/WINDOWS_ACCEPTANCE.md, docs/RELEASE_ACCEPTANCE_TEMPLATE.md) and")
-    print("the live canary (pytest -m network) before tagging.")
+    print("the live canary (pytest -m network tests/test_live_api_canary.py,")
+    print("which these gates deliberately never run) before tagging.")
     return 0
 
 
