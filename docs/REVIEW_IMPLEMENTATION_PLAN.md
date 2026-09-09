@@ -445,7 +445,34 @@ Every value in this section was **independently re-derived during review** from
 the geometry and token formulas with whole-pixel dimension rounding, and matched
 exactly, including the 177,008 allowance, the 92,871 vector E-size figure, and
 the mixed-set total (which resolves as ANSI E 34×44, ARCH D 24×36, ANSI B 11×17,
-letter). They are not rendered-image measurements or complete run estimates. They
+letter).
+
+**Measured during WP-05: whole-pixel dimension rounding is not what the renderer
+does, and it is systematically low.** `page.get_pixmap(matrix=m, clip=r)` sizes
+the pixmap from `(r * m).irect` — the smallest integer rectangle *containing* the
+transformed rect, i.e. floor on the top-left corner and ceil on the bottom-right.
+That expands to contain rather than to nearest, and it depends on where the rect
+sits, not only how big it is: on a 34×44 sheet at 6×6 / 1560, tiles `r0c1` and
+`r0c2` are both 473.280 pt wide and render **1296** and **1295** px. No
+dimension-only rule reproduces that pair.
+
+The gap is small and one-directional:
+
+| Value | Plan (round the dimension) | Renderer (`irect`) | Delta |
+|---|---:|---:|---:|
+| Vector E-size sheet @ 6×6 / 1560 | 92,871 | 93,013 | +0.15% |
+| Square @ 6×6 / 1560 | 116,481 | 116,617 | +0.12% |
+| Mixed 36-sheet set, current 6×6 | 3,150,948 | 3,155,700 | +0.15% |
+| 177,008 allowance; 47,840 @ 3×3; 23,920 @ 2×2 | — | identical | 0.00% |
+
+The values that clamp to the model token cap are unaffected, which is why the
+≤20-image figures agree exactly. Nothing here invalidates §2.5's conclusions —
+this section already says its numbers are cross-checks, "not production
+regression fixtures requiring exact agreement with rasterizer rounding", and
+that is precisely the discrepancy. WP-05's estimator mirrors `irect`, so it
+matches real renders pixel-for-pixel on 18 of 20 shape/grid combinations and
+within 0.0035% of token count on the other two; the plan's figures are asserted
+in tests only within a 0.3% tolerance. They are not rendered-image measurements or complete run estimates. They
 exclude blank suppression, prompt text, output/thinking, verification,
 investigation, citation, retries, and local result-cache hits. Use them as
 arithmetic cross-checks, not production regression fixtures requiring exact
@@ -1335,7 +1362,12 @@ Image estimate algorithm, for every page and every vision-stage model:
    helpers and the selected overlap.
 4. Compute zoom per rectangle with `zoom_for_rect()` and estimated pixel
    dimensions. Document rounding assumptions; use rendered-fixture comparisons to
-   set a defensible tolerance.
+   set a defensible tolerance. **The assumption is not "round the scaled
+   dimension"** — see §2.5: the rasterizer uses `(rect * matrix).irect`, which is
+   position-dependent, so two identically-sized tiles can differ by a pixel.
+   Mirroring `irect` makes the estimate reproduce real renders exactly rather
+   than approximately, which is why the tolerance below is 0.0035% and not a
+   percent or two.
 5. Estimate tokens through `core.tokenizer.estimate_image_tokens()` for that
    stage's model. The same PNG dimensions can produce different model-tier
    estimates.

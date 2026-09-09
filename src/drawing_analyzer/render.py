@@ -31,10 +31,14 @@ import pymupdf  # AGPL-3.0 — see module docstring.
 from . import tiling
 from .diagnostics import get_logger
 from .models import (
+    CLASSIFICATION_RASTER,
+    CLASSIFICATION_UNKNOWN,
+    CLASSIFICATION_VECTOR,
     COORDINATE_SPACE_VERSION,
     ImageTile,
     PageGeometry,
     RenderedSheet,
+    SheetCostBasis,
     SheetGeometry,
     SheetRef,
     transform_rect,
@@ -837,6 +841,80 @@ def _sheet_geometry_no_render(
         text_chars_total=len(raw_text),
         geometry=geometry,
     )
+
+
+def iter_sheet_cost_bases(
+    pdf_paths: list[Path],
+) -> "Iterator[SheetCostBasis]":
+    """Yield one :class:`SheetCostBasis` per page. No rasterization, no network.
+
+    WP-05 §10.3's scanner. Deliberately lighter than :func:`iter_sheet_prescan`,
+    which also computes each page's render identity — a content hash over the
+    page's dependency graph that the level-1 cache needs and a cost estimate does
+    not. This reads ``page.rect`` and ``len(page.get_text("words"))`` and stops.
+
+    Creates no model client, hashes nothing, and retains no PyMuPDF object past
+    the loop (I-5). When the caller *already* has geometry — the GUI's profile
+    preflight and the pipeline prescan both do — use
+    :func:`models.sheet_cost_basis` on it instead of calling this: a second PDF
+    owner contending for the same files buys nothing.
+
+    A page that cannot be measured is still **yielded**, carrying
+    ``geometry_ok=False`` and ``CLASSIFICATION_UNKNOWN``, so its cost is quoted
+    conservatively rather than silently dropped (§10.1 item 8). A source that
+    cannot be opened at all yields one such record standing for the whole file,
+    since its page count is exactly what could not be learned.
+    """
+    source_ids = assign_source_ids(pdf_paths)
+    for path in pdf_paths:
+        path = Path(path)
+        source_id = source_ids.get(str(path), "")
+        try:
+            doc = pymupdf.open(str(path))
+        except Exception as exc:  # noqa: BLE001 - a bad file must not end the scan
+            yield SheetCostBasis(
+                source_name=path.name, source_id=source_id, page_index=0,
+                width_pt=0.0, height_pt=0.0,
+                classification=CLASSIFICATION_UNKNOWN,
+                geometry_ok=False, error=f"could not open source: {type(exc).__name__}",
+            )
+            continue
+        try:
+            for i in range(doc.page_count):
+                try:
+                    page = doc[i]
+                    geometry = page_geometry(page)
+                    # Extracted WORDS, matching render_page's own rule. A page
+                    # can carry text objects that yield no word rectangles; the
+                    # looser "get_text() is nonempty" test would call that page
+                    # vector and quote it at the cheaper target.
+                    word_count = len(page.get_text("words"))
+                    raw_len = len(_cap_sheet_text(page.get_text() or ""))
+                    yield SheetCostBasis(
+                        source_name=path.name,
+                        source_id=source_id,
+                        page_index=i,
+                        width_pt=float(geometry.view_width_pt),
+                        height_pt=float(geometry.view_height_pt),
+                        classification=(
+                            CLASSIFICATION_RASTER if word_count == 0
+                            else CLASSIFICATION_VECTOR
+                        ),
+                        text_chars=raw_len,
+                        geometry_ok=(
+                            geometry.view_width_pt > 0 and geometry.view_height_pt > 0
+                        ),
+                    )
+                except Exception as exc:  # noqa: BLE001 - one bad page, not the set
+                    yield SheetCostBasis(
+                        source_name=path.name, source_id=source_id, page_index=i,
+                        width_pt=0.0, height_pt=0.0,
+                        classification=CLASSIFICATION_UNKNOWN,
+                        geometry_ok=False,
+                        error=f"could not measure page: {type(exc).__name__}",
+                    )
+        finally:
+            doc.close()
 
 
 def iter_sheet_prescan(

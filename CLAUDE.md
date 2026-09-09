@@ -58,7 +58,38 @@ cache-hit, `estimated_cost`), and the run's `total_*` are *derived* sums — no 
 can overwrite another's counters (the old `v_in, v_out = vres…` overwrite is gone).
 `core.pricing.usage_record_cost` prices one record by its rate class; costs carry a
 `PRICING_EFFECTIVE_DATE`. `cost.estimate_exhaustive_run_cost` is the pre-run
-per-stage estimate (verification/citation quoted as a low–high band).
+per-stage estimate (verification/citation quoted as a low–high band), and every
+stage is priced with **its own resolved model** and the runtime's own
+`critique_runs()` — the standard path once priced synthesis/focus at the digest's
+threaded `model` while those stages actually follow `REVIEW_MODEL_DEFAULT`, and
+the critique line was fixed at two reads regardless of
+`DRAWING_ANALYZER_CRITIQUE_RUNS`. Critique imagery is counted with the critique
+model, never reused from the digest count: `estimate_image_tokens` clamps at a
+per-model cap (4784 hi-res / 1568 standard tier), so one count for two tiers is a
+~3× error.
+
+**Geometry-aware image tokens (WP-05 §10.1).**
+`pipeline.estimate_image_tokens_for_set` remains the deliberately conservative
+allowance — every image a square at the *raster* target, at the model cap — and
+its public meaning is unchanged. `cost.estimate_image_tokens_for_bases` is the
+successor that prices each page from its real shape, given a `SheetCostBasis`
+(`models.py`: displayed w/h in points, vector/raster/unknown, capped text length,
+geometry-availability + error state — and deliberately no words, no full text, no
+image bytes, no path). Two facts per page carry the whole correction: aspect
+ratio and *does this page have words*, both from a scan that never rasterizes
+(`render.iter_sheet_cost_bases`, or `models.sheet_cost_basis(geom)` to reuse an
+existing prescan/preflight rather than becoming a second PDF owner). The
+correction is ~1.9× on a vector E-size sheet.
+`tiling.image_pixel_sizes` is the single home for that geometry (GUI, CLI and
+tests all call it) and mirrors PyMuPDF's `(rect * matrix).irect` sizing — which is
+**position**-dependent, so two identically-sized tiles can differ by a pixel and
+no dimension-rounding rule reproduces it. Every tile is counted: blank
+suppression is decided from rendered pixels and must never be *predicted* from
+word absence, since a vector sheet's words sit in the title block while the body
+is lines. An `unknown` page falls back to the conservative allowance and is never
+assumed vector — vector is the cheaper target, so guessing it quotes low on
+exactly the pages least understood — and an unmeasurable page is still quoted,
+never silently dropped.
 
 **Run journal & manifests (Phase 26A, §18.1–18.4).** Every run owns a
 `RunJournal` (`ctx.run_journal`, `run_journal.py`): an append-only, thread-safe
