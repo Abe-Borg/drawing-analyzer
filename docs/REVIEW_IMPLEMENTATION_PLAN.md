@@ -1459,6 +1459,30 @@ size. Record scan duration and, separately, **time spent waiting on
 6,636 words" is one measurement on unknown content and is not a bound for
 arbitrary sets; dense schedule sheets scale with word count.
 
+**Measured (WP-05b), and it chose against the default below.** Synthetic uniform
+E-size pages, medians of 3, via `scripts/measure_scan_time.py`:
+
+| set | fresh cost scan | wait behind a running preflight | derive from the preflight's geometry |
+|---|---:|---:|---:|
+| 39 sheets × 4,000 w | 2,399 ms | 7,494 ms | 0.1 ms |
+| 120 sheets × 4,000 w | **6,896 ms** | **22,457 ms** | **0.4 ms** |
+
+The scan tracks **word count**, not sheet count — ~15 ms per 1,000 words in every
+configuration measured, so ~8 ms/page sparse and ~60 ms/page dense. (The same
+instrument reproduces `render.py`'s recorded 0.32 s / 8 sheets / 6,636 words to
+within 1 ms, which is the check that it is measuring the right thing.) The
+preflight is ~3× the scan because it also hashes each page's render identity.
+
+So **item 2 of the default design below is wrong on a large dense set**: a
+synchronous scan at the Analyze click is a ~7-second freeze at the moment money
+is committed, and waiting on `_preflight_lock` instead can be ~22 s more. Item 3
+is the branch the measurement supports, and it is nearly free —
+`preflight_sheet_ids` already builds a full `SheetGeometry` per page and keeps
+only the sheet id, so emitting a `SheetCostBasis` from the object it discards
+costs 0.01% of a fresh scan, inside a lock already held, with no second PDF
+owner. Escalating to revision 1's background worker is **not** warranted: the
+work is not on the Analyze path at all.
+
 **Step 2 — implement the minimum the measurement supports.** Default design:
 
 1. Keep the live selection summary on the existing conservative allowance. Do not

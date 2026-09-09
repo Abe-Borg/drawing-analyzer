@@ -264,20 +264,56 @@ def preflight_sheet_ids(paths: Iterable[Any]) -> list[str]:
 
     from .auditors.references import detect_sheet_id
 
-    out: list[str] = []
+    return preflight_scan(paths).sheet_ids
+
+
+@dataclass(frozen=True)
+class PreflightScan:
+    """Everything one walk over the input PDFs can yield (WP-05 §10.3).
+
+    The preflight already opens every page and builds a full ``SheetGeometry``
+    to read its title-block sheet id — then discards the geometry. Every fact a
+    :class:`~drawing_analyzer.models.SheetCostBasis` needs is in the object it
+    throws away, so producing both costs one extra attribute read per page.
+
+    Measured (`scripts/measure_scan_time.py`, 120 sheets x 4,000 words): a fresh
+    cost scan of that set takes **6,896 ms** and waits up to **22,457 ms** behind
+    a running preflight; deriving the same records from geometry the preflight
+    already holds takes **0.4 ms** — 0.01% of a fresh scan, inside the lock that
+    is already held, with no second PDF owner. That is why there is no separate
+    scan: the measurement §10.3 asks for made the choice.
+    """
+
+    sheet_ids: list[str]
+    cost_bases: list  # of models.SheetCostBasis; untyped to keep imports shallow
+
+
+def preflight_scan(paths: Iterable[Any]) -> PreflightScan:
+    """One text-only walk; both of its products.
+
+    Same cost as :func:`preflight_sheet_ids` — which now delegates here — and the
+    same tolerance: an unreadable file is skipped with a log line, never raised,
+    because this is a best-effort hint and never authoritative.
+    """
+    from pathlib import Path
+
+    from .auditors.references import detect_sheet_id
+    from .models import sheet_cost_basis
+
+    ids: list[str] = []
+    bases: list = []
     for path in paths or []:
         try:
             from . import render
 
-            # A cheap, text-only prescan (no overview/tile rasterization): it lifts
-            # each page's word list + geometry, which is all detect_sheet_id needs.
             for _ref, _identity, geometry in render.iter_sheet_prescan([Path(path)]):
                 sid = detect_sheet_id(geometry)
                 if sid:
-                    out.append(sid)
+                    ids.append(sid)
+                bases.append(sheet_cost_basis(geometry))
         except Exception as exc:  # noqa: BLE001 - a bad file must not sink preflight
             _log.info("profile preflight skipped %s: %s", path, exc)
-    return out
+    return PreflightScan(sheet_ids=ids, cost_bases=bases)
 
 
 def suggest_profiles_for_paths(
@@ -285,6 +321,18 @@ def suggest_profiles_for_paths(
 ) -> list[Profile]:
     """Auto-suggest profiles for a set of input PDFs (preflight + discipline match)."""
     return suggest_profiles(preflight_sheet_ids(paths), available=available)
+
+
+def suggest_profiles_and_cost_bases(
+    paths: Iterable[Any], *, available: dict[str, Profile] | None = None
+) -> tuple[list[Profile], list]:
+    """``(profiles, cost_bases)`` from a **single** walk over ``paths``.
+
+    What the GUI preflight calls, so the confirmation dialog can price the set
+    from each page's real shape without a second pass over the PDFs (§10.3).
+    """
+    scan = preflight_scan(paths)
+    return suggest_profiles(scan.sheet_ids, available=available), scan.cost_bases
 
 
 def resolve_profile_selection(
