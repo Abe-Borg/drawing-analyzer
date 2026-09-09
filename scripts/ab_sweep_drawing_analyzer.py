@@ -112,15 +112,30 @@ _OUTCOMES = ("served", "cache_hit", "abandoned", "parse_failed", "failed")
 
 
 def _record_outcome(r) -> str:
-    """Which bucket one :class:`UsageRecord` belongs in."""
+    """Which bucket one :class:`UsageRecord` belongs in.
+
+    ``parse_failed`` is reserved for a response that *arrived and could not be
+    used* — tokens were spent on something unusable. A request that raised before
+    any response also carries ``parse_success=False`` (there was nothing to
+    parse), and the pipeline pairs it with ``terminal_status="FAILED"`` and zero
+    tokens. Checking ``parse_success`` first swept those into ``parse_failed``
+    and emptied the ``failed`` bucket — which inverts the one question these
+    buckets exist to answer: did this arm get unusable answers, or get no answers
+    at all? Those call for opposite responses.
+    """
     status = str(getattr(r, "terminal_status", "") or "")
     if getattr(r, "cache_hit", False):
         return "cache_hit"
     if status.startswith("ABANDONED"):
         return "abandoned"
-    if not getattr(r, "parse_success", True):
-        return "parse_failed"
     if status in ("FAILED", "PARTIAL"):
+        return "failed"
+    # Response-bearing only: no tokens means no response to have failed on.
+    if not getattr(r, "parse_success", True) and (
+        getattr(r, "input_tokens", 0) or getattr(r, "output_tokens", 0)
+    ):
+        return "parse_failed"
+    if not getattr(r, "parse_success", True):
         return "failed"
     return "served"
 
@@ -145,13 +160,18 @@ def usage_breakdown(run_usage) -> dict:
 
     ``unpriced_records`` is the honest companion to a ``None`` cost: it says how
     many records could not be priced, so a reader can tell "no model price" from
-    "no usage".
+    "no usage". It calls ``RunUsage.is_billable_but_unpriced`` rather than
+    restating the rule — the first version of this function reimplemented it and
+    immediately drifted, missing cache tokens, which is how two views of the same
+    ledger start disagreeing about what was spent.
 
     **Granularity is labelled, not assumed.** The pipeline aggregates some
     verification work into a single usage record, so ``calls`` is a record count
     and not universally an API-call count. ``record_granularity`` says so in the
     output rather than letting a reader infer call counts from it.
     """
+    from drawing_analyzer.models import RunUsage
+
     records = list(getattr(run_usage, "records", None) or [])
     if not records:
         return {"records": 0, "record_granularity": "one record per API call or attempt,"
@@ -179,10 +199,7 @@ def usage_breakdown(run_usage) -> dict:
         if getattr(r, "cache_write_tokens", 0):
             ttl = str(getattr(r, "cache_write_ttl", None) or "5m")
             write_ttls[ttl] = write_ttls.get(ttl, 0) + getattr(r, "cache_write_tokens", 0)
-        if getattr(r, "estimated_cost", None) is None and (
-            getattr(r, "input_tokens", 0) or getattr(r, "output_tokens", 0)
-            or getattr(r, "billable_tool_uses", None)
-        ):
+        if RunUsage.is_billable_but_unpriced(r):
             unpriced += 1
     return {
         "records": len(records),
@@ -512,8 +529,34 @@ class ArmSpec:
     env: dict
     overlap_frac: float | None = None
 
+    @property
+    def resolved_overlap(self) -> float:
+        """What the arm will actually render at — omitted means the default."""
+        from drawing_analyzer import tiling
+
+        return (
+            tiling.DEFAULT_OVERLAP_FRAC if self.overlap_frac is None
+            else self.overlap_frac
+        )
+
     def identity(self) -> tuple:
-        return (tuple(sorted(self.env.items())), self.overlap_frac)
+        """**Resolved** settings, not the spelling that produced them.
+
+        Comparing the raw options reintroduces the very bug this guard exists to
+        prevent, in a new dress: an omitted ``--baseline-overlap`` and an explicit
+        ``--variant-overlap 0.08`` are ``None`` and ``0.08``, which differ — while
+        both render at the shipping 0.08. The guard would wave through two
+        identical billable runs.
+
+        The typed ``env`` entries stay part of the identity even if the pipeline
+        happens to ignore one. That is deliberate: what the operator typed is
+        their statement of intent, and the alternative — an allowlist of
+        recognised variables — would silently drop a knob added to the pipeline
+        later, turning a real experiment into a rejected one. Erring toward
+        "these arms differ" costs a run the operator asked for; erring the other
+        way costs a run they did not.
+        """
+        return (tuple(sorted(self.env.items())), self.resolved_overlap)
 
     def label(self) -> str:
         parts = [env_label(self.env)] if self.env else []

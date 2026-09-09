@@ -1097,3 +1097,127 @@ def test_an_invalid_overlap_fails_before_any_child_is_spawned(monkeypatch):
     monkeypatch.setattr("ab_sweep_drawing_analyzer.subprocess.run", _explode)
     with pytest.raises(SystemExit):
         main(["--pdf", __file__, "--variant-overlap", "0.123456", "--estimate"])
+
+
+# --------------------------------------------------------------------------- #
+# Review round: three defects, one of them in production pricing
+# --------------------------------------------------------------------------- #
+
+
+def test_cache_only_usage_under_an_unknown_model_poisons_the_total():
+    """The sharpest form: a complete-looking figure that omits real spend.
+
+    Cache tokens are billable usage priced as multipliers on the input rate, and
+    the predicate that decides "unknown price means no dollar figure" did not
+    look at them. A run with one $5.00 digest beside a record carrying 180k cache
+    tokens under an unpriceable model reported **$5.00** — which is exactly the
+    failure ``total_estimated_cost``'s own docstring says it prevents.
+
+    Found through the A/B harness's copy of the rule; the copy is gone and the
+    harness calls the production predicate, so the two views cannot disagree
+    about what was spent.
+    """
+    ru = _usage(
+        _rec(estimated_cost=Decimal("5.00")),
+        _rec(stage_family="critique", model="mystery", input_tokens=0,
+             output_tokens=0, cache_read_tokens=90_000,
+             cache_write_tokens=90_000, estimated_cost=None),
+    )
+    assert ru.total_estimated_cost is None
+    assert usage_breakdown(ru)["unpriced_records"] == 1
+
+
+@pytest.mark.parametrize("field", ["cache_read_tokens", "cache_write_tokens"])
+def test_either_cache_token_kind_counts_as_billable_usage(field):
+    r = _rec(input_tokens=0, output_tokens=0, estimated_cost=None, **{field: 1})
+    assert RunUsage.is_billable_but_unpriced(r) is True
+
+
+def test_a_genuinely_free_cache_hit_still_does_not_poison_the_total():
+    """The other half: a zero-token served hit is not unpriced usage."""
+    ru = _usage(
+        _rec(estimated_cost=Decimal("5.00")),
+        _rec(model="mystery", transport="CACHE", cache_hit=True, input_tokens=0,
+             output_tokens=0, estimated_cost=None),
+    )
+    assert float(ru.total_estimated_cost) == 5.00
+    assert usage_breakdown(ru)["unpriced_records"] == 0
+
+
+def test_the_harness_does_not_reimplement_the_billable_rule():
+    """Two copies of a pricing rule is how the two views drifted apart."""
+    import ast
+    import inspect
+
+    import ab_sweep_drawing_analyzer as mod
+
+    tree = ast.parse(inspect.getsource(mod.usage_breakdown))
+    assert any(
+        isinstance(n, ast.Attribute) and n.attr == "is_billable_but_unpriced"
+        for n in ast.walk(tree)
+    ), "usage_breakdown must call the production predicate, not restate it"
+
+
+def test_a_request_that_never_got_a_response_is_failed_not_parse_failed():
+    """``parse_failed`` means tokens were spent on something unusable.
+
+    A request that raised before any response also carries
+    ``parse_success=False`` — there was nothing to parse — and the pipeline pairs
+    it with ``terminal_status="FAILED"`` and zero tokens. Sweeping those into
+    ``parse_failed`` emptied the ``failed`` bucket and inverted the one question
+    these buckets answer: unusable answers, or no answers? Those call for
+    opposite responses.
+    """
+    ru = _usage(_rec(parse_success=False, terminal_status="FAILED",
+                     input_tokens=0, output_tokens=0, estimated_cost=Decimal("0")))
+    assert usage_breakdown(ru)["by_outcome"]["failed"] == 1
+    assert usage_breakdown(ru)["by_outcome"]["parse_failed"] == 0
+
+
+def test_a_response_that_arrived_and_could_not_be_parsed_is_parse_failed():
+    """The case the bucket is for: real tokens, unusable output."""
+    ru = _usage(_rec(parse_success=False, terminal_status="COMPLETE",
+                     input_tokens=1000, output_tokens=50))
+    assert usage_breakdown(ru)["by_outcome"]["parse_failed"] == 1
+    assert usage_breakdown(ru)["by_outcome"]["failed"] == 0
+
+
+def test_an_abandoned_attempt_still_outranks_both():
+    ru = _usage(_rec(terminal_status="ABANDONED_EXPIRED", parse_success=False,
+                     input_tokens=0, output_tokens=0, estimated_cost=Decimal("0")))
+    assert usage_breakdown(ru)["by_outcome"]["abandoned"] == 1
+
+
+def test_the_guard_compares_resolved_settings_not_the_spelling():
+    """An omitted option and an explicit default are the same experiment.
+
+    `(env, None)` vs `(env, 0.08)` differ as raw options while rendering
+    identically — so the guard would wave through two identical billable runs,
+    which is the very bug it exists to prevent, in a new dress.
+    """
+    from drawing_analyzer import tiling
+
+    omitted = ArmSpec(env={"X": "1"}, overlap_frac=None)
+    explicit = ArmSpec(env={"X": "1"}, overlap_frac=tiling.DEFAULT_OVERLAP_FRAC)
+    assert omitted.identity() == explicit.identity()
+    assert omitted.resolved_overlap == tiling.DEFAULT_OVERLAP_FRAC
+
+
+def test_a_real_overlap_difference_is_still_an_experiment():
+    """The fix must not make every arm identical."""
+    assert (ArmSpec(env={}, overlap_frac=0.04).identity()
+            != ArmSpec(env={}).identity())
+    assert (ArmSpec(env={}, overlap_frac=0.04).identity()
+            != ArmSpec(env={}, overlap_frac=0.16).identity())
+
+
+def test_an_explicit_default_overlap_pair_is_rejected_end_to_end(monkeypatch):
+    """Through `main`, so the guard is exercised where it actually runs."""
+    from ab_sweep_drawing_analyzer import main
+
+    def _explode(*a, **k):
+        raise AssertionError("a child was spawned for two identical arms")
+
+    monkeypatch.setattr("ab_sweep_drawing_analyzer.subprocess.run", _explode)
+    with pytest.raises(SystemExit):
+        main(["--pdf", __file__, "--variant-overlap", "0.08", "--estimate"])
