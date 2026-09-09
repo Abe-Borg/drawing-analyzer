@@ -156,6 +156,32 @@ both the submitted batch and the one that actually served the digests.
   the capped text — and `_cross_qc_cache_key` adds an `evidence_sha256` **only
   for a truncated sheet**, so every untruncated key stays byte-identical and no
   stored result was discarded (hence no `_CROSS_QC_CACHE_CONTRACT` bump).
+  Grounding is **three-state** (WP-03B §8.3, `classify_quote_evidence`), not a
+  boolean: `TEXT_GROUNDED` / `NOT_MATCHED_IN_TEXT` / `TEXT_EVIDENCE_UNAVAILABLE`.
+  Collapsing the last two was the §2.1 trigger-2 bug — a scanned sheet, or the
+  pasted raster region of a *hybrid* one (which has words, so `is_raster` is
+  False and cannot identify it), can never satisfy a text check, and treating
+  that silence as refutation dropped every leg **and every fact**, excluding the
+  sheet from cross-shard reconciliation entirely. Those are now admitted at
+  reduced trust carrying `Finding.evidence_state` / `ConflictLeg.evidence_state`;
+  a quote unmatched on text the sheet *does* have stays a discard, the
+  hallucination signal. An absent quote is `TEXT_EVIDENCE_UNAVAILABLE`, never
+  implicitly grounded (trigger 3, closed).
+  Reduced trust must **reach verification**, so the location travels in three
+  parts: the shard-map prompt requests `tile_label` per fact and leg
+  (`CrossQCFact.tile`, resolved on that leg's own grid); `fact_tile_lookup`
+  rejoins a reconciled leg to its originating fact by `(handle, normalized
+  quote)` — the reconcile contract carries no tile, and the model never supplies
+  the location, it is *derived* from evidence already committed to; and
+  `anchor._anchor_one` falls back to that tile **only** for
+  `TEXT_EVIDENCE_UNAVAILABLE`, so TILE anchoring makes
+  `verify._has_anchored_legs` and `investigate._candidates` reachable. Every
+  other path keeps `quote_not_found`. Reduced trust is visible in the markup
+  (`[NO TEXT TO CHECK]` + a plain-words reason) and the report (a note on the
+  quote cell, not a new status chip — `_STATUS_RANK` drives the browser sort and
+  evidence trust is an orthogonal axis), and `evidence_state` rides the
+  **atomic grounding bundle** through a ledger merge, since a trust label
+  belongs to the quote it describes.
   Cross-QC also carries **count-only discard counters** on the sharded path
   (`CrossQCDiscardCounts`, WP-02 §7.2): how many legs/facts the host dropped and
   why — unresolved handle, quote absent, quote present but unmatched, split by

@@ -420,6 +420,12 @@ def _merge_into(existing: Finding, incoming: Finding, trace: list | None = None)
         existing.tile = incoming.tile
         existing.anchor_hint = incoming.anchor_hint
         existing.anchor = incoming.anchor
+        # The evidence state is a property OF THE QUOTE — it records whether
+        # *that* string was re-found in *that* sheet's text (WP-03B §8.3). It
+        # must ride the bundle: keeping the loser's trust label beside the
+        # winner's quote is the same cross-grounding §12.2 forbids for rects,
+        # and would let a reduced-trust claim inherit a "text-grounded" label.
+        existing.evidence_state = incoming.evidence_state
         existing.id = incoming.id
         _add_supporting(existing, loser_quote)
         if not existing.recommended_action:

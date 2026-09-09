@@ -468,6 +468,43 @@ class SheetGeometry:
         )
 
 
+# ---------------------------------------------------------------------------
+# Evidence trust (WP-03B §8.3). A host-side text check has three outcomes, not
+# two. Collapsing "the quote is not in the text" with "there is no text to check
+# against" is the §2.1 trigger-2 bug: a scanned sheet, or the pasted raster
+# detail on a hybrid sheet, can never satisfy a text check, and treating that
+# silence as refutation discards real evidence.
+# ---------------------------------------------------------------------------
+
+#: The quote was re-found in the sheet's source evidence. Existing full trust.
+EVIDENCE_TEXT_GROUNDED = "TEXT_GROUNDED"
+#: A quote was supplied and was NOT found in text the sheet does have. Not a
+#: contradiction of a visual claim, but the quote should have been findable —
+#: this stays the hallucination signal and never earns a tile fallback.
+EVIDENCE_NOT_MATCHED = "NOT_MATCHED_IN_TEXT"
+#: No textual check was possible: the sheet offers no extractable text, or no
+#: quote was supplied to check. Reduced trust, explicitly labelled, and routed
+#: to visual verification rather than dropped.
+EVIDENCE_UNAVAILABLE = "TEXT_EVIDENCE_UNAVAILABLE"
+
+EVIDENCE_STATES = frozenset({
+    EVIDENCE_TEXT_GROUNDED, EVIDENCE_NOT_MATCHED, EVIDENCE_UNAVAILABLE,
+})
+#: States that are NOT text-corroborated. A finding standing only on these must
+#: never be presented as a dual-anchored, text-corroborated conflict (§8.3).
+EVIDENCE_REDUCED_TRUST = frozenset({EVIDENCE_NOT_MATCHED, EVIDENCE_UNAVAILABLE})
+
+
+def is_reduced_trust(obj: Any) -> bool:
+    """True when this finding/leg's evidence was not corroborated in text.
+
+    ``""`` (an older payload, or a channel that never classified) is **not**
+    reduced trust: it means "not assessed", and treating it as reduced would
+    relabel every legacy finding.
+    """
+    return str(getattr(obj, "evidence_state", "") or "") in EVIDENCE_REDUCED_TRUST
+
+
 def sheet_evidence_text(sheet: Any) -> str:
     """The text a **host-side** check may treat as this sheet's source evidence.
 
@@ -825,6 +862,9 @@ class ConflictLeg:
     tile: list[int] | None = None
     anchor: Anchor = field(default_factory=Anchor)
     source_id: str = ""       # host-owned identity of the leg's sheet (DA-001)
+    # WP-03B §8.3, appended last: how this leg's quote fared against host-side
+    # text. "" = not assessed.
+    evidence_state: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -835,6 +875,7 @@ class ConflictLeg:
             "source_quote": self.source_quote,
             "tile": list(self.tile) if self.tile is not None else None,
             "anchor": self.anchor.to_dict(),
+            "evidence_state": self.evidence_state,
         }
 
     @classmethod
@@ -848,6 +889,7 @@ class ConflictLeg:
             tile=[int(v) for v in tile] if tile else None,
             anchor=Anchor.from_dict(d.get("anchor") or {}),
             source_id=str(d.get("source_id", "") or ""),
+            evidence_state=str(d.get("evidence_state", "") or ""),
         )
 
     @property
@@ -1038,6 +1080,10 @@ class Finding:
     # item survived. Empty for non-prose findings.
     prose_item_ids: list[str] = field(default_factory=list)
     id: str = ""
+    # WP-03B §8.3: how this finding's own quote fared against host-side text.
+    # "" = not assessed (older payload, or a channel that does not classify).
+    # Appended last — see the positional-order note on RenderedSheet.
+    evidence_state: str = ""
 
     def __post_init__(self) -> None:
         if not self.id:
@@ -1080,6 +1126,7 @@ class Finding:
             "sources": list(self.sources),
             "supporting_quotes": list(self.supporting_quotes),
             "prose_item_ids": list(self.prose_item_ids),
+            "evidence_state": self.evidence_state,
             "anchor": self.anchor.to_dict(),
             "verification": self.verification.to_dict(),
             "citations": [a.to_dict() for a in self.citations],
@@ -1115,6 +1162,7 @@ class Finding:
             sources=[str(s) for s in (d.get("sources") or [])],
             supporting_quotes=[str(q) for q in (d.get("supporting_quotes") or [])],
             prose_item_ids=[str(p) for p in (d.get("prose_item_ids") or [])],
+            evidence_state=str(d.get("evidence_state", "") or ""),
             anchor=Anchor.from_dict(d.get("anchor") or {}),
             verification=Verification.from_dict(d.get("verification") or {}),
             qc_id=d.get("qc_id", "") or "",

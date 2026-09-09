@@ -77,6 +77,9 @@ from .digest import (
     scan_structured_blocks,
 )
 from .models import (
+    EVIDENCE_NOT_MATCHED,
+    EVIDENCE_TEXT_GROUNDED,
+    EVIDENCE_UNAVAILABLE,
     ConflictLeg,
     Finding,
     NumericClaim,
@@ -207,11 +210,14 @@ Output a SINGLE fenced code block labeled json and nothing else, containing \
 sheet's handle); category (code, conflict, coordination, question); severity \
 (high, medium, low); text (<= 2 sentences); recommended_action (one sentence, \
 imperative: what the reviewer should DO about it); source_quote (VERBATIM from the \
-primary sheet); also_on (array of {"sheet_handle", "source_quote" verbatim from \
-that sheet}); refs (optional). Every finding lists >= 1 also_on. Emit [] if none.
+primary sheet); tile_label (the label printed on the primary sheet's tile where \
+you saw it, e.g. "r1c1"); also_on (array of {"sheet_handle", "source_quote" \
+verbatim from that sheet, "tile_label" on THAT sheet}); refs (optional). Every \
+finding lists >= 1 also_on. Emit [] if none.
 - Each fact is one comparable data point another shard could contradict: \
 sheet_handle; entity_or_tag (the tag / equipment / room / schedule key); attribute \
 (what about it); value (as printed); exact_quote (VERBATIM on-sheet string); \
+tile_label (the label printed on the tile where you saw it, e.g. "r1c1"); \
 context (<= 12 words). Emit facts for values likely to be REPEATED or REFERENCED \
 elsewhere (equipment tags and capacities, shared/general notes, schedule values, \
 code editions, phasing) so a reconciler can compare them across shards. Emit at \
@@ -275,6 +281,12 @@ class CrossQCFact:
     value: str
     exact_quote: str
     context: str = ""
+    #: Zero-based ``[row, col]`` on this fact's own sheet, from the model's
+    #: ``tile_label`` (§8.4 Part 1). ``None`` when not reported or out of
+    #: bounds — never a guessed rectangle.
+    tile: "list[int] | None" = None
+    #: WP-03B §8.3 host verdict on ``exact_quote`` for this fact's own sheet.
+    evidence_state: str = ""
 
 
 @dataclass
@@ -291,12 +303,14 @@ class CrossQCDiscardCounts:
 
     The three grounding triggers of §2.1 map onto these fields directly:
 
-    - ``legs_ungrounded_quote`` / ``facts_ungrounded_quote`` — a real quote the
-      host could not re-find. Split by whether the target sheet had **any**
-      extractable text, because a textless sheet can never satisfy the check
-      (trigger 2) while a text-bearing sheet failing it is either past the
-      15,000-character cap (trigger 1), inside a raster region of a hybrid
-      sheet, or a genuine hallucination.
+    - ``*_ungrounded_quote_text_bearing_sheet`` — a quote the host could not
+      re-find in text the sheet **does** have. Still a discard: it should have
+      been findable, so this remains the hallucination signal.
+    - ``*_admitted_no_text_evidence`` — the sheet offered no extractable text,
+      so no check was possible (§2.1 trigger 2). Since WP-03B these are
+      **admissions at reduced trust**, not discards: they carry
+      ``EVIDENCE_UNAVAILABLE``, keep their reported tile, and are routed to
+      visual verification rather than dropped.
     - ``legs_accepted_without_quote`` — trigger 3, the trust-by-omission
       population: ``_finding_from_handles`` guards with ``if quote and not
       _grounded(...)``, so a leg carrying no quote is accepted unchecked. This
@@ -305,14 +319,14 @@ class CrossQCDiscardCounts:
     """
 
     legs_unresolved_handle: int = 0
-    legs_ungrounded_quote_textless_sheet: int = 0
+    legs_admitted_no_text_evidence: int = 0
     legs_ungrounded_quote_text_bearing_sheet: int = 0
     legs_accepted_without_quote: int = 0
     legs_accepted_grounded: int = 0
     findings_dropped_under_two_legs: int = 0
     facts_unresolved_handle: int = 0
     facts_no_quote: int = 0
-    facts_ungrounded_quote_textless_sheet: int = 0
+    facts_admitted_no_text_evidence: int = 0
     facts_ungrounded_quote_text_bearing_sheet: int = 0
     facts_accepted: int = 0
     # portable sheet key -> {counter name: count}. Same counter names as above.
@@ -459,6 +473,36 @@ def _grounded(quote: str, sheet_text: str) -> bool:
     return q in _norm_for_match(sheet_text)
 
 
+def classify_quote_evidence(quote: str, geom: Any) -> str:
+    """Three-state host-side verdict on one quote (WP-03B §8.3).
+
+    Replaces the boolean that conflated "this quote is not in the text" with
+    "there is no text to check it against". The distinction decides whether an
+    unmatched quote is a hallucination signal or an unavoidable consequence of
+    the sheet being pixels — and, downstream, whether it may fall back to a tile
+    anchor (§8.4 Part 3).
+
+    - No extractable text on the sheet → ``EVIDENCE_UNAVAILABLE``. Nothing could
+      have matched, so silence refutes nothing.
+    - No quote supplied → ``EVIDENCE_UNAVAILABLE``, never grounded. This closes
+      the ``if quote and not _grounded(...)`` bypass, under which a leg that
+      offered nothing was trusted more readily than one whose quote merely
+      failed to match (§8.3, requirement 3.9).
+    - Quote found → ``EVIDENCE_TEXT_GROUNDED``.
+    - Quote supplied, text present, no match → ``EVIDENCE_NOT_MATCHED``. It
+      should have been findable; this stays the anti-hallucination signal.
+
+    Never consults ``is_raster``: a hybrid sheet has words and still cannot
+    support a text check over its pasted raster detail (§2.1).
+    """
+    evidence = sheet_evidence_text(geom)
+    if not evidence.strip():
+        return EVIDENCE_UNAVAILABLE
+    if not (quote or "").strip():
+        return EVIDENCE_UNAVAILABLE
+    return EVIDENCE_TEXT_GROUNDED if _grounded(quote, evidence) else EVIDENCE_NOT_MATCHED
+
+
 def _quote(v: Any) -> str:
     return v if isinstance(v, str) else ""
 
@@ -548,10 +592,38 @@ def _action(item: dict) -> str:
     return action.strip()[:300]
 
 
+def fact_tile_lookup(facts: "list[CrossQCFact]") -> dict:
+    """``(handle, normalized quote) -> tile`` over the facts sent to a reconcile.
+
+    §8.4 Part 2. ``_reconcile_call`` builds its findings from the **response**
+    and never sees the originating :class:`CrossQCFact`, and the reconcile output
+    contract carries no tile — so a tile stored on a fact is discarded before the
+    finding exists, leaving the cross-shard path (the whole reason the sharded
+    design exists, DA-015) exactly as unlocatable as before.
+
+    The join key is safe because the reconcile prompt already requires that
+    "both quotes must come verbatim from the facts": the location is *derived*
+    from evidence the model already committed to, never supplied by it. Quotes
+    are folded with the same :func:`_norm_for_match` grounding uses, so the join
+    tolerates exactly the cosmetic variation grounding does. A miss yields no
+    tile and today's behaviour.
+    """
+    out: dict = {}
+    for fact in facts or []:
+        if fact.tile is None:
+            continue
+        out.setdefault(
+            (_norm_id(fact.sheet_handle), _norm_for_match(fact.exact_quote)),
+            list(fact.tile),
+        )
+    return out
+
+
 def _finding_from_handles(
     item: Any,
     entry_by_handle: dict[str, tuple],
     counts: "CrossQCDiscardCounts | None" = None,
+    tile_lookup: dict | None = None,
 ) -> Finding | None:
     """Build a dual-anchored :class:`Finding` from a handle-keyed item (map/reconcile).
 
@@ -573,14 +645,16 @@ def _finding_from_handles(
     def _handle(d: dict) -> str:
         return str(d.get("sheet_handle", "") or d.get("handle", "")).strip()
 
-    refs_raw = [(_handle(item), _quote(item.get("source_quote", "")))]
+    # Keep each ref's own dict so its ``tile_label`` resolves against ITS OWN
+    # sheet's grid (§8.4 Part 1), exactly as the whole-set validator does.
+    refs_raw = [(_handle(item), _quote(item.get("source_quote", "")), item)]
     for leg in item.get("also_on") or []:
         if isinstance(leg, dict):
-            refs_raw.append((_handle(leg), _quote(leg.get("source_quote", ""))))
+            refs_raw.append((_handle(leg), _quote(leg.get("source_quote", "")), leg))
 
     resolved = []
     seen_sheets: set[tuple] = set()
-    for handle, quote in refs_raw:
+    for handle, quote, raw in refs_raw:
         entry = entry_by_handle.get(_norm_id(handle))   # case/whitespace-insensitive
         if entry is None:                    # unknown handle → unbound
             if counts is not None:           # no geom: run-level only
@@ -590,29 +664,38 @@ def _finding_from_handles(
         key = source_page_key(geom.ref)
         if key in seen_sheets:               # dedup, not a discard
             continue
-        # WP-03A: ground against the host's *source* evidence, not the capped
-        # string the model was shown. A quote past SHEET_TEXT_MAX_CHARS is real
-        # source text; rejecting it discarded a genuine cross-sheet leg (§2.1).
-        if quote and not _grounded(quote, sheet_evidence_text(geom)):
+        # WP-03A grounds against the host's *source* evidence, not the capped
+        # string the model saw. WP-03B turns the verdict into three states, so a
+        # sheet that could never satisfy a text check is not treated as refuting
+        # the claim (§8.3).
+        state = classify_quote_evidence(quote, geom)
+        if state == EVIDENCE_NOT_MATCHED:
+            # The quote should have been findable in text this sheet does have.
+            # Unchanged behaviour: the hallucination signal still drops the leg.
             if counts is not None:           # WP-02 §7.2: why, not just how many
-                counts.bump(
-                    "legs_ungrounded_quote_textless_sheet" if _sheet_is_textless(geom)
-                    else "legs_ungrounded_quote_text_bearing_sheet", geom)
-            continue                         # ungrounded quote → not a trusted leg
+                counts.bump("legs_ungrounded_quote_text_bearing_sheet", geom)
+            continue
         if counts is not None:
-            # Trigger 3: the guard above short-circuits on an empty quote, so a
-            # quoteless leg is trusted without any check at all.
-            counts.bump(
-                "legs_accepted_grounded" if quote else "legs_accepted_without_quote",
-                geom)
+            if state == EVIDENCE_TEXT_GROUNDED:
+                counts.bump("legs_accepted_grounded", geom)
+            elif not (quote or "").strip():
+                counts.bump("legs_accepted_without_quote", geom)
+            else:
+                # Admitted at reduced trust: no text existed to check against.
+                counts.bump("legs_admitted_no_text_evidence", geom)
+        # §8.4 Part 1/2: the model's own tile_label for this leg, else a tile
+        # derived from the fact this quote came from. Never synthesized.
+        tile = _resolve_tile(raw, getattr(geom, "rows", 0), getattr(geom, "cols", 0))
+        if tile is None and tile_lookup:
+            tile = tile_lookup.get((_norm_id(handle), _norm_for_match(quote)))
         seen_sheets.add(key)
-        resolved.append((sheet_id, quote, geom))
+        resolved.append((sheet_id, quote, geom, state, list(tile) if tile else None))
     if len(resolved) < 2:
         if counts is not None:               # a finding spans sheets: run-level
             counts.bump("findings_dropped_under_two_legs")
         return None
 
-    (p_sid, p_quote, pgeom), *legs = resolved
+    (p_sid, p_quote, pgeom, p_state, p_tile), *legs = resolved
     return Finding(
         sheet_id=p_sid,
         source_name=pgeom.ref.source_name,
@@ -623,8 +706,9 @@ def _finding_from_handles(
         text=text.strip(),
         source_quote=p_quote,
         recommended_action=_action(item),
-        tile=None,
+        tile=p_tile,
         refs=_coerce_refs(item.get("refs")),
+        evidence_state=p_state,
         also_on=[
             ConflictLeg(
                 sheet_id=sid,
@@ -632,9 +716,10 @@ def _finding_from_handles(
                 source_id=g.ref.source_id,
                 page_index=g.ref.page_index,
                 source_quote=q,
-                tile=None,
+                tile=t,
+                evidence_state=st,
             )
-            for sid, q, g in legs
+            for sid, q, g, st, t in legs
         ],
     )
 
@@ -952,15 +1037,27 @@ def _parse_facts(
             if counts is not None:
                 counts.bump("facts_no_quote", geom)
             continue
-        if not _grounded(exact_quote, sheet_evidence_text(geom)):   # WP-03A
+        # WP-03B §8.3. Dropping facts from a textless sheet was the larger half
+        # of trigger 2: with no facts, that sheet never entered cross-shard
+        # reconciliation at all, so no conflict involving it could be found.
+        state = classify_quote_evidence(exact_quote, geom)
+        if state == EVIDENCE_NOT_MATCHED:
             if counts is not None:           # WP-02 §7.2: why, not just how many
-                counts.bump(
-                    "facts_ungrounded_quote_textless_sheet" if _sheet_is_textless(geom)
-                    else "facts_ungrounded_quote_text_bearing_sheet", geom)
-            continue
+                counts.bump("facts_ungrounded_quote_text_bearing_sheet", geom)
+            continue                         # still the hallucination signal
         if counts is not None:
-            counts.bump("facts_accepted", geom)
+            counts.bump(
+                "facts_accepted" if state == EVIDENCE_TEXT_GROUNDED
+                else "facts_admitted_no_text_evidence", geom)
         out.append(CrossQCFact(
+            # Resolved against THIS sheet's grid, as _validate_cross_item does.
+            # ``_resolve_tile`` prefers ``tile_label`` and bounds-checks it, so a
+            # bad label degrades to ``None`` (today's UNANCHORED), never a wrong
+            # rectangle.
+            tile=_resolve_tile(
+                item, getattr(geom, "rows", 0), getattr(geom, "cols", 0)
+            ),
+            evidence_state=state,
             sheet_handle=handle,
             sheet_id=sheet_id,
             discipline=discipline_by_handle.get(handle, ""),
@@ -990,9 +1087,14 @@ def _reconcile_call(
     if obj is None:
         claims = _resolve_claim_handles(parse_numeric_claims(raw), entry_by_handle)
         return [], claims, in_tok, out_tok, _NO_FINDINGS_OBJECT
+    # §8.4 Part 2: recover each returned leg's location from the fact its quote
+    # came from. Built over the facts THIS call was given, so a leg can only
+    # inherit a tile from evidence actually placed in front of the model.
+    lookup = fact_tile_lookup(facts)
     findings = _cap_findings([
         f for item in (obj.get("findings") or [])
-        if (f := _finding_from_handles(item, entry_by_handle, counts)) is not None
+        if (f := _finding_from_handles(item, entry_by_handle, counts, lookup))
+        is not None
     ], budget)
     claims = _resolve_claim_handles(parse_numeric_claims(raw), entry_by_handle)
     return findings, claims, in_tok, out_tok, None

@@ -155,6 +155,7 @@ from .core.api_config import (
     web_search_blocked_domains,
 )
 from .core.pricing import price_for
+from .models import is_reduced_trust
 
 # --------------------------------------------------------------------------- #
 # Report trust boundary (Phase 17, DA-011).
@@ -843,6 +844,18 @@ def _finding_row_html(
         f"<code>{html.escape(quote)}</code>" if quote
         else '<span class="muted">—</span>'
     )
+    # WP-03B §8.3: a quote the host could not check in text must not sit in this
+    # column looking like a corroborated one. The note rides the quote itself so
+    # it cannot drift from the string it qualifies. Rendered as a plain sibling
+    # rather than a new status chip: the chip vocabulary and ``_STATUS_RANK`` are
+    # consumed by the browser's sort, and evidence trust is an axis orthogonal to
+    # the anchor/verification triage state.
+    if is_reduced_trust(f):
+        quote_cell += (
+            '<div class="finding-evidence-note muted">'
+            "No searchable text on this sheet — not checked automatically"
+            "</div>"
+        )
     text_cell = _render_inline(text)
     action = (getattr(f, "recommended_action", "") or "").strip()
     if action:

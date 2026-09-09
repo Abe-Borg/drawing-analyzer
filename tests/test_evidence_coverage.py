@@ -31,7 +31,13 @@ from drawing_analyzer.cross_qc import (  # noqa: E402
     _sheet_is_textless,
     sheet_counter_key,
 )
-from drawing_analyzer.models import RenderedSheet, SheetGeometry, SheetRef  # noqa: E402
+from drawing_analyzer.models import (  # noqa: E402
+    EVIDENCE_TEXT_GROUNDED,
+    EVIDENCE_UNAVAILABLE,
+    RenderedSheet,
+    SheetGeometry,
+    SheetRef,
+)
 from drawing_analyzer.render import SHEET_TEXT_MAX_CHARS  # noqa: E402
 
 from measure_evidence_coverage import (  # noqa: E402
@@ -351,7 +357,7 @@ def test_discard_rate_joins_per_sheet_counts_onto_classification(tmp_path):
     ]
     completeness = {"discards": {"by_sheet": {
         "SRC-0001:p0": {"facts_ungrounded_quote_text_bearing_sheet": 2},
-        "SRC-0001:p1": {"facts_ungrounded_quote_textless_sheet": 7},
+        "SRC-0001:p1": {"facts_admitted_no_text_evidence": 7},
         "SRC-9999:p3": {"facts_no_quote": 1},
     }}}
     out = discard_rate_by_classification(cov, completeness)
@@ -359,7 +365,7 @@ def test_discard_rate_joins_per_sheet_counts_onto_classification(tmp_path):
     assert out["by_classification"]["vector"] == {
         "facts_ungrounded_quote_text_bearing_sheet": 2}
     assert out["by_classification"]["textless"] == {
-        "facts_ungrounded_quote_textless_sheet": 7}
+        "facts_admitted_no_text_evidence": 7}
     # A key with no matching sheet is surfaced, never silently folded in.
     assert out["unmatched_sheet_keys"] == ["SRC-9999:p3"]
     assert "unmatched_sheet_key" in out["by_classification"]
@@ -421,7 +427,13 @@ def test_sheet_is_textless_is_about_text_not_rasterness():
     assert _sheet_is_textless(_geom(words=[(0, 0, 1, 1, "x", 0, 0, 0)], text="x")) is False
 
 
-def test_ungrounded_leg_on_a_textless_sheet_is_counted_separately():
+def test_leg_on_a_textless_sheet_is_admitted_at_reduced_trust():
+    """WP-03B changed this deliberately: it used to be dropped.
+
+    A scanned sheet can never satisfy a text check, so silence there refutes
+    nothing. The leg is admitted carrying ``EVIDENCE_UNAVAILABLE`` and the
+    counter records an admission rather than a discard.
+    """
     entries = {**_entry("S001", text=""), **_entry("S002", text="PV-3 SERVES HALL 2")}
     counts = CrossQCDiscardCounts()
     item = {
@@ -429,10 +441,12 @@ def test_ungrounded_leg_on_a_textless_sheet_is_counted_separately():
         "sheet_handle": "S001", "source_quote": "TRANSCRIBED FROM PIXELS",
         "also_on": [{"sheet_handle": "S002", "source_quote": "PV-3 SERVES HALL 2"}],
     }
-    assert _finding_from_handles(item, entries, counts) is None
-    assert counts.legs_ungrounded_quote_textless_sheet == 1
+    finding = _finding_from_handles(item, entries, counts)
+    assert finding is not None, "a textless sheet is not a refutation (§8.3)"
+    assert finding.evidence_state == EVIDENCE_UNAVAILABLE
+    assert counts.legs_admitted_no_text_evidence == 1
     assert counts.legs_ungrounded_quote_text_bearing_sheet == 0
-    assert counts.findings_dropped_under_two_legs == 1
+    assert counts.findings_dropped_under_two_legs == 0
 
 
 def test_ungrounded_leg_on_a_text_bearing_sheet_is_counted_separately():
@@ -446,11 +460,16 @@ def test_ungrounded_leg_on_a_text_bearing_sheet_is_counted_separately():
     }
     _finding_from_handles(item, entries, counts)
     assert counts.legs_ungrounded_quote_text_bearing_sheet == 1
-    assert counts.legs_ungrounded_quote_textless_sheet == 0
+    assert counts.legs_admitted_no_text_evidence == 0
 
 
-def test_leg_without_a_quote_is_counted_as_accepted_unchecked():
-    """Trigger 3: the guard short-circuits, so this leg is trusted with no check."""
+def test_leg_without_a_quote_is_admitted_but_no_longer_trusted():
+    """Trigger 3, closed: a quoteless leg is admitted at REDUCED trust.
+
+    It used to short-circuit the guard entirely and be trusted as though it had
+    been checked. It is still admitted — dropping it would lose real conflicts —
+    but it now carries ``EVIDENCE_UNAVAILABLE`` like any other unverifiable leg.
+    """
     entries = {**_entry("S001", text="PV-3 SERVES HALL 2"),
                **_entry("S002", text="OTHER SHEET TEXT")}
     counts = CrossQCDiscardCounts()
@@ -476,7 +495,13 @@ def test_unresolved_handle_is_counted():
     assert counts.legs_unresolved_handle == 1
 
 
-def test_fact_discards_are_counted_by_reason():
+def test_fact_outcomes_are_counted_by_reason():
+    """WP-03B: a textless sheet now CONTRIBUTES a fact, at reduced trust.
+
+    Dropping it was the larger half of trigger 2 — with no facts, that sheet
+    never entered cross-shard reconciliation, so no conflict involving it could
+    be found at all.
+    """
     entries = {**_entry("S001", text=""), **_entry("S002", text="PV-3 SERVES HALL 2")}
     counts = CrossQCDiscardCounts()
     facts = _parse_facts({"facts": [
@@ -484,12 +509,15 @@ def test_fact_discards_are_counted_by_reason():
         {"sheet_handle": "S002", "exact_quote": "NOT ON THIS SHEET"},    # text-bearing
         {"sheet_handle": "S002", "exact_quote": ""},                     # no quote
         {"sheet_handle": "S404", "exact_quote": "whatever"},             # bad handle
-        {"sheet_handle": "S002", "exact_quote": "PV-3 SERVES HALL 2"},   # accepted
+        {"sheet_handle": "S002", "exact_quote": "PV-3 SERVES HALL 2"},   # grounded
     ]}, entries, {}, counts)
-    assert len(facts) == 1
-    assert counts.facts_ungrounded_quote_textless_sheet == 1
+    assert len(facts) == 2, "the textless sheet must reach reconciliation"
+    assert {f.evidence_state for f in facts} == {
+        EVIDENCE_UNAVAILABLE, EVIDENCE_TEXT_GROUNDED,
+    }
+    assert counts.facts_admitted_no_text_evidence == 1
     assert counts.facts_ungrounded_quote_text_bearing_sheet == 1
-    assert counts.facts_no_quote == 1
+    assert counts.facts_no_quote == 1        # useless to a quote-comparing reconciler
     assert counts.facts_unresolved_handle == 1
     assert counts.facts_accepted == 1
 
@@ -547,7 +575,7 @@ def test_discards_are_attributed_to_the_sheet_that_caused_them():
         {"sheet_handle": "S002", "exact_quote": "PV-3 SERVES HALL 2"},
     ]}, entries, {}, counts)
     by_sheet = counts.to_dict()["by_sheet"]
-    assert by_sheet["SRC-S001:p0"] == {"facts_ungrounded_quote_textless_sheet": 1}
+    assert by_sheet["SRC-S001:p0"] == {"facts_admitted_no_text_evidence": 1}  # noqa: E501
     assert by_sheet["SRC-S002:p0"] == {
         "facts_ungrounded_quote_text_bearing_sheet": 1, "facts_accepted": 1,
     }

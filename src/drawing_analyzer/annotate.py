@@ -102,6 +102,7 @@ from .models import (
     MarkupPlacement,
     MarkupReceipt,
     MarkupRunResult,
+    is_reduced_trust,
     leg_identity,
 )
 from .source_registry import assign_source_ids
@@ -138,6 +139,10 @@ _REJECTED_COLOR = (0.45, 0.45, 0.45)
 # ASCII only — the same strings must be safe on Base-14 ``insert_text`` pages.
 _TRUST_PREFIX = {"REJECTED": "[REJECTED] ", "UNVERIFIED": "[CHECK] "}
 _PLACE_PREFIX = {"SHEET": "[SHEET-WIDE]", "UNANCHORED": "[QUOTE NOT FOUND]"}
+#: WP-03B §8.3. Distinct from ``[QUOTE NOT FOUND]``, which means the quote
+#: SHOULD have been findable and was not — the hallucination signal. This one
+#: means there was nothing to search, so the reviewer's eyes are the only check.
+_NO_TEXT_EVIDENCE_PREFIX = "[NO TEXT TO CHECK]"
 _TRUST_NOTE = {
     "VERIFIED": "AI-verified against the drawing.",
     "DETERMINISTIC": "Found by an exact text check of the drawings - not an AI judgment.",
@@ -146,6 +151,14 @@ _TRUST_NOTE = {
     "REJECTED": "Rejected on AI re-check - kept for the record only.",
 }
 _TRUST_NOTE_UNVERIFIED = "Not yet verified - double-check on the sheet."
+# WP-03B §8.3: a finding standing on evidence the host could not check in text
+# (a scanned sheet, or the pasted raster region of a hybrid one) must not read
+# like a text-corroborated conflict. Said in plain words, on the drawing, where
+# the reviewer decides whether to trust it. ASCII only (base-14 fonts).
+_TRUST_NOTE_NO_TEXT_EVIDENCE = (
+    "No searchable text on this sheet - the quote could not be checked "
+    "automatically; confirm it visually."
+)
 _TRUST_NOTE_SINGLE_READ = "Not yet verified (seen in one AI read) - double-check on the sheet."
 # Arithmetic operand provenance (§17.5) overrides the generic note: the host
 # math is always deterministic, but only text-extracted operands make it
@@ -571,11 +584,27 @@ def _trust_note(finding: Finding, *, unverified: bool, rejected: bool) -> str:
     if origin == "MODEL_TRANSCRIBED":
         return _TRUST_NOTE_MODEL_TRANSCRIBED
     if unverified:
-        if not getattr(finding, "reproduced", True):
-            return _TRUST_NOTE_SINGLE_READ
-        return _TRUST_NOTE_UNVERIFIED
+        note = (
+            _TRUST_NOTE_SINGLE_READ
+            if not getattr(finding, "reproduced", True)
+            else _TRUST_NOTE_UNVERIFIED
+        )
+        return _with_evidence_reason(finding, note, status="")
     status = (v.status if v is not None else "") or ""
-    return _TRUST_NOTE.get(status, "")
+    return _with_evidence_reason(finding, _TRUST_NOTE.get(status, ""), status=status)
+
+
+def _with_evidence_reason(finding: Finding, note: str, *, status: str) -> str:
+    """Prepend WHY a reduced-trust finding could not be checked (WP-03B §8.3).
+
+    Prepended rather than replacing the verification sentence: both facts matter
+    to a reviewer. Skipped when a direct check already spoke — a VERIFIED crop
+    read or a DETERMINISTIC host computation is the stronger statement, and
+    saying "could not be checked automatically" beside it would be false.
+    """
+    if not is_reduced_trust(finding) or status in ("VERIFIED", "DETERMINISTIC"):
+        return note
+    return f"{_TRUST_NOTE_NO_TEXT_EVIDENCE} {note}".strip()
 
 
 def _citation_phrase(finding: Finding) -> str:
@@ -649,6 +678,8 @@ def _annot_content(
         _TRUST_PREFIX["UNVERIFIED"] if unverified else ""
     )
     prefix = _PLACE_PREFIX.get(place, "")
+    if is_reduced_trust(finding) and prefix != _PLACE_PREFIX["UNANCHORED"]:
+        prefix = f"{_NO_TEXT_EVIDENCE_PREFIX} {prefix}".strip()
     placement = f"{prefix} " if prefix else ""
     return f"{trust}{placement}{content}"
 

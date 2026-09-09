@@ -34,7 +34,7 @@ from collections import Counter
 from typing import Any, Iterable
 
 from . import tiling
-from .models import Anchor, Finding, source_page_key
+from .models import EVIDENCE_UNAVAILABLE, Anchor, Finding, source_page_key
 
 # A hyphen to fold to a space: only one sitting *between* two word characters
 # (``2-1/2"`` → ``2 1/2"``, ``VAV-3`` → ``VAV 3``). A leading/sign hyphen is
@@ -354,8 +354,23 @@ def _anchor_one(
         if anchor is not None:
             return anchor
 
-    # A non-empty quote that matches nothing is the hallucination signal — keep
-    # the finding but flag it; never cloud it by default.
+    # A non-empty quote that matches nothing is normally the hallucination
+    # signal — keep the finding but flag it; never cloud it by default.
+    #
+    # WP-03B §8.4 Part 3, the one exception: when the host recorded that NO
+    # textual check was possible for this leg (a scanned sheet, or the pasted
+    # raster region of a hybrid one), an unmatched quote is not evidence of
+    # fabrication — there was nothing to match against. Such a leg falls back to
+    # the tile the model reported, at the coarse-but-honest TILE tier, so it can
+    # reach the crop check and the investigation loop instead of dying
+    # UNANCHORED where nothing downstream can look at it.
+    #
+    # Deliberately NOT a general relaxation: EVIDENCE_NOT_MATCHED (text existed
+    # and the quote should have been findable) still returns quote_not_found, and
+    # so does every finding that carries no evidence state at all — the digest,
+    # critique and whole-set cross-QC paths are untouched.
+    if getattr(finding, "evidence_state", "") == EVIDENCE_UNAVAILABLE:
+        return _tile_anchor(tile, tile_rects, method="tile_no_text_evidence")
     return Anchor(status="UNANCHORED", rect_pdf=None, method="quote_not_found")
 
 
