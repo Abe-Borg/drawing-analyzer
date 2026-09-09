@@ -341,6 +341,44 @@ def test_spool_preserves_unavailable_as_unavailable(tmp_path):
         spool.close()
 
 
+def test_new_fields_are_appended_not_inserted():
+    """A public dataclass's positional order is part of its contract.
+
+    Inserting an optional field mid-list silently re-binds every positional
+    argument after it — an int count landing in a text field, a list landing in
+    a float. These prefixes are the field order as of the commit before WP-02,
+    frozen here so a future additive field goes on the END and this class of
+    break cannot recur unnoticed.
+    """
+    from dataclasses import fields
+
+    assert [f.name for f in fields(RenderedSheet)][:13] == [
+        "ref", "overview", "tiles", "page_width_pt", "page_height_pt", "rows",
+        "cols", "sheet_text", "words", "is_raster", "omitted_tiles",
+        "overlap_frac", "geometry",
+    ]
+    assert [f.name for f in fields(SheetGeometry)][:11] == [
+        "ref", "page_width_pt", "page_height_pt", "rows", "cols", "overlap_frac",
+        "words", "sheet_text", "is_raster", "geometry", "omitted_tile_count",
+    ]
+
+
+def test_positional_construction_still_binds_the_same_fields():
+    """The concrete break: build positionally and check where values land."""
+    from drawing_analyzer.models import ImageTile
+
+    tile = ImageTile(png_bytes=b"", width_px=1, height_px=1, kind="overview")
+    sheet = RenderedSheet(
+        _ref("s.pdf"), tile, [], W, H, 6, 6, "capped", [], False,
+        [(0, 1)], 0.08, None,            # omitted_tiles, overlap_frac, geometry
+    )
+    assert sheet.omitted_tiles == [(0, 1)]
+    assert sheet.overlap_frac == 0.08
+    assert sheet.geometry is None
+    assert sheet.full_sheet_text is None     # not clobbered by a shifted arg
+    assert sheet.text_chars_total is None
+
+
 def test_prescan_geometry_carries_the_uncapped_text(tmp_path):
     """The level-1 / cache-hit path must supply evidence too, not just rendering.
 

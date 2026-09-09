@@ -295,8 +295,6 @@ class RenderedSheet:
     sheet_text: str = ""
     words: list[Any] = field(default_factory=list)
     is_raster: bool = False
-    full_sheet_text: "str | None" = None
-    text_chars_total: "int | None" = None
     omitted_tiles: list[tuple[int, int]] = field(default_factory=list)
     overlap_frac: float = 0.08  # mirrors tiling.DEFAULT_OVERLAP_FRAC
     # Canonical geometry + transforms (Phase 19). ``page_width_pt`` /
@@ -306,6 +304,12 @@ class RenderedSheet:
     # needs. Defaults to ``None`` so hand-built sheets (older callers, tests) keep
     # working — a ``None`` geometry means an identity transform (un-rotated page).
     geometry: "PageGeometry | None" = None
+    # Appended AFTER every pre-existing field, deliberately: this is a public
+    # dataclass, and inserting a field mid-list silently re-binds every
+    # positional argument after it — an int count landing in a text field, say.
+    # New optional fields go on the end, always.
+    full_sheet_text: "str | None" = None
+    text_chars_total: "int | None" = None
 
     @property
     def image_sizes(self) -> list[tuple[int, int]]:
@@ -429,13 +433,6 @@ class SheetGeometry:
     words: list[Any] = field(default_factory=list)
     sheet_text: str = ""
     is_raster: bool = False
-    # Uncapped reading-order text for host-side source checks only — never sent
-    # to a model; see :class:`RenderedSheet`. ``None`` = unavailable, which is not
-    # the same as an empty extraction (:func:`sheet_evidence_text`).
-    full_sheet_text: "str | None" = None
-    # Length of the text layer before the ``sheet_text`` cap — a count, never the
-    # text; see :class:`RenderedSheet`. ``None`` = not recorded, not zero.
-    text_chars_total: "int | None" = None
     # PAGE_VIEW_V2 geometry + transforms (Phase 19); see :class:`RenderedSheet`.
     geometry: "PageGeometry | None" = None
     # Phase 26A (§18.2): how many blank tiles the render omitted for this sheet
@@ -443,6 +440,14 @@ class SheetGeometry:
     # recorded — a level-1 cache hit never re-rendered, so the count is unknown
     # there, and the run.log must say so rather than claim zero.
     omitted_tile_count: "int | None" = None
+    # Appended after every pre-existing field — see :class:`RenderedSheet`.
+    # Uncapped reading-order text for host-side source checks only, never sent
+    # to a model. ``None`` = unavailable, which is not the same as an empty
+    # extraction (:func:`sheet_evidence_text`).
+    full_sheet_text: "str | None" = None
+    # Length of the text layer before the ``sheet_text`` cap — a count, never
+    # the text. ``None`` = not recorded, not zero.
+    text_chars_total: "int | None" = None
 
     @classmethod
     def from_rendered(cls, rendered: "RenderedSheet") -> "SheetGeometry":
