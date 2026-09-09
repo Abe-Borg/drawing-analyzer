@@ -1853,6 +1853,29 @@ tree. Item 7 was half-satisfied: the cost dialog already priced the batch spec
 path correctly and said so; only the help text was silent, so only the help text
 changed.
 
+**Item 10 was written up wrong on the first pass, and review caught it.** The
+first draft of the WP-07 documentation said the >20-image regime was
+"scale-invariant" and "cap-dominated". §2.6 says neither: it lists the render
+**target** among the variables that move the count, and states plainly that the
+largest possible image at 1560 px is 3,245 tokens against a 4,784 cap, so
+nothing clamps. Dropping the target from that list inverted the guidance on the
+single highest-leverage cost knob in the app. Re-measured through
+`cost.estimate_image_tokens_for_bases` on an E-size vector sheet at 6×6, Opus 5:
+1400 px = 0.806×, 1240 px = 0.632×, 1100 px = 0.498× — quadratic in the target
+to three decimals, and matching the percentages already in `README.md`'s env-var
+table. The invariance that does hold is to the page's **physical size** (48×36
+in, 24×18 in and 12×9 in all cost 90,276 tokens), which is the claim §2.6 is
+making. The corrected text now names what it is invariant *to*, since
+"scale-invariant" alone is what allowed the misreading.
+
+**Item 7's first draft understated the cached-spec cost.** "Paying for the specs
+roughly once" is wrong by an order of magnitude: real-time is one 1.25× write
+plus 0.1× per remaining sheet, so 100 sheets is ~11 copies, not ~1 (and more
+under concurrency, since each sheet in flight before the first response pays a
+write). Batch is ~50 copies across the same 100 sheets — half a copy each, not a
+full one, because batch input is half rate. The help text now carries both
+figures.
+
 `PRICING_EFFECTIVE_DATE` is deliberately untouched, per this section's own
 instruction: this document being newer is not evidence about the rate table.
 

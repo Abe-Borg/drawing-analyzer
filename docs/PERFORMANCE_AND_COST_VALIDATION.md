@@ -330,21 +330,42 @@ Judgement (owner-reviewed against the previous release's recorded medians):
   | | >20 images (a sheet: overview + 36 tiles) | ≤20 images |
   |---|---|---|
   | oversized image | **rejected** outright | silently downscaled |
-  | render target | `TARGET_LONG_EDGE_PX_DEFAULT` (vector) / `TARGET_LONG_EDGE_PX_RASTER` (raster), both a margin under the hard 2000 px cap | `TARGET_LONG_EDGE_PX_FEW_IMAGES` = 2576, the full Opus native long edge |
-  | token cost | **scale-invariant** — set by aspect ratio, grid, overlap and model tier | **cap-dominated** — every image is already at or above the per-model cap, so the count is the cap |
+  | render target | 1560 px vector / 1992 px raster, both a margin under the hard 2000 px cap | 2576 px, the full Opus native long edge |
+  | per-image cost vs the cap | **under it** — a square tile at 1560 px costs 3,245 of the 4,784 tokens allowed | **over it** — a 4:3 image at 2576 px works out to 6,636, so it clamps |
+  | what moves the token count | page **aspect ratio**, the grid, overlap — and the **render target, quadratically** | nothing you can set: the count is the cap |
 
   The 2576 branch is deliberate policy, not an oversight: at ≤20 images an
   oversized image is downscaled rather than rejected, so no safety margin is
   needed and an off-by-one there is harmless. It is also why `--estimate` and
   the GUI preview behave differently on a one-sheet job than on a set.
 
-  Scale-invariance in the >20 regime is the counter-intuitive half. Raising the
-  render target does **not** raise the token count once every image already
-  clamps at the model cap (4784 tokens hi-res, 1568 standard); what moves the
-  count is the *shape* of the page and the grid drawn on it. That is why
-  `cost.estimate_image_tokens_for_bases` needs only two facts per page — aspect
-  ratio, and whether the page has words — and why the correction against the
-  conservative allowance is ~1.9× on a vector E-size sheet.
+  **The render target is the highest-leverage cost knob, and only in the >20
+  regime.** Nothing clamps there, so image tokens go as the square of the
+  target. Measured through `cost.estimate_image_tokens_for_bases` on an E-size
+  vector sheet at the shipped 6×6 grid, Opus 5:
+
+  | `DRAWING_ANALYZER_TILE_TARGET_PX` | image tokens | vs default | (t/1560)² |
+  |---|---|---|---|
+  | 1560 (default) | 90,276 | 1.000 | 1.000 |
+  | 1400 | 72,723 | 0.806 | 0.805 |
+  | 1240 | 57,062 | 0.632 | 0.632 |
+  | 1100 | 44,914 | 0.498 | 0.497 |
+
+  Quadratic to three decimals. Whether a lower target still *reads* the drawing
+  is a separate, unanswered question — which is what the A/B harness is for.
+
+  **The invariance that does hold is to the page's physical size**, and it is a
+  different claim from the one above. Rendering normalizes every page to the
+  target long edge, so two pages of the same aspect ratio cost the same
+  regardless of how big they are on paper: an E-size 48×36 in sheet, a 24×18 in
+  half-size print of it, and a 12×9 in reduction all come to 90,276 tokens.
+  That is exactly why `cost.estimate_image_tokens_for_bases` needs only two
+  facts per page — aspect ratio, and whether the page has words — and why the
+  correction against the conservative allowance is ~1.9× on a vector E-size
+  sheet. An earlier revision of this note called the >20 regime
+  "scale-invariant" without saying invariant to *what*, and a reader would
+  reasonably have taken it to mean the render target — the opposite of the
+  measurement above, on the one number most worth tuning.
 
   `DRAWING_ANALYZER_TILE_TARGET_PX` overrides the **vector** target only. The
   raster target is deliberately not overridable — on a sheet with no text layer

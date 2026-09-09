@@ -71,11 +71,17 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     truncation, before the findings cap became loss-aware), and the README now
     warns against reading that number as the record of either change.
   - **Attached spec documents are priced differently per transport, and the help
-    text now says so.** Real-time modes cache the spec block after the first
-    sheet or two; batch mode sets no breakpoint, so every sheet bills the whole
-    block as ordinary input at the batch rate. On a large set that is the
-    difference between paying for the specs about once and paying once per sheet.
-    The cost dialog already stated this correctly; only the help text did not.
+    text now gives the real arithmetic.** Real-time caches the block behind a
+    breakpoint; batch sets none, so every sheet bills the whole block as ordinary
+    input at the batch discount. The first draft of this help text said real-time
+    meant paying "roughly once", which understates it by an order of magnitude:
+    across 100 sheets real-time comes to about **11** copies of the spec text
+    (one 1.25× write plus 0.1× for each remaining sheet, and more when several
+    sheets go out before the first response lands, since each pays a write),
+    while batch comes to about **50** (half a copy each). So the spec block alone
+    runs 4–5× more in Economy mode on a large set, even though Economy is cheaper
+    overall for the drawings. The cost dialog already stated the mechanism
+    correctly; only the help text did not.
 
   Four review items needed no change, verified rather than assumed: the three
   text representations and their consumers are already documented with `words`
