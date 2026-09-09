@@ -1715,6 +1715,51 @@ target policy.
 - No raw environment secret appears in console, JSON, or Markdown/text comparison
   output.
 
+### 11.6 Implementation notes (WP-06b, recorded after building §11.2/§11.3)
+
+Five things the specification left open, and how they were resolved.
+
+**1. What "identity" means in this codebase.** §11.2 puts wording differences in
+tier 2, but a finding's identity here is *quote-anchored*: `compute_finding_id`
+hashes quote-or-text, so two records with the same verbatim on-sheet quote and a
+differently-worded description are the same finding by the system's own
+definition. Tier 1 therefore accepts them — guarded by the critical-signature
+check, which is what catches a rewording that changed a quantity, a tag, or an
+absence polarity — and sets `text_changed` so the reviewer is told. Demoting
+every rewording to tier 2 would have filled the candidate list with the most
+common benign difference there is and buried the real ones.
+
+**2. The compatibility rule had to be made public.** §11.2's "compatible
+critical attributes" is exactly `critique._signatures_compatible`, which was
+private. It is now `critique.critical_signature` (data) +
+`critique.signatures_compatible` (the rule), with the private helper delegating.
+Reimplementing it in the harness was the obvious path and the wrong one: this
+harness already restated `RunUsage.is_billable_but_unpriced` once and the two
+copies disagreed within a commit.
+
+**3. The `Finding.id` collision is asserted, not assumed.** The plan states that
+two conflicts sharing a primary quote with different legs collide on one id.
+`test_finding_id_collides_on_different_legs_but_identity_does_not` asserts the
+collision *still exists* before checking that the comparison identity separates
+them — so if `compute_finding_id` ever starts hashing legs, the test fails loudly
+instead of quietly protecting against a gap that closed.
+
+**4. Ambiguity needs connected components, not per-record degree.** Checking
+"does this base record have exactly one candidate" is not enough: a chain
+b1–v1–b2 gives v1 two claimants while b2 has only one, and a degree test would
+pair b2 with v1 and leave b1 unmatched — an arbitrary choice presented as a
+result. The matcher takes connected components of the bipartite candidate graph
+and resolves only 1:1 components; anything else is reported as ambiguous with
+every record named. Same discipline as `cross_qc.fact_tile_lookup`: a collision
+loses rather than picks.
+
+**5. A flat count is a note, not a concern.** §11.3 asks for both the count-drop
+signal and the flat-count caution. Implemented as one `concerns` entry and one
+`notes` entry respectively, because the flat case is the *most ordinary outcome
+there is* — firing a concern on it every run would train an operator to skim the
+concern list, which is the only part of the report that must never be skimmed.
+`clean_screen` and `screen_result` are driven by concerns only.
+
 ## 12. WP-07: repository documentation and focused editing
 
 Update `README.md`, `CLAUDE.md`, `docs/PERFORMANCE_AND_COST_VALIDATION.md`,

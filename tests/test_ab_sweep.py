@@ -15,10 +15,20 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from ab_sweep_drawing_analyzer import (  # noqa: E402
+    VALIDITY_COMPARABLE,
+    VALIDITY_NOT_COMPARABLE,
+    VALIDITY_QUALIFIED,
+    RECORDS_MISSING,
+    RECORDS_PRESENT,
+    RECORDS_UNREADABLE,
     _parse_env,
     _pct_delta,
     _tally,
+    _findings_path,
+    comparison_validity,
     diff_summaries,
+    load_arm_records,
+    write_arm_records,
     render_diff,
     summarize_run,
 )
@@ -53,11 +63,28 @@ class _Finding:
         self.sources = ["critique"] if sources is _UNSET else sources
 
 
+class _SheetRef:
+    def __init__(self, source_id, page_index):
+        self.source_id = source_id
+        self.source_name = "set.pdf"
+        self.page_index = page_index
+
+
+class _Sheet:
+    def __init__(self, source_id="SRC-0001", page_index=0, ok=True):
+        self.ref = _SheetRef(source_id, page_index)
+        self.ok = ok
+
+
 class _Ctx:
-    def __init__(self, findings, *, cost=1.0, in_tok=1000, out_tok=100):
+    def __init__(self, findings, *, cost=1.0, in_tok=1000, out_tok=100,
+                 sheets=None):
         self.all_findings = findings
-        self.sheet_count = 4
-        self.ok_sheet_count = 4
+        # Four pages of one source unless a test cares which ones were read.
+        self.sheets = ([_Sheet(page_index=i) for i in range(4)]
+                       if sheets is None else sheets)
+        self.sheet_count = len(self.sheets)
+        self.ok_sheet_count = sum(1 for s in self.sheets if s.ok)
         self.errors = []
         self.qc_status = "COMPLETE"
         self.coverage_status = "COMPLETE"
@@ -207,7 +234,13 @@ def test_screen_catches_the_quiet_failure_of_simply_finding_less():
 
     assert d["verdict"]["clean_screen"] is False
     assert "finding count fell" in concerns
-    assert "missed findings" in concerns
+    # WP-06 §11.3: the screen raises the drop as a REVIEW REQUIREMENT and must
+    # not claim it proves defects went unseen — it cannot tell missed defects
+    # from removed noise, changed dedup, or run-to-run variance, and asserting
+    # the first is how a legitimate noise reduction gets rejected.
+    assert "REVIEW REQUIRED" in concerns
+    assert "findings_diff.json" in concerns
+    assert "missed findings, not cleaner ones" not in concerns
     # And note the rates alone would NOT have caught it:
     assert d["verification"]["VERIFIED"]["delta"] == -10
 
@@ -1221,3 +1254,261 @@ def test_an_explicit_default_overlap_pair_is_rejected_end_to_end(monkeypatch):
     monkeypatch.setattr("ab_sweep_drawing_analyzer.subprocess.run", _explode)
     with pytest.raises(SystemExit):
         main(["--pdf", __file__, "--variant-overlap", "0.08", "--estimate"])
+
+
+# --------------------------------------------------------------------------- #
+# WP-06 §11.3 — comparison validity and evidence-trust composition
+# --------------------------------------------------------------------------- #
+
+
+class _TrustFinding(_Finding):
+    """A fake finding that also carries WP-03B grounding state and legs."""
+
+    def __init__(self, *, evidence_state="", legs=(), **kw):
+        super().__init__(**kw)
+        self.evidence_state = evidence_state
+        self.also_on = [_Leg(s) for s in legs]
+
+
+class _Leg:
+    def __init__(self, evidence_state=""):
+        self.evidence_state = evidence_state
+
+
+def test_clean_arms_are_comparable_and_may_claim_a_saving():
+    base, var = _arms([_Finding() for _ in range(10)],
+                      [_Finding() for _ in range(10)])
+    v = comparison_validity(base, var)
+    assert v["status"] == VALIDITY_COMPARABLE
+    assert v["savings_claim_allowed"] is True
+    assert v["blocking"] == [] and v["qualifiers"] == []
+
+
+def test_a_failed_arm_never_gets_a_comparable_savings_verdict():
+    """A cheaper arm that did not finish is not a cheaper way to do the work.
+
+    This is the misreading that actually gets acted on: the failed arm's total
+    is genuinely lower, every rate looks fine, and adopting it ships a variant
+    that cannot complete a run.
+    """
+    base, var = _arms([_Finding() for _ in range(10)],
+                      [_Finding() for _ in range(10)],
+                      base_cost=10.0, var_cost=2.0)
+    var["qc_status"] = "FAILED"
+    v = comparison_validity(base, var)
+
+    assert v["status"] == VALIDITY_NOT_COMPARABLE
+    assert v["savings_claim_allowed"] is False
+    assert any("FAILED" in b for b in v["blocking"])
+
+    d = diff_summaries(base, var)
+    concerns = " ".join(d["verdict"]["concerns"])
+    assert "NOT comparable" in concerns
+    assert "not a saving" in concerns
+    report = render_diff(d, base_label="base", var_label="var")
+    assert "COMPARISON VALIDITY: NOT_COMPARABLE" in report
+    assert "is NOT a saving" in report
+
+
+def test_fewer_sheets_read_blocks_comparison():
+    """Fewer sheets read is a smaller job, not a cheaper one."""
+    base = summarize_run(_Ctx([_Finding()]))
+    var = summarize_run(_Ctx([_Finding()], sheets=[
+        _Sheet(page_index=0), _Sheet(page_index=1),
+        _Sheet(page_index=2, ok=False), _Sheet(page_index=3, ok=False),
+    ]))
+    v = comparison_validity(base, var)
+    assert v["status"] == VALIDITY_NOT_COMPARABLE
+    assert any("different populations" in b for b in v["blocking"])
+
+
+def test_equal_sheet_counts_over_different_sheets_still_blocks():
+    """The count is not the population.
+
+    Baseline reads {p0, p1, p2}, variant reads {p0, p1, p3} — one transient
+    failure each, which is ordinary on a two-arm run. Both report ok_sheets=3,
+    so a count check passes. Every finding on p2 then reads as something the
+    variant missed and every finding on p3 as something it found, attributing a
+    population difference to the tested model or geometry change.
+    """
+    base = summarize_run(_Ctx([_Finding()], sheets=[
+        _Sheet(page_index=0), _Sheet(page_index=1),
+        _Sheet(page_index=2), _Sheet(page_index=3, ok=False),
+    ]))
+    var = summarize_run(_Ctx([_Finding()], sheets=[
+        _Sheet(page_index=0), _Sheet(page_index=1),
+        _Sheet(page_index=2, ok=False), _Sheet(page_index=3),
+    ]))
+    assert base["ok_sheets"] == var["ok_sheets"] == 3      # the count agrees
+
+    v = comparison_validity(base, var)
+    assert v["status"] == VALIDITY_NOT_COMPARABLE
+    assert v["savings_claim_allowed"] is False
+    blocking = " ".join(v["blocking"])
+    assert "different populations" in blocking
+    assert "only in baseline: SRC-0001:p2" in blocking
+    assert "only in variant: SRC-0001:p3" in blocking
+
+
+def test_identical_sheet_populations_do_not_block():
+    base, var = _arms([_Finding()], [_Finding()])
+    assert base["ok_sheet_ids"] == var["ok_sheet_ids"]
+    assert comparison_validity(base, var)["status"] == VALIDITY_COMPARABLE
+
+
+def test_a_summary_without_sheet_ids_falls_back_to_the_count():
+    """An arm summary written before ``ok_sheet_ids`` existed still compares.
+
+    Additive serialization: an older payload keeps working, at the weaker check
+    it was always getting, rather than silently skipping the check entirely.
+    """
+    base, var = _arms([_Finding()], [_Finding()])
+    del base["ok_sheet_ids"]
+    var["ok_sheets"] = 2
+    v = comparison_validity(base, var)
+    assert v["status"] == VALIDITY_NOT_COMPARABLE
+    assert any("successfully-read sheets differ" in b for b in v["blocking"])
+
+
+def test_missing_cost_data_blocks_the_comparison_in_both_directions():
+    base, var = _arms([_Finding()], [_Finding()])
+    var["estimated_cost_usd"] = None
+    v = comparison_validity(base, var)
+    assert v["status"] == VALIDITY_NOT_COMPARABLE
+    assert v["savings_claim_allowed"] is False
+
+
+def test_partial_arm_is_qualified_not_silently_comparable():
+    """PARTIAL is a caveat that must ride with every number, not a blocker.
+
+    Collapsing it into NOT_COMPARABLE would put most real sweeps in the
+    unreadable bucket, which is how a validity field stops being read at all.
+    """
+    base, var = _arms([_Finding()], [_Finding()])
+    var["qc_status"] = "PARTIAL"
+    v = comparison_validity(base, var)
+    assert v["status"] == VALIDITY_QUALIFIED
+    assert v["savings_claim_allowed"] is False
+    assert any("PARTIAL" in q for q in v["qualifiers"])
+
+
+def test_unpriced_records_qualify_the_total_as_a_floor():
+    base, var = _arms([_Finding()], [_Finding()])
+    var["usage_axes"] = {"unpriced_records": 3, "by_outcome": {}}
+    v = comparison_validity(base, var)
+    assert v["status"] == VALIDITY_QUALIFIED
+    assert any("floor, not a total" in q for q in v["qualifiers"])
+
+
+def test_summary_reports_evidence_trust_composition():
+    s = summarize_run(_Ctx([
+        _TrustFinding(evidence_state="TEXT_GROUNDED", verify="VERIFIED"),
+        _TrustFinding(evidence_state="TEXT_EVIDENCE_UNAVAILABLE",
+                      verify="UNCERTAIN",
+                      legs=("TEXT_EVIDENCE_UNAVAILABLE",)),
+    ]))
+    trust = s["evidence_trust"]
+    assert trust["units"] == 3                   # 2 findings + 1 leg
+    assert trust["grounded_verified_units"] == 1
+    assert trust["reduced_trust_unverified_units"] == 2
+
+
+def test_an_arm_cannot_be_called_equivalent_on_count_alone():
+    """Same count, same severity mix — different evidence underneath.
+
+    §11.3: an arm whose finding count held up on reduced-trust, unverified legs
+    is not equivalent to one that was text-grounded and verified. Every
+    aggregate table in this report shows these two arms as identical.
+    """
+    base = [_TrustFinding(evidence_state="TEXT_GROUNDED", verify="VERIFIED")
+            for _ in range(10)]
+    var = [_TrustFinding(evidence_state="TEXT_EVIDENCE_UNAVAILABLE",
+                         verify="UNCERTAIN") for _ in range(10)]
+    b, v = _arms(base, var)
+    assert b["findings_total"] == v["findings_total"]
+    assert b["findings_by_severity"] == v["findings_by_severity"]
+
+    d = diff_summaries(b, v)
+    concerns = " ".join(d["verdict"]["concerns"])
+    assert "reduced-trust unverified evidence rose" in concerns
+    assert "not equivalent" in concerns
+    assert d["evidence_trust"]["by_state"]["TEXT_GROUNDED"]["delta"] == -10
+
+    report = render_diff(d, base_label="base", var_label="var")
+    assert "evidence trust (per grounded unit)" in report
+    assert "grounded AND verified" in report
+
+
+def test_a_flat_count_is_a_note_not_a_concern():
+    """The most ordinary outcome must not fill the concern list.
+
+    It still gets said — a flat total can hide one real issue replaced by one
+    false positive — but as a note, so "a signal degraded" stays a rare event.
+    """
+    findings = [_Finding() for _ in range(10)]
+    d = diff_summaries(*_arms(findings, [_Finding() for _ in range(10)]))
+    assert d["verdict"]["clean_screen"] is True
+    assert d["verdict"]["screen_result"] == "NO_CONCERNS_DETECTED"
+    notes = " ".join(d["verdict"]["notes"])
+    assert "NOT evidence the same issues were found" in notes
+    assert "findings_diff.json" in notes
+
+
+def test_screen_result_has_no_approval_value():
+    """"No concerns detected" must stay distinct from "quality approved"."""
+    d = diff_summaries(*_arms([_Finding()], [_Finding()]))
+    assert d["verdict"]["screen_result"] == "NO_CONCERNS_DETECTED"
+    report = render_diff(d, base_label="base", var_label="var")
+    assert "NOT an approval" in report
+    # No spelling of "approved" anywhere: the screen has no value that means it,
+    # and a reader skimming for one must not find a word that looks like it.
+    assert "approve" not in report.lower().replace("not an approval", "")
+    assert "screen found nothing" in report
+
+
+def test_findings_sidecar_sits_beside_its_arm_summary(tmp_path):
+    assert _findings_path(tmp_path / "arm_baseline.json").name == \
+        "arm_baseline_findings.json"
+
+
+def test_a_missing_or_corrupt_sidecar_reports_its_status_not_just_emptiness(tmp_path):
+    """An empty list cannot say whether the sidecar was read.
+
+    Missing, unreadable and "read fine, no findings" all hand back ``[]``. If
+    the caller can only see the list, a missing baseline sidecar turns every
+    variant record into a one-sided difference — a comparison result
+    manufactured out of a failed file read — so the status is returned beside
+    the records rather than inferred from them.
+    """
+    arm = tmp_path / "arm_baseline.json"
+    assert load_arm_records(arm) == (RECORDS_MISSING, [])
+
+    _findings_path(arm).write_text("{not json", encoding="utf-8")
+    assert load_arm_records(arm) == (RECORDS_UNREADABLE, [])
+
+    # Valid JSON, wrong shape: still unreadable, not "an arm with no findings".
+    _findings_path(arm).write_text('["nope"]', encoding="utf-8")
+    assert load_arm_records(arm) == (RECORDS_UNREADABLE, [])
+
+    # Read fine, genuinely no findings — distinct from every case above.
+    _findings_path(arm).write_text('{"records": []}', encoding="utf-8")
+    assert load_arm_records(arm) == (RECORDS_PRESENT, [])
+
+    _findings_path(arm).write_text('{"records": [{"finding_id": "abc"}]}',
+                                   encoding="utf-8")
+    assert load_arm_records(arm) == (RECORDS_PRESENT, [{"finding_id": "abc"}])
+
+
+def test_the_records_envelope_round_trips_between_the_child_and_the_parent(tmp_path):
+    """The writer runs in the arm child, the reader in the parent.
+
+    Two hand-written JSON literals across a process boundary is exactly where a
+    key rename goes unnoticed: the parent would report "no records" for an arm
+    that produced hundreds, and the finding-level comparison would silently
+    become a no-op on a run that already cost real money.
+    """
+    arm = tmp_path / "arm_variant.json"
+    records = [{"finding_id": "abc123", "identity_key": "deadbeef"}]
+    written = write_arm_records(arm, records)
+    assert written == _findings_path(arm)
+    assert load_arm_records(arm) == (RECORDS_PRESENT, records)

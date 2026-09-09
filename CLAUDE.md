@@ -273,8 +273,11 @@ both the submitted batch and the one that actually served the digests.
 - ***`ledger.py` is the exclusive findings container*** (Part III §16): every
   channel ingests into it with source tags. Dedup is conservative and lossless
   (Phase 20 §12): a tile/rect overlap is never sufficient — merges need semantic
-  sameness with **compatible critical signatures** (`_signatures_compatible`:
-  tags, measurements, absence polarity, cross-sheet legs); merging keeps
+  sameness with **compatible critical signatures** (`critique.signatures_compatible`
+  over `critique.critical_signature`: tags, measurements, absence polarity,
+  cross-sheet legs — public because the A/B harness's finding-level comparison
+  applies the same rule across two runs, and a restated copy is the drift this
+  codebase has already paid for once); merging keeps
   **coherent grounding** (the text/quote/tile bundle is atomic, from one
   representative chosen by a total quality order; the loser's quote → the new
   `supporting_quotes`), unions `sources`, keeps most-severe severity, and

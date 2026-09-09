@@ -483,26 +483,55 @@ def _leg_targets(f: Finding) -> frozenset:
     )
 
 
-def _signatures_compatible(a: Finding, b: Finding) -> bool:
+def critical_signature(f: Finding) -> dict:
+    """The critical attributes §12.1 refuses to merge across, as plain data.
+
+    Extracted so the *rule* below and any out-of-process consumer (the A/B
+    harness's finding-level comparison, WP-06 §11.2) share one implementation.
+    A second copy of a signature rule is the failure mode this codebase has
+    already paid for once: the harness reimplemented
+    ``RunUsage.is_billable_but_unpriced`` and the two drifted within a commit.
+
+    Values are sorted lists, not sets, so the record is JSON-serializable and
+    byte-stable across runs (I-7).
+    """
+    return {
+        "tags": sorted(_tags(f)),
+        "measurements": sorted(_measurements(f)),
+        "absence": _is_absence(f),
+        "leg_targets": sorted(_leg_targets(f)),
+    }
+
+
+def signatures_compatible(a: dict, b: dict) -> bool:
     """False when a critical signature conflicts — the merge is then blocked (§12.1).
 
     Conservative: a conflict needs both findings to carry the signal and disagree
     on it (disjoint tag sets, disjoint measurement sets, or opposite absence
     polarity). A signal present in only one finding never blocks — "keep both" is
     the safe error, but so is "don't over-block a real duplicate".
+
+    Takes two :func:`critical_signature` records rather than two findings, so a
+    consumer that only has stored signatures (a finished arm's JSON, a cached
+    payload) applies the same rule the live merge does.
     """
-    ta, tb = _tags(a), _tags(b)
+    ta, tb = set(a.get("tags") or ()), set(b.get("tags") or ())
     if ta and tb and ta.isdisjoint(tb):
         return False                       # different equipment / drawing refs
-    ma, mb = _measurements(a), _measurements(b)
+    ma, mb = set(a.get("measurements") or ()), set(b.get("measurements") or ())
     if ma and mb and ma.isdisjoint(mb):
         return False                       # different quantities
-    if _is_absence(a) != _is_absence(b):
+    if bool(a.get("absence")) != bool(b.get("absence")):
         return False                       # "shown" vs "not shown"
-    la, lb = _leg_targets(a), _leg_targets(b)
+    la, lb = set(a.get("leg_targets") or ()), set(b.get("leg_targets") or ())
     if la and lb and la != lb:
         return False                       # same quote, different cross-sheet legs
     return True
+
+
+def _signatures_compatible(a: Finding, b: Finding) -> bool:
+    """The §12.1 rule over two live findings (see :func:`signatures_compatible`)."""
+    return signatures_compatible(critical_signature(a), critical_signature(b))
 
 
 def _categories_compatible(a: Finding, b: Finding) -> bool:
