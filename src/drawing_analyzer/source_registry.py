@@ -247,6 +247,35 @@ def content_changed(doc: "SourceDocument") -> str:
     return ""       # stat drifted (e.g. touch) but bytes are identical → fine
 
 
+def sources_fingerprint(paths: "Iterable[os.PathLike[str] | str]") -> tuple:
+    """Identity of a set of files **as they are on disk right now** (WP-05 §10.3).
+
+    Path, size and mtime — one ``stat`` per file, not a content hash. Hashing is
+    the stronger check and the wrong trade for a cost preview: it is O(bytes) on
+    every Analyze click, which is exactly the wait the confirmation-time design
+    exists to avoid, and the pipeline re-hashes for the level-1 cache anyway.
+    This mirrors the stat fast-gate :func:`current_content_sha256` already uses.
+
+    Its purpose is to notice a file **overwritten in place** — re-exporting a set
+    over the same filenames is ordinary practice, and a selection-generation
+    counter cannot see it. A rewrite preserving both size and ``mtime_ns`` would
+    slip through; nothing short of hashing catches that, and it is not a case a
+    cost preview needs to be exact about.
+
+    An unreadable file contributes ``(path, None, None)`` rather than raising, so
+    a set containing one still produces a comparable fingerprint.
+    """
+    out = []
+    for path in paths or []:
+        path = Path(path)
+        try:
+            st = path.stat()
+            out.append((str(path), st.st_size, st.st_mtime_ns))
+        except OSError:
+            out.append((str(path), None, None))
+    return tuple(out)
+
+
 def current_content_sha256(
     path: "os.PathLike[str] | str",
     snapshot: "tuple[str, int, int] | None" = None,

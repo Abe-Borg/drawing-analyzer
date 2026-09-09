@@ -78,8 +78,18 @@ deriving the same records from geometry the preflight already built takes 0.4 ms
 not sheet count). So `profiles.preflight_scan` returns sheet ids *and*
 `SheetCostBasis` records from one walk, the GUI holds them under the same
 generation guard the profile suggestions use, and `estimate_*_cost(bases=…)`
-uses them **only when they cover every sheet** — a partial scan falls back
+uses them **only when they cover every sheet** — a partial *list* falls back
 whole, since a total mixing measured and conservative sheets is neither figure.
+Covering every sheet is not measuring every sheet: a page that could not be read
+still takes the conservative allowance inside an otherwise measured set, so
+`shape_aware` comes from `ImageTokenEstimate.fully_measured` (never list length)
+and the dialog names the count that fell back rather than claiming either
+extreme. Bases are also gated on `source_registry.sources_fingerprint` — path +
+size + mtime per file, re-checked at consumption — because the generation counter
+tracks *selection* changes and cannot see a PDF overwritten in place, which is
+ordinary when re-exporting a set to the same filenames. That gate is what makes
+the ordering safe too: `_add_pdfs` refreshes the summary before the preflight
+clears the previous selection's bases.
 `pipeline.estimate_image_tokens_for_set` remains the deliberately conservative
 allowance — every image a square at the *raster* target, at the model cap — and
 its public meaning is unchanged. `cost.estimate_image_tokens_for_bases` is the

@@ -316,3 +316,190 @@ def test_the_preflight_scan_makes_no_api_call(sample_pdf, monkeypatch):
 
     monkeypatch.setattr("drawing_analyzer.client.get_client", _explode)
     assert len(preflight_scan([sample_pdf]).cost_bases) == 3
+
+
+# --------------------------------------------------------------------------- #
+# Review round: the label must match what was actually measured
+# --------------------------------------------------------------------------- #
+
+
+def test_one_unreadable_page_stops_the_measured_claim():
+    """`estimate_image_tokens_for_bases` already substitutes the conservative
+    allowance for a page it cannot read — which is right, and better than
+    discarding a whole scan over one bad page. But the resulting figure is then
+    only *partly* measured, and the dialog's "based on each page's measured size"
+    would be false for that page.
+
+    `ImageTokenEstimate.fully_measured` is the honest predicate; deriving the
+    label from list length alone was the defect.
+    """
+    from drawing_analyzer.models import CLASSIFICATION_UNKNOWN
+
+    mixed = bases(9) + [
+        SheetCostBasis(source_name="set.pdf", page_index=9, width_pt=0.0,
+                       height_pt=0.0, classification=CLASSIFICATION_UNKNOWN,
+                       geometry_ok=False, error="could not measure page")
+    ]
+    est = estimate_drawing_set_cost(10, model=OPUS, bases=mixed)
+    assert est.shape_aware is False
+    assert est.unmeasured_pages == 1
+    # ...and the number still uses the nine pages it could measure.
+    assert est.image_tokens < estimate_drawing_set_cost(10, model=OPUS).image_tokens
+
+
+def test_a_partly_measured_set_says_so_rather_than_claiming_either_extreme():
+    """Three states, each true of what it describes."""
+    from drawing_analyzer.models import CLASSIFICATION_UNKNOWN
+
+    mixed = bases(9) + [
+        SheetCostBasis(source_name="set.pdf", page_index=9, width_pt=0.0,
+                       height_pt=0.0, classification=CLASSIFICATION_UNKNOWN,
+                       geometry_ok=False)
+    ]
+    text = format_drawing_cost_prompt(
+        estimate_drawing_set_cost(10, model=OPUS, batch=False, bases=mixed)
+    )
+    assert "except 1 page(s) that could not be read" in text
+    # Neither of the two absolute claims.
+    assert "Conservative planning estimate" not in text
+    assert text.count("Based on each page's measured size and text layer.") == 0
+
+
+def test_the_exhaustive_dialog_reports_the_partial_case_too():
+    from drawing_analyzer.models import CLASSIFICATION_UNKNOWN
+
+    mixed = bases(9) + [
+        SheetCostBasis(source_name="set.pdf", page_index=9, width_pt=0.0,
+                       height_pt=0.0, classification=CLASSIFICATION_UNKNOWN,
+                       geometry_ok=False)
+    ]
+    text = format_exhaustive_cost_prompt(
+        estimate_exhaustive_run_cost(10, model=OPUS, batch=False, bases=mixed)
+    )
+    assert "except 1 page(s) that could not be read" in text
+
+
+def test_a_fully_measured_set_still_claims_it():
+    est = estimate_drawing_set_cost(10, model=OPUS, bases=bases(10))
+    assert est.shape_aware is True and est.unmeasured_pages == 0
+    assert "measured size and text layer." in format_drawing_cost_prompt(est)
+
+
+# --------------------------------------------------------------------------- #
+# Review round: bases must describe the files as they are on disk NOW
+# --------------------------------------------------------------------------- #
+
+
+def test_the_fingerprint_gate_and_the_summary_refresh_are_wired():
+    """`gui.py` is unimportable here and in CI (needs tkinter + the gui extras),
+    so this reads the source. Stated limits, same as the staleness tests above:
+    it pins that both estimate call sites go through the validity gate and that
+    the summary re-renders once bases land, and it would not catch a defect in
+    what the gate itself computes — which is why `_sources_fingerprint` is
+    exercised directly below.
+    """
+    import ast
+
+    src = Path(__file__).resolve().parent.parent / "src" / "drawing_analyzer" / "gui.py"
+    text = src.read_text(encoding="utf-8")
+    tree = ast.parse(text)
+
+    # Every consumer goes through the gate; none reads the raw attribute.
+    gate_calls = sum(
+        1 for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "_usable_preflight_bases"
+    )
+    assert gate_calls >= 2, "both the summary and the confirmation must use the gate"
+
+    apply_fn = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "_apply_profile_suggestions"
+    )
+    assert any(
+        isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+        and n.func.attr == "_refresh_summary"
+        for n in ast.walk(apply_fn)
+    ), "installing bases must refresh the summary, or the measured figure only appears by accident"
+
+
+def test_a_rewritten_file_changes_the_fingerprint(tmp_path):
+    """The case the generation counter cannot see: same selection, new bytes.
+
+    Re-exporting a set over the same filenames is ordinary practice, and the old
+    bases would otherwise price the previous revision while the dialog claimed to
+    have measured the current pages.
+
+    Lives in `source_registry`, not `gui`, precisely so it can be executed rather
+    than read: it is pure path/stat logic with no widget in it, and the first
+    version of this test could not run at all because `gui.py` needs `tkinter`.
+    """
+    import os
+    import time
+
+    from drawing_analyzer.source_registry import sources_fingerprint
+
+    pdf = tmp_path / "set.pdf"
+    pdf.write_bytes(b"%PDF-1.7\nfirst revision\n")
+    before = sources_fingerprint([pdf])
+
+    pdf.write_bytes(b"%PDF-1.7\nsecond revision, longer\n")
+    later = time.time_ns() + 1_000_000_000
+    os.utime(pdf, ns=(later, later))
+    assert sources_fingerprint([pdf]) != before
+
+
+def test_a_same_size_rewrite_is_still_caught_by_mtime(tmp_path):
+    """The interesting half: a re-export with byte-identical length.
+
+    Page count is unchanged too, so nothing upstream of this notices — which is
+    exactly why the length check alone was insufficient.
+    """
+    import os
+    import time
+
+    from drawing_analyzer.source_registry import sources_fingerprint
+
+    pdf = tmp_path / "set.pdf"
+    pdf.write_bytes(b"%PDF-1.7\nrevision A\n")
+    before = sources_fingerprint([pdf])
+    pdf.write_bytes(b"%PDF-1.7\nrevision B\n")   # same length
+    later = time.time_ns() + 1_000_000_000
+    os.utime(pdf, ns=(later, later))
+    after = sources_fingerprint([pdf])
+    assert before[0][1] == after[0][1], "precondition: identical size"
+    assert before != after
+
+
+def test_an_unchanged_file_keeps_its_fingerprint(tmp_path):
+    """The gate must not reject a set nobody touched — that would make the
+    measured path unreachable in practice."""
+    from drawing_analyzer.source_registry import sources_fingerprint
+
+    pdf = tmp_path / "set.pdf"
+    pdf.write_bytes(b"%PDF-1.7\n")
+    assert sources_fingerprint([pdf]) == sources_fingerprint([pdf])
+
+
+def test_a_deleted_or_unreadable_file_still_fingerprints(tmp_path):
+    """It must not raise: a set containing one bad file still needs comparing."""
+    from drawing_analyzer.source_registry import sources_fingerprint
+
+    pdf = tmp_path / "set.pdf"
+    pdf.write_bytes(b"%PDF-1.7\n")
+    before = sources_fingerprint([pdf])
+    pdf.unlink()
+    after = sources_fingerprint([pdf])
+    assert after != before
+    assert after == ((str(pdf), None, None),)
+
+
+def test_reordering_or_adding_files_changes_the_fingerprint(tmp_path):
+    from drawing_analyzer.source_registry import sources_fingerprint
+
+    a, b = tmp_path / "a.pdf", tmp_path / "b.pdf"
+    a.write_bytes(b"%PDF-1.7\na\n")
+    b.write_bytes(b"%PDF-1.7\nbb\n")
+    assert sources_fingerprint([a, b]) != sources_fingerprint([b, a])
+    assert sources_fingerprint([a]) != sources_fingerprint([a, b])

@@ -204,25 +204,34 @@ def estimate_image_tokens_for_bases(
 
 def _image_tokens_for(
     sheet_count: int, bases, *, rows: int, cols: int, model: str,
-) -> tuple[int, bool]:
-    """``(image_tokens, shape_aware)`` — real shapes when we have them.
+) -> tuple[int, bool, int]:
+    """``(image_tokens, shape_aware, unmeasured_pages)`` — real shapes where we have them.
 
     One resolver so the standard and exhaustive estimators cannot disagree about
     when the geometry-aware number applies. ``bases`` is used only when it covers
-    **every** sheet being priced: a partial scan mixed with a conservative
+    **every** sheet being priced: a partial *list* mixed with a conservative
     remainder would be neither figure, and which sheets were missing would not be
     visible in the total.
+
+    Covering every sheet is not the same as measuring every sheet.
+    :func:`estimate_image_tokens_for_bases` already substitutes the conservative
+    allowance for a page it could not classify or could not measure — which is
+    right, and strictly better than discarding the whole scan over one bad page.
+    But the resulting number is then only *partly* measured, and
+    ``shape_aware`` must say so: it is the flag both dialogs use to claim
+    "based on each page's measured size", and that claim would be false for the
+    page that fell back. ``ImageTokenEstimate.fully_measured`` is the honest
+    predicate, and the count of pages that fell back rides along so the dialog
+    can name it rather than silently downgrading a nearly-complete scan.
     """
     if bases and len(bases) == sheet_count and sheet_count > 0:
-        return (
-            estimate_image_tokens_for_bases(
-                bases, rows=rows, cols=cols, model=model
-            ).tokens,
-            True,
+        est = estimate_image_tokens_for_bases(
+            bases, rows=rows, cols=cols, model=model
         )
+        return est.tokens, est.fully_measured, est.unknown_pages
     return estimate_image_tokens_for_set(
         sheet_count, rows=rows, cols=cols, model=model
-    ), False
+    ), False, 0
 
 
 @dataclass(frozen=True)
@@ -236,10 +245,13 @@ class DrawingCostEstimate:
     total_cost: float | None  # None when the model's pricing is unknown
     batch: bool = False  # estimate reflects the 50% Batch-API discount
     spec_chars: int = 0  # uploaded project-specifications char count, if any
-    #: True when image tokens came from each page's measured shape rather than
-    #: the conservative allowance. Additive and defaulted, so an older caller's
-    #: construction still loads.
+    #: True only when EVERY page's image tokens came from its measured shape.
+    #: Additive and defaulted, so an older caller's construction still loads.
     shape_aware: bool = False
+    #: Pages that fell back to the conservative allowance inside an otherwise
+    #: measured set (unreadable, or unclassifiable). 0 on a fully conservative
+    #: estimate too — read it together with ``shape_aware``.
+    unmeasured_pages: int = 0
 
 
 def estimate_drawing_set_cost(
@@ -280,7 +292,7 @@ def estimate_drawing_set_cost(
     # was quoted right in one mode and wrong in the other — the mode a standard
     # run actually uses being the wrong one.
     stage_models = resolve_stage_models(model=model)
-    image_tokens, shape_aware = _image_tokens_for(
+    image_tokens, shape_aware, unmeasured = _image_tokens_for(
         sheet_count, bases, rows=rows, cols=cols, model=model
     )
     digest_output = sheet_count * _ASSUMED_OUTPUT_TOKENS_PER_SHEET
@@ -338,6 +350,7 @@ def estimate_drawing_set_cost(
         batch=batch,
         spec_chars=spec_chars,
         shape_aware=shape_aware,
+        unmeasured_pages=unmeasured,
     )
 
 
@@ -355,8 +368,22 @@ _BASIS_CONSERVATIVE = (
 )
 
 
-def _basis_line(shape_aware: bool) -> str:
-    return _BASIS_MEASURED if shape_aware else _BASIS_CONSERVATIVE
+#: The middle case: the scan covered the set, but some pages could not be read
+#: or classified and took the conservative allowance. Saying "measured" would be
+#: false for those pages; saying "not measured yet" would throw away a nearly
+#: complete scan and quote much higher than the evidence supports.
+_BASIS_PARTLY_MEASURED = (
+    "Based on each page's measured size and text layer, except {n} page(s) that "
+    "could not be read — those use the conservative allowance."
+)
+
+
+def _basis_line(shape_aware: bool, unmeasured: int = 0) -> str:
+    if shape_aware:
+        return _BASIS_MEASURED
+    if unmeasured > 0:
+        return _BASIS_PARTLY_MEASURED.format(n=unmeasured)
+    return _BASIS_CONSERVATIVE
 
 
 def format_drawing_cost_prompt(est: DrawingCostEstimate) -> str:
@@ -373,7 +400,7 @@ def format_drawing_cost_prompt(est: DrawingCostEstimate) -> str:
         "",
         f"Estimated usage: ~{est.input_tokens:,} input tokens "
         f"(~{est.image_tokens:,} from images) / ~{est.output_tokens:,} output.",
-        _basis_line(est.shape_aware),
+        _basis_line(est.shape_aware, est.unmeasured_pages),
     ]
     if est.spec_chars:
         # WP-04 §9.2. The old line promised a ~0.1x prompt-cache read on BOTH
@@ -524,8 +551,10 @@ class ExhaustiveCostEstimate:
     #: Critique reads per sheet, as the runtime resolver reported them (§10.2).
     #: Defaulted to the shipping value so an older caller's construction loads.
     critique_runs: int = 2
-    #: True when image tokens came from each page's measured shape (§10.4).
+    #: True only when EVERY page's image tokens came from its measured shape.
     shape_aware: bool = False
+    #: Pages that fell back to the conservative allowance inside a measured set.
+    unmeasured_pages: int = 0
 
 
 @dataclass(frozen=True)
@@ -757,10 +786,10 @@ def estimate_exhaustive_run_cost(
 
     # Set totals, priced with each stage's own model — the same PNG dimensions
     # clamp at a different per-model cap, so one count cannot serve both (§2.4).
-    digest_set_images, shape_aware = _image_tokens_for(
+    digest_set_images, shape_aware, unmeasured = _image_tokens_for(
         sheet_count, bases, rows=rows, cols=cols, model=model
     )
-    crit_set_images, _ = _image_tokens_for(
+    crit_set_images, _, _ = _image_tokens_for(
         sheet_count, bases, rows=rows, cols=cols, model=stage_models.critique
     )
     components: list[CostComponent] = []
@@ -992,6 +1021,7 @@ def estimate_exhaustive_run_cost(
         batch=batch, critique_batch=critique_batch, spec_chars=spec_chars,
         critique_runs=runs,
         shape_aware=shape_aware,
+        unmeasured_pages=unmeasured,
         stage_models=stage_models,
     )
 
@@ -1019,7 +1049,7 @@ def format_exhaustive_cost_prompt(est: ExhaustiveCostEstimate) -> str:
         "deterministic auditors, prose harvest, verification, the uncertain-"
         "finding investigation loop, and citation checks.",
         "",
-        _basis_line(est.shape_aware),
+        _basis_line(est.shape_aware, est.unmeasured_pages),
         "",
         "Estimated cost by stage:",
     ]
