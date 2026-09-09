@@ -45,6 +45,16 @@ from tempfile import TemporaryDirectory
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "src"))
+# ``tests/fixtures`` owns the transport stand-ins every hermetic fake needs
+# (streaming responses, the ``beta.messages`` namespace). This benchmark reuses
+# them rather than keeping its own copies — see ``OfflineClient``.
+if str(REPO_ROOT / "tests") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "tests"))
+
+from fixtures.fake_anthropic import (  # noqa: E402
+    BetaClientMixin,
+    FinalMessageStream,
+)
 
 _PAGE_W, _PAGE_H = 792.0, 612.0
 
@@ -119,8 +129,29 @@ class _Blocks:
             self.usage = _Blocks.Usage(i, o)
 
 
-class OfflineClient:
-    """Answers every stage with small valid output; counts digest/critique calls."""
+class OfflineClient(BetaClientMixin):
+    """Answers every stage with small valid output; counts digest/critique calls.
+
+    **Must expose the same transport surface production reaches for**, not just
+    ``messages.create``. Two changes landed after this fake was written and it
+    tracked neither, so every scenario failed identically and the gate reported
+    app regressions ("cached run still rasterized", "expected exactly 1 digest
+    call, got 0") that were nothing of the kind:
+
+    - ``digest.stream_message`` issues **every** digest/critique/review-plan/
+      synthesis/focus request over ``messages.stream``, unconditionally — not
+      only above the ~21k cap. A fake with only ``create`` is never called.
+    - ``core.api_config.call_with_refusal_fallback`` re-routes every Opus-5
+      real-time call through ``client.beta.messages``. Without that attribute
+      the pipeline raised ``'OfflineClient' object has no attribute 'beta'``,
+      which I-3 caught per sheet — so the run "succeeded" with zero digests,
+      zero tokens and every sheet in ``ctx.errors``.
+
+    :class:`BetaClientMixin` and :class:`FinalMessageStream` come from
+    ``tests/fixtures/fake_anthropic.py`` deliberately: a benchmark fake that
+    reimplements the transport is a fake that drifts from it again, silently,
+    and the failure mode is a green-looking gate measuring nothing.
+    """
 
     def __init__(self) -> None:
         self.digest_calls = 0
@@ -128,6 +159,9 @@ class OfflineClient:
         outer = self
 
         class _Msgs:
+            def stream(_self, **kw):  # noqa: ANN001, ANN202
+                return FinalMessageStream(_self.create(**kw))
+
             def create(_self, **kw):  # noqa: ANN001, ANN202
                 from drawing_analyzer.citation_check import CITATION_SYSTEM_PROMPT
                 from drawing_analyzer.critique import CRITIQUE_SYSTEM_PROMPT

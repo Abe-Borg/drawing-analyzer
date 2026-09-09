@@ -434,6 +434,38 @@ Judgement (owner-reviewed against the previous release's recorded medians):
 | Gates above all checked | ☐ |
 | Owner sign-off on regressions/tolerances | |
 
+### Benchmark medians — 8 sheets, 5 repeats, offline (WP-08)
+
+Commit `c086f1c`, Linux 6.18.44 / x86_64, Python 3.11.15, PyMuPDF 1.28.2,
+SDK 1.4.0. `Mechanical gates: PASS`.
+
+| scenario | median wall (s) | mechanical assertion | notes |
+|---|---:|---|---|
+| standard-cold | 3.161 | — | 8 digest calls, 8 renders, 8 hashes |
+| standard-warm | **0.030** | 0 API calls, 0 renders | 8 cache hits |
+| one-source-changed | 0.417 | exactly 1 digest call | 1 render |
+| exhaustive-cold | 3.191 | — | qc_status PARTIAL, coverage COMPLETE |
+| corrupt-partial | 3.190 | — | ok_sheets 8, errors 1 (the corrupt input) |
+
+Peak RSS 189.0 MB. The warm run is ~105× faster than cold and touches neither
+the API nor the rasterizer — the property the gate exists to protect.
+
+**These are fake-client timings.** They measure host-side work only: the offline
+client answers by system-prompt identity and never reads the model id, so
+nothing here says anything about model latency, findings quality, or cost.
+
+They are also the **first** numbers this gate has produced that describe the
+application at all. Before WP-08 every scenario failed identically because the
+benchmark's fake client had not tracked two transport changes — unconditional
+streaming through `digest.stream_message`, and the Opus-5 refusal fallback's
+re-route through `client.beta.messages`. Every sheet raised
+`'OfflineClient' object has no attribute 'beta'`, I-3 caught it per sheet, and
+the run finished with zero digests while the gate reported what looked like app
+regressions ("cached run still rasterized", "expected exactly 1 digest call, got
+0"). `tests/test_benchmark_harness.py` now fails the moment the fake stops being
+reached, asserting that work was *done* rather than that particular attributes
+exist — production is free to rename those, which was the whole problem.
+
 ### Confirmation-time cost scan — the measurement (WP-05 §10.3)
 
 ```bash
