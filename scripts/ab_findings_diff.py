@@ -41,6 +41,18 @@ from pathlib import Path
 # Record building
 # --------------------------------------------------------------------------- #
 
+#: How an arm's record sidecar came back. Kept as three values, never folded
+#: into "did we get a list": an arm that legitimately found nothing and an arm
+#: whose sidecar never arrived both hand back an empty list, and the difference
+#: decides whether the other arm's records are *differences* or merely the only
+#: half of the comparison that survived.
+RECORDS_PRESENT = "PRESENT"
+RECORDS_MISSING = "MISSING"
+RECORDS_UNREADABLE = "UNREADABLE"
+
+COMPARISON_COMPLETE = "COMPLETE"
+COMPARISON_INCOMPLETE = "INCOMPLETE"
+
 #: Bumped whenever the record shape changes in a way a reader must notice.
 #: Arm JSON from an older harness still loads (every consumer uses ``.get``),
 #: but a comparison across contract versions is announced rather than assumed.
@@ -443,7 +455,10 @@ def _components(pairs, base_ids, var_ids):
     return out
 
 
-def match_records(base_records: list[dict], variant_records: list[dict]) -> dict:
+def match_records(
+    base_records: list[dict], variant_records: list[dict], *,
+    base_status: str = RECORDS_PRESENT, variant_status: str = RECORDS_PRESENT,
+) -> dict:
     """Match two arms' finding records with the three deterministic tiers.
 
     Tier 1 (``exact``) — equal identity **and** compatible critical signatures,
@@ -457,6 +472,16 @@ def match_records(base_records: list[dict], variant_records: list[dict]) -> dict
     Tier 3 — ``unmatched_base`` / ``unmatched_variant`` / ``ambiguous``. Nothing
     is deleted and nothing is guessed; an ambiguous group names every record in
     it and stays unresolved.
+
+    ``base_status`` / ``variant_status`` say whether each arm's records actually
+    arrived. They do not change the matching — the records present are matched
+    either way — but they set ``comparison_status``, because an unmatched bucket
+    means two entirely different things depending on them. With both sides
+    ``PRESENT``, "17 only in variant" is a real one-sided difference. With the
+    baseline sidecar missing, the same 17 are simply every record the surviving
+    arm produced, and reporting that as a difference invents a result out of an
+    I/O failure. The status rides the JSON, not just the rendered text: a reader
+    opening ``findings_diff.json`` on its own must not have to infer it.
     """
     base_records = list(base_records or [])
     variant_records = list(variant_records or [])
@@ -604,8 +629,17 @@ def match_records(base_records: list[dict], variant_records: list[dict]) -> dict
         pair_count + len(unmatched_b) + amb_b == len(base_records)
         and pair_count + len(unmatched_v) + amb_v == len(variant_records)
     )
+    incomplete = [
+        f"{label} records are {status}"
+        for label, status in (("baseline", base_status), ("variant", variant_status))
+        if status != RECORDS_PRESENT
+    ]
     return {
         "contract_version": RECORD_CONTRACT_VERSION,
+        "comparison_status": (COMPARISON_INCOMPLETE if incomplete
+                              else COMPARISON_COMPLETE),
+        "record_status": {"base": base_status, "variant": variant_status},
+        "incomplete_reasons": incomplete,
         "counts": counts,
         "exact": exact,
         "candidates": candidates,
@@ -676,6 +710,18 @@ def render_findings_diff(match: dict, *, base_label: str, var_label: str) -> str
         f"    base:    {base_label}",
         f"    variant: {var_label}",
         "",
+    ]
+    incomplete = match.get("comparison_status") == COMPARISON_INCOMPLETE
+    if incomplete:
+        lines += ["    [INCOMPLETE] " + "; ".join(match.get("incomplete_reasons")
+                                                  or ["records unavailable"]),
+                  "    The rows below are NOT one-sided differences. They are the "
+                  "records that",
+                  "    survived; the other arm's are unknown, not absent. Nothing "
+                  "here supports",
+                  "    a claim that either arm found or missed anything.",
+                  ""]
+    lines += [
         f"    {'exact matches':<34}{c.get('exact', 0):>6}",
         f"    {'candidates (human review)':<34}{c.get('candidates', 0):>6}",
         f"    {'only in baseline':<34}{c.get('unmatched_base', 0):>6}",
@@ -735,8 +781,14 @@ def render_findings_diff(match: dict, *, base_label: str, var_label: str) -> str
     lines += [
         "",
         "    Only 'exact' means the same finding. A candidate is a pointer for a",
-        "    reviewer, never an equivalence; unmatched records are the result, not",
-        "    noise. Equal totals with unmatched records on both sides means the",
-        "    arms swapped findings, which every aggregate table reads as no change.",
+        "    reviewer, never an equivalence.",
     ]
+    lines += ([
+        "    Because this comparison is INCOMPLETE, the unmatched rows are not a",
+        "    result: re-run the arm whose records are missing before reading them.",
+    ] if incomplete else [
+        "    Unmatched records are the result, not noise. Equal totals with",
+        "    unmatched records on both sides means the arms swapped findings,",
+        "    which every aggregate table reads as no change.",
+    ])
     return "\n".join(lines)

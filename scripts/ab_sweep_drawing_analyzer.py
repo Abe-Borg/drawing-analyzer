@@ -112,6 +112,9 @@ if str(_REPO_SCRIPTS) not in sys.path:
 
 from ab_findings_diff import (  # noqa: E402
     RECORD_CONTRACT_VERSION,
+    RECORDS_MISSING,
+    RECORDS_PRESENT,
+    RECORDS_UNREADABLE,
     copy_linked_artifacts,
     evidence_trust_composition,
     finding_records,
@@ -275,6 +278,19 @@ def summarize_run(ctx) -> dict:
     return {
         "sheets": ctx.sheet_count,
         "ok_sheets": ctx.ok_sheet_count,
+        # WP-06 §11.3. The COUNT of successfully-read sheets is not the
+        # population: baseline reading {A, C} and variant reading {B, C} both
+        # report 2, and every finding on A then looks like something the variant
+        # missed while every finding on B looks like something it found — a
+        # population difference presented as a result of the tested change. One
+        # transient failure per arm is enough to produce it, which makes it
+        # ordinary rather than exotic. Path-free (SRC id, or the basename when a
+        # source predates DA-001) so the record stays portable.
+        "ok_sheet_ids": sorted({
+            f"{getattr(s.ref, 'source_id', '') or getattr(s.ref, 'source_name', '')}"
+            f":p{getattr(s.ref, 'page_index', 0)}"
+            for s in (getattr(ctx, "sheets", None) or []) if getattr(s, "ok", False)
+        }),
         "errors": len(ctx.errors),
         "qc_status": ctx.qc_status,
         "coverage_status": ctx.coverage_status,
@@ -416,6 +432,18 @@ VALIDITY_QUALIFIED = "QUALIFIED"
 VALIDITY_NOT_COMPARABLE = "NOT_COMPARABLE"
 
 
+#: How many sheet ids a blocking reason names before it stops listing them. A
+#: reason a reader cannot finish is a reason they skip; the full sets are in
+#: each arm's ``ok_sheet_ids``.
+_SHEET_LIST_CAP = 8
+
+
+def _sheet_list(ids: list[str]) -> str:
+    shown = ", ".join(ids[:_SHEET_LIST_CAP])
+    extra = len(ids) - _SHEET_LIST_CAP
+    return shown + (f" (+{extra} more)" if extra > 0 else "")
+
+
 def comparison_validity(base: dict, var: dict) -> dict:
     """Can these two arms be compared, and may a cost delta be called a saving?
 
@@ -457,7 +485,26 @@ def comparison_validity(base: dict, var: dict) -> dict:
     if base.get("sheets") != var.get("sheets"):
         blocking.append(f"sheet counts differ ({base.get('sheets')} vs "
                         f"{var.get('sheets')}) — different inputs, not a variant")
-    if base.get("ok_sheets") != var.get("ok_sheets"):
+    # Identities when both arms recorded them, the count only as the fallback
+    # for an arm summary written before ``ok_sheet_ids`` existed. Equal counts
+    # over different sheets is the case the count alone cannot see, and it is
+    # the one that quietly turns a population difference into a finding
+    # difference.
+    base_ids, var_ids = base.get("ok_sheet_ids"), var.get("ok_sheet_ids")
+    if isinstance(base_ids, list) and isinstance(var_ids, list):
+        only_base = sorted(set(base_ids) - set(var_ids))
+        only_var = sorted(set(var_ids) - set(base_ids))
+        if only_base or only_var:
+            blocking.append(
+                "the arms successfully read different sheets, so their findings "
+                "come from different populations and neither the cost nor the "
+                "finding-level comparison is attributable to the tested change"
+                + (f" — only in baseline: {_sheet_list(only_base)}" if only_base
+                   else "")
+                + (f" — only in variant: {_sheet_list(only_var)}" if only_var
+                   else "")
+            )
+    elif base.get("ok_sheets") != var.get("ok_sheets"):
         blocking.append(
             f"successfully-read sheets differ ({base.get('ok_sheets')} vs "
             f"{var.get('ok_sheets')}) — the arms reviewed different populations, "
@@ -958,22 +1005,32 @@ def _run_arm_in_process(
     out_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
 
-def load_arm_records(arm_json: Path) -> list[dict]:
-    """Read one arm's finding records, tolerating an arm that produced none.
+def load_arm_records(arm_json: Path) -> tuple[str, list[dict]]:
+    """Read one arm's finding records as ``(status, records)``.
 
-    A missing or unreadable sidecar yields ``[]`` rather than raising: the
-    aggregate comparison is still worth printing, and the finding-level section
-    says plainly that it had nothing to compare (§11.3 — a comparison that
-    could not run must not look like a comparison that found nothing).
+    The status is returned rather than inferred from the list, because the list
+    cannot carry it: an arm that legitimately found nothing and an arm whose
+    sidecar never arrived both produce ``[]``, and treating those as the same
+    thing is the §11.3 failure one layer down. If the baseline's sidecar is
+    missing, every record the variant produced would otherwise be rendered as a
+    one-sided difference — a comparison result manufactured out of an I/O
+    failure — and if both arms genuinely found nothing, a comparison that ran
+    perfectly would be reported as one that never ran.
+
+    A missing or unreadable sidecar still yields ``[]`` rather than raising: the
+    aggregate comparison is worth printing either way, and a run that already
+    cost real money must not be thrown away over a file read.
     """
     path = _findings_path(arm_json)
     if not path.is_file():
-        return []
+        return RECORDS_MISSING, []
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return []
-    return list(payload.get("records") or [])
+        return RECORDS_UNREADABLE, []
+    if not isinstance(payload, dict) or "records" not in payload:
+        return RECORDS_UNREADABLE, []
+    return RECORDS_PRESENT, list(payload.get("records") or [])
 
 
 def run_arm(
@@ -1305,9 +1362,10 @@ def main(argv: list[str] | None = None) -> int:
                   exhaustive=args.exhaustive, overlap_frac=variant.overlap_frac)
 
     diff = diff_summaries(base, var)
-    base_records = load_arm_records(args.out / "arm_baseline.json")
-    var_records = load_arm_records(args.out / "arm_variant.json")
-    match = match_records(base_records, var_records)
+    base_status, base_records = load_arm_records(args.out / "arm_baseline.json")
+    var_status, var_records = load_arm_records(args.out / "arm_variant.json")
+    match = match_records(base_records, var_records,
+                          base_status=base_status, variant_status=var_status)
     # Redacted: ``diff.txt`` is written to disk and shared, and the arm env is
     # whatever the user typed on the command line — which can include a key.
     # ``ArmSpec.label`` names the overlap too, so a geometry-only experiment is
@@ -1315,17 +1373,13 @@ def main(argv: list[str] | None = None) -> int:
     base_label = baseline.label()
     var_label = variant.label()
     report = render_diff(diff, base_label=base_label, var_label=var_label)
-    if base_records or var_records:
-        report += "\n\n" + render_findings_diff(
-            match, base_label=base_label, var_label=var_label
-        ) + "\n\n" + "=" * 72
-    else:
-        report += (
-            "\n\n  FINDING-LEVEL COMPARISON\n"
-            "    Neither arm wrote finding records, so no finding-level "
-            "comparison ran.\n"
-            "    This is not the same as finding no differences.\n\n" + "=" * 72
-        )
+    # Always rendered, whatever the record statuses are: the renderer itself
+    # says whether the comparison was complete. Branching on "did we get a
+    # non-empty list" was the bug — two arms that genuinely found nothing were
+    # reported as two arms that wrote no records.
+    report += "\n\n" + render_findings_diff(
+        match, base_label=base_label, var_label=var_label
+    ) + "\n\n" + "=" * 72
     print("\n" + report)
 
     (args.out / "diff.json").write_text(json.dumps(diff, indent=2), encoding="utf-8")

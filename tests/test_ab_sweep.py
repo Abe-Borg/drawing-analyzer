@@ -18,6 +18,9 @@ from ab_sweep_drawing_analyzer import (  # noqa: E402
     VALIDITY_COMPARABLE,
     VALIDITY_NOT_COMPARABLE,
     VALIDITY_QUALIFIED,
+    RECORDS_MISSING,
+    RECORDS_PRESENT,
+    RECORDS_UNREADABLE,
     _parse_env,
     _pct_delta,
     _tally,
@@ -60,11 +63,28 @@ class _Finding:
         self.sources = ["critique"] if sources is _UNSET else sources
 
 
+class _SheetRef:
+    def __init__(self, source_id, page_index):
+        self.source_id = source_id
+        self.source_name = "set.pdf"
+        self.page_index = page_index
+
+
+class _Sheet:
+    def __init__(self, source_id="SRC-0001", page_index=0, ok=True):
+        self.ref = _SheetRef(source_id, page_index)
+        self.ok = ok
+
+
 class _Ctx:
-    def __init__(self, findings, *, cost=1.0, in_tok=1000, out_tok=100):
+    def __init__(self, findings, *, cost=1.0, in_tok=1000, out_tok=100,
+                 sheets=None):
         self.all_findings = findings
-        self.sheet_count = 4
-        self.ok_sheet_count = 4
+        # Four pages of one source unless a test cares which ones were read.
+        self.sheets = ([_Sheet(page_index=i) for i in range(4)]
+                       if sheets is None else sheets)
+        self.sheet_count = len(self.sheets)
+        self.ok_sheet_count = sum(1 for s in self.sheets if s.ok)
         self.errors = []
         self.qc_status = "COMPLETE"
         self.coverage_status = "COMPLETE"
@@ -1290,10 +1310,61 @@ def test_a_failed_arm_never_gets_a_comparable_savings_verdict():
     assert "is NOT a saving" in report
 
 
-def test_mismatched_retained_sheet_population_blocks_comparison():
+def test_fewer_sheets_read_blocks_comparison():
     """Fewer sheets read is a smaller job, not a cheaper one."""
+    base = summarize_run(_Ctx([_Finding()]))
+    var = summarize_run(_Ctx([_Finding()], sheets=[
+        _Sheet(page_index=0), _Sheet(page_index=1),
+        _Sheet(page_index=2, ok=False), _Sheet(page_index=3, ok=False),
+    ]))
+    v = comparison_validity(base, var)
+    assert v["status"] == VALIDITY_NOT_COMPARABLE
+    assert any("different populations" in b for b in v["blocking"])
+
+
+def test_equal_sheet_counts_over_different_sheets_still_blocks():
+    """The count is not the population.
+
+    Baseline reads {p0, p1, p2}, variant reads {p0, p1, p3} — one transient
+    failure each, which is ordinary on a two-arm run. Both report ok_sheets=3,
+    so a count check passes. Every finding on p2 then reads as something the
+    variant missed and every finding on p3 as something it found, attributing a
+    population difference to the tested model or geometry change.
+    """
+    base = summarize_run(_Ctx([_Finding()], sheets=[
+        _Sheet(page_index=0), _Sheet(page_index=1),
+        _Sheet(page_index=2), _Sheet(page_index=3, ok=False),
+    ]))
+    var = summarize_run(_Ctx([_Finding()], sheets=[
+        _Sheet(page_index=0), _Sheet(page_index=1),
+        _Sheet(page_index=2, ok=False), _Sheet(page_index=3),
+    ]))
+    assert base["ok_sheets"] == var["ok_sheets"] == 3      # the count agrees
+
+    v = comparison_validity(base, var)
+    assert v["status"] == VALIDITY_NOT_COMPARABLE
+    assert v["savings_claim_allowed"] is False
+    blocking = " ".join(v["blocking"])
+    assert "different populations" in blocking
+    assert "only in baseline: SRC-0001:p2" in blocking
+    assert "only in variant: SRC-0001:p3" in blocking
+
+
+def test_identical_sheet_populations_do_not_block():
     base, var = _arms([_Finding()], [_Finding()])
-    var["ok_sheets"] = 2                     # the base read 4
+    assert base["ok_sheet_ids"] == var["ok_sheet_ids"]
+    assert comparison_validity(base, var)["status"] == VALIDITY_COMPARABLE
+
+
+def test_a_summary_without_sheet_ids_falls_back_to_the_count():
+    """An arm summary written before ``ok_sheet_ids`` existed still compares.
+
+    Additive serialization: an older payload keeps working, at the weaker check
+    it was always getting, rather than silently skipping the check entirely.
+    """
+    base, var = _arms([_Finding()], [_Finding()])
+    del base["ok_sheet_ids"]
+    var["ok_sheets"] = 2
     v = comparison_validity(base, var)
     assert v["status"] == VALIDITY_NOT_COMPARABLE
     assert any("successfully-read sheets differ" in b for b in v["blocking"])
@@ -1400,20 +1471,32 @@ def test_findings_sidecar_sits_beside_its_arm_summary(tmp_path):
         "arm_baseline_findings.json"
 
 
-def test_a_missing_or_corrupt_sidecar_yields_no_records_not_an_exception(tmp_path):
-    """A comparison that could not run must not look like one that found nothing.
+def test_a_missing_or_corrupt_sidecar_reports_its_status_not_just_emptiness(tmp_path):
+    """An empty list cannot say whether the sidecar was read.
 
-    The aggregate tables are still worth printing when an arm wrote no records,
-    so this returns empty and the renderer says so in words — rather than
-    raising, which would throw away a run that already cost real money.
+    Missing, unreadable and "read fine, no findings" all hand back ``[]``. If
+    the caller can only see the list, a missing baseline sidecar turns every
+    variant record into a one-sided difference — a comparison result
+    manufactured out of a failed file read — so the status is returned beside
+    the records rather than inferred from them.
     """
     arm = tmp_path / "arm_baseline.json"
-    assert load_arm_records(arm) == []
+    assert load_arm_records(arm) == (RECORDS_MISSING, [])
+
     _findings_path(arm).write_text("{not json", encoding="utf-8")
-    assert load_arm_records(arm) == []
+    assert load_arm_records(arm) == (RECORDS_UNREADABLE, [])
+
+    # Valid JSON, wrong shape: still unreadable, not "an arm with no findings".
+    _findings_path(arm).write_text('["nope"]', encoding="utf-8")
+    assert load_arm_records(arm) == (RECORDS_UNREADABLE, [])
+
+    # Read fine, genuinely no findings — distinct from every case above.
+    _findings_path(arm).write_text('{"records": []}', encoding="utf-8")
+    assert load_arm_records(arm) == (RECORDS_PRESENT, [])
+
     _findings_path(arm).write_text('{"records": [{"finding_id": "abc"}]}',
                                    encoding="utf-8")
-    assert load_arm_records(arm) == [{"finding_id": "abc"}]
+    assert load_arm_records(arm) == (RECORDS_PRESENT, [{"finding_id": "abc"}])
 
 
 def test_the_records_envelope_round_trips_between_the_child_and_the_parent(tmp_path):
@@ -1428,4 +1511,4 @@ def test_the_records_envelope_round_trips_between_the_child_and_the_parent(tmp_p
     records = [{"finding_id": "abc123", "identity_key": "deadbeef"}]
     written = write_arm_records(arm, records)
     assert written == _findings_path(arm)
-    assert load_arm_records(arm) == records
+    assert load_arm_records(arm) == (RECORDS_PRESENT, records)

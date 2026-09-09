@@ -174,7 +174,7 @@ permits a cost delta to be described as a saving:
 |---|---|---|
 | `COMPARABLE` | both arms finished, read the same sheets, and priced every record | yes |
 | `QUALIFIED` | a `PARTIAL` stage, recorded errors, abandoned/failed/parse-failed calls, unpriced records, or INCOMPLETE markup coverage | no |
-| `NOT_COMPARABLE` | an arm's `qc_status` is `FAILED`, the arms read different sheet populations, or either total is unpriced | no |
+| `NOT_COMPARABLE` | an arm's `qc_status` is `FAILED`, the arms successfully read **different sheets**, or either total is unpriced | no |
 
 Three states rather than two on purpose: most real sweeps land in `QUALIFIED`
 (one retry, one unpriceable record), and folding that into "not comparable"
@@ -182,6 +182,16 @@ would put the ordinary case in the unreadable bucket — at which point the
 `NOT_COMPARABLE` cases stop being read too. A cheaper arm that did not finish is
 not a cheaper way to do the work; its lower total is the price of a different,
 smaller job, and the report says so in those words.
+
+The sheet check compares **identities**, not counts. Each arm records
+`ok_sheet_ids` — path-free `SRC-####:p<n>` entries for the sheets it actually
+read. A count check passes when the baseline read `{p0, p1, p2}` and the variant
+read `{p0, p1, p3}` (one transient failure each, which is ordinary on a two-arm
+run), and every finding on `p2` then reads as something the variant missed while
+every finding on `p3` reads as something it found — a population difference
+attributed to the tested change. The blocking reason names the sheets that
+differ. An arm summary written before `ok_sheet_ids` existed falls back to the
+count check rather than skipping the check entirely.
 
 #### Finding-level comparison (§11.2)
 
@@ -220,6 +230,16 @@ promoted to an equivalence, and no second model is asked to adjudicate — that
 would make a comparison harness cost money and depend on the thing under test.
 Ambiguity loses rather than picks: a many-to-many group names every record in it
 and stays unresolved, the same discipline `cross_qc.fact_tile_lookup` follows.
+
+An empty record list is never read as a result. `load_arm_records` returns a
+status — `PRESENT` / `MISSING` / `UNREADABLE` — beside the records, because
+"read fine, no findings", "sidecar never written" and "sidecar corrupt" all hand
+back `[]`. With the baseline's sidecar missing, every variant record would
+otherwise render as a one-sided difference: a comparison result manufactured out
+of a failed file read. The status rides `findings_diff.json` as
+`comparison_status` / `record_status` rather than only the rendered text, so a
+reader opening the JSON alone cannot miss it, and an INCOMPLETE comparison still
+lists the surviving records while refusing to call them differences.
 
 Source correspondence is the positional `SRC-####` id, so both arms agree
 without either one's absolute paths reaching the artifact. Evidence crops

@@ -18,6 +18,10 @@ from tempfile import TemporaryDirectory
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from ab_findings_diff import (  # noqa: E402
+    COMPARISON_COMPLETE,
+    COMPARISON_INCOMPLETE,
+    RECORDS_MISSING,
+    RECORDS_PRESENT,
     copy_linked_artifacts,
     evidence_trust_composition,
     finding_record,
@@ -413,3 +417,54 @@ def test_render_is_plain_text_and_names_the_unmatched_records():
     assert "DROPPED" in text and "ADDED" in text
     assert "A candidate is a pointer for a" in text
     assert "\t" not in text
+
+
+# --------------------------------------------------------------------------- #
+# Record availability — an empty list is not a result
+# --------------------------------------------------------------------------- #
+
+def test_two_arms_that_genuinely_found_nothing_ran_a_complete_comparison():
+    """Both sidecars read fine and both were empty. That IS a comparison.
+
+    Calling it "no comparison ran" would be the §11.3 error inverted: an arm
+    pair that agreed perfectly reported as one that could not be checked.
+    """
+    m = match_records([], [])
+    assert m["comparison_status"] == COMPARISON_COMPLETE
+    assert m["incomplete_reasons"] == []
+    text = render_findings_diff(m, base_label="base", var_label="var")
+    assert "INCOMPLETE" not in text
+    assert "Unmatched records are the result" in text
+
+
+def test_a_missing_sidecar_makes_the_surviving_records_not_a_difference():
+    """The variant's 2 records are all it produced, not 2 findings the base missed.
+
+    With the baseline sidecar gone the matcher still reports the variant's
+    records — they are real data — but the comparison is marked INCOMPLETE and
+    the renderer refuses to describe them as one-sided differences. Reporting a
+    file-read failure as "the variant found 2 issues the baseline did not" is a
+    result invented out of an I/O error.
+    """
+    var = finding_records([_f(text="a", source_quote="A"),
+                           _f(text="b", source_quote="B")])
+    m = match_records([], var, base_status=RECORDS_MISSING,
+                      variant_status=RECORDS_PRESENT)
+
+    assert m["comparison_status"] == COMPARISON_INCOMPLETE
+    assert m["incomplete_reasons"] == ["baseline records are MISSING"]
+    assert m["record_status"] == {"base": "MISSING", "variant": "PRESENT"}
+    # The records are still there — nothing is thrown away.
+    assert m["counts"]["unmatched_variant"] == 2
+    assert m["counts"]["reconciles"] is True
+
+    text = render_findings_diff(m, base_label="base", var_label="var")
+    assert "[INCOMPLETE]" in text
+    assert "NOT one-sided differences" in text
+    assert "Unmatched records are the result" not in text
+
+
+def test_record_status_defaults_to_present_for_a_standalone_caller():
+    m = match_records(finding_records([_f()]), finding_records([_f()]))
+    assert m["record_status"] == {"base": RECORDS_PRESENT, "variant": RECORDS_PRESENT}
+    assert m["comparison_status"] == COMPARISON_COMPLETE
