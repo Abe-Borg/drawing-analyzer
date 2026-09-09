@@ -409,6 +409,113 @@ class RenderTelemetry:
         }
 
 
+#: WP-05 §10.1. How a page's render target will be chosen. ``UNKNOWN`` is a
+#: first-class outcome, not a synonym for either other value: a page that could
+#: not be inspected must never be labelled ``VECTOR`` (the *cheaper* target), or
+#: the estimate quotes low on exactly the pages it understands least.
+CLASSIFICATION_VECTOR = "vector"
+CLASSIFICATION_RASTER = "raster"
+CLASSIFICATION_UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class SheetCostBasis:
+    """What a pre-run cost estimate needs to know about one page (§10.1).
+
+    Obtained from a scan that never rasterizes: ``page.rect`` plus
+    ``len(page.get_text("words"))``. Those two facts carry the whole correction —
+    per §2.6 the render target alone (a single boolean per page: does it have
+    words?) removes 32% of the shipped preview's overstatement, and aspect ratio
+    another 14.5%.
+
+    Deliberately **not** carried, because these records are exported into
+    estimate diagnostics (§10.1): words, raw or full sheet text, image bytes, any
+    credential, and any persistent filesystem path. ``source_name`` is a
+    basename and ``source_id`` the run-local id, both portable.
+
+    ``width_pt``/``height_pt`` are the *displayed* dimensions — post-CropBox,
+    post-rotation, the ``PAGE_VIEW_V2`` space the renderer tiles in — so a
+    rotated page reports the shape the model will actually see. Token counts
+    depend only on their ratio (§2.6, scale invariance); the absolute values are
+    retained so effective DPI can be discussed.
+    """
+
+    source_name: str
+    page_index: int
+    width_pt: float
+    height_pt: float
+    classification: str = CLASSIFICATION_UNKNOWN
+    source_id: str = ""
+    #: Length of the *capped* prompt text, when the scan inspected it; ``None``
+    #: means "not inspected", never "empty".
+    text_chars: int | None = None
+    #: False when the page could not be measured at all. The page is still
+    #: reported — a page whose cost is silently dropped is worse than one
+    #: quoted conservatively (§10.1 item 8).
+    geometry_ok: bool = True
+    #: One short line naming why inspection failed; "" when it did not.
+    error: str = ""
+
+    @property
+    def is_raster(self) -> bool:
+        """True only for a positively-classified raster page."""
+        return self.classification == CLASSIFICATION_RASTER
+
+    @property
+    def aspect_ratio(self) -> float | None:
+        """Long edge over short edge, or ``None`` when the page has no area."""
+        lo, hi = sorted((abs(self.width_pt), abs(self.height_pt)))
+        return None if lo <= 0 or hi <= 0 else hi / lo
+
+    def to_dict(self) -> dict:
+        """Portable record for an exported estimate diagnostic."""
+        return {
+            "source_name": self.source_name,
+            "source_id": self.source_id,
+            "page_index": self.page_index,
+            "width_pt": round(float(self.width_pt), 3),
+            "height_pt": round(float(self.height_pt), 3),
+            "classification": self.classification,
+            "text_chars": self.text_chars,
+            "geometry_ok": self.geometry_ok,
+            "error": self.error,
+        }
+
+
+def sheet_cost_basis(geom: Any) -> SheetCostBasis:
+    """Project an already-scanned :class:`SheetGeometry` into a cost basis.
+
+    The GUI's profile preflight and the pipeline's level-1 prescan both already
+    hold ``SheetGeometry`` for every page. Re-opening the PDFs to learn what is
+    already in memory would add a second PDF owner for no new information —
+    §10.3 is explicit that the scan should reuse those results rather than
+    compete with them for ``_preflight_lock``.
+
+    Classification mirrors the renderer's own rule exactly: ``is_raster`` is
+    ``len(words) == 0``, decided on **extracted words**, not on whether
+    ``get_text()`` returned a nonempty string. Those disagree — a page can carry
+    a text object that yields no word rectangles — and using the looser test
+    would classify a scanned page as vector and quote it at the cheaper target.
+    """
+    ref = getattr(geom, "ref", None)
+    return SheetCostBasis(
+        source_name=str(getattr(ref, "source_name", "") or ""),
+        source_id=str(getattr(ref, "source_id", "") or ""),
+        page_index=int(getattr(ref, "page_index", 0) or 0),
+        width_pt=float(getattr(geom, "page_width_pt", 0.0) or 0.0),
+        height_pt=float(getattr(geom, "page_height_pt", 0.0) or 0.0),
+        classification=(
+            CLASSIFICATION_RASTER if getattr(geom, "is_raster", False)
+            else CLASSIFICATION_VECTOR
+        ),
+        text_chars=len(getattr(geom, "sheet_text", "") or ""),
+        geometry_ok=(
+            float(getattr(geom, "page_width_pt", 0.0) or 0.0) > 0
+            and float(getattr(geom, "page_height_pt", 0.0) or 0.0) > 0
+        ),
+    )
+
+
 @dataclass
 class SheetGeometry:
     """A sheet's text + geometry, **without the rendered image bytes**.

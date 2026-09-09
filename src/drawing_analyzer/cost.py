@@ -12,12 +12,19 @@ count (cheap to obtain via ``render.list_sheets``).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, Sequence
 
 from .core.api_config import REVIEW_MODEL_DEFAULT
+from .models import (
+    CLASSIFICATION_RASTER,
+    CLASSIFICATION_VECTOR,
+)
+from .core.tokenizer import estimate_image_tokens_total
 from .core.pricing import (
     PRICING_EFFECTIVE_DATE,
     estimate_request_cost,
     friendly_model_name,
+    usage_record_cost,
 )
 from . import tiling
 from .pipeline import estimate_image_tokens_for_set
@@ -87,6 +94,115 @@ def _specs_cost_contribution(
 
 
 @dataclass(frozen=True)
+class ImageTokenEstimate:
+    """A geometry-aware image-token estimate, with the assumptions it rests on.
+
+    ``tokens`` is the planning number. ``conservative_tokens`` is what the legacy
+    allowance (:func:`pipeline.estimate_image_tokens_for_set`) would have quoted
+    for the same pages, kept beside it so a caller can show both and a test can
+    assert the direction of the correction rather than a magic constant.
+    """
+
+    tokens: int
+    conservative_tokens: int
+    #: Pages counted by how their render target was decided.
+    vector_pages: int = 0
+    raster_pages: int = 0
+    #: Pages that could not be classified, or could not be measured, and were
+    #: therefore priced at the conservative allowance. Never dropped, never
+    #: quietly treated as vector.
+    unknown_pages: int = 0
+    unmeasured_pages: int = 0
+
+    @property
+    def pages(self) -> int:
+        return self.vector_pages + self.raster_pages + self.unknown_pages
+
+    @property
+    def fully_measured(self) -> bool:
+        """True when every page contributed real geometry."""
+        return self.pages > 0 and self.unknown_pages == 0 and self.unmeasured_pages == 0
+
+
+def estimate_image_tokens_for_bases(
+    bases: "Sequence[Any]",
+    *,
+    rows: int = tiling.DEFAULT_GRID_ROWS,
+    cols: int = tiling.DEFAULT_GRID_COLS,
+    overlap_frac: float = tiling.DEFAULT_OVERLAP_FRAC,
+    model: str = REVIEW_MODEL_DEFAULT,
+) -> ImageTokenEstimate:
+    """Image tokens for one vision read of these pages, from their real shapes.
+
+    WP-05 §10.1. The shipped allowance
+    (:func:`pipeline.estimate_image_tokens_for_set`) assumes every image is a
+    square at the *raster* target and lands at the model's token cap — a true
+    upper bound, and about 1.9x the actual cost of a vector E-size sheet (§2.6).
+    Two facts per page close most of that gap, and both come from a scan that
+    never rasterizes: the aspect ratio, and whether the page has words.
+
+    The per-page walk mirrors the renderer exactly rather than approximating it:
+    :func:`tiling.image_pixel_sizes` resolves the target through the same
+    :func:`~drawing_analyzer.tiling.target_long_edge_px` policy (so the
+    <=20-image branch and the vector-target override behave identically) and
+    reproduces PyMuPDF's ``irect`` pixel sizing, which is position-dependent and
+    not reproducible from dimensions alone. Measured against real renders it is
+    pixel-exact on 18 of 20 page-shape/grid combinations and within 0.0035% of
+    token count on the other two.
+
+    Tokens are estimated for **this** ``model``. The same PNG dimensions price
+    differently across model tiers — a hi-resolution model caps at 4784 tokens
+    per image and a standard-tier one at 1568 — so digest and critique imagery
+    must be estimated with their own resolved models, never counted once and
+    reused (§2.4).
+
+    A page classified ``unknown``, or one that could not be measured, falls back
+    to the conservative per-sheet allowance and is counted separately. It is
+    never assumed vector: vector is the *cheaper* target, so guessing it would
+    quote low on precisely the pages least understood.
+    """
+    from .pipeline import estimate_image_tokens_for_set
+
+    conservative_per_sheet = estimate_image_tokens_for_set(
+        1, rows=rows, cols=cols, model=model
+    )
+    total = 0
+    vector = raster = unknown = unmeasured = 0
+    for basis in bases or []:
+        classification = str(getattr(basis, "classification", "") or "")
+        width = float(getattr(basis, "width_pt", 0.0) or 0.0)
+        height = float(getattr(basis, "height_pt", 0.0) or 0.0)
+        measurable = (
+            bool(getattr(basis, "geometry_ok", False)) and width > 0 and height > 0
+        )
+        if not measurable:
+            unmeasured += 1
+        if not measurable or classification not in (
+            CLASSIFICATION_VECTOR, CLASSIFICATION_RASTER
+        ):
+            unknown += 1
+            total += conservative_per_sheet
+            continue
+        if classification == CLASSIFICATION_RASTER:
+            raster += 1
+        else:
+            vector += 1
+        sizes = tiling.image_pixel_sizes(
+            width, height, rows=rows, cols=cols, overlap_frac=overlap_frac,
+            is_raster=classification == CLASSIFICATION_RASTER,
+        )
+        total += estimate_image_tokens_total(sizes, model=model)
+    return ImageTokenEstimate(
+        tokens=total,
+        conservative_tokens=conservative_per_sheet * (vector + raster + unknown),
+        vector_pages=vector,
+        raster_pages=raster,
+        unknown_pages=unknown,
+        unmeasured_pages=unmeasured,
+    )
+
+
+@dataclass(frozen=True)
 class DrawingCostEstimate:
     sheet_count: int
     file_count: int
@@ -129,6 +245,13 @@ def estimate_drawing_set_cost(
     cache-written once and cache-read (~0.1x) on every sheet after, so pricing
     it at the flat rate would overstate what it actually costs.
     """
+    # WP-05 §10.2. Synthesis and the focus report have their own runtime
+    # resolvers (``DRAWING_ANALYZER_SYNTHESIS_MODEL`` / ``…_FOCUS_MODEL``), and
+    # this path priced both at the digest ``model``. The exhaustive estimator
+    # already resolved them correctly, so a Sonnet digest with an Opus synthesis
+    # was quoted right in one mode and wrong in the other — the mode a standard
+    # run actually uses being the wrong one.
+    stage_models = resolve_stage_models(model=model)
     image_tokens = estimate_image_tokens_for_set(
         sheet_count, rows=rows, cols=cols, model=model
     )
@@ -151,7 +274,7 @@ def estimate_drawing_set_cost(
         output_tokens += _ASSUMED_SYNTHESIS_OUTPUT_TOKENS
         stage_costs.append(estimate_request_cost(
             synth_input, _ASSUMED_SYNTHESIS_OUTPUT_TOKENS,
-            model=model, batch=False,
+            model=stage_models.synthesis, batch=False,
         ))
 
     if focus and sheet_count >= 1:
@@ -161,7 +284,7 @@ def estimate_drawing_set_cost(
         output_tokens += _ASSUMED_FOCUS_OUTPUT_TOKENS
         stage_costs.append(estimate_request_cost(
             focus_input, _ASSUMED_FOCUS_OUTPUT_TOKENS,
-            model=model, batch=False,
+            model=stage_models.focus, batch=False,
         ))
 
     total_cost = None if any(c is None for c in stage_costs) else sum(
@@ -345,6 +468,9 @@ class ExhaustiveCostEstimate:
     # an older caller; the field is additive and defaulted so stored payloads and
     # third-party constructions keep loading.
     stage_models: "StageModels | None" = None
+    #: Critique reads per sheet, as the runtime resolver reported them (§10.2).
+    #: Defaulted to the shipping value so an older caller's construction loads.
+    critique_runs: int = 2
 
 
 @dataclass(frozen=True)
@@ -451,6 +577,73 @@ def _component(
         stage=stage, input_tokens=input_tokens, output_tokens=output_tokens,
         cost=cost, transport="batch" if batch else "real-time", note=note,
     )
+
+
+def _critique_prefix_costs(
+    *, prefix_tokens: int, output_tokens: int, sheet_count: int, runs: int,
+    model: str, batch: bool,
+) -> tuple[float | None, float | None]:
+    """``(reuse, no_reuse)`` cost of the critique reads, by their real rate class.
+
+    WP-05 §10.2. ``critique_sheet_self_consistent`` sets ``cache_prefix = runs >= 2``
+    (``critique.py``), which attaches an ephemeral breakpoint to the shared image
+    prefix on the **real-time** path. So read 1 cache-*writes* that ~90k-token
+    prefix at 1.25x and reads 2..N serve it at 0.1x — while this estimator was
+    billing all N at the ordinary 1x rate.
+
+    The error runs in both directions, which is why it needs a band rather than a
+    correction. For ``runs=2`` the multipliers are:
+
+    ===============  ==========================
+    scenario          prefix read-equivalents
+    ===============  ==========================
+    flat (old)        2.00
+    reuse             1.25 + 0.10 = 1.35
+    no reuse          1.25 x 2    = 2.50
+    ===============  ==========================
+
+    So the old number over-quoted successful reuse by ~48% and under-quoted a
+    total miss by ~20%, on the single largest QC line. §10.2 asks for the two
+    scenarios rather than an invented hit probability, and that is what this
+    returns: the low end assumes every repeat read hits, the high end assumes
+    every breakpoint misses and re-writes.
+
+    Neither multiplier touches **output**, which is billed at the output rate per
+    read in both scenarios — discounting output with an input-cache multiplier is
+    explicitly called out in §10.2.
+
+    Batch items carry no breakpoint (``submit_critique_batch`` never sets one, and
+    parallel submission could not read a cache still being written), and a single
+    read gets no breakpoint either. Both collapse to ordinary input, so both
+    scenarios return the same figure.
+    """
+    from decimal import Decimal
+
+    per_read_out = usage_record_cost(
+        model=model, output_tokens=output_tokens, batch=batch
+    )
+    if per_read_out is None:
+        return None, None
+    out_total = per_read_out * runs * sheet_count
+
+    if batch or runs < 2:
+        flat = usage_record_cost(model=model, input_tokens=prefix_tokens, batch=batch)
+        if flat is None:
+            return None, None
+        total = flat * runs * sheet_count + out_total
+        return float(total), float(total)
+
+    write = usage_record_cost(
+        model=model, cache_write_tokens=prefix_tokens, batch=False
+    )
+    read = usage_record_cost(
+        model=model, cache_read_tokens=prefix_tokens, batch=False
+    )
+    if write is None or read is None:
+        return None, None
+    reuse = (write + read * (runs - 1)) * sheet_count + out_total
+    no_reuse = (write * runs) * sheet_count + out_total
+    return float(reuse), float(no_reuse)
 
 
 def estimate_exhaustive_run_cost(
@@ -571,17 +764,51 @@ def estimate_exhaustive_run_cost(
         primary_model=model,
     ))
 
-    # Critique — two adversarial reads per sheet. In a ``use_batch`` run both reads
-    # ride one Message Batch referencing a single shared per-sheet upload (Phase
-    # 23C), so they are batch-priced; otherwise real-time.
-    crit_in = 2 * sheet_count * (per_sheet_images + _ASSUMED_PROMPT_TOKENS_PER_SHEET)
-    crit_out = 2 * sheet_count * _ASSUMED_CRITIQUE_OUTPUT_TOKENS_PER_READ
-    components.append(_component(
-        "Critique ×2 (per sheet)", crit_in, crit_out,
+    # Critique — N adversarial reads per sheet. In a ``use_batch`` run they ride
+    # one Message Batch referencing a single shared per-sheet upload (Phase 23C),
+    # so they are batch-priced; otherwise real-time.
+    #
+    # WP-05 §10.2: the count comes from the runtime's own resolver, not a
+    # hardcoded 2. ``DRAWING_ANALYZER_CRITIQUE_RUNS`` moves it, and a preview
+    # that keeps quoting two reads while the run makes four understates the
+    # single largest QC line by half.
+    #
+    # The images are priced with the CRITIQUE model, not the digest's.
+    # ``estimate_image_tokens`` clamps at a per-model cap — 4784 on a
+    # hi-resolution model, 1568 on a standard-tier one — so reusing the digest's
+    # count for a critique pointed at a standard-tier model is a ~3x error
+    # (§2.4). Latent today, since Opus 5 and Sonnet 5 share the tier, and
+    # reachable through one env var.
+    from .critique import critique_runs
+
+    runs = critique_runs()
+    crit_per_sheet_images = estimate_image_tokens_for_set(
+        1, rows=rows, cols=cols, model=stage_models.critique
+    )
+    crit_prefix = crit_per_sheet_images + _ASSUMED_PROMPT_TOKENS_PER_SHEET
+    crit_in = runs * sheet_count * crit_prefix
+    crit_out = runs * sheet_count * _ASSUMED_CRITIQUE_OUTPUT_TOKENS_PER_READ
+    crit_low, crit_high = _critique_prefix_costs(
+        prefix_tokens=crit_prefix, output_tokens=_ASSUMED_CRITIQUE_OUTPUT_TOKENS_PER_READ,
+        sheet_count=sheet_count, runs=runs,
         model=stage_models.critique, batch=critique_batch,
-        note="two full reads per sheet"
-        + (" — one shared upload, Batch rate" if critique_batch else " — real-time"),
-        primary_model=model,
+    )
+    transport_note = (
+        " — one shared upload, Batch rate" if critique_batch
+        else (" — real-time, shared image prefix prompt-cached" if runs >= 2
+              else " — real-time")
+    )
+    components.append(CostComponent(
+        stage=f"Critique ×{runs} (per sheet)",
+        input_tokens=crit_in, output_tokens=crit_out,
+        # The representative row shows the pessimistic end, matching how
+        # verification and citation are displayed; the band carries both.
+        cost=crit_high,
+        transport="batch" if critique_batch else "real-time",
+        note=_stage_note(
+            f"{runs} full read(s) per sheet{transport_note}",
+            stage_model=stage_models.critique, primary=model,
+        ),
     ))
 
     # Cross-sheet QC — one (or a few sharded) text passes over all the digests.
@@ -680,13 +907,24 @@ def estimate_exhaustive_run_cost(
         priced = [c.cost for c in components + variants]
         return None if any(c is None for c in priced) else sum(priced)
 
-    low_cost = _total([low_verify, low_investigate, low_citation])
+    # The critique row in ``components`` already carries ``crit_high``; the low
+    # band swaps in the successful-reuse figure. ``None`` on either side voids the
+    # whole total, exactly as an unpriced component does.
+    crit_delta = (
+        None if crit_low is None or crit_high is None else crit_low - crit_high
+    )
+
+    def _with_crit(total: float | None) -> float | None:
+        return None if total is None or crit_delta is None else total + crit_delta
+
+    low_cost = _with_crit(_total([low_verify, low_investigate, low_citation]))
     high_cost = _total([high_verify, high_investigate, high_citation])
     components = components + [high_verify, high_investigate, high_citation]
     return ExhaustiveCostEstimate(
         sheet_count=sheet_count, file_count=file_count, model=model,
         components=components, low_cost=low_cost, high_cost=high_cost,
         batch=batch, critique_batch=critique_batch, spec_chars=spec_chars,
+        critique_runs=runs,
         stage_models=stage_models,
     )
 
@@ -709,7 +947,8 @@ def format_exhaustive_cost_prompt(est: ExhaustiveCostEstimate) -> str:
     lines = [
         f"About to run the FULL exhaustive QC review on {est.sheet_count} sheet(s)"
         f"{where} with {with_models} — digest, set identity + "
-        "model review plan, two critique reads per sheet, cross-sheet QC, "
+        f"model review plan, {est.critique_runs} critique read(s) per sheet, "
+        "cross-sheet QC, "
         "deterministic auditors, prose harvest, verification, the uncertain-"
         "finding investigation loop, and citation checks.",
         "",

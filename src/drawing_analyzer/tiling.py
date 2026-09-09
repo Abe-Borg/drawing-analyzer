@@ -55,6 +55,7 @@ rasterizes or serializes the pixmap.
 """
 from __future__ import annotations
 
+import math
 import os
 import re
 from dataclasses import dataclass
@@ -329,3 +330,87 @@ def position_label(rect: TileRect, page_width_pt: float, page_height_pt: float) 
     across = f"~{pct(rect.x0, page_width_pt)}-{pct(rect.x1, page_width_pt)}% across"
     down = f"~{pct(rect.y0, page_height_pt)}-{pct(rect.y1, page_height_pt)}% down"
     return f"{quadrant}; {across}, {down}"
+
+
+def rendered_pixel_size(
+    x0: float, y0: float, x1: float, y1: float, zoom: float
+) -> tuple[int, int]:
+    """The pixel dimensions PyMuPDF produces for this clip at this zoom.
+
+    WP-05 §10.1 step 4. The rasterizer does **not** round the scaled dimension;
+    ``page.get_pixmap(matrix=m, clip=r)`` sizes the pixmap from ``(r * m).irect``
+    — the smallest integer rectangle containing the *transformed* rect. That is
+    floor on the top-left corner and ceil on the bottom-right, so the result
+    depends on where the rect sits, not only on how big it is.
+
+    The consequence is easy to get wrong and was measured before this was
+    written: two tiles of byte-identical size can differ by one pixel because
+    their offsets land differently against the integer grid. On a 34x44 sheet at
+    6x6 / 1560, ``r0c1`` and ``r0c2`` are both 473.280 pt wide and render 1296
+    and 1295 px. No dimension-only rule reproduces that; this one reproduces the
+    renderer exactly on 37/37 images for ANSI E, letter and square pages, and
+    36/37 for ARCH D (one float-boundary pixel).
+
+    Rounding the dimension instead — ``round((x1-x0) * zoom)`` — is what the
+    plan's §2.5/§2.6 reference values were derived with, and it is *systematically
+    low*, because an integer rect expands to contain rather than to nearest:
+    92,871 vs the renderer's 93,013 for a vector E-size sheet at 6x6 (0.15%).
+    Those figures remain valid arithmetic cross-checks; they are not the pixel
+    counts this codebase's renderer emits, and §2.5 says as much.
+
+    Pure: no PyMuPDF (I-5). ``zoom <= 0`` or an inverted rect yields ``(0, 0)``,
+    which the tokenizer prices at zero rather than raising.
+    """
+    if zoom <= 0 or x1 <= x0 or y1 <= y0:
+        return 0, 0
+    width = math.ceil(x1 * zoom) - math.floor(x0 * zoom)
+    height = math.ceil(y1 * zoom) - math.floor(y0 * zoom)
+    return max(0, int(width)), max(0, int(height))
+
+
+def image_pixel_sizes(
+    page_width_pt: float,
+    page_height_pt: float,
+    *,
+    rows: int = DEFAULT_GRID_ROWS,
+    cols: int = DEFAULT_GRID_COLS,
+    overlap_frac: float = DEFAULT_OVERLAP_FRAC,
+    is_raster: bool = False,
+) -> list[tuple[int, int]]:
+    """Every image one sheet request carries, as ``(width_px, height_px)``.
+
+    The overview first, then the tiles in :func:`tile_rects` order — the same
+    order, count and geometry :func:`render.render_page` produces, resolved
+    through the same :func:`target_long_edge_px` policy (so the <=20-image branch
+    and the vector-target override behave identically here and there).
+
+    This is the single place the estimate's geometry arithmetic lives (§10.1).
+    A GUI preview, the command-line estimator and the tests all call it rather
+    than each re-deriving zoom and pixel sizes; two copies of this arithmetic is
+    how a preview starts quoting a set the renderer will not produce.
+
+    **Every tile is included.** ``render_page`` drops pixel-uniform tiles, but
+    that is decided from rendered pixels, and blank-tile suppression must not be
+    *predicted* here (§10.1 item 6): a vector sheet's words cluster in the title
+    block while the drawing body is lines, so "no words in this cell" says
+    nothing about whether the cell is blank. Over-counting a suppressed tile
+    quotes slightly high; predicting a suppression that does not happen quotes
+    low, which is the direction that matters before a spend.
+    """
+    total = total_images_for_grid(rows, cols)
+    target = target_long_edge_px(total, is_raster=is_raster)
+    sizes = [
+        rendered_pixel_size(
+            0.0, 0.0, page_width_pt, page_height_pt,
+            zoom_for_rect(page_width_pt, page_height_pt, target),
+        )
+    ]
+    for tr in tile_rects(
+        page_width_pt, page_height_pt,
+        rows=rows, cols=cols, overlap_frac=overlap_frac,
+    ):
+        sizes.append(rendered_pixel_size(
+            tr.x0, tr.y0, tr.x1, tr.y1,
+            zoom_for_rect(tr.width, tr.height, target),
+        ))
+    return sizes

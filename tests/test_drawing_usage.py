@@ -378,17 +378,50 @@ def test_exhaustive_estimate_exceeds_digest_only_and_lists_all_paid_stages():
     assert est.verified_effective_date == PRICING_EFFECTIVE_DATE
 
 
-def test_exhaustive_estimate_critique_batch_halves_vs_realtime():
-    """Phase 23C: the critique component is batch-priced when ``batch=True`` (the
-    ~50% discount is now real for the reviewer), real-time when it is not."""
-    batched = estimate_exhaustive_run_cost(10, file_count=2, batch=True)
-    realtime = estimate_exhaustive_run_cost(10, file_count=2, batch=False)
-    b = {c.stage: c for c in batched.components}["Critique ×2 (per sheet)"]
-    r = {c.stage: c for c in realtime.components}["Critique ×2 (per sheet)"]
+def _critique_component(est):
+    return next(c for c in est.components if c.stage.startswith("Critique"))
+
+
+def test_exhaustive_estimate_critique_batch_is_half_the_real_time_token_rate(monkeypatch):
+    """Phase 23C: the critique component is batch-priced when ``batch=True``.
+
+    Asserted at **one** read per sheet, which is where the claim is exactly
+    testable. WP-05 §10.2 gave the real-time path its true rate class: at
+    ``runs >= 2`` ``critique_sheet_self_consistent`` sets a prompt-cache
+    breakpoint, so the real-time side pays a 1.25x write on the shared image
+    prefix that the batch side (no breakpoint — parallel submission cannot read
+    a cache still being written) never pays.
+
+    This test previously asserted exact halving at the shipping two reads. That
+    held only because the estimator billed every real-time read at a flat 1x,
+    which was the defect §10.2 identifies — so the assertion was true *because
+    of* the bug it could not see. At ``runs=1`` neither path has a breakpoint,
+    both are flat, and the 50% discount is isolated and exact.
+    """
+    monkeypatch.setenv("DRAWING_ANALYZER_CRITIQUE_RUNS", "1")
+    b = _critique_component(estimate_exhaustive_run_cost(10, file_count=2, batch=True))
+    r = _critique_component(estimate_exhaustive_run_cost(10, file_count=2, batch=False))
     assert b.transport == "batch" and r.transport == "real-time"
     assert b.input_tokens == r.input_tokens and b.output_tokens == r.output_tokens
     assert b.cost is not None and r.cost is not None
     assert b.cost == pytest.approx(r.cost * BATCH_DISCOUNT)
+
+
+def test_exhaustive_estimate_batch_critique_beats_half_once_a_prefix_is_cached(monkeypatch):
+    """At the shipping two reads, batch is better than half — and that is real.
+
+    The real-time side writes the ~90k-token image prefix at 1.25x on the read
+    the displayed (pessimistic) figure assumes misses; the batch side has no
+    breakpoint to write. So the ratio drops below ``BATCH_DISCOUNT`` rather than
+    sitting on it, and a test pinning it *at* 0.5 would now be pinning the old
+    flat-rate defect.
+    """
+    monkeypatch.setenv("DRAWING_ANALYZER_CRITIQUE_RUNS", "2")
+    b = _critique_component(estimate_exhaustive_run_cost(10, file_count=2, batch=True))
+    r = _critique_component(estimate_exhaustive_run_cost(10, file_count=2, batch=False))
+    assert b.input_tokens == r.input_tokens          # same work, different rates
+    assert b.cost < r.cost * BATCH_DISCOUNT
+    assert 0.35 < b.cost / r.cost < 0.45
 
 
 def test_exhaustive_prompt_is_labeled_an_estimate_and_names_stages():
