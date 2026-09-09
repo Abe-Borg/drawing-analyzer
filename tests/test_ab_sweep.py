@@ -804,3 +804,296 @@ def test_configuration_record_carries_no_secret_value(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", _FAKE_KEY)
     est = _price({})
     assert _FAKE_KEY not in _json.dumps(est)
+
+
+# --------------------------------------------------------------------------- #
+# WP-06 §11.1 — usage axes the family/model rollups do not carry
+# --------------------------------------------------------------------------- #
+#
+# The plan is explicit that this extends the existing summary rather than
+# building a second benchmarking system, and that nothing here re-prices: every
+# dollar figure comes from ``UsageRecord.estimated_cost``, computed by the run at
+# its own rate class. These tests pin the *view*, and pin that it stays a view.
+
+from decimal import Decimal  # noqa: E402
+
+from ab_sweep_drawing_analyzer import (  # noqa: E402
+    CONFIDENCE_LEVELS,
+    ArmSpec,
+    parse_overlap,
+    usage_breakdown,
+)
+from drawing_analyzer.models import RunUsage, UsageRecord  # noqa: E402
+
+
+def _usage(*records) -> RunUsage:
+    ru = RunUsage()
+    for r in records:
+        ru.add(r)
+    return ru
+
+
+def _rec(**kw) -> UsageRecord:
+    base = dict(stage_family="digest", stage_instance="digest:SRC-0001:p0",
+                model="claude-opus-5", input_tokens=1000, output_tokens=100,
+                estimated_cost=Decimal("0.01"))
+    base.update(kw)
+    return UsageRecord(**base)
+
+
+def test_per_family_cost_reconciles_with_the_run_total():
+    """§11.5: family costs must sum to what the run already says it spent."""
+    ru = _usage(
+        _rec(stage_family="digest", estimated_cost=Decimal("1.00")),
+        _rec(stage_family="critique", estimated_cost=Decimal("2.50")),
+        _rec(stage_family="critique", estimated_cost=Decimal("0.50")),
+    )
+    families = ru.by_family()
+    assert float(families["digest"]["estimated_cost"]) == 1.00
+    assert float(families["critique"]["estimated_cost"]) == 3.00
+    assert float(ru.total_estimated_cost) == 4.00
+
+
+def test_the_summary_now_emits_family_cost_alongside_tokens():
+    """It computed this and dropped it: "cheaper" could not be told from "did less"."""
+    ctx = _Ctx([_Finding()])
+    ctx.run_usage = _usage(_rec(stage_family="critique", estimated_cost=Decimal("2.50")))
+    summary = summarize_run(ctx)
+    assert summary["by_family"]["critique"]["cost"] == 2.50
+    assert summary["by_family"]["critique"]["input"] == 1000
+
+
+def test_an_unpriced_family_stays_none_not_zero():
+    """Same rule as the grand total: unknown price is never a smaller number."""
+    ru = _usage(
+        _rec(stage_family="critique", model="mystery", estimated_cost=None),
+        _rec(stage_family="critique", estimated_cost=Decimal("2.00")),
+    )
+    assert ru.by_family()["critique"]["estimated_cost"] is None
+    assert usage_breakdown(ru)["unpriced_records"] == 1
+
+
+def test_transport_is_broken_out_because_it_moves_the_rate():
+    """Two arms can be token-identical and differ by half on transport alone."""
+    ru = _usage(
+        _rec(transport="REAL_TIME"),
+        _rec(transport="BATCH"), _rec(transport="BATCH"),
+    )
+    axes = usage_breakdown(ru)
+    assert axes["by_transport"]["BATCH"]["records"] == 2
+    assert axes["by_transport"]["REAL_TIME"]["records"] == 1
+    assert axes["by_transport"]["BATCH"]["input_tokens"] == 2000
+
+
+def test_cache_tokens_are_not_folded_into_input():
+    """Read and write are separately priced multipliers on the input rate.
+
+    Summing them into "input" makes a prompt-cache experiment — the exact thing
+    the critique's shared-prefix breakpoint is — unmeasurable.
+    """
+    ru = _usage(
+        _rec(cache_write_tokens=90_000, input_tokens=0),
+        _rec(cache_read_tokens=90_000, input_tokens=0),
+    )
+    axes = usage_breakdown(ru)
+    assert axes["cache_write_tokens"] == 90_000
+    assert axes["cache_read_tokens"] == 90_000
+
+
+def test_the_requested_write_ttl_is_recorded_because_it_picks_the_rate():
+    """5-minute writes bill 1.25x base input; one-hour writes bill 2x."""
+    ru = _usage(
+        _rec(cache_write_tokens=1000, cache_write_ttl=None),
+        _rec(cache_write_tokens=2000, cache_write_ttl="1h"),
+    )
+    ttls = usage_breakdown(ru)["cache_write_tokens_by_ttl"]
+    assert ttls == {"1h": 2000, "5m": 1000}
+
+
+def test_outcomes_are_not_collapsed_into_one_paid_calls_number():
+    """§11.1 names this specifically, and the reason is an arm that looks cheap.
+
+    A served cache hit costs nothing. An abandoned batch attempt costs nothing
+    *and* produced no response. A failed-parse call consumed real tokens. Folding
+    them together lets an arm that abandoned half its batches read as a saving.
+    """
+    ru = _usage(
+        _rec(),                                                    # served
+        _rec(cache_hit=True, transport="CACHE", input_tokens=0,
+             output_tokens=0, estimated_cost=Decimal("0")),        # cache hit
+        _rec(terminal_status="ABANDONED_EXPIRED", input_tokens=0,
+             output_tokens=0, estimated_cost=Decimal("0")),        # non-billable
+        _rec(parse_success=False),                                 # billed, unusable
+        _rec(terminal_status="FAILED"),                            # failed
+    )
+    outcomes = usage_breakdown(ru)["by_outcome"]
+    assert outcomes == {"served": 1, "cache_hit": 1, "abandoned": 1,
+                        "parse_failed": 1, "failed": 1}
+    assert sum(outcomes.values()) == usage_breakdown(ru)["records"]
+
+
+def test_record_granularity_is_labelled_not_implied():
+    """§11.1: verification is aggregated, so a record count is not a call count."""
+    axes = usage_breakdown(_usage(_rec()))
+    assert "verification" in axes["record_granularity"]
+    assert "aggregat" in axes["record_granularity"]
+
+
+def test_an_empty_ledger_does_not_crash_the_summary():
+    axes = usage_breakdown(None)
+    assert axes["records"] == 0
+    ctx = _Ctx([])
+    ctx.run_usage = None
+    assert summarize_run(ctx)["usage_axes"]["records"] == 0
+
+
+def test_existing_summary_fields_are_preserved():
+    """§11.5: this extends the contract; it must not break the old one."""
+    ctx = _Ctx([_Finding()])
+    ctx.run_usage = _usage(_rec())
+    summary = summarize_run(ctx)
+    for key in ("sheets", "findings_total", "anchor_tiers", "verification",
+                "confidence", "by_model", "estimated_cost_usd", "qc_status"):
+        assert key in summary, key
+    # per-model cost and the confidence tally were already there and stay.
+    assert "cost" in summary["by_model"]["claude-opus-5"]
+    assert set(summary["confidence"]) >= set(CONFIDENCE_LEVELS)
+
+
+# --------------------------------------------------------------------------- #
+# WP-06 §11.4 — typed geometry, validated before anything costly
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("raw,expected", [
+    (None, None), ("", None), ("0", 0.0), ("0.08", 0.08), ("0.5", 0.5),
+    ("0.1234", 0.1234),
+])
+def test_valid_overlaps_are_accepted(raw, expected):
+    assert parse_overlap(raw, label="--x") == expected
+
+
+@pytest.mark.parametrize("raw", ["nan", "inf", "-inf", "NaN", "Infinity"])
+def test_non_finite_overlaps_are_rejected(raw):
+    """They survive ``float()``, reach tiling, and — worse — produce a *stable*
+    cache key: ``f"{float('nan'):.4f}"`` is ``"nan"``."""
+    with pytest.raises(ValueError, match="finite"):
+        parse_overlap(raw, label="--variant-overlap")
+
+
+@pytest.mark.parametrize("raw", ["-0.01", "0.51", "1.0", "100"])
+def test_out_of_range_overlaps_are_rejected(raw):
+    with pytest.raises(ValueError, match="range"):
+        parse_overlap(raw, label="--variant-overlap")
+
+
+@pytest.mark.parametrize("raw", ["0.12345", "0.080001", "0.000001"])
+def test_overlaps_finer_than_the_render_identity_are_rejected(raw):
+    """The identity is ``f"overlap={overlap_frac:.4f}"``.
+
+    Two values differing in the fifth decimal render different pixels and share a
+    level-1 cache key — so one arm would be scored against the other's cached
+    renders. Rejecting is the honest response; silently rounding would run an
+    experiment the operator did not ask for under the label they typed.
+    """
+    with pytest.raises(ValueError, match="decimal places"):
+        parse_overlap(raw, label="--variant-overlap")
+
+
+def test_distinct_accepted_overlaps_produce_distinct_render_identities():
+    """The flip side: an accepted pair must actually be distinguishable."""
+    from drawing_analyzer import tiling
+
+    a, b = parse_overlap("0.0800", label="--x"), parse_overlap("0.0801", label="--y")
+    assert f"overlap={a:.4f}" != f"overlap={b:.4f}"
+    # ...and they really do tile differently.
+    assert (tiling.tile_rects(2448.0, 3168.0, overlap_frac=a)[0].width
+            != tiling.tile_rects(2448.0, 3168.0, overlap_frac=b)[0].width)
+
+
+def test_an_overlap_only_experiment_is_expressible():
+    """The old whole-environment guard could not express this at all."""
+    same_env = {"DRAWING_ANALYZER_MODEL": "claude-opus-5"}
+    a = ArmSpec(env=same_env, overlap_frac=0.04)
+    b = ArmSpec(env=same_env, overlap_frac=0.16)
+    assert a.identity() != b.identity()
+
+
+def test_identical_reviewed_configuration_is_still_rejected():
+    a = ArmSpec(env={"X": "1"}, overlap_frac=0.08)
+    b = ArmSpec(env={"X": "1"}, overlap_frac=0.08)
+    assert a.identity() == b.identity()
+
+
+def test_the_arm_label_names_the_overlap_and_still_redacts_secrets():
+    spec = ArmSpec(env={"ANTHROPIC_API_KEY": _FAKE_KEY}, overlap_frac=0.16)
+    label = spec.label()
+    assert "overlap=0.16" in label
+    assert _FAKE_KEY not in label and "[REDACTED]" in label
+    assert ArmSpec(env={}).label() == "defaults"
+
+
+def test_the_resolved_overlap_is_recorded_not_the_spelling(monkeypatch):
+    """§11.4: record resolved values. An omitted option is the shipping default."""
+    from drawing_analyzer import tiling
+
+    import ab_sweep_drawing_analyzer as mod
+
+    omitted = mod.resolve_arm_configuration(exhaustive=True)
+    assert omitted["overlap_frac"] == tiling.DEFAULT_OVERLAP_FRAC
+    assert omitted["overlap_overridden"] is False
+
+    given = mod.resolve_arm_configuration(exhaustive=True, overlap_frac=0.16)
+    assert given["overlap_frac"] == 0.16 and given["overlap_overridden"] is True
+
+
+def test_overlap_reaches_both_children_as_the_same_argument(monkeypatch):
+    """§11.5: estimate and execution must render/price the same geometry."""
+    seen = {}
+
+    class _P:
+        returncode = 0
+        stdout = '{"low_cost": 1.0, "high_cost": 1.0}'
+        stderr = ""
+
+    def _fake_run(cmd, **kw):
+        seen.setdefault("cmds", []).append(cmd)
+        return _P()
+
+    monkeypatch.setattr("ab_sweep_drawing_analyzer.subprocess.run", _fake_run)
+    estimate_arm("x", {}, 4, 1, exhaustive=True, overlap_frac=0.16)
+    assert "--overlap" in seen["cmds"][0]
+    assert "0.16" in seen["cmds"][0]
+
+    # ...and omitting it passes nothing, so the pipeline default stands.
+    seen["cmds"].clear()
+    estimate_arm("x", {}, 4, 1, exhaustive=True)
+    assert "--overlap" not in seen["cmds"][0]
+
+
+def test_the_execution_child_forwards_overlap_to_the_pipeline(tmp_path, monkeypatch):
+    seen = {}
+
+    class _P:
+        returncode = 0
+
+    def _fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        (tmp_path / "arm_x.json").write_text("{}", encoding="utf-8")
+        return _P()
+
+    monkeypatch.setattr("ab_sweep_drawing_analyzer.subprocess.run", _fake_run)
+    run_arm("x", {}, [tmp_path / "a.pdf"], tmp_path, exhaustive=True, overlap_frac=0.04)
+    assert "--overlap" in seen["cmd"] and "0.04" in seen["cmd"]
+
+
+def test_an_invalid_overlap_fails_before_any_child_is_spawned(monkeypatch):
+    """§11.5: cheap validation must precede costly work."""
+    from ab_sweep_drawing_analyzer import main
+
+    def _explode(*a, **k):
+        raise AssertionError("a child was spawned despite an invalid argument")
+
+    monkeypatch.setattr("ab_sweep_drawing_analyzer.subprocess.run", _explode)
+    with pytest.raises(SystemExit):
+        main(["--pdf", __file__, "--variant-overlap", "0.123456", "--estimate"])
