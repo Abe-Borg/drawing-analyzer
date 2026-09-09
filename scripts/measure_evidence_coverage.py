@@ -218,14 +218,34 @@ def scan_sheets(
     hybrid_threshold: float = HYBRID_WORD_FREE_TILE_FRACTION,
 ) -> SetCoverage:
     """Walk every page with the existing no-render prescan. Never rasterizes."""
-    from drawing_analyzer.render import iter_sheet_prescan
+    from drawing_analyzer.render import iter_sheet_prescan, list_sheets
 
     out = SetCoverage(hybrid_word_free_tile_fraction=hybrid_threshold)
-    try:
-        scanned = list(iter_sheet_prescan(pdf_paths))
-    except Exception as exc:    # noqa: BLE001 - report, never crash the measurement
-        out.unreadable_sources.append(f"{type(exc).__name__}: {exc}")
-        return out
+
+    # Drop sources that cannot even be opened BEFORE the scan. ``iter_sheet_prescan``
+    # opens each PDF inside one generator, so a single unopenable file used to
+    # kill the whole iteration — taking every page already yielded from earlier,
+    # valid PDFs with it and reporting an empty set. ``list_sheets`` skips a bad
+    # file while enumerating and is the documented "pass an already-filtered
+    # list" entry point, which also keeps source-id assignment aligned.
+    readable_names = {r.source_name for r in list_sheets(list(pdf_paths))}
+    usable: list[Path] = []
+    for path in pdf_paths:
+        if Path(path).name in readable_names:
+            usable.append(Path(path))
+        else:
+            out.unreadable_sources.append(f"{Path(path).name}: could not be opened")
+
+    scanned = []
+    if usable:
+        # Append as we go: a page that fails mid-scan keeps everything before it.
+        try:
+            for item in iter_sheet_prescan(usable):
+                scanned.append(item)
+        except Exception as exc:    # noqa: BLE001 - report, never lose the scan
+            out.unreadable_sources.append(
+                f"scan stopped after {len(scanned)} page(s): {type(exc).__name__}: {exc}"
+            )
 
     for ref, _identity, geom in scanned:
         total_chars = getattr(geom, "text_chars_total", None)
@@ -331,19 +351,66 @@ def read_run_completeness(export_dir: Path) -> dict:
         payload = json.loads(manifest.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         return {"available": False, "error": f"{type(exc).__name__}: {exc}"}
-    keep = ("status", "qc_status", "coverage_status")
-    out = {"available": True}
-    out.update({k: payload.get(k) for k in keep if k in payload})
+    out: dict = {"available": True}
+
+    # ``build_run_manifest`` nests these under a root ``status`` object. The flat
+    # lookup is a fallback for a hand-built or future manifest, not the shape the
+    # application writes.
+    status = payload.get("status")
+    status = status if isinstance(status, dict) else {}
+    for key in ("qc_status", "qc_status_label", "coverage_status",
+                "sheet_count", "ok_sheet_count"):
+        if key in status:
+            out[key] = status[key]
+        elif key in payload:
+            out[key] = payload[key]
+
+    # Stage entries are serialized with a ``stage`` key (StageResult.to_dict),
+    # not ``name``.
     stages = payload.get("stages")
-    if isinstance(stages, dict) and "cross_qc" in stages:
-        out["cross_qc_stage"] = stages["cross_qc"]
+    if isinstance(stages, dict):
+        out["cross_qc_stage"] = stages.get("cross_qc")
     elif isinstance(stages, list):
         out["cross_qc_stage"] = next(
-            (s for s in stages
-             if isinstance(s, dict) and s.get("name") == "cross_qc"),
+            (e for e in stages
+             if isinstance(e, dict)
+             and (e.get("stage") or e.get("name")) == "cross_qc"),
             None,
         )
+
+    # WP-02 §7.2: if the run was instrumented, its discard counters live here.
+    discards = payload.get("cross_qc_discards")
+    out["discards"] = discards if isinstance(discards, dict) and discards else None
     return out
+
+
+def discard_rate_by_classification(cov: SetCoverage, completeness: dict | None) -> dict:
+    """Join §7.2's per-sheet discards onto §7.1's classification (§7.2 item 3).
+
+    This is the join the counters carry ``by_sheet`` for: run-level totals
+    collapse vector and hybrid into one ``text_bearing`` number, and the
+    question worth paying for is whether failures concentrate in the hybrid
+    raster regions.
+    """
+    discards = (completeness or {}).get("discards") or {}
+    by_sheet = discards.get("by_sheet") if isinstance(discards, dict) else None
+    if not isinstance(by_sheet, dict) or not by_sheet:
+        return {"available": False,
+                "note": "no instrumented run in this export (WP-02 §7.2)"}
+
+    klass = {f"{s.source_id}:p{s.page_index}": s.classification for s in cov.sheets}
+    rolled: dict[str, dict[str, int]] = {}
+    unmatched: list[str] = []
+    for key, counters in by_sheet.items():
+        name = klass.get(key)
+        if name is None:
+            unmatched.append(key)
+            name = "unmatched_sheet_key"
+        dest = rolled.setdefault(name, {})
+        for counter, n in (counters or {}).items():
+            dest[counter] = dest.get(counter, 0) + int(n or 0)
+    return {"available": True, "by_classification": rolled,
+            "unmatched_sheet_keys": sorted(unmatched)}
 
 
 # --------------------------------------------------------------------------- #
@@ -351,7 +418,12 @@ def read_run_completeness(export_dir: Path) -> dict:
 # --------------------------------------------------------------------------- #
 
 
-def summarize(cov: SetCoverage, findings: dict | None, completeness: dict | None) -> dict:
+def summarize(
+    cov: SetCoverage,
+    findings: dict | None,
+    completeness: dict | None,
+    discard_by_class: dict | None = None,
+) -> dict:
     return {
         "tier": "7.1 zero-call",
         "constants": {
@@ -376,6 +448,7 @@ def summarize(cov: SetCoverage, findings: dict | None, completeness: dict | None
         "sheets": [asdict(s) for s in cov.sheets],
         "surviving_findings": findings or {"available": False},
         "run_completeness": completeness or {"available": False},
+        "discard_rate_by_classification": discard_by_class or {"available": False},
         "not_measured_here": {
             "discard_rate": (
                 "requires WP-02 §7.2 counters plus one budgeted sharded run; "
@@ -460,7 +533,8 @@ def main(argv: list[str] | None = None) -> int:
     cov = scan_sheets([Path(p) for p in args.pdf], args.hybrid_threshold)
     findings = read_surviving_findings(args.export_dir) if args.export_dir else None
     completeness = read_run_completeness(args.export_dir) if args.export_dir else None
-    report = summarize(cov, findings, completeness)
+    by_class = discard_rate_by_classification(cov, completeness) if completeness else None
+    report = summarize(cov, findings, completeness, by_class)
 
     print(render_text(report))
     if args.json:

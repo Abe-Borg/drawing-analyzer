@@ -437,6 +437,11 @@ class DrawingContext:
     run_journal: Any = None
     input_inventory: Any = None
     prose_accounting: dict = field(default_factory=dict)
+    # WP-02 §7.2: the sharded cross-QC pass's count-only discard counters, kept
+    # for the run manifest instead of dying with the CrossQCResult. Empty when
+    # cross-QC did not run, or ran on the whole-set (<=40) path, which performs
+    # no host-side grounding — empty means "not measured", never "none dropped".
+    cross_qc_discards: dict = field(default_factory=dict)
 
     @property
     def total_estimated_cost(self) -> Any:
@@ -3319,6 +3324,9 @@ def extract_drawing_context(
     # cloud both sheets. Distinct from the prose synthesis (which stays as-is).
     # Additive and non-fatal.
     cross_findings: list[Finding] = []
+    # WP-02 §7.2. Empty means the measurement was not taken — cross-QC did not
+    # run, or ran on the whole-set (<=40) path, which does no host grounding.
+    cross_qc_discards: dict = {}
     cross_stage = StageResult(stage="cross_qc", expected=config.run_cross_qc)
     if config.run_cross_qc:
         if cross_future is None:
@@ -3338,6 +3346,12 @@ def extract_drawing_context(
             )
             cross_findings = cross_res.findings
             numeric_claims.extend(cross_res.claims)
+            # WP-02 §7.2: retain the discard counters before ``cross_res`` goes
+            # out of scope — they are the whole point of the instrumented run,
+            # and a degraded result is never cached, so this is the only path
+            # by which the measurement reaches an artifact.
+            if getattr(cross_res, "discards", None) is not None:
+                cross_qc_discards = cross_res.discards.to_dict()
             # DA-015/DA-028: a sharded run is COMPLETE only when every shard and the
             # cross-shard reconciliation completed and the text budget was not
             # degraded — a failed shard/reconciliation or a silent truncation holds
@@ -3653,6 +3667,7 @@ def extract_drawing_context(
         run_journal=journal,
         input_inventory=inventory,
         prose_accounting=qc.prose_accounting,
+        cross_qc_discards=cross_qc_discards,
     )
 
 

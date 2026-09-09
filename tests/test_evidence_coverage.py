@@ -14,6 +14,7 @@ so out loud, and §7.2's counters must be the only thing that answers it.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -28,13 +29,17 @@ from drawing_analyzer.cross_qc import (  # noqa: E402
     _finding_from_handles,
     _parse_facts,
     _sheet_is_textless,
+    sheet_counter_key,
 )
 from drawing_analyzer.models import RenderedSheet, SheetGeometry, SheetRef  # noqa: E402
 from drawing_analyzer.render import SHEET_TEXT_MAX_CHARS  # noqa: E402
 
 from measure_evidence_coverage import (  # noqa: E402
     HYBRID_WORD_FREE_TILE_FRACTION,
+    SetCoverage,
+    SheetCoverage,
     classify_sheet,
+    discard_rate_by_classification,
     count_word_free_tiles,
     read_run_completeness,
     read_surviving_findings,
@@ -186,7 +191,11 @@ def test_missing_text_chars_total_falls_back_to_the_capped_length(monkeypatch):
         "drawing_analyzer.render.iter_sheet_prescan",
         lambda paths, **kw: iter([(geom.ref, "identity", geom)]),
     )
-    sheet = mod.scan_sheets([Path("ignored.pdf")]).sheets[0]
+    # The scan now pre-filters unopenable sources, so the stub must be reachable.
+    monkeypatch.setattr(
+        "drawing_analyzer.render.list_sheets", lambda paths, **kw: [geom.ref],
+    )
+    sheet = mod.scan_sheets([Path("s.pdf")]).sheets[0]
     assert sheet.text_chars_total == len("hello")
     assert sheet.truncated is False
     assert sheet.chars_past_cap == 0
@@ -277,13 +286,113 @@ def test_corrupt_findings_json_is_reported_not_raised(tmp_path):
     assert out["available"] is False and "error" in out
 
 
-def test_run_completeness_reads_manifest_fields(tmp_path):
+def test_run_completeness_reads_the_real_manifest_shape(tmp_path):
+    """`build_run_manifest` nests these under a root `status` object.
+
+    A flat lookup silently reported nothing for every export the application
+    actually writes.
+    """
     export = _export(tmp_path, [], manifest={
-        "status": "COMPLETE", "qc_status": "PARTIAL", "coverage_status": "COMPLETE",
+        "status": {
+            "qc_status": "PARTIAL", "qc_status_label": "partial",
+            "coverage_status": "COMPLETE", "sheet_count": 44, "ok_sheet_count": 44,
+        },
+        "stages": [
+            {"stage": "critique", "status": "COMPLETE"},
+            {"stage": "cross_qc", "status": "PARTIAL", "calls_planned": 3},
+        ],
     })
     out = read_run_completeness(export)
     assert out["qc_status"] == "PARTIAL"
     assert out["coverage_status"] == "COMPLETE"
+    assert out["sheet_count"] == 44
+    assert out["cross_qc_stage"]["calls_planned"] == 3
+
+
+def test_run_completeness_still_reads_a_flat_manifest(tmp_path):
+    """Fallback for a hand-built manifest; not the shipped shape."""
+    export = _export(tmp_path, [], manifest={
+        "qc_status": "COMPLETE", "coverage_status": "INCOMPLETE",
+    })
+    out = read_run_completeness(export)
+    assert out["qc_status"] == "COMPLETE"
+    assert out["coverage_status"] == "INCOMPLETE"
+
+
+def test_stage_entries_keyed_by_name_are_still_found(tmp_path):
+    export = _export(tmp_path, [], manifest={
+        "stages": [{"name": "cross_qc", "status": "COMPLETE"}],
+    })
+    assert read_run_completeness(export)["cross_qc_stage"]["status"] == "COMPLETE"
+
+
+# --------------------------------------------------------------------------- #
+# §7.2 item 3 — the join that run-level totals cannot support
+# --------------------------------------------------------------------------- #
+
+
+def test_discard_rate_joins_per_sheet_counts_onto_classification(tmp_path):
+    cov = SetCoverage()
+    cov.sheets = [
+        SheetCoverage(source_id="SRC-0001", page_index=0, sheet_id="FP-101",
+                      width_pt=_W, height_pt=_H, word_count=500,
+                      text_chars_total=900, text_chars_in_prompt=900,
+                      truncated=False, chars_past_cap=0, total_tiles=36,
+                      word_free_tiles=1, word_free_fraction=0.03,
+                      classification="vector", over_cross_qc_budget=False,
+                      cross_qc_chars_omitted=0),
+        SheetCoverage(source_id="SRC-0001", page_index=1, sheet_id="AS-BUILT",
+                      width_pt=_W, height_pt=_H, word_count=0,
+                      text_chars_total=0, text_chars_in_prompt=0,
+                      truncated=False, chars_past_cap=0, total_tiles=36,
+                      word_free_tiles=36, word_free_fraction=1.0,
+                      classification="textless", over_cross_qc_budget=False,
+                      cross_qc_chars_omitted=0),
+    ]
+    completeness = {"discards": {"by_sheet": {
+        "SRC-0001:p0": {"facts_ungrounded_quote_text_bearing_sheet": 2},
+        "SRC-0001:p1": {"facts_ungrounded_quote_textless_sheet": 7},
+        "SRC-9999:p3": {"facts_no_quote": 1},
+    }}}
+    out = discard_rate_by_classification(cov, completeness)
+    assert out["available"] is True
+    assert out["by_classification"]["vector"] == {
+        "facts_ungrounded_quote_text_bearing_sheet": 2}
+    assert out["by_classification"]["textless"] == {
+        "facts_ungrounded_quote_textless_sheet": 7}
+    # A key with no matching sheet is surfaced, never silently folded in.
+    assert out["unmatched_sheet_keys"] == ["SRC-9999:p3"]
+    assert "unmatched_sheet_key" in out["by_classification"]
+
+
+def test_discard_rate_is_unavailable_without_an_instrumented_run(tmp_path):
+    out = discard_rate_by_classification(SetCoverage(), {"discards": None})
+    assert out["available"] is False
+    assert "7.2" in out["note"]
+
+
+# --------------------------------------------------------------------------- #
+# Finding 3 — one bad source must not erase the others
+# --------------------------------------------------------------------------- #
+
+
+def test_a_corrupt_pdf_does_not_erase_earlier_good_scans(tmp_path):
+    """The regression: `list()` over the whole generator lost every page."""
+    good = _pdf(tmp_path, "good.pdf", text="FP-101 GENERAL NOTES")
+    bad = tmp_path / "bad.pdf"
+    bad.write_bytes(b"not a pdf at all")
+    cov = scan_sheets([good, bad])
+    assert len(cov.sheets) == 1, "the readable source must survive"
+    assert any("bad.pdf" in e for e in cov.unreadable_sources)
+
+
+def test_a_corrupt_pdf_listed_first_still_leaves_the_good_one(tmp_path):
+    bad = tmp_path / "bad.pdf"
+    bad.write_bytes(b"not a pdf at all")
+    good = _pdf(tmp_path, "good.pdf", text="FP-102 PLAN")
+    cov = scan_sheets([bad, good])
+    assert len(cov.sheets) == 1
+    assert any("bad.pdf" in e for e in cov.unreadable_sources)
 
 
 def test_report_never_contains_source_text(tmp_path):
@@ -419,5 +528,50 @@ def test_counters_never_carry_quote_text():
     _parse_facts({"facts": [
         {"sheet_handle": "S001", "exact_quote": "SECRET PROPRIETARY STRING"},
     ]}, entries, {}, counts)
-    assert "SECRET" not in json.dumps(counts.to_dict())
-    assert all(isinstance(v, int) for v in counts.to_dict().values())
+    payload = counts.to_dict()
+    assert "SECRET" not in json.dumps(payload)
+    by_sheet = payload.pop("by_sheet")
+    assert all(isinstance(v, int) for v in payload.values())
+    for key, counters in by_sheet.items():
+        assert re.fullmatch(r"[^/\\]+:p\d+", key), key      # portable, never a path
+        assert all(isinstance(v, int) for v in counters.values())
+
+
+def test_discards_are_attributed_to_the_sheet_that_caused_them():
+    """§7.2 item 3 needs a join key; run-level totals alone cannot supply one."""
+    entries = {**_entry("S001", text=""), **_entry("S002", text="PV-3 SERVES HALL 2")}
+    counts = CrossQCDiscardCounts()
+    _parse_facts({"facts": [
+        {"sheet_handle": "S001", "exact_quote": "FROM PIXELS"},
+        {"sheet_handle": "S002", "exact_quote": "NOT ON THIS SHEET"},
+        {"sheet_handle": "S002", "exact_quote": "PV-3 SERVES HALL 2"},
+    ]}, entries, {}, counts)
+    by_sheet = counts.to_dict()["by_sheet"]
+    assert by_sheet["SRC-S001:p0"] == {"facts_ungrounded_quote_textless_sheet": 1}
+    assert by_sheet["SRC-S002:p0"] == {
+        "facts_ungrounded_quote_text_bearing_sheet": 1, "facts_accepted": 1,
+    }
+
+
+def test_sheet_counter_key_is_portable_and_never_a_path():
+    geom = _geom(text="x")
+    assert sheet_counter_key(geom) == "SRC-0001:p0"
+    geom.ref = SheetRef(pdf_path=Path("/abs/secret/plans.pdf"), page_index=4,
+                        source_name="plans.pdf", page_count=9, source_id="")
+    key = sheet_counter_key(geom)
+    assert key == "plans:p4"                 # basename stem, no directory
+    assert "/" not in key and "\\" not in key
+
+
+def test_merge_folds_per_sheet_counts_too():
+    a = CrossQCDiscardCounts()
+    a.by_sheet = {"SRC-0001:p0": {"facts_accepted": 1}}
+    a.facts_accepted = 1
+    b = CrossQCDiscardCounts()
+    b.by_sheet = {"SRC-0001:p0": {"facts_accepted": 2}, "SRC-0002:p1": {"facts_no_quote": 1}}
+    b.facts_accepted, b.facts_no_quote = 2, 1
+    a.merge(b)
+    assert a.facts_accepted == 3
+    assert a.by_sheet["SRC-0001:p0"]["facts_accepted"] == 3
+    assert a.by_sheet["SRC-0002:p1"]["facts_no_quote"] == 1
+    assert CrossQCDiscardCounts.from_dict(a.to_dict()) == a

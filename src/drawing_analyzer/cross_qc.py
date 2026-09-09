@@ -308,19 +308,68 @@ class CrossQCDiscardCounts:
     facts_ungrounded_quote_textless_sheet: int = 0
     facts_ungrounded_quote_text_bearing_sheet: int = 0
     facts_accepted: int = 0
+    # portable sheet key -> {counter name: count}. Same counter names as above.
+    by_sheet: dict = field(default_factory=dict)
+
+    def _counter_names(self) -> list[str]:
+        return [f.name for f in fields(self) if f.name != "by_sheet"]
+
+    def bump(self, name: str, geom: Any = None) -> None:
+        """Increment one counter, run-level and (when known) per sheet."""
+        setattr(self, name, getattr(self, name) + 1)
+        if geom is None:
+            return
+        key = sheet_counter_key(geom)
+        if not key:
+            return
+        self.by_sheet.setdefault(key, {})
+        self.by_sheet[key][name] = self.by_sheet[key].get(name, 0) + 1
 
     def merge(self, other: "CrossQCDiscardCounts") -> None:
         """Fold another counter set in (shards accumulate into the run total)."""
-        for f in fields(self):
-            setattr(self, f.name, getattr(self, f.name) + getattr(other, f.name))
+        for name in self._counter_names():
+            setattr(self, name, getattr(self, name) + getattr(other, name))
+        for key, counters in (other.by_sheet or {}).items():
+            dest = self.by_sheet.setdefault(key, {})
+            for name, n in counters.items():
+                dest[name] = dest.get(name, 0) + n
 
     def to_dict(self) -> dict:
-        return {f.name: getattr(self, f.name) for f in fields(self)}
+        out = {name: getattr(self, name) for name in self._counter_names()}
+        out["by_sheet"] = {k: dict(v) for k, v in sorted(self.by_sheet.items())}
+        return out
 
     @classmethod
     def from_dict(cls, d: dict) -> "CrossQCDiscardCounts":
-        known = {f.name for f in fields(cls)}
-        return cls(**{k: int(v or 0) for k, v in (d or {}).items() if k in known})
+        d = d or {}
+        known = {f.name for f in fields(cls)} - {"by_sheet"}
+        obj = cls(**{k: int(v or 0) for k, v in d.items() if k in known})
+        raw = d.get("by_sheet")
+        if isinstance(raw, dict):
+            obj.by_sheet = {
+                str(k): {str(n): int(c or 0) for n, c in v.items()}
+                for k, v in raw.items() if isinstance(v, dict)
+            }
+        return obj
+
+
+def sheet_counter_key(geom: Any) -> str:
+    """A portable ``"SRC-0001:p0"`` key for one sheet — never a path.
+
+    Mirrors the usage ledger's ``stage_instance`` convention so a manifest
+    reader can join these counts against §7.1's per-sheet classification.
+    Falls back to the source *basename* stem when no source id was assigned;
+    ``""`` when even that is unavailable, which simply skips attribution.
+    """
+    ref = getattr(geom, "ref", None)
+    if ref is None:
+        return ""
+    source = str(getattr(ref, "source_id", "") or "").strip()
+    if not source:
+        source = Path(str(getattr(ref, "source_name", "") or "")).stem
+    if not source:
+        return ""
+    return f"{source}:p{int(getattr(ref, 'page_index', 0) or 0)}"
 
 
 def _sheet_is_textless(geom: Any) -> bool:
@@ -527,8 +576,8 @@ def _finding_from_handles(
     for handle, quote in refs_raw:
         entry = entry_by_handle.get(_norm_id(handle))   # case/whitespace-insensitive
         if entry is None:                    # unknown handle → unbound
-            if counts is not None:
-                counts.legs_unresolved_handle += 1
+            if counts is not None:           # no geom: run-level only
+                counts.bump("legs_unresolved_handle")
             continue
         sheet_id, geom = entry
         key = source_page_key(geom.ref)
@@ -536,23 +585,21 @@ def _finding_from_handles(
             continue
         if quote and not _grounded(quote, getattr(geom, "sheet_text", "") or ""):
             if counts is not None:           # WP-02 §7.2: why, not just how many
-                if _sheet_is_textless(geom):
-                    counts.legs_ungrounded_quote_textless_sheet += 1
-                else:
-                    counts.legs_ungrounded_quote_text_bearing_sheet += 1
+                counts.bump(
+                    "legs_ungrounded_quote_textless_sheet" if _sheet_is_textless(geom)
+                    else "legs_ungrounded_quote_text_bearing_sheet", geom)
             continue                         # ungrounded quote → not a trusted leg
         if counts is not None:
-            if quote:
-                counts.legs_accepted_grounded += 1
-            else:
-                # Trigger 3: the guard above short-circuits on an empty quote, so
-                # this leg is trusted without any check at all.
-                counts.legs_accepted_without_quote += 1
+            # Trigger 3: the guard above short-circuits on an empty quote, so a
+            # quoteless leg is trusted without any check at all.
+            counts.bump(
+                "legs_accepted_grounded" if quote else "legs_accepted_without_quote",
+                geom)
         seen_sheets.add(key)
         resolved.append((sheet_id, quote, geom))
     if len(resolved) < 2:
-        if counts is not None:
-            counts.findings_dropped_under_two_legs += 1
+        if counts is not None:               # a finding spans sheets: run-level
+            counts.bump("findings_dropped_under_two_legs")
         return None
 
     (p_sid, p_quote, pgeom), *legs = resolved
@@ -886,24 +933,23 @@ def _parse_facts(
         handle = str(item.get("sheet_handle", "") or "").strip()
         entry = entry_by_handle.get(_norm_id(handle))   # case/whitespace-insensitive
         if entry is None:
-            if counts is not None:
-                counts.facts_unresolved_handle += 1
+            if counts is not None:           # no geom: run-level only
+                counts.bump("facts_unresolved_handle")
             continue
         sheet_id, geom = entry
         exact_quote = _quote(item.get("exact_quote", ""))
         if not exact_quote:
             if counts is not None:
-                counts.facts_no_quote += 1
+                counts.bump("facts_no_quote", geom)
             continue
         if not _grounded(exact_quote, getattr(geom, "sheet_text", "") or ""):
             if counts is not None:           # WP-02 §7.2: why, not just how many
-                if _sheet_is_textless(geom):
-                    counts.facts_ungrounded_quote_textless_sheet += 1
-                else:
-                    counts.facts_ungrounded_quote_text_bearing_sheet += 1
+                counts.bump(
+                    "facts_ungrounded_quote_textless_sheet" if _sheet_is_textless(geom)
+                    else "facts_ungrounded_quote_text_bearing_sheet", geom)
             continue
         if counts is not None:
-            counts.facts_accepted += 1
+            counts.bump("facts_accepted", geom)
         out.append(CrossQCFact(
             sheet_handle=handle,
             sheet_id=sheet_id,
