@@ -265,6 +265,12 @@ class RenderedSheet:
     - ``is_raster`` — ``True`` when ``words`` is empty (a scanned / pasted-raster
       sheet). Drives the higher raster render target, a prompt disclosure line,
       and a report badge.
+    - ``full_sheet_text`` — the **uncapped** reading-order text, retained for
+      host-side source checks only and never sent to a model. ``sheet_text`` is
+      what the model saw; this is what the host can honestly check a quote
+      against. They differ only on a truncated sheet. ``None`` = unavailable
+      (a hand-built sheet, or one from a caller predating this field), which is
+      **not** the same as an empty extraction — see :func:`sheet_evidence_text`.
     - ``text_chars_total`` — the length of the text layer **before** the
       ``sheet_text`` cap. A count, never the text: with only the capped string
       every truncated sheet reports ``SHEET_TEXT_MAX_CHARS``, so a
@@ -289,6 +295,7 @@ class RenderedSheet:
     sheet_text: str = ""
     words: list[Any] = field(default_factory=list)
     is_raster: bool = False
+    full_sheet_text: "str | None" = None
     text_chars_total: "int | None" = None
     omitted_tiles: list[tuple[int, int]] = field(default_factory=list)
     overlap_frac: float = 0.08  # mirrors tiling.DEFAULT_OVERLAP_FRAC
@@ -422,6 +429,10 @@ class SheetGeometry:
     words: list[Any] = field(default_factory=list)
     sheet_text: str = ""
     is_raster: bool = False
+    # Uncapped reading-order text for host-side source checks only — never sent
+    # to a model; see :class:`RenderedSheet`. ``None`` = unavailable, which is not
+    # the same as an empty extraction (:func:`sheet_evidence_text`).
+    full_sheet_text: "str | None" = None
     # Length of the text layer before the ``sheet_text`` cap — a count, never the
     # text; see :class:`RenderedSheet`. ``None`` = not recorded, not zero.
     text_chars_total: "int | None" = None
@@ -445,10 +456,43 @@ class SheetGeometry:
             words=rendered.words,
             sheet_text=rendered.sheet_text,
             is_raster=rendered.is_raster,
+            full_sheet_text=rendered.full_sheet_text,
             text_chars_total=rendered.text_chars_total,
             geometry=rendered.geometry,
             omitted_tile_count=len(rendered.omitted_tiles or []),
         )
+
+
+def sheet_evidence_text(sheet: Any) -> str:
+    """The text a **host-side** check may treat as this sheet's source evidence.
+
+    ``sheet_text`` is the capped string the *model* was shown; a quote can be
+    genuinely present in the source and absent from it (WP-03A / §2.1 trigger 1).
+    Every host validator that asks "does this quote exist on this sheet?" must
+    ask through here instead.
+
+    Three cases, deliberately distinguished:
+
+    - a **present string** is used as-is, **including an explicitly empty one** —
+      a sheet with no text layer really has no textual evidence, and pretending
+      otherwise would silently re-admit the capped text as a stand-in;
+    - **``None`` or an absent attribute** means the full text is *unavailable*
+      (an older caller, a hand-built fixture), so the capped ``sheet_text`` is
+      the best available evidence and is returned for compatibility;
+    - a **non-string** value is malformed. It is treated like unavailable rather
+      than stringified: turning an arbitrary object into trusted evidence via
+      ``str()`` could fabricate a match, and this function's output is used to
+      decide whether a finding is grounded.
+
+    This is why the implementation is not ``full_sheet_text or sheet_text``,
+    which collapses the first case into the second and quietly re-introduces the
+    bug for every textless sheet.
+    """
+    full = getattr(sheet, "full_sheet_text", None)
+    if isinstance(full, str):
+        return full
+    capped = getattr(sheet, "sheet_text", "")
+    return capped if isinstance(capped, str) else ""
 
 
 # ---------------------------------------------------------------------------

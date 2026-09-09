@@ -141,6 +141,21 @@ both the submitted batch and the one that actually served the digests.
   synthesis conflicts, and opted-in focus items into findings — match first,
   one small structuring call for stragglers on **Sonnet 5** at `EFFORT_LOW`,
   degraded sheet-level entry on failure).
+  Cross-QC's host-side grounding reads **`models.sheet_evidence_text(geom)`**,
+  not `sheet_text` (WP-03A §2.1 trigger 1): `sheet_text` is the *capped* string
+  the model was shown, while `full_sheet_text` is the uncapped reading-order
+  text retained for host checks and **never sent**. A quote transcribed from
+  pixels past `SHEET_TEXT_MAX_CHARS` is real source text, and grounding it
+  against the cap silently dropped the leg — and with it the whole finding,
+  which needs two grounded sheets. The helper is deliberately not
+  `full_sheet_text or sheet_text`: a present-but-empty full text means "no
+  textual evidence" and must not fall back, while `None` (older caller,
+  hand-built fixture) means "unavailable" and does. A non-string is treated as
+  unavailable rather than stringified into trusted evidence. Prompt bytes are
+  unchanged — `cross_sheet_qc` entries and `_budgeted_text_layer` still carry
+  the capped text — and `_cross_qc_cache_key` adds an `evidence_sha256` **only
+  for a truncated sheet**, so every untruncated key stays byte-identical and no
+  stored result was discarded (hence no `_CROSS_QC_CACHE_CONTRACT` bump).
   Cross-QC also carries **count-only discard counters** on the sharded path
   (`CrossQCDiscardCounts`, WP-02 §7.2): how many legs/facts the host dropped and
   why — unresolved handle, quote absent, quote present but unmatched, split by
