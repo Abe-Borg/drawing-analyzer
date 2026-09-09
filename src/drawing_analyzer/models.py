@@ -2371,23 +2371,35 @@ class RunUsage:
         return sum(1 for r in self.records if r.cache_hit)
 
     @staticmethod
-    def _billable_but_unpriced(r: "UsageRecord") -> bool:
+    def is_billable_but_unpriced(r: "UsageRecord") -> bool:
         """A record that consumed billable usage but the model couldn't be priced.
 
         Its cost is genuinely *unknown*, not zero — so summing the priced records
         around it would understate the total and present it as authoritative. A
         zero-token cache hit under an unknown model is NOT billable and does not
         poison the total.
+
+        **Cache tokens count.** They are billable usage priced as multipliers on
+        the input rate (0.1x read, 1.25x/2x write), and omitting them let a record
+        carrying 180k cache tokens under an unpriceable model pass as "no usage":
+        a run with one $5.00 digest beside it reported **$5.00**, a
+        complete-looking total that silently dropped real cache spend. That is
+        the exact failure this predicate exists to prevent — "an unknown price
+        means *no* dollar figure, never *a smaller* dollar figure". Found via a
+        review of the A/B harness's copy of this rule; the copy is gone, and the
+        harness now calls this.
         """
         return r.estimated_cost is None and bool(
-            r.input_tokens or r.output_tokens or r.billable_tool_uses
+            r.input_tokens or r.output_tokens
+            or r.cache_read_tokens or r.cache_write_tokens
+            or r.billable_tool_uses
         )
 
     @property
     def total_estimated_cost(self) -> "Decimal | None":
         # If ANY billable record could not be priced, the aggregate is unknowable —
         # return None rather than a partial sum that silently omits real cost.
-        if any(self._billable_but_unpriced(r) for r in self.records):
+        if any(self.is_billable_but_unpriced(r) for r in self.records):
             return None
         priced = [r.estimated_cost for r in self.records if r.estimated_cost is not None]
         return sum(priced, Decimal("0")) if priced else None
@@ -2413,7 +2425,7 @@ class RunUsage:
             g["calls"] += 1
             if r.cache_hit:
                 g["cache_hits"] += 1
-            if self._billable_but_unpriced(r):
+            if self.is_billable_but_unpriced(r):
                 unpriced.add(k)
             elif r.estimated_cost is not None:
                 g["estimated_cost"] = (g["estimated_cost"] or Decimal("0")) + r.estimated_cost

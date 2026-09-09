@@ -67,6 +67,55 @@ zero-cost arm, and an arm setting whose **name** looks credential-bearing
 (`KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `CREDENTIAL`) is redacted from every
 printed label and from the saved `diff.txt`.
 
+#### Sweeping tile overlap
+
+```bash
+# An overlap-only experiment — not expressible before WP-06
+python scripts/ab_sweep_drawing_analyzer.py --pdf setA.pdf \
+    --baseline-overlap 0.04 --variant-overlap 0.16 --out ab_out
+```
+
+Overlap is a typed per-arm option rather than an environment variable, forwarded
+to the estimate child and the execution child as the same `overlap_frac`
+pipeline argument. Values are validated **before** any child runs: finite,
+within `[0.0, 0.5]`, and at most **four** decimal places — because the render
+identity records `f"overlap={overlap_frac:.4f}"`, so two values differing in the
+fifth decimal render different pixels while sharing a level-1 cache key, and one
+arm would be scored against the other's cached renders. Finer precision is
+rejected rather than silently rounded: rounding runs an experiment the operator
+did not ask for and reports it under the label they typed.
+
+Note that `--estimate` cannot see an overlap difference, and says so. The
+estimate prices the conservative allowance — sheets × images-per-grid × a square
+at the target — and every one of those terms is overlap-invariant. Overlap
+changes the rendered *rectangle*, which only the shape-aware path sees, so the
+difference appears in the run's actual image tokens.
+
+The same-configuration guard now compares the arms' **reviewed parameters**
+rather than whole environment dictionaries. The old comparison failed in both
+directions: an irrelevant variable differing between two shells defeated it, and
+an overlap-only experiment could not be expressed at all.
+
+#### What each arm's summary records
+
+Beyond the three quality signals, `arm_*.json` carries per-family **cost** (not
+just tokens — otherwise "the critique got cheaper" cannot be told from "the
+critique did less work"), and a `usage_axes` block for the axes the family and
+model rollups drop:
+
+| axis | why it is separate |
+|---|---|
+| transport (REAL_TIME / BATCH / CACHE) | two arms can be token-identical and differ by half on rate alone |
+| cache read / write tokens, and the requested write TTL | separately priced multipliers on the input rate — 1.25× for a 5-minute write, 2× for one hour. Folded into "input", a prompt-cache experiment is unmeasurable |
+| outcome: served / cache hit / abandoned / parse-failed / failed | a served cache hit costs nothing; an abandoned batch attempt costs nothing *and* produced no response; a failed-parse call consumed real tokens. Collapsed into one "paid calls" number, an arm that abandoned half its batches reads as a saving |
+| `unpriced_records` | the honest companion to a `None` cost: it separates "no model price" from "no usage" |
+
+Nothing here re-prices anything. Every dollar figure comes from the run's own
+`UsageRecord.estimated_cost`, computed at its own rate class; this is a view over
+the append-only ledger, not a second billing calculator. `record_granularity`
+states in the output that the pipeline aggregates some verification work into one
+record, so a record count is not universally an API-call count.
+
 The hermetic suite cannot answer whether a cheaper configuration still finds the
 same defects — the §19.1 gauntlet routes canned responses by system-prompt
 identity and never reads the model id, so a model swap changes nothing it

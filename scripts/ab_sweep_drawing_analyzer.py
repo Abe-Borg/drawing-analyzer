@@ -64,6 +64,7 @@ import json
 import os
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -102,6 +103,117 @@ def _tally(values, keys) -> dict[str, int]:
     return out
 
 
+#: Outcome buckets for a usage record, in report order. These are NOT
+#: interchangeable and must never be folded into one "paid calls" number:
+#: a served cache hit costs nothing, an abandoned batch attempt costs nothing
+#: *and* produced no response, and a failed-parse call consumed real tokens.
+#: Collapsing them lets an arm that abandoned half its batches look cheap.
+_OUTCOMES = ("served", "cache_hit", "abandoned", "parse_failed", "failed")
+
+
+def _record_outcome(r) -> str:
+    """Which bucket one :class:`UsageRecord` belongs in.
+
+    ``parse_failed`` is reserved for a response that *arrived and could not be
+    used* — tokens were spent on something unusable. A request that raised before
+    any response also carries ``parse_success=False`` (there was nothing to
+    parse), and the pipeline pairs it with ``terminal_status="FAILED"`` and zero
+    tokens. Checking ``parse_success`` first swept those into ``parse_failed``
+    and emptied the ``failed`` bucket — which inverts the one question these
+    buckets exist to answer: did this arm get unusable answers, or get no answers
+    at all? Those call for opposite responses.
+    """
+    status = str(getattr(r, "terminal_status", "") or "")
+    if getattr(r, "cache_hit", False):
+        return "cache_hit"
+    if status.startswith("ABANDONED"):
+        return "abandoned"
+    if status in ("FAILED", "PARTIAL"):
+        return "failed"
+    # Response-bearing only: no tokens means no response to have failed on.
+    if not getattr(r, "parse_success", True) and (
+        getattr(r, "input_tokens", 0) or getattr(r, "output_tokens", 0)
+    ):
+        return "parse_failed"
+    if not getattr(r, "parse_success", True):
+        return "failed"
+    return "served"
+
+
+def usage_breakdown(run_usage) -> dict:
+    """The axes ``by_family``/``by_model`` do not carry (WP-06 §11.1).
+
+    Derived from the same append-only records the run priced itself with — this
+    is a *view*, never a second billing calculator. Every dollar figure here comes
+    from ``UsageRecord.estimated_cost``, which the run computed at its own rate
+    class; nothing is re-priced.
+
+    Three axes the existing rollups drop, each of which can move between two arms
+    that look identical in a family rollup:
+
+    - **transport** — REAL_TIME / BATCH / CACHE. A variant that shifts work to the
+      batch queue halves its rate without changing a single token count.
+    - **cache tokens** — read and write are separately priced multipliers, and the
+      requested write TTL decides which (1.25x for 5-minute, 2x for one hour).
+      Summing them into "input" makes a prompt-cache experiment unmeasurable.
+    - **outcome** — see :data:`_OUTCOMES`.
+
+    ``unpriced_records`` is the honest companion to a ``None`` cost: it says how
+    many records could not be priced, so a reader can tell "no model price" from
+    "no usage". It calls ``RunUsage.is_billable_but_unpriced`` rather than
+    restating the rule — the first version of this function reimplemented it and
+    immediately drifted, missing cache tokens, which is how two views of the same
+    ledger start disagreeing about what was spent.
+
+    **Granularity is labelled, not assumed.** The pipeline aggregates some
+    verification work into a single usage record, so ``calls`` is a record count
+    and not universally an API-call count. ``record_granularity`` says so in the
+    output rather than letting a reader infer call counts from it.
+    """
+    from drawing_analyzer.models import RunUsage
+
+    records = list(getattr(run_usage, "records", None) or [])
+    if not records:
+        return {"records": 0, "record_granularity": "one record per API call or attempt,"
+                " except verification which the pipeline aggregates"}
+
+    def _bucket() -> dict:
+        return {"records": 0, "input_tokens": 0, "output_tokens": 0,
+                "cache_read_tokens": 0, "cache_write_tokens": 0}
+
+    by_transport: dict[str, dict] = {}
+    outcomes = {k: 0 for k in _OUTCOMES}
+    write_ttls: dict[str, int] = {}
+    unpriced = 0
+    cache_read = cache_write = 0
+    for r in records:
+        g = by_transport.setdefault(str(getattr(r, "transport", "") or ""), _bucket())
+        g["records"] += 1
+        g["input_tokens"] += getattr(r, "input_tokens", 0)
+        g["output_tokens"] += getattr(r, "output_tokens", 0)
+        g["cache_read_tokens"] += getattr(r, "cache_read_tokens", 0)
+        g["cache_write_tokens"] += getattr(r, "cache_write_tokens", 0)
+        cache_read += getattr(r, "cache_read_tokens", 0)
+        cache_write += getattr(r, "cache_write_tokens", 0)
+        outcomes[_record_outcome(r)] += 1
+        if getattr(r, "cache_write_tokens", 0):
+            ttl = str(getattr(r, "cache_write_ttl", None) or "5m")
+            write_ttls[ttl] = write_ttls.get(ttl, 0) + getattr(r, "cache_write_tokens", 0)
+        if RunUsage.is_billable_but_unpriced(r):
+            unpriced += 1
+    return {
+        "records": len(records),
+        "record_granularity": "one record per API call or attempt, except"
+                              " verification which the pipeline aggregates",
+        "by_transport": dict(sorted(by_transport.items())),
+        "by_outcome": outcomes,
+        "cache_read_tokens": cache_read,
+        "cache_write_tokens": cache_write,
+        "cache_write_tokens_by_ttl": dict(sorted(write_ttls.items())),
+        "unpriced_records": unpriced,
+    }
+
+
 def summarize_run(ctx) -> dict:
     """Everything the comparison needs from a finished ``DrawingContext``."""
     findings = list(ctx.all_findings)
@@ -133,11 +245,18 @@ def summarize_run(ctx) -> dict:
         "output_tokens": ctx.total_output_tokens,
         "image_token_estimate": ctx.total_image_token_estimate,
         "estimated_cost_usd": None if cost is None else float(cost),
+        # Per-family COST, not just tokens. ``_rollup`` already computes it with
+        # the run's own pricing — this line simply stopped dropping it. Without
+        # it, "the critique got cheaper" could not be told from "the critique did
+        # less work", which is the whole question a model-swap arm is asking.
         "by_family": {
             fam: {"input": g["input_tokens"], "output": g["output_tokens"],
-                  "calls": g["calls"]}
+                  "calls": g["calls"], "cache_hits": g["cache_hits"],
+                  "cost": None if g["estimated_cost"] is None
+                          else float(g["estimated_cost"])}
             for fam, g in (ru.by_family() if ru else {}).items()
         },
+        "usage_axes": usage_breakdown(ru),
         "by_model": {
             m: {"input": g["input_tokens"], "output": g["output_tokens"],
                 "calls": g["calls"],
@@ -342,6 +461,110 @@ def _parse_env(spec: str) -> dict[str, str]:
     return out
 
 
+# --------------------------------------------------------------------------- #
+# Typed per-arm geometry (WP-06 §11.4)
+# --------------------------------------------------------------------------- #
+
+#: The render identity serializes overlap as ``f"overlap={overlap_frac:.4f}"``
+#: (``render.py``), so 0.08001 and 0.08002 produce the SAME level-1 cache key
+#: while rendering different pixels. An experiment sweeping finer than that would
+#: silently compare one arm against the other's cached renders. Rejecting the
+#: value is the honest response; silently rounding it would run an experiment the
+#: operator did not ask for and report it under the label they typed.
+_OVERLAP_DECIMALS = 4
+#: Below zero is meaningless; at 0.5 an interior tile has grown by its own width
+#: on each side and the "grid" no longer partitions anything. Neither bound is a
+#: quality opinion — they exist to catch a fat-fingered value before it reaches
+#: tiling or a cache key.
+_OVERLAP_MIN, _OVERLAP_MAX = 0.0, 0.5
+
+
+def parse_overlap(raw: str | None, *, label: str) -> float | None:
+    """Validate one ``--*-overlap`` value. ``None`` when unset (keep the default).
+
+    Rejects NaN and infinity explicitly: both survive ``float()``, both would
+    reach ``tile_rects`` and the render identity, and ``f"{float('nan'):.4f}"``
+    is ``"nan"`` — a perfectly stable cache key for a geometry that cannot be
+    rendered. Range and precision are checked here, before anything costly, so a
+    bad value fails in milliseconds rather than after two arms have been priced.
+    """
+    import math
+
+    if raw is None or str(raw).strip() == "":
+        return None
+    text = str(raw).strip()
+    try:
+        value = float(text)
+    except ValueError:
+        raise ValueError(f"{label}: expected a number, got {text!r}") from None
+    if not math.isfinite(value):
+        raise ValueError(f"{label}: {text!r} is not a finite number")
+    if not (_OVERLAP_MIN <= value <= _OVERLAP_MAX):
+        raise ValueError(
+            f"{label}: {value} is outside the supported range "
+            f"[{_OVERLAP_MIN}, {_OVERLAP_MAX}]"
+        )
+    if round(value, _OVERLAP_DECIMALS) != value:
+        raise ValueError(
+            f"{label}: {text} has more than {_OVERLAP_DECIMALS} decimal places. "
+            f"The render identity records overlap to {_OVERLAP_DECIMALS} places, "
+            f"so finer values would share a cache key while rendering "
+            f"differently — the arms would compare against each other's caches."
+        )
+    return value
+
+
+@dataclass(frozen=True)
+class ArmSpec:
+    """One arm's reviewed parameters — the experiment's identity (§11.4).
+
+    The same-configuration guard used to compare whole environment dictionaries,
+    which fails in both directions: an irrelevant variable differing between two
+    shells defeated it, and an overlap-only change could not be expressed at all
+    because overlap was not an environment variable. What decides whether two
+    arms are an experiment is the set of things the harness actually varies, and
+    that is exactly this.
+    """
+
+    env: dict
+    overlap_frac: float | None = None
+
+    @property
+    def resolved_overlap(self) -> float:
+        """What the arm will actually render at — omitted means the default."""
+        from drawing_analyzer import tiling
+
+        return (
+            tiling.DEFAULT_OVERLAP_FRAC if self.overlap_frac is None
+            else self.overlap_frac
+        )
+
+    def identity(self) -> tuple:
+        """**Resolved** settings, not the spelling that produced them.
+
+        Comparing the raw options reintroduces the very bug this guard exists to
+        prevent, in a new dress: an omitted ``--baseline-overlap`` and an explicit
+        ``--variant-overlap 0.08`` are ``None`` and ``0.08``, which differ — while
+        both render at the shipping 0.08. The guard would wave through two
+        identical billable runs.
+
+        The typed ``env`` entries stay part of the identity even if the pipeline
+        happens to ignore one. That is deliberate: what the operator typed is
+        their statement of intent, and the alternative — an allowlist of
+        recognised variables — would silently drop a knob added to the pipeline
+        later, turning a real experiment into a rejected one. Erring toward
+        "these arms differ" costs a run the operator asked for; erring the other
+        way costs a run they did not.
+        """
+        return (tuple(sorted(self.env.items())), self.resolved_overlap)
+
+    def label(self) -> str:
+        parts = [env_label(self.env)] if self.env else []
+        if self.overlap_frac is not None:
+            parts.append(f"overlap={self.overlap_frac}")
+        return ", ".join(parts) or "defaults"
+
+
 def resolve_transport() -> tuple[bool, bool]:
     """``(digest_batch, critique_batch)`` for the *current* environment.
 
@@ -362,7 +585,9 @@ def resolve_transport() -> tuple[bool, bool]:
     return use_batch, use_batch
 
 
-def resolve_arm_configuration(*, exhaustive: bool) -> dict:
+def resolve_arm_configuration(
+    *, exhaustive: bool, overlap_frac: float | None = None,
+) -> dict:
     """Everything about THIS process's configuration that moves the bill.
 
     One resolver, called by both children (WP-04 §9.1). Estimation and execution
@@ -388,7 +613,13 @@ def resolve_arm_configuration(*, exhaustive: bool) -> dict:
         "stage_models": vars(resolve_stage_models(model=REVIEW_MODEL_DEFAULT)),
         "transport": {"digest_batch": use_batch, "critique_batch": critique_batch},
         "grid": [tiling.DEFAULT_GRID_ROWS, tiling.DEFAULT_GRID_COLS],
-        "overlap_frac": tiling.DEFAULT_OVERLAP_FRAC,
+        # The value the arm will actually render at, not the command-line
+        # spelling: an omitted option resolves to the shipping default here, so
+        # the record says what happened rather than what was typed (§11.4).
+        "overlap_frac": (
+            tiling.DEFAULT_OVERLAP_FRAC if overlap_frac is None else overlap_frac
+        ),
+        "overlap_overridden": overlap_frac is not None,
         # The raw setting and what the clamp made of it: a fat-fingered value is
         # silently clamped, and an arm priced at the clamped target while the
         # operator believes the typed one is a comparison of the wrong thing.
@@ -399,7 +630,10 @@ def resolve_arm_configuration(*, exhaustive: bool) -> dict:
     }
 
 
-def _run_arm_in_process(pdfs: list[Path], out_path: Path, *, exhaustive: bool) -> None:
+def _run_arm_in_process(
+    pdfs: list[Path], out_path: Path, *, exhaustive: bool,
+    overlap_frac: float | None = None,
+) -> None:
     """Execute one arm and write its summary. Runs inside the child process."""
     from drawing_analyzer.client import get_client
     from drawing_analyzer.digest_cache import DigestCache
@@ -413,10 +647,17 @@ def _run_arm_in_process(pdfs: list[Path], out_path: Path, *, exhaustive: bool) -
         # contaminate each other anyway — but a warm arm compared against a cold
         # one measures nothing.
         cache = DigestCache(Path(tmp) / "cache.json")
+        # Forwarded as the pipeline's own ``overlap_frac`` kwarg — the same
+        # parameter the estimate child resolves — so the arm renders the geometry
+        # it was priced at. Omitted means the shipping default, untouched.
+        geometry_kwargs = (
+            {} if overlap_frac is None else {"overlap_frac": overlap_frac}
+        )
         ctx = extract_drawing_context(
             pdfs,
             client=get_client(),
             cache=cache,
+            **geometry_kwargs,
             qc_markups=exhaustive,
             reference_audit=exhaustive,
             # Passed explicitly, at the value the runtime would have resolved
@@ -429,14 +670,16 @@ def _run_arm_in_process(pdfs: list[Path], out_path: Path, *, exhaustive: bool) -
 
     # The same record the estimate child emits, so an arm's summary and the
     # quote that authorized it are directly comparable field by field.
-    summary["configuration"] = resolve_arm_configuration(exhaustive=exhaustive)
+    summary["configuration"] = resolve_arm_configuration(
+        exhaustive=exhaustive, overlap_frac=overlap_frac
+    )
     summary.update(summary["configuration"])
     out_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
 
 def run_arm(
     label: str, env: dict[str, str], pdfs: list[Path], out_dir: Path,
-    *, exhaustive: bool,
+    *, exhaustive: bool, overlap_frac: float | None = None,
 ) -> dict:
     """Run one arm in a subprocess and return its summary."""
     out_path = out_dir / f"arm_{label}.json"
@@ -444,6 +687,7 @@ def run_arm(
     cmd = [
         sys.executable, str(Path(__file__).resolve()),
         "--_arm", str(out_path), "--exhaustive" if exhaustive else "--no-exhaustive",
+        *([] if overlap_frac is None else ["--overlap", repr(overlap_frac)]),
         *[a for p in pdfs for a in ("--pdf", str(p))],
     ]
     print(f"[{label}] {env_label(env)}")
@@ -508,7 +752,10 @@ def env_label(env: dict[str, str]) -> str:
     )
 
 
-def _estimate_in_process(sheets: int, file_count: int, *, exhaustive: bool) -> dict:
+def _estimate_in_process(
+    sheets: int, file_count: int, *, exhaustive: bool,
+    overlap_frac: float | None = None,
+) -> dict:
     """Resolve this process's configuration and price it. Runs in the child.
 
     Local inspection only — no client is constructed, nothing is uploaded, no
@@ -521,7 +768,9 @@ def _estimate_in_process(sheets: int, file_count: int, *, exhaustive: bool) -> d
         estimate_exhaustive_run_cost,
     )
 
-    config = resolve_arm_configuration(exhaustive=exhaustive)
+    config = resolve_arm_configuration(
+        exhaustive=exhaustive, overlap_frac=overlap_frac
+    )
     model = config["model"]
     use_batch = config["transport"]["digest_batch"]
     out: dict = {"sheets": sheets, "file_count": file_count, **config}
@@ -541,7 +790,7 @@ def _estimate_in_process(sheets: int, file_count: int, *, exhaustive: bool) -> d
 
 def estimate_arm(
     label: str, env: dict[str, str], sheets: int, file_count: int, *,
-    exhaustive: bool,
+    exhaustive: bool, overlap_frac: float | None = None,
 ) -> dict:
     """Price one arm in a fresh child process. Returns the child's JSON.
 
@@ -555,6 +804,7 @@ def estimate_arm(
         "--_estimate-arm", "--sheets", str(sheets),
         "--file-count", str(file_count),
         "--exhaustive" if exhaustive else "--no-exhaustive",
+        *([] if overlap_frac is None else ["--overlap", repr(overlap_frac)]),
     ]
     proc = subprocess.run(
         cmd, env={**os.environ, **env}, capture_output=True, text=True,
@@ -605,7 +855,7 @@ def _model_rows(results: list[tuple[str, dict]]) -> list[str]:
     return ["", "Stage models that differ between the arms:", header, *rows]
 
 
-def _estimate(pdfs: list[Path], arms: list[tuple[str, dict]], *, exhaustive: bool) -> None:
+def _estimate(pdfs: list[Path], arms: "list[tuple[str, ArmSpec]]", *, exhaustive: bool) -> None:
     """Price both arms before spending anything.
 
     Sheet counting happens once, here: no environment variable changes how many
@@ -617,14 +867,30 @@ def _estimate(pdfs: list[Path], arms: list[tuple[str, dict]], *, exhaustive: boo
     sheets = len(list_sheets(pdfs))
     print(f"\n{sheets} sheet(s) across {len(pdfs)} file(s). Estimated per arm:\n")
     results = [
-        (label, estimate_arm(label, env, sheets, len(pdfs), exhaustive=exhaustive))
-        for label, env in arms
+        (label, estimate_arm(label, spec.env, sheets, len(pdfs),
+                             exhaustive=exhaustive, overlap_frac=spec.overlap_frac))
+        for label, spec in arms
     ]
-    for (label, est), (_, env) in zip(results, arms):
+    for (label, est), (_, spec) in zip(results, arms):
         transport = "batch" if est["transport"]["digest_batch"] else "real-time"
-        print(f"  {label:<10}{_money(est):<26}({transport})  {env_label(env)}")
+        print(f"  {label:<10}{_money(est):<26}({transport})  {spec.label()}")
     for line in _model_rows(results):
         print(line)
+    # An overlap-only experiment quotes both arms identically, and a reader could
+    # easily take that for "overlap costs nothing". It does not: the estimate
+    # child has no page shapes, so it prices from the conservative allowance —
+    # sheets x images-per-grid x a square at the target — and every one of those
+    # terms is overlap-invariant. Overlap changes the *rendered rectangle*, which
+    # only the shape-aware path (WP-05) can see. Saying so is the difference
+    # between a limitation and a wrong number.
+    overlaps = {spec.overlap_frac for _, spec in arms}
+    if len(overlaps) > 1:
+        print(
+            "\n  Note: overlap does not move these figures. The estimate prices "
+            "the conservative\n  allowance, which depends on grid and target "
+            "only — the overlap difference shows\n  up in the run's actual image "
+            "tokens, not here."
+        )
     print(
         "\nBoth arms run cold, so neither is discounted by a warm cache. These "
         "are estimates, not quotes: sheet complexity, how many findings turn up, "
@@ -640,6 +906,12 @@ def main(argv: list[str] | None = None) -> int:
                     help="baseline arm env, NAME=VALUE[,NAME=VALUE] ('' = defaults)")
     ap.add_argument("--variant", default="",
                     help="variant arm env, NAME=VALUE[,NAME=VALUE]")
+    ap.add_argument("--baseline-overlap", dest="baseline_overlap", default=None,
+                    help=f"baseline tile overlap fraction "
+                         f"[{_OVERLAP_MIN}, {_OVERLAP_MAX}], <= {_OVERLAP_DECIMALS} "
+                         f"decimals (default: the shipping value)")
+    ap.add_argument("--variant-overlap", dest="variant_overlap", default=None,
+                    help="variant tile overlap fraction (same rules)")
     ap.add_argument("--out", type=Path, default=Path("ab_out"))
     ap.add_argument("--exhaustive", action="store_true", default=True,
                     help="run the full QC stack (default)")
@@ -652,16 +924,26 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--sheets", type=int, default=0, help=argparse.SUPPRESS)
     ap.add_argument("--file-count", dest="file_count", type=int, default=0,
                     help=argparse.SUPPRESS)
+    ap.add_argument("--overlap", default=None, help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
 
     # Estimate-child mode: price this process's resolved configuration and emit
     # one JSON object. Handled before the ``--pdf`` requirement because the
     # child is given a sheet count, not paths — the parent counted the pages
     # once, and no environment variable can change that number.
+    # Validated in the child too, not just the parent: the child is spawned with
+    # an argument vector, and a value that reached it unvalidated would land in
+    # tiling and the cache key.
+    try:
+        child_overlap = parse_overlap(args.overlap, label="--overlap")
+    except ValueError as exc:
+        ap.error(str(exc))
+
     if args._estimate_arm:
         json.dump(
             _estimate_in_process(args.sheets, args.file_count,
-                                 exhaustive=args.exhaustive),
+                                 exhaustive=args.exhaustive,
+                                 overlap_frac=child_overlap),
             sys.stdout,
         )
         return 0
@@ -671,26 +953,38 @@ def main(argv: list[str] | None = None) -> int:
 
     # Child mode: run one arm and write its summary.
     if args._arm is not None:
-        _run_arm_in_process(args.pdf, args._arm, exhaustive=args.exhaustive)
+        _run_arm_in_process(args.pdf, args._arm, exhaustive=args.exhaustive,
+                            overlap_frac=child_overlap)
         return 0
 
     base_env = _parse_env(args.baseline)
     var_env = _parse_env(args.variant)
-    # Compare the effective environments, not just "is the variant non-empty".
-    # ``--baseline X=1 --variant X=1`` is two identical billable runs, and an
-    # empty variant is only the most obvious way to ask for one. What decides
-    # the arms is the env each process ends up with, so that is what is checked.
-    if {**os.environ, **base_env} == {**os.environ, **var_env}:
-        ap.error("--baseline and --variant resolve to the same environment, so "
-                 "both arms would run identically and the comparison would "
-                 "measure nothing. Change at least one variable in --variant.")
+    try:
+        base_overlap = parse_overlap(args.baseline_overlap, label="--baseline-overlap")
+        var_overlap = parse_overlap(args.variant_overlap, label="--variant-overlap")
+    except ValueError as exc:
+        ap.error(str(exc))
+    baseline = ArmSpec(env=base_env, overlap_frac=base_overlap)
+    variant = ArmSpec(env=var_env, overlap_frac=var_overlap)
+
+    # WP-06 §11.4. The guard used to compare whole environment dictionaries,
+    # which fails in both directions: an irrelevant variable differing between
+    # two shells defeated it, and an overlap-only experiment could not be
+    # expressed at all, because overlap is not an environment variable. What
+    # decides whether two arms are an experiment is the set of parameters this
+    # harness actually varies — which is what ArmSpec.identity() is.
+    if baseline.identity() == variant.identity():
+        ap.error("--baseline and --variant resolve to the same reviewed "
+                 "configuration, so both arms would run identically and the "
+                 "comparison would measure nothing. Change a variable in "
+                 "--variant, or give the arms different --*-overlap values.")
 
     missing = [p for p in args.pdf if not p.exists()]
     if missing:
         ap.error("no such file: " + ", ".join(str(p) for p in missing))
 
     if args.estimate:
-        _estimate(args.pdf, [("baseline", base_env), ("variant", var_env)],
+        _estimate(args.pdf, [("baseline", baseline), ("variant", variant)],
                   exhaustive=args.exhaustive)
         return 0
 
@@ -706,14 +1000,18 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     args.out.mkdir(parents=True, exist_ok=True)
-    base = run_arm("baseline", base_env, args.pdf, args.out, exhaustive=args.exhaustive)
-    var = run_arm("variant", var_env, args.pdf, args.out, exhaustive=args.exhaustive)
+    base = run_arm("baseline", baseline.env, args.pdf, args.out,
+                   exhaustive=args.exhaustive, overlap_frac=baseline.overlap_frac)
+    var = run_arm("variant", variant.env, args.pdf, args.out,
+                  exhaustive=args.exhaustive, overlap_frac=variant.overlap_frac)
 
     diff = diff_summaries(base, var)
     # Redacted: ``diff.txt`` is written to disk and shared, and the arm env is
     # whatever the user typed on the command line — which can include a key.
-    base_label = env_label(base_env)
-    var_label = env_label(var_env)
+    # ``ArmSpec.label`` names the overlap too, so a geometry-only experiment is
+    # not labelled "defaults" in the saved report.
+    base_label = baseline.label()
+    var_label = variant.label()
     report = render_diff(diff, base_label=base_label, var_label=var_label)
     print("\n" + report)
 

@@ -57,7 +57,13 @@ holds a required stage at PARTIAL, which the roll-up can never call COMPLETE).
 cache-hit, `estimated_cost`), and the run's `total_*` are *derived* sums — no stage
 can overwrite another's counters (the old `v_in, v_out = vres…` overwrite is gone).
 `core.pricing.usage_record_cost` prices one record by its rate class; costs carry a
-`PRICING_EFFECTIVE_DATE`. `cost.estimate_exhaustive_run_cost` is the pre-run
+`PRICING_EFFECTIVE_DATE`. `RunUsage.is_billable_but_unpriced` is the single rule
+for "this consumed billable usage the table cannot price", and it counts **cache
+read/write tokens** as usage: omitting them let a record carrying 180k cache
+tokens under an unpriceable model pass as "no usage", so a run with one $5.00
+digest beside it reported **$5.00** — a complete-looking total that dropped real
+spend, the exact failure the rule exists to prevent. Never restate that rule; the
+A/B harness had a second copy and it drifted within one commit. `cost.estimate_exhaustive_run_cost` is the pre-run
 per-stage estimate (verification/citation quoted as a low–high band), and every
 stage is priced with **its own resolved model** and the runtime's own
 `critique_runs()` — the standard path once priced synthesis/focus at the digest's
