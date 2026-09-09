@@ -6,6 +6,93 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Documentation corrected against the code it describes (WP-07).** A
+  documentation pass over the claims the review found stale or overstated. Each
+  correction below was verified against the current implementation rather than
+  taken from the review, and two of the review's own statements turned out to be
+  imprecise — recorded here rather than copied forward.
+
+  Three stale code comments:
+
+  - `core/api_config.py` claimed verification "reserves Opus for escalation on
+    CRITICAL/HIGH UNVERIFIED findings". `verify.py` resolves exactly one model
+    and never escalates; `VERIFICATION_ESCALATION_MODEL` is consumed by
+    `investigate.py`, whose trigger is an **anchored UNCERTAIN** verdict at any
+    severity inside a per-run budget. `UNVERIFIED` is not one of
+    `VERIFICATION_STATUSES` at all, so the comment named a severity gate and a
+    status that both do not exist.
+  - `pipeline.py` said the critique "re-renders each sheet (the digest images
+    are gone by now)". They are not gone: `render_spool` reconstructs them
+    byte-for-byte, and the batch path adopts the digest's uploads. A second
+    rasterization is now the per-page fallback — an unspooled page, a grid
+    mismatch, an unavailable manifest, a failed spool read/write — not the rule.
+  - `cost.py` appealed to "the 'slightly high' bias the rest of this module aims
+    for". No such module-wide bias exists, and implying one invited every figure
+    to be read as a ceiling. The module has two explicitly-labelled bases and
+    says which produced a number: the conservative allowance is deliberately
+    high, the shape-aware path aims at the real figure. Neither is a guaranteed
+    maximum.
+
+  Documentation:
+
+  - **A cold exhaustive run does not rasterize every sheet twice.** The
+    performance doc said it did, and budgeting from that overstated cold wall
+    time. Replaced with the spool-reuse story and its per-page fallbacks.
+  - **Three vision reads is not three full-price image reads.** The two
+    self-consistency critique reads share a byte-identical image prefix, so the
+    second bills at the cache-read multiplier; the batch path is uncached and
+    takes the batch discount instead. What a run cost is what its `UsageRecord`s
+    say it cost.
+  - **The two image-token regimes are now documented as a pair.** Above 20
+    images the API rejects an oversized image and the token count is
+    scale-invariant; at 20 or fewer it downscales instead, the target is the full
+    2576 px native long edge, and the count is cap-dominated. The 2576 branch is
+    deliberate policy, and `DRAWING_ANALYZER_TILE_TARGET_PX` overrides the vector
+    target only — the raster target stays fixed so `raster >= vector` holds and
+    the conservative allowance stays a true upper bound.
+  - **Overlap is presented as approximate preservation of interior resolution**,
+    with thinner edge context and an unaffected overview — not as a free
+    resolution win. `--estimate` cannot see an overlap change and says so.
+  - **Three-state grounding is named in the README**, with what each outcome
+    does, and why the region — not the sheet — is the unit of the question.
+  - **Recovered evidence costs more downstream, by design.** Findings that used
+    to be dropped now reach verification and investigation, so a set with
+    scanned or hybrid sheets can bill more than it used to with nothing wrong.
+  - **The two evidence changes handled the cross-QC cache differently**, and the
+    README now says which did what. Recovering quotes past the prompt cap keyed
+    the uncapped text **only for a truncated sheet**, so untruncated keys stayed
+    byte-identical and no stored result was discarded. Admitting visual evidence
+    changed what a cached entry means, so every entry had to go — via the edited
+    map prompt, which rides every key, not a second mechanism. The review
+    described this as a contract invalidation; `_CROSS_QC_CACHE_CONTRACT` is at 2
+    for an unrelated reason (entries stored as `complete` after a silent
+    truncation, before the findings cap became loss-aware), and the README now
+    warns against reading that number as the record of either change.
+  - **Attached spec documents are priced differently per transport, and the help
+    text now gives the real arithmetic.** Real-time caches the block behind a
+    breakpoint; batch sets none, so every sheet bills the whole block as ordinary
+    input at the batch discount. The first draft of this help text said real-time
+    meant paying "roughly once", which understates it by an order of magnitude:
+    across 100 sheets real-time comes to about **11** copies of the spec text
+    (one 1.25× write plus 0.1× for each remaining sheet, and more when several
+    sheets go out before the first response lands, since each pays a write),
+    while batch comes to about **50** (half a copy each). So the spec block alone
+    runs 4–5× more in Economy mode on a large set, even though Economy is cheaper
+    overall for the drawings. The cost dialog already stated the mechanism
+    correctly; only the help text did not.
+
+  Four review items needed no change, verified rather than assumed: the three
+  text representations and their consumers are already documented with `words`
+  named; the quality-screen claims and finding-level review outputs were
+  corrected when that harness work landed; model-variant estimates are already
+  documented as resolving in their own processes, with the
+  `REVIEW_MODEL_DEFAULT` fallback chain given as the reason an in-process fix is
+  insufficient; and no stale predecessor-product terminology remains in the
+  tree. `PRICING_EFFECTIVE_DATE` is deliberately unchanged — this documentation
+  being newer is not evidence about the rate table.
+
 ## [1.3.0] - 2026-09-08
 
 ### Added

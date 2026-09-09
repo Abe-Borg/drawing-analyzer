@@ -1819,6 +1819,66 @@ examples separately from observed runs. Do not update `PRICING_EFFECTIVE_DATE`
 just because this document is newer; change it only after verifying the actual
 rate table against official pricing.
 
+### 12.1 Implementation notes (WP-07, recorded after the documentation pass)
+
+Every item was checked against the current code before being written up. Two of
+this section's own statements did not survive that check, and one class of item
+turned out to be already satisfied.
+
+**Item 13 was understated.** The stale comment did not merely misdescribe the
+escalation trigger; it named a stage that does not exist. `verify.py` resolves
+one model (`default_verify_model()` → `VERIFICATION_MODEL_DEFAULT`) and never
+escalates — `VERIFICATION_ESCALATION_MODEL` is consumed by `investigate.py` and
+priced by `cost.py`. Investigation's trigger is an **anchored UNCERTAIN** verdict
+at any severity, ordered severity-first within a per-run budget, not a
+CRITICAL/HIGH threshold. And `UNVERIFIED` is not one of `VERIFICATION_STATUSES`
+at all. The same confusion had propagated into `CLAUDE.md`'s refusal-fallback
+bullet ("`verify.py`'s escalation calls"), which is corrected with it.
+
+**Item 2's cache claim was imprecise.** "WP-03B invalidated them" is true in
+effect but wrong about the mechanism, and the mechanism is what a maintainer
+needs. Invalidation came from the **edited map prompt**, which rides every
+cross-QC cache key — deliberately one mechanism, not a contract bump beside it.
+`_CROSS_QC_CACHE_CONTRACT` is at 2 for an unrelated earlier reason (entries
+stored as `complete` after a silent truncation, before the findings cap became
+loss-aware), so a reader who attributes the 2 to the evidence work will
+mis-date it. The README now says so explicitly.
+
+**Four items needed no change, and that was verified rather than assumed.**
+Item 1 (three text representations with explicit consumers, `words` included) is
+already in `README.md`. Item 12 was satisfied when the harness work landed. Item
+8 is documented in `docs/PERFORMANCE_AND_COST_VALIDATION.md`, fallback chain and
+all. Item 16 found no stale predecessor-product terminology anywhere in the
+tree. Item 7 was half-satisfied: the cost dialog already priced the batch spec
+path correctly and said so; only the help text was silent, so only the help text
+changed.
+
+**Item 10 was written up wrong on the first pass, and review caught it.** The
+first draft of the WP-07 documentation said the >20-image regime was
+"scale-invariant" and "cap-dominated". §2.6 says neither: it lists the render
+**target** among the variables that move the count, and states plainly that the
+largest possible image at 1560 px is 3,245 tokens against a 4,784 cap, so
+nothing clamps. Dropping the target from that list inverted the guidance on the
+single highest-leverage cost knob in the app. Re-measured through
+`cost.estimate_image_tokens_for_bases` on an E-size vector sheet at 6×6, Opus 5:
+1400 px = 0.806×, 1240 px = 0.632×, 1100 px = 0.498× — quadratic in the target
+to three decimals, and matching the percentages already in `README.md`'s env-var
+table. The invariance that does hold is to the page's **physical size** (48×36
+in, 24×18 in and 12×9 in all cost 90,276 tokens), which is the claim §2.6 is
+making. The corrected text now names what it is invariant *to*, since
+"scale-invariant" alone is what allowed the misreading.
+
+**Item 7's first draft understated the cached-spec cost.** "Paying for the specs
+roughly once" is wrong by an order of magnitude: real-time is one 1.25× write
+plus 0.1× per remaining sheet, so 100 sheets is ~11 copies, not ~1 (and more
+under concurrency, since each sheet in flight before the first response pays a
+write). Batch is ~50 copies across the same 100 sheets — half a copy each, not a
+full one, because batch input is half rate. The help text now carries both
+figures.
+
+`PRICING_EFFECTIVE_DATE` is deliberately untouched, per this section's own
+instruction: this document being newer is not evidence about the rate table.
+
 ## 13. WP-08: integration, review, and acceptance
 
 ### 13.1 Focused test groups

@@ -302,11 +302,107 @@ Judgement (owner-reviewed against the previous release's recorded medians):
 
 ## Known cost-shape notes (current architecture)
 
-- A cold real-time exhaustive run renders each readable sheet **twice** (once
-  for the digest, once for the critique reads). The batch path shares one
-  upload for both critique reads (Phase 23C); warm runs skip both renders via
-  the level-1 caches (Phase 19B). Budget accordingly when comparing cold
-  medians across transports.
+- **A cold exhaustive run does not rasterize every sheet twice.** An earlier
+  revision of this note said it did — that the digest and the critique each
+  rendered every readable sheet — and budgeting from it overstated cold wall
+  time. `render_spool` spools the digest's already-compressed PNG bytes to a
+  private temp directory and reconstructs the same `RenderedSheet`
+  **byte-for-byte** for the critique: nothing is resized, recompressed or
+  filtered, so the two stages are shown the same pixels rather than two
+  renders that ought to agree. The batch path reuses the digest's terminal
+  uploads for the same reason (Phase 23C), and shares one upload across both
+  critique reads.
+
+  A second rasterization is the **fallback**, and it is per page, not per run:
+  it happens for a page whose entry the spool does not have (a digest cache hit
+  rendered nothing to spool), when the grid does not match, when the manifest is
+  unavailable, or when a spool read or write failed. Each of those degrades that
+  one page to the historical renderer — `_one_page_fallback` re-renders exactly
+  the page that failed and never misassigns another — while every other page
+  still reuses. The spool is a run-local performance cache, not a durable
+  analysis cache: a failed write simply leaves the key absent. Warm runs skip
+  both renders entirely via the level-1 caches (Phase 19B).
+- **Two image-token regimes, and only one of them responds to the render
+  target.** The vision API treats a request with more than 20 images differently
+  from one with 20 or fewer, and every cost intuition here depends on which side
+  you are on.
+
+  | | >20 images (a sheet: overview + 36 tiles) | ≤20 images |
+  |---|---|---|
+  | oversized image | **rejected** outright | silently downscaled |
+  | render target | 1560 px vector / 1992 px raster, both a margin under the hard 2000 px cap | 2576 px, the full Opus native long edge |
+  | per-image cost vs the cap | **under it** — a square tile at 1560 px costs 3,245 of the 4,784 tokens allowed | **over it** — a 4:3 image at 2576 px works out to 6,636, so it clamps |
+  | what moves the token count | page **aspect ratio**, the grid, overlap — and the **render target, quadratically** | nothing you can set: the count is the cap |
+
+  The 2576 branch is deliberate policy, not an oversight: at ≤20 images an
+  oversized image is downscaled rather than rejected, so no safety margin is
+  needed and an off-by-one there is harmless. It is also why `--estimate` and
+  the GUI preview behave differently on a one-sheet job than on a set.
+
+  **The render target is the highest-leverage cost knob, and only in the >20
+  regime.** Nothing clamps there, so image tokens go as the square of the
+  target. Measured through `cost.estimate_image_tokens_for_bases` on an E-size
+  vector sheet at the shipped 6×6 grid, Opus 5:
+
+  | `DRAWING_ANALYZER_TILE_TARGET_PX` | image tokens | vs default | (t/1560)² |
+  |---|---|---|---|
+  | 1560 (default) | 90,276 | 1.000 | 1.000 |
+  | 1400 | 72,723 | 0.806 | 0.805 |
+  | 1240 | 57,062 | 0.632 | 0.632 |
+  | 1100 | 44,914 | 0.498 | 0.497 |
+
+  Quadratic to three decimals. Whether a lower target still *reads* the drawing
+  is a separate, unanswered question — which is what the A/B harness is for.
+
+  **The invariance that does hold is to the page's physical size**, and it is a
+  different claim from the one above. Rendering normalizes every page to the
+  target long edge, so two pages of the same aspect ratio cost the same
+  regardless of how big they are on paper: an E-size 48×36 in sheet, a 24×18 in
+  half-size print of it, and a 12×9 in reduction all come to 90,276 tokens.
+  That is exactly why `cost.estimate_image_tokens_for_bases` needs only two
+  facts per page — aspect ratio, and whether the page has words — and why the
+  correction against the conservative allowance is ~1.9× on a vector E-size
+  sheet. An earlier revision of this note called the >20 regime
+  "scale-invariant" without saying invariant to *what*, and a reader would
+  reasonably have taken it to mean the render target — the opposite of the
+  measurement above, on the one number most worth tuning.
+
+  `DRAWING_ANALYZER_TILE_TARGET_PX` overrides the **vector** target only. The
+  raster target is deliberately not overridable — on a sheet with no text layer
+  the pixels are the only channel, so trading resolution there trades data — and
+  keeping it fixed also preserves `raster >= vector`, which
+  `pipeline.estimate_image_tokens_for_set` relies on to stay a true upper bound.
+  The ≤20-image target is untouched too: that regime is not where the payload
+  problem lives.
+
+- **Overlap does not buy resolution; it approximately preserves it.** Reducing
+  tile overlap shrinks the rendered rectangle each tile covers, so for a fixed
+  target the *interior* of a tile keeps roughly the resolution it had. What
+  changes is the edges: less of each neighbour is visible, the boundary context
+  a symbol or dimension string straddles gets thinner, and the overview — which
+  does not tile — is unaffected either way. So an overlap change is a change to
+  how much duplicated edge context the model sees, not a free resolution win.
+  It is worth measuring against a real set rather than assuming, which is what
+  `--baseline-overlap` / `--variant-overlap` exist for. Note that `--estimate`
+  cannot see an overlap difference at all (above): the conservative allowance is
+  overlap-invariant, so the effect shows up only in a run's actual image tokens.
+
+- **Three vision reads is not three full-price image reads.** A real-time
+  exhaustive run sends three vision passes per sheet — one digest, two
+  self-consistency critique reads — and that is the most expensive configuration
+  the app offers. But the two critique reads are byte-identical in their image
+  prefix, so when `runs >= 2` the second read bills those images at the
+  cache-read multiplier (~0.1×) rather than at full rate. Identical tokens in,
+  so the findings are unaffected. The batch critique path stays uncached (parallel
+  submission means a breakpoint buys the write premium with nothing yet written
+  to read), and takes the ~50% batch discount instead.
+
+  Do not infer the bill from the read count in either direction. The cache
+  write/read tokens ride the `RunUsage` ledger as their own priced fields, and
+  `usage_axes` in an A/B arm summary separates them from ordinary input — what a
+  run actually cost is what its `UsageRecord`s say it cost, and an estimate that
+  multiplies a per-read figure by three is quoting a configuration nobody ran.
+
 - **Every model stage caches, not just digest/critique.** Verification caches
   through `stage_cache` (`verify._VERIFY_CACHE_STAGE` / `_VERIFY_CROSS_CACHE_STAGE`),
   as do cross-QC, synthesis, focus and prose harvest; identity, review plan,
