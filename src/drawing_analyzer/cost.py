@@ -205,9 +205,23 @@ def format_drawing_cost_prompt(est: DrawingCostEstimate) -> str:
         f"(~{est.image_tokens:,} from images) / ~{est.output_tokens:,} output.",
     ]
     if est.spec_chars:
+        # WP-04 §9.2. The old line promised a ~0.1x prompt-cache read on BOTH
+        # transports. On the batch path there is no cache breakpoint at all —
+        # ``batch_digest.submit_drawing_batch`` always passes
+        # ``cache_specs=False``, because parallel submission means a breakpoint
+        # would only buy the write premium with nothing yet written to read — so
+        # every sheet bills the block as ordinary batch input. The arithmetic in
+        # ``_specs_cost_contribution`` already prices it that way; only this
+        # sentence was wrong, and it was wrong in the operator's favour, which is
+        # the direction that gets noticed on the invoice.
         lines.append(
             f"Project specifications: ~{est.spec_chars:,} chars attached — "
-            "cached after the first sheet(s) (~0.1x rate)."
+            + ("billed as ordinary batch input on every sheet (the batch path "
+               "sets no prompt-cache breakpoint)."
+               if est.batch else
+               "usually cached after the first sheet(s) (~0.1x rate); sheets "
+               "sent before the first response lands, and any sheet after the "
+               "cache expires, pay the write rate instead.")
         )
     if est.total_cost is not None:
         batch_note = (
@@ -215,9 +229,12 @@ def format_drawing_cost_prompt(est: DrawingCostEstimate) -> str:
             if est.batch else ""
         )
         lines.append(
-            f"Estimated cost: ~${est.total_cost:,.2f}{batch_note} — a rough, "
-            "slightly-high estimate; actual cost varies with sheet complexity, "
-            "and cached sheets cost nothing."
+            f"Estimated cost: ~${est.total_cost:,.2f}{batch_note} — a rough "
+            "estimate, not a cap. The image allowance is a per-model worst "
+            "case, but the text riding with each sheet is not bounded by it, so "
+            "a text-heavy set can land above this figure. Sheets already in the "
+            "local result cache skip their own model call; every other stage "
+            "still bills normally."
         )
     else:
         lines.append("Estimated cost: unavailable for this model.")
@@ -697,9 +714,15 @@ def format_exhaustive_cost_prompt(est: ExhaustiveCostEstimate) -> str:
         "Estimated cost by stage:",
     ]
     if est.spec_chars:
+        # Same §9.2 correction as the standard dialog, and it matters more here:
+        # this run is longer, so an operator reading "cached" budgets for one
+        # copy of the specs and is billed for one per sheet.
         lines.append(
             f"  (Digest includes ~{est.spec_chars:,} chars of uploaded project "
-            "specifications, cached after the first sheet(s).)"
+            + ("specifications, billed as ordinary batch input on every sheet.)"
+               if est.batch else
+               "specifications, usually cached after the first sheet(s); sheets "
+               "in flight before the cache is readable pay the write rate.)")
         )
     for c in est.components:
         money = f"~${c.cost:,.2f}" if c.cost is not None else "n/a"
@@ -708,9 +731,12 @@ def format_exhaustive_cost_prompt(est: ExhaustiveCostEstimate) -> str:
         lines += [
             "",
             f"Estimated total: ${est.low_cost:,.2f} – ${est.high_cost:,.2f} — a rough "
-            "range (verification and citation scale with how many findings and code "
-            f"citations turn up). Pricing verified {est.verified_effective_date}; "
-            "cached sheets cost nothing.",
+            "range, not a cap (verification and citation scale with how many "
+            "findings and code citations turn up, and the text riding with each "
+            "sheet is not bounded by the image allowance). Pricing verified "
+            f"{est.verified_effective_date}. Sheets already in the local result "
+            "cache skip their own digest call; the QC stages below still run and "
+            "still bill.",
         ]
     else:
         # Name the stages whose model this table cannot price. The old wording

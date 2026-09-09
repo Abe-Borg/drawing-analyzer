@@ -362,11 +362,46 @@ def resolve_transport() -> tuple[bool, bool]:
     return use_batch, use_batch
 
 
+def resolve_arm_configuration(*, exhaustive: bool) -> dict:
+    """Everything about THIS process's configuration that moves the bill.
+
+    One resolver, called by both children (WP-04 §9.1). Estimation and execution
+    used to describe the arm separately, and the way that fails is quiet: the two
+    descriptions drift, and the estimate you approved stops being a description
+    of the run you paid for. Every value here is read through the function the
+    runtime itself calls, never restated.
+
+    Deliberately excludes anything secret-valued — this record is printed and
+    saved. It reports the tile-target *override* the operator set, which is the
+    lever, not the resolved per-request target, which also depends on each
+    sheet's own raster/vector classification and so is not a per-arm constant.
+    """
+    from drawing_analyzer import tiling
+    from drawing_analyzer.core.api_config import REVIEW_MODEL_DEFAULT
+    from drawing_analyzer.cost import resolve_stage_models
+
+    use_batch, critique_batch = resolve_transport()
+    return {
+        "model": REVIEW_MODEL_DEFAULT,
+        # Every stage, resolved by the functions the runtime calls. This is what
+        # makes a global-model change legible: six of these move with it.
+        "stage_models": vars(resolve_stage_models(model=REVIEW_MODEL_DEFAULT)),
+        "transport": {"digest_batch": use_batch, "critique_batch": critique_batch},
+        "grid": [tiling.DEFAULT_GRID_ROWS, tiling.DEFAULT_GRID_COLS],
+        "overlap_frac": tiling.DEFAULT_OVERLAP_FRAC,
+        # The raw setting and what the clamp made of it: a fat-fingered value is
+        # silently clamped, and an arm priced at the clamped target while the
+        # operator believes the typed one is a comparison of the wrong thing.
+        "tile_target_px": os.environ.get(tiling.TILE_TARGET_PX_ENV, ""),
+        "tile_target_effective": tiling._vector_target_override(),
+        "tile_target_default": tiling.TARGET_LONG_EDGE_PX_DEFAULT,
+        "exhaustive": bool(exhaustive),
+    }
+
+
 def _run_arm_in_process(pdfs: list[Path], out_path: Path, *, exhaustive: bool) -> None:
     """Execute one arm and write its summary. Runs inside the child process."""
     from drawing_analyzer.client import get_client
-    from drawing_analyzer.cost import resolve_stage_models
-    from drawing_analyzer.core.api_config import REVIEW_MODEL_DEFAULT
     from drawing_analyzer.digest_cache import DigestCache
     from drawing_analyzer.pipeline import extract_drawing_context
 
@@ -392,11 +427,10 @@ def _run_arm_in_process(pdfs: list[Path], out_path: Path, *, exhaustive: bool) -
         )
         summary = summarize_run(ctx)
 
-    summary["stage_models"] = vars(resolve_stage_models(model=REVIEW_MODEL_DEFAULT))
-    summary["tile_target_px"] = os.environ.get("DRAWING_ANALYZER_TILE_TARGET_PX", "")
-    summary["transport"] = {
-        "digest_batch": use_batch, "critique_batch": critique_use_batch,
-    }
+    # The same record the estimate child emits, so an arm's summary and the
+    # quote that authorized it are directly comparable field by field.
+    summary["configuration"] = resolve_arm_configuration(exhaustive=exhaustive)
+    summary.update(summary["configuration"])
     out_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
 
@@ -412,53 +446,190 @@ def run_arm(
         "--_arm", str(out_path), "--exhaustive" if exhaustive else "--no-exhaustive",
         *[a for p in pdfs for a in ("--pdf", str(p))],
     ]
-    print(f"[{label}] {' '.join(f'{k}={v}' for k, v in env.items()) or '(defaults)'}")
+    print(f"[{label}] {env_label(env)}")
     proc = subprocess.run(cmd, env=child_env)
     if proc.returncode != 0:
         raise SystemExit(f"arm {label!r} failed with exit code {proc.returncode}")
     return json.loads(out_path.read_text(encoding="utf-8"))
 
 
-def _estimate(pdfs: list[Path], arms: list[tuple[str, dict]], *, exhaustive: bool) -> None:
-    """Price both arms before spending anything."""
-    from drawing_analyzer.core.api_config import REVIEW_MODEL_DEFAULT
+# --------------------------------------------------------------------------- #
+# Estimation (subprocess, same configuration boundary as a real arm)
+# --------------------------------------------------------------------------- #
+#
+# WP-04 §9.1. The estimate must cross the SAME process boundary an arm does, for
+# the same reason the arms do: ``REVIEW_MODEL_DEFAULT`` is an ``os.environ.get``
+# evaluated at *module scope* in ``core.api_config``, and five stage resolvers
+# fall back to it by value —
+#
+#     critique.critique_model()                  cross_qc.cross_qc_model()
+#     synthesis.default_synthesis_model()        focus.default_focus_model()
+#     review_planner.default_review_plan_model()
+#
+# each of them ``os.environ.get(<its own var>) or REVIEW_MODEL_DEFAULT``. Setting
+# ``DRAWING_ANALYZER_MODEL`` in the parent after import moves none of them.
+#
+# The in-process alternative — re-reading the environment for the model inside
+# the arm loop — was evaluated during review and REJECTED. It fixes the digest,
+# whose model is a threaded parameter, and silently leaves those five stages
+# quoted at the parent's model while execution resolves all five correctly. An
+# estimator that is right about the one stage you were not changing and wrong
+# about the five you were is worse than no estimator, because it looks right.
+# Do not "simplify" this back into the parent process.
+#
+# The child protocol is deliberately small: an argument vector in, one JSON
+# object on stdout, an exit code. No RPC layer, no shared state.
+
+#: Environment names whose VALUE must never reach a printed label, a saved
+#: report, or the effective-configuration record. Substring match, upper-cased:
+#: the environment legitimately carries an API key during a sweep even though
+#: estimation needs none, and ``--variant ANTHROPIC_API_KEY=...`` is a thing a
+#: user can type. Matching the *name* rather than sniffing the value is the
+#: reliable direction — a key that does not look like one still must not print.
+_SECRET_ENV_MARKERS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
+
+
+def _is_secret_env(name: str) -> bool:
+    return any(marker in (name or "").upper() for marker in _SECRET_ENV_MARKERS)
+
+
+def env_label(env: dict[str, str]) -> str:
+    """``{"A": "1"}`` → ``"A=1"``, with secret-valued names shown redacted.
+
+    Used for every human-facing label and for ``diff.txt``, which is saved. The
+    redaction is by variable NAME, so a credential that does not look like one
+    is still covered.
+    """
+    if not env:
+        return "defaults"
+    return ", ".join(
+        f"{k}=[REDACTED]" if _is_secret_env(k) else f"{k}={v}"
+        for k, v in env.items()
+    )
+
+
+def _estimate_in_process(sheets: int, file_count: int, *, exhaustive: bool) -> dict:
+    """Resolve this process's configuration and price it. Runs in the child.
+
+    Local inspection only — no client is constructed, nothing is uploaded, no
+    batch is created, no analysis cache is touched, and no provider token-count
+    call is made. The imports are inside the function so they bind AFTER the
+    child's environment is in place, which is the entire point of the boundary.
+    """
     from drawing_analyzer.cost import (
         estimate_drawing_set_cost,
         estimate_exhaustive_run_cost,
     )
+
+    config = resolve_arm_configuration(exhaustive=exhaustive)
+    model = config["model"]
+    use_batch = config["transport"]["digest_batch"]
+    out: dict = {"sheets": sheets, "file_count": file_count, **config}
+    if exhaustive:
+        est = estimate_exhaustive_run_cost(
+            sheets, file_count=file_count, model=model, batch=use_batch,
+            critique_batch=config["transport"]["critique_batch"],
+        )
+        out["low_cost"], out["high_cost"] = est.low_cost, est.high_cost
+    else:
+        est = estimate_drawing_set_cost(
+            sheets, file_count=file_count, model=model, batch=use_batch,
+        )
+        out["low_cost"] = out["high_cost"] = est.total_cost
+    return out
+
+
+def estimate_arm(
+    label: str, env: dict[str, str], sheets: int, file_count: int, *,
+    exhaustive: bool,
+) -> dict:
+    """Price one arm in a fresh child process. Returns the child's JSON.
+
+    The parent's own environment is never modified — not cleared, not rebuilt.
+    The arm's settings are layered onto a *copy* handed to the child, so an
+    interrupted or failing estimate cannot leave the parent holding an arm's
+    configuration.
+    """
+    cmd = [
+        sys.executable, str(Path(__file__).resolve()),
+        "--_estimate-arm", "--sheets", str(sheets),
+        "--file-count", str(file_count),
+        "--exhaustive" if exhaustive else "--no-exhaustive",
+    ]
+    proc = subprocess.run(
+        cmd, env={**os.environ, **env}, capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        # Never a zero-cost arm. A failed estimate that prints "$0.00" is an
+        # invitation to spend, which is the one thing this mode exists to
+        # prevent. stderr is relayed because the child's traceback is the only
+        # diagnosis available up here.
+        raise SystemExit(
+            f"estimate for arm {label!r} failed with exit code "
+            f"{proc.returncode}\n{(proc.stderr or '').strip()}"
+        )
+    try:
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(
+            f"estimate for arm {label!r} returned unreadable output: {exc}\n"
+            f"{(proc.stdout or '').strip()[:2000]}"
+        ) from exc
+
+
+def _money(est: dict) -> str:
+    lo, hi = est.get("low_cost"), est.get("high_cost")
+    if lo is None or hi is None:
+        return "unavailable"
+    return f"${lo:,.2f}" if lo == hi else f"${lo:,.2f} - ${hi:,.2f}"
+
+
+def _model_rows(results: list[tuple[str, dict]]) -> list[str]:
+    """Per-stage model lines, showing only the stages the arms disagree on.
+
+    The point of printing these at all is the fallback effect: changing
+    ``DRAWING_ANALYZER_MODEL`` alone moves five stages, and an operator pricing
+    that change needs to see which. Stages both arms agree on are noise.
+    """
+    if len(results) < 2:
+        return []
+    stages = sorted({s for _, r in results for s in (r.get("stage_models") or {})})
+    rows = []
+    for stage in stages:
+        values = [(r.get("stage_models") or {}).get(stage) for _, r in results]
+        if len(set(values)) > 1:
+            rows.append(f"  {stage:<14}" + "".join(f"{v or '?':<28}" for v in values))
+    if not rows:
+        return []
+    header = "  " + f"{'stage':<14}" + "".join(f"{lbl:<28}" for lbl, _ in results)
+    return ["", "Stage models that differ between the arms:", header, *rows]
+
+
+def _estimate(pdfs: list[Path], arms: list[tuple[str, dict]], *, exhaustive: bool) -> None:
+    """Price both arms before spending anything.
+
+    Sheet counting happens once, here: no environment variable changes how many
+    pages a PDF has, and counting once means the two arms are provably pricing
+    the same set rather than two independent scans that could disagree.
+    """
     from drawing_analyzer.render import list_sheets
 
     sheets = len(list_sheets(pdfs))
     print(f"\n{sheets} sheet(s) across {len(pdfs)} file(s). Estimated per arm:\n")
-    saved = dict(os.environ)
-    try:
-        for label, env in arms:
-            os.environ.clear()
-            os.environ.update({**saved, **env})
-            # The transport the arm will actually run on, not the estimator's
-            # default. Both default to real-time; quoting the batch rate here
-            # would halve the two stages that dominate the bill.
-            use_batch, critique_batch = resolve_transport()
-            transport = "batch" if use_batch else "real-time"
-            if exhaustive:
-                est = estimate_exhaustive_run_cost(
-                    sheets, file_count=len(pdfs), model=REVIEW_MODEL_DEFAULT,
-                    batch=use_batch, critique_batch=critique_batch,
-                )
-                lo, hi = est.low_cost, est.high_cost
-                money = "unavailable" if lo is None else f"${lo:,.2f} – ${hi:,.2f}"
-            else:
-                est = estimate_drawing_set_cost(
-                    sheets, file_count=len(pdfs), model=REVIEW_MODEL_DEFAULT,
-                    batch=use_batch,
-                )
-                money = ("unavailable" if est.total_cost is None
-                         else f"${est.total_cost:,.2f}")
-            print(f"  {label:<10}{money:<24}({transport})")
-    finally:
-        os.environ.clear()
-        os.environ.update(saved)
-    print("\nBoth arms run cold, so this is what each will actually cost.\n")
+    results = [
+        (label, estimate_arm(label, env, sheets, len(pdfs), exhaustive=exhaustive))
+        for label, env in arms
+    ]
+    for (label, est), (_, env) in zip(results, arms):
+        transport = "batch" if est["transport"]["digest_batch"] else "real-time"
+        print(f"  {label:<10}{_money(est):<26}({transport})  {env_label(env)}")
+    for line in _model_rows(results):
+        print(line)
+    print(
+        "\nBoth arms run cold, so neither is discounted by a warm cache. These "
+        "are estimates, not quotes: sheet complexity, how many findings turn up, "
+        "and retries all move the real invoice.\n"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -476,7 +647,24 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--estimate", action="store_true",
                     help="price both arms and exit without spending anything")
     ap.add_argument("--_arm", type=Path, default=None, help=argparse.SUPPRESS)
+    ap.add_argument("--_estimate-arm", dest="_estimate_arm", action="store_true",
+                    help=argparse.SUPPRESS)
+    ap.add_argument("--sheets", type=int, default=0, help=argparse.SUPPRESS)
+    ap.add_argument("--file-count", dest="file_count", type=int, default=0,
+                    help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
+
+    # Estimate-child mode: price this process's resolved configuration and emit
+    # one JSON object. Handled before the ``--pdf`` requirement because the
+    # child is given a sheet count, not paths — the parent counted the pages
+    # once, and no environment variable can change that number.
+    if args._estimate_arm:
+        json.dump(
+            _estimate_in_process(args.sheets, args.file_count,
+                                 exhaustive=args.exhaustive),
+            sys.stdout,
+        )
+        return 0
 
     if not args.pdf:
         ap.error("--pdf is required (at least one)")
@@ -522,8 +710,10 @@ def main(argv: list[str] | None = None) -> int:
     var = run_arm("variant", var_env, args.pdf, args.out, exhaustive=args.exhaustive)
 
     diff = diff_summaries(base, var)
-    base_label = ", ".join(f"{k}={v}" for k, v in base_env.items()) or "defaults"
-    var_label = ", ".join(f"{k}={v}" for k, v in var_env.items())
+    # Redacted: ``diff.txt`` is written to disk and shared, and the arm env is
+    # whatever the user typed on the command line — which can include a key.
+    base_label = env_label(base_env)
+    var_label = env_label(var_env)
     report = render_diff(diff, base_label=base_label, var_label=var_label)
     print("\n" + report)
 

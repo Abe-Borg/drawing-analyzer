@@ -397,3 +397,410 @@ def test_estimate_does_not_leak_arm_env_into_the_parent(monkeypatch, tmp_path):
           "--estimate"])
     import os as _os
     assert _os.environ["DRAWING_ANALYZER_TILE_TARGET_PX"] == "1560"
+
+
+# --------------------------------------------------------------------------- #
+# WP-04 §9.1 — the estimate crosses the same configuration boundary as an arm
+# --------------------------------------------------------------------------- #
+#
+# The defect these pin, measured before the fix: pricing
+# ``DRAWING_ANALYZER_MODEL=claude-sonnet-5`` against a 10-sheet exhaustive run
+# quoted **$28.59**, byte-identical to the Opus baseline, because
+# ``REVIEW_MODEL_DEFAULT`` was bound when the parent imported ``api_config`` and
+# no later ``os.environ`` write could move it. The true figure is $11.60. The
+# estimator was not merely imprecise about the variant — it never priced the
+# variant at all, and the whole point of that arm is the model swap.
+#
+# These spawn real child processes. That is not incidental: an in-process test
+# CANNOT distinguish a correct fix from the rejected one, because the failure
+# mode *is* the import binding. Each child is hermetic — local inspection only,
+# no key, no client, no network.
+
+import ast                    # noqa: E402
+import json as _json          # noqa: E402
+import os as _os              # noqa: E402
+import subprocess as _subprocess  # noqa: E402
+
+from ab_sweep_drawing_analyzer import (  # noqa: E402
+    _estimate_in_process,
+    _is_secret_env,
+    env_label,
+    estimate_arm,
+    run_arm,
+)
+
+_SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "ab_sweep_drawing_analyzer.py"
+#: Obvious fake. Deliberately not credential-shaped — ``scripts/scan_secrets.py``
+#: flags ``sk-ant-`` followed by 30+ characters, and a realistic sentinel fails
+#: the repo's own secret scan.
+_FAKE_KEY = "not-a-real-key-do-not-use-wp04"
+
+
+def _price(env: dict, *, sheets: int = 10, exhaustive: bool = True) -> dict:
+    return estimate_arm("t", env, sheets, 1, exhaustive=exhaustive)
+
+
+def _fresh_process_stage_models(env: dict) -> dict:
+    """What a fresh process resolves, computed independently of the script.
+
+    This is the oracle for "matches the execution child": ``_run_arm_in_process``
+    resolves its models with exactly this expression, in exactly this kind of
+    freshly-started process. Re-deriving it here rather than importing the
+    script's own helper means a bug in the helper cannot make both sides agree.
+    """
+    src = Path(__file__).resolve().parent.parent / "src"
+    code = (
+        "import json,sys;sys.path.insert(0,%r);"
+        "from drawing_analyzer.core.api_config import REVIEW_MODEL_DEFAULT as M;"
+        "from drawing_analyzer.cost import resolve_stage_models;"
+        "json.dump(vars(resolve_stage_models(model=M)),sys.stdout)" % str(src)
+    )
+    proc = _subprocess.run([sys.executable, "-c", code], env={**_os.environ, **env},
+                           capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    return _json.loads(proc.stdout)
+
+
+#: Every stage whose resolver is ``os.environ.get(<own var>) or
+#: REVIEW_MODEL_DEFAULT``. The plan named four; ``review_plan`` has the same
+#: shape (``review_planner.default_review_plan_model``) and makes five.
+_FALLBACK_STAGES = ("critique", "cross_qc", "synthesis", "focus", "review_plan")
+
+
+def _bind_parents_model() -> str:
+    """Import ``api_config`` HERE so this process's binding is definitely stale.
+
+    Without this the tests below depend on pytest's import order. ``api_config``
+    binds ``REVIEW_MODEL_DEFAULT`` on first import; if nothing in the session has
+    imported it yet, an in-process estimator that sets the environment *before*
+    that first import resolves the variant model correctly by accident — and the
+    rejected design passes. Running one test file in isolation was enough to hit
+    it. Forcing the binding up front makes the test measure the process boundary
+    rather than the order the suite happened to import things in.
+    """
+    from drawing_analyzer.core.api_config import REVIEW_MODEL_DEFAULT
+    return REVIEW_MODEL_DEFAULT
+
+
+def test_estimate_children_resolve_the_arm_model_not_the_parents():
+    """§9.3 case 1. The baseline and variant must price different models."""
+    assert _bind_parents_model() != "claude-sonnet-5", "precondition: parent is not on the variant"
+    base = _price({})
+    var = _price({"DRAWING_ANALYZER_MODEL": "claude-sonnet-5"})
+    assert base["model"] != var["model"]
+    assert var["model"] == "claude-sonnet-5"
+    # And the money moved with it. Equal totals were the whole bug.
+    assert var["low_cost"] < base["low_cost"]
+
+
+def test_a_global_model_variant_moves_every_fallback_dependent_stage():
+    """§9.3 case 2 — the regression an in-process fix passes only for digest.
+
+    Setting ``DRAWING_ANALYZER_MODEL`` alone must move the digest *and* all five
+    stages that fall back to ``REVIEW_MODEL_DEFAULT``. A fix that re-reads the
+    environment for the digest inside the parent satisfies the first assertion
+    and fails every one after it, while the execution child resolves all six.
+    """
+    assert _bind_parents_model() != "claude-sonnet-5", "precondition: parent is not on the variant"
+    env = {"DRAWING_ANALYZER_MODEL": "claude-sonnet-5"}
+    stages = _price(env)["stage_models"]
+    assert stages["digest"] == "claude-sonnet-5"
+    for stage in _FALLBACK_STAGES:
+        assert stages[stage] == "claude-sonnet-5", stage
+    # Stages with their own non-fallback default must NOT move — otherwise this
+    # would pass by resolving everything to the variant model.
+    assert stages["identity"] == "claude-sonnet-5"      # Sonnet by policy anyway
+    assert stages["investigation"] != "claude-sonnet-5"
+
+
+def test_estimate_child_agrees_with_a_fresh_process_resolution():
+    """§9.3 case 2, other half: the estimate matches what execution will do."""
+    assert _bind_parents_model() != "claude-sonnet-5", "precondition: parent is not on the variant"
+    for env in ({}, {"DRAWING_ANALYZER_MODEL": "claude-sonnet-5"}):
+        assert _price(env)["stage_models"] == _fresh_process_stage_models(env)
+
+
+def test_explicit_per_stage_overrides_survive_a_different_global_model():
+    """§9.3 case 3. Sonnet digest, explicit Opus critique and cross-QC."""
+    assert _bind_parents_model() != "claude-sonnet-5", "precondition: parent is not on the variant"
+    stages = _price({
+        "DRAWING_ANALYZER_MODEL": "claude-sonnet-5",
+        "DRAWING_ANALYZER_CRITIQUE_MODEL": "claude-opus-5",
+        "DRAWING_ANALYZER_CROSS_QC_MODEL": "claude-opus-5",
+    })["stage_models"]
+    assert stages["digest"] == "claude-sonnet-5"
+    assert stages["critique"] == "claude-opus-5"
+    assert stages["cross_qc"] == "claude-opus-5"
+    # The stages with no explicit override still follow the global model.
+    assert stages["synthesis"] == stages["focus"] == "claude-sonnet-5"
+
+
+def test_estimate_transport_matches_what_the_arm_will_run_on():
+    """§9.3 case 4."""
+    assert _price({"DRAWING_ANALYZER_USE_BATCH": "1"})["transport"] == {
+        "digest_batch": True, "critique_batch": True,
+    }
+    assert _price({"DRAWING_ANALYZER_USE_BATCH": "0"})["transport"] == {
+        "digest_batch": False, "critique_batch": False,
+    }
+    # And the rate really applied, not just the label.
+    assert (_price({"DRAWING_ANALYZER_USE_BATCH": "1"})["low_cost"]
+            < _price({"DRAWING_ANALYZER_USE_BATCH": "0"})["low_cost"])
+
+
+def test_parent_environment_is_untouched_by_a_successful_estimate(monkeypatch, tmp_path):
+    """§9.3 case 5, success half — and that nothing is ever cleared."""
+    from ab_sweep_drawing_analyzer import main
+
+    monkeypatch.setenv("DRAWING_ANALYZER_MODEL", "claude-opus-5")
+    monkeypatch.setenv("WP04_PARENT_ONLY", "keep-me")
+    before = dict(_os.environ)
+    pdf = tmp_path / "set.pdf"
+    pdf.write_bytes(b"%PDF-1.7\n")
+    monkeypatch.setattr("drawing_analyzer.render.list_sheets", lambda pdfs: [object()] * 3)
+
+    main(["--pdf", str(pdf), "--variant", "DRAWING_ANALYZER_MODEL=claude-sonnet-5",
+          "--estimate"])
+
+    assert dict(_os.environ) == before
+    assert _os.environ["WP04_PARENT_ONLY"] == "keep-me"
+
+
+def test_parent_environment_survives_a_failing_estimate(monkeypatch):
+    """§9.3 case 5, failure half. A dead child must not strand the parent."""
+    before = dict(_os.environ)
+
+    def _boom(cmd, **kw):
+        class _P:
+            returncode = 3
+            stdout = ""
+            stderr = "child exploded"
+        return _P()
+
+    monkeypatch.setattr("ab_sweep_drawing_analyzer.subprocess.run", _boom)
+    with pytest.raises(SystemExit) as exc:
+        estimate_arm("variant", {"DRAWING_ANALYZER_MODEL": "x"}, 4, 1, exhaustive=True)
+    assert dict(_os.environ) == before
+    # Honest propagation: a failed estimate is never a zero-cost arm.
+    assert "variant" in str(exc.value) and "child exploded" in str(exc.value)
+
+
+def test_unreadable_child_output_is_an_error_not_a_free_arm(monkeypatch):
+    """A child that exits 0 with garbage must not be read as $0.00."""
+    class _P:
+        returncode = 0
+        stdout = "Warning: something\nnot json at all"
+        stderr = ""
+
+    monkeypatch.setattr("ab_sweep_drawing_analyzer.subprocess.run", lambda *a, **k: _P())
+    with pytest.raises(SystemExit, match="unreadable output"):
+        estimate_arm("variant", {}, 4, 1, exhaustive=True)
+
+
+def test_estimate_needs_no_api_key(tmp_path):
+    """§9.3 case 6, subprocess half: a real child with the key removed."""
+    env = {k: v for k, v in _os.environ.items() if k != "ANTHROPIC_API_KEY"}
+    proc = _subprocess.run(
+        [sys.executable, str(_SCRIPT), "--_estimate-arm", "--sheets", "5",
+         "--file-count", "1", "--exhaustive"],
+        env=env, capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert _json.loads(proc.stdout)["low_cost"] > 0
+
+
+def test_estimate_never_constructs_a_client(monkeypatch):
+    """§9.3 case 6, in-process half: a client factory that raises if called.
+
+    Run in-process precisely because a subprocess cannot be monkeypatched. This
+    proves the function body reaches no provider client; the subprocess test
+    above proves the shipped path needs no key.
+    """
+    def _explode(*a, **k):
+        raise AssertionError("estimate constructed an API client")
+
+    monkeypatch.setattr("drawing_analyzer.client.get_client", _explode)
+    monkeypatch.setattr("drawing_analyzer.client.Anthropic", _explode)
+    out = _estimate_in_process(6, 1, exhaustive=True)
+    assert out["sheets"] == 6 and out["low_cost"] is not None
+
+
+def test_an_unpriced_model_stays_unknown_rather_than_zero():
+    """§9.3 case 7. Silence beats a confidently wrong small number."""
+    _bind_parents_model()
+    est = _price({"DRAWING_ANALYZER_MODEL": "claude-not-a-real-model-wp04"})
+    assert est["low_cost"] is None and est["high_cost"] is None
+    est_std = _price({"DRAWING_ANALYZER_MODEL": "claude-not-a-real-model-wp04"},
+                     exhaustive=False)
+    assert est_std["low_cost"] is None
+
+
+def test_an_unpriced_stage_does_not_publish_a_partial_total():
+    """One unpriced stage must void the total, not quietly shrink it."""
+    _bind_parents_model()
+    est = _price({"DRAWING_ANALYZER_CRITIQUE_MODEL": "claude-not-a-real-model-wp04"})
+    assert est["low_cost"] is None, (
+        "a total that drops the unpriced stage under-quotes the run while "
+        "looking complete"
+    )
+
+
+def test_arm_argv_is_an_array_and_carries_paths_with_spaces(monkeypatch, tmp_path):
+    """§9.3 case 9. No shell-composed strings; no dependence on a home dir."""
+    captured = {}
+
+    class _P:
+        returncode = 0
+
+    def _fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        captured["env"] = kw.get("env")
+        (tmp_path / "arm_x.json").write_text("{}", encoding="utf-8")
+        return _P()
+
+    monkeypatch.setattr("ab_sweep_drawing_analyzer.subprocess.run", _fake_run)
+    spacey = tmp_path / "Project Set A" / "M-101 rev 2.pdf"
+    spacey.parent.mkdir(parents=True)
+    spacey.write_bytes(b"%PDF-1.7\n")
+
+    run_arm("x", {"DRAWING_ANALYZER_MODEL": "m"}, [spacey], tmp_path, exhaustive=True)
+
+    cmd = captured["cmd"]
+    assert isinstance(cmd, list) and all(isinstance(a, str) for a in cmd)
+    # The path travels as ONE argv element, unquoted and unmangled. A
+    # shell-composed string would have needed quoting and would split here.
+    assert str(spacey) in cmd
+    assert cmd[0] == sys.executable
+    assert captured["env"]["DRAWING_ANALYZER_MODEL"] == "m"
+
+
+def test_estimate_child_argv_is_an_array(monkeypatch):
+    captured = {}
+
+    class _P:
+        returncode = 0
+        stdout = '{"low_cost": 1.0, "high_cost": 1.0}'
+        stderr = ""
+
+    def _fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        return _P()
+
+    monkeypatch.setattr("ab_sweep_drawing_analyzer.subprocess.run", _fake_run)
+    estimate_arm("x", {}, 7, 2, exhaustive=False)
+    cmd = captured["cmd"]
+    assert isinstance(cmd, list) and cmd[0] == sys.executable
+    assert "--sheets" in cmd and "7" in cmd
+    assert "--no-exhaustive" in cmd
+
+
+# --------------------------------------------------------------------------- #
+# §9.3 case 10 — a secret in the environment never reaches printed or saved text
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("name", [
+    "ANTHROPIC_API_KEY", "anthropic_api_key", "SOME_TOKEN", "DB_PASSWORD",
+    "MY_SECRET", "AWS_CREDENTIAL_FILE",
+])
+def test_secret_env_names_are_recognized(name):
+    assert _is_secret_env(name)
+
+
+@pytest.mark.parametrize("name", [
+    "DRAWING_ANALYZER_MODEL", "DRAWING_ANALYZER_TILE_TARGET_PX",
+    "DRAWING_ANALYZER_USE_BATCH", "PATH",
+])
+def test_ordinary_env_names_are_not_redacted(name):
+    assert not _is_secret_env(name)
+    assert f"{name}=1" == env_label({name: "1"})
+
+
+def test_env_label_redacts_by_name_not_by_value_shape():
+    """A credential that does not look like one must still be covered."""
+    label = env_label({"ANTHROPIC_API_KEY": _FAKE_KEY, "DRAWING_ANALYZER_MODEL": "m"})
+    assert _FAKE_KEY not in label
+    assert "ANTHROPIC_API_KEY=[REDACTED]" in label
+    assert "DRAWING_ANALYZER_MODEL=m" in label
+
+
+def test_no_secret_reaches_the_printed_estimate(monkeypatch, capsys, tmp_path):
+    """End to end: a key passed as an arm setting is never echoed."""
+    from ab_sweep_drawing_analyzer import main
+
+    pdf = tmp_path / "set.pdf"
+    pdf.write_bytes(b"%PDF-1.7\n")
+    monkeypatch.setattr("drawing_analyzer.render.list_sheets", lambda pdfs: [object()] * 2)
+    main(["--pdf", str(pdf),
+          "--variant", f"ANTHROPIC_API_KEY={_FAKE_KEY}",
+          "--estimate"])
+    out = capsys.readouterr().out
+    assert _FAKE_KEY not in out
+    assert "[REDACTED]" in out
+
+
+# --------------------------------------------------------------------------- #
+# §9.1 — one configuration resolver, shared by estimation and execution
+# --------------------------------------------------------------------------- #
+
+
+def test_the_estimate_reports_every_lever_that_moves_the_bill():
+    """§9.1: stage models, both transports, grid, overlap, target, mode."""
+    est = _price({"DRAWING_ANALYZER_TILE_TARGET_PX": "1240"})
+    for key in ("model", "stage_models", "transport", "grid", "overlap_frac",
+                "tile_target_px", "tile_target_effective", "exhaustive"):
+        assert key in est, key
+    assert est["tile_target_px"] == "1240"
+    assert est["tile_target_effective"] == 1240
+    assert est["grid"] == [6, 6]
+    assert est["exhaustive"] is True
+
+
+def test_a_clamped_tile_target_is_reported_as_clamped():
+    """The typed value and the effective one are both shown when they differ.
+
+    ``tiling._vector_target_override`` silently clamps out-of-range values. An
+    arm priced at the clamped target while the operator believes the typed one
+    is a comparison of something other than what they asked for.
+    """
+    est = _price({"DRAWING_ANALYZER_TILE_TARGET_PX": "3"})   # below the floor
+    assert est["tile_target_px"] == "3"
+    assert est["tile_target_effective"] != 3
+    assert est["tile_target_effective"] >= 400
+
+
+def test_an_unset_target_reports_the_default_rather_than_a_blank():
+    est = _price({})
+    assert est["tile_target_px"] == ""
+    assert est["tile_target_effective"] is None
+    assert est["tile_target_default"] > 0
+
+
+def test_execution_and_estimate_describe_the_arm_with_the_same_resolver():
+    """Both children call ``resolve_arm_configuration``; drift is the failure.
+
+    Asserted structurally: the execution arm's summary must carry exactly the
+    configuration record the estimate emits, so the quote you approved and the
+    run you paid for are comparable field by field. Two hand-maintained copies
+    is how they stop matching.
+    """
+    import ab_sweep_drawing_analyzer as mod
+    src = Path(mod.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    callers = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and any(
+            isinstance(c, ast.Call) and getattr(c.func, "id", "") == "resolve_arm_configuration"
+            for c in ast.walk(node)
+        )
+    }
+    assert {"_run_arm_in_process", "_estimate_in_process"} <= callers, callers
+
+
+def test_configuration_record_carries_no_secret_value(monkeypatch):
+    """§9.3 case 10 for the saved record, not just the printed label."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", _FAKE_KEY)
+    est = _price({})
+    assert _FAKE_KEY not in _json.dumps(est)

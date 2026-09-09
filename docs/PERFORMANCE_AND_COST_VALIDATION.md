@@ -22,7 +22,7 @@ ANTHROPIC_API_KEY=... python scripts/benchmark_drawing_analyzer.py \
 ### A/B-ing a cost lever against quality
 
 ```bash
-# Price both arms first — spends nothing
+# Price both arms first — spends nothing, needs no API key
 python scripts/ab_sweep_drawing_analyzer.py --pdf setA/M-101.pdf \
     --variant DRAWING_ANALYZER_CRITIQUE_MODEL=claude-sonnet-5 --estimate
 
@@ -31,6 +31,41 @@ ANTHROPIC_API_KEY=... python scripts/ab_sweep_drawing_analyzer.py \
     --pdf setA/M-101.pdf --pdf setA/E-201.pdf \
     --variant DRAWING_ANALYZER_TILE_TARGET_PX=1240 --out ab_out
 ```
+
+`--estimate` prices each arm in a **fresh child process**, the same
+configuration boundary a real arm crosses (WP-04 §9.1). This is not tidiness.
+`REVIEW_MODEL_DEFAULT` is an `os.environ.get` evaluated at module scope in
+`core/api_config.py`, and six stages resolve through it — the digest plus five
+whose resolvers read `os.environ.get(<their own var>) or REVIEW_MODEL_DEFAULT`
+(critique, cross-QC, synthesis, focus, review plan). Setting
+`DRAWING_ANALYZER_MODEL` in the parent after import moves none of them, so the
+estimator used to price a global-model variant at the **baseline's** figure: a
+10-sheet exhaustive Sonnet arm quoted $28.59, the Opus number, against a true
+$11.60. It was not imprecise about the arm; it never priced the arm.
+
+The estimate output names the stages the two arms actually disagree on, which is
+where the fallback effect becomes visible:
+
+```
+  baseline  $8.68 - $9.16             (real-time)  defaults
+  variant   $3.51 - $3.98             (real-time)  DRAWING_ANALYZER_MODEL=claude-sonnet-5
+
+Stage models that differ between the arms:
+  stage         baseline               variant
+  critique      claude-opus-5          claude-sonnet-5
+  cross_qc      claude-opus-5          claude-sonnet-5
+  digest        claude-opus-5          claude-sonnet-5
+  focus         claude-opus-5          claude-sonnet-5
+  review_plan   claude-opus-5          claude-sonnet-5
+  synthesis     claude-opus-5          claude-sonnet-5
+```
+
+Estimation is local inspection only — no client is constructed, nothing is
+uploaded, no batch is created, no cache is touched — so it runs with no
+`ANTHROPIC_API_KEY` at all. A failed estimate raises rather than printing a
+zero-cost arm, and an arm setting whose **name** looks credential-bearing
+(`KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `CREDENTIAL`) is redacted from every
+printed label and from the saved `diff.txt`.
 
 The hermetic suite cannot answer whether a cheaper configuration still finds the
 same defects — the §19.1 gauntlet routes canned responses by system-prompt
