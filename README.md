@@ -1501,6 +1501,22 @@ when the recorded acceptance evidence says so (Phase 27, §19.9). The pieces:
   tiers of cross-sheet findings a previous run *kept*. It states plainly what it
   cannot see: the grounding **discard rate** is a property of what a model
   returned, and the survivors in an export are not a substitute for it.
+- **A/B a cost lever against quality (billable):**
+  `python scripts/ab_sweep_drawing_analyzer.py --pdf SET.pdf --variant NAME=VALUE`
+  runs one real set twice, cold on both arms, with one variable changed, and
+  reports cost against four signals that need no ground truth — the anchor-tier
+  mix, the verification mix, self-consistency, and (WP-03B) evidence trust per
+  grounded unit. `--estimate` prices both arms first and spends nothing.
+  Alongside the aggregates it writes a **finding-level** comparison: one compact
+  record per finding per arm, matched in three deterministic tiers — exact
+  (same identity *and* compatible critical signature), candidates for human
+  review, and explicitly unmatched or ambiguous. That is the only thing that
+  answers "is this the same set of findings?", because two arms can report the
+  same total, severity mix and anchor mix while sharing only two thirds of their
+  findings. A clean screen is **not** an approval, a large count drop is a
+  review requirement rather than proof that defects went unseen, and an arm that
+  failed or read fewer sheets is marked `NOT_COMPARABLE` so its lower total is
+  never presented as a saving. See `docs/PERFORMANCE_AND_COST_VALIDATION.md`.
 - **Benchmarks:** `python scripts/benchmark_drawing_analyzer.py --check`
   measures the §19.7 scenarios (cold/warm/mutated/exhaustive/corrupt-partial)
   on medians and enforces the mechanical gates (a warm run makes zero

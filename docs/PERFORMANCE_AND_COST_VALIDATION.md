@@ -116,11 +116,15 @@ the append-only ledger, not a second billing calculator. `record_granularity`
 states in the output that the pipeline aggregates some verification work into one
 record, so a record count is not universally an API-call count.
 
+The summary also carries `evidence_trust` (the per-unit grounding composition
+described above) and names its finding-record sidecar in `findings_records`, as
+a bare filename — the arm ran in a directory nobody else has.
+
 The hermetic suite cannot answer whether a cheaper configuration still finds the
 same defects — the §19.1 gauntlet routes canned responses by system-prompt
 identity and never reads the model id, so a model swap changes nothing it
 returns. This harness runs the same set twice, cold on both arms, with one
-variable changed, and reports cost against **three signals that need no ground
+variable changed, and reports cost against **four signals that need no ground
 truth**:
 
 | Signal | Regression looks like |
@@ -128,15 +132,105 @@ truth**:
 | Anchor tier mix (EXACT/FUZZY/TILE/**UNANCHORED**) | UNANCHORED share rises — the documented hallucination signal |
 | Verification verdict mix (VERIFIED/REJECTED/UNCERTAIN) | REJECTED share rises — more false positives |
 | Self-consistency (REPRODUCED/SINGLETON) | REPRODUCED share falls — the two reads agree less |
+| Evidence trust, per grounded unit (WP-03B) | reduced-trust **unverified** share rises, or the text-grounded-AND-verified share falls |
 
-It also flags the quiet failure: a large drop in **finding count** at a flat
-VERIFIED share, which reads as "cheaper and cleaner" on every other line while
-actually meaning real defects went unseen.
+Evidence trust is counted per *unit* — the finding's own quote, plus one per
+cross-sheet leg — because a conflict can be text-grounded on one sheet and read
+off a raster detail on the other, and a single per-finding state reports one of
+those two facts and discards the other. `NOT_ASSESSED` is its own state: a
+standard run assesses nothing, and calling that either "grounded" or "reduced
+trust" would invent a signal. The concern this axis exists for is the one §11.3
+names: an arm whose finding count held up on reduced-trust, unverified legs is
+**not** equivalent to one that was text-grounded and verified, and no count,
+severity or anchor table can tell them apart.
 
-A clean screen is **not an approval** — it means the screen found nothing. One
-run of one set cannot establish that a change is safe. Each arm runs in a
-subprocess because `REVIEW_MODEL_DEFAULT` binds at *import* in
-`core.api_config`, so setting `DRAWING_ANALYZER_MODEL` in-process has no effect.
+#### A count drop is a review requirement, not a finding (§11.3)
+
+A large drop in finding count still stops the sweep — it reads as "cheaper and
+cleaner" on every other line, which is what makes it the failure most likely to
+be approved. But the screen no longer claims it *proves* real defects went
+unseen. A drop can be missed defects, removed noise, different dedup behaviour,
+or plain run-to-run variance, and this screen cannot tell them apart. What
+resolves it is the finding-level comparison below: the unmatched baseline
+records name the findings that went missing.
+
+The mirror case is reported as a **note** rather than a concern, because it is
+the most ordinary outcome there is and a concern list that fires every run stops
+being read: counts within 5% of each other are *not* evidence the same issues
+were found, since a flat total can hide one real issue replaced by one false
+positive.
+
+A clean screen is **not an approval** — it means the screen found nothing.
+`screen_result` has exactly two values, `NO_CONCERNS_DETECTED` and
+`CONCERNS_RAISED`; there is deliberately no value that means approved. One run
+of one set cannot establish that a change is safe.
+
+#### Comparison validity — when a lower total is not a saving
+
+`diff.json` carries a `validity` block with three states, and only one of them
+permits a cost delta to be described as a saving:
+
+| status | when | `savings_claim_allowed` |
+|---|---|---|
+| `COMPARABLE` | both arms finished, read the same sheets, and priced every record | yes |
+| `QUALIFIED` | a `PARTIAL` stage, recorded errors, abandoned/failed/parse-failed calls, unpriced records, or INCOMPLETE markup coverage | no |
+| `NOT_COMPARABLE` | an arm's `qc_status` is `FAILED`, the arms read different sheet populations, or either total is unpriced | no |
+
+Three states rather than two on purpose: most real sweeps land in `QUALIFIED`
+(one retry, one unpriceable record), and folding that into "not comparable"
+would put the ordinary case in the unreadable bucket — at which point the
+`NOT_COMPARABLE` cases stop being read too. A cheaper arm that did not finish is
+not a cheaper way to do the work; its lower total is the price of a different,
+smaller job, and the report says so in those words.
+
+#### Finding-level comparison (§11.2)
+
+Every table above is an aggregate, and no aggregate can answer *is this the same
+set of findings?* Two arms can report 287 findings each with identical severity,
+anchor and verification mixes and share only 200 of them.
+
+Each arm therefore writes `arm_<label>_findings.json`: one compact record per
+finding — source id/page, sheet, category, severity, text, quote, every
+cross-sheet leg, anchor tier and rectangle, confidence, verification
+disposition, WP-03B evidence state, and provenance. `findings_diff.json` matches
+the two arms in three deterministic tiers:
+
+| tier | what it means |
+|---|---|
+| `exact` | equal identity **and** compatible critical signatures, unique on both sides — the only tier that is a match |
+| `candidates` | a 1:1 pair for a human to judge: same quote reworded, same legs, heavily-overlapping anchors, or an identity match whose critical signature conflicts |
+| unmatched / `ambiguous` | only in one arm, or a many-to-many group left explicitly unresolved |
+
+Two identities are deliberately **not** used. `QC-###` is positional — it is
+assigned after anchoring, so an arm that dropped finding #12 renumbers every
+finding below it, and matching on it would report 275 unchanged findings as
+changed. `Finding.id` alone is not enough either: `compute_finding_id` hashes
+sheet id, category, quote-or-text and source id, and **excludes legs**, so two
+cross-sheet conflicts quoting the same primary text but pointing at different
+second sheets collide on one id. The identity used here adds the leg signature
+for exactly that reason, and a test asserts the underlying collision still
+exists rather than assuming it.
+
+The "compatible critical signatures" check is `critique.signatures_compatible`,
+the same rule the in-run dedup uses — imported, not restated. A changed
+quantity, a changed equipment tag, or a flipped absence polarity therefore can
+never become an exact match, and geometry never produces one at all: rect
+overlap only ever *suggests* a candidate. Nothing is deleted, no fuzzy score is
+promoted to an equivalence, and no second model is asked to adjudicate — that
+would make a comparison harness cost money and depend on the thing under test.
+Ambiguity loses rather than picks: a many-to-many group names every record in it
+and stays unresolved, the same discipline `cross_qc.fact_tile_lookup` follows.
+
+Source correspondence is the positional `SRC-####` id, so both arms agree
+without either one's absolute paths reaching the artifact. Evidence crops
+referenced by a record are copied out of the arm's workspace into
+`arm_<label>_artifacts/` **before** that workspace is deleted, and linked
+relative to the output directory — a link into a deleted temp directory is worse
+than no link.
+
+Each arm runs in a subprocess because `REVIEW_MODEL_DEFAULT` binds at *import*
+in `core.api_config`, so setting `DRAWING_ANALYZER_MODEL` in-process has no
+effect.
 
 ## Scenarios (§19.7)
 

@@ -30,9 +30,30 @@ failure modes a cost lever actually causes:
                          models directly: put read 1 on one and read 2 on the
                          other.
 
-None of these is a quality oracle. A lever that holds all three flat at
+A fourth signal joins them once WP-03B grounding is on:
+
+  evidence trust mix     WP-03B ``evidence_state`` per finding *and* per
+                         cross-sheet leg. An arm whose count held up on quotes
+                         the host could not find in any text layer, unverified,
+                         is not equivalent to one that was text-grounded and
+                         verified — and no count, severity or anchor table can
+                         tell them apart.
+
+None of these is a quality oracle. A lever that holds all four flat at
 materially lower cost is defensible; one that moves any of them the wrong way is
 a reject. That is a decision procedure, which is what was missing.
+
+Counts are not identities (WP-06 §11.2)
+---------------------------------------
+Every table above is an aggregate, and aggregates cannot answer "is this the
+same set of findings?". Two arms can report 287 findings each, with identical
+severity, anchor and verification mixes, and share only 200 — 87 real issues
+traded for 87 different ones, which every line in the report reads as no change.
+So each arm also writes ``arm_<label>_findings.json``: one compact record per
+finding, matched by ``ab_findings_diff`` into exact matches, candidates for human
+review, and explicitly unmatched or ambiguous records. Only the first tier is a
+match; nothing is deleted, no fuzzy score becomes an equivalence, and no paid
+model adjudicates.
 
 Usage
 -----
@@ -53,6 +74,15 @@ fourteen modules bind it as a second name via ``from ... import``. Setting
 subprocess sidesteps the whole class of problem, and also guarantees the second
 arm cannot inherit warm module state from the first.
 
+Outputs, under ``--out``
+------------------------
+    arm_baseline.json / arm_variant.json          per-arm summary + configuration
+    arm_*_findings.json                           per-finding records (§11.2)
+    arm_*_artifacts/                              evidence crops, copied out of
+                                                  the arm workspace before it is
+                                                  deleted, linked relatively
+    diff.json / findings_diff.json / diff.txt     the comparison
+
 Every run costs real money. Nothing here is hermetic, and there is no
 ``--dry-run`` that would pretend otherwise — but ``--estimate`` prices the two
 arms before you commit.
@@ -71,6 +101,23 @@ from tempfile import TemporaryDirectory
 _REPO_SRC = Path(__file__).resolve().parent.parent / "src"
 if str(_REPO_SRC) not in sys.path:
     sys.path.insert(0, str(_REPO_SRC))
+
+# Sibling module in ``scripts/`` — WP-06 §11.2's finding-level comparison. It is
+# pure and imports nothing from this file, so the dependency runs one way only.
+# The directory is added explicitly rather than relied on: it is ``sys.path[0]``
+# when this file is run as a script, but not when a caller imports it by path.
+_REPO_SCRIPTS = Path(__file__).resolve().parent
+if str(_REPO_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_REPO_SCRIPTS))
+
+from ab_findings_diff import (  # noqa: E402
+    RECORD_CONTRACT_VERSION,
+    copy_linked_artifacts,
+    evidence_trust_composition,
+    finding_records,
+    match_records,
+    render_findings_diff,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -240,6 +287,10 @@ def summarize_run(ctx) -> dict:
             (f.verification.status for f in findings), VERIFY_STATUSES
         ),
         "confidence": _tally((f.confidence for f in findings), CONFIDENCE_LEVELS),
+        # WP-06 §11.3. Counts alone cannot tell "the variant found the same
+        # issues" from "the variant found as many issues, standing on evidence
+        # the host could never check". This is that fourth axis.
+        "evidence_trust": evidence_trust_composition(findings),
         # --- cost ---
         "input_tokens": ctx.total_input_tokens,
         "output_tokens": ctx.total_output_tokens,
@@ -284,6 +335,11 @@ def _pct_delta(base: float | int | None, var: float | int | None) -> float | Non
 
 def diff_summaries(base: dict, var: dict) -> dict:
     """Compare two arm summaries. Pure; the renderer does the judging."""
+    trust_b = base.get("evidence_trust", {}) or {}
+    trust_v = var.get("evidence_trust", {}) or {}
+    trust_states_b = trust_b.get("by_state", {}) or {}
+    trust_states_v = trust_v.get("by_state", {}) or {}
+
     def delta_map(key: str) -> dict:
         b, v = base.get(key, {}), var.get(key, {})
         return {
@@ -311,6 +367,16 @@ def diff_summaries(base: dict, var: dict) -> dict:
         "anchor_tiers": delta_map("anchor_tiers"),
         "verification": delta_map("verification"),
         "confidence": delta_map("confidence"),
+        "evidence_trust": {
+            "base": trust_b, "variant": trust_v,
+            "by_state": {
+                k: {"base": trust_states_b.get(k, 0),
+                    "variant": trust_states_v.get(k, 0),
+                    "delta": trust_states_v.get(k, 0) - trust_states_b.get(k, 0)}
+                for k in sorted(set(trust_states_b) | set(trust_states_v))
+            },
+        },
+        "validity": comparison_validity(base, var),
         "by_model": {
             "base": base.get("by_model", {}), "variant": var.get("by_model", {}),
         },
@@ -330,6 +396,86 @@ def _rate(tally: dict, key: str) -> float | None:
 # the numbers above it are what an operator actually judges on.
 _RATE_TOLERANCE = 0.05
 
+#: A count drop past this is a review requirement (§11.3) — not a finding of
+#: missed defects, which this screen has no way to establish.
+_COUNT_DROP_THRESHOLD = 0.20
+#: Counts within this band of each other are "flat". Flat is the condition under
+#: which a swap of findings is invisible to every aggregate table, so it earns
+#: its own note rather than silence.
+_FLAT_COUNT_BAND = 0.05
+
+
+#: Whether the two arms did comparable work at all (WP-06 §11.3). An arm that
+#: failed, that read a different number of sheets, or whose spend could not be
+#: priced is not a cheaper way of doing the same thing — it is a different,
+#: smaller job. Reporting its lower total as a saving is the single most
+#: expensive misreading this harness can produce, because it is the one that
+#: gets acted on.
+VALIDITY_COMPARABLE = "COMPARABLE"
+VALIDITY_QUALIFIED = "QUALIFIED"
+VALIDITY_NOT_COMPARABLE = "NOT_COMPARABLE"
+
+
+def comparison_validity(base: dict, var: dict) -> dict:
+    """Can these two arms be compared, and may a cost delta be called a saving?
+
+    Three states, deliberately not two: most real sweeps land in ``QUALIFIED``
+    (a retry here, an unpriced record there), and collapsing that into
+    "not comparable" would train an operator to ignore the field entirely — at
+    which point the ``NOT_COMPARABLE`` cases stop being read too.
+
+    ``savings_claim_allowed`` is the one machine-readable consequence: only a
+    ``COMPARABLE`` pair may have a lower total described as a saving.
+    """
+    blocking: list[str] = []
+    qualifiers: list[str] = []
+    for label, arm in (("baseline", base), ("variant", var)):
+        status = str(arm.get("qc_status", "") or "")
+        if status == "FAILED":
+            blocking.append(f"{label} qc_status is FAILED — it did not finish the "
+                            "work the other arm did")
+        elif status == "PARTIAL":
+            qualifiers.append(f"{label} qc_status is PARTIAL — at least one QC "
+                              "stage did not complete")
+        if arm.get("estimated_cost_usd") is None:
+            blocking.append(f"{label} has no priced total, so no cost comparison "
+                            "is possible in either direction")
+        unpriced = (arm.get("usage_axes", {}) or {}).get("unpriced_records", 0)
+        if unpriced:
+            qualifiers.append(f"{label} has {unpriced} billable record(s) the "
+                              "pricing table could not price — its total is a "
+                              "floor, not a total")
+        outcomes = (arm.get("usage_axes", {}) or {}).get("by_outcome", {}) or {}
+        for bucket in ("abandoned", "failed", "parse_failed"):
+            if outcomes.get(bucket):
+                qualifiers.append(
+                    f"{label} had {outcomes[bucket]} {bucket} call(s)")
+        if arm.get("errors"):
+            qualifiers.append(f"{label} recorded {arm['errors']} error(s)")
+        if str(arm.get("coverage_status", "") or "") == "INCOMPLETE":
+            qualifiers.append(f"{label} markup coverage is INCOMPLETE")
+    if base.get("sheets") != var.get("sheets"):
+        blocking.append(f"sheet counts differ ({base.get('sheets')} vs "
+                        f"{var.get('sheets')}) — different inputs, not a variant")
+    if base.get("ok_sheets") != var.get("ok_sheets"):
+        blocking.append(
+            f"successfully-read sheets differ ({base.get('ok_sheets')} vs "
+            f"{var.get('ok_sheets')}) — the arms reviewed different populations, "
+            "so a lower cost is partly a smaller job")
+    status = (VALIDITY_NOT_COMPARABLE if blocking
+              else VALIDITY_QUALIFIED if qualifiers else VALIDITY_COMPARABLE)
+    return {
+        "status": status,
+        "blocking": blocking,
+        "qualifiers": qualifiers,
+        "savings_claim_allowed": status == VALIDITY_COMPARABLE,
+    }
+
+
+def _share(trust: dict, key: str) -> float | None:
+    units = (trust or {}).get("units", 0)
+    return None if not units else (trust or {}).get(key, 0) / units
+
 
 def _verdict(base: dict, var: dict) -> dict:
     """Screen the three quality signals. Advisory — never the final word.
@@ -340,6 +486,10 @@ def _verdict(base: dict, var: dict) -> dict:
     safe. One run of one set cannot establish that.
     """
     concerns: list[str] = []
+    #: Interpretation cautions that are true regardless of what the numbers did.
+    #: Kept apart from ``concerns`` so "a signal degraded" stays a rare, loud
+    #: event rather than a permanent fixture of every report.
+    notes: list[str] = []
 
     unanchored_b = _rate(base.get("anchor_tiers", {}), "UNANCHORED")
     unanchored_v = _rate(var.get("anchor_tiers", {}), "UNANCHORED")
@@ -369,18 +519,79 @@ def _verdict(base: dict, var: dict) -> dict:
                 "— the two independent reads agree less often"
             )
 
-    # A large drop in finding count with the verified share flat is the quiet
-    # failure: the variant is not producing worse findings, it is producing
-    # fewer of them. That reads as "cheaper AND cleaner" on every other line.
+    # A large drop in finding count is a REVIEW REQUIREMENT, not a proof (§11.3).
+    # The screen cannot tell which of four things happened — real defects went
+    # unseen, noise was removed, dedup behaved differently, or the model varied
+    # between two runs — and the earlier wording asserted the first. What makes
+    # the drop worth stopping for is that it reads as "cheaper AND cleaner" on
+    # every other line in this report, so it is the failure most likely to be
+    # approved. The finding-level comparison (§11.2) is what actually resolves
+    # it: unmatched baseline records name the findings that went missing.
     fb, fv = base.get("findings_total", 0), var.get("findings_total", 0)
-    if fb and (fb - fv) / fb > 0.20:
+    if fb and (fb - fv) / fb > _COUNT_DROP_THRESHOLD:
         concerns.append(
-            f"finding count fell {fb} → {fv} ({(fv - fb) / fb:+.0%}) — check "
-            "whether real defects went unseen; a drop with the VERIFIED share "
-            "flat means missed findings, not cleaner ones"
+            f"finding count fell {fb} → {fv} ({(fv - fb) / fb:+.0%}) — REVIEW "
+            "REQUIRED before this variant is adopted. A drop can be missed "
+            "defects, removed noise, different dedup, or run-to-run variance; "
+            "this screen cannot tell them apart. Read the unmatched baseline "
+            "records in findings_diff.json to decide which it was"
+        )
+    # The mirror-image case the count alone hides: a flat total made of
+    # different findings. This is a NOTE, not a concern — no signal degraded,
+    # and firing a concern on the most ordinary outcome there is would teach an
+    # operator to skim the concern list, which is the only part of this report
+    # that must never be skimmed.
+    elif fb and abs(fv - fb) / fb <= _FLAT_COUNT_BAND:
+        notes.append(
+            f"finding counts are close ({fb} → {fv}). That is NOT evidence the "
+            "same issues were found: a flat total can hide one real issue "
+            "replaced by one false positive. findings_diff.json is what "
+            "distinguishes them — unmatched records on both sides means a swap"
         )
 
-    return {"concerns": concerns, "clean_screen": not concerns}
+    # --- evidence-trust composition (§11.3) ---------------------------------
+    # "The variant found just as many" is not the same claim as "the variant
+    # found them on text the host could check and a verifier confirmed."
+    tb, tv = base.get("evidence_trust", {}), var.get("evidence_trust", {})
+    rb = _share(tb, "reduced_trust_unverified_units")
+    rv = _share(tv, "reduced_trust_unverified_units")
+    if rb is not None and rv is not None and rv - rb > _RATE_TOLERANCE:
+        flat = fb and abs(fv - fb) / fb <= _FLAT_COUNT_BAND
+        concerns.append(
+            f"reduced-trust unverified evidence rose {rb:.1%} → {rv:.1%} of "
+            "grounded units — more of this arm's output rests on quotes the host "
+            "could not find in any text layer and no verifier confirmed"
+            + (". The finding count held up, but it is not holding up on the same "
+               "kind of evidence, so the two arms are not equivalent" if flat else "")
+        )
+    gb, gv = _share(tb, "grounded_verified_units"), _share(tv, "grounded_verified_units")
+    if gb is not None and gv is not None and gb - gv > _RATE_TOLERANCE:
+        concerns.append(
+            f"text-grounded AND verified share fell {gb:.1%} → {gv:.1%} — fewer "
+            "of the variant's claims cleared both the text check and the crop "
+            "re-check"
+        )
+
+    validity = comparison_validity(base, var)
+    if validity["status"] == VALIDITY_NOT_COMPARABLE:
+        cb, cv = base.get("estimated_cost_usd"), var.get("estimated_cost_usd")
+        cheaper = (cb is not None and cv is not None and cv < cb)
+        concerns.append(
+            "the arms are NOT comparable: " + "; ".join(validity["blocking"])
+            + (". The variant's lower total is therefore not a saving — it is the "
+               "price of a different, smaller job" if cheaper else "")
+        )
+
+    return {
+        "concerns": concerns,
+        "notes": notes,
+        "clean_screen": not concerns,
+        # Named so no reader and no downstream script can round "the screen
+        # found nothing" up to "approved". There is no value of this field that
+        # means approved, and that is deliberate.
+        "screen_result": "CONCERNS_RAISED" if concerns else "NO_CONCERNS_DETECTED",
+        "validity": validity,
+    }
 
 
 def _fmt_delta_rows(title: str, m: dict) -> list[str]:
@@ -414,11 +625,34 @@ def render_diff(diff: dict, *, base_label: str, var_label: str) -> str:
         ps = "" if p is None else f"  ({p:+.1f}%)"
         lines.append(f"    {label:<22}{bs:>10}{vs:>12}{ps}")
 
+    validity = diff.get("validity") or {}
+    if validity and validity.get("status") != VALIDITY_COMPARABLE:
+        lines += ["", f"  COMPARISON VALIDITY: {validity.get('status', '')}"]
+        for reason in validity.get("blocking", []):
+            lines.append(f"    [BLOCKING] {reason}")
+        for reason in validity.get("qualifiers", []):
+            lines.append(f"    [QUALIFIER] {reason}")
+        if not validity.get("savings_claim_allowed", False):
+            lines.append(
+                "    A lower total above is NOT a saving: the arms did not do "
+                "comparable work."
+            )
+
     lines += ["", "  QUALITY SIGNALS (no ground truth needed)"]
     lines += _fmt_delta_rows("anchor tier", diff["anchor_tiers"])
     lines += _fmt_delta_rows("verification verdict", diff["verification"])
     lines += _fmt_delta_rows("self-consistency", diff["confidence"])
     lines += _fmt_delta_rows("severity", diff["findings_by_severity"])
+    trust = diff.get("evidence_trust") or {}
+    if trust.get("by_state"):
+        lines += _fmt_delta_rows("evidence trust (per grounded unit)",
+                                 trust["by_state"])
+        tb, tv = trust.get("base", {}) or {}, trust.get("variant", {}) or {}
+        for label, key in (("reduced-trust unverified",
+                            "reduced_trust_unverified_units"),
+                           ("grounded AND verified", "grounded_verified_units")):
+            b, v = tb.get(key, 0), tv.get(key, 0)
+            lines.append(f"    {label:<22}{b:>8}{v:>10}{v - b:>+8}")
 
     lines += ["", "  SPEND BY MODEL"]
     for arm, key in (("base", "base"), ("variant", "variant")):
@@ -439,6 +673,8 @@ def render_diff(diff: dict, *, base_label: str, var_label: str) -> str:
     else:
         for c in verdict["concerns"]:
             lines.append(f"    [CONCERN] {c}")
+    for n in verdict.get("notes", []):
+        lines.append(f"    [NOTE] {n}")
     lines += ["", "=" * 72]
     return "\n".join(lines)
 
@@ -630,6 +866,34 @@ def resolve_arm_configuration(
     }
 
 
+def write_arm_records(arm_json: Path, records: list[dict]) -> Path:
+    """Write one arm's finding records beside its summary; return the path.
+
+    Paired with :func:`load_arm_records` so the envelope shape has exactly one
+    definition. The writer runs in the arm child and the reader in the parent,
+    which is precisely the arrangement where two hand-written literals drift
+    apart and the parent silently reports "no records" for an arm that produced
+    hundreds.
+    """
+    path = _findings_path(arm_json)
+    path.write_text(
+        json.dumps({"contract_version": RECORD_CONTRACT_VERSION,
+                    "records": records}, indent=2),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _findings_path(arm_json: Path) -> Path:
+    """The finding-record sidecar beside an arm's summary JSON.
+
+    A sidecar rather than a key in the summary: a 300-finding arm's records run
+    to hundreds of kilobytes, and burying them inside the file an operator reads
+    for four cost numbers makes both harder to use.
+    """
+    return arm_json.parent / f"{arm_json.stem}_findings.json"
+
+
 def _run_arm_in_process(
     pdfs: list[Path], out_path: Path, *, exhaustive: bool,
     overlap_frac: float | None = None,
@@ -667,6 +931,19 @@ def _run_arm_in_process(
             critique_use_batch=critique_use_batch,
         )
         summary = summarize_run(ctx)
+        # WP-06 §11.2. Built and written HERE, inside the workspace's lifetime:
+        # the records themselves are pure data, but the evidence crops they
+        # reference live under the run's own work dir, and a link written after
+        # cleanup points at nothing. Copy first, link second, delete last.
+        records = finding_records(ctx.all_findings)
+        artifacts_root = out_path.parent / f"{out_path.stem}_artifacts"
+        work_dir = getattr(ctx, "qc_work_dir", None)
+        copied = 0
+        if work_dir is not None:
+            copied = copy_linked_artifacts(
+                records, work_dir, artifacts_root, link_from=out_path.parent
+            )
+        findings_path = write_arm_records(out_path, records)
 
     # The same record the estimate child emits, so an arm's summary and the
     # quote that authorized it are directly comparable field by field.
@@ -674,7 +951,29 @@ def _run_arm_in_process(
         exhaustive=exhaustive, overlap_frac=overlap_frac
     )
     summary.update(summary["configuration"])
+    # Filenames, never paths: this JSON is shared, and the arm ran in a
+    # directory nobody else has.
+    summary["findings_records"] = findings_path.name
+    summary["evidence_artifacts_copied"] = copied
     out_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+
+def load_arm_records(arm_json: Path) -> list[dict]:
+    """Read one arm's finding records, tolerating an arm that produced none.
+
+    A missing or unreadable sidecar yields ``[]`` rather than raising: the
+    aggregate comparison is still worth printing, and the finding-level section
+    says plainly that it had nothing to compare (§11.3 — a comparison that
+    could not run must not look like a comparison that found nothing).
+    """
+    path = _findings_path(arm_json)
+    if not path.is_file():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return list(payload.get("records") or [])
 
 
 def run_arm(
@@ -1006,6 +1305,9 @@ def main(argv: list[str] | None = None) -> int:
                   exhaustive=args.exhaustive, overlap_frac=variant.overlap_frac)
 
     diff = diff_summaries(base, var)
+    base_records = load_arm_records(args.out / "arm_baseline.json")
+    var_records = load_arm_records(args.out / "arm_variant.json")
+    match = match_records(base_records, var_records)
     # Redacted: ``diff.txt`` is written to disk and shared, and the arm env is
     # whatever the user typed on the command line — which can include a key.
     # ``ArmSpec.label`` names the overlap too, so a geometry-only experiment is
@@ -1013,11 +1315,25 @@ def main(argv: list[str] | None = None) -> int:
     base_label = baseline.label()
     var_label = variant.label()
     report = render_diff(diff, base_label=base_label, var_label=var_label)
+    if base_records or var_records:
+        report += "\n\n" + render_findings_diff(
+            match, base_label=base_label, var_label=var_label
+        ) + "\n\n" + "=" * 72
+    else:
+        report += (
+            "\n\n  FINDING-LEVEL COMPARISON\n"
+            "    Neither arm wrote finding records, so no finding-level "
+            "comparison ran.\n"
+            "    This is not the same as finding no differences.\n\n" + "=" * 72
+        )
     print("\n" + report)
 
     (args.out / "diff.json").write_text(json.dumps(diff, indent=2), encoding="utf-8")
+    (args.out / "findings_diff.json").write_text(
+        json.dumps(match, indent=2), encoding="utf-8")
     (args.out / "diff.txt").write_text(report + "\n", encoding="utf-8")
-    print(f"\nWrote {args.out}/diff.json, diff.txt, arm_baseline.json, arm_variant.json")
+    print(f"\nWrote {args.out}/diff.json, findings_diff.json, diff.txt, "
+          f"arm_baseline.json, arm_variant.json (+ _findings.json sidecars)")
     return 0
 
 
