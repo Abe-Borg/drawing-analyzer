@@ -1237,7 +1237,16 @@ In `cost.format_drawing_cost_prompt()` and `format_exhaustive_cost_prompt()` —
   allowance.
 - Distinguish local result-cache hits from provider prompt-cache reads. A local
   cache hit avoids that model call; it does not guarantee every other stage is
-  free.
+  free. **Nor is the opposite true** — the first attempt at this fix replaced
+  "cached sheets cost nothing" with "every other stage still bills", which is
+  the same error mirrored: every QC stage caches independently and returns
+  without a provider call on a hit (identity, review plan, cross-QC, synthesis,
+  focus, critique, per-finding verification). The accurate statement has two
+  halves, and needs both: the caches are per stage, so a digest hit implies
+  nothing about the rest; and identity, the review plan, synthesis and cross-QC
+  key on the **whole set**, so the common case — one sheet added to a set
+  reviewed last week — hits the digest cache for every old sheet and still
+  re-runs those four in full.
 - Keep the existing pre-send confirmation behavior and actual transport selection
   unchanged.
 

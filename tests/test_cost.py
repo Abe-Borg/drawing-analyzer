@@ -540,8 +540,31 @@ def test_dialogs_distinguish_a_local_cache_hit_from_a_provider_cache_read():
         assert "local result cache" in text
     exhaustive = _exhaustive_dialog(batch=False, critique_batch=False)
     assert "cost nothing" not in exhaustive
-    assert "local result cache" in exhaustive
-    assert "still run and still bill" in exhaustive
+
+
+def test_no_dialog_claims_the_qc_stages_always_bill():
+    """A warm re-run is cheaper but rarely free — and never "every stage bills".
+
+    Every QC stage caches independently and returns without a provider call on a
+    hit: identity (``set_identity`` ~483), review plan (~459), cross-QC (~1505),
+    synthesis, focus, critique and per-finding verification. Saying they all
+    still bill overstates a warm re-run as badly as "cached sheets cost nothing"
+    understated it — the first version of this fix traded one false claim for
+    its mirror image.
+
+    What is actually true, and what a reviewer needs: the caches are per stage,
+    so a digest hit implies nothing about the rest; and the set-level stages key
+    on the WHOLE set, so the common case — one sheet added to a set reviewed
+    last week — hits the digest cache for every old sheet and still re-runs
+    identity, the review plan, synthesis and cross-sheet QC in full.
+    """
+    for text in (_dialog(batch=True), _dialog(batch=False),
+                 _exhaustive_dialog(batch=True, critique_batch=True),
+                 _exhaustive_dialog(batch=False, critique_batch=False)):
+        assert "still bills normally" not in text
+        assert "still run and still bill" not in text
+        assert "caches separately" in text
+        assert "whole set" in text
 
 
 def test_the_copy_fix_moved_no_price():

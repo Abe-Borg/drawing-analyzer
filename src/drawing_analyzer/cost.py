@@ -232,9 +232,11 @@ def format_drawing_cost_prompt(est: DrawingCostEstimate) -> str:
             f"Estimated cost: ~${est.total_cost:,.2f}{batch_note} — a rough "
             "estimate, not a cap. The image allowance is a per-model worst "
             "case, but the text riding with each sheet is not bounded by it, so "
-            "a text-heavy set can land above this figure. Sheets already in the "
-            "local result cache skip their own model call; every other stage "
-            "still bills normally."
+            "a text-heavy set can land above this figure. Every stage caches "
+            "separately: a sheet already in the local result cache skips its "
+            "own call, but that does not mean the set-level passes are free — "
+            "and because they key on the whole set, adding or changing one "
+            "sheet re-runs them in full."
         )
     else:
         lines.append("Estimated cost: unavailable for this model.")
@@ -734,9 +736,11 @@ def format_exhaustive_cost_prompt(est: ExhaustiveCostEstimate) -> str:
             "range, not a cap (verification and citation scale with how many "
             "findings and code citations turn up, and the text riding with each "
             "sheet is not bounded by the image allowance). Pricing verified "
-            f"{est.verified_effective_date}. Sheets already in the local result "
-            "cache skip their own digest call; the QC stages below still run and "
-            "still bill.",
+            f"{est.verified_effective_date}. Every stage caches separately, so a "
+            "re-run is cheaper but rarely free: a digest hit does not imply a "
+            "hit on the stages below, and identity, the review plan, synthesis "
+            "and cross-sheet QC key on the whole set — adding or changing one "
+            "sheet re-runs each of them in full.",
         ]
     else:
         # Name the stages whose model this table cannot price. The old wording
