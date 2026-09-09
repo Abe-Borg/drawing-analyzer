@@ -1,8 +1,9 @@
 """WP-03A — a genuine quote past the prompt cap is still source evidence.
 
-`docs/REVIEW_IMPLEMENTATION_PLAN.md` §2.1 trigger 1: `render` caps `sheet_text`
-at `SHEET_TEXT_MAX_CHARS` for the *prompt*, but the sharded cross-QC validators
-grounded quotes against that capped string. A quote the model transcribed from
+`render` caps `sheet_text` at `SHEET_TEXT_MAX_CHARS` for the *prompt*, but the
+sharded cross-QC validators grounded quotes against that capped string — see
+`models.sheet_evidence_text` and CLAUDE.md's note on why it is deliberately not
+`full_sheet_text or sheet_text`. A quote the model transcribed from
 pixels past character 15,000 exists in the source and in the full word stream —
 yet `_finding_from_handles` and `_parse_facts` dropped it, and a finding losing
 a leg that way falls below the two-grounded-sheets bar and disappears entirely.

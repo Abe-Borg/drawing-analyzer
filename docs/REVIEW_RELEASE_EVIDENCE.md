@@ -1,6 +1,7 @@
 # Release evidence — review implementation packages WP-00 … WP-08
 
-Deliverable for §13.3 of `REVIEW_IMPLEMENTATION_PLAN.md`. It records what
+Release evidence for the review implementation packages WP-00 … WP-08, all of
+which are complete and merged. It records what
 changed, what was measured, what was verified, and — at least as importantly —
 what was **not**, so nobody has to infer a claim from an absence.
 

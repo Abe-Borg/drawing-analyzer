@@ -1,8 +1,9 @@
 """WP-03B — evidence that is not in the text layer at all.
 
-`docs/REVIEW_IMPLEMENTATION_PLAN.md` §2.1 trigger 2 and 3, and §2.2. WP-03A
-recovered quotes past the prompt cap; the text was still there to find. This
-covers the cases where there is nothing to find:
+The three-state grounding contract (README, "Evidence the host cannot check";
+CLAUDE.md, `classify_quote_evidence`). WP-03A recovered quotes past the prompt
+cap, where the text was still there to find. This covers the cases where there
+is nothing to find:
 
 - a **scanned** sheet has no text layer, so every quote on it failed grounding
   and — worse — `_parse_facts` dropped every fact, excluding the sheet from

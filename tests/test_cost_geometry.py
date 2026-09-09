@@ -1,7 +1,8 @@
 """WP-05 §10.1/§10.2 — a cost preview built from each page's real shape.
 
-`docs/REVIEW_IMPLEMENTATION_PLAN.md` §2.6: the shipped preview assumes every
-image is a square at the *raster* target and lands at the model's token cap.
+The shipped preview assumes every image is a square at the *raster* target and
+lands at the model's token cap (docs/PERFORMANCE_AND_COST_VALIDATION.md, "Two
+image-token regimes").
 That is a true upper bound and about **1.9x** the real cost of a vector E-size
 sheet. Two facts per page close most of the gap, and both come from a scan that
 never rasterizes — the aspect ratio, and whether the page has words.
