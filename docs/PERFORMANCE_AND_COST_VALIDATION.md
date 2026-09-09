@@ -174,3 +174,52 @@ Judgement (owner-reviewed against the previous release's recorded medians):
 | Live batch run manifest attached (scenario 2) | ☐ |
 | Gates above all checked | ☐ |
 | Owner sign-off on regressions/tolerances | |
+
+### Confirmation-time cost scan — the measurement (WP-05 §10.3)
+
+```bash
+# Your own sets — what the plan actually asks for. Zero API calls.
+python scripts/measure_scan_time.py --pdf setA.pdf --pdf setB.pdf
+
+# Synthetic sweep when no real set is at hand
+python scripts/measure_scan_time.py --synthetic
+```
+
+§10.3 is a measurement step before a design step, because `render.py`'s
+"0.32 s / 8 sheets / 6,636 words" is one reading and not a bound. Measured here
+(synthetic uniform E-size pages, medians of 3):
+
+| set | fresh cost scan | wait behind a running preflight | derive from the preflight's geometry |
+|---|---:|---:|---:|
+| 8 sheets × 500 w | 62 ms | 194 ms | 0.0 ms |
+| 39 sheets × 500 w | 330 ms | 1,009 ms | 0.1 ms |
+| 120 sheets × 500 w | 959 ms | 2,912 ms | 0.4 ms |
+| 8 sheets × 4,000 w | 477 ms | 1,450 ms | 0.0 ms |
+| 39 sheets × 4,000 w | 2,399 ms | 7,494 ms | 0.1 ms |
+| **120 sheets × 4,000 w** | **6,896 ms** | **22,457 ms** | **0.4 ms** |
+
+Three things follow.
+
+**The scan tracks word count, not sheet count** — ~15 ms per 1,000 words across
+every configuration, so 8 ms/page on a sparse set and 60 ms/page on a dense one.
+That is why a per-sheet figure was never a bound: a hyperscale fire-protection
+set is mostly dense schedule sheets. As a cross-check, the same instrument
+reproduces the number already in `render.py`: 48.4 ms/1k words × 6.636k words =
+321 ms against the recorded 320 ms.
+
+**The preflight is the larger term, by 3×**, because `iter_sheet_prescan` also
+computes each page's render identity — a content hash over its dependency graph
+that the level-1 cache needs and a cost estimate does not. A scan that wants
+PyMuPDF waits behind that lock.
+
+**So there is no separate scan.** §10.3 Step 2's default design — run it once at
+the Analyze click — would freeze the UI for ~7 seconds on a large dense set, at
+the exact moment money is committed. Item 3's "prefer **reusing** its results" is
+the right branch and is nearly free: `preflight_sheet_ids` already builds a full
+`SheetGeometry` per page and keeps only the sheet id, so emitting a
+`SheetCostBasis` from the object it discards costs 0.4 ms for 120 pages — 0.01%
+of a fresh scan, inside a lock already held, with no second PDF owner. When no
+usable scan exists (the user clicked Analyze first, or it failed), the dialog
+prices conservatively and says so.
+
+The GUI cases that need a real window are in `docs/WINDOWS_MANUAL_ACCEPTANCE.md`.

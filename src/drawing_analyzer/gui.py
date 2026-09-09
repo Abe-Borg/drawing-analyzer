@@ -265,6 +265,10 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         self._profile_forced_off: set[str] = set()
         self._profile_suggested: set[str] = set()
         self._preflight_lock = threading.Lock()
+        # WP-05 §10.3: the cost bases the preflight produced for the CURRENT file
+        # list, or None when no usable scan exists yet. Never a partial list —
+        # a half-scanned set must price conservatively, not blend two bases.
+        self._preflight_bases: "list | None" = None
         self._preflight_gen = 0
         # HTML report: off by default the key is NOT written into the file (the
         # Ask-AI panel prompts for one at runtime). On restores the old embedded
@@ -1387,27 +1391,43 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         pdfs = list(self._pdfs)
         self._preflight_gen += 1
         gen = self._preflight_gen
+        # The bases on hand describe the PREVIOUS file list. Drop them now rather
+        # than at apply time: between here and the worker's result the dialog
+        # would otherwise price the new selection with the old set's shapes.
+        self._preflight_bases = None
 
         def _work() -> None:
+            bases: list = []
             try:
-                from .profiles import suggest_profiles_for_paths
+                from .profiles import suggest_profiles_and_cost_bases
 
                 # Serialize PyMuPDF access across overlapping preflights (I-5).
+                # One walk yields both the profile suggestion and the per-page
+                # cost bases (§10.3): deriving the bases from geometry this pass
+                # already built measured 0.4 ms for 120 sheets, against 6,896 ms
+                # for a second scan of the same set — so there is no second scan.
                 with self._preflight_lock:
-                    names = [p.name for p in suggest_profiles_for_paths(pdfs)]
+                    profiles, bases = suggest_profiles_and_cost_bases(pdfs)
+                names = [p.name for p in profiles]
             except Exception as exc:  # noqa: BLE001 - preflight is a hint, never fatal
                 _log.info("profile preflight failed: %s", exc)
-                names = []
-            self.after(0, lambda: self._apply_profile_suggestions(names, gen))
+                names, bases = [], []
+            self.after(0, lambda: self._apply_profile_suggestions(names, gen, bases))
 
         threading.Thread(target=_work, daemon=True).start()
 
-    def _apply_profile_suggestions(self, names: list[str], gen: int = 0) -> None:
+    def _apply_profile_suggestions(
+        self, names: list[str], gen: int = 0, bases: "list | None" = None,
+    ) -> None:
         """Apply a preflight result: suggested-and-not-forced-off OR forced-on are
         checked; everything else is unchecked (so a suggestion for one file set does
         not leak into the next). A stale result (superseded generation) is ignored."""
         if gen and gen != self._preflight_gen:
             return
+        # Same generation guard, same reason: a superseded scan describes a file
+        # list the user has already replaced, and pricing the new one with it
+        # would be worse than pricing conservatively.
+        self._preflight_bases = list(bases) if bases else None
         from .profiles import resolve_profile_selection
 
         self._profile_suggested = set(names)
@@ -1641,11 +1661,17 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         digest_batch, critique_batch = processing_transports(
             self._processing_mode_var.get()
         )
+        # §10.3 item 1 says not to replace every refresh with a synchronous scan.
+        # This does not: it reads whatever the background preflight has already
+        # produced, or nothing. The summary sharpens on its own once the scan
+        # lands, and never waits for it.
+        bases = self._preflight_bases
         digest_est = estimate_drawing_set_cost(
             sheets, file_count=files, model=REVIEW_MODEL_DEFAULT,
             batch=digest_batch,
             focus=bool(self._current_focus()),
             spec_chars=len(self._current_specs_text()),
+            bases=bases,
         )
         if self._qc_markups_var.get():
             full = estimate_exhaustive_run_cost(
@@ -1653,6 +1679,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 batch=digest_batch, critique_batch=critique_batch,
                 focus=bool(self._current_focus()),
                 spec_chars=len(self._current_specs_text()),
+                bases=bases,
             )
             cost = (
                 f"~${full.low_cost:,.2f}–${full.high_cost:,.2f} (full QC est.)"
@@ -1706,12 +1733,19 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         # low–high band (§15.7); otherwise the digest-only figure. Nothing is sent
         # until this is confirmed.
         refs = list_sheets(self._pdfs)
+        # WP-05 §10.3/§10.4: price from each page's real shape when the profile
+        # preflight has already measured this exact file list, and fall back to
+        # the conservative allowance otherwise — the user clicked Analyze before
+        # the scan finished, or it failed. No blocking, no second PDF owner, and
+        # no spinner: the work was already done under a lock we do not touch.
+        bases = self._preflight_bases
         if qc_markups:
             exh = estimate_exhaustive_run_cost(
                 len(refs), file_count=len(self._pdfs), model=REVIEW_MODEL_DEFAULT,
                 batch=use_batch, critique_batch=critique_use_batch,
                 focus=bool(focus),
                 spec_chars=len(project_specifications or ""),
+                bases=bases,
             )
             prompt = format_exhaustive_cost_prompt(exh)
             dialog_title = "Confirm exhaustive QC review"
@@ -1720,6 +1754,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 len(refs), file_count=len(self._pdfs), model=REVIEW_MODEL_DEFAULT,
                 batch=use_batch, focus=bool(focus),
                 spec_chars=len(project_specifications or ""),
+                bases=bases,
             )
             prompt = format_drawing_cost_prompt(estimate)
             dialog_title = "Confirm drawing analysis"

@@ -202,6 +202,29 @@ def estimate_image_tokens_for_bases(
     )
 
 
+def _image_tokens_for(
+    sheet_count: int, bases, *, rows: int, cols: int, model: str,
+) -> tuple[int, bool]:
+    """``(image_tokens, shape_aware)`` — real shapes when we have them.
+
+    One resolver so the standard and exhaustive estimators cannot disagree about
+    when the geometry-aware number applies. ``bases`` is used only when it covers
+    **every** sheet being priced: a partial scan mixed with a conservative
+    remainder would be neither figure, and which sheets were missing would not be
+    visible in the total.
+    """
+    if bases and len(bases) == sheet_count and sheet_count > 0:
+        return (
+            estimate_image_tokens_for_bases(
+                bases, rows=rows, cols=cols, model=model
+            ).tokens,
+            True,
+        )
+    return estimate_image_tokens_for_set(
+        sheet_count, rows=rows, cols=cols, model=model
+    ), False
+
+
 @dataclass(frozen=True)
 class DrawingCostEstimate:
     sheet_count: int
@@ -213,6 +236,10 @@ class DrawingCostEstimate:
     total_cost: float | None  # None when the model's pricing is unknown
     batch: bool = False  # estimate reflects the 50% Batch-API discount
     spec_chars: int = 0  # uploaded project-specifications char count, if any
+    #: True when image tokens came from each page's measured shape rather than
+    #: the conservative allowance. Additive and defaulted, so an older caller's
+    #: construction still loads.
+    shape_aware: bool = False
 
 
 def estimate_drawing_set_cost(
@@ -226,6 +253,7 @@ def estimate_drawing_set_cost(
     batch: bool = False,
     focus: bool = False,
     spec_chars: int = 0,
+    bases: "Sequence[Any] | None" = None,
 ) -> DrawingCostEstimate:
     """Estimate the cost of digesting ``sheet_count`` sheets.
 
@@ -252,8 +280,8 @@ def estimate_drawing_set_cost(
     # was quoted right in one mode and wrong in the other — the mode a standard
     # run actually uses being the wrong one.
     stage_models = resolve_stage_models(model=model)
-    image_tokens = estimate_image_tokens_for_set(
-        sheet_count, rows=rows, cols=cols, model=model
+    image_tokens, shape_aware = _image_tokens_for(
+        sheet_count, bases, rows=rows, cols=cols, model=model
     )
     digest_output = sheet_count * _ASSUMED_OUTPUT_TOKENS_PER_SHEET
     if focus:
@@ -309,7 +337,26 @@ def estimate_drawing_set_cost(
         total_cost=total_cost,
         batch=batch,
         spec_chars=spec_chars,
+        shape_aware=shape_aware,
     )
+
+
+#: §10.4. Plain language, and the distinction a reviewer can act on: whether the
+#: figure came from the pages in front of them or from a deliberately high
+#: stand-in. Neither is called a confidence interval or a guaranteed maximum,
+#: because it is neither.
+_BASIS_MEASURED = (
+    "Based on each page's measured size and text layer."
+)
+_BASIS_CONSERVATIVE = (
+    "Conservative planning estimate — the pages have not been measured yet, so "
+    "this assumes the most expensive shape. The real figure is usually well "
+    "under half of it."
+)
+
+
+def _basis_line(shape_aware: bool) -> str:
+    return _BASIS_MEASURED if shape_aware else _BASIS_CONSERVATIVE
 
 
 def format_drawing_cost_prompt(est: DrawingCostEstimate) -> str:
@@ -326,6 +373,7 @@ def format_drawing_cost_prompt(est: DrawingCostEstimate) -> str:
         "",
         f"Estimated usage: ~{est.input_tokens:,} input tokens "
         f"(~{est.image_tokens:,} from images) / ~{est.output_tokens:,} output.",
+        _basis_line(est.shape_aware),
     ]
     if est.spec_chars:
         # WP-04 §9.2. The old line promised a ~0.1x prompt-cache read on BOTH
@@ -353,13 +401,18 @@ def format_drawing_cost_prompt(est: DrawingCostEstimate) -> str:
         )
         lines.append(
             f"Estimated cost: ~${est.total_cost:,.2f}{batch_note} — a rough "
-            "estimate, not a cap. The image allowance is a per-model worst "
-            "case, but the text riding with each sheet is not bounded by it, so "
-            "a text-heavy set can land above this figure. Every stage caches "
-            "separately: a sheet already in the local result cache skips its "
-            "own call, but that does not mean the set-level passes are free — "
-            "and because they key on the whole set, adding or changing one "
-            "sheet re-runs them in full."
+            "estimate, not a cap. "
+            + ("The image figure now comes from the pages themselves, but the "
+               "text riding with each sheet is not bounded by it, so a "
+               "text-heavy set can still land above this."
+               if est.shape_aware else
+               "The image allowance is a per-model worst case, but the text "
+               "riding with each sheet is not bounded by it, so a text-heavy "
+               "set can land above this figure.")
+            + " Every stage caches separately: a sheet already in the local "
+            "result cache skips its own call, but that does not mean the "
+            "set-level passes are free — and because they key on the whole "
+            "set, adding or changing one sheet re-runs them in full."
         )
     else:
         lines.append("Estimated cost: unavailable for this model.")
@@ -471,6 +524,8 @@ class ExhaustiveCostEstimate:
     #: Critique reads per sheet, as the runtime resolver reported them (§10.2).
     #: Defaulted to the shipping value so an older caller's construction loads.
     critique_runs: int = 2
+    #: True when image tokens came from each page's measured shape (§10.4).
+    shape_aware: bool = False
 
 
 @dataclass(frozen=True)
@@ -658,6 +713,7 @@ def estimate_exhaustive_run_cost(
     focus: bool = False,
     spec_chars: int = 0,
     verification_model: str | None = None,
+    bases: "Sequence[Any] | None" = None,
 ) -> ExhaustiveCostEstimate:
     """Estimate an **exhaustive QC** run's cost, component by component (§15.7).
 
@@ -699,15 +755,20 @@ def estimate_exhaustive_run_cost(
     harvest_model = stage_models.harvest
     citation_model = stage_models.citation
 
-    per_sheet_images = estimate_image_tokens_for_set(1, rows=rows, cols=cols, model=model)
+    # Set totals, priced with each stage's own model — the same PNG dimensions
+    # clamp at a different per-model cap, so one count cannot serve both (§2.4).
+    digest_set_images, shape_aware = _image_tokens_for(
+        sheet_count, bases, rows=rows, cols=cols, model=model
+    )
+    crit_set_images, _ = _image_tokens_for(
+        sheet_count, bases, rows=rows, cols=cols, model=stage_models.critique
+    )
     components: list[CostComponent] = []
 
     # Digest vision calls use the selected transport. The later synthesis and
     # focus report are synchronous calls even when digest/critique use Batch, so
     # show and price them independently rather than discounting them by mistake.
-    digest_input = sheet_count * per_sheet_images + (
-        sheet_count * _ASSUMED_PROMPT_TOKENS_PER_SHEET
-    )
+    digest_input = digest_set_images + sheet_count * _ASSUMED_PROMPT_TOKENS_PER_SHEET
     digest_output = sheet_count * _ASSUMED_OUTPUT_TOKENS_PER_SHEET
     if focus:
         digest_output += sheet_count * _ASSUMED_FOCUS_SECTION_TOKENS_PER_SHEET
@@ -782,10 +843,15 @@ def estimate_exhaustive_run_cost(
     from .critique import critique_runs
 
     runs = critique_runs()
-    crit_per_sheet_images = estimate_image_tokens_for_set(
-        1, rows=rows, cols=cols, model=stage_models.critique
+    # The cache prefix is a PER-SHEET quantity (one breakpoint per sheet's shared
+    # image block), so a heterogeneous set is priced on its mean sheet. Stated
+    # rather than hidden: with real shapes the sheets differ, and modelling the
+    # cache per sheet would buy precision the surrounding assumed-token constants
+    # do not have.
+    crit_prefix = (
+        (crit_set_images // sheet_count if sheet_count else 0)
+        + _ASSUMED_PROMPT_TOKENS_PER_SHEET
     )
-    crit_prefix = crit_per_sheet_images + _ASSUMED_PROMPT_TOKENS_PER_SHEET
     crit_in = runs * sheet_count * crit_prefix
     crit_out = runs * sheet_count * _ASSUMED_CRITIQUE_OUTPUT_TOKENS_PER_READ
     crit_low, crit_high = _critique_prefix_costs(
@@ -925,6 +991,7 @@ def estimate_exhaustive_run_cost(
         components=components, low_cost=low_cost, high_cost=high_cost,
         batch=batch, critique_batch=critique_batch, spec_chars=spec_chars,
         critique_runs=runs,
+        shape_aware=shape_aware,
         stage_models=stage_models,
     )
 
@@ -952,6 +1019,8 @@ def format_exhaustive_cost_prompt(est: ExhaustiveCostEstimate) -> str:
         "deterministic auditors, prose harvest, verification, the uncertain-"
         "finding investigation loop, and citation checks.",
         "",
+        _basis_line(est.shape_aware),
+        "",
         "Estimated cost by stage:",
     ]
     if est.spec_chars:
@@ -974,7 +1043,9 @@ def format_exhaustive_cost_prompt(est: ExhaustiveCostEstimate) -> str:
             f"Estimated total: ${est.low_cost:,.2f} – ${est.high_cost:,.2f} — a rough "
             "range, not a cap (verification and citation scale with how many "
             "findings and code citations turn up, and the text riding with each "
-            "sheet is not bounded by the image allowance). Pricing verified "
+            "sheet is not bounded by the image "
+            + ("figure" if est.shape_aware else "allowance")
+            + "). Pricing verified "
             f"{est.verified_effective_date}. Every stage caches separately, so a "
             "re-run is cheaper but rarely free: a digest hit does not imply a "
             "hit on the stages below, and identity, the review plan, synthesis "
