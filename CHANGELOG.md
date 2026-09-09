@@ -6,6 +6,56 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The release benchmark was measuring nothing, and its failures read like app
+  regressions (WP-08).** `scripts/benchmark_drawing_analyzer.py --check` asserts
+  that a warm run makes zero digest calls and rasterizes nothing, and that
+  editing one source re-digests exactly one sheet. Both gates were failing, with
+  messages that named the application: "cached run still rasterized", "expected
+  exactly 1 digest call, got 0".
+
+  Neither was true. Every scenario reported `digest_api_calls=0`, `tok=0/0`,
+  `cost≈$0.0000`, and `corrupt-partial` reported `ok_sheets=0; errors=9` — every
+  sheet failing, including the sound ones. The cause was one line in a
+  reproduction: `'OfflineClient' object has no attribute 'beta'`. Two production
+  changes had landed after the benchmark's fake client was written and it tracked
+  neither — `digest.stream_message` issues **every** digest / critique /
+  review-plan / synthesis / focus request over `messages.stream` (unconditionally,
+  not only above the ~21k cap), and `call_with_refusal_fallback` re-routes every
+  Opus-5 real-time call through `client.beta.messages`.
+
+  I-3 did exactly its job: it caught the `AttributeError` per sheet, appended to
+  `ctx.errors`, and let the run finish. Correct for a real run, wrong for a
+  benchmark — the run then "succeeded" having done no work, and the gate's own
+  counters could not tell that from a cache regression.
+
+  `OfflineClient` now mixes in `BetaClientMixin` and answers `messages.stream`
+  through `FinalMessageStream`, both imported from `tests/fixtures/fake_anthropic.py`
+  rather than reimplemented: a benchmark fake that restates the transport is a
+  fake that drifts from it again. `tests/test_benchmark_harness.py` guards it by
+  running the real pipeline and asserting work was **done**, not that particular
+  attributes exist — production is free to rename those. One test reproduces the
+  swallowed-error mode deliberately; another covers `messages.stream` directly,
+  since Sonnet-routed stages bypass the beta namespace and an Opus-only scenario
+  cannot see that half.
+
+  First real medians from this gate, 8 sheets / 5 repeats, recorded in
+  `docs/PERFORMANCE_AND_COST_VALIDATION.md`: cold 3.161 s, **warm 0.030 s with
+  zero API calls and zero renders**, one-source-changed 0.417 s with exactly one
+  digest call, peak RSS 189.0 MB.
+
+### Added
+
+- **`docs/REVIEW_RELEASE_EVIDENCE.md` (WP-08 §13.3).** The release evidence for
+  the whole review sequence: test and gate results, the cache-invalidation scope
+  and the single mechanism used for each change, measurements carried forward,
+  the §13.2 independent review checklist worked item by item — and an explicit
+  list of what was **not** done (the §7.2 discard-rate run, dense-fixture memory,
+  Windows manual GUI, the live canary). Two checklist items are recorded partial
+  and one class of work untouched, because a checklist whose every box is ticked
+  is the one nobody reads.
+
 ### Changed
 
 - **Documentation corrected against the code it describes (WP-07).** A
