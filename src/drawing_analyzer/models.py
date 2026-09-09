@@ -505,6 +505,42 @@ def is_reduced_trust(obj: Any) -> bool:
     return str(getattr(obj, "evidence_state", "") or "") in EVIDENCE_REDUCED_TRUST
 
 
+#: Why a reduced-trust finding could not be text-checked. Tokens, not prose:
+#: the PDF markup writer is ASCII-only (base-14 fonts) and the HTML report uses
+#: typographic punctuation, so each renderer owns its own wording while the
+#: *classification* lives in exactly one place.
+TRUST_REASON_NO_QUOTE = "no_quote"
+TRUST_REASON_NO_TEXT = "no_text"
+TRUST_REASON_NOT_FOUND = "not_found"
+
+
+def reduced_trust_reason(obj: Any) -> str:
+    """Which reduced-trust case this finding/leg is, or ``""`` when it is none.
+
+    ``EVIDENCE_UNAVAILABLE`` covers two situations a reviewer must not be told
+    are the same one: the sheet offered no text to search, and the model offered
+    no quote to search *for*. Telling someone "no searchable text on this sheet"
+    while they are looking at a sheet whose text they can select destroys the
+    credibility of every other caveat on the page. The state stays one value —
+    the host's capability is identical in both cases, and §8.3's three-state
+    vocabulary is what the cache keys, serialization and ``EVIDENCE_REDUCED_TRUST``
+    are built on — but the *explanation* is chosen here from the finding itself.
+
+    ``EVIDENCE_NOT_MATCHED`` gets its own reason for completeness. The cross-QC
+    channel drops those legs, so it should not reach a renderer; if another
+    channel ever sets it, the reviewer gets a true sentence instead of a false
+    one.
+    """
+    if not is_reduced_trust(obj):
+        return ""
+    state = str(getattr(obj, "evidence_state", "") or "")
+    if state == EVIDENCE_NOT_MATCHED:
+        return TRUST_REASON_NOT_FOUND
+    if not str(getattr(obj, "source_quote", "") or "").strip():
+        return TRUST_REASON_NO_QUOTE
+    return TRUST_REASON_NO_TEXT
+
+
 def sheet_evidence_text(sheet: Any) -> str:
     """The text a **host-side** check may treat as this sheet's source evidence.
 

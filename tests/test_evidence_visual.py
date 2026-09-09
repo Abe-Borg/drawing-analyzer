@@ -88,16 +88,78 @@ def test_scanned_sheet_yields_unavailable_not_a_refutation():
     assert classify_quote_evidence(SCANNED_QUOTE, geom) == EVIDENCE_UNAVAILABLE
 
 
-def test_hybrid_sheet_is_reached_without_consulting_is_raster():
-    """A hybrid sheet has words, so `is_raster` is False — §2.1's point.
+def _hybrid_geom() -> SheetGeometry:
+    """A *real* hybrid sheet: selectable title block, pasted raster detail.
 
-    The classifier keys on whether there is text to search, so a sheet whose
-    title block is selectable and whose detail is a pasted image is handled by
-    the same path, with no raster carve-out anywhere.
+    The first cut of this test used ``text="   "``, which strips to empty — that
+    is a scanned sheet with a stray space, not a hybrid one, and it passed for
+    the wrong reason (a code review caught it). A genuine hybrid sheet has a
+    populated text layer, so ``full_sheet_text`` is non-empty and any
+    sheet-level "is there text?" question answers *yes*. The whole point is that
+    the answer must be asked of the **region** the quote was read from.
+
+    Layout on a 792x612 page, 2x2 grid: every word sits in the bottom-right
+    quadrant (the title block); the top-left tile [0, 0] is the pasted detail
+    and holds none. Tiles overlap by ``DEFAULT_OVERLAP_FRAC``, so the words are
+    placed well clear of the boundary rather than just past it.
     """
-    geom = _geom("hybrid.pdf", "M-1", text="   ", words=[_w(10, 10, "M-1")])
+    title_block = [
+        _w(600, 520, "MECHANICAL"), _w(600, 540, "PLAN"),
+        _w(600, 560, "M-1"), _w(600, 580, "SCALE 1/8"),
+    ]
+    return SheetGeometry(
+        ref=_ref("hybrid.pdf"), page_width_pt=W, page_height_pt=H, rows=2, cols=2,
+        words=title_block,
+        sheet_text="MECHANICAL PLAN M-1 SCALE 1/8",
+        full_sheet_text="MECHANICAL PLAN M-1 SCALE 1/8",
+        is_raster=False,
+    )
+
+
+def test_hybrid_sheet_is_reached_without_consulting_is_raster():
+    """A hybrid sheet has words *and* text, so neither flag routes it — §2.1.
+
+    `render.py` populates `full_sheet_text` from `page.get_text()`, so a single
+    selectable title block makes the sheet-level evidence non-empty. Classifying
+    on that alone sends a quote read off the pasted detail to
+    `EVIDENCE_NOT_MATCHED`, which drops it: the advertised hybrid recovery would
+    never fire on any real hybrid page. The classifier therefore asks whether
+    *the reported tile* carries words.
+    """
+    geom = _hybrid_geom()
     assert geom.is_raster is False
-    assert classify_quote_evidence(SCANNED_QUOTE, geom) == EVIDENCE_UNAVAILABLE
+    assert geom.full_sheet_text.strip(), "a hybrid sheet does have a text layer"
+    # Sheet-level: there IS text, so the sheet-wide question answers "yes".
+    assert X._grounded(SCANNED_QUOTE, geom.full_sheet_text) is False
+    # Region-level: tile [0, 0] is the pasted detail — pixels only.
+    assert X._tile_has_words(geom, [0, 0]) is False
+    assert classify_quote_evidence(SCANNED_QUOTE, geom, [0, 0]) == EVIDENCE_UNAVAILABLE
+
+
+def test_hybrid_sheet_text_bearing_tile_still_signals_a_bad_quote():
+    """The other half: a quote attributed to the *title block* tile.
+
+    That region has selectable words. A quote that is not among them is the
+    hallucination signal exactly as before — the region rule must not become a
+    blanket amnesty for every quote on a sheet that happens to contain one
+    image.
+    """
+    geom = _hybrid_geom()
+    assert X._tile_has_words(geom, [1, 1]) is True
+    assert classify_quote_evidence(SCANNED_QUOTE, geom, [1, 1]) == EVIDENCE_NOT_MATCHED
+
+
+def test_hybrid_sheet_without_a_tile_is_not_given_the_benefit_of_the_doubt():
+    """No location reported -> the sheet-level answer stands (NOT_MATCHED).
+
+    `_tile_has_words` returns True for an unknown tile precisely so absence of a
+    location cannot be read as "the region had no text". Without that, every
+    unlocatable bad quote on a text-bearing sheet would be laundered into
+    reduced-trust admission.
+    """
+    geom = _hybrid_geom()
+    assert X._tile_has_words(geom, None) is True
+    assert classify_quote_evidence(SCANNED_QUOTE, geom) == EVIDENCE_NOT_MATCHED
 
 
 def test_unmatched_quote_on_a_text_bearing_sheet_stays_the_signal():
@@ -193,6 +255,47 @@ def test_fact_tile_lookup_joins_on_handle_and_normalized_quote():
     # The reconcile prompt requires quotes copied verbatim, and the join folds
     # them exactly as grounding does — so cosmetic drift still hits.
     assert lookup[("S001", X._norm_for_match(SCANNED_QUOTE.lower()))] == [1, 1]
+
+
+def _fact(quote: str, tile, *, handle: str = "S001") -> CrossQCFact:
+    return CrossQCFact(sheet_handle=handle, sheet_id="A-1", discipline="a",
+                       entity_or_tag="PV-3", attribute="serves", value="hall",
+                       exact_quote=quote, tile=tile)
+
+
+def test_ambiguous_fact_join_yields_no_tile_rather_than_the_first_one():
+    """A short quote can repeat on one sheet; each occurrence is its own fact.
+
+    The obvious ``setdefault`` keeps whichever fact was parsed first and hands
+    every later occurrence a rectangle belonging to somewhere else. That is
+    worse than no tile: a wrong tile still anchors (``_tile_anchor``) and still
+    passes ``_tile_has_words``, so it launders a guess into an artifact-backed
+    location the reviewer is told to go look at.
+    """
+    lookup = fact_tile_lookup([_fact("150 gpm", [0, 0]), _fact("150 gpm", [3, 4])])
+    assert lookup == {}
+
+
+def test_ambiguity_is_order_independent_and_survives_a_later_agreeing_fact():
+    """Poisoned stays poisoned — otherwise the answer depends on parse order."""
+    facts = [_fact("150 gpm", [0, 0]), _fact("150 gpm", [3, 4]),
+             _fact("150 gpm", [0, 0])]
+    assert fact_tile_lookup(facts) == {}
+    assert fact_tile_lookup(list(reversed(facts))) == {}
+
+
+def test_agreeing_duplicate_facts_still_resolve():
+    """Two facts, same quote, same tile: no ambiguity, so no loss of location."""
+    lookup = fact_tile_lookup([_fact("150 gpm", [3, 4]), _fact("150 gpm", [3, 4])])
+    assert lookup[("S001", X._norm_for_match("150 gpm"))] == [3, 4]
+
+
+def test_same_quote_on_different_sheets_is_not_a_collision():
+    """The handle is part of the key — "TYP." on two sheets is two facts."""
+    lookup = fact_tile_lookup([_fact("TYP.", [0, 0]),
+                               _fact("TYP.", [3, 4], handle="S002")])
+    assert lookup[("S001", X._norm_for_match("TYP."))] == [0, 0]
+    assert lookup[("S002", X._norm_for_match("TYP."))] == [3, 4]
 
 
 def test_reconciled_leg_inherits_the_tile_from_its_own_fact():
@@ -403,6 +506,102 @@ def test_report_is_unchanged_for_a_text_grounded_quote():
                 category="conflict", severity="high", text="valves disagree",
                 source_quote=SCANNED_QUOTE, evidence_state=EVIDENCE_TEXT_GROUNDED)
     assert "finding-evidence-note" not in _finding_row_html(f, None, link_evidence=False)
+
+
+def test_the_reviewer_is_never_told_a_text_bearing_sheet_has_no_text():
+    """F4: `EVIDENCE_UNAVAILABLE` covers two situations, not one.
+
+    An omitted quote is unavailable evidence just as a scanned sheet is — the
+    host can check neither — but a reviewer looking at a sheet whose text they
+    can select, being told "No searchable text on this sheet", learns that the
+    tool's caveats are unreliable. One false caveat discredits every true one on
+    the same page.
+    """
+    from drawing_analyzer.annotate import _annot_content
+    from drawing_analyzer.html_report import _finding_row_html
+
+    no_quote = Finding(sheet_id="M-1", source_name="hybrid.pdf", page_index=0,
+                       category="conflict", severity="high", text="valves disagree",
+                       source_quote="", evidence_state=EVIDENCE_UNAVAILABLE)
+    content = _annot_content(no_quote, unverified=True, place="SHEET")
+    assert "No searchable text" not in content
+    assert "gave no quote" in content
+    assert "[NO QUOTE TO CHECK]" in content
+    assert content.isascii(), "base-14 fonts miss non-ASCII glyphs"
+
+    row = _finding_row_html(no_quote, None, link_evidence=False)
+    assert "No searchable text" not in row
+    assert "No quote supplied" in row
+
+
+def test_the_two_unavailable_cases_read_differently():
+    """Same state, different sentence — that is the whole point of §8.3's F4.
+
+    Compares the *trust note* rather than the whole annotation body: the body
+    also embeds the quote, so two findings that differ only by having one would
+    compare unequal no matter what the note said.
+    """
+    from drawing_analyzer.annotate import _trust_note
+
+    def note(quote: str) -> str:
+        return _trust_note(
+            Finding(sheet_id="X", source_name="x.pdf", page_index=0,
+                    category="conflict", severity="high", text="t",
+                    source_quote=quote, evidence_state=EVIDENCE_UNAVAILABLE),
+            unverified=True, rejected=False,
+        )
+
+    assert note("") != note(SCANNED_QUOTE)
+    # ...and both still say, in their own way, that nothing was checked.
+    assert "confirm it visually" in note("")
+    assert "confirm it visually" in note(SCANNED_QUOTE)
+
+
+def test_reduced_trust_reason_classifies_all_three_cases():
+    from drawing_analyzer.models import (
+        TRUST_REASON_NO_QUOTE, TRUST_REASON_NO_TEXT, TRUST_REASON_NOT_FOUND,
+        reduced_trust_reason,
+    )
+
+    def f(quote, state):
+        return Finding(sheet_id="X", source_name="x.pdf", page_index=0,
+                       category="conflict", severity="high", text="t",
+                       source_quote=quote, evidence_state=state)
+
+    assert reduced_trust_reason(f("", EVIDENCE_UNAVAILABLE)) == TRUST_REASON_NO_QUOTE
+    assert reduced_trust_reason(f("   ", EVIDENCE_UNAVAILABLE)) == TRUST_REASON_NO_QUOTE
+    assert reduced_trust_reason(f("q", EVIDENCE_UNAVAILABLE)) == TRUST_REASON_NO_TEXT
+    assert reduced_trust_reason(f("q", EVIDENCE_NOT_MATCHED)) == TRUST_REASON_NOT_FOUND
+    assert reduced_trust_reason(f("q", EVIDENCE_TEXT_GROUNDED)) == ""
+    assert reduced_trust_reason(f("q", "")) == ""
+
+
+def test_a_legs_own_evidence_state_reaches_its_own_markup():
+    """F3: a conflict can be grounded on one sheet and visual on the other.
+
+    `_units_for_finding` draws one mark per leg from a synthetic `Finding`. It
+    copied the leg's quote and anchor but the *parent's* trust, so the mark
+    sitting on the sheet with nothing to check against carried no caveat, while
+    the mark on the corroborated sheet could inherit one it had not earned.
+    """
+    import itertools
+
+    from drawing_analyzer.annotate import _units_for_finding
+
+    leg = ConflictLeg(sheet_id="AS-1", source_name="scan.pdf", source_id="SRC-0002",
+                      page_index=1, source_quote=SCANNED_QUOTE,
+                      evidence_state=EVIDENCE_UNAVAILABLE)
+    parent = Finding(sheet_id="FP-1", source_name="v.pdf", source_id="SRC-0001",
+                     page_index=0, category="conflict", severity="high",
+                     text="valves disagree", source_quote=SCANNED_QUOTE,
+                     evidence_state=EVIDENCE_TEXT_GROUNDED, also_on=[leg])
+    units = _units_for_finding(parent, run_id="r", ordinals=itertools.count(1),
+                               include_unverified=True, ink_rejected=False)
+    by_sheet = {u.finding.sheet_id: u.finding for u in units}
+    assert by_sheet["AS-1"].evidence_state == EVIDENCE_UNAVAILABLE
+    assert by_sheet["FP-1"].evidence_state == EVIDENCE_TEXT_GROUNDED
+    # And the primary, seen as a leg of the synthetic one, keeps its own state.
+    assert by_sheet["AS-1"].also_on[0].evidence_state == EVIDENCE_TEXT_GROUNDED
 
 
 def test_legacy_findings_are_not_relabelled():

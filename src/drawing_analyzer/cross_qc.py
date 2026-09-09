@@ -59,6 +59,7 @@ from .core.api_config import (
     model_supports_adaptive_thinking,
     phase_output_cap,
 )
+from . import tiling
 from .diagnostics import get_logger
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
@@ -473,7 +474,44 @@ def _grounded(quote: str, sheet_text: str) -> bool:
     return q in _norm_for_match(sheet_text)
 
 
-def classify_quote_evidence(quote: str, geom: Any) -> str:
+def _tile_has_words(geom: Any, tile: "list[int] | None") -> bool:
+    """True when the sheet's grid cell at ``tile`` contains any extracted word.
+
+    Pure: word rectangles and :func:`tiling.tile_rects` only, no PDF engine
+    (I-5). ``True`` when the tile is unknown or the grid cannot be built — the
+    caller must not infer "pixels only" from an absent location.
+    """
+    if not tile or len(tile) != 2:
+        return True
+    try:
+        rects = tiling.tile_rects(
+            float(getattr(geom, "page_width_pt", 0.0) or 0.0),
+            float(getattr(geom, "page_height_pt", 0.0) or 0.0),
+            rows=int(getattr(geom, "rows", 0) or tiling.DEFAULT_GRID_ROWS),
+            cols=int(getattr(geom, "cols", 0) or tiling.DEFAULT_GRID_COLS),
+            overlap_frac=float(
+                getattr(geom, "overlap_frac", tiling.DEFAULT_OVERLAP_FRAC)
+            ),
+        )
+    except (TypeError, ValueError):
+        return True
+    row, col = int(tile[0]), int(tile[1])
+    target = next((r for r in rects if r.row == row and r.col == col), None)
+    if target is None:
+        return True
+    for w in (getattr(geom, "words", None) or []):
+        try:
+            x0, y0, x1, y1 = float(w[0]), float(w[1]), float(w[2]), float(w[3])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if x0 < target.x1 and x1 > target.x0 and y0 < target.y1 and y1 > target.y0:
+            return True
+    return False
+
+
+def classify_quote_evidence(
+    quote: str, geom: Any, tile: "list[int] | None" = None
+) -> str:
     """Three-state host-side verdict on one quote (WP-03B §8.3).
 
     Replaces the boolean that conflated "this quote is not in the text" with
@@ -494,13 +532,29 @@ def classify_quote_evidence(quote: str, geom: Any) -> str:
 
     Never consults ``is_raster``: a hybrid sheet has words and still cannot
     support a text check over its pasted raster detail (§2.1).
+
+    Availability is decided **per region**, not per sheet. A hybrid sheet's
+    selectable title block makes the whole-sheet text non-empty, so a sheet-level
+    test classifies a quote read off its pasted raster detail as
+    ``NOT_MATCHED_IN_TEXT`` and drops it — the hybrid recovery never happens.
+    When the model reported where it saw the quote, that tile is checked for
+    extracted words instead. Without a reported location no such claim can be
+    made, so the sheet-level answer stands: absence of a location is not
+    evidence that the region was pixels.
     """
     evidence = sheet_evidence_text(geom)
-    if not evidence.strip():
-        return EVIDENCE_UNAVAILABLE
     if not (quote or "").strip():
+        # Nothing to check. Never grounded (trigger 3); the reviewer-facing
+        # reason is chosen from the finding, since "no searchable text" would be
+        # a lie on a sheet that has plenty.
         return EVIDENCE_UNAVAILABLE
-    return EVIDENCE_TEXT_GROUNDED if _grounded(quote, evidence) else EVIDENCE_NOT_MATCHED
+    if _grounded(quote, evidence):
+        return EVIDENCE_TEXT_GROUNDED
+    if not evidence.strip():
+        return EVIDENCE_UNAVAILABLE          # scanned sheet: nothing to match
+    if not _tile_has_words(geom, tile):
+        return EVIDENCE_UNAVAILABLE          # hybrid: this region is pixels only
+    return EVIDENCE_NOT_MATCHED
 
 
 def _quote(v: Any) -> str:
@@ -592,6 +646,11 @@ def _action(item: dict) -> str:
     return action.strip()[:300]
 
 
+# Distinguishes "no entry yet" from "entry poisoned by an ambiguous join"
+# in :func:`fact_tile_lookup` — ``None`` is a meaningful stored value there.
+_MISSING = object()
+
+
 def fact_tile_lookup(facts: "list[CrossQCFact]") -> dict:
     """``(handle, normalized quote) -> tile`` over the facts sent to a reconcile.
 
@@ -607,16 +666,29 @@ def fact_tile_lookup(facts: "list[CrossQCFact]") -> dict:
     are folded with the same :func:`_norm_for_match` grounding uses, so the join
     tolerates exactly the cosmetic variation grounding does. A miss yields no
     tile and today's behaviour.
+
+    **The key is not unique.** One sheet can carry the same short quote
+    ("150 gpm", "TYP.") in two places, and the map stage reports each as its own
+    fact with its own tile. Keeping the first — the obvious ``setdefault`` — hands
+    the second occurrence a rectangle that belongs to the first, which is a
+    *silently wrong* location: worse than none, because a wrong tile still anchors
+    (``_tile_anchor``) and still passes ``_tile_has_words``. So a collision is
+    resolved only when every candidate agrees; a genuine disagreement drops the
+    key entirely and the leg falls back to being unlocatable, exactly as it is
+    today. Ambiguity is recorded, never guessed.
     """
-    out: dict = {}
+    seen: dict = {}
     for fact in facts or []:
         if fact.tile is None:
             continue
-        out.setdefault(
-            (_norm_id(fact.sheet_handle), _norm_for_match(fact.exact_quote)),
-            list(fact.tile),
-        )
-    return out
+        key = (_norm_id(fact.sheet_handle), _norm_for_match(fact.exact_quote))
+        tile = list(fact.tile)
+        prior = seen.get(key, _MISSING)
+        if prior is _MISSING:
+            seen[key] = tile
+        elif prior is not None and prior != tile:
+            seen[key] = None  # ambiguous — poisoned for good, order-independent
+    return {k: v for k, v in seen.items() if v is not None}
 
 
 def _finding_from_handles(
@@ -664,11 +736,19 @@ def _finding_from_handles(
         key = source_page_key(geom.ref)
         if key in seen_sheets:               # dedup, not a discard
             continue
+        # §8.4 Part 1/2: the model's own tile_label for this leg, else a tile
+        # derived from the fact this quote came from. Never synthesized.
+        # Resolved BEFORE classification because the classifier needs it: on a
+        # hybrid sheet the answer to "was there text to check?" is a property of
+        # the *region* the quote was read from, not of the sheet as a whole.
+        tile = _resolve_tile(raw, getattr(geom, "rows", 0), getattr(geom, "cols", 0))
+        if tile is None and tile_lookup:
+            tile = tile_lookup.get((_norm_id(handle), _norm_for_match(quote)))
         # WP-03A grounds against the host's *source* evidence, not the capped
         # string the model saw. WP-03B turns the verdict into three states, so a
         # sheet that could never satisfy a text check is not treated as refuting
         # the claim (§8.3).
-        state = classify_quote_evidence(quote, geom)
+        state = classify_quote_evidence(quote, geom, tile)
         if state == EVIDENCE_NOT_MATCHED:
             # The quote should have been findable in text this sheet does have.
             # Unchanged behaviour: the hallucination signal still drops the leg.
@@ -683,11 +763,6 @@ def _finding_from_handles(
             else:
                 # Admitted at reduced trust: no text existed to check against.
                 counts.bump("legs_admitted_no_text_evidence", geom)
-        # §8.4 Part 1/2: the model's own tile_label for this leg, else a tile
-        # derived from the fact this quote came from. Never synthesized.
-        tile = _resolve_tile(raw, getattr(geom, "rows", 0), getattr(geom, "cols", 0))
-        if tile is None and tile_lookup:
-            tile = tile_lookup.get((_norm_id(handle), _norm_for_match(quote)))
         seen_sheets.add(key)
         resolved.append((sheet_id, quote, geom, state, list(tile) if tile else None))
     if len(resolved) < 2:
@@ -1037,10 +1112,16 @@ def _parse_facts(
             if counts is not None:
                 counts.bump("facts_no_quote", geom)
             continue
+        # Resolved against THIS sheet's grid, as _validate_cross_item does.
+        # ``_resolve_tile`` prefers ``tile_label`` and bounds-checks it, so a bad
+        # label degrades to ``None`` (today's UNANCHORED), never a wrong
+        # rectangle. Resolved before classification: the classifier asks whether
+        # *this region* had text, not whether the sheet did.
+        tile = _resolve_tile(item, getattr(geom, "rows", 0), getattr(geom, "cols", 0))
         # WP-03B §8.3. Dropping facts from a textless sheet was the larger half
         # of trigger 2: with no facts, that sheet never entered cross-shard
         # reconciliation at all, so no conflict involving it could be found.
-        state = classify_quote_evidence(exact_quote, geom)
+        state = classify_quote_evidence(exact_quote, geom, tile)
         if state == EVIDENCE_NOT_MATCHED:
             if counts is not None:           # WP-02 §7.2: why, not just how many
                 counts.bump("facts_ungrounded_quote_text_bearing_sheet", geom)
@@ -1050,13 +1131,7 @@ def _parse_facts(
                 "facts_accepted" if state == EVIDENCE_TEXT_GROUNDED
                 else "facts_admitted_no_text_evidence", geom)
         out.append(CrossQCFact(
-            # Resolved against THIS sheet's grid, as _validate_cross_item does.
-            # ``_resolve_tile`` prefers ``tile_label`` and bounds-checks it, so a
-            # bad label degrades to ``None`` (today's UNANCHORED), never a wrong
-            # rectangle.
-            tile=_resolve_tile(
-                item, getattr(geom, "rows", 0), getattr(geom, "cols", 0)
-            ),
+            tile=tile,
             evidence_state=state,
             sheet_handle=handle,
             sheet_id=sheet_id,

@@ -102,7 +102,10 @@ from .models import (
     MarkupPlacement,
     MarkupReceipt,
     MarkupRunResult,
-    is_reduced_trust,
+    reduced_trust_reason,
+    TRUST_REASON_NO_QUOTE,
+    TRUST_REASON_NO_TEXT,
+    TRUST_REASON_NOT_FOUND,
     leg_identity,
 )
 from .source_registry import assign_source_ids
@@ -140,9 +143,16 @@ _REJECTED_COLOR = (0.45, 0.45, 0.45)
 _TRUST_PREFIX = {"REJECTED": "[REJECTED] ", "UNVERIFIED": "[CHECK] "}
 _PLACE_PREFIX = {"SHEET": "[SHEET-WIDE]", "UNANCHORED": "[QUOTE NOT FOUND]"}
 #: WP-03B §8.3. Distinct from ``[QUOTE NOT FOUND]``, which means the quote
-#: SHOULD have been findable and was not — the hallucination signal. This one
-#: means there was nothing to search, so the reviewer's eyes are the only check.
+#: SHOULD have been findable and was not — the hallucination signal. These mean
+#: there was nothing to search, or nothing to search *for*, so the reviewer's
+#: eyes are the only check. Keyed by :func:`reduced_trust_reason` so the tag on
+#: the drawing and the sentence under it can never disagree.
 _NO_TEXT_EVIDENCE_PREFIX = "[NO TEXT TO CHECK]"
+_EVIDENCE_PREFIX = {
+    TRUST_REASON_NO_TEXT: _NO_TEXT_EVIDENCE_PREFIX,
+    TRUST_REASON_NO_QUOTE: "[NO QUOTE TO CHECK]",
+    TRUST_REASON_NOT_FOUND: _PLACE_PREFIX["UNANCHORED"],
+}
 _TRUST_NOTE = {
     "VERIFIED": "AI-verified against the drawing.",
     "DETERMINISTIC": "Found by an exact text check of the drawings - not an AI judgment.",
@@ -159,6 +169,19 @@ _TRUST_NOTE_NO_TEXT_EVIDENCE = (
     "No searchable text on this sheet - the quote could not be checked "
     "automatically; confirm it visually."
 )
+_EVIDENCE_NOTE = {
+    TRUST_REASON_NO_TEXT: _TRUST_NOTE_NO_TEXT_EVIDENCE,
+    # A text-bearing sheet with no quote to look for: saying "no searchable text"
+    # here is plainly false to anyone who can select text on the page in front
+    # of them, and a caveat the reviewer can falsify is worse than none.
+    TRUST_REASON_NO_QUOTE: (
+        "The AI gave no quote for this - nothing could be checked "
+        "automatically; confirm it visually."
+    ),
+    TRUST_REASON_NOT_FOUND: (
+        "The quoted text was not found on this sheet - treat it as unconfirmed."
+    ),
+}
 _TRUST_NOTE_SINGLE_READ = "Not yet verified (seen in one AI read) - double-check on the sheet."
 # Arithmetic operand provenance (§17.5) overrides the generic note: the host
 # math is always deterministic, but only text-extracted operands make it
@@ -430,6 +453,9 @@ def _units_for_finding(
         sheet_id=finding.sheet_id, source_name=finding.source_name,
         source_id=finding.source_id, page_index=finding.page_index,
         source_quote=finding.source_quote, tile=finding.tile, anchor=finding.anchor,
+        # A trust label belongs to its quote (§8.3): this leg carries the
+        # finding's own quote, so it carries the finding's own evidence state.
+        evidence_state=getattr(finding, "evidence_state", ""),
     )
     for i, leg in enumerate(legs):
         others = [primary_as_leg] + [l for j, l in enumerate(legs) if j != i]
@@ -440,6 +466,12 @@ def _units_for_finding(
             recommended_action=finding.recommended_action, refs=list(finding.refs),
             also_on=others, anchor=leg.anchor, verification=finding.verification,
             qc_id=finding.qc_id, citation=finding.citation, sources=list(finding.sources),
+            # The synthetic finding stands in for *this leg*, so it must inherit
+            # the leg's evidence state, not the parent's: a conflict can be text
+            # grounded on one sheet and read off a raster detail on the other,
+            # and the reviewer needs the caveat on the mark that has no text
+            # behind it.
+            evidence_state=getattr(leg, "evidence_state", ""),
         )
         lid = leg_identity(
             leg.source_id, leg.source_name, leg.page_index, leg.source_quote, i
@@ -602,9 +634,12 @@ def _with_evidence_reason(finding: Finding, note: str, *, status: str) -> str:
     read or a DETERMINISTIC host computation is the stronger statement, and
     saying "could not be checked automatically" beside it would be false.
     """
-    if not is_reduced_trust(finding) or status in ("VERIFIED", "DETERMINISTIC"):
+    if status in ("VERIFIED", "DETERMINISTIC"):
         return note
-    return f"{_TRUST_NOTE_NO_TEXT_EVIDENCE} {note}".strip()
+    reason = _EVIDENCE_NOTE.get(reduced_trust_reason(finding), "")
+    if not reason:
+        return note
+    return f"{reason} {note}".strip()
 
 
 def _citation_phrase(finding: Finding) -> str:
@@ -678,8 +713,9 @@ def _annot_content(
         _TRUST_PREFIX["UNVERIFIED"] if unverified else ""
     )
     prefix = _PLACE_PREFIX.get(place, "")
-    if is_reduced_trust(finding) and prefix != _PLACE_PREFIX["UNANCHORED"]:
-        prefix = f"{_NO_TEXT_EVIDENCE_PREFIX} {prefix}".strip()
+    evidence_tag = _EVIDENCE_PREFIX.get(reduced_trust_reason(finding), "")
+    if evidence_tag and prefix != _PLACE_PREFIX["UNANCHORED"]:
+        prefix = f"{evidence_tag} {prefix}".strip()
     placement = f"{prefix} " if prefix else ""
     return f"{trust}{placement}{content}"
 

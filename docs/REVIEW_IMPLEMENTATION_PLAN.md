@@ -808,10 +808,14 @@ is the implementer's, but the meanings are fixed:
 
 - **text-grounded** — the quote was re-found in the sheet's source evidence.
   Existing trust, unchanged.
-- **not matched in extracted text** — a quote was supplied and was not found.
-  This is *not* a contradiction: absence from an extracted text layer does not
-  refute a visual claim. Admit at reduced trust and require visual verification
-  before it inks as ground truth.
+- **not matched in extracted text** — a quote was supplied, the region it was
+  attributed to *does* carry extractable text, and the quote was not found in
+  it. This is *not* a contradiction in principle — absence from an extracted
+  text layer does not refute a visual claim — but it remains the hallucination
+  signal in practice: cross-QC drops the leg and the anchor resolver keeps
+  `UNANCHORED` (§8.4 Part 3). The recovery this package promises is delivered by
+  the classifier reaching the third state more often, **not** by relaxing this
+  one.
 - **textual evidence unavailable** — the sheet or the relevant region has no
   extractable text, so no textual check is possible. Admit at reduced trust,
   label the unavailability explicitly, and require visual verification.
@@ -819,6 +823,27 @@ is the implementer's, but the meanings are fixed:
 Do not name the middle state "contradicted." Do not classify solely on
 `is_raster`: a hybrid sheet has words and still cannot support a text check over
 its raster regions (§2.1).
+
+**"or the relevant region" is load-bearing, not a hedge.** `render.py` fills
+`full_sheet_text` from `page.get_text()`, so one selectable title block makes a
+hybrid sheet's *sheet-level* evidence non-empty — and every real hybrid sheet
+has one. A classifier that asks only "does this sheet have text?" therefore
+sends every quote read off a pasted raster detail to *not matched*, and the
+hybrid recovery this package exists for never fires on a single real page. The
+question must be asked of the **tile the quote was attributed to**: does that
+grid cell contain any extracted word? Two consequences follow, and both are
+required:
+
+- the tile must be resolved **before** classification, not after — §8.4 Part 1
+  is an input to §8.3, not a downstream consumer of it;
+- an **unknown** tile must answer "yes, there was text" (i.e. fall back to the
+  sheet-level answer). Absence of a location is not evidence of pixels, and the
+  opposite default would launder every unlocatable bad quote on a text-bearing
+  sheet into reduced-trust admission.
+
+Both halves need a test: a quote from a word-free tile of a text-bearing sheet
+is *unavailable*; a quote from that same sheet's title-block tile is still *not
+matched*.
 
 Trust rules, per requirement 3.9:
 
@@ -831,6 +856,21 @@ Trust rules, per requirement 3.9:
 - Reduced-trust evidence must reach verification. A finding that cannot be
   checked and cannot be located is not a recovered finding — it is an
   unverifiable claim, and disclosing why it could not be checked is mandatory.
+- **The disclosure must be true of the finding it sits on.** "Textual evidence
+  unavailable" covers two situations the reviewer must not be told are one: the
+  sheet offered no text to search, and the model offered no quote to search
+  *for*. The state stays single — the host's capability is identical in both,
+  and the three-state vocabulary is what serialization and the trust set are
+  built on — but the reviewer-facing *reason* is selected from the finding.
+  Telling someone "no searchable text on this sheet" while they are looking at a
+  sheet whose text they can select does not merely misinform them about that
+  finding; it teaches them that the tool's caveats are unreliable, and one false
+  caveat discredits every true one beside it.
+- A trust label belongs to **its own quote**. Where a finding is decomposed into
+  per-leg marks (`annotate._units_for_finding`), each mark carries that leg's
+  evidence state, not the parent's: a conflict can be text-grounded on one sheet
+  and read off a raster detail on the other, and the caveat must land on the
+  half that earned it.
 
 ### 8.4 WP-03B: give recovered evidence a location
 
@@ -868,6 +908,19 @@ deterministic and the model cannot invent a location. Normalize the quote with
 the existing `_norm_for_match` so the join tolerates the same cosmetic variation
 grounding already tolerates. A lookup miss yields no tile and today's behavior —
 never a guessed rectangle.
+
+**The join key is not unique, and the collision must lose rather than pick.**
+One sheet can carry the same short quote ("150 gpm", "TYP.") in two places, and
+the map stage reports each occurrence as its own fact with its own tile. The
+obvious `setdefault` keeps whichever was parsed first and hands every later
+occurrence a rectangle belonging to somewhere else — which is worse than no
+rectangle, because a wrong tile still anchors and still passes the region test,
+so a guess is laundered into an artifact-backed location the reviewer is sent to
+go look at. Resolve a collision only when every candidate agrees; on genuine
+disagreement drop the key entirely and let the leg fall back to being
+unlocatable, exactly as it is today. The poisoning must be order-independent: a
+later agreeing fact does not rehabilitate a key two earlier facts disagreed on,
+or the answer depends on parse order (I-7).
 
 Fallback, only if WP-02 or a pilot shows a high lookup-miss rate: extend the
 reconcile output contract to carry `tile_label` per leg and resolve it with
@@ -1011,9 +1064,22 @@ acceptance tests.
 12. **Textless sheet recovered:** a sheet with no words and a quote transcribed
     from pixels yields a fact and a leg, at reduced trust, that reaches
     reconciliation.
-13. **Hybrid sheet recovered:** a sheet **with** words whose quote is not in the
-    text layer behaves the same as the textless case. A test that passes only
-    because `is_raster` is `True` does not satisfy this case.
+13. **Hybrid sheet recovered:** a sheet with a **populated text layer** whose
+    quote was read from a word-free region behaves the same as the textless
+    case. Two fixtures do *not* satisfy this: one that passes only because
+    `is_raster` is `True`, and — the sharper trap, and the one the first
+    implementation fell into — one whose sheet text is whitespace and strips to
+    empty. That is a scanned sheet with a stray space, not a hybrid one, and it
+    passes without the region rule ever being exercised. The fixture must have a
+    selectable title block, a quote from a different tile, and an assertion that
+    the sheet-level text is non-empty.
+13a. **The region rule is not an amnesty:** on that same hybrid fixture, a quote
+    attributed to the title-block tile — which does carry words — is still *not
+    matched*. Without this half, the region rule reads as "any sheet containing
+    one image excuses every quote on it."
+13b. **An unknown tile does not earn the benefit of the doubt:** the same
+    unmatched quote with no tile reported classifies as *not matched*, not
+    *unavailable*.
 14. **Missing quote is not promoted:** a leg with no quote is admitted at no more
     than "textual evidence unavailable" and never at text-grounded trust.
 15. **Location reaches verification:** a recovered finding with a reported tile
@@ -1045,6 +1111,22 @@ acceptance tests.
 22. **Old cached results do not replay:** a set that was cacheable before the
     change (short text, textless sheets, non-degraded) recomputes after it.
     Assert the invalidation mechanism actually in use.
+23. **An ambiguous fact join yields no tile:** two facts on one sheet with the
+    same normalized quote and different tiles produce no entry, in either input
+    order, and a third agreeing fact does not rehabilitate the key. Two facts
+    that agree still resolve, and the same quote on two different sheets is not
+    a collision at all.
+24. **A leg's own trust reaches its own mark:** a conflict that is text-grounded
+    on one sheet and unavailable on the other produces two marks, each carrying
+    its own state — and the primary, seen as a leg of the synthetic finding,
+    keeps its own state too.
+25. **The reason matches the finding:** a reduced-trust finding with no quote on
+    a text-bearing sheet is never told "no searchable text on this sheet," in
+    either the markup or the report; the two unavailability cases produce
+    different trust sentences, and both still say nothing was checked. Compare
+    the *trust note*, not the whole annotation body — the body embeds the quote,
+    so two findings differing only by having one compare unequal regardless of
+    what the note says.
 
 Use pure fixtures for 41-sheet topology. Only use generated PDFs where
 extraction, coordinate consistency, or cold/warm render behavior is the thing

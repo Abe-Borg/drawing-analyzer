@@ -1460,10 +1460,12 @@ when the recorded acceptance evidence says so (Phase 27, §19.9). The pieces:
 - **Evidence the host cannot check:** a scanned sheet has no text layer, and a
   hybrid sheet's pasted detail is invisible to a text search even though the
   sheet has words. A cross-sheet quote from either is admitted at *reduced
-  trust* rather than discarded — labelled `[NO TEXT TO CHECK]` on the drawing
-  with a plain-words reason, flagged beside the quote in the report, anchored to
-  the tile the model reported so the crop check and the investigation loop can
-  still look at it. A quote that fails to match text the sheet *does* have is
+  trust* rather than discarded — labelled on the drawing with a plain-words
+  reason, flagged beside the quote in the report, anchored to the tile the model
+  reported so the crop check and the investigation loop can still look at it.
+  The label says which case it is: `[NO TEXT TO CHECK]` where the region carried
+  no searchable text, `[NO QUOTE TO CHECK]` where the AI named no quote to look
+  for. A quote that fails to match text the sheet's own region *does* have is
   unchanged: that stays the hallucination signal.
 - **Evidence coverage (zero API calls):**
   `python scripts/measure_evidence_coverage.py --pdf SET.pdf [--export-dir DIR]`
