@@ -1449,6 +1449,14 @@ when the recorded acceptance evidence says so (Phase 27, §19.9). The pieces:
   verifies the live request schemas, critique structured-output compliance, the
   pinned web-search tool type, the Files API upload→delete lifecycle, and that
   exported logs/manifests carry no key. Never runs in CI.
+- **Host evidence vs. prompt text:** a sheet's text layer exists in three forms
+  and they are not interchangeable. `sheet_text` is capped at 15,000 characters
+  and is what the model is shown; `full_sheet_text` is the uncapped text kept
+  for host-side checks and never sent anywhere; `words` is the coordinate stream
+  the anchor resolver uses. Cross-sheet grounding asks
+  `models.sheet_evidence_text()`, so a quote the model read off the drawing past
+  the cap is still recognised as real source text instead of being discarded as
+  a hallucination.
 - **Evidence coverage (zero API calls):**
   `python scripts/measure_evidence_coverage.py --pdf SET.pdf [--export-dir DIR]`
   scans a set without rendering or calling the API and reports how much evidence

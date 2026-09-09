@@ -67,6 +67,10 @@ class _SheetRecord:
     rows: int
     cols: int
     sheet_text: str
+    # Carried so a spool round-trip is lossless for host-side evidence and the
+    # truncation count, not only for the model-visible text (WP-03A / WP-02).
+    full_sheet_text: "str | None"
+    text_chars_total: "int | None"
     words: tuple[Any, ...]
     is_raster: bool
     omitted_tiles: tuple[tuple[int, int], ...]
@@ -84,6 +88,8 @@ class _SheetRecord:
             rows=self.rows,
             cols=self.cols,
             sheet_text=self.sheet_text,
+            full_sheet_text=self.full_sheet_text,
+            text_chars_total=self.text_chars_total,
             words=list(self.words),
             is_raster=self.is_raster,
             omitted_tiles=list(self.omitted_tiles),
@@ -149,6 +155,16 @@ class RenderedSheetSpool:
                     rows=int(sheet.rows),
                     cols=int(sheet.cols),
                     sheet_text=str(sheet.sheet_text),
+                    # Preserve ``None`` as ``None``: "unavailable" and "empty"
+                    # mean different things to ``sheet_evidence_text``.
+                    full_sheet_text=(
+                        sheet.full_sheet_text
+                        if isinstance(sheet.full_sheet_text, str) else None
+                    ),
+                    text_chars_total=(
+                        int(sheet.text_chars_total)
+                        if sheet.text_chars_total is not None else None
+                    ),
                     words=tuple(sheet.words),
                     is_raster=bool(sheet.is_raster),
                     omitted_tiles=tuple(tuple(v) for v in sheet.omitted_tiles),

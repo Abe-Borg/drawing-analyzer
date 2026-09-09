@@ -40,6 +40,7 @@ ships. PDF-engine-free (I-5) — it reads the already-extracted geometry/text.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -75,7 +76,13 @@ from .digest import (
     parse_numeric_claims,
     scan_structured_blocks,
 )
-from .models import ConflictLeg, Finding, NumericClaim, source_page_key
+from .models import (
+    ConflictLeg,
+    Finding,
+    NumericClaim,
+    sheet_evidence_text,
+    source_page_key,
+)
 from .stage_cache import (
     get_stage_cache_entry,
     put_stage_cache_entry,
@@ -380,7 +387,7 @@ def _sheet_is_textless(geom: Any) -> bool:
     This asks the narrower, decidable question — was there any text at all to
     match? — and leaves the hybrid split to the §7.1 tile analysis.
     """
-    return not (getattr(geom, "sheet_text", "") or "").strip()
+    return not sheet_evidence_text(geom).strip()
 
 
 @dataclass
@@ -583,7 +590,10 @@ def _finding_from_handles(
         key = source_page_key(geom.ref)
         if key in seen_sheets:               # dedup, not a discard
             continue
-        if quote and not _grounded(quote, getattr(geom, "sheet_text", "") or ""):
+        # WP-03A: ground against the host's *source* evidence, not the capped
+        # string the model was shown. A quote past SHEET_TEXT_MAX_CHARS is real
+        # source text; rejecting it discarded a genuine cross-sheet leg (§2.1).
+        if quote and not _grounded(quote, sheet_evidence_text(geom)):
             if counts is not None:           # WP-02 §7.2: why, not just how many
                 counts.bump(
                     "legs_ungrounded_quote_textless_sheet" if _sheet_is_textless(geom)
@@ -942,7 +952,7 @@ def _parse_facts(
             if counts is not None:
                 counts.bump("facts_no_quote", geom)
             continue
-        if not _grounded(exact_quote, getattr(geom, "sheet_text", "") or ""):
+        if not _grounded(exact_quote, sheet_evidence_text(geom)):   # WP-03A
             if counts is not None:           # WP-02 §7.2: why, not just how many
                 counts.bump(
                     "facts_ungrounded_quote_textless_sheet" if _sheet_is_textless(geom)
@@ -1139,7 +1149,7 @@ def _cross_qc_cache_key(entries: list[tuple], *, model: str, preamble: str) -> s
     cache_inputs: list[dict[str, Any]] = []
     for sheet_id, digest_text, text_layer, geom in entries:
         ref = geom.ref
-        cache_inputs.append({
+        entry: dict[str, Any] = {
             "sheet_id": sheet_id,
             "digest_text": digest_text,
             "text_layer": text_layer,
@@ -1150,7 +1160,27 @@ def _cross_qc_cache_key(entries: list[tuple], *, model: str, preamble: str) -> s
             "page_index": int(getattr(ref, "page_index", 0) or 0),
             "rows": int(getattr(geom, "rows", 0) or 0),
             "cols": int(getattr(geom, "cols", 0) or 0),
-        })
+        }
+        # WP-03A (§2.3): the host now grounds against the UNCAPPED text, so the
+        # tail past SHEET_TEXT_MAX_CHARS became an acceptance input the key did
+        # not cover. Add its digest **only when the sheet is actually truncated**
+        # — for every untruncated sheet the evidence equals ``text_layer``, which
+        # is already in the key, so the key stays byte-identical and no stored
+        # result is thrown away. Unconditional inclusion would invalidate every
+        # cross-QC entry just as thoroughly as a contract bump, which is why the
+        # contract is deliberately NOT bumped here.
+        #
+        # Reachability, recorded so this is not "dead" code: a >15,000-character
+        # sheet also exceeds the 4,000-character cross-QC budget, so today such a
+        # run is budget-degraded and never cache-admitted at all. This becomes
+        # load-bearing the moment ``_TEXT_LAYER_BUDGET`` rises above
+        # ``SHEET_TEXT_MAX_CHARS``. Computed once per sheet per key build.
+        evidence = sheet_evidence_text(geom)
+        if evidence != text_layer:
+            entry["evidence_sha256"] = hashlib.sha256(
+                evidence.encode("utf-8")
+            ).hexdigest()
+        cache_inputs.append(entry)
     return stage_cache_key(
         "cross_qc",
         model=model,

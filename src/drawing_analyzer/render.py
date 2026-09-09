@@ -725,6 +725,9 @@ def render_sheet(
         sheet_text=sheet_text,
         words=words,
         is_raster=is_raster,
+        # Host-side evidence: the uncapped text, retained but never sent. The
+        # capped ``sheet_text`` above is unchanged and remains the model input.
+        full_sheet_text=raw_text,
         text_chars_total=len(raw_text),
         omitted_tiles=omitted_tiles,
         overlap_frac=overlap_frac,
@@ -830,6 +833,7 @@ def _sheet_geometry_no_render(
         words=words,
         sheet_text=_cap_sheet_text(raw_text),
         is_raster=len(words) == 0,
+        full_sheet_text=raw_text,
         text_chars_total=len(raw_text),
         geometry=geometry,
     )
