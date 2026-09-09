@@ -725,6 +725,7 @@ def render_sheet(
         sheet_text=sheet_text,
         words=words,
         is_raster=is_raster,
+        text_chars_total=len(raw_text),
         omitted_tiles=omitted_tiles,
         overlap_frac=overlap_frac,
         geometry=geometry,
@@ -829,6 +830,7 @@ def _sheet_geometry_no_render(
         words=words,
         sheet_text=_cap_sheet_text(raw_text),
         is_raster=len(words) == 0,
+        text_chars_total=len(raw_text),
         geometry=geometry,
     )
 

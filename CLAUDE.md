@@ -11,6 +11,7 @@ python -m pytest tests/test_drawing_ledger.py                # one file
 python -m pytest tests/test_drawing_ledger.py::test_name     # one test
 drawing-analyzer             # launch the GUI   (or: python -m drawing_analyzer)
 python scripts/run_acceptance.py   # Phase 27 release gates (PASS/FAIL; hermetic — never the canary)
+python scripts/measure_evidence_coverage.py --pdf SET.pdf   # WP-02 §7.1 coverage scan (zero API calls)
 ```
 
 Python 3.11+. No linter/formatter is configured (CI runs ruff **correctness
@@ -140,6 +141,17 @@ both the submitted batch and the one that actually served the digests.
   synthesis conflicts, and opted-in focus items into findings — match first,
   one small structuring call for stragglers on **Sonnet 5** at `EFFORT_LOW`,
   degraded sheet-level entry on failure).
+  Cross-QC also carries **count-only discard counters** on the sharded path
+  (`CrossQCDiscardCounts`, WP-02 §7.2): how many legs/facts the host dropped and
+  why — unresolved handle, quote absent, quote present but unmatched, split by
+  whether the target sheet had any extractable text at all. Purely
+  observational: nothing there feeds `complete` or `budget_degraded`, and it
+  holds counts, never quote text. `discards is None` means **not recorded**
+  (the whole-set ≤40 path performs no host-side grounding, and a result cached
+  before the field existed has none) — never "nothing was discarded". It exists
+  because `_finding_from_handles` / `_parse_facts` drop before `CrossQCResult`
+  is built, so a run that kept 3 findings and one that kept 3 after dropping 40
+  ungrounded legs were previously indistinguishable.
 - ***`ledger.py` is the exclusive findings container*** (Part III §16): every
   channel ingests into it with source tags. Dedup is conservative and lossless
   (Phase 20 §12): a tile/rect overlap is never sufficient — merges need semantic

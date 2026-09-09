@@ -1449,6 +1449,15 @@ when the recorded acceptance evidence says so (Phase 27, §19.9). The pieces:
   verifies the live request schemas, critique structured-output compliance, the
   pinned web-search tool type, the Files API upload→delete lifecycle, and that
   exported logs/manifests carry no key. Never runs in CI.
+- **Evidence coverage (zero API calls):**
+  `python scripts/measure_evidence_coverage.py --pdf SET.pdf [--export-dir DIR]`
+  scans a set without rendering or calling the API and reports how much evidence
+  the host can actually check: sheets whose text layer runs past the
+  15,000-character cap (and by how much), the textless/hybrid population, the
+  cross-QC 4,000-character budget spend, and — with `--export-dir` — the anchor
+  tiers of cross-sheet findings a previous run *kept*. It states plainly what it
+  cannot see: the grounding **discard rate** is a property of what a model
+  returned, and the survivors in an export are not a substitute for it.
 - **Benchmarks:** `python scripts/benchmark_drawing_analyzer.py --check`
   measures the §19.7 scenarios (cold/warm/mutated/exhaustive/corrupt-partial)
   on medians and enforces the mechanical gates (a warm run makes zero
