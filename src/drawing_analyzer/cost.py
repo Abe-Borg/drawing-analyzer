@@ -24,6 +24,7 @@ from .core.pricing import (
     PRICING_EFFECTIVE_DATE,
     estimate_request_cost,
     friendly_model_name,
+    usage_record_cost,
 )
 from . import tiling
 from .pipeline import estimate_image_tokens_for_set
@@ -578,6 +579,73 @@ def _component(
     )
 
 
+def _critique_prefix_costs(
+    *, prefix_tokens: int, output_tokens: int, sheet_count: int, runs: int,
+    model: str, batch: bool,
+) -> tuple[float | None, float | None]:
+    """``(reuse, no_reuse)`` cost of the critique reads, by their real rate class.
+
+    WP-05 §10.2. ``critique_sheet_self_consistent`` sets ``cache_prefix = runs >= 2``
+    (``critique.py``), which attaches an ephemeral breakpoint to the shared image
+    prefix on the **real-time** path. So read 1 cache-*writes* that ~90k-token
+    prefix at 1.25x and reads 2..N serve it at 0.1x — while this estimator was
+    billing all N at the ordinary 1x rate.
+
+    The error runs in both directions, which is why it needs a band rather than a
+    correction. For ``runs=2`` the multipliers are:
+
+    ===============  ==========================
+    scenario          prefix read-equivalents
+    ===============  ==========================
+    flat (old)        2.00
+    reuse             1.25 + 0.10 = 1.35
+    no reuse          1.25 x 2    = 2.50
+    ===============  ==========================
+
+    So the old number over-quoted successful reuse by ~48% and under-quoted a
+    total miss by ~20%, on the single largest QC line. §10.2 asks for the two
+    scenarios rather than an invented hit probability, and that is what this
+    returns: the low end assumes every repeat read hits, the high end assumes
+    every breakpoint misses and re-writes.
+
+    Neither multiplier touches **output**, which is billed at the output rate per
+    read in both scenarios — discounting output with an input-cache multiplier is
+    explicitly called out in §10.2.
+
+    Batch items carry no breakpoint (``submit_critique_batch`` never sets one, and
+    parallel submission could not read a cache still being written), and a single
+    read gets no breakpoint either. Both collapse to ordinary input, so both
+    scenarios return the same figure.
+    """
+    from decimal import Decimal
+
+    per_read_out = usage_record_cost(
+        model=model, output_tokens=output_tokens, batch=batch
+    )
+    if per_read_out is None:
+        return None, None
+    out_total = per_read_out * runs * sheet_count
+
+    if batch or runs < 2:
+        flat = usage_record_cost(model=model, input_tokens=prefix_tokens, batch=batch)
+        if flat is None:
+            return None, None
+        total = flat * runs * sheet_count + out_total
+        return float(total), float(total)
+
+    write = usage_record_cost(
+        model=model, cache_write_tokens=prefix_tokens, batch=False
+    )
+    read = usage_record_cost(
+        model=model, cache_read_tokens=prefix_tokens, batch=False
+    )
+    if write is None or read is None:
+        return None, None
+    reuse = (write + read * (runs - 1)) * sheet_count + out_total
+    no_reuse = (write * runs) * sheet_count + out_total
+    return float(reuse), float(no_reuse)
+
+
 def estimate_exhaustive_run_cost(
     sheet_count: int,
     *,
@@ -717,16 +785,30 @@ def estimate_exhaustive_run_cost(
     crit_per_sheet_images = estimate_image_tokens_for_set(
         1, rows=rows, cols=cols, model=stage_models.critique
     )
-    crit_in = runs * sheet_count * (
-        crit_per_sheet_images + _ASSUMED_PROMPT_TOKENS_PER_SHEET
-    )
+    crit_prefix = crit_per_sheet_images + _ASSUMED_PROMPT_TOKENS_PER_SHEET
+    crit_in = runs * sheet_count * crit_prefix
     crit_out = runs * sheet_count * _ASSUMED_CRITIQUE_OUTPUT_TOKENS_PER_READ
-    components.append(_component(
-        f"Critique ×{runs} (per sheet)", crit_in, crit_out,
+    crit_low, crit_high = _critique_prefix_costs(
+        prefix_tokens=crit_prefix, output_tokens=_ASSUMED_CRITIQUE_OUTPUT_TOKENS_PER_READ,
+        sheet_count=sheet_count, runs=runs,
         model=stage_models.critique, batch=critique_batch,
-        note=f"{runs} full read(s) per sheet"
-        + (" — one shared upload, Batch rate" if critique_batch else " — real-time"),
-        primary_model=model,
+    )
+    transport_note = (
+        " — one shared upload, Batch rate" if critique_batch
+        else (" — real-time, shared image prefix prompt-cached" if runs >= 2
+              else " — real-time")
+    )
+    components.append(CostComponent(
+        stage=f"Critique ×{runs} (per sheet)",
+        input_tokens=crit_in, output_tokens=crit_out,
+        # The representative row shows the pessimistic end, matching how
+        # verification and citation are displayed; the band carries both.
+        cost=crit_high,
+        transport="batch" if critique_batch else "real-time",
+        note=_stage_note(
+            f"{runs} full read(s) per sheet{transport_note}",
+            stage_model=stage_models.critique, primary=model,
+        ),
     ))
 
     # Cross-sheet QC — one (or a few sharded) text passes over all the digests.
@@ -825,7 +907,17 @@ def estimate_exhaustive_run_cost(
         priced = [c.cost for c in components + variants]
         return None if any(c is None for c in priced) else sum(priced)
 
-    low_cost = _total([low_verify, low_investigate, low_citation])
+    # The critique row in ``components`` already carries ``crit_high``; the low
+    # band swaps in the successful-reuse figure. ``None`` on either side voids the
+    # whole total, exactly as an unpriced component does.
+    crit_delta = (
+        None if crit_low is None or crit_high is None else crit_low - crit_high
+    )
+
+    def _with_crit(total: float | None) -> float | None:
+        return None if total is None or crit_delta is None else total + crit_delta
+
+    low_cost = _with_crit(_total([low_verify, low_investigate, low_citation]))
     high_cost = _total([high_verify, high_investigate, high_citation])
     components = components + [high_verify, high_investigate, high_citation]
     return ExhaustiveCostEstimate(
@@ -855,7 +947,8 @@ def format_exhaustive_cost_prompt(est: ExhaustiveCostEstimate) -> str:
     lines = [
         f"About to run the FULL exhaustive QC review on {est.sheet_count} sheet(s)"
         f"{where} with {with_models} — digest, set identity + "
-        "model review plan, two critique reads per sheet, cross-sheet QC, "
+        f"model review plan, {est.critique_runs} critique read(s) per sheet, "
+        "cross-sheet QC, "
         "deterministic auditors, prose harvest, verification, the uncertain-"
         "finding investigation loop, and citation checks.",
         "",

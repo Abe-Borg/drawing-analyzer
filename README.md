@@ -339,18 +339,23 @@ PDFs → list sheets → render (overview + 6×6 tiles) + extract vector text la
   a sheet with an *empty* text layer (scanned or pasted-raster) instead renders at
   **1992 px**, because there the pixels are the only information channel; such
   sheets are flagged in the run and (later) badged in the report.
-- **Cost preview from each page's real shape.** The confirmation dialog's image
-  figure used to assume every image was a square at the *raster* target and hit
-  the model's per-image token cap — a true upper bound, and about **1.9x** what a
-  vector E-size sheet actually costs. Two facts per page close most of that gap,
-  and both come from a scan that never rasterizes: the page's aspect ratio, and
-  whether it has any selectable words. That single boolean is the dominant lever,
-  because it decides the render target. The conservative allowance is still
-  there, unchanged, and is still what a page gets when it cannot be classified or
-  cannot be measured: an unclassifiable page is never assumed to be vector, since
-  vector is the *cheaper* target and guessing it would quote low on exactly the
-  pages the tool understands least. A page that cannot be measured at all is
-  still quoted, never silently dropped from the total.
+- **Cost preview from each page's real shape** *(available to callers; the
+  confirmation dialog is not wired to it yet).* The dialog's image figure assumes
+  every image is a square at the *raster* target and hits the model's per-image
+  token cap — a true upper bound, and about **1.9x** what a vector E-size sheet
+  actually costs (177,008 tokens quoted against 93,013). Two facts per page close
+  most of that gap, and both come from a scan that never rasterizes: the page's
+  aspect ratio, and whether it has any selectable words. That single boolean is
+  the dominant lever, because it decides the render target.
+  `cost.estimate_image_tokens_for_bases` prices a set from those facts today, fed
+  by `render.iter_sheet_cost_bases` or by projecting geometry a caller already
+  holds; the GUI still shows the conservative figure until the confirmation-time
+  scan lands. The conservative allowance keeps its meaning either way, and stays
+  the answer for a page that cannot be classified or cannot be measured: an
+  unclassifiable page is never assumed to be vector, since vector is the
+  *cheaper* target and guessing it would quote low on exactly the pages the tool
+  understands least. A page that cannot be measured at all is still quoted, never
+  silently dropped from the total.
 - **Every stage is priced with the model it will actually run on.** Synthesis and
   the focus report have their own overrides and follow the review-model default
   rather than the digest's model, so a Sonnet digest with default synthesis was

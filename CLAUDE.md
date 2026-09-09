@@ -68,7 +68,10 @@ model, never reused from the digest count: `estimate_image_tokens` clamps at a
 per-model cap (4784 hi-res / 1568 standard tier), so one count for two tiers is a
 ~3× error.
 
-**Geometry-aware image tokens (WP-05 §10.1).**
+**Geometry-aware image tokens (WP-05 §10.1).** *Not yet on the GUI path:*
+`estimate_drawing_set_cost` / `estimate_exhaustive_run_cost` still call the
+conservative allowance, so every shipped confirmation dialog shows that figure
+until WP-05b's confirmation-time scan wires the basis records in.
 `pipeline.estimate_image_tokens_for_set` remains the deliberately conservative
 allowance — every image a square at the *raster* target, at the model cap — and
 its public meaning is unchanged. `cost.estimate_image_tokens_for_bases` is the

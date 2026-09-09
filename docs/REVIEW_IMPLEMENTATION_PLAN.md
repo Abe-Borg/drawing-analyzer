@@ -1422,6 +1422,16 @@ existing five-minute breakpoint:
 - Price uncached suffix/input and each output separately. Do not discount output
   with an input-cache multiplier.
 
+**Why two scenarios and not one corrected number.** The flat estimate sits
+*between* them, so it is wrong in both directions and neither error is
+conservative — at `n = 2` the multipliers are 2.00 flat, 1.35 on reuse, 2.50 on
+total miss, i.e. the flat figure over-quotes successful reuse by ~48% and
+under-quotes a full miss by ~20%, on the single largest QC line. That is also
+why a test asserting the critique component scales *linearly* with run count is
+wrong on the real-time path: the breakpoint only exists at `runs >= 2`, so one
+read is ~40% of two, not 50%. Assert exact linearity on the **batch** path,
+where no breakpoint exists and it genuinely holds.
+
 If the actual request policy changes, resolve it from that policy rather than
 keeping these formulas detached. For the current batch implementation, price
 ordinary batch input and outputs without assumed cache hits. Server tools and all

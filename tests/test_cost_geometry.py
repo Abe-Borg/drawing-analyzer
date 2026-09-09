@@ -435,19 +435,46 @@ def test_an_unknown_priced_INACTIVE_stage_does_not_void_the_total(monkeypatch):
     assert est.total_cost is not None and est.total_cost > 0
 
 
-def test_critique_run_count_comes_from_the_runtime_resolver(monkeypatch):
-    """A preview fixed at two reads under-quotes a four-read run by half."""
-    def cost_at(runs: str | None) -> float:
-        if runs is None:
-            monkeypatch.delenv("DRAWING_ANALYZER_CRITIQUE_RUNS", raising=False)
-        else:
-            monkeypatch.setenv("DRAWING_ANALYZER_CRITIQUE_RUNS", runs)
-        est = estimate_exhaustive_run_cost(10, model=OPUS, batch=False)
-        component = next(c for c in est.components if c.stage.startswith("Critique"))
-        return component.cost
+def _critique_cost_at(monkeypatch, runs, *, batch):
+    if runs is None:
+        monkeypatch.delenv("DRAWING_ANALYZER_CRITIQUE_RUNS", raising=False)
+    else:
+        monkeypatch.setenv("DRAWING_ANALYZER_CRITIQUE_RUNS", str(runs))
+    est = estimate_exhaustive_run_cost(
+        10, model=OPUS, batch=batch, critique_batch=batch
+    )
+    return next(c for c in est.components if c.stage.startswith("Critique")).cost
 
-    two, one, four = cost_at(None), cost_at("1"), cost_at("4")
-    assert one == pytest.approx(two / 2, rel=0.001)
+
+def test_critique_run_count_is_exactly_linear_on_the_batch_path(monkeypatch):
+    """A preview fixed at two reads under-quotes a four-read run by half.
+
+    Asserted on the **batch** path, where it is exactly linear because no
+    prompt-cache breakpoint exists there — parallel submission cannot read a
+    cache still being written. The real-time path is deliberately *not* linear;
+    see the test below.
+    """
+    two = _critique_cost_at(monkeypatch, None, batch=True)
+    assert _critique_cost_at(monkeypatch, 1, batch=True) == pytest.approx(two / 2, rel=0.001)
+    assert _critique_cost_at(monkeypatch, 4, batch=True) == pytest.approx(two * 2, rel=0.001)
+
+
+def test_the_real_time_path_is_deliberately_not_linear_in_run_count(monkeypatch):
+    """Because the breakpoint only exists at ``runs >= 2``.
+
+    One read pays the ordinary rate for its prefix; two reads pay 1.25x twice in
+    the pessimistic scenario the row displays. So one read is ~40% of two, not
+    50%. An earlier version of this test asserted exact halving — which held
+    under the old flat pricing and is precisely the assumption the cache fix
+    breaks. Monotonic and material, without pretending to a linearity that is
+    not there.
+    """
+    one = _critique_cost_at(monkeypatch, 1, batch=False)
+    two = _critique_cost_at(monkeypatch, 2, batch=False)
+    four = _critique_cost_at(monkeypatch, 4, batch=False)
+    assert one < two < four
+    assert 0.35 < one / two < 0.45, one / two
+    # Still roughly proportional once every read past the first is a write.
     assert four == pytest.approx(two * 2, rel=0.001)
 
 
@@ -474,3 +501,156 @@ def test_critique_imagery_is_priced_with_the_critique_model(monkeypatch):
     assert lo.input_tokens < hi.input_tokens, (
         "critique image tokens must be counted with the critique model's own cap"
     )
+
+
+# --------------------------------------------------------------------------- #
+# §10.2 — the real-time critique prefix is priced by its actual rate class
+# --------------------------------------------------------------------------- #
+#
+# ``critique_sheet_self_consistent`` sets ``cache_prefix = runs >= 2``, attaching
+# an ephemeral breakpoint to the shared image prefix on the REAL-TIME path. Read
+# 1 cache-writes that ~90k-token prefix at 1.25x and reads 2..N serve it at 0.1x.
+# Billing all N at the ordinary rate is wrong in *both* directions, which is why
+# §10.2 asks for two scenarios rather than one corrected number:
+#
+#     flat (old)   2.00 read-equivalents
+#     reuse        1.25 + 0.10  = 1.35   -> the old figure over-quoted by ~48%
+#     no reuse     1.25 x 2     = 2.50   -> and under-quoted by ~20%
+#
+# on the single largest QC line.
+
+from drawing_analyzer.cost import _critique_prefix_costs  # noqa: E402
+from drawing_analyzer.core.pricing import usage_record_cost  # noqa: E402
+
+PREFIX, PER_READ_OUT = 90_000, 1_500
+
+
+def _scenarios(*, runs=2, batch=False, model=OPUS, sheets=1):
+    return _critique_prefix_costs(
+        prefix_tokens=PREFIX, output_tokens=PER_READ_OUT,
+        sheet_count=sheets, runs=runs, model=model, batch=batch,
+    )
+
+
+def test_real_time_reuse_is_cheaper_than_no_reuse():
+    low, high = _scenarios()
+    assert low < high
+
+
+def test_the_two_scenarios_match_the_documented_multipliers():
+    """One 1.25x write plus (n-1) 0.1x reads, versus n writes. Hand-checked."""
+    low, high = _scenarios(runs=2)
+    write = float(usage_record_cost(model=OPUS, cache_write_tokens=PREFIX))
+    read = float(usage_record_cost(model=OPUS, cache_read_tokens=PREFIX))
+    out = float(usage_record_cost(model=OPUS, output_tokens=PER_READ_OUT)) * 2
+    assert low == pytest.approx(write + read + out)
+    assert high == pytest.approx(write * 2 + out)
+
+
+def test_the_old_flat_estimate_sat_between_the_two_scenarios():
+    """Which is exactly why a single number could not be right.
+
+    The flat figure over-quotes a run whose cache hits and under-quotes one whose
+    breakpoints all miss. Neither error is conservative.
+    """
+    low, high = _scenarios(runs=2)
+    flat_in = float(usage_record_cost(model=OPUS, input_tokens=PREFIX)) * 2
+    flat_out = float(usage_record_cost(model=OPUS, output_tokens=PER_READ_OUT)) * 2
+    flat = flat_in + flat_out
+    assert low < flat < high
+
+
+def test_output_is_never_discounted_by_an_input_cache_multiplier():
+    """§10.2 says this in as many words. Output is billed per read, both ways.
+
+    The scenarios differ by exactly the prefix's input cost, so subtracting one
+    from the other must leave no trace of the output charge.
+    """
+    low, high = _scenarios(runs=3)
+    write = float(usage_record_cost(model=OPUS, cache_write_tokens=PREFIX))
+    read = float(usage_record_cost(model=OPUS, cache_read_tokens=PREFIX))
+    # no-reuse - reuse == 2 extra writes replacing 2 reads; output cancels.
+    assert high - low == pytest.approx(2 * (write - read))
+
+
+def test_a_single_read_gets_no_breakpoint_and_so_no_band():
+    """``cache_prefix = runs >= 2``: one read would only pay the write premium."""
+    low, high = _scenarios(runs=1)
+    assert low == high
+    expected = (float(usage_record_cost(model=OPUS, input_tokens=PREFIX))
+                + float(usage_record_cost(model=OPUS, output_tokens=PER_READ_OUT)))
+    assert low == pytest.approx(expected)
+
+
+def test_batch_critique_has_no_prefix_cache_at_all():
+    """Parallel submission cannot read a cache still being written."""
+    low, high = _scenarios(runs=2, batch=True)
+    assert low == high
+    assert low < _scenarios(runs=2, batch=False)[0], "batch is still the cheaper rate"
+
+
+def test_an_unpriced_critique_model_yields_no_scenario():
+    assert _scenarios(model="claude-not-real-wp05") == (None, None)
+
+
+def test_the_scenarios_scale_with_sheet_count():
+    one = _scenarios(sheets=1)
+    ten = _scenarios(sheets=10)
+    assert ten[0] == pytest.approx(one[0] * 10)
+    assert ten[1] == pytest.approx(one[1] * 10)
+
+
+def test_the_run_band_widens_to_carry_the_cache_scenario():
+    """The band was purely the finding/citation spread; now it carries this too.
+
+    Compared against the *same* prefix the estimator actually uses, resolved the
+    way it resolves it. An earlier version of this test recomputed the scenarios
+    with a made-up 90k prefix and compared that to the real row — two different
+    inputs, so it would have failed a correct implementation and passed several
+    wrong ones.
+    """
+    fast = estimate_exhaustive_run_cost(10, model=OPUS, batch=False, critique_batch=False)
+    assert fast.low_cost is not None and fast.high_cost is not None
+    assert fast.low_cost < fast.high_cost
+
+    prefix = estimate_image_tokens_for_set(1, model=OPUS) + 800
+    _, pessimistic = _critique_prefix_costs(
+        prefix_tokens=prefix, output_tokens=1_500, sheet_count=10, runs=2,
+        model=OPUS, batch=False,
+    )
+    row = next(c for c in fast.components if c.stage.startswith("Critique"))
+    # The displayed row shows the pessimistic end, as verification's does.
+    assert row.cost == pytest.approx(pessimistic, rel=0.001)
+
+
+def test_the_batch_band_is_not_widened_by_a_cache_scenario_that_cannot_happen():
+    """Economy mode has no breakpoint, so the critique contributes no spread."""
+    economy = estimate_exhaustive_run_cost(10, model=OPUS, batch=True, critique_batch=True)
+    fast = estimate_exhaustive_run_cost(10, model=OPUS, batch=False, critique_batch=False)
+    assert (economy.high_cost - economy.low_cost) < (fast.high_cost - fast.low_cost)
+
+
+def test_an_unpriced_critique_model_voids_both_ends_of_the_band(monkeypatch):
+    """No partial sum, on either end — the rule the rest of this table follows."""
+    monkeypatch.setenv("DRAWING_ANALYZER_CRITIQUE_MODEL", "claude-not-real-wp05")
+    est = estimate_exhaustive_run_cost(10, model=OPUS, batch=False)
+    assert est.low_cost is None and est.high_cost is None
+
+
+# --------------------------------------------------------------------------- #
+# §10.4 — the confirmation must not contradict its own component table
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("runs", ["1", "3", "4"])
+def test_the_confirmation_states_the_resolved_critique_count(runs, monkeypatch):
+    """It said "two critique reads per sheet" beside a row reading "Critique ×4"."""
+    from drawing_analyzer.cost import format_exhaustive_cost_prompt
+
+    monkeypatch.setenv("DRAWING_ANALYZER_CRITIQUE_RUNS", runs)
+    est = estimate_exhaustive_run_cost(10, model=OPUS, batch=False)
+    text = format_exhaustive_cost_prompt(est)
+    assert f"{runs} critique read(s) per sheet" in text
+    assert "two critique reads" not in text
+    # ...and the component row agrees with the prose.
+    assert f"Critique ×{runs}" in text
