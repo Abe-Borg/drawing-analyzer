@@ -451,9 +451,12 @@ both the submitted batch and the one that actually served the digests.
   / zero-API `find_text` / `view_sheet`, every image saved-before-send into
   the finding's evidence dir with an `investigation.json` trace; strictly
   sequential (I-5), budget-capped per finding (`…_INVESTIGATION_MAX_ROUNDS`,
-  default 6, spent per **evidence request** — one turn may carry several
-  `tool_use` blocks and each is a real crop rendered, saved and sent; charging
-  the turn let a 6-request budget buy 18+) and per run (`…_MAX_FINDINGS`, severity-first, **scaled to the set**
+  default 6, spent per **evidence request** and enforced *before* execution —
+  one turn may carry several `tool_use` blocks and each is a real crop
+  rendered, saved and sent; charging the turn let a 6-request budget buy 18+,
+  and merely counting them after the fact still paid for the crops. Blocks past
+  the remaining budget are refused unexecuted, answered in the same user turn
+  as an `is_error` result, and cost nothing so they do not advance the counter) and per run (`…_MAX_FINDINGS`, severity-first, **scaled to the set**
   — 10 + one per 4 sheets, ceiling 40, an explicit env value pinning it) with the
   assistant turn committed before its tools are answered, every tool_use id
   answered in ONE user turn, and a forced no-tools text close at the cap so a

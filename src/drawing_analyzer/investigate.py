@@ -691,6 +691,13 @@ _BUDGET_EXHAUSTED_TEXT = (
     "Evidence budget exhausted — respond now with ONLY the JSON verdict object."
 )
 
+# Answer for a ``tool_use`` block that arrived past the evidence budget. The API
+# requires every id in a turn to be answered, but a refusal costs nothing: no
+# crop is rendered, nothing is saved, nothing is sent back but this sentence.
+_BUDGET_REFUSED_TEXT = (
+    "Not run: this request is past the evidence budget for this finding."
+)
+
 
 def _messages_with_cache_breakpoints(messages: list[dict]) -> list[dict]:
     """Copy a conversation and cache its stable evidence prefixes.
@@ -863,8 +870,27 @@ def _investigate_one(
             # Commit the assistant turn BEFORE answering its tools, then answer
             # every id in one user turn.
             messages = messages + [{"role": "assistant", "content": content}]
+            # Spend the budget per EVIDENCE REQUEST, not per turn — and ENFORCE
+            # it before executing, not after. The model may put several
+            # ``tool_use`` blocks in one assistant turn, and each is a real
+            # crop: an image rendered at 300 DPI, saved to the finding's
+            # evidence dir and sent back. Charging the turn let one turn buy
+            # three or more of them, so a 6-request budget bought 18+ — per
+            # finding, across a task budget that scales to 40 findings.
+            #
+            # Counting them afterwards is not enough, because the cost is the
+            # rendering and the sending: with five of six spent, a three-block
+            # turn would still produce all three crops and only then notice it
+            # had reached eight. So the turn is SPLIT — the first ``remaining``
+            # blocks run, the rest are refused unexecuted. Every ``tool_use``
+            # id is still answered, in ONE user turn, because the API requires
+            # it; a refusal is just an ``is_error`` result that cost nothing.
+            # Refused blocks do not advance the counter: nothing was rendered,
+            # so charging for them would be the same double-count in reverse.
+            remaining = max(0, max_rounds - tool_round)
+            granted, refused = requests[:remaining], requests[remaining:]
             results = []
-            for block in requests:
+            for block in granted:
                 content_out, is_error = executor.execute(
                     str(getattr(block, "name", "") or ""),
                     getattr(block, "input", None),
@@ -877,15 +903,14 @@ def _investigate_one(
                 if is_error:
                     result_block["is_error"] = True
                 results.append(result_block)
-            # Spend the budget per EVIDENCE REQUEST, not per turn. The model may
-            # put several ``tool_use`` blocks in one assistant turn, and each is
-            # a real crop: an image rendered at 300 DPI, saved to the finding's
-            # evidence dir and sent back. Charging the turn let one turn buy
-            # three or more of them, so a 6-request budget bought 18+ — per
-            # finding, across a task budget that scales to 40 findings. The
-            # prompt has always promised "up to {budget} evidence request(s)"
-            # (:func:`_build_initial_content`); this is what makes that true.
-            tool_round += len(requests)
+            for block in refused:
+                results.append({
+                    "type": "tool_result",
+                    "tool_use_id": str(getattr(block, "id", "") or ""),
+                    "content": _BUDGET_REFUSED_TEXT,
+                    "is_error": True,
+                })
+            tool_round += len(granted)
             user_content: list = list(results)
             if tool_round >= max_rounds:
                 user_content.append({"type": "text", "text": _BUDGET_EXHAUSTED_TEXT})

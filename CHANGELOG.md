@@ -34,10 +34,15 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   directory and sent back. Charging the *turn* let one turn buy three or more of
   them, so a 6-request budget bought 18+, per finding, across a task budget that
   scales to 40 findings. The prompt has always promised "up to N evidence
-  request(s)"; the accounting now matches it. No prompt string moved, but
-  `round_budget` is a cache-key input whose **meaning** changed, so
-  `INVESTIGATE_PROMPT_VERSION` is bumped to `investigate-v3` — investigation
-  verdicts only.
+  request(s)"; the accounting now matches it, and the cap is enforced **before**
+  execution rather than counted after — with five of six spent, a three-block
+  turn would otherwise still render and send all three crops and only then
+  notice it had reached eight. Excess blocks are refused unexecuted; every
+  `tool_use` id is still answered in one user turn, because the API requires it,
+  and a refusal costs nothing so it does not advance the counter. No prompt
+  string moved, but `round_budget` is a cache-key input whose **meaning**
+  changed, so `INVESTIGATE_PROMPT_VERSION` is bumped to `investigate-v3` —
+  investigation verdicts only.
 
 - **`find_text` could send an investigation to the wrong word.** The haystack
   was uppercased while the covered-word offsets walked the original-case list,
