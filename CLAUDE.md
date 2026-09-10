@@ -43,9 +43,16 @@ an immutable `RunConfiguration` (§15.1) — the single place `qc_markups=True` 
 the exhaustive stack, `reference_audit` (alone) the free zero-API auditor battery,
 and neither the standard path (findings + text retained and offline-anchored for
 free, DA-012). Every stage reads the resolved config; no call site re-derives the
-booleans. Each QC stage records a typed `StageResult`; `roll_up_qc_status()` folds
-them (+ Phase 21 `coverage_status`) into one `qc_status` (`NOT_REQUESTED` / `COMPLETE`
-/ `PARTIAL` / `FAILED`, §3.3). The Phase 23 completeness gate is **OPEN** (Phase 26B
+booleans. Each QC stage records a typed `StageResult` — **including the digest**,
+which carries one (`expected=True`) so a sheet the run never read reaches the
+roll-up instead of only `ctx.errors` and the journal; it is the single
+`STAGE_END` for that stage, since two would cost `stage_durations()` the
+duration. `roll_up_qc_status()` folds them (+ Phase 21 `coverage_status`) into one
+`qc_status` (`NOT_REQUESTED` / `COMPLETE` / `PARTIAL` / `FAILED`, §3.3). A stage's
+own failure flag is always tested **before** any count derived from its result: an
+exception leaves that result `None`, so a crash judged by counts alone is
+indistinguishable from having had nothing to do (the bug that let a crashed
+cross-verifier report `SKIPPED_VALID`). The Phase 23 completeness gate is **OPEN** (Phase 26B
 §18.0): a clean NORMAL exhaustive run earns `COMPLETE`; the §8 phase-gates are
 permanent regressions enforced by the stage statuses themselves (a failed
 reconciliation / unchecked cited claim / missing evidence leg / mutated source
@@ -56,6 +63,11 @@ holds a required stage at PARTIAL, which the roll-up can never call COMPLETE).
 `UsageRecord` (family, `transport` REAL_TIME/BATCH/CACHE, model, tokens, tool uses,
 cache-hit, `estimated_cost`), and the run's `total_*` are *derived* sums — no stage
 can overwrite another's counters (the old `v_in, v_out = vres…` overwrite is gone).
+The ledger describes work that **happened**, not stages that were configured: a
+stage that placed no call and took no cache hit appends nothing. Guard the
+real-time record on the call count alone — the old `if X.api_calls or not
+X.cache_hits` fired exactly in the no-work case it meant to exclude, so a
+verification that verified nothing still reported two real-time calls.
 `core.pricing.usage_record_cost` prices one record by its rate class; costs carry a
 `PRICING_EFFECTIVE_DATE`. `RunUsage.is_billable_but_unpriced` is the single rule
 for "this consumed billable usage the table cannot price", and it counts **cache

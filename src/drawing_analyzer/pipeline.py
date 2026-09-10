@@ -153,6 +153,29 @@ def _digest_transport(*, cached: bool, rescued: bool, use_batch: bool) -> str:
     return "BATCH" if use_batch else "REAL_TIME"
 
 
+def claim_sort_key(claim: NumericClaim) -> tuple:
+    """Total, deterministic order for one :class:`NumericClaim` (I-7).
+
+    ``claims`` used to be pooled in thread-completion order — both the
+    cache-hit loop and ``_ingest_miss`` extend the list as futures land, and
+    only ``findings`` was sorted. That order flows through ``audit_arithmetic``
+    into ledger insertion order and out to ``findings.json`` / ``findings.csv``
+    and their sha256 in ``run_manifest.json``, so two runs over byte-identical
+    inputs published different manifests.
+
+    ``terms`` and ``expected`` are deliberately raw JSON — an int can sit
+    beside a string like ``"2 1/2"`` — so they are keyed through ``repr``
+    rather than compared directly, which would raise ``TypeError`` on a mixed
+    set. ``repr`` is stable within a process and only ever used to break ties
+    between claims already equal on every identifying field.
+    """
+    return (
+        claim.source_id, claim.source_name, claim.page_index, claim.sheet_id,
+        claim.kind, claim.quote, repr(claim.terms), repr(claim.expected),
+        claim.note,
+    )
+
+
 def _record_usage(
     run_usage: RunUsage,
     *,
@@ -781,6 +804,7 @@ def _digest_sheets_via_batch(
     only: "set[tuple[str, int]] | None" = None,
     tile_sink: "Any" = None,
     reusable_upload_sink: "list[Any] | None" = None,
+    on_page_error: "Any" = None,
     journal: "Any" = None,
 ) -> list[SheetDigest]:
     """Batch path: render-stream → Files-API upload → one Message Batch.
@@ -814,6 +838,12 @@ def _digest_sheets_via_batch(
         _rendered_stream(
             paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
             geometry_sink=geometry_sink, only=only, tile_sink=tile_sink,
+            # Threaded through like the real-time path: without it an
+            # un-renderable page vanished from a batch run with no entry in
+            # ctx.errors, while the identical real-time run recorded it and
+            # went PARTIAL — the same set reporting two different truths
+            # depending only on transport.
+            on_page_error=on_page_error,
             journal=journal,
         ),
         client=client,
@@ -1172,6 +1202,12 @@ def _run_critique_stage(
     findings: list[Finding] = []
     claims: list[NumericClaim] = []
     degraded: list[str] = []
+    # Sheets the input merge could not produce at all — spool load and the
+    # one-page re-render fallback both returned None. These used to be dropped
+    # silently by ``_ordered_inputs``, so the stage reported COMPLETE having
+    # never critiqued them (I-1). Folded into ``degraded`` once the generator
+    # is exhausted, which both transports do before this function returns.
+    unobtained: list[str] = []
     done = 0
 
     def _record_critique(res: Any, portable: "tuple[str, int]") -> None:
@@ -1321,6 +1357,8 @@ def _run_critique_stage(
                     item = _take_fresh(key)
                 if item is not None:
                     yield item
+                else:
+                    unobtained.append(getattr(ref, "display_label", str(key)))
 
         if use_batch:
             reusable_by_ref: dict[tuple[str, int], Any] = {}
@@ -1411,7 +1449,23 @@ def _run_critique_stage(
             while in_flight:
                 _collect_one()
 
+    # Reconcile what was critiqued against what was asked for. A sheet the
+    # merge could never obtain reached neither ``_ingest_miss`` nor the
+    # executor's except arm, so nothing else in this function can see it.
+    for label in sorted(unobtained):
+        degraded.append(f"{label}: no critique input could be obtained")
+        _log.warning("critique input unavailable for a sheet: %s", label)
+
     findings.sort(key=lambda f: (source_page_key(f), f.id))
+    # I-7: ``claims`` was pooled in thread-completion order (both the cache-hit
+    # loop and ``_ingest_miss`` extend it as futures land), and only
+    # ``findings`` was sorted. That order flows through audit_arithmetic into
+    # ledger insertion order and out to findings.json / findings.csv and their
+    # sha256 in run_manifest.json, so two byte-identical runs produced
+    # different manifests. ``terms``/``expected`` are deliberately raw JSON
+    # (ints beside strings), so they are keyed through repr() rather than
+    # compared directly, which would raise on a mixed set.
+    claims.sort(key=claim_sort_key)
     _log.info(
         "critique: %d finding(s), %d numeric claim(s) across %d sheet(s)",
         len(findings), len(claims), total,
@@ -1558,7 +1612,11 @@ def _run_qc_stages(
             )
             # The straggler-structuring call's usage — an independent record, never
             # folded into (and overwritten by) the verification counters (§15.6).
-            if hres.api_calls or not hres.cache_hits:
+            # Guarded on the call count alone: the old ``or not cache_hits``
+            # disjunct fired exactly in the no-work case it was meant to
+            # exclude (zero calls AND zero hits), appending a zero-token
+            # REAL_TIME record for a stage that never reached the API.
+            if hres.api_calls:
                 _record_usage(
                     run_usage, family="harvest", instance="prose_harvest",
                     model=harvest_model(),
@@ -1601,6 +1659,13 @@ def _run_qc_stages(
             harvest_stage.status = "FAILED"
             harvest_stage.errors.append(str(exc))
             _log.warning("prose harvest failed: %s", exc)
+    elif run_prose_harvest:
+        # Requested, but no sheets to harvest from — a valid (empty) skip, as
+        # every sibling stage records it. Without this arm the stage stayed
+        # NOT_REQUESTED while ``expected`` was True, which fails the roll-up's
+        # ``all_ok`` without setting ``any_failed``: the run silently landed on
+        # PARTIAL (or FAILED) for a reason no stage row explained.
+        harvest_stage.status = "SKIPPED_VALID"
     _finish_stage(stage_results, journal, harvest_stage)
 
     # Edition audit (Phase B): adopted-vs-cited edition divergence as a
@@ -1763,7 +1828,9 @@ def _run_qc_stages(
                 all_findings, geometries, client=client,
                 evidence_dir=evidence_dir, progress=_verify_progress, cache=cache,
             )
-            if vres.api_calls or not vres.cache_hits:
+            # Call count alone — see the prose-harvest guard above for why the
+            # old ``or not cache_hits`` disjunct invented real-time records.
+            if vres.api_calls:
                 _record_usage(
                     run_usage, family="verify", instance="verify",
                     model=verify_model,
@@ -1796,7 +1863,7 @@ def _run_qc_stages(
                 all_findings, geometries, client=client,
                 evidence_dir=evidence_dir, progress=_verify_progress, cache=cache,
             )
-            if cres.api_calls or not cres.cache_hits:
+            if cres.api_calls:
                 _record_usage(
                     run_usage, family="verify", instance="verify_cross",
                     model=verify_model, parent="verify",
@@ -1825,6 +1892,9 @@ def _run_qc_stages(
         # findings actually judged (VERIFIED/REJECTED/UNCERTAIN) make it COMPLETE;
         # eligible findings that were *all* skipped make it PARTIAL (verification was
         # required but could not run); zero eligible/counted findings is a valid skip.
+        # Both failure flags are tested BEFORE the counts: an exception leaves its
+        # result None, contributing nothing to ``counted``, so a crash judged by
+        # the counts alone is indistinguishable from having had nothing to do.
         def _counts(r: "Any") -> "tuple[int, int]":
             if r is None:
                 return 0, 0
@@ -1836,6 +1906,15 @@ def _run_qc_stages(
         verify_stage.items_out = judged
         if primary_failed:
             verify_stage.status = "FAILED"
+        elif cross_failed:
+            # Tested before the count ladder, not after it: a cross-verifier
+            # that *raised* leaves ``cres`` None, so its findings never reach
+            # ``counted`` — and when only cross-sheet findings were eligible
+            # (``_is_verifiable`` excludes them from the single-crop pass),
+            # ``counted == 0`` read the crash as "nothing to verify" and
+            # reported SKIPPED_VALID, which the roll-up accepts as a clean run.
+            # An exception is never a valid skip.
+            verify_stage.status = "PARTIAL"
         elif counted == 0:
             verify_stage.status = "SKIPPED_VALID"   # no eligible model findings
         elif judged == 0:
@@ -1845,8 +1924,6 @@ def _run_qc_stages(
             verify_stage.warnings.append(
                 "all eligible findings were skipped (client unavailable or crops failed)"
             )
-        elif cross_failed:
-            verify_stage.status = "PARTIAL"
         else:
             verify_stage.status = "COMPLETE"
     elif qc_markups and verify_enabled:
@@ -2790,7 +2867,8 @@ def extract_drawing_context(
                 on_status=on_status, focus=focus or None,
                 specs_text=specs_text or None,
                 geometry_sink=geometry_sink, only=only, tile_sink=tile_sink,
-                reusable_upload_sink=reusable_uploads, journal=journal,
+                reusable_upload_sink=reusable_uploads,
+                on_page_error=_on_page_error, journal=journal,
             )
         else:
             miss_sheets = _digest_sheets_concurrent(
@@ -2918,6 +2996,13 @@ def extract_drawing_context(
             )
         if sd.error:
             errors.append(f"{sd.ref.display_label}: {sd.error}")
+        elif not sd.ok:
+            # ``sd.ok`` is error-free AND non-empty, so an error-free sheet
+            # whose digest came back empty is a failed sheet. It used to reach
+            # the journal and nothing else, leaving ctx.errors — and every
+            # surface built from it — undercounting the sheets the run never
+            # actually read.
+            errors.append(f"{sd.ref.display_label}: empty digest")
         # One journal event per sheet, in deterministic page order (§18.2):
         # success, cache hit/miss, digest size, findings count, plus the
         # geometry-side facts (raster/vector, text-layer length, omitted tiles)
@@ -2951,13 +3036,44 @@ def extract_drawing_context(
             level="INFO" if sd.ok else "WARNING", **sheet_fields,
         )
     ok_sheets = sum(1 for s in sheets if s.ok)
-    journal.emit(
-        "STAGE_END", stage="digest",
-        status="COMPLETE" if ok_sheets == len(sheets) else "PARTIAL",
-        ok=ok_sheets,
-        failed=len(sheets) - ok_sheets,
-        cached=sum(1 for s in sheets if s.cached),
-    )
+    # §3.3 — the digest was the one stage with no StageResult, so a sheet it
+    # failed to read reached ctx.errors and the journal but never
+    # ``roll_up_qc_status``: an exhaustive run could report COMPLETE over a
+    # sheet it never analyzed, contradicting I-1. ``expected=True`` is the
+    # honest value (every mode digests) and is safe, because the roll-up
+    # returns early on a non-exhaustive run — it is only ever read where the
+    # digest genuinely is required.
+    #
+    # This replaces a hand-written STAGE_END rather than joining it: two
+    # STAGE_END events for one stage make ``RunJournal.stage_durations()``
+    # pair the START with the second and lose the duration.
+    digest_stage = StageResult(stage="digest", expected=True)
+    # items_in counts the sheets the run set out to read, not the ones that
+    # survived rendering, so a page that never produced a SheetDigest at all
+    # stays visible here instead of vanishing from both sides of the ratio.
+    digest_stage.items_in = total
+    digest_stage.items_out = ok_sheets
+    called = [s for s in sheets if not s.cached]
+    digest_stage.calls_planned = len(called)
+    digest_stage.calls_succeeded = sum(1 for s in called if s.ok)
+    digest_stage.calls_failed = sum(1 for s in called if not s.ok)
+    if not total:
+        digest_stage.status = "SKIPPED_VALID"
+    elif ok_sheets == total:
+        digest_stage.status = "COMPLETE"
+    elif ok_sheets:
+        digest_stage.status = "PARTIAL"
+    else:
+        digest_stage.status = "FAILED"
+    if digest_stage.status not in ("COMPLETE", "SKIPPED_VALID"):
+        # Bounded and sorted for I-7, as the critique stage does with its own.
+        digest_stage.errors.extend(
+            sorted(
+                f"{s.ref.display_label}: {s.error or 'empty digest'}"
+                for s in sheets if not s.ok
+            )[:5]
+        )
+    _finish_stage(stage_results, journal, digest_stage)
 
     # Independent text-only set stages can spend their network latency behind
     # identity → planning → critique. Their results are deliberately *not*
