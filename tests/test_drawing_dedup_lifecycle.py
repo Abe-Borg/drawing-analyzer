@@ -9,8 +9,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from drawing_analyzer.ledger import Ledger, reconcile_post_anchor
-from drawing_analyzer.models import Anchor, ConflictLeg, Finding, Verification
+from drawing_analyzer.ledger import Ledger, _families, reconcile_post_anchor
+from drawing_analyzer.models import (
+    CONFIDENCE_REPRODUCED,
+    CONFIDENCE_SINGLETON,
+    Anchor,
+    ConflictLeg,
+    Finding,
+    Verification,
+)
 
 
 def _f(text, *, sid="SRC-0001", source="M-101.pdf", page=0, quote="", cat="code",
@@ -226,21 +233,75 @@ def test_pass_b_complete_link_does_not_collapse_a_conflicting_chain():
 
 
 def test_merge_does_not_cross_ground_anchor_from_a_different_quote():
-    # C-2: a better-grounded member with a DIFFERENT quote must not inherit an
-    # auditor's rectangle (which was resolved from the auditor's quote).
+    # C-2: a better-grounded member with a DIFFERENT quote must not inherit
+    # another member's rectangle (which was resolved from that member's quote).
+    # Both members here are model-authored, so provenance does not decide the
+    # representative and the longer quote wins on its own merits.
     led = Ledger()
-    auditor = _f("beam load 12 kips exceeds capacity", quote="12 KIPS", rect=[10, 10, 60, 24])
-    auditor.verification = Verification(status="DETERMINISTIC")
-    led.add([auditor])
-    # A model duplicate with a LONGER but DIFFERENT quote wins the representative.
+    short = _f("beam load 12 kips exceeds capacity", quote="12 KIPS", rect=[10, 10, 60, 24])
+    led.add([short], "digest_json")
     led.add([_f("beam load 12 kips exceeds the allowable capacity",
                 quote="BEAM B12 LOAD 12 KIPS PER SCHEDULE")], "critique_1")
     assert len(led) == 1
     e = led.entries[0]
     assert e.source_quote == "BEAM B12 LOAD 12 KIPS PER SCHEDULE"   # new representative
-    # The auditor's rect (from "12 KIPS") is NOT grafted onto the different quote.
+    # The rect resolved from "12 KIPS" is NOT grafted onto the different quote.
     assert e.anchor.rect_pdf is None
-    assert e.verification.status == "DETERMINISTIC"                 # verdict still survives
+
+
+def test_a_deterministic_member_wins_the_representative_and_keeps_its_verdict():
+    # §17.5 / "the model never calculates". A DETERMINISTIC finding's text states
+    # the result of a HOST computation over its OWN quote. The auditor quotes only
+    # the term it computed over, so on quote length alone it loses to a model
+    # finding quoting the whole schedule line — and the model's arithmetic then
+    # inherited the DETERMINISTIC label, skipped the crop check, and inked as
+    # "an exact text check of the drawings, not an AI judgment".
+    #
+    # Provenance now ranks first in _grounding_quality, which is what the merge
+    # site's own comment always claimed. The auditor wins the bundle, so its
+    # text, its rect and its verdict travel together and remain true of each
+    # other.
+    led = Ledger()
+    auditor = _f("the sum of the terms is 540", quote="TOTAL CFM 540",
+                 rect=[10, 10, 60, 24])
+    auditor.verification = Verification(status="DETERMINISTIC")
+    # Same quote: this is the shape that actually merges (a differing quote AND a
+    # differing measurement is a conflicting signature, which dedup refuses).
+    model = _f("the sum of the terms is 560", quote="TOTAL CFM 540")
+    led.add([auditor], "auditor_arithmetic")
+    led.add([model], "critique_1")
+
+    assert len(led) == 1
+    e = led.entries[0]
+    assert "540" in e.text and "560" not in e.text     # the host's number, not the model's
+    assert e.source_quote == "TOTAL CFM 540"           # the quote it computed over
+    assert e.anchor.rect_pdf == [10, 10, 60, 24]       # its exact rect is not destroyed
+    assert e.verification.status == "DETERMINISTIC"    # true of the text it sits on
+    assert set(e.sources) == {"auditor_arithmetic", "critique_1"}   # provenance unioned
+
+
+def test_the_representative_does_not_depend_on_ingest_order():
+    # The severity union ran BEFORE the quality comparison it feeds, raising
+    # `existing.severity` to the max and erasing the very difference being
+    # compared: one order saw ranks (3, 2) and the other (3, 3). The tiebreak
+    # then fell to raw text, where "...560..." sorts above "...540...".
+    #
+    # Every fixture in the neighbouring order-independence test uses one
+    # severity, so the union is a no-op there and the claim went uncovered.
+    for a_sev, b_sev in (("high", "low"), ("low", "high"), ("medium", "high")):
+        surviving = set()
+        for order in (0, 1):
+            led = Ledger()
+            a = _f("chilled water pump flow is 540 gpm", quote="CWP-1 540 GPM", sev=a_sev)
+            b = _f("chilled water pump flow is 560 gpm", quote="CWP-1 540 GPM", sev=b_sev)
+            pair = [(a, "digest_json"), (b, "critique_1")]
+            if order:
+                pair.reverse()
+            for finding, tag in pair:
+                led.add([finding], tag)
+            assert len(led) == 1
+            surviving.add(led.entries[0].text)
+        assert len(surviving) == 1, (a_sev, b_sev, surviving)
 
 
 def test_post_anchor_reconciliation_folds_a_geometric_duplicate():
@@ -259,3 +320,185 @@ def test_post_anchor_reconciliation_folds_a_geometric_duplicate():
     folded = reconcile_post_anchor(led)
     assert folded == 1                         # same quote + rect overlap → now one
     assert len(led) == 1
+
+
+def test_an_unanchored_winner_does_not_erase_a_compatible_rect():
+    # The bundle adopted the winner's anchor unconditionally, so an UNANCHORED
+    # winner replaced an exact rect with an empty one — and the anchor upgrade
+    # below could not restore it, because that only fires when the *incoming*
+    # member is the anchored one. The same two findings therefore kept or
+    # destroyed the rectangle depending purely on which arrived first.
+    #
+    # Keeping it is coherent only because the quotes match: the rect anchors the
+    # very string the new representative quotes. A different quote must still
+    # lose the rect (see the cross-grounding test above).
+    led = Ledger()
+    led.add([_f("relief valve RV-3 setting is too high",
+                quote="RV-3 SET 125 PSI", sev="low", rect=[10, 200, 60, 220])], "digest_json")
+    led.add([_f("relief valve RV-3 setting exceeds the vessel maximum",
+                quote="RV-3 SET 125 PSI", sev="high")], "critique_1")
+
+    assert len(led) == 1
+    e = led.entries[0]
+    assert e.text.endswith("exceeds the vessel maximum")   # the winner's text
+    assert e.anchor.rect_pdf == [10, 200, 60, 220]         # the rect survived
+
+
+def test_pass_b_keeps_a_conflict_carried_in_text_not_the_quote():
+    # Pass B rebuilt its complete-link history from the LIVE survivor rather
+    # than the ledger's ingest snapshots. When B won the representative, A's
+    # text — which held the discriminating "500 gpm" — was overwritten, and only
+    # A's *quote* rode into supporting_quotes. The measurement therefore vanished
+    # from the object Pass B compared against, so Pass B folded a chain Pass A
+    # had explicitly refused one call earlier, and C's "550 gpm" ended up
+    # nowhere at all: not in the text, not in the quotes, only a provenance tag
+    # pointing at content that no longer existed.
+    #
+    # The neighbouring chain test survives on quotes, which do ride into
+    # supporting_quotes. Every arithmetic or quantity conflict carries its signal
+    # in the text instead, which is the case that was uncovered.
+    led = Ledger()
+    led.add([_f("riser pump flow is 500 gpm per riser schedule",
+                cat="coordination", quote="RISER")], "digest_json")
+    led.add([_f("riser pump flow per riser schedule", cat="coordination",
+                quote="RISER PUMP FLOW PER RISER SCHEDULE AND COORDINATION DETAILS")],
+            "critique_1")
+    led.add([_f("riser pump flow is 550 gpm per riser schedule",
+                cat="coordination", quote="RISER")], "cross_qc")
+
+    def has_550(ledger):
+        return any(
+            "550" in e.text or any("550" in q for q in e.supporting_quotes)
+            for e in ledger.entries
+        )
+
+    assert len(led) == 2 and has_550(led)        # Pass A refused the fold
+    led.seal()
+    reconcile_post_anchor(led)
+    assert len(led) == 2, [e.text for e in led.entries]
+    assert has_550(led), "the conflicting measurement was destroyed"
+
+
+# --------------------------------------------------------------------------- #
+# §14.4 — ``confidence`` must agree with ``reproduced``
+# --------------------------------------------------------------------------- #
+
+
+def test_cross_family_corroboration_upgrades_confidence_not_only_reproduced():
+    # ``confidence`` is only ever raised by rank, and every non-critique channel
+    # carries "" (rank 0), which can never raise a critique's SINGLETON. The very
+    # same merge unions a second *family* into ``sources`` and flips
+    # ``reproduced`` to True — so the entry said "corroborated across families"
+    # and "only one of the two reads saw it" at once. critique.merge_finding_groups
+    # already settles this the coherent way; the ledger implemented half of it.
+    led = Ledger()
+    crit = _f("branch line exceeds the maximum allowed length",
+              quote="MAX BRANCH LENGTH 150 FT")
+    crit.confidence = CONFIDENCE_SINGLETON
+    crit.sources = ["critique_1"]
+    crit.reproduced = False                 # only one of the two critique reads saw it
+    dig = _f("branch line exceeds the maximum length allowed",
+             quote="MAX BRANCH LENGTH 150 FT")
+    dig.reproduced = False                  # so only the family span can flip it
+    led.add([crit])
+    led.add([dig], "digest_json")
+
+    (e,) = led.entries
+    assert len(_families(e.sources)) >= 2
+    assert e.reproduced is True
+    assert e.confidence == CONFIDENCE_REPRODUCED
+
+
+def test_a_same_family_merge_does_not_invent_corroboration():
+    # Two reads of the SAME family are not two channels. A SINGLETON that only
+    # ever met its own family keeps saying so — the upgrade is corroboration,
+    # not a default.
+    led = Ledger()
+    first = _f("branch line exceeds the maximum allowed length",
+               quote="MAX BRANCH LENGTH 150 FT")
+    first.confidence = CONFIDENCE_SINGLETON
+    first.sources = ["critique_1"]
+    first.reproduced = False
+    second = _f("branch line exceeds the maximum length allowed",
+                quote="MAX BRANCH LENGTH 150 FT")
+    second.confidence = CONFIDENCE_SINGLETON
+    second.sources = ["critique_1"]
+    second.reproduced = False
+    led.add([first])
+    led.add([second])
+
+    (e,) = led.entries
+    assert e.confidence == CONFIDENCE_SINGLETON
+    assert e.reproduced is False
+
+
+# --------------------------------------------------------------------------- #
+# §12.3 — a post-seal duplicate is an invariant failure, not a silent rewrite
+# --------------------------------------------------------------------------- #
+
+
+def test_a_post_numbered_duplicate_is_counted_and_never_rewrites_the_entry():
+    # ``add`` merged and returned BEFORE the sealed guard, so the guard was
+    # reachable only for a *fresh* finding. A duplicate arriving after numbering
+    # therefore rewrote text, quote, content id, severity and sources underneath
+    # a QC-### that is already exported, already inked on a reviewed PDF, and
+    # already the name of an evidence directory — while leaving post_seal_adds
+    # at 0, so the roll-up never reported the run incomplete.
+    led = Ledger()
+    led.add([_f("sprinkler spacing conflict on the main run",
+                quote="SPACING 12 FT", rect=[10, 10, 60, 24])], "digest_json")
+    led.seal()
+    (numbered,) = led.number()
+    before = (numbered.qc_id, numbered.id, numbered.text, numbered.source_quote,
+              numbered.severity, list(numbered.sources), list(numbered.supporting_quotes))
+
+    led.add([_f("sprinkler spacing conflict on the main run line",
+                quote="SPACING 12 FT MAXIMUM PER PLAN", sev="high")], "critique_1")
+
+    (after,) = led.entries
+    assert after is numbered
+    assert (after.qc_id, after.id, after.text, after.source_quote, after.severity,
+            list(after.sources), list(after.supporting_quotes)) == before
+    assert led.post_seal_adds == 1          # the run is marked incomplete instead
+
+
+def test_a_post_seal_duplicate_is_counted_before_numbering_too():
+    led = Ledger()
+    led.add([_f("relief valve RV-3 setting is too high", quote="RV-3 SET 125 PSI")],
+            "digest_json")
+    led.seal()
+    led.add([_f("relief valve RV-3 setting exceeds the maximum", quote="RV-3 SET 125 PSI")],
+            "critique_1")
+    assert len(led) == 1                    # not appended as a second entry either
+    assert led.post_seal_adds == 1
+    assert led.entries[0].sources == ["digest_json"]     # unmutated
+
+
+# --------------------------------------------------------------------------- #
+# §12.1 — the complete-link history freezes at the merge, not at ingest
+# --------------------------------------------------------------------------- #
+
+
+def test_a_second_merge_cannot_capture_the_first_merges_result_as_history():
+    # An entry is its own first member and is held LIVE until a merge is about to
+    # mutate it. Freezing that head is a ONE-TIME act: re-taking it on the second
+    # merge would record the survivor as it is *after* the first — carrying the
+    # winner's bundle — and erase the original member's signature from the very
+    # history complete-link is evaluated against. It takes three merges to see:
+    # on the first merge the live survivor and its snapshot are still identical.
+    long_quote = "RISER PUMP FLOW PER RISER SCHEDULE AND COORDINATION DETAILS"
+    led = Ledger()
+    led.add([_f("riser pump flow is 500 gpm per riser schedule",
+                cat="coordination", quote="RISER")], "digest_json")
+    led.add([_f("riser pump flow per riser schedule", cat="coordination",
+                quote=long_quote)], "critique_1")
+    assert len(led) == 1                        # B won the bundle (longer quote)
+    assert "500" not in led.entries[0].text     # ...so A's measurement left the text
+
+    led.add([_f("riser pump flow per riser schedule", cat="coordination",
+                quote=long_quote)], "critique_2")
+    assert len(led) == 1                        # a second merge into the same entry
+
+    led.add([_f("riser pump flow is 550 gpm per riser schedule",
+                cat="coordination", quote="RISER")], "cross_qc")
+    assert len(led) == 2, [e.text for e in led.entries]   # A's snapshot still refuses

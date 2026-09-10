@@ -660,6 +660,60 @@ def _resolve_workers(max_workers: int | None, total: int) -> int:
     return min(max(1, int(max_workers)), max(1, total))
 
 
+def _provenance_restorer(findings: Iterable[Finding]) -> Callable[[], None]:
+    """Snapshot arithmetic provenance now; return a callable that restores it.
+
+    Every verdict this module produces REPLACES the finding's previous one
+    wholesale, and not one of its eighteen ``Verification(...)`` constructions
+    populates ``computation_method`` / ``operand_origin`` — so a crop re-check
+    silently erased them.
+
+    That is not a cosmetic loss. ``annotate._trust_note`` reads
+    ``operand_origin`` **first**, so a finding whose operands the model merely
+    transcribed went from
+
+        "Computed from numbers as read by the AI - re-check the math against the sheet."
+    to
+        "AI-verified against the drawing."
+
+    The caveat was not weakened; it was inverted. And the exposure is precisely
+    targeted: ``auditors/arithmetic`` emits UNCERTAIN for ``MODEL_TRANSCRIBED``
+    operands while only ``DETERMINISTIC`` is terminal here, so the findings whose
+    provenance matters most are exactly the ones routed through verification.
+
+    Restoring at the boundary rather than at each construction site is
+    deliberate. Ten separate assignments across success, skip, error, abort and
+    warm-cache branches all reach ``finding.verification``; patching them
+    individually leaves the next branch someone adds to reintroduce the bug in
+    silence. ``investigate.py`` carries these forward at its own three sites and
+    keeps doing so — this is the same rule where the sites are too many to trust.
+
+    A verdict that already carries provenance keeps its own.
+    """
+    prior = {
+        id(f): (
+            getattr(getattr(f, "verification", None), "computation_method", ""),
+            getattr(getattr(f, "verification", None), "operand_origin", ""),
+        )
+        for f in findings
+    }
+
+    def _restore() -> None:
+        for finding in findings:
+            method, origin = prior.get(id(finding), ("", ""))
+            if not method and not origin:
+                continue
+            v = getattr(finding, "verification", None)
+            if v is None:
+                continue
+            if not v.computation_method:
+                v.computation_method = method
+            if not v.operand_origin:
+                v.operand_origin = origin
+
+    return _restore
+
+
 def verify_findings(
     findings: Iterable[Finding],
     sheets: Iterable[Any],
@@ -691,6 +745,7 @@ def verify_findings(
     verifiable = [f for f in findings if _is_verifiable(f)]
     if not verifiable:
         return result
+    restore_provenance = _provenance_restorer(verifiable)
 
     lookup, ambiguous = _sheet_lookup(sheets)
 
@@ -717,6 +772,7 @@ def verify_findings(
         items.append((f, sheet, rect, dpi))
 
     if not items:
+        restore_provenance()
         return result
 
     renderer = crop_renderer or _default_crop_renderer
@@ -872,6 +928,7 @@ def verify_findings(
         result.verified, result.rejected, result.uncertain, result.skipped,
         result.input_tokens, result.output_tokens,
     )
+    restore_provenance()
     return result
 
 
@@ -1182,6 +1239,7 @@ def verify_cross_findings(
     dual = [f for f in findings if _has_anchored_legs(f)]
     if not dual:
         return result
+    restore_provenance = _provenance_restorer(dual)
     model = model or default_verify_model()
     lookup, ambiguous = _sheet_lookup(sheets)
 
@@ -1302,4 +1360,5 @@ def verify_cross_findings(
         "cross-verification: %d verified, %d rejected, %d uncertain, %d skipped",
         result.verified, result.rejected, result.uncertain, result.skipped,
     )
+    restore_provenance()
     return result

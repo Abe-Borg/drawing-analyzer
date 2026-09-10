@@ -8,6 +8,89 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The ledger no longer launders model text into ground truth.** Four defects in
+  one place: the merge that folds a duplicate finding into an existing ledger
+  entry. Together they let the model's own arithmetic reach the reviewer wearing
+  the host's label.
+
+  - **A `DETERMINISTIC` verdict could end up on text no host ever computed.**
+    `_grounding_quality` decides which member's grounded bundle survives a merge,
+    and its own docstring at the merge site claimed a deterministic auditor sorts
+    first. It never did — the tuple ranked quote length, severity, id and text,
+    and the auditor normally holds the *shorter* quote, because it quotes only
+    the term it computed over while the model quotes a whole schedule line. So
+    the model's "the sum is 560" beat the host's "the sum is 540", and the
+    verdict — decided separately from the text, further down the function —
+    followed the survivor. `verify._TERMINAL_STATUSES` then skipped the crop
+    check and `annotate` inked it as *"Found by an exact text check of the
+    drawings, not an AI judgment."* Provenance is now the top-ranked element of
+    `_grounding_quality`, and the verdict rides the atomic grounding bundle with
+    the text, quote, tile, rect and evidence state it belongs to. The loser's
+    quote still lands in `supporting_quotes`; only its *verdict* stops
+    travelling to text it did not produce.
+
+  - **Which member survived depended on ingest order.** The severity union ran
+    *before* the quality comparison it feeds, raising the survivor's severity to
+    the max and erasing the very difference being compared: one order saw ranks
+    (3, 2), the reverse saw (3, 3), and the tiebreak fell through to raw text —
+    where `"…560…"` sorts above `"…540…"`. Both quality tuples are now computed
+    before anything mutates a field they read (I-7).
+
+  - **An unanchored member erased an exact rectangle.** The bundle adopted the
+    winner's anchor unconditionally, and the upgrade further down could not
+    restore it (it fires only when the *incoming* member is the anchored one).
+    A survivor's rect is now kept when it places the new representative's quote.
+
+  - **Pass B rebuilt its complete-link history from the mutated survivor.**
+    Post-anchor reconciliation seeded a fresh `{id(entry): [entry]}` map instead
+    of consulting the ledger's ingest snapshots, so it folded chains the ingest
+    pass had explicitly refused one call earlier. Where the conflicting value
+    lived in `text` rather than the quote — every arithmetic or quantity
+    conflict — it was destroyed outright: not in the surviving text, not in the
+    supporting quotes, only a provenance tag pointing at content that no longer
+    existed. Pass B now seeds from `Ledger.member_history`, re-parents a folded
+    entry's history onto the survivor, and the ledger's own snapshot is taken at
+    the moment a merge is about to mutate an entry rather than eagerly at
+    ingest — an eager copy is a permanently *unanchored* twin of a live,
+    anchored entry, which would have blocked every geometry-based Pass B fold.
+
+- **Verification erased arithmetic provenance from the finding it verified.**
+  All eighteen `Verification(...)` constructions in `verify.py` replace the
+  previous verdict wholesale and populate neither `computation_method` nor
+  `operand_origin`. The effect on the reviewer was an inversion, not a
+  weakening: `annotate._trust_note` reads `operand_origin` first, so *"Computed
+  from numbers as read by the AI - re-check the math against the sheet."* became
+  the flat *"AI-verified against the drawing."* And the exposure was precisely
+  targeted — the arithmetic auditor emits `UNCERTAIN` for model-transcribed
+  operands while only `DETERMINISTIC` is terminal in verification, so the
+  findings whose provenance matters most are exactly the ones routed through the
+  pass that lost it. Both public entry points now snapshot provenance on entry
+  and restore it at every exit, including the skip and warm-cache paths.
+  `investigate.py` already carried these forward at its three sites and now has
+  tests saying so.
+
+- **An entry could claim corroboration and its absence at once.** `confidence`
+  is only ever raised by rank, and every non-critique channel carries `""`
+  (rank 0), which can never raise a critique's `SINGLETON`. The same merge
+  unions a second provenance *family* into `sources` and flips `reproduced` to
+  True — so an entry read `reproduced = true` beside `confidence = SINGLETON`,
+  i.e. "two channels independently raised it" beside "only one of the two reads
+  saw it". `critique.merge_finding_groups` already settles this coherently; the
+  ledger implemented only the `reproduced` half of that rule and now implements
+  both.
+
+- **A duplicate arriving after numbering silently rewrote a numbered entry.**
+  `Ledger.add` merged and returned *before* the `sealed` guard, so the
+  orchestration-invariant check was reachable only for a *fresh* finding. A
+  post-seal duplicate therefore rewrote text, quote, content id, severity,
+  sources, supporting quotes, tile, anchor and evidence state underneath a
+  `QC-###` that numbering had already assigned — one that may already be
+  exported, inked on a reviewed PDF, and the name of an evidence directory —
+  while leaving `post_seal_adds` at 0, so nothing reported the run incomplete. A
+  post-seal duplicate is now counted like any post-seal add and **dropped**: the
+  run still ships (I-3), the number keeps pointing at the content it was
+  assigned to, and the roll-up marks exhaustive QC incomplete.
+
 - **Nothing truncated is accepted, and nothing truncated is cached.** Four
   defects that shared one shape: a reply the model did not finish was read as a
   reply it did finish.

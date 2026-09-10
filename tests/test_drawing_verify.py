@@ -794,3 +794,119 @@ def test_a_truncated_or_refused_verdict_is_not_a_garbled_one():
         assert status == "UNCERTAIN"
         assert note == expected, (stop, note)
         assert valid is False        # never stored as a settled verdict
+
+
+# --------------------------------------------------------------------------- #
+# Arithmetic provenance survives verification (Phase 25 §17.5, item 24)
+# --------------------------------------------------------------------------- #
+
+
+def _arithmetic_verification(origin: str = "MODEL_TRANSCRIBED") -> Verification:
+    """The verdict the arithmetic auditor hands to verification.
+
+    ``_TERMINAL_STATUSES`` excludes only DETERMINISTIC, so a host computation
+    over operands the *model* transcribed is exactly what gets routed here — the
+    finding whose provenance matters most.
+    """
+    return Verification(
+        status="UNCERTAIN", note="operands transcribed, not text-extracted",
+        computation_method="HOST_DETERMINISTIC", operand_origin=origin,
+    )
+
+
+def test_verify_carries_arithmetic_provenance_through_its_verdict():
+    # Every Verification() this module builds REPLACES the previous one
+    # wholesale and populates neither provenance field, so a crop re-check used
+    # to erase them. That inverted the reviewer's caveat rather than weakening
+    # it: annotate._trust_note reads operand_origin first, so "re-check the math
+    # against the sheet" became the flat "AI-verified against the drawing."
+    from drawing_analyzer.annotate import _trust_note
+
+    finding = _finding("SUM-540", verif=_arithmetic_verification())
+    _run([finding], client=_FakeClient({"SUM-540": '{"verdict":"CONFIRMED","note":"legible"}'}))
+
+    assert finding.verification.status == "VERIFIED"       # the verdict is the crop's
+    assert finding.verification.note == "legible"
+    assert finding.verification.computation_method == "HOST_DETERMINISTIC"
+    assert finding.verification.operand_origin == "MODEL_TRANSCRIBED"
+    assert _trust_note(finding, unverified=False, rejected=False) == (
+        "Computed from numbers as read by the AI - re-check the math against the sheet."
+    )
+
+
+def test_verify_carries_provenance_on_every_exit_not_only_the_verdict():
+    # Ten assignment sites across success, skip, error and abort branches all
+    # reach finding.verification, so provenance is restored at the boundary. The
+    # early "nothing croppable" return is a separate exit and must restore too.
+    # No sheet for this finding's source: skipped inside the work-list loop, so
+    # the function leaves through the "nothing croppable" return.
+    no_sheet = _finding("SUM-A", source="other.pdf", verif=_arithmetic_verification())
+    _run([no_sheet], sheets=[_sheet("s.pdf")], client=_FakeClient({}))
+    assert no_sheet.verification.status == "SKIPPED"
+    assert "sheet not available" in no_sheet.verification.note
+    assert no_sheet.verification.operand_origin == "MODEL_TRANSCRIBED"
+
+    class _Boom(BetaClientMixin):
+        def __init__(self):
+            class _Msgs(StreamingMessagesMixin):
+                def create(_self, **kw):
+                    raise _StatusError(400, "bad request")
+            self.messages = _Msgs()
+
+    errored = _finding("SUM-C", verif=_arithmetic_verification())
+    _run([errored], client=_Boom())
+    assert errored.verification.status == "UNCERTAIN"
+    assert errored.verification.operand_origin == "MODEL_TRANSCRIBED"
+
+
+def test_verify_carries_provenance_through_a_warm_cache_hit():
+    # _cache_verification persists exactly three fields, so a warm hit rebuilds
+    # a Verification with empty provenance. Carrying it forward from the
+    # finding's own prior verdict — not from storage — is why the cache payload
+    # needs no widening and no schema bump.
+    cache = DigestCache(None, persist=False)
+    cold = _finding("SUM-warm", verif=_arithmetic_verification())
+    _run([cold], client=_FakeClient({"SUM-warm": '{"verdict":"CONFIRMED","note":"seen"}'}), cache=cache)
+
+    warm = _finding("SUM-warm", verif=_arithmetic_verification())
+    warm_client = _FakeClient({})
+    result = _run([warm], client=warm_client, cache=cache)
+
+    assert (result.cache_hits, result.api_calls) == (1, 0)
+    assert warm_client.calls == []
+    assert warm.verification.status == "VERIFIED"
+    assert warm.verification.computation_method == cold.verification.computation_method
+    assert warm.verification.operand_origin == cold.verification.operand_origin
+
+
+def test_provenance_is_restored_per_finding_not_across_colliding_ids():
+    # Findings collide on the content-derived ``Finding.id`` routinely (same
+    # sheet, category and quote, different text) — this suite already pins that
+    # elsewhere. So the snapshot is keyed by object identity: keying it by
+    # ``finding.id`` would hand an ordinary model-authored finding the
+    # arithmetic caveat of an unrelated one, and vice versa.
+    from drawing_analyzer.annotate import _trust_note
+
+    computed = _finding("same-quote", verif=_arithmetic_verification())
+    plain = _finding("same-quote")
+    plain.text = "a different problem, same quoted line"
+    assert computed.id == plain.id                      # the collision
+
+    _run([computed, plain], client=_FakeClient({}, default='{"verdict":"CONFIRMED"}'))
+
+    assert computed.verification.operand_origin == "MODEL_TRANSCRIBED"
+    assert plain.verification.computation_method == ""
+    assert plain.verification.operand_origin == ""
+    assert _trust_note(plain, unverified=False, rejected=False) == (
+        "AI-verified against the drawing."
+    )
+
+
+def test_cross_verify_carries_arithmetic_provenance():
+    finding = _cross_finding("SUM-CROSS")
+    finding.verification = _arithmetic_verification("TEXT_EXTRACTED")
+    verify_cross_findings([finding], [], client=_FakeClient({}), model=OPUS)
+
+    assert finding.verification.status == "SKIPPED"
+    assert finding.verification.computation_method == "HOST_DETERMINISTIC"
+    assert finding.verification.operand_origin == "TEXT_EXTRACTED"

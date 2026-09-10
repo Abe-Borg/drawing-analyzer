@@ -932,3 +932,88 @@ def test_effective_task_budget_reports_what_a_request_would_carry():
         assert inv.effective_task_budget() == 0
     finally:
         inv._task_budget_available = True
+
+
+# --------------------------------------------------------------------------- #
+# Arithmetic provenance survives investigation (Phase 25 §17.5)
+# --------------------------------------------------------------------------- #
+
+
+def _computed_finding():
+    """A host arithmetic verdict over operands the model merely transcribed.
+
+    ``auditors/arithmetic`` emits UNCERTAIN for MODEL_TRANSCRIBED operands, and
+    an anchored UNCERTAIN verdict is exactly what ``_candidates`` escalates — so
+    this is the ordinary investigation subject, not a corner case.
+    """
+    f = _finding(text="1500 x 30 does not equal 45000")
+    f.verification = Verification(
+        status="UNCERTAIN", note="operands transcribed, not text-extracted",
+        computation_method="HOST_DETERMINISTIC", operand_origin="MODEL_TRANSCRIBED",
+    )
+    return f
+
+
+def test_investigation_carries_arithmetic_provenance_on_every_outcome(tmp_path):
+    # investigate.py rebuilds the Verification wholesale at each of its three
+    # sites and reads the fields off ``old`` to keep them. Nothing asserted that
+    # until now, and losing them inverts the reviewer's caveat: annotate reads
+    # operand_origin first, so "re-check the math against the sheet" would
+    # become the flat "AI-verified against the drawing."
+    from drawing_analyzer.annotate import _trust_note
+
+    def _concluding(kw, _n):
+        return _verdict() if _tool_result_turns(kw) else _tool_use()
+
+    _res, concluded = _run_one(
+        _LoopClient(_concluding), finding=_computed_finding(), evidence_dir=tmp_path,
+    )
+    assert concluded.verification.status == "VERIFIED"      # the verdict changed
+    assert concluded.verification.investigated is True
+    assert concluded.verification.computation_method == "HOST_DETERMINISTIC"
+    assert concluded.verification.operand_origin == "MODEL_TRANSCRIBED"
+    assert _trust_note(concluded, unverified=False, rejected=False) == (
+        "Computed from numbers as read by the AI - re-check the math against the sheet."
+    )
+
+    def _never(kw, _n):
+        if _tools_callable(kw):
+            return _tool_use(block_id=f"toolu_{_n}")
+        return FakeMessage(content=[FakeTextBlock(text="still cannot decide")],
+                           stop_reason="end_turn", usage=FakeUsage())
+
+    _res, capped = _run_one(_LoopClient(_never), finding=_computed_finding(), max_rounds=2)
+    assert capped.verification.status == "UNCERTAIN"        # a cap never rejects
+    assert capped.verification.computation_method == "HOST_DETERMINISTIC"
+    assert capped.verification.operand_origin == "MODEL_TRANSCRIBED"
+
+
+def test_investigation_cache_replay_carries_arithmetic_provenance(tmp_path):
+    # The cached entry stores the verdict, not the finding's provenance, so the
+    # replay path reads it off ``old`` exactly as the live path does. A warm run
+    # must be byte-identical to the run that populated the cache (I-7).
+    from drawing_analyzer.digest_cache import DigestCache
+
+    cache = DigestCache(None, persist=False)
+
+    def _run(client, evidence_dir):
+        f = _computed_finding()
+        res = investigate_findings(
+            [f], [_Geom(_ref())], client=client, cache=cache,
+            set_fingerprint="fp-math", evidence_dir=evidence_dir,
+            sleep=lambda *_: None, render_fn=_render_fn,
+        )
+        return res, f
+
+    cold_res, cold = _run(_LoopClient(_confirm_responder), tmp_path / "cold")
+    assert cold_res.cache_hits == 0 and cold.verification.status == "VERIFIED"
+
+    def _explode(kw, n):
+        raise AssertionError("warm run must not call the API")
+
+    warm_res, warm = _run(_LoopClient(_explode), tmp_path / "warm")
+    assert warm_res.cache_hits == 1
+    assert (warm.verification.computation_method, warm.verification.operand_origin) == (
+        cold.verification.computation_method, cold.verification.operand_origin,
+    )
+    assert warm.verification.operand_origin == "MODEL_TRANSCRIBED"

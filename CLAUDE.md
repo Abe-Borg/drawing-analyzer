@@ -308,13 +308,41 @@ both the submitted batch and the one that actually served the digests.
   cross-sheet legs — public because the A/B harness's finding-level comparison
   applies the same rule across two runs, and a restated copy is the drift this
   codebase has already paid for once); merging keeps
-  **coherent grounding** (the text/quote/tile bundle is atomic, from one
-  representative chosen by a total quality order; the loser's quote → the new
-  `supporting_quotes`), unions `sources`, keeps most-severe severity, and
-  preserves auditor anchors + `DETERMINISTIC` verdicts. Explicit lifecycle:
+  **coherent grounding** — the text/quote/tile/rect/evidence-state **and the
+  verdict** are one atomic bundle from a single representative, and the loser's
+  quote → `supporting_quotes`. `_grounding_quality` ranks **host-computed
+  provenance first**, above quote length: a `DETERMINISTIC` verdict is a
+  statement about one computation over one quote, so it must not be decided
+  separately from the text it describes. It was, and the auditor holds the
+  *shorter* quote (it quotes only the term it computed over), so the model's
+  "the sum is 560" won the bundle and inherited the host's label — skipping
+  `verify._TERMINAL_STATUSES` and inking as "an exact text check, not an AI
+  judgment". Both quality tuples are computed **before** the severity union,
+  which used to raise the survivor's severity to the max and erase the very
+  difference it feeds (one order saw ranks (3, 2), the reverse (3, 3), and the
+  tiebreak fell to raw text, where `"…560…"` sorts above `"…540…"`). There is
+  deliberately **no** independent verdict adoption and **no** backfill of a
+  loser's verdict onto an empty winner. An unanchored winner never erases a rect
+  that places its own quote. The merge also unions `sources`, keeps most-severe
+  severity, and — when the merged provenance spans two families — raises
+  `reproduced` **and** `confidence` together (`critique.merge_finding_groups`'s
+  rule; the ledger implemented only half of it, so entries read
+  `reproduced=True` beside `confidence=SINGLETON`). Explicit lifecycle:
   `seal()` (OPEN→SEALED) → anchor → `reconcile_post_anchor` (Pass B) →
   `number()` (SEALED→NUMBERED assigns positional `QC-###` **after** anchoring).
-  A post-seal add marks the run incomplete (no `QC-XTRA` masquerade).
+  Pass B's complete-link history comes from `Ledger.member_history`, never a
+  fresh `{id(e): [e]}` map — the live survivor may no longer carry the signature
+  of what it absorbed, and rebuilding from it let Pass B undo a fold Pass A had
+  refused, destroying a conflicting measurement that lived in `text` rather than
+  the quote. Those snapshots are taken **when a merge is about to mutate an
+  entry**, not eagerly at ingest: anchors are resolved after ingest, so an eager
+  copy is a permanently *unanchored* twin of a live entry and `_is_duplicate`'s
+  geometry branch could never fire against it. A post-seal add marks the run
+  incomplete (no `QC-XTRA` masquerade) — including a post-seal **duplicate**,
+  which used to reach neither the counter nor the log because the merge branch
+  returned first, and which is counted and **dropped** rather than merged: it
+  would otherwise rewrite text, quote, id, severity and anchor underneath an
+  already-exported `QC-###`.
   Anchoring, verification, the citation check, the markup writer, the exports,
   and the report consume ledger entries and nothing else.
 - *Edition audit (Phase B):* `citation_check.reconcile_cited_editions` — a
@@ -333,7 +361,19 @@ both the submitted batch and the one that actually served the digests.
   `verify.py` (high-DPI crop re-check → VERIFIED/REJECTED/UNCERTAIN; adaptive
   thinking at medium effort inside an 8k envelope — thinking shares the
   `max_tokens` budget with the answer, and the old 1k cap fit neither, so
-  verdicts came back empty and degraded to UNCERTAIN) →
+  verdicts came back empty and degraded to UNCERTAIN. A verdict **replaces** the
+  status, never the arithmetic provenance behind it: all 18 `Verification(...)`
+  constructions assign wholesale and populate neither `computation_method` nor
+  `operand_origin`, so `_provenance_restorer` snapshots them at each public
+  entry point and restores them at every exit — success, skip, error, abort and
+  warm-cache alike. Restoring at the boundary rather than at the ten assignment
+  sites is deliberate: patching those leaves the next branch someone adds to
+  reintroduce it silently. Losing them *inverted* the reviewer's caveat, since
+  `annotate._trust_note` reads `operand_origin` first — "re-check the math
+  against the sheet" became "AI-verified against the drawing" — and the exposure
+  is precisely targeted, because `auditors/arithmetic` emits UNCERTAIN for
+  `MODEL_TRANSCRIBED` operands while only DETERMINISTIC is terminal here.
+  `investigate.py` carries both fields forward at its own three sites) →
   `investigate.py` (Phase C: a host-driven client-tool loop escalating each
   anchored UNCERTAIN verdict — the model requests evidence via `crop_region`
   / zero-API `find_text` / `view_sheet`, every image saved-before-send into
