@@ -924,49 +924,104 @@ def find_clear_band(
 
 def _clear_bands(
     words: list[Any], page_w: float, page_h: float,
-    *, max_height: float = 170.0, min_height: float = _CALLOUT_H + 4.0,
+    *, max_height: float = 170.0, min_height: float = _CALLOUT_H,
 ) -> list[tuple[float, float, float, float]]:
-    """Every text-free horizontal band inside the sheet border, tallest first.
+    """Every word-free band a callout can sit in, tallest first.
 
-    The plural generalization of :func:`find_clear_band`: a band is a y-range that
-    no word occupies at any x (so packing inside one can never overlap a word),
-    each at least one callout tall. Occupancy of *non-text* ink (piping, symbols,
-    raster) is checked separately at pack time — a text-free band is not
-    automatically visually clear (§17.6).
+    The plural generalization of :func:`find_clear_band`. Occupancy of *non-text*
+    ink (piping, symbols, raster) is checked separately at pack time — a text-free
+    band is not automatically visually clear (§17.6).
+
+    ``min_height`` is the minimum height of a **returned** band, i.e. after the
+    breathing pad is taken off (N24). It used to be checked against the raw gap
+    with the pad applied afterwards, so a gap that passed at 58 pt came back as a
+    50 pt band that :func:`_pack_callouts` could never use — its guard is
+    ``y + _CALLOUT_H <= band_bottom`` — and every finding that would have gone
+    there overflowed to the review-notes page instead. Measured: gaps of 58 and
+    60 pt yielded 50 and 52 pt bands against a 54 pt callout.
+
+    Bands are also **column-aware** (N24). A band used to be a y-range no word
+    occupied at *any* x, which is close to unobtainable on a real drawing: a
+    right-hand title block spans almost the full sheet height, so on a 1728x1188
+    sheet with a title block at y 60..1050 exactly **one** full-width band was
+    found, and the entire 1448x990 pt clear drawing area beside it was unusable.
+    Callouts overflowed off a sheet with room to spare.
+
+    So the page is also considered in vertical columns, and a column's bands are
+    computed from only those words that actually intersect that column in x. The
+    word-free guarantee still holds exactly — a word that misses the column in x
+    cannot overlap a box inside it, and one that does not was excluded from the
+    gap — which is what lets :func:`_pack_callouts` keep skipping its per-candidate
+    word scan. Full-width bands are generated **first** and sorting is by height,
+    so a wide clear strip is still preferred and the previous behaviour is a
+    subset of this one.
     """
     inset_x = 0.03 * page_w
     inset_y = 0.02 * page_h
     top, bottom = inset_y, page_h - inset_y
-    intervals: list[tuple[float, float]] = []
-    for w in words or []:
-        y0, y1 = float(w[1]), float(w[3])
-        if y1 <= top or y0 >= bottom:
-            continue
-        intervals.append((max(y0, top), min(y1, bottom)))
-    intervals.sort()
-    merged: list[list[float]] = []
-    for y0, y1 in intervals:
-        if merged and y0 <= merged[-1][1]:
-            merged[-1][1] = max(merged[-1][1], y1)
-        else:
-            merged.append([y0, y1])
-    gaps: list[tuple[float, float]] = []
-    prev = top
-    for y0, y1 in merged:
-        if y0 > prev:
-            gaps.append((prev, y0))
-        prev = max(prev, y1)
-    if bottom > prev:
-        gaps.append((prev, bottom))
+    left, right = inset_x, page_w - inset_x
+
+    def bands_in_column(cx0: float, cx1: float) -> "list[tuple[float, float, float, float]]":
+        intervals: list[tuple[float, float]] = []
+        for w in words or []:
+            y0, y1 = float(w[1]), float(w[3])
+            if y1 <= top or y0 >= bottom:
+                continue
+            # Only words that actually intersect this column can obstruct it.
+            if float(w[2]) <= cx0 or float(w[0]) >= cx1:
+                continue
+            intervals.append((max(y0, top), min(y1, bottom)))
+        intervals.sort()
+        merged: list[list[float]] = []
+        for y0, y1 in intervals:
+            if merged and y0 <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], y1)
+            else:
+                merged.append([y0, y1])
+        gaps: list[tuple[float, float]] = []
+        prev = top
+        for y0, y1 in merged:
+            if y0 > prev:
+                gaps.append((prev, y0))
+            prev = max(prev, y1)
+        if bottom > prev:
+            gaps.append((prev, bottom))
+        out: list[tuple[float, float, float, float]] = []
+        for g0, g1 in gaps:
+            pad = min(4.0, (g1 - g0) / 10.0)
+            y0 = g0 + pad
+            y1 = min(g1 - pad, y0 + max_height)
+            if y1 - y0 < min_height:      # gate the PADDED band, not the raw gap
+                continue
+            out.append((cx0, y0, cx1, y1))
+        return out
+
+    # The full width first — the best placement when it exists — then columns wide
+    # enough to hold a callout. One column per callout width keeps the band count
+    # bounded (about seven on an E-size sheet).
+    columns: list[tuple[float, float]] = [(left, right)]
+    usable_w = right - left
+    col_w = _CALLOUT_W + _CALLOUT_GAP
+    if usable_w >= 2.0 * col_w:
+        n_cols = int(usable_w // col_w)
+        step = usable_w / n_cols
+        columns.extend(
+            (left + i * step, left + (i + 1) * step) for i in range(n_cols)
+        )
+
     bands: list[tuple[float, float, float, float]] = []
-    for g0, g1 in gaps:
-        if g1 - g0 < min_height:
+    seen: set[tuple[int, int, int, int]] = set()
+    for cx0, cx1 in columns:
+        if cx1 - cx0 < _CALLOUT_W:
             continue
-        pad = min(4.0, (g1 - g0) / 10.0)
-        y0 = g0 + pad
-        y1 = min(g1 - pad, y0 + max_height)
-        bands.append((inset_x, y0, page_w - inset_x, y1))
-    bands.sort(key=lambda b: b[3] - b[1], reverse=True)
+        for band in bands_in_column(cx0, cx1):
+            key = tuple(int(round(v)) for v in band)
+            if key in seen:                       # a column that reproduces the full width
+                continue
+            seen.add(key)
+            bands.append(band)
+    # Tallest first, then left-to-right / top-down for deterministic assembly (I-7).
+    bands.sort(key=lambda b: (-(b[3] - b[1]), b[1], b[0]))
     return bands
 
 
@@ -980,25 +1035,94 @@ def _rect_overlaps_any(
     return False
 
 
-def _page_occupancy(page: "pymupdf.Page", *, scale: float = 0.12):
-    """A ``occupied(view_rect) -> bool`` sampler over a low-res render of the page.
+# Occupancy sampling constants (P7 item 29). Every one of these was chosen by
+# measurement on an E-size (1728x1188 pt) sheet; see :func:`_page_occupancy`.
+_OCCUPANCY_SCALE = 1.0            # a hairline is only genuinely dark at 1:1
+_OCCUPANCY_CELL_PT = 8.0          # min-filter cell, in POINTS (scale-invariant)
+_OCCUPANCY_DARK_LEVEL = 210       # a sample below this is ink
+_OCCUPANCY_MIN_INKED_FRAC = 0.005  # inked-cell fraction that means "occupied"
+#: OOM guard only. A page so large that 1:1 would blow past this is sampled
+#: coarser, which costs thin-line sensitivity — the one case where this sampler
+#: degrades back toward the old behaviour, so it is a guard, not a tuning knob.
+_OCCUPANCY_MAX_PIXELS = 40_000_000
 
-    A candidate callout box is "occupied" when a meaningful fraction of its area
-    is non-white ink — catching the piping/symbols/vector-schedule/raster content
-    a text-free band can still sit on (§17.6). The pixmap is rendered **lazily** on
-    the first query (so a page with no clear band to pack into never renders one),
-    in the page's rotated **view** space (``page.rect`` dims == PAGE_VIEW_V2), so a
-    view-space box maps to pixels by ``* scale`` with no derotation. If rendering
-    fails the sampler degrades to *never occupied* (callouts still avoid words),
-    so occupancy analysis is additive and non-fatal (I-3).
+
+def _page_occupancy(
+    page: "pymupdf.Page",
+    *,
+    scale: float = _OCCUPANCY_SCALE,
+    cell_pt: float = _OCCUPANCY_CELL_PT,
+):
+    """A ``occupied(view_rect) -> bool`` sampler over a render of the page.
+
+    A candidate callout box is "occupied" when enough of it carries non-white ink
+    — catching the piping/symbols/vector-schedule/raster content a text-free band
+    can still sit on (§17.6). The pixmap is rendered **lazily** on the first query
+    (so a page with no clear band to pack into never renders one), in the page's
+    rotated **view** space (``page.rect`` dims == PAGE_VIEW_V2), so a view-space
+    box maps to pixels by ``* scale`` with no derotation. If rendering fails the
+    sampler degrades to *never occupied* (callouts still avoid words), so
+    occupancy analysis is additive and non-fatal (I-3).
+
+    **Why a min-filter over cells, and why 1:1 (P7 item 29).** The shipped
+    sampler rendered at 0.12 and asked what fraction of the box's *pixels* were
+    dark. Both halves failed on real drawings, and measured on an E-size sheet:
+
+    * At 0.12 a 0.5 pt pipe line covers an eighth of a pixel, so antialiasing
+      returns roughly 223 — *lighter* than the 210 ink threshold. A single
+      sprinkler main across a band scored **0.0000** and the band was declared
+      clear, so the callout was stamped over the piping.
+    * Raising the scale does not fix it, which is the counter-intuitive part: the
+      verdict is **non-monotonic** in scale, because a thin line's pixel count
+      grows linearly while the box's grows quadratically, so the *fraction* falls
+      even as the line becomes visible. One 1 pt line measured clear at 0.12 and
+      0.25, occupied at 0.5, and clear again at 1.0; three 0.5 pt branch lines
+      measured occupied at 0.25 but clear at 0.5, purely on pixel-grid alignment.
+
+    So sensitivity comes from sampling at 1:1, where a hairline really is dark,
+    and stability comes from replacing the pixel fraction with a **min-filter**:
+    the box is divided into cells measured in *points*, a cell counts as inked if
+    **any** pixel in it is dark, and the verdict is the fraction of inked cells.
+    A hairline becomes a solid run of inked cells (7% of a band, well clear of the
+    0.5% floor) while isolated scanner dirt stays one cell each. Measured across
+    eleven contents — blank, a faint 0.93 grey wash, 400 dots of scan speckle, a
+    0.5 pt line, a 1 pt line, a diagonal, three branch lines, ten sprinkler head
+    symbols, 160 hatch lines, and a solid block — this configuration is correct on
+    all eleven, where the shipped one was wrong on five.
+
+    Cost is not the reason the old scale was low: rendering an E-size page at 1:1
+    measures **~1 ms**, and one query ~3 ms.
+
+    **Known limit, stated rather than papered over.** The metric is relative to
+    box area, so an *isolated short* stub is not detected: in a 1340x110 pt band a
+    0.5 pt line is caught from ~100 pt of length, and below that it lands in the
+    same range as heavy speckle (~2,000 isolated dots in one band), so no
+    threshold separates them. Closing that needs run-length/contiguity analysis
+    and is deliberately **not** done here. Words are avoided separately, and a
+    band this empty is the least harmful place to be wrong.
     """
     state: dict[str, Any] = {}
 
-    def occupied(view_rect, *, dark_frac: float = 0.02, dark_level: int = 210) -> bool:
+    def occupied(
+        view_rect,
+        *,
+        min_inked_frac: float = _OCCUPANCY_MIN_INKED_FRAC,
+        dark_level: int = _OCCUPANCY_DARK_LEVEL,
+    ) -> bool:
         if "pix" not in state:
             try:
+                eff = float(scale)
+                rect = page.rect
+                budget = max(1.0, float(rect.width) * float(rect.height))
+                if budget * eff * eff > _OCCUPANCY_MAX_PIXELS:
+                    eff = (_OCCUPANCY_MAX_PIXELS / budget) ** 0.5
+                    _log.info(
+                        "page too large for 1:1 occupancy sampling; using scale "
+                        "%.3f (thin-line sensitivity is reduced)", eff,
+                    )
+                state["scale"] = eff
                 state["pix"] = page.get_pixmap(
-                    matrix=pymupdf.Matrix(scale, scale), colorspace=pymupdf.csGRAY, alpha=False
+                    matrix=pymupdf.Matrix(eff, eff), colorspace=pymupdf.csGRAY, alpha=False
                 )
             except Exception:  # noqa: BLE001 - occupancy is a refinement, never fatal
                 _log.debug("occupancy render failed; callouts fall back to word-avoidance")
@@ -1006,20 +1130,26 @@ def _page_occupancy(page: "pymupdf.Page", *, scale: float = 0.12):
         pix = state["pix"]
         if pix is None:
             return False                         # render unavailable → word-avoidance only
+        eff = float(state.get("scale") or scale)
         w, h, samples = pix.width, pix.height, pix.samples
-        x0 = max(0, int(view_rect[0] * scale)); y0 = max(0, int(view_rect[1] * scale))
-        x1 = min(w, int(view_rect[2] * scale)); y1 = min(h, int(view_rect[3] * scale))
+        x0 = max(0, int(view_rect[0] * eff)); y0 = max(0, int(view_rect[1] * eff))
+        x1 = min(w, int(view_rect[2] * eff)); y1 = min(h, int(view_rect[3] * eff))
         if x1 <= x0 or y1 <= y0:
             return True                          # off-render / degenerate → unsafe
-        total = 0
-        dark = 0
-        for yy in range(y0, y1):
-            base = yy * w
-            for xx in range(x0, x1):
-                total += 1
-                if samples[base + xx] < dark_level:
-                    dark += 1
-        return total > 0 and dark / total >= dark_frac
+        step = max(1, int(round(float(cell_pt) * eff)))
+        inked = cells = 0
+        for cy in range(y0, y1, step):
+            y_end = min(cy + step, y1)
+            for cx in range(x0, x1, step):
+                cells += 1
+                x_end = min(cx + step, x1)
+                for yy in range(cy, y_end):
+                    base = yy * w
+                    # ``min`` over the row slice is the min-filter, at C speed.
+                    if min(samples[base + cx: base + x_end]) < dark_level:
+                        inked += 1
+                        break
+        return cells > 0 and inked / cells >= min_inked_frac
 
     return occupied
 

@@ -456,6 +456,20 @@ def _refs_in(text: str) -> set[int]:
     return {int(match.group(1)) for match in _XREF_REF_RE.finditer(text or "")}
 
 
+def _is_page_object(doc: "pymupdf.Document", xref: int) -> bool:
+    """Whether ``xref`` is a ``/Type /Page`` dictionary (N23's opaque leaf test).
+
+    A lookup failure answers **False**, which keeps the object in the dependency
+    walk — the conservative direction, since an extra dependency can only cause a
+    false miss, never a false hit.
+    """
+    try:
+        kind, value = doc.xref_get_key(int(xref), "Type")
+    except Exception:  # noqa: BLE001 - a malformed object is walked, not trusted
+        return False
+    return kind == "name" and str(value).strip() == "/Page"
+
+
 def _page_dependency_sha256(
     page: "pymupdf.Page",
     whole_source_sha256: str,
@@ -465,7 +479,10 @@ def _page_dependency_sha256(
 
     The page-tree ``/Parent`` is handled specially: traversing it wholesale reaches
     ``/Kids`` and makes every sibling page a dependency.  We instead hash the page
-    dictionary and resolve only its effective inherited rendering attributes.  All
+    dictionary and resolve only its effective inherited rendering attributes.  Any
+    *other* ``/Type /Page`` object reached transitively — a GOTO link's destination
+    — is an opaque leaf for the same reason (N23): its own ``/Parent`` is not
+    stripped, so walking into it reaches ``/Kids`` by the back door.  All
     other references are walked transitively, including streams, fonts, images,
     forms, annotations and appearance streams.  Document globals that influence
     rendering are included too.  Any uncertainty safely falls back to the supplied
@@ -559,6 +576,27 @@ def _page_dependency_sha256(
                 )
                 object_cache[xref] = cached_object
             object_hash, object_refs = cached_object
+            # Another /Type /Page reached transitively is an OPAQUE LEAF (N23).
+            # A GOTO link annot carries a reference to its destination page, and
+            # that page's /Parent is not stripped the way this page's is — so the
+            # walk reached the page-tree root, /Kids, and from there every sibling
+            # page in the set. Measured on a 3-page file with one cross-sheet
+            # navigation link on page 0: editing page 2 changed page 0's identity,
+            # so a set with the internal hyperlinks an issued PDF normally carries
+            # lost per-page caching entirely and re-digested every sheet whenever
+            # any one was re-exported.
+            #
+            # Nothing about the destination is hashed here, and it does not need
+            # to be: a GOTO target cannot change this page's pixels, and the
+            # reference itself already rides the hash inside the referencing annot
+            # object, so retargeting the link still moves the key (asserted). A
+            # shared rendering resource is referenced from this page's /Resources
+            # directly, never through a page object, so nothing that does affect
+            # these pixels is dropped — no false hit, and one fewer false miss.
+            # A `pageref:` marker was tried here and dropped: no test could catch
+            # its removal, because the referencing object covers it already.
+            if xref != page_xref and _is_page_object(doc, xref):
+                continue
             digest.update(f"xref:{xref}\0".encode("ascii"))
             digest.update(object_hash)
             digest.update(b"\0")
