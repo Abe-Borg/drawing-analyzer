@@ -722,3 +722,94 @@ def test_identical_note_on_two_pages_of_one_source_stays_two_items():
     res = harvest_prose(ledger, [p0, p1], [_Geom("M.pdf", 0), _Geom("M.pdf", 1)],
                         client=None, sleep=lambda *_: None)
     assert res.items == 2 and res.missing == 0 and len(ledger) == 2
+
+
+# --------------------------------------------------------------------------- #
+# The prose boilerplate filter must not eat real findings (P8 item 6)
+#
+# _TRIVIAL_RE anchored only at the START, so any finding that OPENED with
+# No/None/Nothing/N/A was discarded as section filler — and an absence finding
+# naturally opens that way. The 20-char floor discarded terse real findings too,
+# and neither drop was counted, so `missing` read 0 and `complete` returned True
+# over the loss.
+# --------------------------------------------------------------------------- #
+
+_REAL_FINDINGS_THAT_OPEN_LIKE_BOILERPLATE = [
+    "None of the sprinkler heads under the duct have clearance shown",
+    "No conflicts were resolved between M-101 and FP-101; both remain open",
+    "Nothing on this sheet shows the drain size for the 6 inch main",
+    "N/A per the mechanical schedule, but the FP drawings require a 4 inch drain",
+    "No issues flagged earlier are addressed by the revised riser diagram",
+]
+
+_TERSE_REAL_FINDINGS = [
+    "Drain is undersized",
+    "6 inch drain wrong",
+    "VAV-3 blocks duct",
+    "No clearance",
+]
+
+_GENUINE_BOILERPLATE = [
+    "None noted.", "N/A", "N/A.", "None", "none", "None found",
+    "No conflicts.", "No conflicts noted", "No issues identified",
+    "No discrepancies noted", "Nothing to report.", "Nothing at this time",
+]
+
+
+def test_findings_that_open_like_boilerplate_are_kept():
+    from drawing_analyzer.prose_harvest import extract_prose_items
+
+    for finding in _REAL_FINDINGS_THAT_OPEN_LIKE_BOILERPLATE:
+        items = extract_prose_items(f"**Coordination**\n- {finding}")
+        assert [i for _tag, i in items] == [finding], (
+            f"dropped as boilerplate: {finding!r}"
+        )
+
+
+def test_terse_findings_survive_the_length_floor():
+    from drawing_analyzer.prose_harvest import extract_prose_items
+
+    for finding in _TERSE_REAL_FINDINGS:
+        items = extract_prose_items(f"**Coordination**\n- {finding}")
+        assert [i for _tag, i in items] == [finding], f"dropped as too short: {finding!r}"
+
+
+def test_genuine_boilerplate_is_still_dropped():
+    # The recall side of the fix: loosening the filter must not start harvesting
+    # section filler as findings.
+    from drawing_analyzer.prose_harvest import extract_prose_items
+
+    for filler in _GENUINE_BOILERPLATE:
+        items = extract_prose_items(f"**Coordination**\n- {filler}")
+        assert items == [], f"harvested filler as a finding: {filler!r}"
+
+
+def test_filtered_prose_lines_are_counted():
+    # `expected` is built from the items that SURVIVED the filter, so a dropped
+    # line never entered the count and `missing` read 0. The count is
+    # observational — it must not claim the run lost a finding — but it has to
+    # exist, or a filter that eats real findings looks like a clean run.
+    from drawing_analyzer.prose_harvest import count_filtered_prose_lines
+
+    assert count_filtered_prose_lines("**Coordination**\n- None noted.") == 1
+    assert count_filtered_prose_lines(
+        "**Coordination**\n- None noted.\n- N/A\n- No conflicts."
+    ) == 3
+    # A real finding is not counted as filtered.
+    assert count_filtered_prose_lines(
+        "**Coordination**\n- None of the sprinkler heads under the duct have clearance"
+    ) == 0
+    # Sections that are not harvested are not counted either.
+    assert count_filtered_prose_lines("**Summary**\n- None noted.") == 0
+
+
+def test_filtered_count_does_not_feed_completeness():
+    # A filtered line is section filler, not a lost finding: counting it against
+    # `complete` would make every clean run incomplete.
+    from drawing_analyzer.prose_harvest import HarvestResult
+
+    result = HarvestResult()
+    result.filtered = 5
+    assert result.missing == 0
+    assert result.complete is True
+    assert result.accounting()["filtered"] == 5

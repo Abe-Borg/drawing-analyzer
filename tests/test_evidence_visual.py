@@ -632,4 +632,8 @@ def test_the_prompt_edit_supplies_the_invalidation():
 
 
 def test_contract_counter_is_not_bumped_by_this_package():
-    assert X._CROSS_QC_CACHE_CONTRACT == 2
+    # 3, not 2, because P8 item 11 bumped it for its own reason (the `_norm_id`
+    # fold — host-side binding that no key input covers). WP-03B added nothing to
+    # it, which is what this tripwire keeps honest: a bump has to be justified
+    # here before the value moves again.
+    assert X._CROSS_QC_CACHE_CONTRACT == 3

@@ -121,10 +121,34 @@ def _resolve_harvest_workers(max_workers: int | None, total: int) -> int:
 _LIST_ITEM_RE = re.compile(r"^(\s*)(?:[-*+•]|\d+[.)])\s+(.*)$")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.;])\s+(?=[A-Z0-9(])")
 # Items that are section boilerplate, not findings ("None noted.", "N/A").
+#
+# Anchored at BOTH ends (P8 item 6). The old pattern anchored only at the start,
+# so any real finding that *opened* with one of these words was discarded as
+# boilerplate — and an absence finding naturally opens that way. All five of these
+# realistic phrasings were being dropped:
+#
+#   "None of the sprinkler heads under the duct have clearance shown"
+#   "No conflicts were resolved between M-101 and FP-101; both remain open"
+#   "Nothing on this sheet shows the drain size for the 6 inch main"
+#   "N/A per the mechanical schedule, but the FP drawings require a 4 inch drain"
+#   "No issues flagged earlier are addressed by the revised riser diagram"
+#
+# Now the whole item must be the boilerplate phrase plus at most a short
+# closing word, so "None noted." still goes and "None of the sprinkler heads…"
+# stays.
 _TRIVIAL_RE = re.compile(
-    r"^\W*(none|n/?a|no (conflicts?|issues?|items?|discrepanc)|nothing)\b", re.I
+    r"^\W*(?:none|n/?a|nothing"
+    r"|no\s+(?:conflicts?|issues?|items?|discrepanc\w*|notes?|findings?))"
+    r"(?:\s+(?:noted|found|reported|identified|observed|apparent"
+    r"|to\s+report|at\s+this\s+time|on\s+this\s+sheet))?"
+    r"\W*$",
+    re.I,
 )
-_MIN_ITEM_CHARS = 20
+# A floor low enough to keep a terse real finding. At 20 it discarded
+# "Drain is undersized" (19), "6 inch drain wrong" (18), "VAV-3 blocks duct" (17)
+# and "No clearance" (12); the boilerplate filter above, not a length guess, is
+# what removes section filler, so this only has to stop single-token fragments.
+_MIN_ITEM_CHARS = 8
 
 # Synthesis harvest keeps conflict statements only (§17): an item must carry one
 # of these signals (mirrors the report's conflict classification keywords).
@@ -149,7 +173,7 @@ def harvest_model() -> str:
 # --------------------------------------------------------------------------- #
 
 
-def _split_items(body: str) -> list[str]:
+def _split_items(body: str) -> "tuple[list[str], int]":
     """Discrete items from one section body: list markers, else sentences."""
     lines = (body or "").replace("\r\n", "\n").split("\n")
     items: list[str] = []
@@ -172,7 +196,8 @@ def _split_items(body: str) -> list[str]:
     if not saw_marker:
         text = " ".join(l.strip() for l in lines if l.strip())
         items = [s.strip() for s in _SENTENCE_SPLIT_RE.split(text) if s.strip()]
-    return [i for i in items if len(i) >= _MIN_ITEM_CHARS and not _TRIVIAL_RE.match(i)]
+    kept = [i for i in items if len(i) >= _MIN_ITEM_CHARS and not _TRIVIAL_RE.match(i)]
+    return kept, len(items) - len(kept)
 
 
 def extract_prose_items(digest_text: str) -> list[tuple[str, str]]:
@@ -188,8 +213,34 @@ def extract_prose_items(digest_text: str) -> list[tuple[str, str]]:
         if category not in ("coordination", "conflict"):
             continue
         tag = f"digest_prose_{category}"
-        out.extend((tag, item) for item in _split_items(body))
+        out.extend((tag, item) for item in _split_items(body)[0])
     return out
+
+
+def count_filtered_prose_lines(digest_text: str) -> int:
+    """How many Coordination/Conflict prose lines the filter removed (P8 item 6).
+
+    Purely **observational** — the same contract as WP-02 §7.2's cross-QC discard
+    counters. It feeds the harvest accounting so a run can state how much the
+    boilerplate/length filter took, and it deliberately feeds neither ``missing``
+    nor ``complete``: a line this filter removes is section filler, not a finding
+    that went astray, so counting it as a loss would make every clean run
+    incomplete.
+
+    It exists because the reconcile in :func:`harvest_prose_findings` builds
+    ``expected`` from the items that already **survived** the filter, so a dropped
+    line never entered the count, ``missing`` read 0 and ``complete`` returned True
+    over a real loss. That is precisely what let the unanchored boilerplate regex
+    discard genuine findings unnoticed. Routed through the same
+    :func:`_split_items` as the harvest, so the two can never disagree about what
+    "filtered" means.
+    """
+    total = 0
+    for header, body in split_into_sections(digest_text or ""):
+        if classify_section(header) not in ("coordination", "conflict"):
+            continue
+        total += _split_items(body)[1]
+    return total
 
 
 def extract_focus_items(digest_text: str) -> list[str]:
@@ -200,7 +251,7 @@ def extract_focus_items(digest_text: str) -> list[str]:
             continue
         if "nothing relevant to the focus" in (body or "").lower():
             continue
-        out.extend(_split_items(body))
+        out.extend(_split_items(body)[0])
     return out
 
 
@@ -219,7 +270,7 @@ def extract_synthesis_conflicts(
     if not ids or not (synthesis_text or "").strip():
         return []
     out: list[tuple[str, list[str]]] = []
-    for item in _split_items(synthesis_text):
+    for item in _split_items(synthesis_text)[0]:
         low = item.lower()
         if not any(sig in low for sig in _CONFLICT_SIGNALS):
             continue
@@ -245,7 +296,7 @@ def extract_set_level_synthesis_conflicts(
     if not (synthesis_text or "").strip():
         return []
     out: list[str] = []
-    for item in _split_items(synthesis_text):
+    for item in _split_items(synthesis_text)[0]:
         low = item.lower()
         if not any(sig in low for sig in _CONFLICT_SIGNALS):
             continue
@@ -526,6 +577,13 @@ class HarvestResult:
     excluded_focus: int = 0   # focus items present but intentionally not harvested
     skipped: int = 0          # retained for back-compat (nothing is dropped now)
     missing: int = 0          # enumerated items with NO ledger entry after reconcile
+    #: Prose lines the boilerplate/length filter removed before enumeration
+    #: (P8 item 6). Observational only — see :func:`count_filtered_prose_lines`:
+    #: it feeds neither ``missing`` nor ``complete``, because filler is not a lost
+    #: finding. It is recorded because ``expected`` is built from what SURVIVED
+    #: the filter, so without this a filter that ate real findings still reported
+    #: ``missing == 0``.
+    filtered: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
     cache_hits: int = 0
@@ -555,6 +613,7 @@ class HarvestResult:
             "excluded_focus": self.excluded_focus,
             "skipped": self.skipped,
             "missing": self.missing,
+            "filtered": self.filtered,
             "complete": self.complete,
         }
 
@@ -716,6 +775,7 @@ def _enumerate_pending(
         sid_label = display_id_of(ref)
         sheet_text = sheet_text_of(ref)
         counters: dict[str, int] = {}
+        result.filtered += count_filtered_prose_lines(sd.text)
         for tag, item in extract_prose_items(sd.text):
             ordinal = counters.get(tag, 0)
             counters[tag] = ordinal + 1
@@ -1026,8 +1086,8 @@ def harvest_prose(
 
     _log.info(
         "prose harvest: %d item(s) — %d matched, %d structured, %d degraded, "
-        "%d set-level, %d excluded-focus, %d MISSING",
+        "%d set-level, %d excluded-focus, %d filtered, %d MISSING",
         result.items, result.matched, result.structured, result.degraded,
-        result.set_level, result.excluded_focus, result.missing,
+        result.set_level, result.excluded_focus, result.filtered, result.missing,
     )
     return result

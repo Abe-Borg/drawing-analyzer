@@ -66,6 +66,7 @@ from .digest import (
     parse_numeric_claims,
 )
 from .digest_cache import critique_cache_key
+from .auditors.sheet_ids import fold_text
 from .models import (
     CONFIDENCE_NOT_APPLICABLE,
     CONFIDENCE_NOT_ASSESSED_PARTIAL,
@@ -555,9 +556,17 @@ def _is_absence(f: Finding) -> bool:
 
 
 def _leg_targets(f: Finding) -> frozenset:
-    """The set of sheets a cross-sheet finding also touches (its ``also_on`` legs)."""
+    """The set of sheets a cross-sheet finding also touches (its ``also_on`` legs).
+
+    Folded through :func:`auditors.sheet_ids.fold_text` for the same reason
+    ``cross_qc._norm_id`` is (P8 item 11), and it has to be the **same** fold: this
+    set feeds ``critical_signature["leg_targets"]``, which decides whether two
+    findings may merge. If the two normalizations disagree, cross-QC resolves a
+    leg that the ledger then refuses to recognise as the same leg — one sheet id
+    meaning two different things inside one run.
+    """
     return frozenset(
-        (leg.sheet_id or "").strip().upper()
+        fold_text((leg.sheet_id or "").strip()).upper()
         for leg in (getattr(f, "also_on", None) or [])
         if (leg.sheet_id or "").strip()
     )

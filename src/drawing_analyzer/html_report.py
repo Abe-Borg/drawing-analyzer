@@ -288,7 +288,13 @@ def _render_inline(text: str) -> str:
     placeholders *before* bold/italic so a ``*`` inside backticks is never
     treated as emphasis, then restored.
     """
-    escaped = html.escape(text, quote=False)
+    # NUL is stripped on entry (P8 item 39). The code-span placeholder below is
+    # "\x00C<index>\x00", so a NUL arriving in the digest text — a UTF-16 spec read
+    # as bytes will do it, and the model can emit one — forges a placeholder and
+    # the restore step raised IndexError, taking the whole report block with it.
+    # NUL is never legitimate display text, so removing it is lossless here and
+    # makes the placeholder scheme unforgeable rather than merely guarded.
+    escaped = html.escape((text or "").replace("\x00", ""), quote=False)
 
     codes: list[str] = []
 
@@ -301,7 +307,13 @@ def _render_inline(text: str) -> str:
     out = _ITALIC_RE.sub(r"<em>\1</em>", out)
 
     def _restore_code(m: re.Match[str]) -> str:
-        return codes[int(m.group(1))]
+        # Bounds-checked as well as unforgeable: the entry strip above is the root
+        # fix, and this keeps a future change to the placeholder scheme from
+        # turning one odd character back into a lost report block.
+        index = int(m.group(1))
+        if 0 <= index < len(codes):
+            return codes[index]
+        return m.group(0)
 
     return re.sub(r"\x00C(\d+)\x00", _restore_code, out)
 

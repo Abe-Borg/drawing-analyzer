@@ -632,3 +632,101 @@ def test_pipeline_specs_under_budget_produces_no_warning(tmp_path):
         project_specifications=BEAM_SPEC,
     )
     assert ctx.errors == []
+
+
+# --------------------------------------------------------------------------- #
+# Encoding, merged cells, and running heads (N9)
+# --------------------------------------------------------------------------- #
+
+_SPEC_TEXT = "SECTION 21 13 13\nWET-PIPE SPRINKLER SYSTEMS\nNFPA 13 (2025) applies.\n"
+
+
+def test_text_specs_decode_whatever_windows_wrote(tmp_path):
+    # read_text(encoding="utf-8", errors="replace") mishandled two shapes Windows
+    # tooling produces constantly: a UTF-8 BOM left \\ufeff on the front so the
+    # first line read as "\\ufeffSECTION 21 13 13" and no section-header match could
+    # fire, and UTF-16 came back as mojibake studded with NUL bytes.
+    from drawing_analyzer.spec_documents import _extract_plain_text
+
+    cases = {
+        "utf-8": _SPEC_TEXT.encode("utf-8"),
+        "utf-8-sig": _SPEC_TEXT.encode("utf-8-sig"),
+        "utf-16 (LE + BOM)": _SPEC_TEXT.encode("utf-16"),
+        "utf-16-le (no BOM)": _SPEC_TEXT.encode("utf-16-le"),
+        "utf-16-be (no BOM)": _SPEC_TEXT.encode("utf-16-be"),
+    }
+    for label, data in cases.items():
+        path = tmp_path / "spec.txt"
+        path.write_bytes(data)
+        text = _extract_plain_text(path)
+        assert text.startswith("SECTION 21 13 13"), f"{label}: {text[:40]!r}"
+        assert "NFPA 13 (2025)" in text, label
+        # A NUL here would also reach the HTML report's inline renderer (item 39).
+        assert "\x00" not in text, label
+
+
+def test_utf8_content_that_merely_contains_a_stray_nul_is_not_read_as_utf16(tmp_path):
+    # The sniff is a density test, not "any NUL", so one stray byte in an
+    # otherwise-UTF-8 spec must not flip the whole decode.
+    from drawing_analyzer.spec_documents import _extract_plain_text
+
+    path = tmp_path / "spec.txt"
+    path.write_bytes(b"SECTION 21 13 13\x00\nWET-PIPE SPRINKLER SYSTEMS\n" + b"x" * 400)
+    text = _extract_plain_text(path)
+    assert text.startswith("SECTION 21 13 13")
+    assert "WET-PIPE SPRINKLER SYSTEMS" in text
+
+
+def test_merged_table_cell_is_not_repeated_per_column(tmp_path):
+    # row.cells yields one entry per GRID column, so a merged cell repeats once per
+    # column it spans: a 3-column merged heading came out three times, inflating the
+    # prompt with text the spec says once.
+    docx = pytest.importorskip("docx")
+    from drawing_analyzer.spec_documents import _extract_docx_text
+
+    doc = docx.Document()
+    table = doc.add_table(rows=2, cols=3)
+    table.cell(0, 0).text = "HAZARD CLASSIFICATION"
+    table.cell(0, 0).merge(table.cell(0, 2))
+    table.cell(1, 0).text = "OH-2"
+    table.cell(1, 1).text = "0.20 gpm/sf"
+    table.cell(1, 2).text = "1500 sf"
+    path = tmp_path / "spec.docx"
+    doc.save(str(path))
+
+    text = _extract_docx_text(path)
+    assert text.count("HAZARD CLASSIFICATION") == 1, text
+    # The unmerged row keeps all three distinct cells.
+    assert "OH-2 | 0.20 gpm/sf | 1500 sf" in text
+
+
+def test_section_headers_and_footers_are_read(tmp_path):
+    # A spec's section number frequently lives ONLY in the running header, so body
+    # text alone loses which section the document is.
+    docx = pytest.importorskip("docx")
+    from drawing_analyzer.spec_documents import _extract_docx_text
+
+    doc = docx.Document()
+    doc.add_paragraph("WET-PIPE SPRINKLER SYSTEMS body text.")
+    section = doc.sections[0]
+    section.header.paragraphs[0].text = "PROJECT 24-118  SECTION 21 13 13"
+    section.footer.paragraphs[0].text = "Page 1 of 12  ISSUED FOR CONSTRUCTION"
+    path = tmp_path / "spec.docx"
+    doc.save(str(path))
+
+    text = _extract_docx_text(path)
+    assert "SECTION 21 13 13" in text
+    assert "ISSUED FOR CONSTRUCTION" in text
+    assert "WET-PIPE SPRINKLER SYSTEMS body text." in text
+
+
+def test_running_head_is_not_repeated_per_section(tmp_path):
+    docx = pytest.importorskip("docx")
+    from drawing_analyzer.spec_documents import _extract_docx_text
+
+    doc = docx.Document()
+    doc.sections[0].header.paragraphs[0].text = "SECTION 21 13 13"
+    doc.add_paragraph("body one")
+    path = tmp_path / "spec.docx"
+    doc.save(str(path))
+    assert _extract_docx_text(path).count("SECTION 21 13 13") == 1

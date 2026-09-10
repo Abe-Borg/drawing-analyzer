@@ -834,3 +834,80 @@ def test_cross_qc_cache_contract_invalidates_pre_accounting_entries(monkeypatch)
     legacy = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")
 
     assert current != legacy, "the contract must ride the key"
+
+
+# --------------------------------------------------------------------------- #
+# Sheet handles fold before matching (P8 item 11)
+# --------------------------------------------------------------------------- #
+
+_ID_VARIANTS = [
+    ("M-101", "M‑101", "non-breaking hyphen U+2011"),
+    ("M-101", "M–101", "en dash U+2013"),
+    ("M-101", "M‐101", "hyphen U+2010"),
+    ("M-101", "Ｍ-１０１", "fullwidth letter and digits"),
+    ("FP-101", " fp-101 ", "case and surrounding whitespace"),
+]
+
+
+def test_norm_id_folds_unicode_sheet_id_variants():
+    # A model reply or a PDF text layer writes a sheet id with a Unicode dash or
+    # fullwidth digits freely. Every variant used to miss its plain-ASCII twin, so
+    # the leg was dropped — and a cross-sheet finding needs two grounded sheets, so
+    # the whole finding went with it.
+    for plain, variant, note in _ID_VARIANTS:
+        assert X._norm_id(plain) == X._norm_id(variant), (
+            f"{note}: {plain!r} != {variant!r}"
+        )
+
+
+def test_norm_id_still_separates_genuinely_different_sheets():
+    # Folding must not merge distinct ids.
+    assert X._norm_id("M-101") != X._norm_id("M-102")
+    assert X._norm_id("M-101") != X._norm_id("E-101")
+    assert X._norm_id("FP-101") != X._norm_id("FP-1011")
+
+
+def test_norm_id_agrees_with_the_shared_grammar_foundation():
+    # fold_text is what the Phase 25 sheet-id grammar and every deterministic
+    # auditor adjudicate against; cross-QC must not disagree with them about what
+    # one sheet id is.
+    from drawing_analyzer.auditors.sheet_ids import fold_text
+
+    for plain, variant, _note in _ID_VARIANTS:
+        assert fold_text(plain.strip()).upper() == X._norm_id(variant)
+
+
+def test_critique_leg_targets_uses_the_same_fold():
+    # The twin. _leg_targets feeds critical_signature["leg_targets"], which decides
+    # whether two findings may merge — so if the two normalizations disagree,
+    # cross-QC resolves a leg the ledger then refuses to recognise as the same leg.
+    import drawing_analyzer.critique as C
+    from drawing_analyzer.models import ConflictLeg, Finding
+
+    def _with_leg(sheet_id: str) -> Finding:
+        f = Finding(sheet_id="A-1", source_name="a.pdf", page_index=0, category="code",
+                    severity="high", text="t", source_quote="q")
+        f.also_on = [ConflictLeg(sheet_id=sheet_id, source_quote="q")]
+        return f
+
+    for plain, variant, note in _ID_VARIANTS:
+        assert C._leg_targets(_with_leg(plain)) == C._leg_targets(_with_leg(variant)), note
+        # …and the value matches what cross-QC resolves the handle to.
+        assert next(iter(C._leg_targets(_with_leg(variant)))) == X._norm_id(plain)
+
+
+def test_cross_qc_contract_bumped_for_the_norm_id_fold():
+    # The invalidation mechanism for item 11. _norm_id is host-side binding, not a
+    # model input, so nothing in the cache key covers it — yet it changes which
+    # legs validate, and so the stored result, for byte-identical request inputs.
+    # A warm entry written under the old normalization would keep serving the
+    # smaller finding set forever.
+    assert X._CROSS_QC_CACHE_CONTRACT == 3
+    geom = _geom("a.pdf", "M-101")
+    entries = [("M-101", "digest", "text", geom)]
+    current = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")
+    import pytest as _pytest
+    with _pytest.MonkeyPatch.context() as mp:
+        mp.setattr(X, "_CROSS_QC_CACHE_CONTRACT", 2)
+        legacy = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")
+    assert current != legacy, "the contract must ride the key"

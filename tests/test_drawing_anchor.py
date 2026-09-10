@@ -431,3 +431,72 @@ def test_best_scoring_window_still_wins_when_it_passes_the_veto():
     assert a.status == "EXACT"                      # the verbatim row wins outright
     ymid = (a.rect_pdf[1] + a.rect_pdf[3]) / 2.0
     assert ymid > 500
+
+
+# --------------------------------------------------------------------------- #
+# Fold coverage: vulgar fractions, fraction slashes, multiplication sign (N7)
+# and invisible characters written as escapes (N8)
+# --------------------------------------------------------------------------- #
+
+
+def test_vulgar_fraction_matches_the_written_out_form():
+    # NFKC expands "½" to "1⁄2" with NO separating space, so a quote written
+    # `2½"` became `21⁄2"` — twenty-one halves — and could never match a sheet
+    # reading `2-1/2"`. On a pipe size that is the difference between a 2.5 inch
+    # drain and a 21 inch one.
+    from drawing_analyzer.anchor import _normalize
+
+    for written, plain in [
+        ('2½"', '2-1/2"'),
+        ('2½"', '2 1/2"'),
+        ("1½ INCH", "1 1/2 inch"),
+        ('¾" DRAIN', '3/4" drain'),
+        ('⅝" ROD', '5/8" rod'),
+    ]:
+        assert _normalize(written) == _normalize(plain), (
+            f"{written!r} -> {_normalize(written)!r} != {_normalize(plain)!r}"
+        )
+
+
+def test_fraction_slash_and_multiplication_sign_fold_to_ascii():
+    from drawing_analyzer.anchor import _normalize
+
+    assert _normalize('1⁄2" PIPE') == _normalize('1/2" pipe')     # U+2044
+    assert _normalize('1∕2" PIPE') == _normalize('1/2" pipe')     # U+2215
+    assert _normalize("300 × 200 DUCT") == _normalize("300 x 200 duct")
+
+
+def test_vulgar_fraction_still_anchors_end_to_end():
+    # The fold is only useful if it reaches the resolver.
+    words = _line(["PROVIDE", "2-1/2\"", "DRAIN", "AT", "COLUMN", "LINE", "4"])
+    a = _anchor('PROVIDE 2½" DRAIN AT COLUMN LINE 4', words)
+    assert a.status in ("EXACT", "FUZZY"), f"{a.status}/{a.method}"
+    assert a.rect_pdf is not None
+
+
+def test_no_invisible_characters_are_written_as_literals_in_the_sources():
+    # N8: as literal characters these are invisible in every editor and diff, so a
+    # maintainer cannot see them and an ordinary edit can delete or duplicate one
+    # silently. They must appear as \\uXXXX escapes.
+    from pathlib import Path
+
+    import drawing_analyzer
+
+    root = Path(drawing_analyzer.__file__).parent
+    invisible = "­​‌‍﻿⁠"
+    offenders = {}
+    for name in ("anchor.py", "auditors/sheet_ids.py"):
+        raw = (root / name).read_text(encoding="utf-8")
+        found = sorted({f"U+{ord(c):04X}" for c in raw if c in invisible})
+        if found:
+            offenders[name] = found
+    assert not offenders, f"literal invisible characters in source: {offenders}"
+
+
+def test_invisible_characters_are_still_folded_at_runtime():
+    # Writing them as escapes must not stop them being stripped.
+    from drawing_analyzer.anchor import _normalize
+
+    assert _normalize("M​-‌101") == _normalize("M-101")
+    assert _normalize("﻿PROVIDE") == _normalize("PROVIDE")
+    assert _normalize("SOFT­HYPHEN") == _normalize("SOFTHYPHEN")

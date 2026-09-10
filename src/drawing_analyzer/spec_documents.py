@@ -68,17 +68,81 @@ def _extract_docx_text(path: Path) -> str:
     import docx  # python-docx; lazy import
 
     doc = docx.Document(str(path))
-    parts = [p.text for p in doc.paragraphs if p.text.strip()]
+    parts: list[str] = []
+    # Section headers/footers carry the spec's own identity (N9). A section number
+    # like "SECTION 21 13 13" frequently lives ONLY in the running header, so
+    # reading body text alone loses which section the document is. Deduped and
+    # placed first: python-docx exposes these per *section*, not per page, but a
+    # multi-section file repeats the same running head.
+    seen_chrome: set[str] = set()
+    for section in doc.sections:
+        for part in (section.header, section.footer):
+            if part is None:
+                continue
+            for para in part.paragraphs:
+                text = para.text.strip()
+                if text and text not in seen_chrome:
+                    seen_chrome.add(text)
+                    parts.append(text)
+    parts.extend(p.text for p in doc.paragraphs if p.text.strip())
     for table in doc.tables:  # spec tables (schedules, submittal matrices) matter
         for row in table.rows:
-            cells = [c.text.strip() for c in row.cells if c.text.strip()]
+            # ``row.cells`` yields one entry per GRID column, so a merged cell is
+            # repeated once per column it spans (N9): a 3-column merged heading
+            # came out as "HAZARD CLASSIFICATION | HAZARD CLASSIFICATION | HAZARD
+            # CLASSIFICATION", inflating the prompt with text the spec says once.
+            # ``cell._tc`` is the underlying XML element, so identity on it is what
+            # distinguishes one real cell from the same cell seen again.
+            cells: list[str] = []
+            seen_tc: set[int] = set()
+            for cell in row.cells:
+                marker = id(getattr(cell, "_tc", cell))
+                if marker in seen_tc:
+                    continue
+                seen_tc.add(marker)
+                text = cell.text.strip()
+                if text:
+                    cells.append(text)
             if cells:
                 parts.append(" | ".join(cells))
     return "\n".join(parts).strip()
 
 
+#: A UTF-16 text file has a NUL in roughly every other byte; UTF-8 never has one.
+#: Well above any plausible stray-NUL rate, well below UTF-16's ~50%.
+_UTF16_NUL_SHARE = 0.20
+
+
+def _decode_text_bytes(data: bytes) -> str:
+    """Decode a spec text file, honouring the BOM and sniffing UTF-16 (N9).
+
+    ``read_text(encoding="utf-8", errors="replace")`` mishandled two shapes that
+    Windows tooling produces constantly:
+
+    * **UTF-8 with a BOM** (what Notepad writes) left ``\ufeff`` on the front, so
+      the first line read as ``\ufeffSECTION 21 13 13`` and no section-header match
+      could ever fire on it.
+    * **UTF-16** came back as mojibake studded with NUL bytes — which then flowed
+      onward as text, and a NUL reaching the HTML report's inline renderer used to
+      raise (P8 item 39, fixed there too; this stops it at the source).
+
+    ``utf-8-sig`` strips a UTF-8 BOM and is otherwise identical to ``utf-8``.
+    """
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return data.decode("utf-16", errors="replace")
+    head = data[:4096]
+    if head and head.count(0) / len(head) >= _UTF16_NUL_SHARE:
+        # BOM-less UTF-16: ASCII text puts the NUL in the high byte, so which
+        # half of each pair is zero says which endianness it is.
+        odd_nuls = sum(1 for i in range(1, len(head), 2) if head[i] == 0)
+        even_nuls = sum(1 for i in range(0, len(head), 2) if head[i] == 0)
+        encoding = "utf-16-le" if odd_nuls >= even_nuls else "utf-16-be"
+        return data.decode(encoding, errors="replace")
+    return data.decode("utf-8-sig", errors="replace")
+
+
 def _extract_plain_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8", errors="replace").strip()
+    return _decode_text_bytes(path.read_bytes()).strip()
 
 
 _EXTRACTORS = {

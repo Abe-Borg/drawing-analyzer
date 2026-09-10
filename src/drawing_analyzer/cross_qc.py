@@ -115,7 +115,15 @@ _TEXT_LAYER_BUDGET = 4_000
 # ``findings_omitted``. Reading them back would default that to 0 and hand a
 # truncated run a clean bill of health forever on warm re-runs, which is the
 # exact failure the accounting was added to end.
-_CROSS_QC_CACHE_CONTRACT = 2
+#
+# Bumped to 3 (P8 item 11): ``_norm_id`` now folds sheet handles through
+# ``fold_text``, so a leg whose handle carried a Unicode dash or fullwidth digit
+# resolves where it used to be dropped. That is **host-side binding**, not a model
+# input — nothing in the key covers it — yet it changes which legs validate and
+# therefore the stored result for byte-identical request inputs. A warm entry
+# written under the old normalization would keep serving the smaller finding set.
+# One mechanism for one change: no key field was added beside this.
+_CROSS_QC_CACHE_CONTRACT = 3
 DEFAULT_CROSS_QC_WORKERS = 3
 _CROSS_QC_WORKERS_ENV = "DRAWING_ANALYZER_CROSS_QC_WORKERS"
 
@@ -448,7 +456,21 @@ class CrossQCResult:
 
 
 def _norm_id(sheet_id: str) -> str:
-    return (sheet_id or "").strip().upper()
+    """A sheet handle normalized for host-side matching (P8 item 11).
+
+    Folds through :func:`auditors.sheet_ids.fold_text` (NFKC + dash fold) rather
+    than a bare ``.strip().upper()``. Model replies and PDF text layers carry
+    Unicode variants of a sheet id freely — a non-breaking hyphen (U+2011), an
+    en dash, a hyphen (U+2010), fullwidth digits — and every one of them failed
+    to match its plain-ASCII twin, so the leg was dropped and with it the whole
+    cross-sheet finding, which needs two grounded sheets. All four variants of
+    ``M-101`` were measured failing here while ``fold_text`` matched every one.
+
+    ``fold_text`` is the same foundation the Phase 25 §17.2 sheet-id grammar and
+    every deterministic auditor adjudicate against, so this stops cross-QC from
+    disagreeing with them about what one sheet id is.
+    """
+    return fold_text((sheet_id or "").strip()).upper()
 
 
 def _fallback_id(ref: Any) -> str:
