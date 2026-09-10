@@ -128,6 +128,46 @@ def test_a_percent_operand_cannot_promote_a_claim_to_ground_truth():
     assert res.checked == 0 and res.unusable == 1
 
 
+def test_a_comma_separated_operand_list_stays_text_extracted():
+    # A binder must be TIGHT. An earlier draft of the tail rule allowed whitespace
+    # around the separator, which read every comma in an ordinary operand list as
+    # a numeric binder and dropped the leading operands. That produces no wrong
+    # answer -- but it downgrades a text-extracted mismatch to
+    # MODEL_TRANSCRIBED/UNCERTAIN and sends it to the crop verifier for nothing,
+    # withholding a deterministic result and spending money to do it.
+    from drawing_analyzer.auditors.arithmetic import _numbers_in_text
+
+    for quote in ("10, 20, 30, TOTAL 70", "10 , 20 , 30 , TOTAL 70"):
+        assert _numbers_in_text(quote) == [
+            Decimal(10), Decimal(20), Decimal(30), Decimal(70),
+        ], quote
+
+    # Thousands commas inside the operands, list commas between them.
+    assert _numbers_in_text("1,200, 2,400, TOTAL 3,600") == [
+        Decimal(1200), Decimal(2400), Decimal(3600),
+    ]
+
+    # A DECIMAL before the list is the sharpest case: it cannot absorb the comma
+    # into its own token the way an integer run can, so it was dropped outright.
+    assert _numbers_in_text("0.5, 1.5, TOTAL 2.0") == [
+        Decimal("0.5"), Decimal("1.5"), Decimal("2.0"),
+    ]
+
+    # ...and the compact malformed forms stay rejected, which is the whole point
+    # of keeping the binder tight rather than dropping the rule.
+    assert parse_number("1,20") is None
+    assert parse_number("10,20") is None
+
+    # End to end: the mismatch is still trusted as host-computed.
+    res = audit_arithmetic([NumericClaim(
+        sheet_id="FP-101", source_name="fp.pdf", page_index=0, kind="sum",
+        terms=["0.5", "1.5"], expected="2.5", quote="0.5, 1.5, TOTAL 2.5",
+    )], [])
+    assert res.mismatched == 1
+    assert res.findings[0].verification.status == "DETERMINISTIC"
+    assert res.findings[0].verification.operand_origin == "TEXT_EXTRACTED"
+
+
 def test_the_quote_scanner_and_the_operand_parser_never_disagree():
     # §17.5's stated invariant, and the reason the head/tail rules live at the
     # scan site rather than inside parse_number: the scanner is handed surrounding

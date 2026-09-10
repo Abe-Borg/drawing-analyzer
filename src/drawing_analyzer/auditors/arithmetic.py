@@ -74,9 +74,17 @@ _PLAIN_NUMBER_RE = re.compile(r"^[-+]?(?:\d+(?:\.\d+)?|\.\d+)")
 # a symbol, punctuation, whitespace and another number, nothing. What it may not
 # be followed by is a **binder** — a separator that joins another digit to the one
 # just read, meaning the token was never a single value and taking the leading run
-# silently mangles it. Whitespace alone is not a binder: ``20  20  20  TOTAL 540``
-# is a column of four numbers, not one, and denying the first would gut the
-# flow-test case the auditor exists for.
+# silently mangles it.
+#
+# A binder must be **tight**: no whitespace on either side of it. Whitespace is
+# what separates two quantities from one malformed quantity, and both halves of
+# that matter. ``20  20  20  TOTAL 540`` is a column of four numbers, and denying
+# the first would gut the flow-test case the auditor exists for; ``0.5, 1.5,
+# TOTAL 2.0`` and ``10 , 20 , 30`` are ordinary comma-separated operand lists, and
+# an earlier draft of this rule allowed whitespace around the separator and so
+# dropped their leading operands — which does not produce a wrong answer, but
+# downgrades a text-extracted mismatch to MODEL_TRANSCRIBED / UNCERTAIN and sends
+# it to the crop verifier for nothing.
 #
 # ``_THOUSANDS_RE`` above already declines to strip a comma that is not a
 # thousands grouping, precisely so ``"1,20"`` is "left alone rather than silently
@@ -94,8 +102,8 @@ _PLAIN_NUMBER_RE = re.compile(r"^[-+]?(?:\d+(?:\.\d+)?|\.\d+)")
 # so never fire on a tail at all.
 _NUMERIC_TAIL_RE = re.compile(
     r"""(?:
-          ['"]? \s* [,.\-] \s* \d   # 12,5 · 1.2.3 · 12'-6" · 12-6
-        | \s* %                       # 30% · 30 %
+          ['"]? [,.\-] \d   # 12,5 · 1.2.3 · 12'-6" · 12-6  (tight only)
+        | \s* %            # 30% · 30 %   — a ratio however it is spaced
     )""",
     re.VERBOSE,
 )

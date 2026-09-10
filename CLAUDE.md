@@ -228,14 +228,21 @@ both the submitted batch and the one that actually served the digests.
   finding. `_ANNOTATION_PREFIXES` (REV/DET/DWG/TYP/SIM/NTS) is kept separate from
   the transmittal set because it is a different kind of thing; paper sizes are
   deliberately absent, since `A1`–`A4` are ISO sizes *and* real architectural ids
-  and the corpus never consults the set. That corpus also vetoes candidates in
-  `references.detect_sheet_id_word` **before** its bottom-right position score:
-  position alone let a code citation in the general notes become the sheet's own
-  id, and `build_inventory` learns the set's grammar from exactly those ids, so one
-  general note redefined the convention every downstream auditor adjudicates
-  against. Only the corpus is consulted there, never the learned grammar — that
-  would be circular — so a same-shape distractor (`M-999`) can still win; closing
-  that needs a two-pass harvest and is **not** done. `detect_sheet_id_word` is
+  and the corpus never consults the set. `references.detect_sheet_id_word` also vetoes
+  before its bottom-right position score: position alone let a code citation in the
+  general notes become the sheet's own id, and `build_inventory` learns the set's
+  grammar from exactly those ids, so one general note redefined the convention
+  every downstream auditor adjudicates against. That veto is
+  **`never_a_sheets_own_id`, a strict subset of the reference corpus** — the
+  reference corpus answers "does this token point at a sheet in the set?", safely
+  No for things a sheet can still be *named*, so `_TRANSMITTAL_PREFIXES` is
+  excluded: `SK-1` is a sketch issued as a sheet, and so are `PR-04` / `ADD-2`.
+  Using the full corpus removed such a sheet's real title-block id from the
+  running, and one un-vetoed `A-101` in a note then won at any position, so the
+  sheet vanished from the inventory under its real name. Only that structural
+  veto, never the learned grammar — that would be circular — so a same-shape
+  distractor (`M-999`) can still win; closing that needs a two-pass harvest and is
+  **not** done. `detect_sheet_id_word` is
   memoized on the sheet **object** (14 live call sites, none cached before); a
   ref-keyed process-wide dict would serve one stage's answer to another stage's
   rebuilt geometry, and `None` is a real answer so the memo needs a sentinel.
@@ -527,9 +534,11 @@ example is parked at `docs/examples/fire_protection.md`.
   TEXT_EXTRACTED gate and inked "the product of 1500, 30 is 45000" as host-computed.
   `_head_denies` / `_tail_denies` are applied at the **quote-scan** site, not inside
   `parse_number`, because only the scanner can see what bound a number — that is
-  what keeps the two from disagreeing. Whitespace is never a binder: `20 20 20
-  TOTAL 540` is four numbers, and denying the first would gut the flow-test case
-  the auditor exists for. `_fmt` expands an integral with `format(v, "f")`, never
+  what keeps the two from disagreeing. A binder must be **tight** — no whitespace
+  on either side: `20 20 20 TOTAL 540` is four numbers and `0.5, 1.5, TOTAL 2.0`
+  is an operand list, while `12,5` and `10,20` stay rejected. A loose binder cost
+  no wrong answers but downgraded such a list to MODEL_TRANSCRIBED and paid for a
+  crop check to re-learn what the quote already said. `_fmt` expands an integral with `format(v, "f")`, never
   `quantize`, which raises above the decimal context's 28 digits from ordinary
   string terms — inside the `Finding(...)` expression, *after* `mismatched` was
   incremented. Each claim now has its own `try` with a tally rollback: the

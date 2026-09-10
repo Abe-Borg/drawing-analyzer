@@ -1164,6 +1164,14 @@ quantity. Feet-inches keeps both halves (`12'-6"` signs as 12 ft **and** 6 in,
 neither negative), and a plural unit folds to its singular so `6 amps` and `6 amp`
 are not read as a conflict. `psig` is deliberately *not* folded into `psi`: gauge
 and absolute are different measurements, and collapsing them would hide a real
+conflict rather than a formatting one. A measurement is
+compared by its **value**, not by how it was typed, so `1/2"` is half an inch and
+never the denominator — *Provide 1/2" drain* and *Provide 2" drain* are two pipe
+sizes, not one finding twice — while `2 1/2"`, `2-1/2"` and `2.5"` are one
+quantity. Feet-inches keeps both halves (`12'-6"` signs as 12 ft **and** 6 in,
+neither negative), and a plural unit folds to its singular so `6 amps` and `6 amp`
+are not read as a conflict. `psig` is deliberately *not* folded into `psi`: gauge
+and absolute are different measurements, and collapsing them would hide a real
 conflict rather than a formatting one. A merge keeps
 **coherent grounding**: the survivor's text and quote come from one member as an
 atomic bundle — never one finding's text paired with another's quote — while the
@@ -1248,7 +1256,7 @@ join `ctx.all_findings`, and the checks-passed tally lands on `ctx.audit_stats`.
 |---|---|---|---|---|
 | **References** | `auditors.references` | Stale / missing cross-references (`SEE DRAWING X`, detail bubbles `NN/X`, CSI spec sections) resolved against the set inventory | the reference's own words | medium (miss), low (spec/malformed) |
 | **Arithmetic** | `auditors.arithmetic` | Numbers that don't add up — column totals, density × area = demand, base area × 1.3 = design area — **computed by the host, never the model** | the claim's verbatim quote | graded by magnitude |
-| **Naming** | `auditors.naming` | The same thing tagged two ways across the set (`C1R` vs `C1-R` — same letters and digits, only formatting differs). A changed *number* (`A1-2` vs `A2`) is meaning-bearing and is **not** flagged | each drifting occurrence | low (question) |
+| **Naming** | `auditors.naming` | The same thing tagged two ways across the set (`C1R` vs `C1-R` — same letters and digits, only formatting differs). A changed *number* (`A1-2` vs `A2`) is meaning-bearing and is **not** flagged, and neither is a **regrouped** one (`VAV-2-1` vs `VAV-21`) unless the set's own usage establishes which spelling is the convention | each drifting occurrence | low (question) |
 | **Title-block** | `auditors.titleblock` | A project-number / **package/project name** (incl. multiword) / date that differs on one sheet from the set consensus — found by its field label, so a *substantially* different value is caught, not just a one-character typo | the drifting value | low (coordination) |
 | **Sheet-index** | `auditors.sheet_index` | A drawing index that lists a sheet not in the set (or a malformed / out-of-convention entry), or omits one that is | the index entry / header | medium / low |
 
@@ -1258,8 +1266,22 @@ hyphenated (`M-101`), compact (`FP101`), or dotted (`M1.01`) — so it works acr
 offices without a hardcoded scheme, and it resolves a reference as present,
 well-formed but **not present in the provided set** (with the closest in-set ID
 suggested), or malformed. A **negative corpus** keeps code/standard citations
-(`NFPA 13`), transmittal numbers (`RFI-123`), voltages (`480V`), room numbers, and
-dimensions from ever becoming a sheet finding. It never claims a sheet *doesn't
+(`NFPA 13`), transmittal numbers (`RFI-123`), **drawing annotations** (`REV-2`,
+`DET-3`, `DWG-4`, `TYP-2`, `SIM-1`, `NTS-1`), voltages (`480V`), room numbers, and
+dimensions from ever becoming a sheet finding. The annotation prefixes matter more
+than they look — they are among the most common words on a sheet, so
+*INSTALL PER REV-2* was being reported as a stale reference (*"did you mean
+E-2?"*) with deterministic ink behind it. Paper sizes are deliberately **not** in
+the corpus: `A1`–`A4` are ISO sizes *and* perfectly good architectural sheet ids,
+and the corpus never consults the set, so a blanket veto would drop real
+references. A **strict subset** of the corpus also vetoes a candidate while the
+*sheet's own* id is being detected, so a code citation or a drawing annotation
+sitting further into the bottom-right corner than the title block can no longer
+become the sheet's id — which matters because the set's grammar is learned from
+exactly those ids. Only a strict subset, because the corpus answers "does this
+point at a sheet in the set?", which is safely *no* for things a sheet can still
+be **named**: `SK-1` is a sketch issued as a sheet, and so are `PR-04` and
+`ADD-2`. It never claims a sheet *doesn't
 exist* — only that it *isn't in the set you provided* — because a partial set
 legitimately omits sheets. On a real 8-sheet fire-protection set this alone caught
 three genuine coordination errors. A one-sheet set is treated as low-confidence:
@@ -1314,9 +1336,12 @@ instead of as a mismatch. `12,5` is not 12, `12'-6"` is twelve feet six, and a
 "the sum of 1500 and 30". That last one mattered most: because the bare `30`
 appeared literally in the quote, the claim *cleared* the independent-validation
 gate and inked a HIGH-severity *"the product of 1500, 30 is 45000"* wearing the
-host's label. The quote scanner applies the identical rule, so the two can never
-disagree about what a number is — and one claim the host cannot compute or print
-no longer costs the run every other claim's arithmetic.
+host's label. A separator only disqualifies when it is **tight**, so an ordinary
+operand list (`0.5, 1.5, TOTAL 2.0`) keeps every term while the compact malformed
+forms (`12,5`, `10,20`) stay rejected. The quote scanner applies the identical
+rule, so the two can never disagree about what a number is — and one claim the
+host cannot compute or print no longer costs the run every other claim's
+arithmetic.
 
 ## Per-run focus
 

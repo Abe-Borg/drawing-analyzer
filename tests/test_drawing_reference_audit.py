@@ -489,7 +489,7 @@ def test_the_negative_corpus_vetoes_a_distractor_before_position_decides():
     # grammar every downstream auditor adjudicates against is learned FROM that
     # list — so one general note becomes the convention for the whole set.
     real = _w(W - 400, H - 300, "E-101")          # the real title block
-    for distractor in ("NFPA-13", "RFI-12", "REV-2", "DET-3"):
+    for distractor in ("NFPA-13", "IBC-202", "REV-2", "DET-3", "480V"):
         # Placed strictly further toward the bottom-right than the real id, so it
         # genuinely OUTSCORES it — the veto, not the geometry, has to be what
         # decides. (A distractor that already loses on position proves nothing.)
@@ -501,11 +501,42 @@ def test_the_negative_corpus_vetoes_a_distractor_before_position_decides():
 def test_a_sheet_whose_every_candidate_is_vetoed_keeps_one():
     # The veto must not be able to erase a sheet's id entirely: a sheet with no id
     # drops out of the inventory, which is worse than a doubtful one. Only the
-    # negative corpus is consulted — never the learned grammar, which would be
+    # structural veto is consulted — never the learned grammar, which would be
     # circular, since build_inventory calls this to produce the ids the grammar is
     # learned from.
-    sheet = _sheet("e.pdf", 0, [_w(W - 300, H - 160, "NFPA-13"), _w(100, 100, "RFI-12")])
+    sheet = _sheet("e.pdf", 0, [_w(W - 300, H - 160, "NFPA-13"), _w(100, 100, "IBC-202")])
     assert detect_sheet_id(sheet) == "NFPA-13"
+
+
+def test_a_sheet_may_be_NAMED_something_the_reference_corpus_rejects():
+    # The self-id veto is never_a_sheets_own_id, NOT the full reference corpus,
+    # and the difference is not academic. The reference corpus answers "does this
+    # token, written in a note, point at a sheet in this set?" -- safely No for
+    # things a sheet can still legitimately be NAMED. SK-1 is the everyday case: a
+    # sketch is issued as a sheet and its title block says SK-1. So are PR-04,
+    # ADD-2, CO-3.
+    #
+    # Used as an unconditional veto here, it removed the real title-block id from
+    # the running, and then ANY un-vetoed id-shaped token on the page -- a single
+    # A-101 in a note, anywhere, at any position -- won by default. The sheet
+    # vanished from the inventory under its real name and learn_grammar learned
+    # the set's convention from a reference.
+    for own_id in ("SK-1", "PR-04", "ADD-2", "CO-3", "SI-7"):
+        sheet = _sheet("s.pdf", 0, [
+            _w(W - 300, H - 160, own_id),     # the real title block
+            _w(200, 400, "A-101"),            # a reference in a note, far away
+        ])
+        assert detect_sheet_id(sheet) == own_id, own_id
+        assert build_inventory([sheet]).ids == frozenset({own_id}), own_id
+
+    # What a title block can never say is still vetoed: a code citation, a drawing
+    # annotation, a voltage.
+    for never in ("NFPA-13", "REV-2", "DET-3", "480V"):
+        sheet = _sheet("s.pdf", 0, [
+            _w(W - 120, H - 80, never),       # better placed than the real id...
+            _w(W - 400, H - 300, "E-101"),
+        ])
+        assert detect_sheet_id(sheet) == "E-101", never
 
 
 def test_split_id_merge_is_linear_and_emits_exactly_what_it_did_before():

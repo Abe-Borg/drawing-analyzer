@@ -24,9 +24,15 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `12'-6"` is twelve feet six. `12,5` was the sharpest — `_THOUSANDS_RE`
     deliberately declines to strip that comma so the value is "left alone rather
     than silently mangled", and `_PLAIN_NUMBER_RE` mangled it anyway one line
-    later. The quote scanner applies the identical head/tail rules **at the scan
-    site**, because only it can see what bound a number, so the two can never
-    disagree about what a number is.
+    later. A separator only disqualifies when it is **tight** — no whitespace on
+    either side — so an ordinary operand list keeps every term (`0.5, 1.5,
+    TOTAL 2.0`, `10 , 20 , 30`) while the compact malformed forms (`12,5`,
+    `10,20`) stay rejected. A looser rule cost no wrong answers but downgraded
+    such a list to `MODEL_TRANSCRIBED` / `UNCERTAIN`, withholding a deterministic
+    result and paying for a crop check to re-learn what the quote already said.
+    The quote scanner applies the identical head/tail rules **at the scan site**,
+    because only it can see what bound a number, so the two can never disagree
+    about what a number is.
 
   - **One bad claim lost the whole run's arithmetic.** The orchestrator wrapped
     the entire claim batch in a single `try`, so any per-claim failure aborted the
@@ -58,10 +64,18 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     corner than the title block simply won. That is not a cosmetic mis-rank:
     `build_inventory` calls it to *build* the id list, and `learn_grammar` derives
     the convention every downstream auditor adjudicates against from that list.
-    The negative corpus now vetoes candidates before the position score. Only the
-    corpus — never the learned grammar, which would be circular — so a same-shape
-    distractor can still win; closing that needs a two-pass harvest and is not
-    attempted here.
+    A **strict subset** of the negative corpus now vetoes candidates before the
+    position score. Only a subset, because the corpus answers "does this token
+    point at a sheet in the set?" — safely *no* for things a sheet can still be
+    **named**. `SK-1` is a sketch issued as a sheet, and so are `PR-04` and
+    `ADD-2`; using the full corpus removed such a sheet's real title-block id from
+    the running, and then any un-vetoed id-shaped token on the page (one `A-101`
+    in a note, at any position) won by default, so the sheet vanished from the
+    inventory under its real name. What remains vetoed is only what a title block
+    can never say: a code citation, a drawing annotation, a voltage. And only that
+    structural veto — never the learned grammar, which would be circular — so a
+    same-shape distractor can still win; closing that needs a two-pass harvest and
+    is not attempted here.
 
   - **Naming drift was manufactured out of alphabetical order.** With no
     frequency winner (every spelling seen once), the auditor fell back to the

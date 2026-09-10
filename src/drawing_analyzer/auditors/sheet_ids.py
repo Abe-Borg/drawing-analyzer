@@ -374,6 +374,42 @@ def is_non_sheet_reference(token: Any) -> bool:
     return False
 
 
+def never_a_sheets_own_id(token: Any) -> bool:
+    """True when a token cannot be the id a sheet gives ITSELF in its title block.
+
+    A strict subset of :func:`is_non_sheet_reference`, and the distinction is the
+    point. That function adjudicates a **reference** — "does this token, written
+    in a note, point at a sheet in this set?" — and its answer is safely No for
+    things a sheet can nonetheless legitimately be *named*.
+
+    ``_TRANSMITTAL_PREFIXES`` is exactly that case and is deliberately excluded
+    here. ``SK-1`` is the everyday example: a sketch is issued as a sheet and its
+    title block says ``SK-1``. So is ``PR-04``, ``ADD-2``, ``CO-3``. Using the
+    reference corpus as an unconditional veto while detecting a sheet's own id
+    removed the real title-block id from the running, and any un-vetoed
+    id-shaped token elsewhere on the page — a single ``A-101`` in a note — then
+    won regardless of position. ``build_inventory`` recorded the *reference* as
+    the sheet's identity, so the sheet disappeared from the set under its real
+    name and ``learn_grammar`` learned the wrong convention from it.
+
+    What remains is only what a title block can never say: a code or standard
+    citation, a drawing annotation (REV / DET / DWG / TYP / SIM / NTS), or a
+    voltage. Bare dimensions are also left out — that rule exists to stop a room
+    number resolving as a reference, and a digits-only token is already excluded
+    from title-block detection by :func:`looks_like_sheet_id` needing a letter.
+    """
+    norm = normalize_sheet_id(token)
+    if not norm:
+        return True
+    lead = _leading_letters(norm).upper()
+    if lead and (lead in _STANDARD_BODIES or lead in _ANNOTATION_PREFIXES):
+        return True
+    head = norm.split("-", 1)[0].split(".", 1)[0].upper()
+    if head in _STANDARD_BODIES or head in _ANNOTATION_PREFIXES:
+        return True
+    return bool(_VOLTAGE_RE.match(norm))
+
+
 # --------------------------------------------------------------------------- #
 # Reference resolution policy (§17.3) — classify one harvested reference.
 # --------------------------------------------------------------------------- #

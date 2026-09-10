@@ -357,22 +357,30 @@ def _detect_sheet_id_word_uncached(sheet: Any) -> Any | None:
     w_pt = float(getattr(sheet, "page_width_pt", 0.0) or 0.0)
     h_pt = float(getattr(sheet, "page_height_pt", 0.0) or 0.0)
 
-    # Veto the §17.3 negative corpus BEFORE scoring (item N22). Position alone
-    # decided this, and position is a weak signal: a code citation or an RFI
-    # number sitting further toward the bottom-right than the real title block
-    # simply won. That is not a cosmetic mis-rank — ``build_inventory`` calls this
-    # to BUILD the set's id list, and ``learn_grammar`` derives the set's grammar
-    # from that list, so one general-note token becoming a sheet id poisons the
-    # grammar every downstream auditor then adjudicates against. Reproduced: an
-    # ``M-999`` in the general notes beat the real ``E-0`` title block.
+    # Veto tokens a title block can never say, BEFORE scoring (item N22). Position
+    # alone decided this, and position is a weak signal: a code citation sitting
+    # further toward the bottom-right than the real title block simply won. That
+    # is not a cosmetic mis-rank — ``build_inventory`` calls this to BUILD the
+    # set's id list, and ``learn_grammar`` derives the set's grammar from that
+    # list, so one general-note token becoming a sheet id poisons the grammar
+    # every downstream auditor then adjudicates against.
     #
-    # Only the corpus is consulted, never the learned grammar: ``build_inventory``
+    # The veto is ``never_a_sheets_own_id``, NOT the full reference corpus. The
+    # reference corpus answers "does this token point at a sheet in the set?",
+    # which is safely No for things a sheet can still be *named*: ``SK-1`` is a
+    # sketch issued as a sheet, and so are ``PR-04`` and ``ADD-2``. Using it here
+    # removed such a sheet's real title-block id from the running, and any
+    # un-vetoed id-shaped token elsewhere on the page — one ``A-101`` in a note —
+    # then won regardless of position, so the sheet vanished from the inventory
+    # under its real name.
+    #
+    # And only that structural veto, never the learned grammar: ``build_inventory``
     # needs this function to produce the ids the grammar is learned FROM, so
-    # consulting the grammar here would be circular. The corpus has no such
-    # dependency — it is purely structural and "never consults the set".
-    preferred = [w for w in candidates if not _S.is_non_sheet_reference(_wtext(w))]
-    # If the corpus vetoes every candidate, keep them: a sheet with no id at all
-    # drops out of the inventory entirely, which is worse than a doubtful one.
+    # consulting the grammar would be circular. A same-shape distractor can
+    # therefore still win; closing that needs a two-pass harvest.
+    preferred = [w for w in candidates if not _S.never_a_sheets_own_id(_wtext(w))]
+    # If every candidate is vetoed, keep them: a sheet with no id at all drops out
+    # of the inventory entirely, which is worse than a doubtful one.
     pool = preferred or candidates
 
     def score(word: Any) -> float:
