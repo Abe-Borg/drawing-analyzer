@@ -8,6 +8,100 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A real finding that began "No…" was thrown away as boilerplate.** The prose
+  harvest's section-filler filter was anchored only at the *start* of an item, so
+  "None of the sprinkler heads under the duct have clearance shown" was discarded
+  exactly as if it read "None noted." — and an absence finding naturally opens
+  with No/None/Nothing. All five realistic phrasings tested were being dropped.
+  A separate 20-character floor discarded terse real findings ("Drain is
+  undersized" is 19). Neither drop was counted: the reconcile builds its expected
+  set from the items that already *survived* the filter, so `missing` read 0 and
+  the harvest reported `complete` over a genuine loss — which is what let this go
+  unnoticed. The filter is now anchored at both ends, the floor is 8, and a
+  `filtered` count records what the filter took (observational only: filler is
+  not a lost finding, so it does not make a clean run incomplete).
+
+- **The review-plan item cap deleted whole disciplines, in alphabetical order.**
+  Plans sort by discipline slug and the trim ate the last plan's tail until that
+  plan was gone. Measured with five disciplines of 20 items against the 60-item
+  cap: **`mechanical` and `plumbing` were removed outright** while
+  `architectural`, `electrical` and `fire protection` kept all 20. On a set whose
+  mechanical and fire-protection sheets are the point of the review, that deletes
+  the checklist that mattered. The trim now takes from the longest plan each
+  round, so the same input leaves 12 items on every discipline.
+
+- **One malformed field in a model reply failed a whole stage — or bought web
+  searches.** Both the identity and review-plan sanitizers are documented as
+  never raising, and the pipeline treats any exception as a stage failure, so a
+  dict where a list belonged took the stage from COMPLETE to FAILED via
+  `TypeError: unhashable type: 'slice'`. A **string** was worse, because it is
+  iterable and passed silently, consumed one character at a time:
+  `"disciplines": "mechanical"` became `['a','c','e','h','i','l','m','n']`, and
+  `"refs": "NFPA 13 2016 §8.17"` reached the citation check as the refs
+  `('N', 'F', 'P')` — three live web searches for single letters, every run. A
+  shared coercion now guards every such site: a string becomes the single value
+  it plainly means, and anything else non-list becomes empty.
+
+- **A sheet id written with a Unicode dash never matched its plain twin.**
+  Cross-sheet handle matching was a bare `.strip().upper()`, so `M-101` written
+  with a non-breaking hyphen, an en dash, a U+2010 hyphen, or fullwidth digits —
+  all of which model replies and PDF text layers produce freely — missed. The leg
+  was dropped, and a cross-sheet finding needs two grounded sheets, so the whole
+  finding went with it. Handles now fold through the same helper the sheet-id
+  grammar and every deterministic auditor already use, and the critique's
+  leg-target normalization folds identically — it feeds the merge signature, so a
+  disagreement would have one sheet id meaning two things inside one run.
+  `cross_qc._CROSS_QC_CACHE_CONTRACT` 2 → 3, because this is host-side binding no
+  cache key covers yet it changes which legs validate.
+
+- **Lowercase drawing prose was read as an adopted code.** The international
+  code-designation pattern ran case-insensitively, so ordinary notes matched: 6 of
+  9 realistic lines produced a false adopted-code window, including "field verify
+  **is 1000** mm clearance to the deflector" (read as Indian Standard 1000) and
+  "the layout **is as 2019** drawings showed" (Australian Standard 2019). Each
+  false window spends the bounded identity corpus a real edition mention needed,
+  and invites a fabricated adopted-code entry. Now case-sensitive — 0 false
+  windows, with all 13 genuine designations still matching (`Eurocode` keeps its
+  own case-insensitive form, since it is conventionally written mixed-case).
+
+- **A quote written `2½"` could not match a sheet reading `2-1/2"`.** Unicode
+  normalization expands `½` to `1⁄2` with **no** separating space, so `2½"`
+  became `21⁄2"` — twenty-one halves. On a pipe size that is the difference
+  between a 2.5 inch drain and a 21 inch one. Vulgar fractions are now rewritten
+  before normalization, and the fraction slash, division slash and multiplication
+  sign fold to ASCII so `1⁄2"` and `300 × 200` match their typed equivalents.
+
+- **A NUL byte cost a whole report block.** The report's inline renderer stashes
+  code spans behind `\x00`-delimited placeholders, so a NUL in the digest text
+  forged one and the restore step raised `IndexError`. NUL is stripped on entry —
+  making the scheme unforgeable rather than merely guarded — and the restore is
+  bounds-checked as well.
+
+- **Spec documents from Windows tools decoded wrong, and their tables tripled.** A
+  UTF-8 BOM (what Notepad writes) left a stray character on the first line so
+  `SECTION 21 13 13` could never match a section header, and a UTF-16 file came
+  back as mojibake studded with NUL bytes — one source of the crash above. Reading
+  now honours the BOM and sniffs BOM-less UTF-16 by NUL density (a density test, so
+  one stray NUL in a UTF-8 file does not flip the decode). Separately, a merged
+  table cell was emitted once per column it spanned, so a 3-column merged heading
+  appeared three times; and section **headers and footers** were not read at all,
+  though a spec's section number frequently lives only in the running head.
+
+- **The diagnostics redaction never fired on the commonest secret name.** A word
+  boundary cannot match inside `ANTHROPIC_API_KEY`, because the character before
+  `API` is `_` — itself a word character. The rule only *looked* effective because
+  a separate pattern catches real `sk-ant-…` values; a credential of any other
+  shape was written to the log in full. Underscore-joined prefixes are now matched
+  and preserved, so the line still names which variable was redacted, and a token
+  *count* (`input_tokens=1234`) is still left alone.
+
+- **Invisible characters are no longer written as literals in the source.** Five
+  zero-width and soft-hyphen code points sat as literal characters in the
+  anchoring and sheet-id modules — invisible in every editor and diff, so a
+  maintainer cannot see them and an ordinary edit can delete or duplicate one
+  silently. They are now `\uXXXX` escapes, with a test that fails if a literal
+  reappears.
+
 - **A QC bookmark or index row could land nowhere near its mark.** A `/XYZ`
   destination is expressed in default user space, but the writer handed it a
   point in PyMuPDF's *annotation* space, which drops the CropBox origin and the
