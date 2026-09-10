@@ -105,6 +105,30 @@ def _as_index_sheet(geom: Any, inventory: SheetInventory) -> _IndexSheet | None:
         tok = _normalize_id(raw)
         if tok in entries:
             continue
+        # NOTE (item 25c): nothing here bounds the harvest to the index table's
+        # own region — it reads every word on the page, so a legend tag or a
+        # general note is collected as an index row. Two "cheap fixes" were tried
+        # and both rejected on the evidence:
+        #
+        # * A negative-corpus veto at this point is REDUNDANT. Both diff
+        #   directions below run every entry through ``classify_reference``,
+        #   which already consults the corpus and returns IGNORE — "a non-sheet
+        #   token in the table; left alone". A second copy of that rule here
+        #   would be the restated-rule drift this codebase has paid for before,
+        #   and it changes only which pages clear ``_MIN_INDEX_ENTRIES``, which
+        #   is the wrong direction: a real index with two table rows beside three
+        #   legend tokens would stop being recognised at all.
+        # * Excluding the sheet's own ``own_id`` breaks a legitimate index that
+        #   lists itself, and can likewise push it under the recognition gate.
+        #   The false positive that motivated it was really item N22 upstream —
+        #   the page's own id had been mis-detected, so its genuine self-listing
+        #   looked absent from the set.
+        #
+        # The real fix is bounding the region, which needs row/column geometry
+        # that does not exist here and re-baselines BOTH directions at once
+        # (direction 2 below would emit strictly more findings, since a token
+        # mentioned anywhere on the page currently suppresses a "present but not
+        # listed" finding). Deferred to its own package rather than half-done.
         entries[tok] = list(_wrect(w))
         if inventory.matches_grammar(tok):
             grammar_valid += 1

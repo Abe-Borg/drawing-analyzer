@@ -318,6 +318,25 @@ _STANDARD_BODIES = frozenset({
 _TRANSMITTAL_PREFIXES = frozenset({
     "RFI", "ASI", "PR", "CO", "CCD", "SK", "SI", "PCO", "COR", "SUB", "ADD", "BUL",
 })
+# Drawing-annotation prefixes: words that point at something ON a drawing rather
+# than AT a drawing (item 25b). Kept separate from the transmittal set because
+# they are a different kind of thing, not a different spelling of one.
+#
+# These were the corpus's most costly omission, because they are the most common
+# words on a sheet. ``INSTALL PER REV-2`` was reported as
+# *"Reference to REV-2 does not match this set's sheet-ID convention; did you mean
+# E-2?"* — a confident, DETERMINISTIC-inked false positive against a revision
+# note. On a set with a three-letter discipline field the same tokens match the
+# learned grammar outright and graduate to **medium** MISSING_FROM_SET findings.
+# ``DWG-4`` and ``TYP-2`` escaped only on edit distance, which is luck, not a rule.
+_ANNOTATION_PREFIXES = frozenset({
+    "REV", "DET", "DWG", "TYP", "SIM", "NTS",
+})
+# Deliberately NOT here: paper sizes. ``A1``–``A4`` are ISO sizes *and* perfectly
+# legitimate architectural sheet ids, and this function never consults the set, so
+# a blanket veto would silently drop real references. The two-token forms need no
+# veto at all: ``PER ARCH E1`` captures only ``ARCH``, and ``looks_like_sheet_id``
+# already rejects a token with no digit. ``ANSI`` is covered as a standards body.
 # A voltage (``480V`` / ``120/208V``) — a compact digits-then-letter shape.
 _VOLTAGE_RE = re.compile(r"^\d{2,4}(?:/\d{2,4})?V$")
 # A pure dimension token (``12'-6``, ``3/4"``) — starts with a digit, no letters.
@@ -327,7 +346,8 @@ _DIMENSION_RE = re.compile(r"^\d")
 def is_non_sheet_reference(token: Any) -> bool:
     """True when a token is a known *non-sheet* reference (§17.3 negative corpus).
 
-    Recognizes standard/code citations, transmittal numbers, voltages, and bare
+    Recognizes standard/code citations, transmittal numbers, drawing-annotation
+    prefixes (REV / DET / DWG / TYP / SIM / NTS), voltages, and bare
     dimensions/room numbers so they can never be adjudicated as a stale or
     malformed sheet reference — even when their shape or edit distance would
     otherwise let them through. Purely structural; it never consults the set.
@@ -336,11 +356,14 @@ def is_non_sheet_reference(token: Any) -> bool:
     if not norm:
         return True
     lead = _leading_letters(norm).upper()
-    if lead and lead in _STANDARD_BODIES:
+    if lead and (lead in _STANDARD_BODIES or lead in _ANNOTATION_PREFIXES):
         return True
-    # A hyphenated head whose first segment is a transmittal/standard prefix.
-    head = norm.split("-", 1)[0].split(".", 1)[0]
-    if head.upper() in _TRANSMITTAL_PREFIXES or head.upper() in _STANDARD_BODIES:
+    # A hyphenated head whose first segment is a transmittal / standard /
+    # annotation prefix. Splitting on both "-" and "." vetoes the dotted family
+    # (``REV.2``) with the same entry.
+    head = norm.split("-", 1)[0].split(".", 1)[0].upper()
+    if (head in _TRANSMITTAL_PREFIXES or head in _STANDARD_BODIES
+            or head in _ANNOTATION_PREFIXES):
         return True
     if _VOLTAGE_RE.match(norm):
         return True

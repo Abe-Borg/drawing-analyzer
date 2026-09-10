@@ -8,6 +8,144 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The deterministic auditors stop crying wolf.** Their findings ink as
+  `DETERMINISTIC` — *"an exact text check of the drawings, not an AI judgment"* —
+  which is why a false positive here costs more than one from the model. Two of
+  these put a wrong number behind that label; the rest buried real findings under
+  noise a reviewer learns to skip.
+
+  - **A percent operand promoted a claim to ground truth.** `1500 SF + 30% =
+    1950 SF` is not "the sum of 1500 and 30", but because the bare `30` appears
+    literally in the quote, the claim *cleared* the independent-validation gate
+    (§17.5) and inked a HIGH-severity *"the product of 1500, 30 is 45000"* as
+    host-computed. The `%` was the thing that made it pass. Percent operands are
+    now refused, so the claim is reported as **unchecked** rather than as a
+    mismatch. Same rule for a term that is not one value: `12,5` is not 12 and
+    `12'-6"` is twelve feet six. `12,5` was the sharpest — `_THOUSANDS_RE`
+    deliberately declines to strip that comma so the value is "left alone rather
+    than silently mangled", and `_PLAIN_NUMBER_RE` mangled it anyway one line
+    later. The quote scanner applies the identical head/tail rules **at the scan
+    site**, because only it can see what bound a number, so the two can never
+    disagree about what a number is.
+
+  - **One bad claim lost the whole run's arithmetic.** The orchestrator wrapped
+    the entire claim batch in a single `try`, so any per-claim failure aborted the
+    loop mid-way and the caller discarded the result — every finding already
+    produced, plus all four `arithmetic_*` stat keys. With the keys *absent*, the
+    summary line then read `arith=0/0` through `stats.get(..., 0)`: the failure
+    rendered as "nothing to check", indistinguishable from a set with no claims.
+    Each claim now has its own `try` with a tally rollback, so
+    `mismatched == len(findings)` still holds when a claim fails after its
+    counters moved. And it did: `_fmt` expanded integrals with
+    `quantize(Decimal(1))`, which raises above the decimal context's 28 digits
+    from ordinary string terms — inside the `Finding(...)` constructor expression,
+    after `mismatched` was incremented.
+
+  - **`PER REV-2` was reported as a stale sheet reference.** REV / DET / DWG /
+    TYP / SIM / NTS are among the most common words on a drawing and none was in
+    the §17.3 negative corpus, so a revision note came back as *"Reference to
+    REV-2 does not match this set's sheet-ID convention; did you mean E-2?"*. On a
+    set with a three-letter discipline field they match the learned grammar
+    outright and graduate to **medium** *"not present in the provided set"*
+    findings. `DWG-4` and `TYP-2` escaped only because their edit distance
+    happened to exceed the cutoff — luck, not a rule. Paper sizes are deliberately
+    *not* added: `A1`–`A4` are ISO sizes **and** real architectural sheet ids, and
+    the corpus never consults the set.
+
+  - **A general note could become the sheet's own id, and redefine the set's
+    grammar.** `detect_sheet_id_word` chose purely by distance toward the
+    bottom-right, so a code citation or transmittal number placed further into the
+    corner than the title block simply won. That is not a cosmetic mis-rank:
+    `build_inventory` calls it to *build* the id list, and `learn_grammar` derives
+    the convention every downstream auditor adjudicates against from that list.
+    The negative corpus now vetoes candidates before the position score. Only the
+    corpus — never the learned grammar, which would be circular — so a same-shape
+    distractor can still win; closing that needs a two-pass harvest and is not
+    attempted here.
+
+  - **Naming drift was manufactured out of alphabetical order.** With no
+    frequency winner (every spelling seen once), the auditor fell back to the
+    *lexicographically first* member as canonical and reported everything else as
+    drift from it. So a canonical NCS `FP-101` was reported as drift from the
+    mangled `F-P101`, and `VAV-21` was called a misspelling of `VAV-2-1` — which
+    on a real schedule are two different boxes. Without a winner, both spellings
+    must now share an *arrangement* (same-kind runs, separators breaking them): a
+    separator between two different kinds is formatting, a separator inside a
+    digit run regroups the number. An established convention still outranks
+    structural doubt, so `A1-2` beside four `A12` is still drift.
+
+  - **`1/2"` and `2"` were the same measurement.** The signature's lookbehind
+    excluded `[A-Za-z0-9.-]` but not `/`, so `1/2"` matched at the **denominator**
+    and signed as `2in` — byte-identical to a real `2"`. *Provide 1/2" drain* and
+    *Provide 2" drain* therefore merged as duplicates: two pipe sizes collapsing
+    into one finding, exactly what the critical signature exists to prevent. A
+    measurement is now compared by its **value**, so `2 1/2`, `2-1/2` and `2.5`
+    are one quantity rather than the meaningless string `21/2`. Feet-inches keeps
+    both halves and neither goes negative — the old lookbehind sat one character
+    before the *sign*, and the character before the `-` in `12'-6"` is `'`, so
+    `[-+]?` swallowed the separator and emitted `-6in`. Fixing that by excluding
+    `-` outright would have been worse: it drops the inches half, and then
+    `12'-6"` and `12'-8"` both sign as `{12ft}` and can merge. Plural units fold
+    (`6 amps` == `6 amp`, which used to *split* one issue into two findings);
+    `psig` deliberately does not fold into `psi`, because gauge and absolute are
+    different measurements.
+
+  - **The split-id scan was quadratic.** The reconstructed id was bounded by the
+    grammar, but the *scan* was not — it kept concatenating and re-matching long
+    after the text was too long to ever match. On a per-glyph CAD text layer,
+    where no single glyph is an id and so nothing stops the run, 2,000 words took
+    **10.0 s** and 10,000 extrapolated to **~5.3 minutes** of a "free" zero-API
+    battery. Capping on **length, not fragment count** makes it linear with
+    byte-identical output: the pathological input *is* a per-glyph layer, where a
+    real `M-101` is five fragments, so a fragment cap would have stopped
+    reconstructing the very ids the merge exists to find. `detect_sheet_id_word`
+    is also memoized per sheet object — fourteen live call sites across twelve
+    modules each re-ran the whole scan, and there was no memoization anywhere in
+    the package.
+
+### Changed
+
+- **`digest_cache._SCHEMA_VERSION` 9 → 10 (one-time cache miss).** The critique
+  entry stores the **post-merge** findings, and the measurement rule inside
+  `critical_signature` changed — so a pre-v10 entry holds a merge the new rule
+  would never have produced: a pair the new rule separates is already collapsed
+  and unrecoverable, a pair it would now join is stored as two. Same reasoning as
+  the v6 and v9 parser rebuilds. Everything in `DigestCache` re-derives on the
+  next run.
+
+- **A/B arm records carry an enforced contract version (`RECORD_CONTRACT_VERSION`
+  1 → 2).** `critical_signature` is computed at arm-run time and stored inside
+  each record, and the comparison re-applies `signatures_compatible` to those
+  *stored* dicts rather than recomputing them. So an arm produced before this
+  release would be scored under a rule it never ran with, and the resulting
+  differences reported as if the arm's model or geometry swap caused them. The
+  version was already written into every sidecar and echoed into every comparison
+  — and read back by nobody, so the contract its own comment describes
+  ("announced rather than assumed") was declarative only. `load_arm_records` now
+  refuses a sidecar from a different contract, and a sidecar with no version is
+  treated as stale rather than as current. Refusing beats warning because the
+  failure is silent: every reader uses `.get(...) or {}` and a one-sided signal
+  never blocks a match, so a stale record whose measurements simply vanished
+  degrades toward "exact match". Re-run affected arms rather than comparing across
+  versions.
+
+### Known limits (unchanged by this release)
+
+- The **sheet-index harvest is still unbounded** — it reads every word on the
+  page, so an equipment tag in a legend can be collected as an index row. Both
+  diff directions already run every entry through `classify_reference`, so a
+  code citation or transmittal number never becomes a finding; an equipment tag
+  is not in that corpus and still can. Two cheap patches were tried and rejected
+  on the evidence: a second corpus check at the harvest is a restated rule that
+  only changes which pages clear the recognition gate, and excluding the sheet's
+  own id breaks an index that legitimately lists itself. The real fix is region
+  bounding, which needs row/column geometry and re-baselines both diff directions
+  together.
+- `signatures_compatible` still blocks only on **disjoint** measurement sets, so
+  `12'-6"` and `12'-8"` remain compatible on their shared `12ft`. That is the
+  documented "don't over-block a real duplicate" conservatism and is unchanged
+  here.
+
 - **The ledger no longer launders model text into ground truth.** Four defects in
   one place: the merge that folds a duplicate finding into an existing ledger
   entry. Together they let the model's own arithmetic reach the reviewer wearing

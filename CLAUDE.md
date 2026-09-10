@@ -224,7 +224,35 @@ both the submitted batch and the one that actually served the digests.
   foundation — Phase 25 §17.2/17.3: `id_signature`/`learn_grammar` learn the set's
   hyphenated/compact/dotted numbering convention, `classify_reference` +
   `is_non_sheet_reference` adjudicate a reference against it with a negative corpus
-  so a code/tag/voltage/RFI/dimension never becomes a sheet finding);
+  so a code/tag/voltage/RFI/**drawing annotation**/dimension never becomes a sheet
+  finding. `_ANNOTATION_PREFIXES` (REV/DET/DWG/TYP/SIM/NTS) is kept separate from
+  the transmittal set because it is a different kind of thing; paper sizes are
+  deliberately absent, since `A1`–`A4` are ISO sizes *and* real architectural ids
+  and the corpus never consults the set. That corpus also vetoes candidates in
+  `references.detect_sheet_id_word` **before** its bottom-right position score:
+  position alone let a code citation in the general notes become the sheet's own
+  id, and `build_inventory` learns the set's grammar from exactly those ids, so one
+  general note redefined the convention every downstream auditor adjudicates
+  against. Only the corpus is consulted there, never the learned grammar — that
+  would be circular — so a same-shape distractor (`M-999`) can still win; closing
+  that needs a two-pass harvest and is **not** done. `detect_sheet_id_word` is
+  memoized on the sheet **object** (14 live call sites, none cached before); a
+  ref-keyed process-wide dict would serve one stage's answer to another stage's
+  rebuilt geometry, and `None` is a real answer so the memo needs a sentinel.
+  `_merge_adjacent_id_words` caps its scan on **length, not fragment count** — the
+  pathological input is a per-glyph text layer where a real `M-101` is five
+  fragments, so a fragment cap would stop reconstructing the very ids it exists to
+  find; the length cap takes it from n²·¹ (10 s at 2,000 words, ~5 min at 10,000)
+  to linear with byte-identical output. `naming.py` refuses to report drift when
+  there is no frequency winner unless both spellings share an `_arrangement`
+  (same-kind runs, separators breaking them): without evidence of a convention the
+  fallback was *lexicographically first wins*, which reported canonical `FP-101` as
+  drift from mangled `F-P101` and `VAV-21` as a misspelling of `VAV-2-1`. An
+  established winner still outranks structural doubt. `sheet_index.py`'s harvest
+  remains unbounded and is deliberately **not** patched with a second copy of the
+  corpus check — both diff directions already run every entry through
+  `classify_reference` — because the real fix is region bounding, which moves the
+  `_MIN_INDEX_ENTRIES` gate and re-baselines both directions together);
   `prose_harvest.py` (mirrors prose Coordination/Conflict items,
   synthesis conflicts, and opted-in focus items into findings — match first,
   one small structuring call for stragglers on **Sonnet 5** at `EFFORT_LOW`,
@@ -307,7 +335,14 @@ both the submitted batch and the one that actually served the digests.
   over `critique.critical_signature`: tags, measurements, absence polarity,
   cross-sheet legs — public because the A/B harness's finding-level comparison
   applies the same rule across two runs, and a restated copy is the drift this
-  codebase has already paid for once); merging keeps
+  codebase has already paid for once — and a measurement in that signature is its
+  **value**, not its spelling: `1/2"` is `0.5in`, not the denominator `2in` it used
+  to collapse to, which made *Provide 1/2" drain* and *Provide 2" drain* one
+  finding. `12'-6"` keeps both halves and neither goes negative, which needs TWO
+  lookbehinds — a single `[A-Za-z0-9.\-]` class blocks the `101` in `M-101`
+  (right) *and* the `6` in `12'-6"` (wrong, and unsafe: `12'-6"` and `12'-8"` then
+  both sign as `{12ft}`). Plurals fold; `psig` deliberately does not fold into
+  `psi`); merging keeps
   **coherent grounding** — the text/quote/tile/rect/evidence-state **and the
   verdict** are one atomic bundle from a single representative, and the loser's
   quote → `supporting_quotes`. `_grounding_quality` ranks **host-computed
@@ -485,7 +520,22 @@ example is parked at `docs/examples/fire_protection.md`.
   *operands* are trusted (`DETERMINISTIC` + auto deterministic-only ink) only when
   the claim's quote independently carries every one (`operand_origin=TEXT_EXTRACTED`,
   Phase 25 §17.5); a mismatch from `MODEL_TRANSCRIBED` terms stays `UNCERTAIN` and
-  is crop-verified before it inks as ground truth.
+  is crop-verified before it inks as ground truth. A term that is not **one** value
+  is refused rather than truncated to its leading run (`12,5`, `12'-6"`, `1.2.3`),
+  and a `%` is refused outright: a percent is a ratio, and because the bare `30` in
+  `1500 SF + 30% = 1950 SF` appears literally in the quote it *cleared* the
+  TEXT_EXTRACTED gate and inked "the product of 1500, 30 is 45000" as host-computed.
+  `_head_denies` / `_tail_denies` are applied at the **quote-scan** site, not inside
+  `parse_number`, because only the scanner can see what bound a number — that is
+  what keeps the two from disagreeing. Whitespace is never a binder: `20 20 20
+  TOTAL 540` is four numbers, and denying the first would gut the flow-test case
+  the auditor exists for. `_fmt` expands an integral with `format(v, "f")`, never
+  `quantize`, which raises above the decimal context's 28 digits from ordinary
+  string terms — inside the `Finding(...)` expression, *after* `mismatched` was
+  incremented. Each claim now has its own `try` with a tally rollback: the
+  orchestrator's single batch-wide `try` meant one bad claim lost every arithmetic
+  finding **and** all four `arithmetic_*` stat keys, after which the summary line
+  read `arith=0/0` — indistinguishable from a set with no claims.
 - **Tiles use the `tile_label` contract (Phase 25 §17.1):** the model returns the
   exact visible label (`"r1c1"`); `tiling.parse_tile_label` converts it to the
   canonical **zero-based** internal `[row, col]`. A legacy `tile` array is accepted

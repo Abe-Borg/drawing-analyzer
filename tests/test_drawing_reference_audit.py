@@ -45,6 +45,12 @@ def _refs(findings):
     return {f.source_quote for f in findings}
 
 
+def _score(word):
+    """The bottom-right proximity score ``detect_sheet_id_word`` ranks by."""
+    x0, y0, x1, y1 = word[:4]
+    return ((x0 + x1) / 2.0) / W + ((y0 + y1) / 2.0) / H
+
+
 # --------------------------------------------------------------------------- #
 # Sheet-ID detection + inventory grammar
 # --------------------------------------------------------------------------- #
@@ -437,3 +443,153 @@ def test_split_word_merge_does_not_absorb_a_complete_id():
     assert detect_sheet_id(sheet) == "A-101"
     inv = build_inventory([sheet])
     assert inv.ids == frozenset({"A-101"})       # no "A-101OF" / "OF24" phantom
+
+
+# --------------------------------------------------------------------------- #
+# P4 — the auditors stop crying wolf
+# --------------------------------------------------------------------------- #
+
+
+def test_a_drawing_annotation_never_becomes_a_stale_sheet_reference():
+    # Item 25b. "REV" / "DET" / "DWG" / "TYP" / "SIM" / "NTS" are among the most
+    # common words on a sheet, and none was in the §17.3 negative corpus. So
+    # "INSTALL PER REV-2" was reported as a stale reference — "did you mean E-2?"
+    # — with DETERMINISTIC ink behind it. DWG-4 and TYP-2 escaped only because
+    # their edit distance happened to exceed the cutoff, which is luck, not a rule.
+    sheets = [
+        _sheet("e.pdf", 0, [_titleblock("E-1"), _w(200, 300, "INSTALL"),
+                            _w(280, 300, "PER"), _w(340, 300, "REV-2")]),
+        _sheet("e.pdf", 1, [_titleblock("E-2")]),
+        _sheet("e.pdf", 2, [_titleblock("E-3")]),
+    ]
+    assert audit_references(sheets) == []
+
+
+def test_annotation_prefixes_survive_a_three_letter_discipline_set():
+    # The sharper case: against a set whose discipline field is three letters,
+    # these tokens MATCH the learned grammar outright, so they graduate from a
+    # low "does not match the convention" to a medium "not present in the set".
+    ids = ["MEP-1", "MEP-2", "MEP-3", "CIV-1"]
+    sheets = [_sheet("s.pdf", i, [_titleblock(sid)]) for i, sid in enumerate(ids)]
+    sheets[0] = _sheet("s.pdf", 0, [
+        _titleblock("MEP-1"),
+        _w(200, 300, "SEE"), _w(250, 300, "SHEET"), _w(330, 300, "REV-2"),
+        _w(200, 340, "SEE"), _w(250, 340, "SHEET"), _w(330, 340, "DET-3"),
+        _w(200, 380, "SEE"), _w(250, 380, "SHEET"), _w(330, 380, "TYP-2"),
+        _w(200, 420, "SEE"), _w(250, 420, "SHEET"), _w(330, 420, "NTS-1"),
+    ])
+    assert audit_references(sheets) == []
+
+
+def test_the_negative_corpus_vetoes_a_distractor_before_position_decides():
+    # Item N22. detect_sheet_id_word chose purely by distance toward the
+    # bottom-right, so a code citation or transmittal number placed further into
+    # the corner than the real title block simply won. That is not a cosmetic
+    # mis-rank: build_inventory calls this to BUILD the set's id list, and the
+    # grammar every downstream auditor adjudicates against is learned FROM that
+    # list — so one general note becomes the convention for the whole set.
+    real = _w(W - 400, H - 300, "E-101")          # the real title block
+    for distractor in ("NFPA-13", "RFI-12", "REV-2", "DET-3"):
+        # Placed strictly further toward the bottom-right than the real id, so it
+        # genuinely OUTSCORES it — the veto, not the geometry, has to be what
+        # decides. (A distractor that already loses on position proves nothing.)
+        far = _w(W - 120, H - 80, distractor)
+        assert _score(far) > _score(real), distractor
+        assert detect_sheet_id(_sheet("e.pdf", 0, [real, far])) == "E-101", distractor
+
+
+def test_a_sheet_whose_every_candidate_is_vetoed_keeps_one():
+    # The veto must not be able to erase a sheet's id entirely: a sheet with no id
+    # drops out of the inventory, which is worse than a doubtful one. Only the
+    # negative corpus is consulted — never the learned grammar, which would be
+    # circular, since build_inventory calls this to produce the ids the grammar is
+    # learned from.
+    sheet = _sheet("e.pdf", 0, [_w(W - 300, H - 160, "NFPA-13"), _w(100, 100, "RFI-12")])
+    assert detect_sheet_id(sheet) == "NFPA-13"
+
+
+def test_split_id_merge_is_linear_and_emits_exactly_what_it_did_before():
+    # Item 26. The emitted id was bounded by the grammar (31 chars here), but the
+    # SCAN was not: the inner loop kept concatenating and re-matching long after
+    # the text was too long to ever match, so on a per-glyph CAD text layer —
+    # where no single glyph is an id, and therefore nothing stops the run — it
+    # went quadratic. Measured before the cap: 2,000 words took 10.0 s, which
+    # extrapolates to ~5.3 min at 10,000, an ordinary dense sheet.
+    #
+    # The cap is on LENGTH, not fragment count, and that matters: the pathological
+    # input IS a per-glyph layer, where a real "M-101" is five one-character
+    # fragments, so a small fragment cap would stop reconstructing the very ids
+    # this function exists to find.
+    import time
+
+    from drawing_analyzer.auditors.references import _merge_adjacent_id_words
+
+    def glyphs(n):
+        cyc = "M-101"
+        return [(float(i), 100.0, float(i) + 1.0, 110.0, cyc[i % len(cyc)], 0, 0, i)
+                for i in range(n)]
+
+    t0 = time.perf_counter()
+    merged = _merge_adjacent_id_words(glyphs(2000))
+    elapsed = time.perf_counter() - t0
+
+    assert elapsed < 4.0, f"split-id merge is superlinear again: {elapsed:.2f}s at n=2000"
+    # Output is unchanged: same count, same longest merge as before the cap.
+    assert len(merged) == 9534
+    assert max(len(text) for text, _rect in merged) == 31
+
+
+def test_sheet_id_detection_is_memoized_per_sheet():
+    # Fourteen live call sites across twelve modules ask for this, and each one
+    # re-ran the whole split-id scan over the same words; there was no
+    # memoization anywhere in the package. The memo is an attribute on the sheet
+    # object rather than a process-wide dict keyed by ref, because geometry is
+    # rebuilt per stage — a ref-keyed cache would serve one stage's answer to
+    # another stage's differently-built words.
+    from drawing_analyzer.auditors import references as refs
+
+    sheet = _sheet("e.pdf", 0, [_titleblock("E-101")])
+    real = refs._merge_adjacent_id_words
+    calls = []
+
+    def counting(words):
+        calls.append(1)
+        return real(words)
+
+    refs._merge_adjacent_id_words = counting
+    try:
+        results = [detect_sheet_id(sheet) for _ in range(14)]
+    finally:
+        refs._merge_adjacent_id_words = real
+
+    assert results == ["E-101"] * 14
+    assert len(calls) == 1, f"scanned {len(calls)} times for one sheet"
+
+
+def test_the_memo_never_confuses_two_sheets_or_swallows_a_raster_answer():
+    # None is a REAL answer (a raster sheet has no words), so it cannot double as
+    # "not computed yet". A memo that stores it and then tests `is not None`
+    # silently rescans every raster sheet on every one of the fourteen call
+    # sites — the exact cost the memo exists to remove, and invisible because the
+    # answer is still correct. Counting the scans is the only way to see it.
+    from drawing_analyzer.auditors import references as refs
+
+    raster = _sheet("r.pdf", 0, [])
+    real = refs._detect_sheet_id_word_uncached
+    calls = []
+
+    def counting(sheet):
+        calls.append(1)
+        return real(sheet)
+
+    refs._detect_sheet_id_word_uncached = counting
+    try:
+        assert [detect_sheet_id(raster) for _ in range(5)] == [None] * 5
+    finally:
+        refs._detect_sheet_id_word_uncached = real
+    assert len(calls) == 1, f"a raster sheet rescanned {len(calls)} times"
+
+    a = _sheet("a.pdf", 0, [_titleblock("A-101")])
+    b = _sheet("b.pdf", 0, [_titleblock("M-201")])
+    assert (detect_sheet_id(a), detect_sheet_id(b)) == ("A-101", "M-201")
+    assert (detect_sheet_id(b), detect_sheet_id(a)) == ("M-201", "A-101")

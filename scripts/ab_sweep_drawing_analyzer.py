@@ -114,6 +114,7 @@ from ab_findings_diff import (  # noqa: E402
     RECORD_CONTRACT_VERSION,
     RECORDS_MISSING,
     RECORDS_PRESENT,
+    RECORDS_STALE_CONTRACT,
     RECORDS_UNREADABLE,
     copy_linked_artifacts,
     evidence_trust_composition,
@@ -1020,6 +1021,16 @@ def load_arm_records(arm_json: Path) -> tuple[str, list[dict]]:
     A missing or unreadable sidecar still yields ``[]`` rather than raising: the
     aggregate comparison is worth printing either way, and a run that already
     cost real money must not be thrown away over a file read.
+
+    A sidecar written under a **different contract version** is refused for the
+    same reason, one level up. Its records parse perfectly and mean something
+    else: ``critical_signature`` is computed at arm-run time and stored, and the
+    comparison re-applies ``signatures_compatible`` to those stored dicts — so an
+    arm produced before a signature-rule change is compared under a rule it was
+    never scored by, and the resulting differences are reported as if the arm's
+    model or geometry swap caused them. Until now the version was written into
+    every sidecar and read back by nobody, so this "announced rather than
+    assumed" contract was declarative only.
     """
     path = _findings_path(arm_json)
     if not path.is_file():
@@ -1030,6 +1041,10 @@ def load_arm_records(arm_json: Path) -> tuple[str, list[dict]]:
         return RECORDS_UNREADABLE, []
     if not isinstance(payload, dict) or "records" not in payload:
         return RECORDS_UNREADABLE, []
+    # A sidecar with no version predates the field entirely, which is strictly
+    # older than the current contract — treat it as stale, not as current.
+    if payload.get("contract_version") != RECORD_CONTRACT_VERSION:
+        return RECORDS_STALE_CONTRACT, []
     return RECORDS_PRESENT, list(payload.get("records") or [])
 
 

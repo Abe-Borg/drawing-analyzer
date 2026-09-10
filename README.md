@@ -1156,7 +1156,15 @@ they are semantically the same *and* their critical signatures agree: a shared
 **tile is a search hint, never identity**, and geometric rectangle overlap alone is
 never enough — two unrelated issues can share a table cell. A conflicting signature
 blocks the merge even when the prose is similar (`500 gpm` vs `550 gpm`, `M-101` vs
-`M-102`, `shown` vs `not shown`, or a different cross-sheet leg). A merge keeps
+`M-102`, `shown` vs `not shown`, or a different cross-sheet leg). A measurement is
+compared by its **value**, not by how it was typed, so `1/2"` is half an inch and
+never the denominator — *Provide 1/2" drain* and *Provide 2" drain* are two pipe
+sizes, not one finding twice — while `2 1/2"`, `2-1/2"` and `2.5"` are one
+quantity. Feet-inches keeps both halves (`12'-6"` signs as 12 ft **and** 6 in,
+neither negative), and a plural unit folds to its singular so `6 amps` and `6 amp`
+are not read as a conflict. `psig` is deliberately *not* folded into `psi`: gauge
+and absolute are different measurements, and collapsing them would hide a real
+conflict rather than a formatting one. A merge keeps
 **coherent grounding**: the survivor's text and quote come from one member as an
 atomic bundle — never one finding's text paired with another's quote — while the
 loser's quote is kept as a supporting quote. The **verdict rides that bundle**,
@@ -1298,6 +1306,17 @@ investigation loop replace the verdict, never the provenance behind it. A
 the model transcribed into numbers the sheet printed, and the caveat a reviewer
 reads must not quietly become "AI-verified against the drawing". The match tolerance is relative (magnitude-aware), so a small-value error
 like `0.2 + 0.2` printed as `0.5` is caught rather than swallowed by a fixed slack.
+
+A term the host cannot read as **one** value is refused outright rather than
+truncated to its leading run, and its claim is then reported as *unchecked*
+instead of as a mismatch. `12,5` is not 12, `12'-6"` is twelve feet six, and a
+**percent is a ratio, not the quantity** — so `1500 SF + 30% = 1950 SF` is not
+"the sum of 1500 and 30". That last one mattered most: because the bare `30`
+appeared literally in the quote, the claim *cleared* the independent-validation
+gate and inked a HIGH-severity *"the product of 1500, 30 is 45000"* wearing the
+host's label. The quote scanner applies the identical rule, so the two can never
+disagree about what a number is — and one claim the host cannot compute or print
+no longer costs the run every other claim's arithmetic.
 
 ## Per-run focus
 

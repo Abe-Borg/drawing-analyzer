@@ -72,8 +72,19 @@ from typing import Any, Iterator
 # place: an inline triple-backtick span opened a phantom block that swallowed
 # the real findings JSON into the sacred prose, and a four-backtick or ``~~~``
 # block was not recognised at all. Same reasoning as the v6 parser rebuild,
-# which is the precedent this follows.
-_SCHEMA_VERSION = 9
+# which is the precedent this follows. Bumped to 10: the measurement rule inside
+# ``critique.critical_signature`` changed, and the critique entry stores the
+# **post-merge** findings (``critique_cache_entry_from_result``), not the raw
+# per-read ones. A measurement now signs by its VALUE — ``1/2"`` is ``0.5in``
+# rather than the denominator ``2in`` it used to collapse to, ``2 1/2`` is
+# ``2.5`` rather than the string ``21/2``, a feet-inches join keeps both halves
+# and neither goes negative, and a plural unit folds to its singular. So a pre-v10
+# entry holds a merge the new rule would never have produced: a pair the new rule
+# separates is already collapsed and unrecoverable, and a pair it would now join
+# is stored as two. Cannot be re-derived in place and must miss once and be
+# re-critiqued rather than served as current. Same reasoning as the v6 and v9
+# parser rebuilds, which are the precedent this follows.
+_SCHEMA_VERSION = 10
 
 # Storage format and concurrency settings are intentionally separate from the
 # content schema above.  ``_SCHEMA_VERSION`` invalidates cached model results;

@@ -78,6 +78,29 @@ _MALFORMED_MAX_DIST = 2
 # normal-spaced "A-101 OF 24" is never merged into one bogus token (§17.3).
 _SPLIT_MAX_GAP_FRAC = 0.12
 
+# Bounds on the split-id SCAN (item 26). The emitted id was already bounded — the
+# widest shape ``sheet_ids._HYPHENATED`` accepts is 6 letters + 3 digits + six
+# ``-`` groups of 6, i.e. 51 characters — but the *scan* was not: the inner loop
+# kept concatenating and re-matching long after ``text`` was too long to ever
+# match again, so on a per-glyph CAD text layer (where no single glyph is itself
+# an id, and therefore nothing stops the run) it degenerated to n²·¹.
+#
+# Measured before these caps: 1,000 words 2.24 s, 2,000 words 10.02 s, which
+# extrapolates to ~5.3 min at 10,000 — an ordinary dense sheet. The "free"
+# zero-API auditor battery could stall a run for minutes.
+#
+# The cap is on **length, not fragment count**, and that distinction is the whole
+# fix. A fragment cap looks equivalent and is not: the pathological input IS a
+# per-glyph layer, where a genuine ``M-101`` is five one-character fragments, so
+# any small fragment cap would stop reconstructing the very ids this function
+# exists to find. Bounding length instead leaves every reachable id reachable and
+# still makes the scan linear — each start position now takes at most 51 steps
+# instead of n.
+#
+# Measured after: n=2,000 falls from 10,016 ms to 29 ms, and the curve is linear
+# (4,000 costs exactly 2× 2,000), with the emitted merges unchanged.
+_MAX_MERGED_ID_LEN = 51
+
 # A looser capture used *inside* trigger phrases / detail bubbles: a token that
 # may be hyphenated (M-101, F-D-01-1), compact (FP101), or dotted (M1.01).
 # Captured tokens are validated with the shared lexer + learned grammar before
@@ -254,6 +277,11 @@ def _merge_adjacent_id_words(words: list[Any]) -> list[tuple[str, tuple[float, f
         prev_x1, prev_yc = xi1, (yi0 + yi1) / 2.0
         j = i + 1
         while j < n:
+            # Bounded scan (item 26): once ``text`` is longer than the id grammar
+            # can accept, every further step is another growing-string concat plus
+            # three regex matches that cannot possibly match.
+            if len(text) > _MAX_MERGED_ID_LEN:
+                break
             xj0, yj0, xj1, yj1 = _wrect(words[j])
             yc = (yj0 + yj1) / 2.0
             gap = xj0 - prev_x1
@@ -272,7 +300,43 @@ def _merge_adjacent_id_words(words: list[Any]) -> list[tuple[str, tuple[float, f
     return merges
 
 
+# Sentinel for the per-sheet memo: ``None`` is a real answer (a raster sheet has
+# no words), so it cannot double as "not computed yet".
+_UNCACHED = object()
+_ID_WORD_CACHE_ATTR = "_da_sheet_id_word"
+
+
 def detect_sheet_id_word(sheet: Any) -> Any | None:
+    """The title-block sheet-ID word tuple, memoized per sheet object (item 26).
+
+    Fourteen live call sites across twelve modules ask for this, and every one of
+    them re-ran the full split-id scan over the same words — there was no
+    memoization anywhere in the package. ``build_inventory`` alone pays it once
+    per sheet, and ``audit_references`` then pays it again inside its own
+    per-sheet loop.
+
+    The memo lives **on the sheet object**, not in a module-level dict keyed by
+    ``(source_id, page_index)``. That is deliberate: geometry objects are rebuilt
+    per stage, so a ref-keyed process-wide cache would serve one stage's answer to
+    another stage's differently-built words, and would leak across runs. An
+    attribute's lifetime is exactly the object's, which is exactly right.
+    ``SheetGeometry`` is a plain (non-frozen, non-slots) dataclass so this
+    attaches cleanly; the write is guarded anyway, because callers pass
+    hand-built fakes and a read-only object must degrade to "just recompute"
+    rather than raise (I-3).
+    """
+    cached = getattr(sheet, _ID_WORD_CACHE_ATTR, _UNCACHED)
+    if cached is not _UNCACHED:
+        return cached
+    result = _detect_sheet_id_word_uncached(sheet)
+    try:
+        setattr(sheet, _ID_WORD_CACHE_ATTR, result)
+    except Exception:  # noqa: BLE001 - a memo is never worth failing a run over
+        pass
+    return result
+
+
+def _detect_sheet_id_word_uncached(sheet: Any) -> Any | None:
     """The title-block sheet-ID **word tuple** (so callers get its rect), or ``None``.
 
     Scans the ID-shaped word tokens and prefers the one nearest the **bottom-
@@ -293,6 +357,24 @@ def detect_sheet_id_word(sheet: Any) -> Any | None:
     w_pt = float(getattr(sheet, "page_width_pt", 0.0) or 0.0)
     h_pt = float(getattr(sheet, "page_height_pt", 0.0) or 0.0)
 
+    # Veto the §17.3 negative corpus BEFORE scoring (item N22). Position alone
+    # decided this, and position is a weak signal: a code citation or an RFI
+    # number sitting further toward the bottom-right than the real title block
+    # simply won. That is not a cosmetic mis-rank — ``build_inventory`` calls this
+    # to BUILD the set's id list, and ``learn_grammar`` derives the set's grammar
+    # from that list, so one general-note token becoming a sheet id poisons the
+    # grammar every downstream auditor then adjudicates against. Reproduced: an
+    # ``M-999`` in the general notes beat the real ``E-0`` title block.
+    #
+    # Only the corpus is consulted, never the learned grammar: ``build_inventory``
+    # needs this function to produce the ids the grammar is learned FROM, so
+    # consulting the grammar here would be circular. The corpus has no such
+    # dependency — it is purely structural and "never consults the set".
+    preferred = [w for w in candidates if not _S.is_non_sheet_reference(_wtext(w))]
+    # If the corpus vetoes every candidate, keep them: a sheet with no id at all
+    # drops out of the inventory entirely, which is worse than a doubtful one.
+    pool = preferred or candidates
+
     def score(word: Any) -> float:
         x0, y0, x1, y1 = _wrect(word)
         cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
@@ -300,7 +382,7 @@ def detect_sheet_id_word(sheet: Any) -> Any | None:
         # normalizing keeps the two axes comparable across sheet sizes.
         return (cx / w_pt if w_pt else 0.0) + (cy / h_pt if h_pt else 0.0)
 
-    return max(candidates, key=score)
+    return max(pool, key=score)
 
 
 def detect_sheet_id(sheet: Any) -> str | None:
