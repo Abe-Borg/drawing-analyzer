@@ -5449,8 +5449,15 @@ _CHAT_JS = r"""
         // what already arrived is right — it was received and billed — but the
         // turn ends here.
         if(stopRequested){
-          if(blocks.length){
-            history.push({role: 'assistant', content: stripDanglingToolUse(blocks)});
+          // Test what will actually be COMMITTED, not what arrived. A reply
+          // that is a bare `tool_use` with no lead-in text is an ordinary
+          // shape, and the strip empties it — so guarding on `blocks.length`
+          // pushed `{role: 'assistant', content: []}`, which the API rejects,
+          // and every later request carried it. (The commit site below already
+          // tested the filtered list; this branch did not.)
+          var keptOnStop = stripDanglingToolUse(blocks);
+          if(keptOnStop.length){
+            history.push({role: 'assistant', content: keptOnStop});
             displays.push({notes: []});
             pushed = true;
           }

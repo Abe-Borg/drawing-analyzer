@@ -2077,6 +2077,81 @@ def test_a_stopped_empty_turn_does_not_annotate_the_previous_answer(page, tmp_pa
         )
 
 
+def test_stopping_a_tool_only_turn_commits_no_empty_assistant_message(page, tmp_path):
+    """A turn whose whole reply is a tool call, stopped before it can be answered.
+
+    The Stop branch tested `blocks.length` — the ORIGINAL list — and then pushed
+    the FILTERED content. When the model's reply is a bare `tool_use` with no
+    lead-in text (an ordinary shape), the filter empties it and what reached
+    history was `{role: 'assistant', content: []}`. The API rejects an empty
+    assistant turn, so every later request carried it and failed. The commit
+    site twenty lines below already tested the filtered list; this one did not.
+    """
+    tool_only = _sse([
+        {"type": "content_block_start", "index": 0,
+         "content_block": {"type": "tool_use", "id": "tu_only",
+                           "name": "query_findings", "input": {}}},
+        {"type": "content_block_delta", "index": 0,
+         "delta": {"type": "input_json_delta", "partial_json": '{"severity":"high"}'}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_delta", "delta": {"stop_reason": "tool_use"}},
+    ])
+    _load(page, _embedded(), tmp_path, queue=[tool_only, _text_turn("unused")])
+    page.click("#da-chat-fab")
+    page.fill("#da-chat-input", "ask something that answers with only a tool call")
+    page.click("#da-chat-send")
+    # Stop via a direct .click() rather than page.click(): the latter waits for
+    # actionability, and a tool-only turn with a fast local tool can finish
+    # inside that wait — the turn then completes normally and the branch under
+    # test never runs. The button is already un-hidden synchronously by
+    # setStreaming(true) at the top of the turn.
+    page.evaluate("() => { document.getElementById('da-chat-stop').click(); return true; }")
+    page.wait_for_timeout(500)
+
+    page.evaluate("window.__SSE_QUEUE = [];")
+    page.fill("#da-chat-input", "the question after that")
+    page.click("#da-chat-send")
+    _finish(page)
+
+    msgs = page.evaluate("window.__REQ")[-1]["messages"]
+    empties = [
+        i for i, m in enumerate(msgs)
+        if isinstance(m.get("content"), list) and not m["content"]
+    ]
+    assert not empties, f"empty message(s) at {empties}: {msgs}"
+
+
+def test_a_stopped_turn_keeps_the_text_that_already_arrived(page, tmp_path):
+    """Stop ends the turn; it does not discard what was already received.
+
+    The other half of the Stop commit rule, and the one that keeps the fix from
+    over-correcting: text that reached the browser was generated and billed, and
+    the reader can see it on screen. Dropping it would make the transcript
+    disagree with the page and lose paid-for output.
+    """
+    _load(page, _embedded(), tmp_path,
+          queue=[_text_turn("Partial answer the reader can already see.")])
+    page.click("#da-chat-fab")
+    page.fill("#da-chat-input", "a question")
+    page.click("#da-chat-send")
+    page.evaluate("() => { document.getElementById('da-chat-stop').click(); return true; }")
+    page.wait_for_timeout(500)
+
+    page.evaluate("window.__SSE_QUEUE = [];")
+    page.fill("#da-chat-input", "follow-up")
+    page.click("#da-chat-send")
+    _finish(page)
+
+    msgs = page.evaluate("window.__REQ")[-1]["messages"]
+    kept = "".join(
+        b.get("text", "")
+        for m in msgs if m.get("role") == "assistant"
+        for b in (m["content"] if isinstance(m["content"], list) else [])
+        if isinstance(b, dict)
+    )
+    assert "Partial answer" in kept, f"the stopped turn's text was discarded: {msgs}"
+
+
 def test_control_tool_turn_really_makes_two_requests(page, tmp_path):
     """Control for the Stop test: without Stop this queue must take TWO rounds."""
     _load(page, _embedded(), tmp_path,

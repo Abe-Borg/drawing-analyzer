@@ -29,7 +29,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   after they finish (the reader can press Stop while a tool is mid-flight).
   What already arrived is still committed — it was received and billed — and a
   tool that did run still gets its `tool_result`, because an unanswered
-  `tool_use` would 400 the next question.
+  `tool_use` would 400 the next question. The commit tests what will actually
+  be stored, not what arrived: a reply that is a bare `tool_use` with no
+  lead-in text is an ordinary shape, and stripping it empty would otherwise
+  have committed an empty assistant message the API rejects.
 
 - **A tool call the turn never answered poisoned the thread.** The assistant
   turn is committed before the stop reason is examined, so a turn that ended
