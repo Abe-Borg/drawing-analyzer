@@ -6,6 +6,68 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A stalled batch was paid for twice.** The largest real-dollar defect in the
+  review. Per-sheet results are filled **only** from a terminal `results()`
+  read, so on a batch that never reached a terminal state — stalled, detached,
+  or unpollable — *every* slot still read "unresolved", including the sheets the
+  batch had completed and billed. The recovery list was therefore all of them.
+  A real 40-sheet run detached at 3.5 h with 11 sheets already produced,
+  resubmitted all 40, watched the resubmission detach too, and returned `0/40`
+  with "not collected" — after paying for 12 digests.
+
+  Cancellation on the Batches API is asynchronous: a canceled batch still
+  transitions to `ended`, and the items it finished stay readable. Every site
+  that abandons a batch now **harvests** it between the cancel and the recovery
+  list, and resubmits only what is genuinely missing. There are **three** such
+  sites, not one: the stalled primary, a stalled resubmission round (which
+  re-billed once per round), and a stalled follow-up batch — that last handing
+  its finished sheets to the direct-call rescue to be digested again at **full
+  real-time rate**, the most expensive of the three. One shared helper serves
+  all three rather than three copies of the rule.
+
+  Three things about it are deliberate, because getting this wrong the other way
+  is worse than the bug it fixes:
+
+  - **Its time is additional, never deducted.** The harvest competes with the
+    rescue for the same seconds precisely on the `detached` path, where the
+    budget is spent by definition and the completed-item count is highest. The
+    first cut charged it to the collection budget and turned a 3/3 direct rescue
+    into 0/3 — trading re-billing for lost sheets. Each caller now adds what the
+    harvest spent back to its own start mark, so the poll and the recovery keep
+    the exact budgets they had before. The price is that a collect which
+    harvests may run up to five minutes past its nominal bound per abandoned
+    batch.
+  - **A batch that will not settle changes nothing.** An unreadable batch, a
+    failed `results()` read, or any exception falls through to resubmitting
+    everything, exactly as before.
+  - **Successes only.** An item that came back `succeeded` but empty does not
+    resolve its sheet — that sheet still needs recovery — yet the attempt *was*
+    charged, so its billed usage record is carried forward onto whatever digest
+    finally lands rather than dropped because the text was unusable.
+
+- **The run now waits as long as it says it does.** The batch collection bound
+  was hardcoded at **4 hours** while the cost dialog, the GUI and the help
+  content all promised runs that "can run overnight (8+ hours)". It is now
+  **24 hours** — the Batches API's own SLA — so the existing wording is true
+  rather than reworded down, and `DRAWING_ANALYZER_BATCH_MAX_ELAPSED_HOURS`
+  caps the wall clock for anyone who would rather. The override is resolved per
+  call rather than frozen as a keyword default at import, which is what a GUI
+  run needs. Raising the bound is safe **only** because of the harvest above:
+  without it, a longer wait is simply a longer window in which finished sheets
+  get billed twice.
+
+- **"Stuck" and "slower than my bound" are no longer the same log line.**
+  Hitting the elapsed bound now records whether the batch was still completing
+  items or had completed none since the first poll. Both are still cancelled,
+  harvested and recovered identically — the cancel is precisely what makes a
+  detached batch's finished sheets readable, so "leave the healthy one running"
+  would strand every sheet it had already been paid for — but the distinction
+  reaches the diagnostics log, the per-sheet error and the usage ledger's
+  terminal status, which is the first thing anyone tuning the bound needs to
+  know.
+
 ---
 
 ## [1.4.0] - 2026-09-10

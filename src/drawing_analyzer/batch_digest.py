@@ -115,7 +115,22 @@ from .models import SheetRef
 # elapsed (drawing batches of a handful of sheets typically land in minutes, but
 # the Batches API may take up to 24h), with progressive backoff so a long batch
 # doesn't hammer the poll endpoint.
-DEFAULT_BATCH_MAX_ELAPSED_SECONDS = 4 * 3600
+#
+# The bound is 24h because that is the Batches API's own SLA: a batch still
+# processing at hour 23 has not misbehaved, and the old 4h bound abandoned it
+# anyway. Every "batch runs can take hours, sometimes overnight (8+ hours)"
+# string the app shows was a promise the engine could not keep — it gave up at
+# four. Raising it makes the existing wording true rather than rewording it
+# down, and it is safe only because the DA-035 harvest now reads a detaching
+# batch's finished sheets back before anything is resubmitted: without that, a
+# longer bound is a longer window in which completed, billed sheets get paid
+# for twice.
+#
+# ``DRAWING_ANALYZER_BATCH_MAX_ELAPSED_HOURS`` overrides it
+# (:func:`_batch_max_elapsed_seconds`) for callers who would rather cap the
+# wall-clock than the spend.
+DEFAULT_BATCH_MAX_ELAPSED_HOURS = 24
+DEFAULT_BATCH_MAX_ELAPSED_SECONDS = DEFAULT_BATCH_MAX_ELAPSED_HOURS * 3600
 DEFAULT_POLL_INTERVAL_SECONDS = 15
 DEFAULT_POLL_MAX_INTERVAL_SECONDS = 120
 DEFAULT_POLL_BACKOFF_AFTER_SECONDS = 5 * 60
@@ -148,6 +163,27 @@ DEFAULT_BATCH_STALL_TIMEOUT_SECONDS = 60 * 60
 # the one line that says the wait is deliberate and bounded.
 DEFAULT_POLL_HEARTBEAT_SECONDS = 5 * 60
 
+# The two ways a poll can run out of clock (:func:`_poll_until_terminal`).
+# ``DETACHED`` is a batch that completed nothing after the first poll: out of
+# time with nothing to show, and indistinguishable from stuck except that the
+# stall watch had not fired yet. ``DETACHED_MOVING`` is a batch that was still
+# finishing items when the bound arrived — healthy, merely larger or more deeply
+# queued than the bound allows.
+#
+# The split is DIAGNOSTIC, not a different disposition: both are cancelled,
+# harvested (DA-035) and recovered the same way, because the Batches API serves
+# ``results()`` only once a batch has ended — so cancelling is precisely what
+# makes a detached batch's finished sheets readable, and "leaving the healthy
+# one running" would strand every sheet it had already been paid for.
+#
+# What the split buys is the first question anyone asks when tuning
+# ``DRAWING_ANALYZER_BATCH_MAX_ELAPSED_HOURS``: was the batch stuck, or just
+# slower than the bound? The sentinel answers it in the log line, the per-sheet
+# error and the ledger's ``ABANDONED_*`` terminal status, where "detached" alone
+# said only that a clock ran out.
+DETACHED = "detached"
+DETACHED_MOVING = "detached_moving"
+
 # Slice of the collection budget held back from the primary poll when recovery
 # is enabled, so a batch that runs the poll's full bound without terminating
 # ("detached") still leaves the direct-call rescue room to work — otherwise
@@ -155,6 +191,36 @@ DEFAULT_POLL_HEARTBEAT_SECONDS = 5 * 60
 # nothing. Capped at 25% of the budget so a small bound still gives the poll
 # the lion's share.
 DEFAULT_RESCUE_RESERVE_SECONDS = 30 * 60
+
+# Bound on the harvest that reads the finished items out of a batch this run is
+# abandoning (:func:`_harvest_abandoned_batch`). Cancellation on the Batches API
+# is asynchronous: a canceled batch still transitions to ``ended`` and the items
+# it already completed stay readable — and were already billed. Reading them
+# back before the rescue list is built is the difference between paying for a
+# stuck batch's finished sheets once and paying for them twice.
+#
+# The harvest's time is deliberately **additional** to the collection budget,
+# not taken out of it: each caller adds what the harvest spent back onto its own
+# start mark, so the poll and the rescue keep the exact budgets they had before
+# this existed. That is the correctness condition, not a nicety. The harvest
+# competes with the rescue for the same seconds precisely on the ``detached``
+# path — where the budget is spent by definition and the completed-item count is
+# highest — so charging it to that budget would trade re-billing for lost
+# sheets, which is strictly worse than the bug. The first attempt here did
+# exactly that and turned a 3/3 recovery into 0/3.
+#
+# The price is that a collect which harvests may run past its nominal bound by
+# up to this much per abandoned batch (so at most one primary plus
+# :func:`_max_batch_resubmit_rounds` resubmissions). Five minutes is far past
+# the seconds an accepted cancel takes to settle, and the 25% cap keeps a small
+# caller-supplied bound from being overshot by a multiple of itself.
+DEFAULT_HARVEST_BUDGET_SECONDS = 5 * 60
+
+# Cadence and error tolerance for that harvest poll. Short and shallow on
+# purpose: the question is only "has the async cancel landed?", which a batch
+# that is going to settle answers within seconds.
+_HARVEST_POLL_INTERVAL_SECONDS = 5.0
+_HARVEST_MAX_POLL_ERRORS = 3
 
 # Recovery transport for a sick/stuck batch (the Batches backend erroring on
 # every item, or a batch whose request counts freeze). ``RECOVERY_DIRECT``
@@ -376,8 +442,13 @@ class _Slot:
     custom_id: str | None = None
     cache_key: str | None = None
     file_ids: list[str] = field(default_factory=list)
-    # Non-billable records for batches abandoned under this slot, held here
-    # until the sheet's real digest lands and absorbs them (§15.6).
+    # Attempt records made under this slot that no result of its own carries,
+    # held here until the sheet's real digest lands and absorbs them (§15.6).
+    # Two producers: the non-billable ABANDONED_* markers of a batch given up
+    # on (:func:`_mark_batch_abandoned`), and the BILLED records of an item a
+    # harvest read back from such a batch that came back empty
+    # (:func:`_park_usage_attempts`) — that attempt really was charged, so it
+    # must reach the ledger even though its digest is unusable.
     abandoned_attempts: list = field(default_factory=list)
     # The batch whose results this sheet was finally parsed from. Differs from
     # the submitted batch whenever recovery resubmitted the sheet, which is
@@ -624,6 +695,197 @@ def _cancel_batch(
     return True
 
 
+def _harvest_budget_seconds(max_elapsed_seconds: float) -> float:
+    """How long a harvest may spend, derived from the caller's FULL bound.
+
+    ``min(``:data:`DEFAULT_HARVEST_BUDGET_SECONDS```, 25%)``, clamped at zero.
+    Deliberately NOT a slice of what is *left*: the harvest's cost is added back
+    to the caller's start mark, so it does not consume the remaining budget, and
+    scaling it to a nearly-exhausted one would shrink the harvest to nothing on
+    exactly the ``detached`` path where it recovers the most. A non-positive
+    bound (the tests force an immediate detach that way) yields zero and skips
+    the harvest entirely — the caller then resubmits everything, which is
+    today's behavior: it loses money but never loses sheets.
+    """
+    return max(0.0, min(DEFAULT_HARVEST_BUDGET_SECONDS, max_elapsed_seconds * 0.25))
+
+
+def _park_usage_attempts(slot: "_Slot", digest: SheetDigest) -> None:
+    """Hold a harvested-but-unusable item's BILLED attempt records on the slot.
+
+    An item can come back ``succeeded`` from the batch and still yield no
+    usable digest (empty or truncated). That attempt was charged, so dropping
+    it because its text is unusable would understate the run — the §15.6 ledger
+    describes work that HAPPENED. The slot is not resolved by it, so the sheet
+    still goes to the rescue; the records ride along and are merged into
+    whatever digest finally lands
+    (:func:`_replace_result_with_attempt_history`).
+    """
+    attempts = list(getattr(digest, "usage_attempts", ()) or ())
+    if not attempts:
+        return
+    slot.abandoned_attempts = list(
+        getattr(slot, "abandoned_attempts", ()) or []
+    ) + attempts
+
+
+def _poll_for_harvest(
+    client: Any,
+    batch_id: str,
+    *,
+    sleep: Callable[[float], None],
+    budget_seconds: float,
+) -> str | None:
+    """Poll a batch this run gave up on, just long enough to see if it settled.
+
+    Deliberately NOT :func:`_poll_until_terminal`. That one is the run's main
+    wait — heartbeat, stall watch, progressive backoff, and a "detached: still
+    processing; remote batch left running (files retained)" warning that would
+    describe something else entirely in the diagnostics trace someone reads
+    when this goes wrong. The question here is narrow: has the asynchronous
+    cancel landed yet? A batch that is going to settle answers in seconds.
+
+    Returns the terminal ``processing_status``, or ``None`` when it did not
+    settle within ``budget_seconds`` or the retrieves kept failing. Always makes
+    at least one retrieve, so a batch that already ended is never missed.
+    """
+    started = time.monotonic()
+    errors = 0
+    while True:
+        try:
+            batch = client.messages.batches.retrieve(batch_id)
+            errors = 0
+        except Exception as exc:  # noqa: BLE001 - advisory; the caller falls through
+            errors += 1
+            _log.warning(
+                "harvest poll of batch %s errored %d/%d: %s",
+                batch_id, errors, _HARVEST_MAX_POLL_ERRORS, summarize_exc(exc),
+            )
+            if errors >= _HARVEST_MAX_POLL_ERRORS:
+                return None
+            batch = None
+        if batch is not None:
+            status = str(_get(batch, "processing_status", "") or "")
+            if status in ("ended", "failed", "expired", "canceled"):
+                return status
+        if time.monotonic() - started >= budget_seconds:
+            return None
+        sleep(_HARVEST_POLL_INTERVAL_SECONDS)
+
+
+def _harvest_abandoned_batch(
+    slots: "list[_Slot]",
+    results: list,
+    *,
+    batch_id: str,
+    client: Any,
+    cache: Any,
+    on_log: LogCallback | None,
+    sleep: Callable[[float], None],
+    budget_seconds: float,
+) -> tuple[set[int], float]:
+    """Read the finished items out of a batch this run has given up collecting.
+
+    The money fix (DA-035). A stalled / detached / unpollable batch used to be
+    canceled and every one of its sheets resubmitted, because ``results`` is
+    filled ONLY from a terminal ``results()`` read — so on a non-terminal batch
+    every slot still reads ``None``, including sheets the batch had completed
+    and billed. A real 40-sheet run detached at 3.5h with 11 sheets already
+    produced, resubmitted all 40, and returned ``0/40`` after paying for 12
+    digests. Cancellation is asynchronous, so those 11 were readable the whole
+    time.
+
+    Called between the cancel and the rescue list at every site that abandons a
+    batch, so a sheet is charged once. Returns ``(resolved slot indices, seconds
+    spent)``; the caller drops exactly those slots from what it resubmits, and
+    adds the seconds back to its own start mark so the stages after it keep the
+    budget they would have had (see
+    :data:`DEFAULT_HARVEST_BUDGET_SECONDS` — this is the whole reason the
+    harvest cannot be charged to the collection budget).
+
+    Deliberately conservative in three ways, because getting this wrong the
+    other way — a harvest that blocks, or one that marks a sheet done when it is
+    not — is worse than the re-billing it prevents:
+
+    * **Bounded, and never at the rescue's expense.** A batch that does not
+      settle, an unreadable ``results()``, or any exception returns an empty set
+      and the caller resubmits everything, exactly as it does today.
+    * **Successes only.** An item that came back errored or empty does not
+      resolve its slot — it still needs the rescue — but its billed attempt
+      records are parked on the slot (:func:`_park_usage_attempts`) rather than
+      dropped, because that attempt really was charged.
+    * **Never fatal.** Recovery is best-effort; a harvest failure can only cost
+      the optimization, never the run (I-3).
+    """
+    if budget_seconds <= 0 or not slots:
+        return set(), 0.0
+    targets = [s for s in slots if s.custom_id is not None]
+    if not targets:
+        return set(), 0.0
+    started = time.monotonic()
+    _log.info(
+        "harvesting completed items from abandoned batch %s (%d sheet(s) "
+        "unresolved, %.0fs budget)", batch_id, len(targets), budget_seconds,
+    )
+    if on_log is not None:
+        on_log(
+            f"Checking abandoned batch {batch_id} for sheets it already "
+            f"finished (up to {budget_seconds / 60:.0f} min)"
+        )
+    status = _poll_for_harvest(
+        client, batch_id, sleep=sleep, budget_seconds=budget_seconds,
+    )
+    if status is None:
+        _log.info(
+            "abandoned batch %s did not settle within the harvest budget; "
+            "resubmitting every unresolved sheet", batch_id,
+        )
+        return set(), time.monotonic() - started
+    try:
+        raw: dict[str, Any] = {}
+        for result in client.messages.batches.results(batch_id):
+            raw[_get(result, "custom_id")] = result
+    except Exception as exc:  # noqa: BLE001 - advisory; the rescue proceeds either way
+        _log.warning(
+            "harvest of abandoned batch %s could not read results: %s; "
+            "resubmitting every unresolved sheet", batch_id, summarize_exc(exc),
+        )
+        return set(), time.monotonic() - started
+    harvested: set[int] = set()
+    billed_but_unusable = 0
+    for slot in targets:
+        res = raw.get(slot.custom_id)
+        if res is None:
+            continue
+        try:
+            digest = _parse_item(slot, res, cache=cache)
+        except Exception as exc:  # noqa: BLE001 - one bad item never costs the rest
+            _log.warning(
+                "harvest of item %s from batch %s failed to parse: %s",
+                slot.custom_id, batch_id, summarize_exc(exc),
+            )
+            continue
+        if digest.error is not None:
+            _park_usage_attempts(slot, digest)
+            billed_but_unusable += 1
+            continue
+        slot.served_by = batch_id
+        _replace_result_with_attempt_history(results, slot, digest)
+        harvested.add(slot.index)
+    _log.info(
+        "harvested %d/%d completed sheet(s) from abandoned batch %s (status=%s, "
+        "%d returned no usable digest); %d sheet(s) still need recovery",
+        len(harvested), len(targets), batch_id, status, billed_but_unusable,
+        len(targets) - len(harvested),
+    )
+    if on_log is not None and harvested:
+        on_log(
+            f"Recovered {len(harvested)} already-completed sheet(s) from "
+            f"batch {batch_id} - not resubmitting them"
+        )
+    return harvested, time.monotonic() - started
+
+
 def _rescue_failed_items_sync(
     rescue: list[tuple[_Slot, dict]],
     results: list,
@@ -766,6 +1028,27 @@ def _max_batch_resubmit_rounds() -> int:
     return DEFAULT_MAX_BATCH_RESUBMIT_ROUNDS
 
 
+def _batch_max_elapsed_seconds() -> float:
+    """Resolve the batch collection bound in seconds (env override > default).
+
+    ``DRAWING_ANALYZER_BATCH_MAX_ELAPSED_HOURS`` names the bound in hours, for
+    an operator who would rather cap wall-clock than wait out the Batches API's
+    full 24h SLA. A malformed or non-positive value falls back to
+    :data:`DEFAULT_BATCH_MAX_ELAPSED_SECONDS` rather than raising, and any
+    override is floored at one minute: a zero-length bound would detach the
+    batch on its first poll and turn every run into a recovery run.
+    """
+    raw = os.environ.get("DRAWING_ANALYZER_BATCH_MAX_ELAPSED_HOURS")
+    if raw and raw.strip():
+        try:
+            hours = float(raw.strip())
+        except ValueError:
+            hours = 0.0
+        if hours > 0:
+            return max(60.0, hours * 3600.0)
+    return float(DEFAULT_BATCH_MAX_ELAPSED_SECONDS)
+
+
 def _stall_timeout_seconds(*, first_watch: bool) -> float:
     """Resolve a stall-watch timeout in seconds (env override > tiered default).
 
@@ -904,6 +1187,23 @@ def _recover_via_batch_resubmit(
             # batch may still be running — the files can't be released yet.
             if not _cancel_batch(client, retry_id, on_log=on_log):
                 files_safe = False
+            # Same money bug as the primary batch (DA-035), and reached more
+            # often: a resubmission that stalls has still completed — and been
+            # billed for — some of its items, and carrying every pending sheet
+            # into the next round pays for those again, once per round.
+            got, harvest_cost = _harvest_abandoned_batch(
+                [slot for slot, _ in pending], results,
+                batch_id=retry_id,
+                client=client, cache=cache,
+                on_log=on_log, sleep=sleep,
+                budget_seconds=_harvest_budget_seconds(max_elapsed_seconds),
+            )
+            started += harvest_cost  # additional time, not deducted
+            if got:
+                recovered += len(got)
+                pending = [(s, prm) for s, prm in pending if s.index not in got]
+                if not pending:
+                    break
             _mark_batch_abandoned(
                 [slot for slot, _ in pending], batch_id=retry_id, status=status,
             )
@@ -1045,7 +1345,14 @@ def _resubmit_failed_items(
         return files_safe
 
     def _rescue_remaining(items: list[tuple[_Slot, dict]]) -> None:
-        """Run the direct-call rescue on whatever budget this round has left."""
+        """Run the direct-call rescue on whatever budget this round has left.
+
+        A no-op on an empty list: a harvest that recovered every pending sheet
+        (DA-035) leaves nothing to digest, and announcing "digesting 0 sheets
+        directly" would report a full-rate rescue that never ran.
+        """
+        if not items:
+            return
         remaining = max_elapsed_seconds - (time.monotonic() - started)
         _log.info(
             "digesting %d still-failed batch item(s) via direct Messages calls",
@@ -1155,6 +1462,20 @@ def _resubmit_failed_items(
             # landed — an uncanceled batch may still be running and
             # referencing them.
             canceled = _cancel_batch(client, retry_id, on_log=on_log)
+            # DA-035, and the most expensive of the three sites: whatever this
+            # follow-up batch already completed would otherwise be re-digested
+            # by the direct rescue at FULL real-time rate, having been billed
+            # once at the batch rate already.
+            got, harvest_cost = _harvest_abandoned_batch(
+                [slot for slot, _ in retry], results,
+                batch_id=retry_id,
+                client=client, cache=cache,
+                on_log=on_log, sleep=sleep,
+                budget_seconds=_harvest_budget_seconds(max_elapsed_seconds),
+            )
+            started += harvest_cost  # additional time, not deducted
+            if got:
+                retry = [(s, prm) for s, prm in retry if s.index not in got]
             _mark_batch_abandoned(
                 [slot for slot, _ in retry], batch_id=retry_id, status=status,
             )
@@ -1590,18 +1911,32 @@ def _poll_until_terminal(
     """Poll ``batch_id`` to a terminal state. Returns the status or a sentinel.
 
     Returns the terminal ``processing_status`` (``ended`` / ``failed`` / …), or
-    ``"detached"`` when the elapsed bound is hit (the remote batch keeps running),
-    or ``"poll_failed"`` after repeated retrieve errors, or ``"stalled"`` when
+    ``"poll_failed"`` after repeated retrieve errors, or ``"stalled"`` when
     ``stall_timeout_seconds`` is set and the batch's request counts have not
     moved at all for that long — the stuck-batch signature (two real batches
     sat at zero completions from submit straight to the 4h bound). Callers
     enable the stall watch only when they can recover the sheets another way;
     without recovery, giving up early would just lose them sooner.
+
+    Hitting the elapsed bound returns one of TWO sentinels, because a batch that
+    ran out of clock is not the same thing as a batch that is stuck.
+    :data:`DETACHED` is a batch that never completed a single item after the
+    first poll — out of time AND showing nothing for it. :data:`DETACHED_MOVING`
+    is one that was still finishing items when the bound arrived: healthy, just
+    bigger or queued deeper than the bound allows. Cancelling that one destroys
+    work in flight and forces a resubmission that pays for it again, which is
+    why the caller treats them differently; collapsing them is what made a
+    24h bound unsafe to raise.
     """
     started = time.monotonic()
     consecutive_errors = 0
     last_done = -1  # the first successful poll always registers as progress
     progressed_at = started
+    # Progress observed after the FIRST successful poll. Seeded False and set
+    # only on a genuine increase, so a batch that reports the same count from
+    # submit to the bound never counts as moving: the first poll's transition
+    # from the -1 sentinel is bookkeeping, not progress.
+    saw_progress = False
     # Heartbeat clock. Seeded at ``started`` so the first line lands one full
     # interval in, not immediately: a batch that lands in its first few minutes
     # (the healthy case) should stay quiet.
@@ -1610,9 +1945,11 @@ def _poll_until_terminal(
         elapsed = time.monotonic() - started
         if elapsed > max_elapsed_seconds:
             _log.warning(
-                "batch %s detached: still processing after %.1fh; remote batch "
-                "left running (files retained)",
-                batch_id, max_elapsed_seconds / 3600,
+                "batch %s detached (%s): still processing after %.1fh; remote "
+                "batch left running (files retained)",
+                batch_id,
+                "still completing items" if saw_progress else "no items completed",
+                max_elapsed_seconds / 3600,
             )
             if on_log is not None:
                 on_log(
@@ -1620,7 +1957,7 @@ def _poll_until_terminal(
                     f"{max_elapsed_seconds / 3600:.1f}h; id={batch_id}",
                     level="warning",
                 )
-            return "detached"
+            return DETACHED_MOVING if saw_progress else DETACHED
         try:
             batch = client.messages.batches.retrieve(batch_id)
             consecutive_errors = 0
@@ -1693,6 +2030,7 @@ def _poll_until_terminal(
                     f"({done_in_batch} sheet(s) done){stall_note}"
                 )
         if done_in_batch > last_done:
+            saw_progress = last_done >= 0  # not the first poll's -1 sentinel
             last_done = done_in_batch
             progressed_at = time.monotonic()
         elif (
@@ -1847,7 +2185,7 @@ def collect_drawing_batch(
     progress: ProgressCallback | None = None,
     on_log: LogCallback | None = None,
     sleep: Callable[[float], None] = time.sleep,
-    max_elapsed_seconds: int = DEFAULT_BATCH_MAX_ELAPSED_SECONDS,
+    max_elapsed_seconds: float | None = None,
     cleanup_in_background: bool = False,
     retry_failed_items: bool = False,
     recovery_transport: str = RECOVERY_DIRECT,
@@ -1901,6 +2239,12 @@ def collect_drawing_batch(
     ``RECOVERY_BATCH`` so a stalled/sick batch is retried as a batch rather than
     silently dropping the run to real-time pricing.
     """
+    # ``None`` means "the app's bound", resolved HERE rather than as a keyword
+    # default so ``DRAWING_ANALYZER_BATCH_MAX_ELAPSED_HOURS`` is read per call
+    # instead of frozen at import (a module-level default would ignore an
+    # override set after the module loads, which is every GUI run).
+    if max_elapsed_seconds is None:
+        max_elapsed_seconds = _batch_max_elapsed_seconds()
     # Size by the actual slot count (one slot per rendered sheet, indices
     # 0..n-1 in page order) so a divergent display ``total`` can never
     # mis-size or drop a result.
@@ -2005,6 +2349,35 @@ def collect_drawing_batch(
             canceled = False
             if retry_failed_items:
                 canceled = _cancel_batch(client, batch.batch_id, on_log=on_log)
+                # Harvest BEFORE building the rescue list (DA-035). A cancel is
+                # asynchronous, so the sheets this batch already finished — and
+                # billed — are still readable; without this the rescue list is
+                # every submitted slot, and each completed sheet is paid for
+                # twice.
+                #
+                # This is also why a still-MOVING detached batch is cancelled
+                # like any other rather than left alone to finish: the Batches
+                # API serves ``results()`` only once a batch has ENDED, so the
+                # cancel is what makes its completed sheets readable at all.
+                # Leaving a healthy-but-slow batch running looks generous and
+                # strands every sheet it had already been paid for — this run
+                # cannot read them, and a later run submits a new batch rather
+                # than collecting this one. The moving/frozen split is
+                # therefore diagnostic (it names which happened in the log, the
+                # per-sheet error and the ledger's terminal status), not a
+                # different disposition.
+                _, harvest_cost = _harvest_abandoned_batch(
+                    [s for s in submitted if results[s.index] is None],
+                    results,
+                    batch_id=batch.batch_id,
+                    client=client, cache=cache,
+                    on_log=on_log, sleep=sleep,
+                    budget_seconds=_harvest_budget_seconds(max_elapsed_seconds),
+                )
+                # The harvest's time is additional, not deducted: move the mark
+                # every later ``remaining`` is measured from, so the rescue gets
+                # exactly the budget it had before the harvest existed.
+                collect_started += harvest_cost
                 rescue = [
                     (slot, slot.params)
                     for slot in submitted

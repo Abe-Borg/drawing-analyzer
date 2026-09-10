@@ -51,11 +51,11 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .batch_digest import (
-    DEFAULT_BATCH_MAX_ELAPSED_SECONDS,
     MAX_CONSECUTIVE_FATAL_UPLOAD_FAILURES,
     LogCallback,
     ProgressCallback,
     StatusCallback,
+    _batch_max_elapsed_seconds,
     _cancel_batch,
     _poll_until_terminal,
     _release_uploaded_files,
@@ -459,7 +459,7 @@ def collect_critique_batch(
     progress: ProgressCallback | None = None,
     on_log: LogCallback | None = None,
     sleep: Callable[[float], None] = time.sleep,
-    max_elapsed_seconds: int = DEFAULT_BATCH_MAX_ELAPSED_SECONDS,
+    max_elapsed_seconds: float | None = None,
     cleanup_in_background: bool = False,
 ) -> list[tuple[Any, CritiqueResult]]:
     """Poll the critique batch to completion and merge each sheet's reads.
@@ -479,6 +479,12 @@ def collect_critique_batch(
     A non-terminal batch this run could not cancel keeps its files (it may still be
     running remotely; they expire server-side) and that retention is logged.
     """
+    # ``None`` means "the app's bound", resolved HERE rather than as a keyword
+    # default so ``DRAWING_ANALYZER_BATCH_MAX_ELAPSED_HOURS`` is read per call
+    # instead of frozen at import.
+    if max_elapsed_seconds is None:
+        max_elapsed_seconds = _batch_max_elapsed_seconds()
+
     submitted = batch.submitted_slots
     if not (batch.batch_id and submitted):
         return _assemble(batch)

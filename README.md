@@ -1399,6 +1399,7 @@ runs.
 | `DRAWING_ANALYZER_USE_BATCH` | off | Opt every run into the Message Batches transport (~50% token-rate discount with the same model/prompt/review contract) without editing call sites. An explicit `use_batch=` argument still wins. |
 | `DRAWING_ANALYZER_BATCH_STALL_TIMEOUT_MIN` | `25` first watch, `60` after | Minutes of **completely frozen** batch request counts before the batch is abandoned and its sheets resubmitted. Setting this applies one value to every watch (see [Stuck batches](#stuck-batches-and-the-stall-watch)). |
 | `DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS` | `4` | Fresh batches the recovery transport will submit for the sheets a stuck batch left unresolved, before the run keeps a clean retriable batch error. |
+| `DRAWING_ANALYZER_BATCH_MAX_ELAPSED_HOURS` | `24` | Hours a batch run will wait before detaching from the remote batch. The default is the Batches API's own SLA. Lower it to cap wall clock; a malformed or non-positive value falls back to the default, and any override is floored at one minute. |
 | `DRAWING_ANALYZER_MAX_WORKERS` | `4` | Real-time digest concurrency (`1` = sequential). |
 | `DRAWING_ANALYZER_STAGE_OVERLAP` | auto | Overlap independent set-level calls for the real SDK client; `0` disables it and `1` explicitly opts a thread-safe custom client in. `DRAWING_ANALYZER_MAX_WORKERS=1` remains fully sequential. |
 | `DRAWING_ANALYZER_UPLOAD_WORKERS` | `6` | Files-API image-upload concurrency per sheet (`1` = sequential). |
@@ -1452,6 +1453,29 @@ on a frozen batch, best-effort cancels it (an abandoned batch left running only
 burns quota and pins the uploaded files), and resubmits its sheets as a **fresh
 batch** on the same still-uploaded `file_id`s. Recovery never silently drops to
 full-rate real-time calls, so a stuck run keeps the ~50% batch discount.
+
+**A sheet the batch already finished is never resubmitted.** Before anything is
+sent again, the run reads the abandoned batch's completed items back and fills
+those sheets from them — cancellation on the Batches API is asynchronous, so a
+canceled batch still transitions to `ended` and the items it finished stay
+readable. Without that step a stalled batch was paid for twice: results are
+filled only from a terminal read, so on a batch that never terminated *every*
+sheet looked unresolved, including the ones already produced and billed. A real
+40-sheet run detached with 11 sheets in hand, resubmitted all 40, and returned
+nothing after paying for 12 digests. The harvest is bounded and never spends the
+recovery's budget: if the batch will not settle, the run resubmits everything
+exactly as it used to, which costs money but never loses sheets.
+
+The run waits up to **24 hours** for a batch — the Batches API's own SLA, and
+what makes the app's "can run overnight" wording true rather than aspirational.
+Set `DRAWING_ANALYZER_BATCH_MAX_ELAPSED_HOURS` to cap the wall clock instead.
+Raising the bound is only safe *because* of the harvest above: a longer wait
+would otherwise just be a longer window in which completed sheets get re-billed.
+A batch that is still completing items when the bound arrives is recorded
+distinctly from one that froze — it is handled the same way, since the cancel is
+what makes its finished sheets readable at all, but the log, the per-sheet error
+and the usage ledger say which happened, so "stuck backend" and "slower than my
+bound" are not the same line to read.
 
 The window is **tiered**, because the first watch and the later ones ask
 different questions:
