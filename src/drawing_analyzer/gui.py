@@ -20,7 +20,48 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import BooleanVar, StringVar, filedialog, messagebox
 
-import customtkinter as ctk
+
+
+def _gui_toolkit_unavailable(exc: BaseException) -> "BaseException":
+    """Report a missing GUI toolkit the only way a windowed app can (P9 item 47).
+
+    ``customtkinter`` is in the ``gui`` extra, so ``pip install drawing-analyzer``
+    without it installs a working engine and a launcher that cannot start. The
+    launcher is declared under ``[project.gui-scripts]``, which on Windows builds
+    a console-less ``.exe``: the ``ModuleNotFoundError`` is written to a stdout
+    that does not exist, so running ``drawing-analyzer`` produced **nothing at
+    all** — no window, no message, no exit code the user ever sees. The frozen
+    PyInstaller build is windowed for the same reason.
+
+    ``tkinter`` is stdlib and ships with every Windows Python (and PyInstaller
+    bundles it), so a messagebox is the one output channel that survives; if even
+    that is unavailable this still writes to stderr and returns the error to
+    raise. Returns rather than raises so the caller's ``raise ... from exc``
+    keeps the original traceback.
+    """
+    detail = f"{type(exc).__name__}: {exc}"
+    message = (
+        "Drawing Analyzer could not start because its user-interface "
+        "libraries are missing.\n\n"
+        f"{detail}\n\n"
+        "Install the GUI extras and try again:\n\n"
+        '    pip install "drawing-analyzer[gui]"'
+    )
+    try:
+        messagebox.showerror("Drawing Analyzer - cannot start", message)
+    except Exception:  # noqa: BLE001 - no display, or tkinter itself is broken
+        pass
+    try:
+        print(message, file=sys.stderr)
+    except Exception:  # noqa: BLE001 - a windowed build may have no stderr either
+        pass
+    return ImportError(message)
+
+
+try:
+    import customtkinter as ctk
+except Exception as _ctk_exc:  # noqa: BLE001 - any import failure is fatal here
+    raise _gui_toolkit_unavailable(_ctk_exc) from _ctk_exc
 
 try:  # drag-and-drop is optional (mirrors the main app shell)
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -223,6 +264,19 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         # outer/card padding — 640 clipped the row once "About" was added.
         self.minsize(740, 560)
         self.configure(fg_color=COLORS["bg_dark"])
+        # Closing the window while a run is in flight throws the run away: the
+        # worker threads are daemons, so the interpreter exits without them and
+        # nothing has been exported yet (the export happens after the analysis
+        # returns). A run costs real money and can take an hour, and the three
+        # secondary windows in this app each already confirm on close while the
+        # MAIN one did not — one stray click on the X and the whole set was gone
+        # with no prompt (P9 item 47).
+        self.protocol("WM_DELETE_WINDOW", self._on_close_request)
+        # An exception raised inside a Tk callback goes to Tk's own handler,
+        # which writes a traceback to stderr — and this is a windowed build with
+        # no stderr, so the app simply appeared to ignore the click (N32). Route
+        # it to the diagnostics trace and tell the user something failed.
+        self.report_callback_exception = self._on_callback_exception
 
         self._pdfs: list[Path] = []
         self._ctx: DrawingContext | None = None
@@ -2846,6 +2900,83 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
             win.destroy()
         except Exception:  # pragma: no cover - platform dependent
             pass
+
+    # -- window lifecycle ------------------------------------------------- #
+
+    def _on_close_request(self) -> None:
+        """Confirm before discarding an in-flight run (P9 item 47).
+
+        The worker threads are daemons and the export runs *after* the analysis
+        returns, so closing mid-run destroys a paid run's results with nothing on
+        disk. A quiet window closes immediately — this is a guard, not a
+        ceremony.
+        """
+        busy = _describe_busy(bool(self._busy), bool(self._export_busy))
+        if busy:
+            try:
+                keep_open = not messagebox.askyesno(
+                    "Quit Drawing Analyzer?",
+                    f"{busy}\n\n"
+                    "Quitting now discards it — nothing has been exported yet, "
+                    "and the API calls already made are still billed.\n\n"
+                    "Quit anyway?",
+                    default="no",
+                    icon="warning",
+                    parent=self,
+                )
+            except Exception:  # noqa: BLE001 - never trap the user in the window
+                keep_open = False
+            if keep_open:
+                return
+        self.destroy()
+
+    def _on_callback_exception(self, exc_type, exc_value, exc_tb) -> None:
+        """Tk callback error hook (N32).
+
+        Tk's default handler prints a traceback to ``sys.stderr``; the shipped
+        app is a windowed build where that is ``None``, so an exception in a
+        button handler left the UI looking like the click did nothing. Record it
+        in the diagnostics trace, put one line in the activity log, and say so
+        once — while staying non-fatal, exactly as Tk's own handler is.
+        """
+        try:
+            # ``diagnostics.get_logger()`` rather than the module-level ``_log``,
+            # which this class shadows with its activity-log method.
+            diagnostics.get_logger().error(
+                "tk callback failed", exc_info=(exc_type, exc_value, exc_tb)
+            )
+        except Exception:  # noqa: BLE001 - the reporter must never raise
+            pass
+        detail = f"{getattr(exc_type, '__name__', exc_type)}: {exc_value}"
+        try:
+            self._log(f"Internal error: {detail}")
+        except Exception:  # noqa: BLE001 - the log widget may be gone
+            pass
+        try:
+            messagebox.showerror(
+                "Drawing Analyzer - internal error",
+                "Something went wrong handling that action:\n\n"
+                f"{detail}\n\n"
+                "The app is still running. Details were written to the "
+                'diagnostics log - see "Open Diagnostics Log".',
+                parent=self,
+            )
+        except Exception:  # noqa: BLE001 - no display / window already gone
+            pass
+
+
+def _describe_busy(analysis: bool, export: bool) -> str:
+    """Which long-running job is in flight, for the confirm-on-close prompt.
+
+    Split out from the handler so the wording is testable without a Tk root.
+    """
+    if analysis and export:
+        return "An analysis run and an export are still running."
+    if analysis:
+        return "An analysis run is still in progress."
+    if export:
+        return "An export is still being written."
+    return ""
 
 
 def main() -> None:

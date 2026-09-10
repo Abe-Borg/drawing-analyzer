@@ -107,6 +107,8 @@ from .models import (
     TRUST_REASON_NO_TEXT,
     TRUST_REASON_NOT_FOUND,
     leg_identity,
+    name_is_taken,
+    record_name,
 )
 from .source_registry import assign_source_ids
 
@@ -2864,10 +2866,12 @@ def write_reviewed_pdfs(
         else:
             name = f"{pdf_path.stem}_reviewed.pdf"
         n = 1
-        while name in used_names:   # last-resort guard (e.g. no source_id to split them)
+        # Case-insensitive (item 45): on Windows two names differing only in case
+        # are one file, and the second reviewed PDF would overwrite the first.
+        while name_is_taken(name, used_names):   # last-resort guard (no source_id to split them)
             n += 1
             name = f"{pdf_path.stem}_reviewed_{n}.pdf"
-        used_names.add(name)
+        record_name(name, used_names)
         out = output_dir / name
         sheet_meta = {
             **meta_by_name.get(pdf_path.name, {}),

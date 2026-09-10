@@ -36,6 +36,7 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from functools import lru_cache
 from typing import Any, Callable
 
 from .diagnostics import redact_secrets
@@ -149,6 +150,28 @@ def scrub_paths(text: str) -> str:
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 
 
+@lru_cache(maxsize=256)
+def _private_root_re(root: str) -> "re.Pattern[str]":
+    """A matcher for one private root: case-insensitive, separator-agnostic.
+
+    Windows paths are case-insensitive and both separators are legal, so one
+    directory has many spellings and a plain ``str.replace`` matches only the
+    spelling that happened to be registered (P9 item 44). Measured: with the
+    root recorded as ``C:\\Users\\Abe Borg\\My Drawings`` — what
+    ``Path.resolve()`` produces — an exception string carrying that same
+    directory with a *lowercase drive letter* scrubbed to
+    ``.../Abe Borg\\My Drawings\\SET 01.pdf``: the literal pass missed, and the
+    regex backstop in :func:`scrub_paths` cannot find where a path containing
+    spaces ends, so the user's own name and folder structure reached run.log and
+    run_manifest.json — both of which exist to be portable.
+
+    Compiled per root and cached: this boundary runs on every field of every
+    journal event.
+    """
+    parts = [re.escape(seg) for seg in re.split(r"[\\/]", root)]
+    return re.compile(r"[\\/]".join(parts), re.IGNORECASE)
+
+
 def sanitize_text(
     value: Any,
     *,
@@ -160,8 +183,9 @@ def sanitize_text(
     The storage boundary for everything the journal keeps (§18.3), in order:
     flatten to one line; strip HTML tags when a tag signature is present (an
     HTML 5xx body must not flood the log); replace each ``private_roots``
-    literal with ``...`` (the run's *known* directories — input parents, work
-    dir, home — which handles spacey Windows paths the bare regexes cannot);
+    directory with ``...`` — the run's *known* directories (input parents, work
+    dir, home), matched case-insensitively and across both separators, which
+    handles spacey Windows paths the bare regexes cannot;
     redact secrets (before truncation, so a secret can never survive as a
     recognizable prefix); scrub remaining absolute paths; bound the length.
     Never raises — an unprintable object becomes a placeholder rather than
@@ -176,12 +200,44 @@ def sanitize_text(
         text = " ".join(_HTML_TAG_RE.sub(" ", text).split())
     for root in private_roots:
         if root:
-            text = text.replace(root, "...")
+            text = _private_root_re(str(root)).sub("...", text)
     text = redact_secrets(text)
     text = scrub_paths(text)
     if len(text) > max_chars:
         text = text[:max_chars] + f"... [+{len(text) - max_chars} chars]"
     return text
+
+
+def redact_for_display(
+    value: Any,
+    *,
+    private_roots: "tuple[str, ...] | list[str]" = (),
+) -> str:
+    """Secret- and path-redact one host-generated string for a shipped artifact.
+
+    :func:`sanitize_text`'s boundary minus the two parts that only make sense for
+    a log *line*: no newline flattening and no truncation, because a shipped
+    report renders an error in a block and must not present a cut-off one as
+    complete. Used by the Markdown and HTML exports (P9 item 44) — run.log and
+    run_manifest.json were carefully sanitized while ``00_index.md``, the
+    per-sheet Markdown and ``report.html`` printed the same exception string
+    verbatim. Measured on one export: an ``AuthenticationError`` repr carrying a
+    request header put both the user's own directory names and an API key into
+    all three, and the export folder is exactly what gets emailed to a client.
+
+    Applies **only** to host-generated status/error text. Digest prose is
+    untouched (I-2), and model findings are not routed through here either: a
+    quote reading ``TOKEN: 12`` is drawing content, and redacting it would
+    corrupt a review to defend against a credential that is not there.
+    """
+    try:
+        text = str(value)
+    except Exception:  # noqa: BLE001 - an artifact write must never raise
+        return "(unprintable " + type(value).__name__ + ")"
+    for root in private_roots:
+        if root:
+            text = _private_root_re(str(root)).sub("...", text)
+    return scrub_paths(redact_secrets(text))
 
 
 def derive_run_outcome(
@@ -587,7 +643,7 @@ def _profile_lines(ctx: Any) -> list[str]:
     return lines
 
 
-def _input_lines(ctx: Any) -> list[str]:
+def _input_lines(ctx: Any, roots: "tuple[str, ...]" = ()) -> list[str]:
     inventory = getattr(ctx, "input_inventory", None)
     docs = list(getattr(inventory, "documents", None) or [])
     if not docs:
@@ -605,10 +661,16 @@ def _input_lines(ctx: Any) -> list[str]:
     for d in docs:
         sid = getattr(d, "source_id", "") or "—"
         status = getattr(d, "status", "") or "?"
-        name = sanitize_text(getattr(d, "display_name", "") or "?", max_chars=80)
+        name = sanitize_text(
+            getattr(d, "display_name", "") or "?", max_chars=80, private_roots=roots
+        )
         detail = f"{int(getattr(d, 'page_count', 0) or 0)} page(s)"
         if not getattr(d, "accepted", False):
-            detail = sanitize_text(getattr(d, "error", "") or status.lower(), max_chars=160)
+            detail = sanitize_text(
+                getattr(d, "error", "") or status.lower(),
+                max_chars=160,
+                private_roots=roots,
+            )
             dup = getattr(d, "duplicate_of", "")
             if dup:
                 detail += f" (duplicate of {dup})"
@@ -616,7 +678,7 @@ def _input_lines(ctx: Any) -> list[str]:
     return lines
 
 
-def _sheet_lines(ctx: Any) -> list[str]:
+def _sheet_lines(ctx: Any, roots: "tuple[str, ...]" = ()) -> list[str]:
     sheets = list(getattr(ctx, "sheets", None) or [])
     if not sheets:
         return ["  (no sheets)"]
@@ -635,7 +697,9 @@ def _sheet_lines(ctx: Any) -> list[str]:
     ]
     for s in sheets:
         ref = getattr(s, "ref", None)
-        label = sanitize_text(getattr(ref, "display_label", "") or "sheet", max_chars=80)
+        label = sanitize_text(
+            getattr(ref, "display_label", "") or "sheet", max_chars=80, private_roots=roots
+        )
         error = getattr(s, "error", None)
         # Classified by ``ok`` (error-free AND non-empty), matching the header
         # sums above — an empty error-free digest is a failure, not "ok" (its
@@ -656,14 +720,18 @@ def _sheet_lines(ctx: Any) -> list[str]:
                 bits.append(f"{int(omitted)} blank tile(s) omitted")
         note = getattr(s, "findings_note", "")
         if note:
-            bits.append(f"parser: {sanitize_text(note, max_chars=120)}")
+            bits.append(
+                f"parser: {sanitize_text(note, max_chars=120, private_roots=roots)}"
+            )
         if error:
-            bits.append(sanitize_text(error, max_chars=160))
+            bits.append(sanitize_text(error, max_chars=160, private_roots=roots))
         lines.append(f"  {label:<40} {status:<9} " + " · ".join(bits))
     return lines
 
 
-def _stage_lines(ctx: Any, journal: "RunJournal | None") -> list[str]:
+def _stage_lines(
+    ctx: Any, journal: "RunJournal | None", roots: "tuple[str, ...]" = ()
+) -> list[str]:
     results = list(getattr(ctx, "stage_results", None) or [])
     durations = journal.stage_durations() if journal is not None else {}
     header = f"  {'stage':<15}{'status':<15}{'calls':<12}{'items in→out':<14}{'duration':<10}notes"
@@ -677,7 +745,7 @@ def _stage_lines(ctx: Any, journal: "RunJournal | None") -> list[str]:
         items = f"{int(getattr(sr, 'items_in', 0) or 0)}→{int(getattr(sr, 'items_out', 0) or 0)}"
         duration = f"{durations[stage]:.1f}s" if stage in durations else "—"
         notes = list(getattr(sr, "errors", None) or []) + list(getattr(sr, "warnings", None) or [])
-        note = sanitize_text(notes[0], max_chars=90) if notes else ""
+        note = sanitize_text(notes[0], max_chars=90, private_roots=roots) if notes else ""
         if len(notes) > 1:
             note += f" (+{len(notes) - 1} more)"
         lines.append(f"  {stage:<15}{status:<15}{calls:<12}{items:<14}{duration:<10}{note}")
@@ -727,7 +795,7 @@ def evidence_summary(findings: "list[Any]") -> dict:
     return {"artifact_count": artifacts, "findings_with_evidence": with_evidence}
 
 
-def _ledger_lines(ctx: Any) -> list[str]:
+def _ledger_lines(ctx: Any, roots: "tuple[str, ...]" = ()) -> list[str]:
     from .models import receipt_status_counts
 
     findings = list(getattr(ctx, "findings", None) or [])
@@ -760,12 +828,16 @@ def _ledger_lines(ctx: Any) -> list[str]:
         lines.append(f"  markup coverage: {coverage} (receipt-derived, §13.5)")
         tally_line = getattr(ctx, "ledger_tally_line", "") or ""
         if tally_line:
-            lines.append(f"  {sanitize_text(tally_line, max_chars=200)}")
+            lines.append(
+                f"  {sanitize_text(tally_line, max_chars=200, private_roots=roots)}"
+            )
     mutated = list(getattr(ctx, "mutated_sources", None) or [])
     if mutated:
         lines.append(
             "  sources changed mid-run (markup skipped): "
-            + ", ".join(sanitize_text(m, max_chars=60) for m in mutated)
+            + ", ".join(
+                sanitize_text(m, max_chars=60, private_roots=roots) for m in mutated
+            )
         )
     return lines
 
@@ -825,6 +897,15 @@ def render_run_log(
         lines.append("Environment: " + pairs[0])
         lines.extend(f"             {p}" for p in pairs[1:])
 
+    # The private-root list belongs to the journal, so every section builder
+    # that sanitizes free-form text (input/sheet/stage errors, the ledger tally,
+    # mutated source names) is handed it. It used to reach only the Errors
+    # section below, so a rejected input's PermissionError printed the user's
+    # own directory names in full while the same string in `ctx.errors` was
+    # scrubbed (P9 item 44). test_run_journal.py asserts structurally that no
+    # sanitize_text call in this module omits it.
+    roots = tuple(getattr(journal, "private_roots", ()) or ())
+
     def section(title: str, *builders: Any) -> None:
         # Each section renders independently and never sinks the log: run.log
         # is an advisory artifact, so a hostile/duck-typed context field costs
@@ -839,12 +920,12 @@ def render_run_log(
         if body:
             lines.extend(["", title, _RULE, *body])
 
-    section("Inputs", _input_lines)
+    section("Inputs", lambda c: _input_lines(c, roots))
     section("Configuration", _config_lines, _profile_lines)
-    section("Sheets", _sheet_lines)
-    section("Stages", lambda c: _stage_lines(c, journal))
+    section("Sheets", lambda c: _sheet_lines(c, roots))
+    section("Stages", lambda c: _stage_lines(c, journal, roots))
     section("Usage & estimated cost", _usage_lines)
-    section("Findings, ledger & markup coverage", _ledger_lines)
+    section("Findings, ledger & markup coverage", lambda c: _ledger_lines(c, roots))
     section("Prose carry-through (§14.9)", _prose_lines)
 
     if outputs is not None:
@@ -856,7 +937,6 @@ def render_run_log(
         )
         section("Outputs", lambda c: body)
 
-    roots = tuple(getattr(journal, "private_roots", ()) or ())
     errors = [
         sanitize_text(e, max_chars=240, private_roots=roots)
         for e in (getattr(ctx, "errors", None) or [])

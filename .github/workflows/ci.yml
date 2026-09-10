@@ -45,7 +45,23 @@ name: CI
 on:
   push:
     branches: [main]
+    # Release tags too (P9 item 42). Branch protection cannot make a check
+    # required for a *tag* push, so before this the commit a release was cut
+    # from was only ever tested as a branch commit — and a tag can point at any
+    # commit, including one never pushed to main. The blocking gate lives in
+    # release.yml's `gates` job (`publish` needs it); this trigger is what runs
+    # the parts that job deliberately leaves out: the Windows leg, the browser
+    # exploit suite, and the wheel build.
+    tags: ["v*"]
   pull_request:
+  # Weekly, so the pip-audit vulnerability scan in `security-gates` runs against a
+  # quiet repository (P9 item 40). Without this the audit only ever fires on a push
+  # or a PR, so a CVE disclosed against an already-pinned dependency goes unnoticed
+  # for as long as nobody happens to commit — which for a released desktop app can
+  # be months. Monday 06:00 UTC.
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
 
 # Least privilege: read-only, and only what checkout needs.
 permissions:
@@ -99,7 +115,15 @@ jobs:
       - name: Install Chromium (pinned by the Playwright version)
         run: python -m playwright install --with-deps chromium
       - name: Report exploit suite
-        run: python -m pytest -q -m browser
+        run: python -m pytest -q -m browser --junitxml=browser-results.xml
+      - name: Guard - the exploit suite actually executed (a skip is not a pass)
+        # Every browser test skips itself when Chromium will not launch, so with
+        # Chromium present-but-unlaunchable this job reported `98 skipped,
+        # 2180 deselected` and exit 0 — a green required check over a suite that
+        # proved nothing about CSP, file:// handling or event execution. The
+        # floor is checked in a script (scripts/check_browser_suite.py) rather
+        # than inline shell so it is unit-tested like the rest of the repo.
+        run: python scripts/check_browser_suite.py browser-results.xml
 
   security-gates:
     name: secret scan · static analysis · dependency audits (linux)

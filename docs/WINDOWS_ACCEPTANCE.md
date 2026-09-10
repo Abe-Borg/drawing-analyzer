@@ -90,7 +90,7 @@ representative real/redacted set):
 | 3A.2 | Version shown | Footer shows `v<version>` matching the release tag and `run.log` | |
 | 3A.3 | Manual "Check for Updates" (up to date) | On the newest version, clicking the footer button reports "You're up to date" | |
 | 3A.4 | Update available | With an older install (or `DRAWING_ANALYZER_UPDATE_URL` pointing at a test manifest), the dialog shows the new version + notes and offers Download / Skip / Later | |
-| 3A.5 | Download + integrity | The download completes, passes its SHA-256 check, the app closes, and the installer replaces it in place (a tampered `sha256` is rejected with an error, not run) | |
+| 3A.5 | Download + integrity | The download completes, passes its SHA-256 check, the app closes, and the installer replaces it in place (a `sha256` that does not match the downloaded bytes is rejected with an error, not run — note this checks the *transfer*: the hash ships in the same release as the installer, so it is not a check on the publisher) | |
 | 3A.6 | Skip / disable | "Skip this Version" suppresses the auto-prompt for that version; `DRAWING_ANALYZER_DISABLE_UPDATE_CHECK=1` silences the daily check | |
 
 ## 4. Output encoding spot checks (see also §19.6 script in RELEASE_ACCEPTANCE_TEMPLATE)

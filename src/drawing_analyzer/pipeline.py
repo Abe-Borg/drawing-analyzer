@@ -107,6 +107,133 @@ _log = get_logger()
 _stage_executor_state = threading.local()
 
 
+#: How long a ``drawing_qc_*`` work directory may sit in the system temp dir
+#: before a later run reaps it. Overridable with
+#: ``DRAWING_ANALYZER_WORKDIR_MAX_AGE_HOURS``; ``0`` disables pruning.
+_WORKDIR_MAX_AGE_HOURS = 24.0
+_WORKDIR_MAX_AGE_ENV = "DRAWING_ANALYZER_WORKDIR_MAX_AGE_HOURS"
+_WORKDIR_PREFIX = "drawing_qc_"
+
+
+def _workdir_max_age_seconds() -> float:
+    """The prune age in seconds (0 disables), resolved at call time."""
+    raw = os.environ.get(_WORKDIR_MAX_AGE_ENV, "")
+    try:
+        hours = float(raw) if raw.strip() else _WORKDIR_MAX_AGE_HOURS
+    except (TypeError, ValueError):
+        hours = _WORKDIR_MAX_AGE_HOURS
+    return max(0.0, hours) * 3600.0
+
+
+#: Entries examined per candidate before :func:`_tree_is_recent` gives up and
+#: keeps the directory. A bound so a pathological tree cannot stall a run start;
+#: exhausting it is treated as "recent", because keeping a stale directory costs
+#: disk while deleting a live one costs a paid run's evidence.
+_WORKDIR_SCAN_BUDGET = 5000
+
+
+def _tree_is_recent(path: "Path", cutoff: float) -> bool:
+    """True as soon as anything at or under ``path`` is newer than ``cutoff``.
+
+    The top-level directory's own mtime is not enough to tell a leaked work dir
+    from one a concurrent run is still filling: a directory's mtime moves only
+    when an entry is added *directly* in it, and the verifier writes its crops to
+    ``evidence/<QC-###>/<leg>.png`` — two levels down. Measured: a work dir whose
+    crop was written **0 seconds ago** but whose own mtime sat well past the prune
+    age was deleted out from under the live run. A run can exceed that age (the
+    batch collection bound alone is a full day), so this is reachable rather than
+    theoretical. (Stated without an hour figure on purpose: ``test_cost.py``
+    scans this file for ``N hours`` claims to keep the batch-wait prose honest,
+    and an unrelated number here reads as one of them.)
+
+    Short-circuits on the first recent entry, so the common case (a live dir)
+    stops almost immediately, and the exhaustive case is a directory about to be
+    deleted anyway.
+    """
+    import os
+
+    seen = 0
+    stack = [str(path)]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    seen += 1
+                    if seen > _WORKDIR_SCAN_BUDGET:
+                        return True          # fail safe: keep it
+                    try:
+                        if entry.stat(follow_symlinks=False).st_mtime >= cutoff:
+                            return True
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(entry.path)
+                    except OSError:
+                        return True          # unreadable: keep it
+        except OSError:
+            return True                      # unreadable: keep it
+    return False
+
+
+def _prune_stale_work_dirs(keep: "Path | None" = None) -> int:
+    """Reap ``drawing_qc_*`` work directories older than the prune age.
+
+    Three of these are created **lazily** — the verify, investigate and markup
+    stages each make one when the caller supplied no ``work_dir`` — and none of
+    them was ever removed (P9 item 46). They hold the high-DPI evidence crops, so
+    on a repeatedly-run set they are the largest thing the tool leaves behind.
+
+    Age-pruning rather than deleting at run end, and that is a decision not a
+    shortcut: :func:`extract_drawing_context` returns **before** the caller
+    exports, and the export *copies* the evidence out (DA-033) rather than the
+    pipeline handing it over — so a work dir removed when the run ends would
+    destroy the crops before anything had a chance to save them. Pruning on the
+    way *in* reclaims every previous run's leak and cannot touch the current one.
+
+    ``keep`` is never pruned regardless of age, and neither is a directory with
+    anything recent **anywhere inside it** (:func:`_tree_is_recent`) — the
+    top-level mtime alone cannot see a concurrent run writing crops two levels
+    down. Best-effort: an unreadable directory is left alone, and no failure here
+    ever affects the run (I-3).
+    """
+    max_age = _workdir_max_age_seconds()
+    if max_age <= 0:
+        return 0
+    import shutil
+    import tempfile
+    import time
+
+    keep_resolved = None
+    if keep is not None:
+        try:
+            keep_resolved = Path(keep).resolve()
+        except Exception:  # noqa: BLE001 - an unresolvable keep just prunes nothing extra
+            keep_resolved = None
+    root = Path(tempfile.gettempdir())
+    now = time.time()
+    pruned = 0
+    try:
+        candidates = sorted(root.glob(_WORKDIR_PREFIX + "*"))
+    except Exception as exc:  # noqa: BLE001 - an unreadable temp dir is not a run failure
+        _log.debug("could not scan the temp dir for stale work dirs: %s", exc)
+        return 0
+    for path in candidates:
+        try:
+            if not path.is_dir() or path.is_symlink():
+                continue
+            if keep_resolved is not None and path.resolve() == keep_resolved:
+                continue
+            cutoff = now - max_age
+            if path.stat().st_mtime >= cutoff or _tree_is_recent(path, cutoff):
+                continue
+            shutil.rmtree(path, ignore_errors=True)
+            pruned += 1
+        except Exception as exc:  # noqa: BLE001 - one stubborn dir never sinks a run
+            _log.debug("could not prune stale work dir %s: %s", path.name, exc)
+    if pruned:
+        _log.info("pruned %d stale %s* work dir(s) from the temp dir", pruned, _WORKDIR_PREFIX)
+    return pruned
+
+
 def _with_stage_executor_cleanup(fn):
     """Guarantee per-run background executors cannot outlive any return/raise."""
     @wraps(fn)
@@ -2580,8 +2707,10 @@ def extract_drawing_context(
     if config.save_tile_artifacts and qc_work_dir is None:
         import tempfile
 
-        qc_work_dir = Path(tempfile.mkdtemp(prefix="drawing_qc_"))
+        qc_work_dir = Path(tempfile.mkdtemp(prefix=_WORKDIR_PREFIX))
         _created_work_dir = True
+    # Reap what earlier runs left behind (item 46), never this run's own dir.
+    _prune_stale_work_dirs(keep=qc_work_dir)
 
     # Run journal (Phase 26A §18.1): one journal per run, created before the
     # inventory so even an all-inputs-rejected run leaves a trace, and attached
@@ -2740,6 +2869,15 @@ def extract_drawing_context(
     if total == 0:
         if progress is not None:
             progress(0, 0, "No sheets found")
+        # Clean up the work dir this call created (P9 item 46). The
+        # ``block_reason`` return fifty lines above does exactly this; this exit
+        # path did not, so selecting files that yield no readable pages left a
+        # ``drawing_qc_*`` directory behind in the system temp dir on every
+        # attempt — the same rule applied on one exit path and not its twin.
+        if _created_work_dir:
+            import shutil
+
+            shutil.rmtree(qc_work_dir, ignore_errors=True)
         journal.emit(
             "RUN_END", level="ERROR", status="FAILED",
             reason="no readable PDF pages found in the selected files",

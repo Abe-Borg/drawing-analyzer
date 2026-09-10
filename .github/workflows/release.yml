@@ -26,6 +26,9 @@
 #     holds a write-capable token.
 #   * Only the `publish` job has `contents: write`, it is gated to tag refs, and
 #     it runs NO repo code — it just downloads the built artifact and calls `gh`.
+#   * `publish` also needs the tag-gated `gates` job (P9 item 42), so a release
+#     cannot be published from a commit whose tests, secret scan and import
+#     isolation have not passed on that exact commit.
 #   * Third-party actions are pinned to immutable commit SHAs (the trailing
 #     comment is the human-readable version).
 #
@@ -98,7 +101,13 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[gui]"
+          # Constrained by requirements-release.lock (P9 item 41). ci.yml already
+          # builds the wheel and runs the clean-install smoke under this lock; the
+          # installer that actually ships was the one build that ignored it, so the
+          # shipped binary could bundle dependency versions no gate had ever seen —
+          # while docs/RELEASE_ACCEPTANCE_TEMPLATE.md carried a "Dependency lock
+          # used" checkbox saying otherwise. The lock is the point of the file.
+          pip install -c requirements-release.lock -e ".[gui]"
           pip install "pyinstaller==6.11.1"
 
       - name: Build one-folder app (PyInstaller)
@@ -119,7 +128,12 @@ jobs:
 
       - name: Install Inno Setup
         shell: pwsh
-        run: choco install innosetup --no-progress -y
+        # Pinned (P9 item 41). Unpinned, the compiler that builds the installer
+        # every user runs floats with whatever Chocolatey serves that day — the one
+        # tool in this pipeline whose output is the shipped artifact, and the only
+        # one that had no version recorded. `--require-checksums` additionally
+        # refuses a package whose checksum the feed does not publish.
+        run: choco install innosetup --version=6.2.2 --no-progress --require-checksums -y
 
       - name: Compile installer (Inno Setup)
         shell: pwsh
@@ -150,9 +164,40 @@ jobs:
             dist/installer/latest.json
           if-no-files-found: error
 
+  gates:
+    # The release gates, on the tagged commit itself (P9 item 42). ci.yml is
+    # required in branch protection, but branch protection does not apply to a
+    # tag push, and a tag can name any commit — so before this, `publish` needed
+    # only that the installer *compiled*. A tag pointing at a commit with a
+    # failing suite published an installer built from it.
+    #
+    # `--fast` is deliberate, not a shortcut: it runs byte-compile, import
+    # isolation (I-5), the whole hermetic suite and the secret scan, and skips
+    # the browser and wheel-build gates, which are separate jobs in ci.yml — and
+    # ci.yml now triggers on `v*` tags too, so those run on this same commit.
+    # Duplicating them here would double a slow release for no added signal.
+    name: Release gates (hermetic suite + secret scan)
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.11"
+      - name: Install (engine + dev)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: Phase 27 release gates
+        run: python scripts/run_acceptance.py --fast
+
   publish:
     name: Publish GitHub Release
-    needs: build
+    needs: [build, gates]
     # Tag refs only. This job runs NO repo-controlled code — it downloads the
     # already-built artifact and calls `gh` — so holding a write token here does
     # not expose the repo to PR-supplied build steps.

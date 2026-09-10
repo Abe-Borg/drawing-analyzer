@@ -16,7 +16,11 @@ Design constraints, mirroring :mod:`drawing_analyzer.export`:
   (``sheets`` / ``synthesis_text`` / ``focus`` / ``focus_report_text`` /
   ``combined_text`` / the run-summary counts / ``errors``); it never imports the
   engine, tkinter, PyMuPDF, or the network, so it unit-tests in isolation. See
-  :func:`build_html_report`.
+  :func:`build_html_report`. The one text helper it does take is
+  :func:`~drawing_analyzer.run_journal.redact_for_display`, so a host error
+  string reaches the report through the same secret/path boundary as run.log
+  (P9 item 44) — pure, I/O-free, and applied to host status text only, never to
+  digest prose (I-2) or to findings.
 - **Lossless.** The structured view is rendered from each sheet's digest, and the
   exact, verbatim ``combined_text`` is also embedded (collapsed) so the original
   Markdown is always one click / copy away — the rendering can never *drop*
@@ -161,6 +165,7 @@ from .models import (
     TRUST_REASON_NOT_FOUND,
     reduced_trust_reason,
 )
+from .run_journal import redact_for_display
 
 #: WP-03B §8.3 reviewer wording, keyed by :func:`reduced_trust_reason`.
 #: "No searchable text on this sheet" is a claim the reader can falsify
@@ -558,6 +563,13 @@ def split_into_sections(md: str) -> list[tuple[str | None, str]]:
 
 def _ref_of(sheet: Any) -> Any:
     return getattr(sheet, "ref", None)
+
+
+def _roots(ctx: Any) -> "tuple[str, ...]":
+    """The run's known private directories, for :func:`redact_for_display`."""
+    return tuple(
+        getattr(getattr(ctx, "run_journal", None), "private_roots", ()) or ()
+    )
 
 
 def _sheet_status(sheet: Any) -> str:
@@ -1210,6 +1222,7 @@ def _sheet_card(
     geometry: Any = None,
     *,
     ambiguous: frozenset[str] = frozenset(),
+    roots: "tuple[str, ...]" = (),
 ) -> str:
     ref = _ref_of(sheet)
     label = getattr(ref, "display_label", None) or f"Sheet {index}/{total}"
@@ -1235,7 +1248,8 @@ def _sheet_card(
         body = (
             f'<section class="block" data-category="other">'
             f'<div class="error-box">This sheet could not be analyzed: '
-            f"{html.escape(str(error))}</div></section>"
+            f"{html.escape(redact_for_display(error, private_roots=roots))}"
+            "</div></section>"
         )
     else:
         body = (
@@ -1409,7 +1423,11 @@ def _summary_html(ctx: Any, source_names: list[str], now: datetime) -> str:
     errors_html = ""
     errors = list(getattr(ctx, "errors", None) or [])
     if errors:
-        items = "".join(f"<li>{html.escape(str(e))}</li>" for e in errors)
+        roots = _roots(ctx)
+        items = "".join(
+            f"<li>{html.escape(redact_for_display(e, private_roots=roots))}</li>"
+            for e in errors
+        )
         errors_html = (
             f'<details class="errors" open><summary>{len(errors)} issue(s) '
             f"this run</summary><ul>{items}</ul></details>"
@@ -1454,11 +1472,18 @@ def _stage_table_html(ctx: Any) -> str:
     if not stages:
         return ""
     rows = []
+    roots = _roots(ctx)
     for s in stages:
         status = str(getattr(s, "status", "") or "NOT_REQUESTED").upper()
         cls = _STAGE_STATUS_CLASS.get(status, "not-requested")
-        errors = [str(e) for e in (getattr(s, "errors", None) or [])]
-        warnings = [str(w) for w in (getattr(s, "warnings", None) or [])]
+        errors = [
+            redact_for_display(e, private_roots=roots)
+            for e in (getattr(s, "errors", None) or [])
+        ]
+        warnings = [
+            redact_for_display(w, private_roots=roots)
+            for w in (getattr(s, "warnings", None) or [])
+        ]
         note = errors[0] if errors else (warnings[0] if warnings else "")
         rows.append(
             "<tr>"
@@ -1760,8 +1785,12 @@ def build_html_report(
     if findings_card:
         cards.append(findings_card)
     cards.append(_overview_card(ctx))
+    sheet_roots = _roots(ctx)
     cards += [
-        _sheet_card(i, total, s, geoms.get(_sheet_key(_ref_of(s))), ambiguous=ambiguous)
+        _sheet_card(
+            i, total, s, geoms.get(_sheet_key(_ref_of(s))),
+            ambiguous=ambiguous, roots=sheet_roots,
+        )
         for i, s in enumerate(sheets, start=1)
     ]
 

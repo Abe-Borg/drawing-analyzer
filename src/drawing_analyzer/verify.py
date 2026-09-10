@@ -10,8 +10,11 @@ asks one *small* model call whether the finding actually holds **in that crop**:
 mapped to ``VERIFIED`` / ``REJECTED`` / ``UNCERTAIN``. ``NOT_VISIBLE`` is a fine
 outcome (a cross-sheet conflict can't be confirmed from one crop) and maps to
 ``UNCERTAIN``, not ``REJECTED``. The crop the verifier saw is written to
-``evidence/<finding_id>.png`` regardless of verdict — the audit trail is the
-whole point.
+``evidence/<QC-###>/leg-NN__<sheet>_pN.png`` regardless of verdict — the audit
+trail is the whole point. One directory per finding (``qc_id``, or the content id
+for a directly-invoked one, with a ``-N`` suffix on a collision) and one file per
+*leg*, because a cross-sheet finding is checked on each of its sheets and a
+single flat name could hold only one of them (DA-016).
 
 Design mirrors the digest pipeline: crops render sequentially on the calling
 thread (PyMuPDF is not thread-safe and lives only in :mod:`render`), while the
@@ -61,7 +64,14 @@ from .digest import (
     _retry_backoff_seconds,
     _tolerant_json_object,
 )
-from .models import EvidenceArtifact, Finding, Verification, source_page_key
+from .models import (
+    EvidenceArtifact,
+    Finding,
+    Verification,
+    name_is_taken,
+    record_name,
+    source_page_key,
+)
 from .stage_cache import (
     get_stage_cache_entry,
     put_stage_cache_entry,
@@ -484,10 +494,10 @@ def _reserve_evidence_dir(finding: Finding, used: set[str]) -> str:
     base = _safe_component(finding.qc_id or finding.id or "finding", "finding")
     name = base
     n = 1
-    while name in used:
+    while name_is_taken(name, used):
         n += 1
         name = f"{base}-{n}"
-    used.add(name)
+    record_name(name, used)
     return name
 
 

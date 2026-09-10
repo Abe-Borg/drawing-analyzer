@@ -9,6 +9,7 @@ thread-safe, monotonic, unambiguous event sequence).
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 from drawing_analyzer.run_journal import (
@@ -16,6 +17,7 @@ from drawing_analyzer.run_journal import (
     RunJournal,
     collect_environment,
     new_run_id,
+    redact_for_display,
     render_run_log,
     sanitize_text,
     scrub_paths,
@@ -321,6 +323,153 @@ def test_private_roots_scrub_spacey_directories():
     # Forward-slash spelling of the same root scrubs too.
     journal.emit("API_ERROR", detail="C:/Users/John Smith/Project X/E-201.pdf")
     assert "John Smith" not in journal.events[1].fields["detail"]
+
+
+def test_private_roots_scrub_whatever_case_the_path_arrives_in():
+    """P9 item 44 — a Windows path is the same directory in any case.
+
+    ``Path.resolve()`` yields ``C:\\…``; a path echoed from a config file, a
+    drag-and-drop or a lowercased comparison can arrive as ``c:\\…``, and
+    ``str.replace`` matches neither the other's spelling. The regex backstop in
+    ``scrub_paths`` cannot bound a path containing spaces, so that one lowercase
+    drive letter put ``Abe Borg\\My Drawings`` — the user's own name — into
+    run.log and run_manifest.json, both of which exist to be shareable.
+    """
+    root = r"C:\Users\Abe Borg\My Drawings"
+    spellings = [
+        rf"open failed: {root}\SET 01.pdf",                          # as registered
+        r"open failed: c:\Users\Abe Borg\My Drawings\SET 01.pdf",     # lower drive
+        r"open failed: c:\users\abe borg\my drawings\SET 01.pdf",     # all lower
+        r"open failed: C:/Users/Abe Borg/My Drawings/SET 01.pdf",     # forward
+        r"open failed: c:\Users/Abe Borg\My Drawings/SET 01.pdf",     # mixed
+    ]
+    for text in spellings:
+        out = sanitize_text(text, private_roots=(root,))
+        assert "Abe Borg" not in out and "My Drawings" not in out, text
+        # The basename is the useful, non-private part and must survive.
+        assert "SET 01.pdf" in out, text
+
+
+def test_private_root_matching_is_literal_not_a_pattern():
+    """Regex metacharacters in a real directory name must not become syntax."""
+    root = r"C:\Users\a+b (draft) [v2]"
+    out = sanitize_text(rf"open failed: {root}\SET.pdf", private_roots=(root,))
+    assert "a+b" not in out and "(draft)" not in out
+    assert "SET.pdf" in out
+    # ...and the wildcard reading of "." must not eat an unrelated character.
+    assert sanitize_text("CxUsers stays", private_roots=(r"C:Users",)) == "CxUsers stays"
+
+
+def test_every_run_log_section_scrubs_the_known_roots():
+    """P9 item 44 — the roots reached only the Errors section.
+
+    A rejected input's ``PermissionError``, a per-sheet error, a stage note and a
+    mutated-source name all render through ``sanitize_text`` too; none of them
+    was given the roots, so the same string was scrubbed in one section of
+    run.log and printed in full two sections above it.
+    """
+    root = r"C:\Users\Abe Borg\My Drawings"
+    leak = r"PermissionError: c:\Users\Abe Borg\My Drawings\Job 4471\SET 01.pdf"
+    journal = RunJournal()
+    journal.add_private_roots([root])
+
+    class _Ref:
+        display_label = "M-101"
+        key = ("src", 0)
+        page_index = 0
+
+    class _Sheet:
+        ref = _Ref()
+        ok = False
+        cached = False
+        text = ""
+        error = leak
+        findings_note = leak
+
+    class _Doc:
+        source_id = "SRC-0001"
+        status = "REJECTED"
+        display_name = "SET 01.pdf"
+        page_count = 0
+        accepted = False
+        error = leak
+        duplicate_of = ""
+
+    class _Stage:
+        stage = "digest"
+        status = "FAILED"
+        expected = True
+        calls_planned = 1
+        calls_succeeded = 0
+        items_in = 1
+        items_out = 0
+        errors = [leak]
+        warnings: list = []
+
+    class _Inventory:
+        documents = [_Doc()]
+
+    class _Ctx:
+        run_journal = journal
+        errors = [leak]
+        sheets = [_Sheet()]
+        sheet_geometries: list = []
+        stage_results = [_Stage()]
+        input_inventory = _Inventory()
+        mutated_sources = [leak]
+        reviewed_pdf_paths: list = []
+        findings: list = []
+        reference_findings: list = []
+        markup_run = None
+        coverage_status = "INCOMPLETE"
+        ledger_tally_line = leak
+
+    log = render_run_log(_Ctx())
+    assert "Abe Borg" not in log and "My Drawings" not in log
+    # Each of those sections still rendered its row — the roots are removed, not
+    # the diagnostic.
+    assert "SRC-0001" in log and "M-101" in log and "digest" in log
+
+
+def test_no_sanitize_call_in_this_module_omits_the_private_roots():
+    """Structural: the next renderer cannot silently forget the roots.
+
+    The bug was one call site out of nine passing ``private_roots``. An
+    assertion about today's nine cannot see the tenth, so this asserts the rule
+    over the module's AST instead — the same technique
+    ``test_run_acceptance.py`` uses for the ``pytest`` argv literal.
+    """
+    import ast
+
+    source = (
+        Path(__file__).resolve().parent.parent
+        / "src" / "drawing_analyzer" / "run_journal.py"
+    ).read_text(encoding="utf-8")
+    offenders = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = getattr(func, "id", None) or getattr(func, "attr", None)
+        if name not in ("sanitize_text", "redact_for_display"):
+            continue
+        if not any(kw.arg == "private_roots" for kw in node.keywords):
+            offenders.append(f"line {node.lineno}")
+    assert not offenders, (
+        "every sanitize_text/redact_for_display call in run_journal.py must pass "
+        f"private_roots (P9 item 44); missing at: {offenders}"
+    )
+
+
+def test_redact_for_display_keeps_newlines_and_length():
+    """The report boundary is the log boundary minus flattening and truncation."""
+    long_text = "detail " * 400
+    out = redact_for_display("line one\nline two")
+    assert out == "line one\nline two"
+    assert "[+" not in redact_for_display(long_text)
+    # ...but the secret and path passes are the same ones.
+    assert "[REDACTED]" in redact_for_display("x-api-key: placeholder-value-0000")
+    assert redact_for_display("/home/user/private/M-101.pdf") == ".../M-101.pdf"
 
 
 def test_sanitize_text_strips_html_error_pages_only():
