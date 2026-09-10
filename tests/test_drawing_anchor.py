@@ -386,3 +386,48 @@ def test_window_slack_is_derived_from_the_overlap_floor():
     for m in (4, 7, 8, 12, 20, 40):
         allowed = m - math.ceil(m * _FUZZY_WINDOW_MIN_OVERLAP)
         assert _fuzzy_window_slack(m) == max(1, allowed)
+
+
+def test_veto_considers_every_candidate_not_only_the_best_scoring():
+    # Review feedback on this PR. Filtering only the best-overlap windows discards
+    # a legitimate match whenever a higher-scoring WRONG-number occurrence exists
+    # elsewhere on the sheet. Here a 20-token quote meets two copies:
+    #   row A — identical but 500 -> 600: 19/20 = 0.95, the sole best window
+    #   row B — the correct 500, with two OCR word errors: 18/20 = 0.90
+    # Vetoing row A and stopping there returned UNANCHORED and never looked at
+    # row B, so the veto turned a real finding into a phantom hallucination signal.
+    quote = ("FIRE PUMP RATED AT 500 GPM AND 100 PSI NET AT THE PUMP DISCHARGE "
+             "FLANGE AS SHOWN PER NFPA 20")
+    tokens = quote.split()
+    assert len(tokens) == 20, len(tokens)          # the scores below depend on this
+
+    row_a = list(tokens); row_a[4] = "600"                     # wrong measurement
+    row_b = list(tokens); row_b[11] = "AAT"; row_b[13] = "TEH"  # right measurement, 2 typos
+    words = _line(row_a, y=100) + _line(row_b, y=900)
+
+    a = _anchor(quote, words)
+    assert a.status == "FUZZY", (
+        f"a correct-measurement window at 0.90 was discarded because a "
+        f"wrong-measurement window at 0.95 outscored it ({a.status}/{a.method})"
+    )
+    ymid = (a.rect_pdf[1] + a.rect_pdf[3]) / 2.0
+    assert ymid > 500, (
+        f"anchored to the WRONG-number row at y={ymid:.0f}; it must reach the "
+        f"correct-number row near y=900"
+    )
+
+
+def test_best_scoring_window_still_wins_when_it_passes_the_veto():
+    # The other direction: the veto must not change ranking among candidates that
+    # all pass it. Two correct-number copies, one a better match — the better one
+    # still wins, exactly as before the veto existed.
+    quote = "PROVIDE 6 INCH DRAIN AT COLUMN LINE 4"
+    tokens = quote.split()
+    exact_row = list(tokens)
+    noisy_row = list(tokens); noisy_row[5] = "COL"
+    words = _line(noisy_row, y=100) + _line(exact_row, y=900)
+
+    a = _anchor(quote, words)
+    assert a.status == "EXACT"                      # the verbatim row wins outright
+    ymid = (a.rect_pdf[1] + a.rect_pdf[3]) / 2.0
+    assert ymid > 500

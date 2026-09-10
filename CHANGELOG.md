@@ -48,7 +48,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   threshold is untouched and a test now asserts that, so a future attempt to fix
   this by moving the floor fails loudly instead. Legitimate transcription
   variance — an extra word on the sheet, an abbreviation, a paraphrase, a
-  spelling variant, digit-free prose — still anchors.
+  spelling variant, digit-free prose — still anchors. The veto is applied to
+  **every** window that clears the floor before they are ranked, not only to the
+  best-scoring ones: a sheet carrying a wrong-number copy that outscores a correct
+  one (0.95 against 0.90, the correct copy having two OCR errors) would otherwise
+  have the good match discarded unseen and the finding reported as a
+  hallucination.
 
 - **FreeText truncation was written and then overwritten.** Three sites handed
   `add_freetext_annot` a truncated string and then called `set_info(content=…)`
@@ -83,7 +88,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   overflows to the *AI Review Notes* page has no mark on its sheet, yet its
   index row targeted the sheet — while the bookmark outline and the receipt both
   correctly named the notes page. The index is now built last, so its rows link
-  to the page each mark actually landed on.
+  to the page each mark actually landed on. The notes page's own back-link to its
+  source sheet therefore resolves that sheet's *current* index and lets the front
+  insertion shift the link — `insert_link` bakes the destination as a reference to
+  the page object, so pre-applying the offset pointed every back-link at the wrong
+  sheet.
 
 - **A generated index page could inherit the drawing's CropBox.** `/CropBox` is
   an inheritable page-tree attribute, and in a set whose `/Pages` node carries

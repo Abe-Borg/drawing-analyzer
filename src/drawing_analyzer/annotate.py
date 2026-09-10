@@ -1867,7 +1867,6 @@ def _insert_review_notes_page(
     doc: "pymupdf.Document",
     overflow: "list[tuple[Finding, MarkupPlacement]]",
     *,
-    n_index: int,
     run_id: str,
     author: str,
     oc_layers: "dict[str, int] | None" = None,
@@ -1877,7 +1876,9 @@ def _insert_review_notes_page(
     A rect-less finding whose callout could not be placed in a visually-clear band
     (§17.6) is written here — visible ink in the reviewed PDF — instead of stamped
     over the drawing. Each row is a ``callout`` FreeText carrying the full popup,
-    plus a GOTO link back to its source page (offset by ``n_index`` index pages),
+    plus a GOTO link back to its source page — by that page's index in the
+    document as it stands when this runs, since the index pages are inserted
+    afterwards and carry the link's target along with the page —
     and its placement is **rerouted** to ``REVIEW_NOTES`` so the tally counts it as
     an overflow note, not a margin callout. Returns
     ``{placement_id: [(component, xref, final_page), …]}`` for stamping. The
@@ -1935,9 +1936,17 @@ def _insert_review_notes_page(
                 collected.setdefault(placement.placement_id, []).append(
                     ("callout", annot.xref, pno)
                 )
-                # GOTO back to the source page (shifted by the front index) — the
-                # finding's rect if it had one, else the sheet top.
-                target = int(finding.page_index) + n_index
+                # GOTO back to the source page — its index in the document as it
+                # stands RIGHT NOW, with no allowance for the index pages that are
+                # inserted afterwards. `insert_link` bakes the destination as a
+                # reference to the page *object* (`getLinkText` resolves `page=` to
+                # a page xref), so the front insertion shifts the link's target
+                # along with the page itself and the offset must not be
+                # pre-applied. Adding it resolved `doc[target]` to a different
+                # page entirely — with a 2-sheet set, every back-link on the notes
+                # page pointed at the wrong sheet, and the rect-bearing branch
+                # would have read that wrong page's geometry too.
+                target = int(finding.page_index)
                 if 0 <= target < doc.page_count:
                     rect = getattr(finding.anchor, "rect_pdf", None) if finding.anchor else None
                     to = _dest_point(doc[target], rect[0], rect[1]) if rect else pymupdf.Point(36, 36)
@@ -2401,7 +2410,7 @@ def _annotate_units(
         if overflow:
             try:
                 notes_collected = _insert_review_notes_page(
-                    doc, overflow, n_index=n_index, run_id=run_id, author=author,
+                    doc, overflow, run_id=run_id, author=author,
                     oc_layers=oc_layers,
                 )
             except Exception:  # noqa: BLE001 - the notes page must not sink the file
@@ -2448,9 +2457,10 @@ def _annotate_units(
 
         # A 'QC Findings' bookmark outline so the marked-up set is one-click
         # navigable in Bluebeam/Acrobat (each issue → the page its mark landed
-        # on, zoomed). Source-page components carry their original page (shifted
-        # by the front index); review-notes components already carry their final
-        # page. I-3: an outline is a nicety — a failure here never sinks the file.
+        # on, zoomed). Every component — source-page and review-notes alike — was
+        # recorded before the index was inserted at the front, so all of them take
+        # the same ``n_index`` shift here. I-3: an outline is a nicety — a failure
+        # here never sinks the file.
         try:
             final_page_by_pid: dict[str, int] = {}
             for pid, comps in collected.items():

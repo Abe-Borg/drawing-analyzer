@@ -349,18 +349,21 @@ def _try_fuzzy_window(
     # query tokens (scattered among unrelated words) score 100%, spuriously
     # anchoring a phrase that isn't there and defeating the UNANCHORED signal.
     qcount = Counter(query)
-    best_overlap = 0.0
-    best_starts: list[int] = []
+    # EVERY window that clears the floor is kept, not just the best-scoring ones,
+    # because the numeric veto is applied before the ranking below. Filtering only
+    # the best set discards a legitimate match whenever a higher-scoring
+    # wrong-number occurrence exists elsewhere on the sheet: a 20-token quote
+    # whose sheet carries one copy differing only by 500 -> 600 (19/20 = 0.95, the
+    # sole best) and one correct copy with two OCR word errors (18/20 = 0.90) went
+    # UNANCHORED — the wrong-number window was vetoed and the correct one was never
+    # considered. ``matched`` is kept as the raw int rather than the ratio so ties
+    # are exact by construction.
+    qualifying: list[tuple[int, int]] = []       # (matched tokens, window start)
     window = Counter(stream.tokens[:m])
     matched = sum(min(count, window.get(token, 0)) for token, count in qcount.items())
     for k in range(n - m + 1):
-        overlap = matched / m
-        if overlap < _FUZZY_WINDOW_MIN_OVERLAP:
-            pass
-        elif overlap > best_overlap:
-            best_overlap, best_starts = overlap, [k]
-        elif overlap == best_overlap:
-            best_starts.append(k)
+        if matched / m >= _FUZZY_WINDOW_MIN_OVERLAP:
+            qualifying.append((matched, k))
         if k + m >= n:
             continue
         outgoing = stream.tokens[k]
@@ -381,18 +384,22 @@ def _try_fuzzy_window(
             matched += after - before
         else:
             window[incoming] += 1
-    if not best_starts:
+    if not qualifying:
         return None
-    # The numeric veto, applied before tile preference so a span that does
-    # account for the quote's measurements can still win over a same-score twin
-    # that does not.
+    # The numeric veto runs across every above-threshold candidate FIRST, so a
+    # span that accounts for the quote's measurements can win over a better-scoring
+    # one that does not. Only then is the survivor set ranked by overlap and handed
+    # to tile preference — the previous order let one vetoed top scorer sink an
+    # otherwise good match.
     slack = _fuzzy_window_slack(m)
-    best_starts = [
-        k for k in best_starts
+    vetted = [
+        (score, k) for score, k in qualifying
         if _numbers_aligned(query, stream.tokens[k : k + m], slack)
     ]
-    if not best_starts:
+    if not vetted:
         return None
+    best_score = max(score for score, _ in vetted)
+    best_starts = [k for score, k in vetted if score == best_score]
     start, _ = _tile_preferred_start(best_starts, m, stream, words, tile, w, h, rows, cols)
     rect = _span_rect(stream, words, start, m)
     if rect is None:

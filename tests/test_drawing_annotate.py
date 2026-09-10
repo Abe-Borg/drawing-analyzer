@@ -889,8 +889,7 @@ def test_overflow_page_backlink_uses_the_destination_transform(tmp_path):
             qc_id="QC-001", scope="SOURCE", source_id="SRC-0001", page_index=0,
             leg_id="primary", expected="MARGIN", required_components=["callout"],
         )
-        _insert_review_notes_page(doc, [(f, placement)], n_index=0, run_id="r1",
-                                  author="tester")
+        _insert_review_notes_page(doc, [(f, placement)], run_id="r1", author="tester")
         dests = _raw_destinations(doc)
         expected_pt = _dest_user_point(doc[0], view_rect[0], view_rect[1])
         expected = (round(expected_pt.x, 1), round(expected_pt.y, 1))
@@ -1266,4 +1265,55 @@ def test_component_stamps_name_the_page_they_are_actually_on(tmp_path):
     assert checked, "no stamped components were found at all"
     assert not mismatched, (
         "stamps name the wrong page (component, stamped, actual): " f"{mismatched}"
+    )
+
+
+def test_notes_page_backlink_targets_the_findings_own_sheet(tmp_path):
+    # Review feedback on this PR. Building the index LAST (item 34) moved
+    # _insert_review_notes_page ahead of the index insertion, but its back-link
+    # still added the future n_index offset — so `doc[target]` resolved to a
+    # DIFFERENT page in the document as it then stood. insert_link bakes the
+    # destination as a reference to the page object, so the front insertion shifts
+    # it along with that page and the offset must not be pre-applied.
+    #
+    # Two source sheets, because with one the wrong target lands out of range and
+    # the bounds check hides it. The finding belongs to sheet 0, so its back-link
+    # must reach sheet 0 — not sheet 1.
+    from drawing_analyzer.models import assign_qc_ids
+
+    src = _make_pdf(tmp_path / "src", pages=2)
+    words = [(float(30 + 150 * i), float(20 + 24 * j), float(130 + 150 * i),
+              float(32 + 24 * j), "TXT", 0, 0, 0)
+             for i in range(5) for j in range(22)]
+    meta = {k: {"words": words, "rows": 2, "cols": 2, "page_width_pt": 792.0,
+                "page_height_pt": 612.0, "overlap_frac": 0.08} for k in (0, 1)}
+    findings = []
+    for i in range(7):
+        f = _finding(f"expected item {i}; not found on this sheet", status="VERIFIED",
+                     page=0, rect=None, quote="")
+        f.anchor_hint = "SHEET"
+        f.anchor = Anchor(status="UNANCHORED", rect_pdf=None, method="quote_not_found")
+        findings.append(f)
+    assign_qc_ids(findings)
+
+    out = tmp_path / "M-101_reviewed.pdf"
+    res = annotate_pdf(src, findings, out, sheet_meta=meta)
+    assert res.tally.get("review_notes", 0) >= 1, "nothing overflowed; test is inert"
+
+    doc = pymupdf.open(str(out))
+    try:
+        notes_pno = next(p for p in range(doc.page_count)
+                         if "AI REVIEW NOTES" in doc[p].get_text().upper())
+        # The source sheets sit after the front index; sheet 0 is the first of them.
+        n_index = next(p for p in range(doc.page_count)
+                       if "SHEET M-101.pdf p1" in doc[p].get_text())
+        targets = [lk.get("page") for lk in doc[notes_pno].get_links()
+                   if lk.get("kind") == pymupdf.LINK_GOTO]
+    finally:
+        doc.close()
+
+    assert targets, "the notes page wrote no back-links at all"
+    assert all(t == n_index for t in targets), (
+        f"notes back-links point at {sorted(set(targets))} but the finding's own "
+        f"sheet is page {n_index} — the index offset was pre-applied"
     )
