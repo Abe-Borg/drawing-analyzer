@@ -390,3 +390,41 @@ def test_both_prompt_hashes_cover_every_shared_user_framing_string():
         edited[i] = edited[i] + " EDITED"
         assert _digest_hash(edited) != digest_mod.DIGEST_PROMPT_VERSION, shared[i]
         assert _critique_hash(edited) != critique_mod.CRITIQUE_PROMPT_VERSION, shared[i]
+
+
+# --------------------------------------------------------------------------- #
+# The render-identity SCHEME bump is the invalidation mechanism (P7 item 28)
+# --------------------------------------------------------------------------- #
+
+
+def test_render_identity_scheme_is_v4_for_the_annotation_free_text_policy(tmp_path):
+    """Item 28 changed the text-extraction POLICY, not the document.
+
+    ``_page_dependency_sha256`` hashes the annotation bytes and those bytes did
+    not move, so without a scheme bump an already-cached annotated page still
+    hits level 1 and is served a digest built from annotation-contaminated
+    ``sheet_text`` **without re-extracting the text** — a false hit, which is the
+    one failure mode the identity exists to prevent.
+
+    Without this test the bump is invisible: reverting the literal to v3 changes
+    nothing else observable, so every other cache-identity test still passes.
+    """
+    import drawing_analyzer.render as R
+
+    assert R._RENDER_IDENTITY_SCHEME == "render-identity-v4"
+
+    path = tmp_path / "M-101.pdf"
+    doc = _base_doc()
+    annot = doc[0].add_freetext_annot(
+        pymupdf.Rect(200, 300, 500, 360), "QC-014 PRIOR REVIEW MARKUP", fontsize=9
+    )
+    annot.update()
+    doc.save(str(path))
+    doc.close()
+
+    current = _identity(path)
+    assert current.startswith("render-identity-v4|")
+    # The scheme rides the key: a pre-change entry cannot be served to the new
+    # extraction policy.
+    legacy = "render-identity-v3|" + current.split("|", 1)[1]
+    assert current != legacy

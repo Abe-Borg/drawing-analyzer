@@ -746,3 +746,159 @@ def test_set_review_notes_pdf_is_layered_by_severity(tmp_path):
         assert "set lo" in by_layer[_SEVERITY_LAYER_NAMES["low"]]
     finally:
         doc.close()
+
+
+# --------------------------------------------------------------------------- #
+# GOTO destinations in the reviewed PDF (P7 item 27)
+#
+# The *math* of the destination transform is pinned in
+# ``tests/test_drawing_geometry.py`` against independent ground truth (an
+# annotation's raw ``/Rect``, which the PDF spec puts in the same default user
+# space as an ``/XYZ`` destination).  What is pinned HERE is the wiring: that
+# every destination the writer emits actually goes through it, at every
+# rotation × CropBox, read as raw ``/XYZ`` out of the saved file rather than
+# through PyMuPDF's own readers — which re-apply the very transform under test
+# and would hide the defect.
+#
+# The load-bearing assertion needs no external truth at all: the index-page row
+# link and the bookmark outline reach the same mark through two *different*
+# PyMuPDF entry points (``insert_link`` and ``set_toc``) whose internal
+# transforms differ, so if either inversion is wrong the two disagree.
+# --------------------------------------------------------------------------- #
+
+_DEST_ROTATIONS = (0, 90, 180, 270)
+_DEST_CROPBOXES = (None, (40, 25, 40, 25))     # inset (l, t, r, b), asymmetric in y
+
+
+def _rotated_cropped_pdf(dir_path: Path, rot: int, crop, name="M-101.pdf") -> Path:
+    dir_path.mkdir(parents=True, exist_ok=True)
+    doc = pymupdf.open()
+    for i in range(2):
+        doc.new_page(width=792, height=612).insert_text(
+            (150, 200), f"TARGETWORD{i}", fontsize=14
+        )
+    page = doc[0]
+    if crop is not None:
+        mb = page.mediabox
+        page.set_cropbox(pymupdf.Rect(mb.x0 + crop[0], crop[1],
+                                      mb.x1 - crop[2], (mb.y1 - mb.y0) - crop[3]))
+    if rot:
+        page.set_rotation(rot)
+    path = dir_path / name
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+def _raw_destinations(doc) -> dict:
+    """Raw ``/XYZ`` per destination kind, straight out of the PDF objects.
+
+    Returns ``{"link": [(x, y), …], "outline": [(x, y), …]}``.  Deliberately
+    NOT ``page.get_links()`` / ``doc.get_toc()``: both map the stored value back
+    through the same transform being tested, so a wrong destination reads back
+    as the point that was asked for.
+    """
+    import re
+    out = {"link": [], "outline": []}
+    for xref in range(1, doc.xref_length()):
+        try:
+            obj = doc.xref_object(xref)
+        except Exception:            # noqa: BLE001 - a free/odd xref is not a destination
+            continue
+        m = re.search(r"/XYZ\s+([\d.\-]+)\s+([\d.\-]+)", obj)
+        if not m:
+            continue
+        pt = (round(float(m.group(1)), 1), round(float(m.group(2)), 1))
+        if "/Title" in obj:
+            # The 'QC Findings' parent targets the page top, not a mark; only the
+            # per-finding leaves do.  Match on the absence of /First rather than
+            # on the title text — a bookmark title is stored as a hex UTF-16BE
+            # string, so "QC-" never appears literally in the object.
+            if "/First" not in obj:
+                out["outline"].append(pt)
+        elif "/Link" in obj:
+            out["link"].append(pt)
+    return out
+
+
+@pytest.mark.parametrize("rot", _DEST_ROTATIONS)
+@pytest.mark.parametrize("crop", _DEST_CROPBOXES)
+def test_reviewed_pdf_destinations_land_in_user_space(tmp_path, rot, crop):
+    from drawing_analyzer.annotate import _dest_user_point
+
+    src = _rotated_cropped_pdf(tmp_path / "src", rot, crop)
+    view_rect = (100.0, 120.0, 260.0, 150.0)
+    f = _finding("drain size wrong", status="VERIFIED", page=0, rect=view_rect,
+                 quote="TARGETWORD0")
+    f.qc_id = "QC-001"
+
+    res = write_reviewed_pdfs([f], [src], tmp_path / "out")
+    doc = pymupdf.open(str(res.reviewed_pdfs[0]))
+    try:
+        dests = _raw_destinations(doc)
+        # The mark lives on the source page shifted by the front index page(s).
+        target = doc.page_count - 2 if doc.page_count >= 3 else 0
+        expected_pt = _dest_user_point(doc[target], view_rect[0], view_rect[1])
+        expected = (round(expected_pt.x, 1), round(expected_pt.y, 1))
+    finally:
+        doc.close()
+
+    assert dests["link"], f"no index-row GOTO link written at rot={rot} crop={crop}"
+    assert dests["outline"], f"no QC bookmark destination written at rot={rot} crop={crop}"
+
+    for got in dests["link"]:
+        assert abs(got[0] - expected[0]) < 1.2 and abs(got[1] - expected[1]) < 1.2, (
+            f"index-row /XYZ {got} != user-space {expected} at rot={rot} crop={crop}"
+        )
+    for got in dests["outline"]:
+        assert abs(got[0] - expected[0]) < 1.2 and abs(got[1] - expected[1]) < 1.2, (
+            f"bookmark /XYZ {got} != user-space {expected} at rot={rot} crop={crop}"
+        )
+    # Two entry points, two internal transforms, one mark: they must agree.
+    assert dests["link"][0] == dests["outline"][0], (
+        f"index link {dests['link'][0]} and bookmark {dests['outline'][0]} name "
+        f"different points at rot={rot} crop={crop}"
+    )
+
+
+def test_overflow_page_backlink_uses_the_destination_transform(tmp_path):
+    # The third destination site: the AI Review Notes page's GOTO back to the
+    # source sheet.  Its rect-bearing branch is defensive — the overflow list is
+    # fed only MARGIN placements, which are rect-less — so it is unreachable
+    # through write_reviewed_pdfs and has to be exercised directly.  It is the
+    # twin of the index-row link, and an untested twin is where this campaign's
+    # defects have consistently lived.
+    from drawing_analyzer.annotate import (
+        _dest_user_point, _insert_review_notes_page,
+    )
+    from drawing_analyzer.models import MarkupPlacement
+
+    view_rect = (100.0, 120.0, 260.0, 150.0)
+    doc = pymupdf.open()
+    page = doc.new_page(width=792, height=612)
+    page.insert_text((150, 200), "TARGETWORD0", fontsize=14)
+    mb = page.mediabox
+    page.set_cropbox(pymupdf.Rect(mb.x0 + 40, 25, mb.x1 - 40, (mb.y1 - mb.y0) - 25))
+    page.set_rotation(90)
+    try:
+        f = _finding("did not fit a clear band", status="VERIFIED", page=0,
+                     rect=view_rect, quote="TARGETWORD0")
+        f.qc_id = "QC-001"
+        placement = MarkupPlacement(
+            run_id="r1", placement_id="r1#f1#primary", finding_id=f.id,
+            qc_id="QC-001", scope="SOURCE", source_id="SRC-0001", page_index=0,
+            leg_id="primary", expected="MARGIN", required_components=["callout"],
+        )
+        _insert_review_notes_page(doc, [(f, placement)], n_index=0, run_id="r1",
+                                  author="tester")
+        dests = _raw_destinations(doc)
+        expected_pt = _dest_user_point(doc[0], view_rect[0], view_rect[1])
+        expected = (round(expected_pt.x, 1), round(expected_pt.y, 1))
+    finally:
+        doc.close()
+
+    assert dests["link"], "the notes page wrote no GOTO back to the source sheet"
+    for got in dests["link"]:
+        assert abs(got[0] - expected[0]) < 1.2 and abs(got[1] - expected[1]) < 1.2, (
+            f"notes-page backlink /XYZ {got} != user-space {expected}"
+        )

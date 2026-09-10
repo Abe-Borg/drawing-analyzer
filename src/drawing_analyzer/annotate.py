@@ -993,8 +993,78 @@ def _derotate_rect(page: "pymupdf.Page", view_rect: Any) -> "pymupdf.Rect":
 
 
 def _derotate_point(page: "pymupdf.Page", x: float, y: float) -> "pymupdf.Point":
-    """A PAGE_VIEW_V2 point → this page's un-rotated (annotation) space."""
+    """A PAGE_VIEW_V2 point → this page's un-rotated (annotation) space.
+
+    Correct for **annotation** placement (``add_*_annot``), which is what it is
+    for.  A GOTO *destination* is a different space entirely — see
+    :func:`_dest_user_point` — so never reuse this for one.
+    """
     return pymupdf.Point(float(x), float(y)) * page.derotation_matrix
+
+
+# --------------------------------------------------------------------------- #
+# GOTO destinations are NOT annotation space (P7 item 27).
+#
+# A ``/XYZ`` destination is expressed in **default user space** (PDF 32000-1
+# §12.3.2.2), the same space an annotation's ``/Rect`` uses (§12.5.2) — which is
+# what lets the two be compared, and is how the transform below was pinned:
+# stamp a rect annot at a known point, save, and read the raw ``/Rect`` back out
+# of the file.  Annotation *placement*, by contrast, goes through PyMuPDF's
+# un-rotated CropBox-relative space, so :func:`_derotate_point` is only half of
+# the journey and passing its result to a destination drops the CropBox origin
+# and the MediaBox origin.
+#
+# Measured on PyMuPDF 1.28.2 across rotation × CropBox × MediaBox-origin (24
+# cases, ``tests/test_drawing_geometry.py``): feeding ``_derotate_point`` to a
+# destination is wrong for **12** of them via ``insert_link`` and **22** via
+# ``set_toc`` — every rotated page, and every inset CropBox.  Errors reach
+# ~550 pt, i.e. off-sheet.
+#
+# Two entry points, two different internal transforms, so two inversions:
+#   * ``Page.insert_link`` maps the point through ``~page.transformation_matrix``
+#     (``pymupdf.utils.getLinkText``), so hand it ``user * transformation_matrix``.
+#   * ``Document.set_toc`` does ``y = cropbox.height - y`` then
+#     ``* page.rotation_matrix`` (``Document.set_toc``), so invert exactly that.
+# Both are composed from PyMuPDF's own published matrices rather than a
+# hard-coded offset, so each is exact by construction rather than by coincidence.
+# --------------------------------------------------------------------------- #
+
+
+def _dest_user_point(page: "pymupdf.Page", x: float, y: float) -> "pymupdf.Point":
+    """A PAGE_VIEW_V2 point → this page's **default user space** (PDF §12.3.2.2).
+
+    ``page.cropbox`` is reported in PyMuPDF's *top-left* convention while
+    ``page.mediabox`` is the **raw** PDF box (bottom-left, un-normalized), so
+    ``mediabox.y1 - cropbox.y0`` is the CropBox's top edge in user space.  That
+    asymmetry is the trap here; it is measured, not assumed.
+    """
+    u = pymupdf.Point(float(x), float(y)) * page.derotation_matrix
+    return pymupdf.Point(
+        page.cropbox.x0 + u.x,
+        page.mediabox.y1 - page.cropbox.y0 - u.y,
+    )
+
+
+def _dest_point(page: "pymupdf.Page", x: float, y: float) -> "pymupdf.Point":
+    """A PAGE_VIEW_V2 point → the ``to=`` value for :meth:`Page.insert_link`.
+
+    ``insert_link`` re-maps ``to`` through ``~page.transformation_matrix``, so
+    pre-multiplying by that matrix makes the round trip land on the user-space
+    point :func:`_dest_user_point` computed.
+    """
+    return _dest_user_point(page, x, y) * page.transformation_matrix
+
+
+def _outline_dest_point(page: "pymupdf.Page", x: float, y: float) -> "pymupdf.Point":
+    """A PAGE_VIEW_V2 point → the ``to=`` value for :meth:`Document.set_toc`.
+
+    ``set_toc`` flips y about ``cropbox.height`` and then applies
+    ``rotation_matrix``; this inverts both.  ``derotation_matrix`` is the exact
+    inverse of ``rotation_matrix`` (their product is bit-exactly the identity,
+    asserted in ``tests/test_drawing_geometry.py``).
+    """
+    q = _dest_user_point(page, x, y) * page.derotation_matrix
+    return pymupdf.Point(q.x, page.cropbox.height - q.y)
 
 
 # --------------------------------------------------------------------------- #
@@ -1395,12 +1465,13 @@ def _insert_index_pages(
             target_page = int(finding.page_index) + n_pages
             rect = getattr(finding.anchor, "rect_pdf", None) if finding.anchor else None
             if 0 <= target_page < doc.page_count:
-                # The destination rect is in PAGE_VIEW_V2 space; a GOTO target lands
-                # in the target page's un-rotated space, so derotate the corner with
-                # that page's own matrix (identity on an un-rotated page).
+                # The destination rect is in PAGE_VIEW_V2 space; a GOTO target is
+                # default user space, so convert with _dest_point (item 27) — NOT
+                # _derotate_point, which is annotation space and drops the CropBox
+                # and MediaBox origins on a rotated sheet.
                 to = pymupdf.Point(36, 36)
                 if rect:
-                    to = _derotate_point(doc[target_page], rect[0], rect[1])
+                    to = _dest_point(doc[target_page], rect[0], rect[1])
                 row_top = y - 9
                 page.insert_link({
                     "kind": pymupdf.LINK_GOTO,
@@ -1528,7 +1599,7 @@ def _insert_review_notes_page(
                 target = int(finding.page_index) + n_index
                 if 0 <= target < doc.page_count:
                     rect = getattr(finding.anchor, "rect_pdf", None) if finding.anchor else None
-                    to = _derotate_point(doc[target], rect[0], rect[1]) if rect else pymupdf.Point(36, 36)
+                    to = _dest_point(doc[target], rect[0], rect[1]) if rect else pymupdf.Point(36, 36)
                     page.insert_link({
                         "kind": pymupdf.LINK_GOTO,
                         "from": pymupdf.Rect(box.x0, box.y0, box.x1, box.y1),
@@ -1798,9 +1869,10 @@ def _set_findings_outline(
     on-sheet cloud/margin callout, the appended *AI Review Notes* page for one
     that overflowed there), so a bookmark always points at the mark, the same
     page its HTML deep link and receipt point at. A rect-bearing finding zooms
-    to the rect's top-left via :func:`_derotate_point` (moving the PAGE_VIEW_V2
-    corner into that page's own space, exactly as the index-page GOTO links do);
-    a rect-less one targets the page top.
+    to the rect's top-left via :func:`_outline_dest_point` (moving the
+    PAGE_VIEW_V2 corner into the space ``set_toc`` wants, which is *not* the one
+    the index-page GOTO links want — see :func:`_dest_user_point`); a rect-less
+    one targets the page top.
 
     Any outline already on the source PDF (a set's sheet-navigation bookmarks)
     is **preserved** — the QC section is appended, never substituted: the writer
@@ -1837,7 +1909,7 @@ def _set_findings_outline(
     for finding, final_page in entries:
         rect = getattr(finding.anchor, "rect_pdf", None) if finding.anchor else None
         if rect:
-            point = _derotate_point(doc[final_page], rect[0], rect[1])
+            point = _outline_dest_point(doc[final_page], rect[0], rect[1])
             dest = {"kind": pymupdf.LINK_GOTO, "to": point, "zoom": _OUTLINE_ZOOM}
         else:
             dest = {"kind": pymupdf.LINK_GOTO, "to": pymupdf.Point(0, 0), "zoom": 0}

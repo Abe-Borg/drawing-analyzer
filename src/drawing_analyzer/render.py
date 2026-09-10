@@ -327,13 +327,114 @@ def _renderer_environment_fingerprint() -> str:
 # **source** content hash (``SourceDocument.content_sha256``), which covers every
 # byte of the file (so rotation, CropBox, and annotations are all captured), plus
 # the canonical coordinate-space version and the renderer-environment fingerprint.
-_RENDER_IDENTITY_SCHEME = "render-identity-v3"
+#
+# v4 (P7 item 28): the text layer stopped including annotation text. This is a
+# *policy* change, not a document change — ``_page_dependency_sha256`` hashes the
+# annotation bytes, and those bytes did not move — so without this bump an
+# affected page still hits level 1 and is served a digest built from
+# annotation-contaminated ``sheet_text`` **without re-extracting the text**: a
+# false hit. Deliberately the ONLY invalidation mechanism for that change (§3):
+# no ``text_annots`` term was added to the parts list below, since a new term
+# would move every key by itself and be a second mechanism for one change.
+_RENDER_IDENTITY_SCHEME = "render-identity-v4"
 
 _XREF_REF_RE = re.compile(r"(?<!\d)(\d+)\s+\d+\s+R\b")
 _PARENT_REF_RE = re.compile(r"/Parent\s+\d+\s+\d+\s+R\b")
 _MAX_PAGE_DEPENDENCY_OBJECTS = 20_000
 _INHERITED_PAGE_KEYS = ("Resources", "MediaBox", "CropBox", "Rotate", "UserUnit")
 _CATALOG_RENDER_KEYS = ("OCProperties", "OutputIntents")
+
+
+# --------------------------------------------------------------------------- #
+# Text extraction excludes annotations (P7 item 28).
+#
+# ``page.get_text()`` includes annotation text.  On a re-reviewed set that means
+# a sheet's **prior QC callouts are fed back to the model as sheet text** — the
+# analyzer reading its own previous output as if the engineer had drawn it — and
+# the same contamination reaches ``full_sheet_text``, which host-side grounding
+# treats as source evidence (WP-03A §2.1), and the word count, which decides
+# ``is_raster`` and therefore the render target.
+#
+# ``page.get_displaylist(annots=False)`` builds the page's own content only.  Its
+# ``get_textpage()`` returns a raw ``FzStextPage``, which has no ``extractText``
+# and is rejected by ``page.get_text(textpage=…)`` — even after wrapping, since
+# the wrapper is not "a textpage of this page" — so the words must come from
+# ``TextPage.extractWORDS()`` rather than a ``get_text`` call.
+#
+# Measured: on a page carrying no annotations the result is byte-identical to
+# ``get_text`` for both text and words, so this is a strict no-op there; and the
+# route is ~1.6x *faster* on a dense 1,200-word sheet (10.7 ms vs 17.0 ms),
+# because one display list serves both extractions instead of two independent
+# ``get_text`` calls.
+# --------------------------------------------------------------------------- #
+
+
+def _annotation_free_text_page(page: "pymupdf.Page") -> "pymupdf.TextPage":
+    """A ``TextPage`` over the page's own content, with annotations excluded."""
+    return pymupdf.TextPage(page.get_displaylist(annots=False).get_textpage())
+
+
+def _page_text_and_view_words(
+    page: "pymupdf.Page", geometry: PageGeometry
+) -> "tuple[str, list]":
+    """``(reading-order text, PAGE_VIEW_V2 word tuples)``, annotations excluded.
+
+    **The two routes report words in different coordinate spaces, so this
+    function — not its callers — owns the conversion.** The display list is built
+    for ``page.rect``, i.e. post-CropBox and post-rotation, so its words are
+    *already* canonical PAGE_VIEW_V2; measured bit-exact (delta 0.0000, matching
+    non-geometry tails) against ``_words_to_view(page.get_text("words"))`` at
+    every rotation × CropBox, so applying that transform on top would
+    double-rotate. ``page.get_text("words")``, which the fallback uses, is
+    rotation-*invariant* un-rotated space and does need it. Returning
+    view-space words from both keeps that asymmetry from reaching a caller.
+    """
+    try:
+        text_page = _annotation_free_text_page(page)
+        return (text_page.extractText() or "", list(text_page.extractWORDS()))
+    except Exception as exc:  # noqa: BLE001 - never fail a sheet over extraction
+        _log.warning(
+            "annotation-free text extraction failed (%s); falling back to "
+            "get_text, whose output may include annotation text",
+            type(exc).__name__,
+        )
+        return (
+            page.get_text() or "",
+            _words_to_view(list(page.get_text("words")), geometry),
+        )
+
+
+def _page_word_count(page: "pymupdf.Page") -> int:
+    """How many words this page carries, excluding annotation text.
+
+    A count is coordinate-space-invariant, so this needs no geometry.
+    """
+    try:
+        return len(_annotation_free_text_page(page).extractWORDS())
+    except Exception as exc:  # noqa: BLE001 - never fail a sheet over extraction
+        _log.warning(
+            "annotation-free word extraction failed (%s); falling back to "
+            "get_text, whose words may include annotation text",
+            type(exc).__name__,
+        )
+        return len(page.get_text("words"))
+
+
+def _page_text_and_word_count(page: "pymupdf.Page") -> "tuple[str, int]":
+    """``(reading-order text, word count)``, annotations excluded.
+
+    For the cost scan, which needs no rectangles and therefore no geometry.
+    """
+    try:
+        text_page = _annotation_free_text_page(page)
+        return (text_page.extractText() or "", len(text_page.extractWORDS()))
+    except Exception as exc:  # noqa: BLE001 - never fail a sheet over extraction
+        _log.warning(
+            "annotation-free text extraction failed (%s); falling back to "
+            "get_text, whose output may include annotation text",
+            type(exc).__name__,
+        )
+        return (page.get_text() or "", len(page.get_text("words")))
 
 
 def _refs_in(text: str) -> set[int]:
@@ -493,7 +594,7 @@ def sheet_render_identity(
     :func:`digest_cache.digest_cache_key_level1`) serves an unchanged sheet's digest
     without ever rendering it.
     """
-    is_raster = len(page.get_text("words")) == 0
+    is_raster = _page_word_count(page) == 0
     total_images = tiling.total_images_for_grid(rows, cols)
     target_px = tiling.target_long_edge_px(total_images, is_raster=is_raster)
     near_blank, near_blank_bytes = _near_blank_config()
@@ -507,7 +608,10 @@ def sheet_render_identity(
         f"page_count={int(page_count)}",
         f"coord_space={COORDINATE_SPACE_VERSION}",
         f"env={_renderer_environment_fingerprint()}",
-        "render_annots=1",                 # current policy: annotations ARE rendered
+        # Pixmap policy only: annotations ARE rasterized into the images. The
+        # *text* layer excludes them as of scheme v4 (item 28) — a different
+        # policy, carried by the scheme literal rather than a second term.
+        "render_annots=1",
         f"rows={rows}",
         f"cols={cols}",
         f"overlap={overlap_frac:.4f}",
@@ -648,11 +752,12 @@ def render_sheet(
     """Render one already-open page into an overview + ``rows*cols`` tiles.
 
     Before rasterizing, the page's vector text layer is lifted (cheap and
-    lossless): ``page.get_text()`` for the reading-order text spliced into the
-    digest prompt, and ``page.get_text("words")`` for the word-rect list the
-    anchor resolver consumes. A page with **no** words is treated as raster
-    (scanned / pasted image) and rendered at the higher raster target, since
-    there the pixels are the only information channel.
+    lossless) by :func:`_page_text_and_words`: the reading-order text spliced
+    into the digest prompt, and the word-rect list the anchor resolver consumes.
+    Both **exclude annotation text** (item 28), so a re-reviewed sheet's prior QC
+    callouts are never fed back as sheet text. A page with **no** words is
+    treated as raster (scanned / pasted image) and rendered at the higher raster
+    target, since there the pixels are the only information channel.
     """
     page_rect = page.rect
     w_pt = float(page_rect.width)
@@ -664,8 +769,9 @@ def render_sheet(
     # PyMuPDF type escapes this module (I-5 isolation). They are transformed into
     # canonical PAGE_VIEW_V2 space (Phase 19) so anchoring/verification/tiling all
     # share the frame the model saw — a no-op on an un-rotated page.
-    raw_text = page.get_text() or ""
-    words = _words_to_view(list(page.get_text("words")), geometry)
+    # Already canonical PAGE_VIEW_V2 — the helper owns that conversion, so a
+    # second _words_to_view here would rotate the words twice.
+    raw_text, words = _page_text_and_view_words(page, geometry)
     is_raster = len(words) == 0
     sheet_text = _cap_sheet_text(raw_text)
     if len(sheet_text) != len(raw_text):
@@ -825,8 +931,9 @@ def _sheet_geometry_no_render(
     level-1 cache hit.
     """
     geometry = page_geometry(page)
-    raw_text = page.get_text() or ""
-    words = _words_to_view(list(page.get_text("words")), geometry)
+    # Already canonical PAGE_VIEW_V2 — the helper owns that conversion, so a
+    # second _words_to_view here would rotate the words twice.
+    raw_text, words = _page_text_and_view_words(page, geometry)
     return SheetGeometry(
         ref=ref,
         page_width_pt=geometry.view_width_pt,
@@ -851,7 +958,7 @@ def iter_sheet_cost_bases(
     WP-05 §10.3's scanner. Deliberately lighter than :func:`iter_sheet_prescan`,
     which also computes each page's render identity — a content hash over the
     page's dependency graph that the level-1 cache needs and a cost estimate does
-    not. This reads ``page.rect`` and ``len(page.get_text("words"))`` and stops.
+    not. This reads ``page.rect`` and the annotation-free word count and stops.
 
     Creates no model client, hashes nothing, and retains no PyMuPDF object past
     the loop (I-5). When the caller *already* has geometry — the GUI's profile
@@ -884,12 +991,15 @@ def iter_sheet_cost_bases(
                 try:
                     page = doc[i]
                     geometry = page_geometry(page)
-                    # Extracted WORDS, matching render_page's own rule. A page
-                    # can carry text objects that yield no word rectangles; the
-                    # looser "get_text() is nonempty" test would call that page
-                    # vector and quote it at the cheaper target.
-                    word_count = len(page.get_text("words"))
-                    raw_len = len(_cap_sheet_text(page.get_text() or ""))
+                    # Extracted WORDS, matching render_page's own rule — and
+                    # from the same annotation-free extractor (item 28), so a
+                    # marked-up sheet is not classified vector on the strength of
+                    # its own prior callouts. A page can carry text objects that
+                    # yield no word rectangles; the looser "get_text() is
+                    # nonempty" test would call that page vector and quote it at
+                    # the cheaper target.
+                    scan_text, word_count = _page_text_and_word_count(page)
+                    raw_len = len(_cap_sheet_text(scan_text))
                     yield SheetCostBasis(
                         source_name=path.name,
                         source_id=source_id,
