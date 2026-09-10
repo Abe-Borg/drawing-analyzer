@@ -155,19 +155,23 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   checkbox saying otherwise. The installer build is now constrained by the lock.
 
 - **Inno Setup — the one tool whose output *is* the shipped artifact — had no
-  version recorded.** A pinned `choco install innosetup --version=6.2.2` was the
-  obvious answer and is the wrong one: the `windows-latest` image already ships
-  Inno Setup (6.7.1 as of 2026-09), so pinning an older version asks Chocolatey
-  to *downgrade*, and it refuses — `0/1 packages`, job failed. Using the
-  compiler the image already provides is also the stronger supply-chain posture
-  rather than a concession: a build that downloads no compiler cannot be served a
-  bad package, so there is no feed, no download and no checksum to trust. What
-  was actually missing is now in place — the exact compiler version is printed
-  and written to the build summary, a version below the known-good floor fails
-  the job, and the pinned install survives only as the fallback for an image that
-  stops shipping one (where nothing preinstalled can conflict with it). The path
-  is resolved once and handed to the compile step, so the floor check cannot be
-  bypassed by a second hardcoded copy.
+  version recorded.** Two obvious fixes were both wrong, and CI said so:
+  a pinned `choco install innosetup --version=6.2.2` fails outright, because the
+  `windows-latest` image already ships Inno Setup (6.7.1 as of 2026-09) and
+  Chocolatey refuses to downgrade (`0/1 packages`); and a floor comparison then
+  failed on a *perfectly good* compiler, because `ISCC.exe` does not stamp its
+  own version — its `ProductVersion` resource reads `0.0.0.0`. What ships is the
+  version those attempts were groping for: the compiler comes from the runner
+  image and is never downloaded (a build that fetches no compiler cannot be
+  served a bad package — no feed, no checksum to trust), the compatibility
+  contract is the `Inno Setup 6\ISCC.exe` directory that `installer.iss` targets,
+  and the exact version is **recorded** — read from the file resources or the
+  install registry, printed, written to the build summary, and given a row in
+  `docs/RELEASE_ACCEPTANCE_TEMPLATE.md`. Reading it is reporting, so it can never
+  fail the job: an unreadable version logs as `unknown`. The pinned install
+  survives only as the fallback for an image that stops shipping one, and the
+  path is resolved once and handed to the compile step so no second hardcoded
+  copy can bypass it.
 
 - **Five documentation claims a skeptical reader could disprove.** Each was
   checked against the code or the wire and corrected: the CI smoke test proves the

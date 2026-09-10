@@ -207,25 +207,36 @@ def test_ci_runs_the_guard_on_the_xml_pytest_writes():
 
 
 def test_the_installer_compiler_is_resolved_in_exactly_one_place():
-    """P9 item 41 — one ISCC path and one floor version, or they drift.
+    """P9 item 41 — one ISCC path, one fallback version, version recorded.
 
-    The first version of this fix pinned ``choco install innosetup
-    --version=6.2.2``, which failed the job outright: the windows-latest image
-    already ships Inno Setup (6.7.1), so pinning an older one asks Chocolatey to
-    downgrade and it refuses. The compiler is now resolved once — recorded,
-    floor-checked, and handed to the compile step — and this pins that "once".
+    Two CI failures shaped this. Pinning ``choco install innosetup
+    --version=6.2.2`` failed outright, because the windows-latest image already
+    ships a newer Inno Setup and Chocolatey refuses to downgrade. Then a floor
+    comparison failed on a good compiler, because ``ISCC.exe`` reports
+    ``ProductVersion = 0.0.0.0`` — it does not stamp its own version. So the
+    compatibility contract is the ``Inno Setup 6`` directory and the version is
+    *recorded*, not gated.
     """
     text = (_REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
         encoding="utf-8"
     )
-    # One definition of the compiler path. A second copy in the compile step is
-    # how the resolve step's floor check gets silently bypassed.
-    assert text.count("ISCC.exe") == 1, "the ISCC path is defined more than once"
-    # One floor number, in the job env — not repeated in the fallback install.
-    assert text.count('"6.2.2"') == 1, "the Inno Setup floor is written twice"
-    assert "INNO_SETUP_MIN" in text
-    # The version must reach the log, or the gap item 41 names is still open.
+    # One *assignment* of the compiler path (the comments name it too, so count
+    # the code): a second copy in the compile step is how the resolve step gets
+    # silently bypassed. The "6" in the path is the real major-version contract.
+    assert text.count('$iscc = "') == 1, "the ISCC path is assigned more than once"
+    assert "Inno Setup 6\\ISCC.exe" in text, "the major-version contract moved"
+    compile_step = text.split("- name: Compile installer", 1)[1]
+    assert '& "$env:ISCC"' in compile_step, "the compile step re-derives the path"
+    # One fallback version, in the job env — not repeated in the install command.
+    assert text.count('"6.2.2"') == 1, "the fallback version is written twice"
+    assert "INNO_SETUP_FALLBACK" in text
+    # The version must reach the build record, or the gap item 41 names is open.
     assert "GITHUB_STEP_SUMMARY" in text
+    # ...and reading it must never be able to fail the release: the only hard
+    # exit in that step is "no compiler at all".
+    resolve = text.split("- name: Resolve Inno Setup compiler", 1)[1]
+    resolve = resolve.split("- name: Compile installer", 1)[0]
+    assert resolve.count("exit 1") == 1, resolve
 
 
 def test_release_publish_needs_every_release_gate():

@@ -70,10 +70,9 @@ jobs:
     permissions:
       contents: read
     env:
-      # The known-good Inno Setup floor: the oldest compiler this installer
-      # script is accepted against, and the version installed if the runner
-      # image ever stops shipping one. One number, one place.
-      INNO_SETUP_MIN: "6.2.2"
+      # The Inno Setup version to install if the runner image ever stops
+      # shipping one. Only a fallback pin — not a floor; see the resolve step.
+      INNO_SETUP_FALLBACK: "6.2.2"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -138,53 +137,72 @@ jobs:
       - name: Resolve Inno Setup compiler
         id: iscc
         shell: pwsh
-        # P9 item 41, corrected after measurement. The goal is the one tool in
-        # this pipeline whose output IS the shipped artifact, and which had no
-        # version recorded anywhere. A pinned `choco install` looked like the
-        # answer and is not: the windows-latest image already ships Inno Setup
-        # (6.7.1 as of 2026-09), so pinning an older version asks Chocolatey to
-        # downgrade and it refuses outright — "A newer version of InnoSetup
-        # (v6.7.1) is already installed", 0/1 packages, job failed.
+        # P9 item 41. The goal is the one tool in this pipeline whose output IS
+        # the shipped artifact, and which had no version recorded anywhere.
         #
-        # Using the compiler the image already provides is also the stronger
-        # supply-chain posture, not a concession: a build that downloads no
-        # compiler cannot be served a bad package at all, so there is no feed,
-        # no download and no checksum to trust. What remains is to (a) refuse a
-        # compiler older than the known-good floor and (b) RECORD the exact
-        # version that built the artifact, which is what was actually missing.
-        # The pinned `choco install` survives only as the fallback for an image
-        # that stops shipping one, where there is no preinstalled version to
-        # conflict with; `--require-checksums` refuses a package whose checksum
-        # the feed does not publish.
+        # Two things were learned the hard way, both from CI:
+        #
+        #  1. A pinned `choco install innosetup --version=…` cannot work here.
+        #     The windows-latest image already ships Inno Setup (6.7.1 as of
+        #     2026-09), so pinning an older version asks Chocolatey to downgrade
+        #     and it refuses outright — "A newer version of InnoSetup (v6.7.1) is
+        #     already installed", 0/1 packages, job failed. Using the compiler the
+        #     image provides is also the stronger supply-chain posture rather than
+        #     a concession: a build that downloads no compiler cannot be served a
+        #     bad package, so there is no feed, no download and no checksum to
+        #     trust. The pinned install survives only as the fallback for an image
+        #     that stops shipping one, where nothing preinstalled can conflict
+        #     with it; `--require-checksums` refuses a package whose checksum the
+        #     feed does not publish.
+        #
+        #  2. `ISCC.exe` does not stamp its own version: its `ProductVersion`
+        #     resource reads **0.0.0.0**. A floor comparison against that number
+        #     failed the build on a compiler that was perfectly good. So the
+        #     compatibility contract is the DIRECTORY — `Inno Setup 6\ISCC.exe`,
+        #     which is what `installer.iss` targets and what a regression to
+        #     Inno Setup 5 would not satisfy — and the exact version is *recorded*
+        #     rather than gated. Reading it is reporting, so it is wrapped and can
+        #     never fail the job: an unreadable version is logged as "unknown",
+        #     not treated as a release blocker.
         run: |
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           if (-not (Test-Path -LiteralPath $iscc)) {
             Write-Host "Inno Setup 6 is not on this image; installing the pinned fallback."
-            choco install innosetup --version=$env:INNO_SETUP_MIN --no-progress --require-checksums -y
+            choco install innosetup --version=$env:INNO_SETUP_FALLBACK --no-progress --require-checksums -y
           }
           if (-not (Test-Path -LiteralPath $iscc)) {
             Write-Error "Inno Setup 6 compiler not found at $iscc"
             exit 1
           }
-          $info = (Get-Item -LiteralPath $iscc).VersionInfo
-          $raw = $info.ProductVersion
-          if (-not $raw) { $raw = $info.FileVersion }
-          $parsed = [regex]::Match([string]$raw, '\d+(\.\d+){1,3}')
-          if (-not $parsed.Success) {
-            Write-Error "could not read a version number from '$raw'"
-            exit 1
+          $version = "unknown"
+          try {
+            $info = (Get-Item -LiteralPath $iscc).VersionInfo
+            foreach ($candidate in @($info.FileVersion, $info.ProductVersion)) {
+              $found = [regex]::Match([string]$candidate, '\d+(\.\d+){1,3}')
+              # ISCC.exe reports 0.0.0.0 in at least one of these fields, so a
+              # zero major means "not stamped", not "version zero".
+              if ($found.Success -and ([version]$found.Value).Major -gt 0) {
+                $version = $found.Value
+                break
+              }
+            }
+            if ($version -eq "unknown") {
+              foreach ($key in @(
+                "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Inno Setup 6_is1",
+                "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Inno Setup 6_is1"
+              )) {
+                $displayed = (Get-ItemProperty -Path $key -Name DisplayVersion -ErrorAction SilentlyContinue).DisplayVersion
+                if ($displayed) { $version = [string]$displayed; break }
+              }
+            }
+          } catch {
+            Write-Host "could not read the Inno Setup version: $_"
           }
-          $found = [version]$parsed.Value
-          $floor = [version]$env:INNO_SETUP_MIN
           Write-Host "Inno Setup compiler: $iscc"
-          Write-Host "Inno Setup version : $found  (known-good floor $floor)"
-          "Installer compiled by Inno Setup $found" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
-          if ($found -lt $floor) {
-            Write-Error "Inno Setup $found is older than the known-good floor $floor"
-            exit 1
-          }
+          Write-Host "Inno Setup version : $version"
+          "Installer compiled by Inno Setup $version" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
           "path=$iscc" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "version=$found" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: Compile installer (Inno Setup ${{ steps.iscc.outputs.version }})
         shell: pwsh

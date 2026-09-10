@@ -1694,10 +1694,12 @@ Three additions worth knowing about:
   `.github/dependabot.yml` opens grouped weekly updates for both the SHA-pinned
   actions and `requirements-release.lock`. The Windows installer build is
   constrained by that lock, and the Inno Setup compiler — the one tool whose
-  output *is* the shipped artifact — has its exact version checked against a
-  known-good floor and recorded in the build summary. It is deliberately **not**
-  fetched: the runner image already ships it, and a build that downloads no
-  compiler cannot be served a bad package.
+  output *is* the shipped artifact — has its exact version recorded in the build
+  summary and in the acceptance record. It is deliberately **not** fetched: the
+  runner image already ships it, and a build that downloads no compiler cannot be
+  served a bad package. The compatibility contract is the `Inno Setup 6`
+  directory `installer.iss` targets, not a version comparison — `ISCC.exe`
+  reports `ProductVersion 0.0.0.0`, so a floor check on it fails good compilers.
 - The browser job now writes a JUnit report and runs
   `scripts/check_browser_suite.py` against it. Every test in that suite skips
   itself when Chromium will not launch and pytest exits **0** on an all-skipped
