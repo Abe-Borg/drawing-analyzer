@@ -148,6 +148,33 @@ of every artifact), written **last** in the §18.4 non-circular order (artifacts
 → markup manifest → run.log → run manifest, which excludes only itself). Usage
 `stage_instance` labels are portable (`digest:SRC-0001:p0`, never a path).
 
+**Text extraction excludes annotations (P7 item 28).** `page.get_text()` folds
+annotation text in, so a re-reviewed set fed its own prior QC callouts back as
+`sheet_text`, contaminated `full_sheet_text` (which host grounding treats as
+source evidence), and inflated the word count that decides `is_raster`.
+`render._page_text_and_view_words` / `_page_word_count` /
+`_page_text_and_word_count` read `page.get_displaylist(annots=False)` instead. The
+raw `FzStextPage` it yields has no `extractText` and is rejected by
+`page.get_text(textpage=…)` **even wrapped**, so words come from
+`TextPage.extractWORDS()`. The trap: that display list is built for `page.rect`,
+so its words are **already** canonical PAGE_VIEW_V2 while `page.get_text("words")`
+is rotation-*invariant* — applying `_words_to_view` on top double-rotates every
+anchor on a rotated sheet. `_page_text_and_view_words` owns that conversion for
+both routes so the asymmetry cannot reach a caller; measured bit-exact against the
+canonical long way round at every rotation × CropBox, and ~1.6× faster because one
+display list serves both extractions. `_RENDER_IDENTITY_SCHEME` is **v4** for this
+(the annotation bytes do not move, so a cached page would otherwise be served
+contaminated text without re-extracting); no key *term* was added, since that
+would be a second mechanism for one change.
+
+**Page identity is page-local even across links (N23).** Any other `/Type /Page`
+object reached transitively by `_page_dependency_sha256` is an **opaque leaf**: a
+GOTO link annot references its destination page, whose `/Parent` is not stripped
+the way the hashed page's own is, so the walk reached `/Kids` and every sibling and
+one cross-sheet hyperlink made every sheet re-key whenever any sheet changed.
+Nothing about the destination is hashed and nothing needs to be — the reference
+already rides the referencing annot object, so retargeting still moves the key.
+
 **Digest path:** `tiling.py` (pure geometry) → `render.py` (rasterization) →
 `digest.py` (prompt + tolerant findings-block parser — fences are **line-anchored**,
 accept 3+ backticks or tildes, and a closer must match its opener's character and
@@ -429,7 +456,20 @@ both the submitted batch and the one that actually served the digests.
   finding anchors to the stale-edition text's own matched span (never the
   citing finding's quote — an identical quote would collide in Pass B).
 - *Disposition:* `anchor.py` (quote → PDF rect, tiered
-  EXACT/FUZZY/TILE/UNANCHORED — UNANCHORED is the hallucination signal) →
+  EXACT/FUZZY/TILE/UNANCHORED — UNANCHORED is the hallucination signal. Both fuzzy
+  tiers carry the **numeric veto** (P7 item 30): token overlap is blind to a
+  swapped digit, so on `PROVIDE 6 INCH DRAIN AT COLUMN LINE 4` every one-number
+  substitution scored 6/7 = 0.857, cleared the 0.85 floor, and clouded a wrong
+  pipe size onto the sheet's real text. `_numbers_aligned` requires each
+  digit-bearing token to sit at **its own position** in the matched span, within
+  `_fuzzy_window_slack` — derived from the overlap floor, never a constant, so the
+  two cannot disagree — and consumes each span position once, so `4 4-INCH DRAINS`
+  cannot satisfy both mentions from a single `4`. Presence anywhere in the span is
+  not evidence: multiset agreement alone is defeated by the window *sliding* to
+  borrow a digit from the next line. The sub-phrase tier instead uses
+  `_numbers_agree`, because its span is the slice verbatim and its failure mode is
+  *dropping* a measurement, not mismatching one. The 0.85 threshold is a standing
+  prohibition and is asserted unchanged) →
   `verify.py` (high-DPI crop re-check → VERIFIED/REJECTED/UNCERTAIN; adaptive
   thinking at medium effort inside an 8k envelope — thinking shares the
   `max_tokens` budget with the answer, and the old 1k cap fit neither, so
@@ -488,7 +528,31 @@ both the submitted batch and the one that actually served the digests.
   (Phase 25 §17.6); one that will not fit overflows to an appended *AI Review
   Notes* page with a GOTO link back, rerouted to a `REVIEW_NOTES` placement; the
   writer stamps every mark, reopens the saved PDF, and reconciles
-  each **placement** against what it finds — returning a `MarkupRunResult` with
+  each **placement** against what it finds. A **GOTO destination is default user
+  space** (PDF §12.3.2.2), a third space beyond the two §19 names, so
+  `_dest_user_point` converts and `_dest_point` / `_outline_dest_point` invert
+  whichever transform the entry point applies — `insert_link` maps `to` through
+  `~page.transformation_matrix`, `set_toc` flips y about `cropbox.height` then
+  applies `rotation_matrix`, and they are **not** interchangeable. `_derotate_point`
+  is annotation space and is wrong for a destination (P7 item 27: 12 of 24 cases
+  wrong via `insert_link`, 22 via `set_toc`). Every generated page comes from
+  `_new_generated_page`, which pins `CropBox` to `MediaBox` because `/CropBox` is
+  **inheritable** and a set carrying one on `/Pages` rendered a 612×792 index page
+  as 512×712. The index is built **last**, after the notes page, so a row links to
+  the page its mark actually landed on rather than guessing its source sheet; every
+  page written before it shifts by the same `n_index`. `_placement_kind` returns
+  `NO_QUOTE` for a quote-less finding — `[QUOTE NOT FOUND]` is the hallucination
+  signal and must not be spent on a graphics-only finding that never had a quote.
+  `_clear_bands` gates the **padded** band (a 58 pt gap once returned a 50 pt band
+  the packer could never use) and is **column-aware**: a full-width word-free
+  y-range is nearly unobtainable beside a title block, so per-column bands are
+  computed from only the words intersecting that column — which preserves the
+  word-free guarantee `_pack_callouts` relies on to skip its word scan.
+  `_page_occupancy` samples at **1:1** with a **min-filter over point-sized cells**,
+  because at a coarse scale a 0.5 pt pipe line antialiases *lighter* than the ink
+  threshold and a pixel-fraction verdict is non-monotonic in scale; `_fit_text` /
+  `_base14_safe` fit page text by measured width and fold glyphs Base-14 cannot
+  draw, which it otherwise renders as a middle dot — returning a `MarkupRunResult` with
   per-placement `WRITTEN`/`INDEXED`/`FAILED` receipts and a receipt-derived
   `coverage_status`. Every finding annotation (cloud, tag, callout, leader,
   overflow/set-level note) is also placed on a per-**severity** PDF
@@ -683,6 +747,31 @@ example is parked at `docs/examples/fire_protection.md`.
   text.
 - PyMuPDF is not thread-safe: rendering stays sequential; concurrency lives in
   the API calls.
+- **A GOTO destination is a THIRD space (P7 item 27).** `/XYZ` is default user
+  space; `add_*_annot()` and `insert_text()` take the un-rotated CropBox-relative
+  space. Worse, the two writers disagree with each other: `Page.insert_link` maps
+  `to` through `~page.transformation_matrix`, while `Document.set_toc` does
+  `y = cropbox.height - y` then `* page.rotation_matrix`. Never share one helper
+  between them. Ground truth is an annotation's raw `/Rect`, which the spec puts in
+  the same space as `/XYZ`.
+- **`page.cropbox` is top-left; `page.mediabox` is the RAW box.** `page.cropbox`
+  is reported in PyMuPDF's top-left convention (a `set_cropbox([50,30,562,700])`
+  stores `/CropBox [50 92 562 762]`), while `page.mediabox` comes back
+  un-normalized in PDF bottom-left. `mediabox.y1 - cropbox.y0` is the CropBox's top
+  edge in user space. This asymmetry has produced several confidently wrong probes.
+- **`/CropBox` is inheritable; `/Rotate` is written explicitly.** A `new_page()` in
+  a document whose `/Pages` node carries a `/CropBox` **inherits** it — a 612×792
+  page came back with a 512×712 visible rect — so pin it. A new page does not
+  inherit `/Rotate`, verified rather than assumed.
+- **`get_text()` includes annotation text.** Use
+  `pymupdf.TextPage(page.get_displaylist(annots=False).get_textpage())`; the raw
+  `FzStextPage` has no `extractText` and `page.get_text(textpage=…)` rejects even
+  the wrapper, so words come from `TextPage.extractWORDS()`. Those words are in
+  **rotated view** space, unlike `get_text("words")`, which is rotation-invariant.
+- **A thin line can be invisible in a downscaled pixmap.** At 0.12 a 0.5 pt line
+  antialiases to ~223, above a 210 "dark" threshold, and whether it registers at
+  all depends on pixel-grid alignment — so a pixel-fraction occupancy test is
+  non-monotonic in scale. Sample at 1:1 and min-filter.
 - **Rotation/CropBox use two coordinate spaces (Phase 19).** `get_text("words")`
   and `add_*_annot()` work in an *un-rotated, CropBox-relative* space; but
   `get_pixmap(clip=...)` clips in the *rotated page-view* space (`page.rect` dims).

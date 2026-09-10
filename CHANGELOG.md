@@ -8,6 +8,118 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A QC bookmark or index row could land nowhere near its mark.** A `/XYZ`
+  destination is expressed in default user space, but the writer handed it a
+  point in PyMuPDF's *annotation* space, which drops the CropBox origin and the
+  MediaBox origin. Measured across rotation × CropBox × MediaBox-origin (24
+  cases): the index and overflow links were wrong in **12**, and the bookmark
+  outline in **22** — every rotated page, with errors reaching ~550 pt, i.e.
+  off-sheet. Architectural sheets are routinely rotated, so the outline that
+  makes a marked-up set navigable was wrong on most of a real set. The two
+  PyMuPDF entry points apply *different* internal transforms, so each is now
+  inverted separately, composed from PyMuPDF's own published matrices rather
+  than a measured offset. `_derotate_point` is unchanged — it is correct for the
+  annotation and leader-line sites it was written for.
+
+- **A re-reviewed set fed its own prior QC callouts back to the model.**
+  `page.get_text()` includes annotation text, so on a second pass each sheet's
+  previous markups arrived as *sheet text* — the analyzer reading its own output
+  as if the engineer had drawn it. The same contamination reached
+  `full_sheet_text`, which host-side grounding treats as source evidence, and
+  the word count, which decides `is_raster`: a scanned sheet carrying nothing
+  but a prior callout was classified vector and rendered at the cheaper target.
+  Extraction now reads the page's own content only. It is also ~1.6× faster on a
+  dense sheet, since one display list serves both text and word extraction.
+  `render._RENDER_IDENTITY_SCHEME` v3 → v4, because the annotation *bytes* did
+  not move and an affected page would otherwise hit the cache and be served a
+  digest built from contaminated text without re-extracting it.
+
+- **A swapped digit still anchored onto the sheet's real text.** Fuzzy anchoring
+  scores bag-of-token overlap, which is blind to the one substitution that
+  matters most on a drawing. On a sheet reading `PROVIDE 6 INCH DRAIN AT COLUMN
+  LINE 4`, *every* one-number substitution tried — `4`, `12`, `2-1/2`, and a
+  changed column line — cleared the 0.85 floor at 6/7 = 0.857 and was clouded
+  onto the real text, while a wholly invented sentence correctly went
+  `UNANCHORED`. So the hallucination signal was blind exactly where a wrong
+  number is least cosmetic: a finding claiming a 4-inch drain was clouded onto
+  text specifying 6. Fixed by adding a veto — each measurement must sit at its
+  own position in the matched span, within a drift budget derived from the
+  overlap floor itself, with each span position consumed once. The 0.85
+  threshold is untouched and a test now asserts that, so a future attempt to fix
+  this by moving the floor fails loudly instead. Legitimate transcription
+  variance — an extra word on the sheet, an abbreviation, a paraphrase, a
+  spelling variant, digit-free prose — still anchors.
+
+- **FreeText truncation was written and then overwritten.** Three sites handed
+  `add_freetext_annot` a truncated string and then called `set_info(content=…)`
+  with the full one. For a plain FreeText annot `/Contents` *is* the displayed
+  text, so the truncation was undone: 220 characters written, 469 restored.
+
+- **Index text overflowed its column, and typography was mangled.** The findings
+  column is 238 pt wide and the row text was capped by *character count*: at
+  8 pt, realistic uppercase drawing text measured 248–285 pt. Lowercase prose
+  fits, which is why it survived — sheets are lettered uppercase, the wider
+  case. Separately, `insert_text` draws with the Base-14 fonts and silently
+  renders anything outside Latin-1 as a **middle dot**, so `3″ drain` became
+  `3· drain`: a mangled dimension in a fire-sprinkler index still reads as a
+  number. Cells are now folded to Base-14-safe ASCII and fitted by measuring
+  with the same metrics `insert_text` draws with.
+
+- **A PNG or EPUB renamed `.pdf` was accepted as a drawing set.** PyMuPDF opens
+  images, XPS, EPUB and CBZ, and a genuine one of those passed inventory and was
+  pushed through a pipeline that assumes a PDF throughout. A *text* file renamed
+  `.pdf` was already rejected on open, which is why the gap looked covered. The
+  rejection names the detected format, because that is what makes it actionable.
+
+- **A graphics-only finding was stamped with the hallucination signal.**
+  `[QUOTE NOT FOUND]` means the quote should have been findable and was not.
+  Every rect-less finding got it, so a finding reported off the drawing itself,
+  with nothing to quote, was indistinguishable from a fabricated quote that
+  matched nothing — opposite messages to a reviewer. The honest label already
+  existed but was unreachable, because the evidence tag was suppressed on
+  exactly the branch whose prefix was `[QUOTE NOT FOUND]`.
+
+- **An index row could point at a page with no mark on it.** A callout that
+  overflows to the *AI Review Notes* page has no mark on its sheet, yet its
+  index row targeted the sheet — while the bookmark outline and the receipt both
+  correctly named the notes page. The index is now built last, so its rows link
+  to the page each mark actually landed on.
+
+- **A generated index page could inherit the drawing's CropBox.** `/CropBox` is
+  an inheritable page-tree attribute, and in a set whose `/Pages` node carries
+  one a new 612×792 page came back with a **512×712** visible area — clipped on
+  the right and shifted vertically, against column widths computed for the full
+  width. Every generated page now pins its CropBox to its own MediaBox.
+
+- **The occupancy mask could not see a pipe.** Callout placement checked the
+  fraction of dark *pixels* in a 0.12-scale render, where a 0.5 pt pipe line
+  antialiases to ~223 — lighter than the 210 ink threshold. A single sprinkler
+  main across a band scored 0.0000, the band was called clear, and the callout
+  was stamped over the piping. Raising the scale does not fix it: with a
+  pixel-fraction metric the verdict is *non-monotonic* in scale, and one 1 pt
+  line measured clear at 0.12 and 0.25, occupied at 0.5, and clear again at 1.0.
+  Sampling is now at 1:1, where a hairline really is dark, with a min-filter over
+  cells measured in points — correct on all eleven contents tested, where the
+  shipped sampler was wrong on five, at ~1 ms per page.
+
+- **Callouts overflowed off sheets with room to spare.** A clear band had to be a
+  y-range free of words at *any* x, which a real drawing almost never offers: a
+  right-hand title block spans nearly the full sheet height. On a 1728×1188 sheet
+  with a title block at y 60–1050, exactly **one** band was found and the whole
+  1448×990 pt clear area beside it was unusable. Bands are now also computed per
+  vertical column, from only the words that intersect that column. Separately,
+  the minimum-height gate was applied to the raw gap with the breathing pad taken
+  off afterwards, so a 58 pt gap returned a 50 pt band that could never hold a
+  54 pt callout.
+
+- **One cross-sheet hyperlink defeated per-page caching for the whole set.** A
+  GOTO link annot references its destination *page*, whose `/Parent` was not
+  stripped the way the hashed page's own is, so the dependency walk reached the
+  page-tree root, `/Kids`, and every sibling. Editing one sheet therefore
+  re-keyed every sheet — on a set carrying the internal navigation links an
+  issued PDF normally has, the per-page cache did nothing. Any other
+  `/Type /Page` object reached transitively is now an opaque leaf.
+
 - **A question asked after "New chat" could 400 forever.** The report's Ask-AI
   turn loop committed the model's reply into `history` with no check that the
   thread it belonged to still existed — and New chat (and Load) *reassign*
