@@ -201,6 +201,28 @@ def test_ci_runs_the_guard_on_the_xml_pytest_writes():
         steps.index(next(s for s in steps if s.get("run") == guard_runs[0]))
 
 
+def test_the_installer_compiler_is_resolved_in_exactly_one_place():
+    """P9 item 41 — one ISCC path and one floor version, or they drift.
+
+    The first version of this fix pinned ``choco install innosetup
+    --version=6.2.2``, which failed the job outright: the windows-latest image
+    already ships Inno Setup (6.7.1), so pinning an older one asks Chocolatey to
+    downgrade and it refuses. The compiler is now resolved once — recorded,
+    floor-checked, and handed to the compile step — and this pins that "once".
+    """
+    text = (_REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
+        encoding="utf-8"
+    )
+    # One definition of the compiler path. A second copy in the compile step is
+    # how the resolve step's floor check gets silently bypassed.
+    assert text.count("ISCC.exe") == 1, "the ISCC path is defined more than once"
+    # One floor number, in the job env — not repeated in the fallback install.
+    assert text.count('"6.2.2"') == 1, "the Inno Setup floor is written twice"
+    assert "INNO_SETUP_MIN" in text
+    # The version must reach the log, or the gap item 41 names is still open.
+    assert "GITHUB_STEP_SUMMARY" in text
+
+
 def test_release_publish_needs_the_release_gates():
     """P9 item 42a: a tag cannot publish an installer past a failing suite.
 

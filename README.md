@@ -1692,7 +1692,12 @@ Three additions worth knowing about:
   `workflow_dispatch`, so the pip-audit gate catches a CVE disclosed against an
   already-pinned dependency instead of waiting for someone to commit.
   `.github/dependabot.yml` opens grouped weekly updates for both the SHA-pinned
-  actions and `requirements-release.lock`.
+  actions and `requirements-release.lock`. The Windows installer build is
+  constrained by that lock, and the Inno Setup compiler — the one tool whose
+  output *is* the shipped artifact — has its exact version checked against a
+  known-good floor and recorded in the build summary. It is deliberately **not**
+  fetched: the runner image already ships it, and a build that downloads no
+  compiler cannot be served a bad package.
 - The browser job now writes a JUnit report and runs
   `scripts/check_browser_suite.py` against it. Every test in that suite skips
   itself when Chromium will not launch and pytest exits **0** on an all-skipped

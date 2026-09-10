@@ -14,6 +14,7 @@ hermetic suite alone is not acceptance (§19 Definition of done).
 | Date / release owner | |
 | Built artifacts (wheel + sdist) sha256 | |
 | Dependency lock used (`requirements-release.lock` at this commit) | ☐ |
+| Inno Setup compiler version (from the build job's summary — the tool whose output IS the shipped installer) | |
 | Python / PyMuPDF / MuPDF / Anthropic SDK versions | |
 | Model ids exercised (digest / critique / verify / citation) | |
 | Web-search tool type observed by the live canary | |
