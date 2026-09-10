@@ -85,6 +85,7 @@ from .digest import (
     _get,
     _is_transient_error,
     _message_text,
+    _message_cache_usage,
     _message_usage,
     _retry_backoff_seconds,
     _server_web_search_requests,
@@ -809,6 +810,13 @@ class _CheckOutcome:
     sources: tuple[str, ...] = ()
     input_tokens: int = 0
     output_tokens: int = 0
+    # The prompt-cache split. This stage attaches a cache breakpoint to its tool
+    # schemas (``tools_with_cache``), so on every request after the first the
+    # bulk of the input is billed as a cache READ and ``input_tokens`` reports
+    # only the remainder. Reading just the latter reported a fraction of what
+    # the stage actually cost.
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
     web_search_requests: int | None = None
     error: str | None = None
     # The reply ran out of output budget before it could finish. Distinct from
@@ -837,6 +845,7 @@ def _check_one(
     )
     messages: list[dict] = [{"role": "user", "content": user_text}]
     total_in = total_out = 0
+    total_cache_read = total_cache_write = 0
     searches: int | None = None
 
     for _resume in range(_MAX_PAUSE_RESUMES + 1):
@@ -872,11 +881,16 @@ def _check_one(
                     continue
                 return _CheckOutcome(
                     input_tokens=total_in, output_tokens=total_out,
+                    cache_read_tokens=total_cache_read,
+                    cache_write_tokens=total_cache_write,
                     web_search_requests=searches, error=_clean_error(exc),
                 )
         in_tok, out_tok = _message_usage(resp)
         total_in += in_tok
         total_out += out_tok
+        cr_tok, cw_tok = _message_cache_usage(resp)
+        total_cache_read += cr_tok
+        total_cache_write += cw_tok
         # Sum server-reported search counts across resumes exactly like tokens;
         # stay None only while NO response has carried the field.
         reported = _server_web_search_requests(resp)
@@ -899,6 +913,8 @@ def _check_one(
             raw_text=_message_text(resp),
             sources=tuple(_extract_web_sources(resp)),
             input_tokens=total_in, output_tokens=total_out,
+            cache_read_tokens=total_cache_read,
+            cache_write_tokens=total_cache_write,
             web_search_requests=searches,
             # A reply cut off at ``max_tokens`` parses to no verdict, which the
             # caller otherwise reports as "no verdict for this claim" — the same
@@ -909,6 +925,8 @@ def _check_one(
 
     return _CheckOutcome(
         input_tokens=total_in, output_tokens=total_out,
+        cache_read_tokens=total_cache_read,
+        cache_write_tokens=total_cache_write,
         web_search_requests=searches,
         error="check did not finish (still paused)",
     )
@@ -941,6 +959,11 @@ class CitationCheckResult:
     unresolvable: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    # Prompt-cache split, summed across every request. The stage caches its tool
+    # schemas, so on a multi-reference run most of the input is billed as a
+    # cache read that ``input_tokens`` does not report.
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
     # Billable web searches: the server-reported count summed where responses
     # carried it, plus 1 per request whose responses did not (the pre-Phase-B
     # lower-bound approximation, kept as the per-request fallback).
@@ -1201,6 +1224,8 @@ def check_citations(
             fresh_requests += 1
             result.input_tokens += outcome.input_tokens
             result.output_tokens += outcome.output_tokens
+            result.cache_read_tokens += outcome.cache_read_tokens
+            result.cache_write_tokens += outcome.cache_write_tokens
             # Exact where the server reported it; else the 1-per-request
             # lower-bound approximation this stage always billed.
             result.web_search_requests += (

@@ -85,7 +85,13 @@ from .verify import (
 _log = get_logger()
 
 # Bump on any prompt/tool-contract change (rides the cache key in Phase C4).
-INVESTIGATE_PROMPT_VERSION = "investigate-v2"
+# v3: the evidence budget counts REQUESTS, not turns (a parallel tool turn used
+# to cost one). No prompt STRING moved — the budget sentence already said
+# "evidence request(s)" — but ``round_budget`` is a cache-key input and its
+# MEANING changed, so a stored verdict reached under turn-counting is not
+# reproducible under the same key. This manual bump is the only mechanism that
+# covers this stage, and it discards investigation verdicts only.
+INVESTIGATE_PROMPT_VERSION = "investigate-v3"
 
 _DEFAULT_MAX_ROUNDS = 6
 # Per-run investigation budget, scaled to the size of the set rather than a
@@ -414,7 +420,18 @@ def find_text_matches(sheet: Any, query: str) -> list[dict]:
         line_words = lines[key]
         texts = [str(w[4]) for w in line_words]
         joined = " ".join(texts)
-        hay = joined.upper()
+        # Search and measure over the SAME strings. The haystack was uppercased
+        # while the covered-word offsets walked the original-case list, so any
+        # glyph whose uppercase is longer shifted every later offset: PDF text
+        # extraction routinely yields ligatures (``ﬁ`` -> ``FI``, ``ﬄ`` -> ``FFL``)
+        # and ``ß`` -> ``SS``. One character of drift is absorbed by the overlap
+        # test's slack; two is not, and then the rect either swallows the next
+        # word or — when the matched word is shorter than the drift — lands on a
+        # DIFFERENT word entirely. Short tokens are exactly what an investigation
+        # searches for (sheet ids, tags, dimensions), and the loop saves a crop
+        # of that rect as evidence, so the failure is silent and looks authoritative.
+        upper = [t.upper() for t in texts]
+        hay = " ".join(upper)
         start = 0
         while True:
             pos = hay.find(needle, start)
@@ -422,7 +439,7 @@ def find_text_matches(sheet: Any, query: str) -> list[dict]:
                 break
             end = pos + len(needle)
             covered, offset = [], 0
-            for w, t in zip(line_words, texts):
+            for w, t in zip(line_words, upper):
                 w_start, w_end = offset, offset + len(t)
                 if w_end > pos and w_start < end:
                     covered.append(w)
@@ -674,6 +691,13 @@ _BUDGET_EXHAUSTED_TEXT = (
     "Evidence budget exhausted — respond now with ONLY the JSON verdict object."
 )
 
+# Answer for a ``tool_use`` block that arrived past the evidence budget. The API
+# requires every id in a turn to be answered, but a refusal costs nothing: no
+# crop is rendered, nothing is saved, nothing is sent back but this sentence.
+_BUDGET_REFUSED_TEXT = (
+    "Not run: this request is past the evidence budget for this finding."
+)
+
 
 def _messages_with_cache_breakpoints(messages: list[dict]) -> list[dict]:
     """Copy a conversation and cache its stable evidence prefixes.
@@ -846,8 +870,27 @@ def _investigate_one(
             # Commit the assistant turn BEFORE answering its tools, then answer
             # every id in one user turn.
             messages = messages + [{"role": "assistant", "content": content}]
+            # Spend the budget per EVIDENCE REQUEST, not per turn — and ENFORCE
+            # it before executing, not after. The model may put several
+            # ``tool_use`` blocks in one assistant turn, and each is a real
+            # crop: an image rendered at 300 DPI, saved to the finding's
+            # evidence dir and sent back. Charging the turn let one turn buy
+            # three or more of them, so a 6-request budget bought 18+ — per
+            # finding, across a task budget that scales to 40 findings.
+            #
+            # Counting them afterwards is not enough, because the cost is the
+            # rendering and the sending: with five of six spent, a three-block
+            # turn would still produce all three crops and only then notice it
+            # had reached eight. So the turn is SPLIT — the first ``remaining``
+            # blocks run, the rest are refused unexecuted. Every ``tool_use``
+            # id is still answered, in ONE user turn, because the API requires
+            # it; a refusal is just an ``is_error`` result that cost nothing.
+            # Refused blocks do not advance the counter: nothing was rendered,
+            # so charging for them would be the same double-count in reverse.
+            remaining = max(0, max_rounds - tool_round)
+            granted, refused = requests[:remaining], requests[remaining:]
             results = []
-            for block in requests:
+            for block in granted:
                 content_out, is_error = executor.execute(
                     str(getattr(block, "name", "") or ""),
                     getattr(block, "input", None),
@@ -860,7 +903,14 @@ def _investigate_one(
                 if is_error:
                     result_block["is_error"] = True
                 results.append(result_block)
-            tool_round += 1
+            for block in refused:
+                results.append({
+                    "type": "tool_result",
+                    "tool_use_id": str(getattr(block, "id", "") or ""),
+                    "content": _BUDGET_REFUSED_TEXT,
+                    "is_error": True,
+                })
+            tool_round += len(granted)
             user_content: list = list(results)
             if tool_round >= max_rounds:
                 user_content.append({"type": "text", "text": _BUDGET_EXHAUSTED_TEXT})

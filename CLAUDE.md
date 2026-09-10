@@ -74,7 +74,12 @@ for "this consumed billable usage the table cannot price", and it counts **cache
 read/write tokens** as usage: omitting them let a record carrying 180k cache
 tokens under an unpriceable model pass as "no usage", so a run with one $5.00
 digest beside it reported **$5.00** — a complete-looking total that dropped real
-spend, the exact failure the rule exists to prevent. Never restate that rule; the
+spend, the exact failure the rule exists to prevent. It also counts tool uses by
+**value, not key**: the dict is truthy whenever it has one, so `{"web_search": 0}`
+— what citation writes when every ref came warm from the verdict cache — read as
+billable usage and unknowned a run in which nothing unpriceable happened. Both
+ends are fixed (`_record_usage` drops zero counts before storing) because either
+alone lets the other bring it back. Never restate that rule; the
 A/B harness had a second copy and it drifted within one commit. `cost.estimate_exhaustive_run_cost` is the pre-run
 per-stage estimate (verification/citation quoted as a low–high band), and every
 stage is priced with **its own resolved model** and the runtime's own
@@ -446,7 +451,12 @@ both the submitted batch and the one that actually served the digests.
   / zero-API `find_text` / `view_sheet`, every image saved-before-send into
   the finding's evidence dir with an `investigation.json` trace; strictly
   sequential (I-5), budget-capped per finding (`…_INVESTIGATION_MAX_ROUNDS`,
-  default 6) and per run (`…_MAX_FINDINGS`, severity-first, **scaled to the set**
+  default 6, spent per **evidence request** and enforced *before* execution —
+  one turn may carry several `tool_use` blocks and each is a real crop
+  rendered, saved and sent; charging the turn let a 6-request budget buy 18+,
+  and merely counting them after the fact still paid for the crops. Blocks past
+  the remaining budget are refused unexecuted, answered in the same user turn
+  as an `is_error` result, and cost nothing so they do not advance the counter) and per run (`…_MAX_FINDINGS`, severity-first, **scaled to the set**
   — 10 + one per 4 sheets, ceiling 40, an explicit env value pinning it) with the
   assistant turn committed before its tools are answered, every tool_use id
   answered in ONE user turn, and a forced no-tools text close at the cap so a
@@ -463,7 +473,14 @@ both the submitted batch and the one that actually served the digests.
   check can only read search snippets rather than the section text; both tools
   carry the shared source-quality blocklist, and the resolved tool set rides
   the verdict cache key because what the model was allowed to do is part of
-  what its answer means) →
+  what its answer means. Its tool schemas carry a cache breakpoint, so after the
+  first request most of the input is billed as a cache **read** while
+  `input_tokens` reports only the remainder: the prompt-cache split rides
+  `_CheckOutcome` → `CitationCheckResult` → the ledger, summed across
+  `pause_turn` resumes and carried on the error and still-paused exits too, since
+  those attempts were billed. `digest._message_cache_usage` is the shared,
+  dict-tolerant reader — attribute-only `extract_cache_usage` silently zeroes a
+  dict-shaped usage, which undercounts rather than failing) →
   `annotate.py` (§18 gating + Phase 21 receipts: every entry gets ink except
   REJECTED/gated, which get reconciled index rows; rect-less entries become
   margin callouts **packed into visually-clear bands** — validated against words,
@@ -590,7 +607,14 @@ example is parked at `docs/examples/fire_protection.md`.
   focus all go through it. Batch items never stream and are unaffected. A cap
   raise without the matching streaming conversion is a hard failure, including
   via the batch→real-time fallbacks in `batch_digest`/`batch_critique`.
-- **Every real-time Opus 5 call opts into the server-side refusal fallback.**
+- **Every real-time call whose model declares it opts into the server-side
+  refusal fallback.** Which models is
+  `ModelCapabilities.supports_refusal_fallback`, a registry capability beside
+  each model's other request-shape decisions — never a test against one model
+  id. The gate read `model != MODEL_OPUS_5`, so any other id (a newer Opus, a
+  changed default) silently lost the protection with nothing raised and nothing
+  logged. Opus 5 is today's only declarer; Opus 4.8 is the fallback *target*,
+  not a source.
   Opus 5's elevated safety classifiers can decline a request outright
   (`stop_reason="refusal"`, HTTP 200); `core.api_config.call_with_refusal_fallback`
   attaches `fallbacks: "default"` (beta `server-side-fallback-2026-07-01`) for

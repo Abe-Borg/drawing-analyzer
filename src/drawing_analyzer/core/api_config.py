@@ -361,6 +361,18 @@ class ModelCapabilities:
     # caller assembling a tool list must gate on this. Default ``False`` so an
     # unregistered model never has the tool sent on its behalf.
     supports_web_fetch: bool = False
+    # Whether a real-time call to this model should opt into the server-side
+    # refusal fallback (``fallbacks: "default"`` under the
+    # ``server-side-fallback-2026-07-01`` beta). A capability rather than a test
+    # against one model id: the decision was written as ``model != MODEL_OPUS_5``,
+    # so pointing ``DRAWING_ANALYZER_MODEL`` at any other id — a newer Opus, a
+    # future default — silently dropped the protection with nothing to notice.
+    # Nothing raised, nothing logged; a refusal simply became an unhandled
+    # ``stop_reason``. Declaring it here forces the question to be answered when
+    # a model is registered, and leaves the answer where its other request-shape
+    # decisions live. Default ``False`` so an unregistered id is never sent a
+    # parameter its platform may reject.
+    supports_refusal_fallback: bool = False
 
 
 # Profiles verified against Anthropic's models overview and effort reference.
@@ -381,6 +393,13 @@ _MODEL_CAPABILITIES: dict[str, ModelCapabilities] = {
         # exceptions to its Opus 4.8 feature parity (the other is Priority
         # Tier). Web *search* is supported; only fetch is excluded.
         supports_web_fetch=False,
+        # Opus 5's elevated safety classifiers can decline a request outright
+        # (``stop_reason="refusal"``, HTTP 200), which is what the fallback
+        # exists to absorb. Deliberately the only model that declares it: Opus
+        # 4.8 is the fallback TARGET, not a source, and turning it on for a
+        # model whose platform has not enabled the beta would trip the
+        # process-wide self-healing latch for everyone.
+        supports_refusal_fallback=True,
     ),
     MODEL_SONNET_5: ModelCapabilities(
         # Sonnet 5 is the first Sonnet-tier model to match Opus on all three
@@ -1256,16 +1275,23 @@ def _is_refusal_fallback_rejection(exc: Exception) -> bool:
 
 
 def apply_refusal_fallback(kwargs: dict, *, model: str) -> dict:
-    """Return ``kwargs`` with the Opus 5 refusal-fallback parameter attached.
+    """Return ``kwargs`` with the server-side refusal-fallback parameter attached.
 
-    Returns ``kwargs`` unchanged (the same object, no copy) when ``model`` is
-    not Opus 5 or the feature is disabled — callers branch on ``"betas" in
+    Which models get it is a registry capability
+    (``ModelCapabilities.supports_refusal_fallback``), not a comparison against
+    one model id — see that field for why.
+
+    Returns ``kwargs`` unchanged (the same object, no copy) when ``model`` does
+    not declare the capability or the feature is disabled — callers branch on ``"betas" in
     kwargs`` (see :func:`messages_namespace`) to decide whether the request
     needs the beta client namespace. Merges into an existing ``betas`` list
     rather than overwriting it, so a caller that already attached a beta
     (investigation's ``task-budgets-2026-03-13``) keeps it.
     """
-    if model != MODEL_OPUS_5 or not refusal_fallback_enabled():
+    if (
+        not model_capabilities(model).supports_refusal_fallback
+        or not refusal_fallback_enabled()
+    ):
         return kwargs
     betas = list(kwargs.get("betas") or [])
     if REFUSAL_FALLBACK_BETA not in betas:

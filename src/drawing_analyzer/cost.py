@@ -27,7 +27,26 @@ from .core.pricing import (
     usage_record_cost,
 )
 from . import tiling
+from .batch_digest import _batch_max_elapsed_seconds
 from .pipeline import estimate_image_tokens_for_set
+
+
+def _batch_wait_sentence() -> str:
+    """How long a batch run will actually wait, in the dialog's own words.
+
+    Derived from the engine's bound rather than written beside it. The app used
+    to promise runs that "can run overnight (8+ hours)" while the collector gave
+    up at four — the wording was not wrong about the queue, it was wrong about
+    US. Reading the resolved value means an operator who sets
+    ``DRAWING_ANALYZER_BATCH_MAX_ELAPSED_HOURS`` is quoted their own number, and
+    a future change to the bound cannot leave this text behind.
+    """
+    hours = _batch_max_elapsed_seconds() / 3600.0
+    shown = f"{hours:.0f}" if abs(hours - round(hours)) < 0.05 else f"{hours:.1f}"
+    return (
+        f"This run waits up to {shown} hours for the queue before it stops "
+        "waiting and reports what it collected."
+    )
 
 # Per-sheet text overhead of the digest prompt (system + user instruction); the
 # images dominate, so a fixed estimate is fine.
@@ -463,6 +482,7 @@ def format_drawing_cost_prompt(est: DrawingCostEstimate) -> str:
             "front, so this can finish in a few minutes, take a few hours, or "
             "run overnight (8+ hours) depending on how busy the queue is. Best "
             "left running when you're not in a rush.",
+            _batch_wait_sentence(),
         ]
     else:
         lines += [
@@ -1114,6 +1134,7 @@ def format_exhaustive_cost_prompt(est: ExhaustiveCostEstimate) -> str:
             "queue and are processed "
             "when they reach the front — often a few hours, sometimes overnight "
             "(8+ hours). Cheapest option; best left running when you're not in a rush.",
+            _batch_wait_sentence(),
         ]
     elif not est.batch and est.critique_batch:
         lines += [
