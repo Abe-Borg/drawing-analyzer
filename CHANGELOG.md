@@ -6,6 +6,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [1.5.0] - 2026-09-10
+
 ### Fixed
 
 - **The exported Markdown and HTML carried API keys and private directory names
@@ -552,6 +556,38 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sets `DRAWING_ANALYZER_BATCH_MAX_ELAPSED_HOURS` is quoted their own number. A
   test asserts no user-facing string promises a longer wait than the engine
   allows — lower the bound without moving the prose and it fails.
+
+### Added
+
+- **`DRAWING_ANALYZER_WORKDIR_MAX_AGE_HOURS`** (default `24`, `0` disables) —
+  how long a leftover `drawing_qc_*` work directory may sit in the system temp
+  directory before a later run reaps it. These hold the high-DPI evidence crops
+  and were never cleaned up.
+
+- **`scripts/check_browser_suite.py`** — fails a browser-suite run that executed
+  nothing, from the JUnit report pytest writes. Used by the CI job and by
+  `run_acceptance.py`'s own browser gate, so the two cannot disagree about what
+  "passed" means.
+
+- **Two tag-gated release-gate jobs** (`gates`, `gates-windows`) that `publish`
+  now requires, so a release cannot be cut from a commit whose full automated
+  gate set has not passed on that exact commit. CI also runs on `v*` tags.
+
+- **Public helpers on the library surface:** `export.long_path` (the Windows
+  `\\?\` form; an identity function elsewhere), `run_journal.redact_for_display`
+  (the journal's secret/path boundary without line-flattening or truncation, for
+  artifacts that render a block), and `models.name_is_taken` / `models.record_name`
+  (the shared case-insensitive name-collision pair).
+
+### Changed
+
+- **Closing the GUI while a run is in flight now asks for confirmation** and
+  names which job it would discard. An idle window still closes immediately.
+
+- **The Inno Setup compiler used for the Windows installer is recorded** — its
+  exact version is printed, written to the build summary, and has a row in
+  `docs/RELEASE_ACCEPTANCE_TEMPLATE.md`. It is taken from the runner image and
+  never downloaded.
 
 ### Not done, and why
 
