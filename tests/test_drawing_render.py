@@ -245,3 +245,174 @@ def test_sheet_render_identity_covers_form_xobjects(tmp_path):
         d1.close()
         d2.close()
     assert id1 != id2
+
+
+# --------------------------------------------------------------------------- #
+# Annotation text never reaches the model or the host's evidence (P7 item 28)
+#
+# page.get_text() includes annotation text.  On a re-reviewed set that feeds a
+# sheet's PRIOR QC callouts back as sheet text, and inflates the word count that
+# decides is_raster (and so the render target).  The extraction route must read
+# the page's own content only.
+# --------------------------------------------------------------------------- #
+
+
+def _annotated_doc(pymupdf, *, rot=0, crop=None, annotate=True):
+    """One page with real sheet text, optionally plus a prior-review annotation.
+
+    ``annotate=False`` builds the otherwise-identical clean twin, which is the
+    ground truth for what the extractor must return.
+    """
+    doc = pymupdf.open()
+    page = doc.new_page(width=792, height=612)
+    page.insert_text((72, 72), "REAL SHEET TEXT FP-2 165 psi", fontsize=11)
+    if annotate:
+        annot = page.add_freetext_annot(
+            pymupdf.Rect(300, 300, 600, 380),
+            "QC-014 PRIOR REVIEW MARKUP SPRINKLER SPACING EXCEEDS MAXIMUM",
+            fontsize=9,
+        )
+        annot.update()
+    if crop is not None:
+        mb = page.mediabox
+        page.set_cropbox(pymupdf.Rect(mb.x0 + crop[0], crop[1],
+                                      mb.x1 - crop[2], (mb.y1 - mb.y0) - crop[3]))
+    if rot:
+        page.set_rotation(rot)
+    return doc
+
+
+def test_get_text_really_does_include_annotations():
+    # The characterization this fix exists for. If a future PyMuPDF stops folding
+    # annotation text into get_text(), this fails and the fix can be revisited —
+    # rather than the guard quietly protecting against nothing.
+    pymupdf = pytest.importorskip("pymupdf")
+    doc = _annotated_doc(pymupdf)
+    try:
+        page = doc[0]
+        assert "PRIOR REVIEW MARKUP" in page.get_text()
+        assert len(page.get_text("words")) > len(
+            [w for w in page.get_text("words") if "PRIOR" not in w[4]]
+        )
+    finally:
+        doc.close()
+
+
+def test_render_sheet_text_layer_excludes_annotation_text():
+    pymupdf = pytest.importorskip("pymupdf")
+    from drawing_analyzer.render import render_sheet
+
+    doc = _annotated_doc(pymupdf)
+    try:
+        rs = render_sheet(doc[0], _ref(0, pages=1), rows=2, cols=2)
+    finally:
+        doc.close()
+
+    assert "REAL SHEET TEXT" in rs.sheet_text
+    # The text the model is shown…
+    assert "PRIOR REVIEW MARKUP" not in rs.sheet_text
+    # …and the uncapped text retained for host-side grounding (WP-03A §2.1),
+    # which treats it as source evidence, so contamination there is worse.
+    assert "PRIOR REVIEW MARKUP" not in (rs.full_sheet_text or "")
+    # …and the word rects the anchor resolver consumes.
+    assert not [w for w in rs.words if "PRIOR" in w[4] or "MARKUP" in w[4]]
+    assert [w for w in rs.words if "REAL" in w[4]]
+
+
+def test_annotation_only_page_is_still_classified_raster():
+    # A scanned sheet that carries nothing but a prior QC callout has no sheet
+    # text at all. Counting the annotation's words called it vector and rendered
+    # it at the cheaper vector target — the pixels are its only channel.
+    pymupdf = pytest.importorskip("pymupdf")
+    from drawing_analyzer.render import _page_word_count
+
+    doc = pymupdf.open()
+    page = doc.new_page(width=792, height=612)
+    annot = page.add_freetext_annot(pymupdf.Rect(100, 100, 400, 160),
+                                    "QC-003 PRIOR MARKUP ONLY", fontsize=10)
+    annot.update()
+    try:
+        assert len(page.get_text("words")) > 0        # get_text sees the annot…
+        assert _page_word_count(page) == 0            # …the extractor does not
+    finally:
+        doc.close()
+
+
+@pytest.mark.parametrize("rot", (0, 90, 180, 270))
+@pytest.mark.parametrize("crop", (None, (50, 30, 50, 92)))
+def test_extracted_words_are_page_view_v2_at_every_rotation(rot, crop):
+    # The trap this fix nearly walked into: the display list is built for
+    # page.rect, so its words are ALREADY post-rotation, while
+    # page.get_text("words") is rotation-invariant. Applying _words_to_view to
+    # the former double-rotates and every anchor on a rotated sheet lands wrong.
+    # _page_text_and_view_words owns that conversion; this pins the contract.
+    pymupdf = pytest.importorskip("pymupdf")
+    from drawing_analyzer.render import (
+        _page_text_and_view_words, _words_to_view, page_geometry,
+    )
+
+    doc = _annotated_doc(pymupdf, rot=rot, crop=crop)
+    try:
+        page = doc[0]
+        _text, got = _page_text_and_view_words(page, page_geometry(page))
+    finally:
+        doc.close()
+    # Ground truth: the identical page WITHOUT the annotation, through the
+    # canonical long way round. A clean twin beats filtering annotation words out
+    # of the contaminated list by name — that filter silently passes whenever it
+    # misses a word.
+    clean = _annotated_doc(pymupdf, rot=rot, crop=crop, annotate=False)
+    try:
+        cpage = clean[0]
+        expected = _words_to_view(list(cpage.get_text("words")), page_geometry(cpage))
+    finally:
+        clean.close()
+
+    assert len(got) == len(expected), (
+        f"word count {len(got)} != {len(expected)} at rot={rot} crop={crop}"
+    )
+    for a, b in zip(got, expected):
+        assert a[4] == b[4]
+        for i in range(4):
+            assert abs(a[i] - b[i]) < 0.01, (
+                f"word {a[4]!r} rect differs at rot={rot} crop={crop}: {a[:4]} vs {b[:4]}"
+            )
+
+
+def test_extraction_fallback_returns_view_space_words_too():
+    # The fallback route reads page.get_text("words"), which is un-rotated space,
+    # so it MUST convert. If it ever returns raw get_text words, a page whose
+    # display list fails silently anchors everything wrong on a rotated sheet.
+    pymupdf = pytest.importorskip("pymupdf")
+    from drawing_analyzer.render import (
+        _page_text_and_view_words, _words_to_view, page_geometry,
+    )
+
+    doc = _annotated_doc(pymupdf, rot=90)
+    try:
+        page = doc[0]
+        geometry = page_geometry(page)
+
+        class _Boom:
+            """A page whose annotation-free display list cannot be built."""
+            def __init__(self, real):
+                self._real = real
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+            def get_displaylist(self, *a, **k):
+                raise RuntimeError("no display list for you")
+
+        _text, got = _page_text_and_view_words(_Boom(page), geometry)
+        expected = _words_to_view(list(page.get_text("words")), geometry)
+    finally:
+        doc.close()
+
+    assert got, "the fallback returned no words at all"
+    assert len(got) == len(expected)
+    for a, b in zip(got, expected):
+        for i in range(4):
+            assert abs(a[i] - b[i]) < 0.01, (
+                f"fallback word {a[4]!r} is not in view space: {a[:4]} vs {b[:4]}"
+            )

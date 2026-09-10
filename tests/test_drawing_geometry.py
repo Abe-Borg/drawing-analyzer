@@ -546,3 +546,153 @@ def test_tile_disambiguation_uses_view_space(rot, tmp_path):
     ayc = (f.anchor.rect_pdf[1] + f.anchor.rect_pdf[3]) / 2.0
     # It anchored to the targeted occurrence (its center is near that word).
     assert math.hypot(axc - cx, ayc - cy) < 40.0
+
+
+# --------------------------------------------------------------------------- #
+# GOTO destinations are default user space, not annotation space (P7 item 27)
+#
+# A ``/XYZ`` destination is expressed in default user space (PDF 32000-1
+# §12.3.2.2) and so is an annotation's ``/Rect`` (§12.5.2) — which is what makes
+# the annotation the ground truth here: stamp a rect annot at the point the
+# annotation path already places correctly (locked by
+# ``test_annotation_lands_on_word_after_reopen``), save, read the raw ``/Rect``
+# back, and the destination must name the same user-space point.
+#
+# The matrix is rotation × CropBox × MediaBox-origin, because the shipped bug
+# hid in exactly the corners a smaller matrix misses: a rotated page is wrong
+# whenever the CropBox *or* the MediaBox has a non-zero origin.
+# --------------------------------------------------------------------------- #
+
+_DEST_CROPS = (None, (50, 30, 50, 92), (0, 0, 0, 0))   # inset (l, t, r, b) from MediaBox
+_DEST_MEDIA_ORIGINS = ((0, 0), (20, 15))
+_DEST_VIEW_PT = (100.0, 120.0)
+
+
+def _dest_doc(pymupdf, rot, crop, media_origin):
+    """A 2-page doc whose page 1 carries ``rot`` / ``crop`` / ``media_origin``."""
+    doc = pymupdf.open()
+    doc.new_page(width=612, height=792)              # page 0 — the link source
+    pg = doc.new_page(width=612, height=792)
+    if media_origin != (0, 0):
+        x, y = media_origin
+        doc.xref_set_key(pg.xref, "MediaBox", f"[{x} {y} {x + 612} {y + 792}]")
+        doc = pymupdf.open("pdf", doc.tobytes())
+    page = doc[1]
+    if crop is not None:
+        # set_cropbox takes x in absolute user x, y measured DOWN from mediabox.y1
+        mb = page.mediabox
+        page.set_cropbox(pymupdf.Rect(mb.x0 + crop[0], crop[1],
+                                      mb.x1 - crop[2], (mb.y1 - mb.y0) - crop[3]))
+    if rot:
+        page.set_rotation(rot)
+    return doc, page
+
+
+def _raw_xyz(pymupdf, doc):
+    """The last ``/XYZ x y`` written into the saved file, in default user space."""
+    import re
+    blob = doc.tobytes(garbage=0, deflate=False, expand=255)
+    found = re.findall(rb"/XYZ\s+([\d.\-]+)\s+([\d.\-]+)", blob)
+    assert found, "no /XYZ destination was written"
+    return tuple(round(float(v), 1) for v in found[-1])
+
+
+def _annot_truth(pymupdf, rot, crop, media_origin):
+    """Ground truth: the user-space top-left of a rect annot at the same point."""
+    import re
+    from drawing_analyzer.annotate import _derotate_point
+    doc, page = _dest_doc(pymupdf, rot, crop, media_origin)
+    p = _derotate_point(page, *_DEST_VIEW_PT)
+    annot = page.add_rect_annot(pymupdf.Rect(p.x, p.y, p.x + 4, p.y + 4))
+    annot.update()
+    blob = doc.tobytes(garbage=0, deflate=False, expand=255)
+    m = re.search(rb"/Rect\s*\[\s*([\d.\-]+)\s+([\d.\-]+)\s+([\d.\-]+)\s+([\d.\-]+)", blob)
+    doc.close()
+    assert m
+    g = [float(v) for v in m.groups()]
+    # add_rect_annot inflates by the 1pt border; undo it to recover the corner.
+    return (round(g[0] + 1, 1), round(g[3] - 1, 1))
+
+
+def _dest_cases():
+    return [(rot, crop, origin)
+            for rot in ROTATIONS
+            for crop in _DEST_CROPS
+            for origin in _DEST_MEDIA_ORIGINS]
+
+
+def test_characterize_rotation_and_derotation_matrices_are_exact_inverses():
+    # _outline_dest_point inverts set_toc's `* rotation_matrix` with
+    # derotation_matrix. That is only valid if the two are true inverses — and
+    # they are bit-exact, not merely close, at every rotation/CropBox.
+    pymupdf = pytest.importorskip("pymupdf")
+    for rot, crop, origin in _dest_cases():
+        doc, page = _dest_doc(pymupdf, rot, crop, origin)
+        product = tuple(page.rotation_matrix * page.derotation_matrix)
+        doc.close()
+        assert product == (1.0, 0.0, 0.0, 1.0, 0.0, 0.0), (
+            f"rotation/derotation are not exact inverses at rot={rot} "
+            f"crop={crop} origin={origin}: {product}"
+        )
+
+
+def test_dest_point_matches_user_space_truth_for_insert_link():
+    # The index-page / overflow-page GOTO route (Page.insert_link).
+    pymupdf = pytest.importorskip("pymupdf")
+    from drawing_analyzer.annotate import _dest_point
+    for rot, crop, origin in _dest_cases():
+        truth = _annot_truth(pymupdf, rot, crop, origin)
+        doc, page = _dest_doc(pymupdf, rot, crop, origin)
+        doc[0].insert_link({
+            "kind": pymupdf.LINK_GOTO, "from": pymupdf.Rect(10, 10, 100, 30),
+            "page": 1, "to": _dest_point(page, *_DEST_VIEW_PT), "zoom": 0,
+        })
+        got = _raw_xyz(pymupdf, doc)
+        doc.close()
+        assert abs(got[0] - truth[0]) < 1.2 and abs(got[1] - truth[1]) < 1.2, (
+            f"insert_link /XYZ {got} != user-space truth {truth} at rot={rot} "
+            f"crop={crop} origin={origin}"
+        )
+
+
+def test_outline_dest_point_matches_user_space_truth_for_set_toc():
+    # The bookmark-outline route (Document.set_toc) — a DIFFERENT internal
+    # transform from insert_link's, so it needs its own inversion and its own
+    # test. Sharing one helper between the two is the shipped bug.
+    pymupdf = pytest.importorskip("pymupdf")
+    from drawing_analyzer.annotate import _outline_dest_point
+    for rot, crop, origin in _dest_cases():
+        truth = _annot_truth(pymupdf, rot, crop, origin)
+        doc, page = _dest_doc(pymupdf, rot, crop, origin)
+        doc.set_toc([[1, "top", 1],
+                     [2, "mark", 2, {"kind": pymupdf.LINK_GOTO,
+                                     "to": _outline_dest_point(page, *_DEST_VIEW_PT),
+                                     "zoom": 1.5}]])
+        got = _raw_xyz(pymupdf, doc)
+        doc.close()
+        assert abs(got[0] - truth[0]) < 1.2 and abs(got[1] - truth[1]) < 1.2, (
+            f"set_toc /XYZ {got} != user-space truth {truth} at rot={rot} "
+            f"crop={crop} origin={origin}"
+        )
+
+
+def test_annotation_space_point_is_not_a_destination_point():
+    # The mechanism guard: _derotate_point (annotation space) and the two
+    # destination helpers must genuinely disagree on a rotated, cropped page.
+    # Without this, a revert to _derotate_point could pass the tests above on a
+    # matrix that happened to exclude the failing corners.
+    pymupdf = pytest.importorskip("pymupdf")
+    from drawing_analyzer.annotate import (
+        _derotate_point, _dest_point, _outline_dest_point,
+    )
+    doc, page = _dest_doc(pymupdf, 90, (50, 30, 50, 92), (20, 15))
+    try:
+        annot_pt = _derotate_point(page, *_DEST_VIEW_PT)
+        link_pt = _dest_point(page, *_DEST_VIEW_PT)
+        toc_pt = _outline_dest_point(page, *_DEST_VIEW_PT)
+    finally:
+        doc.close()
+    assert (round(link_pt.x, 1), round(link_pt.y, 1)) != (round(annot_pt.x, 1), round(annot_pt.y, 1))
+    assert (round(toc_pt.x, 1), round(toc_pt.y, 1)) != (round(annot_pt.x, 1), round(annot_pt.y, 1))
+    # …and the two destination spaces are not each other either.
+    assert (round(link_pt.x, 1), round(link_pt.y, 1)) != (round(toc_pt.x, 1), round(toc_pt.y, 1))

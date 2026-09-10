@@ -799,6 +799,22 @@ call, using a tiered strategy that records which tier fired:
   appears verbatim. Whitespace/linebreak artifacts and Unicode punctuation (dashes,
   curly quotes, the `2 1/2"` vs `2-1/2"` and `″`/`"` inch marks, the `Ø` diameter
   symbol) are the usual reason exact fails; normalization folds most of them.
+
+  A fuzzy match must additionally clear the **numeric veto**. Token overlap is
+  blind to the substitution that matters most on a drawing: swap one digit and
+  the score barely moves. On a sheet reading `PROVIDE 6 INCH DRAIN AT COLUMN
+  LINE 4`, every one-number substitution tried — `4`, `12`, `2-1/2`, a changed
+  column line — scored 6/7 = 0.857 and cleared the 85% floor, so a finding
+  claiming a **4-inch** drain was clouded onto text specifying **6**. On a
+  fire-sprinkler drain that is not cosmetic, and it defeated the hallucination
+  signal precisely where it matters. So every measurement the quote carries must
+  appear at **its own position** in the matched span, within a drift budget
+  derived from the overlap floor itself, and each position in the span counts
+  once — a note reading `4 4-INCH DRAINS` cannot satisfy both mentions from a
+  sheet's single `4`. A sub-phrase match may not drop a measurement either. A
+  quote carrying no digits is unaffected, and ordinary transcription variance (an
+  extra word on the sheet, an abbreviation, a paraphrase) still matches. The 85%
+  threshold itself is unchanged: this is a veto, not a stricter score.
 - **TILE** — a graphics-only finding (empty quote) is anchored to its reported
   tile's rectangle: coarse, but honest.
 - **UNANCHORED** — a *non-empty* quote that matches nothing anywhere. This is the
@@ -833,6 +849,21 @@ plain view-space numbers with no PDF engine. On an ordinary un-rotated page with
 default CropBox both transforms are the identity, so nothing changes. Each page's
 frame and the two transforms are captured in a `PageGeometry` record (matrices as
 plain floats, so no PyMuPDF type leaks past `render.py`).
+
+A **GOTO destination is a third space again**, and the reason a QC bookmark could
+land nowhere near its mark. A `/XYZ` destination is expressed in *default user
+space* — the same space an annotation's `/Rect` uses, which is what lets the two be
+compared and is how this was pinned by measurement — while annotation *placement*
+goes through the un-rotated CropBox-relative space above. Handing a destination the
+annotation-space point drops both the CropBox origin and the MediaBox origin.
+Measured across rotation × CropBox × MediaBox-origin, 24 cases: the index and
+overflow links were wrong in **12** of them and the bookmark outline in **22**,
+with errors up to ~550 pt. The two PyMuPDF entry points that write destinations
+apply *different* internal transforms, so each is inverted separately, composed
+from PyMuPDF's own published matrices rather than a hard-coded offset. Generated
+index and notes pages also pin an explicit `CropBox` equal to their own
+`MediaBox`, because `/CropBox` is an **inheritable** page-tree attribute and a set
+whose `/Pages` node carries one made a new 612×792 page render as 512×712.
 
 ## Verification pass
 
@@ -952,15 +983,26 @@ paths never appear in any exported artifact.
   packed into visually-clear bands** — each box validated against the sheet's word
   rectangles, a rendered **occupancy mask** (so a text-free band that actually
   sits on piping, symbols, or a raster block is *not* used), and its neighbours,
-  so a callout never obscures drawing content. A **leader-line arrow** points to
+  so a callout never obscures drawing content. The mask samples at 1:1 and asks
+  whether any ink falls in each small cell, rather than what fraction of the box's
+  pixels are dark: at a coarse scale a 0.5 pt pipe line antialiases *lighter* than
+  the ink threshold, so a single sprinkler main across a band used to read as
+  clear. Bands are found **per vertical column** as well as full-width, because a
+  right-hand title block spans nearly the full sheet height and used to leave the
+  whole clear drawing area beside it unusable. A **leader-line arrow** points to
   the reported tile when one is known and it would not cross another callout. A
   callout that will not fit any clear band overflows to an appended **"AI Review
   Notes"** page (with a GOTO link back to its source sheet) rather than being
   stacked over the drawing.
 - **Index page(s).** Each reviewed PDF opens with **"AI DRAFT REVIEW - FINDINGS
   INDEX"** — a table (ID, sheet, severity, status, one-line finding) where every
-  row is a **GOTO link** that jumps straight to the finding's page and rectangle
-  (works in Revu, Acrobat, and Chromium). Multi-page as needed.
+  row is a **GOTO link** that jumps straight to **the page its mark actually
+  landed on** and the rectangle (works in Revu, Acrobat, and Chromium): for a
+  callout that overflowed, that is the *AI Review Notes* page, not its source
+  sheet, so a row never sends you to a page with nothing on it. Multi-page as
+  needed. Every cell is fitted to its column by measured width and folded to
+  characters the page fonts can actually draw, so an uppercase drawing note does
+  not run into the next column and an inch mark does not render as a stray dot.
 - **Popups are exhaustive**: the finding text, the verbatim quote, the
   cross-sheet pointer (dual-anchored conflicts cite each other by QC number),
   verification status + verifier note, code refs plus the
@@ -1426,8 +1468,14 @@ runs.
 ## Resilient inputs
 
 Every selected PDF is classified up front (Phase 18B): a corrupt, missing,
-password-protected, or zero-page file is **recorded and skipped** — it never
-aborts the rest of the set — and the same file selected twice is processed once.
+password-protected, zero-page, or **not-actually-a-PDF** file is **recorded and
+skipped** — it never aborts the rest of the set — and the same file selected twice
+is processed once. The not-a-PDF case is worth naming: the PDF engine also opens
+images, XPS, EPUB and CBZ, so a genuine PNG or EPUB renamed `.pdf` used to be
+accepted and pushed through a pipeline that assumes a drawing set throughout. (A
+*text* file renamed `.pdf` was always rejected, which is why the gap was easy to
+miss.) The reason names the format that was detected — "not a PDF (opened as
+Image)" — because that is what tells you which file to look at.
 The run's report and error list name exactly what was dropped and why (without
 leaking absolute paths), so a mixed good/bad drop still produces a partial
 deliverable for the good files. A single unreadable *page* inside an otherwise
@@ -1593,7 +1641,14 @@ when the recorded acceptance evidence says so (Phase 27, §19.9). The pieces:
   and they are not interchangeable. `sheet_text` is capped at 15,000 characters
   and is what the model is shown; `full_sheet_text` is the uncapped text kept
   for host-side checks and never sent anywhere; `words` is the coordinate stream
-  the anchor resolver uses. Cross-sheet grounding asks
+  the anchor resolver uses. All three are extracted from the page's **own
+  content, with annotations excluded**. That matters most on a *re-review*: the
+  PDF engine folds annotation text into ordinary text extraction, so a set marked
+  up by an earlier run used to feed its own prior QC callouts back to the model as
+  sheet text — the analyzer reading its previous output as if the engineer had
+  drawn it — and the inflated word count also decided whether the sheet was
+  treated as raster, so a scanned sheet carrying nothing but a prior callout was
+  rendered at the cheaper vector target. Cross-sheet grounding asks
   `models.sheet_evidence_text()`, so a quote the model read off the drawing past
   the cap is still recognised as real source text instead of being discarded as
   a hallucination.

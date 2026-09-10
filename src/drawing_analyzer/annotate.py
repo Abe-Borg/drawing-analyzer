@@ -141,7 +141,16 @@ _REJECTED_COLOR = (0.45, 0.45, 0.45)
 # hallucination signal) plus a full plain sentence at the end of the popup.
 # ASCII only — the same strings must be safe on Base-14 ``insert_text`` pages.
 _TRUST_PREFIX = {"REJECTED": "[REJECTED] ", "UNVERIFIED": "[CHECK] "}
-_PLACE_PREFIX = {"SHEET": "[SHEET-WIDE]", "UNANCHORED": "[QUOTE NOT FOUND]"}
+#: ``NO_QUOTE`` is distinct from ``UNANCHORED`` on purpose (P7 item 34):
+#: ``[QUOTE NOT FOUND]`` means the quote SHOULD have been findable and was not —
+#: the hallucination signal — while a graphics-only finding never offered a quote
+#: to find, and labelling it with the hallucination signal spends the reviewer's
+#: trust on a finding that did nothing wrong.
+_PLACE_PREFIX = {
+    "SHEET": "[SHEET-WIDE]",
+    "UNANCHORED": "[QUOTE NOT FOUND]",
+    "NO_QUOTE": "[NO QUOTE TO CHECK]",
+}
 #: WP-03B §8.3. Distinct from ``[QUOTE NOT FOUND]``, which means the quote
 #: SHOULD have been findable and was not — the hallucination signal. These mean
 #: there was nothing to search, or nothing to search *for*, so the reviewer's
@@ -247,6 +256,19 @@ _CALLOUT_GAP = 8.0
 
 # Index-page layout (US letter portrait).
 _INDEX_PAGE_W, _INDEX_PAGE_H = 612.0, 792.0
+# Index columns: left edge per column, and the right margin the last one runs to.
+# Widths are DERIVED from the next column's edge so a row's text can be fitted to
+# the space it actually has (item 32) — one definition shared by the header row
+# and the data rows, so the two cannot drift apart.
+_INDEX_COL_X = (36.0, 95.0, 210.0, 258.0, 340.0)
+_INDEX_COL_LABELS = ("ID", "Sheet", "Sev", "Status", "Finding")
+_INDEX_COL_RIGHT = 578.0            # _INDEX_PAGE_W - 34pt right margin
+_INDEX_COL_GUTTER = 4.0             # keep a column off its neighbour's first glyph
+_INDEX_COL_W = tuple(
+    (_INDEX_COL_X[i + 1] if i + 1 < len(_INDEX_COL_X) else _INDEX_COL_RIGHT)
+    - _INDEX_COL_X[i] - _INDEX_COL_GUTTER
+    for i in range(len(_INDEX_COL_X))
+)
 _INDEX_TOP = 90.0
 _INDEX_ROW_H = 14.0
 _INDEX_BOTTOM_MARGIN = 40.0
@@ -580,6 +602,11 @@ def _truncate_at_word(text: str, limit: int) -> str:
     whitespace sits in the first half of the budget (one giant token), where a
     hard cut is the only option. Short text passes through unchanged. Pure and
     PyMuPDF-free, so the display-slice rule is unit-testable.
+
+    For a plain FreeText annot the truncated string must ALSO be what is handed
+    to ``set_info(content=...)``: ``/Contents`` *is* the displayed text there, so
+    passing the untruncated string afterwards silently undoes this (P7 item 33).
+    Callers therefore truncate once and reuse the result for both.
     """
     if len(text) <= limit:
         return text
@@ -591,10 +618,114 @@ def _truncate_at_word(text: str, limit: int) -> str:
     return head.rstrip() + "..."
 
 
+# --------------------------------------------------------------------------- #
+# Base-14 safe, width-fitted page text (P7 item 32).
+#
+# ``insert_text`` draws with the Base-14 fonts, which encode Latin-1. Anything
+# outside it is silently drawn as a **middle dot** — no exception, no warning —
+# so ``3" drain`` written with a U+2033 prime became ``3. drain`` and an em-dash
+# became a stray dot. A mangled dimension in a fire-sprinkler findings index is
+# worse than a missing one, because it still reads as a number.
+#
+# And a character budget is not a width fit. The findings column is 238 pt wide
+# and the shipped 62-char cap measured, at 8 pt Helvetica: 248.1 pt for
+# ``PROVIDE 6 INCH DRAIN AT COLUMN LINE 4 PER DETAIL 3/M-501``, 285.4 pt for
+# ``SPRINKLER HEAD SPACING EXCEEDS MAXIMUM PERMITTED BY NFPA 13``, 276.0 pt for
+# ``VAV-3 HAS NO CLEARANCE SHOWN AND CONFLICTS WITH DUCT MAIN``. Lowercase prose
+# fits at 229.4 pt, which is why this survived: drawings are lettered UPPERCASE
+# and uppercase is wider, so realistic sheet text is exactly the case that
+# overflows into the next column.
+# --------------------------------------------------------------------------- #
+
+#: Typographic characters folded to their ASCII equivalent before insertion.
+#: Latin-1 characters that Base-14 *can* draw (``1/2``, ``deg``, accents) are
+#: deliberately absent — they render correctly and must not be degraded.
+_INSERT_TEXT_FOLD: dict[int, str] = {}
+for _src, _dst in (
+    ("\u2033\u201c\u201d\u201e", '"'),      # double prime, curly/low quotes
+    ("\u2032\u2018\u2019\u201a", "'"),      # prime, curly single quotes
+    ("\u2010\u2011\u2012\u2013\u2014\u2015\u2212", "-"),   # dashes, minus
+    ("\u2044\u2215", "/"),                    # fraction slash, division slash
+    ("\u00d7", "x"),                           # multiplication sign
+    ("\u00f8\u2300", "dia "),                 # slashed o / diameter sign
+    ("\u2264", "<="),
+    ("\u2265", ">="),
+):
+    for _c in _src:
+        _INSERT_TEXT_FOLD[ord(_c)] = _dst
+_INSERT_TEXT_FOLD[ord("\u2026")] = "..."       # ellipsis
+_INSERT_TEXT_FOLD[ord("\u2713")] = "[OK]"      # check mark
+_INSERT_TEXT_FOLD[ord("\u00a0")] = " "         # no-break space
+
+
+def _base14_safe(text: str) -> str:
+    """``text`` with every glyph Base-14 ``insert_text`` cannot draw resolved.
+
+    Known typography folds to its ASCII equivalent; anything still outside
+    Latin-1 becomes ``?``, which at least reads as "unknown character" instead of
+    passing for a decimal point in a dimension.
+    """
+    folded = (text or "").translate(_INSERT_TEXT_FOLD)
+    return folded.encode("latin-1", "replace").decode("latin-1")
+
+
+def _fit_text(
+    text: str, width: float, *, fontsize: float, fontname: str = "helv"
+) -> str:
+    """``text``, Base-14-safe and shortened to actually fit ``width`` points.
+
+    Measures with :func:`pymupdf.get_text_length` — the same metrics
+    ``insert_text`` draws with — instead of counting characters, and backs up to a
+    word boundary, appending an ASCII ``...`` when it had to cut. Folding happens
+    **first**, because folding can change the width (``...`` is wider than the
+    ellipsis it replaces, ``dia `` far wider than ``\u00f8``).
+    """
+    safe = _base14_safe(text)
+    if width <= 0:
+        return ""
+    if pymupdf.get_text_length(safe, fontname=fontname, fontsize=fontsize) <= width:
+        return safe
+    ell = "..."
+    budget = width - pymupdf.get_text_length(ell, fontname=fontname, fontsize=fontsize)
+    if budget <= 0:
+        return ""
+    # Longest prefix that fits, then retreat to the last word boundary unless that
+    # would throw away more than half of it (one very long token).
+    lo, hi = 0, len(safe)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if pymupdf.get_text_length(safe[:mid], fontname=fontname, fontsize=fontsize) <= budget:
+            lo = mid
+        else:
+            hi = mid - 1
+    head = safe[:lo]
+    space = max(head.rfind(" "), head.rfind("\n"), head.rfind("\t"))
+    if space > lo // 2:
+        head = head[:space]
+    return head.rstrip() + ell
+
+
 def _placement_kind(finding: Finding) -> str:
-    """The margin-callout placement key: ``"SHEET"`` / ``"UNANCHORED"`` / ``""``."""
+    """The margin-callout **display prefix** key (a ``_PLACE_PREFIX`` key).
+
+    ``"SHEET"`` / ``"NO_QUOTE"`` / ``"UNANCHORED"``. Unrelated to
+    :data:`~drawing_analyzer.models.PLACEMENT_KINDS` and to
+    ``MarkupPlacement.expected``, despite the name.
+
+    A finding that carries **no quote** returns ``"NO_QUOTE"``, not
+    ``"UNANCHORED"`` (P7 item 34). Every rect-less finding used to be stamped
+    ``[QUOTE NOT FOUND]``, which is the hallucination signal, so a graphics-only
+    finding — one the model reported off the drawing itself, with nothing to
+    quote — was indistinguishable from a fabricated quote that matched nothing.
+    Those are opposite messages to a reviewer, and the vocabulary for the honest
+    one already existed (:data:`_EVIDENCE_PREFIX`) but was unreachable here:
+    ``_annot_content`` suppressed the evidence tag on exactly the branch whose
+    prefix was ``[QUOTE NOT FOUND]``.
+    """
     if getattr(finding, "anchor_hint", "") == "SHEET":
         return "SHEET"
+    if not str(getattr(finding, "source_quote", "") or "").strip():
+        return "NO_QUOTE"
     return "UNANCHORED"
 
 
@@ -714,7 +845,10 @@ def _annot_content(
     )
     prefix = _PLACE_PREFIX.get(place, "")
     evidence_tag = _EVIDENCE_PREFIX.get(reduced_trust_reason(finding), "")
-    if evidence_tag and prefix != _PLACE_PREFIX["UNANCHORED"]:
+    # Never stack the evidence tag on the hallucination signal (they contradict
+    # each other), and never repeat a tag the placement prefix already carries —
+    # a quote-less finding now reaches [NO QUOTE TO CHECK] through `place`.
+    if evidence_tag and prefix != _PLACE_PREFIX["UNANCHORED"] and evidence_tag != prefix:
         prefix = f"{evidence_tag} {prefix}".strip()
     placement = f"{prefix} " if prefix else ""
     return f"{trust}{placement}{content}"
@@ -790,49 +924,104 @@ def find_clear_band(
 
 def _clear_bands(
     words: list[Any], page_w: float, page_h: float,
-    *, max_height: float = 170.0, min_height: float = _CALLOUT_H + 4.0,
+    *, max_height: float = 170.0, min_height: float = _CALLOUT_H,
 ) -> list[tuple[float, float, float, float]]:
-    """Every text-free horizontal band inside the sheet border, tallest first.
+    """Every word-free band a callout can sit in, tallest first.
 
-    The plural generalization of :func:`find_clear_band`: a band is a y-range that
-    no word occupies at any x (so packing inside one can never overlap a word),
-    each at least one callout tall. Occupancy of *non-text* ink (piping, symbols,
-    raster) is checked separately at pack time — a text-free band is not
-    automatically visually clear (§17.6).
+    The plural generalization of :func:`find_clear_band`. Occupancy of *non-text*
+    ink (piping, symbols, raster) is checked separately at pack time — a text-free
+    band is not automatically visually clear (§17.6).
+
+    ``min_height`` is the minimum height of a **returned** band, i.e. after the
+    breathing pad is taken off (N24). It used to be checked against the raw gap
+    with the pad applied afterwards, so a gap that passed at 58 pt came back as a
+    50 pt band that :func:`_pack_callouts` could never use — its guard is
+    ``y + _CALLOUT_H <= band_bottom`` — and every finding that would have gone
+    there overflowed to the review-notes page instead. Measured: gaps of 58 and
+    60 pt yielded 50 and 52 pt bands against a 54 pt callout.
+
+    Bands are also **column-aware** (N24). A band used to be a y-range no word
+    occupied at *any* x, which is close to unobtainable on a real drawing: a
+    right-hand title block spans almost the full sheet height, so on a 1728x1188
+    sheet with a title block at y 60..1050 exactly **one** full-width band was
+    found, and the entire 1448x990 pt clear drawing area beside it was unusable.
+    Callouts overflowed off a sheet with room to spare.
+
+    So the page is also considered in vertical columns, and a column's bands are
+    computed from only those words that actually intersect that column in x. The
+    word-free guarantee still holds exactly — a word that misses the column in x
+    cannot overlap a box inside it, and one that does not was excluded from the
+    gap — which is what lets :func:`_pack_callouts` keep skipping its per-candidate
+    word scan. Full-width bands are generated **first** and sorting is by height,
+    so a wide clear strip is still preferred and the previous behaviour is a
+    subset of this one.
     """
     inset_x = 0.03 * page_w
     inset_y = 0.02 * page_h
     top, bottom = inset_y, page_h - inset_y
-    intervals: list[tuple[float, float]] = []
-    for w in words or []:
-        y0, y1 = float(w[1]), float(w[3])
-        if y1 <= top or y0 >= bottom:
-            continue
-        intervals.append((max(y0, top), min(y1, bottom)))
-    intervals.sort()
-    merged: list[list[float]] = []
-    for y0, y1 in intervals:
-        if merged and y0 <= merged[-1][1]:
-            merged[-1][1] = max(merged[-1][1], y1)
-        else:
-            merged.append([y0, y1])
-    gaps: list[tuple[float, float]] = []
-    prev = top
-    for y0, y1 in merged:
-        if y0 > prev:
-            gaps.append((prev, y0))
-        prev = max(prev, y1)
-    if bottom > prev:
-        gaps.append((prev, bottom))
+    left, right = inset_x, page_w - inset_x
+
+    def bands_in_column(cx0: float, cx1: float) -> "list[tuple[float, float, float, float]]":
+        intervals: list[tuple[float, float]] = []
+        for w in words or []:
+            y0, y1 = float(w[1]), float(w[3])
+            if y1 <= top or y0 >= bottom:
+                continue
+            # Only words that actually intersect this column can obstruct it.
+            if float(w[2]) <= cx0 or float(w[0]) >= cx1:
+                continue
+            intervals.append((max(y0, top), min(y1, bottom)))
+        intervals.sort()
+        merged: list[list[float]] = []
+        for y0, y1 in intervals:
+            if merged and y0 <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], y1)
+            else:
+                merged.append([y0, y1])
+        gaps: list[tuple[float, float]] = []
+        prev = top
+        for y0, y1 in merged:
+            if y0 > prev:
+                gaps.append((prev, y0))
+            prev = max(prev, y1)
+        if bottom > prev:
+            gaps.append((prev, bottom))
+        out: list[tuple[float, float, float, float]] = []
+        for g0, g1 in gaps:
+            pad = min(4.0, (g1 - g0) / 10.0)
+            y0 = g0 + pad
+            y1 = min(g1 - pad, y0 + max_height)
+            if y1 - y0 < min_height:      # gate the PADDED band, not the raw gap
+                continue
+            out.append((cx0, y0, cx1, y1))
+        return out
+
+    # The full width first — the best placement when it exists — then columns wide
+    # enough to hold a callout. One column per callout width keeps the band count
+    # bounded (about seven on an E-size sheet).
+    columns: list[tuple[float, float]] = [(left, right)]
+    usable_w = right - left
+    col_w = _CALLOUT_W + _CALLOUT_GAP
+    if usable_w >= 2.0 * col_w:
+        n_cols = int(usable_w // col_w)
+        step = usable_w / n_cols
+        columns.extend(
+            (left + i * step, left + (i + 1) * step) for i in range(n_cols)
+        )
+
     bands: list[tuple[float, float, float, float]] = []
-    for g0, g1 in gaps:
-        if g1 - g0 < min_height:
+    seen: set[tuple[int, int, int, int]] = set()
+    for cx0, cx1 in columns:
+        if cx1 - cx0 < _CALLOUT_W:
             continue
-        pad = min(4.0, (g1 - g0) / 10.0)
-        y0 = g0 + pad
-        y1 = min(g1 - pad, y0 + max_height)
-        bands.append((inset_x, y0, page_w - inset_x, y1))
-    bands.sort(key=lambda b: b[3] - b[1], reverse=True)
+        for band in bands_in_column(cx0, cx1):
+            key = tuple(int(round(v)) for v in band)
+            if key in seen:                       # a column that reproduces the full width
+                continue
+            seen.add(key)
+            bands.append(band)
+    # Tallest first, then left-to-right / top-down for deterministic assembly (I-7).
+    bands.sort(key=lambda b: (-(b[3] - b[1]), b[1], b[0]))
     return bands
 
 
@@ -846,25 +1035,94 @@ def _rect_overlaps_any(
     return False
 
 
-def _page_occupancy(page: "pymupdf.Page", *, scale: float = 0.12):
-    """A ``occupied(view_rect) -> bool`` sampler over a low-res render of the page.
+# Occupancy sampling constants (P7 item 29). Every one of these was chosen by
+# measurement on an E-size (1728x1188 pt) sheet; see :func:`_page_occupancy`.
+_OCCUPANCY_SCALE = 1.0            # a hairline is only genuinely dark at 1:1
+_OCCUPANCY_CELL_PT = 8.0          # min-filter cell, in POINTS (scale-invariant)
+_OCCUPANCY_DARK_LEVEL = 210       # a sample below this is ink
+_OCCUPANCY_MIN_INKED_FRAC = 0.005  # inked-cell fraction that means "occupied"
+#: OOM guard only. A page so large that 1:1 would blow past this is sampled
+#: coarser, which costs thin-line sensitivity — the one case where this sampler
+#: degrades back toward the old behaviour, so it is a guard, not a tuning knob.
+_OCCUPANCY_MAX_PIXELS = 40_000_000
 
-    A candidate callout box is "occupied" when a meaningful fraction of its area
-    is non-white ink — catching the piping/symbols/vector-schedule/raster content
-    a text-free band can still sit on (§17.6). The pixmap is rendered **lazily** on
-    the first query (so a page with no clear band to pack into never renders one),
-    in the page's rotated **view** space (``page.rect`` dims == PAGE_VIEW_V2), so a
-    view-space box maps to pixels by ``* scale`` with no derotation. If rendering
-    fails the sampler degrades to *never occupied* (callouts still avoid words),
-    so occupancy analysis is additive and non-fatal (I-3).
+
+def _page_occupancy(
+    page: "pymupdf.Page",
+    *,
+    scale: float = _OCCUPANCY_SCALE,
+    cell_pt: float = _OCCUPANCY_CELL_PT,
+):
+    """A ``occupied(view_rect) -> bool`` sampler over a render of the page.
+
+    A candidate callout box is "occupied" when enough of it carries non-white ink
+    — catching the piping/symbols/vector-schedule/raster content a text-free band
+    can still sit on (§17.6). The pixmap is rendered **lazily** on the first query
+    (so a page with no clear band to pack into never renders one), in the page's
+    rotated **view** space (``page.rect`` dims == PAGE_VIEW_V2), so a view-space
+    box maps to pixels by ``* scale`` with no derotation. If rendering fails the
+    sampler degrades to *never occupied* (callouts still avoid words), so
+    occupancy analysis is additive and non-fatal (I-3).
+
+    **Why a min-filter over cells, and why 1:1 (P7 item 29).** The shipped
+    sampler rendered at 0.12 and asked what fraction of the box's *pixels* were
+    dark. Both halves failed on real drawings, and measured on an E-size sheet:
+
+    * At 0.12 a 0.5 pt pipe line covers an eighth of a pixel, so antialiasing
+      returns roughly 223 — *lighter* than the 210 ink threshold. A single
+      sprinkler main across a band scored **0.0000** and the band was declared
+      clear, so the callout was stamped over the piping.
+    * Raising the scale does not fix it, which is the counter-intuitive part: the
+      verdict is **non-monotonic** in scale, because a thin line's pixel count
+      grows linearly while the box's grows quadratically, so the *fraction* falls
+      even as the line becomes visible. One 1 pt line measured clear at 0.12 and
+      0.25, occupied at 0.5, and clear again at 1.0; three 0.5 pt branch lines
+      measured occupied at 0.25 but clear at 0.5, purely on pixel-grid alignment.
+
+    So sensitivity comes from sampling at 1:1, where a hairline really is dark,
+    and stability comes from replacing the pixel fraction with a **min-filter**:
+    the box is divided into cells measured in *points*, a cell counts as inked if
+    **any** pixel in it is dark, and the verdict is the fraction of inked cells.
+    A hairline becomes a solid run of inked cells (7% of a band, well clear of the
+    0.5% floor) while isolated scanner dirt stays one cell each. Measured across
+    eleven contents — blank, a faint 0.93 grey wash, 400 dots of scan speckle, a
+    0.5 pt line, a 1 pt line, a diagonal, three branch lines, ten sprinkler head
+    symbols, 160 hatch lines, and a solid block — this configuration is correct on
+    all eleven, where the shipped one was wrong on five.
+
+    Cost is not the reason the old scale was low: rendering an E-size page at 1:1
+    measures **~1 ms**, and one query ~3 ms.
+
+    **Known limit, stated rather than papered over.** The metric is relative to
+    box area, so an *isolated short* stub is not detected: in a 1340x110 pt band a
+    0.5 pt line is caught from ~100 pt of length, and below that it lands in the
+    same range as heavy speckle (~2,000 isolated dots in one band), so no
+    threshold separates them. Closing that needs run-length/contiguity analysis
+    and is deliberately **not** done here. Words are avoided separately, and a
+    band this empty is the least harmful place to be wrong.
     """
     state: dict[str, Any] = {}
 
-    def occupied(view_rect, *, dark_frac: float = 0.02, dark_level: int = 210) -> bool:
+    def occupied(
+        view_rect,
+        *,
+        min_inked_frac: float = _OCCUPANCY_MIN_INKED_FRAC,
+        dark_level: int = _OCCUPANCY_DARK_LEVEL,
+    ) -> bool:
         if "pix" not in state:
             try:
+                eff = float(scale)
+                rect = page.rect
+                budget = max(1.0, float(rect.width) * float(rect.height))
+                if budget * eff * eff > _OCCUPANCY_MAX_PIXELS:
+                    eff = (_OCCUPANCY_MAX_PIXELS / budget) ** 0.5
+                    _log.info(
+                        "page too large for 1:1 occupancy sampling; using scale "
+                        "%.3f (thin-line sensitivity is reduced)", eff,
+                    )
+                state["scale"] = eff
                 state["pix"] = page.get_pixmap(
-                    matrix=pymupdf.Matrix(scale, scale), colorspace=pymupdf.csGRAY, alpha=False
+                    matrix=pymupdf.Matrix(eff, eff), colorspace=pymupdf.csGRAY, alpha=False
                 )
             except Exception:  # noqa: BLE001 - occupancy is a refinement, never fatal
                 _log.debug("occupancy render failed; callouts fall back to word-avoidance")
@@ -872,20 +1130,26 @@ def _page_occupancy(page: "pymupdf.Page", *, scale: float = 0.12):
         pix = state["pix"]
         if pix is None:
             return False                         # render unavailable → word-avoidance only
+        eff = float(state.get("scale") or scale)
         w, h, samples = pix.width, pix.height, pix.samples
-        x0 = max(0, int(view_rect[0] * scale)); y0 = max(0, int(view_rect[1] * scale))
-        x1 = min(w, int(view_rect[2] * scale)); y1 = min(h, int(view_rect[3] * scale))
+        x0 = max(0, int(view_rect[0] * eff)); y0 = max(0, int(view_rect[1] * eff))
+        x1 = min(w, int(view_rect[2] * eff)); y1 = min(h, int(view_rect[3] * eff))
         if x1 <= x0 or y1 <= y0:
             return True                          # off-render / degenerate → unsafe
-        total = 0
-        dark = 0
-        for yy in range(y0, y1):
-            base = yy * w
-            for xx in range(x0, x1):
-                total += 1
-                if samples[base + xx] < dark_level:
-                    dark += 1
-        return total > 0 and dark / total >= dark_frac
+        step = max(1, int(round(float(cell_pt) * eff)))
+        inked = cells = 0
+        for cy in range(y0, y1, step):
+            y_end = min(cy + step, y1)
+            for cx in range(x0, x1, step):
+                cells += 1
+                x_end = min(cx + step, x1)
+                for yy in range(cy, y_end):
+                    base = yy * w
+                    # ``min`` over the row slice is the min-filter, at C speed.
+                    if min(samples[base + cx: base + x_end]) < dark_level:
+                        inked += 1
+                        break
+        return cells > 0 and inked / cells >= min_inked_frac
 
     return occupied
 
@@ -993,8 +1257,78 @@ def _derotate_rect(page: "pymupdf.Page", view_rect: Any) -> "pymupdf.Rect":
 
 
 def _derotate_point(page: "pymupdf.Page", x: float, y: float) -> "pymupdf.Point":
-    """A PAGE_VIEW_V2 point → this page's un-rotated (annotation) space."""
+    """A PAGE_VIEW_V2 point → this page's un-rotated (annotation) space.
+
+    Correct for **annotation** placement (``add_*_annot``), which is what it is
+    for.  A GOTO *destination* is a different space entirely — see
+    :func:`_dest_user_point` — so never reuse this for one.
+    """
     return pymupdf.Point(float(x), float(y)) * page.derotation_matrix
+
+
+# --------------------------------------------------------------------------- #
+# GOTO destinations are NOT annotation space (P7 item 27).
+#
+# A ``/XYZ`` destination is expressed in **default user space** (PDF 32000-1
+# §12.3.2.2), the same space an annotation's ``/Rect`` uses (§12.5.2) — which is
+# what lets the two be compared, and is how the transform below was pinned:
+# stamp a rect annot at a known point, save, and read the raw ``/Rect`` back out
+# of the file.  Annotation *placement*, by contrast, goes through PyMuPDF's
+# un-rotated CropBox-relative space, so :func:`_derotate_point` is only half of
+# the journey and passing its result to a destination drops the CropBox origin
+# and the MediaBox origin.
+#
+# Measured on PyMuPDF 1.28.2 across rotation × CropBox × MediaBox-origin (24
+# cases, ``tests/test_drawing_geometry.py``): feeding ``_derotate_point`` to a
+# destination is wrong for **12** of them via ``insert_link`` and **22** via
+# ``set_toc`` — every rotated page, and every inset CropBox.  Errors reach
+# ~550 pt, i.e. off-sheet.
+#
+# Two entry points, two different internal transforms, so two inversions:
+#   * ``Page.insert_link`` maps the point through ``~page.transformation_matrix``
+#     (``pymupdf.utils.getLinkText``), so hand it ``user * transformation_matrix``.
+#   * ``Document.set_toc`` does ``y = cropbox.height - y`` then
+#     ``* page.rotation_matrix`` (``Document.set_toc``), so invert exactly that.
+# Both are composed from PyMuPDF's own published matrices rather than a
+# hard-coded offset, so each is exact by construction rather than by coincidence.
+# --------------------------------------------------------------------------- #
+
+
+def _dest_user_point(page: "pymupdf.Page", x: float, y: float) -> "pymupdf.Point":
+    """A PAGE_VIEW_V2 point → this page's **default user space** (PDF §12.3.2.2).
+
+    ``page.cropbox`` is reported in PyMuPDF's *top-left* convention while
+    ``page.mediabox`` is the **raw** PDF box (bottom-left, un-normalized), so
+    ``mediabox.y1 - cropbox.y0`` is the CropBox's top edge in user space.  That
+    asymmetry is the trap here; it is measured, not assumed.
+    """
+    u = pymupdf.Point(float(x), float(y)) * page.derotation_matrix
+    return pymupdf.Point(
+        page.cropbox.x0 + u.x,
+        page.mediabox.y1 - page.cropbox.y0 - u.y,
+    )
+
+
+def _dest_point(page: "pymupdf.Page", x: float, y: float) -> "pymupdf.Point":
+    """A PAGE_VIEW_V2 point → the ``to=`` value for :meth:`Page.insert_link`.
+
+    ``insert_link`` re-maps ``to`` through ``~page.transformation_matrix``, so
+    pre-multiplying by that matrix makes the round trip land on the user-space
+    point :func:`_dest_user_point` computed.
+    """
+    return _dest_user_point(page, x, y) * page.transformation_matrix
+
+
+def _outline_dest_point(page: "pymupdf.Page", x: float, y: float) -> "pymupdf.Point":
+    """A PAGE_VIEW_V2 point → the ``to=`` value for :meth:`Document.set_toc`.
+
+    ``set_toc`` flips y about ``cropbox.height`` and then applies
+    ``rotation_matrix``; this inverts both.  ``derotation_matrix`` is the exact
+    inverse of ``rotation_matrix`` (their product is bit-exactly the identity,
+    asserted in ``tests/test_drawing_geometry.py``).
+    """
+    q = _dest_user_point(page, x, y) * page.derotation_matrix
+    return pymupdf.Point(q.x, page.cropbox.height - q.y)
 
 
 # --------------------------------------------------------------------------- #
@@ -1191,8 +1525,12 @@ def _add_margin_callouts(
         # on plain FreeText annots); unverified/rejected callouts dash the border.
         # ``rotate=page.rotation`` keeps the text upright on a rotated sheet; the
         # box is transformed view→page so it lands in the computed clear band.
+        # One truncation, reused for /Contents below: for a plain FreeText annot
+        # /Contents IS the displayed text, so set_info(content=full) would undo
+        # this and draw the whole string (item 33).
+        shown = _truncate_at_word(content, 220)
         annot = page.add_freetext_annot(
-            _derotate_rect(page, box), _truncate_at_word(content, 220),
+            _derotate_rect(page, box), shown,
             fontsize=7.5, text_color=color, fill_color=(1.0, 1.0, 0.92),
             rotate=int(page.rotation or 0),
         )
@@ -1201,7 +1539,7 @@ def _add_margin_callouts(
                 annot.set_border(width=1.0, dashes=[4, 3])
         except Exception:  # noqa: BLE001
             pass
-        annot.set_info(title=author, subject=finding.category, content=content)
+        annot.set_info(title=author, subject=finding.category, content=shown)
         _assign_layer(annot, finding, oc_layers)
         annot.update()
         components.append(("callout", annot.xref))
@@ -1306,6 +1644,60 @@ def _index_groups(
     return _order(inked), _order(rejected), _order(gated)
 
 
+def _new_generated_page(doc: "pymupdf.Document", *, pno: int | None = None) -> "pymupdf.Page":
+    """A fresh analyzer-owned page at the standard index/notes size.
+
+    Pins an explicit ``CropBox`` equal to the page's own ``MediaBox`` (P7
+    item 34). ``/CropBox`` is an **inheritable** page-tree attribute, so in a set
+    whose ``/Pages`` node carries one -- legal, and produced by some CAD exporters
+    -- a generated page inherits the *drawing's* CropBox. Measured on an E-size
+    source cropped to ``[100 80 1628 1108]``: a new 612x792 page came back with
+    ``cropbox=[100, -316, 1628, 712]`` and a visible ``rect`` of **512x712**, so
+    the index table was clipped on the right and shifted vertically -- and the
+    column widths item 32 fits against are computed for the full 612. Setting the
+    CropBox explicitly makes the page mean what it says regardless of the source's
+    page tree. (``/Rotate`` is inheritable too, but PyMuPDF writes it explicitly
+    on a new page, so it does not need pinning -- verified, not assumed.)
+    """
+    page = (
+        doc.new_page(width=_INDEX_PAGE_W, height=_INDEX_PAGE_H) if pno is None
+        else doc.new_page(pno=pno, width=_INDEX_PAGE_W, height=_INDEX_PAGE_H)
+    )
+    try:
+        page.set_cropbox(page.mediabox)
+    except Exception:  # noqa: BLE001 - a page that will not take one is still usable
+        _log.warning("could not pin the CropBox on a generated page")
+    return page
+
+
+def _index_rows(inked: list, rejected: list, gated: list) -> "list[tuple[str, Any, bool]]":
+    """The uniform index row stream, shared by the page count and the writer.
+
+    ``("heading", label, False)`` rows carry no link; ``index_only`` marks the
+    rows whose sole artifact is this index row (so reconciliation must find them).
+    One builder, so the page count cannot disagree with what is written (P7
+    item 34: the count has to be known *before* any page is inserted, because
+    inserting at the front renumbers every link target).
+    """
+    rows: list[tuple[str, Any, bool]] = [("entry", fp, False) for fp in inked]
+    if rejected:
+        rows.append(("heading", f"Rejected by verification ({len(rejected)})", False))
+        rows.extend(
+            ("rejected", fp, fp[1].expected == "REJECTED_INDEX") for fp in rejected
+        )
+    if gated:
+        rows.append(("heading", f"Not inked by operator gate ({len(gated)})", False))
+        rows.extend(("gated", fp, True) for fp in gated)
+    return rows
+
+
+def _index_page_count(rows: "list[tuple[str, Any, bool]]") -> int:
+    """How many index pages ``rows`` needs (0 for none)."""
+    if not rows:
+        return 0
+    return (len(rows) + _INDEX_ROWS_PER_PAGE - 1) // _INDEX_ROWS_PER_PAGE
+
+
 def _insert_index_pages(
     doc: "pymupdf.Document",
     inked: list,
@@ -1314,6 +1706,7 @@ def _insert_index_pages(
     *,
     run_id: str,
     author: str,
+    mark_page_by_finding: "dict[str, int] | None" = None,
 ) -> int:
     """Insert the findings index at the front of ``doc``; return pages inserted.
 
@@ -1330,21 +1723,11 @@ def _insert_index_pages(
     :data:`_INDEX_ROWS_KEY` as ``pid@target`` so reconciliation can prove each
     row exists and links to the right page.
     """
-    # A uniform row stream ("heading" rows carry no link) paginates the main
-    # table and the two trailing sections together. ``index_only`` marks the rows
-    # whose sole artifact is this index row (so reconciliation must find them).
-    rows: list[tuple[str, Any, bool]] = [("entry", fp, False) for fp in inked]
-    if rejected:
-        rows.append(("heading", f"Rejected by verification ({len(rejected)})", False))
-        rows.extend(
-            ("rejected", fp, fp[1].expected == "REJECTED_INDEX") for fp in rejected
-        )
-    if gated:
-        rows.append(("heading", f"Not inked by operator gate ({len(gated)})", False))
-        rows.extend(("gated", fp, True) for fp in gated)
-    if not rows:
+    rows = _index_rows(inked, rejected, gated)
+    n_pages = _index_page_count(rows)
+    if not n_pages:
         return 0
-    n_pages = (len(rows) + _INDEX_ROWS_PER_PAGE - 1) // _INDEX_ROWS_PER_PAGE
+    mark_page_by_finding = mark_page_by_finding or {}
 
     # Insert EVERY index page before drawing any rows: link targets are numbered
     # for the final document, so drawing while later index pages are still
@@ -1352,19 +1735,22 @@ def _insert_index_pages(
     # the first page's links on a multi-page index. Pages are re-fetched by
     # index below — inserting a page invalidates previously-held Page objects.
     for i in range(n_pages):
-        doc.new_page(pno=i, width=_INDEX_PAGE_W, height=_INDEX_PAGE_H)
+        _new_generated_page(doc, pno=i)
     for i in range(n_pages):
         page = doc[i]
         title = INDEX_PAGE_LABEL + (f"  (page {i + 1}/{n_pages})" if n_pages > 1 else "")
         page.insert_text((36, 42), title, fontsize=13, fontname="hebo", color=(0.1, 0.1, 0.1))
         page.insert_text(
             (36, 60),
-            f"Author: {author} - draft review; every row links to its markup.",
+            _fit_text(
+                f"Author: {author} - draft review; every row links to its markup.",
+                _INDEX_COL_RIGHT - 36.0, fontsize=8,
+            ),
             fontsize=8, color=(0.35, 0.35, 0.35),
         )
         # Column headers.
         y = _INDEX_TOP - 8
-        for x, label in ((36, "ID"), (95, "Sheet"), (210, "Sev"), (258, "Status"), (340, "Finding")):
+        for x, label in zip(_INDEX_COL_X, _INDEX_COL_LABELS):
             page.insert_text((x, y), label, fontsize=8, fontname="hebo", color=(0.25, 0.25, 0.25))
 
         batch = rows[i * _INDEX_ROWS_PER_PAGE:(i + 1) * _INDEX_ROWS_PER_PAGE]
@@ -1385,22 +1771,41 @@ def _insert_index_pages(
             struck = kind in ("rejected", "gated")
             color = _REJECTED_COLOR if struck else _color(finding)
             text_color = _REJECTED_COLOR if struck else (0, 0, 0)
-            page.insert_text((36, y), finding.qc_id or "—", fontsize=8, fontname="hebo", color=color)
-            page.insert_text((95, y), (finding.sheet_id or "")[:20], fontsize=8, color=text_color)
-            page.insert_text((210, y), (finding.severity or "")[:6], fontsize=8, color=color)
-            page.insert_text((258, y), _status_label(finding)[:13], fontsize=8, color=text_color)
-            text = _truncate_at_word(finding.text.strip().replace("\n", " "), 62)
-            page.insert_text((340, y), text, fontsize=8, color=text_color)
+            # Every cell is fitted to its own column width and made Base-14 safe
+            # (item 32): a character cap is not a width fit, and a glyph the
+            # Base-14 fonts lack is drawn as a middle dot rather than raising.
+            cells = (
+                (finding.qc_id or "-", "hebo", color),
+                (finding.sheet_id or "", "helv", text_color),
+                (finding.severity or "", "helv", color),
+                (_status_label(finding), "helv", text_color),
+                (finding.text.strip().replace("\n", " "), "helv", text_color),
+            )
+            for x, cw, (raw, fontname, cell_color) in zip(_INDEX_COL_X, _INDEX_COL_W, cells):
+                page.insert_text(
+                    (x, y), _fit_text(raw, cw, fontsize=8, fontname=fontname),
+                    fontsize=8, fontname=fontname, color=cell_color,
+                )
 
-            target_page = int(finding.page_index) + n_pages
+            # The page the mark ACTUALLY landed on, not the finding's source page
+            # (P7 item 34). A callout that overflowed to the AI Review Notes page
+            # has no mark on its sheet, so a row pointing at the sheet sent the
+            # reviewer to a page with nothing on it — while the bookmark outline
+            # and the receipt both already named the notes page. Every generated
+            # page in this map predates the front-inserted index, so all of them
+            # shift by exactly ``n_pages``, the same as a source page.
+            target_page = int(
+                mark_page_by_finding.get(finding.id, int(finding.page_index))
+            ) + n_pages
             rect = getattr(finding.anchor, "rect_pdf", None) if finding.anchor else None
             if 0 <= target_page < doc.page_count:
-                # The destination rect is in PAGE_VIEW_V2 space; a GOTO target lands
-                # in the target page's un-rotated space, so derotate the corner with
-                # that page's own matrix (identity on an un-rotated page).
+                # The destination rect is in PAGE_VIEW_V2 space; a GOTO target is
+                # default user space, so convert with _dest_point (item 27) — NOT
+                # _derotate_point, which is annotation space and drops the CropBox
+                # and MediaBox origins on a rotated sheet.
                 to = pymupdf.Point(36, 36)
                 if rect:
-                    to = _derotate_point(doc[target_page], rect[0], rect[1])
+                    to = _dest_point(doc[target_page], rect[0], rect[1])
                 row_top = y - 9
                 page.insert_link({
                     "kind": pymupdf.LINK_GOTO,
@@ -1431,11 +1836,14 @@ def _insert_appendix_page(
 ) -> None:
     """The optional 'checked and consistent' page at the end of the document."""
     stats = audit_stats or {}
-    page = doc.new_page(width=_INDEX_PAGE_W, height=_INDEX_PAGE_H)
+    page = _new_generated_page(doc)
     page.insert_text((36, 42), APPENDIX_PAGE_LABEL, fontsize=13, fontname="hebo", color=(0.1, 0.1, 0.1))
     page.insert_text(
         (36, 60),
-        f"Author: {author} - deterministic checks that passed (the balance column).",
+        _fit_text(
+            f"Author: {author} - deterministic checks that passed (the balance column).",
+            _INDEX_COL_RIGHT - 36.0, fontsize=8,
+        ),
         fontsize=8, color=(0.35, 0.35, 0.35),
     )
     lines: list[str] = []
@@ -1459,7 +1867,6 @@ def _insert_review_notes_page(
     doc: "pymupdf.Document",
     overflow: "list[tuple[Finding, MarkupPlacement]]",
     *,
-    n_index: int,
     run_id: str,
     author: str,
     oc_layers: "dict[str, int] | None" = None,
@@ -1469,7 +1876,9 @@ def _insert_review_notes_page(
     A rect-less finding whose callout could not be placed in a visually-clear band
     (§17.6) is written here — visible ink in the reviewed PDF — instead of stamped
     over the drawing. Each row is a ``callout`` FreeText carrying the full popup,
-    plus a GOTO link back to its source page (offset by ``n_index`` index pages),
+    plus a GOTO link back to its source page — by that page's index in the
+    document as it stands when this runs, since the index pages are inserted
+    afterwards and carry the link's target along with the page —
     and its placement is **rerouted** to ``REVIEW_NOTES`` so the tally counts it as
     an overflow note, not a margin callout. Returns
     ``{placement_id: [(component, xref, final_page), …]}`` for stamping. The
@@ -1486,7 +1895,7 @@ def _insert_review_notes_page(
     n_pages = (len(ordered) + per_page - 1) // per_page
     first_pno = doc.page_count
     for _ in range(n_pages):
-        doc.new_page(width=_INDEX_PAGE_W, height=_INDEX_PAGE_H)
+        _new_generated_page(doc)
     for i in range(n_pages):
         pno = first_pno + i
         page = doc[pno]
@@ -1494,8 +1903,11 @@ def _insert_review_notes_page(
         page.insert_text((_NOTE_LEFT, 42), title, fontsize=12, fontname="hebo", color=(0.1, 0.1, 0.1))
         page.insert_text(
             (_NOTE_LEFT, 62),
-            f"Author: {author} - findings that did not fit a clear band on their sheet; "
-            f"each row links to its source page.",
+            _fit_text(
+                f"Author: {author} - findings that did not fit a clear band on their "
+                f"sheet; each row links to its source page.",
+                _INDEX_PAGE_W - 2 * _NOTE_LEFT, fontsize=8,
+            ),
             fontsize=8, color=(0.35, 0.35, 0.35),
         )
         batch = ordered[i * per_page:(i + 1) * per_page]
@@ -1512,23 +1924,32 @@ def _insert_review_notes_page(
             )
             box = pymupdf.Rect(_NOTE_LEFT, y, _INDEX_PAGE_W - _NOTE_LEFT, y + _NOTE_BOX_H)
             try:
+                shown = _truncate_at_word(content, 400)     # reused below (item 33)
                 annot = page.add_freetext_annot(
-                    box, _truncate_at_word(content, 400), fontsize=8,
+                    box, shown, fontsize=8,
                     text_color=(_REJECTED_COLOR if rejected else _color(finding)),
                     fill_color=(1.0, 1.0, 0.92),
                 )
-                annot.set_info(title=author, subject="AI review note", content=content)
+                annot.set_info(title=author, subject="AI review note", content=shown)
                 _assign_layer(annot, finding, oc_layers)
                 annot.update()
                 collected.setdefault(placement.placement_id, []).append(
                     ("callout", annot.xref, pno)
                 )
-                # GOTO back to the source page (shifted by the front index) — the
-                # finding's rect if it had one, else the sheet top.
-                target = int(finding.page_index) + n_index
+                # GOTO back to the source page — its index in the document as it
+                # stands RIGHT NOW, with no allowance for the index pages that are
+                # inserted afterwards. `insert_link` bakes the destination as a
+                # reference to the page *object* (`getLinkText` resolves `page=` to
+                # a page xref), so the front insertion shifts the link's target
+                # along with the page itself and the offset must not be
+                # pre-applied. Adding it resolved `doc[target]` to a different
+                # page entirely — with a 2-sheet set, every back-link on the notes
+                # page pointed at the wrong sheet, and the rect-bearing branch
+                # would have read that wrong page's geometry too.
+                target = int(finding.page_index)
                 if 0 <= target < doc.page_count:
                     rect = getattr(finding.anchor, "rect_pdf", None) if finding.anchor else None
-                    to = _derotate_point(doc[target], rect[0], rect[1]) if rect else pymupdf.Point(36, 36)
+                    to = _dest_point(doc[target], rect[0], rect[1]) if rect else pymupdf.Point(36, 36)
                     page.insert_link({
                         "kind": pymupdf.LINK_GOTO,
                         "from": pymupdf.Rect(box.x0, box.y0, box.x1, box.y1),
@@ -1798,9 +2219,10 @@ def _set_findings_outline(
     on-sheet cloud/margin callout, the appended *AI Review Notes* page for one
     that overflowed there), so a bookmark always points at the mark, the same
     page its HTML deep link and receipt point at. A rect-bearing finding zooms
-    to the rect's top-left via :func:`_derotate_point` (moving the PAGE_VIEW_V2
-    corner into that page's own space, exactly as the index-page GOTO links do);
-    a rect-less one targets the page top.
+    to the rect's top-left via :func:`_outline_dest_point` (moving the
+    PAGE_VIEW_V2 corner into the space ``set_toc`` wants, which is *not* the one
+    the index-page GOTO links want — see :func:`_dest_user_point`); a rect-less
+    one targets the page top.
 
     Any outline already on the source PDF (a set's sheet-navigation bookmarks)
     is **preserved** — the QC section is appended, never substituted: the writer
@@ -1837,7 +2259,7 @@ def _set_findings_outline(
     for finding, final_page in entries:
         rect = getattr(finding.anchor, "rect_pdf", None) if finding.anchor else None
         if rect:
-            point = _derotate_point(doc[final_page], rect[0], rect[1])
+            point = _outline_dest_point(doc[final_page], rect[0], rect[1])
             dest = {"kind": pymupdf.LINK_GOTO, "to": point, "zoom": _OUTLINE_ZOOM}
         else:
             dest = {"kind": pymupdf.LINK_GOTO, "to": pymupdf.Point(0, 0), "zoom": 0}
@@ -1944,15 +2366,36 @@ def _annotate_units(
             except Exception:  # noqa: BLE001 - callouts must not sink the file
                 _log.warning("could not add margin callouts on page %d", page_index)
 
+        # Generated pages are built in this order — appendix, review notes, then
+        # the index inserted at the FRONT last (P7 item 34). The index is last
+        # because its rows link to the page each mark landed on, and an overflowed
+        # callout's page does not exist until the notes page is appended. Building
+        # the index first meant a row could only guess, so it named the finding's
+        # source sheet — where that finding has no mark — while the bookmark
+        # outline and the receipt both correctly named the notes page.
+        #
+        # Front-inserting the index last also makes the shift uniform: every page
+        # written before it — source, appendix, notes — moves down by exactly
+        # ``n_index``, so there is no page that needs a different offset. The
+        # reading order of the finished file is unchanged (index, sheets,
+        # appendix, notes), because the appendix is still appended before the
+        # notes page.
+        #
+        # ``n_index`` is needed *before* insertion, for the notes page's back-links
+        # and for these stamps, so it is computed from the row stream rather than
+        # returned by the writer.
+        index_row_stream: list = []
+        index_groups: tuple = ((), (), ())
         n_index = 0
         if index_pages:
             try:
-                inked, rejected_rows, gated_rows = _index_groups(pairs)
-                n_index = _insert_index_pages(
-                    doc, inked, rejected_rows, gated_rows, run_id=run_id, author=author,
-                )
+                index_groups = _index_groups(pairs)
+                index_row_stream = _index_rows(*index_groups)
+                n_index = _index_page_count(index_row_stream)
             except Exception:  # noqa: BLE001 - the index must not sink the file
-                _log.warning("could not build the findings index for %s", src.name)
+                _log.warning("could not plan the findings index for %s", src.name)
+                index_row_stream, n_index = [], 0
+
         if include_appendix:
             try:
                 _insert_appendix_page(doc, audit_stats, author=author)
@@ -1961,40 +2404,63 @@ def _annotate_units(
 
         # Callouts that did not fit a clear band overflow to an appended
         # 'AI Review Notes' page (§17.6) rather than obscuring the drawing. Its
-        # components are already on their FINAL page (appended after the index), so
-        # they are stamped as-is below — not shifted by ``n_index``.
+        # components carry their PRE-SHIFT page here, and shift by ``n_index``
+        # below along with everything else.
         notes_collected: dict[str, list[tuple[str, int, int]]] = {}
         if overflow:
             try:
                 notes_collected = _insert_review_notes_page(
-                    doc, overflow, n_index=n_index, run_id=run_id, author=author,
+                    doc, overflow, run_id=run_id, author=author,
                     oc_layers=oc_layers,
                 )
             except Exception:  # noqa: BLE001 - the notes page must not sink the file
                 _log.warning("could not build the review-notes page for %s", src.name)
 
-        # Stamp each source-page component with its FINAL page — inserting the index
-        # at the front shifted the originals down by ``n_index``. Xref numbers are
-        # stable across page insertion, so stamping by xref is safe here.
+        # Where each finding's mark actually sits, before the front-insert shift.
+        # The notes page overrides the finding's source page; the index writer adds
+        # ``n_index`` to whichever it uses.
+        mark_page_by_finding: dict[str, int] = {}
+        for _f, _pl in pairs:
+            for _pid, _comps in notes_collected.items():
+                if _pid == _pl.placement_id and _comps:
+                    mark_page_by_finding[_f.id] = _comps[0][2]
+
+        if index_row_stream:
+            try:
+                inserted = _insert_index_pages(
+                    doc, *index_groups, run_id=run_id, author=author,
+                    mark_page_by_finding=mark_page_by_finding,
+                )
+                if inserted != n_index:      # planned vs written must agree
+                    _log.warning(
+                        "index wrote %d page(s) but %d were planned for %s",
+                        inserted, n_index, src.name,
+                    )
+            except Exception:  # noqa: BLE001 - the index must not sink the file
+                _log.warning("could not build the findings index for %s", src.name)
+
+        # Stamp every component with its FINAL page — inserting the index at the
+        # front shifted everything written before it down by ``n_index``. Xref
+        # numbers are stable across page insertion, so stamping by xref is safe.
         for pid, comps in collected.items():
             for component, xref, orig_page in comps:
                 try:
                     _stamp_component(doc, xref, pid, component, orig_page + n_index)
                 except Exception:  # noqa: BLE001 - a failed stamp → that placement fails
                     _log.warning("could not stamp %s for %s", component, pid)
-        # Review-notes components already carry their final page.
         for pid, comps in notes_collected.items():
-            for component, xref, final_page in comps:
+            for component, xref, notes_page in comps:
                 try:
-                    _stamp_component(doc, xref, pid, component, final_page)
+                    _stamp_component(doc, xref, pid, component, notes_page + n_index)
                 except Exception:  # noqa: BLE001
                     _log.warning("could not stamp review note %s for %s", component, pid)
 
         # A 'QC Findings' bookmark outline so the marked-up set is one-click
         # navigable in Bluebeam/Acrobat (each issue → the page its mark landed
-        # on, zoomed). Source-page components carry their original page (shifted
-        # by the front index); review-notes components already carry their final
-        # page. I-3: an outline is a nicety — a failure here never sinks the file.
+        # on, zoomed). Every component — source-page and review-notes alike — was
+        # recorded before the index was inserted at the front, so all of them take
+        # the same ``n_index`` shift here. I-3: an outline is a nicety — a failure
+        # here never sinks the file.
         try:
             final_page_by_pid: dict[str, int] = {}
             for pid, comps in collected.items():
@@ -2002,7 +2468,7 @@ def _annotate_units(
                     final_page_by_pid[pid] = comps[0][2] + n_index
             for pid, comps in notes_collected.items():
                 if comps:
-                    final_page_by_pid[pid] = comps[0][2]
+                    final_page_by_pid[pid] = comps[0][2] + n_index
             _set_findings_outline(doc, pairs, final_page_by_pid, n_index=n_index)
         except Exception:  # noqa: BLE001
             _log.warning("could not build the findings bookmark outline for %s", src.name)
@@ -2556,12 +3022,16 @@ def write_set_review_notes_pdf(
     try:
         n_pages = (len(pairs) + _NOTES_PER_PAGE - 1) // _NOTES_PER_PAGE
         for pno in range(n_pages):
-            page = doc.new_page(width=_INDEX_PAGE_W, height=_INDEX_PAGE_H)
+            page = _new_generated_page(doc)
             title = SET_REVIEW_NOTES_LABEL + (f"  (page {pno + 1}/{n_pages})" if n_pages > 1 else "")
             page.insert_text((_NOTE_LEFT, 42), title, fontsize=12, fontname="hebo", color=(0.1, 0.1, 0.1))
             page.insert_text(
                 (_NOTE_LEFT, 62),
-                f"Author: {author} - findings that belong to no single sheet in the set.",
+                _fit_text(
+                    f"Author: {author} - findings that belong to no single sheet "
+                    f"in the set.",
+                    _INDEX_PAGE_W - 2 * _NOTE_LEFT, fontsize=8,
+                ),
                 fontsize=8, color=(0.35, 0.35, 0.35),
             )
             batch = pairs[pno * _NOTES_PER_PAGE:(pno + 1) * _NOTES_PER_PAGE]
@@ -2576,11 +3046,14 @@ def write_set_review_notes_pdf(
                     + "\nNot yet verified - double-check across the set."
                 )
                 try:
+                    shown = _truncate_at_word(content, 400)  # reused below (item 33)
                     annot = page.add_freetext_annot(
-                        box, _truncate_at_word(content, 400), fontsize=8,
+                        box, shown, fontsize=8,
                         text_color=_color(finding), fill_color=(1.0, 1.0, 0.92),
                     )
-                    annot.set_info(title=author, subject="set-level review note", content=content)
+                    annot.set_info(
+                        title=author, subject="set-level review note", content=shown
+                    )
                     _assign_layer(annot, finding, oc_layers)
                     annot.update()
                     collected.setdefault(placement.placement_id, []).append(

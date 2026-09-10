@@ -746,3 +746,574 @@ def test_set_review_notes_pdf_is_layered_by_severity(tmp_path):
         assert "set lo" in by_layer[_SEVERITY_LAYER_NAMES["low"]]
     finally:
         doc.close()
+
+
+# --------------------------------------------------------------------------- #
+# GOTO destinations in the reviewed PDF (P7 item 27)
+#
+# The *math* of the destination transform is pinned in
+# ``tests/test_drawing_geometry.py`` against independent ground truth (an
+# annotation's raw ``/Rect``, which the PDF spec puts in the same default user
+# space as an ``/XYZ`` destination).  What is pinned HERE is the wiring: that
+# every destination the writer emits actually goes through it, at every
+# rotation × CropBox, read as raw ``/XYZ`` out of the saved file rather than
+# through PyMuPDF's own readers — which re-apply the very transform under test
+# and would hide the defect.
+#
+# The load-bearing assertion needs no external truth at all: the index-page row
+# link and the bookmark outline reach the same mark through two *different*
+# PyMuPDF entry points (``insert_link`` and ``set_toc``) whose internal
+# transforms differ, so if either inversion is wrong the two disagree.
+# --------------------------------------------------------------------------- #
+
+_DEST_ROTATIONS = (0, 90, 180, 270)
+_DEST_CROPBOXES = (None, (40, 25, 40, 25))     # inset (l, t, r, b), asymmetric in y
+
+
+def _rotated_cropped_pdf(dir_path: Path, rot: int, crop, name="M-101.pdf") -> Path:
+    dir_path.mkdir(parents=True, exist_ok=True)
+    doc = pymupdf.open()
+    for i in range(2):
+        doc.new_page(width=792, height=612).insert_text(
+            (150, 200), f"TARGETWORD{i}", fontsize=14
+        )
+    page = doc[0]
+    if crop is not None:
+        mb = page.mediabox
+        page.set_cropbox(pymupdf.Rect(mb.x0 + crop[0], crop[1],
+                                      mb.x1 - crop[2], (mb.y1 - mb.y0) - crop[3]))
+    if rot:
+        page.set_rotation(rot)
+    path = dir_path / name
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+def _raw_destinations(doc) -> dict:
+    """Raw ``/XYZ`` per destination kind, straight out of the PDF objects.
+
+    Returns ``{"link": [(x, y), …], "outline": [(x, y), …]}``.  Deliberately
+    NOT ``page.get_links()`` / ``doc.get_toc()``: both map the stored value back
+    through the same transform being tested, so a wrong destination reads back
+    as the point that was asked for.
+    """
+    import re
+    out = {"link": [], "outline": []}
+    for xref in range(1, doc.xref_length()):
+        try:
+            obj = doc.xref_object(xref)
+        except Exception:            # noqa: BLE001 - a free/odd xref is not a destination
+            continue
+        m = re.search(r"/XYZ\s+([\d.\-]+)\s+([\d.\-]+)", obj)
+        if not m:
+            continue
+        pt = (round(float(m.group(1)), 1), round(float(m.group(2)), 1))
+        if "/Title" in obj:
+            # The 'QC Findings' parent targets the page top, not a mark; only the
+            # per-finding leaves do.  Match on the absence of /First rather than
+            # on the title text — a bookmark title is stored as a hex UTF-16BE
+            # string, so "QC-" never appears literally in the object.
+            if "/First" not in obj:
+                out["outline"].append(pt)
+        elif "/Link" in obj:
+            out["link"].append(pt)
+    return out
+
+
+@pytest.mark.parametrize("rot", _DEST_ROTATIONS)
+@pytest.mark.parametrize("crop", _DEST_CROPBOXES)
+def test_reviewed_pdf_destinations_land_in_user_space(tmp_path, rot, crop):
+    from drawing_analyzer.annotate import _dest_user_point
+
+    src = _rotated_cropped_pdf(tmp_path / "src", rot, crop)
+    view_rect = (100.0, 120.0, 260.0, 150.0)
+    f = _finding("drain size wrong", status="VERIFIED", page=0, rect=view_rect,
+                 quote="TARGETWORD0")
+    f.qc_id = "QC-001"
+
+    res = write_reviewed_pdfs([f], [src], tmp_path / "out")
+    doc = pymupdf.open(str(res.reviewed_pdfs[0]))
+    try:
+        dests = _raw_destinations(doc)
+        # The mark lives on the source page shifted by the front index page(s).
+        target = doc.page_count - 2 if doc.page_count >= 3 else 0
+        expected_pt = _dest_user_point(doc[target], view_rect[0], view_rect[1])
+        expected = (round(expected_pt.x, 1), round(expected_pt.y, 1))
+    finally:
+        doc.close()
+
+    assert dests["link"], f"no index-row GOTO link written at rot={rot} crop={crop}"
+    assert dests["outline"], f"no QC bookmark destination written at rot={rot} crop={crop}"
+
+    for got in dests["link"]:
+        assert abs(got[0] - expected[0]) < 1.2 and abs(got[1] - expected[1]) < 1.2, (
+            f"index-row /XYZ {got} != user-space {expected} at rot={rot} crop={crop}"
+        )
+    for got in dests["outline"]:
+        assert abs(got[0] - expected[0]) < 1.2 and abs(got[1] - expected[1]) < 1.2, (
+            f"bookmark /XYZ {got} != user-space {expected} at rot={rot} crop={crop}"
+        )
+    # Two entry points, two internal transforms, one mark: they must agree.
+    assert dests["link"][0] == dests["outline"][0], (
+        f"index link {dests['link'][0]} and bookmark {dests['outline'][0]} name "
+        f"different points at rot={rot} crop={crop}"
+    )
+
+
+def test_overflow_page_backlink_uses_the_destination_transform(tmp_path):
+    # The third destination site: the AI Review Notes page's GOTO back to the
+    # source sheet.  Its rect-bearing branch is defensive — the overflow list is
+    # fed only MARGIN placements, which are rect-less — so it is unreachable
+    # through write_reviewed_pdfs and has to be exercised directly.  It is the
+    # twin of the index-row link, and an untested twin is where this campaign's
+    # defects have consistently lived.
+    from drawing_analyzer.annotate import (
+        _dest_user_point, _insert_review_notes_page,
+    )
+    from drawing_analyzer.models import MarkupPlacement
+
+    view_rect = (100.0, 120.0, 260.0, 150.0)
+    doc = pymupdf.open()
+    page = doc.new_page(width=792, height=612)
+    page.insert_text((150, 200), "TARGETWORD0", fontsize=14)
+    mb = page.mediabox
+    page.set_cropbox(pymupdf.Rect(mb.x0 + 40, 25, mb.x1 - 40, (mb.y1 - mb.y0) - 25))
+    page.set_rotation(90)
+    try:
+        f = _finding("did not fit a clear band", status="VERIFIED", page=0,
+                     rect=view_rect, quote="TARGETWORD0")
+        f.qc_id = "QC-001"
+        placement = MarkupPlacement(
+            run_id="r1", placement_id="r1#f1#primary", finding_id=f.id,
+            qc_id="QC-001", scope="SOURCE", source_id="SRC-0001", page_index=0,
+            leg_id="primary", expected="MARGIN", required_components=["callout"],
+        )
+        _insert_review_notes_page(doc, [(f, placement)], run_id="r1", author="tester")
+        dests = _raw_destinations(doc)
+        expected_pt = _dest_user_point(doc[0], view_rect[0], view_rect[1])
+        expected = (round(expected_pt.x, 1), round(expected_pt.y, 1))
+    finally:
+        doc.close()
+
+    assert dests["link"], "the notes page wrote no GOTO back to the source sheet"
+    for got in dests["link"]:
+        assert abs(got[0] - expected[0]) < 1.2 and abs(got[1] - expected[1]) < 1.2, (
+            f"notes-page backlink /XYZ {got} != user-space {expected}"
+        )
+
+
+# --------------------------------------------------------------------------- #
+# FreeText truncation is not undone by set_info (P7 item 33)
+#
+# For a plain FreeText annot /Contents IS the displayed text, so passing the
+# untruncated string to set_info after handing the truncated one to
+# add_freetext_annot writes the whole string back and draws it.
+# --------------------------------------------------------------------------- #
+
+
+def _freetext_contents(path) -> list[str]:
+    """Every FreeText annot's raw /Contents in the saved file, in page order."""
+    doc = pymupdf.open(str(path))
+    try:
+        out = []
+        for pno in range(doc.page_count):
+            for annot in doc[pno].annots():
+                if annot.type[1] == "FreeText":
+                    raw = doc.xref_get_key(annot.xref, "Contents")
+                    if raw and len(raw) > 1:
+                        out.append(str(raw[1]))
+        return out
+    finally:
+        doc.close()
+
+
+_LONG_FINDING_TEXT = (
+    "Sprinkler head spacing exceeds the maximum permitted for the hazard "
+    "classification shown, and the branch line drain is undersized relative to "
+    "the main it serves; verify against the hydraulic calculations and the "
+    "manufacturer's listed spacing for this head model before issuing for "
+    "construction, and confirm the remote area selection while you are there."
+)
+
+
+def test_freetext_contents_stays_truncated(tmp_path):
+    # A margin callout is capped at 220 chars for display. /Contents must carry
+    # the capped string, not the full one.
+    src = _make_pdf(tmp_path / "src", pages=1)
+    f = _finding(_LONG_FINDING_TEXT, status="VERIFIED", page=0, rect=None, quote="")
+    f.anchor = Anchor(status="UNANCHORED", rect_pdf=None, method="quote_not_found")
+    f.qc_id = "QC-001"
+
+    res = write_reviewed_pdfs([f], [src], tmp_path / "out")
+    contents = _freetext_contents(res.reviewed_pdfs[0])
+    assert contents, "no FreeText callout was written at all"
+    assert any(c.endswith("...") for c in contents), (
+        "no callout was truncated, so this test is not exercising the cap"
+    )
+    for c in contents:
+        assert len(c) <= 420, (
+            f"/Contents is {len(c)} chars — set_info overwrote the truncated "
+            f"display text with the full string"
+        )
+
+
+def test_set_level_review_notes_contents_stays_truncated(tmp_path):
+    from drawing_analyzer.models import assign_qc_ids
+
+    long_action = "Coordinate with the fire protection engineer and " * 6
+    f = _finding(_LONG_FINDING_TEXT, status="UNCERTAIN", page=-1, rect=None, quote="")
+    f.anchor = Anchor(status="UNANCHORED", rect_pdf=None, method="quote_not_found")
+    f.anchor_hint = "SET"          # _is_set_level_finding: SET-scoped, no source_id
+    f.source_id = ""
+    f.recommended_action = long_action
+    assign_qc_ids([f])
+
+    res = write_set_review_notes_pdf([f], tmp_path / "out")
+    paths = [q for q in (getattr(res, "reviewed_pdfs", None) or []) if q]
+    assert paths, "no set-level review notes PDF was written"
+    for c in _freetext_contents(paths[0]):
+        assert len(c) <= 420, f"/Contents is {len(c)} chars — truncation was undone"
+
+
+# --------------------------------------------------------------------------- #
+# Index rows fit their column and survive Base-14 (P7 item 32)
+# --------------------------------------------------------------------------- #
+
+
+def test_index_row_text_fits_its_column(tmp_path):
+    # Realistic UPPERCASE drawing text: the shipped 62-char cap measured 285 pt in
+    # a 238 pt column. Lowercase prose fits, which is why this survived — sheets
+    # are lettered uppercase, and uppercase is the wider case.
+    from drawing_analyzer.annotate import _INDEX_COL_W, _INDEX_COL_X
+
+    src = _make_pdf(tmp_path / "src", pages=1)
+    f = _finding("SPRINKLER HEAD SPACING EXCEEDS MAXIMUM PERMITTED BY NFPA 13 "
+                 "AND THE DRAIN IS UNDERSIZED FOR THE MAIN IT SERVES",
+                 status="VERIFIED", page=0, quote="VAV-3")
+    f.sheet_id = "FP-101-MEZZANINE-LEVEL-A"
+    f.qc_id = "QC-001"
+    res = write_reviewed_pdfs([f], [src], tmp_path / "out")
+
+    from drawing_analyzer.annotate import _INDEX_TOP
+
+    doc = pymupdf.open(str(res.reviewed_pdfs[0]))
+    try:
+        # Table rows only. The page title and the author subtitle sit above
+        # _INDEX_TOP at the same left margin as column 0 and are not table cells.
+        words = [w for w in doc[0].get_text("words") if w[1] >= _INDEX_TOP - 10]
+    finally:
+        doc.close()
+    assert words, "no table rows were drawn"
+
+    right_edge = _INDEX_COL_X[-1] + _INDEX_COL_W[-1]
+    # No word drawn in the findings column may cross its right edge.
+    spill = [w for w in words if w[0] >= _INDEX_COL_X[-1] - 1 and w[2] > right_edge + 1]
+    assert not spill, f"index text overflowed its column: {[w[4] for w in spill]}"
+    # Each earlier column stays inside its own width too.
+    for i in range(len(_INDEX_COL_X) - 1):
+        lo, hi = _INDEX_COL_X[i], _INDEX_COL_X[i] + _INDEX_COL_W[i]
+        over = [w for w in words if lo - 1 <= w[0] < _INDEX_COL_X[i + 1] and w[2] > hi + 1]
+        assert not over, f"column {i} overflowed: {[w[4] for w in over]}"
+
+
+def test_index_columns_are_derived_from_one_definition():
+    # Header labels and data cells must come from the same column table, or the
+    # width a cell is fitted to stops matching the space the header claims.
+    from drawing_analyzer.annotate import (
+        _INDEX_COL_GUTTER, _INDEX_COL_LABELS, _INDEX_COL_RIGHT, _INDEX_COL_W,
+        _INDEX_COL_X,
+    )
+
+    assert len(_INDEX_COL_X) == len(_INDEX_COL_LABELS) == len(_INDEX_COL_W)
+    for i in range(len(_INDEX_COL_X) - 1):
+        assert _INDEX_COL_W[i] == _INDEX_COL_X[i + 1] - _INDEX_COL_X[i] - _INDEX_COL_GUTTER
+    assert _INDEX_COL_W[-1] == _INDEX_COL_RIGHT - _INDEX_COL_X[-1] - _INDEX_COL_GUTTER
+
+
+def test_base14_safe_folds_typography_instead_of_drawing_a_dot():
+    # insert_text's Base-14 fonts silently draw a MIDDLE DOT for anything outside
+    # Latin-1 — no exception. '3" drain' written with a U+2033 prime became
+    # '3. drain': a mangled dimension in a fire-sprinkler index still reads as a
+    # number, which is worse than a missing one.
+    from drawing_analyzer.annotate import _base14_safe
+
+    assert _base14_safe("3″ drain") == '3" drain'
+    assert _base14_safe("detail — see M-501") == "detail - see M-501"
+    assert _base14_safe("2′1/2″") == "2'1/2\""
+    assert _base14_safe("1⁄2 inch") == "1/2 inch"
+    assert _base14_safe("300 × 200") == "300 x 200"
+    assert _base14_safe("spacing ≤ 12 FT") == "spacing <= 12 FT"
+    # Latin-1 characters Base-14 CAN draw are left alone, not degraded.
+    assert _base14_safe("½ inch at 45°") == "½ inch at 45°"
+    # Anything still undrawable reads as unknown, never as punctuation.
+    assert _base14_safe("zone ①") == "zone ?"
+    # Every result is drawable by the Base-14 encoding.
+    for probe in ("3″", "a—b", "zone ①", "½°"):
+        _base14_safe(probe).encode("latin-1")
+
+
+def test_fit_text_measures_width_not_characters():
+    from drawing_analyzer.annotate import _fit_text
+
+    wide = "SPRINKLER HEAD SPACING EXCEEDS MAXIMUM PERMITTED BY NFPA 13"
+    fitted = _fit_text(wide, 238.0, fontsize=8)
+    assert pymupdf.get_text_length(fitted, fontname="helv", fontsize=8) <= 238.0
+    assert fitted.endswith("...")
+    # Same character count, narrower glyphs -> more of it survives.
+    narrow = "iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii"
+    assert len(_fit_text(narrow, 238.0, fontsize=8)) > len(fitted)
+    # Text that already fits is returned whole, with no ellipsis.
+    assert _fit_text("FP-101", 238.0, fontsize=8) == "FP-101"
+    # A column too narrow for even the ellipsis yields nothing, never an overflow.
+    assert _fit_text(wide, 1.0, fontsize=8) == ""
+
+
+# --------------------------------------------------------------------------- #
+# Placement labels, index link targets, generated-page CropBox (P7 item 34)
+# --------------------------------------------------------------------------- #
+
+
+def test_quote_less_finding_is_not_labelled_quote_not_found():
+    # [QUOTE NOT FOUND] is the hallucination signal: the quote SHOULD have been
+    # findable and was not. A graphics-only finding never offered a quote, so
+    # stamping it with that signal spends the reviewer's trust on a finding that
+    # did nothing wrong — and made it indistinguishable from a fabricated quote.
+    from drawing_analyzer.annotate import _annot_content, _placement_kind
+
+    graphics_only = _finding("Sprinkler omitted under the duct", status="UNCERTAIN",
+                             rect=None, quote="")
+    graphics_only.anchor = Anchor(status="UNANCHORED", rect_pdf=None,
+                                  method="quote_not_found")
+    assert _placement_kind(graphics_only) == "NO_QUOTE"
+    first = _annot_content(graphics_only, unverified=True, rejected=False,
+                           place=_placement_kind(graphics_only)).splitlines()[0]
+    assert "[NO QUOTE TO CHECK]" in first
+    assert "[QUOTE NOT FOUND]" not in first
+
+    # A real quote that matched nothing still gets the hallucination signal.
+    fabricated = _finding("Sprinkler omitted under the duct", status="UNCERTAIN",
+                          rect=None, quote="PROVIDE 6 INCH DRAIN")
+    fabricated.anchor = Anchor(status="UNANCHORED", rect_pdf=None,
+                               method="quote_not_found")
+    assert _placement_kind(fabricated) == "UNANCHORED"
+    first = _annot_content(fabricated, unverified=True, rejected=False,
+                           place=_placement_kind(fabricated)).splitlines()[0]
+    assert "[QUOTE NOT FOUND]" in first
+    assert "[NO QUOTE TO CHECK]" not in first
+
+    # A sheet-wide finding keeps its own label rather than either of those.
+    sheet_wide = _finding("Sheet lacks a north arrow", status="UNCERTAIN",
+                          rect=None, quote="")
+    sheet_wide.anchor_hint = "SHEET"
+    sheet_wide.anchor = Anchor(status="UNANCHORED", rect_pdf=None,
+                               method="quote_not_found")
+    assert _placement_kind(sheet_wide) == "SHEET"
+
+
+def test_evidence_tag_is_not_stacked_or_repeated():
+    # The evidence tag must not duplicate a prefix the placement already carries,
+    # nor stack onto the contradictory hallucination signal.
+    from drawing_analyzer.annotate import _annot_content, _placement_kind
+    from drawing_analyzer.models import EVIDENCE_UNAVAILABLE
+
+    f = _finding("Sprinkler omitted", status="UNCERTAIN", rect=None, quote="")
+    f.anchor = Anchor(status="UNANCHORED", rect_pdf=None, method="quote_not_found")
+    f.evidence_state = EVIDENCE_UNAVAILABLE
+    first = _annot_content(f, unverified=True, rejected=False,
+                           place=_placement_kind(f)).splitlines()[0]
+    assert first.count("[NO QUOTE TO CHECK]") == 1
+
+
+def _overflow_case(tmp_path):
+    """A sheet dense enough that some callouts must overflow to the notes page."""
+    from drawing_analyzer.models import assign_qc_ids
+
+    src = _make_pdf(tmp_path / "src", pages=1)
+    words = [(float(30 + 150 * i), float(20 + 24 * j), float(130 + 150 * i),
+              float(32 + 24 * j), "TXT", 0, 0, 0)
+             for i in range(5) for j in range(22)]
+    meta = {0: {"words": words, "rows": 2, "cols": 2, "page_width_pt": 792.0,
+                "page_height_pt": 612.0, "overlap_frac": 0.08}}
+    findings = []
+    for i in range(7):
+        f = _finding(f"expected item {i}; not found on this sheet", status="VERIFIED",
+                     page=0, rect=None, quote="")
+        f.anchor_hint = "SHEET"
+        f.anchor = Anchor(status="UNANCHORED", rect_pdf=None, method="quote_not_found")
+        findings.append(f)
+    assign_qc_ids(findings)
+    return src, findings, meta
+
+
+def test_index_row_targets_the_page_its_mark_landed_on(tmp_path):
+    # A callout that overflowed to the AI Review Notes page has NO mark on its
+    # sheet, so an index row pointing at the sheet sent the reviewer to a page
+    # with nothing on it — while the bookmark outline and the receipt both
+    # correctly named the notes page. All three must agree.
+    src, findings, meta = _overflow_case(tmp_path)
+    out = tmp_path / "M-101_reviewed.pdf"
+    res = annotate_pdf(src, findings, out, sheet_meta=meta)
+    assert res.tally.get("review_notes", 0) >= 1, "nothing overflowed; test is inert"
+    assert res.tally.get("margin", 0) >= 1, "nothing stayed on the sheet; test is inert"
+
+    doc = pymupdf.open(str(out))
+    try:
+        notes_pno = next(p for p in range(doc.page_count)
+                         if "AI REVIEW NOTES" in doc[p].get_text().upper())
+        index_targets = {lk.get("page") for lk in doc[0].get_links()
+                         if lk.get("kind") == pymupdf.LINK_GOTO}
+    finally:
+        doc.close()
+
+    receipt_pages = {r.output_page_index for r in res.receipts if r.status == "WRITTEN"}
+    assert notes_pno in receipt_pages, "no mark landed on the notes page"
+    # The index must reach the notes page, not only the drawing sheet.
+    assert notes_pno in index_targets, (
+        f"index rows target {sorted(index_targets)} but marks are on "
+        f"{sorted(receipt_pages)} — an overflowed row points at a page with no mark"
+    )
+    # And every page an index row points at is a page some mark actually landed on.
+    assert index_targets <= receipt_pages, (
+        f"index rows point at {sorted(index_targets - receipt_pages)}, where no "
+        f"mark was written"
+    )
+
+
+def test_reordering_the_generated_pages_kept_coverage_complete(tmp_path):
+    # The index is now inserted last, so source, appendix and notes pages all
+    # shift by the same n_index. If a stamp used the wrong offset, DA-007
+    # reconciliation would not find the mark and coverage would degrade.
+    src, findings, meta = _overflow_case(tmp_path)
+    res = annotate_pdf(src, findings, tmp_path / "M-101_reviewed.pdf", sheet_meta=meta)
+    assert res.coverage_status == "COMPLETE", (
+        f"coverage {res.coverage_status}; receipts: "
+        f"{[(r.placement.qc_id, r.status) for r in res.receipts]}"
+    )
+    assert all(r.status == "WRITTEN" for r in res.receipts)
+
+
+def test_generated_pages_pin_their_cropbox(tmp_path):
+    # /CropBox is an inheritable page-tree attribute. In a set whose /Pages node
+    # carries one — legal, and produced by some CAD exporters — a generated index
+    # page inherited the DRAWING's CropBox: measured 512x712 visible instead of
+    # 612x792, clipped right and shifted vertically.
+    from drawing_analyzer.annotate import _INDEX_PAGE_H, _INDEX_PAGE_W
+
+    src = tmp_path / "inherited.pdf"
+    doc = pymupdf.open()
+    for _ in range(2):
+        doc.new_page(width=1728, height=1188)
+    doc = pymupdf.open("pdf", doc.tobytes())
+    pages_xref = int(str(doc.xref_get_key(doc.pdf_catalog(), "Pages")[1]).split()[0])
+    doc.xref_set_key(pages_xref, "CropBox", "[100 80 1628 1108]")
+    doc.save(str(src))
+    doc.close()
+
+    # source= must match the file's name, or no finding is matched to it and no
+    # reviewed PDF is written at all.
+    f = _finding("clearance issue", status="VERIFIED", page=0, rect=(100, 120, 300, 160),
+                 quote="", source="inherited.pdf")
+    f.qc_id = "QC-001"
+    res = write_reviewed_pdfs([f], [src], tmp_path / "out")
+
+    out = pymupdf.open(str(res.reviewed_pdfs[0]))
+    try:
+        index = out[0]
+        assert "FINDINGS INDEX" in index.get_text().upper(), "page 0 is not the index"
+        assert index.rect.width == pytest.approx(_INDEX_PAGE_W), (
+            f"generated page is {index.rect.width} pt wide, not {_INDEX_PAGE_W} — "
+            f"it inherited the drawing's CropBox"
+        )
+        assert index.rect.height == pytest.approx(_INDEX_PAGE_H)
+        assert index.cropbox == index.mediabox
+    finally:
+        out.close()
+
+
+def test_component_stamps_name_the_page_they_are_actually_on(tmp_path):
+    # DA-007 reconciliation deliberately ignores the stamp's page field and uses
+    # the page the component was actually found on, so a wrong page in the stamp
+    # degrades nothing today — which is exactly why it can rot silently. It is
+    # still part of the persisted stamp format written into the artifact, so it is
+    # asserted here against the page the annotation really occupies. This is the
+    # only observable for the review-notes shift: the notes page is written before
+    # the front-inserted index and so must be offset by n_index like every other
+    # page.
+    from drawing_analyzer.annotate import _read_stamp
+
+    src, findings, meta = _overflow_case(tmp_path)
+    out = tmp_path / "M-101_reviewed.pdf"
+    res = annotate_pdf(src, findings, out, sheet_meta=meta)
+    assert res.tally.get("review_notes", 0) >= 1, "nothing overflowed; test is inert"
+
+    doc = pymupdf.open(str(out))
+    try:
+        mismatched, checked = [], 0
+        for pno in range(doc.page_count):
+            for annot in doc[pno].annots():
+                stamp = _read_stamp(doc, annot.xref)
+                if stamp is None:
+                    continue
+                checked += 1
+                _pid, comp, stamped_page = stamp
+                if stamped_page != pno:
+                    mismatched.append((comp, stamped_page, pno))
+    finally:
+        doc.close()
+
+    assert checked, "no stamped components were found at all"
+    assert not mismatched, (
+        "stamps name the wrong page (component, stamped, actual): " f"{mismatched}"
+    )
+
+
+def test_notes_page_backlink_targets_the_findings_own_sheet(tmp_path):
+    # Review feedback on this PR. Building the index LAST (item 34) moved
+    # _insert_review_notes_page ahead of the index insertion, but its back-link
+    # still added the future n_index offset — so `doc[target]` resolved to a
+    # DIFFERENT page in the document as it then stood. insert_link bakes the
+    # destination as a reference to the page object, so the front insertion shifts
+    # it along with that page and the offset must not be pre-applied.
+    #
+    # Two source sheets, because with one the wrong target lands out of range and
+    # the bounds check hides it. The finding belongs to sheet 0, so its back-link
+    # must reach sheet 0 — not sheet 1.
+    from drawing_analyzer.models import assign_qc_ids
+
+    src = _make_pdf(tmp_path / "src", pages=2)
+    words = [(float(30 + 150 * i), float(20 + 24 * j), float(130 + 150 * i),
+              float(32 + 24 * j), "TXT", 0, 0, 0)
+             for i in range(5) for j in range(22)]
+    meta = {k: {"words": words, "rows": 2, "cols": 2, "page_width_pt": 792.0,
+                "page_height_pt": 612.0, "overlap_frac": 0.08} for k in (0, 1)}
+    findings = []
+    for i in range(7):
+        f = _finding(f"expected item {i}; not found on this sheet", status="VERIFIED",
+                     page=0, rect=None, quote="")
+        f.anchor_hint = "SHEET"
+        f.anchor = Anchor(status="UNANCHORED", rect_pdf=None, method="quote_not_found")
+        findings.append(f)
+    assign_qc_ids(findings)
+
+    out = tmp_path / "M-101_reviewed.pdf"
+    res = annotate_pdf(src, findings, out, sheet_meta=meta)
+    assert res.tally.get("review_notes", 0) >= 1, "nothing overflowed; test is inert"
+
+    doc = pymupdf.open(str(out))
+    try:
+        notes_pno = next(p for p in range(doc.page_count)
+                         if "AI REVIEW NOTES" in doc[p].get_text().upper())
+        # The source sheets sit after the front index; sheet 0 is the first of them.
+        n_index = next(p for p in range(doc.page_count)
+                       if "SHEET M-101.pdf p1" in doc[p].get_text())
+        targets = [lk.get("page") for lk in doc[notes_pno].get_links()
+                   if lk.get("kind") == pymupdf.LINK_GOTO]
+    finally:
+        doc.close()
+
+    assert targets, "the notes page wrote no back-links at all"
+    assert all(t == n_index for t in targets), (
+        f"notes back-links point at {sorted(set(targets))} but the finding's own "
+        f"sheet is page {n_index} — the index offset was pre-applied"
+    )

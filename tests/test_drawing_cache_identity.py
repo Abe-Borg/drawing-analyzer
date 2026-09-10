@@ -390,3 +390,124 @@ def test_both_prompt_hashes_cover_every_shared_user_framing_string():
         edited[i] = edited[i] + " EDITED"
         assert _digest_hash(edited) != digest_mod.DIGEST_PROMPT_VERSION, shared[i]
         assert _critique_hash(edited) != critique_mod.CRITIQUE_PROMPT_VERSION, shared[i]
+
+
+# --------------------------------------------------------------------------- #
+# The render-identity SCHEME bump is the invalidation mechanism (P7 item 28)
+# --------------------------------------------------------------------------- #
+
+
+def test_render_identity_scheme_is_v4_for_the_annotation_free_text_policy(tmp_path):
+    """Item 28 changed the text-extraction POLICY, not the document.
+
+    ``_page_dependency_sha256`` hashes the annotation bytes and those bytes did
+    not move, so without a scheme bump an already-cached annotated page still
+    hits level 1 and is served a digest built from annotation-contaminated
+    ``sheet_text`` **without re-extracting the text** — a false hit, which is the
+    one failure mode the identity exists to prevent.
+
+    Without this test the bump is invisible: reverting the literal to v3 changes
+    nothing else observable, so every other cache-identity test still passes.
+    """
+    import drawing_analyzer.render as R
+
+    assert R._RENDER_IDENTITY_SCHEME == "render-identity-v4"
+
+    path = tmp_path / "M-101.pdf"
+    doc = _base_doc()
+    annot = doc[0].add_freetext_annot(
+        pymupdf.Rect(200, 300, 500, 360), "QC-014 PRIOR REVIEW MARKUP", fontsize=9
+    )
+    annot.update()
+    doc.save(str(path))
+    doc.close()
+
+    current = _identity(path)
+    assert current.startswith("render-identity-v4|")
+    # The scheme rides the key: a pre-change entry cannot be served to the new
+    # extraction policy.
+    legacy = "render-identity-v3|" + current.split("|", 1)[1]
+    assert current != legacy
+
+
+# --------------------------------------------------------------------------- #
+# A GOTO link must not collapse per-page identity to the whole document (N23)
+#
+# A link annot carries a reference to its destination PAGE. That page's /Parent
+# is not stripped the way the hashed page's own is, so the walk reached the
+# page-tree root, /Kids, and every sibling. A set carrying the internal
+# navigation hyperlinks an issued PDF normally has therefore lost per-page
+# caching entirely: re-exporting one sheet re-rendered and re-digested them all.
+# --------------------------------------------------------------------------- #
+
+
+def _linked_set(path: Path, *, link_to: int | None, tail_text: str) -> Path:
+    """A 3-page set; page 0 optionally carries a GOTO link to ``link_to``."""
+    doc = pymupdf.open()
+    for i in range(3):
+        doc.new_page(width=612, height=792).insert_text((72, 100), f"SHEET {i}")
+    doc[2].insert_text((72, 300), tail_text)
+    if link_to is not None:
+        doc[0].insert_link({
+            "kind": pymupdf.LINK_GOTO, "from": pymupdf.Rect(10, 10, 100, 30),
+            "page": link_to, "to": pymupdf.Point(72, 100), "zoom": 0,
+        })
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+def test_editing_another_page_does_not_rekey_a_linked_page(tmp_path):
+    a = _linked_set(tmp_path / "a.pdf", link_to=1, tail_text="ORIGINAL")
+    b = _linked_set(tmp_path / "b.pdf", link_to=1, tail_text="EDITED LATER")
+    # A page-local dependency hash, not the whole-source fallback — otherwise this
+    # test would pass for the wrong reason (every page sharing one identity).
+    assert "content_dependency=page:" in _identity(a), (
+        "identity fell back to the whole source"
+    )
+    assert _identity(a) == _identity(b), (
+        "page 0's identity changed because page 2 was edited — a GOTO link "
+        "collapsed per-page identity to the whole document"
+    )
+
+
+def test_page_without_links_is_still_page_local(tmp_path):
+    # The control: this already worked, and must keep working.
+    a = _linked_set(tmp_path / "a.pdf", link_to=None, tail_text="ORIGINAL")
+    b = _linked_set(tmp_path / "b.pdf", link_to=None, tail_text="EDITED LATER")
+    assert _identity(a) == _identity(b)
+
+
+def test_retargeting_the_link_still_rekeys_the_linking_page(tmp_path):
+    # The false-hit guard. Only the destination REFERENCE is hashed, not the
+    # destination's content — so retargeting must still move the key, because it
+    # rewrites this page's own annot object.
+    a = _linked_set(tmp_path / "a.pdf", link_to=1, tail_text="SAME")
+    b = _linked_set(tmp_path / "b.pdf", link_to=2, tail_text="SAME")
+    assert _identity(a) != _identity(b), (
+        "retargeting the link left page 0's identity unchanged — a false hit"
+    )
+
+
+def test_the_edited_page_itself_still_rekeys(tmp_path):
+    # The other false-hit guard: treating a page as an opaque leaf must not stop
+    # that page's OWN identity from tracking its own content.
+    a = _linked_set(tmp_path / "a.pdf", link_to=1, tail_text="ORIGINAL")
+    b = _linked_set(tmp_path / "b.pdf", link_to=1, tail_text="EDITED LATER")
+    assert _identity(a, page_index=2) != _identity(b, page_index=2)
+
+
+def test_annotation_content_on_the_page_itself_still_rekeys(tmp_path):
+    # Only /Type /Page objects are opaque. Everything else a page references —
+    # including its own annotations and their appearance streams — is still
+    # hashed, so a prior-review markup on THIS page moves its key.
+    plain = _linked_set(tmp_path / "plain.pdf", link_to=1, tail_text="SAME")
+    marked = _linked_set(tmp_path / "marked.pdf", link_to=1, tail_text="SAME")
+    doc = pymupdf.open(str(marked))
+    annot = doc[0].add_freetext_annot(
+        pymupdf.Rect(200, 400, 500, 460), "QC-014 PRIOR REVIEW MARKUP", fontsize=9
+    )
+    annot.update()
+    doc.saveIncr()
+    doc.close()
+    assert _identity(plain) != _identity(marked)

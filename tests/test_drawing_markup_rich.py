@@ -1306,3 +1306,327 @@ def test_citation_pause_turn_resumes_keep_every_earlier_turn():
     assert lengths == [1, 2, 3], lengths
     assert client.messages.seen[-1][0]["role"] == "user"
     assert all(m["role"] == "assistant" for m in client.messages.seen[-1][1:])
+
+
+def test_overflow_review_note_contents_stays_truncated(tmp_path):
+    # The third FreeText site (P7 item 33): the per-source AI Review Notes page.
+    # Its callouts are capped at 400 chars for display, and /Contents IS the
+    # displayed text for a plain FreeText, so set_info must be handed the capped
+    # string too. Reached only by forcing an overflow, which the on-sheet margin
+    # callout tests never do — an untested twin of the same defect.
+    long_text = (
+        "Sprinkler head spacing exceeds the maximum permitted for the hazard "
+        "classification shown on this sheet, and the branch line drain appears "
+        "undersized relative to the main it serves; verify against the hydraulic "
+        "calculations and the manufacturer's listed spacing for this head model "
+        "before issuing for construction, and confirm the remote area selection."
+    )
+    src = _pdf(tmp_path)
+    words = [_w(30 + 150 * i, 20 + 24 * j, width=100, height=12)
+             for i in range(5) for j in range(22)]
+    absences = [
+        _f(f"{long_text} (item {i})", source="M-101.pdf", hint="SHEET", quote="")
+        for i in range(7)
+    ]
+    assign_qc_ids(absences)
+    out = tmp_path / "M-101_reviewed.pdf"
+    res = annotate_pdf(src, absences, out, sheet_meta=_meta(words))
+    assert res.tally.get("review_notes", 0) >= 1, "nothing overflowed to the notes page"
+
+    doc = pymupdf.open(str(out))
+    try:
+        notes_pno = next(p for p in range(doc.page_count)
+                         if "AI REVIEW NOTES" in doc[p].get_text().upper())
+        contents = []
+        for annot in doc[notes_pno].annots():
+            if annot.type[1] == "FreeText":
+                raw = doc.xref_get_key(annot.xref, "Contents")
+                if raw and len(raw) > 1:
+                    contents.append(str(raw[1]))
+    finally:
+        doc.close()
+
+    assert contents, "the notes page carries no FreeText callout"
+    assert any(c.endswith("...") for c in contents), (
+        "nothing was truncated, so this test is not exercising the cap"
+    )
+    for c in contents:
+        assert len(c) <= 600, (
+            f"/Contents is {len(c)} chars against a 400-char display cap — "
+            f"set_info overwrote the truncated display text with the full string"
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Occupancy sampling sees thin vector drawing content (P7 item 29)
+#
+# The shipped sampler rendered at 0.12 and thresholded the fraction of DARK
+# PIXELS in the box. At that scale a 0.5 pt pipe line antialiases to ~223 —
+# lighter than the 210 ink threshold — so a single sprinkler main across a band
+# scored 0.0000, the band was declared clear, and the callout was stamped over
+# the piping.
+# --------------------------------------------------------------------------- #
+
+_E_SIZE = (1728.0, 1188.0)
+_OCC_BAND = (180.0, 450.0, 1520.0, 560.0)
+
+
+def _occ_page(draw):
+    """An E-size page carrying ``draw``, round-tripped through a save."""
+    doc = pymupdf.open()
+    page = doc.new_page(width=_E_SIZE[0], height=_E_SIZE[1])
+    draw(page)
+    reopened = pymupdf.open("pdf", doc.tobytes())
+    doc.close()
+    return reopened, reopened[0]
+
+
+def _is_occupied(draw, **kw):
+    from drawing_analyzer.annotate import _page_occupancy
+
+    doc, page = _occ_page(draw)
+    try:
+        return _page_occupancy(page, **kw)(_OCC_BAND)
+    finally:
+        doc.close()
+
+
+_OCC_CONTENT = {
+    # label: (draw, must the band be treated as occupied?)
+    "blank band": (lambda p: None, False),
+    "faint grey wash": (
+        lambda p: p.draw_rect(pymupdf.Rect(*_OCC_BAND), color=None, fill=(0.93,) * 3), False),
+    "scan speckle": (None, False),          # filled in below (needs a seeded RNG)
+    "one 0.5pt pipe line": (
+        lambda p: p.draw_line((200, 500), (1500, 500), width=0.5), True),
+    "one 1pt pipe line": (
+        lambda p: p.draw_line((200, 500), (1500, 500), width=1.0), True),
+    "one 0.5pt diagonal": (
+        lambda p: p.draw_line((200, 460), (1500, 555), width=0.5), True),
+    "three 0.5pt branch lines": (
+        lambda p: [p.draw_line((200, 470 + 20 * i), (1500, 470 + 20 * i), width=0.5)
+                   for i in range(3)], True),
+    "ten sprinkler head symbols": (
+        lambda p: [p.draw_circle((300 + 120 * i, 500), 6, width=0.5) for i in range(10)], True),
+    "160 hatch lines": (
+        lambda p: [p.draw_line((200 + 8 * i, 460), (200 + 8 * i, 540), width=0.4)
+                   for i in range(160)], True),
+    "solid filled block": (
+        lambda p: p.draw_rect(pymupdf.Rect(200, 460, 1500, 540), fill=(0, 0, 0)), True),
+    # A 300 pt run scores 0.0162: above the 0.005 floor, below the shipped 0.02.
+    # It is what makes the threshold load-bearing rather than incidental.
+    "short 300pt 0.5pt run": (
+        lambda p: p.draw_line((700, 500), (1000, 500), width=0.5), True),
+}
+
+
+def _speckle(page, n=400, seed=7):
+    import random
+    rng = random.Random(seed)
+    for _ in range(n):
+        x = rng.uniform(_OCC_BAND[0], _OCC_BAND[2])
+        y = rng.uniform(_OCC_BAND[1], _OCC_BAND[3])
+        page.draw_line((x, y), (x + 0.3, y + 0.3), width=0.3)
+
+
+_OCC_CONTENT["scan speckle"] = (_speckle, False)
+
+
+def test_occupancy_sees_every_kind_of_drawing_content():
+    wrong = []
+    for label, (draw, expected) in _OCC_CONTENT.items():
+        if _is_occupied(draw) is not expected:
+            wrong.append(label)
+    assert not wrong, (
+        f"occupancy verdict wrong for: {wrong} — a callout would be stamped over "
+        f"drawing content, or a clear band refused"
+    )
+
+
+def test_a_single_thin_pipe_line_blocks_a_callout():
+    # The specific reproduction, on its own so the failure names it directly.
+    assert _is_occupied(lambda p: p.draw_line((200, 500), (1500, 500), width=0.5)), (
+        "a 0.5pt sprinkler main across the band reads as clear — the callout "
+        "would be stamped over the piping"
+    )
+
+
+def test_blank_and_noisy_bands_are_not_falsely_occupied():
+    # The other direction matters as much: a sampler that calls everything
+    # occupied sends every callout to the overflow page.
+    assert not _is_occupied(lambda p: None)
+    assert not _is_occupied(_speckle)
+
+
+def test_raising_the_scale_alone_does_not_fix_thin_content():
+    # The counter-intuitive measurement behind the design, pinned so nobody
+    # "fixes" this by bumping the scale: with a PIXEL-fraction metric the verdict
+    # is non-monotonic in scale, because a thin line's pixel count grows linearly
+    # while the box's grows quadratically. Here the shipped metric is reproduced
+    # directly and shown to disagree with itself across scales.
+    def pixel_fraction(page, scale, dark_frac=0.02, dark_level=210):
+        pix = page.get_pixmap(matrix=pymupdf.Matrix(scale, scale),
+                              colorspace=pymupdf.csGRAY, alpha=False)
+        w, h, sm = pix.width, pix.height, pix.samples
+        x0, y0 = max(0, int(_OCC_BAND[0] * scale)), max(0, int(_OCC_BAND[1] * scale))
+        x1, y1 = min(w, int(_OCC_BAND[2] * scale)), min(h, int(_OCC_BAND[3] * scale))
+        total = dark = 0
+        for yy in range(y0, y1):
+            base = yy * w
+            for xx in range(x0, x1):
+                total += 1
+                if sm[base + xx] < dark_level:
+                    dark += 1
+        return total > 0 and dark / total >= dark_frac
+
+    draw = lambda p: [p.draw_line((200, 470 + 20 * i), (1500, 470 + 20 * i), width=0.5)
+                      for i in range(3)]
+    verdicts = []
+    for scale in (0.12, 0.25, 0.5):
+        doc, page = _occ_page(draw)
+        try:
+            verdicts.append(pixel_fraction(page, scale))
+        finally:
+            doc.close()
+    assert len(set(verdicts)) > 1, (
+        "the old pixel-fraction metric was expected to disagree with itself across "
+        "scales; if PyMuPDF's rasterizer changed, re-derive the sampler's design"
+    )
+    # The shipped sampler is stable and correct on the same content.
+    assert _is_occupied(draw)
+
+
+# NOT TESTED, deliberately: the min-filter cell is sized in POINTS rather than
+# pixels, which is the correct expression of "a cell is a fixed distance on the
+# drawing", but it has **no observable** in this harness. Below 1:1 a 0.5 pt line
+# antialiases away entirely (measured 0.0000 inked cells at scale 0.5 for runs of
+# 120, 200, 400 and 1300 pt, with cells in either unit), and for content thick
+# enough to survive a reduced scale the verdict is the same both ways. Rather than
+# keep a test that passes with the behaviour reverted, the gap is recorded here.
+
+
+# --------------------------------------------------------------------------- #
+# Clear bands: the pad, and column awareness (N24)
+# --------------------------------------------------------------------------- #
+
+_BAND_W, _BAND_H = 1728.0, 1188.0
+
+
+def _bw(x, y, text="TXT", width=60, height=12):
+    return (float(x), float(y), float(x + width), float(y + height), text, 0, 0, 0)
+
+
+def _title_block_words():
+    """A right-hand title block spanning almost the full sheet height."""
+    return [_bw(1500, 60 + 22 * i, "TITLE") for i in range(45)]
+
+
+def test_returned_bands_are_tall_enough_to_actually_hold_a_callout():
+    # min_height used to gate the RAW gap, with the breathing pad taken off
+    # afterwards, so a 58 pt gap came back as a 50 pt band against a 54 pt
+    # callout. _pack_callouts' guard is y + _CALLOUT_H <= band_bottom, so such a
+    # band placed nothing and every finding that would have gone there overflowed
+    # to the review-notes page.
+    from drawing_analyzer.annotate import _CALLOUT_H, _clear_bands
+
+    for gap in (56, 58, 60, 62, 70, 120):
+        words = [_bw(100, 300), _bw(100, 300 + 12 + gap)]
+        bands = _clear_bands(words, _BAND_W, _BAND_H)
+        for band in bands:
+            assert band[3] - band[1] >= _CALLOUT_H, (
+                f"gap={gap}: returned a {band[3] - band[1]:.1f} pt band that cannot "
+                f"hold a {_CALLOUT_H} pt callout"
+            )
+
+
+def test_bands_are_found_beside_a_title_block():
+    # A band used to be a y-range free of words at ANY x, which a real drawing
+    # almost never offers: a right-hand title block spans nearly the full height,
+    # so exactly one full-width band was found and the whole clear drawing area
+    # beside it was unusable.
+    from drawing_analyzer.annotate import _CALLOUT_H, _CALLOUT_W, _clear_bands
+
+    words = _title_block_words() + [_bw(200, 900, "NOTE")]
+    bands = _clear_bands(words, _BAND_W, _BAND_H)
+    # Some band must sit in the clear area to the LEFT of the title block and
+    # genuinely OVERLAP the y-range the title block occupies (60..1040) — that is
+    # the area the full-width rule could never reach. Overlap, not containment:
+    # max_height caps a band at 170 pt, so one legitimately starts above y=60.
+    #
+    # The overlap is required to be at least a callout tall. A band merely
+    # *touching* the title block's edge (one starts at y=1044, four points below
+    # its last row) satisfies a loose bounds test while proving nothing, and did:
+    # this assertion passed with the column filter disabled until it was tightened.
+    tb_top, tb_bottom = 60.0, 1040.0
+    beside = [
+        b for b in bands
+        if b[2] <= 1500 and (b[2] - b[0]) >= _CALLOUT_W
+        and min(b[3], tb_bottom) - max(b[1], tb_top) >= _CALLOUT_H
+    ]
+    assert beside, (
+        f"no usable band beside the title block; bands found: "
+        f"{[(round(b[0]), round(b[1]), round(b[2]), round(b[3])) for b in bands]}"
+    )
+
+
+def test_a_box_inside_any_band_never_overlaps_a_word():
+    # The invariant _pack_callouts depends on to skip its per-candidate word scan.
+    # Column-aware bands must not weaken it: a word that misses the column in x
+    # cannot overlap a box inside it, and one that hits it was excluded from the
+    # gap. Checked over randomized layouts, half of them carrying a title block.
+    import random
+
+    from drawing_analyzer.annotate import _CALLOUT_H, _CALLOUT_W, _clear_bands
+
+    rng = random.Random(11)
+    for trial in range(40):
+        words = [_bw(rng.uniform(0, _BAND_W - 60), rng.uniform(0, _BAND_H - 12))
+                 for _ in range(rng.randint(0, 80))]
+        if trial % 2:
+            words += _title_block_words()
+        for bx0, by0, bx1, by1 in _clear_bands(words, _BAND_W, _BAND_H):
+            y = by0
+            while y + _CALLOUT_H <= by1 + 0.5:
+                x = bx0
+                while x + _CALLOUT_W <= bx1 + 0.5:
+                    box = (x, y, x + _CALLOUT_W, y + _CALLOUT_H)
+                    for wd in words:
+                        assert not (box[0] < wd[2] and box[2] > wd[0]
+                                    and box[1] < wd[3] and box[3] > wd[1]), (
+                            f"trial {trial}: box {box} overlaps word {wd[:4]}"
+                        )
+                    x += _CALLOUT_W / 4.0
+                y += _CALLOUT_H + 8.0
+
+
+def test_full_width_bands_are_still_preferred():
+    # Column bands are additive: on a sheet whose clear strip spans the full
+    # width, the widest band must still be the full-width one, so the previous
+    # placement behaviour is preserved rather than replaced.
+    from drawing_analyzer.annotate import _clear_bands
+
+    words = [_bw(100, 100), _bw(100, 1000)]      # one clear strip across the middle
+    bands = _clear_bands(words, _BAND_W, _BAND_H)
+    assert bands
+    widest = max(b[2] - b[0] for b in bands)
+    assert widest >= 0.9 * _BAND_W, (
+        f"widest band is only {widest:.0f} pt on a fully clear sheet"
+    )
+    # And the tallest band comes first (packing order), as before.
+    heights = [b[3] - b[1] for b in bands]
+    assert heights[0] == max(heights)
+
+
+def test_band_order_is_deterministic():
+    # I-7: same words in, same band order out — including across shuffles of the
+    # input, since column bands are generated per column.
+    import random
+
+    from drawing_analyzer.annotate import _clear_bands
+
+    words = _title_block_words() + [_bw(200, 400), _bw(900, 700)]
+    first = _clear_bands(words, _BAND_W, _BAND_H)
+    for seed in range(5):
+        shuffled = list(words)
+        random.Random(seed).shuffle(shuffled)
+        assert _clear_bands(shuffled, _BAND_W, _BAND_H) == first

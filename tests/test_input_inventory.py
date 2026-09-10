@@ -283,3 +283,94 @@ def test_pipeline_blocks_early_on_insufficient_work_disk(tmp_path, monkeypatch):
     )
     assert ctx.sheet_count == 0
     assert any("insufficient free space" in e for e in ctx.errors)
+
+
+# --------------------------------------------------------------------------- #
+# A file PyMuPDF can open is not necessarily a PDF (P7 item 31)
+#
+# PyMuPDF also opens images, XPS, EPUB and CBZ. A genuine PNG or EPUB renamed
+# ".pdf" was ACCEPTED and pushed through the whole pipeline, which assumes a
+# drawing set throughout. A *text* file renamed ".pdf" was already rejected on
+# open, which is why the gap looked covered.
+# --------------------------------------------------------------------------- #
+
+
+def _png_named_pdf(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc = pymupdf.open()
+    page = doc.new_page(width=240, height=180)
+    page.insert_text((20, 100), "SCANNED SHEET")
+    path.write_bytes(page.get_pixmap().tobytes("png"))
+    doc.close()
+    return path
+
+
+def _epub_named_pdf(path: Path) -> Path:
+    import zipfile
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("mimetype", "application/epub+zip")
+        z.writestr(
+            "META-INF/container.xml",
+            '<?xml version="1.0"?><container version="1.0" '
+            'xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles>'
+            '<rootfile full-path="c.opf" '
+            'media-type="application/oebps-package+xml"/></rootfiles></container>',
+        )
+        z.writestr(
+            "c.opf",
+            '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" '
+            'version="2.0"><metadata/><manifest><item id="i" href="p.xhtml" '
+            'media-type="application/xhtml+xml"/></manifest><spine>'
+            '<itemref idref="i"/></spine></package>',
+        )
+        z.writestr("p.xhtml", "<html><body><p>not a drawing set</p></body></html>")
+    return path
+
+
+def test_image_renamed_pdf_is_rejected(tmp_path):
+    (doc,) = inspect_inputs([_png_named_pdf(tmp_path / "scan.pdf")]).documents
+    assert doc.status == UNREADABLE
+    assert "not a pdf" in doc.error.lower()
+    assert doc.page_count == 0
+
+
+def test_epub_renamed_pdf_is_rejected(tmp_path):
+    (doc,) = inspect_inputs([_epub_named_pdf(tmp_path / "book.pdf")]).documents
+    assert doc.status == UNREADABLE
+    assert "not a pdf" in doc.error.lower()
+
+
+def test_non_pdf_rejection_names_what_was_detected(tmp_path):
+    # Telling the user "opened as Image" is what makes this actionable: they
+    # dropped a PNG. The detected format is a short PyMuPDF constant, never a
+    # path, so it is safe in a reason string that reaches the report.
+    (doc,) = inspect_inputs([_png_named_pdf(tmp_path / "scan.pdf")]).documents
+    assert "Image" in doc.error
+    assert str(tmp_path) not in doc.error
+
+
+def test_non_pdf_rejects_individually_beside_a_good_set(tmp_path):
+    # I-3 in spirit: one bad input degrades visibly without taking the set down.
+    good = _pdf(tmp_path / "M-101.pdf")
+    bad = _png_named_pdf(tmp_path / "scan.pdf")
+    inv = inspect_inputs([bad, good])
+    by_name = {d.display_name: d for d in inv.documents}
+    assert by_name["scan.pdf"].status == UNREADABLE
+    assert by_name["M-101.pdf"].status == ACCEPTED
+    assert inv.accepted_paths == [good]
+
+
+def test_a_real_pdf_is_still_accepted(tmp_path):
+    # The guard must not reject the thing it is protecting.
+    (doc,) = inspect_inputs([_pdf(tmp_path / "M-101.pdf", pages=3)]).documents
+    assert doc.status == ACCEPTED and doc.page_count == 3
+
+
+def test_encrypted_pdf_is_still_encrypted_not_not_a_pdf(tmp_path):
+    # Ordering guard: the is_pdf test runs first, so it must not swallow the
+    # distinct ENCRYPTED classification for a genuine password-protected PDF.
+    (doc,) = inspect_inputs([_encrypted(tmp_path / "locked.pdf")]).documents
+    assert doc.status == ENCRYPTED
+    assert "password" in doc.error.lower()
