@@ -1068,3 +1068,202 @@ def test_fit_text_measures_width_not_characters():
     assert _fit_text("FP-101", 238.0, fontsize=8) == "FP-101"
     # A column too narrow for even the ellipsis yields nothing, never an overflow.
     assert _fit_text(wide, 1.0, fontsize=8) == ""
+
+
+# --------------------------------------------------------------------------- #
+# Placement labels, index link targets, generated-page CropBox (P7 item 34)
+# --------------------------------------------------------------------------- #
+
+
+def test_quote_less_finding_is_not_labelled_quote_not_found():
+    # [QUOTE NOT FOUND] is the hallucination signal: the quote SHOULD have been
+    # findable and was not. A graphics-only finding never offered a quote, so
+    # stamping it with that signal spends the reviewer's trust on a finding that
+    # did nothing wrong — and made it indistinguishable from a fabricated quote.
+    from drawing_analyzer.annotate import _annot_content, _placement_kind
+
+    graphics_only = _finding("Sprinkler omitted under the duct", status="UNCERTAIN",
+                             rect=None, quote="")
+    graphics_only.anchor = Anchor(status="UNANCHORED", rect_pdf=None,
+                                  method="quote_not_found")
+    assert _placement_kind(graphics_only) == "NO_QUOTE"
+    first = _annot_content(graphics_only, unverified=True, rejected=False,
+                           place=_placement_kind(graphics_only)).splitlines()[0]
+    assert "[NO QUOTE TO CHECK]" in first
+    assert "[QUOTE NOT FOUND]" not in first
+
+    # A real quote that matched nothing still gets the hallucination signal.
+    fabricated = _finding("Sprinkler omitted under the duct", status="UNCERTAIN",
+                          rect=None, quote="PROVIDE 6 INCH DRAIN")
+    fabricated.anchor = Anchor(status="UNANCHORED", rect_pdf=None,
+                               method="quote_not_found")
+    assert _placement_kind(fabricated) == "UNANCHORED"
+    first = _annot_content(fabricated, unverified=True, rejected=False,
+                           place=_placement_kind(fabricated)).splitlines()[0]
+    assert "[QUOTE NOT FOUND]" in first
+    assert "[NO QUOTE TO CHECK]" not in first
+
+    # A sheet-wide finding keeps its own label rather than either of those.
+    sheet_wide = _finding("Sheet lacks a north arrow", status="UNCERTAIN",
+                          rect=None, quote="")
+    sheet_wide.anchor_hint = "SHEET"
+    sheet_wide.anchor = Anchor(status="UNANCHORED", rect_pdf=None,
+                               method="quote_not_found")
+    assert _placement_kind(sheet_wide) == "SHEET"
+
+
+def test_evidence_tag_is_not_stacked_or_repeated():
+    # The evidence tag must not duplicate a prefix the placement already carries,
+    # nor stack onto the contradictory hallucination signal.
+    from drawing_analyzer.annotate import _annot_content, _placement_kind
+    from drawing_analyzer.models import EVIDENCE_UNAVAILABLE
+
+    f = _finding("Sprinkler omitted", status="UNCERTAIN", rect=None, quote="")
+    f.anchor = Anchor(status="UNANCHORED", rect_pdf=None, method="quote_not_found")
+    f.evidence_state = EVIDENCE_UNAVAILABLE
+    first = _annot_content(f, unverified=True, rejected=False,
+                           place=_placement_kind(f)).splitlines()[0]
+    assert first.count("[NO QUOTE TO CHECK]") == 1
+
+
+def _overflow_case(tmp_path):
+    """A sheet dense enough that some callouts must overflow to the notes page."""
+    from drawing_analyzer.models import assign_qc_ids
+
+    src = _make_pdf(tmp_path / "src", pages=1)
+    words = [(float(30 + 150 * i), float(20 + 24 * j), float(130 + 150 * i),
+              float(32 + 24 * j), "TXT", 0, 0, 0)
+             for i in range(5) for j in range(22)]
+    meta = {0: {"words": words, "rows": 2, "cols": 2, "page_width_pt": 792.0,
+                "page_height_pt": 612.0, "overlap_frac": 0.08}}
+    findings = []
+    for i in range(7):
+        f = _finding(f"expected item {i}; not found on this sheet", status="VERIFIED",
+                     page=0, rect=None, quote="")
+        f.anchor_hint = "SHEET"
+        f.anchor = Anchor(status="UNANCHORED", rect_pdf=None, method="quote_not_found")
+        findings.append(f)
+    assign_qc_ids(findings)
+    return src, findings, meta
+
+
+def test_index_row_targets_the_page_its_mark_landed_on(tmp_path):
+    # A callout that overflowed to the AI Review Notes page has NO mark on its
+    # sheet, so an index row pointing at the sheet sent the reviewer to a page
+    # with nothing on it — while the bookmark outline and the receipt both
+    # correctly named the notes page. All three must agree.
+    src, findings, meta = _overflow_case(tmp_path)
+    out = tmp_path / "M-101_reviewed.pdf"
+    res = annotate_pdf(src, findings, out, sheet_meta=meta)
+    assert res.tally.get("review_notes", 0) >= 1, "nothing overflowed; test is inert"
+    assert res.tally.get("margin", 0) >= 1, "nothing stayed on the sheet; test is inert"
+
+    doc = pymupdf.open(str(out))
+    try:
+        notes_pno = next(p for p in range(doc.page_count)
+                         if "AI REVIEW NOTES" in doc[p].get_text().upper())
+        index_targets = {lk.get("page") for lk in doc[0].get_links()
+                         if lk.get("kind") == pymupdf.LINK_GOTO}
+    finally:
+        doc.close()
+
+    receipt_pages = {r.output_page_index for r in res.receipts if r.status == "WRITTEN"}
+    assert notes_pno in receipt_pages, "no mark landed on the notes page"
+    # The index must reach the notes page, not only the drawing sheet.
+    assert notes_pno in index_targets, (
+        f"index rows target {sorted(index_targets)} but marks are on "
+        f"{sorted(receipt_pages)} — an overflowed row points at a page with no mark"
+    )
+    # And every page an index row points at is a page some mark actually landed on.
+    assert index_targets <= receipt_pages, (
+        f"index rows point at {sorted(index_targets - receipt_pages)}, where no "
+        f"mark was written"
+    )
+
+
+def test_reordering_the_generated_pages_kept_coverage_complete(tmp_path):
+    # The index is now inserted last, so source, appendix and notes pages all
+    # shift by the same n_index. If a stamp used the wrong offset, DA-007
+    # reconciliation would not find the mark and coverage would degrade.
+    src, findings, meta = _overflow_case(tmp_path)
+    res = annotate_pdf(src, findings, tmp_path / "M-101_reviewed.pdf", sheet_meta=meta)
+    assert res.coverage_status == "COMPLETE", (
+        f"coverage {res.coverage_status}; receipts: "
+        f"{[(r.placement.qc_id, r.status) for r in res.receipts]}"
+    )
+    assert all(r.status == "WRITTEN" for r in res.receipts)
+
+
+def test_generated_pages_pin_their_cropbox(tmp_path):
+    # /CropBox is an inheritable page-tree attribute. In a set whose /Pages node
+    # carries one — legal, and produced by some CAD exporters — a generated index
+    # page inherited the DRAWING's CropBox: measured 512x712 visible instead of
+    # 612x792, clipped right and shifted vertically.
+    from drawing_analyzer.annotate import _INDEX_PAGE_H, _INDEX_PAGE_W
+
+    src = tmp_path / "inherited.pdf"
+    doc = pymupdf.open()
+    for _ in range(2):
+        doc.new_page(width=1728, height=1188)
+    doc = pymupdf.open("pdf", doc.tobytes())
+    pages_xref = int(str(doc.xref_get_key(doc.pdf_catalog(), "Pages")[1]).split()[0])
+    doc.xref_set_key(pages_xref, "CropBox", "[100 80 1628 1108]")
+    doc.save(str(src))
+    doc.close()
+
+    # source= must match the file's name, or no finding is matched to it and no
+    # reviewed PDF is written at all.
+    f = _finding("clearance issue", status="VERIFIED", page=0, rect=(100, 120, 300, 160),
+                 quote="", source="inherited.pdf")
+    f.qc_id = "QC-001"
+    res = write_reviewed_pdfs([f], [src], tmp_path / "out")
+
+    out = pymupdf.open(str(res.reviewed_pdfs[0]))
+    try:
+        index = out[0]
+        assert "FINDINGS INDEX" in index.get_text().upper(), "page 0 is not the index"
+        assert index.rect.width == pytest.approx(_INDEX_PAGE_W), (
+            f"generated page is {index.rect.width} pt wide, not {_INDEX_PAGE_W} — "
+            f"it inherited the drawing's CropBox"
+        )
+        assert index.rect.height == pytest.approx(_INDEX_PAGE_H)
+        assert index.cropbox == index.mediabox
+    finally:
+        out.close()
+
+
+def test_component_stamps_name_the_page_they_are_actually_on(tmp_path):
+    # DA-007 reconciliation deliberately ignores the stamp's page field and uses
+    # the page the component was actually found on, so a wrong page in the stamp
+    # degrades nothing today — which is exactly why it can rot silently. It is
+    # still part of the persisted stamp format written into the artifact, so it is
+    # asserted here against the page the annotation really occupies. This is the
+    # only observable for the review-notes shift: the notes page is written before
+    # the front-inserted index and so must be offset by n_index like every other
+    # page.
+    from drawing_analyzer.annotate import _read_stamp
+
+    src, findings, meta = _overflow_case(tmp_path)
+    out = tmp_path / "M-101_reviewed.pdf"
+    res = annotate_pdf(src, findings, out, sheet_meta=meta)
+    assert res.tally.get("review_notes", 0) >= 1, "nothing overflowed; test is inert"
+
+    doc = pymupdf.open(str(out))
+    try:
+        mismatched, checked = [], 0
+        for pno in range(doc.page_count):
+            for annot in doc[pno].annots():
+                stamp = _read_stamp(doc, annot.xref)
+                if stamp is None:
+                    continue
+                checked += 1
+                _pid, comp, stamped_page = stamp
+                if stamped_page != pno:
+                    mismatched.append((comp, stamped_page, pno))
+    finally:
+        doc.close()
+
+    assert checked, "no stamped components were found at all"
+    assert not mismatched, (
+        "stamps name the wrong page (component, stamped, actual): " f"{mismatched}"
+    )

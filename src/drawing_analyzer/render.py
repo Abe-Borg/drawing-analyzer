@@ -174,8 +174,8 @@ def _classify_input(path: Path) -> tuple[str, int, str]:
     """Open one PDF and classify it: ``(status, page_count, sanitized_error)``.
 
     The single PyMuPDF-touching step of the inventory (I-5), and deliberately
-    **file-level**: it distinguishes encrypted (password-required) from
-    plain-corrupt from zero-page, and reports the page count. A *single* bad or
+    **file-level**: it distinguishes not-a-PDF from encrypted (password-required)
+    from plain-corrupt from zero-page, and reports the page count. A *single* bad or
     pathological page does **not** reject the whole file — that is handled
     per-page in :func:`iter_rendered_sheets` (§10.5), which also dimension-checks
     each page *before* rasterizing it so a pathological box fails visibly
@@ -186,6 +186,21 @@ def _classify_input(path: Path) -> tuple[str, int, str]:
     except Exception as exc:  # noqa: BLE001 - a bad file is data, not a crash
         return UNREADABLE, 0, _sanitize_open_error(exc)
     try:
+        # A file PyMuPDF can open is not necessarily a PDF (P7 item 31). It also
+        # opens images, XPS, EPUB and CBZ, and a genuine PNG or EPUB renamed
+        # ``.pdf`` was ACCEPTED and pushed through the whole pipeline — while a
+        # *text* file renamed ``.pdf`` was already rejected on open, which is why
+        # this looked covered. Every downstream stage assumes a drawing set, and
+        # UNREADABLE already means "not a PDF" by its own definition, so this
+        # needs no new status. Checked before the password test: a non-PDF cannot
+        # be an encrypted PDF.
+        if not bool(getattr(doc, "is_pdf", True)):
+            meta = getattr(doc, "metadata", None) or {}
+            detected = str(meta.get("format") or "").strip()[:40]
+            reason = "not a PDF"
+            if detected and detected.upper() != "PDF":
+                reason = f"not a PDF (opened as {detected})"
+            return UNREADABLE, 0, reason
         # PyMuPDF exposes password state as needs_pass / needsPass; a doc that
         # still needs a password after a blank authenticate is encrypted.
         needs_pass = bool(getattr(doc, "needs_pass", False) or getattr(doc, "needsPass", False))

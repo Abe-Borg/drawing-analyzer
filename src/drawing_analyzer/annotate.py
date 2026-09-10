@@ -141,7 +141,16 @@ _REJECTED_COLOR = (0.45, 0.45, 0.45)
 # hallucination signal) plus a full plain sentence at the end of the popup.
 # ASCII only — the same strings must be safe on Base-14 ``insert_text`` pages.
 _TRUST_PREFIX = {"REJECTED": "[REJECTED] ", "UNVERIFIED": "[CHECK] "}
-_PLACE_PREFIX = {"SHEET": "[SHEET-WIDE]", "UNANCHORED": "[QUOTE NOT FOUND]"}
+#: ``NO_QUOTE`` is distinct from ``UNANCHORED`` on purpose (P7 item 34):
+#: ``[QUOTE NOT FOUND]`` means the quote SHOULD have been findable and was not —
+#: the hallucination signal — while a graphics-only finding never offered a quote
+#: to find, and labelling it with the hallucination signal spends the reviewer's
+#: trust on a finding that did nothing wrong.
+_PLACE_PREFIX = {
+    "SHEET": "[SHEET-WIDE]",
+    "UNANCHORED": "[QUOTE NOT FOUND]",
+    "NO_QUOTE": "[NO QUOTE TO CHECK]",
+}
 #: WP-03B §8.3. Distinct from ``[QUOTE NOT FOUND]``, which means the quote
 #: SHOULD have been findable and was not — the hallucination signal. These mean
 #: there was nothing to search, or nothing to search *for*, so the reviewer's
@@ -697,9 +706,26 @@ def _fit_text(
 
 
 def _placement_kind(finding: Finding) -> str:
-    """The margin-callout placement key: ``"SHEET"`` / ``"UNANCHORED"`` / ``""``."""
+    """The margin-callout **display prefix** key (a ``_PLACE_PREFIX`` key).
+
+    ``"SHEET"`` / ``"NO_QUOTE"`` / ``"UNANCHORED"``. Unrelated to
+    :data:`~drawing_analyzer.models.PLACEMENT_KINDS` and to
+    ``MarkupPlacement.expected``, despite the name.
+
+    A finding that carries **no quote** returns ``"NO_QUOTE"``, not
+    ``"UNANCHORED"`` (P7 item 34). Every rect-less finding used to be stamped
+    ``[QUOTE NOT FOUND]``, which is the hallucination signal, so a graphics-only
+    finding — one the model reported off the drawing itself, with nothing to
+    quote — was indistinguishable from a fabricated quote that matched nothing.
+    Those are opposite messages to a reviewer, and the vocabulary for the honest
+    one already existed (:data:`_EVIDENCE_PREFIX`) but was unreachable here:
+    ``_annot_content`` suppressed the evidence tag on exactly the branch whose
+    prefix was ``[QUOTE NOT FOUND]``.
+    """
     if getattr(finding, "anchor_hint", "") == "SHEET":
         return "SHEET"
+    if not str(getattr(finding, "source_quote", "") or "").strip():
+        return "NO_QUOTE"
     return "UNANCHORED"
 
 
@@ -819,7 +845,10 @@ def _annot_content(
     )
     prefix = _PLACE_PREFIX.get(place, "")
     evidence_tag = _EVIDENCE_PREFIX.get(reduced_trust_reason(finding), "")
-    if evidence_tag and prefix != _PLACE_PREFIX["UNANCHORED"]:
+    # Never stack the evidence tag on the hallucination signal (they contradict
+    # each other), and never repeat a tag the placement prefix already carries —
+    # a quote-less finding now reaches [NO QUOTE TO CHECK] through `place`.
+    if evidence_tag and prefix != _PLACE_PREFIX["UNANCHORED"] and evidence_tag != prefix:
         prefix = f"{evidence_tag} {prefix}".strip()
     placement = f"{prefix} " if prefix else ""
     return f"{trust}{placement}{content}"
@@ -1485,6 +1514,60 @@ def _index_groups(
     return _order(inked), _order(rejected), _order(gated)
 
 
+def _new_generated_page(doc: "pymupdf.Document", *, pno: int | None = None) -> "pymupdf.Page":
+    """A fresh analyzer-owned page at the standard index/notes size.
+
+    Pins an explicit ``CropBox`` equal to the page's own ``MediaBox`` (P7
+    item 34). ``/CropBox`` is an **inheritable** page-tree attribute, so in a set
+    whose ``/Pages`` node carries one -- legal, and produced by some CAD exporters
+    -- a generated page inherits the *drawing's* CropBox. Measured on an E-size
+    source cropped to ``[100 80 1628 1108]``: a new 612x792 page came back with
+    ``cropbox=[100, -316, 1628, 712]`` and a visible ``rect`` of **512x712**, so
+    the index table was clipped on the right and shifted vertically -- and the
+    column widths item 32 fits against are computed for the full 612. Setting the
+    CropBox explicitly makes the page mean what it says regardless of the source's
+    page tree. (``/Rotate`` is inheritable too, but PyMuPDF writes it explicitly
+    on a new page, so it does not need pinning -- verified, not assumed.)
+    """
+    page = (
+        doc.new_page(width=_INDEX_PAGE_W, height=_INDEX_PAGE_H) if pno is None
+        else doc.new_page(pno=pno, width=_INDEX_PAGE_W, height=_INDEX_PAGE_H)
+    )
+    try:
+        page.set_cropbox(page.mediabox)
+    except Exception:  # noqa: BLE001 - a page that will not take one is still usable
+        _log.warning("could not pin the CropBox on a generated page")
+    return page
+
+
+def _index_rows(inked: list, rejected: list, gated: list) -> "list[tuple[str, Any, bool]]":
+    """The uniform index row stream, shared by the page count and the writer.
+
+    ``("heading", label, False)`` rows carry no link; ``index_only`` marks the
+    rows whose sole artifact is this index row (so reconciliation must find them).
+    One builder, so the page count cannot disagree with what is written (P7
+    item 34: the count has to be known *before* any page is inserted, because
+    inserting at the front renumbers every link target).
+    """
+    rows: list[tuple[str, Any, bool]] = [("entry", fp, False) for fp in inked]
+    if rejected:
+        rows.append(("heading", f"Rejected by verification ({len(rejected)})", False))
+        rows.extend(
+            ("rejected", fp, fp[1].expected == "REJECTED_INDEX") for fp in rejected
+        )
+    if gated:
+        rows.append(("heading", f"Not inked by operator gate ({len(gated)})", False))
+        rows.extend(("gated", fp, True) for fp in gated)
+    return rows
+
+
+def _index_page_count(rows: "list[tuple[str, Any, bool]]") -> int:
+    """How many index pages ``rows`` needs (0 for none)."""
+    if not rows:
+        return 0
+    return (len(rows) + _INDEX_ROWS_PER_PAGE - 1) // _INDEX_ROWS_PER_PAGE
+
+
 def _insert_index_pages(
     doc: "pymupdf.Document",
     inked: list,
@@ -1493,6 +1576,7 @@ def _insert_index_pages(
     *,
     run_id: str,
     author: str,
+    mark_page_by_finding: "dict[str, int] | None" = None,
 ) -> int:
     """Insert the findings index at the front of ``doc``; return pages inserted.
 
@@ -1509,21 +1593,11 @@ def _insert_index_pages(
     :data:`_INDEX_ROWS_KEY` as ``pid@target`` so reconciliation can prove each
     row exists and links to the right page.
     """
-    # A uniform row stream ("heading" rows carry no link) paginates the main
-    # table and the two trailing sections together. ``index_only`` marks the rows
-    # whose sole artifact is this index row (so reconciliation must find them).
-    rows: list[tuple[str, Any, bool]] = [("entry", fp, False) for fp in inked]
-    if rejected:
-        rows.append(("heading", f"Rejected by verification ({len(rejected)})", False))
-        rows.extend(
-            ("rejected", fp, fp[1].expected == "REJECTED_INDEX") for fp in rejected
-        )
-    if gated:
-        rows.append(("heading", f"Not inked by operator gate ({len(gated)})", False))
-        rows.extend(("gated", fp, True) for fp in gated)
-    if not rows:
+    rows = _index_rows(inked, rejected, gated)
+    n_pages = _index_page_count(rows)
+    if not n_pages:
         return 0
-    n_pages = (len(rows) + _INDEX_ROWS_PER_PAGE - 1) // _INDEX_ROWS_PER_PAGE
+    mark_page_by_finding = mark_page_by_finding or {}
 
     # Insert EVERY index page before drawing any rows: link targets are numbered
     # for the final document, so drawing while later index pages are still
@@ -1531,7 +1605,7 @@ def _insert_index_pages(
     # the first page's links on a multi-page index. Pages are re-fetched by
     # index below — inserting a page invalidates previously-held Page objects.
     for i in range(n_pages):
-        doc.new_page(pno=i, width=_INDEX_PAGE_W, height=_INDEX_PAGE_H)
+        _new_generated_page(doc, pno=i)
     for i in range(n_pages):
         page = doc[i]
         title = INDEX_PAGE_LABEL + (f"  (page {i + 1}/{n_pages})" if n_pages > 1 else "")
@@ -1583,7 +1657,16 @@ def _insert_index_pages(
                     fontsize=8, fontname=fontname, color=cell_color,
                 )
 
-            target_page = int(finding.page_index) + n_pages
+            # The page the mark ACTUALLY landed on, not the finding's source page
+            # (P7 item 34). A callout that overflowed to the AI Review Notes page
+            # has no mark on its sheet, so a row pointing at the sheet sent the
+            # reviewer to a page with nothing on it — while the bookmark outline
+            # and the receipt both already named the notes page. Every generated
+            # page in this map predates the front-inserted index, so all of them
+            # shift by exactly ``n_pages``, the same as a source page.
+            target_page = int(
+                mark_page_by_finding.get(finding.id, int(finding.page_index))
+            ) + n_pages
             rect = getattr(finding.anchor, "rect_pdf", None) if finding.anchor else None
             if 0 <= target_page < doc.page_count:
                 # The destination rect is in PAGE_VIEW_V2 space; a GOTO target is
@@ -1623,7 +1706,7 @@ def _insert_appendix_page(
 ) -> None:
     """The optional 'checked and consistent' page at the end of the document."""
     stats = audit_stats or {}
-    page = doc.new_page(width=_INDEX_PAGE_W, height=_INDEX_PAGE_H)
+    page = _new_generated_page(doc)
     page.insert_text((36, 42), APPENDIX_PAGE_LABEL, fontsize=13, fontname="hebo", color=(0.1, 0.1, 0.1))
     page.insert_text(
         (36, 60),
@@ -1681,7 +1764,7 @@ def _insert_review_notes_page(
     n_pages = (len(ordered) + per_page - 1) // per_page
     first_pno = doc.page_count
     for _ in range(n_pages):
-        doc.new_page(width=_INDEX_PAGE_W, height=_INDEX_PAGE_H)
+        _new_generated_page(doc)
     for i in range(n_pages):
         pno = first_pno + i
         page = doc[pno]
@@ -2144,15 +2227,36 @@ def _annotate_units(
             except Exception:  # noqa: BLE001 - callouts must not sink the file
                 _log.warning("could not add margin callouts on page %d", page_index)
 
+        # Generated pages are built in this order — appendix, review notes, then
+        # the index inserted at the FRONT last (P7 item 34). The index is last
+        # because its rows link to the page each mark landed on, and an overflowed
+        # callout's page does not exist until the notes page is appended. Building
+        # the index first meant a row could only guess, so it named the finding's
+        # source sheet — where that finding has no mark — while the bookmark
+        # outline and the receipt both correctly named the notes page.
+        #
+        # Front-inserting the index last also makes the shift uniform: every page
+        # written before it — source, appendix, notes — moves down by exactly
+        # ``n_index``, so there is no page that needs a different offset. The
+        # reading order of the finished file is unchanged (index, sheets,
+        # appendix, notes), because the appendix is still appended before the
+        # notes page.
+        #
+        # ``n_index`` is needed *before* insertion, for the notes page's back-links
+        # and for these stamps, so it is computed from the row stream rather than
+        # returned by the writer.
+        index_row_stream: list = []
+        index_groups: tuple = ((), (), ())
         n_index = 0
         if index_pages:
             try:
-                inked, rejected_rows, gated_rows = _index_groups(pairs)
-                n_index = _insert_index_pages(
-                    doc, inked, rejected_rows, gated_rows, run_id=run_id, author=author,
-                )
+                index_groups = _index_groups(pairs)
+                index_row_stream = _index_rows(*index_groups)
+                n_index = _index_page_count(index_row_stream)
             except Exception:  # noqa: BLE001 - the index must not sink the file
-                _log.warning("could not build the findings index for %s", src.name)
+                _log.warning("could not plan the findings index for %s", src.name)
+                index_row_stream, n_index = [], 0
+
         if include_appendix:
             try:
                 _insert_appendix_page(doc, audit_stats, author=author)
@@ -2161,8 +2265,8 @@ def _annotate_units(
 
         # Callouts that did not fit a clear band overflow to an appended
         # 'AI Review Notes' page (§17.6) rather than obscuring the drawing. Its
-        # components are already on their FINAL page (appended after the index), so
-        # they are stamped as-is below — not shifted by ``n_index``.
+        # components carry their PRE-SHIFT page here, and shift by ``n_index``
+        # below along with everything else.
         notes_collected: dict[str, list[tuple[str, int, int]]] = {}
         if overflow:
             try:
@@ -2173,20 +2277,42 @@ def _annotate_units(
             except Exception:  # noqa: BLE001 - the notes page must not sink the file
                 _log.warning("could not build the review-notes page for %s", src.name)
 
-        # Stamp each source-page component with its FINAL page — inserting the index
-        # at the front shifted the originals down by ``n_index``. Xref numbers are
-        # stable across page insertion, so stamping by xref is safe here.
+        # Where each finding's mark actually sits, before the front-insert shift.
+        # The notes page overrides the finding's source page; the index writer adds
+        # ``n_index`` to whichever it uses.
+        mark_page_by_finding: dict[str, int] = {}
+        for _f, _pl in pairs:
+            for _pid, _comps in notes_collected.items():
+                if _pid == _pl.placement_id and _comps:
+                    mark_page_by_finding[_f.id] = _comps[0][2]
+
+        if index_row_stream:
+            try:
+                inserted = _insert_index_pages(
+                    doc, *index_groups, run_id=run_id, author=author,
+                    mark_page_by_finding=mark_page_by_finding,
+                )
+                if inserted != n_index:      # planned vs written must agree
+                    _log.warning(
+                        "index wrote %d page(s) but %d were planned for %s",
+                        inserted, n_index, src.name,
+                    )
+            except Exception:  # noqa: BLE001 - the index must not sink the file
+                _log.warning("could not build the findings index for %s", src.name)
+
+        # Stamp every component with its FINAL page — inserting the index at the
+        # front shifted everything written before it down by ``n_index``. Xref
+        # numbers are stable across page insertion, so stamping by xref is safe.
         for pid, comps in collected.items():
             for component, xref, orig_page in comps:
                 try:
                     _stamp_component(doc, xref, pid, component, orig_page + n_index)
                 except Exception:  # noqa: BLE001 - a failed stamp → that placement fails
                     _log.warning("could not stamp %s for %s", component, pid)
-        # Review-notes components already carry their final page.
         for pid, comps in notes_collected.items():
-            for component, xref, final_page in comps:
+            for component, xref, notes_page in comps:
                 try:
-                    _stamp_component(doc, xref, pid, component, final_page)
+                    _stamp_component(doc, xref, pid, component, notes_page + n_index)
                 except Exception:  # noqa: BLE001
                     _log.warning("could not stamp review note %s for %s", component, pid)
 
@@ -2202,7 +2328,7 @@ def _annotate_units(
                     final_page_by_pid[pid] = comps[0][2] + n_index
             for pid, comps in notes_collected.items():
                 if comps:
-                    final_page_by_pid[pid] = comps[0][2]
+                    final_page_by_pid[pid] = comps[0][2] + n_index
             _set_findings_outline(doc, pairs, final_page_by_pid, n_index=n_index)
         except Exception:  # noqa: BLE001
             _log.warning("could not build the findings bookmark outline for %s", src.name)
@@ -2756,7 +2882,7 @@ def write_set_review_notes_pdf(
     try:
         n_pages = (len(pairs) + _NOTES_PER_PAGE - 1) // _NOTES_PER_PAGE
         for pno in range(n_pages):
-            page = doc.new_page(width=_INDEX_PAGE_W, height=_INDEX_PAGE_H)
+            page = _new_generated_page(doc)
             title = SET_REVIEW_NOTES_LABEL + (f"  (page {pno + 1}/{n_pages})" if n_pages > 1 else "")
             page.insert_text((_NOTE_LEFT, 42), title, fontsize=12, fontname="hebo", color=(0.1, 0.1, 0.1))
             page.insert_text(
