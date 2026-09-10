@@ -6,6 +6,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [1.4.0] - 2026-09-10
+
 ### Fixed
 
 - **The deterministic auditors stop crying wolf.** Their findings ink as
@@ -116,49 +120,6 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     is also memoized per sheet object — fourteen live call sites across twelve
     modules each re-ran the whole scan, and there was no memoization anywhere in
     the package.
-
-### Changed
-
-- **`digest_cache._SCHEMA_VERSION` 9 → 10 (one-time cache miss).** The critique
-  entry stores the **post-merge** findings, and the measurement rule inside
-  `critical_signature` changed — so a pre-v10 entry holds a merge the new rule
-  would never have produced: a pair the new rule separates is already collapsed
-  and unrecoverable, a pair it would now join is stored as two. Same reasoning as
-  the v6 and v9 parser rebuilds. Everything in `DigestCache` re-derives on the
-  next run.
-
-- **A/B arm records carry an enforced contract version (`RECORD_CONTRACT_VERSION`
-  1 → 2).** `critical_signature` is computed at arm-run time and stored inside
-  each record, and the comparison re-applies `signatures_compatible` to those
-  *stored* dicts rather than recomputing them. So an arm produced before this
-  release would be scored under a rule it never ran with, and the resulting
-  differences reported as if the arm's model or geometry swap caused them. The
-  version was already written into every sidecar and echoed into every comparison
-  — and read back by nobody, so the contract its own comment describes
-  ("announced rather than assumed") was declarative only. `load_arm_records` now
-  refuses a sidecar from a different contract, and a sidecar with no version is
-  treated as stale rather than as current. Refusing beats warning because the
-  failure is silent: every reader uses `.get(...) or {}` and a one-sided signal
-  never blocks a match, so a stale record whose measurements simply vanished
-  degrades toward "exact match". Re-run affected arms rather than comparing across
-  versions.
-
-### Known limits (unchanged by this release)
-
-- The **sheet-index harvest is still unbounded** — it reads every word on the
-  page, so an equipment tag in a legend can be collected as an index row. Both
-  diff directions already run every entry through `classify_reference`, so a
-  code citation or transmittal number never becomes a finding; an equipment tag
-  is not in that corpus and still can. Two cheap patches were tried and rejected
-  on the evidence: a second corpus check at the harvest is a restated rule that
-  only changes which pages clear the recognition gate, and excluding the sheet's
-  own id breaks an index that legitimately lists itself. The real fix is region
-  bounding, which needs row/column geometry and re-baselines both diff directions
-  together.
-- `signatures_compatible` still blocks only on **disjoint** measurement sets, so
-  `12'-6"` and `12'-8"` remain compatible on their shared `12ft`. That is the
-  documented "don't over-block a real duplicate" conservatism and is unchanged
-  here.
 
 - **The ledger no longer launders model text into ground truth.** Four defects in
   one place: the merge that folds a duplicate finding into an existing ledger
@@ -291,27 +252,6 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     says so instead of sharing the wording used when the model simply did not
     answer.
 
-### Changed
-
-- **The user-turn framing is now inside both prompt hashes (I-6).** How a sheet
-  is introduced, how an omitted tile is disclosed, the overview label and the
-  per-tile label are model-visible strings that sat outside `DIGEST_PROMPT_VERSION`
-  *and* `CRITIQUE_PROMPT_VERSION`. Editing any of them changed what was sent
-  while every cache key stayed byte-identical, so warm runs replayed reads taken
-  under the old wording. They are now module constants gathered in one
-  `SHARED_USER_FRAMING_STRINGS` tuple that both hashes splat, so a string added
-  to the shared builder reaches both automatically instead of waiting to be
-  noticed — the exact drift `CRITIQUE_PROMPT_VERSION`'s own comment records.
-  The prompt bytes the model receives are unchanged, verified byte-identical
-  before and after; only the hash inputs grew.
-
-- **`digest_cache._SCHEMA_VERSION` 8 → 9 (one-time cache miss).** A stored entry
-  holds the *post-parse* product — stripped prose plus parsed findings, never the
-  raw response — so entries written under the old scanner cannot be re-derived in
-  place and must miss once. Same reasoning as the v6 parser rebuild, which is the
-  precedent it follows. Everything in `DigestCache` re-derives on the next run:
-  digest, critique, identity, review plan, citation, investigation.
-
 - **A run can no longer report COMPLETE over a sheet it never read.** Six
   status-accounting defects, each of which let an exhaustive run present a
   degraded result as a clean one. They are grouped because they share a failure
@@ -382,31 +322,6 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   carried no tokens — but per-family call counts in run.log, `run_manifest.json`
   and the GUI were wrong.
 
-### Removed
-
-- **`docs/REVIEW_IMPLEMENTATION_PLAN.md` retired.** Its implementation packages
-  (WP-00 … WP-08) are complete and merged; what they changed is in this
-  changelog, and what was verified is in `docs/REVIEW_RELEASE_EVIDENCE.md`. A
-  2,300-line plan describing work that is done reads as current intent to the
-  next person who opens it.
-
-  Two parts did not retire with it and were preserved in
-  `docs/MEASUREMENT_PACKAGES.md`: the **measurement packages** (R-01 … R-06),
-  which have never been run and still need approved drawing sets and a budget,
-  along with the experiment protocol that keeps them honest; and the **standing
-  prohibitions**, each recording a shortcut rejected for a reason usually
-  discovered the expensive way.
-
-  Five files cited the plan by section number — `measure_evidence_coverage.py`,
-  three evidence/geometry test modules, and the release-evidence doc. Rather
-  than leaving dangling references, each now points at the live documentation
-  for the same fact (the README's grounding sections, the performance doc's
-  image-token regimes, `models.sheet_evidence_text`). A citation to a deleted
-  file is worse than none: it tells a reader there is an explanation and then
-  fails to produce it. The plan remains in git history at `168f4ec`.
-
-### Fixed
-
 - **A lost open race could silently empty an intact digest cache.**
   `DigestCache._load` wrapped two different failures in one `except`:
 
@@ -442,8 +357,6 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   present; the new ones force the sequence (migrate, then fail one open) and
   fail on any platform. They cover the lost race, a genuinely unopenable
   database, and the failed-migration case the fallback was written for.
-
-### Fixed
 
 - **The release benchmark was measuring nothing, and its failures read like app
   regressions (WP-08).** `scripts/benchmark_drawing_analyzer.py --check` asserts
@@ -482,18 +395,50 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   zero API calls and zero renders**, one-source-changed 0.417 s with exactly one
   digest call, peak RSS 189.0 MB.
 
-### Added
-
-- **`docs/REVIEW_RELEASE_EVIDENCE.md` (WP-08 §13.3).** The release evidence for
-  the whole review sequence: test and gate results, the cache-invalidation scope
-  and the single mechanism used for each change, measurements carried forward,
-  the §13.2 independent review checklist worked item by item — and an explicit
-  list of what was **not** done (the §7.2 discard-rate run, dense-fixture memory,
-  Windows manual GUI, the live canary). Two checklist items are recorded partial
-  and one class of work untouched, because a checklist whose every box is ticked
-  is the one nobody reads.
-
 ### Changed
+
+- **`digest_cache._SCHEMA_VERSION` 9 → 10 (one-time cache miss).** The critique
+  entry stores the **post-merge** findings, and the measurement rule inside
+  `critical_signature` changed — so a pre-v10 entry holds a merge the new rule
+  would never have produced: a pair the new rule separates is already collapsed
+  and unrecoverable, a pair it would now join is stored as two. Same reasoning as
+  the v6 and v9 parser rebuilds. Everything in `DigestCache` re-derives on the
+  next run.
+
+- **A/B arm records carry an enforced contract version (`RECORD_CONTRACT_VERSION`
+  1 → 2).** `critical_signature` is computed at arm-run time and stored inside
+  each record, and the comparison re-applies `signatures_compatible` to those
+  *stored* dicts rather than recomputing them. So an arm produced before this
+  release would be scored under a rule it never ran with, and the resulting
+  differences reported as if the arm's model or geometry swap caused them. The
+  version was already written into every sidecar and echoed into every comparison
+  — and read back by nobody, so the contract its own comment describes
+  ("announced rather than assumed") was declarative only. `load_arm_records` now
+  refuses a sidecar from a different contract, and a sidecar with no version is
+  treated as stale rather than as current. Refusing beats warning because the
+  failure is silent: every reader uses `.get(...) or {}` and a one-sided signal
+  never blocks a match, so a stale record whose measurements simply vanished
+  degrades toward "exact match". Re-run affected arms rather than comparing across
+  versions.
+
+- **The user-turn framing is now inside both prompt hashes (I-6).** How a sheet
+  is introduced, how an omitted tile is disclosed, the overview label and the
+  per-tile label are model-visible strings that sat outside `DIGEST_PROMPT_VERSION`
+  *and* `CRITIQUE_PROMPT_VERSION`. Editing any of them changed what was sent
+  while every cache key stayed byte-identical, so warm runs replayed reads taken
+  under the old wording. They are now module constants gathered in one
+  `SHARED_USER_FRAMING_STRINGS` tuple that both hashes splat, so a string added
+  to the shared builder reaches both automatically instead of waiting to be
+  noticed — the exact drift `CRITIQUE_PROMPT_VERSION`'s own comment records.
+  The prompt bytes the model receives are unchanged, verified byte-identical
+  before and after; only the hash inputs grew.
+
+- **`digest_cache._SCHEMA_VERSION` 8 → 9 (one-time cache miss).** A stored entry
+  holds the *post-parse* product — stripped prose plus parsed findings, never the
+  raw response — so entries written under the old scanner cannot be re-derived in
+  place and must miss once. Same reasoning as the v6 parser rebuild, which is the
+  precedent it follows. Everything in `DigestCache` re-derives on the next run:
+  digest, critique, identity, review plan, citation, investigation.
 
 - **Documentation corrected against the code it describes (WP-07).** A
   documentation pass over the claims the review found stale or overstated. Each
@@ -579,6 +524,57 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   insufficient; and no stale predecessor-product terminology remains in the
   tree. `PRICING_EFFECTIVE_DATE` is deliberately unchanged — this documentation
   being newer is not evidence about the rate table.
+
+### Added
+
+- **`docs/REVIEW_RELEASE_EVIDENCE.md` (WP-08 §13.3).** The release evidence for
+  the whole review sequence: test and gate results, the cache-invalidation scope
+  and the single mechanism used for each change, measurements carried forward,
+  the §13.2 independent review checklist worked item by item — and an explicit
+  list of what was **not** done (the §7.2 discard-rate run, dense-fixture memory,
+  Windows manual GUI, the live canary). Two checklist items are recorded partial
+  and one class of work untouched, because a checklist whose every box is ticked
+  is the one nobody reads.
+
+### Removed
+
+- **`docs/REVIEW_IMPLEMENTATION_PLAN.md` retired.** Its implementation packages
+  (WP-00 … WP-08) are complete and merged; what they changed is in this
+  changelog, and what was verified is in `docs/REVIEW_RELEASE_EVIDENCE.md`. A
+  2,300-line plan describing work that is done reads as current intent to the
+  next person who opens it.
+
+  Two parts did not retire with it and were preserved in
+  `docs/MEASUREMENT_PACKAGES.md`: the **measurement packages** (R-01 … R-06),
+  which have never been run and still need approved drawing sets and a budget,
+  along with the experiment protocol that keeps them honest; and the **standing
+  prohibitions**, each recording a shortcut rejected for a reason usually
+  discovered the expensive way.
+
+  Five files cited the plan by section number — `measure_evidence_coverage.py`,
+  three evidence/geometry test modules, and the release-evidence doc. Rather
+  than leaving dangling references, each now points at the live documentation
+  for the same fact (the README's grounding sections, the performance doc's
+  image-token regimes, `models.sheet_evidence_text`). A citation to a deleted
+  file is worse than none: it tells a reader there is an explanation and then
+  fails to produce it. The plan remains in git history at `168f4ec`.
+
+### Known limits
+
+- The **sheet-index harvest is still unbounded** — it reads every word on the
+  page, so an equipment tag in a legend can be collected as an index row. Both
+  diff directions already run every entry through `classify_reference`, so a
+  code citation or transmittal number never becomes a finding; an equipment tag
+  is not in that corpus and still can. Two cheap patches were tried and rejected
+  on the evidence: a second corpus check at the harvest is a restated rule that
+  only changes which pages clear the recognition gate, and excluding the sheet's
+  own id breaks an index that legitimately lists itself. The real fix is region
+  bounding, which needs row/column geometry and re-baselines both diff directions
+  together.
+- `signatures_compatible` still blocks only on **disjoint** measurement sets, so
+  `12'-6"` and `12'-8"` remain compatible on their shared `12ft`. That is the
+  documented "don't over-block a real duplicate" conservatism and is unchanged
+  here.
 
 ## [1.3.0] - 2026-09-08
 
