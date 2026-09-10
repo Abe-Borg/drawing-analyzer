@@ -66,6 +66,7 @@ from .digest import (
     parse_numeric_claims,
 )
 from .digest_cache import critique_cache_key
+from .auditors.sheet_ids import normalize_sheet_id
 from .models import (
     CONFIDENCE_NOT_APPLICABLE,
     CONFIDENCE_NOT_ASSESSED_PARTIAL,
@@ -555,9 +556,18 @@ def _is_absence(f: Finding) -> bool:
 
 
 def _leg_targets(f: Finding) -> frozenset:
-    """The set of sheets a cross-sheet finding also touches (its ``also_on`` legs)."""
+    """The set of sheets a cross-sheet finding also touches (its ``also_on`` legs).
+
+    Canonicalized through :func:`auditors.sheet_ids.normalize_sheet_id` for the
+    same reason ``cross_qc._norm_id`` is (P8 item 11), and it has to be the
+    **same** canonicalization: this set feeds
+    ``critical_signature["leg_targets"]``, which decides whether two findings may
+    merge. If the two disagree, cross-QC resolves a leg that the ledger then
+    refuses to recognise as the same leg — one sheet id meaning two different
+    things inside one run.
+    """
     return frozenset(
-        (leg.sheet_id or "").strip().upper()
+        normalize_sheet_id(leg.sheet_id)
         for leg in (getattr(f, "also_on", None) or [])
         if (leg.sheet_id or "").strip()
     )
@@ -1303,7 +1313,11 @@ def _dedup_claims(claims: list[NumericClaim]) -> list[NumericClaim]:
         key = (
             (c.source_name or "").strip().lower(),
             int(c.page_index or 0),
-            (c.sheet_id or "").strip().upper(),
+            # The same canonical form as every other sheet-handle comparison
+            # (P8 item 11's twin): the self-consistency runs transcribe one
+            # relationship twice, and if one copy writes a Unicode dash the two
+            # keys differ and the arithmetic tally double-counts the claim.
+            normalize_sheet_id(c.sheet_id),
             (c.kind or "").strip().lower(),
             (c.quote or "").strip(),
             tuple(str(t) for t in c.terms),

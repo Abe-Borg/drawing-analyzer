@@ -443,3 +443,120 @@ def test_cross_qc_preamble_present_only_with_identity():
     assert "units: metric" in pre
     assert _identity_preamble(None) == ""
     assert _identity_preamble(SetIdentity()) == ""      # empty identity adds nothing
+
+
+# --------------------------------------------------------------------------- #
+# Malformed list-shaped fields (P8 item 9)
+#
+# _sanitize_payload is documented as never raising, and the pipeline stage treats
+# any exception as a stage failure — so one malformed field took the identity
+# stage from COMPLETE to FAILED. A string is also iterable, so it passed silently
+# and was consumed one CHARACTER at a time.
+# --------------------------------------------------------------------------- #
+
+
+def test_a_string_where_a_list_belongs_is_not_iterated_per_character():
+    from drawing_analyzer.set_identity import _sanitize_payload
+
+    out = _sanitize_payload({"disciplines": "mechanical"})
+    assert out["disciplines"] == ["mechanical"], (
+        f"got {out['disciplines']} — a bare string was consumed per character"
+    )
+    out = _sanitize_payload({"evidence": "NFPA 13 2016 is adopted"})
+    assert out["evidence"] == ["NFPA 13 2016 is adopted"]
+
+
+def test_a_dict_where_a_list_belongs_does_not_raise():
+    from drawing_analyzer.set_identity import _sanitize_payload
+
+    # Each of these used to raise TypeError: unhashable type: 'slice' out of the
+    # very next [:cap], failing the whole stage.
+    for payload in (
+        {"disciplines": {"a": "mechanical"}},
+        {"sheet_disciplines": {"M-101": "mechanical"}},
+        {"adopted_codes": {"code": "NFPA 13"}},
+        {"evidence": {"quote": "NFPA 13 2016"}},
+        {"disciplines": 7},
+        {"adopted_codes": None},
+    ):
+        out = _sanitize_payload(dict(payload))
+        key = next(iter(payload))
+        assert out[key] == [], f"{payload} -> {out[key]!r}"
+
+
+def test_well_formed_payloads_are_unchanged():
+    from drawing_analyzer.set_identity import _sanitize_payload
+
+    out = _sanitize_payload({
+        "disciplines": ["Mechanical", "Fire Protection"],
+        "evidence": ["NFPA 13 2016 is adopted", "IBC 2018 applies"],
+    })
+    assert out["disciplines"] == ["fire protection", "mechanical"]
+    assert out["evidence"] == ["NFPA 13 2016 is adopted", "IBC 2018 applies"]
+
+
+def test_as_list_coercion_contract():
+    from drawing_analyzer.set_identity import _as_list
+
+    assert _as_list(["a", "b"]) == ["a", "b"]
+    assert _as_list(("a", "b")) == ["a", "b"]
+    assert _as_list("NFPA 13") == ["NFPA 13"]     # the single value the model meant
+    assert _as_list("   ") == []                   # but not whitespace
+    assert _as_list({"a": 1}) == []
+    assert _as_list(None) == []
+    assert _as_list(7) == []
+
+
+# --------------------------------------------------------------------------- #
+# Code designators are case-sensitive (P8 item 12)
+# --------------------------------------------------------------------------- #
+
+_LOWERCASE_PROSE = [
+    "field verify is 1000 mm clearance to the deflector",
+    "the layout is as 2019 drawings showed",
+    "route piping as 1234 indicates on the riser diagram",
+    "verify en 1234 openings before rough-in",
+    "install gb 5000 hangers per detail",
+    "sp 1.13130 note",
+    "coordinate ss 2200 anchors with structural",
+    "provide pn 1600 flanges at the pump",
+]
+
+_GENUINE_DESIGNATIONS = [
+    "IS 15105:2002 is adopted for this project",
+    "EN 12845:2015 applies to the sprinkler system",
+    "AS 2118 governs the installation",
+    "GB 50084 is the adopted standard",
+    "designed to BS 9251",
+    "AS/NZS 2118 applies",
+    "ISO 6182 is referenced",
+    "DIN EN 12845 governs",
+    "Eurocode 2 is used for the structure",
+    "SNiP 2.04.01-85 applies",
+    "SANS 10287 applies",
+    "JIS A 1234 applies",
+    "SP 5.13130 applies",
+]
+
+
+def test_lowercase_prose_is_not_read_as_a_code_designation():
+    # Under IGNORECASE these ordinary notes each produced a false adopted-code
+    # window, spending the bounded identity corpus a real edition mention needed
+    # and inviting a fabricated adopted_codes entry. "is 1000 mm clearance"
+    # became Indian Standard 1000.
+    from drawing_analyzer.set_identity import _INTL_CODE_WINDOW_RE
+
+    hits = {s: [m.group(0) for m in _INTL_CODE_WINDOW_RE.finditer(s)]
+            for s in _LOWERCASE_PROSE}
+    offenders = {s: h for s, h in hits.items() if h}
+    assert not offenders, f"lowercase prose still matched: {offenders}"
+
+
+def test_genuine_designations_still_match():
+    # The recall side: requiring uppercase must not cost a real designation.
+    # Eurocode keeps its own case-insensitive group because it is conventionally
+    # written mixed-case.
+    from drawing_analyzer.set_identity import _INTL_CODE_WINDOW_RE
+
+    missed = [s for s in _GENUINE_DESIGNATIONS if not _INTL_CODE_WINDOW_RE.search(s)]
+    assert not missed, f"genuine designations no longer match: {missed}"

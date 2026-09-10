@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal, DivisionByZero, InvalidOperation
 from typing import Any, Iterable
 
+from .sheet_ids import normalize_sheet_id
 from ..models import (
     HOST_DETERMINISTIC,
     MODEL_TRANSCRIBED,
@@ -363,7 +364,7 @@ def _claim_dedup_key(claim: NumericClaim) -> tuple:
     # different same-basename inputs are NOT merged into one (DA-001).
     return (
         source_page_key(claim),
-        (claim.sheet_id or "").strip().upper(),
+        normalize_sheet_id(claim.sheet_id),   # same canonical form (item 11 twin)
         (claim.kind or "").strip().lower(),
         (claim.quote or "").strip(),
         tuple(str(t) for t in claim.terms),
@@ -391,7 +392,12 @@ def _resolve_geometry(claim: NumericClaim, by_key: dict, by_id: dict) -> Any:
         geom = by_key.get(source_page_key(claim))
         if geom is not None:
             return geom
-    return by_id.get((claim.sheet_id or "").strip().upper())
+    # ``by_id`` is keyed by ``detect_sheet_id``, which returns
+    # ``normalize_sheet_id`` — so the lookup has to use the same canonical form
+    # (P8 item 11's twin). A bare ``.strip().upper()`` missed a model-supplied
+    # handle carrying a Unicode dash or fullwidth digits against a correctly-keyed
+    # map, and the claim then resolved to no sheet at all.
+    return by_id.get(normalize_sheet_id(claim.sheet_id))
 
 
 def audit_arithmetic(

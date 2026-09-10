@@ -1694,3 +1694,35 @@ def test_no_grouping_machinery_when_every_quote_is_distinct():
     assert 'data-repeat-key="' not in table
     assert 'class="repeat-toggle"' not in table
     assert 'id="findings-group-toggle"' not in doc
+
+
+# --------------------------------------------------------------------------- #
+# A NUL byte must not forge a code-span placeholder (P8 item 39)
+# --------------------------------------------------------------------------- #
+
+
+def test_nul_byte_in_digest_text_does_not_break_the_report():
+    # The inline renderer stashes code spans as "\\x00C<index>\\x00". A NUL arriving
+    # in the digest text — a UTF-16 spec read as bytes will do it, and the model can
+    # emit one — forged a placeholder, and the restore step raised IndexError,
+    # taking the whole report block with it.
+    from drawing_analyzer.html_report import _render_inline
+
+    for probe in (
+        "sheet says \x00C99\x00 drain",
+        "sheet says \x00C0\x00 drain",
+        "a `X` and \x00C7\x00",
+        "text \x00C000000000000000000009\x00",
+        "\x00" * 40,
+    ):
+        out = _render_inline(probe)          # must not raise
+        assert "\x00" not in out
+
+
+def test_real_code_spans_still_render():
+    from drawing_analyzer.html_report import _render_inline
+
+    assert _render_inline("use `VAV_3` here") == "use <code>VAV_3</code> here"
+    assert _render_inline("`a` and `b`") == "<code>a</code> and <code>b</code>"
+    # A forged placeholder beside a real span leaves the real one intact.
+    assert "<code>X</code>" in _render_inline("a `X` and \x00C7\x00")

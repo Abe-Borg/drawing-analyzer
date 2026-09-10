@@ -97,12 +97,22 @@ _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # `name: value` / `name=value` / `'name': 'value'` for the field list
     # above — covers headers, query parameters, JSON, and dict reprs.
     (
+        # The field name may carry underscore-joined PREFIXES (N10). A leading
+        # `\b` cannot match inside `ANTHROPIC_API_KEY`, because the character
+        # before `API` is `_`, which is itself a word character — so the name rule
+        # never fired on the most common spelling of all. It only *looked* covered
+        # because the `sk-ant-` value pattern above caught real Anthropic keys;
+        # a credential of any other shape went to disk in full.
+        #
+        # The prefix is CAPTURED and replayed, so the line still says which
+        # variable was redacted. Consuming it unnamed would rewrite
+        # `ANTHROPIC_API_KEY=…` as `API_KEY=[REDACTED]` and lose that.
         re.compile(
-            r"(?i)\b(" + _NAMED_SECRET_FIELDS + r")\b"
+            r"(?i)(?<![A-Za-z0-9])((?:[A-Za-z0-9]+_)*)(" + _NAMED_SECRET_FIELDS + r")\b"
             r"([\"']?\s*[:=]\s*[\"']?)"
             r"([^\s\"',;&)\]}]+)"
         ),
-        r"\1\2" + _REDACTED,
+        r"\1\2\3" + _REDACTED,
     ),
 )
 

@@ -641,7 +641,9 @@ edition harvest is the backstop the model cannot argue away.
 **Model-authored review plan.** From the identity + digest heads, a second
 text-only call authors the per-discipline checklist a specialist for *this* set
 would apply — one-line "flag X when Y" items in the exact review-profile style,
-bounded host-side (≤60 items by default, `DRAWING_ANALYZER_MAX_PLAN_ITEMS`).
+bounded host-side (≤60 items by default, `DRAWING_ANALYZER_MAX_PLAN_ITEMS`, with
+the overage shared across disciplines rather than spent on the alphabetically-last
+one).
 Every code-based item must name its code + section + edition inline and never
 invent a section number: the critique echoes those refs into the findings, and
 the **citation check verifies them against the published section text** — the
@@ -798,7 +800,11 @@ call, using a tiered strategy that records which tier fired:
   tokens ≥ 85%, or the longest distinctive sub-phrase (≥ 3 tokens) of the quote
   appears verbatim. Whitespace/linebreak artifacts and Unicode punctuation (dashes,
   curly quotes, the `2 1/2"` vs `2-1/2"` and `″`/`"` inch marks, the `Ø` diameter
-  symbol) are the usual reason exact fails; normalization folds most of them.
+  symbol) are the usual reason exact fails; normalization folds most of them —
+  including **vulgar fractions**, which need care: Unicode normalization expands
+  `½` to `1⁄2` with no separating space, so `2½"` used to become `21⁄2"` —
+  twenty-one halves — and could never match a sheet reading `2-1/2"`. On a pipe
+  size that is the difference between a 2.5 inch drain and a 21 inch one.
 
   A fuzzy match must additionally clear the **numeric veto**. Token overlap is
   blind to the substitution that matters most on a drawing: swap one digit and
@@ -1120,7 +1126,10 @@ carries two artifacts built from it (Phase 26A, DA-024):
   manifest last — it hashes everything and excludes only itself.
 
 Both are **sanitized at the source**: every journal field passes the shared
-Phase 17 secret-redaction filter plus an absolute-path scrubber *at emit time*
+Phase 17 secret-redaction filter — which matches a secret's field name through any
+underscore-joined prefix, so `ANTHROPIC_API_KEY=` and
+`DRAWING_ANALYZER_ANTHROPIC_API_KEY=` are redacted and not only the values that
+happen to look like Anthropic keys — plus an absolute-path scrubber *at emit time*
 (`/home/user/…/M-101.pdf` → `.../M-101.pdf`), and the log/manifest carry counts
 and identifiers — never prompts, image bytes, drawing text, long quotes, API
 keys, or your directory layout. Set `DRAWING_ANALYZER_BUILD` to stamp a
@@ -1427,7 +1436,7 @@ runs.
 | `DRAWING_ANALYZER_CITATION_MODEL` | Sonnet 5 | Citation-check model, with web search **and web fetch** (`citation_check=True`). Sonnet rather than the review flagship is a capability choice: web fetch is unavailable on Opus 5, so an Opus citation check can only read search snippets rather than the cited section's text. A model without web fetch degrades to search-only. |
 | `DRAWING_ANALYZER_IDENTITY_MODEL` | Sonnet 5 | Set-identity model, text-only (Phase A). Advisory-only, with the regex edition harvest as a backstop, so it does not need the flagship. |
 | `DRAWING_ANALYZER_REVIEW_PLAN_MODEL` | Opus 5 | Review-plan authoring model, text-only (Phase A). |
-| `DRAWING_ANALYZER_MAX_PLAN_ITEMS` | `60` | Total item cap on the model-authored review plan. |
+| `DRAWING_ANALYZER_MAX_PLAN_ITEMS` | `60` | Total item cap on the model-authored review plan. When the model writes more than this, the overage is taken from the **longest** discipline each round, so the loss is shared: five disciplines of 20 items leave 12 each. (It used to trim the last plan's tail until that plan was gone, and plans sort alphabetically — so `mechanical` and `plumbing` were deleted outright while `architectural` kept all 20.) |
 | `DRAWING_ANALYZER_HARVEST_MODEL` | Sonnet 5 | Prose-harvest structuring model (one small call per straggler, at low effort). |
 | `DRAWING_ANALYZER_CHAT_MODEL` | Sonnet 5 | The HTML report's in-browser **Ask AI** assistant. Needs adaptive thinking plus the web-search **and web-fetch** server tools; web fetch is unavailable on Opus 5, so a model without it degrades the widget to search-only. |
 | `DRAWING_ANALYZER_WEB_SEARCH_TOOL_TYPE` | `web_search_20260209` | Server-side web-search tool type string (survives an API rename). |

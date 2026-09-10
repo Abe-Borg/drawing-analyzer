@@ -255,8 +255,20 @@ both the submitted batch and the one that actually served the digests.
   `origin="regex"` — the backstop the model can't argue away). **Advisory only**:
   consumers take `SetIdentity | None` and never gate a finding on it — which,
   with the regex backstop, is why this stage runs on **Sonnet 5**.
+  Both sanitizers coerce every list-shaped field through
+  `set_identity._as_list` (P8 item 9): they are documented as never raising and
+  the stages treat an exception as stage FAILED, yet a dict raised `TypeError:
+  unhashable type: 'slice'` and a **string** passed silently and was consumed per
+  character — `"refs": "NFPA 13 2016 §8.17"` reached the citation check as
+  `('N','F','P')`, three live web searches for single letters. The
+  international code-designation regex is **case-sensitive** (item 12): under
+  `IGNORECASE` ordinary lowercase notes matched, so `is 1000 mm clearance` became
+  Indian Standard 1000; `Eurocode` keeps its own case-insensitive group.
   `review_planner.py` — one text-only call authoring the per-discipline review
   checklist (bounded host-side: ≤60 items via `DRAWING_ANALYZER_MAX_PLAN_ITEMS`,
+  the overage taken from the **longest** plan each round — trimming the last
+  plan's tail deleted `mechanical` and `plumbing` outright while `architectural`
+  kept everything, since plans sort by slug (N5) —
   overlong items dropped-never-truncated; every code-based item must name
   code+section+edition inline and never invent a section — the refs flow into
   `Finding.refs`, which the citation check verifies). Plans become caller-built
@@ -317,7 +329,14 @@ both the submitted batch and the one that actually served the digests.
   corpus check — both diff directions already run every entry through
   `classify_reference` — because the real fix is region bounding, which moves the
   `_MIN_INDEX_ENTRIES` gate and re-baselines both directions together);
-  `prose_harvest.py` (mirrors prose Coordination/Conflict items,
+  `prose_harvest.py` — whose boilerplate filter is anchored at **both** ends
+  (P8 item 6: anchored only at the start, it discarded every real finding that
+  *opened* with No/None/Nothing/N/A, which is how an absence finding naturally
+  opens), with the length floor at 8 and a `filtered` count so a drop cannot
+  vanish — `expected` is built from what survived the filter, so `missing` read 0
+  and `complete` was True over a real loss. That count is **observational** (the
+  §7.2 discard-counter contract): filler is not a lost finding, so it feeds
+  neither. `prose_harvest.py` (mirrors prose Coordination/Conflict items,
   synthesis conflicts, and opted-in focus items into findings — match first,
   one small structuring call for stragglers on **Sonnet 5** at `EFFORT_LOW`,
   degraded sheet-level entry on failure).
@@ -381,6 +400,23 @@ both the submitted batch and the one that actually served the digests.
   bundle through a ledger merge, and `annotate._units_for_finding` gives each
   per-leg mark that leg's state rather than the parent's — a conflict can be
   text-grounded on one sheet and read off a raster detail on the other.
+  Sheet **handles canonicalize before matching** (P8 item 11): `_norm_id` runs
+  `auditors.sheet_ids.normalize_sheet_id` — the declared canonical form that
+  `detect_sheet_id` itself returns — not a bare `.strip().upper()`,
+  because a handle written with a non-breaking hyphen, en dash, U+2010 hyphen or
+  fullwidth digits missed its plain-ASCII twin — the leg was dropped, and a
+  cross-sheet finding needs two grounded sheets, so the finding went with it.
+  **Four** sites compare a handle and all four use that one form, asserted equal
+  rather than merely self-consistent: `_norm_id`, `critique._leg_targets` (it feeds
+  `critical_signature["leg_targets"]`, so a disagreement has cross-QC resolving a
+  leg the ledger then refuses to recognise as the same leg), and both claim-dedup
+  keys (`critique._dedup_claims`, `auditors.arithmetic._claim_dedup_key` — a
+  Unicode dash in one of the two self-consistency transcriptions inflates the
+  arithmetic tally). The sharpest was `arithmetic._resolve_geometry`, whose `by_id`
+  map is keyed by `detect_sheet_id` and so already canonical: an uncanonical lookup
+  matched **nothing**, and the claim resolved to no sheet at all. That
+  canonicalization is host-side binding no key input covers, so it carries
+  `_CROSS_QC_CACHE_CONTRACT` **2 → 3**.
   Cross-QC also carries **count-only discard counters** on the sharded path
   (`CrossQCDiscardCounts`, WP-02 §7.2): how many legs/facts the host dropped and
   why — unresolved handle, quote absent, quote present but unmatched, split by
@@ -455,6 +491,15 @@ both the submitted batch and the one that actually served the digests.
   `DETERMINISTIC`; else low + advisory-labeled, crop-verified downstream. The
   finding anchors to the stale-edition text's own matched span (never the
   citing finding's quote — an identical quote would collide in Pass B).
+**Text normalization (P8 N7/N8).** `anchor._normalize` rewrites **vulgar
+fractions before NFKC** (`_VULGAR_FRACTION_TABLE`): NFKC expands `½` to `1⁄2`
+with no separating space, so `2½"` became `21⁄2"` and could never match a sheet
+reading `2-1/2"` — a 2.5 inch drain quoted as a 21 inch one. `_CHAR_FOLD` also
+covers the fraction slash, division slash and multiplication sign. Every
+invisible code point in `anchor.py` and `auditors/sheet_ids.py` is written as a
+`\uXXXX` **escape**, never a literal: as literals they are invisible in every
+editor and diff, and a test fails if one reappears.
+
 - *Disposition:* `anchor.py` (quote → PDF rect, tiered
   EXACT/FUZZY/TILE/UNANCHORED — UNANCHORED is the hallucination signal. Both fuzzy
   tiers carry the **numeric veto** (P7 item 30): token overlap is blind to a

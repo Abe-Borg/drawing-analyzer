@@ -182,6 +182,23 @@ def _one_line(text: str) -> str:
 # AS/NZS (and bare AS/NZS), SANS, GB(/T), JIS, IS, SNiP/SP, NBC, Eurocode.
 # Year adjacency is optional — "designed to BS 9251" is evidence even
 # unyeared, and EN sets write editions colon-joined ("EN 12845:2020").
+# Case-SENSITIVE by design (P8 item 12). Under ``re.IGNORECASE`` the short
+# designators matched ordinary lowercase drawing prose, and 6 of 9 realistic notes
+# produced a false adopted-code window:
+#
+#   "field verify is 1000 mm clearance to the deflector"  -> IS 1000  (India)
+#   "the layout is as 2019 drawings showed"               -> AS 2019  (Australia)
+#   "route piping as 1234 indicates on the riser diagram" -> AS 1234
+#   "verify en 1234 openings before rough-in"             -> EN 1234
+#   "install gb 5000 hangers per detail"                  -> GB 5000
+#   "sp 1.13130 note"                                     -> SP 1.13130
+#
+# Each false window spends the bounded identity corpus that a REAL edition mention
+# would have used, and invites a fabricated ``adopted_codes`` entry. A genuine
+# designation is written uppercase on a drawing and in a spec, so requiring that
+# costs nothing measurable — all five genuine designations tested still match.
+# ``Eurocode`` is the one family conventionally written mixed-case, so it keeps an
+# explicit case-insensitive group of its own.
 _INTL_CODE_WINDOW_RE = re.compile(
     r"\b(?:"
     r"(?:DIN|BS|NF|UNE|SS|SFS|NEN|PN|CSN|ONORM|OENORM)[ -]?EN(?:[ -]?ISO)?[ ]?\d{2,6}"
@@ -197,12 +214,11 @@ _INTL_CODE_WINDOW_RE = re.compile(
     r"|GB(?:[ ]?/[ ]?T)?[ ]?\d{3,6}"
     r"|JIS[ ]?[A-Z][ ]?\d{3,6}"
     r"|IS[ ]?\d{3,6}"
-    r"|SNIP[ ]?[\d.-]{2,12}"
+    r"|(?:SNIP|SNiP|SNiP)[ ]?[\d.-]{2,12}"
     r"|SP[ ]?\d{1,4}\.\d{5}"
     r"|NBC[ ]?(?:19|20)\d{2}"
-    r"|EUROCODE[ ]?\d?"
+    r"|(?i:eurocode)[ ]?\d?"
     r")\b(?:[:\s,()–-]{0,3}(?:19|20)\d{2})?",
-    re.IGNORECASE,
 )
 
 
@@ -315,13 +331,43 @@ def _cap(value: Any, limit: int) -> str:
     return _one_line(str(value or ""))[:limit]
 
 
+def _as_list(value: "Any") -> list:
+    """A model-supplied field coerced to a list, for a site that expects one.
+
+    The two sanitizers are documented as never raising, and the stages that call
+    them treat any exception as a stage failure — so a single malformed field in
+    one reply used to take the whole stage from COMPLETE to FAILED. Both failure
+    modes were real (P8 item 9):
+
+    * A **dict** where a list was expected raised ``TypeError: unhashable type:
+      'slice'`` out of the very next ``[:cap]``.
+    * A **string** is iterable, so it silently passed and was consumed **one
+      character at a time**: ``"disciplines": "mechanical"`` became
+      ``['a','c','e','h','i','l','m','n']``, and ``"refs": "NFPA 13 2016 §8.17"``
+      reached the citation check as the refs ``('N', 'F', 'P')`` — three live
+      ``web_search`` + ``web_fetch`` calls for single letters, on every run.
+
+    A string becomes a **one-element** list, because a model that writes a bare
+    string where a list belongs means the single value; anything else
+    non-list — dict, number, ``None`` — becomes empty, since there is no
+    defensible reading of it.
+    """
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    return []
+
+
 def _sanitize_payload(obj: dict) -> dict:
     """Bound every field of the model's identity payload before it becomes data."""
     disciplines = [
-        _cap(d, 40).lower() for d in (obj.get("disciplines") or []) if _cap(d, 40)
+        _cap(d, 40).lower() for d in _as_list(obj.get("disciplines")) if _cap(d, 40)
     ]
     pairs = []
-    for entry in (obj.get("sheet_disciplines") or [])[:_MAX_SHEET_DISCIPLINES]:
+    for entry in _as_list(obj.get("sheet_disciplines"))[:_MAX_SHEET_DISCIPLINES]:
         if isinstance(entry, dict):
             sheet, disc = entry.get("sheet_id", ""), entry.get("discipline", "")
         elif isinstance(entry, (list, tuple)) and len(entry) >= 2:
@@ -332,7 +378,7 @@ def _sanitize_payload(obj: dict) -> dict:
         if sheet and disc:
             pairs.append([sheet, disc])
     codes = []
-    for entry in (obj.get("adopted_codes") or [])[:_MAX_ADOPTED_CODES]:
+    for entry in _as_list(obj.get("adopted_codes"))[:_MAX_ADOPTED_CODES]:
         if not isinstance(entry, dict):
             continue
         code = _cap(entry.get("code"), 60)
@@ -362,7 +408,7 @@ def _sanitize_payload(obj: dict) -> dict:
         "adopted_codes": codes,
         "confidence": confidence,
         "evidence": [
-            _cap(e, _QUOTE_CAP) for e in (obj.get("evidence") or [])[:_MAX_EVIDENCE]
+            _cap(e, _QUOTE_CAP) for e in _as_list(obj.get("evidence"))[:_MAX_EVIDENCE]
             if _cap(e, _QUOTE_CAP)
         ],
         "notes": _cap(obj.get("notes"), _NOTES_CAP),

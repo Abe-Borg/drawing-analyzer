@@ -69,20 +69,50 @@ for _c in "“”„‟″":  # double quotes, double prime
     _CHAR_FOLD[ord(_c)] = '"'
 for _c in "Øø":  # Ø ø diameter symbol
     _CHAR_FOLD[ord(_c)] = "o"
-for _c in "­​‌‍﻿":  # soft hyphen, zero-widths, BOM
+for _c in "\u2044\u2215":  # FRACTION SLASH, DIVISION SLASH -> plain "/" (N7)
+    _CHAR_FOLD[ord(_c)] = "/"
+_CHAR_FOLD[0x00D7] = "x"     # MULTIPLICATION SIGN, as in 300 x 200 duct (N7)
+# Invisibles: soft hyphen, the three zero-width joiners/spaces, and the BOM.
+# Written as ESCAPES, not literals (N8) — as literal characters they are
+# invisible in every editor and diff, so a maintainer cannot see them, and an
+# ordinary edit can delete or duplicate one silently.
+for _c in (
+    "\u00ad"    # SOFT HYPHEN
+    "\u200b"    # ZERO WIDTH SPACE
+    "\u200c"    # ZERO WIDTH NON-JOINER
+    "\u200d"    # ZERO WIDTH JOINER
+    "\ufeff"    # ZERO WIDTH NO-BREAK SPACE / BOM
+):
     _CHAR_FOLD[ord(_c)] = ""
+
+# Vulgar fractions, rewritten BEFORE NFKC (N7). NFKC turns "½" into "1⁄2" with no
+# separating space, so a quote written `2½"` became `21⁄2"` — twenty-one halves —
+# and could never match a sheet reading `2-1/2"`, which normalizes to `2 1/2"`.
+# Rewriting to " 1/2" first puts the space in; the collapse at the end of
+# _normalize tidies any doubled space.
+_VULGAR_FRACTIONS = {
+    "\u00bc": " 1/4", "\u00bd": " 1/2", "\u00be": " 3/4",
+    "\u2150": " 1/7", "\u2151": " 1/9", "\u2152": " 1/10",
+    "\u2153": " 1/3", "\u2154": " 2/3", "\u2155": " 1/5",
+    "\u2156": " 2/5", "\u2157": " 3/5", "\u2158": " 4/5",
+    "\u2159": " 1/6", "\u215a": " 5/6", "\u215b": " 1/8",
+    "\u215c": " 3/8", "\u215d": " 5/8", "\u215e": " 7/8",
+}
+_VULGAR_FRACTION_TABLE = {ord(k): v for k, v in _VULGAR_FRACTIONS.items()}
 
 
 def _normalize(text: str) -> str:
     """Fold ``text`` to a canonical matching form.
 
-    NFKC, then map Unicode punctuation to ASCII, treat an *infix* hyphen as a
-    space (so ``2-1/2"`` and ``2 1/2"`` compare equal) while preserving a
-    leading/sign hyphen (so ``-5`` does not collapse onto ``5``), lowercase, and
-    collapse all whitespace to single spaces (the prototype's misses were
-    whitespace/linebreak artifacts).
+    Vulgar fractions are rewritten first (N7), then NFKC, then map Unicode
+    punctuation to ASCII, treat an *infix* hyphen as a space (so ``2-1/2"`` and
+    ``2 1/2"`` compare equal) while preserving a leading/sign hyphen (so ``-5``
+    does not collapse onto ``5``), lowercase, and collapse all whitespace to
+    single spaces (the prototype's misses were whitespace/linebreak artifacts).
     """
-    t = unicodedata.normalize("NFKC", text).translate(_CHAR_FOLD)
+    # Vulgar fractions first — NFKC would otherwise glue "2½" into "21⁄2".
+    pre = (text or "").translate(_VULGAR_FRACTION_TABLE)
+    t = unicodedata.normalize("NFKC", pre).translate(_CHAR_FOLD)
     # NFKC decomposes the double-prime inch mark (″) into two primes, which the
     # fold turns into '' — canonicalize that (and a literal '') to a plain " so
     # inches written as ", ″, or '' all compare equal.

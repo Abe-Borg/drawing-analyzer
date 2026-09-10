@@ -141,8 +141,17 @@ def test_sanitize_enforces_total_cap(monkeypatch):
     plans, dropped = sanitize_plans(payload)
     assert sum(len(p.items) for p in plans) == 3
     assert dropped == 5
-    # The FIRST plan (slug order) keeps its items; the tail plan absorbs cuts.
-    assert len(plans[0].items) == 3 or (len(plans) == 1 and plans[0].slug == "a")
+    # The overage is SHARED, not spent on the alphabetically-last plan (N5).
+    # This assertion previously read "the FIRST plan keeps its items; the tail
+    # plan absorbs cuts" — which is the behaviour N5 exists to remove: with plans
+    # sorted by slug, tail-trimming deleted whole disciplines in alphabetical
+    # order, so `mechanical` and `plumbing` were dropped outright while
+    # `architectural` kept everything.
+    assert {p.slug for p in plans} == {"a", "b"}, "a discipline was deleted whole"
+    assert all(p.items for p in plans), "a discipline was emptied"
+    # No plan gives up items while another still holds two more than it.
+    counts = sorted(len(p.items) for p in plans)
+    assert counts[-1] - counts[0] <= 1, f"the trim was not shared: {counts}"
 
 
 def test_sanitize_caps_refs_and_plan_count():
@@ -315,3 +324,89 @@ def test_author_review_plan_cache_misses_on_different_identity():
 
 def test_prompt_version_is_a_content_hash():
     assert len(PLANNER_PROMPT_VERSION) == 16
+
+
+# --------------------------------------------------------------------------- #
+# The total-cap trim is shared, not spent alphabetically (N5)
+# --------------------------------------------------------------------------- #
+
+_FIVE_DISCIPLINES = ["architectural", "electrical", "fire protection",
+                     "mechanical", "plumbing"]
+
+
+def _plans_payload(per_discipline: int):
+    return {"plans": [
+        {"discipline": d, "title": d.title(), "items": [
+            {"text": f"{d} check {i} with enough words to clear the length floor",
+             "severity": "high", "refs": []} for i in range(per_discipline)]}
+        for d in _FIVE_DISCIPLINES]}
+
+
+def test_no_discipline_is_deleted_to_satisfy_the_cap(monkeypatch):
+    # Plans sort by slug, and the trim used to eat the LAST plan's tail until the
+    # plan was gone. Measured with five disciplines of 20 items against the
+    # 60-item cap: `mechanical` and `plumbing` were removed outright while
+    # `architectural`, `electrical` and `fire protection` kept all 20. On a
+    # mechanical / fire-protection review that deletes the checklist that mattered.
+    monkeypatch.setenv("DRAWING_ANALYZER_MAX_PLAN_ITEMS", "60")
+    plans, dropped = sanitize_plans(_plans_payload(20))
+
+    kept = {p.discipline: len(p.items) for p in plans}
+    assert set(kept) == set(_FIVE_DISCIPLINES), f"a discipline was deleted: {kept}"
+    assert all(n > 0 for n in kept.values()), f"a discipline was emptied: {kept}"
+    assert sum(kept.values()) == 60
+    assert dropped == 40
+    # The loss is shared to within one item per discipline.
+    assert max(kept.values()) - min(kept.values()) <= 1, kept
+
+
+def test_trim_is_deterministic_regardless_of_input_order(monkeypatch):
+    # I-7: the same plans in any order must trim identically, since the trim
+    # picks the longest plan and ties resolve by slug.
+    import random
+
+    monkeypatch.setenv("DRAWING_ANALYZER_MAX_PLAN_ITEMS", "23")
+    payload = _plans_payload(9)
+    baseline = [(p.slug, len(p.items)) for p in sanitize_plans(payload)[0]]
+    for seed in range(4):
+        shuffled = {"plans": list(payload["plans"])}
+        random.Random(seed).shuffle(shuffled["plans"])
+        assert [(p.slug, len(p.items)) for p in sanitize_plans(shuffled)[0]] == baseline
+
+
+def test_cap_below_the_discipline_count_still_terminates(monkeypatch):
+    # Only when every plan is down to a single item may a whole plan go — and the
+    # loop must not spin.
+    monkeypatch.setenv("DRAWING_ANALYZER_MAX_PLAN_ITEMS", "3")
+    plans, dropped = sanitize_plans(_plans_payload(1))
+    assert sum(len(p.items) for p in plans) == 3
+    assert len(plans) == 3
+    assert dropped == 2
+
+
+def test_planner_refs_given_as_a_string_are_not_split_per_character():
+    # P8 item 9 on the money-losing path: each unique ref is one web_search +
+    # web_fetch in the citation check, so "NFPA 13 2016 §8.17" arriving as a bare
+    # string used to buy three live searches for the letters N, F and P.
+    payload = {"plans": [{"discipline": "fire protection", "title": "FP", "items": [
+        {"text": "Verify sprinkler spacing against the adopted edition for the hazard",
+         "severity": "high", "refs": "NFPA 13 2016 §8.17"}]}]}
+    plans, _dropped = sanitize_plans(payload)
+    assert plans and plans[0].items
+    assert plans[0].items[0].refs == ("NFPA 13 2016 §8.17",)
+
+
+def test_planner_malformed_items_and_refs_never_raise():
+    # sanitize_plans is documented as never raising; the stage treats an exception
+    # as a stage failure.
+    for refs in ({"code": "NFPA 13"}, 13, None):
+        payload = {"plans": [{"discipline": "fire protection", "title": "FP", "items": [
+            {"text": "Verify sprinkler spacing against the adopted edition here",
+             "severity": "high", "refs": refs}]}]}
+        plans, _dropped = sanitize_plans(payload)
+        assert plans[0].items[0].refs == ()
+    for items in ("not a list", {"a": 1}, 5):
+        plans, dropped = sanitize_plans(
+            {"plans": [{"discipline": "fire protection", "title": "FP", "items": items}]}
+        )
+        assert dropped >= 1          # counted, never silently absent

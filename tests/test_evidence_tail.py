@@ -493,8 +493,17 @@ def test_a_truncated_sheet_keys_distinctly():
 
 
 def test_no_cross_qc_contract_bump_was_needed():
-    """WP-03A must not invalidate stored results; WP-03B is where that happens."""
-    assert X._CROSS_QC_CACHE_CONTRACT == 2
+    """WP-03A must not invalidate stored results; WP-03B is where that happens.
+
+    A tripwire on the counter's value, so any bump has to come through here and
+    say why. It reads 3 rather than 2 because **P8 item 11** bumped it — a
+    separate change with its own reason (``_norm_id`` now folds sheet handles
+    through ``fold_text``, which is host-side binding no key input covers, so a
+    warm entry would keep serving the smaller finding set). Neither WP-03A nor
+    WP-03B contributed to it; that is what this test still asserts, by requiring
+    the value to be exactly what the recorded reasons account for.
+    """
+    assert X._CROSS_QC_CACHE_CONTRACT == 3
 
 
 # --------------------------------------------------------------------------- #

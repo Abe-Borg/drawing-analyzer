@@ -51,6 +51,7 @@ from .digest import (
     scan_structured_blocks,
 )
 from .models import ProfileSnapshot
+from .set_identity import _as_list
 from .profiles import Profile
 
 DEFAULT_PLAN_MAX_TOKENS = 32_000
@@ -243,22 +244,22 @@ def sanitize_plans(obj: dict) -> tuple[list[DisciplinePlan], int]:
     # reports PARTIAL instead of silently losing entire discipline checklists
     # (an uncounted drop would let the run claim a COMPLETE review plan).
     for raw in raw_plans[_MAX_PLANS:]:
-        overflow_items = raw.get("items") if isinstance(raw, dict) else None
-        dropped += max(1, len(overflow_items)) if isinstance(overflow_items, list) else 1
+        overflow_items = _as_list(raw.get("items")) if isinstance(raw, dict) else []
+        dropped += max(1, len(overflow_items))
     for raw in raw_plans[:_MAX_PLANS]:
         if not isinstance(raw, dict):
             dropped += 1
             continue
         discipline = _one_line(raw.get("discipline")).lower()[:40]
         if not discipline or _slug(discipline) in seen_disciplines:
-            dropped += len(raw.get("items") or []) if isinstance(raw.get("items"), list) else 1
+            dropped += max(1, len(_as_list(raw.get("items"))))
             continue
         seen_disciplines.add(_slug(discipline))
         title = _one_line(raw.get("title"))[:_TITLE_CAP] or f"Model review plan — {discipline}"
         items: list[PlanItem] = []
         seen_texts: set[str] = set()
-        raw_items = raw.get("items") or []
-        if isinstance(raw_items, list) and len(raw_items) > _MAX_ITEMS_PER_PLAN * 2:
+        raw_items = _as_list(raw.get("items"))
+        if len(raw_items) > _MAX_ITEMS_PER_PLAN * 2:
             # Items past the scan window are discarded unseen — count them too.
             dropped += len(raw_items) - _MAX_ITEMS_PER_PLAN * 2
         for entry in raw_items[: _MAX_ITEMS_PER_PLAN * 2]:
@@ -283,7 +284,7 @@ def sanitize_plans(obj: dict) -> tuple[list[DisciplinePlan], int]:
                 severity = "medium"
             refs = tuple(
                 _one_line(r)[:_REF_CAP]
-                for r in (entry.get("refs") or [])[:_MAX_REFS_PER_ITEM]
+                for r in _as_list(entry.get("refs"))[:_MAX_REFS_PER_ITEM]
                 if _one_line(r)
             )
             items.append(PlanItem(text=text, severity=severity, refs=refs))
@@ -292,18 +293,33 @@ def sanitize_plans(obj: dict) -> tuple[list[DisciplinePlan], int]:
         else:
             dropped += 1
     plans.sort(key=lambda p: p.slug)
-    # Enforce the TOTAL cap across plans, trimming from the last plan's tail
-    # (item order within a plan is value-ordered, so tails are cheapest).
+    # Enforce the TOTAL cap across plans by trimming the LARGEST plan each round,
+    # not the last plan's tail (N5). Plans are sorted by slug, so tail-trimming
+    # spent the whole overage in alphabetical order and deleted entire
+    # disciplines: measured with five disciplines of 20 items against the 60-item
+    # cap, `mechanical` and `plumbing` were removed outright — not trimmed,
+    # removed — while `architectural`, `electrical` and `fire protection` kept all
+    # 20. On a set whose mechanical and plumbing sheets are the point of the
+    # review, that is the checklist you needed. Largest-first shares the loss
+    # instead: the same input now leaves 12 items on every discipline. Item order
+    # within a plan is value-ordered, so the item given up is still the cheapest
+    # one in that plan.
     total = sum(len(p.items) for p in plans)
     while total > total_cap and plans:
-        last = plans[-1]
-        if len(last.items) <= 1:
+        # Longest plan; ties go to the earliest slug, so the trim is
+        # deterministic (I-7).
+        idx = max(range(len(plans)), key=lambda i: (len(plans[i].items), -i))
+        longest = plans[idx]
+        if len(longest.items) <= 1:
+            # Every plan is down to a single item and the cap is smaller than the
+            # number of disciplines — only now can a whole plan go, from the end.
+            last = plans.pop()
             dropped += len(last.items)
             total -= len(last.items)
-            plans.pop()
             continue
-        plans[-1] = DisciplinePlan(
-            discipline=last.discipline, title=last.title, items=last.items[:-1]
+        plans[idx] = DisciplinePlan(
+            discipline=longest.discipline, title=longest.title,
+            items=longest.items[:-1],
         )
         dropped += 1
         total -= 1

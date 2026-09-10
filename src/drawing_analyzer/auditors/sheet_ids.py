@@ -50,7 +50,7 @@ from typing import Any, Iterable
 # unified the two normalizers: ``auditors.references._normalize_text`` is now an
 # alias of :func:`fold_text`, so every auditor folds text identically.
 _DASHES = "‐‑‒–—―−﹘﹣－"
-_STRIP = "­​‌‍﻿"  # soft hyphen, ZWSP/ZWNJ/ZWJ, BOM
+_STRIP = "\u00ad\u200b\u200c\u200d\ufeff"  # soft hyphen, ZWSP/ZWNJ/ZWJ, BOM
 _TEXT_TRANSLATION = {ord(c): "-" for c in _DASHES}
 _TEXT_TRANSLATION.update({ord(c): "" for c in _STRIP})
 

@@ -289,3 +289,50 @@ def test_secrets_are_still_redacted_after_eliding(tmp_path):
     out = formatter.format(record)
     assert key not in out
     assert "chars elided" in out
+
+
+# --------------------------------------------------------------------------- #
+# Prefixed secret field names redact (N10)
+# --------------------------------------------------------------------------- #
+
+
+def test_prefixed_env_var_names_are_redacted():
+    # A leading \\b cannot match inside ANTHROPIC_API_KEY: the character before
+    # API is "_", itself a word character, so the NAME rule never fired on the
+    # commonest spelling of all. It only looked covered because the sk-ant- VALUE
+    # pattern caught real Anthropic keys — a credential of any other shape went to
+    # disk in full.
+    from drawing_analyzer.diagnostics import redact_secrets
+
+    secret = "zzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+    for line in (
+        f"ANTHROPIC_API_KEY={secret}",
+        f"ANTHROPIC_AUTH_TOKEN={secret}",
+        f"MY_ANTHROPIC_AUTH_TOKEN={secret}",
+        f"DRAWING_ANALYZER_ANTHROPIC_API_KEY={secret}",
+        f"export SOME_DEEP_PREFIX_ACCESS_TOKEN={secret}",
+        f"'anthropic_api_key': '{secret}'",
+    ):
+        out = redact_secrets(line)
+        assert secret not in out, f"leaked: {out}"
+
+
+def test_redaction_keeps_the_variable_name_it_redacted():
+    # Consuming the prefix unnamed would rewrite ANTHROPIC_API_KEY=… as
+    # API_KEY=[REDACTED] and lose which variable it was — the log line has to stay
+    # diagnosable.
+    from drawing_analyzer.diagnostics import redact_secrets
+
+    out = redact_secrets("DRAWING_ANALYZER_ANTHROPIC_API_KEY=zzzzzzzzzzzzzzzz")
+    assert out.startswith("DRAWING_ANALYZER_ANTHROPIC_API_KEY=")
+    assert "[REDACTED]" in out
+
+
+def test_token_counts_are_not_mistaken_for_credentials():
+    # The non-regression that matters: `token` is word-bounded so a count survives.
+    from drawing_analyzer.diagnostics import redact_secrets
+
+    assert redact_secrets("input_tokens=1234") == "input_tokens=1234"
+    assert redact_secrets("output_tokens=99, cache_read_input_tokens=5") == (
+        "output_tokens=99, cache_read_input_tokens=5"
+    )

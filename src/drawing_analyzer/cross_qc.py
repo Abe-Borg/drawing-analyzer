@@ -93,7 +93,7 @@ from .stage_cache import (
     stage_cache_key,
 )
 from .auditors.references import detect_sheet_id
-from .auditors.sheet_ids import fold_text
+from .auditors.sheet_ids import fold_text, normalize_sheet_id
 
 _log = get_logger()
 
@@ -115,7 +115,15 @@ _TEXT_LAYER_BUDGET = 4_000
 # ``findings_omitted``. Reading them back would default that to 0 and hand a
 # truncated run a clean bill of health forever on warm re-runs, which is the
 # exact failure the accounting was added to end.
-_CROSS_QC_CACHE_CONTRACT = 2
+#
+# Bumped to 3 (P8 item 11): ``_norm_id`` now folds sheet handles through
+# ``normalize_sheet_id``, so a leg whose handle carried a Unicode dash or fullwidth digit
+# resolves where it used to be dropped. That is **host-side binding**, not a model
+# input — nothing in the key covers it — yet it changes which legs validate and
+# therefore the stored result for byte-identical request inputs. A warm entry
+# written under the old normalization would keep serving the smaller finding set.
+# One mechanism for one change: no key field was added beside this.
+_CROSS_QC_CACHE_CONTRACT = 3
 DEFAULT_CROSS_QC_WORKERS = 3
 _CROSS_QC_WORKERS_ENV = "DRAWING_ANALYZER_CROSS_QC_WORKERS"
 
@@ -448,7 +456,23 @@ class CrossQCResult:
 
 
 def _norm_id(sheet_id: str) -> str:
-    return (sheet_id or "").strip().upper()
+    """A sheet handle normalized for host-side matching (P8 item 11).
+
+    Canonicalized through :func:`auditors.sheet_ids.normalize_sheet_id` rather
+    than a bare ``.strip().upper()``. Model replies and PDF text layers carry
+    Unicode variants of a sheet id freely — a non-breaking hyphen (U+2011), an
+    en dash, a hyphen (U+2010), fullwidth digits — and every one of them failed
+    to match its plain-ASCII twin, so the leg was dropped and with it the whole
+    cross-sheet finding, which needs two grounded sheets. All four variants of
+    ``M-101`` were measured failing here.
+
+    ``normalize_sheet_id`` is the repo's declared canonical form for "comparison /
+    indexing" of a sheet id, and it is what ``detect_sheet_id`` returns — so using
+    it, rather than folding by hand, stops cross-QC from disagreeing with the
+    auditors about what one sheet id is. It also trims edge punctuation, so a
+    handle written ``"M-101."`` or ``"(M-101)"`` resolves too.
+    """
+    return normalize_sheet_id(sheet_id)
 
 
 def _fallback_id(ref: Any) -> str:
