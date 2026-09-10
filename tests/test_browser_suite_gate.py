@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import re
 from pathlib import Path
 
 import pytest
@@ -170,35 +171,39 @@ def test_the_default_floor_is_reachable_by_the_real_suite(script, tmp_path):
 
 # --- the wiring (the part that makes the rest matter) ----------------------
 
-def _browser_job_steps() -> list[dict]:
-    yaml = pytest.importorskip("yaml")
-    workflow = yaml.safe_load(_CI.read_text(encoding="utf-8"))
-    return workflow["jobs"]["browser-security"]["steps"]
+def _ci_text() -> str:
+    """The CI workflow as text.
+
+    Deliberately **not** parsed with PyYAML: it is not a dependency of this
+    project, so ``importorskip`` silently skipped this guard on the CI Windows
+    leg — a structural check that quietly does not run is the very failure class
+    item 42 exists to prevent, and it would be absurd for the guard against
+    silent skipping to be the thing silently skipping.
+    """
+    return _CI.read_text(encoding="utf-8")
 
 
 def test_ci_runs_the_guard_on_the_xml_pytest_writes():
-    """The pytest step and the guard must agree on one filename, in one job.
+    """The pytest step and the guard must agree on one filename, in one order.
 
     A ``--junitxml`` pointing at one path and a guard reading another is a guard
     that always fails; the same drift the other way (guard dropped, junitxml
     kept) is a guard that never runs. Both are silent, so they are asserted
     together against the workflow itself.
     """
-    steps = _browser_job_steps()
-    pytest_runs = [s["run"] for s in steps if "run" in s and "-m browser" in s["run"]]
-    guard_runs = [s["run"] for s in steps
-                  if "run" in s and "check_browser_suite.py" in s["run"]]
-    assert len(pytest_runs) == 1, pytest_runs
-    assert len(guard_runs) == 1, guard_runs
-
+    text = _ci_text()
     marker = "--junitxml="
-    assert marker in pytest_runs[0], pytest_runs[0]
-    written = pytest_runs[0].split(marker, 1)[1].split()[0].strip("'\"")
-    assert written, pytest_runs[0]
-    assert written in guard_runs[0], (written, guard_runs[0])
-    # And in that order: a guard that runs first reads the *previous* run's file.
-    assert steps.index(next(s for s in steps if s.get("run") == pytest_runs[0])) < \
-        steps.index(next(s for s in steps if s.get("run") == guard_runs[0]))
+    assert text.count(marker) == 1, "expected exactly one JUnit report in CI"
+    written = text.split(marker, 1)[1].split()[0].strip("'\"")
+    assert written, text
+    guard = f"check_browser_suite.py {written}"
+    assert guard in text, f"CI never runs the guard on {written!r}"
+    # In that order: a guard that runs first reads the *previous* run's file.
+    assert text.index(marker) < text.index(guard)
+    # In the same job, or the report is not there to read. Asserted by there
+    # being no job boundary (a top-level `  <name>:` key) between them.
+    between = text[text.index(marker):text.index(guard)]
+    assert not re.search(r"^  [a-z][\w-]*:$", between, re.MULTILINE), between
 
 
 def test_the_installer_compiler_is_resolved_in_exactly_one_place():
@@ -223,21 +228,28 @@ def test_the_installer_compiler_is_resolved_in_exactly_one_place():
     assert "GITHUB_STEP_SUMMARY" in text
 
 
-def test_release_publish_needs_the_release_gates():
+def test_release_publish_needs_every_release_gate():
     """P9 item 42a: a tag cannot publish an installer past a failing suite.
 
     Branch protection does not apply to tag pushes, so ``publish`` needing only
-    ``build`` meant a release was gated on the installer *compiling*.
+    ``build`` meant a release was gated on the installer *compiling*. And a
+    second workflow triggered by the same tag is not a dependency of this one
+    (Codex review), so every release-critical check has to be in the chain:
+    the Linux gate set and the Windows suite both.
+
+    Text, not PyYAML, for the reason given on :func:`_ci_text`.
     """
-    yaml = pytest.importorskip("yaml")
-    release = yaml.safe_load(
-        (_REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    text = (_REPO_ROOT / ".github" / "workflows" / "release.yml").read_text(
+        encoding="utf-8"
     )
-    jobs = release["jobs"]
-    assert "gates" in jobs, "the tag-gated release-gates job is gone"
-    needs = jobs["publish"]["needs"]
-    needs = [needs] if isinstance(needs, str) else list(needs)
-    assert "gates" in needs, needs
-    assert "run_acceptance.py" in " ".join(
-        s.get("run", "") for s in jobs["gates"]["steps"]
+    assert "\n  gates:\n" in text, "the tag-gated release-gates job is gone"
+    assert "\n  gates-windows:\n" in text, "the Windows release-gates job is gone"
+    assert "needs: [build, gates, gates-windows]" in text, (
+        "publish no longer requires every release gate"
     )
+    # The full gate set, not --fast: the browser suite and the wheel build are
+    # release-critical and only run when the whole script runs.
+    assert "run_acceptance.py\n" in text, "the gates job does not run the full suite"
+    assert "run_acceptance.py --fast" not in text
+    # ...and the browser gate can only prove something with a browser present.
+    assert "playwright install --with-deps chromium" in text

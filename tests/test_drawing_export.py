@@ -1378,6 +1378,38 @@ def test_long_path_is_an_identity_function_off_windows():
         assert dx.long_path(Path("rel/x")) == Path("rel/x")
 
 
+def test_a_folder_that_exists_only_past_max_path_is_not_reused(tmp_path, monkeypatch):
+    """``_unique_dir`` must probe through the long-path form too (N30).
+
+    Past MAX_PATH an unprefixed ``exists()`` answers *False* for a directory that
+    is really there, so the name reads as free — and the publish rename then moves
+    the new export straight over the old one. Modelled with the same visible
+    mapping as the plumbing test, since on POSIX the transform is an identity and
+    a value comparison cannot tell the two probes apart.
+    """
+    def fake_long_path(path):
+        text = str(path)
+        return Path(text if text.endswith("__lp") else text + "__lp")
+
+    monkeypatch.setattr(dx, "long_path", fake_long_path)
+    predicted = tmp_path / dx.export_folder_name([SRC], now=NOW)
+    # TWO prior exports, existing only under the mapped name — invisible to a
+    # plain exists(), exactly as a >260-char directory is on Windows. Two, so
+    # that the disambiguation *loop* probes as well as the first check: reverting
+    # either one alone has to fail this.
+    prior = [Path(str(predicted) + "__lp"),
+             Path(str(predicted.with_name(predicted.name + "_2")) + "__lp")]
+    for directory in prior:
+        directory.mkdir(parents=True)
+
+    returned = dx.write_drawing_export(_make_ctx(), tmp_path, source_names=[SRC], now=NOW)
+
+    assert returned != predicted, "the export reused a folder that already existed"
+    assert returned.name.endswith("_3"), returned.name
+    for directory in prior:
+        assert directory.is_dir(), f"a prior export was clobbered: {directory}"
+
+
 def test_export_writes_through_the_long_path_form(tmp_path, monkeypatch):
     r"""The prefix must reach every writer, and must NOT reach the returned path.
 
@@ -1391,14 +1423,24 @@ def test_export_writes_through_the_long_path_form(tmp_path, monkeypatch):
     mapped: list[Path] = []
 
     def fake_long_path(path):
+        # Map only; the caller does the mkdir — which is the point of the fix
+        # this guards: the staging directory is *created* through the long-path
+        # form, not merely written to afterwards.
         text = str(path)
         if text.endswith("__lp"):
             return Path(text)
         out = Path(text + "__lp")
-        if Path(text).is_dir() and not out.exists():
-            out.mkdir(parents=True)
-            mapped.append(out)
+        mapped.append(out)
         return out
+
+    made: list[str] = []
+    real_mkdir = dx.Path.mkdir
+
+    def spy_mkdir(self, *a, **kw):
+        made.append(str(self))
+        return real_mkdir(self, *a, **kw)
+
+    monkeypatch.setattr(dx.Path, "mkdir", spy_mkdir)
 
     seen: list[Path] = []
     real_manifest = dx.write_run_manifest
@@ -1422,6 +1464,14 @@ def test_export_writes_through_the_long_path_form(tmp_path, monkeypatch):
     returned = dx.write_drawing_export(_make_ctx(), tmp_path, source_names=[SRC], now=NOW)
 
     assert mapped, "long_path was never applied to the staging folder"
+    # The staging directory itself must be CREATED through the mapped form: past
+    # MAX_PATH the mkdir is exactly where an unprefixed path fails, before the
+    # first prefixed write is ever reached. Observed on the mkdir call rather
+    # than on the directory, which the publish rename moves away.
+    staging_mkdirs = [d for d in made if ".partial" in Path(d).name]
+    assert staging_mkdirs, made
+    for d in staging_mkdirs:
+        assert d.endswith("__lp"), f"staging mkdir bypassed the long-path form: {d}"
     assert len(seen) == 4, seen
     for folder in seen:
         assert folder.name.endswith("__lp"), f"{folder} bypassed the long-path form"

@@ -753,12 +753,19 @@ def _publish_backoff(attempt: int) -> None:
 
 
 def _unique_dir(path: Path) -> Path:
-    """``path`` if free, else ``path_2`` / ``path_3`` / … (collision-safe)."""
-    if not path.exists():
+    """``path`` if free, else ``path_2`` / ``path_3`` / … (collision-safe).
+
+    Probes through :func:`long_path` (N30): past MAX_PATH an unprefixed
+    ``exists()`` answers *False* for a directory that is really there, so the
+    name would be handed out as free and ``mkdir(exist_ok=False)`` would then
+    fail — or, worse on a re-run, a prior export would be written into. Returns
+    the PLAIN path either way; the prefix is an I/O detail, not an identity.
+    """
+    if not long_path(path).exists():
         return path
     for n in range(2, 1000):
         cand = path.with_name(f"{path.name}_{n}")
-        if not cand.exists():
+        if not long_path(cand).exists():
             return cand
     return path  # give up; mkdir(exist_ok=False) will raise and the caller surfaces it
 
@@ -1512,13 +1519,19 @@ def write_drawing_export(
     # the partial staging directory is renamed to an explicit *_INCOMPLETE
     # label (or left as .partial if even that fails) and the error propagates.
     folder = _unique_dir(final.with_name(final.name + ".partial"))
-    folder.mkdir(parents=True, exist_ok=False)
     # Every write below goes through the long-path form (N30). Deriving it once
     # here covers all of them: each writer builds its targets by joining onto
     # this folder (``folder / name``, ``contained_target(folder, …)``), and a
     # joined path inherits the prefix. The plain ``folder`` / ``final`` are what
     # the renames and the return value use, so no caller sees the prefixed form.
+    #
+    # The mkdir goes through it as well, and that ordering is the point: an
+    # operator-chosen parent deep enough that the export folder *itself* passes
+    # MAX_PATH would otherwise fail here, before the first prefixed write was
+    # ever reached — long-path support that starts one step too late is no
+    # long-path support at all.
     staging = long_path(folder)
+    staging.mkdir(parents=True, exist_ok=False)
     try:
         # One sha256 per artifact per export: markup_manifest.json hashes the
         # reviewed PDFs first, run_manifest.json's whole-folder walk reuses them.

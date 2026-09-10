@@ -199,7 +199,16 @@ def test_a_symlink_is_never_followed(temp_root):
         link.symlink_to(real, target_is_directory=True)
     except (OSError, NotImplementedError):          # pragma: no cover - no symlinks
         pytest.skip("this filesystem does not support symlinks")
-    os.utime(link, (time.time() - _OLD, time.time() - _OLD), follow_symlinks=False)
+    # Back-date the link itself where the platform supports it. Windows does
+    # not: `os.utime(..., follow_symlinks=False)` raises NotImplementedError
+    # there ("utime: follow_symlinks unavailable on this platform"), which is how
+    # this test failed the CI Windows leg. `os.supports_follow_symlinks` is the
+    # API Python provides for exactly this question. It is incidental to what is
+    # being tested either way: `path.stat()` follows the link, so the pruner
+    # reads the *target's* age, back-dated above.
+    if os.utime in os.supports_follow_symlinks:
+        stale = time.time() - _OLD
+        os.utime(link, (stale, stale), follow_symlinks=False)
     # ``rmtree(ignore_errors=True)`` already refuses a symlink, so the target is
     # safe either way; what the guard buys is an honest tally. Without it the run
     # log reports "pruned 1 stale work dir" having deleted nothing, and the next

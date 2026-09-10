@@ -26,9 +26,13 @@
 #     holds a write-capable token.
 #   * Only the `publish` job has `contents: write`, it is gated to tag refs, and
 #     it runs NO repo code — it just downloads the built artifact and calls `gh`.
-#   * `publish` also needs the tag-gated `gates` job (P9 item 42), so a release
-#     cannot be published from a commit whose tests, secret scan and import
-#     isolation have not passed on that exact commit.
+#   * `publish` also needs the tag-gated `gates` and `gates-windows` jobs
+#     (P9 item 42), so a release cannot be published from a commit whose full
+#     automated gate set — Linux and Windows suites, import isolation, secret
+#     scan, browser exploit suite, wheel build, static analysis, license and CVE
+#     audits — has not passed on that exact commit. They run here rather than
+#     being inherited from ci.yml: ci.yml triggers on `v*` tags too, but a
+#     separate workflow run is not a dependency of this one.
 #   * Third-party actions are pinned to immutable commit SHAs (the trailing
 #     comment is the human-readable version).
 #
@@ -222,14 +226,58 @@ jobs:
     # only that the installer *compiled*. A tag pointing at a commit with a
     # failing suite published an installer built from it.
     #
-    # `--fast` is deliberate, not a shortcut: it runs byte-compile, import
-    # isolation (I-5), the whole hermetic suite and the secret scan, and skips
-    # the browser and wheel-build gates, which are separate jobs in ci.yml — and
-    # ci.yml now triggers on `v*` tags too, so those run on this same commit.
-    # Duplicating them here would double a slow release for no added signal.
-    name: Release gates (hermetic suite + secret scan)
+    # Every release-critical check runs INSIDE the needs chain (Codex review).
+    # ci.yml also triggers on `v*` tags, but starting a second workflow for the
+    # same tag does not make it a dependency of this one: `publish` would happily
+    # create the release while those jobs were still running, or after one had
+    # failed. So this job runs the full `run_acceptance.py` — no `--fast` — with
+    # Playwright and Chromium installed so the browser exploit suite genuinely
+    # executes rather than skipping itself, plus the three §19.8 audits the
+    # acceptance script does not own (static analysis, licenses, CVEs).
+    name: Release gates (full automated suite)
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.11"
+      - name: Install (engine + dev + browser test + build tooling)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,browsertest]"
+          pip install "build==1.4.0"
+      - name: Install Chromium (so the browser gate cannot skip itself)
+        run: python -m playwright install --with-deps chromium
+      - name: Phase 27 release gates (all of them)
+        run: python scripts/run_acceptance.py
+      - name: Static analysis (correctness classes only — no style churn)
+        run: |
+          pip install "ruff==0.14.5"
+          ruff check --select E9,F63,F7,F82 src tests scripts
+      - name: Dependency license / AGPL-notice audit
+        run: |
+          pip install -c requirements-release.lock ".[dev]"
+          python scripts/check_licenses.py
+      - name: Dependency vulnerability audit (pip-audit)
+        run: |
+          pip install "pip-audit==2.9.0"
+          pip-audit --skip-editable
+
+  gates-windows:
+    # The Windows leg of the hermetic suite, in the needs chain for the same
+    # reason. It is not redundant with `gates`: this app ships as a Windows
+    # desktop binary and a good deal of its behaviour is Windows-only — path
+    # length and case handling, the `\\?\` long-path form, `os.utime` support,
+    # Credential Manager key storage. A release must not publish past a red
+    # Windows suite.
+    name: Release gates (hermetic suite, windows)
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: windows-latest
     permissions:
       contents: read
     steps:
@@ -243,12 +291,14 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
-      - name: Phase 27 release gates
-        run: python scripts/run_acceptance.py --fast
+      - name: PyMuPDF import isolation (I-5)
+        run: python -m pytest -q -m "not network" tests/test_import_isolation.py
+      - name: Hermetic test suite
+        run: python -m pytest -q -m "not network"
 
   publish:
     name: Publish GitHub Release
-    needs: [build, gates]
+    needs: [build, gates, gates-windows]
     # Tag refs only. This job runs NO repo-controlled code — it downloads the
     # already-built artifact and calls `gh` — so holding a write token here does
     # not expose the repo to PR-supplied build steps.

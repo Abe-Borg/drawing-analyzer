@@ -350,6 +350,40 @@ def test_private_roots_scrub_whatever_case_the_path_arrives_in():
         assert "SET 01.pdf" in out, text
 
 
+def test_a_private_root_never_matches_a_sibling_directory():
+    """A root match must end at a component boundary (Codex review, P9).
+
+    Without one, root ``C:\\Projects\\Job`` matched the *sibling*
+    ``C:\\Projects\\Job2\\…`` on its prefix, and the partial rewrite was worse
+    than no match at all: it produced ``...2\\Client Secret\\file.pdf``, and with
+    the drive letter eaten ``scrub_paths`` could no longer anchor the remainder
+    to reduce it. A non-boundary match now falls through to that backstop, which
+    strips the drive and the first component.
+    """
+    root = r"C:\Projects\Job"
+    for sibling in (
+        r"PermissionError: C:\Projects\Job2\Client Secret\file.pdf",
+        r"PermissionError: C:\Projects\JobArchive\Client X\a.pdf",
+        r"PermissionError: C:/Projects/Job-old/Client Y/b.pdf",
+    ):
+        out = sanitize_text(sibling, private_roots=(root,))
+        # The tell-tale of the prefix match: a bare "..." glued to the rest of
+        # the sibling's own name.
+        assert not out.startswith("PermissionError: ...2"), out
+        assert "...2" not in out and "...Archive" not in out and "...-old" not in out
+        # The backstop still ran, so the drive and first component are gone.
+        assert "C:" not in out and "Projects" not in out, out
+
+    # ...and the real root, with or beyond a boundary, still scrubs.
+    assert "Projects" not in sanitize_text(
+        rf"PermissionError: {root}\SET 01.pdf", private_roots=(root,)
+    )
+    assert sanitize_text(f"open {root}", private_roots=(root,)) == "open ..."
+    assert "Projects" not in sanitize_text(
+        r'open "C:\Projects\Job\SET 01.pdf" failed', private_roots=(root,)
+    )
+
+
 def test_private_root_matching_is_literal_not_a_pattern():
     """Regex metacharacters in a real directory name must not become syntax."""
     root = r"C:\Users\a+b (draft) [v2]"

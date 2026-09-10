@@ -165,11 +165,22 @@ def _private_root_re(root: str) -> "re.Pattern[str]":
     spaces ends, so the user's own name and folder structure reached run.log and
     run_manifest.json — both of which exist to be portable.
 
+    The match must end at a **component boundary** — a separator or the end of
+    the string. Without that, a registered root matches any sibling directory
+    whose name merely starts with it, and the partial rewrite is *worse* than no
+    match: root ``C:\\Projects\\Job`` turned
+    ``C:\\Projects\\Job2\\Client Secret\\file.pdf`` into
+    ``...2\\Client Secret\\file.pdf``, and with the drive letter eaten,
+    :func:`scrub_paths` could no longer anchor the remainder to reduce it. A
+    non-boundary match is left for that backstop instead, which at least strips
+    the drive and the first component. (Inherited from the ``str.replace`` this
+    replaced, which had the same prefix behaviour.)
+
     Compiled per root and cached: this boundary runs on every field of every
     journal event.
     """
     parts = [re.escape(seg) for seg in re.split(r"[\\/]", root)]
-    return re.compile(r"[\\/]".join(parts), re.IGNORECASE)
+    return re.compile(r"[\\/]".join(parts) + r"(?=[\\/]|$)", re.IGNORECASE)
 
 
 def sanitize_text(

@@ -51,10 +51,41 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **A release could publish an installer built from a commit whose tests were
   red.** Branch protection does not apply to a tag push, and a tag can name any
   commit, so `publish` needing only `build` meant the gate was "the installer
-  compiled". `publish` now also needs a tag-gated `gates` job that runs the
-  Phase 27 release gates on that exact commit, and CI itself now triggers on
-  `v*` tags so the Windows leg, the browser suite and the wheel build run there
-  too.
+  compiled". `publish` now needs two tag-gated jobs that run **inside its own
+  `needs` chain**: `gates` (the full `run_acceptance.py` — byte-compile, import
+  isolation, the hermetic suite, the secret scan, the browser exploit suite with
+  Chromium actually installed, and the wheel build — plus static analysis and the
+  license and CVE audits) and `gates-windows` (the hermetic suite on Windows,
+  where path length, case handling and the `\\?\` form actually apply). CI also
+  triggers on `v*` tags, but that is for visibility only: a separate workflow run
+  triggered by the same tag is **not** a dependency, so `publish` would otherwise
+  create the release while those jobs were still running — or after one failed.
+
+- **A private root matched any sibling directory sharing its prefix.** Root
+  `C:\Users\…\Job` matched `C:\Users\…\Job2\Client Secret\file.pdf`, and the
+  partial rewrite was *worse* than no match: it produced
+  `...2\Client Secret\file.pdf`, and with the drive letter eaten the generic path
+  scrub could no longer anchor the remainder to reduce it. A root match must now
+  end at a component boundary — a separator or the end of the string — and a
+  non-boundary match falls through to that backstop, which strips the drive and
+  the first component. (Inherited from the `str.replace` it grew out of, which had
+  the same prefix behaviour.)
+
+- **Long-path support started one step too late.** The `\\?\` form was applied
+  after the staging directory had already been probed and created through the
+  plain path, so an operator-chosen parent deep enough that the export folder
+  *itself* passed MAX_PATH failed before the first prefixed write was reached.
+  The uniqueness probe and the `mkdir` now go through it too — and the probe
+  matters twice over: past MAX_PATH an unprefixed `exists()` answers *False* for
+  a directory that is really there, so the name read as free and the publish
+  rename would move the new export over the old one.
+
+- **The acceptance script's browser gate could pass on an all-skipped run too.**
+  The CI job got the executed-test floor; `run_acceptance.py` — the one-command
+  release gate — still treated "Playwright is installed" as evidence the suite
+  ran. It now writes a JUnit report and applies the same floor through the same
+  script, so the release gate and the CI job cannot disagree about what "passed"
+  means.
 
 - **Quitting the GUI mid-run discarded a paid run with no prompt.** The worker
   threads are daemons and the export happens *after* the analysis returns, so one
