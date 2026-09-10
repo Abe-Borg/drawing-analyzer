@@ -336,3 +336,57 @@ def test_critique_level1_key_sensitive_to_runs_and_profiles():
     kp = critique_cache_key_level1(ri, runs=2, profiles_key="fp@1@hash", **base)
     assert k1 != k2                              # one-read vs two-read differ
     assert k2 != kp                              # a profile selection re-critiques
+
+
+def test_both_prompt_hashes_cover_every_shared_user_framing_string():
+    # The user-turn framing (how a sheet is introduced, how an omitted tile is
+    # disclosed, the overview label, the per-tile label) is model-visible text
+    # that sat OUTSIDE both prompt hashes. Editing it changed what was sent
+    # while every cache key stayed byte-identical, so warm runs replayed reads
+    # taken under the old wording.
+    #
+    # ``build_user_content_blocks`` is SHARED: the critique passes its own
+    # closing instruction and reuses this exact framing, so a string covered by
+    # only one hash re-keys that cache while silently replaying the other — the
+    # failure CRITIQUE_PROMPT_VERSION's own comment already records.
+    import hashlib
+
+    from drawing_analyzer import critique as critique_mod
+    from drawing_analyzer import digest as digest_mod
+
+    assert digest_mod.SHARED_USER_FRAMING_STRINGS, "shared framing tuple is empty"
+
+    def _digest_hash(strings):
+        return hashlib.sha256(
+            "\x00".join(
+                (
+                    digest_mod.DIGEST_SYSTEM_PROMPT,
+                    digest_mod._DIGEST_TASK_INSTRUCTION,
+                    *strings,
+                    digest_mod._FINDINGS_INSTRUCTION,
+                )
+            ).encode("utf-8")
+        ).hexdigest()[:16]
+
+    def _critique_hash(strings):
+        return hashlib.sha256(
+            "\x00".join(
+                (
+                    critique_mod.CRITIQUE_SYSTEM_PROMPT,
+                    critique_mod._CRITIQUE_TASK_INSTRUCTION,
+                    critique_mod._CRITIQUE_FINDINGS_INSTRUCTION,
+                    *strings,
+                )
+            ).encode("utf-8")
+        ).hexdigest()[:16]
+
+    shared = list(digest_mod.SHARED_USER_FRAMING_STRINGS)
+    assert _digest_hash(shared) == digest_mod.DIGEST_PROMPT_VERSION
+    assert _critique_hash(shared) == critique_mod.CRITIQUE_PROMPT_VERSION
+
+    # Editing any one of them must move BOTH versions, never just one.
+    for i in range(len(shared)):
+        edited = list(shared)
+        edited[i] = edited[i] + " EDITED"
+        assert _digest_hash(edited) != digest_mod.DIGEST_PROMPT_VERSION, shared[i]
+        assert _critique_hash(edited) != critique_mod.CRITIQUE_PROMPT_VERSION, shared[i]

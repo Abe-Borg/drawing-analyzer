@@ -574,3 +574,57 @@ def test_list_sheets_splits_pages(tmp_path):
     assert refs[0].page_count == 3
     assert refs[1].page_index == 1
     assert refs[0].source_name == "multi.pdf"
+
+
+def test_truncated_digest_retries_at_a_raised_cap_and_is_never_cached():
+    # A real-time digest cut off at ``max_tokens`` used to be accepted as
+    # complete and CACHED, so every later run served the truncation for free and
+    # with nothing in the log to show for it. The batch path already retried the
+    # empty case; real-time was the outlier, and it checked only for EMPTY text,
+    # so a body severed mid-sentence sailed through.
+    from drawing_analyzer.digest import MAX_TOKENS_RETRY_CEILING
+    from drawing_analyzer.digest_cache import DigestCache
+
+    class _Msgs(StreamingMessagesMixin):
+        def __init__(self, stops):
+            self.stops = list(stops)
+            self.calls: list[dict] = []
+
+        def create(self, **kwargs):
+            self.calls.append(kwargs)
+            stop = self.stops[min(len(self.calls) - 1, len(self.stops) - 1)]
+            return FakeMessage(
+                content=[FakeTextBlock(text="Sheet M-101 - body cut off mid-")],
+                usage=FakeUsage(input_tokens=10, output_tokens=5),
+                stop_reason=stop,
+            )
+
+    class _Client(BetaClientMixin):
+        def __init__(self, stops):
+            self.messages = _Msgs(stops)
+
+    # Still truncated after the retry: failed, and refused by the cache.
+    cache = DigestCache(None, persist=False)
+    client = _Client(["max_tokens", "max_tokens"])
+    sd = digest_sheet(_make_sheet(), client=client, model=OPUS, cache=cache)
+    caps = [kw["max_tokens"] for kw in client.messages.calls]
+    assert len(caps) == 2 and caps[1] > caps[0]          # one raised-cap retry
+    assert caps[1] <= MAX_TOKENS_RETRY_CEILING
+    assert not sd.ok and sd.error == "truncated digest (stop_reason='max_tokens')"
+    assert sd.text                                        # partial prose still ships (I-3)
+    assert len(cache._entries) == 0                       # never stored
+
+    # The retry succeeding is the ordinary recovery: cached, and no error.
+    cache = DigestCache(None, persist=False)
+    client = _Client(["max_tokens", "end_turn"])
+    sd = digest_sheet(_make_sheet(), client=client, model=OPUS, cache=cache)
+    assert len(client.messages.calls) == 2
+    assert sd.ok and sd.error is None
+    assert len(cache._entries) == 1
+
+    # A clean first read never pays for a second call.
+    cache = DigestCache(None, persist=False)
+    client = _Client(["end_turn"])
+    sd = digest_sheet(_make_sheet(), client=client, model=OPUS, cache=cache)
+    assert len(client.messages.calls) == 1 and sd.ok
+    assert len(cache._entries) == 1

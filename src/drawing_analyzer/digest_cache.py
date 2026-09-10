@@ -63,8 +63,17 @@ from typing import Any, Iterator
 # ``digest_cache_key``/``digest_cache_key_level1`` via a new ``specs`` param,
 # mirroring ``focus``), and the request's system prompt may switch shape (plain
 # string -> cached content-block list). A pre-v8 entry predates both and must
-# miss once and be re-digested.
-_SCHEMA_VERSION = 8
+# miss once and be re-digested. Bumped to 9: the fenced-block scanner was
+# rebuilt again. Its opener and closer are now line-anchored, longer and tilde
+# fences are recognised, and a closing fence must match its opener's character
+# and length. A cache entry stores the POST-PARSE product — the stripped prose
+# plus the parsed findings, never the raw response — so a pre-v9 entry holds
+# whatever the old scanner made of that response and cannot be re-derived in
+# place: an inline triple-backtick span opened a phantom block that swallowed
+# the real findings JSON into the sacred prose, and a four-backtick or ``~~~``
+# block was not recognised at all. Same reasoning as the v6 parser rebuild,
+# which is the precedent this follows.
+_SCHEMA_VERSION = 9
 
 # Storage format and concurrency settings are intentionally separate from the
 # content schema above.  ``_SCHEMA_VERSION`` invalidates cached model results;

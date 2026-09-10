@@ -23,6 +23,7 @@ from .core.api_config import (
     call_with_refusal_fallback,
     model_supports_adaptive_thinking,
     model_supports_effort,
+    output_cap_for_model,
 )
 from .core.tokenizer import estimate_image_tokens_total
 from .diagnostics import get_logger
@@ -57,6 +58,26 @@ _log = get_logger()
 # nothing unless a sheet uses it; 64k rather than the 128k model ceiling keeps a
 # fail-fast guard against a runaway read.
 DEFAULT_DIGEST_MAX_TOKENS = 64_000
+
+# Output-cap ceiling for a truncated-digest resubmission, shared by both
+# transports (``batch_digest`` imports it from here so one value governs both;
+# a second copy is how two views of one rule come to disagree).
+#
+# Output is billed by actual tokens, so the extra headroom costs nothing unless
+# a sheet uses it. Both users of this ceiling stream their request — the
+# real-time retry through :func:`stream_message`, the batch direct-call rescue
+# through the same — so the non-streaming timeout guard (the SDK refuses a plain
+# ``create`` whose cap implies >10 minutes of output, a client-side ValueError
+# at roughly 21k) does not bind.
+#
+# This MUST stay above ``DEFAULT_DIGEST_MAX_TOKENS``: a retry doubles the failed
+# cap and clamps to this value, so a ceiling at or below the starting cap would
+# resubmit at *the exact cap that just truncated* — a silent no-op dressed as a
+# retry. At a 64k digest cap, 64k here would have done precisely that. The
+# per-model clamp is applied at each retry site rather than here, because the
+# real ceiling depends on the model the request went to (an unregistered
+# override resolves to ``MAX_OUTPUT_TOKENS_UNKNOWN``).
+MAX_TOKENS_RETRY_CEILING = 128_000
 
 # Effort for the read. "high" is intelligence-appropriate for dense drawings and
 # is accepted by every effort-capable model (so an override never 400s on it).
@@ -290,24 +311,53 @@ the machine-read mirror of those sections. Emit at most 40 findings, most \
 important first; emit {"findings": []} if there are none. Put nothing but the \
 JSON object inside the block, and write no prose after it."""
 
+# The user-turn framing the model actually reads, as templates rather than
+# inline f-strings, so they can be hashed into the prompt versions below.
+#
+# These are model-visible strings that sat OUTSIDE both prompt hashes: editing
+# how a sheet is introduced, how an omitted tile is disclosed, or how a tile is
+# labelled changed what was sent while every cache key stayed byte-identical, so
+# warm runs kept replaying digests taken under the old wording. The per-sheet
+# values interpolated in (label, grid size, tile position) are already covered —
+# the images and text layer ride the key directly.
+_USER_FRAMING_TEMPLATE = (
+    "You are given ONE construction drawing sheet "
+    "({label}), rendered as a low-resolution overview "
+    "followed by a {rows}x{cols} grid of overlapping "
+    "high-resolution tiles. Read them together as a single sheet."
+)
+_USER_OMITTED_TILES_TEMPLATE = (
+    " Tiles omitted as completely blank (no content): {positions}."
+)
+_USER_OVERVIEW_LABEL = "OVERVIEW (entire sheet):"
+_USER_TILE_LABEL_TEMPLATE = "Tile r{row}c{col} of {rows}x{cols} ({label}):"
+
+# Every model-visible string this module composes, in one tuple, so the digest
+# and critique hashes below cannot drift apart on the SHARED half. The critique
+# passes its own closing instruction but reuses this exact framing through
+# ``build_user_content_blocks``, which is why it must hash these too.
+SHARED_USER_FRAMING_STRINGS = (
+    _SHEET_TEXT_LAYER_HEADER,
+    _SHEET_TEXT_LAYER_RASTER_PLACEHOLDER,
+    _SHEET_TEXT_LAYER_OPEN,
+    _SHEET_TEXT_LAYER_CLOSE,
+    _USER_FRAMING_TEMPLATE,
+    _USER_OMITTED_TILES_TEMPLATE,
+    _USER_OVERVIEW_LABEL,
+    _USER_TILE_LABEL_TEMPLATE,
+)
+
 # Folded into the digest cache key so any edit to the prompt, the task
 # instruction, the text-layer framing, or the findings instruction re-digests
 # rather than serving a cached read produced under the old prompt.
 DIGEST_PROMPT_VERSION = hashlib.sha256(
-    (
-        DIGEST_SYSTEM_PROMPT
-        + "\x00"
-        + _DIGEST_TASK_INSTRUCTION
-        + "\x00"
-        + _SHEET_TEXT_LAYER_HEADER
-        + "\x00"
-        + _SHEET_TEXT_LAYER_RASTER_PLACEHOLDER
-        + "\x00"
-        + _SHEET_TEXT_LAYER_OPEN
-        + "\x00"
-        + _SHEET_TEXT_LAYER_CLOSE
-        + "\x00"
-        + _FINDINGS_INSTRUCTION
+    "\x00".join(
+        (
+            DIGEST_SYSTEM_PROMPT,
+            _DIGEST_TASK_INSTRUCTION,
+            *SHARED_USER_FRAMING_STRINGS,
+            _FINDINGS_INSTRUCTION,
+        )
     ).encode("utf-8")
 ).hexdigest()[:16]
 
@@ -550,11 +600,8 @@ def build_user_content_blocks(
     resolution drop relies on (a raster sheet gets the "rely on the images"
     placeholder instead).
     """
-    framing = (
-        f"You are given ONE construction drawing sheet "
-        f"({sheet.ref.display_label}), rendered as a low-resolution overview "
-        f"followed by a {sheet.rows}x{sheet.cols} grid of overlapping "
-        f"high-resolution tiles. Read them together as a single sheet."
+    framing = _USER_FRAMING_TEMPLATE.format(
+        label=sheet.ref.display_label, rows=sheet.rows, cols=sheet.cols
     )
     # Blank-tile suppression drops pixel-uniform tiles before upload; tell the
     # model which grid positions are absent because they were empty (1-based
@@ -562,20 +609,20 @@ def build_user_content_blocks(
     # "nothing there", not "withheld".
     if getattr(sheet, "omitted_tiles", None):
         positions = ", ".join(f"(r{r + 1}c{c + 1})" for r, c in sheet.omitted_tiles)
-        framing += (
-            f" Tiles omitted as completely blank (no content): {positions}."
-        )
+        framing += _USER_OMITTED_TILES_TEMPLATE.format(positions=positions)
     blocks: list[dict] = [
         _text_block(framing),
         _sheet_text_layer_block(sheet),
-        _text_block("OVERVIEW (entire sheet):"),
+        _text_block(_USER_OVERVIEW_LABEL),
         image_block(sheet.overview),
     ]
     for tile in sheet.tiles:
         blocks.append(
             _text_block(
-                f"Tile r{tile.row + 1}c{tile.col + 1} of "
-                f"{sheet.rows}x{sheet.cols} ({tile.label}):"
+                _USER_TILE_LABEL_TEMPLATE.format(
+                    row=tile.row + 1, col=tile.col + 1,
+                    rows=sheet.rows, cols=sheet.cols, label=tile.label,
+                )
             )
         )
         blocks.append(image_block(tile))
@@ -791,22 +838,48 @@ _FINDING_SEVERITIES = frozenset({"high", "medium", "low"})
 # :func:`scan_structured_blocks` (which also recognises an *unclosed* fence).
 _FENCE_RE = re.compile(r"```[ \t]*([A-Za-z0-9_+-]*)[ \t]*\r?\n(.*?)```", re.DOTALL)
 
-# The opening line of a fenced block anchored at a given offset: ``` + optional
-# language label + optional trailing spaces + newline. An unclosed (truncated)
-# block matches this opener even with no closing ``` — the whole point of the
-# line-aware scanner (DA-009).
-_OPEN_FENCE_RE = re.compile(r"```[ \t]*([A-Za-z0-9_+-]*)[ \t]*\r?\n")
+# A fenced block's OPENING LINE, anchored to the start of a line. Three or more
+# backticks or tildes (CommonMark allows both, and any run of three or more),
+# up to three leading spaces, an optional language label, then end of line.
+#
+# The anchoring is load-bearing. The scanner used to hunt for a bare ``` at any
+# offset, so an INLINE triple-backtick span that happened to end a line opened a
+# "block" — and the real ```json opener then closed it. The findings block was
+# reported TRUNCATED with zero findings while its whole JSON body leaked into
+# the prose the digest treats as sacred (I-2), and that prose was then cached.
+# Four-backtick and ~~~ fences were not recognised at all, which leaked the JSON
+# the other way, as ABSENT.
+_OPEN_FENCE_RE = re.compile(
+    r"(?m)^[ \t]{0,3}(?P<fence>`{3,}|~{3,})[ \t]*(?P<lang>[A-Za-z0-9_+-]*)[ \t]*\r?\n"
+)
 # A structurally plausible top-level key. Used to decide whether an *unparseable*
 # fenced block was nonetheless a findings/claims *attempt* (so it is stripped from
 # the sacred prose and recorded as drift) — never triggered by ordinary prose that
 # merely contains the English word "findings" (§14.1).
 _FINDINGS_KEY_RE = re.compile(r'"findings"\s*:')
 _CLAIMS_KEY_RE = re.compile(r'"claims"\s*:')
-# A fence line that was itself truncated — ``` + an optional language label and
-# nothing else to end-of-string (the model was cut off *on the opener line*, before
-# its newline). Recognised so a dangling machine-block opener is still stripped from
-# the sacred prose (DA-009), not misread as ordinary text.
-_DANGLING_FENCE_RE = re.compile(r"[ \t]*([A-Za-z0-9_+-]*)[ \t]*\Z")
+# A fence line that was itself truncated — an opening fence plus an optional
+# language label and nothing else to end-of-string (the model was cut off *on
+# the opener line*, before its newline). Recognised so a dangling machine-block
+# opener is still stripped from the sacred prose (DA-009), not misread as
+# ordinary text. Line-anchored for the same reason as the opener above.
+_DANGLING_FENCE_RE = re.compile(
+    r"(?m)^[ \t]{0,3}(?P<fence>`{3,}|~{3,})[ \t]*(?P<lang>[A-Za-z0-9_+-]*)[ \t]*\Z"
+)
+
+
+def _closing_fence_re(fence: str) -> "re.Pattern[str]":
+    """The closer for a block opened by ``fence``.
+
+    CommonMark: a closing fence uses the SAME character as its opener and is at
+    least as long, so a ```` ``` ```` inside a ```` ```` ```` block is body text
+    rather than the close. Matching any run of three backticks is what let a
+    JSON body containing a fence terminate its own block early.
+    """
+    return re.compile(
+        r"(?m)^[ \t]{0,3}(?P<fence>" + re.escape(fence[0]) + r"{" + str(len(fence)) + r",})"
+        r"[ \t]*(?:\r?\n|\Z)"
+    )
 
 
 @dataclass
@@ -843,41 +916,37 @@ def scan_structured_blocks(raw_text: str) -> list[StructuredBlockCandidate]:
     i = 0
     n = len(raw_text)
     while i < n:
-        open_idx = raw_text.find("```", i)
-        if open_idx == -1:
-            break
-        m = _OPEN_FENCE_RE.match(raw_text, open_idx)
+        m = _OPEN_FENCE_RE.search(raw_text, i)
         if m is None:
-            # No trailing newline after the fence. If the REST of the string is only
-            # an (optional) language label, the fence line was itself truncated
-            # (max_tokens cut before the newline) — a dangling machine-block opener
-            # that must still be stripped from the prose (DA-009). Emit it as an
-            # unclosed, empty-body block. Otherwise it's an inline ``` — skip it.
-            dangling = _DANGLING_FENCE_RE.match(raw_text, open_idx + 3)
-            if dangling is not None and dangling.end() == n:
-                # A fence line at EOF with nothing after it but a (possibly partial)
-                # label is unambiguously a truncated machine-block opener — the label
-                # may itself be cut mid-word ("```jso"), so it is stripped regardless
-                # of whether it spells "json" yet (DA-009).
-                language = (dangling.group(1) or "").strip().lower()
+            # No complete opener line left. A fence line running to end-of-string
+            # is a machine-block opener the model was cut off on (max_tokens
+            # before the newline) — its label may itself be half-written
+            # ("```jso"), so it is stripped regardless of whether it spells
+            # "json" yet (DA-009). Anything else is ordinary prose.
+            dangling = _DANGLING_FENCE_RE.search(raw_text, i)
+            if dangling is not None:
+                language = (dangling.group("lang") or "").strip().lower()
                 out.append(StructuredBlockCandidate(
-                    opening_offset=open_idx, body_offset=n, ending_offset=n,
-                    language=language, body="", closed=False,
+                    opening_offset=dangling.start("fence"), body_offset=n,
+                    ending_offset=n, language=language, body="", closed=False,
                     looks_like_findings=True,
                     looks_like_claims=False,
                 ))
-                break
-            i = open_idx + 3
-            continue
-        language = (m.group(1) or "").strip().lower()
+            break
+        # ``opening_offset`` is the fence character itself, not the line start,
+        # so any leading indentation stays with the prose exactly as before.
+        open_idx = m.start("fence")
+        language = (m.group("lang") or "").strip().lower()
         body_start = m.end()
-        close_idx = raw_text.find("```", body_start)
-        if close_idx == -1:
+        close_m = _closing_fence_re(m.group("fence")).search(raw_text, body_start)
+        if close_m is None:
             body = raw_text[body_start:]
             ending, closed = n, False
         else:
-            body = raw_text[body_start:close_idx]
-            ending, closed = close_idx + 3, True
+            body = raw_text[body_start:close_m.start()]
+            # Just past the closing fence run, NOT past its newline: the prose
+            # splice downstream is byte-compatible with the previous scanner.
+            ending, closed = close_m.end("fence"), True
         is_json = language in ("json", "")
         # An UNCLOSED json/empty fence is a truncated machine-block fragment — the
         # findings block being cut off (the model emits it last). Treat it as a
@@ -1456,22 +1525,42 @@ def digest_sheet(
         specs_text=specs_text,
     )
 
-    attempt = 0
+    # One raised-cap retry for a digest the model ran out of room to finish,
+    # mirroring the batch path's ``_item_retry_params``. The real-time path used
+    # to check only for EMPTY text, so a body cut off mid-sentence was accepted
+    # as a complete digest — and then cached, which served the truncation on
+    # every later run at zero cost and with nothing in the log to show for it.
+    # The digest runs adaptive thinking at effort "high" and thinking shares
+    # this envelope, so a dense sheet reaches the cap in the ordinary case.
+    raised_cap_used = False
     while True:
-        try:
-            resp = stream_message(client, kwargs)
+        attempt = 0
+        while True:
+            try:
+                resp = stream_message(client, kwargs)
+                break
+            except Exception as exc:  # noqa: BLE001 - report, don't sink the whole set
+                if _is_transient_error(exc) and attempt < max_retries:
+                    sleep(_retry_backoff_seconds(attempt))
+                    attempt += 1
+                    continue
+                return SheetDigest(
+                    ref=sheet.ref,
+                    text="",
+                    image_token_estimate=image_est,
+                    error=_clean_error(exc),
+                )
+
+        if _get(resp, "stop_reason") != "max_tokens" or raised_cap_used:
             break
-        except Exception as exc:  # noqa: BLE001 - report, don't sink the whole set
-            if _is_transient_error(exc) and attempt < max_retries:
-                sleep(_retry_backoff_seconds(attempt))
-                attempt += 1
-                continue
-            return SheetDigest(
-                ref=sheet.ref,
-                text="",
-                image_token_estimate=image_est,
-                error=_clean_error(exc),
-            )
+        old_cap = int(kwargs.get("max_tokens") or max_tokens)
+        raised = output_cap_for_model(
+            model, requested=min(old_cap * 2, MAX_TOKENS_RETRY_CEILING)
+        )
+        if raised <= old_cap:
+            break                  # no headroom left to grant; not a retry
+        kwargs = {**kwargs, "max_tokens": raised}
+        raised_cap_used = True
 
     raw_text = _message_text(resp)
     in_tok, out_tok = _message_usage(resp)
@@ -1483,6 +1572,13 @@ def digest_sheet(
     error: str | None = None
     if not raw_text:
         error = f"empty digest (stop_reason={stop!r})"
+    elif stop == "max_tokens":
+        # Still truncated after the raised cap. The partial text is returned —
+        # it is real work and the prose is better than nothing — but the sheet
+        # is marked failed so the run reports it, and the cache guard below
+        # refuses to store it. Caching a truncated read is the worst outcome:
+        # it is indistinguishable from a complete one on every later run.
+        error = "truncated digest (stop_reason='max_tokens')"
 
     # Split the findings block off the prose. ``text`` is the prose only, so
     # ``combined_text`` never sees the JSON (I-2); ``findings`` and the telemetry
@@ -1492,7 +1588,10 @@ def digest_sheet(
     )
 
     # Cache only a real, successful digest — never an empty/error result (those
-    # are transient and a re-run should re-attempt them).
+    # are transient and a re-run should re-attempt them). A digest truncated at
+    # ``max_tokens`` now sets ``error`` above and so is refused here: a stored
+    # truncation is served forever, at zero cost and indistinguishable from a
+    # complete read, which is how a cut-off sheet became permanent.
     if cache is not None and cache_key is not None and error is None and raw_text:
         cache.put(
             cache_key,

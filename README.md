@@ -528,6 +528,22 @@ hook the anchor resolver uses to place it, and the hallucination alarm when a
 quote can't be found), the `tile` where the model saw it, and any `refs` it
 believes apply. The model emits at most 40 per sheet.
 
+The parser reads that block **line-anchored**: a fence must start its own line,
+may be three or more backticks or tildes, and a closing fence has to match its
+opener's character and be at least as long. That is stricter than it looks and
+deliberately so. Scanning for a bare ` ``` ` at any offset meant an *inline*
+triple-backtick span inside the prose opened a phantom block, which the real
+`json` opener then closed — the findings came back empty while the whole JSON
+body leaked into the prose digest, and the prose after the inline span was
+silently dropped. A truncated block (the model cut off mid-JSON) is still
+recognised and stripped, so a partial machine block never reaches the prose.
+
+A reply the model did not finish is never treated as one it did. When a digest
+stops at `max_tokens` the request is retried once at a raised output cap; if it
+is still cut off, the sheet is reported as failed and the result is **not**
+cached — a stored truncation would otherwise be served on every later run,
+indistinguishable from a complete read. The partial prose still ships.
+
 A tolerant parser splits this block off and **strips it from the prose**, so the
 digest text — and the `combined_text` a downstream spec reviewer consumes — is
 byte-for-byte what it was before the block existed (the prose digest is sacred).

@@ -144,10 +144,17 @@ of every artifact), written **last** in the §18.4 non-circular order (artifacts
 `stage_instance` labels are portable (`digest:SRC-0001:p0`, never a path).
 
 **Digest path:** `tiling.py` (pure geometry) → `render.py` (rasterization) →
-`digest.py` (prompt + tolerant findings-block parser), or `batch_digest.py`
+`digest.py` (prompt + tolerant findings-block parser — fences are **line-anchored**,
+accept 3+ backticks or tildes, and a closer must match its opener's character and
+length, because an un-anchored scan let an inline ``` span open a phantom block
+that swallowed the real findings JSON into the sacred prose), or `batch_digest.py`
 (Message Batches + Files APIs, ~50% cheaper) → `digest_cache.py` (two-level
 content-keyed cache — a hit skips rendering entirely and restores parsed
-findings for free). The critique does **not** re-rasterize what the digest
+findings for free — but never a **truncated** read: both transports check
+`stop_reason`, retry once at a raised cap from the shared
+`digest.MAX_TOKENS_RETRY_CEILING`, and refuse the cache write if the reply is
+still cut off, since a stored truncation is indistinguishable from a complete
+one on every later run). The critique does **not** re-rasterize what the digest
 already rendered: `render_spool.py` spools the digest's already-compressed PNG
 bytes to a private temp dir and rebuilds the same `RenderedSheet` byte-for-byte
 (nothing resized, recompressed or filtered), and the batch path adopts the
@@ -413,7 +420,15 @@ example is parked at `docs/examples/fire_protection.md`.
 - **I-6 — cache correctness:** prompt versions are content hashes
   (`DIGEST_PROMPT_VERSION`, `CRITIQUE_PROMPT_VERSION`), so prompt edits
   auto-invalidate; `digest_cache._SCHEMA_VERSION` is manual — bump it whenever
-  what is stored or sent changes.
+  what is stored or sent changes. A hash only covers what it is given: the
+  user-turn framing (sheet introduction, omitted-tile disclosure, overview and
+  per-tile labels) once sat outside both, so editing it changed the request
+  while every key stayed identical. Those strings now live in
+  `digest.SHARED_USER_FRAMING_STRINGS`, which **both** hashes splat — the
+  critique reuses the same builder, so a string covered by only one hash
+  re-keys that cache while silently replaying the other. Add a model-visible
+  string to the shared builder and it is covered automatically; add one
+  elsewhere and it is your job to hash it.
 - **I-7 — deterministic assembly:** same inputs → same ordering (QC numbering,
   index rows, merged output); no randomness or time-dependence in assembly.
   One documented carve-out (Phase B): the citation verdict cache's TTL clock
