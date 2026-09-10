@@ -150,11 +150,14 @@ length, because an un-anchored scan let an inline ``` span open a phantom block
 that swallowed the real findings JSON into the sacred prose), or `batch_digest.py`
 (Message Batches + Files APIs, ~50% cheaper) → `digest_cache.py` (two-level
 content-keyed cache — a hit skips rendering entirely and restores parsed
-findings for free — but never a **truncated** read: both transports check
-`stop_reason`, retry once at a raised cap from the shared
-`digest.MAX_TOKENS_RETRY_CEILING`, and refuse the cache write if the reply is
-still cut off, since a stored truncation is indistinguishable from a complete
-one on every later run). The critique does **not** re-rasterize what the digest
+findings for free — but never a **truncated** read: both transports treat a
+reply the model did not finish as an error whether it came back *empty or merely
+cut off*, retry once at a raised cap from the shared
+`digest.MAX_TOKENS_RETRY_CEILING`, and refuse the cache write if it is still cut
+off, since a stored truncation is indistinguishable from a complete one on every
+later run. Real-time accumulates usage across both attempts — each was billed —
+and falls back to the truncated first read if the raised-cap call cannot land, so
+the retry can only improve on that read, never lose it). The critique does **not** re-rasterize what the digest
 already rendered: `render_spool.py` spools the digest's already-compressed PNG
 bytes to a private temp dir and rebuilds the same `RenderedSheet` byte-for-byte
 (nothing resized, recompressed or filtered), and the batch path adopts the

@@ -1533,8 +1533,12 @@ def digest_sheet(
     # The digest runs adaptive thinking at effort "high" and thinking shares
     # this envelope, so a dense sheet reaches the cap in the ordinary case.
     raised_cap_used = False
+    truncated_resp = None            # the first read, kept if the retry cannot land
+    in_tok = out_tok = cache_read_tok = cache_write_tok = 0
     while True:
         attempt = 0
+        resp = None
+        call_error: Exception | None = None
         while True:
             try:
                 resp = stream_message(client, kwargs)
@@ -1544,12 +1548,35 @@ def digest_sheet(
                     sleep(_retry_backoff_seconds(attempt))
                     attempt += 1
                     continue
+                call_error = exc
+                break
+
+        if resp is None:
+            if truncated_resp is None:
                 return SheetDigest(
                     ref=sheet.ref,
                     text="",
                     image_token_estimate=image_est,
-                    error=_clean_error(exc),
+                    error=_clean_error(call_error),
+                    input_tokens=in_tok,
+                    output_tokens=out_tok,
                 )
+            # The RAISED-CAP retry failed, but the first read is still in hand.
+            # Falling through to it keeps the truncated prose shipping (I-3)
+            # instead of turning a partial digest into an empty one — the retry
+            # exists to improve on that read, never to risk losing it.
+            resp = truncated_resp
+            break
+
+        # Usage accumulates across attempts. Each response was billed, so
+        # reading only the last one would under-report every recovered
+        # truncation in the ledger, the run totals and the cost estimate.
+        att_in, att_out = _message_usage(resp)
+        in_tok += att_in
+        out_tok += att_out
+        _usage = _get(resp, "usage")
+        cache_read_tok += int(_get(_usage, "cache_read_input_tokens", 0) or 0)
+        cache_write_tok += int(_get(_usage, "cache_creation_input_tokens", 0) or 0)
 
         if _get(resp, "stop_reason") != "max_tokens" or raised_cap_used:
             break
@@ -1561,12 +1588,9 @@ def digest_sheet(
             break                  # no headroom left to grant; not a retry
         kwargs = {**kwargs, "max_tokens": raised}
         raised_cap_used = True
+        truncated_resp = resp
 
     raw_text = _message_text(resp)
-    in_tok, out_tok = _message_usage(resp)
-    _usage = _get(resp, "usage")
-    cache_read_tok = int(_get(_usage, "cache_read_input_tokens", 0) or 0)
-    cache_write_tok = int(_get(_usage, "cache_creation_input_tokens", 0) or 0)
     stop = _get(resp, "stop_reason")
 
     error: str | None = None

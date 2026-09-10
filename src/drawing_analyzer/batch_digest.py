@@ -547,7 +547,9 @@ def _item_retry_params(
         rtype == "succeeded"
         and digest is not None
         and digest.error
-        and not digest.text
+        # Deliberately NOT ``and not digest.text``: a partial body is exactly
+        # the case the raised cap exists to finish, and requiring emptiness let
+        # every nonempty truncation through unretried.
         and digest.stop_reason == "max_tokens"
     ):
         old = int(params.get("max_tokens") or DEFAULT_DIGEST_MAX_TOKENS)
@@ -1734,7 +1736,16 @@ def _digest_from_message(
     cache_read_tok = int(_get(usage, "cache_read_input_tokens", 0) or 0)
     cache_write_tok = int(_get(usage, "cache_creation_input_tokens", 0) or 0)
     stop = _get(message, "stop_reason")
-    error = None if raw_text else f"empty digest (stop_reason={stop!r})"
+    # Parity with the real-time path: a reply the model did not FINISH is not a
+    # complete digest, whether it came back empty or merely cut off. Treating a
+    # nonempty truncation as success accepted it AND cached it permanently,
+    # while ``_item_retry_params`` never saw an error to retry on.
+    if not raw_text:
+        error = f"empty digest (stop_reason={stop!r})"
+    elif stop == "max_tokens":
+        error = "truncated digest (stop_reason='max_tokens')"
+    else:
+        error = None
     # Same transport-agnostic split as the real-time path: prose (findings block
     # stripped) becomes ``text``; structured findings ride separately (I-2).
     text, findings, findings_note = parse_findings(

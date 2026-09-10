@@ -628,3 +628,63 @@ def test_truncated_digest_retries_at_a_raised_cap_and_is_never_cached():
     sd = digest_sheet(_make_sheet(), client=client, model=OPUS, cache=cache)
     assert len(client.messages.calls) == 1 and sd.ok
     assert len(cache._entries) == 1
+
+
+def test_a_recovered_truncation_bills_both_attempts():
+    # The raised-cap retry overwrote ``resp``, so the usage read afterwards saw
+    # only the SECOND response. The first was billed too, so the ledger, the run
+    # totals and the cost estimate under-reported every recovered truncation.
+    class _Msgs(StreamingMessagesMixin):
+        def __init__(self, stops):
+            self.stops = list(stops)
+            self.calls: list[dict] = []
+
+        def create(self, **kwargs):
+            self.calls.append(kwargs)
+            stop = self.stops[min(len(self.calls) - 1, len(self.stops) - 1)]
+            return FakeMessage(
+                content=[FakeTextBlock(text="Sheet M-101 - prose")],
+                usage=FakeUsage(input_tokens=100, output_tokens=20),
+                stop_reason=stop,
+            )
+
+    class _Client(BetaClientMixin):
+        def __init__(self, stops):
+            self.messages = _Msgs(stops)
+
+    client = _Client(["max_tokens", "end_turn"])
+    sd = digest_sheet(_make_sheet(), client=client, model=OPUS)
+    assert len(client.messages.calls) == 2
+    assert (sd.input_tokens, sd.output_tokens) == (200, 40)   # both attempts
+
+
+def test_a_failed_retry_keeps_the_truncated_first_read():
+    # If the raised-cap retry fails permanently, discarding the first response
+    # turns a partial digest into an EMPTY one — losing prose already paid for
+    # and breaking the I-3 promise that the deliverable still ships. The retry
+    # exists to improve on that read, never to risk losing it.
+    class _Msgs(StreamingMessagesMixin):
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        def create(self, **kwargs):
+            self.calls.append(kwargs)
+            if len(self.calls) == 1:
+                return FakeMessage(
+                    content=[FakeTextBlock(text="Real prose, cut off mid-")],
+                    usage=FakeUsage(input_tokens=100, output_tokens=20),
+                    stop_reason="max_tokens",
+                )
+            raise ValueError("permanent 400 on the raised cap")
+
+    class _Client(BetaClientMixin):
+        def __init__(self):
+            self.messages = _Msgs()
+
+    client = _Client()
+    sd = digest_sheet(_make_sheet(), client=client, model=OPUS, max_retries=0)
+    assert len(client.messages.calls) == 2
+    assert sd.text.startswith("Real prose")          # the first read still ships
+    assert not sd.ok                                  # but the sheet is reported
+    assert sd.error == "truncated digest (stop_reason='max_tokens')"
+    assert (sd.input_tokens, sd.output_tokens) == (100, 20)   # only what billed
