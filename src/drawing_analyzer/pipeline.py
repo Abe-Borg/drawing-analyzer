@@ -3066,11 +3066,20 @@ def extract_drawing_context(
     else:
         digest_stage.status = "FAILED"
     if digest_stage.status not in ("COMPLETE", "SKIPPED_VALID"):
+        # Both ways a sheet can be missing, because ``items_in`` counts them
+        # both. A sheet that digested badly has a SheetDigest carrying its
+        # error; a page that never rendered has NO SheetDigest at all, so it
+        # exists only in ``page_error_lines`` — reading just ``sheets`` left the
+        # commonest render failure showing as a degraded stage with no
+        # explanation in the journal, run.log or the report's stage table.
         # Bounded and sorted for I-7, as the critique stage does with its own.
         digest_stage.errors.extend(
             sorted(
-                f"{s.ref.display_label}: {s.error or 'empty digest'}"
-                for s in sheets if not s.ok
+                [
+                    f"{s.ref.display_label}: {s.error or 'empty digest'}"
+                    for s in sheets if not s.ok
+                ]
+                + list(page_error_lines)
             )[:5]
         )
     _finish_stage(stage_results, journal, digest_stage)
