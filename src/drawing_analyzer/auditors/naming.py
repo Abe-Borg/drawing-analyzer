@@ -89,6 +89,44 @@ def _cluster_key(tag: str) -> tuple[tuple[str, ...], str]:
     return (letters, digits)
 
 
+def _arrangement(tag: str) -> tuple[tuple[str, int], ...]:
+    """The tag's alphanumeric *arrangement*: maximal same-kind runs, separator-broken.
+
+    ``("A", n)`` is a run of n letters, ``("D", n)`` a run of n digits, and any
+    non-alphanumeric character ends the current run without appearing itself.
+    That last detail is the whole point, and it is why this is not
+    :func:`sheet_ids.id_signature` (which records separators as literal elements):
+
+    * ``C1R`` and ``C1-R`` → both ``(A1, D1, A1)``. A separator inserted *between*
+      two different kinds is pure formatting, and this is the drift the auditor
+      exists to catch.
+    * ``VAV-21`` → ``(A3, D2)`` but ``VAV-2-1`` → ``(A3, D1, D1)``. A separator
+      inserted *inside a digit run* is not formatting — it regroups the number.
+      VAV box 21 and VAV box 2-1 are different equipment.
+    * ``FP-101`` → ``(A2, D3)`` but ``F-P101`` → ``(A1, A1, D3)``, so a canonical
+      NCS id is never reported as drift from a mangled one.
+    """
+    runs: list[tuple[str, int]] = []
+    kind: str | None = None
+    length = 0
+    for ch in tag:
+        k = "A" if ch.isalpha() else ("D" if ch.isdigit() else None)
+        if k is None:
+            if kind is not None:
+                runs.append((kind, length))
+            kind, length = None, 0
+            continue
+        if k == kind:
+            length += 1
+        else:
+            if kind is not None:
+                runs.append((kind, length))
+            kind, length = k, 1
+    if kind is not None:
+        runs.append((kind, length))
+    return tuple(runs)
+
+
 def _looks_like_tag(token: str) -> bool:
     t = token.strip()
     if not (_TAG_MIN_LEN <= len(t) <= _TAG_MAX_LEN):
@@ -152,9 +190,11 @@ def _drift_pairs(
 
     A clear winner (a member at/above the dominant-min frequency) makes every
     rare-enough sibling drift; with no clear winner (all spellings rare) the
-    lexicographically-first spelling is the reference and the rest are drift. The
-    suggested canonical for a drift tag is the established spelling closest to it
-    by edit distance (ties → more frequent, then lexicographic).
+    lexicographically-first spelling is the reference and the rest are drift —
+    but only when they share the same :func:`_arrangement`, since alphabetical
+    order is not evidence of a convention (item 25a). The suggested canonical for
+    a drift tag is the established spelling closest to it by edit distance
+    (ties → more frequent, then lexicographic).
     """
     if len(cluster) < 2:
         return []
@@ -173,15 +213,30 @@ def _drift_pairs(
         )
 
     pairs: list[tuple[str, str]] = []
+    have_winner = dominant >= dominant_min
     for tag in sorted(cluster):
         if tag in established_set:
             continue
-        if dominant >= dominant_min:
+        if have_winner:
             if counts[tag] < dominant and counts[tag] <= drift_max:
                 pairs.append((tag, suggest(tag)))
-        else:
-            # all rare: every non-reference spelling is a drift candidate
-            pairs.append((tag, suggest(tag)))
+            continue
+        # No clear winner: every spelling is rare, so ``established`` fell back to
+        # the LEXICOGRAPHICALLY FIRST member and everything else became drift from
+        # it (item 25a). With one occurrence each there is no evidence any
+        # spelling is the convention, and alphabetical order is not evidence —
+        # that is how a canonical ``FP-101`` came to be reported as drift from the
+        # mangled ``F-P101``, and how ``VAV-21`` was called a misspelling of
+        # ``VAV-2-1``.
+        #
+        # So without a frequency winner, require the two spellings to be the same
+        # *arrangement*: a pure separator difference is still drift (``C1R`` vs
+        # ``C1-R``), but a regrouped number or a moved letter boundary is a
+        # different designator and is left alone. Evidence of an established
+        # convention outranks structural doubt; with no evidence, doubt wins.
+        canonical = suggest(tag)
+        if _arrangement(tag) == _arrangement(canonical):
+            pairs.append((tag, canonical))
     return pairs
 
 

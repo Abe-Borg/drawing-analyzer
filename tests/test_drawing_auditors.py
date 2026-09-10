@@ -66,9 +66,10 @@ def _titleblock(sheet_id):
         ("1/2", Decimal("0.5")),
         ('2-1/2"', Decimal("2.5")),
         ("-1/2", Decimal("-0.5")),
-        ("30%", Decimal(30)),
         ("  42  ", Decimal(42)),
         (".5", Decimal("0.5")),
+        ("12' clear", Decimal(12)),          # a unit tail is still just a unit
+        ("TOTAL 540", None),                 # no LEADING number -> not a number
     ],
 )
 def test_parse_number_table(raw, expected):
@@ -78,6 +79,213 @@ def test_parse_number_table(raw, expected):
 @pytest.mark.parametrize("raw", ["", "abc", "$5.00", None, "1/0", True, [1, 2], {"a": 1}])
 def test_parse_number_rejects_unparseable(raw):
     assert parse_number(raw) is None
+
+
+@pytest.mark.parametrize(
+    "raw, why",
+    [
+        ("12,5", "a comma that is not a thousands grouping"),
+        ("1.2.3", "a second decimal point"),
+        ("12'-6\"", "feet-inches: twelve feet six, not twelve"),
+        ("12-6", "a joined pair, not a single value"),
+        ("30%", "a ratio, not the quantity (item 25d)"),
+        ("30 %", "same, spaced"),
+    ],
+)
+def test_parse_number_rejects_a_number_bound_to_more_number(raw, why):
+    # The parser took the leading run and silently dropped the rest, which is the
+    # one thing it must not do: the host then computes with a number the sheet
+    # never states and inks the result as an exact text check.
+    #
+    # "12,5" is the sharpest case, because _THOUSANDS_RE deliberately declines to
+    # strip that comma so the value is "left alone rather than silently mangled"
+    # -- and _PLAIN_NUMBER_RE mangled it anyway, one line later.
+    #
+    # A rejected term makes its claim UNUSABLE, i.e. reported as unchecked. That
+    # is the safe direction: never a mismatch finding built on a misread operand.
+    assert parse_number(raw) is None, why
+
+
+def test_a_percent_operand_cannot_promote_a_claim_to_ground_truth():
+    # The nastier half of item 25d. "1500 SF + 30% = 1950 SF" is not "the sum of
+    # 1500 and 30" -- but the bare 30 appears literally in the quote, so
+    # _operands_supported found every operand present, and the claim cleared the
+    # independent-validation gate and inked as DETERMINISTIC / TEXT_EXTRACTED:
+    # a HIGH-severity "the product of 1500, 30 is 45000" wearing the host's label.
+    from drawing_analyzer.auditors.arithmetic import _numbers_in_text
+
+    assert _numbers_in_text("1500 SF + 30% = 1950 SF") == [Decimal(1500), Decimal(1950)]
+
+    res = audit_arithmetic(
+        [NumericClaim(
+            sheet_id="FP-101", source_name="fp.pdf", page_index=0,
+            kind="product", terms=["1500", "30%"], expected="1950 SF",
+            quote="1500 SF + 30% = 1950 SF",
+        )],
+        [],
+    )
+    assert res.findings == []          # no finding at all, let alone a trusted one
+    assert res.checked == 0 and res.unusable == 1
+
+
+def test_a_comma_separated_operand_list_stays_text_extracted():
+    # A binder must be TIGHT. An earlier draft of the tail rule allowed whitespace
+    # around the separator, which read every comma in an ordinary operand list as
+    # a numeric binder and dropped the leading operands. That produces no wrong
+    # answer -- but it downgrades a text-extracted mismatch to
+    # MODEL_TRANSCRIBED/UNCERTAIN and sends it to the crop verifier for nothing,
+    # withholding a deterministic result and spending money to do it.
+    from drawing_analyzer.auditors.arithmetic import _numbers_in_text
+
+    for quote in ("10, 20, 30, TOTAL 70", "10 , 20 , 30 , TOTAL 70"):
+        assert _numbers_in_text(quote) == [
+            Decimal(10), Decimal(20), Decimal(30), Decimal(70),
+        ], quote
+
+    # Thousands commas inside the operands, list commas between them.
+    assert _numbers_in_text("1,200, 2,400, TOTAL 3,600") == [
+        Decimal(1200), Decimal(2400), Decimal(3600),
+    ]
+
+    # A DECIMAL before the list is the sharpest case: it cannot absorb the comma
+    # into its own token the way an integer run can, so it was dropped outright.
+    assert _numbers_in_text("0.5, 1.5, TOTAL 2.0") == [
+        Decimal("0.5"), Decimal("1.5"), Decimal("2.0"),
+    ]
+
+    # ...and the compact malformed forms stay rejected, which is the whole point
+    # of keeping the binder tight rather than dropping the rule.
+    assert parse_number("1,20") is None
+    assert parse_number("10,20") is None
+
+    # End to end: the mismatch is still trusted as host-computed.
+    res = audit_arithmetic([NumericClaim(
+        sheet_id="FP-101", source_name="fp.pdf", page_index=0, kind="sum",
+        terms=["0.5", "1.5"], expected="2.5", quote="0.5, 1.5, TOTAL 2.5",
+    )], [])
+    assert res.mismatched == 1
+    assert res.findings[0].verification.status == "DETERMINISTIC"
+    assert res.findings[0].verification.operand_origin == "TEXT_EXTRACTED"
+
+
+def test_the_quote_scanner_and_the_operand_parser_never_disagree():
+    # §17.5's stated invariant, and the reason the head/tail rules live at the
+    # scan site rather than inside parse_number: the scanner is handed surrounding
+    # text and the parser only a substring, so only the scanner can see what bound
+    # a number. Scanning "12'-6\"" linearly, refusing 12 for its tail and then
+    # offering the -6 the scan resumed on would put a quantity in the
+    # "present in the quote" set that the quote never states.
+    from drawing_analyzer.auditors.arithmetic import _numbers_in_text
+
+    assert _numbers_in_text('12\'-6" CLEAR') == []
+    assert parse_number('12\'-6"') is None
+
+    # ...while a genuine column of numbers is untouched. Whitespace is not a
+    # binder; the flow-test total is the case this auditor exists for.
+    assert _numbers_in_text("20  20  20   TOTAL  540") == [
+        Decimal(20), Decimal(20), Decimal(20), Decimal(540),
+    ]
+    # And a separating space keeps two real quantities apart.
+    assert _numbers_in_text('PIPE 2" 150 PSI') == [Decimal(2), Decimal(150)]
+
+
+def test_an_unprintable_result_does_not_lose_the_run(caplog):
+    # _fmt expanded an integral result with quantize(Decimal(1)), which raises
+    # InvalidOperation once the expansion needs more digits than the decimal
+    # context allows (28). Reachable from ordinary string terms, and it raised
+    # INSIDE the Finding(...) constructor expression, so there was no
+    # partially-built finding to recover -- audit_arithmetic aborted mid-loop and
+    # the caller discarded the whole result.
+    huge = NumericClaim(
+        sheet_id="FP-101", source_name="fp.pdf", page_index=0, kind="product",
+        terms=["100000000000000000000", "1000000000000000000000"], expected="5",
+        quote="",
+    )
+    good = NumericClaim(
+        sheet_id="FP-102", source_name="fp.pdf", page_index=0, kind="sum",
+        terms=["100", "200"], expected="500", quote="",
+    )
+    res = audit_arithmetic([huge, good], [])
+    assert res.mismatched == 2
+    assert len(res.findings) == 2
+    assert any("100000000000000000000000000000000000000000" in f.text for f in res.findings)
+    assert any("the sum of 100, 200 is 300" in f.text for f in res.findings)
+
+
+def test_a_claim_that_fails_MID_FINDING_leaves_the_tally_consistent(monkeypatch):
+    # The rollback half of item 10b, and the case the _fmt bug actually hit:
+    # result.mismatched is incremented BEFORE the Finding is built, and _fmt was
+    # called four times inside the constructor expression. So a raise there left a
+    # counted mismatch with no finding behind it -- breaking ArithmeticResult's
+    # own documented invariant (mismatched == len(findings)) for every consumer
+    # downstream, including the report's "N numeric relationships checked" line.
+    from drawing_analyzer.auditors import arithmetic as arith
+
+    real_severity = arith._severity_for
+
+    def _boom(actual, expected):
+        if expected == Decimal(660):
+            raise RuntimeError("synthetic failure after the counters moved")
+        return real_severity(actual, expected)
+
+    monkeypatch.setattr(arith, "_severity_for", _boom)
+
+    doomed = NumericClaim(
+        sheet_id="FP-101", source_name="fp.pdf", page_index=0, kind="sum",
+        terms=["180", "180", "180"], expected="660", quote="",
+    )
+    good = NumericClaim(
+        sheet_id="FP-102", source_name="fp.pdf", page_index=0, kind="sum",
+        terms=["100", "200"], expected="500", quote="",
+    )
+    res = audit_arithmetic([doomed, good], [])
+
+    assert res.mismatched == len(res.findings) == 1
+    assert "the sum of 100, 200 is 300" in res.findings[0].text
+    assert res.unusable == 1        # the doomed claim, counted as unchecked
+    assert res.checked == 1         # ...and NOT counted as one the host computed
+
+
+def test_one_bad_claim_does_not_lose_the_runs_arithmetic(monkeypatch):
+    # The orchestrator wraps the WHOLE batch in one try, so any per-claim failure
+    # aborted audit_arithmetic mid-loop and the caller discarded the result: every
+    # finding already produced was lost, and all four arithmetic_* stat keys went
+    # ABSENT -- so the summary line then read "arith=0/0" via stats.get(..., 0),
+    # rendering the failure as "nothing to check". Indistinguishable from a set
+    # with no claims at all.
+    from drawing_analyzer.auditors import arithmetic as arith
+
+    real_compute = arith._compute
+
+    def _boom(kind, terms):
+        if terms and terms[0] == Decimal(999):
+            raise RuntimeError("synthetic per-claim failure")
+        return real_compute(kind, terms)
+
+    monkeypatch.setattr(arith, "_compute", _boom)
+
+    bad = NumericClaim(
+        sheet_id="FP-101", source_name="fp.pdf", page_index=0, kind="sum",
+        terms=["999", "1"], expected="5", quote="",
+    )
+    good = NumericClaim(
+        sheet_id="FP-102", source_name="fp.pdf", page_index=0, kind="sum",
+        terms=["100", "200"], expected="500", quote="",
+    )
+    res = run_auditors([], claims=[bad, good])
+
+    assert len(res.findings) == 1
+    assert "the sum of 100, 200 is 300" in res.findings[0].text
+    # The stats are PRESENT, not merely zero -- absent keys are what made the
+    # failure read as "no claims".
+    for key in ("arithmetic_checked", "arithmetic_matched",
+                "arithmetic_mismatched", "arithmetic_unusable"):
+        assert key in res.stats, key
+    assert res.stats["arithmetic_unusable"] == 1        # the bad claim, counted
+    # The tally invariant survives the rollback: mismatched is incremented before
+    # the Finding is built, so a failure between the two would otherwise leave a
+    # counted mismatch with no finding behind it.
+    assert res.stats["arithmetic_mismatched"] == len(res.findings)
 
 
 def test_parse_number_boolean_is_not_one():
@@ -284,6 +492,49 @@ def test_naming_still_flags_pure_format_drift_same_digits():
     assert len(drift) == 1 and "A12" in drift[0].text
 
 
+def test_naming_does_not_manufacture_drift_out_of_alphabetical_order():
+    # Item 25a. With no frequency winner (every spelling seen once) the auditor
+    # fell back to the LEXICOGRAPHICALLY FIRST member as canonical and reported
+    # everything else as drift from it. Alphabetical order is not evidence of a
+    # convention, and the results were embarrassing in both directions: a
+    # canonical NCS "FP-101" reported as drift from the mangled "F-P101", and
+    # "VAV-21" called a misspelling of "VAV-2-1" -- which on a real schedule are
+    # two different boxes, not two spellings of one.
+    #
+    # The guard is the ARRANGEMENT, not the digits: a separator between two
+    # different kinds is formatting, a separator inside a digit run regroups the
+    # number.
+    words = [_titleblock("F-D-01-1")]
+    for i, tag in enumerate(["VAV-2-1", "VAV-21", "FP-101", "F-P101", "M-101", "M1-01"]):
+        words.append(_w(200, 200 + 20 * i, tag))
+    assert audit_naming([_sheet("s.pdf", 0, words)]) == []
+
+
+def test_a_pure_separator_drift_is_still_flagged_without_a_winner():
+    # The complement, and the reason the guard is on arrangement rather than a
+    # blanket "no winner -> report nothing": C1R and C1-R are the same
+    # arrangement (A1, D1, A1), so a separator difference between two rare
+    # spellings is still the drift this auditor exists to catch.
+    words = [_titleblock("F-D-01-1"), _w(200, 200, "C1R"), _w(200, 240, "C1-R")]
+    findings = audit_naming([_sheet("s.pdf", 0, words)])
+    assert len(findings) == 1
+    assert findings[0].source_quote == "C1R" and "C1-R" in findings[0].text
+
+
+def test_an_established_convention_outranks_structural_doubt():
+    # The arrangement guard applies ONLY where there is no frequency winner.
+    # A12 seen four times IS evidence of a convention, so the single A1-2 is
+    # still drift from it even though their arrangements differ -- which is what
+    # test_naming_still_flags_pure_format_drift_same_digits pins, and why the
+    # guard could not simply be applied everywhere.
+    words = [_titleblock("F-D-01-1")]
+    for _ in range(4):
+        words.append(_w(200, 200 + 20 * len(words), "A12"))
+    words.append(_w(800, 800, "A1-2"))
+    findings = audit_naming([_sheet("s.pdf", 0, words)])
+    assert [f.source_quote for f in findings] == ["A1-2"]
+
+
 def test_naming_ignores_sheet_ids_and_bare_words():
     # Pure words (no digit) and the sheet's own ID never enter the lexicon.
     sheets = [
@@ -466,6 +717,55 @@ def test_sheet_index_ignored_without_a_header():
         _w(300, 380, "F-D-99-9"), _titleblock("F-D-00-0"),
     ])
     assert audit_sheet_index([no_header]) == []
+
+
+def test_a_legend_citation_never_reaches_the_index_diff_as_a_finding():
+    # Item 25c, and the reason P4 does NOT add a veto at the harvest. The harvest
+    # reads every word on the page -- nothing bounds it to the index table's own
+    # region -- so a code citation or transmittal number in a legend IS collected
+    # as an index row. But both diff directions run every entry through
+    # classify_reference, which consults the negative corpus and returns IGNORE,
+    # so it never becomes a finding. Nothing pinned that, and a second copy of
+    # the corpus check at the harvest would have been the restated-rule drift
+    # this codebase has already paid for once.
+    #
+    # What is still unfixed is the harvest itself: an equipment tag like "P-3" is
+    # not in the corpus and would still be reported. That needs region bounding,
+    # which is deferred.
+    words = [_w(300, 200, "DRAWING"), _w(500, 200, "INDEX")]
+    for i, e in enumerate(["F-D-00-0", "F-D-01-1", "F-D-02-0"]):
+        words.append(_w(300, 300 + 40 * i, e))
+    # ...and a legend block far below the table.
+    words += [_w(300, 1800, "NFPA-13"), _w(300, 1840, "RFI-102"), _w(300, 1880, "REV-2")]
+    words.append(_titleblock("F-D-00-0"))
+    sheets = [
+        _sheet("idx.pdf", 0, words),
+        _sheet("a.pdf", 0, [_titleblock("F-D-01-1")]),
+        _sheet("b.pdf", 0, [_titleblock("F-D-02-0")]),
+    ]
+    texts = " || ".join(f.text for f in audit_sheet_index(sheets))
+    for phantom in ("NFPA-13", "RFI-102", "REV-2"):
+        assert phantom not in texts, phantom
+
+
+def test_an_index_that_lists_itself_is_still_recognised_as_an_index():
+    # The other rejected "cheap fix": excluding the sheet's own id. An index
+    # legitimately lists itself, and dropping it can push a real index below the
+    # _MIN_INDEX_ENTRIES recognition gate -- turning a working index sheet into
+    # no index at all, which is a far worse failure than one phantom row. The
+    # phantom that motivated it was really item N22 upstream: the page's own id
+    # had been mis-detected, so its genuine self-listing looked absent.
+    words = [_w(300, 200, "DRAWING"), _w(500, 200, "INDEX")]
+    for i, e in enumerate(["F-D-00-0", "F-D-01-1", "F-D-02-0"]):
+        words.append(_w(300, 300 + 40 * i, e))
+    words.append(_titleblock("F-D-00-0"))          # the index lists itself
+    sheets = [
+        _sheet("idx.pdf", 0, words),
+        _sheet("a.pdf", 0, [_titleblock("F-D-01-1")]),
+        _sheet("b.pdf", 0, [_titleblock("F-D-02-0")]),
+    ]
+    # Recognised, and reporting nothing: every listed sheet is present.
+    assert audit_sheet_index(sheets) == []
 
 
 def _index_page(source, own_id, entries):

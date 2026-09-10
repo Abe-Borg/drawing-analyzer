@@ -70,6 +70,69 @@ _SIMPLE_FRACTION_RE = re.compile(r"^([-+]?)(\d+)\s*/\s*(\d+)")
 # "0.20 gpm/ft²" → 0.20). Units, symbols, and trailing text are ignored.
 _PLAIN_NUMBER_RE = re.compile(r"^[-+]?(?:\d+(?:\.\d+)?|\.\d+)")
 
+# What a parsed number may be FOLLOWED by and still be the whole quantity: a unit,
+# a symbol, punctuation, whitespace and another number, nothing. What it may not
+# be followed by is a **binder** — a separator that joins another digit to the one
+# just read, meaning the token was never a single value and taking the leading run
+# silently mangles it.
+#
+# A binder must be **tight**: no whitespace on either side of it. Whitespace is
+# what separates two quantities from one malformed quantity, and both halves of
+# that matter. ``20  20  20  TOTAL 540`` is a column of four numbers, and denying
+# the first would gut the flow-test case the auditor exists for; ``0.5, 1.5,
+# TOTAL 2.0`` and ``10 , 20 , 30`` are ordinary comma-separated operand lists, and
+# an earlier draft of this rule allowed whitespace around the separator and so
+# dropped their leading operands — which does not produce a wrong answer, but
+# downgrades a text-extracted mismatch to MODEL_TRANSCRIBED / UNCERTAIN and sends
+# it to the crop verifier for nothing.
+#
+# ``_THOUSANDS_RE`` above already declines to strip a comma that is not a
+# thousands grouping, precisely so ``"1,20"`` is "left alone rather than silently
+# mangled" — and then ``_PLAIN_NUMBER_RE`` truncated it to 1 anyway, mangling it.
+# Same class: ``12'-6"`` is twelve feet six, not 12, and the old parse fed 12 to a
+# host computation that then inked its result as ground truth.
+#
+# ``%`` is rejected outright (§17.5, item 25d). A percent is a *ratio*, not the
+# quantity, so ``1500 SF + 30% = 1950 SF`` is not "the sum of 1500 and 30". Worse,
+# the bare ``30`` appearing literally in the quote is what let such a claim clear
+# :func:`_operands_supported` and ink as DETERMINISTIC / TEXT_EXTRACTED. Rejecting
+# it makes the claim *unusable* — reported as unchecked, never as a mismatch.
+# No ``^``: this is applied with ``.match(s, pos)``, which already anchors at
+# ``pos`` — while ``^`` would keep anchoring to the real start of the string and
+# so never fire on a tail at all.
+_NUMERIC_TAIL_RE = re.compile(
+    r"""(?:
+          ['"]? [,.\-] \d   # 12,5 · 1.2.3 · 12'-6" · 12-6  (tight only)
+        | \s* %            # 30% · 30 %   — a ratio however it is spaced
+    )""",
+    re.VERBOSE,
+)
+
+
+def _tail_denies(s: str, end: int) -> bool:
+    """Whether what follows the match at ``end`` disqualifies the parse."""
+    return _NUMERIC_TAIL_RE.match(s, end) is not None
+
+
+def _head_denies(s: str, start: int) -> bool:
+    """Whether the character immediately BEFORE a match binds it to a number.
+
+    The mirror of :func:`_tail_denies`, and needed for the same reason. Scanning
+    ``12'-6"`` linearly, the tail rule correctly refuses ``12`` — and the scan
+    then resumes past it and offers ``-6`` as a free-standing number. It is not
+    one; it is the inches half of a single dimension, and admitting it would put
+    a quantity in the "present in the quote" set that the quote never states.
+    That set is exactly what promotes a claim to TEXT_EXTRACTED / DETERMINISTIC,
+    so a phantom entry in it launders model arithmetic into ground truth.
+
+    Deliberately does NOT skip whitespace: a separating space means the two are
+    different quantities, so ``PIPE 2" 150 PSI`` still yields 150.
+    """
+    if start <= 0:
+        return False
+    prev = s[start - 1]
+    return prev in "'\",." or prev.isdigit()
+
 
 def parse_number(value: Any) -> Decimal | None:
     """Parse one raw term into an exact :class:`~decimal.Decimal`, or ``None``.
@@ -105,6 +168,8 @@ def _parse_number_str(raw: str) -> Decimal | None:
     try:
         m = _MIXED_FRACTION_RE.match(s)
         if m:
+            if _tail_denies(s, m.end()):
+                return None
             sign, whole, num, den = m.group(1), m.group(2), m.group(3), m.group(4)
             if int(den) == 0:
                 return None
@@ -112,6 +177,8 @@ def _parse_number_str(raw: str) -> Decimal | None:
             return -val if sign == "-" else val
         m = _SIMPLE_FRACTION_RE.match(s)
         if m:
+            if _tail_denies(s, m.end()):
+                return None
             sign, num, den = m.group(1), m.group(2), m.group(3)
             if int(den) == 0:
                 return None
@@ -119,6 +186,8 @@ def _parse_number_str(raw: str) -> Decimal | None:
             return -val if sign == "-" else val
         m = _PLAIN_NUMBER_RE.match(s)
         if m:
+            if _tail_denies(s, m.end()):
+                return None
             return Decimal(m.group(0))
     except (InvalidOperation, DivisionByZero, ValueError):
         return None
@@ -188,8 +257,17 @@ _NUM_IN_TEXT_RE = re.compile(
 
 
 def _numbers_in_text(text: str) -> list[Decimal]:
+    s = str(text or "")
     out: list[Decimal] = []
-    for m in _NUM_IN_TEXT_RE.finditer(str(text or "")):
+    for m in _NUM_IN_TEXT_RE.finditer(s):
+        # The head/tail rules are applied HERE, against the surrounding text,
+        # rather than left to ``parse_number`` — which is handed the matched
+        # substring alone and so cannot see what bound it. Without this the two
+        # disagree in exactly the direction that matters: ``parse_number("30%")``
+        # refuses, while the scanner still reported a bare 30 as "present in the
+        # quote", which is the whole basis of the TEXT_EXTRACTED promotion.
+        if _head_denies(s, m.start()) or _tail_denies(s, m.end()):
+            continue
         v = parse_number(m.group(0))
         if v is not None:
             out.append(v)
@@ -247,11 +325,20 @@ def _compute(kind: str, terms: list[Decimal]) -> Decimal | None:
 
 
 def _fmt(value: Decimal) -> str:
-    """Human-readable decimal: trims a trailing ``.0`` / exponent noise."""
+    """Human-readable decimal: trims a trailing ``.0`` / exponent noise.
+
+    ``normalize`` can yield exponent form (e.g. 1.95E+3), which must be expanded
+    back for a reviewer. It is expanded with ``format(v, "f")``, **not**
+    ``quantize(Decimal(1))``: quantize raises ``InvalidOperation`` as soon as the
+    expanded result needs more digits than the decimal context allows (28 by
+    default), and that is reachable from ordinary string terms — a claim whose
+    product is 1e29 is arithmetic the host can do and cannot print. It raised
+    inside the ``Finding(...)`` constructor expression, so there was not even a
+    partially-built finding to recover.
+    """
     v = value.normalize()
-    # ``normalize`` can yield exponent form (e.g. 1.95E+3); expand it back.
     if v == v.to_integral_value():
-        return str(v.quantize(Decimal(1)))
+        return format(v, "f")
     return str(v)
 
 
@@ -329,87 +416,115 @@ def audit_arithmetic(
     to_anchor: dict[tuple, list[Finding]] = {}
 
     for claim in claims:
-        if (claim.kind or "").strip().lower() not in ("sum", "product", "factor"):
+        # Per-CLAIM isolation (item 10b). The orchestrator wraps this whole
+        # function in one try, so a single bad claim aborted the loop, the
+        # caller discarded ``result``, and the run lost every arithmetic
+        # finding it had already produced AND all four ``arithmetic_*`` stat
+        # keys — after which the summary line reads ``arith=0/0`` via
+        # ``stats.get(..., 0)``, i.e. the failure renders as "nothing to
+        # check", indistinguishable from a set with no claims. Silent.
+        #
+        # The sibling auditors are each wrapped by ``_run``; arithmetic is the
+        # only one hand-rolled outside it, and even ``_run`` is per-auditor.
+        snapshot = (result.checked, result.matched, result.mismatched,
+                    len(result.findings))
+        try:
+            if (claim.kind or "").strip().lower() not in ("sum", "product", "factor"):
+                result.unusable += 1
+                continue
+            key = _claim_dedup_key(claim)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            kind = claim.kind.strip().lower()
+            terms = [parse_number(t) for t in claim.terms]
+            expected = parse_number(claim.expected)
+            if expected is None or any(t is None for t in terms):
+                result.unusable += 1
+                continue
+            actual = _compute(kind, terms)  # type: ignore[arg-type]
+            if actual is None:
+                result.unusable += 1
+                continue
+
+            result.checked += 1
+            if _is_match(actual, expected):
+                result.matched += 1
+                continue
+
+            result.mismatched += 1
+            geom = _resolve_geometry(claim, by_key, by_id)
+            ref = getattr(geom, "ref", None)
+            source_name = ref.source_name if ref is not None else (claim.source_name or "")
+            source_id = ref.source_id if ref is not None else (claim.source_id or "")
+            page_index = ref.page_index if ref is not None else int(claim.page_index or 0)
+            sheet_id = claim.sheet_id or (detect_sheet_id(geom) if geom is not None else "") or source_name
+
+            op = "sum of" if kind == "sum" else "product of"
+            term_str = ", ".join(_fmt(t) for t in terms)  # type: ignore[arg-type]
+            note_tail = f" {claim.note.strip()}" if claim.note.strip() else ""
+
+            # Operand provenance (§17.5): the host *operation* is always deterministic,
+            # but the numbers it used are trusted only when the sheet's own quoted text
+            # independently carries every one of them (TEXT_EXTRACTED). Otherwise the
+            # terms were model-transcribed, so the mismatch stays UNCERTAIN and is
+            # crop-verified — a misread term must never ink as trusted ground truth.
+            text_extracted = _operands_supported(
+                terms, expected, claim.quote or ""  # type: ignore[arg-type]
+            )
+            origin = TEXT_EXTRACTED if text_extracted else MODEL_TRANSCRIBED
+            status = "DETERMINISTIC" if text_extracted else "UNCERTAIN"
+            provenance = (
+                "operands text-extracted from the sheet quote"
+                if text_extracted
+                else "host-computed from model-transcribed terms — verify against the sheet"
+            )
+            finding = Finding(
+                sheet_id=sheet_id,
+                source_name=source_name,
+                source_id=source_id,
+                page_index=page_index,
+                category="conflict",
+                severity=_severity_for(actual, expected),
+                text=(
+                    f"Arithmetic does not check out: the {op} {term_str} is "
+                    f"{_fmt(actual)}, but the sheet states {_fmt(expected)}.{note_tail}"
+                ).strip(),
+                source_quote=claim.quote or "",
+                recommended_action=(
+                    f"Re-check the math: the {op} the printed values is "
+                    f"{_fmt(actual)}, not the stated {_fmt(expected)} - correct "
+                    "whichever is wrong."
+                ),
+                refs=[],
+                verification=Verification(
+                    status=status,
+                    note=f"computed {op} terms = {_fmt(actual)}; stated = {_fmt(expected)} "
+                         f"({provenance})",
+                    computation_method=HOST_DETERMINISTIC,
+                    operand_origin=origin,
+                ),
+                sources=["auditor_arithmetic"],
+            )
+            result.findings.append(finding)
+            if geom is not None and (claim.quote or "").strip():
+                to_anchor.setdefault(source_page_key(finding), []).append(finding)
+        except Exception as exc:  # noqa: BLE001 - one claim never sinks the rest
+            # Roll the tally back to before this claim and count it unusable, so
+            # ``mismatched == len(findings)`` still holds (it is incremented
+            # before the Finding is built, and _fmt used to raise inside the
+            # constructor expression — leaving a counted mismatch with no
+            # finding behind it).
+            (result.checked, result.matched, result.mismatched, kept) = snapshot
+            del result.findings[kept:]
             result.unusable += 1
-            continue
-        key = _claim_dedup_key(claim)
-        if key in seen:
-            continue
-        seen.add(key)
-
-        kind = claim.kind.strip().lower()
-        terms = [parse_number(t) for t in claim.terms]
-        expected = parse_number(claim.expected)
-        if expected is None or any(t is None for t in terms):
-            result.unusable += 1
-            continue
-        actual = _compute(kind, terms)  # type: ignore[arg-type]
-        if actual is None:
-            result.unusable += 1
-            continue
-
-        result.checked += 1
-        if _is_match(actual, expected):
-            result.matched += 1
-            continue
-
-        result.mismatched += 1
-        geom = _resolve_geometry(claim, by_key, by_id)
-        ref = getattr(geom, "ref", None)
-        source_name = ref.source_name if ref is not None else (claim.source_name or "")
-        source_id = ref.source_id if ref is not None else (claim.source_id or "")
-        page_index = ref.page_index if ref is not None else int(claim.page_index or 0)
-        sheet_id = claim.sheet_id or (detect_sheet_id(geom) if geom is not None else "") or source_name
-
-        op = "sum of" if kind == "sum" else "product of"
-        term_str = ", ".join(_fmt(t) for t in terms)  # type: ignore[arg-type]
-        note_tail = f" {claim.note.strip()}" if claim.note.strip() else ""
-
-        # Operand provenance (§17.5): the host *operation* is always deterministic,
-        # but the numbers it used are trusted only when the sheet's own quoted text
-        # independently carries every one of them (TEXT_EXTRACTED). Otherwise the
-        # terms were model-transcribed, so the mismatch stays UNCERTAIN and is
-        # crop-verified — a misread term must never ink as trusted ground truth.
-        text_extracted = _operands_supported(
-            terms, expected, claim.quote or ""  # type: ignore[arg-type]
-        )
-        origin = TEXT_EXTRACTED if text_extracted else MODEL_TRANSCRIBED
-        status = "DETERMINISTIC" if text_extracted else "UNCERTAIN"
-        provenance = (
-            "operands text-extracted from the sheet quote"
-            if text_extracted
-            else "host-computed from model-transcribed terms — verify against the sheet"
-        )
-        finding = Finding(
-            sheet_id=sheet_id,
-            source_name=source_name,
-            source_id=source_id,
-            page_index=page_index,
-            category="conflict",
-            severity=_severity_for(actual, expected),
-            text=(
-                f"Arithmetic does not check out: the {op} {term_str} is "
-                f"{_fmt(actual)}, but the sheet states {_fmt(expected)}.{note_tail}"
-            ).strip(),
-            source_quote=claim.quote or "",
-            recommended_action=(
-                f"Re-check the math: the {op} the printed values is "
-                f"{_fmt(actual)}, not the stated {_fmt(expected)} - correct "
-                "whichever is wrong."
-            ),
-            refs=[],
-            verification=Verification(
-                status=status,
-                note=f"computed {op} terms = {_fmt(actual)}; stated = {_fmt(expected)} "
-                     f"({provenance})",
-                computation_method=HOST_DETERMINISTIC,
-                operand_origin=origin,
-            ),
-            sources=["auditor_arithmetic"],
-        )
-        result.findings.append(finding)
-        if geom is not None and (claim.quote or "").strip():
-            to_anchor.setdefault(source_page_key(finding), []).append(finding)
+            from ..diagnostics import get_logger
+            get_logger().warning(
+                "arithmetic auditor: claim skipped (%s %s): %s",
+                getattr(claim, "sheet_id", "") or "?", getattr(claim, "kind", "") or "?",
+                exc,
+            )
 
     # Anchor the mismatch findings via their quotes, grouped per sheet. Reuses the
     # pure resolver (EXACT/FUZZY/TILE/UNANCHORED) exactly like model findings.

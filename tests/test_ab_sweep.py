@@ -7,6 +7,7 @@ cost. Those are exactly the parts where a bug would quietly bless a bad change.
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -18,8 +19,10 @@ from ab_sweep_drawing_analyzer import (  # noqa: E402
     VALIDITY_COMPARABLE,
     VALIDITY_NOT_COMPARABLE,
     VALIDITY_QUALIFIED,
+    RECORD_CONTRACT_VERSION,
     RECORDS_MISSING,
     RECORDS_PRESENT,
+    RECORDS_STALE_CONTRACT,
     RECORDS_UNREADABLE,
     _parse_env,
     _pct_delta,
@@ -1491,12 +1494,56 @@ def test_a_missing_or_corrupt_sidecar_reports_its_status_not_just_emptiness(tmp_
     assert load_arm_records(arm) == (RECORDS_UNREADABLE, [])
 
     # Read fine, genuinely no findings — distinct from every case above.
-    _findings_path(arm).write_text('{"records": []}', encoding="utf-8")
+    _findings_path(arm).write_text(
+        json.dumps({"contract_version": RECORD_CONTRACT_VERSION, "records": []}),
+        encoding="utf-8",
+    )
     assert load_arm_records(arm) == (RECORDS_PRESENT, [])
 
-    _findings_path(arm).write_text('{"records": [{"finding_id": "abc"}]}',
-                                   encoding="utf-8")
+    _findings_path(arm).write_text(
+        json.dumps({"contract_version": RECORD_CONTRACT_VERSION,
+                    "records": [{"finding_id": "abc"}]}),
+        encoding="utf-8",
+    )
     assert load_arm_records(arm) == (RECORDS_PRESENT, [{"finding_id": "abc"}])
+
+
+def test_a_sidecar_from_a_different_contract_is_refused_not_compared(tmp_path):
+    """Records that parse perfectly and mean something else are the worst case.
+
+    ``critical_signature`` is computed at ARM-RUN time and stored inside each
+    record, and the comparison re-applies ``signatures_compatible`` to those
+    stored dicts rather than recomputing them. So an arm produced before a
+    signature-rule change is scored under a rule it never ran with, and the
+    resulting differences get reported as if the arm's model or geometry swap
+    caused them — a comparison result manufactured out of a code change.
+
+    The version was written into every sidecar and echoed into every comparison
+    from the start, and read back by nobody; the contract its own comment
+    describes was declarative only until it was enforced here.
+
+    Refusing beats warning because the failure is SILENT: every reader uses
+    ``.get(...) or {}``, and a one-sided signal never blocks a match, so a stale
+    record whose measurements simply vanished degrades toward "exact match".
+    """
+    arm = tmp_path / "arm_baseline.json"
+    records = [{"finding_id": "abc", "critical_signature": {"measurements": ["2in"]}}]
+
+    _findings_path(arm).write_text(
+        json.dumps({"contract_version": RECORD_CONTRACT_VERSION - 1, "records": records}),
+        encoding="utf-8",
+    )
+    assert load_arm_records(arm) == (RECORDS_STALE_CONTRACT, [])
+
+    # A sidecar with NO version predates the field, which is strictly older than
+    # the current contract — stale, never "current by default".
+    _findings_path(arm).write_text(json.dumps({"records": records}), encoding="utf-8")
+    assert load_arm_records(arm) == (RECORDS_STALE_CONTRACT, [])
+
+    # And the status is a fourth value, not a flavour of UNREADABLE: the sidecar
+    # read perfectly, which is exactly what makes it dangerous.
+    assert RECORDS_STALE_CONTRACT not in (RECORDS_UNREADABLE, RECORDS_MISSING,
+                                          RECORDS_PRESENT)
 
 
 def test_the_records_envelope_round_trips_between_the_child_and_the_parent(tmp_path):

@@ -49,14 +49,32 @@ from pathlib import Path
 RECORDS_PRESENT = "PRESENT"
 RECORDS_MISSING = "MISSING"
 RECORDS_UNREADABLE = "UNREADABLE"
+#: An arm written under a different :data:`RECORD_CONTRACT_VERSION`. Its records
+#: parse perfectly and mean something else, which is the worst of both worlds —
+#: so it is a fourth status, not a flavour of UNREADABLE.
+RECORDS_STALE_CONTRACT = "STALE_CONTRACT"
 
 COMPARISON_COMPLETE = "COMPLETE"
 COMPARISON_INCOMPLETE = "INCOMPLETE"
 
-#: Bumped whenever the record shape changes in a way a reader must notice.
-#: Arm JSON from an older harness still loads (every consumer uses ``.get``),
-#: but a comparison across contract versions is announced rather than assumed.
-RECORD_CONTRACT_VERSION = 1
+#: Bumped whenever the record shape **or its meaning** changes in a way a reader
+#: must notice, and now actually enforced by :func:`load_arm_records` — until P4
+#: it was written into every sidecar, echoed into every comparison, and read back
+#: by nobody, so the contract this comment describes was declarative only.
+#:
+#: v2 (P4, item 23): ``critical_signature`` is computed at ARM-RUN time and stored
+#: inside each record, and ``signatures_compatible`` is then re-applied to the
+#: stored dicts rather than recomputed from the finding. The measurement rule
+#: changed, so a pre-v2 sidecar carries old-rule signatures — ``1/2"`` signed as
+#: ``2in``, a mixed number as the string ``21/2``, a feet-inches join as a
+#: negative. Comparing a v1 baseline against a v2 variant would attribute the
+#: difference to the arm's model or geometry swap, when it is a code change.
+#:
+#: The failure mode is **silent**, which is why refusing beats warning: every
+#: reader uses ``.get(...) or {}`` and a one-sided signal never blocks a match, so
+#: a stale record whose measurements simply vanished degrades toward "exact
+#: match" rather than erroring.
+RECORD_CONTRACT_VERSION = 2
 
 _WS_RE = re.compile(r"\s+")
 

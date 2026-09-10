@@ -247,7 +247,14 @@ def test_signature_regexes_avoid_false_positives():
     # The hyphen in a tag "P-1" is not a numeric sign, and "voltage" isn't "volt".
     assert _measurements(_finding("pump P-1 voltage rating is 480 at panel")) == set()
     # A real measurement adjacent to a tag reads (only the real one, no spurious -1).
-    assert _measurements(_finding("pump P-1 draws 6 amps")) == {"6amps"}
+    # The unit is folded to its singular (item 23): "6 amps" and "6 amp" are one
+    # quantity, and signing them differently SPLIT a single issue into two
+    # findings. Deliberately not folded: psig into psi -- gauge and absolute are
+    # different measurements, and collapsing those would hide a real conflict.
+    assert _measurements(_finding("pump P-1 draws 6 amps")) == {"6amp"}
+    assert _measurements(_finding("pump P-1 draws 6 amp")) == {"6amp"}
+    assert _measurements(_finding("relief set at 20 psig")) == {"20psig"}
+    assert _measurements(_finding("relief set at 20 psi")) == {"20psi"}
     # Dotted refs stay distinct (M1.01 != M10.1); a hyphen folds (M-101 == M101).
     assert _tags(_finding("see M1.01")) != _tags(_finding("see M10.1"))
     assert _tags(_finding("see M-101")) == _tags(_finding("see M101"))
@@ -1040,3 +1047,82 @@ def test_pipeline_profiles_ignored_without_critique(tmp_path):
         profiles=["fire-protection"], qc_work_dir=tmp_path / "qc",
     )
     assert client.critique_calls == 0 and client.critique_had_checklist is False
+
+
+# --------------------------------------------------------------------------- #
+# Item 23 — a measurement's signature is its VALUE
+# --------------------------------------------------------------------------- #
+
+
+def test_a_half_inch_and_two_inches_are_not_the_same_measurement():
+    # The lookbehind excluded [A-Za-z0-9.-] but not "/", so 1/2" matched at the
+    # DENOMINATOR and signed as 2in -- byte-identical to a real 2". "Provide 1/2"
+    # drain" and "Provide 2" drain" therefore had the same critical signature and
+    # merged as duplicates: two different pipe sizes collapsing into one finding,
+    # which is exactly what the signature exists to prevent.
+    from drawing_analyzer.critique import (
+        _measurements,
+        critical_signature,
+        signatures_compatible,
+    )
+
+    half = _finding('Provide 1/2" drain at the low point')
+    two = _finding('Provide 2" drain at the low point')
+
+    assert _measurements(half) == {"0.5in"}
+    assert _measurements(two) == {"2in"}
+    assert not signatures_compatible(critical_signature(half), critical_signature(two))
+
+    # The bare-fraction alternative is what fixes 1/2" (it consumes the whole
+    # fraction, so the denominator never gets its own match). The "/" exclusion
+    # earns its place separately: it stops a DENOMINATOR-LIKE position whose
+    # numerator is not a digit, which the fraction alternative cannot match.
+    assert _measurements(_finding("Zone A/2 in the north wing")) == set()
+    assert _measurements(_finding("see detail 3/A4 in the corner")) == set()
+
+
+def test_a_measurement_signs_by_value_not_by_how_it_was_written():
+    # The old normalizer collapsed the digits as a STRING, so "2 1/2" became the
+    # meaningless "21/2" and could never equal a 2.5 written elsewhere. Patching
+    # the regex alone would have left a half inch signing as "1/2in" -- still only
+    # textually distinct from 2in, not numerically.
+    from drawing_analyzer.critique import _measurements
+
+    for text in ('2 1/2" pipe', '2-1/2" pipe', '2.5" pipe', '2.50" pipe'):
+        assert _measurements(_finding(text)) == {"2.5in"}, text
+
+    # ...and every token the suite already pins is untouched, because normalize()
+    # is a no-op on an already-minimal integer.
+    assert _measurements(_finding("6 in clearance")) == {"6in"}
+    assert _measurements(_finding("500 gpm at the riser")) == {"500gpm"}
+    assert _measurements(_finding("rated 165 psi")) == {"165psi"}
+
+
+def test_feet_inches_keeps_both_halves_and_neither_goes_negative():
+    # The old lookbehind sat one character before the SIGN, and the character
+    # before the "-" in 12'-6" is "'" -- not excluded -- so [-+]? swallowed the
+    # feet-inches separator and emitted a spurious NEGATIVE -6in.
+    #
+    # Fixing that by excluding "-" outright would have been worse: it drops the
+    # inches half entirely, and then 12'-6" and 12'-8" both sign as just {12ft}
+    # and can merge. Two lookbehinds separate the cases -- "M-" is a tag, "'-" is
+    # a feet-inches join.
+    from drawing_analyzer.critique import _measurements
+
+    assert _measurements(_finding('maintain 12\'-6" clear')) == {"12ft", "6in"}
+    assert _measurements(_finding('maintain 12\'-8" clear')) == {"12ft", "8in"}
+    # The tag guard the exclusion existed for still holds.
+    assert _measurements(_finding("route clearance to M-101 in the room")) == set()
+    assert _measurements(_finding("pump P-1 voltage rating is 480 at panel")) == set()
+
+
+def test_a_negative_measurement_keeps_its_sign():
+    # The sign is part of the value: an elevation of -6 in and one of 6 in are
+    # different, and dropping the sign would let them sign identically and merge.
+    from drawing_analyzer.critique import _measurements
+
+    assert _measurements(_finding("invert set -6 in below datum")) == {"-6in"}
+    assert _measurements(_finding("invert set 6 in above datum")) == {"6in"}
+    assert _measurements(_finding('drop -2-1/2" from datum')) == {"-2.5in"}
+    # A quote mark before a number is prose, not a sign to swallow.
+    assert _measurements(_finding('the note says "6 in clear"')) == {"6in"}

@@ -37,6 +37,7 @@ import hashlib
 import os
 import re
 import time
+from decimal import Decimal, InvalidOperation
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -414,12 +415,50 @@ _ALPHA_UNIT = (
     r"amps?|volts?|kv|va|gal|deg"
 )
 _SYM_UNIT = r"°[fc]?|%|\"|'"
+# The number, in three parts (item 23):
+#
+# * The lookbehind now excludes ``/`` as well. Without it, ``1/2"`` matched at the
+#   DENOMINATOR — the ``2`` — and signed as ``2in``, byte-identical to a real
+#   ``2"``. So *Provide 1/2" drain* and *Provide 2" drain* had the same critical
+#   signature and merged as duplicates: two different pipe sizes collapsing into
+#   one finding, which is precisely what the signature exists to prevent.
+# * A **bare fraction** alternative, tried first so it beats the plain-integer
+#   read of the same characters. ``2 1/2`` still wins as a mixed number, because
+#   the mixed alternative consumes further.
+# * The sign is refused after a foot or inch mark. The old lookbehind sat one
+#   character before the SIGN, and the character before the ``-`` in ``12'-6"`` is
+#   ``'`` — not excluded — so ``[-+]?`` swallowed the feet-inches separator and
+#   emitted a spurious NEGATIVE ``-6in``. Only the sign is guarded, not the whole
+#   number: excluding a preceding quote outright would drop the ``6`` in ordinary
+#   prose like ``the note says "6 in clear"``.
+#
+# The "not mid-token" guard is TWO lookbehinds rather than one class, and the
+# split is load-bearing. A single ``[A-Za-z0-9.\-]`` class blocks any number
+# preceded by a hyphen — which stops the ``101`` in ``M-101`` (right) and the
+# ``6`` in ``12'-6"`` (wrong, and unsafe: with the inches half dropped, ``12'-6"``
+# and ``12'-8"`` both signed as just ``{12ft}`` and could merge). Asking instead
+# whether the hyphen is itself preceded by an alphanumeric separates them: ``M-``
+# is a tag, ``'-`` is a feet-inches join.
+#
+# Feet-inches deliberately stays TWO tokens (``12ft`` and ``6in``). ``_SYM_UNIT``
+# carries both marks by design, and joining them would change the token model for
+# every dimension in the corpus, not just this one.
 _MEAS_RE = re.compile(
-    r"(?<![A-Za-z0-9.\-])([-+]?\d+(?:\.\d+)?(?:[-\s]*\d+\s*/\s*\d+)?)\s*"
+    r"(?<![A-Za-z0-9./])(?<![A-Za-z0-9]-)"
+    r"((?:(?<![\'\"])[-+])?"
+    r"(?:\d+\s*/\s*\d+|\d+(?:\.\d+)?(?:[-\s]*\d+\s*/\s*\d+)?))\s*"
     r"((?:" + _ALPHA_UNIT + r")\b|(?:" + _SYM_UNIT + r"))",
     re.IGNORECASE,
 )
-_UNIT_SYNONYM = {"inches": "in", "inch": "in", "feet": "ft", '"': "in", "'": "ft"}
+# Plural folding only. ``6 amps`` and ``6 amp`` are one quantity, and treating
+# them as two conflicting ones SPLIT a single issue into two findings — the safe
+# direction, but still wrong. Deliberately NOT folded: ``psig`` into ``psi``.
+# Gauge and absolute pressure are different measurements, and collapsing them
+# would hide a real conflict rather than a formatting one.
+_UNIT_SYNONYM = {
+    "inches": "in", "inch": "in", "feet": "ft", '"': "in", "'": "ft",
+    "amps": "amp", "volts": "volt",
+}
 # Strong "absence / not-present" phrasing — an absence finding contradicts a finding
 # about the same thing being present. Symmetric across channels: the digest's
 # "should be provided" and the critique's "not found" both read as an absence.
@@ -450,12 +489,60 @@ def _tags(f: Finding) -> set[str]:
     }
 
 
+# The sign stays INSIDE the captured number (and so inside these), because a
+# measurement's sign is part of its value: dropping it would let ``-6 in`` and
+# ``6 in`` sign identically and merge.
+_MIXED_MEAS_RE = re.compile(r"^([-+]?\d+)[-\s]+(\d+)\s*/\s*(\d+)$")
+_FRACTION_MEAS_RE = re.compile(r"^([-+]?\d+)\s*/\s*(\d+)$")
+
+
+def _meas_value(raw: str) -> str:
+    """Canonicalize a matched measurement number to its VALUE (item 23).
+
+    The old normalizer collapsed the digits as a *string*, so ``2 1/2`` became the
+    meaningless ``"21/2"`` and could never compare equal to a ``2.5`` written
+    elsewhere. Comparing values instead is what actually separates ``1/2"`` from
+    ``2"``; patching the regex alone would leave a half inch signing as ``1/2in``,
+    which is still only textually distinct.
+
+    Every pinned token survives this unchanged — ``6`` stays ``6``, ``500`` stays
+    ``500``, ``165`` stays ``165`` — because :meth:`Decimal.normalize` is a no-op
+    on an already-minimal integer. The one shift is ``0.20`` → ``0.2``, and
+    folding those two is correct.
+
+    Never raises: the caller has a regex match in hand, so a value is guaranteed;
+    an unparseable leftover falls back to the raw text rather than losing the
+    measurement from the signature entirely.
+    """
+    s = raw.strip()
+    try:
+        m = _MIXED_MEAS_RE.match(s)
+        if m:
+            den = Decimal(m.group(3))
+            whole = Decimal(m.group(1))
+            frac = (Decimal(m.group(2)) / den) if den else Decimal(0)
+            # "-2-1/2" is negative two and a half, not -2 + 0.5.
+            value = whole - frac if whole < 0 else whole + frac
+        else:
+            m = _FRACTION_MEAS_RE.match(s)
+            if m:
+                den = Decimal(m.group(2))
+                if not den:
+                    return s.replace(" ", "")
+                value = Decimal(m.group(1)) / den
+            else:
+                value = Decimal(s.replace(" ", ""))
+        return format(value.normalize(), "f")
+    except (InvalidOperation, ValueError, ZeroDivisionError):
+        return re.sub(r"\s+", "", s)
+
+
 def _measurements(f: Finding) -> set[str]:
     out: set[str] = set()
     for m in _MEAS_RE.finditer(_sig_text(f)):
-        # Collapse internal digit separators so "2 1/2" == "2-1/2" (but keep a
-        # leading sign); the UNIT is part of the signature so "6 in" != "6 ft".
-        num = re.sub(r"(?<=\d)[-\s]+(?=\d)", "", m.group(1)).replace(" ", "")
+        # The VALUE, not the digits as written, so "2 1/2" == "2-1/2" == "2.5";
+        # the UNIT is part of the signature so "6 in" != "6 ft".
+        num = _meas_value(m.group(1))
         unit = re.sub(r"\s+", "", m.group(2)).lower()
         out.add(num + _UNIT_SYNONYM.get(unit, unit))
     return out
