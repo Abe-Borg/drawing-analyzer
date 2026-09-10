@@ -902,3 +902,169 @@ def test_overflow_page_backlink_uses_the_destination_transform(tmp_path):
         assert abs(got[0] - expected[0]) < 1.2 and abs(got[1] - expected[1]) < 1.2, (
             f"notes-page backlink /XYZ {got} != user-space {expected}"
         )
+
+
+# --------------------------------------------------------------------------- #
+# FreeText truncation is not undone by set_info (P7 item 33)
+#
+# For a plain FreeText annot /Contents IS the displayed text, so passing the
+# untruncated string to set_info after handing the truncated one to
+# add_freetext_annot writes the whole string back and draws it.
+# --------------------------------------------------------------------------- #
+
+
+def _freetext_contents(path) -> list[str]:
+    """Every FreeText annot's raw /Contents in the saved file, in page order."""
+    doc = pymupdf.open(str(path))
+    try:
+        out = []
+        for pno in range(doc.page_count):
+            for annot in doc[pno].annots():
+                if annot.type[1] == "FreeText":
+                    raw = doc.xref_get_key(annot.xref, "Contents")
+                    if raw and len(raw) > 1:
+                        out.append(str(raw[1]))
+        return out
+    finally:
+        doc.close()
+
+
+_LONG_FINDING_TEXT = (
+    "Sprinkler head spacing exceeds the maximum permitted for the hazard "
+    "classification shown, and the branch line drain is undersized relative to "
+    "the main it serves; verify against the hydraulic calculations and the "
+    "manufacturer's listed spacing for this head model before issuing for "
+    "construction, and confirm the remote area selection while you are there."
+)
+
+
+def test_freetext_contents_stays_truncated(tmp_path):
+    # A margin callout is capped at 220 chars for display. /Contents must carry
+    # the capped string, not the full one.
+    src = _make_pdf(tmp_path / "src", pages=1)
+    f = _finding(_LONG_FINDING_TEXT, status="VERIFIED", page=0, rect=None, quote="")
+    f.anchor = Anchor(status="UNANCHORED", rect_pdf=None, method="quote_not_found")
+    f.qc_id = "QC-001"
+
+    res = write_reviewed_pdfs([f], [src], tmp_path / "out")
+    contents = _freetext_contents(res.reviewed_pdfs[0])
+    assert contents, "no FreeText callout was written at all"
+    assert any(c.endswith("...") for c in contents), (
+        "no callout was truncated, so this test is not exercising the cap"
+    )
+    for c in contents:
+        assert len(c) <= 420, (
+            f"/Contents is {len(c)} chars — set_info overwrote the truncated "
+            f"display text with the full string"
+        )
+
+
+def test_set_level_review_notes_contents_stays_truncated(tmp_path):
+    from drawing_analyzer.models import assign_qc_ids
+
+    long_action = "Coordinate with the fire protection engineer and " * 6
+    f = _finding(_LONG_FINDING_TEXT, status="UNCERTAIN", page=-1, rect=None, quote="")
+    f.anchor = Anchor(status="UNANCHORED", rect_pdf=None, method="quote_not_found")
+    f.anchor_hint = "SET"          # _is_set_level_finding: SET-scoped, no source_id
+    f.source_id = ""
+    f.recommended_action = long_action
+    assign_qc_ids([f])
+
+    res = write_set_review_notes_pdf([f], tmp_path / "out")
+    paths = [q for q in (getattr(res, "reviewed_pdfs", None) or []) if q]
+    assert paths, "no set-level review notes PDF was written"
+    for c in _freetext_contents(paths[0]):
+        assert len(c) <= 420, f"/Contents is {len(c)} chars — truncation was undone"
+
+
+# --------------------------------------------------------------------------- #
+# Index rows fit their column and survive Base-14 (P7 item 32)
+# --------------------------------------------------------------------------- #
+
+
+def test_index_row_text_fits_its_column(tmp_path):
+    # Realistic UPPERCASE drawing text: the shipped 62-char cap measured 285 pt in
+    # a 238 pt column. Lowercase prose fits, which is why this survived — sheets
+    # are lettered uppercase, and uppercase is the wider case.
+    from drawing_analyzer.annotate import _INDEX_COL_W, _INDEX_COL_X
+
+    src = _make_pdf(tmp_path / "src", pages=1)
+    f = _finding("SPRINKLER HEAD SPACING EXCEEDS MAXIMUM PERMITTED BY NFPA 13 "
+                 "AND THE DRAIN IS UNDERSIZED FOR THE MAIN IT SERVES",
+                 status="VERIFIED", page=0, quote="VAV-3")
+    f.sheet_id = "FP-101-MEZZANINE-LEVEL-A"
+    f.qc_id = "QC-001"
+    res = write_reviewed_pdfs([f], [src], tmp_path / "out")
+
+    from drawing_analyzer.annotate import _INDEX_TOP
+
+    doc = pymupdf.open(str(res.reviewed_pdfs[0]))
+    try:
+        # Table rows only. The page title and the author subtitle sit above
+        # _INDEX_TOP at the same left margin as column 0 and are not table cells.
+        words = [w for w in doc[0].get_text("words") if w[1] >= _INDEX_TOP - 10]
+    finally:
+        doc.close()
+    assert words, "no table rows were drawn"
+
+    right_edge = _INDEX_COL_X[-1] + _INDEX_COL_W[-1]
+    # No word drawn in the findings column may cross its right edge.
+    spill = [w for w in words if w[0] >= _INDEX_COL_X[-1] - 1 and w[2] > right_edge + 1]
+    assert not spill, f"index text overflowed its column: {[w[4] for w in spill]}"
+    # Each earlier column stays inside its own width too.
+    for i in range(len(_INDEX_COL_X) - 1):
+        lo, hi = _INDEX_COL_X[i], _INDEX_COL_X[i] + _INDEX_COL_W[i]
+        over = [w for w in words if lo - 1 <= w[0] < _INDEX_COL_X[i + 1] and w[2] > hi + 1]
+        assert not over, f"column {i} overflowed: {[w[4] for w in over]}"
+
+
+def test_index_columns_are_derived_from_one_definition():
+    # Header labels and data cells must come from the same column table, or the
+    # width a cell is fitted to stops matching the space the header claims.
+    from drawing_analyzer.annotate import (
+        _INDEX_COL_GUTTER, _INDEX_COL_LABELS, _INDEX_COL_RIGHT, _INDEX_COL_W,
+        _INDEX_COL_X,
+    )
+
+    assert len(_INDEX_COL_X) == len(_INDEX_COL_LABELS) == len(_INDEX_COL_W)
+    for i in range(len(_INDEX_COL_X) - 1):
+        assert _INDEX_COL_W[i] == _INDEX_COL_X[i + 1] - _INDEX_COL_X[i] - _INDEX_COL_GUTTER
+    assert _INDEX_COL_W[-1] == _INDEX_COL_RIGHT - _INDEX_COL_X[-1] - _INDEX_COL_GUTTER
+
+
+def test_base14_safe_folds_typography_instead_of_drawing_a_dot():
+    # insert_text's Base-14 fonts silently draw a MIDDLE DOT for anything outside
+    # Latin-1 — no exception. '3" drain' written with a U+2033 prime became
+    # '3. drain': a mangled dimension in a fire-sprinkler index still reads as a
+    # number, which is worse than a missing one.
+    from drawing_analyzer.annotate import _base14_safe
+
+    assert _base14_safe("3″ drain") == '3" drain'
+    assert _base14_safe("detail — see M-501") == "detail - see M-501"
+    assert _base14_safe("2′1/2″") == "2'1/2\""
+    assert _base14_safe("1⁄2 inch") == "1/2 inch"
+    assert _base14_safe("300 × 200") == "300 x 200"
+    assert _base14_safe("spacing ≤ 12 FT") == "spacing <= 12 FT"
+    # Latin-1 characters Base-14 CAN draw are left alone, not degraded.
+    assert _base14_safe("½ inch at 45°") == "½ inch at 45°"
+    # Anything still undrawable reads as unknown, never as punctuation.
+    assert _base14_safe("zone ①") == "zone ?"
+    # Every result is drawable by the Base-14 encoding.
+    for probe in ("3″", "a—b", "zone ①", "½°"):
+        _base14_safe(probe).encode("latin-1")
+
+
+def test_fit_text_measures_width_not_characters():
+    from drawing_analyzer.annotate import _fit_text
+
+    wide = "SPRINKLER HEAD SPACING EXCEEDS MAXIMUM PERMITTED BY NFPA 13"
+    fitted = _fit_text(wide, 238.0, fontsize=8)
+    assert pymupdf.get_text_length(fitted, fontname="helv", fontsize=8) <= 238.0
+    assert fitted.endswith("...")
+    # Same character count, narrower glyphs -> more of it survives.
+    narrow = "iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii"
+    assert len(_fit_text(narrow, 238.0, fontsize=8)) > len(fitted)
+    # Text that already fits is returned whole, with no ellipsis.
+    assert _fit_text("FP-101", 238.0, fontsize=8) == "FP-101"
+    # A column too narrow for even the ellipsis yields nothing, never an overflow.
+    assert _fit_text(wide, 1.0, fontsize=8) == ""

@@ -1306,3 +1306,52 @@ def test_citation_pause_turn_resumes_keep_every_earlier_turn():
     assert lengths == [1, 2, 3], lengths
     assert client.messages.seen[-1][0]["role"] == "user"
     assert all(m["role"] == "assistant" for m in client.messages.seen[-1][1:])
+
+
+def test_overflow_review_note_contents_stays_truncated(tmp_path):
+    # The third FreeText site (P7 item 33): the per-source AI Review Notes page.
+    # Its callouts are capped at 400 chars for display, and /Contents IS the
+    # displayed text for a plain FreeText, so set_info must be handed the capped
+    # string too. Reached only by forcing an overflow, which the on-sheet margin
+    # callout tests never do — an untested twin of the same defect.
+    long_text = (
+        "Sprinkler head spacing exceeds the maximum permitted for the hazard "
+        "classification shown on this sheet, and the branch line drain appears "
+        "undersized relative to the main it serves; verify against the hydraulic "
+        "calculations and the manufacturer's listed spacing for this head model "
+        "before issuing for construction, and confirm the remote area selection."
+    )
+    src = _pdf(tmp_path)
+    words = [_w(30 + 150 * i, 20 + 24 * j, width=100, height=12)
+             for i in range(5) for j in range(22)]
+    absences = [
+        _f(f"{long_text} (item {i})", source="M-101.pdf", hint="SHEET", quote="")
+        for i in range(7)
+    ]
+    assign_qc_ids(absences)
+    out = tmp_path / "M-101_reviewed.pdf"
+    res = annotate_pdf(src, absences, out, sheet_meta=_meta(words))
+    assert res.tally.get("review_notes", 0) >= 1, "nothing overflowed to the notes page"
+
+    doc = pymupdf.open(str(out))
+    try:
+        notes_pno = next(p for p in range(doc.page_count)
+                         if "AI REVIEW NOTES" in doc[p].get_text().upper())
+        contents = []
+        for annot in doc[notes_pno].annots():
+            if annot.type[1] == "FreeText":
+                raw = doc.xref_get_key(annot.xref, "Contents")
+                if raw and len(raw) > 1:
+                    contents.append(str(raw[1]))
+    finally:
+        doc.close()
+
+    assert contents, "the notes page carries no FreeText callout"
+    assert any(c.endswith("...") for c in contents), (
+        "nothing was truncated, so this test is not exercising the cap"
+    )
+    for c in contents:
+        assert len(c) <= 600, (
+            f"/Contents is {len(c)} chars against a 400-char display cap — "
+            f"set_info overwrote the truncated display text with the full string"
+        )

@@ -247,6 +247,19 @@ _CALLOUT_GAP = 8.0
 
 # Index-page layout (US letter portrait).
 _INDEX_PAGE_W, _INDEX_PAGE_H = 612.0, 792.0
+# Index columns: left edge per column, and the right margin the last one runs to.
+# Widths are DERIVED from the next column's edge so a row's text can be fitted to
+# the space it actually has (item 32) — one definition shared by the header row
+# and the data rows, so the two cannot drift apart.
+_INDEX_COL_X = (36.0, 95.0, 210.0, 258.0, 340.0)
+_INDEX_COL_LABELS = ("ID", "Sheet", "Sev", "Status", "Finding")
+_INDEX_COL_RIGHT = 578.0            # _INDEX_PAGE_W - 34pt right margin
+_INDEX_COL_GUTTER = 4.0             # keep a column off its neighbour's first glyph
+_INDEX_COL_W = tuple(
+    (_INDEX_COL_X[i + 1] if i + 1 < len(_INDEX_COL_X) else _INDEX_COL_RIGHT)
+    - _INDEX_COL_X[i] - _INDEX_COL_GUTTER
+    for i in range(len(_INDEX_COL_X))
+)
 _INDEX_TOP = 90.0
 _INDEX_ROW_H = 14.0
 _INDEX_BOTTOM_MARGIN = 40.0
@@ -580,6 +593,11 @@ def _truncate_at_word(text: str, limit: int) -> str:
     whitespace sits in the first half of the budget (one giant token), where a
     hard cut is the only option. Short text passes through unchanged. Pure and
     PyMuPDF-free, so the display-slice rule is unit-testable.
+
+    For a plain FreeText annot the truncated string must ALSO be what is handed
+    to ``set_info(content=...)``: ``/Contents`` *is* the displayed text there, so
+    passing the untruncated string afterwards silently undoes this (P7 item 33).
+    Callers therefore truncate once and reuse the result for both.
     """
     if len(text) <= limit:
         return text
@@ -589,6 +607,93 @@ def _truncate_at_word(text: str, limit: int) -> str:
     if space > cut // 2:
         head = head[:space]
     return head.rstrip() + "..."
+
+
+# --------------------------------------------------------------------------- #
+# Base-14 safe, width-fitted page text (P7 item 32).
+#
+# ``insert_text`` draws with the Base-14 fonts, which encode Latin-1. Anything
+# outside it is silently drawn as a **middle dot** — no exception, no warning —
+# so ``3" drain`` written with a U+2033 prime became ``3. drain`` and an em-dash
+# became a stray dot. A mangled dimension in a fire-sprinkler findings index is
+# worse than a missing one, because it still reads as a number.
+#
+# And a character budget is not a width fit. The findings column is 238 pt wide
+# and the shipped 62-char cap measured, at 8 pt Helvetica: 248.1 pt for
+# ``PROVIDE 6 INCH DRAIN AT COLUMN LINE 4 PER DETAIL 3/M-501``, 285.4 pt for
+# ``SPRINKLER HEAD SPACING EXCEEDS MAXIMUM PERMITTED BY NFPA 13``, 276.0 pt for
+# ``VAV-3 HAS NO CLEARANCE SHOWN AND CONFLICTS WITH DUCT MAIN``. Lowercase prose
+# fits at 229.4 pt, which is why this survived: drawings are lettered UPPERCASE
+# and uppercase is wider, so realistic sheet text is exactly the case that
+# overflows into the next column.
+# --------------------------------------------------------------------------- #
+
+#: Typographic characters folded to their ASCII equivalent before insertion.
+#: Latin-1 characters that Base-14 *can* draw (``1/2``, ``deg``, accents) are
+#: deliberately absent — they render correctly and must not be degraded.
+_INSERT_TEXT_FOLD: dict[int, str] = {}
+for _src, _dst in (
+    ("\u2033\u201c\u201d\u201e", '"'),      # double prime, curly/low quotes
+    ("\u2032\u2018\u2019\u201a", "'"),      # prime, curly single quotes
+    ("\u2010\u2011\u2012\u2013\u2014\u2015\u2212", "-"),   # dashes, minus
+    ("\u2044\u2215", "/"),                    # fraction slash, division slash
+    ("\u00d7", "x"),                           # multiplication sign
+    ("\u00f8\u2300", "dia "),                 # slashed o / diameter sign
+    ("\u2264", "<="),
+    ("\u2265", ">="),
+):
+    for _c in _src:
+        _INSERT_TEXT_FOLD[ord(_c)] = _dst
+_INSERT_TEXT_FOLD[ord("\u2026")] = "..."       # ellipsis
+_INSERT_TEXT_FOLD[ord("\u2713")] = "[OK]"      # check mark
+_INSERT_TEXT_FOLD[ord("\u00a0")] = " "         # no-break space
+
+
+def _base14_safe(text: str) -> str:
+    """``text`` with every glyph Base-14 ``insert_text`` cannot draw resolved.
+
+    Known typography folds to its ASCII equivalent; anything still outside
+    Latin-1 becomes ``?``, which at least reads as "unknown character" instead of
+    passing for a decimal point in a dimension.
+    """
+    folded = (text or "").translate(_INSERT_TEXT_FOLD)
+    return folded.encode("latin-1", "replace").decode("latin-1")
+
+
+def _fit_text(
+    text: str, width: float, *, fontsize: float, fontname: str = "helv"
+) -> str:
+    """``text``, Base-14-safe and shortened to actually fit ``width`` points.
+
+    Measures with :func:`pymupdf.get_text_length` — the same metrics
+    ``insert_text`` draws with — instead of counting characters, and backs up to a
+    word boundary, appending an ASCII ``...`` when it had to cut. Folding happens
+    **first**, because folding can change the width (``...`` is wider than the
+    ellipsis it replaces, ``dia `` far wider than ``\u00f8``).
+    """
+    safe = _base14_safe(text)
+    if width <= 0:
+        return ""
+    if pymupdf.get_text_length(safe, fontname=fontname, fontsize=fontsize) <= width:
+        return safe
+    ell = "..."
+    budget = width - pymupdf.get_text_length(ell, fontname=fontname, fontsize=fontsize)
+    if budget <= 0:
+        return ""
+    # Longest prefix that fits, then retreat to the last word boundary unless that
+    # would throw away more than half of it (one very long token).
+    lo, hi = 0, len(safe)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if pymupdf.get_text_length(safe[:mid], fontname=fontname, fontsize=fontsize) <= budget:
+            lo = mid
+        else:
+            hi = mid - 1
+    head = safe[:lo]
+    space = max(head.rfind(" "), head.rfind("\n"), head.rfind("\t"))
+    if space > lo // 2:
+        head = head[:space]
+    return head.rstrip() + ell
 
 
 def _placement_kind(finding: Finding) -> str:
@@ -1261,8 +1366,12 @@ def _add_margin_callouts(
         # on plain FreeText annots); unverified/rejected callouts dash the border.
         # ``rotate=page.rotation`` keeps the text upright on a rotated sheet; the
         # box is transformed view→page so it lands in the computed clear band.
+        # One truncation, reused for /Contents below: for a plain FreeText annot
+        # /Contents IS the displayed text, so set_info(content=full) would undo
+        # this and draw the whole string (item 33).
+        shown = _truncate_at_word(content, 220)
         annot = page.add_freetext_annot(
-            _derotate_rect(page, box), _truncate_at_word(content, 220),
+            _derotate_rect(page, box), shown,
             fontsize=7.5, text_color=color, fill_color=(1.0, 1.0, 0.92),
             rotate=int(page.rotation or 0),
         )
@@ -1271,7 +1380,7 @@ def _add_margin_callouts(
                 annot.set_border(width=1.0, dashes=[4, 3])
         except Exception:  # noqa: BLE001
             pass
-        annot.set_info(title=author, subject=finding.category, content=content)
+        annot.set_info(title=author, subject=finding.category, content=shown)
         _assign_layer(annot, finding, oc_layers)
         annot.update()
         components.append(("callout", annot.xref))
@@ -1429,12 +1538,15 @@ def _insert_index_pages(
         page.insert_text((36, 42), title, fontsize=13, fontname="hebo", color=(0.1, 0.1, 0.1))
         page.insert_text(
             (36, 60),
-            f"Author: {author} - draft review; every row links to its markup.",
+            _fit_text(
+                f"Author: {author} - draft review; every row links to its markup.",
+                _INDEX_COL_RIGHT - 36.0, fontsize=8,
+            ),
             fontsize=8, color=(0.35, 0.35, 0.35),
         )
         # Column headers.
         y = _INDEX_TOP - 8
-        for x, label in ((36, "ID"), (95, "Sheet"), (210, "Sev"), (258, "Status"), (340, "Finding")):
+        for x, label in zip(_INDEX_COL_X, _INDEX_COL_LABELS):
             page.insert_text((x, y), label, fontsize=8, fontname="hebo", color=(0.25, 0.25, 0.25))
 
         batch = rows[i * _INDEX_ROWS_PER_PAGE:(i + 1) * _INDEX_ROWS_PER_PAGE]
@@ -1455,12 +1567,21 @@ def _insert_index_pages(
             struck = kind in ("rejected", "gated")
             color = _REJECTED_COLOR if struck else _color(finding)
             text_color = _REJECTED_COLOR if struck else (0, 0, 0)
-            page.insert_text((36, y), finding.qc_id or "—", fontsize=8, fontname="hebo", color=color)
-            page.insert_text((95, y), (finding.sheet_id or "")[:20], fontsize=8, color=text_color)
-            page.insert_text((210, y), (finding.severity or "")[:6], fontsize=8, color=color)
-            page.insert_text((258, y), _status_label(finding)[:13], fontsize=8, color=text_color)
-            text = _truncate_at_word(finding.text.strip().replace("\n", " "), 62)
-            page.insert_text((340, y), text, fontsize=8, color=text_color)
+            # Every cell is fitted to its own column width and made Base-14 safe
+            # (item 32): a character cap is not a width fit, and a glyph the
+            # Base-14 fonts lack is drawn as a middle dot rather than raising.
+            cells = (
+                (finding.qc_id or "-", "hebo", color),
+                (finding.sheet_id or "", "helv", text_color),
+                (finding.severity or "", "helv", color),
+                (_status_label(finding), "helv", text_color),
+                (finding.text.strip().replace("\n", " "), "helv", text_color),
+            )
+            for x, cw, (raw, fontname, cell_color) in zip(_INDEX_COL_X, _INDEX_COL_W, cells):
+                page.insert_text(
+                    (x, y), _fit_text(raw, cw, fontsize=8, fontname=fontname),
+                    fontsize=8, fontname=fontname, color=cell_color,
+                )
 
             target_page = int(finding.page_index) + n_pages
             rect = getattr(finding.anchor, "rect_pdf", None) if finding.anchor else None
@@ -1506,7 +1627,10 @@ def _insert_appendix_page(
     page.insert_text((36, 42), APPENDIX_PAGE_LABEL, fontsize=13, fontname="hebo", color=(0.1, 0.1, 0.1))
     page.insert_text(
         (36, 60),
-        f"Author: {author} - deterministic checks that passed (the balance column).",
+        _fit_text(
+            f"Author: {author} - deterministic checks that passed (the balance column).",
+            _INDEX_COL_RIGHT - 36.0, fontsize=8,
+        ),
         fontsize=8, color=(0.35, 0.35, 0.35),
     )
     lines: list[str] = []
@@ -1565,8 +1689,11 @@ def _insert_review_notes_page(
         page.insert_text((_NOTE_LEFT, 42), title, fontsize=12, fontname="hebo", color=(0.1, 0.1, 0.1))
         page.insert_text(
             (_NOTE_LEFT, 62),
-            f"Author: {author} - findings that did not fit a clear band on their sheet; "
-            f"each row links to its source page.",
+            _fit_text(
+                f"Author: {author} - findings that did not fit a clear band on their "
+                f"sheet; each row links to its source page.",
+                _INDEX_PAGE_W - 2 * _NOTE_LEFT, fontsize=8,
+            ),
             fontsize=8, color=(0.35, 0.35, 0.35),
         )
         batch = ordered[i * per_page:(i + 1) * per_page]
@@ -1583,12 +1710,13 @@ def _insert_review_notes_page(
             )
             box = pymupdf.Rect(_NOTE_LEFT, y, _INDEX_PAGE_W - _NOTE_LEFT, y + _NOTE_BOX_H)
             try:
+                shown = _truncate_at_word(content, 400)     # reused below (item 33)
                 annot = page.add_freetext_annot(
-                    box, _truncate_at_word(content, 400), fontsize=8,
+                    box, shown, fontsize=8,
                     text_color=(_REJECTED_COLOR if rejected else _color(finding)),
                     fill_color=(1.0, 1.0, 0.92),
                 )
-                annot.set_info(title=author, subject="AI review note", content=content)
+                annot.set_info(title=author, subject="AI review note", content=shown)
                 _assign_layer(annot, finding, oc_layers)
                 annot.update()
                 collected.setdefault(placement.placement_id, []).append(
@@ -2633,7 +2761,11 @@ def write_set_review_notes_pdf(
             page.insert_text((_NOTE_LEFT, 42), title, fontsize=12, fontname="hebo", color=(0.1, 0.1, 0.1))
             page.insert_text(
                 (_NOTE_LEFT, 62),
-                f"Author: {author} - findings that belong to no single sheet in the set.",
+                _fit_text(
+                    f"Author: {author} - findings that belong to no single sheet "
+                    f"in the set.",
+                    _INDEX_PAGE_W - 2 * _NOTE_LEFT, fontsize=8,
+                ),
                 fontsize=8, color=(0.35, 0.35, 0.35),
             )
             batch = pairs[pno * _NOTES_PER_PAGE:(pno + 1) * _NOTES_PER_PAGE]
@@ -2648,11 +2780,14 @@ def write_set_review_notes_pdf(
                     + "\nNot yet verified - double-check across the set."
                 )
                 try:
+                    shown = _truncate_at_word(content, 400)  # reused below (item 33)
                     annot = page.add_freetext_annot(
-                        box, _truncate_at_word(content, 400), fontsize=8,
+                        box, shown, fontsize=8,
                         text_color=_color(finding), fill_color=(1.0, 1.0, 0.92),
                     )
-                    annot.set_info(title=author, subject="set-level review note", content=content)
+                    annot.set_info(
+                        title=author, subject="set-level review note", content=shown
+                    )
                     _assign_layer(annot, finding, oc_layers)
                     annot.update()
                     collected.setdefault(placement.placement_id, []).append(
