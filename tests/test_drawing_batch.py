@@ -2731,6 +2731,50 @@ def test_harvested_item_with_no_usable_digest_is_rescued_and_still_billed(monkey
         getattr(a, "billable", False) and getattr(a, "input_tokens", 0) == 1234
         for a in attempts
     ), attempts
+    # ...exactly ONCE. The batch answered this slot, so it was not abandoned
+    # under it: an ABANDONED_* marker beside the parked record would stamp a
+    # second attempt at the same attempt_number, and one request would read as
+    # two. `billable=False` means "submitted, no response", which this is not.
+    assert len(attempts) == 2, attempts          # primary + one resubmission
+    assert [a.attempt_number for a in attempts] == [1, 2], attempts
+    assert all(a.billable for a in attempts), attempts
+    assert not any(
+        str(a.terminal_status).startswith("ABANDONED_") for a in attempts
+    ), attempts
+
+
+def test_a_sheet_the_batch_never_answered_still_gets_its_abandoned_marker(
+    monkeypatch,
+):
+    # The other side of that exclusion: a slot the abandoned batch produced
+    # NOTHING for must keep its non-billable ABANDONED_* record, or the run
+    # manifest omits the attempts that explain its wall clock (§15.6).
+    clock = {"t": 0.0}
+    monkeypatch.setattr(batch_digest.time, "monotonic", lambda: clock["t"])
+    client = _FakeClient(_succeed)
+    _install_batches(client, _StallThenSettleWithCompletedItems(
+        client, clock, tick=600.0, done_ids={"sheet__0"},   # sheet__1: no result
+    ))
+
+    batch = submit_drawing_batch(
+        iter([_make_sheet(0), _make_sheet(1)]), client=client, model=OPUS, total=2
+    )
+    digests = collect_drawing_batch(
+        batch, client=client, sleep=NOSLEEP, retry_failed_items=True,
+        recovery_transport=batch_digest.RECOVERY_BATCH,
+        max_elapsed_seconds=100_000,
+    )
+
+    unanswered = list(getattr(digests[1], "usage_attempts", ()) or ())
+    assert any(
+        not a.billable and str(a.terminal_status).startswith("ABANDONED_")
+        for a in unanswered
+    ), unanswered
+    # The harvested sheet, which the batch DID answer, carries no such marker.
+    harvested = list(getattr(digests[0], "usage_attempts", ()) or ())
+    assert not any(
+        str(a.terminal_status).startswith("ABANDONED_") for a in harvested
+    ), harvested
 
 
 def test_stalled_resubmission_also_harvests_its_completed_sheets(monkeypatch):

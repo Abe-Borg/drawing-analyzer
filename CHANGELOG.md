@@ -42,10 +42,17 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - **A batch that will not settle changes nothing.** An unreadable batch, a
     failed `results()` read, or any exception falls through to resubmitting
     everything, exactly as before.
-  - **Successes only.** An item that came back `succeeded` but empty does not
-    resolve its sheet — that sheet still needs recovery — yet the attempt *was*
-    charged, so its billed usage record is carried forward onto whatever digest
-    finally lands rather than dropped because the text was unusable.
+  - **Successes only, and counted once.** An item that came back `succeeded`
+    but empty does not resolve its sheet — that sheet still needs recovery —
+    yet the attempt *was* charged, so its billed usage record is carried
+    forward onto whatever digest finally lands rather than dropped because the
+    text was unusable. A sheet the batch answered is also excluded from the
+    abandonment marker: `billable=False` means "submitted, no response", so
+    marking one anyway wrote a second record at the same attempt number and
+    one request read as two attempts (an empty primary plus one good retry
+    showed three records for two submissions), corrupting both the attempt
+    sequence and the per-attempt image-token estimate. A sheet the batch never
+    answered keeps its marker.
 
 - **The run now waits as long as it says it does.** The batch collection bound
   was hardcoded at **4 hours** while the cost dialog, the GUI and the help

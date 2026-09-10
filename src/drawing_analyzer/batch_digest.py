@@ -411,6 +411,17 @@ def _mark_batch_abandoned(
     canceled — so the run manifest shows the attempts that were made and thrown
     away rather than only the one that eventually worked. Zero tokens, so the
     records price at zero and no derived total moves.
+
+    Callers must pass only slots the abandoned batch **never answered**.
+    ``billable=False`` means exactly "submitted, no response", so a slot the
+    DA-035 harvest read a response for — even an unusable one, whose real
+    billed attempt is already parked by :func:`_park_usage_attempts` — has not
+    been abandoned and must be excluded (``_HarvestOutcome.responded``).
+    Marking it anyway writes a SECOND record at the same ``attempt_number`` as
+    the parked one, so one request reads as two attempts: an empty primary plus
+    one good retry showed three records for two submissions, corrupting both
+    the attempt sequence and the per-attempt image-token estimate, which counts
+    response-bearing attempts.
     """
     for slot in slots:
         if slot.custom_id is None:
@@ -773,6 +784,22 @@ def _poll_for_harvest(
         sleep(_HARVEST_POLL_INTERVAL_SECONDS)
 
 
+@dataclass(frozen=True)
+class _HarvestOutcome:
+    """What one :func:`_harvest_abandoned_batch` call recovered, and at what cost.
+
+    ``responded`` is a superset of ``resolved``: it also names the slots whose
+    item came back with a response the harvest could not use (empty, truncated).
+    Those still need recovery, but their attempt was **served, not abandoned**,
+    so they must be excluded from :func:`_mark_batch_abandoned` — see
+    :func:`_park_usage_attempts`.
+    """
+
+    resolved: frozenset[int] = frozenset()
+    responded: frozenset[int] = frozenset()
+    elapsed: float = 0.0
+
+
 def _harvest_abandoned_batch(
     slots: "list[_Slot]",
     results: list,
@@ -783,7 +810,7 @@ def _harvest_abandoned_batch(
     on_log: LogCallback | None,
     sleep: Callable[[float], None],
     budget_seconds: float,
-) -> tuple[set[int], float]:
+) -> "_HarvestOutcome":
     """Read the finished items out of a batch this run has given up collecting.
 
     The money fix (DA-035). A stalled / detached / unpollable batch used to be
@@ -796,10 +823,10 @@ def _harvest_abandoned_batch(
     time.
 
     Called between the cancel and the rescue list at every site that abandons a
-    batch, so a sheet is charged once. Returns ``(resolved slot indices, seconds
-    spent)``; the caller drops exactly those slots from what it resubmits, and
-    adds the seconds back to its own start mark so the stages after it keep the
-    budget they would have had (see
+    batch, so a sheet is charged once. Returns a :class:`_HarvestOutcome`: the
+    caller drops ``resolved`` from what it resubmits, excludes ``responded``
+    from its abandonment marking, and adds ``elapsed`` back to its own start
+    mark so the stages after it keep the budget they would have had (see
     :data:`DEFAULT_HARVEST_BUDGET_SECONDS` — this is the whole reason the
     harvest cannot be charged to the collection budget).
 
@@ -818,10 +845,10 @@ def _harvest_abandoned_batch(
       the optimization, never the run (I-3).
     """
     if budget_seconds <= 0 or not slots:
-        return set(), 0.0
+        return _HarvestOutcome()
     targets = [s for s in slots if s.custom_id is not None]
     if not targets:
-        return set(), 0.0
+        return _HarvestOutcome()
     started = time.monotonic()
     _log.info(
         "harvesting completed items from abandoned batch %s (%d sheet(s) "
@@ -840,7 +867,7 @@ def _harvest_abandoned_batch(
             "abandoned batch %s did not settle within the harvest budget; "
             "resubmitting every unresolved sheet", batch_id,
         )
-        return set(), time.monotonic() - started
+        return _HarvestOutcome(elapsed=time.monotonic() - started)
     try:
         raw: dict[str, Any] = {}
         for result in client.messages.batches.results(batch_id):
@@ -850,8 +877,9 @@ def _harvest_abandoned_batch(
             "harvest of abandoned batch %s could not read results: %s; "
             "resubmitting every unresolved sheet", batch_id, summarize_exc(exc),
         )
-        return set(), time.monotonic() - started
+        return _HarvestOutcome(elapsed=time.monotonic() - started)
     harvested: set[int] = set()
+    responded: set[int] = set()
     billed_but_unusable = 0
     for slot in targets:
         res = raw.get(slot.custom_id)
@@ -865,6 +893,7 @@ def _harvest_abandoned_batch(
                 slot.custom_id, batch_id, summarize_exc(exc),
             )
             continue
+        responded.add(slot.index)
         if digest.error is not None:
             _park_usage_attempts(slot, digest)
             billed_but_unusable += 1
@@ -883,7 +912,11 @@ def _harvest_abandoned_batch(
             f"Recovered {len(harvested)} already-completed sheet(s) from "
             f"batch {batch_id} - not resubmitting them"
         )
-    return harvested, time.monotonic() - started
+    return _HarvestOutcome(
+        resolved=frozenset(harvested),
+        responded=frozenset(responded),
+        elapsed=time.monotonic() - started,
+    )
 
 
 def _rescue_failed_items_sync(
@@ -1191,21 +1224,26 @@ def _recover_via_batch_resubmit(
             # often: a resubmission that stalls has still completed — and been
             # billed for — some of its items, and carrying every pending sheet
             # into the next round pays for those again, once per round.
-            got, harvest_cost = _harvest_abandoned_batch(
+            harvest = _harvest_abandoned_batch(
                 [slot for slot, _ in pending], results,
                 batch_id=retry_id,
                 client=client, cache=cache,
                 on_log=on_log, sleep=sleep,
                 budget_seconds=_harvest_budget_seconds(max_elapsed_seconds),
             )
-            started += harvest_cost  # additional time, not deducted
-            if got:
-                recovered += len(got)
-                pending = [(s, prm) for s, prm in pending if s.index not in got]
+            started += harvest.elapsed  # additional time, not deducted
+            if harvest.resolved:
+                recovered += len(harvest.resolved)
+                pending = [
+                    (s, prm) for s, prm in pending
+                    if s.index not in harvest.resolved
+                ]
                 if not pending:
                     break
             _mark_batch_abandoned(
-                [slot for slot, _ in pending], batch_id=retry_id, status=status,
+                [slot for slot, _ in pending
+                 if slot.index not in harvest.responded],
+                batch_id=retry_id, status=status,
             )
             if on_log is not None:
                 on_log(
@@ -1466,18 +1504,23 @@ def _resubmit_failed_items(
             # follow-up batch already completed would otherwise be re-digested
             # by the direct rescue at FULL real-time rate, having been billed
             # once at the batch rate already.
-            got, harvest_cost = _harvest_abandoned_batch(
+            harvest = _harvest_abandoned_batch(
                 [slot for slot, _ in retry], results,
                 batch_id=retry_id,
                 client=client, cache=cache,
                 on_log=on_log, sleep=sleep,
                 budget_seconds=_harvest_budget_seconds(max_elapsed_seconds),
             )
-            started += harvest_cost  # additional time, not deducted
-            if got:
-                retry = [(s, prm) for s, prm in retry if s.index not in got]
+            started += harvest.elapsed  # additional time, not deducted
+            if harvest.resolved:
+                retry = [
+                    (s, prm) for s, prm in retry
+                    if s.index not in harvest.resolved
+                ]
             _mark_batch_abandoned(
-                [slot for slot, _ in retry], batch_id=retry_id, status=status,
+                [slot for slot, _ in retry
+                 if slot.index not in harvest.responded],
+                batch_id=retry_id, status=status,
             )
             if on_log is not None:
                 on_log(
@@ -2366,7 +2409,7 @@ def collect_drawing_batch(
                 # therefore diagnostic (it names which happened in the log, the
                 # per-sheet error and the ledger's terminal status), not a
                 # different disposition.
-                _, harvest_cost = _harvest_abandoned_batch(
+                harvest = _harvest_abandoned_batch(
                     [s for s in submitted if results[s.index] is None],
                     results,
                     batch_id=batch.batch_id,
@@ -2377,14 +2420,15 @@ def collect_drawing_batch(
                 # The harvest's time is additional, not deducted: move the mark
                 # every later ``remaining`` is measured from, so the rescue gets
                 # exactly the budget it had before the harvest existed.
-                collect_started += harvest_cost
+                collect_started += harvest.elapsed
                 rescue = [
                     (slot, slot.params)
                     for slot in submitted
                     if results[slot.index] is None and slot.params is not None
                 ]
                 _mark_batch_abandoned(
-                    [slot for slot, _ in rescue],
+                    [slot for slot, _ in rescue
+                     if slot.index not in harvest.responded],
                     batch_id=batch.batch_id, status=status,
                 )
                 if rescue:
