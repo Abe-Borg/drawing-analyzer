@@ -2856,6 +2856,18 @@ def _chat_bootstrap_html(
         # ``buildRequest`` can omit the tool instead of breaking every question
         # when someone overrides DRAWING_ANALYZER_CHAT_MODEL.
         "webFetch": caps.supports_web_fetch,
+        # Whether the model accepts `thinking` at all. Adaptive thinking is NOT
+        # universal — Haiku 4.5 and any unregistered id take neither the
+        # `adaptive` shape nor this app's effort levels — and the widget emitted
+        # it unconditionally, so `DRAWING_ANALYZER_CHAT_MODEL=claude-haiku-4-5`
+        # 400d on every question with nothing in the UI to say why. Same
+        # host-resolves / browser-omits pattern as webFetch above.
+        "thinking": caps.supports_adaptive_thinking,
+        # ...and whether it accepts the `web_search_20260209` variant the widget
+        # sends. The second, independent reason that override 400d: Haiku 4.5
+        # has web search, but only the older basic variant. Both had to move for
+        # a non-default chat model to work at all.
+        "webSearch": caps.supports_web_search,
         # The source-quality blocklist lives in Python (api_config) and is handed
         # over rather than restated in JS, so the widget and the pipeline's
         # citation check cannot drift into two different policies.
@@ -2882,7 +2894,10 @@ def _chat_bootstrap_html(
         foot = (
             "AI-generated answers — verify against the drawings. Enter your "
             "Anthropic API key in the field above; it is kept only in this "
-            "browser tab (sessionStorage) and is never saved into this file."
+            "browser tab (sessionStorage) and is never saved into this file. "
+            "If you opened this report from disk, use Forget key (or close the "
+            "tab) when you are done — another local HTML file opened in the "
+            "same tab can read it."
         )
     return (
         f'<script id="da-chat-config" type="application/json">{config_json}</script>'
@@ -3665,10 +3680,17 @@ _CHAT_JS = r"""
       // written by an older build that has no `maxTokens` key.
       max_tokens: CFG.maxTokens || 16000,
       system: systemBlocks(),
-      thinking: {type: 'adaptive', display: 'summarized'},
       messages: messagesForRequest(),
       stream: true
     };
+    // Only for a model that accepts it (CFG.thinking, resolved host-side from
+    // the capability registry). Sending `thinking` to a model without adaptive
+    // thinking is a 400 that fails the whole request — the same class of
+    // breakage as the web tools below, and the reason a non-default
+    // DRAWING_ANALYZER_CHAT_MODEL could not ask a single question.
+    if(CFG.thinking !== false){
+      req.thinking = {type: 'adaptive', display: 'summarized'};
+    }
     // One fixed effort level, resolved host-side from the capability registry
     // (null when the configured model does not accept it) because the browser
     // cannot see it and an unsupported level is a 400 that fails the request.
@@ -3685,10 +3707,17 @@ _CHAT_JS = r"""
     // blocked_domains carries the same source-quality policy the pipeline's
     // citation check uses, handed over from Python so the two cannot drift. A
     // code answer grounded on a forum post is worse than no answer.
-    req.tools = [
-      {type: 'web_search_20260209', name: 'web_search', max_uses: 8,
-       blocked_domains: CFG.blockedDomains || []}
-    ];
+    // Web search only when the model accepts THIS variant (CFG.webSearch). Not
+    // the same question as "does it have web search": Haiku 4.5 does, but only
+    // the older basic `web_search_20250305`, so sending ours fails exactly as if
+    // it had none. Degrades to no server tools rather than breaking the request.
+    req.tools = [];
+    if(CFG.webSearch !== false){
+      req.tools.push(
+        {type: 'web_search_20260209', name: 'web_search', max_uses: 8,
+         blocked_domains: CFG.blockedDomains || []}
+      );
+    }
     // web_fetch only when the configured model actually supports it (CFG.webFetch,
     // resolved host-side from the capability registry). Opus 5 supports web search
     // but not web fetch, and sending an unsupported server tool is a 400 that fails
@@ -4105,7 +4134,18 @@ _CHAT_JS = r"""
   var keyAuthor = document.getElementById('da-chat-key-author');
   var keySetLabel = document.getElementById('da-chat-key-set-label');
   var keyStatus = document.getElementById('da-chat-key-status');
-  document.getElementById('da-chat-model').textContent = CFG.model + ' · web search · thinking';
+  // The capability line names what this model's requests ACTUALLY carry. It was
+  // a fixed string, so a chat model without adaptive thinking or without the
+  // web-search variant advertised both while sending neither — and, before the
+  // gating above, while failing every question.
+  (function(){
+    var caps = [];
+    if(CFG.webSearch !== false) caps.push('web search');
+    if(CFG.webFetch) caps.push('web fetch');
+    if(CFG.thinking !== false) caps.push('thinking');
+    document.getElementById('da-chat-model').textContent =
+      CFG.model + (caps.length ? ' · ' + caps.join(' · ') : '');
+  })();
 
   // Session token/cost readout. The dollar figure is an ESTIMATE and is labelled
   // as one: cache reads bill at ~0.1x input and writes at 1.25x (5-minute) or 2x
@@ -4705,6 +4745,16 @@ _CHAT_JS = r"""
   }
 
   var streaming = false, aborter = null;
+  // Stop is a TURN-level intent, but `aborter` is per REQUEST: streamOnce()
+  // builds a fresh AbortController on every call, so aborting the current fetch
+  // ends one round and the loop then starts the next one with a signal that was
+  // never aborted. A multi-round turn — a server pause_turn resume, or the
+  // request that follows a client tool round — sailed straight past Stop.
+  // This latch is what actually ends the turn: set by the Stop button, cleared
+  // when a turn begins, and checked before recursing and before answering tools
+  // (tools are the expensive half — a web_search or a crop must not run after
+  // the reader has said stop).
+  var stopRequested = false;
   // The in-flight request's reveal state, so Stop can end the animation as well
   // as the download. Cleared as soon as the turn's stream settles.
   var activeStream = null;
@@ -4782,13 +4832,22 @@ _CHAT_JS = r"""
       // about CLOSE_MS, so the tool loop and the composer unlock are unaffected
       // — but the composer can never re-enable while text is still arriving on
       // screen, and a caller that inspects the DOM afterwards sees all of it.
+      // Clear the handle only if it is still OURS. A stream that settles after
+      // its thread was replaced (New chat or Load mid-answer) would otherwise
+      // null out the handle belonging to the turn that replaced it, and Stop on
+      // that new turn would silently stop hard-flushing the reveal — the exact
+      // control this handle exists to serve. Identity, not truthiness: two
+      // turns are indistinguishable by "is set".
+      function releaseStream(){
+        if(activeStream && activeStream.st === st) activeStream = null;
+      }
       return pump().then(function(){
         return paceFlush(st, bubble, false).then(function(){
-          activeStream = null;
+          releaseStream();
           return st;
         });
       }, function(err){
-        activeStream = null;
+        releaseStream();
         // Abort and mid-stream failure: stop animating and commit everything
         // that did arrive — text that reached the browser is never hidden, it
         // just stops being revealed — so the caller's error path ("⏹ Stopped.")
@@ -5331,11 +5390,29 @@ _CHAT_JS = r"""
     if(!on) aborter = null;
   }
 
+  // A `tool_use` block the turn will never answer must not reach `history`.
+  // The API requires the very next user turn to answer EVERY tool_use in an
+  // assistant turn, so an unanswered one makes the reader's next question a 400
+  // — and the assistant turn is committed before the stop reason is examined,
+  // so a turn that ends mid-tool-call (max_tokens, refusal, a context-window
+  // stop, or Stop) left exactly that shape behind. `dropUnansweredTail` repairs
+  // it on RELOAD, but the live thread is already poisoned and every question
+  // until then fails.
+  //
+  // Dropping the block is the right repair rather than synthesising an
+  // is_error tool_result: the call never ran, and inventing a result for it
+  // would put a fabricated tool outcome into the transcript the model reads
+  // back. The visible text of the turn is untouched.
+  function stripDanglingToolUse(blocks){
+    return blocks.filter(function(b){ return !b || b.type !== 'tool_use'; });
+  }
+
   // apiContent : string|array  — pushed to history as the user turn's content
   // displayText: string        — shown in the da-user bubble (textContent)
   // opts       : {retryValue, excerpt, onCommit}
   function runTurn(apiContent, displayText, opts){
     opts = opts || {};
+    stopRequested = false;   // a new turn is not born stopped
     var gen = turnGen;   // the thread this turn belongs to (see turnGen)
     if(startersRow) startersRow.style.display = 'none';  // chips give way to the thread
     history.push({role: 'user', content: apiContent});
@@ -5356,11 +5433,41 @@ _CHAT_JS = r"""
     function step(round, toolRound){
       var noTools = toolRound > MAX_TOOL_ROUNDS;
       return streamOnce(bubble, noTools).then(function(st){
+        // This turn's thread was replaced while the request was in flight (New
+        // chat, or Load). `history` and `displays` were REASSIGNED, and this
+        // closure reads the current binding — so every push below would land in
+        // a conversation this answer has nothing to do with. The outer
+        // catch/then already guard cleanup; without this the damage happens
+        // first, and it is not cosmetic: a fresh thread that begins with an
+        // assistant turn is rejected by the API, `dropUnansweredTail` only
+        // trims a TRAILING unanswered exchange so a reload never heals it, and
+        // saveTranscript() writes it to localStorage. Every later question 400s
+        // until another New chat.
+        if(gen !== turnGen) return;
         var blocks = st.blocks.filter(function(b){ return !!b; });
+        // Honour Stop before doing anything that continues the turn. Committing
+        // what already arrived is right — it was received and billed — but the
+        // turn ends here.
+        if(stopRequested){
+          if(blocks.length){
+            history.push({role: 'assistant', content: stripDanglingToolUse(blocks)});
+            displays.push({notes: []});
+            pushed = true;
+          }
+          turnNote(bubble, '\u23f9 Stopped.');
+          return;
+        }
         // Commit the assistant turn (incl. any tool_use blocks) BEFORE answering
         // tools, so history is always assistant(tool_use) → user(tool_result).
-        if(blocks.length){
-          history.push({role: 'assistant', content: blocks});
+        // `tool_use` blocks are answered only when the turn continues into the
+        // tool branch below (stopReason 'tool_use') or the server resumes its
+        // own loop ('pause_turn'). On every other stop they are dangling, and
+        // committing them breaks the reader's NEXT question — see
+        // stripDanglingToolUse.
+        var answerable = st.stopReason === 'tool_use' || st.stopReason === 'pause_turn';
+        var commit = answerable ? blocks : stripDanglingToolUse(blocks);
+        if(commit.length){
+          history.push({role: 'assistant', content: commit});
           displays.push({notes: []});   // keeps displays index-aligned with history
           pushed = true;
         }
@@ -5381,8 +5488,15 @@ _CHAT_JS = r"""
                 return tr;
               });
             })).then(function(results){
+              // Tools run asynchronously, so the thread can be replaced while
+              // they are still executing — check again on the far side.
+              if(gen !== turnGen) return;
               history.push({role: 'user', content: results});
               displays.push(null);   // a tool_result turn is history, never a bubble
+              // Stop pressed while the tools ran: the results are committed (the
+              // API requires every tool_use to be answered, and leaving them
+              // unanswered would 400 the next question) but no new request goes out.
+              if(stopRequested){ turnNote(bubble, '\u23f9 Stopped.'); return; }
               return step(round, toolRound + 1);
             });
           }
@@ -5427,7 +5541,14 @@ _CHAT_JS = r"""
         }
       }
       if(aborted){
-        turnNote(bubble, '⏹ Stopped.');
+        // DOM-only, NOT turnNote: when nothing was pushed this turn, the pops
+        // above have just removed this turn's entries, so `displays` now ends
+        // with the PREVIOUS turn's assistant entry — which does have `.notes`.
+        // turnNote would append "Stopped." to the answer above this one, and a
+        // reload would replay it there. With content pushed, the turn owns the
+        // last entry and the note belongs on it.
+        if(pushed) turnNote(bubble, '⏹ Stopped.');
+        else note(bubble, '⏹ Stopped.');
       } else {
         var msg = (err && err.message) || 'Request failed.';
         if(err instanceof TypeError) msg = 'Could not reach api.anthropic.com — the assistant needs an internet connection.';
@@ -5484,6 +5605,7 @@ _CHAT_JS = r"""
   // length of the drain. Hard-flushing commits everything that arrived and lets
   // the turn settle at once.
   stopBtn.addEventListener('click', function(){
+    stopRequested = true;            // ends the TURN, not just this request
     if(aborter) aborter.abort();
     if(activeStream) paceFlush(activeStream.st, activeStream.bubble, true);
   });

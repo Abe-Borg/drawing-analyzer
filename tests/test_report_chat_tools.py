@@ -1723,3 +1723,363 @@ def test_the_usage_readout_appearing_reclamps_the_ask_box(page, tmp_path):
     assert geom["msgs"]["height"] >= 80, "the transcript floor still holds"
     assert geom["foot"]["bottom"] <= geom["panel"]["bottom"] + 1, (
         "the footer must stay inside the panel once the readout appears")
+
+
+# =========================================================================== #
+# P6 — the Ask-AI chat's turn lifecycle.
+#
+# Every one of these is a state bug that a DOM emulator cannot show: the damage
+# needs a real in-flight turn, a real thread swap, or a real multi-round loop.
+# =========================================================================== #
+
+
+def _tool_use_turn(tool_id="tu_x", name="query_findings", args='{"severity":"high"}',
+                   stop="tool_use"):
+    """An assistant turn carrying one client tool_use block, ending on `stop`."""
+    return _sse([
+        {"type": "content_block_start", "index": 0,
+         "content_block": {"type": "text", "text": ""}},
+        {"type": "content_block_delta", "index": 0,
+         "delta": {"type": "text_delta", "text": "Let me look. "}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "content_block_start", "index": 1,
+         "content_block": {"type": "tool_use", "id": tool_id, "name": name, "input": {}}},
+        {"type": "content_block_delta", "index": 1,
+         "delta": {"type": "input_json_delta", "partial_json": args}},
+        {"type": "content_block_stop", "index": 1},
+        {"type": "message_delta", "delta": {"stop_reason": stop}},
+    ])
+
+
+def _embedded(ctx=None):
+    return hr.build_html_report(
+        ctx or _findings_ctx(), source_names=["a.pdf"], now=NOW,
+        api_key=KEY, embed_api_key=True,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Item 35 — a turn that outlives its own thread must not write into the next one.
+# --------------------------------------------------------------------------- #
+
+
+def test_new_chat_midturn_does_not_poison_the_fresh_thread(page, tmp_path):
+    # The worst of the six: `step`'s success path pushed into `history` with no
+    # generation check, and New chat REASSIGNS history — so a turn still in
+    # flight committed its assistant turn into the brand-new conversation. The
+    # API rejects a thread that begins with an assistant turn,
+    # `dropUnansweredTail` only trims a TRAILING unanswered exchange so a reload
+    # never heals it, and saveTranscript() writes it to localStorage. Every
+    # later question 400s until another New chat.
+    _load(page, _embedded(), tmp_path, queue=[_text_turn("first answer")])
+    page.click("#da-chat-fab")
+    page.fill("#da-chat-input", "one")
+    page.click("#da-chat-send")
+    # Mid-flight (the stub delays its first chunk by 25ms), start a new chat.
+    page.wait_for_timeout(5)
+    page.click("#da-chat-clear")
+    page.wait_for_timeout(300)
+
+    page.fill("#da-chat-input", "two")
+    page.click("#da-chat-send")
+    _finish(page)
+
+    sent = page.evaluate("window.__REQ")[-1]["messages"]
+    assert sent[0]["role"] == "user", (
+        "the fresh thread must start with a user turn, not the retired turn's "
+        f"assistant content: {[m['role'] for m in sent]}"
+    )
+    assert [m["role"] for m in sent] == ["user"], [m["role"] for m in sent]
+
+
+def test_the_poisoned_thread_also_never_reaches_localstorage(page, tmp_path):
+    # The persistence half. A leading assistant turn that reached storage
+    # survived every reload, so the damage outlived the session that caused it.
+    _load(page, _embedded(), tmp_path, queue=[_text_turn("first answer")])
+    page.click("#da-chat-fab")
+    page.fill("#da-chat-input", "one")
+    page.click("#da-chat-send")
+    page.wait_for_timeout(5)
+    page.click("#da-chat-clear")
+    page.wait_for_timeout(400)
+
+    stored = page.evaluate(
+        "() => { var k = Object.keys(localStorage).filter(function(x){"
+        "return x.indexOf('da-chat-tx-') === 0; }); "
+        "return k.length ? localStorage.getItem(k[0]) : null; }"
+    )
+    if stored:
+        turns = json.loads(stored).get("turns") or []
+        roles = [(t.get("message") or {}).get("role") for t in turns]
+        assert not roles or roles[0] == "user", roles
+
+
+# --------------------------------------------------------------------------- #
+# Item 36 — Stop must end the TURN, not one request of it.
+# --------------------------------------------------------------------------- #
+
+
+def test_stop_ends_a_multi_round_turn_instead_of_one_request(page, tmp_path):
+    # `aborter` is rebuilt inside streamOnce on every call, so aborting the
+    # current fetch ended one round and the loop started the next with a signal
+    # that had never been aborted. A tool round is exactly that shape: Stop
+    # looked like it worked, and the widget then issued another request and ran
+    # the tools for it.
+    _load(page, _embedded(), tmp_path,
+          queue=[_tool_use_turn(), _text_turn("second round ran")])
+    page.click("#da-chat-fab")
+    page.fill("#da-chat-input", "search for something")
+    page.click("#da-chat-send")
+    page.wait_for_timeout(5)
+    page.click("#da-chat-stop")
+    page.wait_for_timeout(500)
+
+    assert len(page.evaluate("window.__REQ")) == 1, (
+        "Stop must prevent the follow-up request, not just abort the first"
+    )
+
+    # ...and the tools must not have RUN. Two guards stand between Stop and the
+    # next request — one before the tools, one after them — and only the first
+    # keeps a stopped turn from doing the work. Without it the turn still
+    # executed every tool and merely declined to send the result, which is the
+    # expensive half on a server tool. A tool that ran commits a tool_result
+    # turn, so its absence from the thread is the observable.
+    page.evaluate("window.__SSE_QUEUE = [];")
+    page.fill("#da-chat-input", "after stopping")
+    page.click("#da-chat-send")
+    _finish(page)
+    msgs = page.evaluate("window.__REQ")[-1]["messages"]
+    ran = [
+        b.get("tool_use_id")
+        for m in msgs
+        for b in (m["content"] if isinstance(m["content"], list) else [])
+        if isinstance(b, dict) and b.get("type") == "tool_result"
+    ]
+    assert not ran, f"tools executed after Stop: {ran}"
+
+
+def test_a_stopped_turn_leaves_a_thread_the_next_question_can_use(page, tmp_path):
+    # Stopping mid-tool-call must not strand an unanswered tool_use: the API
+    # requires the next user turn to answer every one, so the reader's NEXT
+    # question would 400.
+    _load(page, _embedded(), tmp_path,
+          queue=[_tool_use_turn(), _text_turn("unused")])
+    page.click("#da-chat-fab")
+    page.fill("#da-chat-input", "search")
+    page.click("#da-chat-send")
+    page.wait_for_timeout(5)
+    page.click("#da-chat-stop")
+    page.wait_for_timeout(500)
+
+    page.evaluate("window.__SSE_QUEUE = [];")
+    page.fill("#da-chat-input", "after stopping")
+    page.click("#da-chat-send")
+    _finish(page)
+
+    msgs = page.evaluate("window.__REQ")[-1]["messages"]
+    for i, m in enumerate(msgs):
+        uses = [b.get("id") for b in (m["content"] if isinstance(m["content"], list) else [])
+                if isinstance(b, dict) and b.get("type") == "tool_use"]
+        if uses:
+            nxt = msgs[i + 1] if i + 1 < len(msgs) else None
+            answered = [b.get("tool_use_id") for b in ((nxt or {}).get("content") or [])
+                        if isinstance(b, dict) and b.get("type") == "tool_result"]
+            assert set(uses) <= set(answered), (
+                f"tool_use {uses} left unanswered — the next question would 400"
+            )
+
+
+# --------------------------------------------------------------------------- #
+# Item 38 — never commit a tool_use nothing will answer.
+# --------------------------------------------------------------------------- #
+
+
+def test_a_tool_call_cut_off_by_max_tokens_is_not_committed(page, tmp_path):
+    # The assistant turn is committed BEFORE the stop reason is examined, so a
+    # turn that ran out of output mid-tool-call left `assistant(tool_use)` with
+    # nothing to answer it. dropUnansweredTail repairs that on RELOAD; the live
+    # thread stayed poisoned and every question until then failed.
+    _load(page, _embedded(), tmp_path,
+          queue=[_tool_use_turn(stop="max_tokens")])
+    _ask(page, "do something that gets cut off")
+
+    page.evaluate("window.__SSE_QUEUE = [];")
+    page.fill("#da-chat-input", "next question")
+    page.click("#da-chat-send")
+    _finish(page)
+
+    msgs = page.evaluate("window.__REQ")[-1]["messages"]
+    dangling = [
+        b.get("id")
+        for i, m in enumerate(msgs)
+        for b in (m["content"] if isinstance(m["content"], list) else [])
+        if isinstance(b, dict) and b.get("type") == "tool_use"
+        and not any(
+            isinstance(r, dict) and r.get("tool_use_id") == b.get("id")
+            for r in ((msgs[i + 1] if i + 1 < len(msgs) else {}).get("content") or [])
+        )
+    ]
+    assert not dangling, f"unanswered tool_use reached the next request: {dangling}"
+    # The visible text of that turn is kept — only the dead call is dropped.
+    text = "".join(
+        b.get("text", "")
+        for m in msgs if m.get("role") == "assistant"
+        for b in (m["content"] if isinstance(m["content"], list) else [])
+        if isinstance(b, dict)
+    )
+    assert "Let me look." in text
+
+
+# --------------------------------------------------------------------------- #
+# N26 — the request must carry only what the configured model accepts.
+# --------------------------------------------------------------------------- #
+
+
+def test_default_model_still_gets_thinking_and_web_search(page, tmp_path):
+    _load(page, _embedded(), tmp_path)
+    _ask(page, "hello")
+    req = page.evaluate("window.__REQ")[0]
+    assert req.get("thinking", {}).get("type") == "adaptive"
+    assert any(t.get("name") == "web_search" for t in req["tools"])
+
+
+def test_a_model_without_adaptive_thinking_is_not_sent_thinking(page, tmp_path, monkeypatch):
+    # A live 400 for anyone overriding DRAWING_ANALYZER_CHAT_MODEL to Haiku 4.5:
+    # `thinking` was emitted unconditionally while the registry already knew the
+    # model does not take it.
+    monkeypatch.setenv("DRAWING_ANALYZER_CHAT_MODEL", "claude-haiku-4-5")
+    import importlib
+
+    from drawing_analyzer.core import api_config
+    importlib.reload(api_config)
+    importlib.reload(hr)
+    try:
+        _load(page, _embedded(), tmp_path)
+        _ask(page, "hello")
+        req = page.evaluate("window.__REQ")[0]
+        assert "thinking" not in req, req.get("thinking")
+        # ...and the second, independent reason it 400d: Haiku 4.5 takes only
+        # the older basic web_search variant, never the _20260209 one we send.
+        assert not any(t.get("type", "").startswith("web_search") for t in req["tools"])
+        # The client tools still ride — those work on every model.
+        assert any(t.get("name") == "query_findings" for t in req["tools"])
+        # And the footer no longer advertises what the request does not carry.
+        label = page.text_content("#da-chat-model")
+        assert "thinking" not in label and "web search" not in label, label
+    finally:
+        monkeypatch.delenv("DRAWING_ANALYZER_CHAT_MODEL", raising=False)
+        importlib.reload(api_config)
+        importlib.reload(hr)
+
+
+def test_stop_pressed_while_a_tool_is_running_still_ends_the_turn(page, tmp_path):
+    """The second Stop guard: pressed AFTER the tools started, before they finish.
+
+    Two guards stand between Stop and the next request. The first refuses to run
+    the tools at all; this one covers the window the first cannot see — the
+    reader hits Stop while a tool is mid-flight. `filter_report` waits out the
+    report's ~130ms search debounce, which is a real async gap to land in.
+    Without this guard the tool results are committed and the loop issues
+    another request anyway, so Stop looked obeyed and the widget kept going.
+    """
+    _load(page, _embedded(), tmp_path,
+          queue=[_tool_use_turn(tool_id="tu_f", name="filter_report",
+                                args='{"search":"VAV"}'),
+                 _text_turn("second round ran")])
+    page.click("#da-chat-fab")
+    page.fill("#da-chat-input", "filter the report")
+    page.click("#da-chat-send")
+    # Land Stop INSIDE the tool, not before it. `toolFilter` sets the search box
+    # synchronously and only then waits out the ~130ms debounce, so that value
+    # is the signal that the tool has started — a fixed sleep raced the reveal
+    # pacing and hit the FIRST guard instead, which proves nothing about this one.
+    page.wait_for_function(
+        "() => { var s = document.getElementById('search');"
+        " return s && s.value === 'VAV'; }",
+        timeout=5000,
+    )
+    page.click("#da-chat-stop")
+    page.wait_for_timeout(600)
+
+    assert len(page.evaluate("window.__REQ")) == 1, (
+        "Stop during tool execution must still prevent the follow-up request"
+    )
+    # The tool DID run (that is the premise), so its result must be committed —
+    # an unanswered tool_use would 400 the reader's next question.
+    page.evaluate("window.__SSE_QUEUE = [];")
+    page.fill("#da-chat-input", "after stopping mid-tool")
+    page.click("#da-chat-send")
+    _finish(page)
+    msgs = page.evaluate("window.__REQ")[-1]["messages"]
+    answered = [
+        b.get("tool_use_id")
+        for m in msgs
+        for b in (m["content"] if isinstance(m["content"], list) else [])
+        if isinstance(b, dict) and b.get("type") == "tool_result"
+    ]
+    assert "tu_f" in answered, f"the executed tool was left unanswered: {answered}"
+
+
+# --------------------------------------------------------------------------- #
+# Item 37 — a turn's note belongs to that turn.
+# --------------------------------------------------------------------------- #
+
+
+def test_a_stopped_empty_turn_does_not_annotate_the_previous_answer(page, tmp_path):
+    """`displays.pop()` runs BEFORE the note, so `displays[last]` is the turn above.
+
+    When a turn is aborted before committing anything, the catch pops this
+    turn's entries — and `turnNote` then appended "Stopped." to whatever was
+    left at the end, which is the PREVIOUS answer's notes. It is invisible in
+    the live DOM (the note is drawn on this turn's bubble) and shows up on
+    reload, under an answer that completed perfectly well.
+    """
+    # The shared stub ignores AbortSignal, so the catch's aborted branch — the
+    # only one that writes a note through turnNote — is unreachable with it.
+    # This turn gets a fetch that actually honours the signal.
+    _load(page, _embedded(), tmp_path,
+          queue=[_text_turn("A complete first answer.")])
+    _ask(page, "first question")
+
+    # Second turn: a request that never resolves until the signal aborts it, so
+    # the turn dies with nothing pushed.
+    page.evaluate("""() => {
+      window.fetch = function(url, opts){
+        return new Promise(function(_resolve, reject){
+          var sig = opts && opts.signal;
+          if(!sig) return;
+          sig.addEventListener('abort', function(){
+            var e = new Error('aborted'); e.name = 'AbortError'; reject(e);
+          });
+        });
+      };
+      return true;
+    }""")
+    page.fill("#da-chat-input", "second question")
+    page.click("#da-chat-send")
+    page.wait_for_timeout(80)
+    page.click("#da-chat-stop")
+    page.wait_for_timeout(600)
+
+    stored = page.evaluate(
+        "() => { var k = Object.keys(localStorage).filter(function(x){"
+        "return x.indexOf('da-chat-tx-') === 0; }); "
+        "return k.length ? localStorage.getItem(k[0]) : null; }"
+    )
+    assert stored, "the completed first turn should have been saved"
+    turns = json.loads(stored)["turns"]
+    for t in turns:
+        if (t.get("message") or {}).get("role") != "assistant":
+            continue
+        notes = ((t.get("display") or {}).get("notes")) or []
+        assert not any("Stopped" in str(n) for n in notes), (
+            f"the stop note was recorded on a completed answer: {notes}"
+        )
+
+
+def test_control_tool_turn_really_makes_two_requests(page, tmp_path):
+    """Control for the Stop test: without Stop this queue must take TWO rounds."""
+    _load(page, _embedded(), tmp_path,
+          queue=[_tool_use_turn(), _text_turn("second round ran")])
+    _ask(page, "search for something")
+    assert len(page.evaluate("window.__REQ")) == 2, page.evaluate("window.__REQ.length")

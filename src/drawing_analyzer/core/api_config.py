@@ -373,6 +373,16 @@ class ModelCapabilities:
     # decisions live. Default ``False`` so an unregistered id is never sent a
     # parameter its platform may reject.
     supports_refusal_fallback: bool = False
+    # Whether the model accepts the ``web_search_20260209`` server tool — the
+    # dynamic-filtering variant this app sends, and the only one it sends.
+    # Deliberately NOT "does this model support web search at all": Haiku 4.5
+    # supports web search, but only the older basic ``web_search_20250305``
+    # variant, so sending ours is a 400 exactly as if it had no web search. A
+    # boolean about OUR request shape is the useful fact; a boolean about the
+    # model's abstract capability would read True and still break the request.
+    # Default ``False`` so an unregistered id is never sent a tool variant its
+    # generation may not accept.
+    supports_web_search: bool = False
 
 
 # Profiles verified against Anthropic's models overview and effort reference.
@@ -393,6 +403,8 @@ _MODEL_CAPABILITIES: dict[str, ModelCapabilities] = {
         # exceptions to its Opus 4.8 feature parity (the other is Priority
         # Tier). Web *search* is supported; only fetch is excluded.
         supports_web_fetch=False,
+        # ...but web SEARCH is supported, in the dynamic-filtering variant.
+        supports_web_search=True,
         # Opus 5's elevated safety classifiers can decline a request outright
         # (``stop_reason="refusal"``, HTTP 200), which is what the fallback
         # exists to absorb. Deliberately the only model that declares it: Opus
@@ -413,6 +425,7 @@ _MODEL_CAPABILITIES: dict[str, ModelCapabilities] = {
         supported_effort_levels=_EFFORT_LEVELS_FULL,
         supports_hires_vision=True,
         supports_web_fetch=True,
+        supports_web_search=True,
     ),
     MODEL_OPUS_48: ModelCapabilities(
         supports_adaptive_thinking=True,
@@ -422,6 +435,7 @@ _MODEL_CAPABILITIES: dict[str, ModelCapabilities] = {
         supported_effort_levels=_EFFORT_LEVELS_FULL,
         supports_hires_vision=True,
         supports_web_fetch=True,
+        supports_web_search=True,
     ),
     MODEL_SONNET_46: ModelCapabilities(
         supports_adaptive_thinking=True,
@@ -435,6 +449,7 @@ _MODEL_CAPABILITIES: dict[str, ModelCapabilities] = {
         supported_effort_levels=_EFFORT_LEVELS_NO_XHIGH,
         supports_hires_vision=False,
         supports_web_fetch=True,
+        supports_web_search=True,
     ),
     MODEL_HAIKU_45: ModelCapabilities(
         # Anthropic models overview lists Haiku 4.5 without adaptive

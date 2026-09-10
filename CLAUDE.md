@@ -517,7 +517,25 @@ row in the browser — **display only**: the ledger, exports, markups and the ba
 total keep every finding (§18.6), and the grouping recomputes after every
 sort/filter so a follower never outlives its lead. Journal timestamps render
 through `_local_stamp` in the same clock as the report header (the raw UTC value
-beside a local header read as a report predating its own run). In the chat
+beside a local header read as a report predating its own run). The chat widget's **turn loop** owns four rules a DOM emulator cannot check
+(P6): every commit into `history` is generation-guarded (`gen !== turnGen`)
+**inside `step`**, not only on the outer catch/then — New chat and Load
+*reassign* `history`, so an in-flight turn otherwise writes its assistant turn
+into the next conversation, which the API rejects, `dropUnansweredTail` cannot
+heal (it trims only a **trailing** unanswered exchange) and `saveTranscript`
+persists. Stop is a **turn** latch (`stopRequested`), not the per-request
+`AbortController` that `streamOnce` rebuilds on every call, and it is checked
+both before the tools run and after they finish. A `tool_use` block nothing
+will answer is stripped before commit (`stripDanglingToolUse`) — dropped, never
+answered with a synthetic result, because the call never ran. And a turn's note
+is DOM-only unless that turn owns the last `displays` entry, since the catch's
+pops run first. `activeStream` is released **by identity**, so a stream
+settling after its thread was replaced cannot clear the new turn's handle.
+The request shape is resolved host-side from the capability registry —
+`thinking`, `webSearch` and `webFetch` all ride `CFG` and the browser omits
+what the model will not take, because `DRAWING_ANALYZER_CHAT_MODEL` is
+overridable and an unsupported `thinking` or web-search *variant* is a 400 that
+kills every question. In the chat
 widget a **reader-supplied key outranks the embedded one** — the key row renders
 in both modes, since hiding it billed every shared report's questions to its
 author and left a rotated-key report dead.
