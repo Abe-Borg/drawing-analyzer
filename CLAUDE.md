@@ -170,7 +170,32 @@ batch transport for the pipeline (`recovery_transport=RECOVERY_BATCH`): a
 stalled batch is canceled and its unresolved sheets resubmitted as fresh
 batches (bounded rounds + collection budget, `_recover_via_batch_resubmit`), so
 a run **never silently drops to full-rate real-time calls**; when the rounds/
-budget are spent, unreached sheets keep a clean retriable batch error. The
+budget are spent, unreached sheets keep a clean retriable batch error.
+Every site that abandons a batch first **harvests** it
+(`_harvest_abandoned_batch`, DA-035): `results` is filled only from a terminal
+`results()` read, so on a non-terminal batch every slot reads `None` —
+including sheets it completed **and billed** — and the rescue list was
+therefore all of them. Cancellation is asynchronous, so a canceled batch still
+reaches `ended` and its finished items stay readable; the harvest reads them
+back between the cancel and the rescue list at all three sites (primary,
+resubmission, follow-up — the last re-billing at full real-time rate). It
+resolves **successes only**: an item that came back empty still needs the
+rescue, but its billed attempt is parked on the slot
+(`_park_usage_attempts`) so §15.6 keeps it. Its time is **additional**, added
+back to each caller's start mark rather than deducted — it competes with the
+rescue for the same seconds exactly on the `detached` path, and charging it
+there turned a 3/3 recovery into 0/3, trading re-billing for lost sheets. A
+batch that will not settle within the bound harvests nothing and the caller
+resubmits everything, as before. The collection bound is
+**24h** (`DEFAULT_BATCH_MAX_ELAPSED_HOURS`, the Batches API's own SLA),
+overridable per call via `DRAWING_ANALYZER_BATCH_MAX_ELAPSED_HOURS`
+(`_batch_max_elapsed_seconds`, resolved at call time from a `None` default, not
+frozen at import) — safe to raise only because of the harvest. Hitting it
+returns `DETACHED_MOVING` when items were still completing and `DETACHED` when
+none had; the split is **diagnostic** (log line, per-sheet error,
+`ABANDONED_*` terminal status), never a different disposition: leaving a
+healthy-but-slow batch running would strand every sheet it was already billed
+for, since `results()` is served only after a batch ends. The
 legacy full-rate direct-call rescue (`_rescue_failed_items_sync`) is the
 `RECOVERY_DIRECT` default kept only for direct callers/tests. The stall watch is
 **tiered** (`_stall_timeout_seconds`): 25 min on the primary batch ("is it
