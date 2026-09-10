@@ -48,9 +48,17 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   all of which model replies and PDF text layers produce freely — missed. The leg
   was dropped, and a cross-sheet finding needs two grounded sheets, so the whole
   finding went with it. Handles now fold through the same helper the sheet-id
-  grammar and every deterministic auditor already use, and the critique's
-  leg-target normalization folds identically — it feeds the merge signature, so a
-  disagreement would have one sheet id meaning two things inside one run.
+  grammar and every deterministic auditor already use — specifically
+  `normalize_sheet_id`, the declared canonical form that `detect_sheet_id` itself
+  returns, so cross-QC no longer has a normalization of its own (it also trims edge
+  punctuation, so a handle written `"M-101."` resolves). Three other places
+  compared a handle by hand and are folded the same way: the critique's leg targets
+  (they feed the merge signature, so a disagreement would have one sheet id meaning
+  two things inside one run), and both claim-dedup keys — where a Unicode dash in
+  one of the two self-consistency transcriptions inflated the arithmetic tally.
+  Worst of the four was the arithmetic auditor's geometry lookup, whose map is
+  keyed by `detect_sheet_id` and therefore already canonical: an uncanonical lookup
+  found **nothing at all**, so the claim resolved to no sheet.
   `cross_qc._CROSS_QC_CACHE_CONTRACT` 2 → 3, because this is host-side binding no
   cache key covers yet it changes which legs validate.
 

@@ -400,16 +400,23 @@ both the submitted batch and the one that actually served the digests.
   bundle through a ledger merge, and `annotate._units_for_finding` gives each
   per-leg mark that leg's state rather than the parent's — a conflict can be
   text-grounded on one sheet and read off a raster detail on the other.
-  Sheet **handles fold before matching** (P8 item 11): `_norm_id` runs
-  `auditors.sheet_ids.fold_text` (NFKC + dash fold), not a bare `.strip().upper()`,
+  Sheet **handles canonicalize before matching** (P8 item 11): `_norm_id` runs
+  `auditors.sheet_ids.normalize_sheet_id` — the declared canonical form that
+  `detect_sheet_id` itself returns — not a bare `.strip().upper()`,
   because a handle written with a non-breaking hyphen, en dash, U+2010 hyphen or
   fullwidth digits missed its plain-ASCII twin — the leg was dropped, and a
   cross-sheet finding needs two grounded sheets, so the finding went with it.
-  `critique._leg_targets` folds **identically**, and is asserted equal to
-  `_norm_id` rather than merely self-consistent: it feeds
+  **Four** sites compare a handle and all four use that one form, asserted equal
+  rather than merely self-consistent: `_norm_id`, `critique._leg_targets` (it feeds
   `critical_signature["leg_targets"]`, so a disagreement has cross-QC resolving a
-  leg the ledger then refuses to recognise as the same leg. That fold is host-side
-  binding no key input covers, so it carries `_CROSS_QC_CACHE_CONTRACT` **2 → 3**.
+  leg the ledger then refuses to recognise as the same leg), and both claim-dedup
+  keys (`critique._dedup_claims`, `auditors.arithmetic._claim_dedup_key` — a
+  Unicode dash in one of the two self-consistency transcriptions inflates the
+  arithmetic tally). The sharpest was `arithmetic._resolve_geometry`, whose `by_id`
+  map is keyed by `detect_sheet_id` and so already canonical: an uncanonical lookup
+  matched **nothing**, and the claim resolved to no sheet at all. That
+  canonicalization is host-side binding no key input covers, so it carries
+  `_CROSS_QC_CACHE_CONTRACT` **2 → 3**.
   Cross-QC also carries **count-only discard counters** on the sharded path
   (`CrossQCDiscardCounts`, WP-02 §7.2): how many legs/facts the host dropped and
   why — unresolved handle, quote absent, quote present but unmatched, split by

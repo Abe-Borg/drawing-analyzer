@@ -867,14 +867,65 @@ def test_norm_id_still_separates_genuinely_different_sheets():
     assert X._norm_id("FP-101") != X._norm_id("FP-1011")
 
 
-def test_norm_id_agrees_with_the_shared_grammar_foundation():
-    # fold_text is what the Phase 25 sheet-id grammar and every deterministic
-    # auditor adjudicate against; cross-QC must not disagree with them about what
-    # one sheet id is.
-    from drawing_analyzer.auditors.sheet_ids import fold_text
+def test_norm_id_agrees_with_the_shared_canonical_form():
+    # normalize_sheet_id is the repo's declared canonical form for comparison and
+    # indexing of a sheet id, and it is what detect_sheet_id returns — so cross-QC
+    # must not have its own. Asserted against normalize_sheet_id itself, not a
+    # hand-rolled fold, or the two can drift apart while the test still passes.
+    from drawing_analyzer.auditors.sheet_ids import normalize_sheet_id
 
     for plain, variant, _note in _ID_VARIANTS:
-        assert fold_text(plain.strip()).upper() == X._norm_id(variant)
+        assert normalize_sheet_id(plain) == X._norm_id(variant)
+    # Edge punctuation a model writes around a handle resolves too.
+    for written in ("M-101.", "(M-101)", "M-101:", " M-101 "):
+        assert X._norm_id(written) == X._norm_id("M-101"), written
+
+
+def test_every_sheet_handle_comparison_uses_the_same_canonical_form():
+    # The twin sweep. A handle is compared in four places, and each one that rolls
+    # its own normalization is a place a Unicode dash silently loses a match:
+    # cross-QC resolving a leg, the critique's leg targets and claim dedup key, and
+    # the arithmetic auditor's geometry lookup — whose map is keyed by
+    # detect_sheet_id, i.e. already canonical, so an uncanonical lookup finds
+    # nothing at all.
+    import drawing_analyzer.critique as C
+    from drawing_analyzer.auditors.arithmetic import _claim_dedup_key, _resolve_geometry
+    from drawing_analyzer.auditors.sheet_ids import normalize_sheet_id
+    from drawing_analyzer.models import ConflictLeg, Finding, NumericClaim
+
+    canonical = normalize_sheet_id("M-101")
+    variant = "M‑101"          # U+2011
+
+    f = Finding(sheet_id="A-1", source_name="a.pdf", page_index=0, category="code",
+                severity="high", text="t", source_quote="q")
+    f.also_on = [ConflictLeg(sheet_id=variant, source_quote="q")]
+    assert C._leg_targets(f) == {canonical}
+
+    def _claim(sheet_id):
+        return NumericClaim(sheet_id=sheet_id, source_name="a.pdf", page_index=0,
+                            kind="sum", quote="20 20 20 TOTAL 60",
+                            terms=["20", "20", "20"], expected="60")
+
+    # The dedup keys must collapse the two spellings, or one claim is counted twice.
+    assert _claim_dedup_key(_claim(variant)) == _claim_dedup_key(_claim("M-101"))
+    # …and the critique's own dedup, which is a separate implementation of the
+    # same key: the self-consistency runs transcribe one relationship twice, so a
+    # Unicode dash in one copy inflates the arithmetic tally.
+    assert len(C._dedup_claims([_claim("M-101"), _claim(variant)])) == 1, (
+        "the critique kept two copies of one claim because the spellings differed"
+    )
+    # Distinct sheets must still stay distinct through both.
+    assert len(C._dedup_claims([_claim("M-101"), _claim("M-102")])) == 2
+    assert _claim_dedup_key(_claim("M-101")) != _claim_dedup_key(_claim("M-102"))
+
+    # And the geometry lookup must find a map keyed by the canonical id.
+    class _Geom:
+        pass
+
+    geom = _Geom()
+    assert _resolve_geometry(_claim(variant), {}, {canonical: geom}) is geom, (
+        "a model handle with a Unicode dash resolved to no sheet at all"
+    )
 
 
 def test_critique_leg_targets_uses_the_same_fold():
