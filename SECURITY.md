@@ -67,6 +67,15 @@ The report is a single self-contained file. Its security rests on four layers:
   for a key on first use and keeps it only in the browser tab's
   `sessionStorage`. A **Forget key** control clears both the in-memory copy and
   `sessionStorage`. A `401` clears the stored prompted key before retry.
+- **On a `file://` report, `sessionStorage` is not isolated per file.** Local
+  files do not get distinct origins the way `https://` pages do, so **another
+  local HTML file opened later in the same tab can read the stored key.**
+  Measured, not assumed: in headless Chromium a second local page navigated to
+  in the same tab read the key back verbatim; a page in a *new* tab read
+  `null`. The scope is therefore one tab, and the remedies are the ones the
+  widget names — **Forget key**, or close the tab — plus the ordinary one of
+  not opening untrusted HTML in a tab that has held a key. Serving the report
+  over `http(s)://` gives it a real origin and removes the exposure.
 - **Embedded-key mode is an explicit opt-in** (GUI checkbox / `embed_api_key=
   True`). The key is then baked into the HTML; the report shows a red warning,
   and the file must be treated as a credential. A runtime "forget" **cannot**

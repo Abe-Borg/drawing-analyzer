@@ -8,6 +8,68 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A question asked after "New chat" could 400 forever.** The report's Ask-AI
+  turn loop committed the model's reply into `history` with no check that the
+  thread it belonged to still existed — and New chat (and Load) *reassign*
+  `history`, so a turn still in flight wrote its assistant turn into the brand
+  new conversation. The API rejects a thread that opens on an assistant turn;
+  `dropUnansweredTail` only trims a **trailing** unanswered exchange, so a
+  reload never healed it; and the transcript was saved to `localStorage`, so
+  the damage outlived the session. Every later question failed until another
+  New chat. The generation check now guards the commit itself — before the
+  assistant turn and again after tools, which run asynchronously and can
+  outlive the thread on their own.
+
+- **Stop stopped one request, not the turn.** The `AbortController` is built
+  fresh inside every `streamOnce` call, so aborting the in-flight fetch ended
+  one round and the loop opened the next with a signal that had never been
+  aborted — a server `pause_turn` resume, or the request that follows a tool
+  round, sailed straight past it. A per-turn latch now ends the turn, checked
+  in two places: before the tools run (so a stopped turn does no work) and
+  after they finish (the reader can press Stop while a tool is mid-flight).
+  What already arrived is still committed — it was received and billed — and a
+  tool that did run still gets its `tool_result`, because an unanswered
+  `tool_use` would 400 the next question. The commit tests what will actually
+  be stored, not what arrived: a reply that is a bare `tool_use` with no
+  lead-in text is an ordinary shape, and stripping it empty would otherwise
+  have committed an empty assistant message the API rejects.
+
+- **A tool call the turn never answered poisoned the thread.** The assistant
+  turn is committed before the stop reason is examined, so a turn that ended
+  mid-tool-call — `max_tokens`, a refusal, a context-window stop, Stop — left
+  `assistant(tool_use)` with nothing to answer it. `dropUnansweredTail` repairs
+  that on **reload**; the live thread stayed broken and every question until
+  then failed. A `tool_use` block that nothing will answer is now dropped
+  before the turn is committed. Dropping beats synthesising an `is_error`
+  result: the call never ran, and inventing an outcome would put a fabricated
+  tool result into the transcript the model reads back. The turn's visible text
+  is untouched.
+
+- **A stopped turn annotated the previous answer.** When a turn was aborted
+  before committing anything, the catch popped its entries and *then* wrote the
+  "Stopped." note — by which point the end of `displays` was the **previous**
+  turn's answer. Invisible live (the note draws on the current bubble) and
+  wrong on reload, where a perfectly complete answer carried someone else's
+  interruption. The note is now DOM-only when the turn owns no entry.
+
+- **The chat widget 400d on any non-default model.** `DRAWING_ANALYZER_CHAT_MODEL`
+  pointed at Haiku 4.5 (or an unregistered id) sent `thinking: {type: "adaptive"}`
+  to a model that does not accept it — while the capability registry already
+  knew. Two independent reasons, in fact: it also hardcoded the
+  `web_search_20260209` tool, and Haiku 4.5 takes only the older basic
+  `web_search_20250305` variant. Both are now resolved host-side from the
+  registry and omitted by the browser, the same way `webFetch` already was, and
+  the footer's capability line names what the request actually carries instead
+  of a fixed "web search · thinking".
+
+- **A `file://` report's stored key is readable by another local page in the
+  same tab.** Measured, not assumed: in headless Chromium a second local HTML
+  file navigated to in the same tab read the key back verbatim, while a page in
+  a *new* tab read `null`. Local files do not get distinct origins, so
+  `sessionStorage` is not isolated per file. The widget's footer and
+  `SECURITY.md` now say so, with the scope (one tab) and the remedies (Forget
+  key, close the tab, or serve the report over `http(s)://`).
+
 - **A citation run that searched nothing reported an unknown total.**
   `billable_tool_uses` is truthy on its **keys**, so `{"web_search": 0}` — what
   a citation stage writes when every reference came warm from the verdict cache
