@@ -6,6 +6,78 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A run can no longer report COMPLETE over a sheet it never read.** Six
+  status-accounting defects, each of which let an exhaustive run present a
+  degraded result as a clean one. They are grouped because they share a failure
+  shape: the run's own status was derived from something other than what
+  happened.
+
+  - **The digest had no `StageResult`.** It was the one stage with no typed
+    outcome, so a failed sheet reached `ctx.errors` and the journal but never
+    `roll_up_qc_status` — a run could announce "1/2 sheet(s) analyzed, 1 failed"
+    and roll up `COMPLETE` in the same breath, contradicting I-1. It now carries
+    one (`expected=True`, honest because the digest runs in every mode and safe
+    because the roll-up returns early on a non-exhaustive run). This **replaces**
+    the stage's hand-written `STAGE_END` rather than joining it: two `STAGE_END`
+    events for one stage make `RunJournal.stage_durations()` pair the START with
+    the second and lose the duration. That renames this stage's journal fields
+    (`ok`/`failed`/`cached` become the shared `calls`/`items`); the per-sheet
+    counts remain available from the `SHEET_DIGESTED` events and run.log's
+    Sheets section.
+
+  - **An error-free sheet with an empty digest recorded no error.** `sd.ok` is
+    error-free *and* non-empty, so an empty digest is a failed sheet — but only
+    the journal said so, leaving `ctx.errors` and every surface built from it
+    undercounting the sheets the run never actually read.
+
+  - **The critique silently dropped a sheet it could not obtain.** When the
+    spool load and the one-page re-render both returned `None`, `_ordered_inputs`
+    skipped the sheet and nothing reconciled critiqued against expected, so the
+    stage reported COMPLETE having never read it. The unobtained sheets are now
+    folded into the stage's degraded list.
+
+  - **A crashed cross-verifier reported `SKIPPED_VALID`.** `counted == 0` was
+    tested before `cross_failed`. An exception leaves its result `None`, so its
+    findings never reach `counted`; when only cross-sheet findings were eligible
+    (the single-crop pass excludes them by design), the crash was
+    indistinguishable from "nothing to verify" and the roll-up accepted it as a
+    clean run. Both failure flags are now tested before any count derived from a
+    result. An exception is never a valid skip.
+
+  - **The batch transport lost `on_page_error`.** An un-renderable page vanished
+    from a batch run with no entry in `ctx.errors`, while the identical
+    real-time run recorded it and went PARTIAL — one set reporting two different
+    truths depending only on transport.
+
+  - **`prose_harvest` could sit at `NOT_REQUESTED` while expected.** Its extra
+    `and sheets` guard had no `elif expected: SKIPPED_VALID` arm, which every
+    sibling stage has. An expected stage left `NOT_REQUESTED` fails the roll-up's
+    `all_ok` without setting `any_failed`, so the run landed on PARTIAL or FAILED
+    for a reason no stage row explained.
+
+- **Numeric claims are pooled in deterministic order (I-7).** `claims` was
+  extended as futures completed — both the cache-hit loop and `_ingest_miss`
+  append as results land — while only `findings` was sorted. That order flowed
+  through `audit_arithmetic` into ledger insertion order and out to
+  `findings.json` / `findings.csv` and their sha256 in `run_manifest.json`, so
+  two runs over byte-identical inputs published different manifests. QC numbering
+  and the reviewed PDFs were already stable; the exports and their hashes were
+  not. Sorting goes through the new `pipeline.claim_sort_key`, which keys
+  `terms`/`expected` via `repr` because they are deliberately raw JSON — an int
+  can sit beside `"2 1/2"`, and comparing those directly raises `TypeError`.
+
+- **Stages that made no call no longer report phantom real-time calls.** The
+  guard `if X.api_calls or not X.cache_hits` fired exactly in the no-work case it
+  was meant to exclude (zero calls **and** zero hits), appending a zero-token
+  REAL_TIME `UsageRecord`. A verification that verified nothing showed two calls,
+  and the GUI printed `harvest: 1 call(s) · in 0 / out 0 tok` for a stage that
+  never reached the API. The ledger describes work that happened, not stages that
+  were configured. Costs and derived totals are unmoved — the phantom records
+  carried no tokens — but per-family call counts in run.log, `run_manifest.json`
+  and the GUI were wrong.
+
 ### Removed
 
 - **`docs/REVIEW_IMPLEMENTATION_PLAN.md` retired.** Its implementation packages

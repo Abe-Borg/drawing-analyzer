@@ -2279,6 +2279,39 @@ def test_pipeline_use_batch_combines_digests(tmp_path):
     assert progress[-1] == (2, 2, "Done")
 
 
+def test_pipeline_batch_records_an_unrenderable_page(tmp_path):
+    # The batch helper never received ``on_page_error``, so a page that could
+    # not be rendered vanished from a batch run with no entry in ctx.errors —
+    # while the identical real-time run recorded it and went PARTIAL. The same
+    # set reported two different truths depending only on transport.
+    pymupdf = pytest.importorskip("pymupdf")
+    from drawing_analyzer.pipeline import extract_drawing_context
+
+    doc = pymupdf.open()
+    doc.new_page(width=792, height=612).insert_text((72, 72), "SHEET M-101 GOOD PAGE")
+    doc.new_page(width=999999, height=999999)          # pathological: fails to render
+    path = tmp_path / "mixed.pdf"
+    doc.save(str(path))
+    doc.close()
+
+    ctx = extract_drawing_context(
+        [path], client=_FakeClient(_succeed), rows=2, cols=2, use_batch=True,
+    )
+
+    assert ctx.ok_sheet_count == 1                     # only the good page digested
+    assert any("page 2/2" in e for e in ctx.errors), ctx.errors
+
+    # The digest stage must also SAY why it degraded. A page that never rendered
+    # has no SheetDigest at all, so it exists only in the render-error lines —
+    # reading just the digested sheets left the commonest render failure showing
+    # as a degraded stage with no explanation in the journal, run.log, or the
+    # report's stage table, all of which read StageResult.errors.
+    digest_stage = next(s for s in ctx.stage_results if s.stage == "digest")
+    assert digest_stage.status == "PARTIAL"
+    assert (digest_stage.items_in, digest_stage.items_out) == (2, 1)
+    assert any("page 2/2" in e for e in digest_stage.errors), digest_stage.errors
+
+
 def test_pipeline_batch_retry_ledger_keeps_each_billable_attempt(tmp_path):
     pymupdf = pytest.importorskip("pymupdf")
     from drawing_analyzer.pipeline import extract_drawing_context

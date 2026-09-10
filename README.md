@@ -1040,8 +1040,10 @@ carries two artifacts built from it (Phase 26A, DA-024):
   (`SRC-####` per accepted file, an explicit line per rejected one), the
   normalized configuration + profile snapshots, a per-sheet table (ok/failed,
   cache hit, raster/vector, text-layer length, omitted blank tiles, parser
-  drift), a stage table (status, calls, items, duration), per-family token/cost
-  usage with derived totals, the ledger/receipt/coverage accounting, prose
+  drift), a stage table (status, calls, items, duration) that **includes the
+  digest**, per-family token/cost usage with derived totals — a stage that
+  placed no call contributes no usage row at all — the
+  ledger/receipt/coverage accounting, prose
   carry-through counts, the artifacts written, every run error, and the full
   event trace. UTF-8 + CRLF so Notepad reads it cleanly. This is per-run and
   ships in the export — distinct from the rotating `drawing_analyzer.log`

@@ -780,9 +780,9 @@ def test_audit_only_makes_no_incremental_api_calls(tmp_path):
 
 def test_exhaustive_run_usage_is_derived_and_per_stage(tmp_path):
     # §15.6: the run's token totals are DERIVED from an append-only usage ledger —
-    # every stage records independently, so harvest and verify both appear (the old
-    # ``v_in, v_out = vres…`` overwrite dropped harvest) and the grand total equals
-    # the exact sum of the records.
+    # every stage records independently (the old ``v_in, v_out = vres…``
+    # overwrite dropped harvest) and the grand total equals the exact sum of the
+    # records. A stage that made no call contributes no record at all.
     a = _make_pdf(tmp_path / "M-101.pdf")
     b = _make_pdf(tmp_path / "M-102.pdf")
     client = _CountingClient([_VAV_FINDING])
@@ -797,8 +797,24 @@ def test_exhaustive_run_usage_is_derived_and_per_stage(tmp_path):
     fams = set(ru.by_family())
     for needle in ("digest", "critique", "cross_qc", "synthesis", "verify", "citation"):
         assert needle in fams, needle
-    # harvest and verify are BOTH present as independent records (no overwrite).
-    assert "harvest" in fams and "verify" in fams
+    # ``verify`` keeps its own records rather than being folded into (or
+    # overwritten by) a neighbouring stage's counters — the defect the
+    # append-only ledger replaced.
+    assert "verify" in fams
+    # The ledger describes work that HAPPENED, not stages that were configured:
+    # a stage that placed no call and took no cache hit records nothing. This
+    # run's prose harvest finds no enumerated items, so it is the stage that
+    # exercises the rule — it used to append a zero-token REAL_TIME record and
+    # show up in the GUI as "harvest: 1 call(s) - in 0 / out 0 tok".
+    assert "harvest" not in fams
+    for rec in ru.records:
+        if rec.transport != "REAL_TIME":
+            continue
+        assert (
+            rec.input_tokens or rec.output_tokens
+            or rec.cache_read_tokens or rec.cache_write_tokens
+            or rec.billable_tool_uses
+        ), f"phantom real-time record with no usage: {rec.stage_instance}"
     assert ctx.total_estimated_cost is not None       # Opus is priced
 
 
@@ -1585,3 +1601,64 @@ def test_tile_sink_failure_is_nonfatal(tmp_path, monkeypatch):
     assert stages["tile_artifacts"].status == "FAILED"
     assert stages["tile_artifacts"].expected is False
     assert any("tile artifacts:" in e and "disk full" in e for e in ctx.errors)
+
+
+def test_claim_sort_key_is_total_over_raw_json_terms():
+    # I-7: claims were pooled in thread-completion order and only ``findings``
+    # was sorted, so the order flowed through audit_arithmetic into ledger
+    # insertion order and out to findings.json / findings.csv and their sha256
+    # in run_manifest.json — two runs over identical inputs, two manifests.
+    #
+    # ``terms``/``expected`` are deliberately raw JSON (an int beside a string
+    # like "2 1/2"), so the key must not compare them directly: that raises
+    # TypeError on a mixed set, which would turn a determinism fix into a crash.
+    from drawing_analyzer.models import NumericClaim
+    from drawing_analyzer.pipeline import claim_sort_key
+
+    def _claim(**kw):
+        base = dict(sheet_id="M-101", quote="q", kind="sum", terms=[1], expected=2)
+        base.update(kw)
+        return NumericClaim(**base)
+
+    mixed = [
+        _claim(terms=["2 1/2", 3], expected="6"),
+        _claim(terms=[1, 2], expected=3),
+        _claim(sheet_id="M-102"),
+        _claim(page_index=2),
+    ]
+    # Sorting must not raise, and must be a total order: the same multiset in
+    # any starting arrangement lands in the same sequence.
+    forward = [claim_sort_key(c) for c in sorted(mixed, key=claim_sort_key)]
+    backward = [claim_sort_key(c) for c in sorted(mixed[::-1], key=claim_sort_key)]
+    assert forward == backward
+    assert len(set(forward)) == len(mixed)          # no two claims collide
+
+
+def test_a_sheet_the_critique_cannot_obtain_degrades_its_stage(tmp_path):
+    # ``_ordered_inputs`` dropped an item when the spool load and the one-page
+    # re-render both came back None, and nothing reconciled critiqued sheets
+    # against expected ones — so the stage reported COMPLETE having never read
+    # that sheet (I-1). A pathological page is excluded at render time, which
+    # is exactly the shape that used to disappear.
+    doc = pymupdf.open()
+    doc.new_page(width=792, height=612).insert_text((80, 120), "VAV-3 SERVES ROOM 120")
+    doc.new_page(width=999999, height=999999)          # never renders
+    src = tmp_path / "mixed.pdf"
+    doc.save(str(src))
+    doc.close()
+
+    client = _RoutingClient([_VAV_FINDING])
+    ctx = extract_drawing_context(
+        [src], client=client, rows=2, cols=2,
+        reference_audit=True, qc_markups=True, qc_work_dir=tmp_path / "qc",
+    )
+
+    stages = {s.stage: s for s in ctx.stage_results}
+    assert stages["critique"].status == "PARTIAL", {k: v.status for k, v in stages.items()}
+    # The per-sheet detail rides the stage (ctx.errors carries the summary line).
+    assert any(
+        "no critique input could be obtained" in e
+        for e in stages["critique"].errors
+    ), stages["critique"].errors
+    assert any("Critique:" in e for e in ctx.errors), ctx.errors
+    assert ctx.qc_status != "COMPLETE"

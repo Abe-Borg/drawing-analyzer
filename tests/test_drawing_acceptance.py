@@ -1228,6 +1228,78 @@ def test_gauntlet_failure_injection_bad_model_output(tmp_path, sabotage, stage):
     _assert_degraded_honestly(ctx, stage)
 
 
+def test_a_failed_digest_sheet_holds_the_run_below_complete(tmp_path, monkeypatch):
+    # I-1 / §3.3: the digest had no StageResult, so a sheet it never read
+    # reached ctx.errors and the journal but not ``roll_up_qc_status`` — an
+    # exhaustive run reported COMPLETE while announcing "1/2 sheet(s)
+    # analyzed, 1 failed" in the same breath.
+    import drawing_analyzer.pipeline as pipeline
+    from drawing_analyzer.digest import SheetDigest
+
+    original = pipeline.digest_sheet
+
+    def _fail_second_sheet(rendered, **kw):
+        if rendered.ref.source_name == "M-102.pdf":
+            return SheetDigest(
+                ref=rendered.ref, text="", error="injected: digest request failed",
+            )
+        return original(rendered, **kw)
+
+    monkeypatch.setattr(pipeline, "digest_sheet", _fail_second_sheet)
+    ctx = _mini_run(tmp_path, G.mini_client())
+
+    statuses = {s.stage: s.status for s in ctx.stage_results}
+    assert statuses["digest"] == "PARTIAL", statuses
+    assert ctx.qc_status != "COMPLETE"
+    assert ctx.ok_sheet_count == 1
+    assert any("injected" in e for e in ctx.errors)
+    # I-3: the sheet that did read still ships its prose.
+    assert "VAV-3 serves Room 120" in ctx.combined_text
+
+
+def test_an_empty_digest_sheet_is_reported_as_an_error(tmp_path, monkeypatch):
+    # ``sd.ok`` is error-free AND non-empty, so an error-free empty digest is a
+    # failed sheet — but it used to reach only the journal, leaving ctx.errors
+    # (and the surfaces built from it) undercounting the failures.
+    import drawing_analyzer.pipeline as pipeline
+    from drawing_analyzer.digest import SheetDigest
+
+    original = pipeline.digest_sheet
+
+    def _empty_second_sheet(rendered, **kw):
+        if rendered.ref.source_name == "M-102.pdf":
+            return SheetDigest(ref=rendered.ref, text="", error=None)
+        return original(rendered, **kw)
+
+    monkeypatch.setattr(pipeline, "digest_sheet", _empty_second_sheet)
+    ctx = _mini_run(tmp_path, G.mini_client())
+
+    statuses = {s.stage: s.status for s in ctx.stage_results}
+    assert statuses["digest"] == "PARTIAL", statuses
+    assert ctx.ok_sheet_count == 1
+    assert any("empty digest" in e for e in ctx.errors), ctx.errors
+
+
+def test_a_cross_verifier_crash_is_not_a_valid_skip(tmp_path, monkeypatch):
+    # ``counted == 0`` was tested before ``cross_failed``. A cross-verifier that
+    # raised left its result None, contributing nothing to ``counted``, so the
+    # crash was indistinguishable from "no eligible findings" and the stage
+    # reported SKIPPED_VALID — which the roll-up accepts as a clean run.
+    import drawing_analyzer.verify as verify
+
+    def _boom(*a, **k):
+        raise RuntimeError("injected cross-verifier crash")
+
+    monkeypatch.setattr(verify, "verify_findings", lambda *a, **k: verify.VerifyResult())
+    monkeypatch.setattr(verify, "verify_cross_findings", _boom)
+    ctx = _mini_run(tmp_path, G.mini_client())
+
+    statuses = {s.stage: s.status for s in ctx.stage_results}
+    assert statuses["verification"] == "PARTIAL", statuses
+    assert ctx.qc_status != "COMPLETE"
+    assert any("injected cross-verifier crash" in e for e in ctx.errors)
+
+
 def test_gauntlet_plan_failure_leaves_critique_on_user_profiles(tmp_path, monkeypatch):
     # Phase A: a malformed plan degrades the review_plan stage only — the
     # critique still runs, and a user-selected profile still rides its prompt.
