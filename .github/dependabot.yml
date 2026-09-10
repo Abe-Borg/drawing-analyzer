@@ -1,0 +1,43 @@
+# Dependency and action updates (P9 item 40).
+#
+# Two ecosystems, both deliberate:
+#
+#   * github-actions — this repository pins every third-party action to an
+#     immutable commit SHA, which is the right posture but means a pinned action
+#     never picks up its own security fixes. Both workflows carry a "NOTE TO
+#     MAINTAINER" saying the SHAs could not be re-verified from the build sandbox
+#     and suggesting Dependabot manage them; this is that.
+#   * pip — the release build is constrained by requirements-release.lock, so a
+#     dependency fix has to arrive as a commit to that file. Dependabot opens it.
+#
+# Grouped and weekly on purpose: an unbatched daily stream of pin bumps is noise
+# a solo maintainer stops reading, and a PR nobody reads is not a security
+# control. Everything still goes through CI (tests on the Linux + Windows matrix,
+# ruff, the secret scan, and the pip-audit gate) before it can merge.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"
+
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    open-pull-requests-limit: 5
+    groups:
+      python-dependencies:
+        patterns: ["*"]
+    commit-message:
+      prefix: "deps"

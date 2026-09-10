@@ -1105,3 +1105,462 @@ def test_write_drawing_export_includes_tiles_in_manifest_and_log(tmp_path):
     assert "tiles/index.json" in arts
     log = (folder / "run.log").read_text(encoding="utf-8")
     assert "tiles/" in log
+
+
+# --------------------------------------------------------------------------- #
+# P9 item 44 — the Markdown and HTML artifacts go through the same
+# secret/path boundary as run.log
+# --------------------------------------------------------------------------- #
+
+_PRIVATE_ROOT = r"C:\Users\Abe Borg\My Drawings"
+# One exception repr carrying both a private directory and a credential-shaped
+# header value — the shape an httpx/anthropic error actually has. The drive
+# letter is deliberately LOWERCASE: that alone used to defeat the known-roots
+# pass (P9 item 44, first half). The "key" is not key-shaped, so
+# scripts/scan_secrets.py stays quiet on this file.
+_LEAKY_ERROR = (
+    r"AuthenticationError: POST failed for "
+    r"c:\Users\Abe Borg\My Drawings\Job 4471\SET 01.pdf "
+    r"headers={'x-api-key': 'placeholder-value-not-a-key-0000'}"
+)
+
+
+def _rooted_ctx() -> _Ctx:
+    """A context whose journal knows the private root, and whose errors leak."""
+    from drawing_analyzer.run_journal import RunJournal
+
+    journal = RunJournal()
+    journal.add_private_roots([_PRIVATE_ROOT])
+    sheets = [
+        _Sheet(_Ref(SRC, 0, 2), text="VAV-3 serves Rm 120"),
+        _Sheet(_Ref(SRC, 1, 2), error=_LEAKY_ERROR),
+    ]
+    return _Ctx(
+        sheets=sheets,
+        combined_text="# Drawing Set Context Digest\n\nVAV-3 serves Rm 120",
+        errors=[_LEAKY_ERROR],
+        run_journal=journal,
+    )
+
+
+def _leaks(text: str) -> list[str]:
+    return [
+        probe for probe in ("Abe Borg", "My Drawings", "placeholder-value-not-a-key-0000")
+        if probe in text
+    ]
+
+
+def test_every_exported_artifact_redacts_host_error_strings(tmp_path):
+    """run.log and run_manifest.json were sanitized; the rest were not.
+
+    Measured before the fix, on one export: ``00_index.md``, the per-sheet
+    Markdown and ``report.html`` each carried the user's own directory names AND
+    the API key from the error string, while run.log and run_manifest.json in the
+    same folder were clean. The export folder is what gets emailed to a client.
+    """
+    folder = dx.write_drawing_export(
+        _rooted_ctx(), tmp_path, source_names=[SRC], now=NOW
+    )
+    seen = {}
+    for path in sorted(folder.rglob("*")):
+        if path.is_file():
+            seen[path.name] = _leaks(path.read_text(encoding="utf-8", errors="replace"))
+    assert seen, "the export wrote nothing"
+    assert not any(seen.values()), seen
+    # The diagnostic itself must survive the redaction — this is not a silent drop.
+    index = (folder / "00_index.md").read_text(encoding="utf-8")
+    assert "AuthenticationError" in index
+    assert "SET 01.pdf" in index
+
+
+def test_redaction_leaves_the_digest_prose_byte_exact(tmp_path):
+    """I-2: nothing may alter the prose digest — including the redactor.
+
+    ``TOKEN: 12`` matches the named-secret rule and ``C:4`` looks like a path
+    root, so a redactor applied to sheet bodies would corrupt real drawing text.
+    """
+    prose = '## Coordination\n\n- Note reads TOKEN: 12 at grid C:4\n- 1/2" drain\n'
+    from drawing_analyzer.run_journal import RunJournal
+
+    journal = RunJournal()
+    journal.add_private_roots([_PRIVATE_ROOT])
+    ctx = _Ctx(
+        sheets=[_Sheet(_Ref(SRC, 0, 1), text=prose)],
+        combined_text=prose,
+        run_journal=journal,
+    )
+    folder = dx.write_drawing_export(ctx, tmp_path, source_names=[SRC], now=NOW)
+    assert (folder / "combined.md").read_text(encoding="utf-8") == prose.strip() + "\n"
+    sheet_md = (folder / "01_Weld_County_Mechanical_Permit_Set_p1.md").read_text(
+        encoding="utf-8"
+    )
+    assert "TOKEN: 12" in sheet_md and "grid C:4" in sheet_md
+    report = (folder / "report.html").read_text(encoding="utf-8")
+    assert "TOKEN: 12" in report and "grid C:4" in report
+
+
+def test_stage_notes_in_the_report_are_redacted():
+    """The stage table renders StageResult errors/warnings — same boundary."""
+    from dataclasses import dataclass, field as _field
+
+    from drawing_analyzer.html_report import build_html_report
+    from drawing_analyzer.run_journal import RunJournal
+
+    @dataclass
+    class _Stage:
+        stage: str = "cross_qc"
+        status: str = "FAILED"
+        expected: bool = True
+        calls_planned: int = 1
+        calls_succeeded: int = 0
+        items_in: int = 1
+        items_out: int = 0
+        errors: list = _field(default_factory=lambda: [_LEAKY_ERROR])
+        warnings: list = _field(default_factory=list)
+
+    journal = RunJournal()
+    journal.add_private_roots([_PRIVATE_ROOT])
+    ctx = _Ctx(
+        sheets=[_Sheet(_Ref(SRC, 0, 1), text="ok")],
+        run_journal=journal,
+        stage_results=[_Stage()],
+    )
+    html_text = build_html_report(ctx, source_names=[SRC], now=NOW)
+    assert not _leaks(html_text)
+    assert "cross_qc" in html_text
+
+
+def test_manifest_source_and_mutation_blocks_redact_the_known_roots():
+    """Two manifest blocks assemble their own strings and had to be threaded too.
+
+    ``_source_entries`` (a rejected input's error) and ``_receipt_summary``
+    (mutated source names) each call the sanitize boundary without the roots
+    unless ``build_run_manifest`` hands them over — a caller-side omission the
+    structural AST check below cannot see, because the call it inspects looks
+    correct.
+    """
+    import json
+
+    from drawing_analyzer.run_journal import RunJournal
+
+    class _Doc:
+        source_id = "SRC-0002"
+        display_name = "SET 01.pdf"
+        input_order = 2
+        status = "REJECTED"
+        page_count = 0
+        byte_size = 11
+        error = _LEAKY_ERROR
+        duplicate_of = ""
+
+    class _Inventory:
+        documents = [_Doc()]
+
+    journal = RunJournal()
+    journal.add_private_roots([_PRIVATE_ROOT])
+    ctx = _Ctx(sheets=[_Sheet(_Ref(SRC, 0, 1), text="ok")], run_journal=journal)
+    ctx.input_inventory = _Inventory()
+    ctx.mutated_sources = [_LEAKY_ERROR]
+
+    manifest = dx.build_run_manifest(ctx)
+    assert not _leaks(json.dumps(manifest))
+    # Both blocks still carry their row.
+    assert manifest["sources"][0]["source_id"] == "SRC-0002"
+    assert manifest["markup_coverage"]["mutated_sources"]
+
+
+def test_no_sanitize_call_in_export_omits_the_private_roots():
+    """Structural twin of the run_journal.py check (P9 item 44)."""
+    import ast
+
+    source = (
+        Path(__file__).resolve().parent.parent
+        / "src" / "drawing_analyzer" / "export.py"
+    ).read_text(encoding="utf-8")
+    offenders = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+        if name not in ("sanitize_text", "redact_for_display"):
+            continue
+        if not any(kw.arg == "private_roots" for kw in node.keywords):
+            offenders.append(f"line {node.lineno}")
+    assert not offenders, (
+        "every sanitize_text/redact_for_display call in export.py must pass "
+        f"private_roots (P9 item 44); missing at: {offenders}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# N30 — the atomic publish: backoff on a transient lock, and Windows long paths
+# --------------------------------------------------------------------------- #
+
+
+def test_publish_backs_off_between_rename_attempts(tmp_path, monkeypatch):
+    """A retry issued in the same microsecond as the failure is not a retry.
+
+    The loop already retried the rename three times for the "an AV lock cleared"
+    case, but with no wait between attempts all three landed inside the same
+    lock. The retry therefore only ever helped the *other* branch (a sibling
+    export won the name), which re-derives a name and does not need a wait.
+    """
+    slept: list[float] = []
+    monkeypatch.setattr(dx.time, "sleep", lambda s: slept.append(s))
+
+    calls = {"n": 0}
+    real_rename = dx.Path.rename
+
+    def flaky_rename(self, target):
+        # Fail the first two publish renames of the .partial folder, then work.
+        if str(self).endswith(".partial"):
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                raise OSError(32, "The process cannot access the file")
+        return real_rename(self, target)
+
+    monkeypatch.setattr(dx.Path, "rename", flaky_rename)
+    folder = dx.write_drawing_export(_make_ctx(), tmp_path, source_names=[SRC], now=NOW)
+
+    assert calls["n"] == 3, "the publish should have retried the same name twice"
+    assert slept == list(dx._PUBLISH_BACKOFF_SECONDS[:2]), slept
+    assert not folder.name.endswith(".partial")
+    assert not folder.name.endswith("_INCOMPLETE")
+
+
+def test_publish_backoff_never_sleeps_after_the_last_attempt():
+    """The budget is spent on waiting between tries, not on a trailing pause."""
+    assert dx._PUBLISH_ATTEMPTS == len(dx._PUBLISH_BACKOFF_SECONDS) + 1
+    slept: list[float] = []
+    import time as _time
+
+    original = _time.sleep
+    try:
+        _time.sleep = lambda s: slept.append(s)
+        for attempt in range(dx._PUBLISH_ATTEMPTS):
+            dx._publish_backoff(attempt)
+    finally:
+        _time.sleep = original
+    assert slept == list(dx._PUBLISH_BACKOFF_SECONDS)
+
+
+def test_long_path_prefix_literal_is_the_windows_one():
+    r"""Pinned as a literal so every assertion below can use the constant.
+
+    ``\\?\`` — two backslashes, a question mark, one backslash.
+    """
+    assert dx._WIN_LONG_PREFIX == 2 * chr(92) + "?" + chr(92)
+
+
+def test_long_path_text_prefixes_drive_and_unc_paths():
+    """N30 — pure string logic, so the Windows form is testable off Windows."""
+    pfx = dx._WIN_LONG_PREFIX
+    drive = r"C:\Users\abe\out"
+    assert dx._long_path_text(drive) == pfx + drive
+    # UNC needs the ``UNC\`` form: a bare prefix on \\server is invalid.
+    unc = r"\\server\share\dwg"
+    assert dx._long_path_text(unc) == pfx + "UNC" + unc[1:]
+    # Idempotent, so a path that already carries the prefix is never doubled.
+    assert dx._long_path_text(pfx + drive) == pfx + drive
+    # A device path is left alone.
+    device = 2 * chr(92) + "." + chr(92) + "PIPE" + chr(92) + "x"
+    assert dx._long_path_text(device) == device
+
+
+def test_long_path_is_an_identity_function_off_windows():
+    """POSIX has no MAX_PATH, so the tested platform must be untouched."""
+    import os
+
+    if os.name == "nt":                     # pragma: no cover - Windows CI leg
+        assert str(dx.long_path("out")).startswith(dx._WIN_LONG_PREFIX)
+    else:
+        assert dx.long_path("/tmp/a/b") == Path("/tmp/a/b")
+        assert dx.long_path(Path("rel/x")) == Path("rel/x")
+
+
+def test_a_folder_that_exists_only_past_max_path_is_not_reused(tmp_path, monkeypatch):
+    """``_unique_dir`` must probe through the long-path form too (N30).
+
+    Past MAX_PATH an unprefixed ``exists()`` answers *False* for a directory that
+    is really there, so the name reads as free — and the publish rename then moves
+    the new export straight over the old one. Modelled with the same visible
+    mapping as the plumbing test, since on POSIX the transform is an identity and
+    a value comparison cannot tell the two probes apart.
+    """
+    def fake_long_path(path):
+        text = str(path)
+        return Path(text if text.endswith("__lp") else text + "__lp")
+
+    monkeypatch.setattr(dx, "long_path", fake_long_path)
+    predicted = tmp_path / dx.export_folder_name([SRC], now=NOW)
+    # TWO prior exports, existing only under the mapped name — invisible to a
+    # plain exists(), exactly as a >260-char directory is on Windows. Two, so
+    # that the disambiguation *loop* probes as well as the first check: reverting
+    # either one alone has to fail this.
+    prior = [Path(str(predicted) + "__lp"),
+             Path(str(predicted.with_name(predicted.name + "_2")) + "__lp")]
+    for directory in prior:
+        directory.mkdir(parents=True)
+
+    returned = dx.write_drawing_export(_make_ctx(), tmp_path, source_names=[SRC], now=NOW)
+
+    assert returned != predicted, "the export reused a folder that already existed"
+    assert returned.name.endswith("_3"), returned.name
+    for directory in prior:
+        assert directory.is_dir(), f"a prior export was clobbered: {directory}"
+
+
+def test_export_writes_through_the_long_path_form(tmp_path, monkeypatch):
+    r"""The prefix must reach every writer, and must NOT reach the returned path.
+
+    On POSIX ``long_path`` is an identity function, so a value comparison cannot
+    tell "went through the transform" from "did not". A stand-in that maps the
+    staging folder to a visibly different directory can: every writer must land
+    in the mapped one, while the path handed back to the caller (and shown in the
+    GUI) stays the plain form — a ``\\?\`` prefix leaking into the UI, or into
+    ``os.startfile``, is its own bug.
+    """
+    mapped: list[Path] = []
+
+    def fake_long_path(path):
+        # Map only; the caller does the mkdir — which is the point of the fix
+        # this guards: the staging directory is *created* through the long-path
+        # form, not merely written to afterwards.
+        text = str(path)
+        if text.endswith("__lp"):
+            return Path(text)
+        out = Path(text + "__lp")
+        mapped.append(out)
+        return out
+
+    made: list[str] = []
+    real_mkdir = dx.Path.mkdir
+
+    def spy_mkdir(self, *a, **kw):
+        made.append(str(self))
+        return real_mkdir(self, *a, **kw)
+
+    monkeypatch.setattr(dx.Path, "mkdir", spy_mkdir)
+
+    seen: list[Path] = []
+    real_manifest = dx.write_run_manifest
+    real_log = dx.write_run_log
+    real_qc = dx.write_qc_outputs
+    real_tiles = dx.write_tile_artifacts
+    monkeypatch.setattr(dx, "long_path", fake_long_path)
+    monkeypatch.setattr(dx, "write_run_manifest",
+                        lambda ctx, folder, **kw: (seen.append(Path(folder)),
+                                                   real_manifest(ctx, folder, **kw))[1])
+    monkeypatch.setattr(dx, "write_run_log",
+                        lambda ctx, folder, **kw: (seen.append(Path(folder)),
+                                                   real_log(ctx, folder, **kw))[1])
+    monkeypatch.setattr(dx, "write_qc_outputs",
+                        lambda ctx, folder, **kw: (seen.append(Path(folder)),
+                                                   real_qc(ctx, folder, **kw))[1])
+    monkeypatch.setattr(dx, "write_tile_artifacts",
+                        lambda ctx, folder, **kw: (seen.append(Path(folder)),
+                                                   real_tiles(ctx, folder, **kw))[1])
+
+    returned = dx.write_drawing_export(_make_ctx(), tmp_path, source_names=[SRC], now=NOW)
+
+    assert mapped, "long_path was never applied to the staging folder"
+    # The staging directory itself must be CREATED through the mapped form: past
+    # MAX_PATH the mkdir is exactly where an unprefixed path fails, before the
+    # first prefixed write is ever reached. Observed on the mkdir call rather
+    # than on the directory, which the publish rename moves away.
+    staging_mkdirs = [d for d in made if ".partial" in Path(d).name]
+    assert staging_mkdirs, made
+    for d in staging_mkdirs:
+        assert d.endswith("__lp"), f"staging mkdir bypassed the long-path form: {d}"
+    assert len(seen) == 4, seen
+    for folder in seen:
+        assert folder.name.endswith("__lp"), f"{folder} bypassed the long-path form"
+    # The published folder is the mapped one (that is where the bytes are), and
+    # what comes back to the caller is the plain name.
+    assert not str(returned).endswith("__lp"), returned
+    assert dx._WIN_LONG_PREFIX not in str(returned)
+    published = Path(str(returned) + "__lp")
+    # Every document writer, not just the two the spies cover: the Markdown and
+    # HTML files go through contained_target(staging, …) and must land here too.
+    for name in ("run_manifest.json", "run.log", "report.html", "00_index.md",
+                 "combined.md"):
+        assert (published / name).is_file(), name
+    # ...and the §18.4 Outputs list is derived by *reading* the same folder, so
+    # it must be read through the long-path form too or run.log lists nothing.
+    assert "report.html" in (published / "run.log").read_text(encoding="utf-8")
+    # The internal form must not reach the CONTENTS of an artifact either: a
+    # `\\?\` prefix in run.log's Outputs list or the manifest's paths would be a
+    # portability bug in an artifact whose whole job is to be portable.
+    for artifact in sorted(published.rglob("*")):
+        if artifact.is_file():
+            body = artifact.read_text(encoding="utf-8", errors="replace")
+            assert "__lp" not in body, artifact.name
+
+
+# --------------------------------------------------------------------------- #
+# P9 item 45 — name allocators must dedupe the way the filesystem compares
+# --------------------------------------------------------------------------- #
+
+
+def test_artifact_names_dedupe_case_insensitively():
+    """`M-101.pdf` and `m-101.pdf` are ONE file on Windows and macOS.
+
+    Every allocator deduped with a case-*sensitive* set, so a set containing both
+    spellings produced two names the allocator thought were distinct and the
+    filesystem did not: the second sheet's artifact silently overwrote the first,
+    and the run reported success. The original case is still what gets written —
+    the fold is only how collisions are *detected*.
+    """
+    used: set[str] = set()
+    names = [dx.safe_artifact_name(n, used=used)
+             for n in ("M-101.pdf", "m-101.pdf", "M-101.PDF")]
+    assert len({n.casefold() for n in names}) == 3, names
+    assert names[0] == "M-101.pdf"            # first one keeps its own spelling
+    assert names[1].startswith("m-101")       # ...and so does each later one
+    assert names[2].startswith("M-101")
+
+
+def test_sheet_text_names_dedupe_case_insensitively():
+    class _Ref:
+        def __init__(self, source_name: str) -> None:
+            self.source_name = source_name
+            self.page_index = 0
+
+    used: set[str] = set()
+    names = [dx._sheet_text_name(_Ref(n), used) for n in ("M-101", "m-101", "M-101")]
+    assert len({n.casefold() for n in names}) == 3, names
+
+
+def test_evidence_directories_dedupe_case_insensitively():
+    """The verifier's crops live in a per-finding directory (DA-016)."""
+    from drawing_analyzer import verify as vf
+
+    class _Finding:
+        def __init__(self, qc_id: str) -> None:
+            self.qc_id = qc_id
+            self.id = qc_id
+
+    used: set[str] = set()
+    names = [vf._reserve_evidence_dir(_Finding(q), used)
+             for q in ("QC-1", "qc-1", "QC-1")]
+    assert len({n.casefold() for n in names}) == 3, names
+
+
+def test_every_allocator_uses_the_shared_fold_helpers():
+    """Structural: four allocators, one rule — asserted so a fifth cannot drift.
+
+    The bug was the same missing fold in four places. `models.name_is_taken` /
+    `record_name` are the single pair; a `while <name> in used` / `used.add(...)`
+    reappearing in any of these modules is the same bug returning.
+    """
+    import re
+
+    root = Path(__file__).resolve().parent.parent / "src" / "drawing_analyzer"
+    offenders = []
+    for rel in ("export.py", "verify.py", "annotate.py"):
+        source = (root / rel).read_text(encoding="utf-8")
+        for match in re.finditer(r"while\s+(\w+)\s+in\s+used(_names)?\s*:", source):
+            offenders.append(f"{rel}:{source[:match.start()].count(chr(10)) + 1}")
+    assert not offenders, (
+        "case-sensitive name dedupe (P9 item 45) is back at: " + ", ".join(offenders)
+    )

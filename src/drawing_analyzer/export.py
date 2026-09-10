@@ -37,13 +37,26 @@ import json
 import os
 import re
 import shutil
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from .html_report import build_html_report
-from .models import PRIMARY_LEG_ID, receipt_status_counts, source_page_key
-from .run_journal import _iso, evidence_summary, render_run_log, sanitize_text
+from .models import (
+    PRIMARY_LEG_ID,
+    name_is_taken,
+    receipt_status_counts,
+    record_name,
+    source_page_key,
+)
+from .run_journal import (
+    _iso,
+    evidence_summary,
+    redact_for_display,
+    render_run_log,
+    sanitize_text,
+)
 from .tile_artifacts import (
     TILES_DIRNAME,
     TILES_INVENTORY_NAME,
@@ -95,16 +108,18 @@ def _sheet_filename(index: int, sheet: Any) -> str:
     return f"{index:02d}_{_slug(Path(source).stem, max_len=40)}_p{page}.md"
 
 
-def _sheet_status(sheet: Any) -> str:
+def _sheet_status(sheet: Any, roots: "tuple[str, ...]" = ()) -> str:
     error = getattr(sheet, "error", None)
     if error:
-        return f"FAILED — {error}"
+        return f"FAILED — {redact_for_display(error, private_roots=roots)}"
     if getattr(sheet, "cached", False):
         return "OK (served from cache)"
     return "OK"
 
 
-def _sheet_document(index: int, total: int, sheet: Any) -> str:
+def _sheet_document(
+    index: int, total: int, sheet: Any, roots: "tuple[str, ...]" = ()
+) -> str:
     """One sheet's Markdown file: heading, status/token line, then digest text.
 
     A failed sheet has no digest text, so its error is rendered as the body — the
@@ -117,14 +132,17 @@ def _sheet_document(index: int, total: int, sheet: Any) -> str:
     in_tok = int(getattr(sheet, "input_tokens", 0) or 0)
     out_tok = int(getattr(sheet, "output_tokens", 0) or 0)
 
-    lines = [f"# {label}", "", f"**Status:** {_sheet_status(sheet)}"]
+    lines = [f"# {label}", "", f"**Status:** {_sheet_status(sheet, roots)}"]
     if in_tok or out_tok:
         lines.append(f"**Tokens:** {in_tok:,} in / {out_tok:,} out")
     lines += ["", ""]
     if text:
         lines.append(text)
     elif error:
-        lines.append(f"> This sheet could not be analyzed: {error}")
+        lines.append(
+            "> This sheet could not be analyzed: "
+            + redact_for_display(error, private_roots=roots)
+        )
     else:
         lines.append("> (empty digest)")
     lines.append("")
@@ -181,6 +199,7 @@ def _index_document(
     source_names: list[str],
     now: datetime,
     sheet_files: list[tuple[int, Any, str]],
+    roots: "tuple[str, ...]" = (),
 ) -> str:
     """The run summary: sources, counts, a per-sheet status table, errors, files."""
     ok = int(getattr(ctx, "ok_sheet_count", 0) or 0)
@@ -188,7 +207,10 @@ def _index_document(
     cached = int(getattr(ctx, "cached_sheet_count", 0) or 0)
     in_tok = int(getattr(ctx, "total_input_tokens", 0) or 0)
     out_tok = int(getattr(ctx, "total_output_tokens", 0) or 0)
-    errors = list(getattr(ctx, "errors", None) or [])
+    errors = [
+        redact_for_display(e, private_roots=roots)
+        for e in (getattr(ctx, "errors", None) or [])
+    ]
 
     lines = [
         "# Drawing Digest Export",
@@ -220,7 +242,9 @@ def _index_document(
     for index, sheet, fname in sheet_files:
         ref = _ref_of(sheet)
         label = getattr(ref, "display_label", None) or f"Sheet {index}/{total}"
-        lines.append(f"| {index} | {label} | {_sheet_status(sheet)} | `{fname}` |")
+        lines.append(
+            f"| {index} | {label} | {_sheet_status(sheet, roots)} | `{fname}` |"
+        )
     lines.append("")
 
     if errors:
@@ -334,13 +358,22 @@ def build_export_documents(
     sheet_files = [
         (i, sheet, _sheet_filename(i, sheet)) for i, sheet in enumerate(sheets, start=1)
     ]
+    # The run's known private directories, for the host-generated status/error
+    # strings rendered below (P9 item 44). Digest prose never passes through the
+    # redactor (I-2) and neither do findings.
+    roots = tuple(
+        getattr(getattr(ctx, "run_journal", None), "private_roots", ()) or ()
+    )
 
     docs: list[tuple[str, str]] = [
         ("report.html",
          build_html_report(ctx, source_names=source_names, now=now, api_key=api_key,
                            embed_api_key=embed_api_key, link_evidence=True,
                            include_chat=include_chat, pdf_links=pdf_links)),
-        ("00_index.md", _index_document(ctx, source_names=source_names, now=now, sheet_files=sheet_files)),
+        ("00_index.md", _index_document(
+            ctx, source_names=source_names, now=now, sheet_files=sheet_files,
+            roots=roots,
+        )),
         ("00_synthesis.md", _synthesis_document(ctx)),
     ]
     set_identity = getattr(ctx, "set_identity", None)
@@ -348,8 +381,6 @@ def build_export_documents(
         # Phase A (§20.1): the machine-readable identity record. Written with the
         # other documents, so it lands before run.log / run_manifest.json (§18.4)
         # and is hashed into the manifest's artifact list like everything else.
-        journal = getattr(ctx, "run_journal", None)
-        roots = tuple(getattr(journal, "private_roots", ()) or ())
         docs.append((
             "set_identity.json",
             json.dumps(_sanitize_json(set_identity.to_dict(), roots), indent=2) + "\n",
@@ -363,7 +394,7 @@ def build_export_documents(
     if _focus_value(ctx):
         docs.append(("00_focus.md", _focus_document(ctx)))
     for index, sheet, fname in sheet_files:
-        docs.append((fname, _sheet_document(index, total, sheet)))
+        docs.append((fname, _sheet_document(index, total, sheet, roots)))
 
     combined = (getattr(ctx, "combined_text", "") or "").strip()
     docs.append(("combined.md", combined + "\n" if combined else "(no combined digest produced)\n"))
@@ -408,6 +439,7 @@ def write_run_log(ctx: Any, folder: Path, *, outputs: list[str] | None = None) -
     if outputs is None:
         outputs = _folder_inventory(folder)
     journal = getattr(ctx, "run_journal", None)
+    roots = tuple(getattr(journal, "private_roots", ()) or ())
     try:
         if journal is not None and hasattr(journal, "render_text"):
             text = journal.render_text(context=ctx, outputs=list(outputs))
@@ -417,7 +449,9 @@ def write_run_log(ctx: Any, folder: Path, *, outputs: list[str] | None = None) -
         text = (
             "Drawing Analyzer — run log\n\n"
             "run.log could not be fully rendered: "
-            + sanitize_text(f"{type(exc).__name__}: {exc}", max_chars=300)
+            + sanitize_text(
+                f"{type(exc).__name__}: {exc}", max_chars=300, private_roots=roots
+            )
             + "\n"
         )
     with open(folder / "run.log", "w", encoding="utf-8", newline="\r\n") as fp:
@@ -437,7 +471,7 @@ def _stage_dict(sr: Any) -> dict:
     }
 
 
-def _source_entries(ctx: Any) -> list[dict]:
+def _source_entries(ctx: Any, roots: "tuple[str, ...]" = ()) -> list[dict]:
     """The §6.1 input inventory for the manifest — **no absolute paths, no
     content hashes** (§18.4 keeps the source SHA private by default; the
     run-local ``source_id`` + input order are the portable provenance)."""
@@ -452,14 +486,16 @@ def _source_entries(ctx: Any) -> list[dict]:
                 "status": str(getattr(d, "status", "") or ""),
                 "page_count": int(getattr(d, "page_count", 0) or 0),
                 "byte_size": int(getattr(d, "byte_size", 0) or 0),
-                "error": sanitize_text(getattr(d, "error", "") or "", max_chars=200),
+                "error": sanitize_text(
+                    getattr(d, "error", "") or "", max_chars=200, private_roots=roots
+                ),
                 "duplicate_of": getattr(d, "duplicate_of", "") or "",
             }
         )
     return entries
 
 
-def _receipt_summary(ctx: Any) -> dict:
+def _receipt_summary(ctx: Any, roots: "tuple[str, ...]" = ()) -> dict:
     """Receipt-derived markup coverage (§13.5) in compact machine form."""
     run = getattr(ctx, "markup_run", None)
     counts = receipt_status_counts(getattr(run, "receipts", None))
@@ -474,7 +510,7 @@ def _receipt_summary(ctx: Any) -> dict:
             Path(p).name for p in (getattr(ctx, "reviewed_pdf_paths", None) or [])
         ],
         "mutated_sources": [
-            sanitize_text(m, max_chars=120)
+            sanitize_text(m, max_chars=120, private_roots=roots)
             for m in (getattr(ctx, "mutated_sources", None) or [])
         ],
     }
@@ -553,7 +589,7 @@ def build_run_manifest(
             "error_count": len(list(getattr(ctx, "errors", None) or [])),
         },
         "configuration": config_to_dict() if callable(config_to_dict) else None,
-        "sources": _source_entries(ctx),
+        "sources": _source_entries(ctx, roots),
         "profiles": [
             s.to_dict() if hasattr(s, "to_dict") else {"name": str(s)}
             for s in (getattr(ctx, "profile_snapshots", None) or [])
@@ -587,7 +623,7 @@ def build_run_manifest(
         # not run, or ran on the whole-set path, which does no host grounding).
         "cross_qc_discards": dict(getattr(ctx, "cross_qc_discards", None) or {}),
         "evidence": evidence_summary(findings + reference),
-        "markup_coverage": _receipt_summary(ctx),
+        "markup_coverage": _receipt_summary(ctx, roots),
         "errors": [
             sanitize_text(e, max_chars=240, private_roots=roots)
             for e in (getattr(ctx, "errors", None) or [])
@@ -608,7 +644,10 @@ def build_run_manifest(
                 )
             except OSError as exc:
                 manifest["artifacts"].append(
-                    {"path": rel, "error": sanitize_text(exc, max_chars=120)}
+                    {
+                        "path": rel,
+                        "error": sanitize_text(exc, max_chars=120, private_roots=roots),
+                    }
                 )
     return manifest
 
@@ -645,7 +684,9 @@ def write_run_manifest(
                 "schema_version": RUN_MANIFEST_SCHEMA_VERSION,
                 "kind": "drawing_analyzer_run_manifest",
                 "error": "run_manifest could not be fully built: "
-                + sanitize_text(f"{type(exc).__name__}: {exc}", max_chars=240),
+                + sanitize_text(
+                    f"{type(exc).__name__}: {exc}", max_chars=240, private_roots=roots
+                ),
             },
             indent=2,
         )
@@ -653,13 +694,78 @@ def write_run_manifest(
     return "run_manifest.json"
 
 
+# ---------------------------------------------------------------------------
+# Windows long paths (N30). Two facts make the export folder the place this
+# bites: an artifact name may be up to _MAX_NAME_COMPONENT (120) characters, and
+# the operator picks the parent — a real one looks like
+# ``C:\Users\<name>\OneDrive - <Company>\Projects\2026\4471 - <Project>\Fire
+# Protection\QC Reviews`` before the export folder, ``sheet_text\`` and the file
+# name are appended. Past 260 characters the Windows ``W`` APIs refuse the write
+# unless the process is long-path aware AND the machine has LongPathsEnabled — a
+# registry setting off by default on many images, and not something a desktop app
+# can require of its user. The ``\\?\`` prefix bypasses the limit outright.
+#
+# It costs nothing where it is not needed: on POSIX these are identity functions,
+# so the Linux test suite and CI exercise byte-identical behaviour. The prefixed
+# form stays INTERNAL — it is used for the writes and the publish rename, and the
+# path handed back to the caller (and shown in the GUI) is always the plain one.
+# ---------------------------------------------------------------------------
+
+_WIN_LONG_PREFIX = "\\\\?\\"
+
+
+def _long_path_text(absolute: str) -> str:
+    r"""The ``\\?\`` form of an already-absolute, normalized Windows path string.
+
+    Pure string logic, split out from :func:`long_path` so it is testable off
+    Windows. ``\\?\`` disables all path normalization, so the caller must
+    normalize first — a ``..`` or a forward slash left in would become a literal
+    filename component rather than being resolved.
+    """
+    if absolute.startswith(_WIN_LONG_PREFIX) or absolute.startswith("\\\\.\\"):
+        return absolute                     # already prefixed (or a device path)
+    if absolute.startswith("\\\\"):
+        # UNC: \\server\share\… must become \\?\UNC\server\share\…
+        return _WIN_LONG_PREFIX + "UNC" + absolute[1:]
+    return _WIN_LONG_PREFIX + absolute
+
+
+def long_path(path: "Path | str") -> Path:
+    """``path`` in a form Windows will accept past MAX_PATH; unchanged elsewhere."""
+    if os.name != "nt":
+        return Path(path)
+    return Path(_long_path_text(os.path.abspath(str(path))))
+
+
+# The atomic-publish rename's retry budget (N30). Sized for a filesystem lock,
+# NOT an API rate limit: ``digest._retry_backoff_seconds`` starts at 2s, which
+# would add six seconds to a publish that is going to fail anyway, while an
+# antivirus or indexer handle on a just-written folder clears in tens of
+# milliseconds. Sleeps only BETWEEN attempts, never after the last.
+_PUBLISH_ATTEMPTS = 3
+_PUBLISH_BACKOFF_SECONDS = (0.1, 0.4)
+
+
+def _publish_backoff(attempt: int) -> None:
+    """Wait before publish retry ``attempt + 1`` (0-based); no-op on the last."""
+    if attempt < len(_PUBLISH_BACKOFF_SECONDS):
+        time.sleep(_PUBLISH_BACKOFF_SECONDS[attempt])
+
+
 def _unique_dir(path: Path) -> Path:
-    """``path`` if free, else ``path_2`` / ``path_3`` / … (collision-safe)."""
-    if not path.exists():
+    """``path`` if free, else ``path_2`` / ``path_3`` / … (collision-safe).
+
+    Probes through :func:`long_path` (N30): past MAX_PATH an unprefixed
+    ``exists()`` answers *False* for a directory that is really there, so the
+    name would be handed out as free and ``mkdir(exist_ok=False)`` would then
+    fail — or, worse on a re-run, a prior export would be written into. Returns
+    the PLAIN path either way; the prefix is an I/O detail, not an identity.
+    """
+    if not long_path(path).exists():
         return path
     for n in range(2, 1000):
         cand = path.with_name(f"{path.name}_{n}")
-        if not cand.exists():
+        if not long_path(cand).exists():
             return cand
     return path  # give up; mkdir(exist_ok=False) will raise and the caller surfaces it
 
@@ -722,13 +828,13 @@ def safe_artifact_name(
         base, tail = (text[: text.rfind(".")], text[text.rfind(".") :]) if "." in text[1:] else (text, "")
         n = 1
         candidate = text
-        while candidate in used:
+        while name_is_taken(candidate, used):
             n += 1
             suffix = f"_{n}{tail}"
             # The dedupe suffix stays WITHIN the component cap: trim the base
             # rather than overrun the invariant on a maximally-long name.
             candidate = base[: max(1, _MAX_NAME_COMPONENT - len(suffix))] + suffix
-        used.add(candidate)
+        record_name(candidate, used)
         text = candidate
     return text
 
@@ -1034,10 +1140,10 @@ def _sheet_text_name(ref: Any, used: set[str]) -> str:
     page = int(getattr(ref, "page_index", 0) or 0) + 1
     name = f"{stem}_p{page}.txt"
     n = 1
-    while name in used:
+    while name_is_taken(name, used):
         n += 1
         name = f"{stem}_p{page}_{n}.txt"
-    used.add(name)
+    record_name(name, used)
     return name
 
 
@@ -1413,7 +1519,19 @@ def write_drawing_export(
     # the partial staging directory is renamed to an explicit *_INCOMPLETE
     # label (or left as .partial if even that fails) and the error propagates.
     folder = _unique_dir(final.with_name(final.name + ".partial"))
-    folder.mkdir(parents=True, exist_ok=False)
+    # Every write below goes through the long-path form (N30). Deriving it once
+    # here covers all of them: each writer builds its targets by joining onto
+    # this folder (``folder / name``, ``contained_target(folder, …)``), and a
+    # joined path inherits the prefix. The plain ``folder`` / ``final`` are what
+    # the renames and the return value use, so no caller sees the prefixed form.
+    #
+    # The mkdir goes through it as well, and that ordering is the point: an
+    # operator-chosen parent deep enough that the export folder *itself* passes
+    # MAX_PATH would otherwise fail here, before the first prefixed write was
+    # ever reached — long-path support that starts one step too late is no
+    # long-path support at all.
+    staging = long_path(folder)
+    staging.mkdir(parents=True, exist_ok=False)
     try:
         # One sha256 per artifact per export: markup_manifest.json hashes the
         # reviewed PDFs first, run_manifest.json's whole-folder walk reuses them.
@@ -1430,29 +1548,30 @@ def write_drawing_export(
             ctx, source_names=source_names, now=now, api_key=api_key,
             embed_api_key=embed_api_key, include_chat=include_chat, pdf_links=pdf_links,
         ):
-            contained_target(folder, name).write_text(content, encoding="utf-8")
+            contained_target(staging, name).write_text(content, encoding="utf-8")
         # QC review inventory (findings.json/csv, sheet_text/, reviewed PDFs,
         # evidence/, markup_manifest.json) — only written when the run ran a QC stage.
-        write_qc_outputs(ctx, folder, hash_cache=hash_cache)
+        write_qc_outputs(ctx, staging, hash_cache=hash_cache)
         # Opt-in tile artifacts (save_tile_artifacts): staged tile PNGs + the
         # mirrored per-tile notes. Before run.log/run_manifest.json so the §18.4
         # inventory and hashes include every tile file automatically.
-        write_tile_artifacts(ctx, folder)
+        write_tile_artifacts(ctx, staging)
         # Phase 26A finalization order (§18.4): every ordinary artifact and the
         # markup manifest are on disk → finalize run.log (it lists what is
         # actually there) → write run_manifest.json last (it hashes them all,
         # run.log included, excluding only itself). Every export gets both, QC
         # or not (§18.1). The Outputs list derives from the folder itself, so
         # it cannot drift from what the manifest hashes.
-        outputs = _folder_inventory(folder)
+        outputs = _folder_inventory(staging)
         journal = getattr(ctx, "run_journal", None)
         if journal is not None and hasattr(journal, "emit"):
             journal.emit("EXPORT_WRITTEN", stage="export", files=len(outputs))
-        write_run_log(ctx, folder, outputs=outputs)
-        write_run_manifest(ctx, folder, now=now, hash_cache=hash_cache)
+        write_run_log(ctx, staging, outputs=outputs)
+        write_run_manifest(ctx, staging, now=now, hash_cache=hash_cache)
     except BaseException:
         try:
-            folder.rename(_unique_dir(final.with_name(final.name + "_INCOMPLETE")))
+            labelled = _unique_dir(final.with_name(final.name + "_INCOMPLETE"))
+            long_path(folder).rename(long_path(labelled))
         except OSError:
             pass                      # the .partial name itself is the label then
         raise
@@ -1460,18 +1579,25 @@ def write_drawing_export(
     # prediction (_unique_dir ran before the export was written), so a sibling
     # export started in the same second can win the name first — re-derive a
     # free name at publish time instead of failing a fully-written export.
-    for _ in range(3):
+    for attempt in range(_PUBLISH_ATTEMPTS):
         try:
-            folder.rename(final)
+            long_path(folder).rename(long_path(final))
             return final
         except OSError:
             fresh = _unique_dir(final)
             if fresh == final:
-                continue              # transient (AV lock, etc.) — retry same name
+                # Transient: an antivirus scan, the search indexer, or an open
+                # Explorer window on the just-written folder. Three renames
+                # issued back-to-back all land inside the same lock, so the
+                # retry only ever helped the name-collision case above; a real
+                # lock clears in tens of milliseconds (N30).
+                _publish_backoff(attempt)
+                continue              # retry the same name
             final = fresh
     try:
         final = _unique_dir(final.with_name(final.name + "_INCOMPLETE"))
-        folder.rename(final)          # publish failed: label honestly, keep content
+        # publish failed: label honestly, keep content
+        long_path(folder).rename(long_path(final))
     except OSError:
         final = folder                # the .partial name itself is the label then
     return final

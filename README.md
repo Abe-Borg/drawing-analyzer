@@ -86,9 +86,13 @@ own PC and talks only to the Anthropic API using your own API key.
 **Staying up to date.** The app checks for a newer version once a day at launch,
 and you can check any time with **Check for Updates** in the bottom-right
 corner. When an update is available it shows what's new and offers to download
-and install it — you decide when. Every download is verified against a published
-SHA-256 hash before it runs, so a corrupted or tampered installer is rejected
-automatically. (Building and publishing a release is documented in
+and install it — you decide when. Every download is verified against the SHA-256
+hash in that release's `latest.json` before it runs, so a corrupted, truncated or
+substituted **download** is rejected automatically. Be clear about what that hash
+does and does not cover: it is published in the same GitHub release as the
+installer, by the same workflow, so it protects the transfer — not the publisher.
+Trust in the *contents* of a release rests on HTTPS to github.com and on who can
+push a release to this repository, and the installer is not code-signed. (Building and publishing a release is documented in
 [`docs/RELEASE_WINDOWS.md`](docs/RELEASE_WINDOWS.md).)
 
 ## Install from source (developers)
@@ -122,11 +126,27 @@ Drop in (or browse to) PDFs, confirm the estimated cost, and the analyzer digest
 every sheet. Save the result as a **navigable HTML report** (*Save HTML Report…* —
 opens in your browser, searchable and filterable).
 
+Closing the window while a run is in flight **asks first**, and names which job it
+would discard: the worker threads are daemons and the export happens after the
+analysis returns, so a stray click on the X used to throw away an hour of work and
+the API spend behind it with no prompt at all (the help, focus and update windows
+each already confirmed on close). An idle window still closes immediately. Two
+other silent failures are gone with it: `pip install drawing-analyzer` without the
+`gui` extra now reports the missing toolkit in a dialog naming the fix instead of
+producing no window and no message — the launcher is a console-less Windows
+executable, so there was nowhere for the traceback to go — and an exception inside
+a button handler is recorded in the diagnostics log and reported, rather than
+looking like the click did nothing.
+
 > **GUI export options.** The GUI keeps the buttons a reviewer actually reaches
 > for: the **HTML report** (*Save HTML Report…*), the **marked-up PDFs** (*Save
 > Reviewed PDF(s)…*, after a QC run), and the one-click **full folder export**
 > (*Export All…*, which also writes the `run.log` / `run_manifest.json` run record
-> even for a failed run). The per-artifact *Save Markdown…* and *Save Findings
+> even for a run that analyzed nothing — every input rejected, or a preflight
+> block — because that record is the diagnostic for exactly those failures. A run
+> that *raised* is the one case it cannot cover: there is no context to export,
+> so the button stays disabled and the failure is reported in the activity log
+> and the diagnostics file instead). The per-artifact *Save Markdown…* and *Save Findings
 > CSV…* buttons were **removed from the GUI** to keep it fast and uncluttered —
 > both artifacts are still written inside the *Export All…* folder. This is a
 > **GUI-only** change: none of that functionality was deleted. The two removed
@@ -1096,6 +1116,21 @@ directory, never a final-looking one with silently missing files. In the GUI,
 **Export All…** produces this complete folder in one action (see [GUI export
 options](#gui)).
 
+Two Windows realities are handled explicitly. Name collisions are deduped
+**case-insensitively**, because `M-101` and `m-101` are one file on Windows and
+macOS and the second sheet's text (or evidence directory) would otherwise
+overwrite the first silently; the original case is still what gets written. And
+every write goes through the `\\?\` long-path form: an artifact name may be 120
+characters, the operator picks the parent directory, and a real one
+(`…\OneDrive - <Company>\Projects\2026\<job>\Fire Protection\QC Reviews\` plus
+the export folder, `sheet_text\` and the file name) passes the 260-character
+limit that applies unless the machine has `LongPathsEnabled` — off by default on
+many images. The prefixed form stays internal: the path returned to the caller
+and shown in the GUI is the plain one, and on POSIX the transform is an identity
+function. The final publish rename also **waits between retries** now, since an
+antivirus or search-indexer handle on the just-written folder does not clear
+within the same microsecond three attempts used to span.
+
 ## Run log & run manifest
 
 Every analysis run — standard, audit-only, exhaustive, even one where every
@@ -1134,6 +1169,24 @@ happen to look like Anthropic keys — plus an absolute-path scrubber *at emit t
 and identifiers — never prompts, image bytes, drawing text, long quotes, API
 keys, or your directory layout. Set `DRAWING_ANALYZER_BUILD` to stamp a
 build/commit identifier into the header.
+
+The run's **known private directories** (input parents, work dir, home) are
+additionally replaced with `...` by literal match, which is what makes a spacey
+Windows path scrub reliably — the bare regexes cannot tell where
+`C:\Users\Jane Smith\Job 4471\SET 01.pdf` ends. That match is
+case-insensitive and accepts either separator: Windows paths are
+case-insensitive, and one lowercase drive letter in an exception string used to
+be enough to leave the directory names in the file. Every renderer of both
+artifacts receives that list, not just the errors section.
+
+**The same boundary applies to the exported Markdown and the HTML report.**
+`00_index.md`, each per-sheet file and `report.html` render host-generated status
+and error strings — a rejected input's `PermissionError`, a failed API call's
+exception repr, a stage note — and those now pass through the same
+secret/path redaction. Digest prose deliberately does not: a sheet note reading
+`TOKEN: 12` at `grid C:4` is drawing content, and rewriting it to protect a
+credential that is not there would corrupt the review (I-2). Model findings are
+left alone for the same reason.
 
 ## Citation check
 
@@ -1473,6 +1526,7 @@ runs.
 | `DRAWING_ANALYZER_MAX_FILES` | `500` | Input-file count above which a run needs explicit confirmation. |
 | `DRAWING_ANALYZER_MAX_PAGE_PT` | `20000` | Largest sane page dimension (points); a larger/NaN/infinite box is treated as pathological and its page is skipped before rendering. |
 | `DRAWING_ANALYZER_EST_BYTES_PER_SHEET` | `3145728` | Per-sheet temp/output estimate for the QC-run disk preflight (evidence crops, reviewed PDFs). |
+| `DRAWING_ANALYZER_WORKDIR_MAX_AGE_HOURS` | `24` | How long a leftover `drawing_qc_*` work directory may sit in the system temp dir before a later run reaps it. These hold the high-DPI evidence crops and are created lazily by the verify / investigate / markup stages, so on a repeatedly-reviewed set they are the largest thing the tool leaves behind. Pruned on the way *in*, never at run end: `extract_drawing_context` returns before the caller exports, and the export copies the evidence out — deleting at run end would destroy the crops before anything saved them. The current run's own directory is never touched, and neither is one with anything recent anywhere inside it (a concurrent run writes crops two levels down, where the top-level mtime cannot see them). `0` disables pruning; a malformed value falls back to the default. |
 
 ## Resilient inputs
 
@@ -1622,11 +1676,45 @@ correctness-class static analysis, the dependency license/AGPL audit, and a
 pip-audit vulnerability scan with a documented dated-exception policy) and
 `build` (wheel/sdist build under the committed `requirements-release.lock`
 constraints, `twine check`, and a clean-venv install smoke test proving the
-packaged review profiles ship in the wheel and the installed version matches
-`drawing_analyzer.__version__`). Actions are pinned to immutable commit SHAs,
+profile *mechanism* works in the installed wheel — the loader tolerates the
+absent packaged directory and the parser round-trips a checklist item — and that
+the installed version matches `drawing_analyzer.__version__`). No built-in
+profiles ship: the packaged `profiles/` directory is empty by design and review
+plans are model-authored per set (Phase A), so there is nothing in the wheel for
+that smoke to find. Actions are pinned to immutable commit SHAs,
 permissions are read-only, and the workflow never uses `pull_request_target`.
 Making these checks *required* is a one-time branch-protection setting an
 owner/admin configures in repository settings.
+
+Three additions worth knowing about:
+
+- The workflow also runs on a **weekly schedule** (Monday 06:00 UTC) and on
+  `workflow_dispatch`, so the pip-audit gate catches a CVE disclosed against an
+  already-pinned dependency instead of waiting for someone to commit.
+  `.github/dependabot.yml` opens grouped weekly updates for both the SHA-pinned
+  actions and `requirements-release.lock`. The Windows installer build is
+  constrained by that lock, and the Inno Setup compiler — the one tool whose
+  output *is* the shipped artifact — has its exact version recorded in the build
+  summary and in the acceptance record. It is deliberately **not** fetched: the
+  runner image already ships it, and a build that downloads no compiler cannot be
+  served a bad package. The compatibility contract is the `Inno Setup 6`
+  directory `installer.iss` targets, not a version comparison — `ISCC.exe`
+  reports `ProductVersion 0.0.0.0`, so a floor check on it fails good compilers.
+- The browser job now writes a JUnit report and runs
+  `scripts/check_browser_suite.py` against it. Every test in that suite skips
+  itself when Chromium will not launch and pytest exits **0** on an all-skipped
+  run, so the required check was green over a suite that executed nothing —
+  measured on one commit, one environment variable apart: `98 passed` and
+  `98 skipped, 2180 deselected`, both exit 0. The guard fails the job below a
+  floor of genuinely executed tests. A skip is not a pass.
+- `release.yml`'s `publish` job now needs two tag-gated jobs in its own `needs`
+  chain: `gates` (the full `scripts/run_acceptance.py` with Chromium installed,
+  plus static analysis and the license and CVE audits) and `gates-windows` (the
+  hermetic suite on Windows). Branch protection does not apply to a tag push and
+  a tag can name any commit, so a release used to be gated only on the installer
+  *compiling*. CI also triggers on `v*` tags, but that is visibility only — a
+  separate workflow run started by the same tag is not a dependency of the
+  release workflow, so it cannot gate the publish.
 
 ## Acceptance & release gate
 

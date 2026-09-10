@@ -333,7 +333,10 @@ _HOW_TO_USE = HelpDocument(
             _bullet(
                 "Export All… — the complete review folder in one action (report, Markdown, "
                 "findings.json / findings.csv, per-sheet text, evidence, reviewed PDFs, and "
-                "the run.log / run_manifest.json record) — written even for a failed run."
+                "the run.log / run_manifest.json record) — written even for a run that "
+                "analyzed nothing, which is exactly when that record is the diagnostic. "
+                "A run that crashed outright has no context to export; the failure is in "
+                "the activity log and the diagnostics file instead."
             ),
             _bullet("Open Diagnostics Log — the detailed request-level trace, available any time."),
             _para(
@@ -1320,9 +1323,10 @@ RUNTIME_TRANSPARENCY = HelpDocument(
             "Updates, logs, and what is kept on your disk",
             _bullet(
                 "Update check — once a day at launch, plus the button in the corner. It "
-                "reads a version file from github.com and sends nothing about you or your "
-                "project. Any download is verified against a published SHA-256 hash before "
-                "it is allowed to run, and you choose when to install."
+                "reads a version file from github.com (redirected to GitHub's asset host) "
+                "and sends nothing about you or your project. Any download is verified "
+                "against the SHA-256 hash in that same release before it is allowed to "
+                "run, and you choose when to install."
             ),
             _bullet(
                 "Diagnostics log — a rotating local file, never uploaded. Every line runs "
@@ -1464,8 +1468,13 @@ RUNTIME_TRANSPARENCY = HelpDocument(
                 "anything this app reports."
             ),
             _bullet(
-                "Watch the wire: point any network monitor at it. You will see "
-                "api.anthropic.com and, once a day, github.com. Nothing else."
+                "Watch the wire: point any network monitor at it. Analysis traffic goes "
+                "to api.anthropic.com and nowhere else. The once-a-day update check adds "
+                "github.com, which redirects the version file to "
+                "release-assets.githubusercontent.com (GitHub's own asset host) — so "
+                "three names in total, and any of them can be silenced by turning "
+                "update checks off. If you see a fourth, something is wrong: measured, "
+                "not asserted."
             ),
             _bullet(
                 "Read the source: all of it, including everything described in this panel. "
@@ -1531,9 +1540,13 @@ _ABOUT = HelpDocument(
                 "in control of when to update."
             ),
             _bullet(
-                "Every downloaded update is integrity-checked against a "
-                "published SHA-256 hash before it is ever run, so a corrupted "
-                "or tampered download is rejected automatically."
+                "Every downloaded update is integrity-checked against the SHA-256 "
+                "hash published in that release before it is ever run, so a "
+                "corrupted, truncated or substituted download is rejected "
+                "automatically. What that does not do is vouch for the release "
+                "itself: the hash ships in the same release as the installer, so "
+                "it protects the transfer, and trust in the contents rests on "
+                "HTTPS to github.com and on who can publish a release."
             ),
             _bullet(
                 "The installer is not code-signed, so Windows SmartScreen may "

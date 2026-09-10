@@ -8,6 +8,192 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The exported Markdown and HTML carried API keys and private directory names
+  that run.log carefully removed.** Measured on one export folder: `00_index.md`,
+  the per-sheet Markdown and `report.html` each printed an
+  `AuthenticationError` repr verbatim — including the user's own
+  `…\Abe Borg\My Drawings\…` and the `x-api-key` header value from the failed
+  request — while `run.log` and `run_manifest.json`, sitting in the same folder,
+  were clean. The export folder is what gets emailed to a client. Host-generated
+  status and error strings in all three artifacts (plus stage notes in the
+  report's stage table) now pass through the same secret/path boundary the
+  journal uses. Digest prose does **not**: a sheet note reading `TOKEN: 12` at
+  `grid C:4` is drawing content, and redacting it would corrupt a review to
+  defend against a credential that is not there (I-2).
+
+- **A single lowercase drive letter leaked the user's home directory.** The
+  known-private-roots pass replaced each root as a literal string, and Windows
+  paths are case-insensitive with two legal separators — so a root recorded as
+  `C:\Users\Abe Borg\My Drawings` (what `Path.resolve()` produces) did not match
+  the same directory written `c:\Users\…` in an exception string. The regex
+  backstop cannot bound a path containing spaces, so the name and folder
+  structure survived into run.log and run_manifest.json. Roots are now matched
+  case-insensitively and across both separators.
+
+- **The private-roots list reached only one section of run.log.** A rejected
+  input's `PermissionError`, a per-sheet error, a stage note, the ledger tally
+  and a mutated-source name all render through the same sanitizer, and none of
+  them was given the roots — so one string was scrubbed in the Errors section and
+  printed in full two sections above it. Same for `run_manifest.json`'s `sources`
+  and `markup_coverage` blocks. Every renderer now receives them, and a
+  structural test over the module's own AST fails if a future call site omits
+  them.
+
+- **The mandatory browser exploit suite passed by skipping.** Every test in it
+  skips itself when Chromium will not launch, and pytest exits 0 on an
+  all-skipped run. Measured on one commit, one environment variable apart:
+  `98 passed` and `98 skipped, 2180 deselected` — both exit 0. The required check
+  was green over a suite that proved nothing about CSP, `file://` handling or
+  event execution. CI now writes a JUnit report and
+  `scripts/check_browser_suite.py` fails the job below a floor of genuinely
+  executed tests. A skip is not a pass.
+
+- **A release could publish an installer built from a commit whose tests were
+  red.** Branch protection does not apply to a tag push, and a tag can name any
+  commit, so `publish` needing only `build` meant the gate was "the installer
+  compiled". `publish` now needs two tag-gated jobs that run **inside its own
+  `needs` chain**: `gates` (the full `run_acceptance.py` — byte-compile, import
+  isolation, the hermetic suite, the secret scan, the browser exploit suite with
+  Chromium actually installed, and the wheel build — plus static analysis and the
+  license and CVE audits) and `gates-windows` (the hermetic suite on Windows,
+  where path length, case handling and the `\\?\` form actually apply). CI also
+  triggers on `v*` tags, but that is for visibility only: a separate workflow run
+  triggered by the same tag is **not** a dependency, so `publish` would otherwise
+  create the release while those jobs were still running — or after one failed.
+
+- **A private root matched any sibling directory sharing its prefix.** Root
+  `C:\Users\…\Job` matched `C:\Users\…\Job2\Client Secret\file.pdf`, and the
+  partial rewrite was *worse* than no match: it produced
+  `...2\Client Secret\file.pdf`, and with the drive letter eaten the generic path
+  scrub could no longer anchor the remainder to reduce it. A root match must now
+  end at a component boundary — a separator or the end of the string — and a
+  non-boundary match falls through to that backstop, which strips the drive and
+  the first component. (Inherited from the `str.replace` it grew out of, which had
+  the same prefix behaviour.)
+
+- **Long-path support started one step too late.** The `\\?\` form was applied
+  after the staging directory had already been probed and created through the
+  plain path, so an operator-chosen parent deep enough that the export folder
+  *itself* passed MAX_PATH failed before the first prefixed write was reached.
+  The uniqueness probe and the `mkdir` now go through it too — and the probe
+  matters twice over: past MAX_PATH an unprefixed `exists()` answers *False* for
+  a directory that is really there, so the name read as free and the publish
+  rename would move the new export over the old one.
+
+- **The acceptance script's browser gate could pass on an all-skipped run too.**
+  The CI job got the executed-test floor; `run_acceptance.py` — the one-command
+  release gate — still treated "Playwright is installed" as evidence the suite
+  ran. It now writes a JUnit report and applies the same floor through the same
+  script, so the release gate and the CI job cannot disagree about what "passed"
+  means.
+
+- **Quitting the GUI mid-run discarded a paid run with no prompt.** The worker
+  threads are daemons and the export happens *after* the analysis returns, so one
+  stray click on the window's X threw away an hour of work and the API spend
+  behind it — while the help, focus-popout and update windows each already
+  confirmed on close. The main window now confirms, names which job is in flight,
+  and says what quitting costs; an idle window still closes immediately.
+
+- **The app could not report that its own UI toolkit was missing.**
+  `customtkinter` is in the `gui` extra and the launcher is declared under
+  `[project.gui-scripts]`, which on Windows builds a console-less executable — so
+  `pip install drawing-analyzer` followed by `drawing-analyzer` produced *nothing
+  at all*: no window, no message, no visible exit code. The import is now guarded
+  and reports through a stdlib messagebox naming the fix
+  (`pip install "drawing-analyzer[gui]"`). It raises `ImportError`, not
+  `SystemExit`, because the frozen build's `--selfcheck` catches `Exception` and
+  `SystemExit` would sail past it and report success.
+
+- **An exception in a Tk callback looked like the click did nothing.** Tk's
+  default handler writes a traceback to `sys.stderr`, which is `None` in a
+  windowed build. `report_callback_exception` is now wired to record the failure
+  in the diagnostics trace, put a line in the activity log, and tell the user —
+  while staying non-fatal, exactly as Tk's own handler is.
+
+- **The atomic-publish retry retried three times inside the same lock.** The
+  export's final rename retried on `OSError` with no wait, so the three attempts
+  for the "an antivirus or indexer handle cleared" case all landed inside the same
+  hold; the retry only ever helped the other branch (a sibling export won the
+  name), which re-derives a name and needs no wait. A short backoff now separates
+  the attempts, sized for a filesystem lock rather than an API rate limit.
+
+- **A deep export folder could not be written on Windows.** An artifact name may
+  be 120 characters and the operator picks the parent, so a real path
+  (`…\OneDrive - <Company>\Projects\2026\<job>\Fire Protection\QC Reviews\`
+  plus the export folder, `sheet_text\` and the file name) passes 260 characters
+  and the write is refused unless the machine has `LongPathsEnabled` — off by
+  default on many images, and not something a desktop app can require. Every
+  export write and the publish rename now go through the `\\?\` form; the path
+  handed back to the caller and shown in the GUI stays plain. Identity function
+  on POSIX.
+
+- **Two artifact allocators deduped case-sensitively onto case-insensitive
+  filesystems.** `M-101` and `m-101` are one file on Windows and macOS, so the
+  second sheet's text or evidence directory silently overwrote the first. All
+  three name allocators and the evidence-directory reserver now key on
+  `casefold()` while still writing the original case.
+
+- **A run that analyzed nothing left its work directory behind forever.** The
+  zero-sheet early return skipped cleanup, and the lazily created
+  `drawing_qc_*` directories had no owner at all — evidence crops accumulated in
+  `%TEMP%` run after run. They are now age-pruned (24h, `0` disables), which the
+  end-of-run alternative cannot be: `extract_drawing_context` returns *before*
+  the caller exports, and the export copies evidence out.
+
+- **The weekly dependency audit only ran when somebody happened to commit.** The
+  pip-audit gate fired on push and pull request only, so a CVE disclosed against
+  an already-pinned dependency went unnoticed for as long as the repository was
+  quiet. CI now also runs on a weekly schedule, and `.github/dependabot.yml`
+  opens grouped weekly updates for both the SHA-pinned actions and
+  `requirements-release.lock`.
+
+- **The shipped installer was the one build that ignored the dependency lock.**
+  CI builds the wheel and runs its install smoke under
+  `requirements-release.lock`, but the release job installed the app unconstrained
+  — so the binary users run could bundle versions no gate had seen, while
+  `docs/RELEASE_ACCEPTANCE_TEMPLATE.md` carried a "Dependency lock used"
+  checkbox saying otherwise. The installer build is now constrained by the lock.
+
+- **Inno Setup — the one tool whose output *is* the shipped artifact — had no
+  version recorded.** Two obvious fixes were both wrong, and CI said so:
+  a pinned `choco install innosetup --version=6.2.2` fails outright, because the
+  `windows-latest` image already ships Inno Setup (6.7.1 as of 2026-09) and
+  Chocolatey refuses to downgrade (`0/1 packages`); and a floor comparison then
+  failed on a *perfectly good* compiler, because `ISCC.exe` does not stamp its
+  own version — its `ProductVersion` resource reads `0.0.0.0`. What ships is the
+  version those attempts were groping for: the compiler comes from the runner
+  image and is never downloaded (a build that fetches no compiler cannot be
+  served a bad package — no feed, no checksum to trust), the compatibility
+  contract is the `Inno Setup 6\ISCC.exe` directory that `installer.iss` targets,
+  and the exact version is **recorded** — read from the file resources or the
+  install registry, printed, written to the build summary, and given a row in
+  `docs/RELEASE_ACCEPTANCE_TEMPLATE.md`. Reading it is reporting, so it can never
+  fail the job: an unreadable version logs as `unknown`. The pinned install
+  survives only as the fallback for an image that stops shipping one, and the
+  path is resolved once and handed to the compile step so no second hardcoded
+  copy can bypass it.
+
+- **Five documentation claims a skeptical reader could disprove.** Each was
+  checked against the code or the wire and corrected: the CI smoke test proves the
+  profile *mechanism*, not that packaged profiles ship (none do, by design);
+  "written even for a failed run" holds for a run that analyzed nothing but not
+  for one that crashed (there is no context to export); the update check contacts
+  `release-assets.githubusercontent.com` as well as `github.com`, so "nothing
+  else" named two hosts out of three; `verify.py` documented an
+  `evidence/<finding_id>.png` layout that has been
+  `evidence/<QC-###>/leg-NN__<sheet>_pN.png` since per-leg crops arrived; and the
+  updater's SHA-256 ships in the same release as the installer, so it protects
+  the transfer, not the publisher — the README, the in-app help and the Windows
+  acceptance script now say so rather than implying tamper-proofing.
+
+- **The NFPA 13 example did not say which edition it was written against.**
+  `docs/examples/fire_protection.md` cites 2022 section numbers; the current
+  edition is 2025 and NFPA 13 renumbers between editions (the 2019 reorganization
+  is why one of its own checks exists). The title and a prominent note now state
+  the edition and that the citations have **not** been re-verified against 2025.
+  No section number was changed — renumbering on unverified numbers is the exact
+  error the checklist exists to catch.
+
 - **A real finding that began "No…" was thrown away as boilerplate.** The prose
   harvest's section-filler filter was anchored only at the *start* of an item, so
   "None of the sprinkler heads under the duct have clearance shown" was discarded

@@ -43,6 +43,29 @@ class SheetRef:
         return (self.source_id or self.source_name, self.page_index)
 
 
+def name_is_taken(candidate: str, used: "set[str]") -> bool:
+    """Whether ``candidate`` collides with an already-allocated output name.
+
+    Compared **case-insensitively** (P9 item 45). Windows and macOS filesystems
+    are case-insensitive, so two names a case-sensitive allocator considers
+    distinct are the same file on disk and the second write silently destroys the
+    first. Measured: a set containing ``M-101.pdf`` and ``m-101.pdf`` allocated
+    ``M_101_p1.txt`` and ``m_101_p1.txt`` — two names, one file, one surviving
+    sheet of extracted text.
+
+    ``used`` therefore holds **casefolded** keys; add to it with
+    :func:`record_name` rather than ``used.add`` so the two cannot diverge. The
+    returned/created name keeps its original case — only the collision test is
+    folded, so filenames still read the way the drawing set spells them.
+    """
+    return candidate.casefold() in used
+
+
+def record_name(candidate: str, used: "set[str]") -> None:
+    """Record ``candidate`` as allocated, keyed for :func:`name_is_taken`."""
+    used.add(candidate.casefold())
+
+
 def source_page_key(obj: Any) -> tuple[str, int]:
     """The collision-safe ``(source, page_index)`` key for any source-scoped object.
 

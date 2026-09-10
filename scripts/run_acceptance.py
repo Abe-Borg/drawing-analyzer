@@ -15,7 +15,9 @@ Gates (in order):
   2. import isolation    pytest -m "not network" tests/test_import_isolation.py
   3. hermetic suite      pytest -m "not network"  (incl. §19.1/§19.2 gauntlet)
   4. secret scan         scripts/scan_secrets.py                 (§19.8)
-  5. browser security    pytest -m "(browser) and not network"
+  5. browser security    pytest -m "(browser) and not network", then
+                         scripts/check_browser_suite.py on its JUnit report —
+                         an all-skipped run exits 0 and is NOT a pass
                          (SKIP if Playwright absent)
   6. build + install     wheel/sdist build, clean-venv install, import +
                          packaged-profiles smoke  (SKIP with --fast)
@@ -102,14 +104,32 @@ def gate_secret_scan() -> str:
 
 
 def gate_browser_security() -> str:
+    """The report exploit suite — and proof that it actually ran (P9 item 42).
+
+    Every test in that suite skips itself when Chromium will not launch, and
+    pytest exits **0** on an all-skipped run: measured on one commit, one
+    environment variable apart, ``98 passed`` and ``98 skipped, 2180
+    deselected``, both exit 0. Playwright being *installed* is therefore not
+    evidence the gate ran, so this reads the JUnit report and applies the same
+    executed-test floor CI does — one rule, one implementation
+    (``scripts/check_browser_suite.py``), so the release gate and the CI job
+    cannot disagree about what "passed" means.
+    """
     if importlib.util.find_spec("playwright") is None:
         return "SKIP (playwright not installed; pip install -e '.[browsertest]' " \
                "&& python -m playwright install chromium)"
-    # Selection is unchanged in practice: no test carries both markers, so
-    # ``(browser) and not network`` collects exactly what ``browser`` did. The
-    # deselection rides along so the property holds for every gate uniformly.
-    rc = _run(_pytest_cmd(select="browser"))
-    return "PASS" if rc == 0 else "FAIL"
+    with tempfile.TemporaryDirectory(prefix="da-browser-") as tmp:
+        report = Path(tmp) / "browser-results.xml"
+        # Selection is unchanged in practice: no test carries both markers, so
+        # ``(browser) and not network`` collects exactly what ``browser`` did. The
+        # deselection rides along so the property holds for every gate uniformly.
+        rc = _run(_pytest_cmd(select="browser") + [f"--junitxml={report}"])
+        if rc != 0:
+            return "FAIL"
+        checker = REPO_ROOT / "scripts" / "check_browser_suite.py"
+        if _run([sys.executable, str(checker), str(report)]) != 0:
+            return "FAIL (the suite skipped itself — a skip is not a pass)"
+    return "PASS"
 
 
 def gate_build_and_install_smoke() -> str:

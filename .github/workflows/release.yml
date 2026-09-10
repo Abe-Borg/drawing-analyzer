@@ -26,6 +26,13 @@
 #     holds a write-capable token.
 #   * Only the `publish` job has `contents: write`, it is gated to tag refs, and
 #     it runs NO repo code — it just downloads the built artifact and calls `gh`.
+#   * `publish` also needs the tag-gated `gates` and `gates-windows` jobs
+#     (P9 item 42), so a release cannot be published from a commit whose full
+#     automated gate set — Linux and Windows suites, import isolation, secret
+#     scan, browser exploit suite, wheel build, static analysis, license and CVE
+#     audits — has not passed on that exact commit. They run here rather than
+#     being inherited from ci.yml: ci.yml triggers on `v*` tags too, but a
+#     separate workflow run is not a dependency of this one.
 #   * Third-party actions are pinned to immutable commit SHAs (the trailing
 #     comment is the human-readable version).
 #
@@ -62,6 +69,10 @@ jobs:
     # and imports the package). No write token is ever exposed to it.
     permissions:
       contents: read
+    env:
+      # The Inno Setup version to install if the runner image ever stops
+      # shipping one. Only a fallback pin — not a floor; see the resolve step.
+      INNO_SETUP_FALLBACK: "6.2.2"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -98,7 +109,13 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[gui]"
+          # Constrained by requirements-release.lock (P9 item 41). ci.yml already
+          # builds the wheel and runs the clean-install smoke under this lock; the
+          # installer that actually ships was the one build that ignored it, so the
+          # shipped binary could bundle dependency versions no gate had ever seen —
+          # while docs/RELEASE_ACCEPTANCE_TEMPLATE.md carried a "Dependency lock
+          # used" checkbox saying otherwise. The lock is the point of the file.
+          pip install -c requirements-release.lock -e ".[gui]"
           pip install "pyinstaller==6.11.1"
 
       - name: Build one-folder app (PyInstaller)
@@ -117,15 +134,85 @@ jobs:
             exit 1
           }
 
-      - name: Install Inno Setup
+      - name: Resolve Inno Setup compiler
+        id: iscc
         shell: pwsh
-        run: choco install innosetup --no-progress -y
-
-      - name: Compile installer (Inno Setup)
-        shell: pwsh
+        # P9 item 41. The goal is the one tool in this pipeline whose output IS
+        # the shipped artifact, and which had no version recorded anywhere.
+        #
+        # Two things were learned the hard way, both from CI:
+        #
+        #  1. A pinned `choco install innosetup --version=…` cannot work here.
+        #     The windows-latest image already ships Inno Setup (6.7.1 as of
+        #     2026-09), so pinning an older version asks Chocolatey to downgrade
+        #     and it refuses outright — "A newer version of InnoSetup (v6.7.1) is
+        #     already installed", 0/1 packages, job failed. Using the compiler the
+        #     image provides is also the stronger supply-chain posture rather than
+        #     a concession: a build that downloads no compiler cannot be served a
+        #     bad package, so there is no feed, no download and no checksum to
+        #     trust. The pinned install survives only as the fallback for an image
+        #     that stops shipping one, where nothing preinstalled can conflict
+        #     with it; `--require-checksums` refuses a package whose checksum the
+        #     feed does not publish.
+        #
+        #  2. `ISCC.exe` does not stamp its own version: its `ProductVersion`
+        #     resource reads **0.0.0.0**. A floor comparison against that number
+        #     failed the build on a compiler that was perfectly good. So the
+        #     compatibility contract is the DIRECTORY — `Inno Setup 6\ISCC.exe`,
+        #     which is what `installer.iss` targets and what a regression to
+        #     Inno Setup 5 would not satisfy — and the exact version is *recorded*
+        #     rather than gated. Reading it is reporting, so it is wrapped and can
+        #     never fail the job: an unreadable version is logged as "unknown",
+        #     not treated as a release blocker.
         run: |
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          & "$iscc" /DMyAppVersion=${{ steps.ver.outputs.version }} packaging\windows\installer.iss
+          if (-not (Test-Path -LiteralPath $iscc)) {
+            Write-Host "Inno Setup 6 is not on this image; installing the pinned fallback."
+            choco install innosetup --version=$env:INNO_SETUP_FALLBACK --no-progress --require-checksums -y
+          }
+          if (-not (Test-Path -LiteralPath $iscc)) {
+            Write-Error "Inno Setup 6 compiler not found at $iscc"
+            exit 1
+          }
+          $version = "unknown"
+          try {
+            $info = (Get-Item -LiteralPath $iscc).VersionInfo
+            foreach ($candidate in @($info.FileVersion, $info.ProductVersion)) {
+              $found = [regex]::Match([string]$candidate, '\d+(\.\d+){1,3}')
+              # ISCC.exe reports 0.0.0.0 in at least one of these fields, so a
+              # zero major means "not stamped", not "version zero".
+              if ($found.Success -and ([version]$found.Value).Major -gt 0) {
+                $version = $found.Value
+                break
+              }
+            }
+            if ($version -eq "unknown") {
+              foreach ($key in @(
+                "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Inno Setup 6_is1",
+                "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Inno Setup 6_is1"
+              )) {
+                $displayed = (Get-ItemProperty -Path $key -Name DisplayVersion -ErrorAction SilentlyContinue).DisplayVersion
+                if ($displayed) { $version = [string]$displayed; break }
+              }
+            }
+          } catch {
+            Write-Host "could not read the Inno Setup version: $_"
+          }
+          Write-Host "Inno Setup compiler: $iscc"
+          Write-Host "Inno Setup version : $version"
+          "Installer compiled by Inno Setup $version" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "path=$iscc" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Compile installer (Inno Setup ${{ steps.iscc.outputs.version }})
+        shell: pwsh
+        # The compiler path comes from the resolve step above — one definition,
+        # so the two cannot drift — and travels through the environment rather
+        # than being interpolated into the command line.
+        env:
+          ISCC: ${{ steps.iscc.outputs.path }}
+        run: |
+          & "$env:ISCC" /DMyAppVersion=${{ steps.ver.outputs.version }} packaging\windows\installer.iss
 
       - name: Generate update manifest (latest.json)
         shell: pwsh
@@ -150,9 +237,86 @@ jobs:
             dist/installer/latest.json
           if-no-files-found: error
 
+  gates:
+    # The release gates, on the tagged commit itself (P9 item 42). ci.yml is
+    # required in branch protection, but branch protection does not apply to a
+    # tag push, and a tag can name any commit — so before this, `publish` needed
+    # only that the installer *compiled*. A tag pointing at a commit with a
+    # failing suite published an installer built from it.
+    #
+    # Every release-critical check runs INSIDE the needs chain (Codex review).
+    # ci.yml also triggers on `v*` tags, but starting a second workflow for the
+    # same tag does not make it a dependency of this one: `publish` would happily
+    # create the release while those jobs were still running, or after one had
+    # failed. So this job runs the full `run_acceptance.py` — no `--fast` — with
+    # Playwright and Chromium installed so the browser exploit suite genuinely
+    # executes rather than skipping itself, plus the three §19.8 audits the
+    # acceptance script does not own (static analysis, licenses, CVEs).
+    name: Release gates (full automated suite)
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.11"
+      - name: Install (engine + dev + browser test + build tooling)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,browsertest]"
+          pip install "build==1.4.0"
+      - name: Install Chromium (so the browser gate cannot skip itself)
+        run: python -m playwright install --with-deps chromium
+      - name: Phase 27 release gates (all of them)
+        run: python scripts/run_acceptance.py
+      - name: Static analysis (correctness classes only — no style churn)
+        run: |
+          pip install "ruff==0.14.5"
+          ruff check --select E9,F63,F7,F82 src tests scripts
+      - name: Dependency license / AGPL-notice audit
+        run: |
+          pip install -c requirements-release.lock ".[dev]"
+          python scripts/check_licenses.py
+      - name: Dependency vulnerability audit (pip-audit)
+        run: |
+          pip install "pip-audit==2.9.0"
+          pip-audit --skip-editable
+
+  gates-windows:
+    # The Windows leg of the hermetic suite, in the needs chain for the same
+    # reason. It is not redundant with `gates`: this app ships as a Windows
+    # desktop binary and a good deal of its behaviour is Windows-only — path
+    # length and case handling, the `\\?\` long-path form, `os.utime` support,
+    # Credential Manager key storage. A release must not publish past a red
+    # Windows suite.
+    name: Release gates (hermetic suite, windows)
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.11"
+      - name: Install (engine + dev)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: PyMuPDF import isolation (I-5)
+        run: python -m pytest -q -m "not network" tests/test_import_isolation.py
+      - name: Hermetic test suite
+        run: python -m pytest -q -m "not network"
+
   publish:
     name: Publish GitHub Release
-    needs: build
+    needs: [build, gates, gates-windows]
     # Tag refs only. This job runs NO repo-controlled code — it downloads the
     # already-built artifact and calls `gh` — so holding a write token here does
     # not expose the repo to PR-supplied build steps.

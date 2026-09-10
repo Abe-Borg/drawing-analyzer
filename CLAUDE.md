@@ -11,6 +11,7 @@ python -m pytest tests/test_drawing_ledger.py                # one file
 python -m pytest tests/test_drawing_ledger.py::test_name     # one test
 drawing-analyzer             # launch the GUI   (or: python -m drawing_analyzer)
 python scripts/run_acceptance.py   # Phase 27 release gates (PASS/FAIL; hermetic — never the canary)
+python scripts/check_browser_suite.py browser-results.xml   # P9 item 42: a skip is not a pass
 python scripts/measure_evidence_coverage.py --pdf SET.pdf   # WP-02 §7.1 coverage scan (zero API calls)
 ```
 
@@ -135,6 +136,27 @@ assumed vector — vector is the cheaper target, so guessing it quotes low on
 exactly the pages least understood — and an unmeasurable page is still quoted,
 never silently dropped.
 
+**Work-dir hygiene (P9 item 46).** The verify, investigate and markup stages each
+create a `drawing_qc_*` temp directory when the caller supplied no `work_dir`, and
+nothing removed them — they hold the high-DPI evidence crops, so a repeatedly
+reviewed set leaks the largest artifact the tool produces into `%TEMP%`.
+`pipeline._prune_stale_work_dirs(keep=…)` reaps them on the way **in**
+(`DRAWING_ANALYZER_WORKDIR_MAX_AGE_HOURS`, default 24, `0` disables, resolved at
+call time). Pruning at run *end* is not an option: `extract_drawing_context`
+returns before the caller exports and the export *copies* evidence out (DA-033),
+so it would destroy the crops before anything saved them. Age is judged by
+`_tree_is_recent`, not the directory's own mtime: a directory's mtime moves only
+when an entry is added directly in it, and crops land in
+`evidence/<QC-###>/<leg>.png` — measured, a work dir whose crop was written **0
+seconds ago** but whose own mtime was 40 hours old was pruned out from under a
+live run, and a run can outlive the prune age (the batch bound alone is 24h). Both
+checks are needed: an empty young dir has nothing inside to date. Every
+uncertainty fails **safe** (keep, never delete) — an unreadable entry, an
+unscannable directory, an exhausted scan budget — because keeping a stale
+directory costs disk and deleting a live one costs a paid run's evidence. The
+zero-sheet early return cleans up the dir it created, in the byte-identical form
+its `block_reason` twin uses.
+
 **Run journal & manifests (Phase 26A, §18.1–18.4).** Every run owns a
 `RunJournal` (`ctx.run_journal`, `run_journal.py`): an append-only, thread-safe
 event trace whose every field is **sanitized at emit time** (shared Phase 17
@@ -147,6 +169,26 @@ and `ctx.prose_accounting` are retained for the manifests. Every export gets
 of every artifact), written **last** in the §18.4 non-circular order (artifacts
 → markup manifest → run.log → run manifest, which excludes only itself). Usage
 `stage_instance` labels are portable (`digest:SRC-0001:p0`, never a path).
+`private_roots` is matched **case-insensitively, across both separators, and only
+to a component boundary** (`_private_root_re`, cached per root): Windows paths are case-insensitive with two
+legal separators, so a literal `str.replace` matched only the registered spelling
+and one lowercase drive letter left `Abe Borg\My Drawings` in the file — the
+regex path scrubber cannot bound a path containing spaces. The boundary
+(`(?=[\\/]|$)`) is what stops a root matching a *sibling* whose name merely
+starts with it: `…\Job` matched `…\Job2\Client Secret\…` and the partial
+rewrite was worse than none, since eating the drive letter left the backstop
+nothing to anchor on. And **every** renderer
+of both artifacts is handed that list, not just the errors section (it was only
+the errors section, so one string was scrubbed two sections below where it printed
+in full); `test_run_journal.py` asserts that structurally over the module's AST,
+because an assertion about today's call sites cannot see tomorrow's.
+`redact_for_display` is the same boundary minus flattening and truncation, for
+artifacts that render a block rather than a line: the exported Markdown
+(`00_index.md`, per-sheet files) and `report.html` printed host error strings
+verbatim — measured, an `AuthenticationError` repr put both the user's directory
+names and an `x-api-key` value into all three while run.log beside them was
+clean. Host status/error text only: digest prose (I-2) and model findings are
+never routed through it, because `TOKEN: 12` on a sheet is drawing content.
 
 **Text extraction excludes annotations (P7 item 28).** `page.get_text()` folds
 annotation text in, so a re-reviewed set fed its own prior QC callouts back as
@@ -244,6 +286,37 @@ and the progress line carries elapsed minutes. Every abandoned batch appends a
 — so §15.6 sees every attempt while the image-token estimate still counts only
 response-bearing ones. Each slot records `served_by`, so the collect log names
 both the submitted batch and the one that actually served the digests.
+
+**CI gates (P9 item 42).** `pytest -m browser` writes a JUnit report and
+`scripts/check_browser_suite.py` fails the job below a floor of genuinely
+*executed* tests. Every test in that suite skips itself when Chromium will not
+launch and pytest exits **0** on an all-skipped run: measured on one commit, one
+environment variable apart, `98 passed` and `98 skipped, 2180 deselected`, both
+exit 0 — a green required check over a suite that proved nothing about CSP,
+`file://` handling or event execution. Failures count as executed (the body ran);
+skips and setup errors do not. The same floor is applied inside
+`run_acceptance.py`'s own browser gate, through the same script — the release
+gate and the CI job must not disagree about what "passed" means.
+`release.yml`'s `publish` needs two tag-gated jobs in its own `needs` chain —
+`gates` (the full `run_acceptance.py`, Chromium installed, plus ruff/licenses/
+pip-audit) and `gates-windows` (the hermetic suite on Windows) — because branch
+protection does not apply to a tag push, a tag can name any commit, and a second
+workflow run triggered by that tag is **not** a dependency of this one. `ci.yml`
+triggers on `v*` tags for visibility only.
+
+**GUI lifecycle (P9 items 47/N32).** `gui.py` is a console-less entry point
+(`[project.gui-scripts]` on Windows, and the frozen build is windowed), so
+anything written to stdout/stderr is invisible: the `customtkinter` import is
+guarded and reports through a stdlib `messagebox` naming the fix, raising
+**ImportError** and not `SystemExit` (`app_entry.py`'s `--selfcheck` catches
+`Exception`, and `SystemExit` would sail past it and report success). The main
+window wires `WM_DELETE_WINDOW` → `_on_close_request` (the workers are daemons and
+the export runs *after* the analysis returns, so closing mid-run discarded a paid
+run with no prompt, while all three secondary windows already confirmed) and
+`report_callback_exception` → `_on_callback_exception` (Tk's default handler
+prints to the stderr that does not exist). Both reporters swallow every failure of
+their own channels: a broken dialog must not trap the user in the window, and the
+reporter of last resort must never raise from inside Tk's handler.
 
 **QC stack** (each stage optional and independently cached):
 
@@ -612,6 +685,29 @@ editor and diff, and a test fails if one reappears.
   (`tile_artifacts.py`) and exports a `tiles/` folder with mirrored per-tile
   notes; it bypasses the level-1 render skip so tiles exist on warm runs, while
   the level-2 (PNG-keyed) cache still serves the digests with zero API calls.
+
+**Export filesystem contract (`export.py`, P9).** Every write inside the atomic
+publish goes through `long_path(folder)`, derived **once** in
+`write_drawing_export`: each writer builds its targets by joining onto that
+folder, so a joined path inherits the `\\?\` prefix and the ~18 write sites need
+no individual treatment. `_long_path_text` is the pure string transform (UNC
+becomes `\\?\UNC\…`, never a bare prefix; idempotent; device paths untouched) and
+`long_path` is the os-gated wrapper — an **identity function** off Windows, which
+is why the Linux suite exercises byte-identical behaviour and the Windows CI leg
+exercises the prefixed form end to end. `_unique_dir` probes and `mkdir` creates
+through it as well, and that ordering is load-bearing twice: a parent deep enough
+that the export folder *itself* passes MAX_PATH would otherwise fail before the
+first prefixed write, and past MAX_PATH an unprefixed `exists()` answers *False*
+for a directory that is really there — so the name reads as free and the publish
+rename moves the new export over the old one. The prefixed form is internal: the path
+returned to the caller (and shown in the GUI, and passed to `os.startfile`) is
+always plain. Name dedupe is `casefold()`-keyed at all four allocators
+(`models.name_is_taken` / `record_name`) because `M-101` and `m-101` are one file
+on Windows and macOS; the original case is still written. The publish rename's
+retry loop **waits** between attempts (`_publish_backoff`, 0.1s/0.4s) — sized for
+a filesystem lock, not an API rate limit, so deliberately not
+`digest._retry_backoff_seconds` (2s/4s/8s), and it never sleeps after the last
+attempt.
 
 **HTML report (`html_report.py`).** `_finding_display_status` folds anchor +
 verification into one chip, and keeps `UNCERTAIN` ("a verifier looked and could
