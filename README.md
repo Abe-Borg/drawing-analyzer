@@ -595,7 +595,10 @@ sameness with compatible critical signatures (a shared tile or overlapping
 rectangle alone never merges — see [the ledger](#the-findings-ledger-part-iii)).
 The digest's findings and the merged critique's then pool into one per-sheet set
 before anchoring — an issue the digest *and* the critique independently raised is
-also marked reproduced. A long review-profile checklist is sent **identically** to
+also marked reproduced. The [ledger](#the-findings-ledger-part-iii) applies the
+same rule when it merges across channels, and raises `confidence` with it: an
+entry can never read "corroborated by two channels" and "only one of the two
+reads saw it" at the same time. A long review-profile checklist is sent **identically** to
 both reads (never split across them), so the two stay directly comparable.
 
 The merged critique is cached under its own key, so a re-run skips the extra
@@ -1156,17 +1159,35 @@ blocks the merge even when the prose is similar (`500 gpm` vs `550 gpm`, `M-101`
 `M-102`, `shown` vs `not shown`, or a different cross-sheet leg). A merge keeps
 **coherent grounding**: the survivor's text and quote come from one member as an
 atomic bundle — never one finding's text paired with another's quote — while the
-loser's quote is kept as a supporting quote. It unions the provenance, keeps the
-most severe severity, and preserves the best anchor/verification either member
-carries (an auditor's pre-anchored `DETERMINISTIC` duplicate *upgrades* a model
-entry). Multi-source provenance doubles as a confidence signal, shown as chips in
-the report rows and the markup popups (`prose+json+critique×2`).
+loser's quote is kept as a supporting quote. The **verdict rides that bundle**,
+for the same reason the rectangle does: `DETERMINISTIC` means "a host computed
+this result from *this* quote", so it is only ever true of the text the host
+computed. A member the auditors produced therefore wins the representative
+outright — provenance outranks quote length, and the auditor normally holds the
+*shorter* quote, because it quotes only the term it computed over while the model
+quotes a whole schedule line. An auditor's pre-anchored `DETERMINISTIC` duplicate
+still *upgrades* a model entry; what no longer happens is the reverse, where the
+model's phrasing of the same issue inherited the host's label. A survivor's exact
+rectangle is likewise never erased by an unanchored member. The merge unions the
+provenance, keeps the most severe severity, and — when the merged provenance
+spans two source *families* — marks the entry corroborated, raising **both**
+`reproduced` and `confidence` so the two can never disagree. Multi-source
+provenance doubles as a confidence signal, shown as chips in the report rows and
+the markup popups (`prose+json+critique×2`).
 
 The ledger runs an explicit lifecycle: it **ingests** while open, **seals**, then
 **anchors** every finding, folds any duplicate the ingest pass couldn't see without
 geometry, and only then assigns the sequential **`QC-###`** numbers — so they follow
 visual order (source input order → page → top-to-bottom). Numbering strictly after
 anchoring is what makes the numbers positional.
+
+A finding that arrives *after* the seal is an orchestration failure, and the
+ledger treats it as one whether or not it duplicates an existing entry. It is
+counted, logged, and the run is marked **incomplete** — never numbered as
+ordinary output. A post-seal *duplicate* is additionally **dropped** rather than
+merged: a `QC-###` is a promise about specific content, and by then that number
+may already be exported, inked on a reviewed PDF, and the name of an evidence
+directory. The run still ships (I-3); it just says so.
 
 **Source-tag glossary** (`Finding.sources`):
 
@@ -1271,7 +1292,11 @@ independently carries every operand; when the operands were merely transcribed b
 the model — the common case for a column sum whose addends live in a table — the
 mismatch is left **`UNCERTAIN`** and sent to the crop verifier before it inks as
 ground truth. The popup states which ("host-computed from model-transcribed
-terms"). The match tolerance is relative (magnitude-aware), so a small-value error
+terms"), and it keeps saying so **after** the crop check: verification and the
+investigation loop replace the verdict, never the provenance behind it. A
+`VERIFIED` crop means a verifier looked at the drawing — it does not turn numbers
+the model transcribed into numbers the sheet printed, and the caveat a reviewer
+reads must not quietly become "AI-verified against the drawing". The match tolerance is relative (magnitude-aware), so a small-value error
 like `0.2 + 0.2` printed as `0.5` is caught rather than swallowed by a fixed slack.
 
 ## Per-run focus

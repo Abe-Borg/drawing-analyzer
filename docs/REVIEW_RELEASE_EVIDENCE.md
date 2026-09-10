@@ -181,6 +181,17 @@ Digest and critique caches were not touched by the evidence work; no
 indiscriminate schema bump was used. Dense cross-QC cases keep their existing
 budget degradation and cache ineligibility.
 
+### The corrective-fix packages (post-WP)
+
+Recorded here per the standing one-mechanism rule, so that a maintainer reading
+`digest_cache._SCHEMA_VERSION` can date each step of it.
+
+| package | mechanism | what is discarded |
+|---|---|---|
+| P1 — status honesty | **none** | nothing. No key input, stored shape or model-visible string moved. |
+| P2 — truncation | `digest_cache._SCHEMA_VERSION` **8 → 9** | every `DigestCache` entry (digest, critique, identity, review plan, citation, investigation), once. The entry stores the *post-parse* product, so entries written under the old fence scanner cannot be re-derived in place — the v6 parser rebuild is the precedent. The `SHARED_USER_FRAMING_STRINGS` prompt-hash change rides that same bump: two changes, one cold run, not two mechanisms for one change. |
+| P3 — ledger truth | **none** | nothing. The ledger merge runs *after* the critique stage and its output is never cached (`critique_cache_key` stores the critique's own merged result, written before a `Ledger` exists), so a warm run replays the same findings through the corrected merge. Item 24 carries provenance forward from the finding's existing verdict rather than from storage, exactly as `investigate.py` does, so the verify stage's three-key payload is unchanged. Confirmed by `benchmark_drawing_analyzer.py --check`: `standard-warm` still makes 0 digest calls and 0 renders, `one-source-changed` still exactly 1. |
+
 ---
 
 ## 5. Measured results carried forward
