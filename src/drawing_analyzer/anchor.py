@@ -28,6 +28,7 @@ dependency-free tile geometry, so it is unit-testable without PyMuPDF.
 """
 from __future__ import annotations
 
+import math
 import re
 import unicodedata
 from collections import Counter
@@ -51,6 +52,10 @@ _FUZZY_WINDOW_MIN_OVERLAP = 0.85
 _FUZZY_MIN_SUBPHRASE_TOKENS = 3
 # Cap the sub-phrase search length so a pathological quote can't blow up cost.
 _FUZZY_MAX_SUBPHRASE_TOKENS = 8
+
+# A token that carries a digit is a *measurement* for veto purposes (P7 item 30):
+# ``6``, ``1/2"``, ``12'-6"``, ``101``, ``30%``.
+_DIGIT_RE = re.compile(r"\d")
 
 # Character folding applied (after NFKC) before matching, so the model's quote
 # and the extracted words compare equal despite cosmetic differences: Unicode
@@ -238,6 +243,97 @@ def _try_exact(
     return Anchor(status="EXACT", rect_pdf=_padded(rect, w, h), method=method)
 
 
+def _numeric_tokens(tokens: "Iterable[str]") -> Counter:
+    """The multiset of digit-bearing tokens in ``tokens``."""
+    return Counter(tok for tok in tokens if _DIGIT_RE.search(tok))
+
+
+def _numbers_agree(query: list[str], span: list[str]) -> bool:
+    """Whether quote and span carry the **same** measurements (multiset, both ways).
+
+    Part of the **numeric veto** (P7 item 30). Fuzzy matching scores bag-of-token
+    overlap, which is blind to exactly the substitution that matters most on a
+    drawing: swap one digit and the score barely moves. Measured on
+    ``PROVIDE 6 INCH DRAIN AT COLUMN LINE 4``, every one-number substitution
+    tried — ``4``, ``12``, ``2-1/2``, and a changed column line — cleared the 0.85
+    floor at 6/7 = 0.857 and clouded onto the real text, while a wholly invented
+    sentence correctly went UNANCHORED. The hallucination signal was blind
+    precisely where a wrong number is least cosmetic: a fire-sprinkler drain size
+    clouded onto a sheet that says something else.
+
+    Counted as a **multiset**, not by set membership: quoting
+    ``PROVIDE 4 INCH DRAIN AT COLUMN LINE 4`` against a sheet reading
+    ``... 6 INCH ... LINE 4`` needs two ``4``s while the span has one, and
+    membership sees a ``4`` and waves it through.
+
+    This is the veto for the **sub-phrase** path, where the matched span is the
+    slice verbatim, so the failure mode is not a substitution but *dropping*: a
+    3–8 token sub-phrase that omits the measurement anchors a numeric claim to
+    text that never carried the number. The sliding-window path needs a
+    positional rule instead — see :func:`_numbers_aligned`.
+
+    A quote carrying no digits is unaffected — prose findings anchor exactly as
+    before.
+    """
+    return _numeric_tokens(query) == _numeric_tokens(span)
+
+
+def _numbers_aligned(query: list[str], span: list[str], slack: int) -> bool:
+    """Whether each measurement sits at its **own position** in the span.
+
+    The other half of the veto, and the half that actually closes the hole.
+    Multiset agreement alone is satisfied by a *sliding* window: dropping
+    ``PROVIDE`` from the front let the window pick up the trailing ``4`` of
+    ``COLUMN LINE 4`` — the quote's ``4`` was "found", playing a different role,
+    on text still reading ``6 INCH`` — and sliding one further borrowed it from
+    the *next line of the sheet* while shedding the unexplained ``6``. Presence
+    anywhere in the span is not evidence; presence where the quote puts it is.
+
+    ``slack`` bounds the positional drift, because a fuzzy window is the same
+    length as the query and drift can only come from a token the overlap floor
+    already permits to differ. The caller derives it from that floor rather than
+    picking a constant, so the two can never disagree.
+
+    Each span position is **consumed once**, so a repeated measurement needs a
+    distinct occurrence per mention: a drawing note reading ``4 4-INCH DRAINS``
+    against a sheet reading ``4 6-INCH DRAINS`` cannot satisfy both of the
+    quote's ``4``s from the sheet's single one. Presence anywhere in the window is
+    not evidence; presence where the quote puts it, once per claim, is.
+
+    This makes the positional rule the whole veto for the window path — it
+    subsumes the multiset check there, which would otherwise also refuse a
+    legitimate match whose *non*-numeric garbled token happens to sit where the
+    sheet carries an unrelated number (``…AND XXX`` against ``…AND 100``, whose
+    own ``500`` is correctly located).
+    """
+    if slack < 0:
+        slack = 0
+    used: set[int] = set()
+    for i, token in enumerate(query):
+        if not _DIGIT_RE.search(token):
+            continue
+        lo = max(0, i - slack)
+        hi = min(len(span), i + slack + 1)
+        for j in range(lo, hi):
+            if j not in used and span[j] == token:
+                used.add(j)
+                break
+        else:
+            return False
+    return True
+
+
+def _fuzzy_window_slack(m: int) -> int:
+    """How far a measurement may drift inside a fuzzy window of ``m`` tokens.
+
+    At most the number of tokens the overlap floor lets differ — one for a
+    7-token quote, three for a 20-token one — so a legitimate match whose sheet
+    text carries an inserted word still aligns, while a substitution cannot.
+    """
+    allowed_mismatches = m - math.ceil(m * _FUZZY_WINDOW_MIN_OVERLAP)
+    return max(1, allowed_mismatches)
+
+
 def _try_fuzzy_window(
     finding: Finding, stream: _Stream, words: list[Any],
     tile: tuple[int, int] | None, w: float, h: float, rows: int, cols: int,
@@ -287,6 +383,16 @@ def _try_fuzzy_window(
             window[incoming] += 1
     if not best_starts:
         return None
+    # The numeric veto, applied before tile preference so a span that does
+    # account for the quote's measurements can still win over a same-score twin
+    # that does not.
+    slack = _fuzzy_window_slack(m)
+    best_starts = [
+        k for k in best_starts
+        if _numbers_aligned(query, stream.tokens[k : k + m], slack)
+    ]
+    if not best_starts:
+        return None
     start, _ = _tile_preferred_start(best_starts, m, stream, words, tile, w, h, rows, cols)
     rect = _span_rect(stream, words, start, m)
     if rect is None:
@@ -307,6 +413,17 @@ def _try_fuzzy_subphrase(
         candidates: list[tuple[int, list[int]]] = []  # (distinctiveness, starts)
         for s in range(0, m - length + 1):
             sub = query[s : s + length]
+            # A sub-phrase that drops one of the quote's measurements anchors a
+            # numeric claim to text that never carried the number — the same
+            # defect as above, reached by discarding the digit instead of
+            # mismatching it.
+            # The span matched is `sub` verbatim (find_subsequences requires a
+            # contiguous exact run), so no positional drift is possible here and
+            # the multiset check is the whole veto: it refuses a sub-phrase that
+            # drops one of the quote's measurements, which anchors a numeric
+            # claim to text that never carried the number.
+            if not _numbers_agree(query, sub):
+                continue
             starts = stream.find_subsequences(sub)
             if not starts:
                 continue
