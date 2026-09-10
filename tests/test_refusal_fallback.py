@@ -215,3 +215,52 @@ def test_transient_error_propagates_without_being_swallowed():
             client, {"model": OPUS_5, "max_tokens": 10}, model=OPUS_5, method="create"
         )
     assert api._refusal_fallback_available is True
+
+
+# --------------------------------------------------------------------------- #
+# Which models get the fallback is a REGISTRY CAPABILITY, not a model literal.
+#
+# The gate was ``model != MODEL_OPUS_5``, so pointing DRAWING_ANALYZER_MODEL at
+# any other id — a newer Opus, a future default — silently dropped the
+# protection. Nothing raised, nothing logged; a refusal simply became an
+# unhandled stop_reason. These pin the mechanism, since today only Opus 5
+# declares the capability and a behavioural test alone cannot tell the two
+# implementations apart.
+# --------------------------------------------------------------------------- #
+
+
+def test_opus_5_declares_the_capability_in_the_registry():
+    assert api.model_capabilities(OPUS_5).supports_refusal_fallback is True
+
+
+def test_the_gate_follows_the_capability_not_the_model_id(monkeypatch):
+    # A model that declares it gets the fallback even though it is not Opus 5 —
+    # the whole point. Under the old literal gate this attaches nothing.
+    other = "claude-opus-9-hypothetical"
+    caps = api.model_capabilities(OPUS_5)
+    monkeypatch.setitem(api._MODEL_CAPABILITIES, other, caps)
+
+    out = api.apply_refusal_fallback({"model": other}, model=other)
+    assert out.get("fallbacks") == "default"
+    assert api.REFUSAL_FALLBACK_BETA in out.get("betas", [])
+
+
+def test_a_model_that_does_not_declare_it_gets_nothing(monkeypatch):
+    # And the converse, so the gate cannot be "always on": clearing the flag on
+    # Opus 5 itself withdraws the parameter.
+    import dataclasses
+
+    stripped = dataclasses.replace(
+        api.model_capabilities(OPUS_5), supports_refusal_fallback=False
+    )
+    monkeypatch.setitem(api._MODEL_CAPABILITIES, OPUS_5, stripped)
+
+    kwargs = {"model": OPUS_5}
+    assert api.apply_refusal_fallback(kwargs, model=OPUS_5) is kwargs
+
+
+def test_an_unregistered_model_is_never_sent_the_parameter():
+    # Default False: an id the registry does not know must not be sent a
+    # parameter its platform may reject.
+    kwargs = {"model": "totally-unknown-model"}
+    assert api.apply_refusal_fallback(kwargs, model="totally-unknown-model") is kwargs

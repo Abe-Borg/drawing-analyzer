@@ -6,6 +6,8 @@ the best-effort file-logging configuration (idempotent, disable-able, advisory).
 """
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from drawing_analyzer import diagnostics
@@ -201,3 +203,89 @@ def test_nested_dict_repr_secrets_are_redacted():
     out = diagnostics.redact_secrets(str(payload))
     assert nested not in out
     assert "accept" in out            # unrelated fields survive
+
+
+# --------------------------------------------------------------------------- #
+# N18: a base64-heavy SDK record must not flush the diagnostics ring.
+#
+# The ring is _MAX_BYTES x _BACKUP_COUNT and one sheet's base64 request body
+# measures ~3 MB against a 2 MB rotation cap, so in DEBUG mode a SINGLE sheet
+# rotated the ring and six flushed every backup: the trace was destroyed by its
+# own payload, exactly when it was being collected to explain a failure.
+# --------------------------------------------------------------------------- #
+
+
+def _b64_blob(n_chars: int) -> str:
+    import base64
+    import os
+
+    raw = base64.b64encode(os.urandom(n_chars)).decode()
+    return raw[:n_chars]
+
+
+def test_a_long_base64_blob_is_elided_with_its_size():
+    blob = _b64_blob(80_000)
+    out = diagnostics.elide_blobs(f'{{"type":"image","source":{{"data":"{blob}"}}}}')
+    assert blob not in out
+    assert "80000 chars elided" in out
+    # The request SHAPE survives — that is the whole point of wire capture.
+    assert '"type":"image"' in out and '"source"' in out
+
+
+def test_short_identifiers_are_never_elided():
+    # A request id, a file id, a sha256 — all identifier-shaped and all far
+    # below the threshold. Eliding these would gut the trace to fix the payload.
+    sha = "a" * 64
+    text = f"request_id=req_011CQ file_id=file_0123456789 sha256={sha}"
+    assert diagnostics.elide_blobs(text) == text
+
+
+def test_one_sheet_of_base64_no_longer_rotates_the_ring(tmp_path):
+    import logging
+
+    path = tmp_path / "diag.log"
+    assert diagnostics.configure_file_logging(path, capture_sdk=True) == path
+    log = diagnostics.get_logger()
+    for i in range(12):
+        log.info("run marker %d", i)
+
+    # Ten sheets' worth of DEBUG request bodies, each ~3 MB of base64.
+    body = "".join(
+        f'{{"type":"image","source":{{"data":"{_b64_blob(80_000)}"}}}},'
+        for _ in range(37)
+    )
+    assert len(body) > diagnostics._MAX_BYTES      # one record exceeds the cap
+    sdk = logging.getLogger("anthropic")
+    for _ in range(10):
+        sdk.debug("Request options: %s", body)
+
+    # Nothing rotated: no backup files, and every marker still readable.
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["diag.log"]
+    text = path.read_text(encoding="utf-8", errors="replace")
+    assert text.count("run marker") == 12
+    assert sum(p.stat().st_size for p in tmp_path.iterdir()) < diagnostics._MAX_BYTES
+
+
+def test_a_huge_non_base64_record_is_truncated_and_says_so():
+    # The backstop: a record can be enormous without being base64 (a giant
+    # traceback, an HTML error page), and the ring still cannot defend itself.
+    formatter = diagnostics.RedactingFormatter("%(message)s")
+    record = logging.LogRecord(
+        "anthropic", logging.DEBUG, __file__, 1,
+        "x y " * diagnostics._MAX_RECORD_CHARS, (), None,
+    )
+    out = formatter.format(record)
+    assert len(out) < diagnostics._MAX_RECORD_CHARS + 200
+    assert "more chars truncated" in out
+
+
+def test_secrets_are_still_redacted_after_eliding(tmp_path):
+    # Elision is a volume control, never a secret control: the mandatory
+    # boundary must still hold on whatever survives it.
+    key = _fake_key("after-elide")
+    text = f'{{"data":"{_b64_blob(80_000)}","x-api-key":"{key}"}}'
+    formatter = diagnostics.RedactingFormatter("%(message)s")
+    record = logging.LogRecord("anthropic", logging.DEBUG, __file__, 1, text, (), None)
+    out = formatter.format(record)
+    assert key not in out
+    assert "chars elided" in out

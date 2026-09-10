@@ -8,6 +8,86 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A citation run that searched nothing reported an unknown total.**
+  `billable_tool_uses` is truthy on its **keys**, so `{"web_search": 0}` — what
+  a citation stage writes when every reference came warm from the verdict cache
+  — read as billable usage. Under a model the pricing table cannot price, that
+  turned the whole run's cost into "unknown" when nothing unpriceable had
+  happened. Fixed at both ends, because either alone lets the other bring it
+  back: the predicate counts **values**, and the writer never stores a
+  zero-count entry.
+
+- **The citation stage never recorded the cache tokens it was billed for.** It
+  attaches a cache breakpoint to its tool schemas, so on every request after the
+  first most of the input is billed as a cache **read** while `input_tokens`
+  reports only the remainder. The stage read only the latter, so a multi-
+  reference run looked near-free — and, since cache tokens are what
+  `is_billable_but_unpriced` keys on, a cache-heavy record under an unpriceable
+  model passed as "no usage" entirely. The prompt-cache split now rides
+  `_CheckOutcome` through to the ledger, summed across `pause_turn` resumes and
+  carried on the error and still-paused exits too, since those attempts were
+  billed as well.
+
+- **The investigation evidence budget is spent per request, not per turn.** The
+  model may put several `tool_use` blocks in one assistant turn, and each is a
+  real crop — an image rendered at 300 DPI, saved to the finding's evidence
+  directory and sent back. Charging the *turn* let one turn buy three or more of
+  them, so a 6-request budget bought 18+, per finding, across a task budget that
+  scales to 40 findings. The prompt has always promised "up to N evidence
+  request(s)"; the accounting now matches it. No prompt string moved, but
+  `round_budget` is a cache-key input whose **meaning** changed, so
+  `INVESTIGATE_PROMPT_VERSION` is bumped to `investigate-v3` — investigation
+  verdicts only.
+
+- **`find_text` could send an investigation to the wrong word.** The haystack
+  was uppercased while the covered-word offsets walked the original-case list,
+  so any glyph whose uppercase is longer shifted every later offset — and PDF
+  extraction routinely yields ligatures (`ﬁ`→`FI`, `ﬄ`→`FFL`) and `ß`→`SS`. One
+  character of drift is absorbed by the overlap test's slack; two is not. The
+  rect then either swallowed the following word or, when the matched word was
+  shorter than the drift, **landed on a different word entirely** — and short
+  tokens (sheet ids, tags, dimensions) are exactly what an investigation
+  searches for. The loop saves a crop of that rect as the finding's evidence, so
+  the failure was silent and looked authoritative.
+
+- **The refusal fallback is a model capability, not a hard-coded id.** The gate
+  read `model != MODEL_OPUS_5`, so pointing `DRAWING_ANALYZER_MODEL` at any
+  other id — a newer Opus, a future default — silently dropped the protection
+  with nothing to notice: nothing raised, nothing logged, and a refusal simply
+  became an unhandled `stop_reason`. It is now
+  `ModelCapabilities.supports_refusal_fallback`, declared beside each model's
+  other request-shape decisions, so registering a model forces the question to
+  be answered. Behaviour is unchanged today — Opus 5 remains the only declarer,
+  since Opus 4.8 is the fallback *target*, not a source.
+
+- **A debug log could destroy itself.** The diagnostics ring is 2 MB × 5, and
+  one sheet's base64 request body measures ~3 MB — so with SDK wire capture on,
+  a *single* sheet rotated the ring and six flushed every backup. The trace was
+  destroyed by its own payload, precisely when it was being collected to explain
+  a failure. Long base64 runs are now elided with their size, and a record is
+  capped as a backstop for something huge that is not base64. Ten sheets of
+  debug traffic went from ~30 MB to **23 KB** with the request shape — model,
+  params, message structure, headers, status — fully intact. Elision runs before
+  redaction, so the mandatory secret boundary now works over a bounded string
+  rather than megabytes of image data.
+
+- **The cost dialog now names how long the run will actually wait**, derived
+  from the engine's own bound rather than written beside it, so an operator who
+  sets `DRAWING_ANALYZER_BATCH_MAX_ELAPSED_HOURS` is quoted their own number. A
+  test asserts no user-facing string promises a longer wait than the engine
+  allows — lower the bound without moving the prose and it fails.
+
+### Not done, and why
+
+- **Explicit request timeouts (review item N19) were dropped on evidence.** The
+  finding was that `client.py` sets no timeout. It does not — but the SDK is not
+  unbounded: an `Anthropic()` client carries `Timeout(connect=5, read=600,
+  write=600, pool=600)` with `max_retries=2`, and a non-streaming `create`
+  derives a further cap from `max_tokens`. There is no hang to fix. Adding
+  `with_options(timeout=…)` would have restated a default as though it were a
+  policy, which is the kind of change the standing prohibitions exist to keep
+  out. Raised here rather than shipped half-done.
+
 - **A stalled batch was paid for twice.** The largest real-dollar defect in the
   review. Per-sheet results are filled **only** from a terminal `results()`
   read, so on a batch that never reached a terminal state — stalled, detached,

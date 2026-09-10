@@ -755,6 +755,32 @@ def _message_usage(resp: Any) -> tuple[int, int]:
     )
 
 
+def _message_cache_usage(resp: Any) -> tuple[int, int]:
+    """``(cache_read_tokens, cache_write_tokens)`` from a response's usage.
+
+    The sibling of :func:`_message_usage`, for the prompt-cache split: on a hit
+    or a write the API reports the cached prefix in these separate counters and
+    ``input_tokens`` carries only the uncached remainder, so a stage that reads
+    only the latter under-reports what it was billed for.
+
+    Read with the dict-tolerant ``_get``, deliberately **not** the attribute-only
+    ``core.api_config.extract_cache_usage``: a dict-shaped usage — a raw-REST
+    client, a batch dict result, or the ``dict_shape`` test fixtures — would be
+    silently zeroed by ``getattr``, which undercounts rather than failing.
+
+    Several stages still inline this pair (digest, critique, batch_digest,
+    investigate); they predate this helper and should adopt it when next
+    touched, rather than a sixth copy being written.
+    """
+    usage = _get(resp, "usage")
+    if usage is None:
+        return 0, 0
+    return (
+        int(_get(usage, "cache_read_input_tokens", 0) or 0),
+        int(_get(usage, "cache_creation_input_tokens", 0) or 0),
+    )
+
+
 def stream_message(client: Any, kwargs: dict[str, Any]) -> Any:
     """Issue one Messages request over the **streaming** transport.
 

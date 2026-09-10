@@ -1,6 +1,8 @@
 """Pricing + drawing cost-estimate tests (Workstream 4). Hermetic — pure math."""
 from __future__ import annotations
 
+import pathlib
+
 import pytest
 
 from drawing_analyzer.core.pricing import (
@@ -603,3 +605,51 @@ def test_the_confirmation_question_is_unchanged():
         "Proceed with the exhaustive review?"
     )
     assert "Nothing is sent until you confirm." in _dialog(batch=False)
+
+
+# --------------------------------------------------------------------------- #
+# 14c: what the app promises about waiting must follow what the engine does.
+#
+# The cost dialog, the GUI and the help content all told the user a batch run
+# "can run overnight (8+ hours)" while the collector detached at four. The
+# wording was not wrong about the queue — it was wrong about us.
+# --------------------------------------------------------------------------- #
+
+
+def test_the_wait_sentence_is_derived_from_the_engine_bound(monkeypatch):
+    from drawing_analyzer import batch_digest, cost as cost_mod
+
+    assert "24 hours" in cost_mod._batch_wait_sentence()
+    monkeypatch.setenv("DRAWING_ANALYZER_BATCH_MAX_ELAPSED_HOURS", "6")
+    assert "6 hours" in cost_mod._batch_wait_sentence()
+    # A fractional override is quoted as itself, not rounded to a lie.
+    monkeypatch.setenv("DRAWING_ANALYZER_BATCH_MAX_ELAPSED_HOURS", "1.5")
+    assert "1.5 hours" in cost_mod._batch_wait_sentence()
+    assert batch_digest._batch_max_elapsed_seconds() == 5400.0
+
+
+def test_no_user_facing_string_promises_a_longer_wait_than_the_engine_allows():
+    # The drift guard. Several strings claim "(8+ hours)"; that is only honest
+    # while the bound is at least 8. Lower the bound without moving the prose
+    # and this fails, which is the point — the two must move together.
+    import re
+
+    import drawing_analyzer
+    from drawing_analyzer import batch_digest
+
+    bound_hours = batch_digest._batch_max_elapsed_seconds() / 3600.0
+    claim = re.compile(r"(\d+)\+?\s*hours")
+    # Read by path, not by import: gui.py needs tkinter, which neither this
+    # container nor the Linux CI job has.
+    pkg = pathlib.Path(drawing_analyzer.__file__).parent
+    sources = [
+        (pkg / name).read_text(encoding="utf-8")
+        for name in ("cost.py", "gui.py", "help_content.py", "pipeline.py")
+    ]
+
+    promised = {int(m) for src in sources for m in claim.findall(src)}
+    assert promised, "expected at least one hour claim to guard"
+    assert max(promised) <= bound_hours, (
+        f"user-facing text promises up to {max(promised)}h but the engine "
+        f"waits {bound_hours}h"
+    )

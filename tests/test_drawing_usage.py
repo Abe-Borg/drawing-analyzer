@@ -463,3 +463,129 @@ def test_exhaustive_estimate_investigation_band_is_capped_and_realtime():
     # It rides the low/high totals: an estimate without it would be smaller.
     est = estimate_exhaustive_run_cost(10)
     assert est.low_cost is not None and est.low_cost <= est.high_cost
+
+
+# --------------------------------------------------------------------------- #
+# 20a: a zero-count tool entry is not usage.
+#
+# ``billable_tool_uses`` is truthy on its KEYS, so a citation run whose every
+# reference came warm from the verdict cache wrote {"web_search": 0} — which
+# read as billable usage and turned a whole run's total into "unknown" when
+# nothing unpriceable had happened. Both ends are guarded here, because either
+# alone leaves the other free to reintroduce it.
+# --------------------------------------------------------------------------- #
+
+_UNPRICEABLE = "some-unregistered-model"
+
+
+def _tool_rec(tools):
+    return UsageRecord(
+        stage_family="citation", stage_instance="citation", model=_UNPRICEABLE,
+        transport="REAL_TIME", billable_tool_uses=tools, estimated_cost=None,
+    )
+
+
+@pytest.mark.parametrize(
+    "tools,expected",
+    [
+        ({"web_search": 0}, False),          # the bug: a count of zero
+        ({}, False),
+        ({"web_search": 0, "other": 0}, False),
+        ({"web_search": 3}, True),           # a real use still poisons the total
+        ({"web_search": 0, "other": 2}, True),
+        ({"web_search": None}, False),       # server field absent, not a use
+        ({"web_search": "x"}, False),        # unparseable, never a raise
+    ],
+)
+def test_only_a_positive_tool_count_is_billable_usage(tools, expected):
+    assert RunUsage.is_billable_but_unpriced(_tool_rec(tools)) is expected
+
+
+def test_a_zero_search_citation_record_does_not_unknown_the_run_total():
+    # The consequence, end to end: one priced digest beside a citation stage
+    # that made no searches must still report a total, not "unknown".
+    usage = RunUsage()
+    usage.records.append(UsageRecord(
+        stage_family="digest", stage_instance="digest:SRC-0001:p0", model=_OPUS,
+        transport="REAL_TIME", input_tokens=1000, output_tokens=1000,
+        estimated_cost=Decimal("5.00"),
+    ))
+    usage.records.append(_tool_rec({"web_search": 0}))
+    assert usage.total_estimated_cost == Decimal("5.00")
+
+    # ...while a run that genuinely searched under an unpriceable model still
+    # refuses to report a number. Losing that would be the worse bug.
+    poisoned = RunUsage()
+    poisoned.records.append(usage.records[0])
+    poisoned.records.append(_tool_rec({"web_search": 2}))
+    assert poisoned.total_estimated_cost is None
+
+
+def test_record_usage_never_stores_a_zero_count_tool_entry():
+    # The writer half. Storing the key at all is what made the predicate's job
+    # impossible, so the record must not carry it in the first place.
+    from drawing_analyzer.pipeline import _record_usage
+
+    usage = RunUsage()
+    rec = _record_usage(
+        usage, family="citation", instance="citation", model=_OPUS,
+        billable_tool_uses={"web_search": 0},
+    )
+    assert rec.billable_tool_uses == {}
+
+    kept = _record_usage(
+        usage, family="citation", instance="citation2", model=_OPUS,
+        billable_tool_uses={"web_search": 4, "unused": 0},
+    )
+    assert kept.billable_tool_uses == {"web_search": 4}
+
+
+# --------------------------------------------------------------------------- #
+# The citation stage records the cache tokens it is billed for.
+#
+# It attaches a cache breakpoint to its tool schemas, so on every request after
+# the first most of the input is billed as a cache READ and ``input_tokens``
+# reports only the remainder. Reading just the latter reported a fraction of
+# what the stage cost — and a cache-heavy record under an unpriceable model
+# passed as "no usage" entirely.
+# --------------------------------------------------------------------------- #
+
+
+def test_citation_outcome_carries_the_prompt_cache_split():
+    from drawing_analyzer.citation_check import CitationCheckResult, _CheckOutcome
+
+    outcome = _CheckOutcome()
+    assert outcome.cache_read_tokens == 0 and outcome.cache_write_tokens == 0
+    result = CitationCheckResult()
+    assert result.cache_read_tokens == 0 and result.cache_write_tokens == 0
+
+
+def test_message_cache_usage_reads_dict_and_object_shaped_usage():
+    from drawing_analyzer.digest import _message_cache_usage
+
+    class _Usage:
+        cache_read_input_tokens = 700
+        cache_creation_input_tokens = 900
+
+    class _Resp:
+        usage = _Usage()
+
+    assert _message_cache_usage(_Resp()) == (700, 900)
+    # A dict-shaped usage (raw-REST client, batch result, dict fixtures) must be
+    # counted, not silently zeroed — that undercounts rather than failing.
+    assert _message_cache_usage(
+        {"usage": {"cache_read_input_tokens": 5, "cache_creation_input_tokens": 6}}
+    ) == (5, 6)
+    assert _message_cache_usage({"usage": None}) == (0, 0)
+    assert _message_cache_usage({}) == (0, 0)
+
+
+def test_citation_cache_tokens_make_a_record_billable():
+    # The reason this matters: a cache-heavy citation record under a model the
+    # table cannot price is real spend, and must not read as "no usage".
+    rec = UsageRecord(
+        stage_family="citation", stage_instance="citation", model=_UNPRICEABLE,
+        transport="REAL_TIME", input_tokens=0, output_tokens=0,
+        cache_read_tokens=180_000, estimated_cost=None,
+    )
+    assert RunUsage.is_billable_but_unpriced(rec) is True

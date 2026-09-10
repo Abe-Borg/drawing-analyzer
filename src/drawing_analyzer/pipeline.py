@@ -210,6 +210,7 @@ def _record_usage(
     ``api_config``'s breakpoint helpers pass ``cache_write_ttl_for(phase)``.
     """
     from .core.pricing import usage_record_cost
+    from .models import _positive as _positive_count
 
     cost = usage_record_cost(
         model=model,
@@ -231,7 +232,17 @@ def _record_usage(
             output_tokens=int(output_tokens),
             cache_read_tokens=int(cache_read_tokens),
             cache_write_tokens=int(cache_write_tokens),
-            billable_tool_uses=dict(billable_tool_uses or {}),
+            # Zero-count entries are dropped, never stored: a tool a stage did
+            # not use is not a tool use, and the dict is truthy on its KEYS.
+            # A citation run whose references all came warm from the verdict
+            # cache wrote {"web_search": 0}, which read as billable usage and
+            # turned the run's whole total into "unknown". The predicate
+            # (``RunUsage.is_billable_but_unpriced``) counts values too; both
+            # ends are fixed because either alone lets the other reintroduce it.
+            billable_tool_uses={
+                k: v for k, v in (billable_tool_uses or {}).items()
+                if _positive_count(v)
+            },
             cache_hit=cache_hit,
             parse_success=parse_success,
             terminal_status=terminal_status,
@@ -2079,6 +2090,12 @@ def _run_qc_stages(
                     run_usage, family="citation", instance="citation",
                     model=citation_model(),
                     input_tokens=cires.input_tokens, output_tokens=cires.output_tokens,
+                    # The stage caches its tool schemas, so on a multi-reference
+                    # run most of the input is billed as a cache READ that
+                    # ``input_tokens`` does not report. Omitting these made a
+                    # cached citation stage look near-free in the ledger.
+                    cache_read_tokens=int(getattr(cires, "cache_read_tokens", 0) or 0),
+                    cache_write_tokens=int(getattr(cires, "cache_write_tokens", 0) or 0),
                     billable_tool_uses={"web_search": int(
                         getattr(cires, "web_search_requests", 0) or 0
                     )},

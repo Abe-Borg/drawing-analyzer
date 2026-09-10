@@ -120,17 +120,56 @@ def redact_secrets(text: str) -> str:
     return text
 
 
+# One record's ceiling, and the length of an embedded blob that gets elided
+# rather than written. The diagnostics ring is _MAX_BYTES x _BACKUP_COUNT, and
+# a single sheet's base64 request body measures ~3 MB against a 2 MB rotation
+# cap — so in DEBUG mode ONE sheet rotated the ring and six flushed every
+# backup. The trace was destroyed by its own payload, precisely when it was
+# being collected to explain a failure.
+#
+# The blob threshold sits far above anything identifier-shaped (a key, a
+# request id, a file id, a sha256 are all < 100 chars) and far below any real
+# image, so eliding is unambiguous: what goes is pixels, what stays is the
+# request shape — model, params, message structure, headers, status — which is
+# the whole reason SDK wire capture exists.
+_MAX_RECORD_CHARS = 64_000
+_MIN_ELIDED_BLOB_CHARS = 512
+_BLOB_RE = re.compile(r"[A-Za-z0-9+/]{%d,}={0,2}" % _MIN_ELIDED_BLOB_CHARS)
+
+
+def elide_blobs(text: str) -> str:
+    """Replace long base64-ish runs with a placeholder naming their size.
+
+    Not a secret control — :func:`redact_secrets` is that — but a *volume*
+    control, and the two are applied in that order for a reason: eliding first
+    means the redaction regexes run over a bounded string instead of megabytes
+    of image data, and anything the elision removes cannot leak by definition.
+    """
+    return _BLOB_RE.sub(lambda m: f"[{len(m.group(0))} chars elided]", text)
+
+
 class RedactingFormatter(logging.Formatter):
-    """A formatter that redacts secrets *after* full formatting.
+    """A formatter that redacts secrets *after* full formatting, and bounds size.
 
     Running on the final formatted string (message with args interpolated,
     plus any traceback text) means no code path — our loggers, the SDK's
     debug loggers, or an exception repr — can write un-redacted secret
     material through a handler using this formatter.
+
+    It also bounds what one record may write (:data:`_MAX_RECORD_CHARS`), after
+    eliding embedded blobs (:func:`elide_blobs`). A rotating ring cannot defend
+    itself: it will happily rotate a whole session away to make room for one
+    record, so the bound has to be here. Elide, redact, then truncate — the
+    truncation is a backstop for a record that is huge without being base64,
+    and it says how much it dropped rather than ending mid-word silently.
     """
 
     def format(self, record: logging.LogRecord) -> str:  # noqa: A003
-        return redact_secrets(super().format(record))
+        text = redact_secrets(elide_blobs(super().format(record)))
+        if len(text) > _MAX_RECORD_CHARS:
+            dropped = len(text) - _MAX_RECORD_CHARS
+            text = f"{text[:_MAX_RECORD_CHARS]}... [{dropped} more chars truncated]"
+        return text
 
 _logger = logging.getLogger(LOGGER_NAME)
 _logger.addHandler(logging.NullHandler())  # silent until the app configures a file

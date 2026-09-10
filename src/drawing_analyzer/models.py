@@ -943,7 +943,11 @@ class Verification:
     # Phase C: set when the agentic investigation loop touched this verdict —
     # whether it concluded (status upgraded) or exhausted its evidence budget
     # (status unchanged, still UNCERTAIN). ``investigation_rounds`` counts the
-    # evidence rounds actually spent.
+    # evidence REQUESTS actually spent — each one a crop rendered, saved and
+    # sent — which is what the budget bounds and what the model is promised.
+    # A single assistant turn may carry several, so this can exceed the turn
+    # count; the field name predates the fix and is kept because renaming a
+    # serialized key would break older cached payloads (additive serialization).
     investigated: bool = False
     investigation_rounds: int = 0
 
@@ -2335,6 +2339,20 @@ class UsageRecord:
         }
 
 
+def _positive(value: "object") -> bool:
+    """True when ``value`` is a count greater than zero.
+
+    Tolerant on purpose: a tool-use count arrives from a server-reported field
+    and may be ``None``, a string, or absent entirely. Anything that will not
+    read as a number is treated as **no** uses rather than raising inside a
+    predicate the whole cost total depends on.
+    """
+    try:
+        return float(value or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 @dataclass
 class RunUsage:
     """The run's append-only usage ledger (§6.3). Totals are derived, never stored.
@@ -2388,11 +2406,20 @@ class RunUsage:
         means *no* dollar figure, never *a smaller* dollar figure". Found via a
         review of the A/B harness's copy of this rule; the copy is gone, and the
         harness now calls this.
+
+        **A zero-count tool entry is not usage.** The dict is truthy whenever it
+        has a key, so ``{"web_search": 0}`` — what a citation run writes when
+        every reference was served warm from the verdict cache — read as billable
+        usage and turned an entire run's total into "unknown" because nothing
+        unpriceable had happened. The values decide, not the keys. Writers should
+        also omit an all-zero dict (:func:`~drawing_analyzer.pipeline._record_usage`
+        drops zero counts); both ends are fixed because either alone leaves the
+        other free to reintroduce it.
         """
         return r.estimated_cost is None and bool(
             r.input_tokens or r.output_tokens
             or r.cache_read_tokens or r.cache_write_tokens
-            or r.billable_tool_uses
+            or any(_positive(v) for v in (r.billable_tool_uses or {}).values())
         )
 
     @property

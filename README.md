@@ -896,7 +896,9 @@ finding in place: a confirmation turns the dashed "double-check" callout into a
 solid verified cloud; a contradiction removes the ink.
 
 The loop is hard-bounded: `DRAWING_ANALYZER_INVESTIGATION_MAX_ROUNDS` evidence
-requests per finding (default 6) and `DRAWING_ANALYZER_INVESTIGATION_MAX_FINDINGS`
+requests per finding (default 6) — counted per **request**, not per turn, since
+the model may ask for several crops in one turn and each is a real image
+rendered, saved and sent — and `DRAWING_ANALYZER_INVESTIGATION_MAX_FINDINGS`
 investigations per run, severity-first. That per-run budget **scales with the
 set** (10 plus one per 4 sheets, capped at 40): a flat number is generous on a
 20-sheet permit set and severe on a 200-sheet one, which simply has more
@@ -1399,7 +1401,7 @@ runs.
 | `DRAWING_ANALYZER_USE_BATCH` | off | Opt every run into the Message Batches transport (~50% token-rate discount with the same model/prompt/review contract) without editing call sites. An explicit `use_batch=` argument still wins. |
 | `DRAWING_ANALYZER_BATCH_STALL_TIMEOUT_MIN` | `25` first watch, `60` after | Minutes of **completely frozen** batch request counts before the batch is abandoned and its sheets resubmitted. Setting this applies one value to every watch (see [Stuck batches](#stuck-batches-and-the-stall-watch)). |
 | `DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS` | `4` | Fresh batches the recovery transport will submit for the sheets a stuck batch left unresolved, before the run keeps a clean retriable batch error. |
-| `DRAWING_ANALYZER_BATCH_MAX_ELAPSED_HOURS` | `24` | Hours a batch run will wait before detaching from the remote batch. The default is the Batches API's own SLA. Lower it to cap wall clock; a malformed or non-positive value falls back to the default, and any override is floored at one minute. |
+| `DRAWING_ANALYZER_BATCH_MAX_ELAPSED_HOURS` | `24` | Hours a batch run will wait before detaching from the remote batch. The default is the Batches API's own SLA. Lower it to cap wall clock; a malformed or non-positive value falls back to the default, and any override is floored at one minute. The cost dialog quotes whatever this resolves to. |
 | `DRAWING_ANALYZER_MAX_WORKERS` | `4` | Real-time digest concurrency (`1` = sequential). |
 | `DRAWING_ANALYZER_STAGE_OVERLAP` | auto | Overlap independent set-level calls for the real SDK client; `0` disables it and `1` explicitly opts a thread-safe custom client in. `DRAWING_ANALYZER_MAX_WORKERS=1` remains fully sequential. |
 | `DRAWING_ANALYZER_UPLOAD_WORKERS` | `6` | Files-API image-upload concurrency per sheet (`1` = sequential). |
@@ -1414,7 +1416,7 @@ runs.
 | `DRAWING_ANALYZER_DIAGNOSTICS` | on | Set `0`/`false` to disable the rotating `drawing_analyzer.log` diagnostics file the GUI writes. |
 | `DRAWING_ANALYZER_DISABLE_UPDATE_CHECK` | off | Set truthy to turn off the desktop app's daily update check and "Check for Updates" button (locked-down deployments). |
 | `DRAWING_ANALYZER_UPDATE_URL` | GitHub releases `latest.json` | Override the update-manifest URL (testing, or self-hosting a fork's releases). |
-| `DRAWING_ANALYZER_DEBUG` | off | Also route the Anthropic SDK / httpx wire-level logs (status codes, request-ids, retries) into the diagnostics file. |
+| `DRAWING_ANALYZER_DEBUG` | off | Also route the Anthropic SDK / httpx wire-level logs (status codes, request-ids, retries) into the diagnostics file. Long base64 runs are elided with their size and each record is capped, so a sheet's ~3 MB of image data cannot rotate the log ring away — what stays is the request shape, which is what wire capture is for. |
 | `DRAWING_ANALYZER_CACHE_DIAGNOSTICS` | off | Request the prompt-cache diagnostics beta on API calls (operator debugging only). |
 | `DRAWING_ANALYZER_MAX_SHEETS` | `2000` | Sheet count above which a run needs explicit confirmation (`confirm_large_set=True`) rather than silent truncation. |
 | `DRAWING_ANALYZER_MAX_FILES` | `500` | Input-file count above which a run needs explicit confirmation. |

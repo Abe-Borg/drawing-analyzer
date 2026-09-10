@@ -377,7 +377,10 @@ def test_multiple_tool_uses_in_one_turn_are_all_answered_together():
                 for b in client.calls[-1]["messages"][-1]["content"]
                 if isinstance(b, dict) and b.get("type") == "tool_result"]
     assert answered == ["t1", "t2"]                # one user turn, both ids
-    assert f.verification.investigation_rounds == 1
+    # TWO evidence requests, though they arrived in one turn: each is a real
+    # crop rendered, saved and sent. This used to read 1, which is how a
+    # 6-request budget bought 18+.
+    assert f.verification.investigation_rounds == 2
 
 
 def test_budget_cap_forces_a_no_tools_close_and_stays_uncertain():
@@ -1017,3 +1020,120 @@ def test_investigation_cache_replay_carries_arithmetic_provenance(tmp_path):
         cold.verification.computation_method, cold.verification.operand_origin,
     )
     assert warm.verification.operand_origin == "MODEL_TRANSCRIBED"
+
+
+# --------------------------------------------------------------------------- #
+# Item 17: the evidence budget is spent per REQUEST, not per turn.
+# --------------------------------------------------------------------------- #
+
+
+def test_parallel_tool_turn_spends_its_true_budget():
+    # A turn carrying three tool_use blocks buys three crops — each rendered at
+    # 300 DPI, saved to the evidence dir and sent. Charging the TURN let a
+    # 3-request budget buy nine, per finding, across a task budget that scales
+    # to 40 findings.
+    turns = {"n": 0}
+
+    def responder(kw, _n):
+        if _tool_result_turns(kw):
+            if not _tools_callable(kw):        # the forced no-tools close
+                return _verdict("NOT_VISIBLE", "could not settle")
+            turns["n"] += 1
+            return FakeMessage(
+                content=[FakeToolUseBlock(name="find_text",
+                                          input={"query": "AGAIN"}, id="z1")],
+                stop_reason="tool_use", usage=FakeUsage(),
+            )
+        turns["n"] += 1
+        return FakeMessage(
+            content=[
+                FakeToolUseBlock(name="find_text", input={"query": "A"}, id="a1"),
+                FakeToolUseBlock(name="find_text", input={"query": "B"}, id="a2"),
+                FakeToolUseBlock(name="find_text", input={"query": "C"}, id="a3"),
+            ],
+            stop_reason="tool_use", usage=FakeUsage(),
+        )
+
+    client = _LoopClient(responder)
+    _res, f = _run_one(client, max_rounds=3)
+
+    # The budget was exhausted by the first turn alone, so the loop went
+    # straight to its forced close rather than granting a second tool turn.
+    assert f.verification.investigation_rounds == 3
+    assert turns["n"] == 1
+    assert f.verification.status == "UNCERTAIN"   # capped, never REJECTED
+
+
+def test_a_single_tool_per_turn_still_spends_one():
+    # The common case is unchanged: one request per turn costs one.
+    def responder(kw, _n):
+        if _tool_result_turns(kw):
+            return _verdict("CONFIRMED", "seen at 150 PSI")
+        return FakeMessage(
+            content=[FakeToolUseBlock(name="find_text",
+                                      input={"query": "PUMP"}, id="s1")],
+            stop_reason="tool_use", usage=FakeUsage(),
+        )
+
+    client = _LoopClient(responder)
+    _res, f = _run_one(client, max_rounds=6)
+    assert f.verification.investigation_rounds == 1
+
+
+# --------------------------------------------------------------------------- #
+# Item 19: find_text offsets must be measured over the string that was searched.
+# --------------------------------------------------------------------------- #
+
+
+class _WordSheet:
+    def __init__(self, words):
+        self.words = words
+
+
+def _line(*texts):
+    """One text line, each word 10 wide with a 10pt gap: word i at x=20*i."""
+    return [(20 * i, 0, 20 * i + 10, 10, t, 0, 0) for i, t in enumerate(texts)]
+
+
+def test_find_text_rect_survives_a_length_changing_ligature():
+    # PDF extraction routinely yields ligatures. 'ﬄ'.upper() == 'FFL' — two
+    # characters longer — so measuring offsets over the original-case list while
+    # searching the uppercased one drifted every later word by two. The rect
+    # then swallowed the following word.
+    sheet = _WordSheet(_line("ﬄ", "PUMP", "ROOM"))
+    (match,) = find_text_matches(sheet, "PUMP")
+    assert match["rect"] == [20.0, 0.0, 30.0, 10.0]      # PUMP alone, not PUMP+ROOM
+
+
+def test_find_text_does_not_return_a_different_word_entirely():
+    # The worse half, and the one that matters: when the matched word is SHORTER
+    # than the drift it drops out of the covered set and the rect lands on the
+    # next word. Short tokens — sheet ids, tags, dimensions — are exactly what an
+    # investigation searches for, and the loop saves a crop of that rect as
+    # evidence, so a wrong location is presented as a finding's proof.
+    sheet = _WordSheet(_line("ﬄ", "A1", "ZZZZ"))
+    (match,) = find_text_matches(sheet, "A1")
+    assert match["rect"] == [20.0, 0.0, 30.0, 10.0]      # A1, not ZZZZ
+
+
+def test_find_text_stays_case_insensitive_and_reports_original_text():
+    # The uppercasing exists to make the search case-insensitive; that must
+    # survive, and the returned line must still read as it does on the sheet.
+    sheet = _WordSheet(_line("Fire", "Pump", "Room"))
+    (match,) = find_text_matches(sheet, "pump")
+    assert match["rect"] == [20.0, 0.0, 30.0, 10.0]
+    assert match["line"] == "Fire Pump Room"
+
+
+def test_the_budget_change_bumped_the_investigation_prompt_version():
+    """Counting requests instead of turns changed what ``round_budget`` MEANS.
+
+    No prompt string moved — the budget sentence already said "evidence
+    request(s)" — but ``round_budget`` is a cache-key input, so a verdict
+    stored under turn-counting is not reproducible under the same key.
+    ``INVESTIGATE_PROMPT_VERSION`` is a hand-maintained string and the only
+    mechanism covering this stage, so it carries the invalidation.
+    """
+    from drawing_analyzer import investigate as inv
+
+    assert inv.INVESTIGATE_PROMPT_VERSION == "investigate-v3"
