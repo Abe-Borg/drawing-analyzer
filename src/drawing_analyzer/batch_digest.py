@@ -81,6 +81,7 @@ from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
     DEFAULT_DIGEST_MAX_TOKENS,
     DIGEST_PROMPT_VERSION,
+    MAX_TOKENS_RETRY_CEILING,
     SheetDigest,
     _clean_error,
     _get,
@@ -505,22 +506,8 @@ _PERMANENT_ITEM_ERROR_TYPES = frozenset(
     }
 )
 
-# Output-cap ceiling for the empty-at-max_tokens resubmission. Batch items
-# never stream, so the non-streaming-timeout rationale doesn't bind inside a
-# batch, and output is billed by actual tokens, so the extra headroom costs
-# nothing unless the sheet uses it. The direct-call rescue can carry this raised
-# cap too because it STREAMS its request (see ``_rescue_failed_items_sync``) —
-# the SDK refuses a plain non-streaming ``create`` whose cap implies >10 minutes
-# of output (a client-side ValueError at ~21k tokens under the default timeout).
-#
-# This MUST stay above ``DEFAULT_DIGEST_MAX_TOKENS``: the retry below doubles
-# the failed cap and clamps to this value, so a ceiling at or below the starting
-# cap would resubmit at *the exact cap that just came back empty* — a silent
-# no-op dressed as a retry. At a 64k digest cap, 64k here would have done
-# precisely that. The per-model clamp is applied at the retry site rather than
-# here, because the real ceiling depends on which model the item was sent to
-# (an unregistered override resolves to ``MAX_OUTPUT_TOKENS_UNKNOWN``).
-MAX_TOKENS_RETRY_CEILING = 128_000
+# ``MAX_TOKENS_RETRY_CEILING`` now lives in ``digest`` (imported above) so the
+# real-time truncation retry and this batch resubmission share one value.
 
 
 def _item_retry_params(
@@ -560,7 +547,9 @@ def _item_retry_params(
         rtype == "succeeded"
         and digest is not None
         and digest.error
-        and not digest.text
+        # Deliberately NOT ``and not digest.text``: a partial body is exactly
+        # the case the raised cap exists to finish, and requiring emptiness let
+        # every nonempty truncation through unretried.
         and digest.stop_reason == "max_tokens"
     ):
         old = int(params.get("max_tokens") or DEFAULT_DIGEST_MAX_TOKENS)
@@ -1747,7 +1736,16 @@ def _digest_from_message(
     cache_read_tok = int(_get(usage, "cache_read_input_tokens", 0) or 0)
     cache_write_tok = int(_get(usage, "cache_creation_input_tokens", 0) or 0)
     stop = _get(message, "stop_reason")
-    error = None if raw_text else f"empty digest (stop_reason={stop!r})"
+    # Parity with the real-time path: a reply the model did not FINISH is not a
+    # complete digest, whether it came back empty or merely cut off. Treating a
+    # nonempty truncation as success accepted it AND cached it permanently,
+    # while ``_item_retry_params`` never saw an error to retry on.
+    if not raw_text:
+        error = f"empty digest (stop_reason={stop!r})"
+    elif stop == "max_tokens":
+        error = "truncated digest (stop_reason='max_tokens')"
+    else:
+        error = None
     # Same transport-agnostic split as the real-time path: prose (findings block
     # stripped) becomes ``text``; structured findings ride separately (I-2).
     text, findings, findings_note = parse_findings(

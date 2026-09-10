@@ -244,14 +244,34 @@ def test_parse_unclosed_malformed_block_is_stripped_not_leaked():
     assert "```" not in r.prose and "findings" not in r.prose
 
 
-def test_digest_sheet_truncated_block_keeps_prose_clean_and_ships():
-    # End-to-end (DA-009): a truncated findings block must not fail the sheet (I-3)
-    # and must not contaminate the shipped prose digest.
+def test_digest_sheet_unparseable_block_keeps_prose_clean_and_ships():
+    # End-to-end (DA-009): a findings block that will not PARSE must not fail the
+    # sheet (I-3) and must not contaminate the shipped prose digest. The response
+    # itself is complete — ``end_turn`` — so the prose is whole and trustworthy;
+    # only the machine block is drift, which is telemetry, not a failure.
+    raw = "Good prose digest of the sheet.\n```json\n{\"findings\": [ garbage } not-json {"
+    client = _FakeClient(lambda kw: FakeMessage(
+        content=[FakeTextBlock(text=raw)], stop_reason="end_turn"))
+    sd = digest_sheet(_sheet(), client=client, model=OPUS)
+    assert sd.ok and sd.error is None
+    assert sd.text == "Good prose digest of the sheet."
+    assert "```" not in sd.text and '"findings"' not in sd.text
+    assert sd.findings == []
+
+
+def test_digest_sheet_truncated_response_fails_the_sheet_but_still_ships_prose():
+    # A response cut off at ``max_tokens`` is a DIFFERENT thing from a block that
+    # will not parse, and the two used to be conflated. The prose itself may be
+    # severed mid-sentence, so the sheet is marked failed and (see
+    # test_drawing_digest) never cached — but I-3 still holds: the partial prose
+    # ships, and the run reports the sheet rather than sinking.
     raw = "Good prose digest of the sheet.\n```json\n{\"findings\": [ {\"category\":"
     client = _FakeClient(lambda kw: FakeMessage(
         content=[FakeTextBlock(text=raw)], stop_reason="max_tokens"))
     sd = digest_sheet(_sheet(), client=client, model=OPUS)
-    assert sd.ok and sd.error is None
+    assert not sd.ok
+    assert sd.error == "truncated digest (stop_reason='max_tokens')"
+    # The prose still ships, and the machine block still never reaches it.
     assert sd.text == "Good prose digest of the sheet."
     assert "```" not in sd.text and '"findings"' not in sd.text
     assert sd.findings == []
@@ -404,3 +424,54 @@ def test_pipeline_combined_text_excludes_findings_block(tmp_path):
     # The structured findings rode out on the sheet result instead.
     assert len(ctx.sheets) == 1 and len(ctx.sheets[0].findings) == 1
     assert ctx.sheets[0].findings[0].source_quote == "VAV-3"
+
+
+def test_inline_backtick_span_does_not_open_a_findings_block():
+    # The scanner used to hunt for a bare ``` at ANY offset, so an inline
+    # triple-backtick span that happened to end a line opened a "block" — and
+    # the real ```json opener then CLOSED it. The findings block came back
+    # TRUNCATED with zero findings while its whole JSON body leaked into the
+    # prose the digest treats as sacred (I-2), and that prose was then cached.
+    from drawing_analyzer.digest import parse_findings_detailed
+    from drawing_analyzer.models import FINDINGS_PARSED_CLOSED
+
+    raw = (
+        "Note that the schedule uses ```\n"
+        "as a delimiter.\n"
+        "\n" + _block([_item(text="VAV-3 mismatch")]) + "\n"
+    )
+    r = parse_findings_detailed(raw, _ref())
+    assert r.status == FINDINGS_PARSED_CLOSED, r.status
+    assert len(r.findings) == 1
+    assert '"findings"' not in r.prose
+    # And the prose keeps every word of itself (I-2). An un-anchored opener cuts
+    # the prose at the inline span, silently dropping the sentence after it from
+    # combined_text — the quieter half of the same defect.
+    assert "as a delimiter." in r.prose
+
+
+@pytest.mark.parametrize("fence", ["````", "~~~", "~~~~"])
+def test_longer_and_tilde_fences_are_recognised(fence):
+    # A four-backtick or ~~~ fence was not recognised at all, so the JSON leaked
+    # into the prose the other way — as ABSENT rather than TRUNCATED.
+    from drawing_analyzer.digest import parse_findings_detailed
+    from drawing_analyzer.models import FINDINGS_PARSED_CLOSED
+
+    body = json.dumps({"findings": [_item(text="VAV-3 mismatch")]})
+    raw = f"Prose digest.\n\n{fence}json\n{body}\n{fence}\n"
+    r = parse_findings_detailed(raw, _ref())
+    assert r.status == FINDINGS_PARSED_CLOSED, r.status
+    assert len(r.findings) == 1
+    assert '"findings"' not in r.prose
+
+
+def test_a_shorter_fence_inside_a_longer_block_is_body_not_the_close():
+    # CommonMark: a closing fence uses the same character as its opener and is
+    # at least as long. Matching any run of three backticks let a JSON body
+    # containing a fence terminate its own block early.
+    from drawing_analyzer.digest import scan_structured_blocks
+
+    raw = "````json\nline one\n```\nline two\n````\n"
+    (block,) = scan_structured_blocks(raw)
+    assert block.closed
+    assert "line one" in block.body and "line two" in block.body

@@ -737,6 +737,15 @@ def _parse_assessments(
         if isinstance(obj, dict) and ("assessments" in obj or "status" in obj):
             verdict = obj
     if verdict is None:
+        # Fenced blocks are what the prompt asks for, but a model that answers
+        # with the bare JSON object — no fence — has still answered. Reading
+        # only fenced blocks threw that verdict away and reported the claim
+        # UNCHECKED, which then held the whole stage at PARTIAL: a formatting
+        # preference presented as a failed check.
+        obj = _tolerant_json_object(raw_text)
+        if isinstance(obj, dict) and ("assessments" in obj or "status" in obj):
+            verdict = obj
+    if verdict is None:
         return {}, "", False
 
     edition_notes = str(verdict.get("edition_notes", "") or "").strip()[:_NOTE_CAP]
@@ -802,6 +811,10 @@ class _CheckOutcome:
     output_tokens: int = 0
     web_search_requests: int | None = None
     error: str | None = None
+    # The reply ran out of output budget before it could finish. Distinct from
+    # ``error`` (the request failed) and from an unparseable body (the model
+    # answered badly): here it did not finish answering at all.
+    truncated: bool = False
 
 
 def _check_one(
@@ -869,20 +882,29 @@ def _check_one(
         reported = _server_web_search_requests(resp)
         if reported is not None:
             searches = (searches or 0) + reported
-        if _get(resp, "stop_reason") == "pause_turn":
+        stop = _get(resp, "stop_reason")
+        if stop == "pause_turn":
             # The server-side search loop paused; re-send with the partial
-            # assistant turn appended — the server resumes where it left off.
-            content = _get(resp, "content")
-            messages = [
-                {"role": "user", "content": user_text},
-                {"role": "assistant", "content": content},
-            ]
+            # assistant turn APPENDED so the server resumes where it left off.
+            #
+            # This used to rebuild the list as ``[user, assistant]`` from
+            # scratch, which is correct only for the first resume: on the second
+            # and third it threw away every earlier partial turn, so the model
+            # resumed from a conversation missing the searches it had already
+            # done. The claims that need three resumes are the ones with the
+            # most work behind them.
+            messages = [*messages, {"role": "assistant", "content": _get(resp, "content")}]
             continue
         return _CheckOutcome(
             raw_text=_message_text(resp),
             sources=tuple(_extract_web_sources(resp)),
             input_tokens=total_in, output_tokens=total_out,
             web_search_requests=searches,
+            # A reply cut off at ``max_tokens`` parses to no verdict, which the
+            # caller otherwise reports as "no verdict for this claim" — the same
+            # words it uses when the model simply did not answer. Naming the
+            # truncation keeps a cap problem from reading as a model problem.
+            truncated=(stop == "max_tokens"),
         )
 
     return _CheckOutcome(
@@ -1201,9 +1223,14 @@ def check_citations(
                 )
                 if not parsed:
                     result.partial = True
+            unchecked_note = (
+                "no verdict (reply truncated at max_tokens)"
+                if outcome.truncated
+                else "no verdict for this claim"
+            )
             for handle, claim in handled:
                 fields = per.get(
-                    handle, {"status": "UNCHECKED", "note": "no verdict for this claim"}
+                    handle, {"status": "UNCHECKED", "note": unchecked_note}
                 )
                 if fields["status"] == "UNCHECKED":
                     result.partial = True

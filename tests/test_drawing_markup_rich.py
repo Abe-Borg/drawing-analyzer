@@ -1238,3 +1238,71 @@ def test_bookmark_outline_preserves_existing_source_outline(tmp_path):
     assert "Sheet Index" in titles and "M-101" in titles and "M-102" in titles
     # … and the QC section was appended.
     assert any(t.startswith("QC Findings") for t in titles)
+
+
+def test_citation_verdict_parses_without_a_fence():
+    # The prompt asks for a fenced block, but a model that answers with the bare
+    # JSON object has still answered. Reading only fenced blocks threw that
+    # verdict away and reported the claim UNCHECKED, which held the whole stage
+    # at PARTIAL — a formatting preference presented as a failed check.
+    import json as _json
+
+    from drawing_analyzer.citation_check import _parse_assessments
+
+    verdict = {
+        "assessments": [{"claim": "C1", "status": "CHECKED_SUPPORTS", "note": "ok"}],
+        "edition_notes": "2025 edition",
+    }
+    per, notes, parsed = _parse_assessments(
+        "Here is my answer:\n" + _json.dumps(verdict), ["C1"]
+    )
+    assert parsed is True
+    assert per["C1"]["status"] == "CHECKED_SUPPORTS"
+    assert notes == "2025 edition"
+
+
+def test_citation_pause_turn_resumes_keep_every_earlier_turn():
+    # The resume rebuilt the conversation as [user, assistant] from scratch,
+    # which is right only for the FIRST resume: on the second and third it threw
+    # away every earlier partial turn, so the model resumed from a conversation
+    # missing the searches it had already run. The claims needing three resumes
+    # are the ones with the most work behind them.
+    import json as _json
+
+    from drawing_analyzer.citation_check import _check_one
+
+    verdict = _json.dumps(
+        {"assessments": [{"claim": "C1", "status": "CHECKED_SUPPORTS", "note": "ok"}]}
+    )
+
+    class _Msgs:
+        def __init__(self):
+            self.seen: list[list[dict]] = []
+
+        def create(self, **kw):
+            self.seen.append(list(kw["messages"]))
+            if len(self.seen) <= 2:                    # pause twice, then answer
+                return FakeMessage(
+                    content=[FakeTextBlock(text=f"searching {len(self.seen)}")],
+                    stop_reason="pause_turn", usage=FakeUsage(),
+                )
+            return FakeMessage(
+                content=[FakeTextBlock(text="```json\n" + verdict + "\n```")],
+                stop_reason="end_turn", usage=FakeUsage(),
+            )
+
+    class _Client(BetaClientMixin):
+        def __init__(self):
+            self.messages = _Msgs()
+
+    client = _Client()
+    out = _check_one(
+        "NFPA 13 8.15.1", "NFPA 13 2025", [("C1", "a claim")],
+        client=client, model="claude-sonnet-5", max_retries=0, sleep=lambda _s: None,
+    )
+    assert out.error is None and out.raw_text
+    # Each resume carries every turn before it, so the conversation only grows.
+    lengths = [len(m) for m in client.messages.seen]
+    assert lengths == [1, 2, 3], lengths
+    assert client.messages.seen[-1][0]["role"] == "user"
+    assert all(m["role"] == "assistant" for m in client.messages.seen[-1][1:])

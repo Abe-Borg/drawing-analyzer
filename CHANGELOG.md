@@ -8,6 +8,75 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Nothing truncated is accepted, and nothing truncated is cached.** Four
+  defects that shared one shape: a reply the model did not finish was read as a
+  reply it did finish.
+
+  - **A truncated real-time digest was accepted as complete and cached
+    forever.** The path checked only for *empty* text, so a body severed
+    mid-sentence passed as a good digest — and was then stored, which served the
+    truncation on every later run at zero cost, with nothing in `run.log` to
+    show for it. The batch path already retried the empty case; real-time was
+    the outlier. It now reads `stop_reason`, retries once at a raised cap
+    (`MAX_TOKENS_RETRY_CEILING` moved into `digest.py` so both transports share
+    one value rather than two that can drift), and if the reply is *still*
+    truncated it marks the sheet failed and refuses the cache write. The partial
+    prose still ships (I-3) and `SHEET_DIGESTED` now carries `stop_reason`
+    whenever it is not the ordinary `end_turn`. This matters more than it
+    sounds: the digest runs adaptive thinking at effort `high`, and thinking
+    draws from the same envelope as the answer, so a dense sheet reaches the cap
+    in the ordinary case.
+
+  - **The fenced-block scanner was not line-anchored.** It hunted for a bare
+    ```` ``` ```` at any offset, so an **inline** triple-backtick span that
+    happened to end a line opened a phantom block — and the real ```` ```json ````
+    opener then closed it. The findings block came back TRUNCATED with zero
+    findings while its entire JSON body leaked into the prose the digest treats
+    as sacred (I-2), and that prose was cached. The quieter half of the same
+    defect: prose after the inline span was silently cut from `combined_text`.
+    Four-backtick and `~~~` fences were not recognised at all, leaking the JSON
+    the other way as ABSENT. Openers and closers are now line-anchored, longer
+    and tilde fences are read, and a closing fence must match its opener's
+    character and length. `scan_structured_blocks` is shared, so set identity,
+    the review planner, cross-QC and the prose harvest all get the fix.
+
+  - **A truncated or refused verification verdict read as a garbled one.** Both
+    degrade to UNCERTAIN, but they are different failures — one is the model's
+    judgment arriving malformed, the other means nothing was judged because the
+    envelope was too small — and the note now says which. Neither is cached.
+
+  - **The citation check lost work across `pause_turn` resumes, and threw away
+    unfenced verdicts.** The resume rebuilt the conversation as `[user,
+    assistant]` from scratch, which is right only for the *first* resume; on the
+    second and third it discarded every earlier partial turn, so the model
+    resumed from a conversation missing searches it had already run. A verdict
+    returned as a bare JSON object with no fence was also discarded, reporting
+    the claim UNCHECKED and holding the stage at PARTIAL — a formatting
+    preference presented as a failed check. A reply cut off at `max_tokens` now
+    says so instead of sharing the wording used when the model simply did not
+    answer.
+
+### Changed
+
+- **The user-turn framing is now inside both prompt hashes (I-6).** How a sheet
+  is introduced, how an omitted tile is disclosed, the overview label and the
+  per-tile label are model-visible strings that sat outside `DIGEST_PROMPT_VERSION`
+  *and* `CRITIQUE_PROMPT_VERSION`. Editing any of them changed what was sent
+  while every cache key stayed byte-identical, so warm runs replayed reads taken
+  under the old wording. They are now module constants gathered in one
+  `SHARED_USER_FRAMING_STRINGS` tuple that both hashes splat, so a string added
+  to the shared builder reaches both automatically instead of waiting to be
+  noticed — the exact drift `CRITIQUE_PROMPT_VERSION`'s own comment records.
+  The prompt bytes the model receives are unchanged, verified byte-identical
+  before and after; only the hash inputs grew.
+
+- **`digest_cache._SCHEMA_VERSION` 8 → 9 (one-time cache miss).** A stored entry
+  holds the *post-parse* product — stripped prose plus parsed findings, never the
+  raw response — so entries written under the old scanner cannot be re-derived in
+  place and must miss once. Same reasoning as the v6 parser rebuild, which is the
+  precedent it follows. Everything in `DigestCache` re-derives on the next run:
+  digest, critique, identity, review plan, citation, investigation.
+
 - **A run can no longer report COMPLETE over a sheet it never read.** Six
   status-accounting defects, each of which let an exhaustive run present a
   degraded result as a clean one. They are grouped because they share a failure

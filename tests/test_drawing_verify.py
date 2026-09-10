@@ -758,3 +758,39 @@ def test_verify_states_its_thinking_and_effort_explicitly():
     assert kw["output_config"] == {"effort": "high"}
     # The envelope has to cover the reasoning as well as the verdict.
     assert kw["max_tokens"] == 8_000
+
+
+def test_a_truncated_or_refused_verdict_is_not_a_garbled_one():
+    # The verdict parser saw only text, so a reply cut off at max_tokens — or
+    # declined outright — arrived as "unparseable verdict", indistinguishable
+    # from the model answering badly. Both degrade to UNCERTAIN, but they are
+    # different failures: one is the model's judgment arriving malformed, the
+    # other means nothing was judged at all because the envelope was too small.
+    # Verification is the likeliest place to hit it, since adaptive thinking
+    # draws from the same max_tokens envelope as the answer.
+    import json as _json
+
+    from drawing_analyzer.verify import _verdict_from_response
+    from tests.fixtures.fake_anthropic import FakeMessage, FakeTextBlock
+
+    def _resp(text, stop):
+        return FakeMessage(content=[FakeTextBlock(text=text)], stop_reason=stop)
+
+    good = _json.dumps({"verdict": "CONFIRMED", "note": "seen on the sheet"})
+    assert _verdict_from_response(_resp(good, "end_turn")) == (
+        "VERIFIED", "seen on the sheet", True,
+    )
+
+    # A garbled answer keeps the existing wording — the model answered badly.
+    status, note, valid = _verdict_from_response(_resp("I think maybe?", "end_turn"))
+    assert (status, note, valid) == ("UNCERTAIN", "unparseable verdict", False)
+
+    # A truncated or refused reply says so, and is never cacheable.
+    for stop, expected in (
+        ("max_tokens", "no verdict (truncated at max_tokens)"),
+        ("refusal", "no verdict (declined by the model)"),
+    ):
+        status, note, valid = _verdict_from_response(_resp('{"verdict": "CONF', stop))
+        assert status == "UNCERTAIN"
+        assert note == expected, (stop, note)
+        assert valid is False        # never stored as a settled verdict

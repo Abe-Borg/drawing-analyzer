@@ -2475,3 +2475,42 @@ def test_abandoned_recovery_rounds_survive_on_a_sheet_recovery_never_resolves(
     # The healthy sheet is unaffected.
     assert digests[1].ok
     assert not [a for a in (getattr(digests[1], "usage_attempts", ()) or []) if not a.billable]
+
+
+def test_batch_nonempty_truncation_is_an_error_and_is_retried():
+    # Parity with the real-time path. The batch parser set an error only when
+    # the text was EMPTY, so a succeeded item carrying partial text at
+    # max_tokens was accepted as a complete digest and cached permanently —
+    # and ``_item_retry_params`` never saw an error to retry on, because it
+    # also demanded ``not digest.text``. A partial body is exactly the case the
+    # raised cap exists to finish.
+    from drawing_analyzer import batch_digest
+    from drawing_analyzer.digest import DEFAULT_DIGEST_MAX_TOKENS
+    from drawing_analyzer.digest_cache import DigestCache
+    from drawing_analyzer.models import SheetRef
+
+    ref = SheetRef(
+        pdf_path=Path("M-101.pdf"), page_index=0,
+        source_name="M-101.pdf", page_count=1,
+    )
+    slot = batch_digest._Slot(
+        index=0, ref=ref, image_estimate=0, rows=2, cols=2, cache_key="k",
+    )
+    message = FakeMessage(
+        content=[FakeTextBlock(text="Real prose, cut off mid-")],
+        usage=FakeUsage(input_tokens=100, output_tokens=20),
+        stop_reason="max_tokens",
+    )
+    cache = DigestCache(None, persist=False)
+    digest = batch_digest._digest_from_message(slot, message, cache=cache)
+
+    assert digest.error == "truncated digest (stop_reason='max_tokens')"
+    assert digest.text                                  # partial prose kept (I-3)
+    assert len(cache._entries) == 0                     # never stored
+
+    # And it now qualifies for the raised-cap resubmission.
+    params = {"model": OPUS, "max_tokens": DEFAULT_DIGEST_MAX_TOKENS}
+    retry = batch_digest._item_retry_params(
+        slot, {"type": "succeeded"}, digest, params=params,
+    )
+    assert retry is not None and retry["max_tokens"] > DEFAULT_DIGEST_MAX_TOKENS

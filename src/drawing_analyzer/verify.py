@@ -53,6 +53,7 @@ from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
     _clean_error,
     _error_status,
+    _get,
     _image_block,
     _is_transient_error,
     _message_text,
@@ -200,6 +201,33 @@ def _parse_verdict_with_validity(text: str) -> tuple[str, str, bool]:
     if mapped is None:
         return "UNCERTAIN", note or f"unrecognized verdict {raw!r}", False
     return mapped, note, True
+
+
+def _verdict_from_response(resp: Any) -> tuple[str, str, bool]:
+    """Parse one verdict response, accounting for WHY the model stopped.
+
+    :func:`_parse_verdict_with_validity` sees only text, so a reply cut off at
+    ``max_tokens`` — or declined outright — arrived as "unparseable verdict",
+    indistinguishable from a garbled answer. Both degrade to UNCERTAIN, but they
+    are different failures and call for different responses: a garbled answer is
+    the model's judgment arriving badly formed, while a truncated one means the
+    envelope was too small and nothing was judged at all. Only the first is a
+    conclusion; neither is cacheable, and the note now says which happened so a
+    reviewer reading a run of UNCERTAINs can tell a prompt problem from a cap
+    problem.
+
+    Verification requests are the ones most likely to hit this: they run
+    adaptive thinking, which draws from the same ``max_tokens`` envelope as the
+    answer.
+    """
+    stop = _get(resp, "stop_reason")
+    if stop in ("max_tokens", "refusal"):
+        reason = (
+            "truncated at max_tokens" if stop == "max_tokens"
+            else "declined by the model"
+        )
+        return "UNCERTAIN", f"no verdict ({reason})", False
+    return _parse_verdict_with_validity(_message_text(resp))
 
 
 def parse_verdict(text: str) -> tuple[str, str]:
@@ -579,7 +607,7 @@ def _verify_one(
             _log.warning("verify finding %s failed: %s", finding.id, note)
             return Verification(status="UNCERTAIN", note=note, evidence=list(artifacts)), 0, 0, False
 
-    status, note, valid_model_verdict = _parse_verdict_with_validity(_message_text(resp))
+    status, note, valid_model_verdict = _verdict_from_response(resp)
     in_tok, out_tok = _message_usage(resp)
     if note == "unparseable verdict" or note.startswith("unrecognized verdict"):
         _log.info("verify finding %s: %s", finding.id, note)
@@ -1099,7 +1127,7 @@ def _call_prepared_cross(
             )
             return v, 0, 0, False
 
-    status, note, valid_model_verdict = _parse_verdict_with_validity(_message_text(resp))
+    status, note, valid_model_verdict = _verdict_from_response(resp)
     in_tok, out_tok = _message_usage(resp)
     v = Verification(status=status, note=note, evidence=prepared.artifacts)
     return v, in_tok, out_tok, valid_model_verdict

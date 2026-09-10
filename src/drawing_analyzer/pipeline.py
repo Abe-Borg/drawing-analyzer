@@ -3019,6 +3019,12 @@ def extract_drawing_context(
             "digest_chars": len(sd.text or ""),
             "findings": len(getattr(sd, "findings", None) or []),
         }
+        # Why the model stopped. Omitted while it is the ordinary end_turn, so
+        # the common line stays short — but a run that hit the cap used to leave
+        # nothing at all in run.log, which is what made a truncated digest
+        # invisible after the fact.
+        if getattr(sd, "stop_reason", None) not in (None, "", "end_turn"):
+            sheet_fields["stop_reason"] = sd.stop_reason
         geom = geom_by_key.get(source_page_key(sd.ref))
         if geom is not None:
             sheet_fields["layer"] = "raster" if geom.is_raster else "vector"

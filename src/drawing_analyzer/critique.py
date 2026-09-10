@@ -50,10 +50,7 @@ from .digest import (
     DEFAULT_DIGEST_EFFORT,
     DEFAULT_DIGEST_MAX_RETRIES,
     DEFAULT_DIGEST_MAX_TOKENS,
-    _SHEET_TEXT_LAYER_CLOSE,
-    _SHEET_TEXT_LAYER_HEADER,
-    _SHEET_TEXT_LAYER_OPEN,
-    _SHEET_TEXT_LAYER_RASTER_PLACEHOLDER,
+    SHARED_USER_FRAMING_STRINGS,
     _clean_error,
     _get,
     _is_transient_error,
@@ -233,20 +230,16 @@ calculation catch any error. Put nothing but the JSON object inside the block.""
 # framing re-keyed the digest cache while silently replaying warm critiques
 # taken under the old wording.
 CRITIQUE_PROMPT_VERSION = hashlib.sha256(
-    (
-        CRITIQUE_SYSTEM_PROMPT
-        + "\x00"
-        + _CRITIQUE_TASK_INSTRUCTION
-        + "\x00"
-        + _CRITIQUE_FINDINGS_INSTRUCTION
-        + "\x00"
-        + _SHEET_TEXT_LAYER_HEADER
-        + "\x00"
-        + _SHEET_TEXT_LAYER_RASTER_PLACEHOLDER
-        + "\x00"
-        + _SHEET_TEXT_LAYER_OPEN
-        + "\x00"
-        + _SHEET_TEXT_LAYER_CLOSE
+    "\x00".join(
+        (
+            CRITIQUE_SYSTEM_PROMPT,
+            _CRITIQUE_TASK_INSTRUCTION,
+            _CRITIQUE_FINDINGS_INSTRUCTION,
+            # The whole shared framing, imported as ONE tuple rather than named
+            # constant by constant: a string added to the builder now reaches
+            # this hash automatically instead of waiting to be noticed here.
+            *SHARED_USER_FRAMING_STRINGS,
+        )
     ).encode("utf-8")
 ).hexdigest()[:16]
 
