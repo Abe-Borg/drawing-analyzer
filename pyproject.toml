@@ -28,7 +28,7 @@ dev = ["pytest>=9.0"]
 # Pinned for reproducible CI: the Playwright version fixes the Chromium build
 # that `playwright install chromium` fetches. Not needed for the default suite,
 # which skips the browser tests when Playwright/its browser is absent.
-browsertest = ["playwright==1.61.0"]
+browsertest = ["playwright==1.62.0"]
 
 # Launch the standalone GUI with `drawing-analyzer` (or `python -m drawing_analyzer`).
 [project.gui-scripts]
