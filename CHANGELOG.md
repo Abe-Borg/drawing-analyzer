@@ -6,6 +6,24 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Anthropic SDK bumped 1.4.0 → 1.5.0.** No breaking changes for this app:
+  1.5.0 is additive (Managed Agents auto-mode permissions, a new web-fetch
+  `content_too_large` error code, user-profiles beta fields, `Message.to_param`)
+  plus bug fixes, one of which is directly load-bearing here — "corrected
+  streaming tool input JSON handling" fixes the same transport
+  (`digest.stream_message`) the investigation loop's agentic tool-call turns
+  (`investigate.py`) run on. The new web-fetch error code needs no handling
+  here: `_extract_web_sources` and the report's chat widget already surface
+  `content.error_code` generically rather than branching on known values.
+  `pyproject.toml`'s pin, `requirements.txt`, and `requirements-release.lock`
+  regenerated accordingly (`anthropic`, plus the transitive `jiter`,
+  `platformdirs`, `pypdf`, `regex` bumps a clean resolve picked up). Full test
+  suite green against a real `anthropic==1.5.0` install (2242 passed; the same
+  3 pre-existing, environment-only cryptography/cffi failures in
+  `test_spec_documents.py` as before, unrelated to this change).
+
 ---
 
 ## [1.5.0] - 2026-09-10
