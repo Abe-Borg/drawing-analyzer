@@ -2,14 +2,21 @@
 
 Copy of `docs/RELEASE_ACCEPTANCE_TEMPLATE.md` for this candidate.
 
-> **Status: INCOMPLETE — do not tag yet.**
-> Every automated gate that has been run is green, but §1 is not yet complete
-> (Windows `run_acceptance.py`, CI on the release commit, and branch-protection
-> evidence are outstanding), and §§2–6 are the manual/billable gates and are
-> **unstarted**: they need a real API key, a Windows machine, Bluebeam Revu,
-> Excel, and an owner's eyes. §19 Definition of done: *"A release may be cut
-> only when every automated gate passes and every manual section is recorded —
-> passing the hermetic suite alone is not acceptance."*
+> **Status: INCOMPLETE. `v1.6.0` was tagged and the release did NOT publish** —
+> `gates` failed on a dependency-audit finding and `publish` was skipped, so no
+> GitHub Release exists and no installer was distributed. The fix has landed;
+> the tag must be re-cut. See the audit row in §1.
+>
+> §1 is therefore **not** "all green": one gate failed on the release commit and
+> that is what stopped the release. What the tag run *did* establish on `2058975`
+> is recorded there — the full CI matrix, the Windows hermetic suite, and the
+> installer path with the version guard active. Still outstanding in §1:
+> `run_acceptance.py` on **Windows** (no CI job runs it) and branch-protection
+> evidence. §§2–6 are the manual/billable gates and remain **unstarted**: they
+> need a real API key, a Windows machine, Bluebeam Revu, Excel, and an owner's
+> eyes. §19 Definition of done: *"A release may be cut only when every automated
+> gate passes and every manual section is recorded — passing the hermetic suite
+> alone is not acceptance."*
 >
 > Every unchecked box below is a real gate, not a formality. This file is the
 > permanent attestation for 1.6.0: if a box is ticked here, someone is saying
@@ -29,15 +36,22 @@ Copy of `docs/RELEASE_ACCEPTANCE_TEMPLATE.md` for this candidate.
 | Model ids exercised (digest / critique / verify / citation) | `claude-opus-5` / `claude-opus-5` / `claude-sonnet-5` / `claude-sonnet-5` (escalation `claude-opus-5`) |
 | Web-search tool type observed by the live canary | configured `web_search_20260209` — **observed value pending §2** |
 
-## 1. Automated gates — ⚠️ INCOMPLETE (every gate run is green; three required evidence items are missing)
+## 1. Automated gates — ❌ INCOMPLETE (one gate FAILED on the release commit; two evidence items still missing)
 
-> Not "COMPLETE": the template requires `run_acceptance.py` on Linux **and**
-> Windows plus CI **on the release commit**, and a branch-protection check that
-> needs the admin console. What is recorded below is Linux-only, CI on the
-> parent commit `28a6cf9`, and no branch-protection evidence. Every gate that
-> did run passed — but a section marked complete while its own boxes are open is
-> how a permanent record ends up attesting to checks that never ran, so it stays
-> open until the three items below have evidence.
+> The dependency vulnerability audit **failed** on `2058975` in `release.yml`'s
+> `gates` job, which is why `publish` was skipped and nothing shipped. The fix is
+> in, verified against a reproduction, and needs a green re-cut to be ticked.
+>
+> CI **on the release commit** is no longer outstanding — the `v1.6.0` tag fired
+> its own `ci.yml` run (34995155028), green across the whole matrix. What remains
+> missing is `run_acceptance.py` on **Windows** (no CI job runs it; `gates-windows`
+> runs the hermetic suite, which is a different thing) and branch-protection
+> evidence from the admin console.
+>
+> An earlier draft of this section said "COMPLETE", then "every gate run is
+> green" after one had failed. Both were wrong in the same direction, which is
+> the direction that matters here: a record that overstates is worse than no
+> record.
 
 `python scripts/run_acceptance.py` on Linux, all six gates PASS with **no skips**
 (Chromium and the build tooling were installed so the browser and build gates
@@ -52,7 +66,8 @@ executed rather than short-circuiting):
   build + clean-install smoke      PASS
 ```
 
-- [~] Hermetic suite green on Windows (py3.11) and Linux (py3.11 + py3.12) — CI `test` matrix, run `34925367466`, **on parent commit `28a6cf9`**. Re-confirm on the release commit (the prep PR's own CI run covers the prep branch; the tag run covers the tagged commit).
+- [x] Hermetic suite green on Windows (py3.11) and Linux (py3.11 + py3.12) — evidenced on the release commit by the tag's own `ci.yml` run, [34995155028](https://github.com/Abe-Borg/drawing-analyzer/actions/runs/34995155028) on `2058975`: all six jobs green, including `tests (ubuntu-latest, py3.12)`. Cited deliberately rather than `release.yml`'s `gates`, which pins `python-version: "3.11"` and so cannot evidence py3.12 at all — an earlier draft credited it with that and was wrong. `release.yml`'s `gates-windows` separately passed the Windows hermetic suite + I-5 on the same commit ([run 34995154773](https://github.com/Abe-Borg/drawing-analyzer/actions/runs/34995154773)).
+- [x] Windows installer path green on the release commit — same run: the version guard (tag vs both literals) **passed**, PyInstaller build, frozen-exe self-check, Inno Setup **6.7.1** compile, `latest.json`, artifact upload.
 - [ ] **`python scripts/run_acceptance.py` on Windows.** Only the Linux run is recorded below. The Windows leg is not redundant: path length and case handling, the `\\?\` long-path form, `os.utime`, and Credential Manager key storage are Windows-only behaviours, which is exactly why `release.yml` carries a separate `gates-windows` job.
 - [x] Trust gauntlet (§19.1) green — included in the hermetic suite gate above.
 - [x] Large-set cross-shard acceptance (§19.2) green — same.
@@ -60,7 +75,11 @@ executed rather than short-circuiting):
 - [x] Headless-Chromium report exploit suite green — CI `browser-security`, and locally with the executed-test floor enforced (`check_browser_suite.py`; a skip is not a pass).
 - [x] Secret scan clean (`scripts/scan_secrets.py`).
 - [x] Static analysis (correctness classes) clean — `ruff check --select E9,F63,F7,F82 src tests scripts`.
-- [x] Dependency vulnerability audit clean — **verified against CI, not locally.** A local `pip-audit` in a fresh venv reported `setuptools 79.0.1 / PYSEC-2026-3447`; `setuptools` is **not in `requirements-release.lock`** (it is a `build-system.requires` entry), so that finding is the audit venv's own ambient setuptools, not the shipped dependency set. The authoritative run is CI's `security-gates` step "Dependency vulnerability audit (pip-audit)" on `28a6cf9`, which installs `-c requirements-release.lock ".[dev]"` first and **passed**. No `--ignore-vuln` exception is needed or added.
+- [ ] **Dependency vulnerability audit — FAILED the v1.6.0 tag run, then fixed.** `setuptools 79.0.1 / PYSEC-2026-3447` (fix: 83.0.0) failed the `gates` job of [run 34995154773](https://github.com/Abe-Borg/drawing-analyzer/actions/runs/34995154773), so `publish` was skipped and **no release was created**.
+
+  An earlier draft of this record dismissed the identical finding as "the audit venv's own ambient setuptools, not the shipped dependency set". The premise was right and the conclusion did not follow: `setuptools` genuinely is absent from `requirements-release.lock` (`pip freeze` excludes it by default), but `pip-audit --skip-editable` skips the **editable install** — this package — and audits every other installed distribution, ambient ones included. So an unpinned setuptools was always in scope, and really is part of the release toolchain. It passed on earlier commits only because the advisory landed between those runs and the tag run.
+
+  Fixed by upgrading rather than excepting: both audit jobs (`ci.yml` security-gates, `release.yml` gates) now `pip install --upgrade "setuptools>=83.0.0"` before auditing. That removes the vulnerable code from the environment, so it is a fix and not an `--ignore-vuln` gate downgrade, and needs no dated exception under `ci.yml`'s header policy. Reproduced and verified in a clean venv running the exact CI sequence: `setuptools 79.0.1 / PYSEC-2026-3447` before, `No known vulnerabilities found` (exit 0) after. **Re-tick this only against a green `gates` job on the re-cut tag.**
 - [x] Dependency license / AGPL-notice audit clean — `scripts/check_licenses.py`, 70 distributions.
 - [x] Wheel/sdist build + twine check + clean-venv install smoke green — locally and CI `build`.
 - [ ] **Branch protection names `test`, `browser-security`, `security-gates`, `build` as required checks** (admin console — record who verified). *Not verifiable from here; needs the repo admin UI.*
@@ -198,9 +217,10 @@ the status flips to SHIP nothing could show which of them actually passed.
 ## Sign-off
 
 ```
-Automated gates:   INCOMPLETE       (Linux run_acceptance.py 6/6 green, no skips;
-                                     Windows run + CI-on-release-commit +
-                                     branch-protection evidence outstanding)
+Automated gates:   FAILED on the v1.6.0 tag run (pip-audit / PYSEC-2026-3447);
+                   fix landed, needs a green re-cut. Windows hermetic suite and
+                   the installer path DID pass on 2058975. run_acceptance.py on
+                   Windows + branch-protection evidence still outstanding.
 Live canary:       NOT RUN
 Manual sections:   INCOMPLETE       (§§2-6 unstarted)
 

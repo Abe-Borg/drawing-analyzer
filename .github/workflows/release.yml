@@ -282,7 +282,19 @@ jobs:
           pip install -c requirements-release.lock ".[dev]"
           python scripts/check_licenses.py
       - name: Dependency vulnerability audit (pip-audit)
+        # `setuptools` is NOT in requirements-release.lock — `pip freeze`
+        # excludes it by default — but pip-audit audits the whole installed
+        # environment, so the runner's ambient copy is in scope. That is not a
+        # scanner quirk to work around: an unpinned setuptools really is part of
+        # the release toolchain, and PYSEC-2026-3447 (affecting < 83.0.0) failed
+        # the v1.6.0 tag run on exactly that. Upgrading removes the vulnerable
+        # code from the environment; it is a fix, not an `--ignore-vuln`
+        # downgrade, so it needs no dated exception under the header policy.
+        # (`--skip-editable` skips the EDITABLE install — this package — never
+        # ambient packages. Reading it as "only the lock is audited" is what let
+        # the finding be dismissed once already.)
         run: |
+          pip install "setuptools==84.0.0"
           pip install "pip-audit==2.9.0"
           pip-audit --skip-editable
 
