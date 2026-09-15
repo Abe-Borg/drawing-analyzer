@@ -34,6 +34,7 @@ request/parse helpers; the pipeline owns rendering.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import time
@@ -43,8 +44,10 @@ from typing import Any
 
 from .core.api_config import (
     REVIEW_MODEL_DEFAULT,
+    clamp_effort_for_model,
     model_supports_adaptive_thinking,
     model_supports_effort,
+    model_supports_structured_outputs,
 )
 from .diagnostics import get_logger
 from .digest import (
@@ -53,6 +56,7 @@ from .digest import (
     DEFAULT_DIGEST_MAX_TOKENS,
     SHARED_USER_FRAMING_STRINGS,
     _clean_error,
+    _error_status,
     _get,
     _is_transient_error,
     _message_text,
@@ -68,6 +72,7 @@ from .digest import (
 from .digest_cache import critique_cache_key
 from .auditors.sheet_ids import normalize_sheet_id
 from .models import (
+    CLAIM_KINDS,
     CONFIDENCE_NOT_APPLICABLE,
     CONFIDENCE_NOT_ASSESSED_PARTIAL,
     CONFIDENCE_REPRODUCED,
@@ -246,7 +251,180 @@ CRITIQUE_PROMPT_VERSION = hashlib.sha256(
 ).hexdigest()[:16]
 
 
-def critique_system_prompt(checklist: str = "") -> str:
+# --------------------------------------------------------------------------- #
+# Structured outputs (opt-in, F-01)
+# --------------------------------------------------------------------------- #
+#
+# The critique is the one high-volume call in this pipeline whose response is
+# JSON and *only* JSON ("no prose before or after it"), which is what makes it —
+# and not the digest — the stage ``output_config.format`` actually fits. It also
+# runs more often than any other model call: twice per sheet, every sheet, for
+# self-consistency.
+#
+# Two derivations rather than two copies. The structured instruction is produced
+# from :data:`_CRITIQUE_FINDINGS_INSTRUCTION` by substitution, so every semantic
+# rule around the fence sentence — the category enum, "cite conservatively", the
+# verbatim-quote rule, the 40-finding cap, the whole claims contract and its
+# never-compute prohibition — has exactly one author. A second hand-maintained
+# copy of this text is the drift this codebase has already paid for once (see
+# ``critical_signature`` and the A/B harness), and the failure would be quiet:
+# two prompts that agree today and disagree after the next edit, with the cache
+# key unable to tell which one produced a stored critique.
+_STRUCTURED_FENCE_SENTENCE = (
+    "Output a SINGLE fenced code block labeled json and nothing else — no prose "
+    "before or after it — containing "
+)
+_STRUCTURED_FENCE_REPLACEMENT = "Return exactly one JSON object: "
+_STRUCTURED_TAIL_SENTENCE = " Put nothing but the JSON object inside the block."
+
+_CRITIQUE_STRUCTURED_INSTRUCTION = _CRITIQUE_FINDINGS_INSTRUCTION.replace(
+    _STRUCTURED_FENCE_SENTENCE, _STRUCTURED_FENCE_REPLACEMENT, 1
+).replace(_STRUCTURED_TAIL_SENTENCE, "", 1)
+
+# A substitution that silently matched nothing would ship the fence instruction
+# under a schema that forbids a fence — the model told to emit one thing and
+# constrained to another. Checked at import so an edit to the source string can
+# never land that combination.
+assert _STRUCTURED_FENCE_SENTENCE not in _CRITIQUE_STRUCTURED_INSTRUCTION, (
+    "structured critique instruction still asks for a fenced block"
+)
+assert _STRUCTURED_TAIL_SENTENCE not in _CRITIQUE_STRUCTURED_INSTRUCTION, (
+    "structured critique instruction still refers to 'the block'"
+)
+
+# Mirrors the finding/claim shapes ``parse_findings_detailed`` and
+# ``_validate_claim_item`` already validate — the schema constrains, it does not
+# replace, those checks: a response can be schema-valid and still name a tile
+# that does not exist on this grid or a quote that is not on the sheet.
+#
+# Deliberately absent: the 40-finding cap. Structured outputs rejects ``maxItems``
+# (and ``minItems`` above 1) outright, so the cap stays a prose rule and stays
+# enforced host-side, exactly as the ``rect`` length does for strict tools.
+# ``additionalProperties: false`` is mandatory on every object under the schema
+# compiler; optional fields are expressed by omission from ``required``.
+_CRITIQUE_FINDING_ITEM_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "sheet_id": {"type": "string"},
+        "category": {
+            "type": "string",
+            "enum": ["code", "conflict", "coordination", "question"],
+        },
+        "severity": {"type": "string", "enum": ["high", "medium", "low"]},
+        "text": {"type": "string"},
+        "recommended_action": {"type": "string"},
+        "source_quote": {"type": "string"},
+        "anchor_hint": {"type": "string", "enum": ["SHEET"]},
+        "tile_label": {"type": "string"},
+        "refs": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": [
+        "sheet_id",
+        "category",
+        "severity",
+        "text",
+        "recommended_action",
+        "source_quote",
+    ],
+    "additionalProperties": False,
+}
+
+# ``terms`` and ``expected`` accept a string or a number because the sheet does:
+# the model transcribes what is printed ("1,500 SF", 1500) and the deterministic
+# auditor — never the model — parses it. Constraining them to one JSON type here
+# would force a transcription decision the invariant reserves for the host.
+_CRITIQUE_SCALAR_SCHEMA: dict = {"anyOf": [{"type": "string"}, {"type": "number"}]}
+
+_CRITIQUE_CLAIM_ITEM_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "sheet_id": {"type": "string"},
+        "quote": {"type": "string"},
+        "kind": {"type": "string", "enum": sorted(CLAIM_KINDS)},
+        "terms": {"type": "array", "items": _CRITIQUE_SCALAR_SCHEMA},
+        "expected": _CRITIQUE_SCALAR_SCHEMA,
+        "note": {"type": "string"},
+    },
+    "required": ["sheet_id", "quote", "kind", "terms", "expected", "note"],
+    "additionalProperties": False,
+}
+
+CRITIQUE_FINDINGS_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "findings": {"type": "array", "items": _CRITIQUE_FINDING_ITEM_SCHEMA},
+        "claims": {"type": "array", "items": _CRITIQUE_CLAIM_ITEM_SCHEMA},
+    },
+    "required": ["findings", "claims"],
+    "additionalProperties": False,
+}
+
+# The structured half of the cache identity, kept SEPARATE from
+# ``CRITIQUE_PROMPT_VERSION`` on purpose. Folding the structured instruction and
+# the schema into the main version would re-key — and so discard — every critique
+# ever cached, including those of users who never turn this on, for a request
+# shape they never sent. Instead this rides ``critique_cache_key`` only when
+# structured mode is actually used, so: structured off, keys stay byte-identical
+# to today; structured on, the instruction AND the schema are both covered, and
+# editing either re-critiques only the structured entries (I-6).
+CRITIQUE_STRUCTURED_PROMPT_VERSION = hashlib.sha256(
+    "\x00".join(
+        (
+            _CRITIQUE_STRUCTURED_INSTRUCTION,
+            json.dumps(CRITIQUE_FINDINGS_SCHEMA, sort_keys=True),
+        )
+    ).encode("utf-8")
+).hexdigest()[:16]
+
+# Process-wide self-healing latch, same shape and same reason as
+# ``investigate._strict_tools_available``. Anthropic documents citations and
+# prefill as the only incompatibilities of ``output_config.format`` and says
+# nothing either way about image inputs — and every critique request is a vision
+# request carrying ~37 tiles. So the capability registry is treated as "the
+# request will be accepted", not as a guarantee, and the first rejection turns
+# the feature off for the process and re-sends unconstrained. A critique stage
+# that 400s on every sheet would take the entire QC read down with it (I-3).
+_structured_outputs_available = True
+
+_STRUCTURED_OUTPUTS_REJECTION_MARKERS = (
+    "output_config",
+    "json_schema",
+    "output_format",
+    "structured output",
+    "schema",
+)
+
+
+def _is_structured_outputs_rejection(exc: Exception) -> bool:
+    """True for a 400 that names the structured-output contract."""
+    if _error_status(exc) != 400:
+        return False
+    text = str(exc).lower()
+    return any(marker in text for marker in _STRUCTURED_OUTPUTS_REJECTION_MARKERS)
+
+
+def critique_structured_outputs_enabled(model: str) -> bool:
+    """Whether this critique request should carry ``output_config.format``.
+
+    Three gates, all of which must pass:
+
+    1. ``DRAWING_ANALYZER_CRITIQUE_STRUCTURED_OUTPUTS`` is truthy. **Opt-in**,
+       because the one thing that would make this unsafe — whether a schema
+       constraint holds on a 37-image vision request — is undocumented upstream
+       and cannot be settled from inside a hermetic test suite. It is settled by
+       one cheap live call: ``tests/test_live_api_canary.py`` exercises the real
+       contract under ``-m network``. Flip the default here once that passes on
+       your account, not before.
+    2. the model declares the capability (registry, never a model-id test);
+    3. the process has not already latched off after a rejection this run.
+    """
+    raw = os.environ.get("DRAWING_ANALYZER_CRITIQUE_STRUCTURED_OUTPUTS", "")
+    if raw.strip().lower() not in {"1", "true", "yes", "on"}:
+        return False
+    return _structured_outputs_available and model_supports_structured_outputs(model)
+
+
+def critique_system_prompt(checklist: str = "", *, structured: bool = False) -> str:
     """The effective critique system prompt: persona, then any review-profile
     ``checklist`` (Phase 12), then the findings instruction.
 
@@ -254,8 +432,16 @@ def critique_system_prompt(checklist: str = "") -> str:
     emitted after everything (the parser's "last fenced block" rule); the
     checklist rides between the persona and it. Empty ``checklist`` reproduces the
     pre-profiles prompt byte-for-byte.
+
+    ``structured`` swaps in the fence-free instruction for a request that
+    carries ``output_config.format``. Default ``False`` keeps every existing
+    caller — and every cached critique — byte-identical.
     """
-    return CRITIQUE_SYSTEM_PROMPT + (checklist or "") + _CRITIQUE_FINDINGS_INSTRUCTION
+    instruction = (
+        _CRITIQUE_STRUCTURED_INSTRUCTION if structured
+        else _CRITIQUE_FINDINGS_INSTRUCTION
+    )
+    return CRITIQUE_SYSTEM_PROMPT + (checklist or "") + instruction
 
 
 def build_critique_request_params(
@@ -267,6 +453,7 @@ def build_critique_request_params(
     effort: str | None = DEFAULT_CRITIQUE_EFFORT,
     checklist: str = "",
     cache_prefix: bool = False,
+    structured: bool | None = None,
 ) -> dict[str, Any]:
     """Build the Messages-API request body for one critique read.
 
@@ -297,16 +484,29 @@ def build_critique_request_params(
         # verbatim across the batch path's reads) is never mutated in place.
         *head, last = content
         content = [*head, {**last, "cache_control": {"type": "ephemeral"}}]
+    if structured is None:
+        structured = critique_structured_outputs_enabled(model)
     params: dict[str, Any] = {
         "model": model,
         "max_tokens": max_tokens,
-        "system": critique_system_prompt(checklist),
+        "system": critique_system_prompt(checklist, structured=structured),
         "messages": [{"role": "user", "content": content}],
     }
     if use_thinking and model_supports_adaptive_thinking(model):
         params["thinking"] = {"type": "adaptive"}
     if effort and model_supports_effort(model):
-        params["output_config"] = {"effort": effort}
+        # Clamped for the same reason as the digest twin: ``effort`` is a
+        # caller override, and an unsupported level is a 400 at submit.
+        params["output_config"] = {"effort": clamp_effort_for_model(effort, model)}
+    if structured:
+        # ``format`` shares ``output_config`` with ``effort``, so it is merged
+        # into whatever the effort branch above left rather than assigned over
+        # it — writing a fresh dict here would silently drop the effort level on
+        # every structured request, which is a quality change disguised as a
+        # formatting one.
+        config = dict(params.get("output_config") or {})
+        config["format"] = {"type": "json_schema", "schema": CRITIQUE_FINDINGS_SCHEMA}
+        params["output_config"] = config
     return params
 
 
@@ -980,7 +1180,8 @@ def critique_cache_entry_from_result(res: CritiqueResult) -> dict:
 
 
 def outcome_from_message(
-    message: Any, *, run_id: str, ref: Any, rows: int = 0, cols: int = 0
+    message: Any, *, run_id: str, ref: Any, rows: int = 0, cols: int = 0,
+    structured: bool = False,
 ) -> CritiqueRunOutcome:
     """Parse one critique Messages response into a :class:`CritiqueRunOutcome` (DA-008).
 
@@ -994,6 +1195,16 @@ def outcome_from_message(
     never an empty success (so it is neither merged as a clean read nor cached as
     corroborated). Every success stamps its findings ``sources=[run_id]`` at
     production; billed tokens are recorded even on a parse failure (§14.4).
+
+    ``structured`` says the read was taken under ``output_config.format``, whose
+    response carries no fence. It is threaded in rather than sniffed from the
+    text because the two parsers must agree: findings and claims arrive in ONE
+    object, so reading one under the bare contract and the other under the
+    fenced one would drop every claim and leave the arithmetic auditor reporting
+    ``arith=0/0`` — indistinguishable from a sheet that had no claims. The bare
+    read is a *fallback* inside both parsers, tried only when no fenced block is
+    present, so a structured request whose constraint did not take and came back
+    fenced anyway still parses on the ordinary path.
     """
     raw = _message_text(message)
     in_tok, out_tok = _message_usage(message)
@@ -1021,7 +1232,7 @@ def outcome_from_message(
     # nonempty-prose / missing-object / truncated / malformed response is a failure,
     # NOT an empty success — this is the DA-008 correction. The billed tokens are
     # kept regardless (the response cost money even though it did not parse).
-    parsed = parse_findings_detailed(raw, ref, rows, cols)
+    parsed = parse_findings_detailed(raw, ref, rows, cols, bare_json=structured)
     if parsed.status not in FINDINGS_PARSE_OK:
         return CritiqueRunOutcome(
             run_id=run_id, status="FAILED", input_tokens=in_tok, output_tokens=out_tok,
@@ -1045,7 +1256,7 @@ def outcome_from_message(
     for f in findings:                 # stamp provenance at production (§14.3)
         if run_id not in f.sources:
             f.sources = [run_id, *f.sources]
-    claims = parse_numeric_claims(raw, ref)
+    claims = parse_numeric_claims(raw, ref, bare_json=structured)
     if parsed.note:
         _log.info("critique parse: %s (%s)", parsed.note, getattr(ref, "display_label", ref))
     return CritiqueRunOutcome(
@@ -1086,15 +1297,26 @@ def _critique_read(
 
         client = _get_client()
 
-    kwargs = build_critique_request_params(
-        build_user_content(rendered, task_instruction=_CRITIQUE_TASK_INSTRUCTION),
-        model=model,
-        max_tokens=max_tokens,
-        use_thinking=use_thinking,
-        effort=effort,
-        checklist=checklist,
-        cache_prefix=cache_prefix,
-    )
+    # Resolved ONCE per read and threaded to both the request and the parser.
+    # Re-deriving it at the parse site would let the latch flip mid-read and
+    # have the response parsed under a contract the request never carried.
+    global _structured_outputs_available
+    structured = critique_structured_outputs_enabled(model)
+    content = build_user_content(rendered, task_instruction=_CRITIQUE_TASK_INSTRUCTION)
+
+    def _params(structured_now: bool) -> dict:
+        return build_critique_request_params(
+            content,
+            model=model,
+            max_tokens=max_tokens,
+            use_thinking=use_thinking,
+            effort=effort,
+            checklist=checklist,
+            cache_prefix=cache_prefix,
+            structured=structured_now,
+        )
+
+    kwargs = _params(structured)
 
     attempt = 0
     while True:
@@ -1102,6 +1324,20 @@ def _critique_read(
             resp = stream_message(client, kwargs)
             break
         except Exception as exc:  # noqa: BLE001 - report, don't sink the set
+            if structured and _is_structured_outputs_rejection(exc):
+                # Latch off for the process and re-send this same read
+                # unconstrained. Deliberately does NOT consume a transient
+                # retry: this is a permanent capability answer, not a blip, and
+                # a sheet must not lose its retry budget learning it.
+                _structured_outputs_available = False
+                structured = False
+                kwargs = _params(False)
+                _log.warning(
+                    "critique: structured outputs rejected (%s); continuing with "
+                    "the fenced-block contract for the rest of this run.",
+                    _clean_error(exc),
+                )
+                continue
             if _is_transient_error(exc) and attempt < max_retries:
                 sleep(_retry_backoff_seconds(attempt))
                 attempt += 1
@@ -1111,6 +1347,7 @@ def _critique_read(
     return outcome_from_message(
         resp, run_id=run_id, ref=rendered.ref,
         rows=getattr(rendered, "rows", 0), cols=getattr(rendered, "cols", 0),
+        structured=structured,
     )
 
 
@@ -1245,9 +1482,16 @@ def critique_sheet_self_consistent(
     runs = critique_runs() if runs is None else max(1, int(runs))
     run_checklists = _run_checklists(profiles, runs)
 
-    cache_key: str | None = None
-    if cache is not None:
-        cache_key = critique_cache_key(
+    # Built twice on purpose — once to LOOK UP, once to STORE — because the
+    # structured-outputs latch can flip between them. The lookup key describes
+    # the contract this run intends to send; the store key describes the one it
+    # actually sent. If a read is rejected mid-run and degrades to the fenced
+    # contract, storing under the intended (structured) key would freeze a
+    # fenced-produced merge where a later, working structured run would find and
+    # serve it. Recomputing at store time puts the result where a fenced run
+    # will look, which is exactly what produced it.
+    def _cache_key(*, structured: bool) -> str:
+        return critique_cache_key(
             rendered,
             model=model,
             prompt_version=CRITIQUE_PROMPT_VERSION,
@@ -1257,7 +1501,14 @@ def critique_sheet_self_consistent(
             runs=runs,
             sheet_text=rendered.sheet_text,
             profiles_key=profiles_cache_fragment(profiles or []),
+            # Only set when the read actually carried the schema, so a fenced
+            # run's key stays byte-identical to every key written before F-01.
+            structured_key=CRITIQUE_STRUCTURED_PROMPT_VERSION if structured else None,
         )
+
+    cache_key: str | None = None
+    if cache is not None:
+        cache_key = _cache_key(structured=critique_structured_outputs_enabled(model))
         hit = cache.get(cache_key)
         if hit is not None:
             return critique_result_from_entry(hit, rendered.ref)
@@ -1298,7 +1549,13 @@ def critique_sheet_self_consistent(
     # a clean/corroborated sheet (DA-008). Mirrors digest_sheet refusing to cache
     # transient/degraded reads.
     if cache is not None and cache_key is not None and result.completed_runs == runs:
-        cache.put(cache_key, critique_cache_entry_from_result(result))
+        # Re-read the latch: a rejection during the reads above means these
+        # outcomes came back under the fenced contract, whatever this run set out
+        # to send.
+        cache.put(
+            _cache_key(structured=critique_structured_outputs_enabled(model)),
+            critique_cache_entry_from_result(result),
+        )
 
     return result
 

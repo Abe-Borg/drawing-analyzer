@@ -54,6 +54,7 @@ from .core.api_config import (
     apply_thinking_config,
     cache_policy_for,
     call_with_refusal_fallback,
+    model_supports_structured_outputs,
     phase_output_cap,
     system_prompt_with_cache,
     tools_with_cache,
@@ -224,7 +225,79 @@ def _is_task_budget_rejection(exc: Exception) -> bool:
     return any(marker in text for marker in _TASK_BUDGET_REJECTION_MARKERS)
 
 
+# Whether this process may still send ``strict`` tool schemas. Same shape and
+# same reason as ``_task_budget_available`` above: strict tool use is GA and
+# gated on ``model_supports_structured_outputs``, but the investigation model is
+# overridable (``DRAWING_ANALYZER_VERIFICATION_ESCALATION_MODEL``) and a
+# platform that rejects the flag — or a schema the compiler reads differently
+# than the docs do — would otherwise 400 every turn of every investigation. On a
+# stage that must stay additive and non-fatal (I-3) that is the difference
+# between degrading and disappearing. The first such rejection turns strict off
+# for the process; the retry re-sends the same turn with the relaxed schemas, so
+# the rejection costs one round trip and no evidence.
+#
+# Deliberately NOT folded into ``_TASK_BUDGET_REJECTION_MARKERS``: the two
+# features fail on disjoint vocabulary, and one shared marker list would have
+# either latch swallowing the other's 400 and disabling the wrong feature.
+_strict_tools_available = True
+
+_STRICT_TOOLS_REJECTION_MARKERS = (
+    "strict",
+    "additionalproperties",
+    "input_schema",
+    "json_schema",
+    "structured output",
+)
+
+
+def _is_strict_tools_rejection(exc: Exception) -> bool:
+    """True for a 400 that names strict tool schemas, not a transient blip."""
+    if _error_status(exc) != 400:
+        return False
+    text = str(exc).lower()
+    return any(marker in text for marker in _STRICT_TOOLS_REJECTION_MARKERS)
+
+
 def _investigation_message(client: Any, kwargs: dict, *, task_budget: int) -> Any:
+    """One investigation turn, degrading off strict tool schemas if rejected.
+
+    Wraps :func:`_investigation_message_turn` so the strict latch sits OUTSIDE
+    the task-budget latch rather than beside it. Both can be active on the same
+    request and each has to be able to fire on a turn the other already shaped;
+    nesting makes that ordering explicit, and means a strict rejection is
+    retried with the task budget still attached rather than losing both.
+    """
+    global _strict_tools_available
+    try:
+        return _investigation_message_turn(client, kwargs, task_budget=task_budget)
+    except Exception as exc:  # noqa: BLE001 - re-raised unless strict-specific
+        if not _is_strict_tools_rejection(exc):
+            raise
+        # Deliberately NOT gated on ``_strict_tools_available``. Gating it there
+        # made the recovery a once-per-process trick: the latch flips on the
+        # first rejection, and any later turn that still carried strict schemas
+        # — a caller that rebuilt its tool list from an unrelaxed source, a path
+        # added later — would hit this guard already False and re-raise the very
+        # error the latch exists to absorb, failing the investigation it was
+        # meant to save. The callers are careful (``_investigate_one`` relaxes
+        # per turn once the latch is down), but that is their discipline, not a
+        # property of this function, and I-3 says this stage degrades rather
+        # than fails. Relaxing is idempotent and the retry is one-shot, so the
+        # cost of being wrong here is a single extra round trip.
+        _strict_tools_available = False
+        _log.warning(
+            "investigation: strict tool schemas rejected (%s); continuing with "
+            "unconstrained schemas. Every tool input is still validated host-side.",
+            _clean_error(exc),
+        )
+    relaxed = dict(kwargs)
+    tools = relaxed.get("tools")
+    if isinstance(tools, list):
+        relaxed["tools"] = relax_strict_tools(tools)
+    return _investigation_message_turn(client, relaxed, task_budget=task_budget)
+
+
+def _investigation_message_turn(client: Any, kwargs: dict, *, task_budget: int) -> Any:
     """One investigation turn, carrying the advisory task budget when possible.
 
     The round cap is enforced host-side by withdrawing tool permission
@@ -260,8 +333,47 @@ def _investigation_message(client: Any, kwargs: dict, *, task_budget: int) -> An
     return stream_message(client, kwargs)
 
 
-def investigation_tools() -> list[dict]:
-    """The static client-tool schemas (stable → cacheable via tools_with_cache)."""
+def investigation_tools(*, strict: bool = True) -> list[dict]:
+    """The static client-tool schemas (stable → cacheable via tools_with_cache).
+
+    ``strict`` attaches the structured-outputs ``strict: true`` flag (and the
+    ``additionalProperties: false`` it requires) so the API guarantees each
+    ``tool_use.input`` validates before the host ever sees it. That matters
+    here for one specific reason: the evidence budget is charged per *granted*
+    block — ``tool_round += len(granted)`` — and a granted block that fails
+    validation still spends its slot. A malformed request therefore costs the
+    model one of six scarce, explicitly-communicated evidence requests and buys
+    nothing. Rejecting it upstream gives the slot back.
+
+    **What strict cannot do, and why every host check below stays.** Strict
+    mode constrains the schema *language* as well as the model: numeric bounds
+    (``minimum``/``maximum``), string bounds (``minLength``) and array bounds
+    (``maxItems``, and ``minItems`` above 1) are all rejected by the schema
+    compiler, so they are stated in each parameter's ``description`` instead —
+    where they still steer the model — and enforced where they always were, in
+    :class:`_ToolExecutor`. The sharpest case is ``rect``: strict can promise
+    it is present and is an array of numbers, and cannot promise it holds
+    exactly four, which was the whole point of the ``minItems``/``maxItems``
+    pair it replaces. ``_crop_region``'s ``len(raw) != 4`` check is therefore
+    still load-bearing, as are the finite-number test, the sort-and-clamp to
+    the page box, the degenerate-span rejection and the DPI clamp. Strict
+    narrows the funnel; it does not close it.
+
+    Optional parameters stay out of ``required`` (the documented way to express
+    them). ``view_sheet`` requires nothing at all by design — sheet id, or
+    source name plus page number, are alternative addressing modes and
+    ``_resolve_sheet`` adjudicates between them.
+
+    Passing ``strict=False`` returns the pre-strict shape. That is what the
+    process-wide ``_strict_tools_available`` latch falls back to, so a platform
+    or an overridden model that rejects the flag degrades to the old behaviour
+    instead of failing every investigation (I-3).
+    """
+    strict_flag: dict = {"strict": True} if strict else {}
+    # ``additionalProperties: false`` is mandatory under strict and rejected
+    # nowhere else, but it is attached only alongside the flag so the relaxed
+    # shape is byte-identical to the pre-strict one.
+    closed: dict = {"additionalProperties": False} if strict else {}
     return [
         {
             "name": "crop_region",
@@ -270,23 +382,32 @@ def investigation_tools() -> list[dict]:
                 "Coordinates are PDF points in the same space as the crops you "
                 "are shown, origin top-left. Defaults to the finding's own sheet."
             ),
+            **strict_flag,
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "rect": {
                         "type": "array",
                         "items": {"type": "number"},
-                        "minItems": 4,
-                        "maxItems": 4,
-                        "description": "[x0, y0, x1, y1] in points",
+                        "description": (
+                            "[x0, y0, x1, y1] in points — exactly 4 numbers. "
+                            "A rect with any other length is rejected."
+                        ),
                     },
                     "sheet_id": {
                         "type": "string",
                         "description": "Optional: another sheet's ID (e.g. M-101).",
                     },
-                    "dpi": {"type": "integer", "minimum": 72, "maximum": 300},
+                    "dpi": {
+                        "type": "integer",
+                        "description": (
+                            "Optional: 72-300. Values outside that range are "
+                            "clamped, not rejected."
+                        ),
+                    },
                 },
                 "required": ["rect"],
+                **closed,
             },
         },
         {
@@ -297,13 +418,18 @@ def investigation_tools() -> list[dict]:
                 "with crop_region to view one. Free and instant; raster sheets "
                 "have no text layer. Defaults to the finding's own sheet."
             ),
+            **strict_flag,
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "minLength": 2},
+                    "query": {
+                        "type": "string",
+                        "description": "At least 2 characters.",
+                    },
                     "sheet_id": {"type": "string"},
                 },
                 "required": ["query"],
+                **closed,
             },
         },
         {
@@ -313,17 +439,43 @@ def investigation_tools() -> list[dict]:
                 "by sheet ID or by source file + 1-based page number. Use before "
                 "crop_region on that sheet."
             ),
+            **strict_flag,
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "sheet_id": {"type": "string"},
                     "source_name": {"type": "string"},
-                    "page_number": {"type": "integer", "minimum": 1},
+                    "page_number": {
+                        "type": "integer",
+                        "description": "1-based; 1 or greater.",
+                    },
                 },
                 "required": [],
+                **closed,
             },
         },
     ]
+
+
+def relax_strict_tools(tools: list[dict]) -> list[dict]:
+    """Return ``tools`` with the strict-mode additions stripped.
+
+    Used by the ``_strict_tools_available`` latch to retry a rejected request
+    without rebuilding the list from scratch — rebuilding would drop the
+    ``cache_control`` breakpoint :func:`tools_with_cache` placed on the last
+    entry, silently un-caching the tool block for the rest of the run. Copies
+    at both levels touched so the caller's list is never mutated in place.
+    """
+    relaxed: list[dict] = []
+    for tool in tools:
+        out = {k: v for k, v in tool.items() if k != "strict"}
+        schema = out.get("input_schema")
+        if isinstance(schema, dict):
+            out["input_schema"] = {
+                k: v for k, v in schema.items() if k != "additionalProperties"
+            }
+        relaxed.append(out)
+    return relaxed
 
 
 # render_fn contract: (pdf_path, page_index, rect_pts, dpi) -> png bytes | None.
@@ -818,7 +970,13 @@ def _investigate_one(
         # leaves tools+system cached, with identical effect on the model: it
         # cannot call a tool either way. (Same reasoning, same mechanism, as
         # the report chat widget's own no-tools close.)
-        kwargs["tools"] = tools_with_cache(list(tools), phase=PHASE_INVESTIGATION)
+        # Re-checked per turn, not just per run. ``tools`` is built once for the
+        # whole stage, so without this a latch that flipped on investigation 1
+        # would still send strict schemas on every later turn and eat a 400 plus
+        # a retry each time — up to 40 findings x 6 rounds of wasted round trips
+        # to re-learn what the process already knows.
+        turn_tools = tools if _strict_tools_available else relax_strict_tools(tools)
+        kwargs["tools"] = tools_with_cache(list(turn_tools), phase=PHASE_INVESTIGATION)
         if tool_round >= max_rounds:
             kwargs["tool_choice"] = {"type": "none"}
         apply_thinking_config(kwargs, model=model, phase=PHASE_INVESTIGATION)
@@ -1234,7 +1392,13 @@ def investigate_findings(
             _log.warning("investigation skipped (client unavailable): %s", note)
             return result
 
-    tools = investigation_tools()
+    # Strict schemas ride two gates: the model must declare the capability
+    # (registry, never a model-id test — the escalation model is overridable),
+    # and the process-wide latch must not already have degraded off them after
+    # a rejection earlier in this run.
+    tools = investigation_tools(
+        strict=_strict_tools_available and model_supports_structured_outputs(model)
+    )
     used_evidence_names: set = set()
     total = len(picked)
     # Phase C4: the verdict cache is keyed on the finding + the whole-set

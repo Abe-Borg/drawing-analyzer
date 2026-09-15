@@ -347,6 +347,15 @@ def submit_critique_batch(
                     use_thinking=use_thinking,
                     effort=effort,
                     checklist=checklists[i],
+                    # Explicitly OFF on the batch transport, never left to the
+                    # env flag. The structured-outputs latch recovers from a
+                    # rejection by re-sending the same read unconstrained, and a
+                    # batch item cannot be re-sent: its shape is fixed at submit
+                    # and a rejection surfaces per item, after the whole batch
+                    # has been built and billed. So the transport that cannot
+                    # degrade does not opt in. ``structured_key`` is omitted
+                    # from this path's cache key to match (below).
+                    structured=False,
                 )
                 reqs.append({"custom_id": custom_id, "params": params})
                 slot.custom_ids.append(custom_id)

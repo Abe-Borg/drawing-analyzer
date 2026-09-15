@@ -1222,22 +1222,33 @@ def _critique_level1_partition(
     Mirrors :func:`_level1_partition` for the digest: walks every sheet via
     :func:`iter_sheet_prescan` (page access only, no rasterization), computes the
     critique level-1 key over the *same* render identity the digest keys on, and
-    probes the critique cache. Returns ``(cached_by_ref, miss_only, level1_keys)``
-    — a hit is served as a merged :class:`~drawing_analyzer.critique.CritiqueResult`
-    with neither a render nor an API call; a miss renders and critiques and its
-    result is stored under its level-1 key (store-under-both).
+    probes the critique cache. Returns
+    ``(cached_by_ref, miss_only, level1_identities, portable_by_key)`` — a hit is
+    served as a merged :class:`~drawing_analyzer.critique.CritiqueResult` with
+    neither a render nor an API call; a miss renders and critiques and its result
+    is stored under its level-1 key (store-under-both).
+
+    The render **identity** is returned rather than the finished key because the
+    store happens after the reads, and the structured-outputs latch can flip in
+    between: a run that probed as structured but degraded mid-flight must store
+    under the fenced key, or it freezes a fenced-produced merge exactly where the
+    next working structured run looks. The caller rebuilds the key from the
+    identity with the live latch state, the same correction the level-2 key needs
+    in ``critique_sheet_self_consistent``.
     """
     from .critique import (
         CRITIQUE_PROMPT_VERSION,
+        CRITIQUE_STRUCTURED_PROMPT_VERSION,
         DEFAULT_CRITIQUE_EFFORT,
         DEFAULT_CRITIQUE_MAX_TOKENS,
         critique_result_from_entry,
+        critique_structured_outputs_enabled,
     )
     from .digest_cache import critique_cache_key_level1
 
     cached_by_ref: dict[tuple[str, int], Any] = {}
     miss_only: set[tuple[str, int]] = set()
-    level1_keys: dict[tuple[str, int], str] = {}
+    level1_identities: dict[tuple[str, int], str] = {}
     # Portable (source_id, page) identity per refkey, taken from the stamped
     # refs themselves — the recorded usage instances must carry SRC-#### ids,
     # never paths (§10.4), and deriving from the refs (like the digest path
@@ -1255,16 +1266,24 @@ def _critique_level1_partition(
             use_thinking=True,
             runs=runs,
             profiles_key=profiles_key,
+            # Probed with the contract this run INTENDS to send. Without it a
+            # warm run turning structured outputs on would hit a stored fenced
+            # entry here — before any render or request — and return it, so the
+            # feature would read as enabled and change nothing.
+            structured_key=(
+                CRITIQUE_STRUCTURED_PROMPT_VERSION
+                if critique_structured_outputs_enabled(model) else None
+            ),
         )
         rk = _refkey(ref)
-        level1_keys[rk] = key
+        level1_identities[rk] = identity
         portable_by_key[rk] = source_page_key(ref)
         entry = cache.get(key)
         if entry is not None:
             cached_by_ref[rk] = critique_result_from_entry(entry, ref)
         else:
             miss_only.add(rk)
-    return cached_by_ref, miss_only, level1_keys, portable_by_key
+    return cached_by_ref, miss_only, level1_identities, portable_by_key
 
 
 def _run_critique_stage(
@@ -1310,11 +1329,17 @@ def _run_critique_stage(
     ``REAL_TIME``); each record aggregates the sheet's two self-consistency reads.
     """
     from .critique import (
+        CRITIQUE_PROMPT_VERSION,
+        CRITIQUE_STRUCTURED_PROMPT_VERSION,
+        DEFAULT_CRITIQUE_EFFORT,
+        DEFAULT_CRITIQUE_MAX_TOKENS,
         critique_cache_entry_from_result,
         critique_model,
         critique_runs,
         critique_sheet_self_consistent,
+        critique_structured_outputs_enabled,
     )
+    from .digest_cache import critique_cache_key_level1
     from .profiles import profiles_cache_fragment
 
     model = critique_model()
@@ -1322,11 +1347,11 @@ def _run_critique_stage(
     profiles_key = profiles_cache_fragment(profiles or [])
 
     cached_by_ref: dict[tuple[str, int], Any] = {}
-    level1_keys: dict[tuple[str, int], str] = {}
+    level1_identities: dict[tuple[str, int], str] = {}
     portable_by_key: dict[tuple[str, int], tuple[str, int]] = {}
     only: set[tuple[str, int]] | None = None
     if cache is not None:
-        cached_by_ref, only, level1_keys, portable_by_key = _critique_level1_partition(
+        cached_by_ref, only, level1_identities, portable_by_key = _critique_level1_partition(
             paths, rows=rows, cols=cols, overlap_frac=overlap_frac, cache=cache,
             model=model, runs=runs, profiles_key=profiles_key, snapshot_by_path=snapshot_by_path,
         )
@@ -1410,9 +1435,32 @@ def _run_critique_stage(
         # next run skips rendering this sheet entirely. A partial (a dropped run) is
         # never cached — mirrors the level-2 guard inside
         # critique_sheet_self_consistent.
-        key = level1_keys.get(_refkey(ref)) if cache is not None else None
-        if key is not None and res.error is None and res.runs == runs:
-            cache.put(key, critique_cache_entry_from_result(res))
+        #
+        # The key is rebuilt HERE rather than reused from the probe, because the
+        # structured-outputs latch can flip during the reads above: a run that
+        # probed as structured but degraded must store under the fenced key, or
+        # it parks a fenced-produced merge exactly where the next working
+        # structured run will find and serve it. Same correction, same reason, as
+        # the level-2 store key.
+        identity = level1_identities.get(_refkey(ref)) if cache is not None else None
+        if identity is not None and res.error is None and res.runs == runs:
+            cache.put(
+                critique_cache_key_level1(
+                    identity,
+                    model=model,
+                    prompt_version=CRITIQUE_PROMPT_VERSION,
+                    max_tokens=DEFAULT_CRITIQUE_MAX_TOKENS,
+                    effort=DEFAULT_CRITIQUE_EFFORT,
+                    use_thinking=True,
+                    runs=runs,
+                    profiles_key=profiles_key,
+                    structured_key=(
+                        CRITIQUE_STRUCTURED_PROMPT_VERSION
+                        if critique_structured_outputs_enabled(model) else None
+                    ),
+                ),
+                critique_cache_entry_from_result(res),
+            )
         if progress is not None:
             progress(total, total, f"Critiquing sheet {done}/{total}")
 
