@@ -959,7 +959,13 @@ def _investigate_one(
         # leaves tools+system cached, with identical effect on the model: it
         # cannot call a tool either way. (Same reasoning, same mechanism, as
         # the report chat widget's own no-tools close.)
-        kwargs["tools"] = tools_with_cache(list(tools), phase=PHASE_INVESTIGATION)
+        # Re-checked per turn, not just per run. ``tools`` is built once for the
+        # whole stage, so without this a latch that flipped on investigation 1
+        # would still send strict schemas on every later turn and eat a 400 plus
+        # a retry each time — up to 40 findings x 6 rounds of wasted round trips
+        # to re-learn what the process already knows.
+        turn_tools = tools if _strict_tools_available else relax_strict_tools(tools)
+        kwargs["tools"] = tools_with_cache(list(turn_tools), phase=PHASE_INVESTIGATION)
         if tool_round >= max_rounds:
             kwargs["tool_choice"] = {"type": "none"}
         apply_thinking_config(kwargs, model=model, phase=PHASE_INVESTIGATION)

@@ -649,3 +649,17 @@ def test_an_unrelated_400_does_not_disable_strict_tools():
     with pytest.raises(_Status400):
         I._investigation_message(client, kwargs, task_budget=0)
     assert I._strict_tools_available is True
+
+
+def test_a_flipped_strict_latch_stops_resending_strict_schemas():
+    # `tools` is built once for the whole stage. Without a per-turn re-check, a
+    # latch that flipped on the first investigation would keep sending strict
+    # schemas on every later turn and pay a 400 plus a retry each time — up to
+    # 40 findings x 6 rounds of round trips to re-learn a settled fact.
+    tools = I.investigation_tools(strict=I._strict_tools_available)
+    assert tools[0]["strict"] is True
+
+    I._strict_tools_available = False
+    per_turn = tools if I._strict_tools_available else I.relax_strict_tools(tools)
+    assert "strict" not in per_turn[0]
+    assert per_turn == I.investigation_tools(strict=False)
