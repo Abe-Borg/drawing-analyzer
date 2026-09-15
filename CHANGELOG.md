@@ -6,7 +6,96 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [1.6.0] - 2026-09-15
+
+### Added
+
+- **Structured outputs for the critique pass, opt-in
+  (`DRAWING_ANALYZER_CRITIQUE_STRUCTURED_OUTPUTS=1`).** Each critique read can
+  now carry a JSON schema the decoder itself enforces (`output_config.format`)
+  instead of asking, in prose, for a fenced ```` ```json ```` block. The critique
+  is the only high-volume call in the pipeline whose reply is JSON and nothing
+  else, which is what makes it the one stage a whole-response schema fits: the
+  digest writes a full Markdown digest **and then** a findings block, and no
+  schema describes "prose, then JSON" (I-2).
+
+  **Off by default, and that is a statement about evidence rather than
+  confidence.** Anthropic documents citations and message prefill as the only
+  incompatibilities of structured outputs and says nothing either way about
+  image inputs — while every critique request carries an overview plus a full
+  grid of tiles. No hermetic test can settle that, so the proof is one live
+  call: `pytest -m network tests/test_live_api_canary.py -k output_config_format`
+  asserts the request is accepted, that the reply comes back with no fence, and
+  that the self-consistency merge still completes both reads. Turn the flag on
+  once that passes on your own account.
+
+  Three things make it safe to try. The run **self-heals**: the first 400 naming
+  the contract turns the feature off for the rest of the process and re-sends
+  that same read under the fenced contract, so a sheet is never lost learning
+  that the platform will not take it — and that retry does not consume the
+  sheet's transient retry budget, because a capability answer is permanent
+  rather than a blip. The **tolerant parser stays**, and a schema-constrained
+  request whose reply comes back fenced anyway parses on the ordinary path
+  without the latch firing at all. And structured and fenced reads **cache under
+  separate keys on both cache levels**, so nothing already paid for is discarded
+  and flipping the flag costs one re-read per sheet each way rather than
+  invalidating both sides. The Message-Batches transport ignores the flag
+  entirely: a batch item's shape is fixed at submit and a rejection surfaces per
+  item after the whole batch is built and billed, so the transport that cannot
+  degrade does not opt in.
+
+  The structured instruction is *derived* from the canonical one by substitution
+  with an import-time assertion, never maintained as a second copy — the category
+  enum, the verbatim-quote rule, the 40-finding cap and the whole claims contract
+  keep exactly one author.
+
+- **Strict tool schemas on the investigation loop's three evidence tools.**
+  `crop_region`, `find_text` and `view_sheet` now declare `strict: true`, so the
+  API guarantees each `tool_use.input` validates before the host sees it. That
+  matters for one specific reason: the evidence budget is charged per *granted*
+  request, and a malformed request still spends its slot — costing the model one
+  of six scarce looks and buying nothing.
+
+  It is not a substitute for the host's own checks, and the schemas say so.
+  Strict mode constrains the schema *language* as well as the model: numeric
+  bounds, string bounds and array length are all rejected by the compiler, so
+  those rules moved into each parameter's description — where they still steer
+  the model — and stay enforced where they always were. The sharpest case is the
+  crop rectangle: strict can promise it is present and is an array of numbers,
+  and cannot promise it holds exactly four, which is precisely what the previous
+  `minItems`/`maxItems` pair expressed. A three-number rect is therefore still
+  schema-valid, still reaches the host, and is still rejected there. As with the
+  critique flag, a rejection of the strict schemas latches the feature off for
+  the process and re-sends the same turn unconstrained rather than failing the
+  stage (I-3).
+
 ### Changed
+
+- **Digest and critique effort now resolves through the `core.api_config` phase
+  registry** (`DEFAULT_DIGEST_EFFORT = default_effort_for_phase(PHASE_REVIEW)`,
+  inherited by `DEFAULT_CRITIQUE_EFFORT`), and a caller-supplied `effort`
+  override is clamped to what the model accepts. **No request changes.**
+
+  Before this, `_PHASE_DEFAULT_EFFORT[PHASE_REVIEW]` was registered at
+  `EFFORT_XHIGH` while both stages sent a hardcoded `"high"` — and nothing read
+  the registry entry, so the two never had to agree and the live value was
+  invisible to anyone tuning the registry. The entry moved to `EFFORT_HIGH`, the
+  level the stages actually send, rather than wiring them up at `xhigh`: raising
+  it would be a cost increase on the highest-volume calls in the pipeline *and* a
+  cache-wide invalidation (`effort` is a component of both digest and critique
+  cache keys), so it stays a separately priced decision — and `high` is also what
+  the API applies when the field is omitted. `PHASE_CROSS_CHECK` keeps its
+  `xhigh` and remains unwired.
+
+- **`ModelCapabilities.supports_structured_outputs`** joins the capability
+  registry beside the other request-shape decisions, gating both the schema and
+  the strict tool flag. A registry capability rather than a model-id test, for
+  the reason `supports_refusal_fallback` already exists: Sonnet 4.6 is a current
+  model that is *not* on Anthropic's structured-outputs roster, and Haiku 4.5 is
+  on it despite carrying neither adaptive thinking nor any effort level — a
+  generation-shaped check gets both backwards.
 
 - **Anthropic SDK bumped 1.4.0 → 1.5.0.** No breaking changes for this app:
   1.5.0 is additive (Managed Agents auto-mode permissions, a new web-fetch
