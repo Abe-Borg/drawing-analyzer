@@ -379,9 +379,21 @@ reporter of last resort must never raise from inside Tk's handler.
   `format` is **merged** into `output_config`, never assigned over it — a fresh
   dict there silently drops `effort` on every structured request. The whole
   feature is cache-neutral: `CRITIQUE_PROMPT_VERSION` is untouched and
-  `critique_cache_key`'s `structured_key` folds in ONLY when set (the
-  `profiles_key` precedent), so a fenced run keys byte-identically to every
-  pre-F-01 entry and no paid read is discarded. The batch transport pins
+  `structured_key` folds in ONLY when set (the `profiles_key` precedent), so a
+  fenced run keys byte-identically to every pre-F-01 entry and no paid read is
+  discarded. It rides **both** cache levels, and that is not optional:
+  `critique_cache_key_level1` is probed *before rendering* and answers first, so
+  separating only the level-2 (PNG-bytes) key closes nothing — a warm run
+  enabling structured outputs would hit a stored fenced entry at level 1 and
+  return it without ever issuing a structured request, and the feature would
+  read as enabled while changing nothing. Both **store** keys are rebuilt after
+  the reads rather than reused from the probe, because the latch can flip in
+  between and a degraded run must store under the fenced key or it parks a
+  fenced-produced merge exactly where the next working structured run looks
+  (`_ingest_miss` keeps the render *identity*, not the finished key, for that
+  reason). `tests/test_structured_outputs.py` asserts the level-1 threading over
+  the pipeline's AST, since a test naming today's call sites cannot see the next
+  one added. The batch transport pins
   `structured=False` — a batch item's shape is fixed at submit and a rejection
   surfaces per item after the batch is built and billed, so the transport that
   cannot degrade does not opt in);

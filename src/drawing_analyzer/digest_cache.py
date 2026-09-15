@@ -258,6 +258,7 @@ def critique_cache_key_level1(
     use_thinking: bool,
     runs: int,
     profiles_key: str | None = None,
+    structured_key: str | None = None,
 ) -> str:
     """Content-address one sheet's *critique* **before rendering** (Phase 19B, §11.5).
 
@@ -277,6 +278,17 @@ def critique_cache_key_level1(
 
     ``profiles_key`` is folded **only when non-empty**, so a no-profiles critique
     level-1 key stays byte-identical to a run that never selected one.
+
+    ``structured_key`` (F-01) carries the same meaning it does on the level-2
+    :func:`critique_cache_key`, and carrying it on **both** levels is the whole
+    point: this key is probed *before rendering*, so a level-1 entry that did
+    not distinguish the two contracts would let a warm run enabling structured
+    outputs hit a stored **fenced** result and return it without ever issuing a
+    structured request — the feature would look enabled and change nothing.
+    The reverse leaks too: a structured result stored under a shared key would
+    be served after the option was switched back off. Separating only the
+    level-2 key closes neither case, because level 1 answers first and a hit
+    there means level 2 is never consulted.
     """
     h = hashlib.sha256()
     for part in (
@@ -295,6 +307,10 @@ def critique_cache_key_level1(
     if profiles_key:
         h.update(b"profiles=")
         h.update(profiles_key.encode("utf-8"))
+        h.update(b"\x00")
+    if structured_key:
+        h.update(b"structured=")
+        h.update(structured_key.encode("utf-8"))
         h.update(b"\x00")
     h.update(b"render_identity=")
     h.update(render_identity.encode("utf-8"))

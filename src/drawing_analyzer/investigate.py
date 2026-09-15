@@ -271,8 +271,19 @@ def _investigation_message(client: Any, kwargs: dict, *, task_budget: int) -> An
     try:
         return _investigation_message_turn(client, kwargs, task_budget=task_budget)
     except Exception as exc:  # noqa: BLE001 - re-raised unless strict-specific
-        if not (_strict_tools_available and _is_strict_tools_rejection(exc)):
+        if not _is_strict_tools_rejection(exc):
             raise
+        # Deliberately NOT gated on ``_strict_tools_available``. Gating it there
+        # made the recovery a once-per-process trick: the latch flips on the
+        # first rejection, and any later turn that still carried strict schemas
+        # — a caller that rebuilt its tool list from an unrelaxed source, a path
+        # added later — would hit this guard already False and re-raise the very
+        # error the latch exists to absorb, failing the investigation it was
+        # meant to save. The callers are careful (``_investigate_one`` relaxes
+        # per turn once the latch is down), but that is their discipline, not a
+        # property of this function, and I-3 says this stage degrades rather
+        # than fails. Relaxing is idempotent and the retry is one-shot, so the
+        # cost of being wrong here is a single extra round trip.
         _strict_tools_available = False
         _log.warning(
             "investigation: strict tool schemas rejected (%s); continuing with "

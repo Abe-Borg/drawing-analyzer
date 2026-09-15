@@ -32,7 +32,7 @@ from drawing_analyzer import critique as C
 from drawing_analyzer import digest as D
 from drawing_analyzer import investigate as I
 from drawing_analyzer.core import api_config as api
-from drawing_analyzer.digest_cache import critique_cache_key
+from drawing_analyzer.digest_cache import critique_cache_key, critique_cache_key_level1
 from drawing_analyzer.models import FINDINGS_PARSE_OK, Finding, ImageTile, RenderedSheet, SheetRef
 
 OPUS_5 = api.MODEL_OPUS_5
@@ -663,3 +663,76 @@ def test_a_flipped_strict_latch_stops_resending_strict_schemas():
     per_turn = tools if I._strict_tools_available else I.relax_strict_tools(tools)
     assert "strict" not in per_turn[0]
     assert per_turn == I.investigation_tools(strict=False)
+
+
+# --------------------------------------------------------------------------- #
+# F-01 — the LEVEL-1 cache key (probed before rendering)
+# --------------------------------------------------------------------------- #
+#
+# The critique cache has two levels. Level 2 keys on the rendered PNG bytes;
+# level 1 keys on a pre-render identity so a warm run can skip rasterizing
+# entirely. Level 1 answers FIRST, so separating the contracts only at level 2
+# closes nothing: a warm run enabling structured outputs would hit a stored
+# fenced entry before any render or request and return it, and the feature would
+# read as enabled while changing nothing. (Caught in review on the first commit.)
+
+
+def _l1(**kw):
+    return critique_cache_key_level1(
+        "render-identity-abc", model=OPUS_5, prompt_version=C.CRITIQUE_PROMPT_VERSION,
+        max_tokens=C.DEFAULT_CRITIQUE_MAX_TOKENS, effort="high",
+        use_thinking=True, runs=2, **kw
+    )
+
+
+def test_level1_fenced_key_is_unchanged_by_this_feature():
+    assert _l1() == _l1(structured_key=None)
+
+
+def test_level1_separates_structured_from_fenced():
+    assert _l1(structured_key=C.CRITIQUE_STRUCTURED_PROMPT_VERSION) != _l1()
+
+
+def test_level1_and_level2_do_not_collide_on_the_structured_key():
+    # Different namespaces must stay different even with the same extra input.
+    assert _l1(structured_key=C.CRITIQUE_STRUCTURED_PROMPT_VERSION) != _key(
+        structured_key=C.CRITIQUE_STRUCTURED_PROMPT_VERSION
+    )
+
+
+def test_every_level1_call_site_threads_the_structured_key():
+    # Structural, over the AST, rather than an assertion about today's two call
+    # sites: the bug was a call site that silently omitted the argument, and a
+    # test naming the current ones cannot see the next one added.
+    import ast
+
+    source = Path("src/drawing_analyzer/pipeline.py").read_text(encoding="utf-8")
+    calls = [
+        node for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call)
+        and getattr(node.func, "id", None) == "critique_cache_key_level1"
+    ]
+    assert calls, "expected the pipeline to build level-1 critique keys"
+    for call in calls:
+        assert "structured_key" in {kw.arg for kw in call.keywords}, (
+            f"critique_cache_key_level1 at pipeline.py:{call.lineno} omits "
+            "structured_key — a warm structured run would serve a fenced result"
+        )
+
+
+def test_the_strict_latch_relaxes_even_once_already_flipped():
+    # The guard must not be gated on the latch. Gated, recovery was a
+    # once-per-process trick: any later turn still carrying strict schemas hit a
+    # guard already False and re-raised the error the latch exists to absorb.
+    I._strict_tools_available = False
+    client = _LatchClient(_Status400("tools.0: additionalProperties must be false"))
+    kwargs = {
+        "model": OPUS_5, "max_tokens": 1024,
+        "messages": [{"role": "user", "content": "go"}],
+        "tools": I.investigation_tools(),          # strict, despite the flipped latch
+    }
+
+    I._investigation_message(client, kwargs, task_budget=0)
+
+    assert len(client.captured) == 2
+    assert "strict" not in client.captured[1]["tools"][0]
