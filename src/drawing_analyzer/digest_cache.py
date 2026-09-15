@@ -313,6 +313,7 @@ def critique_cache_key(
     runs: int,
     sheet_text: str | None = None,
     profiles_key: str | None = None,
+    structured_key: str | None = None,
 ) -> str:
     """Content-address one sheet's *critique* (Phase 11) — a separate model read
     from the digest, over the same images.
@@ -333,6 +334,19 @@ def critique_cache_key(
     — sorted ``name@version@hash`` triples). Folded in **only when non-empty**, so
     a no-profiles critique key stays byte-identical to a pre-profiles one (existing
     entries valid), while selecting a profile — or editing one — re-critiques.
+
+    ``structured_key`` (F-01) is
+    :data:`drawing_analyzer.critique.CRITIQUE_STRUCTURED_PROMPT_VERSION` when the
+    read was taken under ``output_config.format``, and ``None`` otherwise. It
+    exists because a structured read is a genuinely different request — a
+    different findings instruction and a schema the model decoded against — and
+    must not be served to, or from, a fenced run. Folded in on the same
+    only-when-set rule as ``profiles_key``, which is what lets this land with NO
+    ``_SCHEMA_VERSION`` bump: every existing entry was written without it, every
+    fenced run still computes the pre-F-01 key byte-for-byte, and nothing already
+    paid for is discarded. Turning the feature on adds entries beside the old
+    ones rather than replacing them, so flipping it back and forth costs one
+    re-read each way instead of invalidating both sides.
     """
     h = hashlib.sha256()
     for part in (
@@ -354,6 +368,10 @@ def critique_cache_key(
     if profiles_key:
         h.update(b"profiles=")
         h.update(profiles_key.encode("utf-8"))
+        h.update(b"\x00")
+    if structured_key:
+        h.update(b"structured=")
+        h.update(structured_key.encode("utf-8"))
         h.update(b"\x00")
     h.update(sheet.overview.png_bytes)
     for tile in sheet.tiles:

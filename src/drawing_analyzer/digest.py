@@ -19,8 +19,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .core.api_config import (
+    PHASE_REVIEW,
     REVIEW_MODEL_DEFAULT,
     call_with_refusal_fallback,
+    clamp_effort_for_model,
+    default_effort_for_phase,
     model_supports_adaptive_thinking,
     model_supports_effort,
     output_cap_for_model,
@@ -79,9 +82,18 @@ DEFAULT_DIGEST_MAX_TOKENS = 64_000
 # override resolves to ``MAX_OUTPUT_TOKENS_UNKNOWN``).
 MAX_TOKENS_RETRY_CEILING = 128_000
 
-# Effort for the read. "high" is intelligence-appropriate for dense drawings and
-# is accepted by every effort-capable model (so an override never 400s on it).
-DEFAULT_DIGEST_EFFORT = "high"
+# Effort for the read, resolved from the ``core.api_config`` phase registry
+# rather than restated here. "high" is intelligence-appropriate for dense
+# drawings and is accepted by every effort-capable model (so an override never
+# 400s on it) — but it used to be a literal that nothing checked, while the
+# registry declared ``xhigh`` for PHASE_REVIEW and no call site read it. Two
+# sources of truth, silently disagreeing, with the live one invisible to
+# anybody tuning the registry. §C asks for effort to be resolved through the
+# registry; this is that, for the one pair of stages that could not use
+# ``apply_effort_config`` (both expose ``effort`` as a caller override, so the
+# level is not a pure function of the phase). The clamp still happens per
+# request in :func:`build_digest_request_params`, where the model is known.
+DEFAULT_DIGEST_EFFORT = default_effort_for_phase(PHASE_REVIEW)
 
 # App-level retries layered ON TOP of the Anthropic SDK's own per-call retries.
 # A drawing run is a long sequence of large vision requests; a transient blip
@@ -678,7 +690,11 @@ def build_digest_request_params(
     if use_thinking and model_supports_adaptive_thinking(model):
         params["thinking"] = {"type": "adaptive"}
     if effort and model_supports_effort(model):
-        params["output_config"] = {"effort": effort}
+        # Clamped, not passed through: ``effort`` is a caller override, so a
+        # level this model does not accept is a 400 at submit exactly as if it
+        # had come from the registry. Byte-identical for the default ``high``,
+        # which every effort-capable model in the registry accepts.
+        params["output_config"] = {"effort": clamp_effort_for_model(effort, model)}
     return params
 
 
@@ -1182,7 +1198,8 @@ class FindingsParse:
 
 
 def parse_findings_detailed(
-    raw_text: str, ref: SheetRef, rows: int = 0, cols: int = 0
+    raw_text: str, ref: SheetRef, rows: int = 0, cols: int = 0,
+    *, bare_json: bool = False,
 ) -> FindingsParse:
     """Parse the findings block with a full :class:`FindingsParse` (§14.2).
 
@@ -1192,8 +1209,42 @@ def parse_findings_detailed(
     or a json-labeled ``"findings":`` attempt), so neither a duplicate block nor a
     truncated/unclosed one ever leaks into the prose. When there is no findings
     presence at all the prose is returned **byte-for-byte unchanged** (I-2).
+
+    ``bare_json`` (opt-in, default off) additionally accepts a response that is
+    the JSON object itself with no fence around it — what
+    ``output_config.format`` returns. It is a keyword with a false default
+    because this function is shared with the digest, whose response is prose
+    *then* a fenced block: a digest that happened to open with ``{`` must never
+    be reinterpreted as a findings object and have its prose silently zeroed,
+    and I-2 makes that the one unacceptable failure here. So the bare read is
+    something a caller asks for, never something inferred from the text.
+
+    It is also tried **only when there is no fenced candidate at all**, which is
+    what lets a structured-outputs caller degrade safely: if the constraint did
+    not take and the model emitted a fence anyway, the ordinary path handles it
+    unchanged, and the caller's latch never has to be involved for that sheet.
     """
     candidates = scan_structured_blocks(raw_text)
+    if bare_json and not candidates:
+        obj = _tolerant_json_object(raw_text)
+        if isinstance(obj, dict) and isinstance(obj.get("findings"), list):
+            # Synthesized to cover the whole response so every downstream rule
+            # (last-block wins, prose cut at first presence, closed-vs-unclosed
+            # status) applies unchanged rather than growing a second copy. The
+            # zero opening offset is what makes the prose correctly empty: a
+            # schema-constrained response has no prose to protect.
+            candidates = [
+                StructuredBlockCandidate(
+                    opening_offset=0,
+                    body_offset=0,
+                    ending_offset=len(raw_text),
+                    language="json",
+                    body=raw_text,
+                    closed=True,
+                    looks_like_findings=True,
+                    looks_like_claims=bool(_CLAIMS_KEY_RE.search(raw_text)),
+                )
+            ]
     parsed = [(_tolerant_json_object(c.body), c) for c in candidates]
     findings_blocks = [
         (obj, c) for obj, c in parsed
@@ -1362,7 +1413,9 @@ def _validate_claim_item(item: Any, ref: SheetRef | None) -> NumericClaim | None
     )
 
 
-def parse_numeric_claims(raw_text: str, ref: SheetRef | None = None) -> list[NumericClaim]:
+def parse_numeric_claims(
+    raw_text: str, ref: SheetRef | None = None, *, bare_json: bool = False
+) -> list[NumericClaim]:
     """Extract the numeric ``claims`` array from a model response (Phase 14).
 
     Reads the same **last** fenced json block the findings come from (models emit
@@ -1371,10 +1424,21 @@ def parse_numeric_claims(raw_text: str, ref: SheetRef | None = None) -> list[Num
     items are dropped and the list is capped at :data:`MAX_CLAIMS_PER_SHEET`. A
     response with no claims array yields ``[]``. Never raises — claims are additive
     telemetry for the deterministic auditor, never load-bearing for the digest.
+
+    ``bare_json`` mirrors :func:`parse_findings_detailed`'s flag and must be
+    passed by any caller that passed it there: findings and claims arrive in one
+    object, so reading one of them under the bare contract and the other under
+    the fenced one would silently drop every claim on a structured read — the
+    arithmetic auditor would then see an empty batch and report ``arith=0/0``,
+    which is indistinguishable from a sheet with no claims.
     """
     last_obj: dict | None = None
     for c in scan_structured_blocks(raw_text):
         obj = _tolerant_json_object(c.body)
+        if isinstance(obj, dict) and isinstance(obj.get("claims"), list):
+            last_obj = obj
+    if last_obj is None and bare_json:
+        obj = _tolerant_json_object(raw_text)
         if isinstance(obj, dict) and isinstance(obj.get("claims"), list):
             last_obj = obj
     if last_obj is None:

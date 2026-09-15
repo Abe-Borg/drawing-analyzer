@@ -206,3 +206,126 @@ def test_live_versions_recorded():
     digest = hashlib.sha256(json.dumps(env, sort_keys=True).encode()).hexdigest()
     print(f"  identity sha256 = {digest[:16]}…")
     assert env.get("anthropic_sdk") and env.get("pymupdf")
+
+
+def test_live_critique_under_output_config_format(tmp_path, monkeypatch):
+    """The F-01 gate: does ``output_config.format`` hold on a VISION request?
+
+    This is the one question a hermetic suite cannot answer and the reason the
+    critique's structured-outputs path ships opt-in. Anthropic documents
+    citations and prefill as the only incompatibilities of
+    ``output_config.format`` and says nothing either way about image inputs —
+    and every critique request carries an overview plus a full tile grid.
+
+    What this proves, on the live service:
+
+    1. the request is ACCEPTED with the schema attached (no 400);
+    2. the reply parses under the bare-JSON contract (no fence to find); and
+    3. the self-consistency merge still completes both reads.
+
+    If it passes on your account, flipping the default in
+    ``critique.critique_structured_outputs_enabled`` is justified. If it 400s,
+    the latch has already done its job — the run degrades to the fenced
+    contract — but the default must stay off.
+    """
+    from drawing_analyzer import critique as critique_mod
+    from drawing_analyzer.critique import (
+        CRITIQUE_FINDINGS_SCHEMA,
+        build_critique_request_params,
+        critique_structured_outputs_enabled,
+        critique_sheet_self_consistent,
+        outcome_from_message,
+    )
+    from drawing_analyzer.digest import stream_message
+    from drawing_analyzer.models import SheetRef
+    from drawing_analyzer.render import render_sheet
+
+    monkeypatch.setenv("DRAWING_ANALYZER_CRITIQUE_STRUCTURED_OUTPUTS", "1")
+    # A prior canary in this session may have latched it off; this test is the
+    # one that gets to find out.
+    monkeypatch.setattr(critique_mod, "_structured_outputs_available", True)
+
+    src = _make_sheet(tmp_path / "M-101.pdf")
+    doc = pymupdf.open(str(src))
+    try:
+        ref = SheetRef(pdf_path=src, page_index=0, source_name=src.name,
+                       page_count=doc.page_count, source_id="SRC-0001")
+        rendered = render_sheet(doc[0], ref, rows=2, cols=2)
+    finally:
+        doc.close()
+
+    from drawing_analyzer.critique import _CRITIQUE_TASK_INSTRUCTION, critique_model
+    from drawing_analyzer.digest import build_user_content
+
+    model = critique_model()
+    if not critique_structured_outputs_enabled(model):
+        pytest.skip(f"{model} does not declare structured-outputs support")
+
+    params = build_critique_request_params(
+        build_user_content(rendered, task_instruction=_CRITIQUE_TASK_INSTRUCTION),
+        model=model, structured=True,
+    )
+    assert params["output_config"]["format"]["schema"] is CRITIQUE_FINDINGS_SCHEMA
+    assert "fenced code block" not in params["system"]
+
+    # (1) accepted — a 400 here is the answer, and it is a failure of the
+    # *assumption*, not of the code: the latch handles it in production.
+    message = stream_message(_live_client(), params)
+
+    # (2) parses bare, with no fence anywhere in the reply.
+    raw = "".join(b.text for b in message.content if getattr(b, "type", "") == "text")
+    assert "```" not in raw, f"schema-constrained reply still carried a fence: {raw[:200]!r}"
+    outcome = outcome_from_message(
+        message, run_id="critique_1", ref=ref,
+        rows=rendered.rows, cols=rendered.cols, structured=True,
+    )
+    assert outcome.status == "COMPLETE", outcome.error
+    print(f"\n[canary] structured critique: model={model} "
+          f"findings={len(outcome.findings)} claims={len(outcome.claims)}")
+
+    # (3) the whole stage still completes under the flag.
+    res = critique_sheet_self_consistent(rendered, client=_live_client(), cache=None)
+    assert res.error is None, res.error
+    assert res.completed_runs == res.requested_runs == 2
+
+
+def test_live_investigation_tools_accept_strict(tmp_path):
+    """The F-03 gate: are the strict tool schemas accepted by the live API?
+
+    Strict tool use forbids ``minimum``/``maximum``/``minLength``/``maxItems``
+    and ``minItems`` above 1 — every one of which the pre-F-03 schemas used —
+    so the rewrite is only correct if the compiler actually takes what replaced
+    them. A 400 here means the latch will spend one wasted round trip per run.
+
+    Deliberately a cheap one-turn call rather than a whole investigation: what
+    is under test is schema acceptance, not the loop.
+    """
+    from drawing_analyzer.core.api_config import model_supports_structured_outputs
+    from drawing_analyzer.digest import stream_message
+    from drawing_analyzer.investigate import investigation_model, investigation_tools
+
+    model = investigation_model()
+    if not model_supports_structured_outputs(model):
+        pytest.skip(f"{model} does not declare structured-outputs support")
+
+    tools = investigation_tools()
+    assert all(t["strict"] is True for t in tools)
+
+    message = stream_message(_live_client(), {
+        "model": model,
+        "max_tokens": 1024,
+        "tools": tools,
+        "messages": [{
+            "role": "user",
+            "content": "Call find_text once to search for the phrase VAV-3. Nothing else.",
+        }],
+    })
+    assert message.stop_reason in ("tool_use", "end_turn"), message.stop_reason
+    calls = [b for b in message.content if getattr(b, "type", "") == "tool_use"]
+    print(f"\n[canary] strict tools: model={model} accepted, "
+          f"{len(calls)} tool_use block(s)")
+    for block in calls:
+        # Strict guarantees the input validates against the schema — which
+        # notably does NOT include rect's length; that stays a host check.
+        assert isinstance(block.input, dict)
+        assert set(block.input) <= {"query", "sheet_id"}

@@ -636,6 +636,52 @@ batch that can't be collected degrades those sheets' critique, never the digest.
 (`DRAWING_ANALYZER_CRITIQUE_MODEL`); the run count is `DRAWING_ANALYZER_CRITIQUE_RUNS`
 (default 2; set 1 to disable self-consistency).
 
+### Structured outputs (opt-in)
+
+The critique is the one high-volume call in the pipeline whose reply is JSON and
+*only* JSON — "no prose before or after it." That makes it the single stage a
+whole-response schema actually fits. The digest cannot use one at all: it writes
+a full Markdown digest **and then** a findings block, and `output_config.format`
+constrains the entire response, so there is no schema that describes "prose,
+then JSON."
+
+Set `DRAWING_ANALYZER_CRITIQUE_STRUCTURED_OUTPUTS=1` and each critique read
+carries a JSON schema the decoder itself enforces, with the "output a fenced
+json block" sentence swapped out of the prompt. Everything else in that prompt
+is unchanged — it is *derived* from the normal instruction by substitution
+rather than maintained as a second copy, so the category enum, the
+verbatim-quote rule, the 40-finding cap and the whole claims contract keep
+exactly one author.
+
+It is **off by default**, and that is a statement about evidence rather than
+about confidence. Anthropic documents citations and message prefill as the only
+incompatibilities of structured outputs, and says nothing either way about image
+inputs — while every critique request carries an overview plus a full grid of
+tiles. No hermetic test can settle that; one live call can:
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-... python -m pytest -m network \
+  tests/test_live_api_canary.py -k output_config_format
+```
+
+That canary asserts the request is accepted, that the reply comes back with no
+fence, and that the self-consistency merge still completes both reads. If it
+passes on your account, turn the flag on.
+
+Three things keep it safe to try. The run **self-heals**: the first 400 naming
+the contract turns the feature off for the rest of the process and re-sends that
+same read under the fenced contract, so a sheet is never lost learning that the
+platform won't take it — and that retry does not consume the sheet's transient
+retry budget, because a capability answer is permanent rather than a blip. The
+**tolerant parser stays**, and a schema-constrained request whose reply comes
+back fenced anyway parses on the ordinary path without the latch ever firing.
+And structured and fenced reads **cache under separate keys**, so nothing you
+have already paid for is discarded and flipping the flag back and forth costs
+one re-read per sheet each way rather than invalidating both sides. The
+Message-Batches transport ignores the flag entirely: a batch item's shape is
+fixed at submit and a rejection surfaces per item after the whole batch is built
+and billed, so the transport that cannot degrade does not opt in.
+
 ## Set identity & the model-authored review plan
 
 The universal-reviewer stages (Phase A): before the critique runs, the pipeline
@@ -972,6 +1018,24 @@ content-addressed against a whole-set content fingerprint; a warm re-run
 *replays* the tool trace (re-render + hash-compare, zero API calls) so the
 evidence bytes are recreated exactly and any source edit falls back to a live
 investigation.
+
+The three evidence tools are declared with Anthropic **strict tool use**, so the
+API guarantees each request validates against its schema before the host sees
+it. That matters here for one specific reason: the evidence budget is charged
+per granted request, and a malformed request still spends its slot — costing the
+model one of six scarce looks and buying nothing.
+
+Strict mode is not a substitute for the host's own checks, and the schemas say
+so. It constrains the schema *language* as well as the model: numeric bounds,
+string bounds and array length are all rejected by the compiler, so those rules
+moved into each parameter's description — where they still steer the model — and
+stay enforced where they always were. The sharpest case is the crop rectangle.
+Strict can promise it is present and is an array of numbers; it cannot promise
+it holds exactly four, which is precisely what the old `minItems`/`maxItems`
+pair expressed. So a three-number rect is schema-valid, still reaches the host,
+and is still rejected there. As with the critique flag above, a rejection of the
+strict schemas latches the feature off for the process and re-sends the same
+turn unconstrained rather than failing the stage.
 
 ## Reviewed PDFs & findings CSV
 
@@ -1498,6 +1562,7 @@ runs.
 | `DRAWING_ANALYZER_CITATION_TTL_DAYS` | `30` | Citation verdict-cache TTL; `0` disables the cache (no read, no write). |
 | `DRAWING_ANALYZER_MARKUP_APPENDIX` | off | Append the "checked and consistent" page to reviewed PDFs. |
 | `DRAWING_ANALYZER_CRITIQUE_RUNS` | `2` | Critique self-consistency reads to merge (`1` disables it). |
+| `DRAWING_ANALYZER_CRITIQUE_STRUCTURED_OUTPUTS` | off | Constrain the critique's reply with Anthropic **structured outputs** (`output_config.format` + a JSON schema) instead of asking for a fenced ```` ```json ```` block in prose. The critique is the only high-volume call whose reply is JSON and nothing else, which is what makes it the one stage a whole-response schema actually fits (the digest writes a prose digest *then* a findings block, so a schema cannot describe it). **Opt-in on purpose:** Anthropic documents citations and prefill as the only incompatibilities and says nothing either way about image inputs — and every critique request carries an overview plus a full tile grid. Prove it on your own account with `pytest -m network tests/test_live_api_canary.py -k output_config_format` before turning it on. Ignored on the Message-Batches transport (a batch item's shape is fixed at submit, so it cannot degrade). Structured and fenced reads cache under separate keys, so flipping this costs one re-read per sheet each way and discards nothing. |
 | `DRAWING_ANALYZER_ARITHMETIC_REL_TOL` | `0.01` | Arithmetic auditor's relative match tolerance (drawings round). |
 | `DRAWING_ANALYZER_NAMING_DOMINANT_MIN_FREQ` | `2` | Naming auditor: occurrences that make a tag "established" vocabulary. |
 | `DRAWING_ANALYZER_NAMING_DRIFT_MAX_FREQ` | `2` | Naming auditor: a tag is only flagged as drift when this rare. |

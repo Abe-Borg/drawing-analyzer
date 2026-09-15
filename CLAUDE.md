@@ -359,7 +359,32 @@ reporter of last resort must never raise from inside Tk's handler.
   real-time path the two byte-identical reads prompt-cache their shared image
   prefix when `runs>=2`, so the second bills it at ~0.1× — cache write/read tokens
   ride the ledger; the parallel batch path stays uncached, and `use_batch` resolves
-  from `DRAWING_ANALYZER_USE_BATCH` when the caller leaves it `None`);
+  from `DRAWING_ANALYZER_USE_BATCH` when the caller leaves it `None`.
+  **Structured outputs, opt-in (F-01):** the critique is the ONLY high-volume
+  call whose reply is JSON and nothing else, so it is the only stage
+  `output_config.format` fits — the digest writes prose *then* a findings block
+  and no schema describes that (F-02 would need a `record_findings` tool; not
+  done, and its cost is a `_SCHEMA_VERSION` bump on the highest-traffic call).
+  `DRAWING_ANALYZER_CRITIQUE_STRUCTURED_OUTPUTS=1` + the registry capability +
+  the `_structured_outputs_available` latch all gate it. Off by default because
+  vision × schema is **undocumented upstream**: citations and prefill are the
+  only stated incompatibilities and images are not mentioned either way, so it
+  is settled by one live call (`test_live_critique_under_output_config_format`),
+  not by a hermetic assertion. `_CRITIQUE_STRUCTURED_INSTRUCTION` is **derived**
+  from `_CRITIQUE_FINDINGS_INSTRUCTION` by substitution with an import-time
+  assert, never a second copy — one author for the enum, the verbatim rule, the
+  40-finding cap and the claims contract. The schema omits that cap on purpose
+  (`maxItems` is rejected by the compiler, as are `minimum`/`maximum`/
+  `minLength` and `minItems`>1), so it stays prose and stays host-enforced.
+  `format` is **merged** into `output_config`, never assigned over it — a fresh
+  dict there silently drops `effort` on every structured request. The whole
+  feature is cache-neutral: `CRITIQUE_PROMPT_VERSION` is untouched and
+  `critique_cache_key`'s `structured_key` folds in ONLY when set (the
+  `profiles_key` precedent), so a fenced run keys byte-identically to every
+  pre-F-01 entry and no paid read is discarded. The batch transport pins
+  `structured=False` — a batch item's shape is fixed at submit and a rejection
+  surfaces per item after the batch is built and billed, so the transport that
+  cannot degrade does not opt in);
   `cross_qc.py` (text-only cross-sheet conflict hunt; dual anchors via
   `also_on` legs); `auditors/` (five deterministic zero-API auditors over the
   text layers, **all** grounded on the shared `auditors/sheet_ids.py` grammar
@@ -606,7 +631,22 @@ editor and diff, and a test fails if one reappears.
   `investigate.py` carries both fields forward at its own three sites) →
   `investigate.py` (Phase C: a host-driven client-tool loop escalating each
   anchored UNCERTAIN verdict — the model requests evidence via `crop_region`
-  / zero-API `find_text` / `view_sheet`, every image saved-before-send into
+  / zero-API `find_text` / `view_sheet`, all three declared `strict: true`
+  (F-03) so a malformed request is rejected upstream instead of spending an
+  evidence slot — `tool_round += len(granted)` charges a granted block even when
+  it returns `is_error`. Strict constrains the schema *language* too, and all
+  three schemas used keywords it rejects (`minItems`/`maxItems` on `rect`,
+  `minimum`/`maximum` on `dpi` and `page_number`, `minLength` on `query`), so
+  every one moved into the parameter `description` and stays enforced in
+  `_ToolExecutor`. **Strict cannot promise `rect` holds four numbers** — array
+  length is exactly what it cannot express — so a 3-number rect is schema-valid,
+  reaches the host, and `len(raw) != 4` is still load-bearing; same for the DPI
+  clamp and the 2-char query floor. `relax_strict_tools` (not a rebuild) powers
+  the `_strict_tools_available` latch, because rebuilding drops the
+  `cache_control` breakpoint `tools_with_cache` put on the last entry and
+  silently un-caches the tool block. That latch nests OUTSIDE the task-budget
+  one and keeps a disjoint marker vocabulary — one shared list had either latch
+  disabling the other's feature. Every image is saved-before-send into
   the finding's evidence dir with an `investigation.json` trace; strictly
   sequential (I-5), budget-capped per finding (`…_INVESTIGATION_MAX_ROUNDS`,
   default 6, spent per **evidence request** and enforced *before* execution —
@@ -820,7 +860,21 @@ example is parked at `docs/examples/fire_protection.md`.
   once relied on omission meaning "off" and starved their own output. Every
   request builder therefore states `thinking` and `effort` explicitly, resolved
   through the `core.api_config` phase registry (which also applies the
-  model-ceiling clamp). A phase that wants shallow work registers `EFFORT_LOW`;
+  model-ceiling clamp). Digest and critique now read that registry too
+  (`DEFAULT_DIGEST_EFFORT = default_effort_for_phase(PHASE_REVIEW)`, inherited by
+  `DEFAULT_CRITIQUE_EFFORT`): they cannot use `apply_effort_config` because both
+  expose `effort` as a caller override, so they clamp per request via
+  `clamp_effort_for_model` instead. Before this, `PHASE_REVIEW` was registered at
+  `EFFORT_XHIGH` while both stages sent a hardcoded `"high"` and **nothing read
+  the entry** — two sources of truth that never had to agree, with the live one
+  invisible to anyone tuning the registry. It was moved to `EFFORT_HIGH`, the
+  level the stages actually send, rather than wiring them up at `xhigh`: raising
+  it is a cost increase on the highest-volume calls in the pipeline AND a
+  cache-wide invalidation (`effort` is a component of `digest_cache_key` /
+  `critique_cache_key`), so it is a separately-priced decision and one worth an
+  eval — `high` is also what the API applies when the field is omitted.
+  `PHASE_CROSS_CHECK` keeps its `xhigh` and stays orphaned. A phase that wants
+  shallow work registers `EFFORT_LOW`;
   it does **not** send `{"type": "disabled"}`, which risks leaking reasoning tags
   into a response the host parses as JSON.
 - **Above ~21k `max_tokens`, streaming is mandatory, not preferred.** The SDK

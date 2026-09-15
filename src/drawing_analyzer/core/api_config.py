@@ -383,6 +383,24 @@ class ModelCapabilities:
     # Default ``False`` so an unregistered id is never sent a tool variant its
     # generation may not accept.
     supports_web_search: bool = False
+    # Whether the model accepts the structured-outputs family: the
+    # ``output_config.format`` JSON-schema constraint AND the ``strict: true``
+    # flag on a tool definition. One capability for both because the API ships
+    # them as one feature with one model roster — a model that takes a
+    # constrained response takes a constrained tool argument. Anthropic lists
+    # Opus 5, Opus 4.8, Sonnet 5 and Haiku 4.5 as supported; Sonnet 4.6 is
+    # absent from that roster and so declares ``False`` here even though it is
+    # otherwise a current model, which is exactly why this is a registry
+    # capability and not a generation test (the same rule
+    # ``supports_refusal_fallback`` exists to enforce).
+    #
+    # Declaring it True is a statement about the *request being accepted*, not
+    # a promise the schema will be honored on every content shape: the vision
+    # path is undocumented either way upstream, so every consumer pairs this
+    # with its own self-healing latch and a fenced-block fallback rather than
+    # treating the capability as a guarantee. Default ``False`` so an
+    # unregistered id is never sent a parameter its platform may reject.
+    supports_structured_outputs: bool = False
 
 
 # Profiles verified against Anthropic's models overview and effort reference.
@@ -412,6 +430,7 @@ _MODEL_CAPABILITIES: dict[str, ModelCapabilities] = {
         # model whose platform has not enabled the beta would trip the
         # process-wide self-healing latch for everyone.
         supports_refusal_fallback=True,
+        supports_structured_outputs=True,
     ),
     MODEL_SONNET_5: ModelCapabilities(
         # Sonnet 5 is the first Sonnet-tier model to match Opus on all three
@@ -426,6 +445,7 @@ _MODEL_CAPABILITIES: dict[str, ModelCapabilities] = {
         supports_hires_vision=True,
         supports_web_fetch=True,
         supports_web_search=True,
+        supports_structured_outputs=True,
     ),
     MODEL_OPUS_48: ModelCapabilities(
         supports_adaptive_thinking=True,
@@ -436,6 +456,7 @@ _MODEL_CAPABILITIES: dict[str, ModelCapabilities] = {
         supports_hires_vision=True,
         supports_web_fetch=True,
         supports_web_search=True,
+        supports_structured_outputs=True,
     ),
     MODEL_SONNET_46: ModelCapabilities(
         supports_adaptive_thinking=True,
@@ -450,6 +471,11 @@ _MODEL_CAPABILITIES: dict[str, ModelCapabilities] = {
         supports_hires_vision=False,
         supports_web_fetch=True,
         supports_web_search=True,
+        # Sonnet 4.6 is absent from Anthropic's structured-outputs model
+        # roster. Stated explicitly rather than left to the ``False`` default,
+        # because every other current model in this registry declares True and
+        # a silent omission here would read as an oversight.
+        supports_structured_outputs=False,
     ),
     MODEL_HAIKU_45: ModelCapabilities(
         # Anthropic models overview lists Haiku 4.5 without adaptive
@@ -464,6 +490,11 @@ _MODEL_CAPABILITIES: dict[str, ModelCapabilities] = {
         supported_effort_levels=frozenset(),
         supports_hires_vision=False,
         supports_web_fetch=False,
+        # Structured outputs is the one modern request-shape feature Haiku 4.5
+        # does carry — it is on the supported roster despite having no effort
+        # levels and no adaptive thinking. A generation-shaped check would have
+        # guessed the opposite.
+        supports_structured_outputs=True,
     ),
 }
 
@@ -551,6 +582,24 @@ def model_supports_effort(model: str) -> bool:
     return bool(model_capabilities(model).supported_effort_levels)
 
 
+def model_supports_structured_outputs(model: str) -> bool:
+    """Whether ``model`` accepts ``output_config.format`` and ``strict`` tools.
+
+    Callers MUST check this before attaching either. Both are rejected with a
+    400 by a model outside the roster, and a 400 on the digest/critique path
+    costs a whole sheet — so, exactly as with ``supports_web_fetch``, an
+    unregistered or unsupported id silently takes the unconstrained shape.
+
+    ``True`` means the request will be *accepted*. It is not a promise the
+    constraint holds on every content shape: Anthropic documents citations and
+    prefill as the only incompatibilities and says nothing either way about
+    image inputs, and this pipeline's structured calls are vision calls. So
+    every consumer pairs this check with a self-healing latch and keeps the
+    tolerant fenced-block parser as its fallback.
+    """
+    return model_capabilities(model).supports_structured_outputs
+
+
 def model_supports_extended_output_beta(model: str) -> bool:
     """Whether ``model`` is eligible for the 300k batch-output beta.
 
@@ -625,17 +674,26 @@ def apply_thinking_config(kwargs: dict, *, model: str, phase: str) -> dict:
 # :func:`effort_config_for` therefore clamps every level against the model's
 # registered ``supported_effort_levels`` via :func:`_clamp_effort_for_model`.
 #
-# Scope note: the two ``xhigh`` entries below (PHASE_REVIEW,
-# PHASE_CROSS_CHECK) are inherited from the spec-review lineage and have no
-# call site in the drawing pipeline today — several live stages (digest,
-# critique, identity, plan, synthesis, focus) still pass their own explicit
-# ``high``/``medium`` straight to ``model_supports_effort``, while the
-# :func:`apply_effort_config` consumers are the investigation loop
-# (``high``), harvest (``low``), citation (``medium``) and cross-sheet QC
-# (``high``). So moving the two orphaned phases onto Sonnet 5 does not, by
-# itself, change any request or any bill. The clamp is kept correct rather
-# than deleted because it is what makes those defaults safe to wire up
-# later, on whichever model. PHASE_CROSS_QC is deliberately its own phase
+# Scope note: PHASE_REVIEW is now the digest/critique default and is read by
+# ``digest.DEFAULT_DIGEST_EFFORT`` (which ``critique.DEFAULT_CRITIQUE_EFFORT``
+# inherits), so those two stages no longer carry a second, disagreeing copy of
+# the level. It was registered at ``xhigh`` while both stages had always sent
+# ``high``; since nothing read the entry, the two never had to agree, and the
+# registry's value was simply dead. Wiring them up at ``xhigh`` would have been
+# a silent cost increase on the highest-volume calls in the pipeline AND a
+# cache-wide invalidation (``effort`` is a component of
+# ``digest_cache.digest_cache_key`` / ``critique_cache_key``), so the entry
+# moved to the level the stages actually send. The request bytes are unchanged;
+# what changed is that there is now one source of truth to tune. Raising it is
+# a deliberate, separately-priced decision — and one worth an eval first, since
+# ``high`` is also what the API applies when the field is omitted.
+#
+# PHASE_CROSS_CHECK keeps its ``xhigh`` and remains orphaned: it is inherited
+# from the spec-review lineage and still has no call site in the drawing
+# pipeline. The clamp is kept correct rather than deleted because it is what
+# makes that default safe to wire up later, on whichever model. The remaining
+# stages that pass their own explicit level (identity, plan, synthesis, focus)
+# are unchanged. PHASE_CROSS_QC is deliberately its own phase
 # rather than a reuse of PHASE_CROSS_CHECK: the two differ in both output
 # budget (16k vs 96k) and lineage, and conflating them would silently
 # re-budget one when the other is tuned.
@@ -650,8 +708,10 @@ def apply_thinking_config(kwargs: dict, *, model: str, phase: str) -> dict:
 #
 # - Sonnet verification (PHASE_VERIFICATION{,_RETRY,_CONTINUATION}): medium.
 # - Opus verification (i.e. escalation): high.
-# - Deep review (PHASE_REVIEW, PHASE_CROSS_CHECK): xhigh, clamped to high on
-#   any model whose roster lacks it (Sonnet 4.6 and older).
+# - Digest / critique (PHASE_REVIEW): high — the level both stages have always
+#   sent, and the level the API applies when the field is omitted.
+# - Deep review (PHASE_CROSS_CHECK): xhigh, clamped to high on any model whose
+#   roster lacks it (Sonnet 4.6 and older).
 # - Harvest: low. Structuring one prose item into a Finding is formatting, not
 #   judgment; low effort is the cheap setting that keeps thinking *on* (see
 #   :func:`thinking_config_for` on why we never send ``{"type": "disabled"}``).
@@ -663,7 +723,7 @@ def apply_thinking_config(kwargs: dict, *, model: str, phase: str) -> dict:
 
 # Phases whose request paths route through ``output_config.effort``.
 _PHASE_DEFAULT_EFFORT: dict[str, str] = {
-    PHASE_REVIEW: EFFORT_XHIGH,
+    PHASE_REVIEW: EFFORT_HIGH,
     PHASE_CROSS_CHECK: EFFORT_XHIGH,
     PHASE_VERIFICATION: EFFORT_MEDIUM,
     PHASE_VERIFICATION_RETRY: EFFORT_MEDIUM,
@@ -711,6 +771,34 @@ def _clamp_effort_for_model(level: str, model: str) -> str:
     if level in model_capabilities(model).supported_effort_levels:
         return level
     return EFFORT_HIGH
+
+
+def default_effort_for_phase(phase: str) -> str | None:
+    """The registered, un-clamped effort level for ``phase`` (``None`` if any).
+
+    The model-free half of :func:`effort_config_for`, for the two module
+    constants that must exist at import time and before a model is known
+    (``digest.DEFAULT_DIGEST_EFFORT``, and ``critique.DEFAULT_CRITIQUE_EFFORT``
+    which inherits it). Those are keyword defaults on public request builders,
+    so they cannot be resolved per call — but they can at least be resolved
+    from the registry instead of restating a literal that nothing checks.
+    The clamp still happens at request-build time via
+    :func:`clamp_effort_for_model`, where the model is known.
+    """
+    return _PHASE_DEFAULT_EFFORT.get(phase)
+
+
+def clamp_effort_for_model(level: str, model: str) -> str:
+    """Public wrapper over :func:`_clamp_effort_for_model`.
+
+    Exists for the request builders that resolve their own level rather than
+    reading a phase default — :func:`drawing_analyzer.digest.build_digest_request_params`
+    and its critique twin both accept a caller-supplied ``effort`` and so
+    cannot route through :func:`apply_effort_config`. They still owe the same
+    clamp: an override of ``xhigh`` aimed at a Sonnet 4.6 run is a 400 whether
+    the level came from the registry or from a keyword argument.
+    """
+    return _clamp_effort_for_model(level, model)
 
 
 def effort_config_for(*, model: str, phase: str) -> dict | None:
