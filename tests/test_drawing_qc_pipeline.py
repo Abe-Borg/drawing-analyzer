@@ -1662,3 +1662,40 @@ def test_a_sheet_the_critique_cannot_obtain_degrades_its_stage(tmp_path):
     ), stages["critique"].errors
     assert any("Critique:" in e for e in ctx.errors), ctx.errors
     assert ctx.qc_status != "COMPLETE"
+
+
+def test_pipeline_reports_verify_parse_loss_on_the_stage_not_as_an_error(tmp_path):
+    # A reply the verifier could not read is counted UNCERTAIN exactly like a
+    # real NOT_VISIBLE; the stage carries the distinction so run.log and the
+    # manifest can say how much of the UNCERTAIN share the parser produced.
+    src = _make_pdf(tmp_path / "M-101.pdf")
+    client = _RoutingClient([_VAV_FINDING], verdict="MAYBE")     # not in the enum
+    ctx = extract_drawing_context(
+        [src], client=client, rows=2, cols=2,
+        reference_audit=True, qc_markups=True, investigate=False,
+        qc_work_dir=tmp_path / "qc",
+    )
+    assert client.verify_calls == 1
+    stage = {s.stage: s for s in ctx.stage_results}["verification"]
+    assert stage.status == "COMPLETE"                  # observational: status unmoved
+    assert stage.errors == []
+    assert stage.warnings == [
+        "verification: 1 of 1 live verdict calls returned no judgment "
+        "(malformed=1, truncated=0, failed=0); each was left UNCERTAIN"
+    ]
+    assert ctx.findings[0].verification.status == "UNCERTAIN"
+    # The warning reaches the exported manifest through the stage record.
+    assert stage.to_dict()["warnings"] == stage.warnings
+
+
+def test_pipeline_a_clean_verification_carries_no_parse_loss_warning(tmp_path):
+    src = _make_pdf(tmp_path / "M-101.pdf")
+    client = _RoutingClient([_VAV_FINDING], verdict="NOT_VISIBLE")   # a real judgment
+    ctx = extract_drawing_context(
+        [src], client=client, rows=2, cols=2,
+        reference_audit=True, qc_markups=True, investigate=False,
+        qc_work_dir=tmp_path / "qc",
+    )
+    stage = {s.stage: s for s in ctx.stage_results}["verification"]
+    assert stage.warnings == []
+    assert ctx.findings[0].verification.status == "UNCERTAIN"

@@ -31,6 +31,8 @@ moved (I-2). PDF-engine-free (I-5); real-time only (stragglers are few).
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import time
@@ -49,9 +51,12 @@ from .core.api_config import (
     phase_output_cap,
     thinking_config_for,
 )
+from .core.structured_outputs import StructuredOutputsGate, attach_format
 from .critique import _token_overlap
 from .diagnostics import get_logger
 from .digest import (
+    _FINDING_SEVERITIES,
+    _MODEL_FINDING_CATEGORIES,
     _clean_error,
     _is_transient_error,
     _message_text,
@@ -402,6 +407,83 @@ sentences); source_quote (COPY VERBATIM a supporting string from the SHEET TEXT 
 LAYER — exact characters — or "" if no on-sheet string supports it); tile \
 (null); refs (an array, usually empty). Never invent quotes, tags, or values."""
 
+# Structured-outputs variant of the harvest prompt (opt-in,
+# ``DRAWING_ANALYZER_HARVEST_STRUCTURED_OUTPUTS``). ONE substitution on the
+# fenced prompt, never a second copy — the field list, the verbatim-quote rule
+# and the "never invent" rule have exactly one author. Asserted at import so a
+# prompt edit that breaks the substitution fails the import, not a live run.
+_HARVEST_FENCE_SENTENCE = (
+    "Output ONLY a fenced code block labeled json containing a single object with: "
+)
+_HARVEST_FENCE_REPLACEMENT = "Output ONLY a single JSON object with: "
+HARVEST_STRUCTURED_SYSTEM_PROMPT = HARVEST_SYSTEM_PROMPT.replace(
+    _HARVEST_FENCE_SENTENCE, _HARVEST_FENCE_REPLACEMENT, 1
+)
+assert HARVEST_STRUCTURED_SYSTEM_PROMPT != HARVEST_SYSTEM_PROMPT, (
+    "harvest fence sentence no longer matches the system prompt"
+)
+assert "fenced code block" not in HARVEST_STRUCTURED_SYSTEM_PROMPT, (
+    "structured harvest prompt still asks for a fenced block"
+)
+
+#: The single-finding object the harvest asks for, as a JSON schema for
+#: ``output_config.format``. Mirrors the prompt's field list one-for-one:
+#: ``additionalProperties: false`` means a field the prompt names must be here
+#: or the grammar forbids what the prose asks for. The category and severity
+#: enums are the same frozensets the host validator checks against
+#: (``digest._validate_finding_item``), sorted so the schema — and the cache
+#: key that hashes it — is deterministic (I-7). ``tile`` is pinned to ``null``
+#: exactly as the prompt says; the ``at most two sentences`` cap on ``text``
+#: stays prose (``maxLength`` is rejected by the schema compiler).
+HARVEST_FINDING_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "sheet_id": {"type": "string"},
+        "category": {"type": "string", "enum": sorted(_MODEL_FINDING_CATEGORIES)},
+        "severity": {"type": "string", "enum": sorted(_FINDING_SEVERITIES)},
+        "text": {"type": "string"},
+        "source_quote": {"type": "string"},
+        "tile": {"type": "null"},
+        "refs": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["sheet_id", "category", "severity", "text", "source_quote", "tile", "refs"],
+    "additionalProperties": False,
+}
+
+# The structured half of the item cache identity. Folded into the key ONLY
+# when the request carries the schema (see ``_structure_item``), so a fenced
+# run's key is byte-identical to every key written before this existed, and
+# editing the structured prompt or the schema re-structures only the
+# structured entries (I-6).
+HARVEST_STRUCTURED_PROMPT_VERSION = hashlib.sha256(
+    "\x00".join(
+        (HARVEST_STRUCTURED_SYSTEM_PROMPT, json.dumps(HARVEST_FINDING_SCHEMA, sort_keys=True))
+    ).encode("utf-8")
+).hexdigest()[:16]
+
+# Its own latch: this is a text-only Sonnet 5 call, and a rejection on the
+# critique's 37-image vision request says nothing about it (nor the reverse).
+STRUCTURED_OUTPUTS = StructuredOutputsGate(
+    "prose_harvest", "DRAWING_ANALYZER_HARVEST_STRUCTURED_OUTPUTS"
+)
+
+
+def harvest_structured_outputs_enabled(model: str) -> bool:
+    """Whether a structuring call should carry ``output_config.format``.
+
+    Three gates (env opt-in, model capability, the process latch) — see
+    :class:`drawing_analyzer.core.structured_outputs.StructuredOutputsGate`.
+    Off by default until the live canary
+    (``tests/test_live_api_canary.py::test_live_harvest_under_output_config_format``)
+    has passed on your account; text-only, so the lowest-risk stage to flip.
+    """
+    return STRUCTURED_OUTPUTS.enabled(model)
+
+
+def harvest_system_prompt(*, structured: bool = False) -> str:
+    """The fenced prompt by default; the fence-free variant for a schema-bound request."""
+    return HARVEST_STRUCTURED_SYSTEM_PROMPT if structured else HARVEST_SYSTEM_PROMPT
+
 
 def _structure_item(
     item: str,
@@ -424,27 +506,41 @@ def _structure_item(
         f"SHEET TEXT LAYER (verbatim):\n{text or '[none]'}\n\n"
         "Convert the item into the single finding object now."
     )
-    cache_key = stage_cache_key(
-        "prose_harvest_item",
-        model=model,
-        prompt=HARVEST_SYSTEM_PROMPT,
-        inputs={
-            "user_text": user,
-            # Host binding is part of the durable result even though the model
-            # sees only the display sheet id above.
-            "source_name": ref.source_name,
-            "source_id": ref.source_id,
-            "page_index": ref.page_index,
-        },
-        params={
+    # Resolved ONCE per item and threaded to the key, the request and the
+    # parser — never re-derived after the request is sent (the latch can flip
+    # in between, and a reply must be parsed under the contract it was asked
+    # for).
+    structured = harvest_structured_outputs_enabled(model)
+
+    def _cache_key(structured_now: bool) -> str:
+        params: dict[str, Any] = {
             "contract": _HARVEST_CACHE_CONTRACT,
             "max_tokens": phase_output_cap(PHASE_HARVEST, model=model),
             "text_cap": _HARVEST_TEXT_CAP,
             # Thinking/effort change the structured result, so they key it.
             "thinking": thinking_config_for(model=model, phase=PHASE_HARVEST),
             "effort": effort_config_for(model=model, phase=PHASE_HARVEST),
-        },
-    )
+        }
+        if structured_now:
+            # Only when the request carries the schema: a fenced key stays
+            # byte-identical to every key written before the feature (I-6).
+            params["structured"] = HARVEST_STRUCTURED_PROMPT_VERSION
+        return stage_cache_key(
+            "prose_harvest_item",
+            model=model,
+            prompt=HARVEST_SYSTEM_PROMPT,
+            inputs={
+                "user_text": user,
+                # Host binding is part of the durable result even though the
+                # model sees only the display sheet id above.
+                "source_name": ref.source_name,
+                "source_id": ref.source_id,
+                "page_index": ref.page_index,
+            },
+            params=params,
+        )
+
+    cache_key = _cache_key(structured)
     cached_entry = get_stage_cache_entry(
         cache, cache_key, stage="prose_harvest_item"
     )
@@ -464,22 +560,49 @@ def _structure_item(
     if client is None:
         return None, 0, 0, False, False
 
-    kwargs: dict[str, Any] = {
-        "model": model,
-        "max_tokens": phase_output_cap(PHASE_HARVEST, model=model),
-        "system": HARVEST_SYSTEM_PROMPT,
-        "messages": [{"role": "user", "content": user}],
-    }
-    # Explicit, never implicit: an omitted ``thinking`` key runs adaptive on the
-    # current models. Low effort is the cheap setting that keeps it on.
-    apply_thinking_config(kwargs, model=model, phase=PHASE_HARVEST)
-    apply_effort_config(kwargs, model=model, phase=PHASE_HARVEST)
+    def _params(structured_now: bool) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "max_tokens": phase_output_cap(PHASE_HARVEST, model=model),
+            "system": harvest_system_prompt(structured=structured_now),
+            "messages": [{"role": "user", "content": user}],
+        }
+        # Explicit, never implicit: an omitted ``thinking`` key runs adaptive
+        # on the current models. Low effort is the cheap setting that keeps
+        # it on.
+        apply_thinking_config(kwargs, model=model, phase=PHASE_HARVEST)
+        apply_effort_config(kwargs, model=model, phase=PHASE_HARVEST)
+        if structured_now:
+            # Merged into ``output_config``, never assigned over it: ``format``
+            # shares that dict with ``effort`` (see ``attach_format``).
+            attach_format(kwargs, HARVEST_FINDING_SCHEMA)
+        return kwargs
+
+    # Re-checked at send time: another item's rejection may have latched the
+    # feature off since ``structured`` was resolved above. Sending plain now
+    # saves a guaranteed 400, and the store key below follows this final value.
+    if structured and not STRUCTURED_OUTPUTS.available:
+        structured = False
+    kwargs = _params(structured)
     attempt = 0
     while True:
         try:
             resp = call_with_refusal_fallback(client, kwargs, model=model, method="create")
             break
         except Exception as exc:  # noqa: BLE001 - degrade, never raise
+            if structured and STRUCTURED_OUTPUTS.rejects(exc):
+                # A capability answer, not a blip: latch off for the process
+                # and re-send this same item under the fenced contract without
+                # spending a transient retry on learning it.
+                STRUCTURED_OUTPUTS.latch_off()
+                structured = False
+                kwargs = _params(False)
+                _log.warning(
+                    "prose-harvest: structured outputs rejected (%s); continuing "
+                    "with the fenced-block contract for the rest of this run.",
+                    _clean_error(exc),
+                )
+                continue
             if _is_transient_error(exc) and attempt < max_retries:
                 sleep(_retry_backoff_seconds(attempt))
                 attempt += 1
@@ -494,6 +617,11 @@ def _structure_item(
         candidate = _tolerant_json_object(c.body)
         if isinstance(candidate, dict):
             obj = candidate
+    if obj is None and structured:
+        # A schema-constrained reply is bare JSON with no fence to find. A
+        # fenced reply still wins above: it means the constraint did not take,
+        # and the fence is the more specific signal (the critique's rule).
+        obj = _tolerant_json_object(raw or "")
     if obj is None:
         return None, in_tok, out_tok, False, True
     if isinstance(obj.get("findings"), list) and obj["findings"]:
@@ -502,7 +630,10 @@ def _structure_item(
     if finding is not None:
         put_stage_cache_entry(
             cache,
-            cache_key,
+            # Re-resolved: a read that degraded mid-call came back under the
+            # fenced contract and must be stored where a fenced run will look,
+            # not where the next working structured run does (I-6).
+            _cache_key(structured),
             stage="prose_harvest_item",
             payload={"finding": finding.to_dict()},
         )

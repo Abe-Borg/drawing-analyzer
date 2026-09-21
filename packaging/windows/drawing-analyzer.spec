@@ -37,11 +37,6 @@ for _pkg in ("customtkinter", "tkinterdnd2"):
     binaries += _b
     hiddenimports += _h
 
-# tiktoken discovers its encodings through the ``tiktoken_ext`` namespace
-# package via dynamic import — a classic PyInstaller miss.
-hiddenimports += collect_submodules("tiktoken_ext")
-hiddenimports += ["tiktoken_ext.openai_public"]
-
 # keyring resolves its backend (Windows Credential Manager) dynamically; bundle
 # every backend plus the metadata it reads to enumerate them.
 hiddenimports += collect_submodules("keyring.backends")
@@ -50,7 +45,7 @@ hiddenimports += ["keyring.backends.Windows"]
 # Distribution metadata read at runtime. Including our own means
 # ``importlib.metadata.version('drawing-analyzer')`` keeps working in the frozen
 # app (the run manifest reports it), matching the source install.
-for _dist in ("drawing-analyzer", "anthropic", "keyring", "tiktoken"):
+for _dist in ("drawing-analyzer", "anthropic", "keyring"):
     try:
         datas += copy_metadata(_dist)
     except Exception:

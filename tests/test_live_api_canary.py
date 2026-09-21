@@ -12,7 +12,9 @@ fixtures only):
 - the digest request schema is still accepted and the structured-findings
   contract still parses (one 1-page vision call);
 - the critique structured-output contract completes both self-consistency
-  reads;
+  reads, and — under their opt-in flags — ``output_config.format`` is
+  accepted on the critique's vision read, the harvest's text-only structuring
+  call and the verifier's one-crop verdict (one canary per stage gate);
 - the pinned server-side web-search tool type is still accepted and the
   citation parser handles a real tool-result stream;
 - the Files API upload → consume → delete lifecycle works and cleans up; and
@@ -243,7 +245,7 @@ def test_live_critique_under_output_config_format(tmp_path, monkeypatch):
     monkeypatch.setenv("DRAWING_ANALYZER_CRITIQUE_STRUCTURED_OUTPUTS", "1")
     # A prior canary in this session may have latched it off; this test is the
     # one that gets to find out.
-    monkeypatch.setattr(critique_mod, "_structured_outputs_available", True)
+    critique_mod.STRUCTURED_OUTPUTS.reset()
 
     src = _make_sheet(tmp_path / "M-101.pdf")
     doc = pymupdf.open(str(src))
@@ -329,3 +331,107 @@ def test_live_investigation_tools_accept_strict(tmp_path):
         # notably does NOT include rect's length; that stays a host check.
         assert isinstance(block.input, dict)
         assert set(block.input) <= {"query", "sheet_id"}
+
+
+def test_live_harvest_under_output_config_format(monkeypatch):
+    """Does ``output_config.format`` hold on the prose harvest's structuring call?
+
+    The lowest-risk structured-outputs target in the app: text-only, Sonnet 5,
+    one flat object. What this proves on the live service:
+
+    1. the request is ACCEPTED with ``HARVEST_FINDING_SCHEMA`` attached (no
+       400 — the per-stage latch stays up);
+    2. the bare-JSON reply validates as a :class:`Finding` under the same host
+       validator the fenced path uses.
+
+    If it passes on your account, flipping the default in
+    ``prose_harvest.harvest_structured_outputs_enabled`` is justified. If it
+    400s, the latch has already degraded the run to the fenced contract — but
+    the default must stay off.
+    """
+    import time
+
+    from drawing_analyzer import prose_harvest as harvest_mod
+    from drawing_analyzer.models import SheetRef
+
+    monkeypatch.setenv(harvest_mod.STRUCTURED_OUTPUTS.env_var, "1")
+    harvest_mod.STRUCTURED_OUTPUTS.reset()
+    model = harvest_mod.harvest_model()
+    if not harvest_mod.harvest_structured_outputs_enabled(model):
+        pytest.skip(f"{model} does not declare structured-outputs support")
+
+    ref = SheetRef(pdf_path=Path("M-101.pdf"), page_index=0, source_name="M-101.pdf",
+                   page_count=1, source_id="SRC-0001")
+    finding, _in_tok, _out_tok, cache_hit, live = harvest_mod._structure_item(
+        "The riser diagram shows a check valve the plan never draws.", "conflict",
+        "VAV-3 SERVES ROOM 120\nCHECK VALVE AT RISER\nSEE DRAWING M-999 FOR CONTINUATION",
+        ref, "M-101",
+        client=_live_client(), model=model, max_retries=1, sleep=time.sleep, cache=None,
+    )
+    assert live is True and cache_hit is False
+    # (1) accepted — a latched-off gate here means the API said no.
+    assert harvest_mod.STRUCTURED_OUTPUTS.available is True, (
+        "the API rejected the harvest schema; keep the default off"
+    )
+    # (2) the constrained reply is a valid finding.
+    assert finding is not None, "schema-constrained reply did not validate as a finding"
+    print(f"\n[canary] structured harvest: model={model} category={finding.category} "
+          f"severity={finding.severity} quote={finding.source_quote!r}")
+
+
+def test_live_verify_under_output_config_format(tmp_path, monkeypatch):
+    """Does ``output_config.format`` hold on the verifier's one-crop VISION request?
+
+    Same open question as the critique canary, on the smallest vision request
+    in the pipeline: one crop, one finding, a two-field verdict. What this
+    proves on the live service:
+
+    1. the request is ACCEPTED with ``VERIFY_VERDICT_SCHEMA`` attached (the
+       per-stage latch stays up);
+    2. the reply is a settled verdict — not malformed, not truncated — so the
+       parse-loss counters read zero.
+
+    If it passes on your account, flipping the default in
+    ``verify.verify_structured_outputs_enabled`` is justified.
+    """
+    from drawing_analyzer import verify as verify_mod
+    from drawing_analyzer.models import Anchor, Finding, SheetRef
+    from drawing_analyzer.render import render_sheet
+
+    monkeypatch.setenv(verify_mod.STRUCTURED_OUTPUTS.env_var, "1")
+    verify_mod.STRUCTURED_OUTPUTS.reset()
+    model = verify_mod.default_verify_model()
+    if not verify_mod.verify_structured_outputs_enabled(model):
+        pytest.skip(f"{model} does not declare structured-outputs support")
+
+    src = _make_sheet(tmp_path / "M-101.pdf")
+    doc = pymupdf.open(str(src))
+    try:
+        ref = SheetRef(pdf_path=src, page_index=0, source_name=src.name,
+                       page_count=doc.page_count, source_id="SRC-0001")
+        rendered = render_sheet(doc[0], ref, rows=2, cols=2)
+    finally:
+        doc.close()
+
+    finding = Finding(
+        sheet_id="M-101", source_name=src.name, source_id="SRC-0001", page_index=0,
+        category="coordination", severity="low",
+        text="VAV-3 is shown serving Room 120.",
+        source_quote="VAV-3 SERVES ROOM 120",
+        anchor=Anchor(status="EXACT", rect_pdf=[72.0, 88.0, 260.0, 104.0], method="exact"),
+    )
+    result = verify_mod.verify_findings(
+        [finding], [rendered], client=_live_client(), model=model,
+        evidence_dir=tmp_path / "evidence", cache=None,
+    )
+    assert result.api_calls == 1
+    # (1) accepted.
+    assert verify_mod.STRUCTURED_OUTPUTS.available is True, (
+        "the API rejected the verdict schema on a vision request; keep the default off"
+    )
+    # (2) a settled verdict, whichever way it went.
+    assert (result.malformed, result.truncated, result.failed) == (0, 0, 0)
+    assert finding.verification is not None
+    assert finding.verification.status in {"VERIFIED", "REJECTED", "UNCERTAIN"}
+    print(f"\n[canary] structured verify: model={model} "
+          f"status={finding.verification.status} note={finding.verification.note!r}")

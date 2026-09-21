@@ -217,10 +217,12 @@ restructure the pipeline around the original brief's 27% claim.
 - Do not replace all `except Exception` guards with `except BaseException`, or
   dismiss a native panic as safe to continue without a concrete boundary
   analysis.
-- Do not assume `tiktoken.count_tokens` is a current production hot path; the
-  review found no production callers of those helpers. Note separately that
-  `core/tokenizer.py` imports `tiktoken` at module scope, so the dependency is
-  not removable by deleting the helper.
+- `tiktoken` is gone: the review found no production callers of the
+  `count_tokens` / `get_encoder` helpers, and the module-scope import was the
+  only thing keeping the dependency (it also fetched its encoding from a
+  third-party host on first use, which a locked-down workstation blocks).
+  `core/tokenizer.py` keeps the image-token estimator and the safety-factor
+  table; the exact count is still `count_tokens_via_api`.
 - Do not infer a tile is empty from absence of words/vector operations or enable
   the near-blank heuristic by default.
 - Do not change image format to claim token savings; current token estimation is

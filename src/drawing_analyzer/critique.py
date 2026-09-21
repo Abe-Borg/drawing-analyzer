@@ -47,8 +47,8 @@ from .core.api_config import (
     clamp_effort_for_model,
     model_supports_adaptive_thinking,
     model_supports_effort,
-    model_supports_structured_outputs,
 )
+from .core.structured_outputs import StructuredOutputsGate, attach_format
 from .diagnostics import get_logger
 from .digest import (
     DEFAULT_DIGEST_EFFORT,
@@ -56,7 +56,6 @@ from .digest import (
     DEFAULT_DIGEST_MAX_TOKENS,
     SHARED_USER_FRAMING_STRINGS,
     _clean_error,
-    _error_status,
     _get,
     _is_transient_error,
     _message_text,
@@ -384,23 +383,13 @@ CRITIQUE_STRUCTURED_PROMPT_VERSION = hashlib.sha256(
 # request will be accepted", not as a guarantee, and the first rejection turns
 # the feature off for the process and re-sends unconstrained. A critique stage
 # that 400s on every sheet would take the entire QC read down with it (I-3).
-_structured_outputs_available = True
-
-_STRUCTURED_OUTPUTS_REJECTION_MARKERS = (
-    "output_config",
-    "json_schema",
-    "output_format",
-    "structured output",
-    "schema",
+# The env-var gate, the capability check, the latch and the rejection predicate
+# are the shared per-stage :class:`StructuredOutputsGate` — the harvest and the
+# verifier carry their own instances, so a vision rejection here never turns
+# off a text-only stage, and no stage restates the rules.
+STRUCTURED_OUTPUTS = StructuredOutputsGate(
+    "critique", "DRAWING_ANALYZER_CRITIQUE_STRUCTURED_OUTPUTS"
 )
-
-
-def _is_structured_outputs_rejection(exc: Exception) -> bool:
-    """True for a 400 that names the structured-output contract."""
-    if _error_status(exc) != 400:
-        return False
-    text = str(exc).lower()
-    return any(marker in text for marker in _STRUCTURED_OUTPUTS_REJECTION_MARKERS)
 
 
 def critique_structured_outputs_enabled(model: str) -> bool:
@@ -418,10 +407,7 @@ def critique_structured_outputs_enabled(model: str) -> bool:
     2. the model declares the capability (registry, never a model-id test);
     3. the process has not already latched off after a rejection this run.
     """
-    raw = os.environ.get("DRAWING_ANALYZER_CRITIQUE_STRUCTURED_OUTPUTS", "")
-    if raw.strip().lower() not in {"1", "true", "yes", "on"}:
-        return False
-    return _structured_outputs_available and model_supports_structured_outputs(model)
+    return STRUCTURED_OUTPUTS.enabled(model)
 
 
 def critique_system_prompt(checklist: str = "", *, structured: bool = False) -> str:
@@ -499,14 +485,9 @@ def build_critique_request_params(
         # caller override, and an unsupported level is a 400 at submit.
         params["output_config"] = {"effort": clamp_effort_for_model(effort, model)}
     if structured:
-        # ``format`` shares ``output_config`` with ``effort``, so it is merged
-        # into whatever the effort branch above left rather than assigned over
-        # it — writing a fresh dict here would silently drop the effort level on
-        # every structured request, which is a quality change disguised as a
-        # formatting one.
-        config = dict(params.get("output_config") or {})
-        config["format"] = {"type": "json_schema", "schema": CRITIQUE_FINDINGS_SCHEMA}
-        params["output_config"] = config
+        # Merged into ``output_config``, never assigned over it: ``format``
+        # shares that dict with ``effort`` (see ``attach_format``).
+        attach_format(params, CRITIQUE_FINDINGS_SCHEMA)
     return params
 
 
@@ -1300,7 +1281,6 @@ def _critique_read(
     # Resolved ONCE per read and threaded to both the request and the parser.
     # Re-deriving it at the parse site would let the latch flip mid-read and
     # have the response parsed under a contract the request never carried.
-    global _structured_outputs_available
     structured = critique_structured_outputs_enabled(model)
     content = build_user_content(rendered, task_instruction=_CRITIQUE_TASK_INSTRUCTION)
 
@@ -1324,12 +1304,12 @@ def _critique_read(
             resp = stream_message(client, kwargs)
             break
         except Exception as exc:  # noqa: BLE001 - report, don't sink the set
-            if structured and _is_structured_outputs_rejection(exc):
+            if structured and STRUCTURED_OUTPUTS.rejects(exc):
                 # Latch off for the process and re-send this same read
                 # unconstrained. Deliberately does NOT consume a transient
                 # retry: this is a permanent capability answer, not a blip, and
                 # a sheet must not lose its retry budget learning it.
-                _structured_outputs_available = False
+                STRUCTURED_OUTPUTS.latch_off()
                 structured = False
                 kwargs = _params(False)
                 _log.warning(

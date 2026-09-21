@@ -910,3 +910,287 @@ def test_cross_verify_carries_arithmetic_provenance():
     assert finding.verification.status == "SKIPPED"
     assert finding.verification.computation_method == "HOST_DETERMINISTIC"
     assert finding.verification.operand_origin == "TEXT_EXTRACTED"
+
+
+# --------------------------------------------------------------------------- #
+# Parse-loss accounting — which UNCERTAINs were judgments and which were not
+# --------------------------------------------------------------------------- #
+#
+# ``_parse_verdict_with_validity`` always knew whether a reply was a verdict
+# and threw that away at the call site, so no run could say whether its
+# UNCERTAIN share came from the drawings or from the parser. The tally now
+# carries it, observationally: nothing here changes a status.
+
+from drawing_analyzer import verify as V  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _reset_verify_latch():
+    V.STRUCTURED_OUTPUTS.reset()
+    yield
+    V.STRUCTURED_OUTPUTS.reset()
+
+
+def test_verify_tallies_a_malformed_reply_as_not_judged():
+    result = _run([_finding("garbled")], client=_FakeClient({}, default="not json"))
+    assert (result.uncertain, result.malformed, result.truncated, result.failed) == (1, 1, 0, 0)
+    assert result.not_judged == 1
+    assert result.degradation_note() == (
+        "verification: 1 of 1 live verdict calls returned no judgment "
+        "(malformed=1, truncated=0, failed=0); each was left UNCERTAIN"
+    )
+
+
+def test_verify_tallies_an_unrecognised_verdict_as_malformed():
+    result = _run([_finding("maybe")], client=_FakeClient({}, default='{"verdict":"MAYBE"}'))
+    assert result.malformed == 1 and result.uncertain == 1
+
+
+def test_verify_tallies_a_truncated_reply_separately():
+    from tests.fixtures.fake_anthropic import FakeMessage, FakeTextBlock
+
+    class _CutOff(BetaClientMixin):
+        def __init__(self):
+            class _Msgs(StreamingMessagesMixin):
+                def create(_self, **_kw):
+                    return FakeMessage(content=[FakeTextBlock(text='{"verdict": "CONF')],
+                                       stop_reason="max_tokens")
+            self.messages = _Msgs()
+
+    result = _run([_finding("cut")], client=_CutOff())
+    assert (result.uncertain, result.malformed, result.truncated, result.failed) == (1, 0, 1, 0)
+    assert "truncated=1" in result.degradation_note()
+
+
+def test_verify_tallies_a_failed_call_as_not_judged():
+    class _FailureClient(BetaClientMixin):
+        def __init__(self):
+            class _Messages(StreamingMessagesMixin):
+                def create(_self, **_kw):
+                    raise _StatusError(400, "bad request")
+            self.messages = _Messages()
+
+    result = _run([_finding("failure")], client=_FailureClient())
+    assert (result.uncertain, result.malformed, result.truncated, result.failed) == (1, 0, 0, 1)
+
+
+def test_a_genuine_not_visible_is_a_judgment_not_a_degradation():
+    client = _FakeClient({}, default='{"verdict":"NOT_VISIBLE","note":"outside crop"}')
+    result = _run([_finding("nv")], client=client)
+    assert result.uncertain == 1 and result.not_judged == 0
+    assert result.degradation_note() is None            # a clean run adds nothing
+
+
+def test_degradation_counts_are_a_breakdown_of_uncertain_not_additional():
+    client = _FakeClient({"good": '{"verdict":"CONFIRMED","note":"ok"}'}, default="garbage")
+    result = _run([_finding("good"), _finding("bad-1"), _finding("bad-2")], client=client)
+    assert (result.verified, result.uncertain, result.malformed) == (1, 2, 2)
+    assert result.not_judged <= result.uncertain
+
+
+def test_cross_verification_tallies_malformed_replies_too(monkeypatch):
+    monkeypatch.setattr("drawing_analyzer.verify._render_leg_crops",
+                        lambda reqs, dpi: [b"crop-a", b"crop-b"])
+    client = _FakeClient({}, default="no json")
+    result = verify_cross_findings(
+        [_cross_finding("x")], [_sheet("primary.pdf"), _sheet("other.pdf")],
+        client=client, model=OPUS, sleep=lambda _s: None,
+    )
+    assert result.api_calls == 1
+    assert (result.uncertain, result.malformed) == (1, 1)
+    assert result.degradation_note("cross-verification").startswith("cross-verification: 1 of 1")
+
+
+# --------------------------------------------------------------------------- #
+# Structured outputs on the verdict — opt-in, vision-involved
+# --------------------------------------------------------------------------- #
+
+
+def test_verify_structured_is_off_unless_asked_for(monkeypatch):
+    monkeypatch.delenv(V.STRUCTURED_OUTPUTS.env_var, raising=False)
+    assert V.verify_structured_outputs_enabled(OPUS) is False
+    client = _FakeClient({"x": '{"verdict":"CONFIRMED","note":"ok"}'})
+    _run([_finding("x")], client=client)
+    assert "format" not in client.calls[0].get("output_config", {})
+
+
+def test_verify_structured_request_carries_the_verdict_schema_and_nothing_else_moves(monkeypatch):
+    from drawing_analyzer.core.structured_outputs import detach_format
+
+    f = _finding("x")
+    plain = V._build_request(f, b"png", OPUS)
+    structured = V._build_request(f, b"png", OPUS, structured=True)
+    assert structured["output_config"]["format"] == {
+        "type": "json_schema", "schema": V.VERIFY_VERDICT_SCHEMA,
+    }
+    assert structured["output_config"]["effort"] == plain["output_config"]["effort"]
+    # The prompt already asks for a bare object, so it is NOT swapped.
+    assert structured["system"] == plain["system"] == VERIFY_SYSTEM_PROMPT
+    assert detach_format(dict(structured)) == plain
+    # The enum is the verdict map's key set, sorted (deterministic schema, I-7).
+    assert V.VERIFY_VERDICT_SCHEMA["properties"]["verdict"]["enum"] == sorted(V._VERDICT_MAP)
+    assert V.VERIFY_VERDICT_SCHEMA["additionalProperties"] is False
+    assert set(V.VERIFY_VERDICT_SCHEMA["required"]) == {"verdict", "note"}
+
+
+def test_verify_structured_key_differs_and_the_plain_key_is_untouched():
+    f = _finding("x")
+    kw = dict(dpi=300, model=OPUS)
+    plain = V._single_verify_cache_key(f, _sheet(), b"png", [0.0, 0.0, 1.0, 1.0], **kw)
+    plain_again = V._single_verify_cache_key(
+        f, _sheet(), b"png", [0.0, 0.0, 1.0, 1.0], structured=False, **kw,
+    )
+    structured = V._single_verify_cache_key(
+        f, _sheet(), b"png", [0.0, 0.0, 1.0, 1.0], structured=True, **kw,
+    )
+    assert plain == plain_again != structured
+
+
+def test_verify_enabled_request_carries_the_schema_end_to_end(monkeypatch):
+    monkeypatch.setenv(V.STRUCTURED_OUTPUTS.env_var, "1")
+    client = _FakeClient({"x": '{"verdict":"CONFIRMED","note":"ok"}'})
+    result = _run([_finding("x")], client=client)
+    assert result.verified == 1
+    assert client.calls[0]["output_config"]["format"]["schema"] is V.VERIFY_VERDICT_SCHEMA
+
+
+class _RejectOnce(BetaClientMixin):
+    """400s the first structured request, then answers CONFIRMED."""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+        outer = self
+
+        class _Msgs(StreamingMessagesMixin):
+            def create(_self, **kw):
+                outer.calls.append(kw)
+                if "format" in (kw.get("output_config") or {}):
+                    raise _StatusError(400, "output_config.format is not supported")
+                return _FakeResp('{"verdict":"CONFIRMED","note":"seen"}')
+
+        self.messages = _Msgs()
+
+
+def test_verify_rejection_degrades_latches_and_stores_under_the_plain_key(monkeypatch):
+    monkeypatch.setenv(V.STRUCTURED_OUTPUTS.env_var, "1")
+    cache = DigestCache(None, persist=False)
+    client = _RejectOnce()
+
+    cold = _run([_finding("a")], client=client, cache=cache, max_retries=0)
+    assert cold.verified == 1 and cold.api_calls == 1     # one submission, two attempts
+    assert len(client.calls) == 2
+    assert "format" in client.calls[0]["output_config"]
+    assert "format" not in client.calls[1].get("output_config", {})
+    assert client.calls[1]["output_config"]["effort"] == client.calls[0]["output_config"]["effort"]
+    assert V.STRUCTURED_OUTPUTS.available is False
+    # The verdict came back under the plain contract, so it is stored under
+    # the plain key: a plain warm run hits it without asking again.
+    warm = _run([_finding("a")], client=client, cache=cache)
+    assert (warm.cache_hits, warm.cache_misses) == (1, 0) and len(client.calls) == 2
+    # ...and nothing sits under the structured key for a later structured
+    # run to serve as if the schema had held.
+    V.STRUCTURED_OUTPUTS.reset()
+    f = _finding("a")
+    structured_key = V._single_verify_cache_key(
+        f, _sheet(), b"\x89PNG-crop", V.context_rect(f.anchor.rect_pdf, PAGE_W, PAGE_H),
+        dpi=300, model=OPUS, structured=True,
+    )
+    assert cache.get(structured_key) is None
+
+
+def test_verify_worker_honours_a_latch_that_flipped_after_its_key_was_built():
+    # The caller keyed this item as structured; by the time the worker runs,
+    # another worker's rejection has latched the feature off. The worker must
+    # not re-derive the decision (the key would then describe a request never
+    # sent) — it sends plain, pays no 400, and reports the plain contract so
+    # the collector stores under the plain key.
+    client = _FakeClient({"x": '{"verdict":"CONFIRMED","note":"ok"}'})
+    V.STRUCTURED_OUTPUTS.latch_off()
+    res = V._verify_one(
+        _finding("x"), b"png", [], client=client, model=OPUS, max_retries=0,
+        sleep=lambda _s: None, fatal=threading.Event(), structured=True,
+    )
+    assert len(client.calls) == 1
+    assert "format" not in client.calls[0].get("output_config", {})
+    assert res.structured is False and res.cacheable is True
+    assert res.verification.status == "VERIFIED"
+
+
+def test_verify_concurrent_findings_never_park_a_plain_verdict_under_a_structured_key(monkeypatch):
+    # Several findings in flight while the latch trips: whichever order the
+    # workers run in, every verdict came back plain and must be found by a
+    # plain warm run — none may be sitting under a structured key.
+    monkeypatch.setenv(V.STRUCTURED_OUTPUTS.env_var, "1")
+    cache = DigestCache(None, persist=False)
+    client = _RejectOnce()
+    findings = [_finding(m) for m in ("a", "b", "c")]
+    cold = _run(findings, client=client, cache=cache, max_retries=0, max_workers=3)
+    assert cold.verified == 3 and cold.api_calls == 3
+    plain_calls = [kw for kw in client.calls if "format" not in kw.get("output_config", {})]
+    assert len(plain_calls) == 3                       # one plain send per finding
+    assert V.STRUCTURED_OUTPUTS.available is False
+    n = len(client.calls)
+    warm = _run([_finding(m) for m in ("a", "b", "c")], client=client, cache=cache)
+    assert (warm.cache_hits, warm.cache_misses) == (3, 0) and len(client.calls) == n
+
+
+def test_verify_unrelated_400_is_not_swallowed_by_the_latch(monkeypatch):
+    monkeypatch.setenv(V.STRUCTURED_OUTPUTS.env_var, "1")
+
+    class _Broke(BetaClientMixin):
+        def __init__(self):
+            self.calls = 0
+
+            class _Msgs(StreamingMessagesMixin):
+                def create(_self, **_kw):
+                    self.calls += 1
+                    raise _StatusError(400, "credit balance is too low")
+            self.messages = _Msgs()
+
+    client = _Broke()
+    result = _run([_finding("a")], client=client, max_retries=0)
+    assert result.uncertain == 1 and result.failed == 1 and client.calls == 1
+    assert V.STRUCTURED_OUTPUTS.available is True
+
+
+def test_cross_verify_later_items_honour_the_latch_without_a_400(monkeypatch):
+    # Every cross request is prepared (with the schema) before any is sent.
+    # Once the first rejection latches the feature off, the rest must be sent
+    # plain straight away — not through a guaranteed 400 each — and every
+    # plain verdict must be cached under its plain key.
+    monkeypatch.setenv(V.STRUCTURED_OUTPUTS.env_var, "1")
+    monkeypatch.setattr("drawing_analyzer.verify._render_leg_crops",
+                        lambda reqs, dpi: [b"crop-a", b"crop-b"])
+    cache = DigestCache(None, persist=False)
+    client = _RejectOnce()
+    sheets = [_sheet("primary.pdf"), _sheet("other.pdf")]
+    cold = verify_cross_findings(
+        [_cross_finding("x"), _cross_finding("y")], sheets, client=client, model=OPUS,
+        sleep=lambda _s: None, max_retries=0, max_workers=1, cache=cache,
+    )
+    assert cold.verified == 2
+    assert len(client.calls) == 3                      # one 400, then two plain sends
+    assert "format" in client.calls[0]["output_config"]
+    assert all("format" not in kw.get("output_config", {}) for kw in client.calls[1:])
+    warm = verify_cross_findings(
+        [_cross_finding("x"), _cross_finding("y")], sheets, client=client, model=OPUS,
+        sleep=lambda _s: None, cache=cache,
+    )
+    assert (warm.cache_hits, warm.cache_misses) == (2, 0) and len(client.calls) == 3
+
+
+def test_cross_verify_request_carries_the_schema_and_degrades_the_same_way(monkeypatch):
+    monkeypatch.setenv(V.STRUCTURED_OUTPUTS.env_var, "1")
+    monkeypatch.setattr("drawing_analyzer.verify._render_leg_crops",
+                        lambda reqs, dpi: [b"crop-a", b"crop-b"])
+    client = _RejectOnce()
+    finding = _cross_finding("x")
+    result = verify_cross_findings(
+        [finding], [_sheet("primary.pdf"), _sheet("other.pdf")],
+        client=client, model=OPUS, sleep=lambda _s: None, max_retries=0,
+    )
+    assert result.verified == 1 and finding.verification.status == "VERIFIED"
+    assert len(client.calls) == 2
+    assert client.calls[0]["output_config"]["format"]["schema"] is V.VERIFY_VERDICT_SCHEMA
+    assert "format" not in client.calls[1].get("output_config", {})
+    assert V.STRUCTURED_OUTPUTS.available is False
