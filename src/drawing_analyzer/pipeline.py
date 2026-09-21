@@ -2032,6 +2032,13 @@ def _run_qc_stages(
                 "verification: %d verified, %d rejected, %d uncertain, %d skipped",
                 vres.verified, vres.rejected, vres.uncertain, vres.skipped,
             )
+            # A live call that returned no judgment (garbled, truncated,
+            # failed) is counted UNCERTAIN like a real NOT_VISIBLE; the note
+            # keeps the two apart in run.log and the manifest. Warning, not
+            # error: observational, and it never changes the stage status.
+            degradation = vres.degradation_note()
+            if degradation:
+                verify_stage.warnings.append(degradation)
         except Exception as exc:  # noqa: BLE001 - never fatal
             errors.append(f"Verification: {exc}")
             primary_failed = True
@@ -2066,6 +2073,9 @@ def _run_qc_stages(
                     "cross-verification: %d verified, %d rejected, %d uncertain, %d skipped",
                     cres.verified, cres.rejected, cres.uncertain, cres.skipped,
                 )
+            degradation = cres.degradation_note("cross-verification")
+            if degradation:
+                verify_stage.warnings.append(degradation)
         except Exception as exc:  # noqa: BLE001 - never fatal
             errors.append(f"Cross-sheet verification: {exc}")
             cross_failed = True

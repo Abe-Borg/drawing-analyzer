@@ -6,6 +6,52 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Verification parse-loss accounting.** `VerifyResult` now counts the live
+  verdict calls that returned no judgment — `malformed` (the model answered,
+  but not as a verdict), `truncated` (cut off at `max_tokens`, or declined) and
+  `failed` (the call itself failed) — as a breakdown of `uncertain`, and the
+  verification stage carries one warning line in `run.log` /
+  `run_manifest.json` whenever any did. Observational: no status or stage
+  completeness moves. The parser always knew which UNCERTAINs were judgments
+  (`_parse_verdict_with_validity`) and the call site discarded it, so no run
+  could say whether its UNCERTAIN share came from the drawings or the parser.
+- **Structured outputs (opt-in) for the prose harvest and the verifier.**
+  `DRAWING_ANALYZER_HARVEST_STRUCTURED_OUTPUTS=1` constrains the harvest's
+  per-straggler structuring call to `HARVEST_FINDING_SCHEMA` (a closed object
+  mirroring the prompt's field list, enums shared with the host validator);
+  `DRAWING_ANALYZER_VERIFY_STRUCTURED_OUTPUTS=1` constrains the verifier's
+  reply to `VERIFY_VERDICT_SCHEMA` (`verdict` as the three-way enum + `note`)
+  on the single-crop and cross-sheet calls alike. Both off by default, both
+  with a live canary in `tests/test_live_api_canary.py`, both cache-isolated
+  (a fenced/plain run keys byte-identically to before). The critique's
+  env-gate → capability → self-healing-latch pattern is now one shared
+  `core/structured_outputs.py` (`StructuredOutputsGate`, `attach_format`,
+  `detach_format`), and every stage owns its **own** latch instance, so a
+  rejection on the critique's vision request never turns off a text-only
+  stage. `critique._structured_outputs_available` is replaced by
+  `critique.STRUCTURED_OUTPUTS` (a test-visible rename; behaviour and cache
+  keys unchanged).
+- **The report chat hands the model the report inside a `<document>`
+  wrapper** (`<source>` = the report title, `<document_content>` = the
+  verbatim text), per Anthropic's long-context guidance for one large
+  reference document; the block stays byte-stable per page so its 1h prompt-
+  cache breakpoint is unaffected.
+
+### Removed
+
+- **`tiktoken`.** Its only two helpers (`core.tokenizer.count_tokens` /
+  `get_encoder`) had no callers anywhere in the package, scripts or tests, and
+  the module-scope import was the only thing keeping the dependency — which
+  also downloads its encoding from a third-party host on first use, a
+  fragility on a locked-down workstation. Dropped from `pyproject.toml`,
+  `requirements.txt`, `requirements-release.lock` (together with the five
+  transitive pins only it pulled in: `certifi`, `charset-normalizer`, `regex`,
+  `requests`, `urllib3`) and the PyInstaller spec. The image-token estimator
+  and the safety-factor table are unchanged; the exact count remains
+  `count_tokens_via_api`.
+
 ### Changed
 
 - **Anthropic SDK bumped 1.5.0 → 1.7.0.** No breaking changes for this app

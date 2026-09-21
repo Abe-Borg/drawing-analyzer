@@ -51,6 +51,7 @@ from .core.api_config import (
     call_with_refusal_fallback,
     phase_output_cap,
 )
+from .core.structured_outputs import StructuredOutputsGate, attach_format, detach_format
 from .diagnostics import get_logger
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
@@ -113,6 +114,46 @@ _VERDICT_MAP = {
     "CONTRADICTED": "REJECTED",
     "NOT_VISIBLE": "UNCERTAIN",
 }
+
+#: The verdict object as a JSON schema for ``output_config.format`` — the
+#: opt-in structured-outputs contract (``DRAWING_ANALYZER_VERIFY_STRUCTURED_OUTPUTS``).
+#: The three-way ``enum`` is the whole point: a verdict outside it is exactly
+#: the reply :func:`_parse_verdict_with_validity` degrades to UNCERTAIN. The
+#: prompt is unchanged — it already asks for a bare object — so the structured
+#: and plain requests differ only by this block, and the 25-word ``note`` cap
+#: stays a prose rule (``maxLength`` is rejected by the schema compiler; the
+#: host still clips it to 200 characters). Enum order is sorted so the schema,
+#: and every cache key that carries it, is deterministic (I-7).
+VERIFY_VERDICT_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "verdict": {"type": "string", "enum": sorted(_VERDICT_MAP)},
+        "note": {"type": "string"},
+    },
+    "required": ["verdict", "note"],
+    "additionalProperties": False,
+}
+
+# Opt-in, off by default: every verify request is a VISION request (one crop,
+# or one per leg), and whether a schema constraint holds on image input is
+# undocumented upstream — the same caveat the critique carries. Settled by one
+# live call (``tests/test_live_api_canary.py``), not by a hermetic assertion.
+# Its own gate instance, so a rejection here never latches the harvest or the
+# critique off, and theirs never latch this.
+STRUCTURED_OUTPUTS = StructuredOutputsGate(
+    "verify", "DRAWING_ANALYZER_VERIFY_STRUCTURED_OUTPUTS"
+)
+
+
+def verify_structured_outputs_enabled(model: str) -> bool:
+    """Whether a verify request should carry ``output_config.format``.
+
+    Three gates (env opt-in, model capability, the process latch) — see
+    :class:`drawing_analyzer.core.structured_outputs.StructuredOutputsGate`.
+    Resolved once per call and threaded to the request builder and the cache
+    key, never re-derived after the request is sent.
+    """
+    return STRUCTURED_OUTPUTS.enabled(model)
 
 # HTTP statuses that mean the whole pass is doomed (bad/again missing key): mark
 # the rest SKIPPED rather than burning a doomed call on every finding.
@@ -251,7 +292,34 @@ def parse_verdict(text: str) -> tuple[str, str]:
     return status, note
 
 
-def _build_request(finding: Finding, crop_png: bytes, model: str) -> dict[str, Any]:
+#: Why a live reply produced no settled verdict. ``None`` means it did.
+DEGRADE_MALFORMED = "malformed"     # the model answered, but not as a verdict
+DEGRADE_TRUNCATED = "truncated"     # cut off at max_tokens, or declined
+DEGRADE_FAILED = "failed"           # the call itself failed (non-fatal error)
+
+
+def _degrade_kind(resp: Any, valid_model_verdict: bool) -> str | None:
+    """Classify a live reply that :func:`_verdict_from_response` did not settle.
+
+    An UNCERTAIN verdict is the pipeline's most human-facing signal — "a
+    verifier looked and could not tell" — and it is also where every
+    non-judgment lands: a garbled reply, a reply cut off by the envelope, a
+    declined request. Those are not judgments, and a run that could not tell
+    them from real NOT_VISIBLE verdicts could not say whether a parse problem
+    or the drawings produced its UNCERTAIN share. The parser already knows
+    which happened (it writes the note); this returns the same distinction as
+    a countable kind so the tally can carry it.
+    """
+    if valid_model_verdict:
+        return None
+    stop = _get(resp, "stop_reason")
+    return DEGRADE_TRUNCATED if stop in ("max_tokens", "refusal") else DEGRADE_MALFORMED
+
+
+def _build_request(
+    finding: Finding, crop_png: bytes, model: str, *, structured: bool = False,
+) -> dict[str, Any]:
+    """The single-crop verify request. ``structured`` attaches the verdict schema."""
     quote = finding.source_quote.strip()
     finding_text = (
         f"FINDING to check (category={finding.category}, "
@@ -278,6 +346,8 @@ def _build_request(finding: Finding, crop_png: bytes, model: str) -> dict[str, A
     # runs adaptive anyway, so saying nothing is not the same as saying no.
     apply_thinking_config(kwargs, model=model, phase=PHASE_VERIFICATION)
     apply_effort_config(kwargs, model=model, phase=PHASE_VERIFICATION)
+    if structured:
+        attach_format(kwargs, VERIFY_VERDICT_SCHEMA)
     return kwargs
 
 
@@ -343,10 +413,17 @@ def _single_verify_cache_key(
     *,
     dpi: int,
     model: str,
+    structured: bool = False,
 ) -> str:
-    """Key every model-visible and source/geometry-shaping single-crop input."""
+    """Key every model-visible and source/geometry-shaping single-crop input.
+
+    ``structured`` is part of the shape: the schema rides ``output_config``,
+    which :func:`_request_shape_params` already keys, so a structured verdict
+    never serves a plain run or vice versa, and a plain run's key is
+    byte-identical to every key written before the feature existed (I-6).
+    """
     crop_sha = hashlib.sha256(crop_png).hexdigest()
-    request = _build_request(finding, crop_png, model)
+    request = _build_request(finding, crop_png, model, structured=structured)
     sheet_ref = getattr(sheet, "ref", None)
     anchor = finding.anchor
     return stage_cache_key(
@@ -590,21 +667,45 @@ def _verify_one(
     max_retries: int,
     sleep: Any,
     fatal: threading.Event,
-) -> tuple[Verification, int, int, bool]:
+) -> tuple[Verification, int, int, bool, str | None]:
     """One verify call (runs on the pool). Never raises.
 
-    Always returns ``(verification, input_tokens, output_tokens, cacheable)``.
-    Tokens are 0 and ``cacheable`` is false on a failure path. The verdict carries
-    the exact evidence ``artifacts`` that were sent (the crop it judged), so the
-    saved trail matches the request.
+    Always returns ``(verification, input_tokens, output_tokens, cacheable,
+    degrade_kind)``. Tokens are 0 and ``cacheable`` is false on a failure path;
+    ``degrade_kind`` is one of the ``DEGRADE_*`` kinds when the call produced
+    no settled verdict, else ``None``. The verdict carries the exact evidence
+    ``artifacts`` that were sent (the crop it judged), so the saved trail
+    matches the request.
+
+    ``cacheable`` is also false for the one call that trips the structured-
+    outputs latch: its cache key was computed for the structured request, and
+    the verdict came back under the plain one. Storing it would park a plain
+    result where the next structured run looks (I-6); one lost write is the
+    price of learning, once per process.
     """
-    kwargs = _build_request(finding, crop_png, model)
+    structured = verify_structured_outputs_enabled(model)
+    kwargs = _build_request(finding, crop_png, model, structured=structured)
+    degraded_contract = False
     attempt = 0
     while True:
         try:
             resp = call_with_refusal_fallback(client, kwargs, model=model, method="create")
             break
         except Exception as exc:  # noqa: BLE001 - degrade the finding, never raise
+            if structured and STRUCTURED_OUTPUTS.rejects(exc):
+                # A capability answer, not a blip: latch off for the process and
+                # re-send this same call unconstrained without spending a
+                # transient retry on learning it.
+                STRUCTURED_OUTPUTS.latch_off()
+                structured = False
+                degraded_contract = True
+                kwargs = detach_format(kwargs)
+                _log.warning(
+                    "verify: structured outputs rejected (%s); continuing with the "
+                    "plain verdict contract for the rest of this run.",
+                    _clean_error(exc),
+                )
+                continue
             if _is_transient_error(exc) and attempt < max_retries:
                 sleep(_retry_backoff_seconds(attempt))
                 attempt += 1
@@ -612,10 +713,16 @@ def _verify_one(
             note = _clean_error(exc)
             if _error_status(exc) in _FATAL_STATUSES:
                 fatal.set()
-                return Verification(status="SKIPPED", note=note, evidence=list(artifacts)), 0, 0, False
+                return (
+                    Verification(status="SKIPPED", note=note, evidence=list(artifacts)),
+                    0, 0, False, None,
+                )
             # Permanent, non-fatal (e.g. 400): keep the finding but stay uncertain.
             _log.warning("verify finding %s failed: %s", finding.id, note)
-            return Verification(status="UNCERTAIN", note=note, evidence=list(artifacts)), 0, 0, False
+            return (
+                Verification(status="UNCERTAIN", note=note, evidence=list(artifacts)),
+                0, 0, False, DEGRADE_FAILED,
+            )
 
     status, note, valid_model_verdict = _verdict_from_response(resp)
     in_tok, out_tok = _message_usage(resp)
@@ -625,15 +732,28 @@ def _verify_one(
         Verification(status=status, note=note, evidence=list(artifacts)),
         in_tok,
         out_tok,
-        valid_model_verdict,
+        valid_model_verdict and not degraded_contract,
+        _degrade_kind(resp, valid_model_verdict),
     )
 
 
 class VerifyResult:
-    """Lightweight tally of a verification pass."""
+    """Lightweight tally of a verification pass.
+
+    ``malformed`` / ``truncated`` / ``failed`` count the live calls that
+    produced **no settled verdict** and were left UNCERTAIN — a garbled reply,
+    a reply cut off by the envelope or declined, a call that failed outright.
+    They are a breakdown of ``uncertain``, not additional to it, and they are
+    observational: nothing here changes a status or the stage's completeness.
+    They exist because ``_parse_verdict_with_validity`` always knew which
+    UNCERTAINs were judgments and which were not, and threw that away at the
+    call site, so no run could say whether its UNCERTAIN share came from the
+    drawings or from the parser.
+    """
 
     __slots__ = (
         "verified", "rejected", "uncertain", "skipped",
+        "malformed", "truncated", "failed",
         "input_tokens", "output_tokens", "cache_hits", "cache_misses", "api_calls",
     )
 
@@ -642,6 +762,9 @@ class VerifyResult:
         self.rejected = 0
         self.uncertain = 0
         self.skipped = 0
+        self.malformed = 0
+        self.truncated = 0
+        self.failed = 0
         self.input_tokens = 0
         self.output_tokens = 0
         self.cache_hits = 0
@@ -655,6 +778,36 @@ class VerifyResult:
         }.get(status)
         if attr:
             setattr(self, attr, getattr(self, attr) + 1)
+
+    def _count_degrade(self, kind: str | None) -> None:
+        attr = {
+            DEGRADE_MALFORMED: "malformed",
+            DEGRADE_TRUNCATED: "truncated",
+            DEGRADE_FAILED: "failed",
+        }.get(kind or "")
+        if attr:
+            setattr(self, attr, getattr(self, attr) + 1)
+
+    @property
+    def not_judged(self) -> int:
+        """Live calls that returned no verdict (all left UNCERTAIN)."""
+        return self.malformed + self.truncated + self.failed
+
+    def degradation_note(self, label: str = "verification") -> str | None:
+        """One line for the stage's warnings when any live call was not a judgment.
+
+        ``None`` when every live call settled, so a clean run adds nothing to
+        run.log or the manifest. The counts are the whole message: a reviewer
+        reading a high UNCERTAIN share needs to know how much of it the parser
+        or the envelope produced before blaming the drawings.
+        """
+        if not self.not_judged:
+            return None
+        return (
+            f"{label}: {self.not_judged} of {self.api_calls} live verdict calls "
+            f"returned no judgment (malformed={self.malformed}, "
+            f"truncated={self.truncated}, failed={self.failed}); each was left UNCERTAIN"
+        )
 
 
 def _resolve_workers(max_workers: int | None, total: int) -> int:
@@ -806,8 +959,9 @@ def verify_findings(
             finished, _ = wait(in_flight, return_when=FIRST_COMPLETED)
             for fut in finished:
                 finding, dir_name, cache_key = in_flight.pop(fut)
-                verification, in_tok, out_tok, cacheable = fut.result()
+                verification, in_tok, out_tok, cacheable, degrade = fut.result()
                 finding.verification = verification
+                result._count_degrade(degrade)
                 if cacheable and cache_key:
                     _cache_verification(
                         cache, cache_key, stage=_VERIFY_CACHE_STAGE,
@@ -859,6 +1013,7 @@ def verify_findings(
                     cache_key = _single_verify_cache_key(
                         finding, sheet, crop_png, crop_rect,
                         dpi=dpi_used, model=model,
+                        structured=verify_structured_outputs_enabled(model),
                     )
                     payload = get_stage_cache_entry(
                         cache, cache_key, stage=_VERIFY_CACHE_STAGE,
@@ -934,8 +1089,9 @@ def verify_findings(
 
     _log.info(
         "verification: %d verified, %d rejected, %d uncertain, %d skipped "
-        "(input=%d output=%d tok)",
+        "(not judged: malformed=%d truncated=%d failed=%d; input=%d output=%d tok)",
         result.verified, result.rejected, result.uncertain, result.skipped,
+        result.malformed, result.truncated, result.failed,
         result.input_tokens, result.output_tokens,
     )
     restore_provenance()
@@ -968,7 +1124,9 @@ def _render_leg_crops(reqs: list, dpi: int) -> list:
     return crops
 
 
-def _build_dual_request(finding: Finding, labeled_crops: list, model: str) -> dict[str, Any]:
+def _build_dual_request(
+    finding: Finding, labeled_crops: list, model: str, *, structured: bool = False,
+) -> dict[str, Any]:
     """A verify request carrying one crop per sheet, so the model can compare them."""
     header = (
         f"CROSS-SHEET FINDING to check (category={finding.category}, "
@@ -993,6 +1151,8 @@ def _build_dual_request(finding: Finding, labeled_crops: list, model: str) -> di
     }
     apply_thinking_config(kwargs, model=model, phase=PHASE_VERIFICATION)
     apply_effort_config(kwargs, model=model, phase=PHASE_VERIFICATION)
+    if structured:
+        attach_format(kwargs, VERIFY_VERDICT_SCHEMA)
     return kwargs
 
 
@@ -1154,7 +1314,9 @@ def _prepare_cross_one(
         art.request_order = order   # position in the request actually sent
 
     labeled = [(label, crop) for (label, crop, _a, _leg) in kept]
-    kwargs = _build_dual_request(finding, labeled, model)
+    kwargs = _build_dual_request(
+        finding, labeled, model, structured=verify_structured_outputs_enabled(model),
+    )
     cache_key = _cross_verify_cache_key(
         finding, kwargs, [leg for (_l, _c, _a, leg) in kept], model=model,
     )
@@ -1167,20 +1329,39 @@ def _prepare_cross_one(
 def _call_prepared_cross(
     prepared: _PreparedCrossVerification, *,
     client: Any, max_retries: int, sleep: Any,
-) -> tuple[Verification, int, int, bool]:
-    """Run only the independent model call; rendering has already completed."""
+) -> tuple[Verification, int, int, bool, str | None]:
+    """Run only the independent model call; rendering has already completed.
+
+    Same return shape as :func:`_verify_one`, including the ``cacheable`` rule
+    for the call that trips the structured-outputs latch.
+    """
     # The refusal fallback is applied inside ``call_with_refusal_fallback``,
     # not when ``prepared.kwargs`` was built: it must not leak into
     # ``_cross_verify_cache_key``, which was computed from the pre-fallback
     # kwargs (I-6 cache correctness).
     kwargs = prepared.kwargs
     model = str(kwargs.get("model", ""))
+    structured = "format" in (kwargs.get("output_config") or {})
+    degraded_contract = False
     attempt = 0
     while True:
         try:
             resp = call_with_refusal_fallback(client, kwargs, model=model, method="create")
             break
         except Exception as exc:  # noqa: BLE001 - degrade, never raise
+            if structured and STRUCTURED_OUTPUTS.rejects(exc):
+                STRUCTURED_OUTPUTS.latch_off()
+                structured = False
+                degraded_contract = True
+                # A copy: ``prepared.kwargs`` is the request the cache key
+                # describes and must stay as built.
+                kwargs = detach_format(dict(kwargs))
+                _log.warning(
+                    "cross-verify: structured outputs rejected (%s); continuing "
+                    "with the plain verdict contract for the rest of this run.",
+                    _clean_error(exc),
+                )
+                continue
             if _is_transient_error(exc) and attempt < max_retries:
                 sleep(_retry_backoff_seconds(attempt))
                 attempt += 1
@@ -1192,12 +1373,16 @@ def _call_prepared_cross(
             v = Verification(
                 status="UNCERTAIN", note=note, evidence=prepared.artifacts
             )
-            return v, 0, 0, False
+            return v, 0, 0, False, DEGRADE_FAILED
 
     status, note, valid_model_verdict = _verdict_from_response(resp)
     in_tok, out_tok = _message_usage(resp)
     v = Verification(status=status, note=note, evidence=prepared.artifacts)
-    return v, in_tok, out_tok, valid_model_verdict
+    return (
+        v, in_tok, out_tok,
+        valid_model_verdict and not degraded_contract,
+        _degrade_kind(resp, valid_model_verdict),
+    )
 
 
 def _verify_cross_one(
@@ -1213,7 +1398,7 @@ def _verify_cross_one(
     if immediate is not None:
         return immediate, 0, 0
     assert prepared is not None
-    verification, in_tok, out_tok, _cacheable = _call_prepared_cross(
+    verification, in_tok, out_tok, _cacheable, _degrade = _call_prepared_cross(
         prepared, client=client, max_retries=max_retries, sleep=sleep,
     )
     _write_evidence_request(
@@ -1326,8 +1511,9 @@ def verify_cross_findings(
             # they were all submitted first, so their API calls still overlap.
             for index, prepared, future in submitted:
                 try:
-                    verification, in_tok, out_tok, cacheable = future.result()
+                    verification, in_tok, out_tok, cacheable, degrade = future.result()
                     outcomes[index] = (verification, in_tok, out_tok)
+                    result._count_degrade(degrade)
                     if cacheable:
                         _cache_verification(
                             cache, prepared.cache_key,
@@ -1367,8 +1553,10 @@ def verify_cross_findings(
             progress(index + 1, total, f"Verifying conflict {index + 1}/{total}")
 
     _log.info(
-        "cross-verification: %d verified, %d rejected, %d uncertain, %d skipped",
+        "cross-verification: %d verified, %d rejected, %d uncertain, %d skipped "
+        "(not judged: malformed=%d truncated=%d failed=%d)",
         result.verified, result.rejected, result.uncertain, result.skipped,
+        result.malformed, result.truncated, result.failed,
     )
     restore_provenance()
     return result

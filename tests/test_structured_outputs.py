@@ -15,6 +15,7 @@ network-marked proof.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -31,6 +32,10 @@ from tests.fixtures.fake_anthropic import (
 from drawing_analyzer import critique as C
 from drawing_analyzer import digest as D
 from drawing_analyzer import investigate as I
+from drawing_analyzer import prose_harvest as H
+from drawing_analyzer import verify as V
+from drawing_analyzer.core import structured_outputs as SO
+from drawing_analyzer.core.api_config import model_supports_structured_outputs
 from drawing_analyzer.core import api_config as api
 from drawing_analyzer.digest_cache import critique_cache_key, critique_cache_key_level1
 from drawing_analyzer.models import FINDINGS_PARSE_OK, Finding, ImageTile, RenderedSheet, SheetRef
@@ -459,13 +464,18 @@ def test_the_batch_path_never_opts_in(monkeypatch):
 # every call would take the deliverable down with it (I-3).
 
 
+_GATES = (C.STRUCTURED_OUTPUTS, H.STRUCTURED_OUTPUTS, V.STRUCTURED_OUTPUTS)
+
+
 @pytest.fixture(autouse=True)
 def _reset_latches():
-    """Both latches are process-wide by design; a test must not leak its state."""
-    C._structured_outputs_available = True
+    """Every latch is process-wide by design; a test must not leak its state."""
+    for gate in _GATES:
+        gate.reset()
     I._strict_tools_available = True
     yield
-    C._structured_outputs_available = True
+    for gate in _GATES:
+        gate.reset()
     I._strict_tools_available = True
 
 
@@ -507,7 +517,7 @@ def test_a_structured_rejection_degrades_and_still_returns_findings(monkeypatch)
     assert len(client.captured) == 2             # one rejected, one re-sent
     assert "format" in client.captured[0]["output_config"]
     assert "format" not in client.captured[1].get("output_config", {})
-    assert C._structured_outputs_available is False   # latched off for the process
+    assert C.STRUCTURED_OUTPUTS.available is False   # latched off for the process
 
 
 def test_the_degraded_retry_keeps_the_effort_level(monkeypatch):
@@ -554,12 +564,12 @@ def test_an_unrelated_400_is_not_swallowed_by_the_latch(monkeypatch):
     )
     assert outcome.status == "FAILED"
     assert len(client.captured) == 1
-    assert C._structured_outputs_available is True   # nothing was learned
+    assert C.STRUCTURED_OUTPUTS.available is True   # nothing was learned
 
 
 def test_once_latched_off_later_reads_never_ask_again(monkeypatch):
     monkeypatch.setenv("DRAWING_ANALYZER_CRITIQUE_STRUCTURED_OUTPUTS", "1")
-    C._structured_outputs_available = False
+    C.STRUCTURED_OUTPUTS.latch_off()
     assert C.critique_structured_outputs_enabled(OPUS_5) is False
     params = C.build_critique_request_params([], model=OPUS_5)
     assert "format" not in params["output_config"]
@@ -594,7 +604,7 @@ def test_a_run_that_degrades_mid_flight_stores_under_the_fenced_key(monkeypatch)
         runs=1, sleep=lambda _s: None,
     )
     assert res.error is None, res.error
-    assert C._structured_outputs_available is False
+    assert C.STRUCTURED_OUTPUTS.available is False
 
     (written_key,) = cache.store
     fenced = critique_cache_key(
@@ -615,7 +625,7 @@ def test_a_run_that_degrades_mid_flight_stores_under_the_fenced_key(monkeypatch)
 
 def test_a_latched_off_run_never_asks_for_the_schema_again(monkeypatch):
     monkeypatch.setenv("DRAWING_ANALYZER_CRITIQUE_STRUCTURED_OUTPUTS", "1")
-    C._structured_outputs_available = False
+    C.STRUCTURED_OUTPUTS.latch_off()
     assert C.critique_structured_outputs_enabled(OPUS_5) is False
 
 
@@ -736,3 +746,291 @@ def test_the_strict_latch_relaxes_even_once_already_flipped():
 
     assert len(client.captured) == 2
     assert "strict" not in client.captured[1]["tools"][0]
+
+
+# --------------------------------------------------------------------------- #
+# The shared per-stage gate (core.structured_outputs)
+# --------------------------------------------------------------------------- #
+#
+# The critique wrote the rules (env opt-in -> capability -> self-healing latch
+# -> cache-key isolation); the harvest and the verifier reuse them through one
+# class instead of restating them. The properties below are the ones a restated
+# copy would drift on.
+
+
+class _Err(Exception):
+    def __init__(self, status_code, msg):
+        super().__init__(msg)
+        self.status_code = status_code
+
+
+def test_gate_is_off_without_its_env_var(monkeypatch):
+    monkeypatch.delenv("X_TEST_GATE", raising=False)
+    assert SO.StructuredOutputsGate("test", "X_TEST_GATE").enabled(OPUS_5) is False
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [("1", True), ("true", True), ("YES", True), (" on ", True),
+     ("0", False), ("", False), ("no", False), ("enabled", False)],
+)
+def test_gate_reads_the_usual_truthy_spellings(monkeypatch, raw, expected):
+    monkeypatch.setenv("X_TEST_GATE", raw)
+    assert SO.StructuredOutputsGate("test", "X_TEST_GATE").enabled(OPUS_5) is expected
+
+
+def test_gate_requires_the_capability_not_the_env_alone(monkeypatch):
+    monkeypatch.setenv("X_TEST_GATE", "1")
+    gate = SO.StructuredOutputsGate("test", "X_TEST_GATE")
+    assert gate.enabled(OPUS_5) is True
+    assert gate.enabled(SONNET_46) is False          # current model, not on the roster
+    assert gate.enabled("some-future-model") is False
+
+
+def test_gate_latch_is_permanent_until_reset(monkeypatch):
+    monkeypatch.setenv("X_TEST_GATE", "1")
+    gate = SO.StructuredOutputsGate("test", "X_TEST_GATE")
+    gate.latch_off()
+    assert gate.available is False and gate.enabled(OPUS_5) is False
+    gate.reset()
+    assert gate.enabled(OPUS_5) is True
+
+
+def test_the_three_stage_gates_are_distinct_instances():
+    # A vision rejection on the critique must not turn off the text-only
+    # harvest, and a harvest rejection must not turn off the verifier.
+    assert len({id(g) for g in _GATES}) == 3
+    assert len({g.env_var for g in _GATES}) == 3
+    assert len({g.stage for g in _GATES}) == 3
+
+
+def test_gate_latches_are_per_stage(monkeypatch):
+    for gate in _GATES:
+        monkeypatch.setenv(gate.env_var, "1")
+    C.STRUCTURED_OUTPUTS.latch_off()
+    assert C.critique_structured_outputs_enabled(OPUS_5) is False
+    assert H.harvest_structured_outputs_enabled(SONNET_5) is True
+    assert V.verify_structured_outputs_enabled(SONNET_5) is True
+    H.STRUCTURED_OUTPUTS.latch_off()
+    assert V.verify_structured_outputs_enabled(SONNET_5) is True
+
+
+@pytest.mark.parametrize(
+    "message, expected",
+    [
+        ("output_config.format is not supported", True),
+        ("json_schema: unsupported keyword", True),
+        ("Structured Output is unavailable for this model", True),
+        ("credit balance is too low", False),
+    ],
+)
+def test_gate_rejection_is_recognised_only_on_a_400(message, expected):
+    assert SO.is_structured_outputs_rejection(_Err(400, message)) is expected
+    # A 529 naming the same words is an overload blip, not a capability answer.
+    assert SO.is_structured_outputs_rejection(_Err(529, message)) is False
+    # No status at all (a connection error) is never a capability answer.
+    assert SO.is_structured_outputs_rejection(Exception(message)) is False
+
+
+def test_the_critique_gate_keeps_its_public_surface():
+    # ``critique_structured_outputs_enabled`` and the env var are what the
+    # pipeline, the README and the canary name; the refactor must not move them.
+    assert C.STRUCTURED_OUTPUTS.env_var == "DRAWING_ANALYZER_CRITIQUE_STRUCTURED_OUTPUTS"
+    assert C.STRUCTURED_OUTPUTS.stage == "critique"
+
+
+def test_attach_format_merges_and_detach_restores_byte_for_byte():
+    params = {"model": OPUS_5, "output_config": {"effort": "high"}}
+    SO.attach_format(params, {"type": "object"})
+    assert params["output_config"] == {
+        "effort": "high",
+        "format": {"type": "json_schema", "schema": {"type": "object"}},
+    }
+    SO.detach_format(params)
+    assert params == {"model": OPUS_5, "output_config": {"effort": "high"}}
+
+
+def test_detach_format_drops_an_output_config_it_emptied():
+    # A model without effort support had no output_config before the schema;
+    # the degraded re-send must not carry an empty one the plain request lacks.
+    params = {"model": HAIKU}
+    SO.attach_format(params, {"type": "object"})
+    SO.detach_format(params)
+    assert params == {"model": HAIKU}
+
+
+# --------------------------------------------------------------------------- #
+# Prose harvest — structured outputs, opt-in
+# --------------------------------------------------------------------------- #
+
+_HARVEST_REF = SheetRef(
+    pdf_path=Path("s.pdf"), page_index=0, source_name="s.pdf", page_count=1,
+    source_id="SRC-0001",
+)
+_HARVEST_ITEM = json.dumps({
+    "sheet_id": "M-101", "category": "coordination", "severity": "low",
+    "text": "Riser check valve is not on the plan.", "source_quote": "",
+    "tile": None, "refs": [],
+})
+_HARVEST_FENCED = "```json\n" + _HARVEST_ITEM + "\n```"
+
+
+def _harvest_one(client, *, cache=None, model=SONNET_5):
+    return H._structure_item(
+        "The riser diagram shows a check valve the plan never draws.", "conflict",
+        "CHECK VALVE AT RISER", _HARVEST_REF, "M-101",
+        client=client, model=model, max_retries=0, sleep=lambda _s: None, cache=cache,
+    )
+
+
+def test_harvest_structured_is_off_unless_asked_for(monkeypatch):
+    monkeypatch.delenv(H.STRUCTURED_OUTPUTS.env_var, raising=False)
+    assert H.harvest_structured_outputs_enabled(SONNET_5) is False
+    client = _LatchClient(None, failures=0, text=_HARVEST_FENCED)
+    finding, *_ = _harvest_one(client)
+    assert finding is not None
+    (kw,) = client.captured
+    assert kw["system"] == H.HARVEST_SYSTEM_PROMPT
+    assert "format" not in kw.get("output_config", {})
+
+
+def test_harvest_structured_request_carries_the_schema_and_keeps_everything_else(monkeypatch):
+    monkeypatch.delenv(H.STRUCTURED_OUTPUTS.env_var, raising=False)
+    plain_client = _LatchClient(None, failures=0, text=_HARVEST_FENCED)
+    _harvest_one(plain_client)
+    monkeypatch.setenv(H.STRUCTURED_OUTPUTS.env_var, "1")
+    client = _LatchClient(None, failures=0, text=_HARVEST_ITEM)      # bare JSON, no fence
+    finding, *_ = _harvest_one(client)
+    assert finding is not None and finding.text == "Riser check valve is not on the plan."
+    (plain,), (kw,) = plain_client.captured, client.captured
+    assert kw["system"] == H.HARVEST_STRUCTURED_SYSTEM_PROMPT
+    assert kw["output_config"]["format"] == {
+        "type": "json_schema", "schema": H.HARVEST_FINDING_SCHEMA,
+    }
+    # Only the prompt and the schema differ: effort, thinking, cap, messages
+    # are byte-identical to the plain request.
+    assert kw["output_config"]["effort"] == plain["output_config"]["effort"]
+    strip = lambda d: {k: v for k, v in d.items() if k not in ("system", "output_config")}  # noqa: E731
+    assert strip(kw) == strip(plain)
+
+
+def test_harvest_bare_json_parses_only_under_the_structured_contract(monkeypatch):
+    # Today's fenced parser must not start accepting bare objects: a fence is
+    # what separates the machine block from prose that merely contains braces.
+    monkeypatch.delenv(H.STRUCTURED_OUTPUTS.env_var, raising=False)
+    finding, *_ = _harvest_one(_LatchClient(None, failures=0, text=_HARVEST_ITEM))
+    assert finding is None
+    monkeypatch.setenv(H.STRUCTURED_OUTPUTS.env_var, "1")
+    finding, *_ = _harvest_one(_LatchClient(None, failures=0, text=_HARVEST_ITEM))
+    assert finding is not None
+
+
+def test_harvest_a_fenced_reply_still_wins_when_structured_was_requested(monkeypatch):
+    monkeypatch.setenv(H.STRUCTURED_OUTPUTS.env_var, "1")
+    fenced = "Here it is:\n" + _HARVEST_FENCED + "\ntrailing prose"
+    finding, *_ = _harvest_one(_LatchClient(None, failures=0, text=fenced))
+    assert finding is not None
+
+
+def test_harvest_prompt_is_derived_never_duplicated():
+    assert H.HARVEST_STRUCTURED_SYSTEM_PROMPT == H.HARVEST_SYSTEM_PROMPT.replace(
+        H._HARVEST_FENCE_SENTENCE, H._HARVEST_FENCE_REPLACEMENT, 1
+    )
+    assert "fenced" not in H.HARVEST_STRUCTURED_SYSTEM_PROMPT
+    assert H.harvest_system_prompt() == H.HARVEST_SYSTEM_PROMPT
+    assert H.harvest_system_prompt(structured=True) == H.HARVEST_STRUCTURED_SYSTEM_PROMPT
+
+
+def test_harvest_schema_is_closed_compiler_safe_and_mirrors_the_prompt():
+    blob = json.dumps(H.HARVEST_FINDING_SCHEMA)
+    for keyword in UNSUPPORTED_SCHEMA_KEYWORDS:
+        assert keyword not in blob
+    (root,) = _iter_schema_objects(H.HARVEST_FINDING_SCHEMA)
+    assert root["additionalProperties"] is False
+    # additionalProperties: false means every field the prompt names must be
+    # in the schema, or the grammar forbids what the prose asks for.
+    for name in ("sheet_id", "category", "severity", "text", "source_quote", "tile", "refs"):
+        assert name in root["properties"] and name in root["required"]
+        assert name in H.HARVEST_SYSTEM_PROMPT
+    assert set(root["properties"]["category"]["enum"]) == set(D._MODEL_FINDING_CATEGORIES)
+    assert set(root["properties"]["severity"]["enum"]) == set(D._FINDING_SEVERITIES)
+    assert root["properties"]["tile"] == {"type": "null"}
+
+
+def test_harvest_structured_version_covers_prompt_and_schema():
+    expected = hashlib.sha256("\x00".join((
+        H.HARVEST_STRUCTURED_SYSTEM_PROMPT,
+        json.dumps(H.HARVEST_FINDING_SCHEMA, sort_keys=True),
+    )).encode("utf-8")).hexdigest()[:16]
+    assert H.HARVEST_STRUCTURED_PROMPT_VERSION == expected
+
+
+def test_harvest_structured_key_folds_in_only_when_enabled(monkeypatch):
+    def key_for(*, enabled, version):
+        if enabled:
+            monkeypatch.setenv(H.STRUCTURED_OUTPUTS.env_var, "1")
+        else:
+            monkeypatch.delenv(H.STRUCTURED_OUTPUTS.env_var, raising=False)
+        monkeypatch.setattr(H, "HARVEST_STRUCTURED_PROMPT_VERSION", version)
+        cache = _DictCache()
+        reply = _HARVEST_ITEM if enabled else _HARVEST_FENCED
+        _harvest_one(_LatchClient(None, failures=0, text=reply), cache=cache)
+        (key,) = cache.store
+        return key
+
+    # A fenced key ignores the structured version entirely — byte-identical to
+    # every key written before the feature existed.
+    assert key_for(enabled=False, version="aaaa") == key_for(enabled=False, version="bbbb")
+    # A structured key covers it, and never collides with the fenced key.
+    assert key_for(enabled=True, version="aaaa") != key_for(enabled=True, version="bbbb")
+    assert key_for(enabled=True, version="aaaa") != key_for(enabled=False, version="aaaa")
+
+
+def test_harvest_rejection_degrades_and_stores_under_the_fenced_key(monkeypatch):
+    monkeypatch.setenv(H.STRUCTURED_OUTPUTS.env_var, "1")
+    client = _LatchClient(_Status400("output_config.format is not supported"),
+                          failures=1, text=_HARVEST_FENCED)
+    cache = _DictCache()
+    finding, _i, _o, cache_hit, live = _harvest_one(client, cache=cache)
+    assert finding is not None and live is True and cache_hit is False
+    # One rejected, one re-sent under the fenced contract — with max_retries=0,
+    # so the re-send did not spend the transient budget.
+    assert len(client.captured) == 2
+    first, second = client.captured
+    assert "format" in first["output_config"]
+    assert first["system"] == H.HARVEST_STRUCTURED_SYSTEM_PROMPT
+    assert "format" not in second.get("output_config", {})
+    assert second["system"] == H.HARVEST_SYSTEM_PROMPT
+    assert second["output_config"]["effort"] == first["output_config"]["effort"]
+    assert H.STRUCTURED_OUTPUTS.available is False
+    # Stored where a fenced run looks: a plain warm run hits without a call.
+    monkeypatch.delenv(H.STRUCTURED_OUTPUTS.env_var, raising=False)
+    warm = _LatchClient(None, failures=0, text=_HARVEST_FENCED)
+    finding2, _i, _o, hit, live2 = _harvest_one(warm, cache=cache)
+    assert finding2 is not None and hit is True and live2 is False
+    assert warm.captured == []
+
+
+def test_harvest_unrelated_400_is_not_swallowed_by_the_latch(monkeypatch):
+    monkeypatch.setenv(H.STRUCTURED_OUTPUTS.env_var, "1")
+    client = _LatchClient(_Status400("credit balance is too low"), failures=1)
+    finding, _i, _o, _hit, live = _harvest_one(client)
+    assert finding is None and live is True
+    assert len(client.captured) == 1
+    assert H.STRUCTURED_OUTPUTS.available is True     # nothing was learned
+
+
+def test_harvest_once_latched_off_never_asks_again(monkeypatch):
+    monkeypatch.setenv(H.STRUCTURED_OUTPUTS.env_var, "1")
+    H.STRUCTURED_OUTPUTS.latch_off()
+    client = _LatchClient(None, failures=0, text=_HARVEST_FENCED)
+    _harvest_one(client)
+    (kw,) = client.captured
+    assert "format" not in kw.get("output_config", {})
+    assert kw["system"] == H.HARVEST_SYSTEM_PROMPT
+
+
+def test_harvest_gate_is_on_the_capability_not_the_model_family(monkeypatch):
+    monkeypatch.setenv(H.STRUCTURED_OUTPUTS.env_var, "1")
+    assert H.harvest_structured_outputs_enabled(SONNET_5) is model_supports_structured_outputs(SONNET_5)
+    assert H.harvest_structured_outputs_enabled(SONNET_46) is False

@@ -3588,7 +3588,9 @@ _CHAT_JS = r"""
       'AI-generated analysis of a set of construction drawings.\n\n' +
       'Report: ' + CFG.title + '\nGenerated: ' + CFG.generated +
       '\nSource file(s): ' + (CFG.sources && CFG.sources.length ? CFG.sources.join(', ') : '(unknown)') +
-      '\n\nThe next system block is the complete report text, verbatim. Ground your answers in it:\n' +
+      '\n\nThe next system block is the complete report text, verbatim, wrapped in a ' +
+      '<document> tag: <source> names the report and <document_content> holds its text. ' +
+      'Ground your answers in it:\n' +
       '- Answer from the report first, and name the sheet labels / section headers you used ' +
       '(e.g. "M-501", "Coordination items") so the reader can find them in the page above this chat.\n' +
       '- You can see only this report, not the drawings themselves. If the report does not contain ' +
@@ -3612,8 +3614,18 @@ _CHAT_JS = r"""
       // next hour then reads the report at 0.1x. The 2x write needs three reads
       // to beat the 5-minute tier's 1.25x, which any real reading session clears
       // — and the 5-minute tier loses outright the moment one pause runs long.
+      //
+      // The report rides inside a <document> wrapper — Anthropic's long-context
+      // guidance for one large reference document the model must ground answers
+      // in and keep apart from its instructions. Only the wrapper is new: the
+      // report text itself is byte-identical to what the page embeds, and the
+      // title inside <source> is the same CFG.title the preamble already carries,
+      // so the block stays byte-stable for the life of the page (the cache
+      // contract the test below guards).
       {type: 'text',
-       text: '=== FULL REPORT (verbatim) ===\n\n' + (REPORT || '(no report text was embedded)'),
+       text: '<document>\n<source>' + CFG.title + '</source>\n<document_content>\n' +
+             (REPORT || '(no report text was embedded)') +
+             '\n</document_content>\n</document>',
        cache_control: {type: 'ephemeral', ttl: '1h'}}
     ];
   }

@@ -1,8 +1,9 @@
 """
 Token counting and limit management for Claude API calls.
 
-Uses tiktoken with cl100k_base for approximate preflight estimates.
-These counts are used for guardrails, not exact billing.
+Local estimates here are conservative guardrails, never exact billing; the
+authoritative number is Anthropic's ``count_tokens`` endpoint
+(:func:`count_tokens_via_api`).
 
 Token limits (v2.3.0):
     - Claude Opus 5 context window: 1,000,000 tokens
@@ -26,8 +27,6 @@ from __future__ import annotations
 import logging
 import math
 from typing import Any, Optional
-
-import tiktoken
 
 _log = logging.getLogger(__name__)
 
@@ -166,17 +165,6 @@ def exceeds_per_call_limit_for_model(
     """
     padded = safe_local_estimate(overhead_tokens + spec_tokens, model=model)
     return padded > RECOMMENDED_MAX
-
-
-def get_encoder():
-    """Get the tokenizer used for approximate token estimates."""
-    return tiktoken.get_encoding("cl100k_base")
-
-
-def count_tokens(text: str) -> int:
-    """Count tokens in a text string (local cl100k_base estimate)."""
-    encoder = get_encoder()
-    return len(encoder.encode(text))
 
 
 # ---------------------------------------------------------------------------

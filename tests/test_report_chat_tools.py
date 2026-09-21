@@ -1237,7 +1237,12 @@ def test_report_block_uses_one_hour_ttl(page, tmp_path):
     _ask(page, "what are the conflicts?")
 
     system = page.evaluate("window.__REQ")[0]["system"]
-    assert system[-1]["text"].startswith("=== FULL REPORT")
+    # The report block is the <document> wrapper Anthropic's long-context
+    # guidance prescribes for one large reference document: <source> names the
+    # report, <document_content> holds the verbatim text.
+    assert system[-1]["text"].startswith("<document>\n<source>")
+    assert "<document_content>\n" in system[-1]["text"]
+    assert system[-1]["text"].endswith("\n</document_content>\n</document>")
     assert system[-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
     # Exactly one breakpoint in the system tier — the preamble must not carry one.
     assert [b for b in system if b.get("cache_control")] == [system[-1]]

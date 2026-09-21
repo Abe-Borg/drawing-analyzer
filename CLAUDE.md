@@ -366,7 +366,14 @@ reporter of last resort must never raise from inside Tk's handler.
   and no schema describes that (F-02 would need a `record_findings` tool; not
   done, and its cost is a `_SCHEMA_VERSION` bump on the highest-traffic call).
   `DRAWING_ANALYZER_CRITIQUE_STRUCTURED_OUTPUTS=1` + the registry capability +
-  the `_structured_outputs_available` latch all gate it. Off by default because
+  the per-stage latch all gate it — the three are one shared
+  `core.structured_outputs.StructuredOutputsGate` (`critique.STRUCTURED_OUTPUTS`),
+  reused verbatim by `prose_harvest` and `verify` under their own env vars and
+  their own latch **instances**, because a vision rejection on the critique says
+  nothing about a text-only call and must not switch it off; `attach_format` /
+  `detach_format` are the one request rule, and the gate's rejection vocabulary
+  overlaps `investigate.py`'s two latches on purpose-neutral words, which is safe
+  only while no request carries both features. Off by default because
   vision × schema is **undocumented upstream**: citations and prefill are the
   only stated incompatibilities and images are not mentioned either way, so it
   is settled by one live call (`test_live_critique_under_output_config_format`),
@@ -449,7 +456,18 @@ reporter of last resort must never raise from inside Tk's handler.
   neither. `prose_harvest.py` (mirrors prose Coordination/Conflict items,
   synthesis conflicts, and opted-in focus items into findings — match first,
   one small structuring call for stragglers on **Sonnet 5** at `EFFORT_LOW`,
-  degraded sheet-level entry on failure).
+  degraded sheet-level entry on failure; opt-in structured outputs
+  (`DRAWING_ANALYZER_HARVEST_STRUCTURED_OUTPUTS`): `HARVEST_STRUCTURED_SYSTEM_PROMPT`
+  is ONE substitution on the fenced prompt with an import-time assert,
+  `HARVEST_FINDING_SCHEMA` mirrors the prompt's field list one-for-one as a
+  closed object — `additionalProperties: false` means a field the prompt names
+  must be in the schema or the grammar forbids what the prose asks for — with
+  the enums taken from `digest._MODEL_FINDING_CATEGORIES` / `_FINDING_SEVERITIES`,
+  `HARVEST_STRUCTURED_PROMPT_VERSION` folds into the item key ONLY when the
+  request carried the schema, the store key is re-resolved after the call so a
+  read that degraded mid-call lands under the fenced key, and a bare-JSON parse
+  is attempted only under the structured contract with a fenced reply still
+  winning).
   Cross-QC's host-side grounding reads **`models.sheet_evidence_text(geom)`**,
   not `sheet_text` (WP-03A §2.1 trigger 1): `sheet_text` is the *capped* string
   the model was shown, while `full_sheet_text` is the uncapped reading-order
@@ -628,7 +646,21 @@ editor and diff, and a test fails if one reappears.
   `verify.py` (high-DPI crop re-check → VERIFIED/REJECTED/UNCERTAIN; adaptive
   thinking at medium effort inside an 8k envelope — thinking shares the
   `max_tokens` budget with the answer, and the old 1k cap fit neither, so
-  verdicts came back empty and degraded to UNCERTAIN. A verdict **replaces** the
+  verdicts came back empty and degraded to UNCERTAIN. Every live call that
+  returns no verdict is now **counted** on `VerifyResult` — `malformed` /
+  `truncated` / `failed`, a breakdown of `uncertain`, classified by
+  `_degrade_kind` from the same validity flag and stop reason the parser
+  already produced and the call site used to discard — and
+  `degradation_note()` becomes one stage *warning* (observational: no status
+  moves), because a run could not otherwise say whether its UNCERTAIN share came
+  from the drawings or the parser. Opt-in `output_config.format`
+  (`DRAWING_ANALYZER_VERIFY_STRUCTURED_OUTPUTS`, `VERIFY_VERDICT_SCHEMA`, enum =
+  `sorted(_VERDICT_MAP)`) leaves the prompt untouched — it already asks for a
+  bare object — so the structured and plain requests differ only by the schema,
+  which rides `_request_shape_params` into both cache keys for free; the one
+  call that trips the latch is deliberately **not cached**, since its key
+  described the structured request and the verdict came back under the plain
+  one. A verdict **replaces** the
   status, never the arithmetic provenance behind it: all 18 `Verification(...)`
   constructions assign wholesale and populate neither `computation_method` nor
   `operand_origin`, so `_provenance_restorer` snapshots them at each public
@@ -774,7 +806,11 @@ row in the browser — **display only**: the ledger, exports, markups and the ba
 total keep every finding (§18.6), and the grouping recomputes after every
 sort/filter so a follower never outlives its lead. Journal timestamps render
 through `_local_stamp` in the same clock as the report header (the raw UTC value
-beside a local header read as a report predating its own run). The chat widget's **turn loop** owns four rules a DOM emulator cannot check
+beside a local header read as a report predating its own run). The chat widget hands the report to the model inside a
+`<document><source>…</source><document_content>…</document_content></document>`
+wrapper (Anthropic's long-context guidance for one large reference document);
+the wrapper is byte-stable for the life of the page, so the 1h cache breakpoint
+on that block still holds. The chat widget's **turn loop** owns four rules a DOM emulator cannot check
 (P6): every commit into `history` is generation-guarded (`gen !== turnGen`)
 **inside `step`**, not only on the outer catch/then — New chat and Load
 *reassign* `history`, so an in-flight turn otherwise writes its assistant turn
@@ -798,7 +834,11 @@ in both modes, since hiding it billed every shared report's questions to its
 author and left a rotated-key report dead.
 
 `core/` is a shared kernel (model ids + env overrides in `api_config.py`, key
-store, pricing, tokenizer). `reference_audit.py` is a back-compat shim over
+store, pricing, tokenizer, the structured-outputs gate). The tokenizer is
+estimate-only: `tiktoken` was removed — its only two callers had no callers,
+and it fetched its encoding from a third-party host on first use, which a
+locked-down workstation blocks — so the exact count is `count_tokens_via_api`
+and the local path is the conservative safety-factor table. `reference_audit.py` is a back-compat shim over
 `auditors/references.py`. **No built-in review profiles ship** (Phase A): the
 packaged `profiles/` dir is empty by design — the model authors the plan per
 set; user checklists live in `~/.drawing_analyzer/profiles/` and a worked

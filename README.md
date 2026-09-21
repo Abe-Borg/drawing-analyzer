@@ -682,6 +682,23 @@ Message-Batches transport ignores the flag entirely: a batch item's shape is
 fixed at submit and a rejection surfaces per item after the whole batch is built
 and billed, so the transport that cannot degrade does not opt in.
 
+The same contract is available, behind its own flag, on the two other stages
+whose reply is JSON and nothing else. The **prose harvest**'s per-straggler
+structuring call (`DRAWING_ANALYZER_HARVEST_STRUCTURED_OUTPUTS=1`) is text-only,
+Sonnet 5, one flat finding object — the lowest-risk place to try the feature —
+and its schema mirrors the prompt's field list one-for-one, with the same
+category and severity enums the host validator checks. The **verifier**'s
+verdict (`DRAWING_ANALYZER_VERIFY_STRUCTURED_OUTPUTS=1`) becomes `verdict` as a
+three-way enum plus `note`, on the single-crop and cross-sheet calls alike; it
+is vision-involved, so it carries the critique's caveat and its own canary. All
+three stages share one gate (`core/structured_outputs.py`: env opt-in → model
+capability → self-healing latch), but each owns its **own** latch — a rejection
+on the critique's 37-image request says nothing about a text-only call and must
+not switch it off — and each keys structured and plain results apart, so
+nothing already paid for is discarded. Each has a live canary
+(`-k harvest_under_output_config_format`, `-k verify_under_output_config_format`);
+flip a default only after its canary passes on your account.
+
 ## Set identity & the model-authored review plan
 
 The universal-reviewer stages (Phase A): before the critique runs, the pipeline
@@ -973,6 +990,25 @@ failure degrades that finding to `UNCERTAIN`, and a fatal auth failure marks the
 rest `SKIPPED` — the run always completes. Each call sends one ~1–2k-token crop
 image and a short prompt. The model defaults to Sonnet 5, overridable with
 `DRAWING_ANALYZER_VERIFY_MODEL`.
+
+**Not every `UNCERTAIN` is a judgment.** A garbled reply, a reply cut off by
+the output envelope or declined, and a call that failed outright all land on
+`UNCERTAIN` too — the safe status, never `REJECTED` — and until now nothing kept
+them apart from a real `NOT_VISIBLE`. The pass counts the live calls that
+returned no verdict (`malformed`, `truncated`, `failed`, a breakdown of the
+`UNCERTAIN` tally, never additional to it), and when any did, the verification
+stage carries one warning line in `run.log` and `run_manifest.json`:
+
+```
+verification: 3 of 120 live verdict calls returned no judgment (malformed=2, truncated=1, failed=0); each was left UNCERTAIN
+```
+
+Observational only: no status moves and the stage's completeness is unchanged.
+It answers the question the `UNCERTAIN` share alone cannot — how much of it the
+parser or the envelope produced before you blame the drawings — and it is the
+number that says whether `DRAWING_ANALYZER_VERIFY_STRUCTURED_OUTPUTS` is worth
+turning on for your sets: a near-zero `malformed` count means the schema buys
+nothing, a persistent one is a measured quality win.
 
 The verdict itself is one or two sentences, but the call runs **adaptive
 thinking at medium effort** — judging whether a crop supports a finding is a
@@ -1563,6 +1599,8 @@ runs.
 | `DRAWING_ANALYZER_MARKUP_APPENDIX` | off | Append the "checked and consistent" page to reviewed PDFs. |
 | `DRAWING_ANALYZER_CRITIQUE_RUNS` | `2` | Critique self-consistency reads to merge (`1` disables it). |
 | `DRAWING_ANALYZER_CRITIQUE_STRUCTURED_OUTPUTS` | off | Constrain the critique's reply with Anthropic **structured outputs** (`output_config.format` + a JSON schema) instead of asking for a fenced ```` ```json ```` block in prose. The critique is the only high-volume call whose reply is JSON and nothing else, which is what makes it the one stage a whole-response schema actually fits (the digest writes a prose digest *then* a findings block, so a schema cannot describe it). **Opt-in on purpose:** Anthropic documents citations and prefill as the only incompatibilities and says nothing either way about image inputs — and every critique request carries an overview plus a full tile grid. Prove it on your own account with `pytest -m network tests/test_live_api_canary.py -k output_config_format` before turning it on. Ignored on the Message-Batches transport (a batch item's shape is fixed at submit, so it cannot degrade). Structured and fenced reads cache under separate keys, so flipping this costs one re-read per sheet each way and discards nothing. |
+| `DRAWING_ANALYZER_HARVEST_STRUCTURED_OUTPUTS` | off | The same structured-outputs contract on the prose harvest's per-straggler structuring call: text-only, Sonnet 5, one flat finding object whose schema mirrors the prompt's field list — the lowest-risk stage to try it on. Its own self-healing latch and its own cache-key fold-in (structured and fenced items never collide). Prove it with `pytest -m network tests/test_live_api_canary.py -k harvest_under_output_config_format`. |
+| `DRAWING_ANALYZER_VERIFY_STRUCTURED_OUTPUTS` | off | The same contract on the verifier's two-field verdict (`verdict` as a three-way enum + `note`), on the single-crop and cross-sheet calls alike. Vision-involved, so it carries the critique's caveat; the prompt is unchanged (it already asks for a bare object), so the requests differ only by the schema. Structured and plain verdicts cache under separate keys. Prove it with `-k verify_under_output_config_format`. Whether it is worth turning on is answered by the parse-loss line the verification stage now writes (see *Verification pass*). |
 | `DRAWING_ANALYZER_ARITHMETIC_REL_TOL` | `0.01` | Arithmetic auditor's relative match tolerance (drawings round). |
 | `DRAWING_ANALYZER_NAMING_DOMINANT_MIN_FREQ` | `2` | Naming auditor: occurrences that make a tag "established" vocabulary. |
 | `DRAWING_ANALYZER_NAMING_DRIFT_MAX_FREQ` | `2` | Naming auditor: a tag is only flagged as drift when this rare. |
