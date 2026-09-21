@@ -6,6 +6,25 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Anthropic SDK bumped 1.5.0 → 1.7.0.** No breaking changes for this app
+  across 1.6.0/1.7.0: both releases are additive (Managed Agents auto-mode
+  tool permissions, compaction beta, `web_fetch`'s `url_sources` parameter,
+  workspace-geo enum fields, rate-limit `display_name` replacing the
+  deprecated `group_type`, the tool runner's `compact_before_next_turn()`)
+  plus retry/response-parsing bug fixes (`Retry-After` handling, async
+  connection-error handling, multipart header formatting, `X | Y` union
+  response parsing) — none of the new surface is wired up here: the pipeline
+  calls `client.messages.create`/`.stream` directly (no `tool_runner`, no
+  Managed Agents, no compaction beta, synchronous client only), so this is a
+  maintenance-only bump. `pyproject.toml`'s pin, `requirements.txt`, and
+  `requirements-release.lock` regenerated accordingly (`anthropic`, plus the
+  transitive `httpcore2`/`httpx2`/`idna`/`platformdirs`/`pypdf`/`urllib3`
+  bumps a clean resolve picked up). Full hermetic test suite green against a
+  real `anthropic==1.7.0` install (2300 passed, 5 skipped — same
+  Playwright/permission-bit skips as before, unrelated to this change).
+
 ---
 
 ## [1.6.0] - 2026-09-15
