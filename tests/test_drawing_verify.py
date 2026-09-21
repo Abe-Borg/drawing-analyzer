@@ -1071,7 +1071,7 @@ class _RejectOnce(BetaClientMixin):
         self.messages = _Msgs()
 
 
-def test_verify_rejection_degrades_latches_and_skips_that_one_cache_write(monkeypatch):
+def test_verify_rejection_degrades_latches_and_stores_under_the_plain_key(monkeypatch):
     monkeypatch.setenv(V.STRUCTURED_OUTPUTS.env_var, "1")
     cache = DigestCache(None, persist=False)
     client = _RejectOnce()
@@ -1083,14 +1083,55 @@ def test_verify_rejection_degrades_latches_and_skips_that_one_cache_write(monkey
     assert "format" not in client.calls[1].get("output_config", {})
     assert client.calls[1]["output_config"]["effort"] == client.calls[0]["output_config"]["effort"]
     assert V.STRUCTURED_OUTPUTS.available is False
-    # The tripping call's key described the structured request; its plain
-    # verdict is NOT stored there, so a plain warm run still has to ask...
+    # The verdict came back under the plain contract, so it is stored under
+    # the plain key: a plain warm run hits it without asking again.
     warm = _run([_finding("a")], client=client, cache=cache)
-    assert (warm.cache_hits, warm.cache_misses) == (0, 1) and len(client.calls) == 3
-    assert "format" not in client.calls[2].get("output_config", {})
-    # ...and its verdict lands under the plain key, which the next run hits.
-    third = _run([_finding("a")], client=client, cache=cache)
-    assert third.cache_hits == 1 and len(client.calls) == 3
+    assert (warm.cache_hits, warm.cache_misses) == (1, 0) and len(client.calls) == 2
+    # ...and nothing sits under the structured key for a later structured
+    # run to serve as if the schema had held.
+    V.STRUCTURED_OUTPUTS.reset()
+    f = _finding("a")
+    structured_key = V._single_verify_cache_key(
+        f, _sheet(), b"\x89PNG-crop", V.context_rect(f.anchor.rect_pdf, PAGE_W, PAGE_H),
+        dpi=300, model=OPUS, structured=True,
+    )
+    assert cache.get(structured_key) is None
+
+
+def test_verify_worker_honours_a_latch_that_flipped_after_its_key_was_built():
+    # The caller keyed this item as structured; by the time the worker runs,
+    # another worker's rejection has latched the feature off. The worker must
+    # not re-derive the decision (the key would then describe a request never
+    # sent) — it sends plain, pays no 400, and reports the plain contract so
+    # the collector stores under the plain key.
+    client = _FakeClient({"x": '{"verdict":"CONFIRMED","note":"ok"}'})
+    V.STRUCTURED_OUTPUTS.latch_off()
+    res = V._verify_one(
+        _finding("x"), b"png", [], client=client, model=OPUS, max_retries=0,
+        sleep=lambda _s: None, fatal=threading.Event(), structured=True,
+    )
+    assert len(client.calls) == 1
+    assert "format" not in client.calls[0].get("output_config", {})
+    assert res.structured is False and res.cacheable is True
+    assert res.verification.status == "VERIFIED"
+
+
+def test_verify_concurrent_findings_never_park_a_plain_verdict_under_a_structured_key(monkeypatch):
+    # Several findings in flight while the latch trips: whichever order the
+    # workers run in, every verdict came back plain and must be found by a
+    # plain warm run — none may be sitting under a structured key.
+    monkeypatch.setenv(V.STRUCTURED_OUTPUTS.env_var, "1")
+    cache = DigestCache(None, persist=False)
+    client = _RejectOnce()
+    findings = [_finding(m) for m in ("a", "b", "c")]
+    cold = _run(findings, client=client, cache=cache, max_retries=0, max_workers=3)
+    assert cold.verified == 3 and cold.api_calls == 3
+    plain_calls = [kw for kw in client.calls if "format" not in kw.get("output_config", {})]
+    assert len(plain_calls) == 3                       # one plain send per finding
+    assert V.STRUCTURED_OUTPUTS.available is False
+    n = len(client.calls)
+    warm = _run([_finding(m) for m in ("a", "b", "c")], client=client, cache=cache)
+    assert (warm.cache_hits, warm.cache_misses) == (3, 0) and len(client.calls) == n
 
 
 def test_verify_unrelated_400_is_not_swallowed_by_the_latch(monkeypatch):
@@ -1110,6 +1151,32 @@ def test_verify_unrelated_400_is_not_swallowed_by_the_latch(monkeypatch):
     result = _run([_finding("a")], client=client, max_retries=0)
     assert result.uncertain == 1 and result.failed == 1 and client.calls == 1
     assert V.STRUCTURED_OUTPUTS.available is True
+
+
+def test_cross_verify_later_items_honour_the_latch_without_a_400(monkeypatch):
+    # Every cross request is prepared (with the schema) before any is sent.
+    # Once the first rejection latches the feature off, the rest must be sent
+    # plain straight away — not through a guaranteed 400 each — and every
+    # plain verdict must be cached under its plain key.
+    monkeypatch.setenv(V.STRUCTURED_OUTPUTS.env_var, "1")
+    monkeypatch.setattr("drawing_analyzer.verify._render_leg_crops",
+                        lambda reqs, dpi: [b"crop-a", b"crop-b"])
+    cache = DigestCache(None, persist=False)
+    client = _RejectOnce()
+    sheets = [_sheet("primary.pdf"), _sheet("other.pdf")]
+    cold = verify_cross_findings(
+        [_cross_finding("x"), _cross_finding("y")], sheets, client=client, model=OPUS,
+        sleep=lambda _s: None, max_retries=0, max_workers=1, cache=cache,
+    )
+    assert cold.verified == 2
+    assert len(client.calls) == 3                      # one 400, then two plain sends
+    assert "format" in client.calls[0]["output_config"]
+    assert all("format" not in kw.get("output_config", {}) for kw in client.calls[1:])
+    warm = verify_cross_findings(
+        [_cross_finding("x"), _cross_finding("y")], sheets, client=client, model=OPUS,
+        sleep=lambda _s: None, cache=cache,
+    )
+    assert (warm.cache_hits, warm.cache_misses) == (2, 0) and len(client.calls) == 3
 
 
 def test_cross_verify_request_carries_the_schema_and_degrades_the_same_way(monkeypatch):

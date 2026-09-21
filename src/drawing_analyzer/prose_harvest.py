@@ -578,6 +578,11 @@ def _structure_item(
             attach_format(kwargs, HARVEST_FINDING_SCHEMA)
         return kwargs
 
+    # Re-checked at send time: another item's rejection may have latched the
+    # feature off since ``structured`` was resolved above. Sending plain now
+    # saves a guaranteed 400, and the store key below follows this final value.
+    if structured and not STRUCTURED_OUTPUTS.available:
+        structured = False
     kwargs = _params(structured)
     attempt = 0
     while True:

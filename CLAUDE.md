@@ -657,10 +657,18 @@ editor and diff, and a test fails if one reappears.
   (`DRAWING_ANALYZER_VERIFY_STRUCTURED_OUTPUTS`, `VERIFY_VERDICT_SCHEMA`, enum =
   `sorted(_VERDICT_MAP)`) leaves the prompt untouched — it already asks for a
   bare object — so the structured and plain requests differ only by the schema,
-  which rides `_request_shape_params` into both cache keys for free; the one
-  call that trips the latch is deliberately **not cached**, since its key
-  described the structured request and the verdict came back under the plain
-  one. A verdict **replaces** the
+  which rides `_request_shape_params` into both cache keys for free. The
+  decision is made **once, at submit time**, and threaded to the worker
+  (`_verify_one(structured=)`, `_PreparedCrossVerification.kwargs`) — never
+  re-derived on the pool, or the request and the cache identity resolve
+  separately and a plain verdict lands under a structured key. The latch is
+  the one thing that can change in between (another worker's rejection), so
+  the worker honours the keyed decision unless the latch is already off, then
+  sends plain without paying for a guaranteed 400, and `_CallResult.structured`
+  reports the contract actually sent; both keys are built at submit time and
+  the verdict is stored under that contract's key (`cache_keys[res.structured]`,
+  `plain_cache_key` on the cross path, whose requests are all prepared before
+  any is sent). A verdict **replaces** the
   status, never the arithmetic provenance behind it: all 18 `Verification(...)`
   constructions assign wholesale and populate neither `computation_method` nor
   `operand_origin`, so `_provenance_restorer` snapshots them at each public
