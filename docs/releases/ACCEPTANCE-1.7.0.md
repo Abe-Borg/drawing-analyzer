@@ -18,8 +18,25 @@ Copy of `docs/RELEASE_ACCEPTANCE_TEMPLATE.md` for this candidate.
 > or an owner's eyes (§§2–6) is **unstarted** and marked so. §19 Definition of
 > done still applies: *"A release may be cut only when every automated gate
 > passes and every manual section is recorded — passing the hermetic suite alone
-> is not acceptance."* If the tag is pushed before §§2–6 are recorded, say so
-> here, as the 1.6.0 record did, rather than ticking a box nobody ran.
+> is not acceptance."*
+>
+> **So the stable `v1.7.0` tag is on HOLD** until every §§2–6 section is
+> recorded, or explicitly waived by the owner in the *Deferrals / waivers*
+> table below (item, justification, approval, expiry), and the *Release
+> decision* line in the sign-off reads SHIP. This is not a formality:
+> `release.yml` publishes whatever `v1.7.0` points at as the **latest**
+> release, and every installed copy is offered it within a day
+> (`docs/RELEASE_WINDOWS.md`), so a stable tag ahead of acceptance ships an
+> unaccepted build to every existing install. 1.6.0 did exactly that; its
+> record documents it as the failure it was, not as precedent.
+>
+> The sanctioned way to get this build into testers' hands *before* §§2–6 are
+> done is a **release candidate**: set both version literals to `1.7.0rc1`,
+> promote the CHANGELOG heading to match (`tests/test_release_metadata.py`
+> pins the two together), and tag `v1.7.0rc1`. `release.yml` publishes an
+> `rcN` tag as a GitHub **pre-release**, which the updater never auto-offers
+> (`latest.json` resolves to the newest full release), so existing installs
+> are untouched while the RC is exercised through §§2–6.
 
 ## 0. Release candidate identification
 
@@ -206,7 +223,11 @@ Automated gates:   PASS on the merged code 1649ba7 (local run_acceptance.py,
 Live canary:       NOT RUN
 Manual sections:   INCOMPLETE       (§§2-6 unstarted)
 
-Release decision:  ______  (owner)
+Stable tag:        HOLD — §§2-6 unrecorded and no waivers filed; an RC tag
+                   (1.7.0rc1) is the sanctioned interim.
+
+Release decision:  HOLD   (owner flips to SHIP once §§2-6 are recorded or
+                   waived in the table above)
 
 Owner signature: ______________________  Date: __________
 ```
