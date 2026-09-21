@@ -6,6 +6,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-09-21
+
 ### Added
 
 - **Verification parse-loss accounting.** `VerifyResult` now counts the live
@@ -25,7 +27,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reply to `VERIFY_VERDICT_SCHEMA` (`verdict` as the three-way enum + `note`)
   on the single-crop and cross-sheet calls alike. Both off by default, both
   with a live canary in `tests/test_live_api_canary.py`, both cache-isolated
-  (a fenced/plain run keys byte-identically to before). The critique's
+  (a fenced/plain run keys byte-identically to before). On the verifier the
+  structured decision is made once at submit time and threaded to the worker,
+  and the verdict is stored under the key of the contract actually sent — both
+  keys are built up front — so a plain verdict never lands under a structured
+  key and none is lost when the latch trips mid-run. The critique's
   env-gate → capability → self-healing-latch pattern is now one shared
   `core/structured_outputs.py` (`StructuredOutputsGate`, `attach_format`,
   `detach_format`), and every stage owns its **own** latch instance, so a
