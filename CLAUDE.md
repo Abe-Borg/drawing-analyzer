@@ -2,11 +2,49 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Remediation program (active)
+
+A multi-session remediation program is under way. Its files are in `_plans/`:
+- the plan: `drawing-analyzer-remediation-plan.md`;
+- the tracker: `PROGRESS.md`;
+- the session protocol: `README.md`;
+- the contract decisions: `DECISIONS.md`.
+
+**If your session works on it** (the user asks you to continue the plan, or names
+a slice such as `WP-04.1`), start with `_plans/README.md` and follow its protocol:
+- **Before starting:** check the open PRs for slices already in flight.
+- **In the same PR:** mark your slice in `PROGRESS.md` and add a handoff entry.
+  That is how the next session knows where to continue.
+- **Never** tag, publish or approve a release, and never record a manual waiver.
+
+Two naming collisions to keep straight:
+- The `WP-00`…`WP-08`, `WP-03A/B`, "WP-02 §7.1" and "WP-05 §10.1" references in
+  this file and in `docs/` belong to an earlier, completed plan.
+- `R-01`…`R-06` are the measurement packages in `docs/MEASUREMENT_PACKAGES.md`,
+  whose §2 standing prohibitions still bind all work.
+
+Remediation slices are always written `WP-nn.m`.
+
+**Known-inaccurate statements in this file** (verified 2026-09-22 against 1.7.0).
+The slice named in parentheses corrects the text and removes the entry here:
+- HTML report: grouping "recomputes after every sort/filter". It does not after a
+  sort (H1; WP-21.2).
+- Critical signature: keeping both halves of `12'-6"` keeps `12'-6"` and `12'-8"`
+  apart. It does not: they share `12ft`, and the compatibility rule treats one
+  shared value as compatible (N1; WP-04.2).
+- Digest truncation: the raised-cap retry "can only improve on that read, never
+  lose it". A retry that lands empty or refused discards the first read (N16;
+  WP-01.3).
+- Geometry-aware image tokens: the GUI prices from real page shapes once the
+  profile preflight has run. In a default install the preflight never runs,
+  because no profiles ship (N23; WP-15.1).
+
 ## Commands
 
 ```bash
 pip install -e ".[dev]"      # engine + pytest   (GUI too: pip install -e ".[gui,dev]")
-python -m pytest             # full suite — hermetic: no API key, no network
+pip install cffi             # cloud container only: its system `cryptography` lacks _cffi_backend (3 spurious test_spec_documents panics)
+python -m pytest -m "not network"   # full suite — hermetic. A bare `pytest` runs the live canary if a real ANTHROPIC_API_KEY is exported
 python -m pytest tests/test_drawing_ledger.py                # one file
 python -m pytest tests/test_drawing_ledger.py::test_name     # one test
 drawing-analyzer             # launch the GUI   (or: python -m drawing_analyzer)
