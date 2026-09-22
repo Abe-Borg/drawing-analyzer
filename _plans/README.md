@@ -11,6 +11,7 @@ see from `main` alone what is done and where to continue.
 | [`PROGRESS.md`](PROGRESS.md) | **The tracker**: every work package split into session-sized slices, in queue order, with status; the per-finding disposition register; owner-only actions; the handoff log. Authoritative for *status and order*. | Every session, in its PR. |
 | [`DECISIONS.md`](DECISIONS.md) | The shared-contract decision record (plan §4.1) and the cache/schema migration register (plan WP-10 step 9). | The session that decides a contract or changes a cache/schema version. |
 | [`DEEP_REVIEW_2026-09.md`](DEEP_REVIEW_2026-09.md) | The original September 2026 review the plan is built on: the concrete reproductions and suggested fixes behind IDs `B*`, `R*`, `C*`, `$*`, `K*`, `A*`, `H*`, `G*`. **Frozen reference.** Its line numbers are against 1.6.0 (`f5284ac`), so locate code by symbol. | Nobody. |
+| [`verification-2026-09-22/`](verification-2026-09-22/) | Evidence snapshot from the 2026-09-22 re-verification: one report per area. Each gives the current `path::symbol (line)` anchors, how each defect was reproduced, and which pinned tests a fix must re-baseline. Line numbers are against 1.7.0. Where it disagrees with the plan or `PROGRESS.md`, those win. | Nobody (frozen). |
 
 ## Session protocol
 
@@ -37,7 +38,13 @@ the handoff entry.
 4. Read the slice's work package in the plan **in full** (not only the step the
    slice names), the review entries for its IDs in `DEEP_REVIEW_2026-09.md`, any
    `DECISIONS.md` contract the slice touches, and the parts of `CLAUDE.md` that
-   document the code you will change.
+   document the code you will change. Also read the standing prohibitions in
+   `docs/MEASUREMENT_PACKAGES.md` §2 (plan §2 rule 15).
+5. **Naming.** `CLAUDE.md` and `docs/` also cite an *earlier, completed* plan
+   (WP-00 … WP-08, WP-03A/B, "WP-02 §7.1") and measurement packages R-01 … R-06.
+   None of these is this program's work. This program's slices are always
+   written `WP-nn.m`, and its finding IDs are `B/R/C/$/K/A/H/G/N/U` followed by a
+   number.
 
 ### 2. Set up and record a baseline
 
@@ -84,8 +91,12 @@ requires. If the plan's description is wrong, see step 7.
   decide it narrowly and record it there.
 - **Cache and serialization:** if what is sent, stored or interpreted changes,
   the key must change: a content-hashed prompt version, a new key term, or a
-  namespace/`_SCHEMA_VERSION` bump (I-6, WP-10). New serialized fields default
-  safely in `from_dict`. Add a row to the migration register in `DECISIONS.md`.
+  namespace/`_SCHEMA_VERSION` bump (I-6, WP-10). Use **one** mechanism per change,
+  never a contract bump *and* a new key term for the same change. Never bump
+  the global `digest_cache._SCHEMA_VERSION` unless the plan says so: it feeds
+  all seven key builders and discards every paid digest. New serialized fields
+  default safely in `from_dict`. Add a row to the migration register in
+  `DECISIONS.md`.
 - **Stay in scope.** If you find something outside your slice, add it to
   `PROGRESS.md` as a new row or a note on the owning slice. Do not widen the PR.
 
