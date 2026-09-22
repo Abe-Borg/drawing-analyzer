@@ -450,8 +450,13 @@ adjacent to a SHEET / SHEET NO / DWG NO label; penalize PROJECT / JOB / SIZE
 neighbours.
 
 **A6. `FM` in `_STANDARD_BODIES` (`sheet_ids.py:312-316`)** makes
-`never_a_sheets_own_id("FM-101")` True, so a set with FM-* (facilities
-management or FM Global) sheets loses them from the inventory.
+`never_a_sheets_own_id("FM-101")` True, so an FM-* sheet's real title-block id
+is removed from the preferred pool in `detect_sheet_id_word`
+(`references.py:381-384`). The sheet is not lost outright: `pool = preferred or
+candidates` keeps `FM-101` when it is the only id-shaped token on the page. But
+any other non-vetoed id-shaped token — a `SEE M-101` in a note, which most real
+sheets carry — then wins regardless of position, and the sheet is inventoried
+under that wrong name while every reference to `FM-101` becomes MISSING_FROM_SET.
 
 **A7. A prose sheet can be read as THE drawing index** (`sheet_index.py:86-143`:
 header phrase anywhere + ≥3 grammar-valid ids anywhere). A notes sheet reading
