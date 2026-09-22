@@ -44,9 +44,14 @@ the handoff entry.
 ```bash
 pip install -e ".[dev,browsertest]"
 pip install cffi   # see note below
-python -m pytest -q   # compare the counts with the newest handoff entry
+python -m pytest -q -m "not network"   # compare the counts with the newest handoff entry
 ```
 
+- **Always pass `-m "not network"`.** `tests/conftest.py` skips the live canary
+  (`tests/test_live_api_canary.py`) only when no real key is set, and
+  `pyproject.toml` has no default exclusion. So a bare `pytest` in a session
+  where `ANTHROPIC_API_KEY` happens to be exported makes billed API calls. The
+  same rule applies to every pytest command in this file.
 - **`cffi`:** in the cloud container, the system `cryptography` package is
   missing `_cffi_backend`. Without `cffi`, three tests in
   `tests/test_spec_documents.py` die with a `pyo3_runtime.PanicException`. This
@@ -88,16 +93,17 @@ requires. If the plan's description is wrong, see step 7.
 
 ```bash
 python -m compileall -q src
-python -m pytest -q
-python -m pytest -q -m browser --junitxml=/tmp/browser-results.xml \
+python -m pytest -q -m "not network"
+python -m pytest -q -m "browser and not network" --junitxml=/tmp/browser-results.xml \
   && python scripts/check_browser_suite.py /tmp/browser-results.xml   # if report JS/HTML/chat behavior changed
 pip install "ruff==0.14.5" && ruff check --select E9,F63,F7,F82 src tests scripts
 python scripts/scan_secrets.py
 ```
 
-- **No live API calls.** Tests marked `network` stay deselected unless the user
-  explicitly authorized a live budget in the session request. Never put a real
-  key anywhere.
+- **No live API calls.** Tests marked `network` stay deselected, explicitly, as
+  above, unless the user authorized a live budget in the session request. Never
+  put a real key anywhere. `python scripts/run_acceptance.py` already deselects
+  `network` in every gate it spawns.
 - Re-read your own diff as a reviewer would before you push (see the system
   guidance on pushes).
 
