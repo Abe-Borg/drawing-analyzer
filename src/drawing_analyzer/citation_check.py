@@ -532,8 +532,10 @@ def reconcile_cited_editions(
                         rec["rep"] = f
                     # The divergence anchors to the stale-edition text ITSELF —
                     # its own matched span, never the citing finding's whole
-                    # quote (a copied quote would anchor to the identical rect
-                    # and Pass B would fold the two findings into one).
+                    # quote (a copied quote would anchor to the identical rect,
+                    # and until remediation WP-03.7 Pass B folded two findings
+                    # on that alone; an equal quote still lets moderate text
+                    # agreement fold them in Pass A).
                     if not rec["sheet_span"]:
                         rec["sheet_span"] = _cited_span(rx, year, sheet_text)
                     if not rec["quote_span"]:

@@ -246,6 +246,32 @@ argument, only when non-empty, so every other id is unchanged), rides the
 representative's bundle, and is serialized only when set. Whether `claim_id`
 builds on it is WP-03.4's call; WP-03.7 (N28) may give model findings one.
 
+Added by WP-03.7, as an input, not a decision: **what may fold two findings.**
+Position is not evidence that two findings make one claim. The merge predicate
+(`critique._is_duplicate`, both ledger passes and the critique's `_cluster`)
+reads no anchor rectangle: its geometry branch (IoU > 0.5 plus an equal quote,
+no text check) is removed. The anchor stage resolves each rectangle from the
+finding's own quote (and its tile, to choose among repeated occurrences), so two
+findings quoting one string share a rectangle by construction, and the branch
+was the quote-alone rule the quote branch refuses on purpose. It folded two
+different issues that quote one tag (`PUMP P-1` voltage / impeller) once both
+anchored. An equal quote therefore needs at least moderate text agreement (0.4)
+before and after anchoring, and a same-spot paraphrase with less (the `CO-1`
+pair, 1 of 11 content words) stays two findings: the decided cost (plan §2.1).
+Since nothing the remaining branches read changes with anchoring, Pass B folds
+nothing Pass A refused.
+- Considered and not taken, with the owner's choice recorded in the WP-03.7
+  handoff: a claim discriminator for model findings (the host cannot derive one
+  that separates the pair, since both sign as `{tags: [P1]}`; a model-emitted
+  one needs digest and critique prompt changes that re-bill every cached read);
+  a geometry branch that needs one content word shared outside the quote (a
+  threshold at one word; two different pump issues sharing "conflicts" still
+  folded); geometry only between findings anchored before ingest (keeps N28
+  between auditors).
+- For WP-03.4 and WP-03.6: an anchor rectangle is evidence of *where*, never of
+  *which claim*. Per-observation anchors (WP-03.6) map evidence; they do not
+  make two observations one.
+
 - Decision: —
 - Rejected shortcuts: —
 - Version / cache changes: —

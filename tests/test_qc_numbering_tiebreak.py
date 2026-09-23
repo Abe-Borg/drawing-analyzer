@@ -165,11 +165,13 @@ def test_the_k5_pair_through_the_ledger_on_one_rectangle_without_the_fold():
 
 
 def test_the_k5_pair_through_the_whole_lifecycle_on_one_rectangle():
-    """Whatever Pass B decides, the numbers do not follow arrival. Today it
-    folds the pair (N28, WP-03.7) and keeps the same survivor in both orders;
-    once WP-03.7 keeps them apart, the tie-break above numbers them."""
+    """Whatever Pass B decides, the numbers do not follow arrival. Until
+    WP-03.7 it folded the pair (N28) and kept the same survivor in both orders.
+    Now Pass B keeps them apart (a rectangle resolved from one quote is not
+    evidence of one issue), so the tie-break above numbers them."""
     numbered = [_numbers(_k5_through_the_ledger(order, rect=_RECT)) for order in ("XY", "YX")]
     assert numbered[0] == numbered[1]
+    assert numbered[0] == {_MOTOR: "QC-001", _PUMP: "QC-002"}
 
 
 def test_the_evidence_directories_follow_the_numbers_not_the_arrival_order():

@@ -12,8 +12,9 @@ in the rejected index).
 
 Ingest-time merge (Pass A, §12.1) is **conservative and lossless**: two findings
 merge only when they are semantically the same *and* their critical signatures are
-compatible — a tile is a search hint, never identity, and geometric overlap alone
-is never sufficient (see :func:`~drawing_analyzer.critique._is_duplicate`).
+compatible — a tile is a search hint, never identity, and position is no evidence
+at all: an anchor rectangle is resolved from the quote, so the merge rule reads
+none (remediation WP-03.7; see :func:`~drawing_analyzer.critique._is_duplicate`).
 Conflicting signatures — ``500 gpm`` vs ``550 gpm``, ``M-101`` vs ``M-102``,
 ``shown`` vs ``not shown``, or different cross-sheet legs — block the merge even
 when the prose is similar. Merging keeps **coherent grounding** (§12.2): the
@@ -158,11 +159,11 @@ class Ledger:
         # serialized.
         self._members: dict[int, list[Finding]] = {}
         # Conservative per-sheet candidate indexes.  Every duplicate accepted by
-        # ``_is_duplicate`` either shares at least one normalized content token
-        # (its text-overlap branches) or the exact normalized source quote (its
-        # geometry branch).  Indexing those signals avoids comparing a new item
-        # with every unrelated finding while the unchanged final predicate below
-        # remains the authority.  Indexes retain every folded member's signals so
+        # ``_is_duplicate`` shares at least one normalized content token (both of
+        # its branches need text agreement; the quote branch also needs the exact
+        # normalized source quote, which is indexed too).  Indexing those signals
+        # avoids comparing a new item with every unrelated finding while the
+        # unchanged final predicate below remains the authority.  Indexes retain every folded member's signals so
         # complete-link history cannot become undiscoverable after a representative
         # bundle changes.
         self._token_index: dict[tuple[str, int], dict[str, set[int]]] = {}
@@ -345,17 +346,15 @@ class Ledger:
         """Replace a live self-reference in ``entry``'s history with a snapshot.
 
         An entry is its own first member, and it is held **live** until a merge
-        is about to mutate it. Copying it eagerly at ingest looks equivalent and
-        is not, in a way only Pass B can see: anchors are resolved *after*
-        ingest, so an eager copy is a permanently **unanchored** twin of a live,
-        anchored entry — and ``_is_duplicate``'s geometry branch, which needs a
-        rectangle on both sides, could then never fire against it. Pass B
-        stopped folding rect-overlap duplicates entirely.
-
-        A head frozen here during Pass A is unanchored for the same reason, so
-        an entry that merged in Pass A does not fold on geometry in Pass B, and
-        since WP-03.1 that holds on both sides of the comparison. Decided, not
-        overlooked: see :func:`reconcile_post_anchor`.
+        is about to mutate it. The reason was ``_is_duplicate``'s geometry
+        branch: anchors are resolved *after* ingest, so an eager copy was a
+        permanently **unanchored** twin of a live, anchored entry, and the
+        branch, which needed a rectangle on both sides, could never fire against
+        it. Remediation WP-03.7 (N28) removed that branch: the predicate reads no
+        rectangle, so for anchoring an eager copy and the live head are alike.
+        The live head still carries what is attached to the entry after ingest
+        and the predicate does read (a cross-sheet leg the prose harvest adds to
+        ``also_on``), which can only block a later merge.
 
         Frozen here instead: at the one moment the live object stops being an
         accurate record of what it was, which is exactly the reason the
@@ -648,16 +647,16 @@ def _deterministic(finding: Finding) -> bool:
 
 
 def reconcile_post_anchor(ledger: "Ledger") -> int:
-    """Pass B (§12.1): with anchors resolved, fold any newly-evident duplicates.
+    """Pass B (§12.1): after anchoring, a second complete-link pass over the entries.
 
-    The ingest pass (Pass A) runs *before* anchoring, so it can only use quote/text.
-    Now that entries carry rectangles, two entries on the same sheet whose rects
-    overlap **and** which agree on text/quote and critical signatures can be seen as
-    one issue the digest and critique reported at slightly different phrasings.
-    Geometry is only *supporting* evidence (see :func:`_is_duplicate`), so unrelated
-    findings sharing a table cell are never collapsed. The lower-quality member is
-    merged into the survivor and dropped; deterministic (best-quality survivor,
-    fixed order). Returns the number of entries folded. Only runs while SEALED.
+    It was written to fold duplicates the ingest pass (Pass A) could not see
+    without geometry: two entries quoting one string whose rectangles overlapped.
+    Since remediation WP-03.7 (N28) no branch of :func:`_is_duplicate` reads a
+    rectangle, because a rectangle is resolved from the quote and so adds nothing
+    to it; that fold was the quote alone, and it folded two different issues
+    that quote one tag. A folded member is merged into the survivor and dropped;
+    deterministic (best-quality survivor, fixed order). Returns the number of
+    entries folded. Only runs while SEALED.
 
     **Symmetric complete-link** (remediation WP-03.1, review B1). An entry folds
     into a survivor only when every member of its history duplicates every
@@ -668,20 +667,24 @@ def reconcile_post_anchor(ledger: "Ledger") -> int:
     two entries sorts first, a second call folds nothing, and afterwards every
     entry's history is a clique of duplicates.
 
-    **What it can still fold, by decision.** Two entries Pass A kept apart hold
-    a pair of members Pass A did not find to be duplicates, and the only
-    evidence Pass B has that Pass A lacked is a rectangle. The snapshots that
-    record a Pass A merge are frozen before anchoring, so they carry none, and
-    the geometry branch needs one on both sides. Pass B therefore folds only
-    entries that absorbed nothing in Pass A (or whose absorbed members were
-    anchored before ingest, as auditor findings are). The resolved rect is
-    deliberately NOT lent to snapshots that quote the same string: the geometry
-    branch has no text check, so it already folds two different issues that
-    quote one tag once they anchor together, and the resolver chooses among
-    repeated occurrences by each finding's own tile, so a lent rect is a guess.
-    The cost is recall: a geometric duplicate of an entry that absorbed a
-    member in Pass A stays a separate entry. Anchoring every observation
-    belongs to canonical clustering (WP-03.6).
+    **What it can still fold: nothing Pass A refused.** Two entries Pass A kept
+    apart hold a pair of members Pass A compared and did not find to be
+    duplicates: each entry's first member was compared with the members of
+    every entry that existed when it arrived. Nothing the predicate reads
+    changes after that except a cross-sheet leg the prose harvest adds to an
+    entry that had none, which can only block. So in the pipeline Pass B folds
+    nothing (zero folds over the whole suite once the geometry branch was gone;
+    pinned over generated sets in ``tests/test_position_is_not_sameness.py``).
+    It stays as the post-anchor step, cheap and idempotent; anchoring every
+    observation and clustering them canonically is WP-03.6's.
+
+    The history of that decision. WP-03.1 found that the snapshots recording a
+    Pass A merge are frozen before anchoring, so they carry no rectangle, and
+    chose not to lend one: the geometry branch had no text check, and the
+    resolver chooses among repeated occurrences by each finding's own tile, so
+    a lent rect is a guess. WP-03.7 then removed the branch; a same-spot
+    paraphrase that shares too few words stays two entries on either side
+    (recall, decided in ``_plans/DECISIONS.md``, D-3).
     """
     if ledger.state != SEALED:          # SEALED only — never re-dedup a NUMBERED ledger
         return 0
@@ -718,12 +721,13 @@ def reconcile_post_anchor(ledger: "Ledger") -> int:
             # Only narrows the search; the predicate below decides. Looking a
             # survivor up by ``finding``'s LIVE text tokens and quote cannot
             # miss a fold the predicate allows: every accepting branch of
-            # ``_is_duplicate`` needs a shared text token or an equal quote,
-            # and the pair of representatives (the members carrying each
-            # entry's live text and quote) is among the pairs the predicate
-            # checks. A survivor's own signals were indexed when it became
-            # one, and Pass B never changes them (the survivor always keeps
-            # its bundle). A survivor the index skips shares nothing with that
+            # ``_is_duplicate`` needs a shared text token (since WP-03.7 no
+            # branch accepts on an equal quote alone), and the pair of
+            # representatives (the members carrying each entry's live text
+            # and quote) is among the pairs the predicate checks. A
+            # survivor's own signals were indexed when it became one, and
+            # Pass B never changes them (the survivor always keeps its
+            # bundle). A survivor the index skips shares nothing with that
             # pair, so the predicate would refuse it anyway.
             tokens, quote = _signals(finding)
             if not tokens and not quote:

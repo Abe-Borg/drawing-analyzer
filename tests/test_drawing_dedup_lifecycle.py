@@ -304,22 +304,29 @@ def test_the_representative_does_not_depend_on_ingest_order():
         assert len(surviving) == 1, (a_sev, b_sev, surviving)
 
 
-def test_post_anchor_reconciliation_folds_a_geometric_duplicate():
+def test_post_anchor_reconciliation_keeps_a_same_spot_paraphrase_apart():
     # Two entries the ingest pass could NOT merge — same verbatim quote but text too
-    # different to merge on text, and no geometry yet — become one once anchored to
-    # overlapping rects (Pass B: same quote + rect overlap). Mirrors the pipeline:
-    # ingest unanchored → seal → anchor → reconcile.
+    # different to merge on text — stay two once anchored to overlapping rects.
+    # Mirrors the pipeline: ingest unanchored → seal → anchor → reconcile.
+    #
+    # Retention, pinned by remediation WP-03.7 (N28). This test used to pin the
+    # fold (Pass B: same quote + rect overlap). A rect is resolved from the quote,
+    # so the pair was folded on the quote alone, which is also how two DIFFERENT
+    # issues that quote one tag ("PUMP P-1") were folded. These two texts share
+    # fewer words (1 of 11) than that pair does (3 of 12), so no text threshold
+    # tells them apart: a same-spot paraphrase with this little shared text now
+    # stays two findings. The safe error (plan §2.1).
     led = Ledger()
     led.add([_f("cleanout required at base of the soil stack per code", quote="CO-1")], "digest_json")
     led.add([_f("provide a cleanout fitting shown on the plumbing detail", quote="CO-1")], "critique_1")
-    assert len(led) == 2                       # ingest can't merge (weak text, no rects)
+    assert len(led) == 2                       # ingest can't merge (weak text)
     led.seal()
     # Anchor both to heavily-overlapping rectangles (as resolve_anchors would).
     for e in led.entries:
         e.anchor = Anchor(status="EXACT", rect_pdf=[10, 20, 60, 42], method="t")
     folded = reconcile_post_anchor(led)
-    assert folded == 1                         # same quote + rect overlap → now one
-    assert len(led) == 1
+    assert folded == 0                         # one rectangle is not one issue
+    assert len(led) == 2
 
 
 def test_an_unanchored_winner_does_not_erase_a_compatible_rect():

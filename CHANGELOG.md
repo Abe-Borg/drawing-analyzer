@@ -48,6 +48,41 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Two different issues that quote one tag became one finding once anchored
+  (remediation WP-03.7; N28).** Findings routinely quote an equipment tag
+  verbatim (`PUMP P-1`), so the findings ledger never merges two findings on an
+  equal quote alone: their texts must also agree. After anchoring, a second
+  rule merged two findings whose quotes were equal and whose rectangles
+  overlapped, with no text check. But a finding's rectangle is found from its
+  own quote, so two findings quoting one tag land on one rectangle by
+  construction: that rule was the quote-alone merge, applied late. "Pump P-1
+  voltage listed as 480 should be 208" and "pump P-1 impeller diameter
+  conflicts with the curve" were kept apart when they arrived and merged once
+  anchored, and the impeller issue disappeared from every export. Findings the
+  deterministic auditors anchor themselves (reference, naming, title-block,
+  arithmetic) were merged the same way as they arrived.
+
+  Now position is never evidence that two findings are one: the merge rule
+  reads no rectangle, in either ledger pass. Two findings quoting one string
+  still merge when their texts agree (a restatement of one issue), as before.
+
+  **Visible effect:** such a pair is two findings, each with its own `QC-###`
+  number, text, markup and evidence folder. The cost, chosen on purpose: two
+  findings about the same thing that quote one string at one spot but share
+  very few words (say "cleanout required at base of the soil stack per code"
+  and "provide a cleanout fitting shown on the plumbing detail", both quoting
+  `CO-1`) now stay two findings as well. No wording rule can tell that pair from
+  the pump pair (it shares fewer words), and a reviewer seeing two findings is
+  the safe error. Where a finding no longer absorbs another, its merged
+  severity and sources can differ from 1.7.0.
+
+  **Cache:** nothing is invalidated. The ledger is rebuilt on every run and never
+  cached; the critique's own merge compares unanchored reads, so its pinned
+  merge-rule fingerprint holds and the critique cache contract stays at 2; no
+  model request changed. A finding that is now kept separate is verified (and,
+  on exhaustive runs, investigated) as a finding of its own, like any other new
+  finding.
+
 - **A second arithmetic mistake on the same table row disappeared
   (remediation WP-03.3; B7).** The arithmetic auditor checks every numeric
   relationship the critique and cross-sheet passes transcribe, and reports each

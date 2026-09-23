@@ -1962,7 +1962,8 @@ def _run_qc_stages(
                 status="FAILED", error=str(exc),
             )
 
-    # Cautious post-anchor reconciliation (Pass B, §12.1): geometry is now available.
+    # Post-anchor reconciliation (Pass B, §12.1). Since remediation WP-03.7 the
+    # merge rule reads no rectangle, so it folds nothing Pass A refused.
     try:
         from .ledger import reconcile_post_anchor
 

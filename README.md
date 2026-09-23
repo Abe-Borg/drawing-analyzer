@@ -1456,8 +1456,10 @@ assertion guarantees it is accounted for on the PDF.
 
 Duplicates merge **conservatively and losslessly**. Two findings merge only when
 they are semantically the same *and* their critical signatures agree: a shared
-**tile is a search hint, never identity**, and geometric rectangle overlap alone is
-never enough — two unrelated issues can share a table cell. A conflicting signature
+**tile is a search hint, never identity**, and a rectangle is no evidence at all:
+two unrelated issues can share a table cell, and a finding's rectangle is found
+from its own quote, so two findings quoting one tag share it whatever they say
+(see below). A conflicting signature
 blocks the merge even when the prose is similar (`500 gpm` vs `550 gpm`, `M-101` vs
 `M-102`, `shown` vs `not shown`, or a different cross-sheet leg). A measurement is
 compared by its **value**, not by how it was typed, so `1/2"` is half an inch and
@@ -1531,8 +1533,9 @@ provenance doubles as a confidence signal, shown as chips in the report rows and
 the markup popups (`prose+json+critique×2`).
 
 The ledger runs an explicit lifecycle: it **ingests** while open, **seals**, then
-**anchors** every finding, folds any duplicate the ingest pass couldn't see without
-geometry, and only then assigns the sequential **`QC-###`** numbers — so they follow
+**anchors** every finding, runs a second merge pass over the anchored entries (which,
+since remediation WP-03.7, merges nothing the ingest pass refused; see below), and
+only then assigns the sequential **`QC-###`** numbers — so they follow
 visual order (source input order → page → top-to-bottom). Numbering strictly after
 anchoring is what makes the numbers positional. When two findings share a position
 (two with no rectangle on one sheet, or two anchored to the same spot), what they
@@ -1552,14 +1555,24 @@ disappeared; whether it did depended on which channel reported first. Now the
 two measurements stay two findings however the channels arrive. Two gaps remain
 for later remediation work: which of the two the generic finding joins still
 follows arrival order, and where it took over the `500 gpm` finding's text,
-`500` survives only inside the run, not in the exports. The fold also uses
-position (the same quote at the same spot) only between findings that have
-absorbed nothing: a finding worded differently stays separate when either side
-has already absorbed a duplicate. That is the safe error, chosen on purpose,
-because position is no check on meaning. Between two findings that have
-absorbed nothing the fold still uses position, so two different issues about
-one pump that both quote its tag can become one finding; that is a known gap
-(N28) for later remediation work.
+`500` survives only inside the run, not in the exports.
+
+Position is never a reason to merge (remediation WP-03.7). A finding's rectangle
+is found from its own quote, so two findings that quote one tag land on the same
+spot whatever they say. Until WP-03.7 the fold after anchoring merged two
+findings on that alone, so two different issues about one pump that both quoted
+its tag ("pump P-1 voltage listed as 480 should be 208", "pump P-1 impeller
+diameter conflicts with the curve") became one finding and the second issue was
+lost; the auditors' own findings, which arrive already anchored, were merged the
+same way. Now two findings that quote the same text merge only when their
+wording also agrees, before or after anchoring, so the pump's two issues stay
+two findings with two numbers. The price is chosen on purpose: two findings
+about the same thing that quote one tag but share very few words (a cleanout
+"required at base of the soil stack per code" and one to "provide a cleanout
+fitting shown on the plumbing detail") also stay two findings. No wording rule
+can tell that pair from the pump pair, and a reviewer seeing two findings is the
+safe error. As a result the fold after anchoring merges nothing the first merge
+did not already refuse.
 
 A finding that arrives *after* the seal is an orchestration failure, and the
 ledger treats it as one whether or not it duplicates an existing entry. It is
@@ -1614,7 +1627,8 @@ claims=…)` runs the whole battery and returns the combined findings plus a sma
 `stats` tally. Each auditor is isolated, so one failing never loses the others
 (I-3). It hands on every finding every auditor returns and leaves duplicates to
 the [findings ledger](#the-findings-ledger-part-iii), which still folds two
-auditors' reports of the same thing at the same spot into one finding. Until
+auditors' reports of the same thing into one finding when their wording agrees
+(the same spot alone never merges two findings, since remediation WP-03.7). Until
 remediation WP-03.3 it dropped any finding whose content id another had
 already used, and that id is built from the sheet, category and quote, so two
 different arithmetic mistakes quoted from one table row were one finding. The battery wires into a run through `reference_audit=True` (or the GUI's

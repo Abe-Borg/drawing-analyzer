@@ -10,8 +10,9 @@ hashes sheet, category and quote). Two things then destroyed the second one:
   orders: unitless numbers give an empty critical signature, and the two texts
   share the auditor's boilerplate (Jaccard 0.667 on an equal quote), so the
   quote branch of ``_is_duplicate`` fired. Once anchored (the auditor anchors its
-  own findings) the geometry branch fires too. The UNCERTAIN claim vanished
-  into the DETERMINISTIC survivor.
+  own findings) the geometry branch fired too, until remediation WP-03.7
+  removed it (N28). The UNCERTAIN claim vanished into the DETERMINISTIC
+  survivor.
 
 The fix: the coordinator's id dedup is gone; every arithmetic finding carries a
 claim discriminator (the host operation, the Decimal-canonical terms as a
@@ -301,14 +302,12 @@ def _pair(a_claim, b_claim, *, anchored):
          _claim("sum", [20, 20, 20], 550, quote=""), False),
         # An equal quote with moderate overlap (0.4 .. 0.7).
         ("quote", _det(), _unc(), False),
-        # An equal quote on one rectangle, texts too different for either
-        # text branch: only the geometry branch accepts the pair.
-        ("geometry",
-         _claim("sum", [20, 20, 20], 540,
-                note="north zone riser flow test column per hydraulic calculation sheet"),
-         _claim("sum", [30, 30], 500,
-                note="stair pressurization fan schedule totals for level two supply"),
-         True),
+        # WP-03.3 had a third row: an equal quote on one rectangle, texts too
+        # different for either text branch, accepted only by the geometry
+        # branch. Remediation WP-03.7 (N28) removed that branch, so no branch
+        # accepts the pair and its discriminators have nothing left to block:
+        # it stays apart without them
+        # (tests/test_position_is_not_sameness.py).
     ],
 )
 def test_the_discriminator_holds_against_every_accepting_branch(branch, a_claim, b_claim, anchored):
@@ -316,11 +315,8 @@ def test_the_discriminator_holds_against_every_accepting_branch(branch, a_claim,
     tov = _token_overlap(a.text, b.text)
     if branch == "text":
         assert tov >= 0.7
-    elif branch == "quote":
-        assert a.source_quote == b.source_quote and 0.4 <= tov < 0.7
     else:
-        assert a.source_quote == b.source_quote and tov < 0.4
-        assert a.anchor.rect_pdf == b.anchor.rect_pdf is not None
+        assert a.source_quote == b.source_quote and 0.4 <= tov < 0.7
 
     # Precondition: without their discriminators the branch accepts the pair.
     bare_a, bare_b = _strip(a), _strip(b)
@@ -352,9 +348,10 @@ def _copy(f: Finding) -> Finding:
 
 
 def test_pass_b_does_not_fold_two_mismatches_anchored_after_ingest():
-    """Pass A cannot see geometry on findings that arrive unanchored; Pass B
-    can. Two mismatches on one row, too different in text for either text
-    branch, fold on geometry alone once both anchor to the row."""
+    """Two mismatches on one row, too different in text for either text
+    branch, arrive unanchored and then anchor to the row. Before remediation
+    WP-03.7 (N28) Pass B's geometry branch accepted them and only their claim
+    discriminators kept them apart; no branch reads a rectangle now."""
     a, b = _pair(
         _claim("sum", [20, 20, 20], 540,
                note="north zone riser flow test column per hydraulic calculation sheet"),

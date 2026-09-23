@@ -715,7 +715,8 @@ reporter of last resort must never raise from inside Tk's handler.
   ungrounded legs were previously indistinguishable.
 - ***`ledger.py` is the exclusive findings container*** (Part III §16): every
   channel ingests into it with source tags. Dedup is conservative and lossless
-  (Phase 20 §12): a tile/rect overlap is never sufficient — merges need semantic
+  (Phase 20 §12): a tile is never sufficient and a rectangle is not read at all
+  (remediation WP-03.7, below) — merges need semantic
   sameness with **compatible critical signatures** (`critique.critical_signature`:
   tags, measurements, absence polarity, cross-sheet legs, compared by
   `critique.signature_conflicts`, the ONE copy of the rule: it names the
@@ -784,7 +785,22 @@ reporter of last resort must never raise from inside Tk's handler.
   merges and the ratchet fingerprint are unchanged. It is folded into `id`
   (`compute_finding_id`'s last argument, appended only when non-empty, like
   `source_id`) and serialized only when set. It is scoped by who sets it, not
-  by a source tag; WP-03.7 (N28) may generalize it. Merging keeps
+  by a source tag. After those gates `_is_duplicate` has **two** accepting
+  branches, and both need text agreement: strong overlap (≥ 0.7), or an equal
+  quote with moderate overlap (≥ 0.4). It reads **no rectangle** (remediation
+  WP-03.7, N28): its geometry branch (IoU > 0.5 plus an equal quote, no text
+  check) is gone. The anchor stage resolves each rect from the finding's own
+  quote (its tile only picks among repeated occurrences), so two findings
+  quoting one string share a rect by construction and that branch was the
+  quote-alone merge the quote branch refuses: `pump P-1 voltage listed as 480
+  should be 208` and `pump P-1 impeller diameter conflicts with the curve`
+  stayed apart in Pass A and folded in Pass B, and auditor findings (anchored
+  at creation) folded that way in Pass A. No text threshold separates that pair
+  from a same-spot paraphrase (0.25 against the `CO-1` pair's 0.09), and a
+  model-finding discriminator could not either (both sign as `{tags: [P1]}`), so
+  such a paraphrase now stays two findings: the decided cost (D-3 input in
+  `_plans/DECISIONS.md`). The ratchet corpus is unanchored, so its fingerprint
+  and the critique contract are unchanged. Merging keeps
   **coherent grounding** — the text/quote/tile/rect/evidence-state **and the
   verdict** (and the claim discriminator, with the `id` it is folded into) are
   one atomic bundle from a single representative, and the loser's
@@ -841,22 +857,28 @@ reporter of last resort must never raise from inside Tk's handler.
   folds nothing, and every history is a clique of `_is_duplicate` pairs. The
   candidate index (each entry's live text tokens and quote) only narrows the
   search and cannot miss a fold: the pair of representatives is always among
-  the pairs checked, and every accepting branch needs a shared token or an
-  equal quote. Those snapshots are taken **when a merge is about to mutate an
-  entry**, not eagerly at ingest: anchors are resolved after ingest, so an eager
-  copy is a permanently *unanchored* twin of a live entry and `_is_duplicate`'s
-  geometry branch could never fire against it. A head frozen in Pass A is
-  unanchored all the same, and a rectangle is the only evidence Pass B has that
-  Pass A lacked, so Pass B now folds only entries that absorbed nothing in
-  Pass A (or members anchored before ingest, as auditor findings are). That
-  recall loss is **decided**: the resolved rect is not lent to same-quote
-  snapshots, because the geometry branch has no text check (it already folds
-  two different issues that quote one tag, N28) and the resolver picks among
-  repeated occurrences by each finding's own tile. Pinned in
-  `tests/test_pass_b_complete_link.py` beside the recorded limits later slices
-  flip: the generic bridge's cluster and a four-finding chain's entry count
-  still follow arrival order (WP-03.6), and `500` still leaves the exports
-  where the bridge won its bundle (WP-03.5). A post-seal add marks the run
+  the pairs checked, and every accepting branch needs a shared text token.
+  Those snapshots are taken **when a merge is about to mutate an
+  entry**, not eagerly at ingest; the reason was the geometry branch (an eager
+  copy is a permanently *unanchored* twin of a live entry), and since WP-03.7
+  the live head matters only for a cross-sheet leg the prose harvest adds after
+  ingest. WP-03.1 had decided not to lend the resolved rect to same-quote
+  snapshots (the geometry branch had no text check, and the resolver picks
+  among repeated occurrences by each finding's own tile); WP-03.7 removed the
+  branch. With no branch reading a rectangle, **Pass B folds nothing Pass A
+  refused**: every pair of members two entries hold was compared by Pass A
+  (each entry's first member met every member of every earlier entry), and
+  nothing the predicate reads changes afterwards except a leg added to a
+  leg-less entry, which can only block. Measured: zero Pass B folds over the
+  suite; pinned over generated sets in
+  `tests/test_position_is_not_sameness.py`. Pass B stays as the post-anchor
+  step; per-observation anchors and canonical clustering are WP-03.6's.
+  Pinned in `tests/test_pass_b_complete_link.py` beside the recorded limits
+  later slices flip: the generic bridge's cluster and a four-finding chain's
+  entry count still follow arrival order (WP-03.6), and `500` still leaves the
+  exports where the bridge won its bundle (WP-03.5). The N28 limit is flipped
+  there (`test_two_issues_that_quote_one_tag_stay_apart_after_anchoring`). A
+  post-seal add marks the run
   incomplete (no `QC-XTRA` masquerade) — including a post-seal **duplicate**,
   which used to reach neither the counter nor the log because the merge branch
   returned first, and which is counted and **dropped** rather than merged: it
