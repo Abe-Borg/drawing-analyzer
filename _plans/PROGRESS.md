@@ -1,7 +1,7 @@
 # Remediation progress tracker
 
-**Next up:** Wave 1 in order: `WP-04.1`. WP-01.2 is done: it decided D-1 and started D-4, which WP-10.4 completes. Its dependants are now available in their waves: WP-01.3 and WP-01.4 (Wave 1), WP-01.5 and WP-06.3 (Wave 2), WP-12.6 (Wave 3). First check the open PRs ([`README.md`](README.md), step 1). Before the next stable tag, the owner should look at O-5.
-**Last updated:** 2026-09-23 by the WP-01.2 session ([PR #156](https://github.com/Abe-Borg/drawing-analyzer/pull/156)).
+**Next up:** Wave 1 in order: `WP-04.2`. WP-04.1 is done: it changed the quantity tokenizer and added a critique-only cache term, `digest_cache._CRITIQUE_CACHE_CONTRACT`, which WP-04.2 bumps. WP-05.3 now waits only on WP-05.2. First check the open PRs ([`README.md`](README.md), step 1). Before the next stable tag, the owner should look at O-5.
+**Last updated:** 2026-09-23 by the WP-04.1 session ([PR #157](https://github.com/Abe-Borg/drawing-analyzer/pull/157)).
 
 This file is authoritative for **status and order**. Requirements live in
 [`drawing-analyzer-remediation-plan.md`](drawing-analyzer-remediation-plan.md).
@@ -100,8 +100,8 @@ starting.
 |---|---|---|---|---|---|
 | WP-01.1 | Verification is `COMPLETE` only when every eligible item was judged; failures and skips are counted separately; decides D-2 (N5) | M | — | done | [PR #155](https://github.com/Abe-Borg/drawing-analyzer/pull/155), 2026-09-23. One rule, `models.item_coverage_status` (D-2), over both passes. The denominator is fixed before any call (`VerifyResult.eligible`); skips and calls that returned no judgment are counted and surfaced separately (`coverage_note`). Investigation reports the findings it recovers and never rewrites verification's record. Tests: `tests/test_drawing_acceptance.py` (N5 block), `tests/test_drawing_verify.py` (completeness section). Residual: a finding that raises after the single-crop loop picks it up keeps its prior verdict (the report shows *Not checked*); the stage counts it "not accounted for" and stays off `COMPLETE` |
 | WP-01.2 | Shared terminal-outcome helper; the digest (real-time and batch) never admits a refusal, truncation or `stop_reason=None` read as success or into either cache level; cached refusals are rejected when read; decides D-1 (N4 digest, N27) | M/L | — | done | [PR #156](https://github.com/Abe-Borg/drawing-analyzer/pull/156), 2026-09-23. One classifier, `core.terminal_outcome.classify_stop_reason` (D-1), its vocabulary pinned by test to the SDK's `StopReason` ∪ `BetaStopReason`. Both transports share one ladder (`digest.digest_terminal_error`), one write predicate (`digest.digest_cache_admits`, both levels) and one loader (`digest.sheet_digest_from_cache_entry`, all three cache hits), which serves only a stored finished stop reason; a stored `null` and a missing key are misses (D-4 started, one migration-register row, no schema or key change). Tests: `tests/test_digest_terminal_outcome.py`, `tests/test_terminal_outcome.py`, `tests/test_drawing_acceptance.py::test_a_refused_or_unfinished_digest_holds_the_run_below_complete`. Residual: N15, an errored digest's findings still reach the ledger (WP-01.3) |
-| WP-04.1 | Quantity tokenizer: hyphenated units, thousands groups, opaque malformed tokens, `deg`/`°` (angle vs temperature), lists and ranges, W×H and V/A with a negative corpus; critique-scoped cache term (B2, B3, B12, N19) | M | — | todo | |
-| WP-04.2 | Compatibility rule over per-unit value sets and partial tag overlap; one shared `signature_conflicts` that the A/B harness also uses (N1) | M | WP-04.1 | todo | |
+| WP-04.1 | Quantity tokenizer: hyphenated units, thousands groups, opaque malformed tokens, `deg`/`°` (angle vs temperature), lists and ranges, W×H and V/A with a negative corpus; critique-scoped cache term (B2, B3, B12, N19) | M | — | done | [PR #157](https://github.com/Abe-Borg/drawing-analyzer/pull/157), 2026-09-23. `critique._quantity_tokens`, a scanner that reads each quantity whole. A composite (list, range, W×H size, voltage pair) is ONE token, compared whole; the representation is documented at the tokenizer and pinned by `tests/test_quantity_signature.py`. Compact `A` needs electrical context (negative corpus in the same file). Critique cache term `digest_cache._CRITIQUE_CACHE_CONTRACT = 1` inside both critique builders; A/B `RECORD_CONTRACT_VERSION` 2 → 3. Tests: `tests/test_quantity_signature.py`, the WP-04.1 section of `tests/test_drawing_cache_identity.py`, four tests in `tests/test_ab_findings_diff.py`. Residual partial signatures (loose-comma lists, `to` ranges, `and`/`or` lists, a bare `20A`) are listed in the handoff |
+| WP-04.2 | Compatibility rule over per-unit value sets and partial tag overlap; one shared `signature_conflicts` that the A/B harness also uses (N1) | M | WP-04.1 | todo | Consume WP-04.1's representation: a token is `<value><unit>`, and a composite value (`2,4,6`, `4..6`, `24x12`, `120/208`) is one member of its unit's set, never split. The rule change re-merges critiques, so bump `digest_cache._CRITIQUE_CACHE_CONTRACT` 1 → 2 and pin the new fingerprint in `tests/test_drawing_cache_identity.py` (the test prints it); bump `RECORD_CONTRACT_VERSION` only if stored records change meaning |
 | WP-03.1 | Symmetric complete-link in Pass B, order-independent entry count (B1, count part) | S | — | todo | |
 | WP-03.2 | Deterministic total-order tie-break in `assign_qc_ids` (K5) | S | — | todo | |
 | WP-03.3 | Remove the auditor coordinator's id dedup; arithmetic claim discriminator so the ledger keeps two different same-row mismatches; Decimal claim-dedup keys (B7) | S/M | — | todo | |
@@ -113,7 +113,7 @@ starting.
 | WP-09.1 | Boilerplate filter with repeatable qualifiers; negation-aware synthesis conflict extraction (B11, N11) | S | — | todo | |
 | WP-09.2 | Prose matching rejects signature-incompatible candidates; per-item outcome counters; labelled paraphrase corpus (no threshold change) (N10, U11) | M | WP-04.2, WP-09.1 | todo | |
 | WP-01.3 | Digest partial reads: a raised-cap retry never loses the first read; findings from an errored, refused or truncated digest are labelled or held out of the ledger (N15, N16) | M | WP-01.2 | todo | Since WP-01.2 a refused or unfinished digest carries an error too, so N15 now also covers, for example, an N27 partial read whose unclosed findings block was salvaged: its findings still reach the ledger unlabelled. `digest.digest_terminal_error` is the ladder to extend, not restate |
-| WP-01.4 | Critique: `max_tokens`/refusal/unknown terminal states are not completed reads on either transport; critique-only cache contract term (N4 critique) | M | WP-01.2 | todo | |
+| WP-01.4 | Critique: `max_tokens`/refusal/unknown terminal states are not completed reads on either transport; critique-only cache contract term (N4 critique) | M | WP-01.2 | todo | The critique-only term exists since WP-04.1 (`digest_cache._CRITIQUE_CACHE_CONTRACT`, folded inside both critique builders). Bump it for this admission change rather than adding a second term (D-4), and pin the merge-rule fingerprint under the new value in `tests/test_drawing_cache_identity.py` |
 | WP-11.1 | Per-source and per-page fault isolation in the render and prescan iterators; the inventory is the page denominator; every expected page gets an outcome (R1 core) | M | — | todo | |
 | WP-11.2 | Digest-phase containment: completed paid digests, journal and manifest always ship; uploads and spool released on every exit (R1) | M | WP-11.1 | todo | |
 | WP-16.1 | Key store: BOM-safe load, repair of BOM values already in the keyring, shape check, migration that never deletes the only good copy (G3) | S/M | — | todo | |
@@ -273,8 +273,8 @@ report is built from it).
 | ID | Summary | Pri | Slice(s) | Disposition | Evidence |
 |---|---|---|---|---|---|
 | B1 | Pass B complete-link checks one direction; a 550 gpm finding absorbs the 500 gpm one | P0 | 03.1, 03.5 | open | |
-| B2 | Hyphenated units (`6-inch`) get no measurement signature | P0 | 04.1 | open | |
-| B3 | Thousands separators split numbers (`12,500` signs as `500`) | P0 | 04.1 | open | |
+| B2 | Hyphenated units (`6-inch`) get no measurement signature | P0 | 04.1 | implemented+validated | `tests/test_quantity_signature.py` (the B2 token table; the `B2 …` conflict and equivalence pairs, each asserted in the critique merge and the ledger); `tests/test_ab_findings_diff.py::test_a_changed_hyphenated_quantity_is_never_an_exact_match` (WP-04.1, [PR #157](https://github.com/Abe-Borg/drawing-analyzer/pull/157)) |
+| B3 | Thousands separators split numbers (`12,500` signs as `500`) | P0 | 04.1 | implemented+validated | `tests/test_quantity_signature.py` (the B3 token table, incl. `15,000` once signing as zero and the malformed `1,2,500` kept whole; the `B3 …` pairs); `tests/test_ab_findings_diff.py::test_thousands_grouped_quantities_compare_by_value` (WP-04.1, [PR #157](https://github.com/Abe-Borg/drawing-analyzer/pull/157)) |
 | B4 | Verbatim quotes fail to anchor on punctuation/spacing variance | P0/P1 | 05.2, 05.3 | open | |
 | B5 | Cross-QC quotes under 6 chars are "grounded" without a check | P0 | 05.1 | open | |
 | B6 | Cross-QC prompt asks for severity `question`; the items are dropped silently | P0 | 06.1 | open | |
@@ -283,7 +283,7 @@ report is built from it).
 | B9 | Merge discards the loser's text and recommended action | P0 | 03.5 | open | |
 | B10 | A→B and B→A copies of one conflict both survive | P1 | 06.4 | open | |
 | B11 | "No conflicts noted on this sheet." becomes a medium finding | P1 | 09.1 | open | |
-| B12 | `deg`/`°` sign differently; `90 deg F` vs `90 deg C` compatible | P0 | 04.1 | open | |
+| B12 | `deg`/`°` sign differently; `90 deg F` vs `90 deg C` compatible | P0 | 04.1 | implemented+validated | `tests/test_quantity_signature.py` (the B12 token table; the `B12 …` pairs, incl. no inferred scale); `tests/test_ab_findings_diff.py::test_a_changed_temperature_scale_is_never_an_exact_match` (WP-04.1, [PR #157](https://github.com/Abe-Borg/drawing-analyzer/pull/157)) |
 | R1 | Source unreadable after inventory aborts the whole run | P0/P1 | 11.1, 11.2, 11.3 | open | |
 | R2 | Refused batch item never retried or rescued | P1 | 01.5 | open | |
 | R3 | Canceled/errored envelopes lose attempt records (harvest and terminal path) | P1 | 14.1 | open | |
@@ -341,7 +341,7 @@ report is built from it).
 | N16 | A raised-cap retry can lose the first (truncated) read | P1 | 01.3 | open | |
 | N17 | References to FM-numbered sheets are never reported as missing | P1 | 08.4 | open | |
 | N18 | Contradictory transcriptions of one quote counted as independent checks | P1 | 07.3 | open | |
-| N19 | W×H duct sizes, `20A`/`480V`, ranges and lists get no or partial signature | P0 | 04.1 | open | |
+| N19 | W×H duct sizes, `20A`/`480V`, ranges and lists get no or partial signature | P0 | 04.1 | implemented+validated | `tests/test_quantity_signature.py` (the size, volt, amp, range and list tables; the negative corpus; the `N19 …` pairs; `test_a_shared_name_is_not_a_shared_quantity`) (WP-04.1, [PR #157](https://github.com/Abe-Borg/drawing-analyzer/pull/157)). Covers the named forms. By decision these still sign partially: loose-comma lists (`2, 4, 6 in`), `to` ranges and `and`/`or` lists, and a bare `20A` with no electrical context. **A conflict hidden by a shared value is N1, not N19:** a pair whose differing quantities sit beside a shared one (`6 in` / `4 in` beside `100 psi`; `12'-6"` / `12'-8"`, both `12ft`) can still merge until WP-04.2 |
 | N20 | Investigation executes and echoes pre-fallback `tool_use` blocks | P1 | 13.4 | open | |
 | N21 | Files-API failure fallbacks send full-rate requests under Economy; inline can exceed the size limit | P1 | 18.1, 18.2 | open | |
 | N22 | Code and help text claim uploads "expire server-side"; they persist until deleted | P1 | 18.4, 18.5 | open | |
@@ -388,6 +388,185 @@ report is built from it).
 Each session adds one entry at the top: date, slices and IDs, PR, what changed,
 contracts decided, cache/schema effects, validation actually run (with counts),
 what could not be verified, risks, and next steps.
+
+### 2026-09-23 — WP-04.1: the quantity tokenizer behind the critical signature ([PR #157](https://github.com/Abe-Borg/drawing-analyzer/pull/157))
+
+- **Slice and IDs:** WP-04.1. B2, B3, B12 and N19. No `DECISIONS.md`
+  contract is decided here. D-4 stays open (WP-10.4 completes it); this slice
+  adds two migration-register rows and a note to D-4 (below). The WP-04
+  package stays `todo`: its acceptance ("demonstrated conflicting pairs never
+  merge") also needs WP-04.2 (N1).
+- **What changed:**
+  - **One tokenizer, rewritten as a scanner** (`critique._quantity_tokens`,
+    behind `_measurements` and so `critical_signature`). It finds each number
+    at a legal start, reads the whole quantity, and resumes past it, so no part
+    of a quantity is read again on its own. The item-23 number-start rule is
+    kept and extended: never after a letter, digit, `.`, `/` **or `,`** (B3),
+    never after an alphanumeric-hyphen, and a sign is refused after `'` `"`
+    **`°` `%`** (a hyphen there is a join: `90°-95°F` no longer yields
+    `-95°f`).
+  - **Hyphenated alpha units** (B2): `6-inch`, `6-in`, `6-in.` sign `6in`.
+    `foot` and `gallon(s)` were missing outright and are added (`10-foot` is
+    `10ft`, `100-gallon` is `100gal`).
+  - **Thousands groups** (B3): a valid grouping is one number (`12,500` is
+    `12500`, `1,500.5` is `1500.5`, `15,000` is no longer `0`). A tight comma
+    run that is not a valid grouping is kept whole (`1,2,500 cfm` is
+    `1,2,500cfm`), never its trailing fragment and never a guess.
+  - **Degrees** (B12): `deg`/`degree(s)`/`°` are `°`; `deg F`, `deg. F`,
+    `degrees F`, `degF`, `°F`, `° F` and `degrees Fahrenheit` are `°f` (C
+    likewise). A scale is never inferred (`90°` stays `90°`). A tight `°F`
+    keeps its old meaning whatever follows (`80°FDB`); a spaced or word-form
+    scale needs a boundary (`45° Flange`, `90 deg flange` stay angles).
+  - **N19:**
+    - W×H sizes (`24x12`, `24 x 12`, `24×12`, `24"x12"`, `24x12-inch`,
+      `600x300 mm`, `24x12x6`) with per-dimension units that must agree.
+      Multiplication (`4 x 25 gpm`), mixed units (`6" x 12'`) and feet-inches
+      W×H (`10'-6" x 12'-0"`) fall back to single tokens, keeping every
+      dimension in the tight form too (review follow-up below).
+    - Compact volts (`480V`, `24VAC`, `24VDC`) anywhere but a slope
+      (`3H:1V`). Voltage pairs (`120/208V`, `208Y/120V`, `120/208 volts`) are
+      one token, low first; `120/208 volts` used to sign as the fraction
+      0.5769…volt.
+    - Compact amps only with electrical context: a pole count after
+      (`20A/1P`, `20A-2P`, `20A 3P`), an overcurrent device after
+      (`breaker`, `bkr`, `cb`, `fuse(s)`, `fused`, `non-fused`,
+      `disconnect(s)`, `mcb`, `mlo`, `ocpd`) unless a name precedes the number
+      (`panel`, `room`, `grid`, `line`, `column`, `level`, `floor`, `type`,
+      `detail`, `keynote`, `note`, `sheet`, `unit`, `area`, `zone`, `suite`,
+      `bay`, `space`, `circuit` and abbreviations), or a rating label before
+      (`MCA`, `MOCP`, `MOP`, `FLA`, `RLA`, `OCPD`, `breaker`, `bkr`, `cb`,
+      `fuse(s)`).
+    - Ranges `4-6 in`, `4 - 6 in`, `65-75°F`, `1,000-2,000 cfm` (a lopsided
+      `4 -6 in` is a sign; a mixed number wins first).
+    - Tight comma lists `2,4,6 in`.
+  - **Memoized.** `_quantity_tokens` is an `lru_cache(4096)` keyed on the
+    signature text, the whole input, so a hit is never stale. Measured on a
+    synthetic 1,800-finding, 40-sheet ledger ingest (79,114 signature calls):
+    old regex 1.35–1.52 s, new scanner uncached 1.86 s, cached 0.91–0.95 s.
+  - **The representation WP-04.2 consumes** (documented at the tokenizer, and
+    pinned by `test_every_token_is_a_value_followed_by_a_unit`): every token is
+    `<value><unit>`, unit canonical and lowercase (empty for a unitless size).
+    The value is one canonical number, or ONE composite: a list `2,4,6`, a
+    range `4..6` (low first), a size `24x12` (written order), a voltage pair
+    `120/208` (low first). A composite is compared whole and never split:
+    splitting `1,2,500` would recreate the trailing fragment plan WP-04
+    step 2 forbids.
+  - **Critique cache term.** `digest_cache._CRITIQUE_CACHE_CONTRACT = 1`,
+    folded as `critique_contract=1` inside both `critique_cache_key` and
+    `critique_cache_key_level1` (not caller-supplied, so a probe and a store
+    cannot disagree). No `_SCHEMA_VERSION` bump. The new term makes every
+    critique key new, so four statements that a key stays byte-identical to
+    keys written before profiles or F-01 existed became false: two sentences
+    in `critique_cache_key`'s docstring and two comments in `critique.py`.
+    They now state what was true when those features landed.
+  - **A/B harness:** `RECORD_CONTRACT_VERSION` 2 → 3; `_signature_conflicts`
+    is untouched (WP-04.2 replaces it).
+  - **Review follow-up (Codex P1 on this PR).** A tight W×H candidate that was
+    not a size lost its second dimension: the scanner resumed after the first
+    number, and a number may not start right after `x`. So `6"x12'` signed
+    only `6in` and `4x25 gpm` signed nothing (the spaced forms were fine; the
+    base code lost them too). `_read_quantity` now hands back where the next
+    dimension starts, and the scanner reads it in place (`_NUMBER_AT_RE`, the
+    same number grammar without the start guard). `6"x12'` is `{6in, 12ft}`,
+    `4x25 gpm` is `{25gpm}`, `10'x12'-6"` keeps its `12ft`. A pair such as
+    `6"x12'` / `6"x14'` still shares `6in`, so under today's rule it can still
+    merge: that is N1 (WP-04.2).
+  - **Docs:** CHANGELOG (Fixed: B2, B3, B12, N19, with the one-time critique
+    re-run as the visible cost), CLAUDE.md (the ledger paragraph's signature
+    description, I-6 and the new term), README (the ledger section's
+    measurement passage, which appeared twice verbatim, now appears once and
+    carries the new spellings; the critique cache paragraph names the one-time
+    re-run).
+- **Contracts decided:** none. D-4 (open) gains a note: the critique's
+  contract term now exists, so WP-04.2 and WP-01.4 bump it rather than adding
+  a second term.
+- **Cache/schema effects:**
+  - Critique cache, both levels: every entry written before this slice misses
+    once (new key term). Nothing is deleted. The next exhaustive run
+    re-critiques every sheet once; digests, identity, review plan, citation
+    and investigation entries are untouched, pinned byte-for-byte by
+    `tests/test_drawing_cache_identity.py::test_wp_04_1_moves_every_critique_key_and_no_other_key`.
+  - A/B arm sidecars: a v2 record is refused as `RECORDS_STALE_CONTRACT`.
+  - Two migration-register rows.
+- **Re-baselined tests:** none. Every existing test passed unchanged,
+  including `test_duplicate_matrix`, `test_signature_measurements_carry_the_unit`,
+  `test_signature_regexes_avoid_false_positives`, the four item-23 tests,
+  `tests/test_ab_findings_diff.py` and `tests/test_ab_sweep.py` (whose stale
+  contract test uses `RECORD_CONTRACT_VERSION - 1`).
+- **New guard:** `test_the_critique_contract_is_pinned_to_the_merge_rule`
+  fingerprints the merge rule (signatures, the pairwise `_is_duplicate` matrix
+  and a self-consistency merge over a fixed 34-finding corpus) and pins it per
+  contract value. The base commit's rule fingerprints differently
+  (`70a2e0…`, recorded in the test), and so does this PR's head before the
+  review follow-up (`715fa2…`), so a rule change that forgets the bump fails
+  there.
+- **Validation (this container, Python 3.11.15, SDK 1.7.0, PyMuPDF 1.28.2):**
+  - **Baseline before any change:** `python -m pytest -q -m "not network"`
+    gave **2,726 passed, 2 skipped, 10 deselected** (238 s), identical to the
+    WP-01.2 handoff.
+  - **Reproduced first.** On the base code: `Provide 6-inch drain` signed
+    nothing; `12,500 cfm` and `1,500 cfm` both signed `500cfm`; `15,000 cfm`
+    signed `0cfm`; `90 deg F` and `90 deg C` both signed `90deg`; `24x12`,
+    `20A`, `480V` and `4-6 in` signed nothing; `2,4,6 in` signed `6in`; and
+    `120/208 volts` signed `0.5769230769230769230769230769volt`.
+  - **Failing first.** The 201 new tests, run in a full copy of the base
+    commit with only the new test files added: **125 failed, 76 passed**
+    (`tests/test_quantity_signature.py` 117/76; all four cache-identity tests
+    and all four A/B tests failed). The review follow-up's five tests, and the
+    ratchet, also failed on this PR's head before it. The 76 pin what the fix
+    keeps: the item-23 safeguards, the negative corpus, the spellings that
+    already signed, and merge outcomes the old rule already got right
+    (`90°F`/`90°C`, `90°`/`90°F`,
+    `1/2"`/`2"`, `-6 in`/`6 in`, `2 1/2"`=`2.5"`, the three shared-name pairs,
+    and `2,4,6 in`/`2,4,8 in`, blocked before only because the trailing
+    fragments differed). One pair (`10'x12'` against `10'x14'`) was blocked on
+    the base code only by the stray `x12` tag, so the test uses the spaced
+    form, which failed.
+  - **After:** the 201 new tests pass. Full suite **2,927 passed, 2 skipped, 10 deselected** (237 s), the baseline
+    plus the 201 new tests, with the same two environment skips (IPv6
+    loopback; chmod as root).
+  - **Browser suite:** not run separately. No report JS, HTML or chat code
+    changed; the browser tests also ran inside the full suite above.
+  - `ruff check --select E9,F63,F7,F82 src tests scripts` is clean.
+    F401/F811/F841 over the touched files shows two hits, both present on the
+    base (WP-22.5 territory); none is new. `scan_secrets.py` is clean over 196
+    tracked files, the new one included. `compileall src` passes.
+- **Not verified:** live API behaviour (no budget, O-4; this slice makes no
+  call). Real drawing text: the negative corpus is synthetic, written from
+  common drawing conventions, not mined from a real set (O-10). Windows is
+  covered by this PR's CI.
+- **Risks and residual gaps:**
+  - **N1 (WP-04.2).** One shared value still makes two findings compatible,
+    so a conflict hidden by a shared value can still merge: `6 in … 100 psi`
+    against `4 in … 100 psi`, `12'-6"` against `12'-8"` (both `12ft`), and
+    two lists written with a unit on every element that share one element.
+  - **Partial signatures that remain, by decision:**
+    - loose-comma lists (`2, 4, 6 in` keeps only `6in`): a comma and a space
+      are prose punctuation as often as a list separator (`column 4, 10 ft`);
+    - `to` ranges and `and`/`or` lists (`4 to 6 in`, `4 and 6 in`) keep only
+      the far end;
+    - a bare `20A` with no electrical context (`20A 120V circuit`) is
+      unsigned, and a `V`-suffixed room or grid label (`101V`) would sign as a
+      voltage (V suffixes are not a room or grid convention);
+    - `UL 94V-0` signs as `94volt`;
+    - a number after `/` still never starts (item 23), so `30A/2P/240V` loses
+      `240V` and `80°FDB/67°FWB` loses `67°f`;
+    - Unicode dashes, primes and vulgar fractions are not folded (N13 /
+      WP-05.1's shared normalizer); `24×12` is handled because the size
+      separator is in scope.
+  - **The `in` preposition** remains the tokenizer's oldest false positive
+    (`see pages 4-6 in the manual` now signs `4..6in`, as `6 in the manual`
+    signed `6in` before).
+  - **One-time cost:** the first exhaustive run after upgrade re-critiques
+    every sheet (one cold critique pass).
+- **Re-checked (U31):**
+  - "The critique cache stores post-merge findings, and only it depends on the
+    signature": `critique_cache_entry_from_result` stores merged findings; the
+    ledger (Pass A and B) is never cached; `prose_harvest` matches on
+    `_token_overlap` only; `cross_qc._dedup_findings` keys on ids.
+  - "`_measurements` has no caller outside critique.py" (grep).
+- **Next:** WP-04.2 (compatibility rule; bump `_CRITIQUE_CACHE_CONTRACT` 1 → 2
+  and pin the new fingerprint). WP-05.3 now waits only on WP-05.2.
 
 ### 2026-09-23 — WP-01.2: the digest never admits a read the model did not finish ([PR #156](https://github.com/Abe-Borg/drawing-analyzer/pull/156))
 

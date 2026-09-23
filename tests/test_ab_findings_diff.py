@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from ab_findings_diff import (  # noqa: E402
     COMPARISON_COMPLETE,
     COMPARISON_INCOMPLETE,
+    RECORD_CONTRACT_VERSION,
     RECORDS_MISSING,
     RECORDS_PRESENT,
     copy_linked_artifacts,
@@ -188,6 +189,51 @@ def test_geometry_overlap_alone_never_produces_an_exact_match():
     assert m["counts"]["exact"] == 0
     assert m["counts"]["candidates"] == 1
     assert "IoU" in " ".join(m["candidates"][0]["reasons"])
+
+
+# --------------------------------------------------------------------------- #
+# Remediation WP-04.1 — the tokenizer behind the stored signatures
+# --------------------------------------------------------------------------- #
+
+def test_a_changed_hyphenated_quantity_is_never_an_exact_match():
+    """B2: "6-inch" and "4-inch" carried no measurement at all, so the pair
+    matched EXACT on the shared quote: a changed pipe size reported as the same
+    finding."""
+    m = _overlapping_pair("provide 6-inch drain at the riser",
+                          "provide 4-inch drain at the riser")
+    assert m["counts"]["exact"] == 0
+    assert "measurements" in m["candidates"][0]["signature_conflicts"]
+
+
+def test_a_changed_temperature_scale_is_never_an_exact_match():
+    """B12: "90 deg F" and "90 deg C" both signed as ``90deg``."""
+    m = _overlapping_pair("supply air setpoint is 90 deg F",
+                          "supply air setpoint is 90 deg C")
+    assert m["counts"]["exact"] == 0
+    assert "measurements" in m["candidates"][0]["signature_conflicts"]
+
+
+def test_thousands_grouped_quantities_compare_by_value():
+    """B3: "12,500" signed as its trailing "500", so 12,500 and 1,500 cfm
+    matched exact while 12,500 and 12500 cfm, one quantity, did not."""
+    changed = _overlapping_pair("supply air is 12,500 cfm", "supply air is 1,500 cfm")
+    assert changed["counts"]["exact"] == 0
+    assert "measurements" in changed["candidates"][0]["signature_conflicts"]
+
+    same = _overlapping_pair("supply air is 12,500 cfm", "supply air is 12500 cfm")
+    assert same["counts"]["exact"] == 1
+    assert same["exact"][0]["text_changed"] is True
+
+
+def test_records_are_written_under_the_wp_04_1_contract():
+    """A record stores ``critical_signature`` computed when the arm ran, so a v2
+    record holds the old tokens (``6-inch`` signed as nothing, ``12,500`` as
+    ``500``). Comparing it with a v3 arm would report a tokenizer change as a
+    model difference; ``load_arm_records`` refuses it
+    (``tests/test_ab_sweep.py``)."""
+    assert RECORD_CONTRACT_VERSION == 3
+    record = finding_record(_f(text="provide 6-inch drain at 12,500 cfm"))
+    assert record["critical_signature"]["measurements"] == ["12500cfm", "6in"]
 
 
 # --------------------------------------------------------------------------- #

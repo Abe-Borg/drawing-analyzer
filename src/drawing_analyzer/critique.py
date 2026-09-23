@@ -33,6 +33,7 @@ request/parse helpers; the pipeline owns rendering.
 """
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
@@ -363,8 +364,8 @@ CRITIQUE_FINDINGS_SCHEMA: dict = {
 # the schema into the main version would re-key — and so discard — every critique
 # ever cached, including those of users who never turn this on, for a request
 # shape they never sent. Instead this rides ``critique_cache_key`` only when
-# structured mode is actually used, so: structured off, keys stay byte-identical
-# to today; structured on, the instruction AND the schema are both covered, and
+# structured mode is actually used, so: structured off, it adds nothing to the
+# key; structured on, the instruction AND the schema are both covered, and
 # editing either re-critiques only the structured entries (I-6).
 CRITIQUE_STRUCTURED_PROMPT_VERSION = hashlib.sha256(
     "\x00".join(
@@ -587,60 +588,176 @@ def _same_sheet(a: Finding, b: Finding) -> bool:
 # separator, so "SET 165" is a measurement, not a tag. A hyphen is normalized away
 # (M-101 == M101) but a DOT is kept (M1.01 != M10.1 — different sheets).
 _TAG_RE = re.compile(r"\b([A-Za-z]{1,4})-?(\d{1,4}(?:[.-]\d{1,3})?[A-Za-z]?)\b")
-# A number (signed / decimal / fraction) immediately followed by a unit — a
-# measurement whose value AND unit discriminate the finding. Alpha units require a
-# trailing word boundary (so "voltage" isn't read as "volt", "into" as "in"); the
-# number can't start mid-token (so the "-1" in "P-1" or the "101" in "M-101" is not
-# a measurement).
-_ALPHA_UNIT = (
-    r"gpm|gpd|gph|psig|psi|cfm|fpm|inch(?:es)?|in|ft|feet|mm|cm|kva|kw|hp|hz|"
-    r"amps?|volts?|kv|va|gal|deg"
+# --- Measurements: the quantity tokenizer (item 23; remediation WP-04.1) --------
+#
+# A measurement signs as ONE token, ``<value><unit>``, and the value is what the
+# number MEANS, not how it was written: ``12,500 cfm`` and ``12500 cfm`` are both
+# ``12500cfm``, ``2 1/2"`` and ``2.5"`` both ``2.5in``, ``6-inch`` and ``6 in``
+# both ``6in``. A spelling the tokenizer cannot read is not a neutral miss. A
+# signal present on only one side never blocks a merge (``signatures_compatible``),
+# so every quantity left unread is a merge nobody asked for (B2, B3, B12, N19).
+#
+# ``<unit>`` is canonical and lowercase: ``in``, ``ft``, ``gpm``, ``psig``, ``°``,
+# ``°f``, ``amp``, ``volt``, ``vac``, ``%`` and so on, or empty for a unitless W×H
+# size. ``<value>`` is one number, as its canonical decimal (``12500``, ``0.5``,
+# ``-6``), or ONE composite quantity:
+#
+# * a list: its elements joined by ``,`` in written order (``2,4,6 in`` is
+#   ``2,4,6in``). Every tight comma run that is not a valid thousands grouping is
+#   kept whole this way (``1,2,500 cfm`` is ``1,2,500cfm``);
+# * a range: low end first, joined by ``..`` (``4-6 in`` is ``4..6in``);
+# * a W×H size: its dimensions joined by ``x`` in written order (``24"x12"`` is
+#   ``24x12in``);
+# * a voltage pair: low first, joined by ``/`` (``208Y/120V`` is ``120/208volt``).
+#
+# A composite is one quantity and never shares a token with its parts. Under the
+# disjoint-set rule that is what makes ``2,4,6 in`` conflict with ``3,5,6 in``
+# rather than agree on ``6in``. A consumer must compare it whole: splitting
+# ``1,2,500`` would recreate the trailing fragment ``500`` that a malformed
+# grouping must never yield (plan WP-04 step 2).
+#
+# The critique cache stores post-merge findings, so a change here changes what a
+# stored critique means. Bump ``digest_cache._CRITIQUE_CACHE_CONTRACT`` with it;
+# ``tests/test_drawing_cache_identity.py`` pins the merge rule to that value.
+
+# Where a number may start (item 23, extended). The "not mid-token" guard is TWO
+# lookbehinds rather than one class, and the split is load-bearing:
+#
+# * never after a letter, digit, ``.``, ``,`` or ``/``. The ``/`` is item 23's:
+#   without it ``1/2"`` matched at the DENOMINATOR and signed as ``2in``,
+#   byte-identical to a real ``2"``, so *Provide 1/2" drain* and *Provide 2"
+#   drain* merged as duplicates. The ``,`` is B3's: without it ``12,500`` signed
+#   as its trailing ``500``, and ``15,000`` as the value zero.
+# * never after an alphanumeric-then-hyphen: the ``101`` in ``M-101`` is a tag,
+#   and the ``6`` in ``4-6`` is a range's far end. A single ``[A-Za-z0-9.\-]``
+#   class would also block the ``6`` in ``12'-6"`` (wrong, and unsafe: with the
+#   inches half dropped, ``12'-6"`` and ``12'-8"`` both signed as just
+#   ``{12ft}``). Asking whether the hyphen is itself preceded by an alphanumeric
+#   separates them: ``M-`` is a tag, ``'-`` is a feet-inches join.
+#
+# The sign is refused right after a unit mark (``'`` ``"`` ``°`` ``%``), where a
+# hyphen is a join and not a minus: the ``-`` in ``12'-6"`` would otherwise emit
+# a spurious NEGATIVE ``-6in``, and the one in ``90°-95°F`` a ``-95°f``. Only the
+# sign is guarded, not the number: excluding a preceding quote outright would drop
+# the ``6`` in ordinary prose like ``the note says "6 in clear"``.
+#
+# Feet-inches deliberately stays TWO tokens (``12ft`` and ``6in``): joining them
+# would change the token model for every dimension in the corpus.
+_NUMBER_START = r"(?<![A-Za-z0-9.,/])(?<![A-Za-z0-9]-)"
+_SIGN = r"(?:(?<![\'\"°%])[-+])?"
+# The number shapes, most specific first so each beats a shorter read of the same
+# characters: a voltage pair (``480Y/277``); a tight comma run (``12,500``,
+# ``1,500.5``, ``2,4,6``, ``1,2,500``); a bare fraction, which must beat the plain
+# integer or ``1/2`` reads as ``1`` (item 23); a mixed number (``2 1/2``,
+# ``2-1/2``); then an integer or decimal.
+_DEC = r"\d+(?:\.\d+)?"
+_FRACTION = r"\d+\s*/\s*\d+"
+_MIXED = r"\d+(?:\.\d+)?[-\s]*\d+\s*/\s*\d+"
+_THOUSANDS = r"\d{1,3}(?:,\d{3})+(?:\.\d+)?"
+_COMMA_RUN = r"(?:\d+/\d+|\d+(?:\.\d+)?)(?:,(?:\d+/\d+|\d+(?:\.\d+)?))+"
+_VOLTAGE_PAIR = r"\d+\s*[Yy]\s*/\s*\d+"
+_PLAIN_NUMBER = r"(?:" + _THOUSANDS + r"|" + _FRACTION + r"|" + _MIXED + r"|" + _DEC + r")"
+_THOUSANDS_RE = re.compile(_THOUSANDS)
+_NUMBER_KINDS = ("vpair", "run", "frac", "mixed", "dec")
+_NUMBER_BODY = (
+    r"(?P<sign>" + _SIGN + r")(?:"
+    r"(?P<vpair>" + _VOLTAGE_PAIR + r")|(?P<run>" + _COMMA_RUN + r")"
+    r"|(?P<frac>" + _FRACTION + r")|(?P<mixed>" + _MIXED + r")|(?P<dec>" + _DEC + r"))"
 )
-_SYM_UNIT = r"°[fc]?|%|\"|'"
-# The number, in three parts (item 23):
-#
-# * The lookbehind now excludes ``/`` as well. Without it, ``1/2"`` matched at the
-#   DENOMINATOR — the ``2`` — and signed as ``2in``, byte-identical to a real
-#   ``2"``. So *Provide 1/2" drain* and *Provide 2" drain* had the same critical
-#   signature and merged as duplicates: two different pipe sizes collapsing into
-#   one finding, which is precisely what the signature exists to prevent.
-# * A **bare fraction** alternative, tried first so it beats the plain-integer
-#   read of the same characters. ``2 1/2`` still wins as a mixed number, because
-#   the mixed alternative consumes further.
-# * The sign is refused after a foot or inch mark. The old lookbehind sat one
-#   character before the SIGN, and the character before the ``-`` in ``12'-6"`` is
-#   ``'`` — not excluded — so ``[-+]?`` swallowed the feet-inches separator and
-#   emitted a spurious NEGATIVE ``-6in``. Only the sign is guarded, not the whole
-#   number: excluding a preceding quote outright would drop the ``6`` in ordinary
-#   prose like ``the note says "6 in clear"``.
-#
-# The "not mid-token" guard is TWO lookbehinds rather than one class, and the
-# split is load-bearing. A single ``[A-Za-z0-9.\-]`` class blocks any number
-# preceded by a hyphen — which stops the ``101`` in ``M-101`` (right) and the
-# ``6`` in ``12'-6"`` (wrong, and unsafe: with the inches half dropped, ``12'-6"``
-# and ``12'-8"`` both signed as just ``{12ft}`` and could merge). Asking instead
-# whether the hyphen is itself preceded by an alphanumeric separates them: ``M-``
-# is a tag, ``'-`` is a feet-inches join.
-#
-# Feet-inches deliberately stays TWO tokens (``12ft`` and ``6in``). ``_SYM_UNIT``
-# carries both marks by design, and joining them would change the token model for
-# every dimension in the corpus, not just this one.
-_MEAS_RE = re.compile(
-    r"(?<![A-Za-z0-9./])(?<![A-Za-z0-9]-)"
-    r"((?:(?<![\'\"])[-+])?"
-    r"(?:\d+\s*/\s*\d+|\d+(?:\.\d+)?(?:[-\s]*\d+\s*/\s*\d+)?))\s*"
-    r"((?:" + _ALPHA_UNIT + r")\b|(?:" + _SYM_UNIT + r"))",
+_NUMBER_RE = re.compile(_NUMBER_START + _NUMBER_BODY)
+# The next dimension of a W×H candidate that turned out not to be a size is a
+# number of its own, but it follows an "x" that _NUMBER_START refuses, so it is
+# matched in place (see _read_quantity).
+_NUMBER_AT_RE = re.compile(_NUMBER_BODY)
+# Alpha units need a trailing word boundary (so "voltage" is not "volt", "into"
+# not "in"), and may be joined to the number by a hyphen: ``6-inch``, ``6-in.``,
+# ``a 10-foot clearance`` (B2).
+_ALPHA_UNIT = (
+    r"gpm|gpd|gph|psig|psi|cfm|fpm|inch(?:es)?|in|ft|feet|foot|mm|cm|kva|kw|hp|hz|"
+    r"amps?|volts?|kv|va|gal(?:lons?)?"
+)
+# Degrees (B12). ``°`` and ``deg`` / ``degree(s)`` are one unit, an angle ``°``,
+# unless a scale follows, and a scale is only ever READ, never inferred: ``90 deg
+# F`` and ``90°F`` are ``90°f``, ``90 deg C`` is ``90°c``, and a bare ``90°`` stays
+# ``90°``. A scale letter tight against ``°`` counts whatever follows it
+# (``80°FDB``, as it always did). A spaced or word-form scale needs a word
+# boundary, so ``45° Flange`` and ``90 deg flange`` stay angles, and a tag
+# (``90 deg F-1``) is not a scale.
+_DEG_SCALE = r"f(?:ahrenheit)?|c(?:elsius)?"
+_UNIT_RE = re.compile(
+    r"\s*(?P<deg>°)(?:(?P<tight>[fc])"
+    r"|\s(?P<spaced>" + _DEG_SCALE + r")(?![A-Za-z0-9]|-\d))?"
+    r"|\s*-?\s*(?P<deg_word>deg(?:ree)?s?(?![A-Za-z])\.?|deg(?=[fc](?![A-Za-z0-9])))"
+    r"(?:\s?(?P<scale>" + _DEG_SCALE + r")(?![A-Za-z0-9]|-\d))?"
+    r"|\s*-?\s*(?P<alpha>" + _ALPHA_UNIT + r")\b"
+    r"|\s*(?P<sym>[%\"'])"
+    # Compact electrical units, written against the number (N19). Each must also
+    # pass _unit_context_ok.
+    r"|(?P<volt>v(?:ac|dc)?)(?![A-Za-z0-9])"
+    r"|(?P<amp>a)(?![A-Za-z0-9])",
     re.IGNORECASE,
 )
-# Plural folding only. ``6 amps`` and ``6 amp`` are one quantity, and treating
-# them as two conflicting ones SPLIT a single issue into two findings — the safe
-# direction, but still wrong. Deliberately NOT folded: ``psig`` into ``psi``.
-# Gauge and absolute pressure are different measurements, and collapsing them
-# would hide a real conflict rather than a formatting one.
+# One spelling per unit, and plural folding (item 23). ``6 amps`` and ``6 amp``
+# are one quantity, and treating them as two conflicting ones SPLIT a single issue
+# into two findings: the safe direction, but still wrong. Deliberately NOT folded:
+# ``psig`` into ``psi``. Gauge and absolute pressure are different measurements,
+# and collapsing them would hide a real conflict rather than a formatting one. The
+# same holds for ``vac`` / ``vdc`` against ``volt``, and for a temperature scale
+# against a bare degree.
 _UNIT_SYNONYM = {
-    "inches": "in", "inch": "in", "feet": "ft", '"': "in", "'": "ft",
-    "amps": "amp", "volts": "volt",
+    "inches": "in", "inch": "in", "feet": "ft", "foot": "ft", '"': "in", "'": "ft",
+    "amps": "amp", "volts": "volt", "gallon": "gal", "gallons": "gal",
 }
+_VOLT_UNITS = frozenset({"volt", "vac", "vdc"})
+# W×H sizes (N19): ``24x12``, ``24 x 12``, ``24×12``, ``24"x12"``, ``24x12 in``,
+# and a third dimension (``24x12x6``). Each dimension may carry a length unit;
+# when several do they must agree, and the size takes it. What is not a size
+# falls back to the single tokens: dimensions in different units (``6" x 12'``),
+# multiplication (``4 x 25 gpm``, a unit after the last dimension), and a
+# feet-inches W×H (``10'-6" x 12'-0"``), whose inches half can neither start nor
+# end a size. The fallback keeps every dimension, tight or spaced: ``6"x12'`` is
+# ``6in`` and ``12ft``, ``4x25 gpm`` is ``25gpm`` (see _read_quantity).
+_SIZE_UNIT = r"(?:\"|'|in(?:ch(?:es)?)?\b|ft\b|feet\b|foot\b|mm\b|cm\b)"
+_SIZE_TAIL_RE = re.compile(
+    r"(?P<u1>\s*-?\s*" + _SIZE_UNIT + r")?"
+    r"\s*[x\u00d7]\s*(?P<d2>" + _PLAIN_NUMBER + r")(?P<u2>\s*-?\s*" + _SIZE_UNIT + r")?"
+    r"(?:\s*[x\u00d7]\s*(?P<d3>" + _PLAIN_NUMBER + r")(?P<u3>\s*-?\s*" + _SIZE_UNIT + r")?)?",
+    re.IGNORECASE,
+)
+_INCHES_HALF_RE = re.compile(r"'\s*-?\s*$")
+_INCH_CONTINUATION_RE = re.compile(r"\s*-?\s*\d")
+# Ranges (N19): ``4-6 in``, ``4 - 6 in``, ``65-75°F``. The hyphen is tight or
+# spaced on both sides: a lopsided ``4 -6 in`` is a sign on the 6. A mixed number
+# is read first (``2-1/2`` is two and a half, never 2 to 0.5), and a unit on the
+# first end (``12'-6"``) makes a feet-inches join, not a range.
+_RANGE_TAIL_RE = re.compile(r"(?:-|\s+-\s+)(?P<hi>" + _PLAIN_NUMBER + r")")
+# Compact electrical units (N19). ``480V`` is a voltage in every set, so a
+# compact ``V`` (``VAC`` and ``VDC`` kept apart) reads wherever it stands against
+# a number, except in a slope ratio (``3H:1V``). ``A`` is different: ``20A`` is a
+# breaker rating, but ``room 101A``, ``grid 2A``, ``keynote 3A`` and ``panel 2A``
+# are names. Under the disjoint-set rule one shared value makes two findings
+# compatible (N1), so reading a room number as a current would do more than block
+# a merge: two findings about room 101A would share ``101amp``, and a 6 in / 4 in
+# conflict between them would merge. So a compact ``A`` needs electrical context:
+# a rating label right before it (``MCA 18.2A``, ``MOCP: 25A``), or, unless a name
+# precedes the number (``panel 2A breaker``), a pole count or an overcurrent
+# device right after it (``20A/1P``, ``20A-2P``, ``20A breaker``, ``30A fused
+# disconnect``, ``200A MLO``). The spelled-out ``20 amp`` / ``20-amp`` needs none.
+_AMP_RATING_BEFORE_RE = re.compile(
+    r"\b(?:mca|mocp|mop|fla|rla|ocpd|breaker|bkr|cb|fuses?)\s*[:=]?\s*$", re.IGNORECASE,
+)
+_NAME_BEFORE_RE = re.compile(
+    r"\b(?:panel|panelboard|pnl|room|rm|grid|gridline|line|col|column|level|lvl|floor|"
+    r"flr|type|detail|dtl|keynote|note|sheet|unit|area|zone|suite|bay|space|circuit|"
+    r"ckt)\.?\s*[:#]?\s*$",
+    re.IGNORECASE,
+)
+_AMP_POLE_OR_DEVICE_AFTER_RE = re.compile(
+    r"\s?(?:[/-]\s?)?[1-4]\s?-?\s?p(?:ole)?\b"
+    r"|\s?-?\s?(?:breakers?|bkr|cb|fuses?|fused|non-fused|disconnects?|mcb|mlo|ocpd)\b",
+    re.IGNORECASE,
+)
+_CONTEXT_WINDOW = 16
 # Strong "absence / not-present" phrasing — an absence finding contradicts a finding
 # about the same thing being present. Symmetric across channels: the digest's
 # "should be provided" and the critique's "not found" both read as an absence.
@@ -719,15 +836,164 @@ def _meas_value(raw: str) -> str:
         return re.sub(r"\s+", "", s)
 
 
-def _measurements(f: Finding) -> set[str]:
+def _canonical_unit(unit: re.Match) -> str:
+    if unit.group("deg") is not None or unit.group("deg_word") is not None:
+        scale = unit.group("tight") or unit.group("spaced") or unit.group("scale") or ""
+        return "°" + scale[:1].lower()
+    if unit.group("volt") is not None:
+        volt = unit.group("volt").lower()
+        return "volt" if volt == "v" else volt
+    if unit.group("amp") is not None:
+        return "amp"
+    raw = (unit.group("alpha") or unit.group("sym")).lower()
+    return _UNIT_SYNONYM.get(raw, raw)
+
+
+def _unit_context_ok(text: str, start: int, unit: re.Match) -> bool:
+    """Whether a compact ``A`` / ``V`` against the number at ``start`` is a unit."""
+    if unit.group("amp") is not None:
+        before = text[max(0, start - _CONTEXT_WINDOW):start]
+        if _AMP_RATING_BEFORE_RE.search(before):
+            return True
+        if _NAME_BEFORE_RE.search(before):
+            return False
+        return _AMP_POLE_OR_DEVICE_AFTER_RE.match(text, unit.end()) is not None
+    if unit.group("volt") is not None:
+        return not (text[start - 1:start] == ":" or text[unit.end():unit.end() + 1] == ":")
+    return True
+
+
+def _plain_value(raw: str) -> str:
+    """One number's VALUE, with a valid thousands grouping read as one number (B3)."""
+    return _meas_value(raw.replace(",", "") if _THOUSANDS_RE.fullmatch(raw) else raw)
+
+
+def _size_token(text: str, start: int, first: str, size: re.Match) -> str | None:
+    """The W×H token, or ``None`` when the shape is not a size (see ``_SIZE_UNIT``)."""
+    if _INCHES_HALF_RE.search(text[max(0, start - _CONTEXT_WINDOW):start]):
+        return None
+    if _UNIT_RE.match(text, size.end()) is not None:
+        return None
+    units = set()
+    for group in ("u1", "u2", "u3"):
+        raw = re.sub(r"[\s-]+", "", size.group(group) or "").lower()
+        if raw:
+            units.add(_UNIT_SYNONYM.get(raw, raw))
+    if len(units) > 1:
+        return None
+    unit = units.pop() if units else ""
+    if unit == "ft" and _INCH_CONTINUATION_RE.match(text, size.end()):
+        return None
+    dims = [first, size.group("d2")] + ([size.group("d3")] if size.group("d3") else [])
+    return "x".join(_plain_value(d) for d in dims) + unit
+
+
+def _range_value(lo_raw: str, hi_raw: str) -> str:
+    """A range's value, low end first; an unreadable end keeps the written order."""
+    lo, hi = _meas_value(lo_raw), _plain_value(hi_raw)
+    try:
+        if Decimal(hi) < Decimal(lo):
+            lo, hi = hi, lo
+    except (InvalidOperation, ValueError):
+        pass
+    return f"{lo}..{hi}"
+
+
+def _read_quantity(text: str, m: re.Match) -> tuple[str | None, int, int | None]:
+    """The token for the number ``m`` found (or ``None``), where to resume, and
+    where a rejected W×H candidate's next dimension starts (or ``None``).
+
+    Scanning resumes past the whole quantity, never inside it, so its parts are
+    never read again on their own: the ``500`` in ``12,500``, the ``12`` in
+    ``24x12``, the ``6`` in ``4-6``. The exception is a W×H candidate that is
+    not a size (``6"x12'``, ``4x25 gpm``). Its next dimension is a quantity of
+    its own, and it follows an ``x`` a number may not start after, so it is
+    handed back to be read where it stands; otherwise ``12ft`` and ``25gpm``
+    would be lost.
+    """
+    start, end, sign = m.start(), m.end(), m.group("sign")
+    kind = next(k for k in _NUMBER_KINDS if m.group(k) is not None)
+    raw = m.group(kind)
+    if kind == "run" and _THOUSANDS_RE.fullmatch(raw):
+        kind, raw = "dec", raw.replace(",", "")
+    tail = None
+    if kind in ("dec", "mixed", "frac") and not sign:
+        size = _SIZE_TAIL_RE.match(text, end)
+        if size is not None:
+            token = _size_token(text, start, raw, size)
+            if token is not None:
+                return token, size.end(), None
+            tail = size.start("d2")
+    token, resume = _read_one(text, start, end, sign, kind, raw)
+    return token, resume, tail
+
+
+def _read_one(
+    text: str, start: int, end: int, sign: str, kind: str, raw: str
+) -> tuple[str | None, int]:
+    """One number's token, a range or a value with its unit, and where it ends."""
+    if kind in ("dec", "mixed", "frac"):
+        rng = _RANGE_TAIL_RE.match(text, end)
+        if rng is not None:
+            unit = _UNIT_RE.match(text, rng.end())
+            if unit is None:
+                return None, rng.end()
+            if not _unit_context_ok(text, start, unit):
+                return None, unit.end()
+            value = _range_value(sign + raw, rng.group("hi"))
+            return value + _canonical_unit(unit), unit.end()
+    unit = _UNIT_RE.match(text, end)
+    if unit is None:
+        return None, end
+    if not _unit_context_ok(text, start, unit):
+        return None, unit.end()
+    canonical = _canonical_unit(unit)
+    if kind == "vpair" or (kind == "frac" and canonical in _VOLT_UNITS):
+        # A slash between two voltages is a system (``120/208V``), not the
+        # fraction 120/208; ``480Y/277V`` names the same kind of pair.
+        if canonical not in _VOLT_UNITS:
+            return None, unit.end()
+        lo, hi = sorted(int(v) for v in re.split(r"\s*[Yy]?\s*/\s*", raw))
+        return f"{lo}/{hi}{canonical}", unit.end()
+    if kind == "run":
+        # Not one number (``2,4,6``, ``1,2,500``): kept whole, never its
+        # trailing fragment and never a guess at the grouping it missed.
+        value = ",".join(_meas_value(g) for g in (sign + raw).split(","))
+    else:
+        # The VALUE, not the digits as written, so "2 1/2" == "2-1/2" == "2.5".
+        value = _meas_value(sign + raw)
+    return value + canonical, unit.end()
+
+
+@functools.lru_cache(maxsize=4096)
+def _quantity_tokens(text: str) -> frozenset[str]:
+    """Every measurement token in ``text``, in the representation described above.
+
+    Memoized on the text itself, which is the whole input, so a hit can never be
+    stale. The ledger's complete-link dedup recomputes a finding's signature
+    against every candidate (about 44 times per finding when a 1,800-finding set
+    was measured). Uncached, this scanner made that ingest slower than the single
+    regex it replaced (1.9 s against 1.4 s); cached, it is faster (0.9 s).
+    """
     out: set[str] = set()
-    for m in _MEAS_RE.finditer(_sig_text(f)):
-        # The VALUE, not the digits as written, so "2 1/2" == "2-1/2" == "2.5";
-        # the UNIT is part of the signature so "6 in" != "6 ft".
-        num = _meas_value(m.group(1))
-        unit = re.sub(r"\s+", "", m.group(2)).lower()
-        out.add(num + _UNIT_SYNONYM.get(unit, unit))
-    return out
+    pos, tail = 0, None
+    while True:
+        m = _NUMBER_AT_RE.match(text, tail) if tail is not None else None
+        if m is None:
+            m = _NUMBER_RE.search(text, pos)
+        if m is None:
+            return frozenset(out)
+        token, end, tail = _read_quantity(text, m)
+        if token is not None:
+            out.add(token)
+        pos = max(end, m.end())
+        if tail is not None and tail < pos:
+            tail = None
+
+
+def _measurements(f: Finding) -> set[str]:
+    # The UNIT is part of the signature, so "6 in" != "6 ft".
+    return set(_quantity_tokens(_sig_text(f)))
 
 
 def _is_absence(f: Finding) -> bool:
@@ -1481,8 +1747,8 @@ def critique_sheet_self_consistent(
             runs=runs,
             sheet_text=rendered.sheet_text,
             profiles_key=profiles_cache_fragment(profiles or []),
-            # Only set when the read actually carried the schema, so a fenced
-            # run's key stays byte-identical to every key written before F-01.
+            # Only set when the read actually carried the schema, so the
+            # feature adds nothing to a fenced run's key.
             structured_key=CRITIQUE_STRUCTURED_PROMPT_VERSION if structured else None,
         )
 

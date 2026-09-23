@@ -83,8 +83,29 @@ from typing import Any, Iterator
 # separates is already collapsed and unrecoverable, and a pair it would now join
 # is stored as two. Cannot be re-derived in place and must miss once and be
 # re-critiqued rather than served as current. Same reasoning as the v6 and v9
-# parser rebuilds, which are the precedent this follows.
+# parser rebuilds, which are the precedent this follows. A later change to the
+# merge rule bumps ``_CRITIQUE_CACHE_CONTRACT`` below instead: this version feeds
+# every key builder, so v10 re-billed every digest to invalidate critiques.
 _SCHEMA_VERSION = 10
+
+# The critique cache's own contract, folded into BOTH critique key builders and
+# into nothing else. A critique entry stores the POST-MERGE findings of its reads
+# (``critique.critique_cache_entry_from_result``), so the host's merge rule
+# (``critique.critical_signature``, ``signatures_compatible``, ``_is_duplicate``)
+# is part of what a stored critique means, exactly as the prompt is. A change to
+# that rule bumps this, and only this: it invalidates the critique namespace and
+# leaves every digest, identity, plan, citation and investigation entry alone
+# (plan §2 rule 6). It rides both levels for the reason ``structured_key`` does:
+# level 1 is probed before rendering and answers first, so a term on level 2
+# alone would change nothing on a warm run. ``tests/test_drawing_cache_identity.py``
+# pins the merge rule to this value.
+#
+# 1 (remediation WP-04.1): the quantity tokenizer behind ``critical_signature``
+#   reads hyphenated units, thousands groups, degree spellings, W×H sizes,
+#   compact volts and amps, ranges and lists. An entry written before it (keyed
+#   with no term) holds merges the new tokenizer would not make, so it misses
+#   once and is re-critiqued. It is left on disk, never deleted.
+_CRITIQUE_CACHE_CONTRACT = 1
 
 # Storage format and concurrency settings are intentionally separate from the
 # content schema above.  ``_SCHEMA_VERSION`` invalidates cached model results;
@@ -289,11 +310,16 @@ def critique_cache_key_level1(
     be served after the option was switched back off. Separating only the
     level-2 key closes neither case, because level 1 answers first and a hit
     there means level 2 is never consulted.
+
+    ``_CRITIQUE_CACHE_CONTRACT`` is folded here and in :func:`critique_cache_key`
+    unconditionally, from the module, never passed by a caller, so the probe and
+    the store cannot disagree about which merge rule an entry was produced under.
     """
     h = hashlib.sha256()
     for part in (
         f"schema={_SCHEMA_VERSION}",
         "stage=critique",
+        f"critique_contract={_CRITIQUE_CACHE_CONTRACT}",
         "level=1",
         f"model={model or ''}",
         f"prompt={prompt_version or ''}",
@@ -348,8 +374,9 @@ def critique_cache_key(
     ``profiles_key`` (Phase 12) is the fingerprint of the review profiles injected
     into the critique prompt (:func:`drawing_analyzer.profiles.profiles_cache_fragment`
     — sorted ``name@version@hash`` triples). Folded in **only when non-empty**, so
-    a no-profiles critique key stays byte-identical to a pre-profiles one (existing
-    entries valid), while selecting a profile — or editing one — re-critiques.
+    selecting no profile adds nothing to the key (when profiles were introduced,
+    every existing entry stayed valid), while selecting a profile — or editing
+    one — re-critiques.
 
     ``structured_key`` (F-01) is
     :data:`drawing_analyzer.critique.CRITIQUE_STRUCTURED_PROMPT_VERSION` when the
@@ -357,17 +384,23 @@ def critique_cache_key(
     exists because a structured read is a genuinely different request — a
     different findings instruction and a schema the model decoded against — and
     must not be served to, or from, a fenced run. Folded in on the same
-    only-when-set rule as ``profiles_key``, which is what lets this land with NO
-    ``_SCHEMA_VERSION`` bump: every existing entry was written without it, every
-    fenced run still computes the pre-F-01 key byte-for-byte, and nothing already
-    paid for is discarded. Turning the feature on adds entries beside the old
-    ones rather than replacing them, so flipping it back and forth costs one
-    re-read each way instead of invalidating both sides.
+    only-when-set rule as ``profiles_key``, which is what let it land with NO
+    ``_SCHEMA_VERSION`` bump: every existing entry had been written without it,
+    a fenced run kept computing its pre-F-01 key byte-for-byte, and nothing
+    already paid for was discarded. Turning the feature on adds entries beside
+    the old ones rather than replacing them, so flipping it back and forth costs
+    one re-read each way instead of invalidating both sides.
+
+    ``_CRITIQUE_CACHE_CONTRACT`` versions the host merge rule the stored
+    findings were produced under (see its definition). It is folded on every
+    call, unlike ``profiles_key`` and ``structured_key``: its whole purpose is
+    to make every entry written under an older rule miss.
     """
     h = hashlib.sha256()
     for part in (
         f"schema={_SCHEMA_VERSION}",
         "stage=critique",
+        f"critique_contract={_CRITIQUE_CACHE_CONTRACT}",
         f"model={model or ''}",
         f"prompt={prompt_version or ''}",
         f"max_tokens={int(max_tokens)}",
