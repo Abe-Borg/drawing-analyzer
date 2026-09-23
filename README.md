@@ -1025,7 +1025,7 @@ finding status:
 | `VERIFIED` | verifier `CONFIRMED` | the crop shows the finding is correct |
 | `REJECTED` | verifier `CONTRADICTED` | the crop shows the finding is wrong — pulled from the ink and listed in the index's *Rejected by verification* section (grey struck ink only with `ink_rejected=True`) |
 | `UNCERTAIN` | verifier `NOT_VISIBLE` (or a garbled reply) | can't be decided from this crop (e.g. it depends on another sheet) — a perfectly fine outcome |
-| `DETERMINISTIC` | the offline auditors | trusted without a model re-check (references, naming, title-block, sheet-index; arithmetic **only** when the claim's quote is found on its own sheet and the sheet prints every operand there, once per use — any other mismatch is `UNCERTAIN` and crop-verified) |
+| `DETERMINISTIC` | the offline auditors | trusted without a model re-check (references, naming, title-block, sheet-index; arithmetic **only** when the claim's quote is found on its own sheet, the sheet prints every operand there, once per use (a tag's digits never count), and it states the claim's operation with those operands and that result — any other mismatch is `UNCERTAIN` and crop-verified) |
 | `SKIPPED` | — | nothing to look at (unanchored), no crop, or the pass was unavailable (no key) |
 
 The pass is additive and non-fatal: crops render sequentially (PyMuPDF is not
@@ -1733,7 +1733,20 @@ model's quote:
 - a number counts only where **both** the model's quote and the sheet's own
   words at that spot print it. A quote that starts in the middle of `2-1/2"`
   reads a `1/2` the sheet never printed, and the sheet's words alone can read
-  more than the model offered as evidence.
+  more than the model offered as evidence;
+- the digits of a tag or a sheet number are never a number: `FP101`, `M-101`,
+  `AHU-2` and `A1.01` supply no operand, and the hyphen in `P-3` is never a
+  minus sign;
+- the sheet must **state the relationship** the claim checks, in the quote and
+  in its own words at that spot: one equation whose result (the first number
+  after `=` or TOTAL) is the stated value, whose operands are exactly the
+  claim's terms, and whose operators are all `+` for a sum, or all `x`, `×` or
+  `*` for a product. A list with no operator counts as a sum only with TOTAL
+  (`20 20 20 TOTAL 540`). So a correct product `20 x 2 = 40` that the model
+  transcribed as a sum, a total swapped in among the terms
+  (`A 100 B 250 TOTAL 375` read as `100 + 375 = 250`), an operand left out of
+  a correct row, and a correct subtraction are not trusted. The host reads the
+  roles from the printed layout; the model is never asked for them.
 
 When any of that fails (the common case being a column sum whose addends live in
 a table the quote only summarizes), the operands count as transcribed by the
@@ -1742,10 +1755,14 @@ it inks as ground truth. Until remediation WP-07.1 (review N3) the check was
 whether each operand appeared anywhere in the model's quote, so a correct
 `20 + 20 = 40` that the model transcribed as `20 + 20 + 20` got a high-severity
 "Math checked by computer from the sheet's own printed numbers" mismatch, and so
-did a quote the sheet does not contain or a claim on no sheet at all. The check
-does not yet look at the operation itself or at which number plays which part
-(a sum read as a product, two terms swapped), nor at digits inside tags and
-sheet numbers (`FP101`); that is the next remediation slice. The popup states which ("host-computed from model-transcribed
+did a quote the sheet does not contain or a claim on no sheet at all. Until
+remediation WP-07.2 (review A8) the check did not look at the operation or at
+which number plays which part, and read the `101` in `SEE FP101 TOTAL 540` as a
+printed number, so each of those shapes was trusted too. The rule is
+conservative on purpose: a row that prints a label's number among its operands
+(`RISER 3: 20 20 20 TOTAL 540`), an operation written with a symbol the host
+does not read as one (`3 @ 250 CFM = 800 CFM`), or an `=` with no operator
+between the operands is not trusted, and costs one crop check. The popup states which ("host-computed from model-transcribed
 terms"), and it keeps saying so **after** the crop check: verification and the
 investigation loop replace the verdict, never the provenance behind it. A
 `VERIFIED` crop means a verifier looked at the drawing — it does not turn numbers
@@ -1762,7 +1779,14 @@ appeared literally in the quote, the claim *cleared* the independent-validation
 gate and inked a HIGH-severity *"the product of 1500, 30 is 45000"* wearing the
 host's label. A separator only disqualifies when it is **tight**, so an ordinary
 operand list (`0.5, 1.5, TOTAL 2.0`) keeps every term while the compact malformed
-forms (`12,5`, `10,20`) stay rejected. The quote scanner applies the identical
+forms (`12,5`, `10,20`) stay rejected. Letters after a number are its unit
+(`20A`, `150GPM`, `0.20 gpm/ft²` all read as numbers) unless more digits follow
+them: `24x12` is a duct size, `2P20A` a breaker, and **scientific notation is
+refused, not read** (`1e3` used to read as 1, so `1e3 + 500 = 1600` became "the
+sum of 1, 500 is 501"; on a drawing `2E1` is as likely a panel as an exponent).
+The same goes for a number glued to a Unicode dash, a fraction slash or a
+vulgar fraction (`2½"` is not 2). An ASCII-squared `100m2` is refused as well,
+the accepted cost of that rule. The quote scanner applies the identical
 rule, so the two can never disagree about what a number is — and one claim the
 host cannot compute or print no longer costs the run every other claim's
 arithmetic.

@@ -48,6 +48,68 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Tag digits, `1e3` and the wrong operation could still make a trusted
+  arithmetic mismatch (remediation WP-07.2; A8).** After WP-07.1 a mismatch was
+  trusted as ground truth (`DETERMINISTIC`, never crop-checked, labelled "Math
+  checked by computer from the sheet's own printed numbers") when the sheet
+  printed every number the model transcribed. Two gaps remained:
+  - **numbers that are not one value.** The digits of a tag or sheet number
+    counted as printed numbers (`SEE FP101 TOTAL 540 AT 439 GPM` "printed" a
+    101, so `101 + 540 = 439` was trusted), a hyphen after a letter was read as
+    a minus sign (`M-101 P-3 AHU-2` printed -101, -3 and -2), and scientific
+    notation was cut short (`1e3` read as 1, so `1e3 + 500 = 1600` became "the
+    sum of 1, 500 is 501");
+  - **the relationship was never checked.** A correct product `20 x 2 = 40`
+    transcribed as a sum became "the sum of 20, 2 is 22, but the sheet states
+    40", and `A 100 B 250 TOTAL 375` read as `100 + 375 = 250` was trusted
+    although the row checks out.
+
+  Now, decided with the owner (see the WP-07.2 handoff in
+  `_plans/PROGRESS.md`):
+  - digits glued after a letter, with or without a hyphen (`FP101`, `M-101`,
+    `AHU-2`, `A1.01`), are never a number, and a hyphen after a letter is never
+    a minus sign. Letters after a number are still its unit (`20A`, `150GPM`,
+    `0.20 gpm/ft²`) unless more digits follow them: `24x12`, `2P20A`, `10A1`,
+    `100m2` and `1e3` are not one value. Scientific notation is refused, never
+    read. A number glued to a Unicode dash, a fraction slash or a vulgar
+    fraction (`2½"`) is refused the same way;
+  - a mismatch is trusted only when the model's quote and the sheet's own words
+    at that spot each print the claim as one equation: the stated value is the
+    first number after `=` or TOTAL, the numbers before it are exactly the
+    claim's terms, and they are joined all by `+` (a sum) or all by `x`, `×`
+    or `*` (a product). A list with no operator counts as a sum only with
+    TOTAL, so a flow-test row `20 20 20 TOTAL 540` is still trusted. Nothing
+    was added to what the model is asked for: the host reads the operation and
+    the roles from the printed layout.
+
+  **Visible effect:** a mismatch whose operand is a tag's digits, whose
+  operation or roles the sheet does not state (a product read as a sum, a total
+  swapped into the terms, an operand left out of a correct row, a subtraction,
+  an operator the host does not read such as `@`, or a label's number among
+  the operands, as in `RISER 3: 20 20 20 TOTAL 540`) is now `UNCERTAIN` with
+  the "re-check the math" caveat, instead of a computer-checked fact. On an
+  exhaustive run each such mismatch whose quote was found on the sheet costs
+  one crop-verification call (and an investigation if the crop cannot settle
+  it); verified-only mode no longer inks it unless the verifier confirms it;
+  where no verifier ran the report shows "Uncertain" instead of
+  "Deterministic". A claim with a term spelled like `1e3` or `24x12` is now
+  counted as unchecked (`arithmetic_unusable`) instead of producing a finding
+  built on a truncated number, so the "N numeric relationships checked" line
+  can read lower. No finding that is still produced changes its text,
+  severity, id or number: every change only refuses a number, never reads a
+  different one.
+
+  **Cache:** no key, prompt, claims contract or schema changed, and no
+  finding id moved, so no investigation, verification, critique or cross-QC
+  entry is re-keyed. Critique and cross-QC entries store the model's raw
+  claims, and the new rules apply when they are read. One narrow residual is
+  recorded in `_plans/DECISIONS.md`: an entry stored before this change may
+  have merged two transcriptions of one quote that differed only by a spelling
+  now refused (`"1e3"` and `1`), so a warm run checks the one it kept.
+
+  **Not in this change:** arithmetic counters split by provenance and
+  contradictory transcriptions of one quote (N18, WP-07.3).
+
 - **A correct equation got a "computer-checked" arithmetic mismatch
   (remediation WP-07.1; N3).** The arithmetic auditor does the math the model
   transcribes, and trusts a mismatch as ground truth (`DETERMINISTIC`: never
@@ -98,7 +160,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   **Not in this change:** checking the operation and which number plays which
   part (a sum read as a product, two terms swapped), and digits inside tags,
-  sheet numbers and `1e3` (A8, WP-07.2); arithmetic counters split by
+  sheet numbers and `1e3` (A8, WP-07.2, now done: the entry above); arithmetic counters split by
   provenance and contradictory transcriptions of one quote (N18, WP-07.3).
 
 - **Two different issues that quote one tag became one finding once anchored

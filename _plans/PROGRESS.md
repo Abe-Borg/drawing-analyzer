@@ -1,7 +1,7 @@
 # Remediation progress tracker
 
-**Next up:** Wave 1 in order: `WP-07.2` (A8), which depends only on WP-07.1. WP-07.1 is done: an arithmetic mismatch is trusted (DETERMINISTIC) only when its claim resolved to a sheet, its quote anchored there EXACT or by a numerically vetoed FUZZY match, and the terms and the stated value each have their own printed number where both the quote and the sheet's words print it (N3; the three rule choices were the owner's). WP-07 is not done: WP-07.2 (strict tokens, relationships) and WP-07.3 (counters, N18) remain. WP-03 is not done: WP-03.4, WP-03.5 and WP-03.6 remain (Wave 2). WP-04 is not done: its acceptance needs quantity roles, slice `WP-04.3` (Wave 2). First check the open PRs ([`README.md`](README.md), step 1). Before the next stable tag, the owner should look at O-5.
-**Last updated:** 2026-09-23 by the WP-07.1 session ([PR #163](https://github.com/Abe-Borg/drawing-analyzer/pull/163)).
+**Next up:** Wave 1 in order: `WP-05.1` (B5, N12 cross-QC part, N13), which has no dependencies. WP-07.2 is done: an arithmetic mismatch is trusted only when its operands are one-value tokens the sheet prints (a tag's digits never count, a hyphen after a letter is never a minus sign, `1e3` is refused) and the quote and the sheet's words each state the claim's operation with its terms as the operands and its value as the result (A8; the three rule choices were the owner's). WP-07 is not done: WP-07.3 (counters, N18; Wave 2) remains and is now available. WP-03 is not done: WP-03.4, WP-03.5 and WP-03.6 remain (Wave 2). WP-04 is not done: its acceptance needs quantity roles, slice `WP-04.3` (Wave 2). First check the open PRs ([`README.md`](README.md), step 1). Before the next stable tag, the owner should look at O-5.
+**Last updated:** 2026-09-23 by the WP-07.2 session ([PR #164](https://github.com/Abe-Borg/drawing-analyzer/pull/164)).
 
 This file is authoritative for **status and order**. Requirements live in
 [`drawing-analyzer-remediation-plan.md`](drawing-analyzer-remediation-plan.md).
@@ -107,7 +107,7 @@ starting.
 | WP-03.3 | Remove the auditor coordinator's id dedup; arithmetic claim discriminator so the ledger keeps two different same-row mismatches; Decimal claim-dedup keys (B7) | S/M | — | done | [PR #161](https://github.com/Abe-Borg/drawing-analyzer/pull/161), 2026-09-23. `run_auditors` dedups nothing (the ledger decides); `audit_titleblock` keys its two-path dedup on (sheet, quote). `Finding.claim_discriminator` (additive, serialized only when set), set by the arithmetic auditor from `arithmetic.claim_content_key` (host operation, terms as a multiset of exact decimals, stated value; scheme `arithmetic/1`). `critique._claims_differ` refuses a merge when both findings carry one and they disagree, before every accepting branch of `_is_duplicate` (so Pass A and Pass B); it is folded into `id` (`compute_finding_id`'s last argument, only when non-empty) and rides the representative's bundle. All three claim dedups (arithmetic, critique, cross-QC) share `claim_content_key`. Merge-rule fingerprint unchanged; one migration-register row re-keys arithmetic investigations. Tests: `tests/test_arithmetic_claim_discriminator.py` |
 | WP-03.7 | The geometry branch folds two different issues that quote one tag (N28): decide what, besides a shared quote and an overlapping rectangle, may fold two findings, and apply it in both passes | S/M | WP-03.3 | done | [PR #162](https://github.com/Abe-Borg/drawing-analyzer/pull/162), 2026-09-23. **Decided by the owner (option a):** the geometry branch of `critique._is_duplicate` is removed, in both passes; the predicate reads no rectangle (D-3 input in `DECISIONS.md`). A rectangle is resolved from the finding's own quote, so "equal quote + overlapping rect" was the quote-alone merge. Measured before deciding (instrumented full suite): the branch decided 10 folds, all in 6 synthetic tests (gauntlet and pipeline fixtures: none); a claim discriminator for model findings could not separate the pair host-side (both sign as `{tags: [P1]}`) and a model-emitted one re-bills every digest and critique; a shared-word rule was a threshold at one word. Pass B now folds nothing Pass A refused (zero folds over the suite). The `CO-1` same-spot paraphrase stays two findings (the decided cost; retention pinned). Merge-rule ratchet unchanged (`63dbfe17…`, critique contract 2); no cache or key change. Tests: `tests/test_position_is_not_sameness.py` (incl. the pipeline-level pair); flipped: the N28 recorded limit, the `CO-1` fold, the Pass B omit fold; the K5 lifecycle now asserts its numbers |
 | WP-07.1 | Occurrence-aware, sheet-grounded operand support; provenance decided after anchoring; a fabricated quote or unresolved sheet is never DETERMINISTIC (N3) | M | — | done | [PR #163](https://github.com/Abe-Borg/drawing-analyzer/pull/163), 2026-09-23. **Rule decided with the owner (three choices, measured first):** a mismatch is TEXT_EXTRACTED / DETERMINISTIC only when the claim resolved to a sheet, its quote anchored there EXACT or FUZZY by a numerically vetoed method (`anchor.numbers_grounded`, fail-closed on method; never TILE or UNANCHORED), and the terms and the stated value together fit, one occurrence each, the numbers that both the quote and the sheet's words under the matched span print (`arithmetic._operands_grounded`, per value the smaller count; `anchor.resolve_anchors(matched_text=)`). Every mismatch is built MODEL_TRANSCRIBED and promoted after the auditor's own anchoring pass; a failure while deciding, or anchoring one sheet, leaves it UNCERTAIN. Ids, text, severity and the verification note's wording are unchanged; no cache or key effect. Tests: `tests/test_arithmetic_operand_grounding.py`; the three pinned `audit_arithmetic(..., [])` tests re-baselined with sheet words |
-| WP-07.2 | Strict numeric tokens (tag and sheet-id digits, hyphen-as-minus, `1e3`) and host-side relationship checks (A8) | M | WP-07.1 | todo | From WP-07.1: operands are counted by `arithmetic._operands_grounded` over `_numbers_in_text` of BOTH the quote and the sheet's matched words (`anchor.resolve_anchors(matched_text=)`), so a stricter scanner applies to both sides at once; keep the scanner/parser agreement test. A grounded claim can still name the wrong operation: `20 × 2 = 40` transcribed as `sum [20, 2] = 40` prints every operand once, so it is a DETERMINISTIC "the sum of 20, 2 is 22" mismatch on a correct product. That, and swapped roles, is this slice's relationship check. Relationship checks stay host-side (plan WP-07 step 4) |
+| WP-07.2 | Strict numeric tokens (tag and sheet-id digits, hyphen-as-minus, `1e3`) and host-side relationship checks (A8) | M | WP-07.1 | done | [PR #164](https://github.com/Abe-Borg/drawing-analyzer/pull/164), 2026-09-23. **Rules decided with the owner (three choices, measured first):** (1) scientific notation is rejected (`1e3`, `2.5e-2`, `2E1` are not one value; a term spelled that way makes its claim unusable); (2) digits glued after a letter, with or without a hyphen, are a tag's (`FP101`, `M-101`, `AHU-2`, `A1.01`) and a hyphen after a letter is never a minus sign; letters after a number are its unit (`20A`, `150GPM`) unless digits follow them directly (`24x12`, `2P20A`, `10A1`, `100m2`: refused), in `parse_number` (`_NUMERIC_TAIL_RE`) and the scanner (`_head_denies`) alike, with Unicode dashes, the fraction slash, `×` between digits and glued vulgar fractions refused the same way; (3) `arithmetic._relationship_grounded`: the quote AND the sheet's words under the span each print the claim as one equation (`_equations`: the result is the first number after `=` or TOTAL, the operands are exactly the terms, every join is `+` for a sum or `x`/`×`/`*` for a product; an operator-less list is a sum only with TOTAL). Every change only refuses, so no surviving finding's text or id moves; no cache key changes (one stored-claims residual in the migration register). Tests: `tests/test_arithmetic_tokens_and_relationships.py`; no pinned test re-baselined |
 | WP-05.1 | Cross-QC grounding: a real match for every non-empty quote at word boundaries; no text means unavailable evidence; one normalizer shared with `anchor`; `_CROSS_QC_CACHE_CONTRACT` 3→4 (B5, N12 cross-QC part, N13) | M | — | todo | |
 | WP-05.2 | Anchor punctuation folding and a source-word-boundary rule (B4: `PSI,`, `NOTE 3:`, `(568 L/MIN)`; N12 anchor part: `VAV-2` in `VAV-2-1`) | M | — | todo | |
 | WP-06.1 | Cross-QC prompt says category `question` with severity `low`; invalid-field counters on both paths; candidate duplicates go to the ledger instead of being destroyed (B6, N2) | S/M | — | todo | |
@@ -138,10 +138,10 @@ starting.
 | WP-10.3 | Planner loss metadata stored with the plan; legacy entries report loss as unknown (K4) | S/M | WP-01.1 | todo | |
 | WP-10.4 | Cache map with the admission predicate of every write; N4 read-side migration completed; migration register filled (N4 cache part; WP-10 steps 1, 7, 9) | S/M | WP-01.2, WP-01.4 | todo | |
 | WP-03.4 | Versioned `claim_id` beside the existing `id`; the inventoried consumers switched; cross-QC and prose-harvest cache restores rebound; decides D-3 (B8 identity) | L | WP-03.2 | todo | From WP-03.2: `investigate._candidates`, `annotate._severity_first_key`, `_set_findings_outline`, `_annotate_units` and `tile_artifacts._finding_sort_key` sort by `qc_id` before `id`, and every entry is numbered, so in a run they follow the numbering now; their `id` fallback is reached only by an unnumbered finding. Three orders still follow arrival: `pipeline._run_critique_stage`'s pre-ingest sort `(source_page_key, id)` keeps thread-completion order among ties, which becomes ledger order; `findings.json` and `findings.csv` are written in ledger order (`ctx.findings + ctx.reference_findings`, split from `ledger.number()`'s arrival-ordered list); and the report table sorts by severity and status only (`html_report._key`, a stable sort), so ties keep ledger order. Sorting `entries` by `qc_id` after `ledger.number()` would put every row in QC order, a visible change to decide here. From WP-03.3: `Finding.claim_discriminator` exists (arithmetic only, folded into `id`); decide whether `claim_id` builds on it (D-3 records it as an input). The A/B harness's `identity_key` hashes quote-or-text, not the discriminator, so two mismatches on one row still share an A/B identity (`scripts/ab_findings_diff.py`, in this slice's consumer inventory) |
-| WP-03.5 | Lossless observations: upstream merges hand observations to the ledger; observations and alternative actions serialized (incl. critique cache); specificity-aware representative (B9, B1 rest, N29; N30's lost text) | L | WP-03.1, WP-03.4, WP-04.2 | todo | From WP-03.2 (N29): `_merge_into` compares an incoming member with the live survivor, whose severity an earlier merge may have raised, so with three or more duplicates the representative follows arrival order. Choose it from the members' own qualities (their snapshots), not the live survivor's, and flip `tests/test_qc_numbering_tiebreak.py::_N29_REPRESENTATIVE` to one representative in every order. From WP-03.1: flip `tests/test_pass_b_complete_link.py::_500_EXPORTED` ("500" leaves the exports in ABC/ACB/BAC, where the generic bridge wins A's bundle). Also hand the prose harvest's matched mirror to the ledger as an observation: `prose_harvest._process_free_pending` sets `also_on` on a live entry directly, so legs attached after that entry's first merge are in no member snapshot and Pass B's complete-link cannot see them (narrow since WP-03.1: Pass B folds such an entry only through a member anchored before ingest). From WP-03.7 (N30): the quote branch folds two different issues that share boilerplate wording ("pump P-1 impeller diameter conflicts with the curve" / "pump P-1 selected flow conflicts with the curve at 480", overlap 0.5, one quote), and the loser's text is lost; its observation is what must survive From WP-07.1: fewer arithmetic mismatches are DETERMINISTIC (only those whose operands the sheet prints where the quote anchors), so `_grounding_quality`'s first rank settles fewer merged entries. When an ungrounded auditor mismatch merges with a model twin, the representative falls to quote length and severity, and a twin that wins carries its own text and verdict into the entry (the auditor's `MODEL_TRANSCRIBED` provenance stays on its member snapshot only). Present before for model-transcribed mismatches; weigh it in the specificity-aware representative |
+| WP-03.5 | Lossless observations: upstream merges hand observations to the ledger; observations and alternative actions serialized (incl. critique cache); specificity-aware representative (B9, B1 rest, N29; N30's lost text) | L | WP-03.1, WP-03.4, WP-04.2 | todo | From WP-03.2 (N29): `_merge_into` compares an incoming member with the live survivor, whose severity an earlier merge may have raised, so with three or more duplicates the representative follows arrival order. Choose it from the members' own qualities (their snapshots), not the live survivor's, and flip `tests/test_qc_numbering_tiebreak.py::_N29_REPRESENTATIVE` to one representative in every order. From WP-03.1: flip `tests/test_pass_b_complete_link.py::_500_EXPORTED` ("500" leaves the exports in ABC/ACB/BAC, where the generic bridge wins A's bundle). Also hand the prose harvest's matched mirror to the ledger as an observation: `prose_harvest._process_free_pending` sets `also_on` on a live entry directly, so legs attached after that entry's first merge are in no member snapshot and Pass B's complete-link cannot see them (narrow since WP-03.1: Pass B folds such an entry only through a member anchored before ingest). From WP-03.7 (N30): the quote branch folds two different issues that share boilerplate wording ("pump P-1 impeller diameter conflicts with the curve" / "pump P-1 selected flow conflicts with the curve at 480", overlap 0.5, one quote), and the loser's text is lost; its observation is what must survive From WP-07.1 and WP-07.2: fewer arithmetic mismatches are DETERMINISTIC (only those whose operands the sheet prints where the quote anchors, as one-value tokens, in a relationship the sheet states), so `_grounding_quality`'s first rank settles fewer merged entries. When an ungrounded auditor mismatch merges with a model twin, the representative falls to quote length and severity, and a twin that wins carries its own text and verdict into the entry (the auditor's `MODEL_TRANSCRIBED` provenance stays on its member snapshot only). Present before for model-transcribed mismatches; weigh it in the specificity-aware representative |
 | WP-03.6 | Canonical final clustering over retained observations; per-observation anchors; idempotent reconciliation (WP-03 clustering clarification) | M/L | WP-03.5 | todo | From WP-03.1: flip `tests/test_pass_b_complete_link.py::_BRIDGE_JOINS` (which cluster the generic bridge joins follows arrival order) and `::test_recorded_limit_a_four_finding_chain_still_counts_by_arrival_order` (entry count 2 or 3 by order). From WP-03.7: the geometric recall WP-03.1 gave up does not come back. A rectangle is resolved from the quote, so it is evidence of where, never of which claim (D-3 input); per-observation anchors map evidence and must not merge two observations (`tests/test_pass_b_complete_link.py::test_a_same_spot_pair_never_folds_on_position`). Pass B now folds nothing Pass A refused, so canonical clustering may replace it rather than extend it |
 | WP-06.4 | Direction-free merge for reversed cross-sheet conflicts with a stated same-claim predicate (B10) | M | WP-03.4, WP-06.1 | todo | |
-| WP-07.3 | Truthful arithmetic counters split by provenance; contradictory transcriptions of one quote flagged (N18; WP-07 step 7) | S/M | WP-07.1, WP-03.3 | todo | From WP-03.3: the "claim dedup keys move to Decimals" part of WP-07 step 7 is done (`arithmetic.claim_content_key`, shared by all three claim dedups). Since WP-03.3 two contradictory mismatch transcriptions of one quote (different terms) are two findings, where the coordinator used to keep the first one silently; a contradictory pair where one read matches and the other does not still counts one matched and one mismatched (N18 as reproduced) |
+| WP-07.3 | Truthful arithmetic counters split by provenance; contradictory transcriptions of one quote flagged (N18; WP-07 step 7) | S/M | WP-07.1, WP-03.3 | todo | From WP-07.2: the matched path (`result.matched`) still checks neither provenance nor the relationship, so a claim whose operands or operation the sheet does not state still counts as "checked out OK"; and a claim with a refused term (`1e3`, `24x12`) now counts `unusable` instead of `checked`, so `arithmetic_checked` can read lower on the same claims. From WP-03.3: the "claim dedup keys move to Decimals" part of WP-07 step 7 is done (`arithmetic.claim_content_key`, shared by all three claim dedups). Since WP-03.3 two contradictory mismatch transcriptions of one quote (different terms) are two findings, where the coordinator used to keep the first one silently; a contradictory pair where one read matches and the other does not still counts one matched and one mismatched (N18 as reproduced) |
 | WP-11.3 | Source revision checked on every reopen (verify, investigate, markup) (R1 revision part) | M | WP-11.1 | todo | |
 
 ### Wave 3 — P1 evidence quality: auditors, citations, investigation
@@ -199,7 +199,7 @@ starting.
 | WP-21.1 | Markup plan rebuilt from worker receipts by `placement_id`; serial and process-pool manifests agree (R5) | S | — | todo | |
 | WP-21.2 | Repeat grouping recomputed after sort; cached search text with identical results; CLAUDE.md sentence fixed (H1, U18) | S/M | — | todo | |
 | WP-21.3 | Index and bookmark links go to the actual written destination (notes row rect); navigation keyed by `placement_id` (N9, B8 navigation) | M | WP-21.1 | todo | |
-| WP-21.4 | One display vocabulary: sheet-level observation, no quote, quote not found, not checked, inconclusive, failed attempt (H2) | M/L | WP-05.1, WP-05.2, WP-01.1 | todo | From WP-07.1: an arithmetic mismatch checked against model-transcribed operands is built `UNCERTAIN` before any verifier looks, so on a run with no verification (standard, audit-only) the report shows "Uncertain" ("a verifier looked and could not settle") where "Not checked" is the truth (`html_report._finding_display_status` reads only the status). Present since §17.5; more common since WP-07.1, which makes every ungrounded mismatch `UNCERTAIN`. Include it in the vocabulary (the popup's trust note is already right: `annotate._trust_note` reads `operand_origin` first) |
+| WP-21.4 | One display vocabulary: sheet-level observation, no quote, quote not found, not checked, inconclusive, failed attempt (H2) | M/L | WP-05.1, WP-05.2, WP-01.1 | todo | From WP-07.1: an arithmetic mismatch checked against model-transcribed operands is built `UNCERTAIN` before any verifier looks, so on a run with no verification (standard, audit-only) the report shows "Uncertain" ("a verifier looked and could not settle") where "Not checked" is the truth (`html_report._finding_display_status` reads only the status). Present since §17.5; more common since WP-07.1, which makes every ungrounded mismatch `UNCERTAIN`, and since WP-07.2, which does the same for a mismatch whose relationship the sheet does not state. Include it in the vocabulary (the popup's trust note is already right: `annotate._trust_note` reads `operand_origin` first) |
 | WP-20.1 | Exact calculator: full numeric grammar, BigInt rationals, bounds, `is_error: true`, no "guaranteed correct" wording (N7) | S/M | — | todo | |
 | WP-20.2 | Chat cost readout from final cumulative usage, cache-write TTL split and web-search charges (H3) | S/M | — | todo | |
 | WP-20.3 | Reader key and transcript storage policy validated in Chromium; in-memory where isolation cannot be shown (N26, U19) | S/M | — | todo | |
@@ -314,7 +314,7 @@ report is built from it).
 | A5 | Own sheet-id detection picks a bottom-right distractor | P1 | 08.4 | open | |
 | A6 | A note id displaces an FM sheet's own id (see also N17) | P1 | 08.4 | open | |
 | A7 | A prose sheet read as the drawing index | P1 | 08.5 | open | |
-| A8 | Tag/sheet-id digits count as operands; `1e3` → 1; hyphen read as minus | P0 | 07.2 | open | |
+| A8 | Tag/sheet-id digits count as operands; `1e3` → 1; hyphen read as minus | P0 | 07.2 | implemented+validated | `tests/test_arithmetic_tokens_and_relationships.py` (WP-07.2, [PR #164](https://github.com/Abe-Borg/drawing-analyzer/pull/164)): the review's `SEE FP101 TOTAL 540 AT 439 GPM` (`sum [101, 540] = 439` no longer trusted), `M-101 P-3 AHU-2` (no negatives, no numbers), `1e3`/`2.5e-2`/`1E+3`/`2E1` refused by the parser and the scanner (a claim with such a term is unusable), `24x12`, `2P20A`, `10A1`, `100m2`, Unicode dashes (pinned equal to the anchor's fold set), a fraction slash and a glued vulgar fraction refused, units still parsing (`20A`, `150GPM`, `0.20 gpm/ft²`, `6-INCH`), a per-token scanner/parser agreement table; the relationship: a product transcribed as a sum (`x`, `X`, `×`, `*`), a sum as a product, four role swaps, an operand left out of a correct row, a correct subtraction, no operator, an unknown symbol, a refused number between operands, mixed operators, a label's number among the operands, operands from two rows, no result marker, and an operator the quote states but the sheet does not (FUZZY); kept: 15 stated shapes incl. TOTAL rows, a running total and a tag label first, and a signed operand after a printed operator (`20 + -5`, `20 x +2`; the Codex review); ids, text and notes unchanged; verification eligibility, the trust note, `run_auditors`' tally, the critique and cross-QC dedups, a failure while checking one finding; and the pipeline sending two unstated relationships to the crop verifier while `TOTAL 100 + 250 = 375` stays DETERMINISTIC |
 | H1 | Sorting never recomputes repeat grouping (CLAUDE.md claims it does) | P2 | 21.2 | open | |
 | H2 | A quote-less sheet-level finding is branded "Unanchored" | P1 | 21.4 | open | |
 | H3 | Chat cost ignores final usage and web-search charges | P2 | 20.2 | open | |
@@ -327,7 +327,7 @@ report is built from it).
 | G6 | Installer hashed at download only, launched hours later | P1 | 24.1 | open | |
 | N1 | One shared value (`100 psi`, `12ft`) masks conflicting measurements | P0 | 04.2 | implemented+validated | `tests/test_quantity_signature.py` (the `N1 …` rows of `_CONFLICTS`, each asserted in the critique merge and the ledger; `_CORROBORATIONS`, `_NO_SHARED_QUANTITY`, `_CONSERVATIVE_RETENTION`, `_RECORDED_LIMITS`); `tests/test_signature_compatibility.py` (tags incl. sheet, grid and detail references; the per-kind table; complete-link in the critique merge, `Ledger.add` and Pass B; the rule never merges a pair the flat rule blocked); `tests/test_ab_findings_diff.py::test_a_conflict_beside_a_shared_value_is_never_an_exact_match` and `::test_a_second_tag_that_changed_is_never_an_exact_match` (WP-04.2, [PR #158](https://github.com/Abe-Borg/drawing-analyzer/pull/158)). Closes every conflict the signature can see. Still merged, as recorded limits: quantity roles (WP-04.3), a bare `12'` against `12'-6"`, and WP-04.1's partial signatures |
 | N2 | Cross-QC dedup destroys distinct claims sharing sheet/quote/legs | P0 | 06.1 | open | |
-| N3 | Reused operand membership (and fabricated quotes) give false DETERMINISTIC | P0 | 07.1 | implemented+validated | `tests/test_arithmetic_operand_grounding.py` (WP-07.1, [PR #163](https://github.com/Abe-Borg/drawing-analyzer/pull/163)): the review's `sum [20,20,20] = 40` on `20 + 20 = 40` and on `20 20 TOTAL 40`; a fabricated (UNANCHORED) quote; a quote printed only on another sheet; an unresolved sheet (id not in the set, and no sheets); the stated result reusing a term's number; a FUZZY quote that dropped a printed operand; a quote that starts inside `2-1/2"`; verification eligibility and the trust note; the pipeline sending the N3 mismatch to the crop verifier while the grounded one stays DETERMINISTIC; failures while anchoring or deciding leave it UNCERTAIN. Kept: repeated printed values, equal values in two spellings, a result printed in its own right, `exact_ambiguous`, a vetoed FUZZY anchor. Role swap, sum versus product and A8 stay open (WP-07.2) |
+| N3 | Reused operand membership (and fabricated quotes) give false DETERMINISTIC | P0 | 07.1 | implemented+validated | `tests/test_arithmetic_operand_grounding.py` (WP-07.1, [PR #163](https://github.com/Abe-Borg/drawing-analyzer/pull/163)): the review's `sum [20,20,20] = 40` on `20 + 20 = 40` and on `20 20 TOTAL 40`; a fabricated (UNANCHORED) quote; a quote printed only on another sheet; an unresolved sheet (id not in the set, and no sheets); the stated result reusing a term's number; a FUZZY quote that dropped a printed operand; a quote that starts inside `2-1/2"`; verification eligibility and the trust note; the pipeline sending the N3 mismatch to the crop verifier while the grounded one stays DETERMINISTIC; failures while anchoring or deciding leave it UNCERTAIN. Kept: repeated printed values, equal values in two spellings, a result printed in its own right, `exact_ambiguous`, a vetoed FUZZY anchor. Role swap, sum versus product and A8 were closed by WP-07.2 (A8 row) |
 | N4 | Refused/truncated digests and critiques accepted and cached | P0 | 01.2, 01.4, 10.4 | open (digest part implemented+validated in 01.2; the critique part (01.4) and the cache map (10.4) stay open) | `tests/test_digest_terminal_outcome.py` (both transports, both cache levels, the read-side reject, the warm re-run of a refusal the old code cached, the delivery contract) and `tests/test_drawing_acceptance.py::test_a_refused_or_unfinished_digest_holds_the_run_below_complete` (WP-01.2, [PR #156](https://github.com/Abe-Borg/drawing-analyzer/pull/156)). Remaining: the critique (WP-01.4: `critique.outcome_from_message`, and a critique-only contract term, since critique entries store no stop reason); the cache map and the other writers' admission predicates (WP-10.4) |
 | N5 | Verification COMPLETE with no judgments or with skipped items | P0 | 01.1 | implemented+validated | `tests/test_drawing_acceptance.py::test_verification_is_complete_only_when_every_eligible_finding_was_judged` (six of the plan's seven cases, plus all-truncated and all-skipped) and `::test_a_later_investigation_never_erases_the_verification_outcome` (the seventh); `tests/test_drawing_verify.py` completeness section (WP-01.1, [PR #155](https://github.com/Abe-Borg/drawing-analyzer/pull/155)) |
 | N6 | Duplicate sheet labels bind first-wins (whole-set, dedup, arithmetic, legs) | P1 | 06.2 | open | |
@@ -393,6 +393,274 @@ report is built from it).
 Each session adds one entry at the top: date, slices and IDs, PR, what changed,
 contracts decided, cache/schema effects, validation actually run (with counts),
 what could not be verified, risks, and next steps.
+
+### 2026-09-23 — WP-07.2: strict numeric tokens and a relationship the sheet states ([PR #164](https://github.com/Abe-Borg/drawing-analyzer/pull/164))
+
+- **Slice and IDs:** WP-07.2. A8 (implemented+validated); the N3 row now points
+  here for role swap and sum versus product. No `DECISIONS.md` contract is
+  decided (the arithmetic rules are none of D-1 … D-8); the owner's three
+  choices are recorded here, in the plan's WP-07 step 4 and step 5 notes and in
+  CLAUDE.md. D-4 gains a WP-07.2 note and the migration register one row (a
+  stored-claims residual, below). WP-07 is not done (WP-07.3 remains), so there
+  is no package acceptance check.
+- **Base.** `main` moved to `3e7fd78` after the request was written: the
+  Dependabot PRs #136 (CI actions) and #148 (`pydantic_core` 2.49.0,
+  `playwright` 1.63.0) merged. Neither touches product code; the baseline was
+  identical (below), and the browser tests ran under Playwright 1.63.0 inside
+  the full suite.
+- **Reproduced first** on `3e7fd78` (scratch script, the real auditor), each
+  DETERMINISTIC / TEXT_EXTRACTED with an EXACT anchor: `sum [101, 540] = 439`
+  on `SEE FP101 TOTAL 540 AT 439 GPM` (scan `[101, 540, 439]`);
+  `parse_number("1e3") == 1`, `"2.5e-2"` → 2.5, and `sum ["1e3", 500] = 1600`
+  on `1e3 + 500 = 1600` as "the sum of 1, 500 is 501" (scan `[1, 3, 500,
+  1600]`); `M-101 P-3 AHU-2` scanned as `[-101, -3, -2]`; `sum [20, 2] = 40` on
+  `20 x 2 = 40`; `sum [100, 375] = 250` on `A 100 B 250 TOTAL 375`. One more,
+  from step 5's shape: `sum [-3, 100, 100] = 200` on `VAV-3 100 + 100 = 200`
+  (the tag's `-3` grounded an operand).
+- **Facts confirmed, not assumed:**
+  - The scanner feeds both sides of `_operands_grounded` (the quote and the
+    matched sheet words), so the stricter `_numbers_in_text` applies to both.
+    The new relationship reader uses the same scanner (`_scan_numbers`) on
+    both.
+  - `parse_number` feeds `claim_value_key`, hence every claim dedup, the
+    discriminator and each arithmetic finding's `id`. Under the chosen rules
+    every change only **refuses**: a parse becomes `None` or stays exactly what
+    it was (the parser gained tail binders only; the head rule is scan-only).
+    So a term whose parse changes makes its claim unusable, and no finding that
+    is still produced changes its text, discriminator or id. The
+    investigation key (`investigate._payload_hash`: id, text, quote, category,
+    severity, rect, prior note, source) is therefore unchanged for every
+    finding that stays model-transcribed; a finding the relationship check
+    newly leaves model-transcribed was DETERMINISTIC before, which neither
+    verification nor investigation takes, so it has no stored entry to miss.
+    **No investigation re-key; no register row for it.**
+  - Critique and cross-QC caches store raw claims (`critique._dedup_claims`,
+    `cross_qc._dedup_claims` run before the store) and the auditor re-parses
+    them on every read, so the new rules apply to warm entries with no key
+    change. The one effect: both dedups key on `claim_content_key`, so an
+    entry stored before WP-07.2 may have kept only one of two transcriptions
+    of one quote that differed only by a now-refused spelling (`"1e3"` and
+    `1` both keyed `1`). Recorded in the register as an accepted narrow
+    residual (re-billing every critique and cross-QC call for it is not
+    proportionate).
+  - The merge-rule fingerprint (`tests/test_drawing_cache_identity.py`) does
+    not move: its corpus has no arithmetic and `_is_duplicate` is untouched.
+  - `test_parse_number_table` passes unchanged (`20A`, `150GPM`, `165 psi`,
+    `0.20 gpm/ft²`, `2-1/2"`, `1,200`, `12' clear`), and `12,5`, `12'-6"`,
+    `1.2.3` and `30%` stay refused.
+  - No role or operator field is added: the claims contract in
+    `critique._CRITIQUE_FINDINGS_INSTRUCTION` and `cross_qc.CROSS_QC_SYSTEM_PROMPT`
+    is untouched, so `CRITIQUE_PROMPT_VERSION` and `_CROSS_QC_CACHE_CONTRACT`
+    do not move.
+- **The decision, made by the owner before any code** (AskUserQuestion with
+  measured options). Chosen, each as recommended:
+  - **Scientific notation: rejected.** `1e3`, `2.5e-2`, `1E+3`, `2E1` are not
+    one value to the parser or the scanner; a term spelled that way makes its
+    claim unusable. Not taken: reading `1e3` as 1000 (a panel tag `2E1` would
+    then print a 20, and a term that parsed as 1 would parse as 1000, moving
+    that finding's text, discriminator and id).
+  - **Tag digits:** digits glued after a letter, with or without a hyphen,
+    are a tag's or sheet id's (`FP101`, `M-101`, `AHU-2`, `A1.01`), and a
+    hyphen after a letter is never a minus sign; letters after a number are
+    its unit unless digits follow them directly (`24x12`, `2P20A`, `10A1`,
+    `100m2`, `1e3` are not one value). Not taken: refusing only exponent and
+    size forms after a number (`100m2` would read 100, `10A1` 10, `2P20A` 2).
+  - **Relationship: an operator or TOTAL, exact roles.** The quote AND the
+    sheet's words under the span each print the claim as one equation: the
+    result is the first number after `=` or TOTAL/SUBTOTAL, the operands are
+    exactly the terms (a multiset), and every join is `+` (sum) or
+    `x`/`×`/`*` (product, factor); an operator-less list is a sum only with
+    TOTAL. Anything else is not established and stays MODEL_TRANSCRIBED /
+    UNCERTAIN (plan step 4). Not taken: requiring an explicit operator (a
+    TOTAL-only row such as `20 20 20 TOTAL 540` would lose trust). Reading
+    the relationship from both sides conforms to WP-07.1's evidence rule and
+    was stated, not asked: a FUZZY window can differ from the sheet in one
+    non-numeric token, and that token can be the operator (pinned).
+  - **Measured first**, as the request asked: a scratch copy of
+    `origin/main` whose `audit_arithmetic` logged, for every claim with the
+    test name, today's outcome and the outcome under 35 option combinations
+    (tokens today / broad / narrow × scientific notation rejected / read ×
+    relationship none / quote / span / both × TOTAL a sum or not). The hooks
+    ran **93 `audit_arithmetic` calls over 145 claims** (40 trusted, 77
+    model-transcribed mismatches, 6 matched, 9 unusable, 10 dedup-skipped).
+    **No token or scientific-notation option moved any fixture** (no parse
+    changed; one scan changed: the pipeline's `VAV-3`, from `[-3]` to `[]`,
+    MODEL_TRANSCRIBED either way). The TOTAL-as-sum relationship moved none;
+    the explicit-operator one moved **24 claims in 24 tests** to UNCERTAIN (20
+    in `tests/test_arithmetic_claim_discriminator.py`, incl. `_det()`; 2 in
+    `tests/test_arithmetic_operand_grounding.py`; 1 each in
+    `tests/test_drawing_auditors.py` and `tests/test_position_is_not_sameness.py`).
+    The gauntlet's `TOTAL 100 + 250 = 375` stayed trusted under every option.
+    A second table ran the A8 shapes and 25 edge cases through every option.
+- **What changed** (`auditors/arithmetic.py` only; no other product file):
+  - `_NUMERIC_TAIL_RE` (parser and scanner) refuses a number followed
+    directly by letters and a digit, an exponent sign, `×` or a fraction slash
+    and a digit, a glued vulgar fraction, and a Unicode dash wherever `-`
+    already bound. `_head_denies` (scanner) refuses a number glued after a
+    letter (a `+` glued to a letter stays an operator, `250GPM+100GPM`, except
+    as an exponent's sign, `1E+3`), after a Unicode dash (incl. `−5`, whose
+    sign `[-+]` cannot read), after a fraction slash, and after `×` preceded
+    by a digit. `_UNICODE_DASHES` is pinned equal to the dashes
+    `anchor._normalize` folds (`anchor.py` is untouched).
+  - **Codex review, P2, fixed in this PR** ("preserve unary signs after
+    explicit operators"). `_equations` read a sign glued to an operand as a
+    second operator even when the gap already printed one, so `20 + -5 = 15`
+    joined `{+, other}` and `20 x +2 = 40` joined `{x, +}`, and both stated
+    equations were refused (UNCERTAIN, a paid crop check, and no ink in
+    verified-only mode). Root cause, not only the two examples: a glued sign
+    is the operator only when nothing is printed between the two numbers
+    (`20 +30` adds, `20 -5` subtracts); after a printed operator it is the
+    operand's own sign, already in its value. The safe direction was never
+    at stake (a refusal is not a false trust), and `20 - -5` still reads as
+    a subtraction.
+  - `_scan_numbers` returns each number's span and matched text;
+    `_numbers_in_text` keeps its signature and returns the values.
+  - The relationship reader: `_gap_marks` (what the text between two numbers
+    says: `=`, `total`, `+`, `x`, or `other` for a subtraction or division, an
+    unknown symbol, or a digit, i.e. a refused number), `_equations` (results,
+    operands since the previous result, running totals, a glued sign as the
+    operator), `_relationship_stated`, and `_relationship_grounded` (both
+    sides). It is one more conjunct in the promotion after the anchoring pass,
+    inside the existing per-finding `try`, so a failure leaves only that
+    finding UNCERTAIN (pinned). `pending` carries the claim kind.
+  - Module, `parse_number`, `_head_denies` and `audit_arithmetic` docstrings
+    updated. The verification note keeps its exact wording for each
+    provenance (pinned).
+- **Contracts decided:** none of D-1 … D-8 (the rules are the owner's, above).
+- **Cache/schema effects:** no key, prompt version, contract term or schema
+  changed, and no finding id moved (above). One migration-register row: the
+  critique and cross-QC stored-claims dedup residual. The A/B
+  `RECORD_CONTRACT_VERSION` stays 3 (a record's shape and meaning are
+  unchanged; a status delta between arms run before and after is the code
+  change it is, as for WP-07.1).
+- **Re-baselined tests: none.** Every pinned test passes unchanged:
+  `tests/test_drawing_auditors.py` (the parser table, rejects, percent,
+  comma list, the scanner/parser agreement test, no-eval, the arithmetic block,
+  `run_auditors`), all of `tests/test_arithmetic_operand_grounding.py` (incl.
+  the FUZZY quote ending `RISER 3`, the `2-1/2"` case, the note wording and
+  the pipeline test), all of `tests/test_arithmetic_claim_discriminator.py`
+  (`ROW = "20 20 20 TOTAL 540"` stays DETERMINISTIC), the gauntlet's
+  `test_gauntlet_deterministic_auditors_fired`, the pipeline's
+  `test_arithmetic_auditor_flags_bad_claim_end_to_end` (MODEL_TRANSCRIBED),
+  `tests/test_drawing_models.py`, `tests/test_source_identity.py`,
+  `tests/test_drawing_cache_identity.py`. Since no existing test file was
+  edited, the fixed-tree full suite is also the run of the original pinned
+  files against the fix.
+- **Fixture effects, instrumented over the whole fixed suite** (a scratch copy
+  whose `audit_arithmetic` compared, per claim with the test name, the old
+  rule recomputed with `origin/main`'s parser and scanner against the real new
+  outcome, and logged every parse, scan, provenance or status change). The
+  hooks ran **142 `audit_arithmetic` calls over 199 claims**: TE→TE 59, MT→MT
+  76, matched 6, unusable 9, dedup-skipped 10, **TE→MT 30, mismatch→unusable
+  6, MT→TE 0**. Every change is in the new test file except: the pipeline's
+  `VAV-3` scan (`[-3]` → `[]`, MT→MT), and the two tests that monkeypatch a
+  provenance helper to raise (a probe artifact: the old-rule recomputation
+  does not see the monkeypatch; both findings are MT in the real run, as the
+  tests assert).
+- **New tests:** `tests/test_arithmetic_tokens_and_relationships.py` (136):
+  tag and sheet-id digits (10 texts) and hyphens (6); units that still parse,
+  in the parser and the scanner (12); tokens that are not one value, refused
+  by both (15); the safeguards kept; a per-token scanner/parser agreement
+  table (17); the dash set pinned to the anchor's; refused spellings keyed
+  apart; the auditor on the A8 shapes (`FP101`, `VAV-3`, five refused terms
+  → unusable); the relationship: a product as a sum (4 operator spellings), a
+  sum as a product, four role swaps, an omitted operand of a correct row, a
+  correct subtraction, nine unstated shapes, fifteen stated shapes kept, and
+  the FUZZY case where only the quote states the operator; a signed operand
+  after a printed operator still trusted (3, the Codex review below); the
+  finding's id, discriminator and note unchanged; the reader (20 rows) and the
+  both-sides rule; a failure while checking one finding; `run_auditors`' tally;
+  verification eligibility and the trust note; the critique and cross-QC
+  dedups; and **the pipeline**: on an exhaustive run `20 x 2 = 40` (as a sum)
+  and `SEE FP101 TOTAL 540 AT 439 GPM` are each crop-verified once and keep
+  their MODEL_TRANSCRIBED caveat, while `TOTAL 100 + 250 = 375` stays
+  DETERMINISTIC and is never re-checked.
+- **Downstream consumers walked:**
+  - Verification (`_is_verifiable`) and investigation (`_candidates`): an
+    anchored mismatch the rules no longer trust is eligible (one crop call
+    each on exhaustive runs; an investigation if the crop cannot settle it).
+    A claim that becomes unusable produces no finding and no call.
+  - Markups: `annotate._trust_note` reads `operand_origin` first (the
+    "re-check the math" caveat before and after a verdict); the verified-only
+    gate (`_TRUSTED = {VERIFIED, DETERMINISTIC}`) no longer inks such a
+    mismatch unless the verifier confirms it; the index says "Check" instead
+    of "Computed". Anchors, placement, severity layer and stamping unchanged.
+  - Report chip (`html_report._finding_display_status`): "Deterministic"
+    becomes the verifier's verdict, or "Uncertain" where no verifier ran
+    (WP-21.4's note, extended). `_audit_checks_line` ("M of N numeric
+    relationships checked out") reads a lower N when a term is refused.
+  - Exports: `findings.csv` `verification_status` / `verification_note` and
+    `markup_manifest.json` dispositions follow the status; `findings.json`
+    gains no field; ids unchanged.
+  - Ledger: fewer entries rank first in `_grounding_quality` (WP-03.5's note,
+    extended).
+  - Claim dedups and ids: a refused spelling keys `raw:…` and no longer
+    collapses into the number it used to parse as (pinned in all three).
+- **Validation** (this container, Python 3.11.15, SDK 1.7.0, PyMuPDF 1.28.2,
+  Playwright 1.63.0):
+  - **Baseline before any change:** `python -m pytest -q -m "not network"`
+    gave **3,289 passed, 2 skipped, 10 deselected** (211 s) on `3e7fd78`,
+    identical to the WP-07.1 handoff.
+  - **Failing first.** The new file was run in a `git archive` copy of
+    `origin/main` (`3e7fd78`) with only that file added, classified from
+    `--junitxml`: **74 failed on behaviour, 17 failed only on the new API**
+    (`_relationship_stated` ×14, `_relationship_grounded` ×2 incl. the
+    monkeypatch, `_UNICODE_DASHES`), **36 passed** (they pin what the fix
+    keeps: units, the safeguards, agreement on tokens both trees read alike,
+    and the fifteen stated shapes).
+  - **After:** full suite **3,416 passed, 2 skipped, 10 deselected** (204 s):
+    the baseline plus 127, with the same two environment skips (IPv6
+    loopback; chmod as root).
+  - **After the Codex P2 fix:** full suite **3,425 passed, 2 skipped, 10
+    deselected** (203 s): the 3,416 above plus the 9 signed-operand tests. Those 9 were
+    first run on the PR head before the fix (`5d9287a`): 7 failed on
+    behaviour; the `20 + +5` row passed (a `+` beside a `+` was already one
+    operator).
+  - **Browser suite:** not run separately; no report JS, HTML or chat code
+    changed (the browser tests ran inside the full suite).
+  - `python -m ruff check --select E9,F63,F7,F82 src tests scripts` (pinned
+    0.14.5) is clean. F401/F811/F841 over the touched files finds one unused
+    import, on `origin/main` already and on a line this change does not touch
+    (`arithmetic._wtext`; WP-22.5). `scan_secrets.py` is clean over 203
+    tracked files, the new one included. `compileall src` passes.
+- **Docs:** CHANGELOG (Fixed, A8, with the visible effect, the extra
+  verification calls, the unusable count and the cache note; the WP-07.1
+  entry's "not in this change" now points to it); CLAUDE.md (the "model never
+  calculates" invariant: the token rules and the relationship check; its
+  "not checked yet (WP-07.2)" sentence is replaced; the anchor paragraph is
+  unchanged, since `anchor.py` is untouched); README (the verification status
+  table and the numeric-claims contract, whose "next remediation slice"
+  sentence now describes what is checked); DECISIONS (D-4 note, one register
+  row); the plan (WP-07 step 2, 4 and 5 notes); PROGRESS (this entry, the
+  WP-07.2, A8 and N3 rows, notes on WP-07.3, WP-21.4 and WP-03.5).
+- **Not verified:** live API behaviour (no budget, O-4; this slice makes no
+  call). Real drawings: how many real mismatches the relationship rule leaves
+  UNCERTAIN, so how many verification calls it adds per run, is unmeasured
+  (O-10). Windows is covered by this PR's CI.
+- **Risks and residual gaps:**
+  - **More paid calls, by design, and recall costs the owner accepted:** a
+    label's number among the operands (`RISER 3: 20 20 20 TOTAL 540`), an
+    operation written with a symbol the host does not read as one
+    (`3 @ 250 CFM = 800 CFM`), a list with `=` but no operator
+    (`1500 SF 1.3 = 2000`), a multiplier glued to `x` (`x1.3`, read as a
+    tag), a tight `20+30=60` (the `+30` was already refused as bound to the
+    digit before it), an ASCII-squared `100m2`, and a diameter `Ø6"` (Ø is a
+    letter) are not trusted and cost a crop check each. All are the safe
+    direction.
+  - **The matched path is unchanged** (WP-07.3): a claim that "checks out"
+    is counted without checking provenance or the relationship.
+  - **Stored-claims residual** (register row): warm critique and cross-QC
+    entries stored before WP-07.2 may hold one of two transcriptions that
+    differed only by a now-refused spelling.
+  - "Uncertain" in the report on a run with no verifier (WP-21.4 note).
+- **Re-checked (U31):** a non-finite JSON number (`NaN`, `Infinity`; Python's
+  `json` accepts both) already made its claim unusable through the per-claim
+  guard (the tolerance comparison raises), so the tally stays consistent; not
+  changed. `anchor.py` and the claims contract are untouched; the three claim
+  dedups still share `claim_content_key`.
+- **Next:** WP-05.1 (Wave 1, no dependencies). WP-07.3 (Wave 2) is now
+  available; WP-07 is done only when it lands and the Acceptance paragraph
+  holds.
 
 ### 2026-09-23 — WP-07.1: arithmetic operands are trusted only where the sheet prints them ([PR #163](https://github.com/Abe-Borg/drawing-analyzer/pull/163))
 

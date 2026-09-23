@@ -36,6 +36,27 @@ alone, before anchoring, by membership: one printed ``20`` supported any number
 of transcribed ``20`` operands, and a quote the sheet does not carry, or a claim
 on no sheet at all, was trusted as readily as one the sheet prints.
 
+Two more conditions since remediation WP-07.2 (review A8), each decided with
+the owner:
+
+* **Only a token that is one value is a number** (:func:`parse_number`,
+  :func:`_numbers_in_text`). The digits of a tag or sheet id (``FP101``,
+  ``M-101``, ``AHU-2``) are never a number, and a hyphen after a letter is
+  never a minus sign. Letters after a number are its unit (``20A``,
+  ``150GPM``) unless digits follow them directly (``24x12``, ``2P20A``,
+  ``1e3``): scientific notation is rejected, never truncated, so a term
+  spelled ``1e3`` makes its claim unusable.
+* **The relationship is stated on the sheet** (:func:`_relationship_grounded`).
+  The quote and the sheet's words under the span must each print the claim as
+  one equation: its operation (``+`` for a sum, ``x``/``×``/``*`` for a
+  product), its terms as the operands and its stated value as the result. A
+  sum transcribed from a product, or a total put among the terms, prints every
+  operand and was trusted anyway.
+
+A mismatch that fails any condition stays model-transcribed and ``UNCERTAIN``.
+The host never learns roles from the model: the claims contract is unchanged
+(plan WP-07 step 4).
+
 PDF-engine-free (I-5): it reuses the pure anchor resolver and word helpers; the
 pipeline owns rendering.
 """
@@ -108,16 +129,36 @@ _PLAIN_NUMBER_RE = re.compile(r"^[-+]?(?:\d+(?:\.\d+)?|\.\d+)")
 # the bare ``30`` appearing literally in the quote is what let such a claim clear
 # :func:`_operands_supported` and ink as DETERMINISTIC / TEXT_EXTRACTED. Rejecting
 # it makes the claim *unusable* — reported as unchecked, never as a mismatch.
+#
+# Letters glued after the number are its unit (``20A``, ``150GPM``, ``12IN``)
+# unless more digits follow them directly (remediation WP-07.2, review A8): then
+# the token is one identifier or compound, never the number it starts with.
+# ``1e3`` is not 1 (scientific notation is rejected, not read: on a drawing
+# ``2E1`` is as likely a panel as an exponent), ``24x12`` is a duct size, not 24,
+# ``2P20A`` a breaker, ``10A1`` a tag. Accepted cost: an ASCII-squared ``100m2``
+# is refused too (``100 m²`` and ``100 m2`` still read 100). The same holds for
+# ``×`` and the fraction slash between digits, a Unicode dash anywhere ``-``
+# binds (``12'–6"``), and a vulgar fraction glued on (``2½"`` is not 2).
+#
 # No ``^``: this is applied with ``.match(s, pos)``, which already anchors at
 # ``pos`` — while ``^`` would keep anchoring to the real start of the string and
 # so never fire on a tail at all.
 _NUMERIC_TAIL_RE = re.compile(
     r"""(?:
-          ['"]? [,.\-] \d   # 12,5 · 1.2.3 · 12'-6" · 12-6  (tight only)
-        | \s* %            # 30% · 30 %   — a ratio however it is spaced
+          ['"]? [,.\-\u2010-\u2015\u2212\ufe58\ufe63\uff0d] \d
+                              # 12,5 · 1.2.3 · 12'-6" · 12-6 · 12–6 (tight only)
+        | \s* %               # 30% · 30 %   — a ratio however it is spaced
+        | [^\W\d_]+ \d        # 1e3 · 24x12 · 2P20A · 10A1 · 100m2
+        | [eE] [-+] \d        # 2.5e-2 · 1E+3 — an exponent
+        | [\u00d7\u2044\u2215] \d   # 24×12 · 1⁄2 (a size; a fraction slash)
+        | [\u00bc-\u00be\u2150-\u215e]  # 2½ — a vulgar fraction glued on
     )""",
     re.VERBOSE,
 )
+
+# The Unicode dashes ``anchor._normalize`` folds to ``-`` (its ``_CHAR_FOLD``):
+# a hyphen, never a sign this scanner can read (``[-+]`` is ASCII only).
+_UNICODE_DASHES = frozenset("\u2010\u2011\u2012\u2013\u2014\u2015\u2212\ufe58\ufe63\uff0d")
 
 
 def _tail_denies(s: str, end: int) -> bool:
@@ -136,13 +177,31 @@ def _head_denies(s: str, start: int) -> bool:
     That set is exactly what promotes a claim to TEXT_EXTRACTED / DETERMINISTIC,
     so a phantom entry in it launders model arithmetic into ground truth.
 
+    A letter glued before the match makes it a tag's or sheet id's digits
+    (remediation WP-07.2, review A8): ``FP101``, ``A1.01``, and ``M-101`` /
+    ``AHU-2``, where the hyphen after a letter joins the tag and is never a
+    minus sign (``M-101 P-3 AHU-2`` scanned as -101, -3 and -2). A ``+`` glued
+    to a letter stays an operator (``250GPM+100GPM`` still reads 100), except
+    as an exponent's sign (``1E+3``). A Unicode dash binds too (``M–101``, and
+    ``−5``, whose sign the ASCII ``[-+]`` cannot read), as do a fraction slash
+    and a ``×`` with a digit before it (``24×12``).
+
     Deliberately does NOT skip whitespace: a separating space means the two are
-    different quantities, so ``PIPE 2" 150 PSI`` still yields 150.
+    different quantities, so ``PIPE 2" 150 PSI`` still yields 150, and
+    ``RISER 3`` reads 3 (a label's number is still a number; the relationship
+    check decides whether it is an operand).
     """
     if start <= 0:
         return False
     prev = s[start - 1]
-    return prev in "'\",." or prev.isdigit()
+    if prev in "'\",." or prev.isdigit():
+        return True
+    if prev.isalpha():
+        exponent = prev in "eE" and start >= 2 and s[start - 2].isdigit()
+        return s[start] != "+" or exponent
+    if prev in _UNICODE_DASHES or prev in "\u2044\u2215":
+        return True
+    return prev == "\u00d7" and start >= 2 and s[start - 2].isdigit()
 
 
 def parse_number(value: Any) -> Decimal | None:
@@ -150,10 +209,13 @@ def parse_number(value: Any) -> Decimal | None:
 
     Accepts JSON numbers directly and strings the way a drawing writes them:
     thousands commas (``"1,950"``), units and symbols (``"165 psi"``,
-    ``"0.20 gpm/ft²"``), and fractions (``"1/2"``, ``"2 1/2"``, ``"2-1/2\\""``).
-    Booleans are rejected (``True`` is not the number 1 here). Returns ``None`` for
-    anything with no leading number — the claim it belongs to is then skipped, not
-    guessed at. Never evaluates the string as code.
+    ``"0.20 gpm/ft²"``, ``"20A"``), and fractions (``"1/2"``, ``"2 1/2"``,
+    ``"2-1/2\\""``). Booleans are rejected (``True`` is not the number 1 here).
+    Returns ``None`` for anything with no leading number, and for a leading
+    number that is not the whole value (``_NUMERIC_TAIL_RE``: ``"12'-6\\""``,
+    ``"30%"``, and since remediation WP-07.2 ``"1e3"``, ``"24x12"``,
+    ``"2P20A"``) — the claim it belongs to is then skipped, not guessed at.
+    Never evaluates the string as code.
     """
     if isinstance(value, bool):
         return None
@@ -354,22 +416,31 @@ _NUM_IN_TEXT_RE = re.compile(
 )
 
 
-def _numbers_in_text(text: str) -> list[Decimal]:
+def _scan_numbers(text: str) -> list[tuple[int, int, Decimal, str]]:
+    """Every number ``text`` prints: ``(start, end, value, matched text)``.
+
+    The head/tail rules are applied HERE, against the surrounding text, rather
+    than left to ``parse_number`` — which is handed the matched substring alone
+    and so cannot see what bound it. Without this the two disagree in exactly
+    the direction that matters: ``parse_number("30%")`` refuses, while the
+    scanner still reported a bare 30 as "present in the quote", which is the
+    whole basis of the TEXT_EXTRACTED promotion. The same goes for a tag's
+    digits (``FP101``), which only the text before them can reveal.
+    """
     s = str(text or "")
-    out: list[Decimal] = []
+    out: list[tuple[int, int, Decimal, str]] = []
     for m in _NUM_IN_TEXT_RE.finditer(s):
-        # The head/tail rules are applied HERE, against the surrounding text,
-        # rather than left to ``parse_number`` — which is handed the matched
-        # substring alone and so cannot see what bound it. Without this the two
-        # disagree in exactly the direction that matters: ``parse_number("30%")``
-        # refuses, while the scanner still reported a bare 30 as "present in the
-        # quote", which is the whole basis of the TEXT_EXTRACTED promotion.
         if _head_denies(s, m.start()) or _tail_denies(s, m.end()):
             continue
         v = parse_number(m.group(0))
         if v is not None:
-            out.append(v)
+            out.append((m.start(), m.end(), v, m.group(0)))
     return out
+
+
+def _numbers_in_text(text: str) -> list[Decimal]:
+    """The values of :func:`_scan_numbers`, in reading order."""
+    return [value for _start, _end, value, _raw in _scan_numbers(text)]
 
 
 def _operands_supported(
@@ -412,6 +483,167 @@ def _operands_grounded(
     """
     printed = Counter(_numbers_in_text(quote)) & Counter(_numbers_in_text(matched_text))
     return _operands_supported(terms, expected, printed)
+
+
+# --------------------------------------------------------------------------- #
+# The relationship (remediation WP-07.2, review A8): does the sheet print the
+# claim's operation, with its terms as the operands and its value as the result?
+# --------------------------------------------------------------------------- #
+
+# The word that marks a result: TOTAL, TOTALS, SUBTOTAL; a whole word.
+_TOTAL_RE = re.compile(r"(?<![^\W\d_])(?:SUB)?TOTALS?(?![^\W\d_])", re.IGNORECASE)
+# What may sit between two numbers without saying anything about how they
+# relate: letters (units, labels), whitespace, and this punctuation.
+_GAP_FILLER = frozenset(
+    ",;:.'\"()[]#/-_\u00b2\u00b3\u00b0\u2018\u2019\u201c\u201d\u2032\u2033"
+)
+# A whitespace-separated token that is an operation the claims contract cannot
+# express: a subtraction or a division.
+_OTHER_OPERATOR_TOKENS = frozenset({"-", "/", *_UNICODE_DASHES})
+_DIGIT_RE = re.compile(r"\d")
+_PLUS, _TIMES, _OTHER = "+", "x", "other"
+
+
+def _gap_marks(gap: str) -> frozenset:
+    """What the text between two numbers says about how they relate.
+
+    ``=`` and ``total`` mark the next number as a result. ``+`` and ``x``
+    (``x``, ``×`` or ``*``) are the two operations the host computes. ``other``
+    is anything that leaves the relationship unreadable: a subtraction or a
+    division, a symbol this reader does not know (``@``, ``$``), or a digit,
+    which is a number the scan refused (``FP101``, ``30%``, ``1e3``) and so an
+    operand the host cannot read.
+    """
+    marks: set[str] = set()
+    if "=" in gap:
+        marks.add("=")
+    if _TOTAL_RE.search(gap):
+        marks.add("total")
+    if "+" in gap:
+        marks.add(_PLUS)
+    if "\u00d7" in gap or "*" in gap:
+        marks.add(_TIMES)
+    for token in gap.split():
+        if token in ("x", "X"):
+            marks.add(_TIMES)
+        elif token in _OTHER_OPERATOR_TOKENS:
+            marks.add(_OTHER)
+    if _DIGIT_RE.search(gap) or any(
+        not (ch.isalpha() or ch.isspace() or ch in _GAP_FILLER or ch in "+=*\u00d7")
+        for ch in gap
+    ):
+        marks.add(_OTHER)
+    return frozenset(marks)
+
+
+@dataclass(frozen=True)
+class _Equation:
+    """One ``operands → result`` run a text prints, and what joins it."""
+
+    operands: tuple[Decimal, ...]
+    joins: tuple[frozenset, ...]    # the marks between consecutive operands
+    result: Decimal
+    total: bool                     # TOTAL labels or marks it
+    readable: bool                  # nothing but a marker before the result
+
+
+def _equations(text: str) -> list[_Equation]:
+    """Every equation ``text`` prints, left to right.
+
+    A result is the first number after ``=`` or TOTAL that follows at least one
+    operand; its operands are every number since the previous result (or the
+    start). So in ``TOTAL 100 + 250 = 375`` the leading TOTAL only labels the
+    row, and ``20 20 TOTAL 40 30 30 TOTAL 70`` is two equations. A result
+    followed by an operator is the next equation's first operand (a running
+    total: ``0.2 x 1500 = 300 + 250 = 550``). A sign glued to an operand after
+    the first is its operator only when nothing else joins the two:
+    ``20 +30`` adds and ``20 -5`` subtracts, while in ``20 + -5`` and
+    ``20 x +2`` the printed operator joins them and the sign is the operand's
+    own.
+    """
+    s = str(text or "")
+    out: list[_Equation] = []
+    operands: list[Decimal] = []
+    joins: list[frozenset] = []
+    total = False
+    carried: Decimal | None = None
+    prev_end = 0
+    for start, end, value, raw in _scan_numbers(s):
+        marks = _gap_marks(s[prev_end:start])
+        prev_end = end
+        if operands and ("=" in marks or "total" in marks):
+            out.append(_Equation(
+                operands=tuple(operands), joins=tuple(joins), result=value,
+                total=total or "total" in marks,
+                readable=not (marks & {_PLUS, _TIMES, _OTHER}),
+            ))
+            operands, joins, total, carried = [], [], False, value
+            continue
+        if "total" in marks:
+            total = True
+        ops = set(marks & {_PLUS, _TIMES, _OTHER})
+        if not ops:
+            # Nothing printed between the two numbers: a sign glued to this
+            # one is the operator. After a printed operator it is the
+            # operand's own sign, already in ``value``.
+            if raw[:1] == "+":
+                ops.add(_PLUS)
+            elif raw[:1] == "-" and (operands or carried is not None):
+                ops.add(_OTHER)
+        if operands:
+            joins.append(frozenset(ops))
+        elif carried is not None and ops:
+            operands, joins = [carried], [frozenset(ops)]
+        operands.append(value)
+        carried = None
+    return out
+
+
+def _relationship_stated(
+    kind: str, terms: list[Decimal], expected: Decimal, text: str
+) -> bool:
+    """Whether ``text`` prints the claim as one of its equations.
+
+    The equation's result is the stated value, its operands are exactly the
+    terms (a multiset: an operand the claim leaves out, or one it adds, is a
+    different relationship), and every join is the claim's operation: ``+`` for
+    a sum, ``x``/``×``/``*`` for a product or factor. A list with no operator
+    at all is a sum only when TOTAL labels or marks it (``20 20 20 TOTAL
+    540``); with only ``=`` the operation is not on the sheet. Decided with the
+    owner (remediation WP-07.2, review A8): anything else is not established,
+    and the mismatch stays model-transcribed for the crop verifier.
+    """
+    operation = claim_operation(kind)
+    need = Counter(terms)
+    for eq in _equations(text):
+        if not eq.readable or len(eq.operands) < 2:
+            continue
+        if eq.result != expected or Counter(eq.operands) != need:
+            continue
+        if operation == "sum" and (
+            all(j == {_PLUS} for j in eq.joins) or (eq.total and not any(eq.joins))
+        ):
+            return True
+        if operation == "product" and all(j == {_TIMES} for j in eq.joins):
+            return True
+    return False
+
+
+def _relationship_grounded(
+    kind: str, terms: list[Decimal], expected: Decimal, quote: str, matched_text: str
+) -> bool:
+    """Whether the quote AND the sheet's words under its span state the claim.
+
+    Both, as for the operands (:func:`_operands_grounded`): the quote is the
+    model's stated evidence, and the words are what the sheet prints there. A
+    FUZZY match may differ from the sheet in one non-numeric token, and that
+    token can be the operator: a quote reading ``20 + 2 = 40`` over a sheet
+    printing ``20 x 2 = 40`` states a sum the sheet does not.
+    """
+    return (
+        _relationship_stated(kind, terms, expected, quote)
+        and _relationship_stated(kind, terms, expected, matched_text)
+    )
 
 
 def _arithmetic_verification(
@@ -555,9 +787,11 @@ def audit_arithmetic(
     on its sheet via the claim's verbatim quote (the pure anchor resolver —
     ``UNANCHORED`` if the quote isn't on the sheet, the honest signal). It is
     ``DETERMINISTIC`` only when that anchoring shows the sheet prints every
-    operand (module docstring; remediation WP-07.1, N3), and ``UNCERTAIN``
-    otherwise. Claims whose numbers can't be parsed, or whose kind is
-    unknown, are counted ``unusable`` and dropped — never guessed at. Duplicate
+    operand (module docstring; remediation WP-07.1, N3) and states the claim's
+    relationship (WP-07.2, A8), and ``UNCERTAIN`` otherwise. Claims whose
+    numbers can't be parsed (including a term that is not one value, such as
+    ``"1e3"``), or whose kind is unknown, are counted ``unusable`` and dropped —
+    never guessed at. Duplicate
     claims (the critique runs twice) are collapsed before checking so the tally
     isn't double-counted: the same sheet, quote and :func:`claim_content_key`
     (exact decimals, terms as a multiset), so ``20`` and ``"20.0"`` are one
@@ -574,7 +808,7 @@ def audit_arithmetic(
     # Every mismatch starts model-transcribed; its operands are judged after the
     # anchoring pass below (remediation WP-07.1, N3). Kept beside the findings,
     # and rolled back with them, so the two lists always correspond.
-    pending: list[tuple[Finding, list[Decimal], Decimal, Decimal, Any, str]] = []
+    pending: list[tuple[Finding, list[Decimal], Decimal, Decimal, Any, str, str]] = []
 
     for claim in claims:
         # Per-CLAIM isolation (item 10b). The orchestrator wraps this whole
@@ -662,7 +896,7 @@ def audit_arithmetic(
                 ),
             )
             result.findings.append(finding)
-            pending.append((finding, terms, expected, actual, geom, op))  # type: ignore[arg-type]
+            pending.append((finding, terms, expected, actual, geom, op, kind))  # type: ignore[arg-type]
             if geom is not None and (claim.quote or "").strip():
                 to_anchor.setdefault(source_page_key(finding), []).append(finding)
         except Exception as exc:  # noqa: BLE001 - one claim never sinks the rest
@@ -701,16 +935,18 @@ def audit_arithmetic(
 
     # Operand provenance, now that the anchors exist (remediation WP-07.1, N3):
     # trusted only when the claim resolved to a sheet, its quote anchored there
-    # by a numerically vetoed match, and the numbers printed there carry every
-    # operand once per use. Anything else, including a failure here, leaves the
-    # finding model-transcribed, the safe direction.
-    for finding, terms, expected, actual, geom, op in pending:
+    # by a numerically vetoed match, the numbers printed there carry every
+    # operand once per use, and both the quote and those words state the claim's
+    # relationship (WP-07.2, A8). Anything else, including a failure here,
+    # leaves the finding model-transcribed, the safe direction.
+    for finding, terms, expected, actual, geom, op, kind in pending:
         text = matched.get(id(finding))
         try:
             if (
                 geom is not None and text is not None
                 and anchor.numbers_grounded(finding.anchor)
                 and _operands_grounded(terms, expected, finding.source_quote, text)
+                and _relationship_grounded(kind, terms, expected, finding.source_quote, text)
             ):
                 finding.verification = _arithmetic_verification(
                     op, actual, expected, TEXT_EXTRACTED,
