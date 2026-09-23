@@ -500,11 +500,11 @@ def build_critique_request_params(
 # Two findings on the same sheet are duplicates only when they are *semantically*
 # the same issue and their **critical signatures are compatible** (Phase 20, §12.1).
 # A tile is a search hint, never identity — same-tile alone never merges — and
-# geometric overlap alone is not enough either: two unrelated issues can share a
-# table cell or a note. Thresholds:
-_IOU_DUP_THRESHOLD = 0.5          # rect overlap needed for the geometry branch
+# position is no evidence either: an anchor rectangle is resolved FROM the
+# finding's quote, so two findings quoting one string share one by construction
+# (remediation WP-03.7, N28; see ``_is_duplicate``). Thresholds:
 _TEXT_DUP_THRESHOLD = 0.7         # strong topical overlap → duplicate
-_MODERATE_TEXT_THRESHOLD = 0.4    # moderate overlap that only *supports* geometry
+_MODERATE_TEXT_THRESHOLD = 0.4    # moderate overlap that, with an equal quote, merges
 
 _SEVERITY_RANK = {"high": 3, "medium": 2, "low": 1}
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
@@ -559,7 +559,11 @@ def _token_overlap(a: str, b: str) -> float:
 
 
 def _rect_iou(a: list[float], b: list[float]) -> float:
-    """Intersection-over-union of two ``[x0, y0, x1, y1]`` rectangles (0..1)."""
+    """Intersection-over-union of two ``[x0, y0, x1, y1]`` rectangles (0..1).
+
+    No merge rule reads it since remediation WP-03.7 removed the geometry branch
+    of :func:`_is_duplicate` (N28).
+    """
     ax0, ay0, ax1, ay1 = a
     bx0, by0, bx1, by1 = b
     iw = max(0.0, min(ax1, bx1) - max(ax0, bx0))
@@ -1221,13 +1225,30 @@ def _is_duplicate(a: Finding, b: Finding) -> bool:
     """Whether two findings describe the same issue (Phase 20, §12.1).
 
     Requires the same source+page and **compatible critical signatures** — a tile
-    is never sufficient, and geometric overlap alone is never sufficient. A merge
-    fires only when the two are semantically the same: identical non-empty quote
-    (same category), strong topical overlap, or — once both are anchored —
-    heavily-overlapping rectangles *backed by* at least moderate text/quote
-    agreement. When uncertain, keep both (more separate findings is the safe error).
-    Two findings whose claim discriminators disagree are never duplicates,
-    whichever branch would accept them (:func:`_claims_differ`).
+    is never sufficient, and neither is position. A merge fires only when the two
+    are semantically the same: strong topical overlap, or an identical non-empty
+    quote backed by at least moderate text agreement. When uncertain, keep both
+    (more separate findings is the safe error). Two findings whose claim
+    discriminators disagree are never duplicates, whichever branch would accept
+    them (:func:`_claims_differ`).
+
+    **No rectangle is read** (remediation WP-03.7, N28). A third branch folded two
+    anchored findings whose rectangles overlapped (IoU > 0.5) and whose quotes
+    were equal, with no text check. But the anchor stage resolves each rectangle
+    from the finding's own quote (and its tile, to choose among repeated
+    occurrences), so two findings quoting one string land on one rectangle by
+    construction: the branch was "the quote alone", which the quote branch below
+    refuses on purpose, applied once anchors existed. "pump P-1 voltage listed as
+    480 should be 208" and "pump P-1 impeller diameter conflicts with the curve",
+    both quoting ``PUMP P-1``, stayed apart in Pass A and folded in Pass B, and
+    the impeller issue was lost; auditor findings arrive anchored, so it fired
+    between them in Pass A too. No text threshold separates that pair from the
+    same-spot paraphrases the branch also folded (it shares 3 of 12 content
+    words, the pinned ``CO-1`` paraphrase 1 of 11), so the branch is gone and
+    such a paraphrase stays two findings: the decided cost
+    (``_plans/DECISIONS.md``, D-3). Nothing the branches left read is changed by
+    anchoring, so the ledger's Pass B can fold no pair of members Pass A
+    compared and refused (:func:`~drawing_analyzer.ledger.reconcile_post_anchor`).
     """
     if not _same_sheet(a, b):
         return False
@@ -1245,14 +1266,9 @@ def _is_duplicate(a: Finding, b: Finding) -> bool:
     # grounded issue. The quote alone is NOT enough: quoting a tag / schedule title
     # verbatim ("PUMP P-1") is the norm, so two *different* issues about one
     # component share a quote — a text check keeps them apart (§12.1, no data loss).
+    # That holds after anchoring too: a rectangle resolved from the quote adds
+    # nothing to it (WP-03.7, N28).
     if _quotes_equal(a, b) and tov >= _MODERATE_TEXT_THRESHOLD:
-        return True
-    # Geometry (post-anchor) is only *supporting* evidence: heavily-overlapping
-    # rectangles merge only when the two also share the same verbatim quote — two
-    # unrelated issues can share a table cell, so IoU + weak text is not enough.
-    ra = a.anchor.rect_pdf if a.anchor else None
-    rb = b.anchor.rect_pdf if b.anchor else None
-    if ra and rb and _rect_iou(ra, rb) > _IOU_DUP_THRESHOLD and _quotes_equal(a, b):
         return True
     return False
 

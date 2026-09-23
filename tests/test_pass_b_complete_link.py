@@ -18,18 +18,19 @@ Pinned here:
   two entries every time, no history holding two members that are not
   duplicates (the WP-03 acceptance "no incompatible members share a merged
   finding"), and a second pass that folds nothing (idempotence);
-* the geometry decision. Member snapshots are frozen when a Pass A merge first
-  mutates an entry, which is before anchoring, so a snapshot carries no
-  rectangle and ``_is_duplicate``'s geometry branch never fires against one.
-  A geometric duplicate therefore folds only between two entries that absorbed
-  nothing in Pass A. The rect is deliberately NOT lent to snapshots (see
-  ``test_a_geometric_duplicate_folds_only_between_entries_that_absorbed_nothing``);
+* the geometry decision, and what replaced it. WP-03.1 recorded that a Pass A
+  snapshot carries no rectangle, so ``_is_duplicate``'s geometry branch folded
+  only two entries that absorbed nothing, and it did not lend the rect to
+  snapshots. WP-03.7 (N28) removed the branch: a rectangle is resolved from
+  the quote, so it is no evidence that two findings make one claim, and a
+  same-spot pair now stays two entries in every configuration (see
+  ``test_a_same_spot_pair_never_folds_on_position``);
 * the candidate index only speeds up discovery: the partition equals the one
   found by comparing every entry with every earlier survivor;
 * recorded limits that later slices flip deliberately: which cluster the
-  generic bridge joins and a longer chain's entry count (WP-03.6), whether
-  "500" reaches the exports (WP-03.5), and the geometry branch folding two
-  issues that quote one tag (N28).
+  generic bridge joins and a longer chain's entry count (WP-03.6), and whether
+  "500" reaches the exports (WP-03.5). The N28 limit is flipped:
+  ``test_two_issues_that_quote_one_tag_stay_apart_after_anchoring``.
 """
 from __future__ import annotations
 
@@ -276,7 +277,7 @@ def test_recorded_limit_a_four_finding_chain_still_counts_by_arrival_order():
 
 
 # --------------------------------------------------------------------------- #
-# The geometry decision: a snapshot carries no rectangle, and none is lent
+# The geometry decision: position is not evidence of sameness (WP-03.7, N28)
 # --------------------------------------------------------------------------- #
 
 _X = ("cleanout required at the base of the soil stack per code",
@@ -289,28 +290,21 @@ _RECT = [10.0, 20.0, 60.0, 42.0]
 @pytest.mark.parametrize("first", ["X", "Y"])
 @pytest.mark.parametrize("x_absorbed", [False, True])
 @pytest.mark.parametrize("y_absorbed", [False, True])
-def test_a_geometric_duplicate_folds_only_between_entries_that_absorbed_nothing(
-    first, x_absorbed, y_absorbed
-):
+def test_a_same_spot_pair_never_folds_on_position(first, x_absorbed, y_absorbed):
     """X and Y quote one string and anchor to one rectangle, but their texts
-    share too little for Pass A (the geometric-duplicate shape). Each side has
-    either absorbed a text duplicate in Pass A or not; ``first`` decides, by
-    severity, which side sorts first in Pass B.
+    share too little for Pass A (the shape the geometry branch folded). Each
+    side has either absorbed a text duplicate in Pass A or not; ``first``
+    decides, by severity, which side sorts first in Pass B.
 
-    Only two entries that absorbed nothing fold. A snapshot is frozen before
-    anchoring, so it has no rectangle, and the geometry branch needs one on
-    both sides. The old rule compared the live incoming entry, so it also
-    folded when only the INCOMING side had absorbed a member: the outcome for
-    one pair of clusters depended on which of them was more severe.
-
-    Decided, not incidental: the anchor is not lent to a snapshot that quotes
-    the same string. The geometry branch has no text check, so it already
-    folds two different issues that quote one tag once they anchor together,
-    and the anchor resolver picks among repeated occurrences by each finding's
-    own tile, so a lent rectangle is a guess about where that member was.
-    Anchoring every observation belongs with canonical clustering (WP-03.6).
-    The cost is recall: this pair stays two entries when either side absorbed
-    a member, although the live entries are geometric duplicates.
+    Re-baselined by WP-03.7 (N28). WP-03.1 pinned that the pair folded only
+    when neither side had absorbed a member: a snapshot is frozen before
+    anchoring, so it has no rectangle, and the geometry branch needed one on
+    both sides. The branch is gone. The anchor stage resolves each rectangle
+    from the finding's own quote, so an equal quote on an equal rectangle is
+    the quote alone, which Pass A already refuses without text agreement. The
+    pair stays two entries in all eight configurations, and the live pair is
+    no longer a duplicate. The cost is recall on a same-spot paraphrase
+    (decided; ``tests/test_position_is_not_sameness.py``).
     """
     x_sev, y_sev = ("high", "low") if first == "X" else ("low", "high")
     ledger = Ledger()
@@ -323,23 +317,21 @@ def test_a_geometric_duplicate_folds_only_between_entries_that_absorbed_nothing(
     for entry in ledger.entries:
         entry.anchor = Anchor(status="EXACT", rect_pdf=list(_RECT), method="exact")
     x_entry, y_entry = sorted(ledger.entries, key=lambda e: e.text not in _X)
-    assert _is_duplicate(x_entry, y_entry)             # the live pair IS a geometric duplicate
+    assert not _is_duplicate(x_entry, y_entry)         # one rectangle is not one issue
 
-    reconcile_post_anchor(ledger)
-    expected = 2 if (x_absorbed or y_absorbed) else 1
-    assert len(ledger) == expected
+    assert reconcile_post_anchor(ledger) == 0
+    assert len(ledger) == 2
     assert _history_is_a_clique(ledger)
 
 
-def test_recorded_limit_the_geometry_branch_folds_two_issues_that_quote_one_tag():
-    """Why no rectangle is lent (N28, not this slice's to close). Two different
-    issues about one pump quote its tag, which is the norm, and share too few
-    words for Pass A: its text check keeps them apart on purpose. Once both
-    anchor to the tag, the geometry branch folds them (same quote, rectangles
-    overlapping, no text check), and the impeller issue is gone: its text is
-    overwritten and its quote equals the survivor's, so nothing of it is left.
-    Lending a rect to snapshots would extend this rule to every cluster that
-    quotes one string."""
+def test_two_issues_that_quote_one_tag_stay_apart_after_anchoring():
+    """N28, flipped by WP-03.7 (it was this file's recorded limit). Two
+    different issues about one pump quote its tag, which is the norm, and
+    share too few words for Pass A: its text check keeps them apart on
+    purpose. Once both anchored to the tag, the geometry branch folded them
+    (same quote, rectangles overlapping, no text check), and the impeller
+    issue was gone: its text overwritten, its quote equal to the survivor's.
+    The branch is gone, so both issues survive, each with its own text."""
     voltage = _f("pump P-1 voltage listed as 480 should be 208", "PUMP P-1")
     impeller = _f("pump P-1 impeller diameter conflicts with the curve", "PUMP P-1")
     ledger = Ledger()
@@ -349,9 +341,10 @@ def test_recorded_limit_the_geometry_branch_folds_two_issues_that_quote_one_tag(
     ledger.seal()
     for entry in ledger.entries:
         entry.anchor = Anchor(status="EXACT", rect_pdf=list(_RECT), method="exact")
-    reconcile_post_anchor(ledger)
-    assert len(ledger) == 1                            # N28: one issue folded away
-    assert "impeller" not in _exported(ledger.entries[0])
+    assert reconcile_post_anchor(ledger) == 0
+    assert len(ledger) == 2
+    exported = " ".join(_exported(e) for e in ledger.entries)
+    assert "impeller" in exported and "480" in exported
 
 
 # --------------------------------------------------------------------------- #
@@ -362,7 +355,8 @@ _MEASURES = ("", " is 500 gpm", " is 550 gpm")
 _TAGS = ("", " at P-1", " at P-2")
 _QUOTES = ("RISER", "RISER PUMP", "RISER PUMP FLOW", "RISER PUMP FLOW SCHEDULE")
 # Where the anchor stage places each quote (``None``: not found). Two quotes
-# share a place, so the geometry branch has something to find.
+# share a place: the shape the geometry branch folded until WP-03.7, kept so
+# the property below still meets it.
 _PLACES = {"RISER": _RECT, "RISER PUMP": [11.0, 21.0, 61.0, 43.0],
            "RISER PUMP FLOW": _RECT, "RISER PUMP FLOW SCHEDULE": None}
 

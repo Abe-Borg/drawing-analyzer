@@ -429,8 +429,8 @@ def _pass_b(text_a: str, text_b: str, quote: str) -> tuple[int, int]:
 
 
 def test_pass_b_refuses_a_conflicting_tag_behind_one_shared_tag():
-    # Same quote, same rectangle: Pass B folds such a pair on geometry. The
-    # second valve differs, so it must not.
+    # Same quote, same rectangle: until remediation WP-03.7 Pass B folded such a
+    # pair on geometry. The second valve differs, so it must not either way.
     assert _pass_b(
         "Pump P-1 suction valve V-3 conflicts with the strainer",
         "Relocate V-4 at the P-1 inlet",
@@ -438,9 +438,15 @@ def test_pass_b_refuses_a_conflicting_tag_behind_one_shared_tag():
     ) == (2, 2)
 
 
-def test_pass_b_still_folds_a_reference_one_side_omits():
-    assert _pass_b(
-        "Pump P-1 suction valve V-3 conflicts with the strainer",
-        "Relocate the P-1 inlet strainer",
-        "PUMP P-1 SUCTION",
-    ) == (2, 1)
+def test_pass_b_does_not_fold_a_compatible_pair_on_position_alone():
+    # Re-baselined by remediation WP-03.7 (N28). This pair used to fold in
+    # Pass B on geometry (2, 1): one side omits the valve, which the tag rule
+    # allows, and both anchor to one rectangle. A rectangle is resolved from the
+    # quote, so that fold was the quote alone, and the pair shares too little
+    # text to be the same issue by any other branch. It now stays two. That a
+    # reference one side omits does not block a merge is pinned where a merge
+    # is still decided on text: test_a_reference_one_side_omits_still_merges.
+    a = "Pump P-1 suction valve V-3 conflicts with the strainer"
+    b = "Relocate the P-1 inlet strainer"
+    assert signatures_compatible(critical_signature(_finding(a)), critical_signature(_finding(b)))
+    assert _pass_b(a, b, "PUMP P-1 SUCTION") == (2, 2)
