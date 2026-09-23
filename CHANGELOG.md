@@ -48,6 +48,67 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A second arithmetic mistake on the same table row disappeared
+  (remediation WP-03.3; B7).** The arithmetic auditor checks every numeric
+  relationship the critique and cross-sheet passes transcribe, and reports each
+  one that does not add up. Two relationships read off one row (say
+  `20 + 20 + 20 = 540` and `30 + 30 = 500` on a flow-test row) quote the same
+  row, and a finding's content id is built from its sheet, category and quote,
+  so the two findings shared an id. The auditor coordinator then kept only the
+  first, while the tally still counted two mismatches. Without that step the
+  findings ledger merged them anyway, in either arrival order: plain numbers
+  carry no unit to tell them apart, and the two texts share the auditor's
+  wording. In the review's example the `UNCERTAIN` mismatch (checked against
+  numbers the model transcribed) vanished into the trusted `DETERMINISTIC` one.
+
+  Now:
+  - **The coordinator hands every auditor finding to the ledger.** Two
+    auditors reporting the same thing at the same spot still become one ledger
+    entry naming both. The title-block auditor, whose two checks can catch one
+    value twice, now keys that dedup on the sheet and the quoted value instead
+    of the id.
+  - **Every arithmetic finding records the relationship it checked** (a new
+    `claim_discriminator` field: the operation, the terms and the stated value,
+    compared as exact numbers). Two findings that checked different
+    relationships are never merged, in either ledger pass, however alike their
+    wording and wherever they are anchored, and the record is folded into the
+    finding's id, so they no longer share one either. A model finding that
+    states the same mistake still merges with the auditor's finding, which
+    keeps the text and the verdict.
+  - **A relationship is counted once however it was written.** Every claim
+    de-duplication (the arithmetic auditor's, the critique's, cross-sheet QC's)
+    compares parsed numbers: `20`, `20.0` and `"20.0"` are one value, `1200`
+    and `"1,200"` too, the terms of a sum or product in any order are one
+    relationship, and `factor` is the product it names. A term that cannot be
+    read as a number is compared exactly as written, so it never makes two
+    different claims one. Before, one read writing `20` and the other `20.0`
+    was checked and counted twice.
+
+  **Visible effect:** a table row with two different arithmetic mistakes shows
+  two findings, each with its own `QC-###` number, verdict and markup, and
+  `findings.json` carries a `claim_discriminator` on each arithmetic finding
+  (it is omitted from every other finding, which serializes as before). Every
+  arithmetic finding gets a new content id, which the CSV `id` column and the
+  markup manifest show. The "N numeric relationships checked" count can drop
+  where two reads spelled one relationship differently.
+
+  **Cache:** the investigation cache is keyed by the finding's content id, so a
+  cached investigation of an arithmetic finding is not reused and that finding
+  is investigated again once (only a mismatch checked against model-transcribed
+  numbers is ever investigated). Nothing else is invalidated: no model request
+  changed, the critique's merge rule is unchanged (its pinned fingerprint holds,
+  so the critique cache contract stays at 2), and `_SCHEMA_VERSION` is
+  untouched. Cached critique and cross-sheet results may hold two spellings of
+  one claim, which the arithmetic auditor counts once; the one exception is two
+  cross-sheet transcriptions whose quotes also differ in letter case, counted
+  twice until that cached result is refreshed (their findings still merge).
+  Nothing is deleted.
+
+  **Not in this change:** a general claim discriminator for model findings
+  (N28, WP-03.7), operand provenance decided after anchoring (N3, WP-07.1), and
+  counters split by provenance with contradictory transcriptions flagged (N18,
+  WP-07.3).
+
 - **Two findings at one position were numbered in the order they arrived
   (remediation WP-03.2; K5).** `QC-###` numbers follow position: source input
   order, page, anchored before unanchored, top, left. When two findings shared a

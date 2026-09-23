@@ -595,7 +595,14 @@ reporter of last resort must never raise from inside Tk's handler.
   remains unbounded and is deliberately **not** patched with a second copy of the
   corpus check — both diff directions already run every entry through
   `classify_reference` — because the real fix is region bounding, which moves the
-  `_MIN_INDEX_ENTRIES` gate and re-baselines both directions together);
+  `_MIN_INDEX_ENTRIES` gate and re-baselines both directions together.
+  `run_auditors` hands **every** auditor finding to the ledger and dedups
+  nothing itself (remediation WP-03.3, B7): it used to dedup by content id, which
+  hashes sheet, category and quote, so two different arithmetic mismatches on one
+  table row were one finding while `arithmetic_mismatched` counted two. A true
+  cross-auditor duplicate (one quote, one rectangle) still becomes one ledger
+  entry with both tags. `audit_titleblock`'s own two-path dedup keys on
+  (sheet, quote) explicitly, never on the id, which is not an identity (B8));
   `prose_harvest.py` — whose boilerplate filter is anchored at **both** ends
   (P8 item 6: anchored only at the start, it discarded every real finding that
   *opened* with No/None/Nothing/N/A, which is how an absence finding naturally
@@ -761,10 +768,29 @@ reporter of last resort must never raise from inside Tk's handler.
   the rule ride `digest_cache._CRITIQUE_CACHE_CONTRACT` (2 since WP-04.2), a term
   inside both critique key builders and nothing else, never `_SCHEMA_VERSION`;
   `tests/test_drawing_cache_identity.py` pins the rule's fingerprint to its
-  value, so a rule change that forgets the bump fails); merging keeps
+  value, so a rule change that forgets the bump fails). One more gate precedes
+  every accepting branch of `critique._is_duplicate`: two findings that **both**
+  carry a `Finding.claim_discriminator` and disagree are never duplicates
+  (`_claims_differ`, remediation WP-03.3, B7). Only the arithmetic auditor sets
+  one (`auditors.arithmetic.arithmetic_claim_discriminator`: the host operation,
+  the terms as a multiset of exact decimals, the stated value, e.g.
+  `arithmetic/1:sum:20,20,20=540`), because two mismatches on one table row
+  quote one string, their unitless numbers give no signature, and their texts
+  share the auditor's wording: the quote branch (Jaccard 0.667) and, once
+  anchored, the geometry branch folded them, so `[30,30]=500` (UNCERTAIN)
+  vanished into `[20,20,20]=540` (DETERMINISTIC). A discriminator on one side
+  never blocks, so an auditor finding still merges with the model finding that
+  states the same mismatch, and no model finding carries one, so the critique's
+  merges and the ratchet fingerprint are unchanged. It is folded into `id`
+  (`compute_finding_id`'s last argument, appended only when non-empty, like
+  `source_id`) and serialized only when set. It is scoped by who sets it, not
+  by a source tag; WP-03.7 (N28) may generalize it. Merging keeps
   **coherent grounding** — the text/quote/tile/rect/evidence-state **and the
-  verdict** are one atomic bundle from a single representative, and the loser's
-  quote → `supporting_quotes`. `_grounding_quality` ranks **host-computed
+  verdict** (and the claim discriminator, with the `id` it is folded into) are
+  one atomic bundle from a single representative, and the loser's
+  quote → `supporting_quotes`. When the bundle goes to a member without a
+  discriminator, the absorbed arithmetic member still blocks a different claim
+  from its snapshot, since every complete-link check compares member histories. `_grounding_quality` ranks **host-computed
   provenance first**, above quote length: a `DETERMINISTIC` verdict is a
   statement about one computation over one quote, so it must not be decided
   separately from the text it describes. It was, and the auditor holds the
@@ -1167,7 +1193,17 @@ example is parked at `docs/examples/fire_protection.md`.
   incremented. Each claim now has its own `try` with a tally rollback: the
   orchestrator's single batch-wide `try` meant one bad claim lost every arithmetic
   finding **and** all four `arithmetic_*` stat keys, after which the summary line
-  read `arith=0/0` — indistinguishable from a set with no claims.
+  read `arith=0/0` — indistinguishable from a set with no claims. What counts as
+  **one claim** is decided on parsed values, never spellings: every claim dedup
+  (`arithmetic._claim_dedup_key`, `critique._dedup_claims`,
+  `cross_qc._dedup_claims`) and the discriminator share
+  `arithmetic.claim_content_key` — the host operation (`factor` is a product),
+  the terms as a sorted multiset of `canonical_decimal` spellings (exact, never
+  rounded at 28 digits), the stated value (remediation WP-03.3). `20`, `"20.0"`
+  and the JSON float `20.0` were two claims under `str()` keys, checked and
+  counted twice. A term that does not parse keeps its raw spelling behind a
+  `raw:` tag, so it never collapses two different claims and never equals a
+  number.
 - **Tiles use the `tile_label` contract (Phase 25 §17.1):** the model returns the
   exact visible label (`"r1c1"`); `tiling.parse_tile_label` converts it to the
   canonical **zero-based** internal `[row, col]`. A legacy `tile` array is accepted

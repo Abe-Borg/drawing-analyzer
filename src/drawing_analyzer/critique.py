@@ -70,6 +70,7 @@ from .digest import (
     parse_numeric_claims,
 )
 from .digest_cache import critique_cache_key
+from .auditors.arithmetic import claim_content_key
 from .auditors.sheet_ids import normalize_sheet_id
 from .models import (
     CLAIM_KINDS,
@@ -1199,6 +1200,23 @@ def _quotes_equal(a: Finding, b: Finding) -> bool:
     return bool(qa) and qa == qb
 
 
+def _claims_differ(a: Finding, b: Finding) -> bool:
+    """Whether both findings state exactly what they claim, and disagree.
+
+    ``Finding.claim_discriminator`` is set only by a producer that can state its
+    claim exactly (the arithmetic auditor, remediation WP-03.3). Two arithmetic
+    mismatches on one table row quote the same string, their unitless numbers
+    give no measurement signature, and their texts share the auditor's wording,
+    so every accepting branch below could fold them, and did (review B7). A
+    discriminator on ONE side never blocks: a model finding has none, and it
+    must still merge with the auditor finding that states the same mismatch.
+    No model finding carries one, so the critique's own merges are unchanged.
+    """
+    da = getattr(a, "claim_discriminator", "") or ""
+    db = getattr(b, "claim_discriminator", "") or ""
+    return bool(da) and bool(db) and da != db
+
+
 def _is_duplicate(a: Finding, b: Finding) -> bool:
     """Whether two findings describe the same issue (Phase 20, §12.1).
 
@@ -1208,8 +1226,12 @@ def _is_duplicate(a: Finding, b: Finding) -> bool:
     (same category), strong topical overlap, or — once both are anchored —
     heavily-overlapping rectangles *backed by* at least moderate text/quote
     agreement. When uncertain, keep both (more separate findings is the safe error).
+    Two findings whose claim discriminators disagree are never duplicates,
+    whichever branch would accept them (:func:`_claims_differ`).
     """
     if not _same_sheet(a, b):
+        return False
+    if _claims_differ(a, b):
         return False
     if not _signatures_compatible(a, b):
         return False
@@ -1325,6 +1347,9 @@ def _representative(
         reproduced=reproduced,
         confidence=confidence if confidence is not None else base.confidence,
         id=base.id,
+        # A statement about ``text``: it rides the bundle with the id it is
+        # folded into (the critique's own findings carry none).
+        claim_discriminator=base.claim_discriminator,
     )
 
 
@@ -1924,6 +1949,10 @@ def critique_sheet_self_consistent(
 def _dedup_claims(claims: list[NumericClaim]) -> list[NumericClaim]:
     """Collapse identical claims (the self-consistency runs transcribe the same
     relationship twice) so the arithmetic tally isn't double-counted. Order-stable.
+
+    Called with ONE sheet's reads, so the source part of the key is constant
+    here; the arithmetic auditor's dedup, which sees every sheet's claims, keys
+    on ``source_page_key`` (DA-001).
     """
     seen: set[tuple] = set()
     out: list[NumericClaim] = []
@@ -1936,10 +1965,10 @@ def _dedup_claims(claims: list[NumericClaim]) -> list[NumericClaim]:
             # relationship twice, and if one copy writes a Unicode dash the two
             # keys differ and the arithmetic tally double-counts the claim.
             normalize_sheet_id(c.sheet_id),
-            (c.kind or "").strip().lower(),
             (c.quote or "").strip(),
-            tuple(str(t) for t in c.terms),
-            str(c.expected),
+            # Exact decimals, terms as a multiset (remediation WP-03.3): one
+            # read writing 20 and the other "20.0" is still one claim.
+            *claim_content_key(c.kind, c.terms, c.expected),
         )
         if key in seen:
             continue

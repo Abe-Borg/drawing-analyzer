@@ -35,7 +35,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass, field
-from decimal import Decimal, DivisionByZero, InvalidOperation
+from decimal import MAX_EMAX, MIN_EMIN, Context, Decimal, DivisionByZero, InvalidOperation
 from typing import Any, Iterable
 
 from .sheet_ids import normalize_sheet_id
@@ -193,6 +193,93 @@ def _parse_number_str(raw: str) -> Decimal | None:
     except (InvalidOperation, DivisionByZero, ValueError):
         return None
     return None
+
+
+# --------------------------------------------------------------------------- #
+# Claim identity — what "the same claim" means (remediation WP-03.3, review B7)
+# --------------------------------------------------------------------------- #
+
+# The operation the host performs for each claim kind (see :func:`_compute`):
+# a ``factor`` is a product whose second term is the multiplier, and the finding
+# text says "product of" for both.
+_CLAIM_OPERATION = {"sum": "sum", "product": "product", "factor": "product"}
+
+# The scheme of :func:`arithmetic_claim_discriminator`. Versioned so a later
+# change to the canonical form, or a second producer of discriminators, can
+# never read an arithmetic one as its own.
+ARITHMETIC_CLAIM_SCHEME = "arithmetic/1"
+
+
+def claim_operation(kind: Any) -> str:
+    """The host operation a claim ``kind`` names; an unknown kind, lowercased."""
+    k = str(kind or "").strip().lower()
+    return _CLAIM_OPERATION.get(k, k)
+
+
+def canonical_decimal(value: Decimal) -> str:
+    """One spelling per value: ``20``, ``20.0`` and ``2E+1`` all read ``"20"``.
+
+    Exact. Trailing zeros are stripped at the value's own precision, never
+    rounded at the decimal context's 28 digits, so two different long numbers
+    stay different. Zero has one spelling whatever its sign. Never raises: the
+    exponent range is unbounded, because two of the dedups that use this have
+    no per-claim guard.
+    """
+    if not value.is_finite():
+        return str(value)
+    if value.is_zero():
+        return "0"
+    digits = len(value.as_tuple().digits)
+    exact = Context(prec=digits, Emax=MAX_EMAX, Emin=MIN_EMIN)
+    return format(value.normalize(exact), "f")
+
+
+def claim_value_key(value: Any) -> str:
+    """One raw claim term, or a stated value, as it counts for "the same claim".
+
+    Parsed with :func:`parse_number`, so ``20``, ``"20.0"``, the JSON float
+    ``20.0`` and ``"1,200"`` against ``1200`` agree, and spelled by
+    :func:`canonical_decimal`. A value that does not parse keeps its raw
+    spelling behind a ``raw:`` tag, which no parsed value can carry: an
+    unparseable term never collapses two different claims, and never equals a
+    number. (Before WP-03.3 every claim dedup keyed on ``str(term)``, so
+    ``20`` and ``"20.0"`` were two claims, checked and counted twice.)
+    """
+    parsed = parse_number(value)
+    if parsed is None:
+        return "raw:" + str(value)
+    return canonical_decimal(parsed)
+
+
+def claim_content_key(kind: Any, terms: Any, expected: Any) -> tuple:
+    """What a claim asserts: ``(operation, terms, stated value)``, canonical.
+
+    The terms are a sorted multiset: both operations the host performs commute,
+    so two reads that transcribe one row in a different order make one claim.
+    The one canonical form behind every claim dedup (this module's
+    ``_claim_dedup_key``, ``critique._dedup_claims``, ``cross_qc._dedup_claims``)
+    and behind :func:`arithmetic_claim_discriminator`, so the dedups and the
+    ledger can never disagree about which values are the same claim.
+    """
+    return (
+        claim_operation(kind),
+        tuple(sorted(claim_value_key(t) for t in list(terms or []))),
+        claim_value_key(expected),
+    )
+
+
+def arithmetic_claim_discriminator(kind: Any, terms: Any, expected: Any) -> str:
+    """The :attr:`~drawing_analyzer.models.Finding.claim_discriminator` of a
+    mismatch: ``"arithmetic/1:sum:20,20,20=540"``.
+
+    The scheme, then :func:`claim_content_key`. Only ever built for a claim the
+    host could compute, whose every value parsed, so no part holds a separator.
+    Two mismatches on one table row quote the same string; this is what tells
+    them apart, in the ledger's merge (``critique._is_duplicate``) and in the
+    finding's id (review B7).
+    """
+    operation, term_keys, stated = claim_content_key(kind, terms, expected)
+    return f"{ARITHMETIC_CLAIM_SCHEME}:{operation}:{','.join(term_keys)}={stated}"
 
 
 # --------------------------------------------------------------------------- #
@@ -365,10 +452,10 @@ def _claim_dedup_key(claim: NumericClaim) -> tuple:
     return (
         source_page_key(claim),
         normalize_sheet_id(claim.sheet_id),   # same canonical form (item 11 twin)
-        (claim.kind or "").strip().lower(),
         (claim.quote or "").strip(),
-        tuple(str(t) for t in claim.terms),
-        str(claim.expected),
+        # Exact decimals, terms as a multiset (WP-03.3): the last dedup before
+        # any count or finding, so it decides what "checked" counts.
+        *claim_content_key(claim.kind, claim.terms, claim.expected),
     )
 
 
@@ -412,7 +499,11 @@ def audit_arithmetic(
     the honest signal). Claims whose numbers can't be parsed, or whose kind is
     unknown, are counted ``unusable`` and dropped — never guessed at. Duplicate
     claims (the critique runs twice) are collapsed before checking so the tally
-    isn't double-counted.
+    isn't double-counted: the same sheet, quote and :func:`claim_content_key`
+    (exact decimals, terms as a multiset), so ``20`` and ``"20.0"`` are one
+    claim. Every finding carries its claim's
+    :func:`arithmetic_claim_discriminator`, so two different mismatches on one
+    row keep different ids and are never merged (remediation WP-03.3, B7).
     """
     sheets = list(rendered_sheets)
     by_key, by_id = _build_maps(sheets)
@@ -512,6 +603,12 @@ def audit_arithmetic(
                     operand_origin=origin,
                 ),
                 sources=["auditor_arithmetic"],
+                # Two mismatches on one row share this quote, and so shared an
+                # id and were merged by the ledger (review B7). The
+                # discriminator keeps them apart there, and is folded into id.
+                claim_discriminator=arithmetic_claim_discriminator(
+                    claim.kind, claim.terms, claim.expected
+                ),
             )
             result.findings.append(finding)
             if geom is not None and (claim.quote or "").strip():

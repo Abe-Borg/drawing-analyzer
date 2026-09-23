@@ -234,6 +234,18 @@ and quote, so it is **not unique**: review B8), `models.assign_qc_ids`,
 `Ledger.seal()` → anchor → `reconcile_post_anchor` → `number()`. The full
 consumer inventory is in plan WP-03.
 
+Added by WP-03.3 ([PR #161](https://github.com/Abe-Borg/drawing-analyzer/pull/161)), as an input, not a decision:
+`Finding.claim_discriminator`, a canonical statement of what a finding asserts,
+set only by a producer that can state it exactly. Today only the arithmetic
+auditor sets one (`auditors.arithmetic.arithmetic_claim_discriminator`: the host
+operation, the terms as a multiset of exact decimals, the stated value, under the
+versioned scheme `arithmetic/1`). Two findings that both carry one and disagree
+are never duplicates (`critique._claims_differ`, in both ledger passes); one on a
+single side never blocks. It is folded into `id` (`compute_finding_id`'s last
+argument, only when non-empty, so every other id is unchanged), rides the
+representative's bundle, and is serialized only when set. Whether `claim_id`
+builds on it is WP-03.4's call; WP-03.7 (N28) may give model findings one.
+
 - Decision: —
 - Rejected shortcuts: —
 - Version / cache changes: —
@@ -323,6 +335,20 @@ never deleted (plan §2 rule 6, WP-10).
   contract value, so a rule change that forgets the bump fails.
   WP-04.2 bumped it to 2 for the compatibility rule (N1); see the migration
   register.
+- **Added by WP-03.3: stored claims and a changed claim dedup.** Critique and
+  cross-QC entries store numeric claims already de-duplicated, and WP-03.3
+  changed that de-duplication (exact decimals, terms as a multiset,
+  `arithmetic.claim_content_key`). No term is bumped for it: claims have one
+  consumer, the arithmetic auditor, whose own dedup (the last before any count
+  or finding) applies the same canonical form, so a warm entry holding two
+  spellings of one claim yields what a cold run yields. The one exception is
+  recorded in the migration register (cross-QC dedups on a lowercased quote,
+  the auditor on the quote as written). The critique merge rule did not change
+  (`_is_duplicate` gained a gate that only fires on two findings that both
+  carry a claim discriminator, and no critique finding carries one), so the
+  pinned fingerprint holds and the critique term stays at 2. The arithmetic
+  findings' new ids re-key `stage=investigation`: that is the key's own
+  mechanism (the id is one of its inputs), so no term is added there either.
 - **Rejected shortcuts.**
   - A `_SCHEMA_VERSION` bump: it discards every paid digest.
   - A new key term for the same change, and a bump and a term together.
@@ -416,3 +442,6 @@ migration.
 | Critique cache, level 1 and level 2 (`critique_cache_key_level1`, `critique_cache_key`) | schema 10, no critique term | schema 10, `critique_contract=1` (`digest_cache._CRITIQUE_CACHE_CONTRACT`) | Every field; the entry shape is unchanged | None: every critique entry written before WP-04.1 misses once | The quantity tokenizer behind `critique.critical_signature` changed (B2, B3, B12, N19), and a critique entry stores post-merge findings, so an old entry holds merges the new rule would not make. One mechanism: a new critique-scoped term folded inside both critique builders, never `_SCHEMA_VERSION`, which feeds every builder (the v10 bump did this for a signature change and re-billed every digest). Digest, identity, review-plan, citation and investigation keys are byte-identical, pinned by `tests/test_drawing_cache_identity.py`. Old entries stay on disk; the next exhaustive run re-critiques each sheet once. A later change to the merge rule bumps the same term (WP-04.2, WP-01.4) | WP-04.1, [PR #157](https://github.com/Abe-Borg/drawing-analyzer/pull/157) |
 | A/B harness arm records (`scripts/ab_findings_diff.RECORD_CONTRACT_VERSION`) | 2 | 3 | Every field | None: `load_arm_records` refuses a v2 sidecar (`RECORDS_STALE_CONTRACT`) rather than compare it | A record stores `critical_signature` computed when its arm ran, so a v2 record carries the old tokens and would report a tokenizer change as a model difference. Refused, never deleted: re-run the arm | WP-04.1, [PR #157](https://github.com/Abe-Borg/drawing-analyzer/pull/157) |
 | Critique cache, level 1 and level 2 (`critique_cache_key_level1`, `critique_cache_key`) | schema 10, `critique_contract=1` | schema 10, `critique_contract=2` | Every field; the entry shape is unchanged | None: every critique entry written under contract 1 misses once | The compatibility rule behind `critique.signatures_compatible` changed (N1): `critique.signature_conflicts` compares quantities per kind and tags by inclusion, so one shared value or tag no longer makes two findings compatible. A critique entry stores post-merge findings, so an entry stored under contract 1 can hold a merge the new rule refuses (`6 in` and `4 in` beside a shared `100 psi`). One mechanism: the existing critique-scoped term, bumped; never `_SCHEMA_VERSION` and never a second term. Digest, identity, review-plan, citation and investigation keys are byte-identical, pinned by `tests/test_drawing_cache_identity.py` (`test_wp_04_2_moves_every_critique_key_and_no_other_key`); the merge-rule fingerprint is pinned under the new value. Old entries stay on disk; the next exhaustive run re-critiques each sheet once. The A/B record contract is not bumped: a record stores the signature's tokens, which did not change, and the rule is re-applied when two records are compared | WP-04.2, [PR #158](https://github.com/Abe-Borg/drawing-analyzer/pull/158) |
+| Investigation cache (`stage=investigation`, `investigate._payload_hash`) | key over the finding's content `id` (sheet, category, quote, source) | the same key; an arithmetic finding's `id` now also folds its `claim_discriminator` | Every field; the entry shape is unchanged | Every entry except those for an arithmetic finding, or for a merged entry whose representative is one | The `id` is one of the key's inputs, and every arithmetic finding's `id` changed so that two mismatches on one table row no longer share one (B7). Only a mismatch checked against model-transcribed numbers is ever investigated (it starts UNCERTAIN; investigation takes it only if it is anchored and verification leaves it UNCERTAIN), so only those entries miss once and are investigated again (a paid call per finding, exhaustive runs only). One mechanism: the id change itself; no key term added, no `_SCHEMA_VERSION` bump. Every other finding's `id` is byte-identical (`compute_finding_id` appends the discriminator only when non-empty; pinned by `tests/test_drawing_models.py`, `tests/test_source_identity.py`). Old entries stay on disk | WP-03.3, [PR #161](https://github.com/Abe-Borg/drawing-analyzer/pull/161) |
+| Critique cache, level 1 and level 2 (stored `claims`) | schema 10, `critique_contract=2` | schema 10, `critique_contract=2` (no version, key or term change) | Every field | Every entry | `critique._dedup_claims` now keys on exact decimals with the terms as a multiset (`arithmetic.claim_content_key`), so an entry stored before WP-03.3 can hold two spellings of one claim (`20` and `"20.0"`). Harmless: the arithmetic auditor, the only consumer of claims, applies the same canonical form, and one critique entry holds one sheet's claims, so its dedup collapses them exactly as a cold run would. The merge rule is unchanged (its pinned fingerprint holds), and critique findings carry no discriminator, so stored findings are byte-identical. Only the log line's claim count can differ | WP-03.3, [PR #161](https://github.com/Abe-Borg/drawing-analyzer/pull/161) |
+| Cross-QC cache (`_cross_qc_cache_key`, stored `claims`) | `_CROSS_QC_CACHE_CONTRACT=3` | `_CROSS_QC_CACHE_CONTRACT=3` (no version, key or term change) | Every field | Every entry | `cross_qc._dedup_claims` now keys on exact decimals with the terms as a multiset, so an entry stored before WP-03.3 can hold two spellings of one claim, which the arithmetic auditor counts once. Narrow residual, accepted rather than re-billing every cross-QC call: this dedup compares the quote lowercased and the auditor's does not, so two transcriptions whose quotes differ in letter case AND whose numbers are spelled differently are counted twice from a stored entry and once cold (the `arithmetic_checked`/`arithmetic_mismatched` tally only: their two findings carry one discriminator and still merge in the ledger). WP-05.1's planned contract bump (3 → 4) retires those entries | WP-03.3, [PR #161](https://github.com/Abe-Borg/drawing-analyzer/pull/161) |

@@ -25,7 +25,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-from ..models import Anchor, Finding, Verification
+from ..models import Anchor, Finding, Verification, source_page_key
 from .references import _levenshtein, _wrect, _wtext, detect_sheet_id, detect_sheet_id_word
 
 # The band extends this fraction of the page width to the LEFT of the sheet-ID
@@ -333,14 +333,19 @@ def audit_titleblock(rendered_sheets: Iterable[Any]) -> list[Finding]:
                 note=f"title-block field '{tok}' vs set norm '{match}'",
             ))
 
-    # Dedup by content id: a near-variant token can be caught by BOTH paths on the
-    # same sheet (same quote → same Finding.id) — keep one, first-wins order (I-7).
-    seen: set[str] = set()
+    # A near-variant token can be caught by BOTH paths on the same sheet: one
+    # value, one place, reported twice. Keep one, first wins (I-7), so the
+    # labelled path, which names the field, is the one kept. Keyed explicitly on
+    # (sheet, quote), which is what makes two of these the same report, rather
+    # than on the content id (remediation WP-03.3): the id is not an identity
+    # (review B8), and this rule must not change when it does.
+    seen: set[tuple] = set()
     deduped: list[Finding] = []
     for f in findings:
-        if f.id in seen:
+        key = (source_page_key(f), f.source_quote)
+        if key in seen:
             continue
-        seen.add(f.id)
+        seen.add(key)
         deduped.append(f)
     return deduped
 

@@ -1500,7 +1500,12 @@ two may well be one pipe. Equipment tags and sheet, grid and detail references
 work the same way. One finding may add a quantity or name a reference the other
 omits (`P-1` against `P-1 per M-501`) and the two still merge, but two findings
 that each name a different extra reference (`V-3` on one, `M-501` on the other)
-stay apart. Keeping both is the safe error. A few pairs still merge, because
+stay apart. Keeping both is the safe error. Two arithmetic findings merge only
+when they checked the same relationship (the same operation, the same numbers,
+the same stated result), however alike their wording and wherever they sit, so
+two mistakes on one table row stay two findings (see
+[the numeric-claims contract](#the-numeric-claims-contract-arithmetic-auditor)).
+A few pairs still merge, because
 nothing in the finding shows the conflict: two sizes with their roles swapped
 (`6 in main, 4 in branch` against `4 in main, 6 in branch`), because the app does
 not yet read which quantity belongs to what; a bare `12'` against `12'-6"`; and
@@ -1607,7 +1612,12 @@ onto the reviewed PDFs by default when QC Markups is on.
 They live in the `drawing_analyzer.auditors` package; `run_auditors(rendered_sheets,
 claims=…)` runs the whole battery and returns the combined findings plus a small
 `stats` tally. Each auditor is isolated, so one failing never loses the others
-(I-3). The battery wires into a run through `reference_audit=True` (or the GUI's
+(I-3). It hands on every finding every auditor returns and leaves duplicates to
+the [findings ledger](#the-findings-ledger-part-iii), which still folds two
+auditors' reports of the same thing at the same spot into one finding. Until
+remediation WP-03.3 it dropped any finding whose content id another had
+already used, and that id is built from the sheet, category and quote, so two
+different arithmetic mistakes quoted from one table row were one finding. The battery wires into a run through `reference_audit=True` (or the GUI's
 **Reference audit** checkbox); its findings arrive on `ctx.reference_findings`,
 join `ctx.all_findings`, and the checks-passed tally lands on `ctx.audit_stats`.
 
@@ -1673,6 +1683,22 @@ multiplying with the standard library, **never `eval`, never the model's answer*
 1.3 = 1950`, but the DIPA row still states `1500`). Relationships that check out
 are counted, not flagged, and surfaced in the report as *"N numeric relationships
 checked ✓"* — the balance column of a real review.
+
+A relationship is counted once however it was written. The critique reads each
+sheet twice, and one read may write `20` where the other writes `20.0`, or list
+the same terms in another order; the host compares the numbers, not their
+spelling, so that is one relationship checked, not two. A term the host cannot
+read as a number is never treated as equal to anything but the same term. And
+two *different* mistakes on one table row are two findings, even though both
+quote the same row: each finding records exactly which relationship it checked
+(`sum` of `20, 20, 20` against `540`, say), and two findings about different
+relationships are never merged, never share an id, and get separate `QC-###`
+numbers. Until remediation WP-03.3 the second mistake on a row disappeared, even
+though the tally still counted it; in the review's example a mismatch the host
+could only check against model-transcribed numbers (`UNCERTAIN`) vanished into
+a trusted `DETERMINISTIC` one on the same row. A model finding that states the
+same mistake as the auditor still merges with it, and the auditor's finding
+wins the text, as below.
 
 The *operation* is always host-deterministic, but the numbers it operated on may
 have been misread. So a mismatch is trusted **`DETERMINISTIC`** (and clouded

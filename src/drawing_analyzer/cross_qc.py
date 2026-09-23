@@ -92,6 +92,7 @@ from .stage_cache import (
     put_stage_cache_entry,
     stage_cache_key,
 )
+from .auditors.arithmetic import claim_content_key
 from .auditors.references import detect_sheet_id
 from .auditors.sheet_ids import fold_text, normalize_sheet_id
 
@@ -1336,8 +1337,10 @@ def _dedup_claims(claims: list[NumericClaim]) -> list[NumericClaim]:
     seen: set[tuple] = set()
     out: list[NumericClaim] = []
     for c in claims:
-        key = (_norm_id(c.sheet_id), c.kind, (c.quote or "").strip().lower(),
-               tuple(str(t) for t in c.terms), str(c.expected))
+        # Exact decimals, terms as a multiset: the canonical claim form every
+        # claim dedup shares (remediation WP-03.3), so "20" and 20.0 are one.
+        key = (_norm_id(c.sheet_id), (c.quote or "").strip().lower(),
+               *claim_content_key(c.kind, c.terms, c.expected))
         if key in seen:
             continue
         seen.add(key)

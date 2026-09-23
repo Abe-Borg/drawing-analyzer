@@ -429,7 +429,7 @@ Regression cases:
   - It must block the merge in both Pass A and Pass B.
   - Fold it into the arithmetic finding's id.
   - Scope it to `auditor_arithmetic` findings, because the same predicate drives the cached self-consistency merges.
-- Also key `critique._dedup_claims` and `arithmetic._claim_dedup_key` on parsed Decimals; `20` and `"20.0"` count twice today.
+- Also key `critique._dedup_claims` and `arithmetic._claim_dedup_key` on parsed Decimals; `20` and `"20.0"` count twice today. *(Corrected by WP-03.3: cross-QC does not call `critique._dedup_claims`; it has its own copy, `cross_qc._dedup_claims`, with the same `str()` keys, so it moves too. `540` against `"540"` already shared a key, since `str(540) == "540"`; the gaps are `20` against `"20.0"` or the JSON float `20.0`, `1200` against `"1,200"`, terms in another order, and `factor` against `product`.)*
 - Regression path: `run_auditors` → `Ledger.add` → `reconcile_post_anchor` → `number()`, in both orders.
 
 **Step 6: snapshots and compatibility.**

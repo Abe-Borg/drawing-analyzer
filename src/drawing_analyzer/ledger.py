@@ -468,7 +468,8 @@ def _merge_into(existing: Finding, incoming: Finding, trace: list | None = None)
     """Fold a duplicate ``incoming`` into the ledger's ``existing`` entry (§12.2).
 
     **Coherent grounding.** The grounded fields — ``text`` / ``category`` /
-    ``source_quote`` / ``tile`` / ``anchor_hint`` / ``id`` — move together as an
+    ``source_quote`` / ``tile`` / ``anchor_hint`` / ``id`` /
+    ``claim_discriminator`` — move together as an
     **atomic bundle** from whichever member is the better representative (by
     :func:`_grounding_quality`); a merge never pairs one finding's text with a
     *different* finding's quote. The loser's distinct quote is kept in
@@ -576,6 +577,12 @@ def _merge_into(existing: Finding, incoming: Finding, trace: list | None = None)
         # verdict stops travelling to text it did not produce.
         existing.verification = incoming.verification
         existing.id = incoming.id
+        # The claim discriminator says what ``text`` asserts, and the id folds
+        # it (remediation WP-03.3), so it rides the bundle with both. A merged
+        # entry whose bundle went to a member without one reads "", and the
+        # member that had one still blocks a different claim from its snapshot:
+        # every complete-link check compares member histories.
+        existing.claim_discriminator = incoming.claim_discriminator
         _add_supporting(existing, loser_quote)
         if not existing.recommended_action:
             existing.recommended_action = loser_action
