@@ -51,7 +51,8 @@ on:
     # including one never pushed to main. This trigger gives the tag its own CI
     # run for visibility; it is NOT what gates the release. A separate workflow
     # run is not a dependency, so release.yml runs the whole gate set inside its
-    # own `needs` chain (`gates` + `gates-windows`, which `publish` requires).
+    # own `needs` chain (`gates` + `gates-windows` + `acceptance`, which
+    # `publish` requires).
     tags: ["v*"]
   pull_request:
   # Weekly, so the pip-audit vulnerability scan in `security-gates` runs against a

@@ -1830,14 +1830,19 @@ Three additions worth knowing about:
   measured on one commit, one environment variable apart: `98 passed` and
   `98 skipped, 2180 deselected`, both exit 0. The guard fails the job below a
   floor of genuinely executed tests. A skip is not a pass.
-- `release.yml`'s `publish` job now needs two tag-gated jobs in its own `needs`
-  chain: `gates` (the full `scripts/run_acceptance.py` with Chromium installed,
+- `release.yml`'s `publish` job now needs these tag-gated jobs in its own
+  `needs` chain: `gates` (the full `scripts/run_acceptance.py` with Chromium installed,
   plus static analysis and the license and CVE audits) and `gates-windows` (the
   hermetic suite on Windows). Branch protection does not apply to a tag push and
   a tag can name any commit, so a release used to be gated only on the installer
   *compiling*. CI also triggers on `v*` tags, but that is visibility only — a
   separate workflow run started by the same tag is not a dependency of the
   release workflow, so it cannot gate the publish.
+- A third job in that chain, `acceptance`, gates `publish` on the release's
+  **acceptance record**, not only on the automated suite; see
+  [Acceptance & release gate](#acceptance--release-gate). `publish` also deploys
+  to a `release` environment, so a repository admin can require a reviewer's
+  approval before anything is published.
 
 ## Acceptance & release gate
 
@@ -1953,6 +1958,30 @@ when the recorded acceptance evidence says so (Phase 27, §19.9). The pieces:
   checklist, including the Bluebeam Revu / Acrobat / Chromium viewer script and
   the Excel/Notepad output script) are completed per release candidate and kept
   with the release.
+- **The publish gate (enforced, not advisory).** A stable tag `vX.Y.Z` is
+  published only when the tagged commit's `docs/releases/ACCEPTANCE-X.Y.Z.md`
+  says so. The release workflow's `acceptance` job runs
+  `scripts/check_release_acceptance.py`, and `publish` needs it. The record must:
+  - be titled for that exact version;
+  - have a Sign-off whose `Release decision:` line starts with exactly `SHIP`
+    (not `SHIPPED`, not the template's unfilled `SHIP / HOLD`);
+  - list only complete waivers whose `Expiry` date (`YYYY-MM-DD`) has not
+    passed. Waivers stand in for sections; they never lift a HOLD.
+
+  Otherwise nothing is published. This exists because it already went wrong:
+  1.6.0 shipped ahead of its record, and 1.7.0 was published as the stable
+  release every install is offered about eight minutes after its record merged
+  saying HOLD. A release candidate (`vX.Y.ZrcN`) needs no record. It publishes
+  as a GitHub pre-release, which the updater never offers to installed copies,
+  so it is how a build reaches testers first. Dry-run the gate before tagging:
+  `python scripts/check_release_acceptance.py --tag vX.Y.Z`.
+
+  The workflow file is read from the tagged commit, so this check stops
+  accidents. The independent boundary is the `release` environment `publish`
+  deploys to: required reviewers configured by a repository admin in the
+  repository settings, where a tag cannot change them. GitHub creates an
+  environment nobody configured *without* protection, so that setting has to be
+  confirmed, not assumed (`docs/RELEASE_WINDOWS.md`, "The publish boundary").
 - **Reproducible builds:** `requirements-release.lock` pins the dependency set
   release artifacts are built and smoke-tested against
   (`pip install -c requirements-release.lock ".[dev]"`); regenerate it

@@ -46,6 +46,59 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - **CI** passes `-m "not network"` on every pytest command. A new test fails
     if a workflow pytest command drops it.
 
+### Fixed
+
+- **A stable tag could publish past its own acceptance hold, and did (remediation
+  WP-23.1; N8).** `docs/releases/ACCEPTANCE-1.7.0.md` put the stable `v1.7.0` tag
+  on HOLD, and about eight minutes after that record merged, `v1.7.0` was
+  published as the stable `latest` release: the release every installed copy is
+  offered within a day. `v1.6.0` had shipped ahead of its record too. Nothing in
+  `release.yml` read the record; `publish` needed only the build and the
+  automated gates. Now:
+  - **A new tag-only, read-only `acceptance` job** runs
+    `scripts/check_release_acceptance.py` on the tagged commit, and `publish`
+    needs it (`needs: [build, gates, gates-windows, acceptance]`).
+  - **A stable tag `vX.Y.Z` publishes only when**
+    `docs/releases/ACCEPTANCE-X.Y.Z.md` meets all of these:
+    - it is titled for exactly that version;
+    - its Sign-off has one `Release decision:` line whose first word is
+      `SHIP`, and which does not also say `HOLD`;
+    - every waiver it lists is complete (item, scope, justification, owner
+      approval) with an `Expiry` written `YYYY-MM-DD` that has not passed.
+
+    `SHIPPED` (the 1.6.0 record's wording), `Ship` and the template's unfilled
+    `SHIP / HOLD` are not SHIP. Waivers stand in for sections, never for the
+    decision, so they do not lift a HOLD. A record the script cannot read is
+    refused.
+  - **An `rcN` tag needs no record** and keeps publishing as a GitHub
+    pre-release, which the updater never offers to installed copies.
+  - **The channel is decided once.** `publish` takes `prerelease` or `stable`
+    from the gate's output rather than globbing the tag for `*rc*` (a glob
+    that also matched `v1.8.0-rc1`). A tag outside the updater's
+    `X.Y.Z[rcN]` grammar publishes nothing.
+  - **`publish` checks the earliest waiver expiry twice**: before uploading,
+    because an approval can come days after the gate ran, and again after the
+    upload. To make the second check possible, the assets now upload into a
+    **draft**, invisible to the public and the updater, which one final call
+    makes public. Plain `gh release create` publishes at the end of its own
+    upload, which left the whole upload between the check and the release
+    going public. A re-run finishes a draft left by an earlier attempt, and
+    only replaces a published release's assets, without re-marking it
+    `latest`.
+  - **`publish` deploys to a `release` environment**, whose required reviewers
+    and tag policy live in the repository settings, where a tag cannot rewrite
+    them. The YAML alone proves nothing: GitHub creates an unconfigured
+    environment with no protection, and a tag runs the workflow file from the
+    tagged commit. Configuring and confirming the protection is an owner
+    action, as is deciding what to do about the published 1.7.0.
+
+  Regressions: `tests/test_release_acceptance_gate.py`, which reads the real
+  record format (the verbatim 1.6.0 and 1.7.0 sign-offs, the template, and every
+  committed record). `tests/test_browser_suite_gate.py` now pins the longer
+  `needs:` chain. The runbook (`docs/RELEASE_WINDOWS.md`, new section "The
+  publish boundary") and the template (`docs/RELEASE_ACCEPTANCE_TEMPLATE.md`) say
+  exactly what the gate reads.
+
 ## [1.7.0] - 2026-09-21
 
 ### Added

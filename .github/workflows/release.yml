@@ -5,6 +5,9 @@
 #                            then the tag-only `publish` job attaches both to a
 #                            GitHub Release. The installed app's updater fetches
 #                            releases/latest/download/latest.json to discover it.
+#                            A stable tag publishes only when
+#                            docs/releases/ACCEPTANCE-X.Y.Z.md says SHIP (the
+#                            `acceptance` job, N8); an rcN tag needs no record.
 #   * pull_request / workflow_dispatch (packaging-related changes) -> the `build`
 #                            job builds + self-checks + compiles the installer
 #                            WITHOUT publishing, and uploads the artifacts, so the
@@ -18,6 +21,9 @@
 #   3. This workflow builds and publishes the release automatically. A tag with
 #      an `rcN` suffix is published as a GitHub *pre-release*, so it never
 #      becomes `releases/latest` and is not auto-offered to stable installs.
+#      A stable tag must name a commit whose docs/releases/ACCEPTANCE-1.2.3.md
+#      reads SHIP, with every waiver in it unexpired; otherwise `acceptance`
+#      fails and nothing is published.
 #
 # Security posture (mirrors .github/workflows/ci.yml §9.8):
 #   * The `build` job executes repo-controlled code (PyInstaller runs the spec
@@ -26,6 +32,11 @@
 #     holds a write-capable token.
 #   * Only the `publish` job has `contents: write`, it is gated to tag refs, and
 #     it runs NO repo code — it just downloads the built artifact and calls `gh`.
+#     It deploys to the `release` environment, whose protection (required
+#     reviewers, a `v*` tag policy) is set in the repository settings, where a
+#     tag cannot rewrite it. An environment nobody configured is auto-created
+#     unprotected, so that protection must be confirmed through the API
+#     (_plans/PROGRESS.md O-5); this file alone proves nothing about it.
 #   * `publish` also needs the tag-gated `gates` and `gates-windows` jobs
 #     (P9 item 42), so a release cannot be published from a commit whose full
 #     automated gate set — Linux and Windows suites, import isolation, secret
@@ -33,6 +44,10 @@
 #     audits — has not passed on that exact commit. They run here rather than
 #     being inherited from ci.yml: ci.yml triggers on `v*` tags too, but a
 #     separate workflow run is not a dependency of this one.
+#   * ...and the tag-gated `acceptance` job (N8), because a green automated
+#     suite is not acceptance: it reads the tagged commit's acceptance record
+#     with scripts/check_release_acceptance.py and decides the release channel
+#     once. `publish` takes that channel from its outputs.
 #   * Third-party actions are pinned to immutable commit SHAs (the trailing
 #     comment is the human-readable version).
 #
@@ -326,13 +341,59 @@ jobs:
       - name: Hermetic test suite
         run: python -m pytest -q -m "not network"
 
+  acceptance:
+    # N8 (remediation WP-23.1). v1.7.0 was published as the stable `latest`
+    # release about eight minutes after docs/releases/ACCEPTANCE-1.7.0.md
+    # merged saying HOLD, and v1.6.0 shipped ahead of its record too: nothing
+    # in this file read the record, and a green automated suite is not
+    # acceptance. This job decides once what the tag may publish, and `publish`
+    # takes that decision from its outputs instead of re-deriving it:
+    #   * an `rcN` tag publishes as a GitHub pre-release and needs no record;
+    #   * a stable tag needs docs/releases/ACCEPTANCE-<version>.md titled for
+    #     this version, whose Sign-off `Release decision:` reads SHIP and whose
+    #     every waiver row is complete with an unexpired Expiry (YYYY-MM-DD).
+    #     Waivers never override HOLD.
+    # It runs on EVERY tag, RC included, and the RC bypass lives in the
+    # unit-tested script rather than in an `if:` here: a skipped job in `needs`
+    # skips `publish` too. It is read-only like `gates`, because it runs repo
+    # code. A tag runs this file from the tagged commit, so this job stops
+    # accidents; the independent boundary is the protected `release`
+    # environment on `publish` (O-5).
+    name: Release acceptance record (a stable tag needs SHIP)
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      channel: ${{ steps.decide.outputs.channel }}
+      valid_through: ${{ steps.decide.outputs.valid_through }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.11"
+      - name: Read docs/releases/ACCEPTANCE-<version>.md
+        # Standard library only; nothing is installed. On a refusal it exits 1
+        # and writes no output, so `publish` never starts.
+        id: decide
+        run: python scripts/check_release_acceptance.py --tag "${GITHUB_REF_NAME}" --github-output "${GITHUB_OUTPUT}"
+
   publish:
     name: Publish GitHub Release
-    needs: [build, gates, gates-windows]
+    needs: [build, gates, gates-windows, acceptance]
     # Tag refs only. This job runs NO repo-controlled code — it downloads the
     # already-built artifact and calls `gh` — so holding a write token here does
-    # not expose the repo to PR-supplied build steps.
+    # not expose the repo to PR-supplied build steps. That is also why the
+    # acceptance check is a separate read-only job whose outputs this one reads.
     if: startsWith(github.ref, 'refs/tags/')
+    # The approval boundary a tag cannot rewrite (N8, O-5): the environment's
+    # required reviewers and tag policy live in the repository settings. An
+    # environment no admin has configured is auto-created on first use WITH NO
+    # PROTECTION, so this line alone proves nothing; confirm the protection
+    # through the API. It covers RC tags too.
+    environment: release
     runs-on: ubuntu-latest
     permissions:
       contents: write   # create the release / upload assets
@@ -347,29 +408,76 @@ jobs:
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          # Decided once, by the `acceptance` job.
+          CHANNEL: ${{ needs.acceptance.outputs.channel }}
+          VALID_THROUGH: ${{ needs.acceptance.outputs.valid_through }}
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
-          version="${tag#v}"
+
+          # The channel comes from the acceptance job, never from the tag text.
+          # A release candidate is published as a pre-release so GitHub never
+          # marks it "latest": the updater reads
+          # releases/latest/download/latest.json, so stable installs are not
+          # auto-offered an RC. Any other value refuses, before anything is
+          # published.
+          case "${CHANNEL}" in
+            prerelease) channel_flag=--prerelease ;;
+            stable)     channel_flag=--latest ;;
+            *)
+              echo "::error::The acceptance job reported no publishable channel for ${tag}; nothing was published." >&2
+              exit 1
+              ;;
+          esac
+
+          # A waiver can lapse while this job waits for the environment's
+          # approval, and again while the assets upload. So the earliest expiry
+          # is checked here, before anything is uploaded, and once more just
+          # before the release is made public. Same rule as the script: valid
+          # through its Expiry day (UTC). ISO dates compare correctly as strings.
+          if [[ -n "${VALID_THROUGH}" && ! "${VALID_THROUGH}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            echo "::error::The acceptance job reported a malformed waiver expiry for ${tag}; nothing was published." >&2
+            exit 1
+          fi
+          waiver_lapsed() {
+            [[ -n "${VALID_THROUGH}" && "$(date -u +%F)" > "${VALID_THROUGH}" ]]
+          }
+          if waiver_lapsed; then
+            echo "::error::A waiver in the acceptance record for ${tag} expired on ${VALID_THROUGH}, after the acceptance job ran; nothing was published." >&2
+            exit 1
+          fi
+
           notes=$'Windows installer for Drawing Analyzer '"$tag"$'.\n\n'
           notes+=$'Download **DrawingAnalyzerSetup.exe** below and run it. '
           notes+=$'The app is not code-signed, so Windows SmartScreen may warn on '
           notes+=$'first run - choose **More info** then **Run anyway**.\n\n'
           notes+=$'Existing installs will offer this update automatically.'
 
-          # A release-candidate tag (vX.Y.ZrcN) is published as a pre-release so
-          # GitHub never marks it "latest" — the updater reads
-          # releases/latest/download/latest.json, so stable installs are not
-          # auto-offered an RC.
           flags=(--verify-tag --title "Drawing Analyzer ${tag}" --notes "${notes}")
-          if [[ "${version}" == *rc* ]]; then
-            flags+=(--prerelease)
-          else
-            flags+=(--latest)
-          fi
-
           assets=(artifact/DrawingAnalyzerSetup.exe artifact/latest.json)
-          if ! gh release create "${tag}" "${assets[@]}" --repo "${GITHUB_REPOSITORY}" "${flags[@]}"; then
-            # Release already exists (e.g. a re-run) - replace the assets.
-            gh release upload "${tag}" "${assets[@]}" --repo "${GITHUB_REPOSITORY}" --clobber
+
+          # Upload into a DRAFT, which neither the public nor the updater can
+          # see, and make it public in one final call after the last check.
+          # `gh release create` would otherwise publish at the end of its own
+          # upload, leaving the whole upload between the check above and the
+          # moment the release goes public. A re-run finds what an earlier
+          # attempt left: a draft is finished and published; a published
+          # release only has its assets replaced, and keeps its latest and
+          # pre-release flags, so re-running an old tag never takes `latest`
+          # back from a newer release.
+          state="$(gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" --json isDraft --jq .isDraft || echo missing)"
+          case "${state}" in
+            missing) gh release create "${tag}" "${assets[@]}" --repo "${GITHUB_REPOSITORY}" --draft "${flags[@]}" ;;
+            true|false) gh release upload "${tag}" "${assets[@]}" --repo "${GITHUB_REPOSITORY}" --clobber ;;
+            *)
+              echo "::error::Could not tell whether ${tag} already has a release; nothing was published." >&2
+              exit 1
+              ;;
+          esac
+          if [[ "${state}" != "false" ]]; then
+            if waiver_lapsed; then
+              echo "::error::A waiver in the acceptance record for ${tag} expired on ${VALID_THROUGH} while the assets uploaded; the release was left an unpublished draft." >&2
+              exit 1
+            fi
+            gh release edit "${tag}" --repo "${GITHUB_REPOSITORY}" --draft=false "${channel_flag}"
           fi
