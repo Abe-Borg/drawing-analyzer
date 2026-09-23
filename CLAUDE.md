@@ -29,9 +29,6 @@ Remediation slices are always written `WP-nn.m`.
 The slice named in parentheses corrects the text and removes the entry here:
 - HTML report: grouping "recomputes after every sort/filter". It does not after a
   sort (H1; WP-21.2).
-- Critical signature: keeping both halves of `12'-6"` keeps `12'-6"` and `12'-8"`
-  apart. It does not: they share `12ft`, and the compatibility rule treats one
-  shared value as compatible (N1; WP-04.2).
 - Digest truncation: the raised-cap retry "can only improve on that read, never
   lose it". A retry that lands empty or refused discards the first read (N16;
   WP-01.3).
@@ -712,14 +709,35 @@ reporter of last resort must never raise from inside Tk's handler.
 - ***`ledger.py` is the exclusive findings container*** (Part III §16): every
   channel ingests into it with source tags. Dedup is conservative and lossless
   (Phase 20 §12): a tile/rect overlap is never sufficient — merges need semantic
-  sameness with **compatible critical signatures** (`critique.signatures_compatible`
-  over `critique.critical_signature`: tags, measurements, absence polarity,
-  cross-sheet legs — public because the A/B harness's finding-level comparison
-  applies the same rule across two runs, and a restated copy is the drift this
-  codebase has already paid for once — and a measurement in that signature is its
-  **value**, not its spelling: `1/2"` is `0.5in`, not the denominator `2in` it used
-  to collapse to, which made *Provide 1/2" drain* and *Provide 2" drain* one
-  finding. `12'-6"` keeps both halves and neither goes negative, which needs TWO
+  sameness with **compatible critical signatures** (`critique.critical_signature`:
+  tags, measurements, absence polarity, cross-sheet legs, compared by
+  `critique.signature_conflicts`, the ONE copy of the rule: it names the
+  conflicting axes, `signatures_compatible` is its negation, and the A/B
+  harness's finding-level comparison reports those axes instead of restating the
+  rule — a restated copy is the drift this codebase has already paid for twice.
+  Since remediation WP-04.2 (N1) one shared tag or value no longer makes two
+  signatures compatible. Quantities compare **per kind**: a unit, or one of the
+  `_QUANTITY_KIND` groups of units that measure one kind of quantity (lengths
+  `in`/`ft`/`mm`/`cm` and a unitless W×H size; degrees `°`/`°f`/`°c`; pressures
+  `psi`/`psig`; voltages `volt`/`vac`/`vdc`/`kv`). For every kind both carry, one
+  side's tokens must include the other's, and tags must include one another the
+  same way; two signatures that share no quantity at all still conflict. So one
+  side may add detail and still merge, but a value or tag on EACH side that the
+  other lacks blocks: `6 in`/`4 in` beside a shared `100 psi`, `12'-6"`/`12'-8"`
+  (both `12ft`), `90°F`/`90°C` beside a shared `6 in`, `P-1 + V-3`/`P-1 + V-4`.
+  A kind relates units without converting a value (`12 in` never equals `1 ft`),
+  so it can only ever block. Tags are not grouped by prefix (`LP-1` and `HP-1` are
+  both panels), so two findings that each name a different extra reference stay
+  apart: deliberate retention, pinned in `tests/test_signature_compatibility.py`
+  and `tests/test_quantity_signature.py` beside the recorded limits that still
+  merge (swapped roles, since nothing extracts quantity roles, WP-04.3; a bare
+  `12'` against `12'-6"`; WP-04.1's partial signatures). A survivor's signature
+  grows (it includes `supporting_quotes`), which is why every complete-link check
+  compares a newcomer with each member as it arrived (`_cluster`, `Ledger.add`'s
+  snapshots, Pass B's `member_history`) and never with the grown survivor — and a
+  measurement in that signature is its **value**, not its spelling: `1/2"` is
+  `0.5in`, not the denominator `2in` it used to collapse to, which made *Provide
+  1/2" drain* and *Provide 2" drain* one finding. `12'-6"` keeps both halves and neither goes negative, which needs TWO
   lookbehinds — a single `[A-Za-z0-9.\-]` class blocks the `101` in `M-101`
   (right) *and* the `6` in `12'-6"` (wrong, and unsafe: `12'-6"` and `12'-8"` then
   both sign as `{12ft}`). Plurals fold; `psig` deliberately does not fold into
@@ -733,9 +751,9 @@ reporter of last resort must never raise from inside Tk's handler.
   size `24x12in`, a range `4..6in`, a tight list `2,4,6in`, a voltage pair
   `120/208volt`. A compact `V` reads anywhere but a slope (`3H:1V`), a compact `A`
   only beside a pole count, an overcurrent device or a rating label: a room
-  `101A` read as a current would put one shared token in two findings, and one
-  shared value makes them compatible (N1). The critique cache stores post-merge
-  findings, so this rule rides `digest_cache._CRITIQUE_CACHE_CONTRACT`, a term
+  `101A` read as a current would put a quantity nobody wrote into two findings'
+  signatures. The critique cache stores post-merge findings, so the tokenizer and
+  the rule ride `digest_cache._CRITIQUE_CACHE_CONTRACT` (2 since WP-04.2), a term
   inside both critique key builders and nothing else, never `_SCHEMA_VERSION`;
   `tests/test_drawing_cache_identity.py` pins the rule's fingerprint to its
   value, so a rule change that forgets the bump fails); merging keeps

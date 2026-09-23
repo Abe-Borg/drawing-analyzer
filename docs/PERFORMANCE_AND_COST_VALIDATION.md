@@ -222,9 +222,15 @@ for exactly that reason, and a test asserts the underlying collision still
 exists rather than assuming it.
 
 The "compatible critical signatures" check is `critique.signatures_compatible`,
-the same rule the in-run dedup uses — imported, not restated. A changed
+the same rule the in-run dedup uses — imported, not restated. The axes a
+candidate row names as conflicting (`tags`, `measurements`, `absence_polarity`,
+`cross_sheet_legs`) come from `critique.signature_conflicts`, the rule itself,
+of which `signatures_compatible` is the negation; the harness kept its own copy
+of the axis test until remediation WP-04.2 changed the rule. A changed
 quantity, a changed equipment tag, or a flipped absence polarity therefore can
-never become an exact match, and geometry never produces one at all: rect
+never become an exact match — nor, since WP-04.2, can one that changed beside
+an unchanged one (`6 in` to `4 in` beside the same `100 psi`) — and geometry
+never produces one at all: rect
 overlap only ever *suggests* a candidate. Nothing is deleted, no fuzzy score is
 promoted to an equivalence, and no second model is asked to adjudicate — that
 would make a comparison harness cost money and depend on the thing under test.

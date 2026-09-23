@@ -640,6 +640,51 @@ def test_a_critique_entry_from_before_wp_04_1_misses_and_is_never_deleted(tmp_pa
         reopened.close()
 
 
+# The critique keys WP-04.1 wrote (``critique_contract=1``) for the same inputs.
+# WP-04.2 changed the compatibility rule behind the merge (N1) and bumped the
+# contract to 2: an entry stored under 1 holds merges the new rule would not
+# make, so each must miss once, and no other key may move.
+_CRITIQUE_KEYS_UNDER_CONTRACT_1 = {
+    "critique_l2": "61f1b23d9ab68e79a861b2ffd8bdf32246edae6a2584da0e35996170bef22e3a",
+    "critique_l1": "31c15132bf93ce5b8c1e49a4ebd84e9e53e33dffa081627b59a34cf30bfd2b70",
+    "critique_l2_profiles_structured":
+        "5e36b2151a75531f689cb23710e62aaa03fd482a36fa02068e52f08b26ccf581",
+    "critique_l1_profiles_structured":
+        "3ebca36feeaf661ac0a23f07cc37302e6a2cd4e1e748480834f51b454f701970",
+}
+
+
+def test_wp_04_2_moves_every_critique_key_and_no_other_key():
+    now = _current_keys()
+    for name in _CRITIQUE_KEYS:
+        assert now[name] != _CRITIQUE_KEYS_UNDER_CONTRACT_1[name], (
+            f"{name}: an entry merged under WP-04.1's rule would still hit")
+    for name in _OTHER_KEYS:
+        assert now[name] == _KEYS_BEFORE_WP_04_1[name], f"{name}: a paid entry was orphaned"
+
+
+def test_a_critique_entry_from_wp_04_1_misses_and_is_never_deleted(tmp_path):
+    path = tmp_path / "digest_cache.json"
+    cache = DigestCache(path, persist=True)
+    stale = {"findings": [], "claims": [], "runs": 2, "requested_runs": 2,
+             "completed_runs": 2, "input_tokens": 1, "output_tokens": 1}
+    cache.put(_CRITIQUE_KEYS_UNDER_CONTRACT_1["critique_l1"], stale)
+    cache.put(_CRITIQUE_KEYS_UNDER_CONTRACT_1["critique_l2"], stale)
+    cache.put(_KEYS_BEFORE_WP_04_1["digest_l1"], {"text": "digest", "stop_reason": "end_turn"})
+    cache.close()
+
+    reopened = DigestCache(path, persist=True)
+    try:
+        now = _current_keys()
+        assert reopened.get(now["critique_l1"]) is None
+        assert reopened.get(now["critique_l2"]) is None
+        assert reopened.get(now["digest_l1"]) == {"text": "digest", "stop_reason": "end_turn"}
+        assert reopened.get(_CRITIQUE_KEYS_UNDER_CONTRACT_1["critique_l1"]) == stale
+        assert reopened.get(_CRITIQUE_KEYS_UNDER_CONTRACT_1["critique_l2"]) == stale
+    finally:
+        reopened.close()
+
+
 # The merge rule a stored critique was produced under, fingerprinted over a
 # fixed corpus: the critical signature of every finding, the pairwise duplicate
 # verdict, and the self-consistency merge of the corpus read as two reads. A
@@ -682,6 +727,16 @@ _MERGE_RULE_CORPUS = (
     ('Board 6"x12\' is cut from the wrong stock', ""),
     ("Detail 5 is not shown on this sheet", "DETAIL 5"),
     ("Detail 5 is shown on this sheet", "DETAIL 5"),
+    # Added by WP-04.2 (N1): a conflict beside a shared tag or value, within a
+    # unit and across units of one kind, and the extra detail that still merges.
+    ("Pump P-1 suction valve V-3 conflicts with the strainer at the riser", ""),
+    ("Pump P-1 suction valve V-4 conflicts with the strainer at the riser", ""),
+    ("Pump P-1 suction valve conflicts with the strainer at the riser", ""),
+    ("Provide 2 in, 4 in and 6 in floor drains in the mechanical room", ""),
+    ("Provide 3 in, 5 in and 6 in floor drains in the mechanical room", ""),
+    ("Supply air setpoint for AHU-2 is 90°F at the 6 in duct heater", ""),
+    ("Supply air setpoint for AHU-2 is 90°C at the 6 in duct heater", ""),
+    ("Supply air setpoint for AHU-2 is 90°F at the duct heater", ""),
 )
 
 
@@ -720,8 +775,15 @@ def _merge_rule_fingerprint() -> str:
 
 # Before the term existed (1.7.0 through WP-01.2) this rule fingerprinted as
 # 70a2e09c50476f79c5096837430c6b4a5628a66b3df11a7ff03830135404e1e4.
+#
+# Contract 1's value was computed over the corpus as WP-04.1 left it: the rows
+# above "Added by WP-04.2". WP-04.2 added those rows, so contract 1 can no
+# longer be reproduced from this corpus; over the extended corpus, WP-04.1's
+# rule fingerprints as
+# 978ae4fc76af3b2d8e27b501fdf3c2ead48747450d8e0e600ce8e284c02c7867.
 _MERGE_RULE_BY_CRITIQUE_CONTRACT = {
     1: "fa3623035836987525e786ff44597ec1cdf2cc59e1dffbff6a07ef278f3614bb",  # WP-04.1
+    2: "d9bcaad64b49b9bd1c3a10b2d473f65826b31f0124c7e1adca847e115f4cf0b8",  # WP-04.2
 }
 
 

@@ -48,6 +48,61 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **One shared value or tag let two conflicting findings merge (remediation
+  WP-04.2; N1).** Two findings whose prose reads alike merge only when their
+  critical signatures (tags, quantities, absence polarity, cross-sheet legs) are
+  compatible, and "compatible" meant "share at least one". So one shared value
+  excused everything beside it, in the critique's two-read merge and in the
+  findings ledger alike, and the A/B harness reported such pairs as an exact
+  match:
+  - `6 in` against `4 in` beside a shared `100 psi`, or `500 gpm` against
+    `550 gpm` beside it;
+  - `12'-6"` against `12'-8"`, which both read as `12 ft` plus inches;
+  - `2 in, 4 in and 6 in` against `3 in, 5 in and 6 in`, on the shared `6 in`;
+  - `90°F` against `90°C`, `20 psig` against `20 psi`, or `6 in` against
+    `100 mm`, beside a shared `6 in` or `100 psi`;
+  - pump `P-1` with valve `V-3` against `P-1` with valve `V-4`, on the pump.
+
+  Now:
+  - **Quantities are compared by kind.** A kind is a unit, or a group of units
+    that measure one kind of quantity: lengths (`in`, `ft`, `mm`, `cm`, and a
+    duct size written without a unit), degrees (`°`, `°F`, `°C`), `psi` and
+    `psig`, and volts (`V`, `VAC`, `VDC`, `kV`). For each kind both findings
+    mention, one finding's values must include the other's. No value is
+    converted between units: `12 in` is never `1 ft`, and a scale is never
+    inferred.
+  - **Tags work the same way.** One finding may name a reference the other
+    omits and the two still merge; two findings that each name a tag the other
+    lacks stay apart, whether the tags are equipment, sheet ids, grid lines or
+    detail references.
+  - **Unchanged:** two findings that share no quantity at all still stay apart
+    (`6 in` against `150 mm`), one quantity written two ways still merges, and
+    absence polarity and cross-sheet legs are compared as before. The new rule
+    only ever keeps more findings apart; it never merges a pair the old one
+    kept apart.
+  - **One copy of the rule.** `critique.signature_conflicts` names the
+    conflicting axes and `signatures_compatible` is its negation. The A/B
+    harness reports those axes instead of its own restated copy, which would
+    have named no reason for a pair the new rule refuses.
+
+  **Visible effect:** some findings that used to merge now appear as two, each
+  with its own markup, and a critique finding both reads raised with
+  conflicting values is reported as two single-read findings rather than one
+  corroborated one. Kept apart on purpose, although they may be one issue: the
+  same pipe in two unit systems (`6 in` / `150 mm`) beside a shared value, and
+  two findings that each name a different extra reference. **Still merged**,
+  because nothing in the finding shows the conflict: swapped roles
+  (`6 in main, 4 in branch` against `4 in main, 6 in branch`; the app does not
+  yet read which quantity belongs to what), a bare `12'` against `12'-6"`, and
+  WP-04.1's partly-read spellings (`4 to 6 in`, `2, 4, 6 in`, a bare `20A`).
+  **The first exhaustive run after upgrading re-runs the critique on every
+  sheet once**, because a cached critique holds findings merged under the old
+  rule (`digest_cache._CRITIQUE_CACHE_CONTRACT` 1 → 2). Digests, the set
+  identity, review plans, citation checks and investigations stay cached, and
+  the old entries are left on disk. A/B arm records are unaffected
+  (`RECORD_CONTRACT_VERSION` stays 3): a record stores the signature's values,
+  and the rule is applied when two records are compared.
+
 - **Two findings that differed only in a quantity's spelling merged into one
   (remediation WP-04.1; B2, B3, B12, N19).** The critical signature is what
   keeps "Provide 6 in drain" and "Provide 4 in drain" two findings when the rest
@@ -101,9 +156,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   refused as a stale contract (`RECORD_CONTRACT_VERSION` 3); re-run those arms
   rather than compare across it.
 
-  **Not in this change** (N1, the next slice): one shared quantity still makes
-  two findings compatible. A `6 in` / `4 in` conflict beside a shared `100 psi`,
-  or `12'-6"` against `12'-8"` (both `12 ft`), can still merge.
+  **Not in this change** (N1): one shared quantity still made two findings
+  compatible, so a `6 in` / `4 in` conflict beside a shared `100 psi`, or
+  `12'-6"` against `12'-8"` (both `12 ft`), could still merge. Fixed by the
+  WP-04.2 entry above.
 
 - **A refused or unfinished sheet read counted as a digested sheet, and was
   cached (remediation WP-01.2; N4, digest part; N27).** Both digest transports
