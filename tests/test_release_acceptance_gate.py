@@ -26,7 +26,9 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import os
 import re
+import shutil
 import subprocess
 import sys
 from datetime import date
@@ -698,16 +700,153 @@ def test_publish_takes_the_channel_from_the_gate():
 def test_publish_rechecks_waiver_expiry_at_publish_time():
     """Approval can come days after the gate ran; a lapsed waiver still refuses.
 
-    Same rule as the script (valid through the expiry day): refuse only when
-    today's UTC date sorts after it.
+    Same rule as the script (valid through the expiry day): lapsed only when
+    today's UTC date sorts after it. Checked twice: before anything is
+    uploaded, and again after the upload, immediately before the draft is made
+    public (Codex review: ``gh release create`` uploads before it publishes,
+    so a check ahead of it leaves the whole upload between check and use).
     """
     code = _code(_jobs()["publish"])
-    recheck = code.index('if [[ "$(date -u +%F)" > "${VALID_THROUGH}" ]]; then')
-    closing = re.search(r"^\s*fi$", code[recheck:], re.MULTILINE)
-    assert closing, "the expiry re-check is never closed"
-    assert "exit 1" in code[recheck:recheck + closing.start()]
+    assert '[[ -n "${VALID_THROUGH}" && "$(date -u +%F)" > "${VALID_THROUGH}" ]]' in code
     assert "=~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$" in code
-    assert recheck < code.index("gh release create")
+    checks = [m.start() for m in re.finditer(r"if waiver_lapsed; then", code)]
+    assert len(checks) == 2, checks
+    for check in checks:
+        closing = re.search(r"^\s*fi$", code[check:], re.MULTILINE)
+        assert closing, "an expiry check is never closed"
+        assert "exit 1" in code[check:check + closing.start()]
+    create = code.index("gh release create")
+    publish = code.index('gh release edit "${tag}"')
+    assert checks[0] < create < checks[1] < publish
+
+
+def test_publish_uploads_into_a_draft_and_publishes_last():
+    """The release becomes public in one final call, after every check.
+
+    A draft is invisible to the public and to the updater, so the upload can
+    take as long as it takes. A re-run finds what an earlier attempt left: a
+    draft is finished and published, while a published release only has its
+    assets replaced and keeps its latest/pre-release flags (re-running an old
+    tag must not take ``latest`` back from a newer release).
+    """
+    code = _code(_jobs()["publish"])
+    create = re.search(r'^\s*missing\) gh release create "\$\{tag\}" .*$', code, re.M)
+    assert create and " --draft " in create.group(0), create
+    assert "--latest" not in create.group(0) and "--prerelease" not in create.group(0)
+    assert re.search(
+        r'^\s*if \[\[ "\$\{state\}" != "false" \]\]; then$', code, re.M)
+    assert ('gh release edit "${tag}" --repo "${GITHUB_REPOSITORY}" --draft=false '
+            '"${channel_flag}"') in code
+    assert code.count('"${channel_flag}"') == 1
+
+
+def _publish_script() -> str:
+    """The ``Publish GitHub Release`` step's shell script, dedented."""
+    step = _jobs()["publish"].split("- name: Publish GitHub Release", 1)[1]
+    body = step.split("run: |\n", 1)[1]
+    lines = []
+    for line in body.splitlines():
+        if line.strip() and not line.startswith(" " * 10):
+            break
+        lines.append(line[10:])
+    return "\n".join(lines) + "\n"
+
+
+_FAKE_GH = """\
+#!/usr/bin/env bash
+args=("${@//$'\\n'/ }")          # one log line per call: --notes spans lines
+printf '%s\\n' "${args[*]}" >> "$GH_LOG"
+case "$1 $2" in
+  "release view")
+    if [[ "$GH_STATE" == missing ]]; then echo "release not found" >&2; exit 1; fi
+    echo "$GH_STATE" ;;
+  "release create"|"release upload")
+    # The upload is the slow part: the clock may pass midnight during it.
+    if [[ -n "${GH_UPLOAD_ENDS_ON:-}" ]]; then echo "$GH_UPLOAD_ENDS_ON" > "$FAKE_TODAY"; fi ;;
+esac
+"""
+
+_FAKE_DATE = """\
+#!/usr/bin/env bash
+[[ "$*" == "-u +%F" ]] || { echo "fake date: unexpected $*" >&2; exit 2; }
+cat "$FAKE_TODAY"
+"""
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the publish step runs on ubuntu-latest; this needs a POSIX bash",
+)
+@pytest.mark.parametrize("channel, valid_through, today, upload_ends_on, state, rc, calls", [
+    # A first publish: a draft, then one call that makes it public.
+    ("stable", "", "2026-10-01", "", "missing", 0,
+     ["release view", "release create --draft", "release edit --draft=false --latest"]),
+    ("prerelease", "", "2026-10-01", "", "missing", 0,
+     ["release view", "release create --draft", "release edit --draft=false --prerelease"]),
+    ("stable", "2026-10-01", "2026-10-01", "", "missing", 0,
+     ["release view", "release create --draft", "release edit --draft=false --latest"]),
+    # Codex's case: valid when the job starts, lapsed by the time the upload
+    # ends. The draft is never published.
+    ("stable", "2026-10-01", "2026-10-01", "2026-10-02", "missing", 1,
+     ["release view", "release create --draft"]),
+    # Refusals before anything is touched.
+    ("stable", "2026-09-30", "2026-10-01", "", "missing", 1, []),
+    ("stable", "2026-9-30", "2026-10-01", "", "missing", 1, []),
+    ("", "", "2026-10-01", "", "missing", 1, []),
+    ("Stable", "", "2026-10-01", "", "missing", 1, []),
+    # Re-runs: an earlier attempt's draft is finished; a published release only
+    # has its assets replaced, and its flags are left alone.
+    ("stable", "", "2026-10-01", "", "true", 0,
+     ["release view", "release upload --clobber", "release edit --draft=false --latest"]),
+    ("stable", "", "2026-10-01", "", "false", 0,
+     ["release view", "release upload --clobber"]),
+])
+def test_the_publish_step_publishes_only_what_it_should(
+    tmp_path, channel, valid_through, today, upload_ends_on, state, rc, calls,
+):
+    """The real step's script, run under a fake ``gh`` and a fake clock."""
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("no bash on PATH")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name, text in (("gh", _FAKE_GH), ("date", _FAKE_DATE)):
+        path = bin_dir / name
+        path.write_text(text, encoding="utf-8")
+        path.chmod(0o755)
+    (tmp_path / "artifact").mkdir()
+    (tmp_path / "artifact" / "DrawingAnalyzerSetup.exe").write_bytes(b"MZ")
+    (tmp_path / "artifact" / "latest.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "today").write_text(today, encoding="utf-8")
+    script = tmp_path / "publish.sh"
+    script.write_text(_publish_script(), encoding="utf-8")
+    log = tmp_path / "gh.log"
+    env = {
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+        "GITHUB_REF_NAME": "v1.8.0rc1" if channel == "prerelease" else "v1.8.0",
+        "GITHUB_REPOSITORY": "owner/repo",
+        "GH_TOKEN": "placeholder",
+        "CHANNEL": channel,
+        "VALID_THROUGH": valid_through,
+        "GH_STATE": state,
+        "GH_LOG": str(log),
+        "FAKE_TODAY": str(tmp_path / "today"),
+        "GH_UPLOAD_ENDS_ON": upload_ends_on,
+    }
+    run = subprocess.run([bash, "-e", str(script)], cwd=tmp_path, env=env,
+                         capture_output=True, text=True, timeout=60)
+    assert run.returncode == rc, run.stderr
+    made = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+    # Each expected call, in order, with its decisive flags.
+    assert len(made) == len(calls), made
+    for line, expected in zip(made, calls):
+        words = expected.split()
+        assert line.split()[:2] == words[:2], (line, expected)
+        for flag in words[2:]:
+            assert flag in line.split(), (line, expected)
+    for line in made:
+        if line.startswith("release create"):
+            assert "--latest" not in line.split() and "--prerelease" not in line.split()
 
 
 def test_publish_is_a_protected_deployment():

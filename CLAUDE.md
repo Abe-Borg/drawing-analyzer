@@ -409,9 +409,16 @@ The script is stdlib-only (the job installs nothing) and keeps a copy of
 `updates._VERSION_RE` that a test pins equal. It runs on **every** tag, because
 a skipped job in `needs` skips `publish`, so the RC bypass lives in the script
 and not in an `if:`. `publish` runs no repo code: it reads the job's `channel`
-and `valid_through` outputs (no `*rc*` glob), re-checks the earliest waiver
-expiry right before `gh release create` (an environment approval can come days
-later), and deploys to `environment: release`. Two limits hold:
+and `valid_through` outputs (no `*rc*` glob) and deploys to
+`environment: release`. It uploads into a **draft** (`gh release create --draft`,
+never a channel flag) and makes it public in one final
+`gh release edit --draft=false <channel flag>`. The earliest waiver expiry is
+checked before the upload and again after it, because an environment approval
+can come days later and plain `gh release create` publishes at the end of its
+own upload, which left the whole upload between check and use (Codex review).
+A re-run finds the earlier attempt through `gh release view --json isDraft`: it
+finishes a draft, and only replaces a published release's assets, so re-running
+an old tag cannot take `latest` back from a newer release. Two limits hold:
 - a tag runs the workflow from the tagged commit, so all of this stops
   accidents only;
 - an unconfigured environment is auto-created **unprotected**, so the

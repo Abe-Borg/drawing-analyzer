@@ -76,8 +76,15 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     from the gate's output rather than globbing the tag for `*rc*` (a glob
     that also matched `v1.8.0-rc1`). A tag outside the updater's
     `X.Y.Z[rcN]` grammar publishes nothing.
-  - **`publish` re-checks the earliest waiver expiry** just before publishing,
-    because an approval can come days after the gate ran.
+  - **`publish` checks the earliest waiver expiry twice**: before uploading,
+    because an approval can come days after the gate ran, and again after the
+    upload. To make the second check possible, the assets now upload into a
+    **draft**, invisible to the public and the updater, which one final call
+    makes public. Plain `gh release create` publishes at the end of its own
+    upload, which left the whole upload between the check and the release
+    going public. A re-run finishes a draft left by an earlier attempt, and
+    only replaces a published release's assets, without re-marking it
+    `latest`.
   - **`publish` deploys to a `release` environment**, whose required reviewers
     and tag policy live in the repository settings, where a tag cannot rewrite
     them. The YAML alone proves nothing: GitHub creates an unconfigured

@@ -420,9 +420,23 @@ what could not be verified, risks, and next steps.
   - **`publish`.** It now needs `[build, gates, gates-windows, acceptance]` and
     deploys to `environment: release`. It takes the channel from
     `needs.acceptance.outputs.channel`; the `*rc*` glob is gone, and an unknown
-    channel exits 1 before `gh release create`. It re-checks `valid_through`
-    against `date -u` just before publishing, because an environment approval
-    can come days after the gate ran. It still runs no repo code.
+    channel exits 1 before `gh release create`. It still runs no repo code.
+  - **Draft first, publish last** (review follow-up, Codex P2 on the PR).
+    - **The defect.** `publish` checked `valid_through` against `date -u` and
+      then ran `gh release create`, which uploads the assets and publishes at
+      the end. The whole upload therefore sat between check and use: a
+      waiver lapsing at midnight UTC mid-upload still published.
+    - **The fix.** The assets now upload into a `--draft` (no channel flag),
+      and one final `gh release edit --draft=false <channel flag>` makes the
+      release public. The expiry is checked before the upload and again
+      after it.
+    - **Re-runs.** A re-run finds the earlier attempt via
+      `gh release view --json isDraft`. It finishes a draft. A published
+      release only has its assets replaced (the old `--clobber` path) and
+      keeps its flags, so re-running an old tag cannot take `latest` back
+      from a newer release.
+    - **Residual gap.** One API call now separates the final check from
+      publication, instead of a whole upload.
   - **Docs.**
     - CHANGELOG: a Fixed entry for N8.
     - CLAUDE.md: the "CI gates" paragraph and a Commands line.
@@ -461,11 +475,20 @@ what could not be verified, risks, and next steps.
       already had and the fix had to keep: `publish` runs no repo code, its
       `if:` carries no status function, and the committed records exist.
     - The re-baselined `needs:` assertion failed on the old string.
+    - **The review follow-up, also failing first.** The two new text tests
+      failed against the first push's workflow, and so did six of the ten
+      cases that run the real `publish` script under a fake `gh` and a fake
+      clock. That includes Codex's case: valid at the start, midnight passing
+      mid-upload, and the old step exited 0 after a direct
+      `release create … --latest`. The four refusal cases passed on both and
+      pin behaviour the fix keeps.
   - **After:**
-    - `tests/test_release_acceptance_gate.py`: 107 passed.
-    - Full suite: **2,608 passed, 2 skipped, 10 deselected** (183 s). That is
-      the baseline plus the 107 new tests, with the same two environment
-      skips (IPv6 loopback; chmod as root).
+    - `tests/test_release_acceptance_gate.py`: 118 passed. The simulation
+      skips on Windows, since `publish` runs on ubuntu-latest.
+    - Full suite: **2,619 passed, 2 skipped, 10 deselected** (182 s). That is
+      the baseline plus the 118 new tests, with the same two environment
+      skips (IPv6 loopback; chmod as root). The first push measured 2,608
+      with 107.
     - Browser suite, run because the slice edits that gate's test file: 98
       collected, 98 executed and passed. `check_browser_suite.py` passes.
     - `ruff check --select E9,F63,F7,F82 src tests scripts` is clean
@@ -481,6 +504,14 @@ what could not be verified, risks, and next steps.
       - an empty channel, `Stable`, a lapsed `valid_through` and a malformed
         one each exit 1, and `gh` is never called;
       - an expiry of today or tomorrow publishes.
+
+      That scratch check is now a test,
+      `test_the_publish_step_publishes_only_what_it_should`. Its text
+      extraction of the step equals PyYAML's parse byte for byte, so it runs
+      the real script. The real `gh` was not run: its draft-by-tag handling
+      (`gh release edit <tag> --draft=false` is gh's own documented way to
+      publish a draft) is taken from gh's documentation, because this
+      container's egress policy blocks gh's source.
   - **Dry run against the real records.** `v1.7.0` is refused (HOLD). `v1.6.0`
     is refused (`SHIPPED` is not SHIP). `v1.7.0rc1` is a prerelease. `v1.8.0`
     is refused (no record). The gate would have stopped both stable tags that
@@ -518,6 +549,14 @@ what could not be verified, risks, and next steps.
     deliberate: a malformed record surfaces at PR time, not at tag time. The
     incident regressions use verbatim copies of the 1.6.0 and 1.7.0 sign-offs,
     so correcting those files cannot retire them.
+  - **A partial publish leaves a draft.** If the job fails after the upload
+    (the waiver lapsed, or an API error), an unpublished draft remains.
+    Neither the public nor the updater can see it, and a re-run finishes it.
+    A draft for a tag that will never ship is the owner's to delete.
+  - **Size.** The PR is well past the **S** estimate: about 1,980 added lines
+    against `main`. That is the test file (870, much of it parametrised cases
+    and verbatim record fixtures), the script (536, much of it docstring and
+    messages), the workflow (140), and docs and this tracker (about 430).
 - **Re-checked (U31):**
   - The `release.yml` header's claim that `publish` "runs NO repo code" still
     holds, and is now pinned (`test_publish_runs_no_repo_code`).

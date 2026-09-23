@@ -431,18 +431,20 @@ jobs:
           esac
 
           # A waiver can lapse while this job waits for the environment's
-          # approval, so the earliest expiry is re-checked here, just before
-          # publishing. Same rule as the script: valid through its Expiry day
-          # (UTC). ISO dates compare correctly as strings.
-          if [[ -n "${VALID_THROUGH}" ]]; then
-            if [[ ! "${VALID_THROUGH}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
-              echo "::error::The acceptance job reported a malformed waiver expiry for ${tag}; nothing was published." >&2
-              exit 1
-            fi
-            if [[ "$(date -u +%F)" > "${VALID_THROUGH}" ]]; then
-              echo "::error::A waiver in the acceptance record for ${tag} expired on ${VALID_THROUGH}, after the acceptance job ran; nothing was published." >&2
-              exit 1
-            fi
+          # approval, and again while the assets upload. So the earliest expiry
+          # is checked here, before anything is uploaded, and once more just
+          # before the release is made public. Same rule as the script: valid
+          # through its Expiry day (UTC). ISO dates compare correctly as strings.
+          if [[ -n "${VALID_THROUGH}" && ! "${VALID_THROUGH}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            echo "::error::The acceptance job reported a malformed waiver expiry for ${tag}; nothing was published." >&2
+            exit 1
+          fi
+          waiver_lapsed() {
+            [[ -n "${VALID_THROUGH}" && "$(date -u +%F)" > "${VALID_THROUGH}" ]]
+          }
+          if waiver_lapsed; then
+            echo "::error::A waiver in the acceptance record for ${tag} expired on ${VALID_THROUGH}, after the acceptance job ran; nothing was published." >&2
+            exit 1
           fi
 
           notes=$'Windows installer for Drawing Analyzer '"$tag"$'.\n\n'
@@ -451,10 +453,31 @@ jobs:
           notes+=$'first run - choose **More info** then **Run anyway**.\n\n'
           notes+=$'Existing installs will offer this update automatically.'
 
-          flags=(--verify-tag --title "Drawing Analyzer ${tag}" --notes "${notes}" "${channel_flag}")
-
+          flags=(--verify-tag --title "Drawing Analyzer ${tag}" --notes "${notes}")
           assets=(artifact/DrawingAnalyzerSetup.exe artifact/latest.json)
-          if ! gh release create "${tag}" "${assets[@]}" --repo "${GITHUB_REPOSITORY}" "${flags[@]}"; then
-            # Release already exists (e.g. a re-run) - replace the assets.
-            gh release upload "${tag}" "${assets[@]}" --repo "${GITHUB_REPOSITORY}" --clobber
+
+          # Upload into a DRAFT, which neither the public nor the updater can
+          # see, and make it public in one final call after the last check.
+          # `gh release create` would otherwise publish at the end of its own
+          # upload, leaving the whole upload between the check above and the
+          # moment the release goes public. A re-run finds what an earlier
+          # attempt left: a draft is finished and published; a published
+          # release only has its assets replaced, and keeps its latest and
+          # pre-release flags, so re-running an old tag never takes `latest`
+          # back from a newer release.
+          state="$(gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" --json isDraft --jq .isDraft || echo missing)"
+          case "${state}" in
+            missing) gh release create "${tag}" "${assets[@]}" --repo "${GITHUB_REPOSITORY}" --draft "${flags[@]}" ;;
+            true|false) gh release upload "${tag}" "${assets[@]}" --repo "${GITHUB_REPOSITORY}" --clobber ;;
+            *)
+              echo "::error::Could not tell whether ${tag} already has a release; nothing was published." >&2
+              exit 1
+              ;;
+          esac
+          if [[ "${state}" != "false" ]]; then
+            if waiver_lapsed; then
+              echo "::error::A waiver in the acceptance record for ${tag} expired on ${VALID_THROUGH} while the assets uploaded; the release was left an unpublished draft." >&2
+              exit 1
+            fi
+            gh release edit "${tag}" --repo "${GITHUB_REPOSITORY}" --draft=false "${channel_flag}"
           fi

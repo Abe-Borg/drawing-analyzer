@@ -1499,7 +1499,7 @@ Implementation:
 - the Sign-off's single `Release decision:` line starts with the word `SHIP` and does not also say `HOLD` (`SHIPPED`, as in the 1.6.0 record, and the template's unfilled `SHIP / HOLD` both refuse);
 - every waiver the record lists is complete (item, scope, justification, owner approval, `Expiry` as `YYYY-MM-DD`) and unexpired, valid through its expiry day in UTC.
 
-This is stricter than either reading, never weaker. Waivers stand in for sections, not for the decision. An expired waiver refuses even under SHIP, and `publish` re-checks the earliest expiry just before publishing, because an environment approval can come days later.
+This is stricter than either reading, never weaker. Waivers stand in for sections, not for the decision. An expired waiver refuses even under SHIP. `publish` checks the earliest expiry twice: before uploading, because an environment approval can come days later, and again after uploading into a draft, just before one final call makes it public.
 
 **What WP-23.1 leaves of steps 9–12 (now WP-23.6):**
 - the release-run attestation that binds the record to the tested candidate (step 10: a code-tree fingerprint with a strict allowlist of evidence-only changes, such as the version literals, the CHANGELOG heading and `docs/releases/`) and to the built artifact hashes;

@@ -113,8 +113,11 @@ two layers:
   the channel once. An RC tag publishes as a pre-release. A stable tag publishes
   as `latest` only if the record says SHIP with no expired or incomplete waiver.
   `publish` needs this job, and it takes the channel from the job's output
-  instead of re-deriving it from the tag. Right before publishing, `publish`
-  re-checks the earliest waiver expiry, since an approval can come days later.
+  instead of re-deriving it from the tag. `publish` uploads the installer into
+  a **draft** release, which nobody outside the repository can see, and makes
+  it public in one final step. It checks the earliest waiver expiry before the
+  upload and again just before that final step, since an approval can come
+  days later. If a run fails partway, re-running it finishes the draft.
 - **The `release` environment** on the `publish` job. A tag runs the workflow
   file *from the tagged commit*, so the first layer only stops accidents: a
   commit could change the workflow itself. What a tag cannot change is the
