@@ -40,7 +40,7 @@ and its `_refusal_fallback_available` latch; `verify._degrade_kind` and the
 - Version / cache changes: —
 - Consumers affected: —
 
-## D-2 Stage accounting — `decided` (WP-01.1)
+## D-2 Stage accounting — `decided` (WP-01.1, [PR #155](https://github.com/Abe-Borg/drawing-analyzer/pull/155))
 
 **Required decision:** define eligible, judged, failed, skipped,
 deferred/canceled and recovered work independently of display labels. Zero
