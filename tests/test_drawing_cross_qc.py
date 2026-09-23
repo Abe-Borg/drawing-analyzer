@@ -953,12 +953,18 @@ def test_cross_qc_contract_bumped_for_the_norm_id_fold():
     # legs validate, and so the stored result, for byte-identical request inputs.
     # A warm entry written under the old normalization would keep serving the
     # smaller finding set forever.
-    assert X._CROSS_QC_CACHE_CONTRACT == 3
+    #
+    # 4 since remediation WP-05.1 (B5, N12, N13) bumped it for the same kind of
+    # reason: grounding became a real, whole-word match on the anchor's
+    # normalizer, which changes which legs and facts validate, and the
+    # `evidence_state` stored on each, for byte-identical request inputs.
+    assert X._CROSS_QC_CACHE_CONTRACT == 4
     geom = _geom("a.pdf", "M-101")
     entries = [("M-101", "digest", "text", geom)]
     current = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")
     import pytest as _pytest
-    with _pytest.MonkeyPatch.context() as mp:
-        mp.setattr(X, "_CROSS_QC_CACHE_CONTRACT", 2)
-        legacy = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")
-    assert current != legacy, "the contract must ride the key"
+    for previous in (2, 3):
+        with _pytest.MonkeyPatch.context() as mp:
+            mp.setattr(X, "_CROSS_QC_CACHE_CONTRACT", previous)
+            legacy = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")
+        assert current != legacy, "the contract must ride the key"

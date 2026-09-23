@@ -502,8 +502,13 @@ def test_no_cross_qc_contract_bump_was_needed():
     warm entry would keep serving the smaller finding set). Neither WP-03A nor
     WP-03B contributed to it; that is what this test still asserts, by requiring
     the value to be exactly what the recorded reasons account for.
+
+    It reads 4 since **remediation WP-05.1** (B5, N12, N13) bumped it: grounding
+    became a real, whole-word match on the anchor's normalizer, which changes
+    which legs and facts are admitted, and the ``evidence_state`` stored on
+    each, for byte-identical inputs. Still nothing from WP-03A.
     """
-    assert X._CROSS_QC_CACHE_CONTRACT == 3
+    assert X._CROSS_QC_CACHE_CONTRACT == 4
 
 
 # --------------------------------------------------------------------------- #

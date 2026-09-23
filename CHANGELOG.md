@@ -48,6 +48,63 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Cross-sheet QC accepted short quotes unchecked, matched inside longer
+  words, and folded text differently from the anchor (remediation WP-05.1;
+  B5, N12 cross-QC part, N13).** On a large set (over 40 sheets) cross-sheet QC
+  checks every quote the model returns against the sheet's text before it
+  keeps the leg or fact. Three gaps:
+  - **B5.** A quote under six characters was accepted without a check, and
+    that test ran before the "does this sheet have any text?" test. So an
+    equipment tag (`P-1`, `AHU-7`, `M-101`) counted as found on a sheet that
+    does not print it (a made-up tag leg was kept, and counted as grounded),
+    and on a scanned sheet (the leg could not be placed, missed the
+    tile fallback that scanned-sheet evidence gets, and never reached the crop
+    check);
+  - **N12.** A longer quote was a plain substring test, so `AHU-10` was found
+    inside `AHU-101`;
+  - **N13.** The check folded text differently from the anchor resolver, so a
+    quote with a curly inch mark (`PROVIDE 6” DRAIN`), `2½"` against a
+    printed `2-1/2"`, `Ø6`, `300×200` or primes was not found, and the leg
+    was dropped.
+
+  Now, decided with the owner (see the WP-05.1 handoff in
+  `_plans/PROGRESS.md`):
+  - every non-empty quote gets a real match, at any length, and a sheet with no
+    text still means the quote could not be checked (reduced trust), never
+    that it was found;
+  - a match must cover whole words. It may leave out the punctuation around a
+    word (`P-1,`, `(P-1)`, `NOTE 3:`) but never start or end inside one. So
+    `VAV-2` is not in `VAV-2-1`, `AHU-10` is not in `AHU-101`, and `5` is not
+    in `.5` or `-5`; `12` is not in `12,500` or `12'-6"`;
+  - cross-sheet QC matches with the anchor's own text normalization, and so
+    does the step that recovers a reconciled leg's tile from its fact.
+
+  **Visible effect:** a cross-sheet conflict whose tag the sheet does not print
+  loses that leg, and the conflict disappears if it had only two. A short tag
+  read off a scanned sheet is now kept at reduced trust (`[NO TEXT TO CHECK]`
+  on the drawing, a note beside the quote in the report), placed on the tile
+  the model reported, and crop-verified: on an exhaustive run that is one
+  dual-crop verification call per such conflict, plus an investigation if the
+  crop cannot settle it, where there was none. A leg that differed from the
+  sheet only in quote marks, primes, fractions, `×`, `Ø` or a hyphen written
+  as a space is kept instead of dropped, so a conflict can survive that used
+  to vanish. Accepted cost: a tag inside a list written without spaces
+  (`P-1,P-2`, `M-101/M-102`) is not found, and that leg is dropped. The
+  whole-set path (40 sheets or fewer) still checks no quote at all
+  (remediation WP-06.2), so it is unchanged.
+
+  **Cache:** grounding is host-side, so `cross_qc._CROSS_QC_CACHE_CONTRACT`
+  goes 3 → 4 and every stored cross-QC result misses once and is re-run on the
+  next cross-QC run (one Opus call for a set of 40 sheets or fewer, the map
+  and reconcile calls above that). This also retires the two stored-claims
+  residuals recorded for WP-03.3 and WP-07.2. No other key moves: digest,
+  critique, identity, review-plan, citation, verification and investigation
+  entries are all kept. See `_plans/DECISIONS.md`.
+
+  **Not in this change:** the anchor resolver's own word boundaries and
+  punctuation folding (B4 and N12's anchor part, WP-05.2: `VAV-2` still anchors
+  inside `VAV-2-1` on the drawing); grounding on the whole-set path (WP-06.2).
+
 - **Tag digits, `1e3` and the wrong operation could still make a trusted
   arithmetic mismatch (remediation WP-07.2; A8).** After WP-07.1 a mismatch was
   trusted as ground truth (`DETERMINISTIC`, never crop-checked, labelled "Math

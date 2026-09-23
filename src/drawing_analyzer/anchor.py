@@ -31,7 +31,10 @@ from __future__ import annotations
 import math
 import re
 import unicodedata
+from array import array
+from bisect import bisect_right
 from collections import Counter
+from functools import lru_cache
 from typing import Any, Iterable
 
 from . import tiling
@@ -122,6 +125,121 @@ def _normalize(text: str) -> str:
 
 def _tokenize(text: str) -> list[str]:
     return _normalize(text).split()
+
+
+# --------------------------------------------------------------------------- #
+# Whole source words (remediation WP-05.1; the owner's rule, B5 and N12)
+#
+# A quote matches a text only where it covers whole source words. A source word
+# is a whitespace-delimited run of the text; a match may leave out the
+# punctuation around a word, and may never start or end inside what the word
+# says. So ``P-1`` is in ``P-1,`` and ``(P-1)``, while ``VAV-2`` is not in
+# ``VAV-2-1``, ``AHU-10`` is not in ``AHU-101``, ``5`` is not in ``.5`` or
+# ``-5``, and ``12`` is not in ``12,500`` or ``12'-6"``. Accepted cost: a tag
+# inside a list written without spaces (``P-1,P-2``, ``M-101/M-102``) is
+# inside one source word and does not match.
+#
+# Cross-sheet QC grounds a quote against a string, the sheet's uncapped text
+# layer, so it matches through :class:`SourceWords`. The anchor's own tiers
+# match tokens and do not apply the rule yet: remediation WP-05.2 applies this
+# same :func:`word_core` to ``_Stream``'s words (N12's anchor part) rather than
+# writing a second rule.
+# --------------------------------------------------------------------------- #
+
+#: Punctuation a source word may carry before what it says. Not ``-`` or
+#: ``.``: before a digit they are a sign and a decimal point (``-5``, ``.5``).
+WORD_LEADING_PUNCTUATION = frozenset("([{<\"'")
+#: Punctuation a source word may carry after what it says. Not ``%``: ``30%``
+#: is a ratio, not the number 30.
+WORD_TRAILING_PUNCTUATION = frozenset(")]}>,;:.!?\"'")
+
+
+def word_core(word: str) -> tuple[int, int]:
+    """``[start, end)`` of what a normalized source word says.
+
+    ``word`` without its leading and trailing edge punctuation. A word made of
+    nothing but edge punctuation has an empty core at its end.
+    """
+    start, end = 0, len(word)
+    while start < end and word[start] in WORD_LEADING_PUNCTUATION:
+        start += 1
+    while end > start and word[end - 1] in WORD_TRAILING_PUNCTUATION:
+        end -= 1
+    return start, end
+
+
+class SourceWords:
+    """A text's source words, normalized by :func:`_normalize`, for whole-word matching.
+
+    Each whitespace-delimited word is normalized on its own and the results are
+    joined with single spaces. That is exactly ``_normalize(text)``: whitespace
+    survives the normalizer, and nothing it changes reaches across a space. It
+    also keeps where each source word starts, which the boundary rule needs,
+    because the normalizer puts spaces *inside* a word (``VAV-2-1`` becomes
+    ``vav 2 1``, and a vulgar fraction gains a space before it), so the
+    normalized string alone cannot tell ``vav 2`` from a whole word.
+    """
+
+    __slots__ = ("normalized", "_starts")
+
+    def __init__(self, text: str) -> None:
+        parts: list[str] = []
+        starts = array("l")
+        at = 0
+        for word in (text or "").split():
+            norm = _normalize(word)
+            if not norm:
+                continue                    # a word of invisibles says nothing
+            if parts:
+                at += 1                     # the joining space
+            starts.append(at)
+            parts.append(norm)
+            at += len(norm)
+        self.normalized = " ".join(parts)
+        self._starts = starts
+
+    def contains(self, quote: str) -> bool:
+        """Whether ``quote`` occurs here covering whole source words.
+
+        Every occurrence is tried, so a quote printed both inside a longer
+        identifier and on its own still matches. A quote that normalizes to
+        nothing matches nothing.
+        """
+        query = _normalize(quote)
+        if not query:
+            return False
+        text = self.normalized
+        at = text.find(query)
+        while at != -1:
+            if self._starts_word(at) and self._ends_word(at + len(query)):
+                return True
+            at = text.find(query, at + 1)
+        return False
+
+    def _word(self, pos: int) -> tuple[int, int]:
+        """``[start, end)`` of the source word holding character ``pos``."""
+        i = bisect_right(self._starts, pos) - 1
+        start = self._starts[i]
+        end = self._starts[i + 1] - 1 if i + 1 < len(self._starts) else len(self.normalized)
+        return start, end
+
+    def _starts_word(self, pos: int) -> bool:
+        start, end = self._word(pos)
+        return pos - start <= word_core(self.normalized[start:end])[0]
+
+    def _ends_word(self, pos: int) -> bool:
+        start, end = self._word(pos - 1)
+        return pos - start >= word_core(self.normalized[start:end])[1]
+
+
+@lru_cache(maxsize=128)
+def source_words(text: str) -> SourceWords:
+    """:class:`SourceWords` for ``text``, built once per distinct text.
+
+    A sheet's text is matched once per leg and fact that quotes it; normalizing
+    a dense sheet one word at a time takes tens of milliseconds.
+    """
+    return SourceWords(text)
 
 
 def _word_rect(word: Any) -> tuple[float, float, float, float]:
