@@ -1,7 +1,7 @@
 # Remediation progress tracker
 
-**Next up:** `WP-23.1`, then Wave 1 in order (`WP-02.2` is unblocked by WP-02.1 but sits in Wave 2). First check the open PRs ([`README.md`](README.md), step 1).
-**Last updated:** 2026-09-23 by the WP-02.1 session ([PR #153](https://github.com/Abe-Borg/drawing-analyzer/pull/153)).
+**Next up:** Wave 1 in order, starting with `WP-01.1`. Wave 0 is complete. `WP-02.2` is unblocked by WP-02.1 but sits in Wave 2. First check the open PRs ([`README.md`](README.md), step 1). Before the next stable tag, the owner should look at O-5.
+**Last updated:** 2026-09-23 by the WP-23.1 session.
 
 This file is authoritative for **status and order**. Requirements live in
 [`drawing-analyzer-remediation-plan.md`](drawing-analyzer-remediation-plan.md).
@@ -72,7 +72,7 @@ A package is `done` only when every slice is `done` or `n/a` **and** its
 | WP-20 | Bounded assistant context, accurate chat costs and calculator input | P1/P2 | 20.1–20.5 | todo |
 | WP-21 | Report vocabulary, grouping, PDF plans and destinations | P1/P2 | 21.1–21.4 | todo |
 | WP-22 | Diagnostics, configuration fidelity and defensive deserialization | P1/P2 | 22.1–22.5 | todo |
-| WP-23 | Reproducible packaging and enforceable release acceptance | P1 | 23.1–23.5 | todo |
+| WP-23 | Reproducible packaging and enforceable release acceptance | P1 | 23.1–23.6 | todo |
 | WP-24 | Update authenticity, download constraints and launch verification | P1/P2 | 24.1–24.3 | todo |
 | WP-25 | Measured optimizations and viewer compatibility experiments | P2, decision-gated | 25.1–25.12 | blocked: O-4 |
 | INT | Integrated acceptance and release report (plan §6, §10) | — | INT.1–INT.3 | todo |
@@ -92,7 +92,7 @@ starting.
 | Slice | Scope (IDs closed) | Size | Depends on | Status | PR / date / notes |
 |---|---|---|---|---|---|
 | WP-02.1 | Hermetic network and credential guard for every non-`network` test (loopback and `AF_UNIX` allowed; proxy and credential variables removed); `network` becomes an explicit opt-in; `-m "not network"` in CI (U26) | S | — | done | [PR #153](https://github.com/Abe-Borg/drawing-analyzer/pull/153), 2026-09-23. `tests/fixtures/hermetic_guard.py` (whole-run scope; swallowed attempts fail at teardown); `tests/test_hermetic_guard.py` |
-| WP-23.1 | A stable `publish` fails unless `docs/releases/ACCEPTANCE-<ver>.md` reads SHIP or lists unexpired waivers; `environment:` on `publish`; RC tags unaffected (N8) | S | — | todo | Admin half is O-5 |
+| WP-23.1 | A stable `publish` fails unless `docs/releases/ACCEPTANCE-<ver>.md` reads SHIP or lists unexpired waivers; `environment:` on `publish`; RC tags unaffected (N8) | S | — | done | 2026-09-23. `scripts/check_release_acceptance.py` in a new read-only `acceptance` job that `publish` needs. The rule is SHIP **and** complete, unexpired waivers; waivers never lift a HOLD (plan WP-23 notes). `publish` takes the channel from the job and re-checks waiver expiry, and it deploys to `environment: release`. Tests: `tests/test_release_acceptance_gate.py`. Admin half is O-5 (open). The rest of steps 9–12 is WP-23.6 |
 
 ### Wave 1 — P0 correctness (independent slices first)
 
@@ -212,6 +212,7 @@ starting.
 | WP-23.3 | Constrained runtime lock including GUI dependencies; gates run under it; freeze diff (G5) | M | WP-23.2 | todo | |
 | WP-23.4 | Installer `[InstallDelete]` upgrade cleanup; architecture declarations; uninstall retention policy documented (U23) | M | WP-23.2 | todo | Manual Windows test is O-8 |
 | WP-23.5 | License allowlist and pip-audit run on the shipped Windows environment (U24) | M | WP-23.3 | todo | Unknown licenses need O-9 |
+| WP-23.6 | Release attestation, the rest of WP-23 steps 9–12: bind the acceptance record to the tested candidate (a code-tree fingerprint with an evidence-only allowlist: version literals, CHANGELOG heading, `docs/releases/`) and to the built artifact hashes; per-section validation (each §§2–6 item recorded or covered by a named waiver); stale, wrong-commit and wrong-artifact record tests; optional API evidence that the `release` environment is protected (N8) | M | WP-23.1 | todo | The protection evidence needs O-5 |
 | WP-24.1 | One HTTPS-only opener with a host policy; download size cap; re-hash immediately before launch; update prompt deferred while busy; docs corrected (G6, U22, U25) | M | — | todo | |
 | WP-24.2 | Signed-manifest verification with a test keypair (canonical encoding, key ids, rotation) | M | WP-23.3 | todo | Production key is O-6 |
 | WP-24.3 | Authenticode signing and verification hook | S | WP-23.2 | blocked: O-7 | |
@@ -329,7 +330,7 @@ report is built from it).
 | N5 | Verification COMPLETE with no judgments or with skipped items | P0 | 01.1 | open | |
 | N6 | Duplicate sheet labels bind first-wins (whole-set, dedup, arithmetic, legs) | P1 | 06.2 | open | |
 | N7 | Calculator accepts malformed numbers; inexact large integers | P1 | 20.1 | open | |
-| N8 | Stable publish ignores the acceptance hold (it happened for 1.7.0) | P1 | 23.1, O-1, O-5 | open | |
+| N8 | Stable publish ignores the acceptance hold (it happened for 1.7.0) | P1 | 23.1, 23.6, O-1, O-5 | open (publish gate implemented+validated in 23.1; the O-1 and O-5 parts stay open) | `tests/test_release_acceptance_gate.py` (WP-23.1). Remaining: O-1 (the published v1.7.0 and its record), O-5 (protect and confirm the `release` environment and a `v*` tag ruleset), WP-23.6 (commit and artifact binding) |
 | N9 | Overflow-note index/bookmark links land at the page top, not the row | P2 | 21.3 | open | |
 | N10 | Prose-harvest matching ignores measurement signatures (4 in absorbed by 6 in) | P0 | 09.2 | open | |
 | N11 | Synthesis conflict extraction is negation-blind | P1 | 09.1 | open | |
@@ -387,6 +388,146 @@ report is built from it).
 Each session adds one entry at the top: date, slices and IDs, PR, what changed,
 contracts decided, cache/schema effects, validation actually run (with counts),
 what could not be verified, risks, and next steps.
+
+### 2026-09-23 — WP-23.1: minimal stable-release publish gate
+
+- **Slice and IDs:** WP-23.1. N8, its enforcement part. The owner actions stay
+  open: the published v1.7.0 is O-1, and the admin half, protecting the
+  `release` environment, is O-5. The rest of WP-23 steps 9–12 is the new slice
+  WP-23.6 (Wave 5).
+- **What changed:**
+  - **The gate.** New `scripts/check_release_acceptance.py` (stdlib only, the
+    `check_browser_suite.py` pattern) decides, once, what a tag may publish:
+    - `vX.Y.ZrcN` is `prerelease` and needs no record.
+    - `vX.Y.Z` is `stable` only when `docs/releases/ACCEPTANCE-X.Y.Z.md`
+      meets all of these:
+      - it is titled for that version;
+      - its Sign-off has exactly one `Release decision:` line whose first
+        word is `SHIP` and which does not also say `HOLD`;
+      - every waiver row is complete (item, scope, justification, owner
+        approval, `Expiry` as `YYYY-MM-DD`) and unexpired. A waiver is valid
+        through its UTC expiry day.
+    - Anything else refuses, as does anything unreadable. A tag outside the
+      updater's `_VERSION_RE` grammar publishes nothing; a test pins the
+      script's copy of the grammar equal to the updater's.
+    - On success it appends `channel=` and `valid_through=` (the earliest
+      waiver expiry) to `$GITHUB_OUTPUT`. On a refusal it writes nothing,
+      exits 1 and names the RC route.
+  - **The `acceptance` job.** New in `release.yml`: tag-only and read-only
+    (checkout without credentials, setup-python, the script). It runs on every
+    tag, RC included. A skipped job in `needs` skips `publish`, so the RC bypass
+    lives in the script, not in an `if:`.
+  - **`publish`.** It now needs `[build, gates, gates-windows, acceptance]` and
+    deploys to `environment: release`. It takes the channel from
+    `needs.acceptance.outputs.channel`; the `*rc*` glob is gone, and an unknown
+    channel exits 1 before `gh release create`. It re-checks `valid_through`
+    against `date -u` just before publishing, because an environment approval
+    can come days after the gate ran. It still runs no repo code.
+  - **Docs.**
+    - CHANGELOG: a Fixed entry for N8.
+    - CLAUDE.md: the "CI gates" paragraph and a Commands line.
+    - README: the CI section, including a corrected "two tag-gated jobs", and a
+      publish-gate bullet under "Acceptance & release gate".
+    - `docs/RELEASE_WINDOWS.md`: a new step 3, the approval in step 5, a new
+      section "The publish boundary", the diagram and the pieces table.
+    - `docs/RELEASE_ACCEPTANCE_TEMPLATE.md`: what the gate reads (the title,
+      the Sign-off decision, the waiver-table format), and that it does not
+      read §0.
+    - A `ci.yml` comment.
+
+    **No acceptance record was edited.**
+- **Plan corrected** (WP-23 verification notes; the slices line now reads
+  23.1 … 23.6):
+  - "Reads SHIP or lists unexpired waivers" is ambiguous. Read as a plain OR,
+    one waiver would publish a HOLD record. That contradicts WP-23's
+    acceptance criterion and the records' own policy ("… and the Release
+    decision line in the sign-off reads SHIP").
+  - The gate therefore requires SHIP **and** complete, unexpired waivers. That
+    is stricter than either reading, never weaker. The user's wording ("must
+    fail unless SHIP or unexpired waivers") states a necessary condition, and
+    the stricter gate satisfies it.
+  - What 23.1 leaves of steps 9–12 is listed there and added as WP-23.6.
+- **Contracts decided:** none of D-1 … D-8 (release tooling only).
+- **Cache/schema effects:** none. `src/` is untouched: no key, prompt or schema
+  changed, and there is no migration-register row.
+- **Validation (this container, Python 3.11.15, SDK 1.7.0):**
+  - **Baseline before the change:** `python -m pytest -q -m "not network"` gave
+    **2,501 passed, 2 skipped, 10 deselected** (186 s), identical to the
+    WP-02.1 handoff.
+  - **Failing first.** The new file plus the re-baselined
+    `tests/test_browser_suite_gate.py` gave 9 failed, 96 errors, 17 passed.
+    - The errors are every script test: the script did not exist yet.
+    - Three new-file tests passed. They pin properties the old workflow
+      already had and the fix had to keep: `publish` runs no repo code, its
+      `if:` carries no status function, and the committed records exist.
+    - The re-baselined `needs:` assertion failed on the old string.
+  - **After:**
+    - `tests/test_release_acceptance_gate.py`: 107 passed.
+    - Full suite: **2,608 passed, 2 skipped, 10 deselected** (183 s). That is
+      the baseline plus the 107 new tests, with the same two environment
+      skips (IPv6 loopback; chmod as root).
+    - Browser suite, run because the slice edits that gate's test file: 98
+      collected, 98 executed and passed. `check_browser_suite.py` passes.
+    - `ruff check --select E9,F63,F7,F82 src tests scripts` is clean
+      (F401/F811/F841 too, on the two new files). `scan_secrets.py` is clean
+      over 192 tracked files, the new ones included. `compileall src scripts`
+      passes.
+  - **The workflow, exercised locally:**
+    - PyYAML, present in this container but not a dependency, parses the
+      jobs, `needs`, `environment` and outputs as intended.
+    - The `publish` step's bash, extracted and run under a stub `gh`, over
+      eight cases:
+      - `stable` publishes with `--latest`, `prerelease` with `--prerelease`;
+      - an empty channel, `Stable`, a lapsed `valid_through` and a malformed
+        one each exit 1, and `gh` is never called;
+      - an expiry of today or tomorrow publishes.
+  - **Dry run against the real records.** `v1.7.0` is refused (HOLD). `v1.6.0`
+    is refused (`SHIPPED` is not SHIP). `v1.7.0rc1` is a prerelease. `v1.8.0`
+    is refused (no record). The gate would have stopped both stable tags that
+    shipped ahead of their acceptance.
+- **Not verified:**
+  - **A real tag run.** Nothing was tagged, by protocol. This PR's own
+    `release.yml` run executes only `build`; `gates`, `acceptance` and
+    `publish` are tag-only and skip.
+  - **The environment's protection** (O-5). The `release` environment does not
+    exist until a tag run creates it, and this session made no admin or API
+    call to inspect or configure it.
+  - **Windows.** The new tests run on this PR's Windows CI leg.
+- **Risks and residual gaps:**
+  - **The YAML stops accidents only.** A tag runs the workflow from the tagged
+    commit. So a commit that edits `release.yml` bypasses the gate, and so
+    does a tag at a commit older than this PR, whose workflow predates both
+    the gate and the `environment:` line. Only O-5 closes that: environment
+    reviewers with a `v*` tag policy, plus a tag ruleset restricting who may
+    create, move or delete `v*` tags.
+  - **Unprotected until O-5.** An unconfigured `environment: release` is
+    auto-created without protection on the first tag run. Until O-5, the
+    first stable tag after this merges is gated by its record alone.
+  - **The environment covers RC tags too.** Once O-5 adds reviewers, RC
+    publishes also wait for approval. They still publish as pre-releases, as
+    the session request requires.
+  - **The gate trusts the SHIP line.** It does not check that §§2–6 items are
+    ticked or covered, and it does not bind the record to the tested commit
+    or to the artifacts (WP-23.6). The environment reviewer is the human
+    check.
+  - **Record structure is now CI-checked.**
+    `test_every_committed_record_is_readable_by_the_gate` parses every
+    `docs/releases/ACCEPTANCE-*.md`, structure only; no decision is pinned.
+    An owner edit that leaves a record unreadable, for example while
+    correcting the 1.7.0 record (O-1), fails CI and names the reason. That is
+    deliberate: a malformed record surfaces at PR time, not at tag time. The
+    incident regressions use verbatim copies of the 1.6.0 and 1.7.0 sign-offs,
+    so correcting those files cannot retire them.
+- **Re-checked (U31):**
+  - The `release.yml` header's claim that `publish` "runs NO repo code" still
+    holds, and is now pinned (`test_publish_runs_no_repo_code`).
+  - The old `*rc*` glob and the updater's grammar agree on every tag this
+    repository has published: `v1.0.0rc1` and `v1.3.0rc1` are pre-releases,
+    the rest stable (checked against the release list).
+- **Next:** Wave 1 in order, starting with WP-01.1. Before the next stable tag,
+  the owner should do O-5: configure and confirm the `release` environment and a
+  `v*` tag ruleset. O-1 is still open. WP-23.6 (Wave 5) holds the rest of
+  WP-23 steps 9–12.
 
 ### 2026-09-23 — WP-02.1: hermetic network and credential guard ([PR #153](https://github.com/Abe-Borg/drawing-analyzer/pull/153))
 

@@ -5,6 +5,34 @@ completed copy with the release. **A release may be cut only when every
 automated gate passes and every manual section is recorded** — passing the
 hermetic suite alone is not acceptance (§19 Definition of done).
 
+Save the copy as `docs/releases/ACCEPTANCE-<version>.md` and title it
+`# Release acceptance record — <version>` (for example
+`# Release acceptance record — 1.8.0`).
+
+**A stable tag cannot publish without it (N8).** Since remediation WP-23.1,
+`release.yml`'s `publish` job needs an `acceptance` job that runs
+`scripts/check_release_acceptance.py` on the tagged commit. A stable tag
+`vX.Y.Z` publishes only when this record, in that commit:
+
+- is titled for exactly that version;
+- has one `Release decision:` line in its **Sign-off**, whose first word is
+  `SHIP` and which does not also say `HOLD`;
+- lists, in its **Deferrals / waivers** table, only waivers whose every column
+  is filled and whose `Expiry` (written `YYYY-MM-DD`) has not passed.
+
+Anything else, including a record the script cannot read, fails the job, and
+nothing is published. A waiver stands in for a section, never for the decision:
+waivers do not lift a HOLD. A release candidate (`vX.Y.ZrcN`) needs no record,
+because it publishes as a GitHub pre-release that the updater never offers to
+installed copies. That is the way to get a build to testers before this record
+says SHIP. Dry-run the check before tagging:
+`python scripts/check_release_acceptance.py --tag vX.Y.Z`.
+
+The gate reads nothing in §0. A record cannot contain the hash of the commit
+that contains it, so the commit and artifact hashes are filled in after the tag,
+as the 1.6.0 record did. Binding the record to the tested commit and the shipped
+artifacts is not automated yet.
+
 ## 0. Release candidate identification
 
 | Field | Value |
@@ -141,6 +169,15 @@ In **Acrobat** and **Chromium**:
 
 ## Deferrals / waivers (owner-approved, in writing)
 
+One row per waived section or item. The publish gate reads this table:
+
+- A filled row must have all five columns. `Expiry` is written `YYYY-MM-DD` and
+  is the last UTC day the waiver counts. After it, a stable tag no longer
+  publishes on this record, including a publish that waited for approval.
+- Keep the blank row when nothing is waived. An all-blank row is not a waiver,
+  but a missing table is unreadable, and an unreadable record never publishes.
+- Columns are found by their header names, so keep the headers as they are.
+
 | Item | Scope | Justification | Owner approval / date | Expiry |
 |---|---|---|---|---|
 | | | | | |
@@ -156,3 +193,10 @@ Release decision:  SHIP / HOLD
 
 Owner signature: ______________________  Date: __________
 ```
+
+The publish gate reads the first word after `Release decision:`. Exactly `SHIP`
+publishes a stable tag. Anything else holds it: `HOLD`, `SHIPPED`, `Ship`, an
+empty value, or this unfilled `SHIP / HOLD`. A note may follow the word (for
+example `SHIP   (sections 2-6 recorded 2026-10-02)`), but the line must not also
+say `HOLD`, and the Sign-off has exactly one such line. The owner edits it; a
+coding session never does.

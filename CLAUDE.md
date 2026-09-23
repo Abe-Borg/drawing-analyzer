@@ -50,6 +50,7 @@ python -m pytest tests/test_drawing_ledger.py::test_name     # one test
 drawing-analyzer             # launch the GUI   (or: python -m drawing_analyzer)
 python scripts/run_acceptance.py   # Phase 27 release gates (PASS/FAIL; hermetic — never the canary)
 python scripts/check_browser_suite.py browser-results.xml   # P9 item 42: a skip is not a pass
+python scripts/check_release_acceptance.py --tag v1.8.0     # N8 publish gate dry run: reads docs/releases/ACCEPTANCE-1.8.0.md
 python scripts/measure_evidence_coverage.py --pdf SET.pdf   # WP-02 §7.1 coverage scan (zero API calls)
 ```
 
@@ -379,12 +380,47 @@ exit 0 — a green required check over a suite that proved nothing about CSP,
 skips and setup errors do not. The same floor is applied inside
 `run_acceptance.py`'s own browser gate, through the same script — the release
 gate and the CI job must not disagree about what "passed" means.
-`release.yml`'s `publish` needs two tag-gated jobs in its own `needs` chain —
-`gates` (the full `run_acceptance.py`, Chromium installed, plus ruff/licenses/
-pip-audit) and `gates-windows` (the hermetic suite on Windows) — because branch
-protection does not apply to a tag push, a tag can name any commit, and a second
-workflow run triggered by that tag is **not** a dependency of this one. `ci.yml`
-triggers on `v*` tags for visibility only.
+`release.yml`'s `publish` needs three tag-gated jobs in its own `needs` chain
+(`needs: [build, gates, gates-windows, acceptance]`, pinned in two tests):
+- `gates`: the full `run_acceptance.py` with Chromium installed, plus ruff,
+  licenses and pip-audit.
+- `gates-windows`: the hermetic suite on Windows.
+- `acceptance` (remediation WP-23.1, N8): v1.7.0 was published as the stable
+  `latest` release about eight minutes after its record merged saying HOLD,
+  and a green suite is not acceptance.
+
+Branch protection does not apply to a tag push, a tag can name any commit, and a
+second workflow run triggered by that tag is **not** a dependency of this one.
+`ci.yml` triggers on `v*` tags for visibility only.
+
+`acceptance` runs `scripts/check_release_acceptance.py`, which decides the
+channel **once**:
+- an `rcN` tag is `prerelease` and needs no record;
+- a stable tag needs `docs/releases/ACCEPTANCE-<ver>.md` titled for that
+  version, whose Sign-off has exactly one `Release decision:` line with first
+  word `SHIP` and no `HOLD`. `SHIPPED`, `Ship` and the template's unfilled
+  `SHIP / HOLD` all refuse;
+- every waiver row must be complete, with an unexpired ISO `Expiry` (valid
+  through that UTC day). Waivers never lift a HOLD;
+- anything unreadable refuses, and a tag outside the updater's `_VERSION_RE`
+  grammar publishes nothing.
+
+The script is stdlib-only (the job installs nothing) and keeps a copy of
+`updates._VERSION_RE` that a test pins equal. It runs on **every** tag, because
+a skipped job in `needs` skips `publish`, so the RC bypass lives in the script
+and not in an `if:`. `publish` runs no repo code: it reads the job's `channel`
+and `valid_through` outputs (no `*rc*` glob), re-checks the earliest waiver
+expiry right before `gh release create` (an environment approval can come days
+later), and deploys to `environment: release`. Two limits hold:
+- a tag runs the workflow from the tagged commit, so all of this stops
+  accidents only;
+- an unconfigured environment is auto-created **unprotected**, so the
+  independent boundary is the admin-configured protection, confirmed through
+  the API (`_plans/PROGRESS.md` O-5).
+
+The record is read from the tagged commit and is never asked to name its own
+commit (plan WP-23 step 10). Binding it to the tested commit and the artifact
+hashes is WP-23.6.
 
 **GUI lifecycle (P9 items 47/N32).** `gui.py` is a console-less entry point
 (`[project.gui-scripts]` on Windows, and the frozen build is windowed), so

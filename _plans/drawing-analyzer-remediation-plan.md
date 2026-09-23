@@ -1495,6 +1495,18 @@ Implementation:
 - An `environment:` name that is not configured is auto-created with no protection. Verify through the API.
 - Update `tests/test_browser_suite_gate.py`. It pins the exact `needs:` string and the Inno Setup "6.2.2" fallback.
 
+**The rule WP-23.1 enforces (clarified 2026-09-23).** "Reads SHIP or lists unexpired waivers" is ambiguous. Read as a plain OR, one waiver would publish a HOLD record, which breaks this package's acceptance criterion and the records' own policy: `ACCEPTANCE-1.7.0.md` keeps the stable tag on HOLD until the sections are recorded or waived *and* "the Release decision line in the sign-off reads SHIP". So the gate requires both:
+- the Sign-off's single `Release decision:` line starts with the word `SHIP` and does not also say `HOLD` (`SHIPPED`, as in the 1.6.0 record, and the template's unfilled `SHIP / HOLD` both refuse);
+- every waiver the record lists is complete (item, scope, justification, owner approval, `Expiry` as `YYYY-MM-DD`) and unexpired, valid through its expiry day in UTC.
+
+This is stricter than either reading, never weaker. Waivers stand in for sections, not for the decision. An expired waiver refuses even under SHIP, and `publish` re-checks the earliest expiry just before publishing, because an environment approval can come days later.
+
+**What WP-23.1 leaves of steps 9–12 (now WP-23.6):**
+- the release-run attestation that binds the record to the tested candidate (step 10: a code-tree fingerprint with a strict allowlist of evidence-only changes, such as the version literals, the CHANGELOG heading and `docs/releases/`) and to the built artifact hashes;
+- per-section validation: every §§2–6 item recorded or covered by a named waiver;
+- the stale, wrong-commit and wrong-artifact record tests of step 12;
+- optionally, a check through the API that the `release` environment really is protected. That check needs O-5 first, and it runs from the tagged commit's workflow, so it is evidence, not a boundary.
+
 **Step 1.** The package has no data files (there is no `profiles/` directory, and only `.py` is tracked). Replace `collect_all` with `collect_submodules`. The review's spec line number is stale; the spec lost 5 lines in 1.7.0.
 
 **Step 2.**
@@ -1512,7 +1524,7 @@ Implementation:
 
 **Step 8.** The license check and pip-audit run only in the Linux `.[dev]` environment, so the shipped Windows GUI dependencies are never audited.
 
-Slices: WP-23.1 … WP-23.5.
+Slices: WP-23.1 … WP-23.6.
 
 ### WP-24 — Update authenticity, download constraints, and launch verification
 
