@@ -500,9 +500,10 @@ what could not be verified, risks, and next steps.
 - **What changed:**
   - **`anchor.py`** gained a new pure section (no PDF engine):
     - `WORD_LEADING_PUNCTUATION`, `WORD_TRAILING_PUNCTUATION` and `word_core`;
-    - `SourceWords`, which holds the per-word normalized text and the word
-      starts. `contains` tries every occurrence and checks both edges against
-      the word cores;
+    - `SourceWords`, which holds the per-word normalized text, the word
+      starts and each word's core offsets. `contains` tries every occurrence
+      that could start a word and checks both edges against those cores (the
+      Codex item below);
     - `source_words(text)`, an `lru_cache` of 128.
 
     `_normalize`, `_Stream` and every tier are untouched, so no anchor can
