@@ -48,6 +48,59 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A correct equation got a "computer-checked" arithmetic mismatch
+  (remediation WP-07.1; N3).** The arithmetic auditor does the math the model
+  transcribes, and trusts a mismatch as ground truth (`DETERMINISTIC`: never
+  re-checked by the crop verifier, inked even in verified-only mode, and
+  labelled "Math checked by computer from the sheet's own printed numbers")
+  only when the sheet itself prints the numbers it computed with. That test
+  asked only whether each operand appeared somewhere in the model's quote,
+  and it ran before the quote was looked for on the sheet. So:
+  - one printed number supported any number of operands: the sheet's correct
+    `20 + 20 = 40`, transcribed by the model as `20 + 20 + 20`, became a
+    high-severity trusted mismatch ("the sum of 20, 20, 20 is 60, but the
+    sheet states 40");
+  - the stated result could reuse a term's number (`20 + 30` "stated" a total
+    of 20);
+  - a quote the sheet does not contain, and a claim that belongs to no sheet
+    in the set, were trusted just the same.
+
+  Now the check runs after the auditor has looked for the quote on the claim's
+  own sheet, and a mismatch is trusted only when the claim belongs to a sheet
+  in the set, its quote is found there (word for word, or by a close match
+  that still places every number of the quote on the sheet), and each operand
+  and the stated result have their own printed number, counted where both the
+  model's quote and the sheet's own words at that spot print it. Values the
+  sheet genuinely repeats (`20 20 20 TOTAL 540`) are still trusted. The owner
+  chose each part of the rule (see the WP-07.1 handoff in `_plans/PROGRESS.md`).
+  If anything goes wrong while deciding, including a failure to anchor one
+  sheet, the mismatch stays untrusted and the other sheets are unaffected.
+
+  **Visible effect:** these arithmetic mismatches are now `UNCERTAIN` and say
+  "Computed from numbers as read by the AI - re-check the math against the
+  sheet." A mismatch whose quote was found on the sheet is sent to the crop
+  verifier on exhaustive runs (one verification call each, and, if the crop
+  cannot settle it, an investigation), so its status becomes the verifier's
+  verdict while the popup keeps the caveat. A mismatch whose quote is not on
+  the sheet, or that belongs to no sheet, has nothing to crop: it stays
+  unverified, the drawing marks it `[QUOTE NOT FOUND]` as before, and
+  verified-only mode no longer inks it. The finding's text, severity, id and
+  number are unchanged. Where no verifier ran, the HTML report shows such a
+  mismatch as "Uncertain" (or "Unanchored") instead of "Deterministic", and
+  the markup index says "Check" instead of "Computed".
+
+  **Cache:** nothing is invalidated. No model request, prompt, claims contract,
+  anchor or finding id changed; the verification note keeps its exact wording
+  for each provenance, so an investigation key that reads it is unchanged. The
+  mismatches that are no longer trusted were never verified or investigated
+  before, so their verification and investigation calls are new work, not
+  cache misses.
+
+  **Not in this change:** checking the operation and which number plays which
+  part (a sum read as a product, two terms swapped), and digits inside tags,
+  sheet numbers and `1e3` (A8, WP-07.2); arithmetic counters split by
+  provenance and contradictory transcriptions of one quote (N18, WP-07.3).
+
 - **Two different issues that quote one tag became one finding once anchored
   (remediation WP-03.7; N28).** Findings routinely quote an equipment tag
   verbatim (`PUMP P-1`), so the findings ledger never merges two findings on an

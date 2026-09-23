@@ -662,6 +662,7 @@ Regression cases: correct `20 + 20 = 40` with duplicated model operand; genuinel
 - **Status.** N3 and A8 reproduced. N3 is broader than stated (§3). The package also covers N18.
 
 **Step 2.** A multiset-only fix closes the duplicated-operand case, but role swap, sum/product confusion and A8 stay DETERMINISTIC. Steps 2, 4 and 5 are all required.
+- **Done by WP-07.1 (decided with the owner):** the terms and the expected value are counted together against the printed numbers, one occurrence each, so the expected value never reuses a term's number (`20 + 30` does not state a total of 20; `20 + 30 = 20` does). Role swap, sum/product and A8 remain WP-07.2's.
 
 **Step 3: decide provenance after anchoring.**
 - Today provenance is decided in `audit_arithmetic` (~479–483) **before anchoring**. It never looks at the anchor, or at whether the sheet resolved.
@@ -670,6 +671,10 @@ Regression cases: correct `20 + 20 = 40` with duplicated model operand; genuinel
   - `tests/test_drawing_auditors.py::test_a_comma_separated_operand_list_stays_text_extracted`, `::test_arithmetic_text_extracted_operands_stay_deterministic` and `::test_arithmetic_mixed_fraction_operand_is_text_extracted`. They call `audit_arithmetic(..., [])` and assert DETERMINISTIC; give them sheet words.
   - `::test_arithmetic_unresolved_sheet_still_records_finding_unanchored` keeps its finding, which becomes UNCERTAIN.
 - `tests/test_drawing_acceptance.py::test_gauntlet_deterministic_auditors_fired` must stay DETERMINISTIC; its quote is on the sheet.
+- **Done by WP-07.1 (decided with the owner):**
+  - the tiers: EXACT, or FUZZY by a method that carries the numeric veto (`anchor.numbers_grounded`: `fuzzy_window`, `fuzzy_subphrase`; a new method grounds nothing until it carries the veto). TILE and UNANCHORED never;
+  - the evidence: an operand counts where **both** the quote and the sheet's own words under the matched span print it (per value, the smaller count; `resolve_anchors(matched_text=)`). The quote alone takes the model's spelling; the words alone read numbers the quote left out and read the sheet's non-ASCII forms with ASCII rules.
+- **Correction (WP-07.1):** `::test_arithmetic_unresolved_sheet_still_records_finding_unanchored` was already UNCERTAIN on 1.7.0 and on `b3f60bb` (its quote `X` carries no operand), so it needed no re-baseline; it now asserts that. The unresolved case with a quote that carries the operands is pinned in `tests/test_arithmetic_operand_grounding.py`.
 
 **Step 4: keep relationship checks host-side.** Adding role or operator fields to the claims contract (`critique._CRITIQUE_FINDINGS_INSTRUCTION`, which is hashed into `CRITIQUE_PROMPT_VERSION`, and its cross-QC twin) would re-key every critique and cross-QC cache entry.
 

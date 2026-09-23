@@ -20,12 +20,21 @@ add up. Relationships that check out are counted (surfaced in the report as
 The *operation* is always host-deterministic, but the numbers it operated on may
 have been misread. Phase 25 §17.5 makes that distinction explicit: a mismatch is
 trusted (``verification.status="DETERMINISTIC"``, ``operand_origin=TEXT_EXTRACTED``)
-only when the claim's own verbatim quote independently carries every operand;
-otherwise the terms were model-transcribed (``operand_origin=MODEL_TRANSCRIBED``)
-and the mismatch stays ``UNCERTAIN`` so the crop verifier confirms the numbers
-before it inks as ground truth. ``computation_method`` is always
-``HOST_DETERMINISTIC``. Every finding is anchored on the sheet via the claim's
-verbatim quote.
+only when the sheet independently prints every operand; otherwise the terms were
+model-transcribed (``operand_origin=MODEL_TRANSCRIBED``) and the mismatch stays
+``UNCERTAIN`` so the crop verifier confirms the numbers before it inks as ground
+truth. ``computation_method`` is always ``HOST_DETERMINISTIC``. Every finding is
+anchored on the sheet via the claim's verbatim quote.
+
+"Prints every operand" is decided **after** that anchoring (remediation WP-07.1,
+review N3): the claim must resolve to a sheet, its quote must anchor there EXACT
+or FUZZY by a numerically vetoed method (:func:`~drawing_analyzer.anchor.numbers_grounded`),
+and the terms and the stated value together must fit the numbers that both the
+quote and the sheet's own words under the matched span print, one occurrence
+each (:func:`_operands_grounded`). It used to be decided from the quote string
+alone, before anchoring, by membership: one printed ``20`` supported any number
+of transcribed ``20`` operands, and a quote the sheet does not carry, or a claim
+on no sheet at all, was trusted as readily as one the sheet prints.
 
 PDF-engine-free (I-5): it reuses the pure anchor resolver and word helpers; the
 pipeline owns rendering.
@@ -34,6 +43,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from decimal import MAX_EMAX, MIN_EMIN, Context, Decimal, DivisionByZero, InvalidOperation
 from typing import Any, Iterable
@@ -362,22 +372,70 @@ def _numbers_in_text(text: str) -> list[Decimal]:
     return out
 
 
-def _operands_supported(terms: list[Decimal], expected: Decimal, quote: str) -> bool:
-    """True when EVERY operand (terms + expected) appears in the claim's quote.
+def _operands_supported(
+    terms: list[Decimal], expected: Decimal, printed: Counter
+) -> bool:
+    """True when every operand has its **own** printed occurrence.
 
-    The independent-validation test for :data:`TEXT_EXTRACTED` provenance (§17.5):
-    the model's own verbatim quote must literally carry each number the host
-    computed with. A column-sum whose addends live in a table the quote only
-    summarizes fails this — correctly — and stays model-transcribed / UNCERTAIN,
-    so a misread term is caught by the crop verifier rather than trusted.
+    ``printed`` counts the printed numbers by value (``20`` and ``20.0`` are one
+    value). The terms and the stated value are counted together, so each one
+    uses up an occurrence: one printed ``20`` supports one ``20`` operand, not
+    three (remediation WP-07.1, review N3: ``sum [20, 20, 20] = 40`` over
+    ``20 + 20 = 40`` was trusted), and the stated value cannot reuse a term's
+    number (``20 + 30`` states no total of 20). Genuinely repeated values are
+    fine: ``20 20 20 TOTAL 540`` prints three.
+
+    A column sum whose addends live in a table the quote only summarizes fails
+    this, correctly, and stays model-transcribed / UNCERTAIN, so a misread term
+    is caught by the crop verifier rather than trusted.
     """
-    present = _numbers_in_text(quote)
-    if not present:
+    if not printed:
         return False
-    for n in [*terms, expected]:
-        if not any(p == n for p in present):
-            return False
-    return True
+    need = Counter([*terms, expected])
+    return all(printed[value] >= count for value, count in need.items())
+
+
+def _operands_grounded(
+    terms: list[Decimal], expected: Decimal, quote: str, matched_text: str
+) -> bool:
+    """Whether the sheet's own text, where the quote anchored, prints every operand.
+
+    ``matched_text`` is the sheet's words under the span the quote matched
+    (:func:`~drawing_analyzer.anchor.resolve_anchors`). An operand counts where
+    **both** the quote and those words print it, per value the smaller count:
+    the model's quote is its stated evidence, and the words are what the sheet
+    prints there. Either alone trusts too much. The quote alone takes the
+    model's spelling (a quote that starts inside ``2-1/2"`` reads a ``1/2`` the
+    sheet never printed); the words alone read numbers the quote left out, and
+    read the sheet's non-ASCII forms with ASCII rules (an en-dash ``12'–6"``
+    becomes a ``12`` and a ``6``).
+    """
+    printed = Counter(_numbers_in_text(quote)) & Counter(_numbers_in_text(matched_text))
+    return _operands_supported(terms, expected, printed)
+
+
+def _arithmetic_verification(
+    op: str, actual: Decimal, expected: Decimal, origin: str
+) -> Verification:
+    """The verdict a mismatch carries: trusted only for :data:`TEXT_EXTRACTED`.
+
+    The note's wording is part of the investigation cache key
+    (``investigate._payload_hash`` reads the prior note), so it is the same for
+    every finding of one origin, whatever made the operands model-transcribed.
+    """
+    text_extracted = origin == TEXT_EXTRACTED
+    provenance = (
+        "operands text-extracted from the sheet quote"
+        if text_extracted
+        else "host-computed from model-transcribed terms — verify against the sheet"
+    )
+    return Verification(
+        status="DETERMINISTIC" if text_extracted else "UNCERTAIN",
+        note=f"computed {op} terms = {_fmt(actual)}; stated = {_fmt(expected)} "
+             f"({provenance})",
+        computation_method=HOST_DETERMINISTIC,
+        operand_origin=TEXT_EXTRACTED if text_extracted else MODEL_TRANSCRIBED,
+    )
 
 
 def _severity_for(actual: Decimal, expected: Decimal) -> str:
@@ -493,10 +551,12 @@ def audit_arithmetic(
     """Check every numeric claim's arithmetic; return findings + the tally.
 
     Deterministic and side-effect-free. Each mismatch becomes a
-    ``DETERMINISTIC``-verified :class:`~drawing_analyzer.models.Finding`
-    (``category="conflict"``) anchored on its sheet via the claim's verbatim quote
-    (the pure anchor resolver — ``UNANCHORED`` if the quote isn't on the sheet,
-    the honest signal). Claims whose numbers can't be parsed, or whose kind is
+    :class:`~drawing_analyzer.models.Finding` (``category="conflict"``) anchored
+    on its sheet via the claim's verbatim quote (the pure anchor resolver —
+    ``UNANCHORED`` if the quote isn't on the sheet, the honest signal). It is
+    ``DETERMINISTIC`` only when that anchoring shows the sheet prints every
+    operand (module docstring; remediation WP-07.1, N3), and ``UNCERTAIN``
+    otherwise. Claims whose numbers can't be parsed, or whose kind is
     unknown, are counted ``unusable`` and dropped — never guessed at. Duplicate
     claims (the critique runs twice) are collapsed before checking so the tally
     isn't double-counted: the same sheet, quote and :func:`claim_content_key`
@@ -511,6 +571,10 @@ def audit_arithmetic(
     result = ArithmeticResult()
     seen: set[tuple] = set()
     to_anchor: dict[tuple, list[Finding]] = {}
+    # Every mismatch starts model-transcribed; its operands are judged after the
+    # anchoring pass below (remediation WP-07.1, N3). Kept beside the findings,
+    # and rolled back with them, so the two lists always correspond.
+    pending: list[tuple[Finding, list[Decimal], Decimal, Decimal, Any, str]] = []
 
     for claim in claims:
         # Per-CLAIM isolation (item 10b). The orchestrator wraps this whole
@@ -524,7 +588,7 @@ def audit_arithmetic(
         # The sibling auditors are each wrapped by ``_run``; arithmetic is the
         # only one hand-rolled outside it, and even ``_run`` is per-auditor.
         snapshot = (result.checked, result.matched, result.mismatched,
-                    len(result.findings))
+                    len(result.findings), len(pending))
         try:
             if (claim.kind or "").strip().lower() not in ("sum", "product", "factor"):
                 result.unusable += 1
@@ -563,20 +627,11 @@ def audit_arithmetic(
             note_tail = f" {claim.note.strip()}" if claim.note.strip() else ""
 
             # Operand provenance (§17.5): the host *operation* is always deterministic,
-            # but the numbers it used are trusted only when the sheet's own quoted text
-            # independently carries every one of them (TEXT_EXTRACTED). Otherwise the
-            # terms were model-transcribed, so the mismatch stays UNCERTAIN and is
-            # crop-verified — a misread term must never ink as trusted ground truth.
-            text_extracted = _operands_supported(
-                terms, expected, claim.quote or ""  # type: ignore[arg-type]
-            )
-            origin = TEXT_EXTRACTED if text_extracted else MODEL_TRANSCRIBED
-            status = "DETERMINISTIC" if text_extracted else "UNCERTAIN"
-            provenance = (
-                "operands text-extracted from the sheet quote"
-                if text_extracted
-                else "host-computed from model-transcribed terms — verify against the sheet"
-            )
+            # but the numbers it used are trusted only when the sheet independently
+            # prints every one of them (TEXT_EXTRACTED). That needs the anchor, so
+            # every mismatch starts MODEL_TRANSCRIBED / UNCERTAIN and is promoted
+            # after the anchoring pass below, or never: a misread term must never
+            # ink as trusted ground truth.
             finding = Finding(
                 sheet_id=sheet_id,
                 source_name=source_name,
@@ -595,12 +650,8 @@ def audit_arithmetic(
                     "whichever is wrong."
                 ),
                 refs=[],
-                verification=Verification(
-                    status=status,
-                    note=f"computed {op} terms = {_fmt(actual)}; stated = {_fmt(expected)} "
-                         f"({provenance})",
-                    computation_method=HOST_DETERMINISTIC,
-                    operand_origin=origin,
+                verification=_arithmetic_verification(
+                    op, actual, expected, MODEL_TRANSCRIBED,  # type: ignore[arg-type]
                 ),
                 sources=["auditor_arithmetic"],
                 # Two mismatches on one row share this quote, and so shared an
@@ -611,6 +662,7 @@ def audit_arithmetic(
                 ),
             )
             result.findings.append(finding)
+            pending.append((finding, terms, expected, actual, geom, op))  # type: ignore[arg-type]
             if geom is not None and (claim.quote or "").strip():
                 to_anchor.setdefault(source_page_key(finding), []).append(finding)
         except Exception as exc:  # noqa: BLE001 - one claim never sinks the rest
@@ -619,8 +671,9 @@ def audit_arithmetic(
             # before the Finding is built, and _fmt used to raise inside the
             # constructor expression — leaving a counted mismatch with no
             # finding behind it).
-            (result.checked, result.matched, result.mismatched, kept) = snapshot
+            (result.checked, result.matched, result.mismatched, kept, kept_pending) = snapshot
             del result.findings[kept:]
+            del pending[kept_pending:]
             result.unusable += 1
             from ..diagnostics import get_logger
             get_logger().warning(
@@ -630,13 +683,47 @@ def audit_arithmetic(
             )
 
     # Anchor the mismatch findings via their quotes, grouped per sheet. Reuses the
-    # pure resolver (EXACT/FUZZY/TILE/UNANCHORED) exactly like model findings.
-    if to_anchor:
-        from ..anchor import resolve_anchors
+    # pure resolver (EXACT/FUZZY/TILE/UNANCHORED) exactly like model findings,
+    # and keeps the sheet words each quote matched for the operand check below.
+    from .. import anchor
 
-        geom_by_key = {source_page_key(g.ref): g for g in sheets if getattr(g, "ref", None)}
-        for key, group in to_anchor.items():
-            geom = geom_by_key.get(key)
-            if geom is not None:
-                resolve_anchors(group, geom)
+    matched: dict[int, str] = {}
+    geom_by_key = {source_page_key(g.ref): g for g in sheets if getattr(g, "ref", None)}
+    for key, group in to_anchor.items():
+        geom = geom_by_key.get(key)
+        if geom is None:
+            continue
+        try:
+            anchor.resolve_anchors(group, geom, matched_text=matched)
+        except Exception as exc:  # noqa: BLE001 - one sheet never sinks the rest
+            # Its findings keep no anchor, so they stay model-transcribed.
+            _log_warning("arithmetic auditor: anchoring failed for %s: %s", key, exc)
+
+    # Operand provenance, now that the anchors exist (remediation WP-07.1, N3):
+    # trusted only when the claim resolved to a sheet, its quote anchored there
+    # by a numerically vetoed match, and the numbers printed there carry every
+    # operand once per use. Anything else, including a failure here, leaves the
+    # finding model-transcribed, the safe direction.
+    for finding, terms, expected, actual, geom, op in pending:
+        text = matched.get(id(finding))
+        try:
+            if (
+                geom is not None and text is not None
+                and anchor.numbers_grounded(finding.anchor)
+                and _operands_grounded(terms, expected, finding.source_quote, text)
+            ):
+                finding.verification = _arithmetic_verification(
+                    op, actual, expected, TEXT_EXTRACTED,
+                )
+        except Exception as exc:  # noqa: BLE001 - stays UNCERTAIN, never trusted
+            _log_warning(
+                "arithmetic auditor: operand provenance undecided for %s: %s",
+                finding.sheet_id or "?", exc,
+            )
     return result
+
+
+def _log_warning(msg: str, *args: Any) -> None:
+    from ..diagnostics import get_logger
+
+    get_logger().warning(msg, *args)

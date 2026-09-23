@@ -1025,7 +1025,7 @@ finding status:
 | `VERIFIED` | verifier `CONFIRMED` | the crop shows the finding is correct |
 | `REJECTED` | verifier `CONTRADICTED` | the crop shows the finding is wrong — pulled from the ink and listed in the index's *Rejected by verification* section (grey struck ink only with `ink_rejected=True`) |
 | `UNCERTAIN` | verifier `NOT_VISIBLE` (or a garbled reply) | can't be decided from this crop (e.g. it depends on another sheet) — a perfectly fine outcome |
-| `DETERMINISTIC` | the offline auditors | trusted without a model re-check (references, naming, title-block, sheet-index; arithmetic **only** when its operands are text-extracted from the quote — a model-transcribed mismatch is `UNCERTAIN` and crop-verified) |
+| `DETERMINISTIC` | the offline auditors | trusted without a model re-check (references, naming, title-block, sheet-index; arithmetic **only** when the claim's quote is found on its own sheet and the sheet prints every operand there, once per use — any other mismatch is `UNCERTAIN` and crop-verified) |
 | `SKIPPED` | — | nothing to look at (unanchored), no crop, or the pass was unavailable (no key) |
 
 The pass is additive and non-fatal: crops render sequentially (PyMuPDF is not
@@ -1718,11 +1718,34 @@ wins the text, as below.
 
 The *operation* is always host-deterministic, but the numbers it operated on may
 have been misread. So a mismatch is trusted **`DETERMINISTIC`** (and clouded
-automatically, even in verified-only mode) only when the claim's own quote
-independently carries every operand; when the operands were merely transcribed by
-the model — the common case for a column sum whose addends live in a table — the
-mismatch is left **`UNCERTAIN`** and sent to the crop verifier before it inks as
-ground truth. The popup states which ("host-computed from model-transcribed
+automatically, even in verified-only mode) only when the **sheet itself prints
+every operand**, and that is checked against the sheet, not taken from the
+model's quote:
+
+- the claim must belong to a sheet in the set, and its quote must be found on
+  that sheet, word for word or by a close match that still places every number
+  of the quote on the sheet (a quote the sheet does not carry is the
+  hallucination signal, and never ground truth);
+- each operand needs **its own printed number**: `20 + 20 = 40` prints two
+  `20`s, so it supports two `20` operands, not three, and the stated result
+  needs its own printed number too (`20 + 30` states no total). Values the sheet
+  genuinely repeats are fine: `20 20 20 TOTAL 540` prints three `20`s;
+- a number counts only where **both** the model's quote and the sheet's own
+  words at that spot print it. A quote that starts in the middle of `2-1/2"`
+  reads a `1/2` the sheet never printed, and the sheet's words alone can read
+  more than the model offered as evidence.
+
+When any of that fails (the common case being a column sum whose addends live in
+a table the quote only summarizes), the operands count as transcribed by the
+model: the mismatch is left **`UNCERTAIN`** and sent to the crop verifier before
+it inks as ground truth. Until remediation WP-07.1 (review N3) the check was
+whether each operand appeared anywhere in the model's quote, so a correct
+`20 + 20 = 40` that the model transcribed as `20 + 20 + 20` got a high-severity
+"Math checked by computer from the sheet's own printed numbers" mismatch, and so
+did a quote the sheet does not contain or a claim on no sheet at all. The check
+does not yet look at the operation itself or at which number plays which part
+(a sum read as a product, two terms swapped), nor at digits inside tags and
+sheet numbers (`FP101`); that is the next remediation slice. The popup states which ("host-computed from model-transcribed
 terms"), and it keeps saying so **after** the crop check: verification and the
 investigation loop replace the verdict, never the provenance behind it. A
 `VERIFIED` crop means a verifier looked at the drawing — it does not turn numbers

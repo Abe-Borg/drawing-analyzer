@@ -193,13 +193,29 @@ def _padded(rect: list[float], w_pt: float, h_pt: float) -> list[float]:
     ]
 
 
+def _span_word_indices(stream: _Stream, start: int, length: int, n_words: int) -> list[int]:
+    """The source words a token span covers, in reading order, each once."""
+    idxs = sorted({stream.word_of[k] for k in range(start, start + length)})
+    return [i for i in idxs if 0 <= i < n_words]
+
+
 def _span_rect(
     stream: _Stream, words: list[Any], start: int, length: int
 ) -> list[float] | None:
     """Union rect (top-left-origin points) of the words a token span covers."""
-    word_idxs = sorted({stream.word_of[k] for k in range(start, start + length)})
-    rects = [_word_rect(words[i]) for i in word_idxs if 0 <= i < len(words)]
+    rects = [_word_rect(words[i]) for i in _span_word_indices(stream, start, length, len(words))]
     return _rect_union(rects) if rects else None
+
+
+def _span_text(stream: _Stream, words: list[Any], start: int, length: int) -> str:
+    """The source words a token span covers, as printed, joined by single spaces.
+
+    Whole words, not tokens: a span that starts inside ``2-1/2"`` reports the
+    whole ``2-1/2"``, because that is what the sheet prints there.
+    """
+    return " ".join(
+        str(words[i][4]) for i in _span_word_indices(stream, start, length, len(words))
+    )
 
 
 def _rect_center(rect: list[float]) -> tuple[float, float]:
@@ -253,10 +269,16 @@ def _tile_preferred_start(
     return starts[0], False
 
 
+# What each quote tier returns on a hit: the anchor, and the token span
+# ``(start, length)`` it matched, so a caller can read the sheet's own words
+# there (:func:`resolve_anchors`' ``matched_text``).
+_QuoteMatch = tuple[Anchor, int, int]
+
+
 def _try_exact(
     finding: Finding, stream: _Stream, words: list[Any],
     tile: tuple[int, int] | None, w: float, h: float, rows: int, cols: int,
-) -> Anchor | None:
+) -> _QuoteMatch | None:
     query = _tokenize(finding.source_quote)
     if not query:
         return None
@@ -270,7 +292,7 @@ def _try_exact(
     if rect is None:
         return None
     method = "exact" if (len(starts) == 1 or disambiguated) else "exact_ambiguous"
-    return Anchor(status="EXACT", rect_pdf=_padded(rect, w, h), method=method)
+    return Anchor(status="EXACT", rect_pdf=_padded(rect, w, h), method=method), start, len(query)
 
 
 def _numeric_tokens(tokens: "Iterable[str]") -> Counter:
@@ -367,7 +389,7 @@ def _fuzzy_window_slack(m: int) -> int:
 def _try_fuzzy_window(
     finding: Finding, stream: _Stream, words: list[Any],
     tile: tuple[int, int] | None, w: float, h: float, rows: int, cols: int,
-) -> Anchor | None:
+) -> _QuoteMatch | None:
     query = _tokenize(finding.source_quote)
     m = len(query)
     n = len(stream.tokens)
@@ -434,13 +456,16 @@ def _try_fuzzy_window(
     rect = _span_rect(stream, words, start, m)
     if rect is None:
         return None
-    return Anchor(status="FUZZY", rect_pdf=_padded(rect, w, h), method="fuzzy_window")
+    return (
+        Anchor(status="FUZZY", rect_pdf=_padded(rect, w, h), method="fuzzy_window"),
+        start, m,
+    )
 
 
 def _try_fuzzy_subphrase(
     finding: Finding, stream: _Stream, words: list[Any],
     tile: tuple[int, int] | None, w: float, h: float, rows: int, cols: int,
-) -> Anchor | None:
+) -> _QuoteMatch | None:
     query = _tokenize(finding.source_quote)
     m = len(query)
     if m < _FUZZY_MIN_SUBPHRASE_TOKENS:
@@ -477,10 +502,37 @@ def _try_fuzzy_subphrase(
             )
             rect = _span_rect(stream, words, start, length)
             if rect is not None:
-                return Anchor(
-                    status="FUZZY", rect_pdf=_padded(rect, w, h), method="fuzzy_subphrase"
+                return (
+                    Anchor(status="FUZZY", rect_pdf=_padded(rect, w, h),
+                           method="fuzzy_subphrase"),
+                    start, length,
                 )
     return None
+
+
+# Anchor methods whose match puts every digit-bearing token of the quote on its
+# own token of the sheet, once per mention: EXACT is the quote verbatim; the
+# window tier aligns each measurement at its position (``_numbers_aligned``);
+# the sub-phrase tier matches a verbatim run holding the quote's whole digit
+# multiset (``_numbers_agree``). A method not listed here does not ground a
+# number until it carries the veto, so a new tier fails closed.
+_NUMBER_GROUNDING_METHODS = {
+    "EXACT": frozenset({"exact", "exact_ambiguous"}),
+    "FUZZY": frozenset({"fuzzy_window", "fuzzy_subphrase"}),
+}
+
+
+def numbers_grounded(anchor: Anchor | None) -> bool:
+    """Whether ``anchor`` shows the quote's numbers are printed on the sheet.
+
+    True for an EXACT anchor and for a FUZZY one by a numerically vetoed method
+    (P7 item 30); never for TILE (a location, not a text match) or UNANCHORED
+    (the hallucination signal). The arithmetic auditor trusts a claim's operands
+    only through such an anchor (remediation WP-07.1, N3).
+    """
+    if anchor is None:
+        return False
+    return anchor.method in _NUMBER_GROUNDING_METHODS.get(anchor.status, frozenset())
 
 
 def _tile_anchor(
@@ -495,18 +547,21 @@ def _tile_anchor(
 def _anchor_one(
     finding: Finding, stream: _Stream, words: list[Any], tile_rects: dict,
     w: float, h: float, rows: int, cols: int,
-) -> Anchor:
+) -> tuple[Anchor, tuple[int, int] | None]:
+    """The finding's anchor, and the token span its quote matched (``None`` for
+    a TILE or UNANCHORED anchor: nothing on the sheet matched the quote)."""
     tile = _reported_tile(finding, rows, cols)
 
     if not finding.source_quote.strip():
         # Graphics-only finding: anchor to its tile (coarse but honest), or leave
         # it unanchored if no usable tile was reported.
-        return _tile_anchor(tile, tile_rects, method="tile")
+        return _tile_anchor(tile, tile_rects, method="tile"), None
 
     for attempt in (_try_exact, _try_fuzzy_window, _try_fuzzy_subphrase):
-        anchor = attempt(finding, stream, words, tile, w, h, rows, cols)
-        if anchor is not None:
-            return anchor
+        hit = attempt(finding, stream, words, tile, w, h, rows, cols)
+        if hit is not None:
+            anchor, start, length = hit
+            return anchor, (start, length)
 
     # A non-empty quote that matches nothing is normally the hallucination
     # signal — keep the finding but flag it; never cloud it by default.
@@ -524,11 +579,16 @@ def _anchor_one(
     # so does every finding that carries no evidence state at all — the digest,
     # critique and whole-set cross-QC paths are untouched.
     if getattr(finding, "evidence_state", "") == EVIDENCE_UNAVAILABLE:
-        return _tile_anchor(tile, tile_rects, method="tile_no_text_evidence")
-    return Anchor(status="UNANCHORED", rect_pdf=None, method="quote_not_found")
+        return _tile_anchor(tile, tile_rects, method="tile_no_text_evidence"), None
+    return Anchor(status="UNANCHORED", rect_pdf=None, method="quote_not_found"), None
 
 
-def resolve_anchors(findings: Iterable[Finding], rendered_sheet: Any) -> list[Finding]:
+def resolve_anchors(
+    findings: Iterable[Finding],
+    rendered_sheet: Any,
+    *,
+    matched_text: dict[int, str] | None = None,
+) -> list[Finding]:
     """Anchor each finding to a rectangle on ``rendered_sheet`` (in place).
 
     Pure function over the sheet's word tuples and tile geometry — no PDF engine.
@@ -539,6 +599,14 @@ def resolve_anchors(findings: Iterable[Finding], rendered_sheet: Any) -> list[Fi
 
     ``findings`` are assumed to belong to ``rendered_sheet``; the caller groups
     them by sheet before calling.
+
+    ``matched_text``, when given, receives ``id(finding) →`` the sheet's own
+    words under the span the finding's quote matched (:func:`_span_text`), for
+    every finding this call anchors EXACT or FUZZY; nothing for a TILE or
+    UNANCHORED anchor, or for a finding left untouched. It changes no anchor.
+    The arithmetic auditor reads it to count the numbers the sheet prints
+    there, not only the ones the model's quote says it prints (remediation
+    WP-07.1, N3).
     """
     findings = list(findings)
     words = list(getattr(rendered_sheet, "words", []) or [])
@@ -560,7 +628,10 @@ def resolve_anchors(findings: Iterable[Finding], rendered_sheet: Any) -> list[Fi
         already = finding.anchor
         if already is not None and already.status != "UNANCHORED" and already.rect_pdf is not None:
             continue
-        finding.anchor = _anchor_one(finding, stream, words, tile_rects, w, h, rows, cols)
+        anchor, span = _anchor_one(finding, stream, words, tile_rects, w, h, rows, cols)
+        finding.anchor = anchor
+        if matched_text is not None and span is not None:
+            matched_text[id(finding)] = _span_text(stream, words, *span)
     return findings
 
 
