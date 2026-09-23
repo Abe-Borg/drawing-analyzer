@@ -1061,7 +1061,14 @@ editor and diff, and a test fails if one reappears.
   `_base14_safe` fit page text by measured width and fold glyphs Base-14 cannot
   draw, which it otherwise renders as a middle dot — returning a `MarkupRunResult` with
   per-placement `WRITTEN`/`INDEXED`/`FAILED` receipts and a receipt-derived
-  `coverage_status`. Every finding annotation (cloud, tag, callout, leader,
+  `coverage_status`. QC tags are laid out per page before any is drawn
+  (`_plan_tag_boxes`, in QC-number order, never drawing order, which follows
+  arrival): a tag with nothing in its way keeps its home spot above its cloud,
+  and one that would cover an earlier tag slides along the row, then to the next
+  row away from the cloud, bounded, falling back to home rather than dropping
+  the tag. Laid out from the rectangle alone, two clouds on one rectangle (the
+  pairs remediation WP-03.7 keeps apart) drew both tags at one spot and the later
+  white-filled one hid the other (Codex review). Every finding annotation (cloud, tag, callout, leader,
   overflow/set-level note) is also placed on a per-**severity** PDF
   optional-content layer (`QC markups - High/Medium/Low severity`, all shipped on)
   so a reviewer can toggle a whole severity tier; layered strictly by `severity`

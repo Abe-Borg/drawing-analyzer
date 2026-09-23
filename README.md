@@ -1194,7 +1194,9 @@ paths never appear in any exported artifact.
   (`QC-001` …, ordered sheet → position). Each inked finding carries the number
   as a small **FreeText tag** beside its markup, in the severity color; the same
   number appears in `findings.csv`, `findings.json`, the HTML report, and the
-  index page — one namespace everywhere.
+  index page — one namespace everywhere. When two findings mark the same spot
+  (two different issues that quote one tag), their tags sit side by side in
+  number order instead of on top of each other, so both numbers stay readable.
 - **Severity colors.** high = **red**, medium = **orange**, low and any
   *question*-category finding = **blue**.
 - **Border styles say who found it.** A model finding that verified draws a

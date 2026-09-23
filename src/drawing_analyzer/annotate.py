@@ -250,6 +250,7 @@ _SEVERITY_LAYER_ORDER = ("high", "medium", "low")
 _BORDER_WIDTH = 1.5
 _TAG_FONTSIZE = 8.0
 _TAG_HEIGHT = 12.0
+_TAG_GAP = 2.0
 
 # Margin callout layout (sheet-level / absence findings).
 _CALLOUT_W = 230.0
@@ -1403,27 +1404,113 @@ def _assign_layer(
 # --------------------------------------------------------------------------- #
 
 
+def _tag_width(qc_id: str) -> float:
+    return 6.0 * len(qc_id) + 8.0
+
+
+def _home_tag_box(
+    qc_id: str, rect: "tuple[float, float, float, float]", page_w: float, page_h: float,
+) -> "tuple[float, float, float, float]":
+    """Where a QC tag sits when nothing else is there: above its cloud's top-left
+    corner, or below the cloud when there is no room above (PAGE_VIEW_V2 space)."""
+    tag_w = _tag_width(qc_id)
+    x0 = max(2.0, min(rect[0], page_w - tag_w - 2.0))
+    y0 = rect[1] - _TAG_HEIGHT - _TAG_GAP
+    if y0 < 2.0:
+        y0 = min(rect[3] + _TAG_GAP, page_h - _TAG_HEIGHT - 2.0)
+    return (x0, y0, x0 + tag_w, y0 + _TAG_HEIGHT)
+
+
+def _boxes_overlap(a: "tuple[float, ...]", b: "tuple[float, ...]") -> bool:
+    return min(a[2], b[2]) > max(a[0], b[0]) and min(a[3], b[3]) > max(a[1], b[1])
+
+
+def _clear_tag_box(
+    qc_id: str, rect: "tuple[float, float, float, float]", page_w: float, page_h: float,
+    placed: "list[tuple[float, float, float, float]]",
+) -> "tuple[float, float, float, float]":
+    """The first spot for a QC tag that covers no tag already placed on the page.
+
+    A tag is laid out from its cloud's rectangle alone, so two findings anchored
+    to one rectangle got their tags at one spot and the later one, white-filled,
+    covered the earlier: one of the two issues had no visible number (Codex
+    review of remediation WP-03.7, which made such pairs common by no longer
+    folding two different issues that quote one tag; WP-03.3's two arithmetic
+    mismatches on one row were already such a pair). The search keeps the home
+    spot when it is free, so a tag nothing collides with is placed exactly as
+    before; otherwise it slides along the row past each tag it hits, then tries
+    the next row further from the cloud. Bounded (plan §2 rule 14): a row is
+    crossed in at most ``len(placed) + 1`` steps, and each placed tag can block at
+    most two rows. If no spot on the page is clear, the home spot is used: a tag
+    that overlaps another is still drawn and stamped, never dropped (I-3).
+    """
+    home = _home_tag_box(qc_id, rect, page_w, page_h)
+    if not any(_boxes_overlap(home, p) for p in placed):
+        return home
+    tag_w = _tag_width(qc_id)
+    row_step = _TAG_HEIGHT + _TAG_GAP
+    dy = -row_step if home[1] < rect[1] else row_step    # away from the cloud
+    for row in range(2 * len(placed) + 1):
+        y0 = home[1] + row * dy
+        if y0 < 2.0 or y0 + _TAG_HEIGHT > page_h - 2.0:
+            break
+        x0 = home[0]
+        for _ in range(len(placed) + 1):
+            if x0 + tag_w > page_w - 2.0:
+                break
+            box = (x0, y0, x0 + tag_w, y0 + _TAG_HEIGHT)
+            hits = [p for p in placed if _boxes_overlap(box, p)]
+            if not hits:
+                return box
+            x0 = max(p[2] for p in hits) + _TAG_GAP
+    return home
+
+
+def _plan_tag_boxes(
+    items: "list[tuple[str, str, tuple[float, float, float, float]]]",
+    page_w: float, page_h: float,
+) -> "dict[str, tuple[float, float, float, float]]":
+    """``{placement_id: tag box}`` for one page's clouds, ``items`` being
+    ``(placement_id, qc_id, cloud rect)`` in PAGE_VIEW_V2 space.
+
+    Laid out in QC-number order, never in drawing order: the drawing order
+    follows the ledger's order, which follows arrival, and which of two
+    colliding tags keeps its home spot must not (I-7). So ``QC-001`` sits where a
+    lone tag would, and ``QC-002`` beside it.
+    """
+    placed: list[tuple[float, float, float, float]] = []
+    out: dict[str, tuple[float, float, float, float]] = {}
+    for pid, qc_id, rect in sorted(items, key=lambda it: (len(it[1]), it[1], it[0])):
+        box = _clear_tag_box(qc_id, rect, page_w, page_h, placed)
+        placed.append(box)
+        out[pid] = box
+    return out
+
+
 def _add_qc_tag(
     page: "pymupdf.Page", view_rect: "pymupdf.Rect", finding: Finding, *, author: str,
     oc_layers: "dict[str, int] | None" = None,
+    tag_box: "tuple[float, float, float, float] | None" = None,
 ) -> "int | None":
     """A small FreeText tag with the finding's QC number beside its markup.
 
     ``view_rect`` is the finding's cloud rectangle in PAGE_VIEW_V2 space; the tag is
     laid out relative to it in view space (``page.rect`` dims are view dims), then
     transformed to page space for drawing so it lands correctly on a rotated sheet.
-    Returns the tag annot's xref (for stamping), or ``None`` when the finding has
-    no QC number and therefore no tag.
+    ``tag_box`` is the spot :func:`_plan_tag_boxes` chose for it among the page's
+    other tags; without one the tag goes to its home spot. Returns the tag annot's
+    xref (for stamping), or ``None`` when the finding has no QC number and
+    therefore no tag.
     """
     if not finding.qc_id:
         return None
     color = _color(finding)
-    tag_w = 6.0 * len(finding.qc_id) + 8.0
-    x0 = max(2.0, min(view_rect.x0, page.rect.width - tag_w - 2.0))
-    y0 = view_rect.y0 - _TAG_HEIGHT - 2.0
-    if y0 < 2.0:
-        y0 = min(view_rect.y1 + 2.0, page.rect.height - _TAG_HEIGHT - 2.0)
-    tag_rect = _derotate_rect(page, (x0, y0, x0 + tag_w, y0 + _TAG_HEIGHT))
+    if tag_box is None:
+        tag_box = _home_tag_box(
+            finding.qc_id, (view_rect.x0, view_rect.y0, view_rect.x1, view_rect.y1),
+            page.rect.width, page.rect.height,
+        )
+    tag_rect = _derotate_rect(page, tag_box)
     annot = page.add_freetext_annot(
         tag_rect, finding.qc_id,
         fontsize=_TAG_FONTSIZE, text_color=color, fill_color=(1, 1, 1),
@@ -1440,6 +1527,7 @@ def _add_qc_tag(
 def _add_cloud(
     page: "pymupdf.Page", finding: Finding, *, unverified: bool, author: str,
     rejected: bool = False, oc_layers: "dict[str, int] | None" = None,
+    tag_box: "tuple[float, float, float, float] | None" = None,
 ) -> "list[tuple[str, int]]":
     """The finding's Square annot + its QC tag; returns ``[(component, xref), …]``.
 
@@ -1474,7 +1562,9 @@ def _add_cloud(
     # nothing. This is the whole reason PyMuPDF is used here (see module docstring).
     annot.update()
     components: list[tuple[str, int]] = [("cloud", annot.xref)]
-    tag_xref = _add_qc_tag(page, view_rect, finding, author=author, oc_layers=oc_layers)
+    tag_xref = _add_qc_tag(
+        page, view_rect, finding, author=author, oc_layers=oc_layers, tag_box=tag_box,
+    )
     if tag_xref is not None:
         components.append(("tag", tag_xref))
     return components
@@ -2324,6 +2414,27 @@ def _annotate_units(
         }
         oc_layers = _create_severity_layers(doc, tiers_present) if tiers_present else {}
         callouts_by_page: dict[int, list[tuple[Finding, MarkupPlacement]]] = {}
+        # QC tags are laid out per page before any is drawn, so two clouds on one
+        # rectangle get two readable tags (see ``_plan_tag_boxes``). Non-fatal: a
+        # planning failure leaves every tag at its home spot, as before.
+        tag_boxes: dict[str, tuple[float, float, float, float]] = {}
+        try:
+            by_page: dict[int, list] = {}
+            for finding, placement in pairs:
+                page_index = int(finding.page_index)
+                if (placement.expected == "CLOUD" and finding.qc_id
+                        and 0 <= page_index < page_count
+                        and finding.anchor is not None and finding.anchor.rect_pdf):
+                    by_page.setdefault(page_index, []).append(
+                        (placement.placement_id, finding.qc_id,
+                         tuple(float(v) for v in finding.anchor.rect_pdf)),
+                    )
+            for page_index, items in by_page.items():
+                view = doc[page_index].rect
+                tag_boxes.update(_plan_tag_boxes(items, view.width, view.height))
+        except Exception:  # noqa: BLE001 - layout is a refinement, never fatal
+            _log.warning("could not plan QC tag positions for %s", src.name)
+            tag_boxes = {}
         for finding, placement in pairs:
             kind = placement.expected
             if kind in ("REJECTED_INDEX", "GATED_INDEX"):
@@ -2342,6 +2453,7 @@ def _annotate_units(
                         doc[page_index], finding,
                         unverified=_is_unverified(finding) and not rejected,
                         author=author, rejected=rejected, oc_layers=oc_layers,
+                        tag_box=tag_boxes.get(placement.placement_id),
                     )
                     collected.setdefault(placement.placement_id, []).extend(
                         (c, x, page_index) for c, x in comps

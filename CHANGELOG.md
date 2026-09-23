@@ -67,7 +67,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   still merge when their texts agree (a restatement of one issue), as before.
 
   **Visible effect:** such a pair is two findings, each with its own `QC-###`
-  number, text, markup and evidence folder. The cost, chosen on purpose: two
+  number, text, markup and evidence folder. Both are clouded on the same spot of
+  the reviewed drawing, so their number tags, which used to be drawn from the
+  cloud's position alone (the second covering the first), are now laid out side
+  by side in number order; a tag with nothing in its way stays where it always
+  was. That also fixes two arithmetic mistakes on one table row, whose tags
+  collided the same way. The cost, chosen on purpose: two
   findings about the same thing that quote one string at one spot but share
   very few words (say "cleanout required at base of the soil stack per code"
   and "provide a cleanout fitting shown on the plumbing detail", both quoting

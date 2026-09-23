@@ -33,7 +33,10 @@ Pinned here:
 * over generated same-sheet sets, Pass B's partition is Pass A's;
 * the pipeline: two digest findings quoting one tag are two findings after the
   anchor stage and Pass B;
-* what still folds: text duplicates, before and after anchoring.
+* what still folds: text duplicates, before and after anchoring;
+* the reviewed PDF: two findings clouded on one rectangle get two QC tags that
+  do not cover each other (Codex review of this slice), laid out in QC-number
+  order, a lone tag keeping its old spot.
 
 Hermetic: synthetic findings; the pipeline test builds a one-page PDF with
 PyMuPDF (tests may import it; I-5 binds ``src``) and uses the scripted fake
@@ -344,3 +347,131 @@ def test_two_digest_findings_quoting_one_tag_stay_two_through_the_pipeline(tmp_p
     assert len(rects) == 1                                  # one rectangle, two issues
     assert all(f.anchor.status == "EXACT" for f in ctx.findings)
     assert sorted(f.qc_id for f in ctx.findings) == ["QC-001", "QC-002"]
+
+
+# --------------------------------------------------------------------------- #
+# The reviewed PDF: two findings on one rectangle get two readable QC tags
+# --------------------------------------------------------------------------- #
+#
+# Codex review of this slice (P1): keeping the pair apart is only half of it if
+# the reviewed drawing cannot show it. A QC tag was laid out from its cloud's
+# rectangle alone, so both tags landed at one spot and the later one, drawn
+# white-filled over the earlier, hid it. WP-03.3's two arithmetic mismatches on
+# one row were already such a pair; this slice made them common.
+
+
+def _tag_annots(pdf_path) -> list[tuple[str, tuple[float, float, float, float]]]:
+    """``(QC number, rect)`` of every QC tag on the reviewed PDF, reopened."""
+    pymupdf = pytest.importorskip("pymupdf")
+    doc = pymupdf.open(str(pdf_path))
+    try:
+        out = []
+        for page in doc:
+            for annot in page.annots():
+                info = annot.info
+                if info.get("subject") == "QC tag":
+                    r = annot.rect
+                    out.append((info.get("content", ""), (r.x0, r.y0, r.x1, r.y1)))
+        return out
+    finally:
+        doc.close()
+
+
+def _overlap(a, b) -> bool:
+    return min(a[2], b[2]) > max(a[0], b[0]) and min(a[3], b[3]) > max(a[1], b[1])
+
+
+@pytest.mark.parametrize("rotation", [0, 90])
+@pytest.mark.parametrize("order", ["VI", "IV"])
+def test_two_findings_on_one_rectangle_get_two_visible_tags(tmp_path, order, rotation):
+    pymupdf = pytest.importorskip("pymupdf")
+    from drawing_analyzer.annotate import write_reviewed_pdfs
+    from drawing_analyzer.models import assign_qc_ids
+
+    doc = pymupdf.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_text((100, 212), "PUMP P-1")
+    if rotation:
+        page.set_rotation(rotation)
+    src = tmp_path / "M-101.pdf"
+    doc.save(str(src))
+    doc.close()
+
+    items = {"V": _f(_VOLTAGE, "PUMP P-1", rect=_RECT, verdict="VERIFIED"),
+             "I": _f(_IMPELLER, "PUMP P-1", rect=_RECT, verdict="VERIFIED")}
+    findings = [items[k] for k in order]
+    assign_qc_ids(findings)
+    res = write_reviewed_pdfs(findings, [src], tmp_path / "out", include_unverified=True)
+    assert res.coverage_status == "COMPLETE"
+
+    tags = _tag_annots(res.reviewed_pdfs[0])
+    assert sorted(number for number, _ in tags) == ["QC-001", "QC-002"]
+    (_, a), (_, b) = tags
+    assert not _overlap(a, b)                           # neither hides the other
+
+
+def test_a_lone_tag_keeps_its_home_spot():
+    from drawing_analyzer.annotate import _home_tag_box, _plan_tag_boxes
+
+    rect = (100.0, 200.0, 160.0, 212.0)
+    plan = _plan_tag_boxes([("p1", "QC-001", rect)], 612.0, 792.0)
+    # The 1.7.0 layout: above the cloud's top-left corner, 2 pt clear of it.
+    assert plan == {"p1": (100.0, 186.0, 144.0, 198.0)}
+    assert plan["p1"] == _home_tag_box("QC-001", rect, 612.0, 792.0)
+
+
+def test_tags_on_one_rectangle_never_overlap_and_follow_the_qc_numbers():
+    from drawing_analyzer.annotate import _plan_tag_boxes
+
+    rect = (100.0, 200.0, 160.0, 212.0)
+    items = [(f"p{i}", f"QC-{i:03d}", rect) for i in range(1, 13)]
+    plans = [_plan_tag_boxes(list(order), 612.0, 792.0)
+             for order in (items, items[::-1], items[5:] + items[:5])]
+    assert plans[0] == plans[1] == plans[2]             # not the drawing order (I-7)
+    boxes = plans[0]
+    for a, b in itertools.combinations(boxes.values(), 2):
+        assert not _overlap(a, b)
+    for box in boxes.values():
+        assert 2.0 <= box[0] and box[2] <= 610.0 and 2.0 <= box[1] and box[3] <= 790.0
+    assert boxes["p1"] == (100.0, 186.0, 144.0, 198.0)   # QC-001 at home
+    assert boxes["p2"][1] == boxes["p1"][1]              # QC-002 beside it
+
+
+def test_tags_move_away_from_the_cloud_and_never_go_missing():
+    from drawing_analyzer.annotate import _home_tag_box, _plan_tag_boxes
+
+    # A cloud at the top edge: tags sit below it, so further rows go down.
+    top = (100.0, 4.0, 160.0, 16.0)
+    boxes = _plan_tag_boxes([(f"p{i}", f"QC-{i:03d}", top) for i in range(1, 30)],
+                            200.0, 792.0)
+    assert all(box[1] >= top[3] for box in boxes.values())
+    for a, b in itertools.combinations(boxes.values(), 2):
+        assert not _overlap(a, b)
+    # A page with no room for a second tag: every tag still gets a spot (its
+    # home), overlapping rather than dropped.
+    tiny = (2.0, 16.0, 60.0, 30.0)
+    crowded = _plan_tag_boxes([(f"p{i}", f"QC-{i:03d}", tiny) for i in range(1, 4)],
+                              64.0, 32.0)
+    assert set(crowded) == {"p1", "p2", "p3"}
+    assert crowded["p3"] == _home_tag_box("QC-003", tiny, 64.0, 32.0)
+
+
+def test_two_digest_findings_quoting_one_tag_get_two_tags_on_the_reviewed_pdf(tmp_path):
+    """The pipeline with QC markups on: both findings are clouded on one
+    rectangle, and both QC numbers are readable on the reviewed drawing."""
+    from drawing_analyzer.pipeline import extract_drawing_context
+    from tests.test_drawing_qc_pipeline import _RoutingClient, _make_pdf
+
+    src = _make_pdf(tmp_path / "M-101.pdf")
+    client = _RoutingClient([_CLEARANCE, _AIRFLOW])
+    ctx = extract_drawing_context(
+        [src], client=client, rows=2, cols=2, qc_markups=True,
+        qc_work_dir=tmp_path / "qc",
+    )
+    model = [f for f in ctx.findings if f.source_quote == "VAV-3"]
+    assert len(model) == 2 and len({tuple(f.anchor.rect_pdf) for f in model}) == 1
+    tags = dict(_tag_annots(ctx.reviewed_pdf_paths[0]))
+    numbers = {f.qc_id for f in model}
+    assert numbers <= set(tags)
+    a, b = (tags[n] for n in sorted(numbers))
+    assert not _overlap(a, b)

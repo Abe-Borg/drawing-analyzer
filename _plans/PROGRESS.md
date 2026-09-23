@@ -462,6 +462,25 @@ what could not be verified, risks, and next steps.
   - **Plan corrected** (README step 7): WP-03 step 6's "choose one of" note and
     the slices paragraph record the resolution; N30 added to §3, WP-03's
     "Covers", §7.1's range and §7.2.
+  - **Codex review, P1, fixed in this PR** ("offset markups for same-anchor
+    findings"). Keeping the pair apart was only half of it if the reviewed
+    drawing cannot show it: `annotate._add_qc_tag` laid a QC tag out from its
+    cloud's rectangle alone, so two findings on one rectangle got their tags
+    at one spot and the later, white-filled, covered the earlier. Verified on
+    the PR head (both tag rects identical, also on a sheet rotated 90°). Root
+    cause, not only this pair: WP-03.3's two arithmetic mismatches on one row
+    collided the same way. Now `_annotate_units` lays out every page's tags
+    before drawing (`_plan_tag_boxes`, in QC-number order, never drawing
+    order, which follows arrival, I-7): a tag with nothing in its way keeps
+    its home spot (`_home_tag_box`, the old formula, so every other markup
+    is unchanged), and one that would cover an earlier tag slides along the
+    row and then to the next row away from the cloud (`_clear_tag_box`,
+    bounded: a row is crossed in at most `len(placed) + 1` steps and each
+    placed tag blocks at most two rows; no clear spot falls back to home, so
+    a tag is never dropped). Non-fatal: a planning failure leaves every tag
+    at home. The two clouds still coincide, as the finding's location; the
+    tags tell them apart. Stamping and reconciliation are untouched (the tag
+    stays an optional, stamped component).
 - **Contracts decided:** none (D-3 input recorded: position is evidence of
   where, never of which claim).
 - **Cache/schema effects: none**, confirmed:
@@ -518,7 +537,7 @@ what could not be verified, risks, and next steps.
     strong text), `tests/test_drawing_ledger.py` (69, 85), the ratchet, the
     gauntlet, and `test_ingest_order_independent_entries_and_numbers` (4
     entries instead of 3; it asserts order independence only).
-- **New tests:** `tests/test_position_is_not_sameness.py` (19): the N28 pair
+- **New tests:** `tests/test_position_is_not_sameness.py` (27): the N28 pair
   on one rectangle (predicate), through the lifecycle in both orders, with its
   numbers and evidence directories; two auditor-shaped findings anchored before
   ingest (Pass A, both orders); the real arithmetic auditor's same-row pair
@@ -528,7 +547,13 @@ what could not be verified, risks, and next steps.
   same-spot shape, counted so the test cannot pass vacuously: the old rule
   folded 36 times there); and **the pipeline**: two digest findings quoting
   `VAV-3` on a standard run are two findings with `QC-001`/`QC-002` on one
-  EXACT rectangle (on the base, "post-anchor reconciliation folded 1").
+  EXACT rectangle (on the base, "post-anchor reconciliation folded 1"). Added
+  for the Codex P1 (8): two findings on one rectangle get two non-overlapping
+  tags on the reopened reviewed PDF (both orders, rotation 0 and 90); the same
+  through the pipeline with QC markups on; a lone tag keeps its old spot;
+  twelve tags on one rectangle never overlap, stay on the page and come out
+  the same in any input order; tags move away from a cloud at the top edge,
+  and a page with no room still gets every tag.
 - **Validation** (this container, Python 3.11.15, SDK 1.7.0, PyMuPDF 1.28.2):
   - **Baseline before any change:** `python -m pytest -q -m "not network"`
     gave **3,232 passed, 2 skipped, 10 deselected** (219 s) on `614951d`,
@@ -543,6 +568,14 @@ what could not be verified, risks, and next steps.
   - **After:** full suite **3,250 passed, 2 skipped, 10 deselected** (217 s):
     the baseline plus 19 new, minus the removed matrix row, with the same two
     environment skips (IPv6 loopback; chmod as root).
+  - **After the Codex P1 fix:** full suite **3,258 passed, 2 skipped, 10
+    deselected** (213 s): the 3,250 above plus the 8 tag tests. Those 8 were
+    first run in a `git archive` of the PR head before the fix (`1c35a87`):
+    5 failed on behaviour (both tag rects identical, incl. the pipeline run
+    with QC markups), 3 only on the new helpers; the 19 earlier tests passed.
+    A rendered check of the reviewed PDF shows `QC-001` at its old spot and
+    `QC-002` beside it over one cloud. `annotate.py` adds one pre-existing
+    F401 hit to the list below (`ANNOTATION_COMPONENTS`, on `origin/main`).
   - **Pass B folds after the fix:** a scratch copy of the fixed tree counted
     them over the full suite (3,250 passed): **0 folds** in 7,322 Pass B
     entries, beside 8,000 Pass A adds (the base had 7 folds, all refused by
