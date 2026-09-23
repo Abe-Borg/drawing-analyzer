@@ -20,7 +20,7 @@ changed; keep the history).
 
 ---
 
-## D-1 Response outcome — `decided` (WP-01.2)
+## D-1 Response outcome — `decided` (WP-01.2, [PR #156](https://github.com/Abe-Borg/drawing-analyzer/pull/156))
 
 **Required decision (plan §4.1):** tell apart a finished response, a refusal, a
 truncation, an interrupted stream, a transport failure, a malformed result, and
@@ -239,7 +239,7 @@ consumer inventory is in plan WP-03.
 - Version / cache changes: —
 - Consumers affected: —
 
-## D-4 Cache contract — `open`: started by WP-01.2, completed by WP-10.4
+## D-4 Cache contract — `open`: started by WP-01.2 ([PR #156](https://github.com/Abe-Borg/drawing-analyzer/pull/156)), completed by WP-10.4
 
 **Required decision:** every cache key names the request format actually sent,
 the host validator/normalizer version, and the completeness metadata, with
@@ -399,4 +399,4 @@ migration.
 
 | Namespace / schema | Old version | New version | Readable fields kept | Reusable content | Invalidation reason and scope | Slice / PR |
 |---|---|---|---|---|---|---|
-| Digest cache, level 1 and level 2 (`digest_cache_key_level1`, `digest_cache_key`) | schema 10 | schema 10 (no version, key or term change) | Every field | Every entry whose stored `stop_reason` is `end_turn` or `stop_sequence` | Read-side reject (N4, N27; D-4). An entry that records `refusal`, `max_tokens`, `model_context_window_exceeded`, `tool_use`, `pause_turn`, `compaction`, `null`, any other value, or no `stop_reason` key is a miss. Only those entries are affected. They stay on disk, and a finished re-read overwrites them. Released 1.6.0 and 1.7.0 could have written the refusal and `null` shapes | WP-01.2 |
+| Digest cache, level 1 and level 2 (`digest_cache_key_level1`, `digest_cache_key`) | schema 10 | schema 10 (no version, key or term change) | Every field | Every entry whose stored `stop_reason` is `end_turn` or `stop_sequence` | Read-side reject (N4, N27; D-4). An entry that records `refusal`, `max_tokens`, `model_context_window_exceeded`, `tool_use`, `pause_turn`, `compaction`, `null`, any other value, or no `stop_reason` key is a miss. Only those entries are affected. They stay on disk, and a finished re-read overwrites them. Released 1.6.0 and 1.7.0 could have written the refusal and `null` shapes | WP-01.2, [PR #156](https://github.com/Abe-Borg/drawing-analyzer/pull/156) |
