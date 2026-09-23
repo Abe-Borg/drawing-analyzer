@@ -308,7 +308,10 @@ class Ledger:
         """Assign the run's sequential ``QC-###`` numbers (§12.4): SEALED → NUMBERED.
 
         Must be called **after** anchoring so the ordering is *positional* (source
-        input order → page → anchored-before-unanchored → top → left → stable id).
+        input order → page → anchored-before-unanchored → top → left), with a
+        tie broken by the entry's own content (id, text, then everything else
+        it carries), never by the order entries arrived in (remediation
+        WP-03.2, K5; :func:`~drawing_analyzer.models.assign_qc_ids`).
         Idempotent: a second call re-derives the same numbers (deterministic — I-7).
         """
         assign_qc_ids(self._entries)
@@ -423,7 +426,12 @@ def _grounding_quality(f: Finding) -> tuple:
        *fixed* set of members (§12.4).
 
     "For a fixed set of members" is load-bearing: the caller must not mutate a
-    field this reads between constructing the two tuples it compares.
+    field this reads between constructing the two tuples it compares. Across
+    merges that does not hold yet: ``_merge_into`` compares an incoming member
+    with the live survivor, whose severity an EARLIER merge may have raised,
+    so with three or more members the representative can still follow arrival
+    order (N29, owned by WP-03.5; pinned in
+    ``tests/test_qc_numbering_tiebreak.py``).
     """
     return (
         1 if _deterministic(f) else 0,

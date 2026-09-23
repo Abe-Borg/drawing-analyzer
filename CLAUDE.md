@@ -774,7 +774,10 @@ reporter of last resort must never raise from inside Tk's handler.
   judgment". Both quality tuples are computed **before** the severity union,
   which used to raise the survivor's severity to the max and erase the very
   difference it feeds (one order saw ranks (3, 2), the reverse (3, 3), and the
-  tiebreak fell to raw text, where `"…560…"` sorts above `"…540…"`). There is
+  tiebreak fell to raw text, where `"…560…"` sorts above `"…540…"`). Across
+  merges an earlier union still feeds the next comparison, so with three or more
+  members the representative can follow arrival order (N29, WP-03.5; a recorded
+  limit in `tests/test_qc_numbering_tiebreak.py`). There is
   deliberately **no** independent verdict adoption and **no** backfill of a
   loser's verdict onto an empty winner. An unanchored winner never erases a rect
   that places its own quote. The merge also unions `sources`, keeps most-severe
@@ -784,6 +787,21 @@ reporter of last resort must never raise from inside Tk's handler.
   `reproduced=True` beside `confidence=SINGLETON`). Explicit lifecycle:
   `seal()` (OPEN→SEALED) → anchor → `reconcile_post_anchor` (Pass B) →
   `number()` (SEALED→NUMBERED assigns positional `QC-###` **after** anchoring).
+  Position leaves ties (two rect-less findings on a sheet, two on one rectangle,
+  two set-level findings), and `models.assign_qc_ids` breaks them by the
+  finding's own content, never by arrival (remediation WP-03.2, K5): the content
+  `id` first (the old tie-break, so a pair whose ids differ keeps its number),
+  then the text (the id hashes the quote, so two issues quoting `PUMP P-1` share
+  one, B8), then `_qc_content_key`: every other field but `qc_id`, with the lists
+  that record only arrival (`_ARRIVAL_ORDERED_FIELDS`: `sources`, `refs`,
+  `supporting_quotes`, `prose_item_ids`, `citations`) sorted. Two entries can
+  share text, quote, category and id when members they absorbed conflict; what
+  they absorbed reaches the live entries, so the content still orders them, and
+  two findings that tie on all of it make the same claim. The content key is
+  built only for the runs the cheap key leaves tied (it serializes the whole
+  finding, ~25× the rest of numbering). `qc_id` is in no cache key: it names
+  evidence directories and orders display, and the investigation key reads
+  `id`, text, quote and the source fingerprint instead.
   Pass B's complete-link is **symmetric** (remediation WP-03.1, B1): an entry
   folds into a survivor only when every member of its `Ledger.member_history`
   duplicates every member of the survivor's, never through either live object.
