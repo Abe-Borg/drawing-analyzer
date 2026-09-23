@@ -510,9 +510,9 @@ what could not be verified, risks, and next steps.
       run's `qc_status` below `COMPLETE`.
 
     A warm run re-reads, and re-bills, any sheet whose cached read was a
-    refusal or a stream that ended early: once if the re-read finishes, and on every
-    run while it keeps failing. That is by design, since an unfinished read is
-    never served.
+    refusal or a stream that ended early: once if the re-read finishes, and on
+    every run while it keeps failing. That is by design, since an unfinished
+    read is never served.
   - **N15 (WP-01.3).** An errored digest's findings still reach the ledger
     unlabelled. Now that refusals and unfinished reads carry an error, that
     includes an N27 partial read whose unclosed findings block was salvaged.
