@@ -334,6 +334,10 @@ Implementation:
 - The browser suite uses `file://` and pipes, not a server. 65 browser tests passed under the probe guard.
 - Make `network` an explicit opt-in. Today `conftest` runs the live canary whenever a real key is exported.
 - Add `-m "not network"` to `ci.yml` (~99).
+- *Correction (WP-02.1, 2026-09-23).* The variable list above is incomplete for SDK 1.7.0. The SDK also reads `ANTHROPIC_CUSTOM_HEADERS`, which can carry an auth header, and `ANTHROPIC_SERVICE_ACCOUNT_ID`, `ANTHROPIC_WORKSPACE_ID` and `ANTHROPIC_SCOPE`. So the guard removes every `ANTHROPIC_*` variable. Three further facts shaped the guard:
+  - With `ANTHROPIC_CONFIG_DIR` set, profile selection is *explicit*, so a zero-arg client raises `CredentialsError`: the guard fails closed.
+  - Deleting the proxy variables is not enough on Windows or macOS. When no `*_proxy` variable is set, `urllib.request.getproxies` (which `httpx2` calls) falls back to the registry or system configuration. `NO_PROXY=*` closes that.
+  - A function-scoped fixture does not cover module-scoped fixtures. The gauntlet's `oracle` runs the whole pipeline in one. The guard spans the run and lifts only inside an opted-in test.
 
 **Step 7.** An agent can write the canaries but can run them only with an owner budget (O-4). Bound the wait, then cancel, harvest and report.
 

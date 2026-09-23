@@ -2,14 +2,17 @@
 
 ``scripts/run_acceptance.py`` is the one-command release gate. Its hermetic
 gate used to spawn a bare ``pytest -q``; ``pyproject.toml`` sets no default
-marker exclusion, and ``tests/conftest.py`` skips ``network`` tests *only when
-no real key is set*. So running the acceptance script on a machine with a real
-``ANTHROPIC_API_KEY`` exported turned a release check into a billed live-canary
-run.
+marker exclusion, and ``tests/conftest.py`` then skipped ``network`` tests *only
+when no real key was set*. So running the acceptance script on a machine with a
+real ``ANTHROPIC_API_KEY`` exported turned a release check into a billed
+live-canary run.
 
 The fix is marker deselection in the child the script spawns — not an unset
-key, which is an environment accident a future gate could lose. These tests
-pin that property three ways:
+key, which is an environment accident a future gate could lose. (Since WP-02.1
+the suite's own guard, ``tests/fixtures/hermetic_guard.py``, also refuses to run
+a ``network`` test that ``-m`` did not select explicitly; the deselection here
+stays, so a release gate never rests on that one layer.) These tests pin that
+property three ways:
 
 1. every gate's constructed argv deselects ``network`` (no suite is run here);
 2. the deselection survives a key being present in the environment;
@@ -39,8 +42,9 @@ _SCRIPT = _REPO_ROOT / "scripts" / "run_acceptance.py"
 # credential-shaped. ``scripts/scan_secrets.py`` flags ``sk-ant-`` followed by
 # 30+ characters, so a realistic-looking sentinel fails the repo's own secret
 # scan (it did, on the first push of this file). Mirror the convention in
-# ``tests/conftest.py::_PLACEHOLDER_KEY`` instead: the tests below only need a
-# value that differs from that placeholder, never one shaped like a real key.
+# ``tests/fixtures/hermetic_guard.py::PLACEHOLDER_KEY`` instead: the tests below
+# only need a value that differs from that placeholder, never one shaped like a
+# real key.
 _FAKE_KEY = "not-a-real-key-do-not-use-wp01"
 
 

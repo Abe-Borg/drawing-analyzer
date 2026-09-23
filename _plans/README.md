@@ -54,11 +54,13 @@ pip install cffi   # see note below
 python -m pytest -q -m "not network"   # compare the counts with the newest handoff entry
 ```
 
-- **Always pass `-m "not network"`.** `tests/conftest.py` skips the live canary
-  (`tests/test_live_api_canary.py`) only when no real key is set, and
-  `pyproject.toml` has no default exclusion. So a bare `pytest` in a session
-  where `ANTHROPIC_API_KEY` happens to be exported makes billed API calls. The
-  same rule applies to every pytest command in this file.
+- **Always pass `-m "not network"`.** Since WP-02.1 the suite's guard
+  (`tests/fixtures/hermetic_guard.py`) skips the live canary
+  (`tests/test_live_api_canary.py`) unless `-m` selects it explicitly, and it
+  refuses every non-local connection, so a bare `pytest` no longer bills an
+  exported `ANTHROPIC_API_KEY`. Pass the deselection anyway: CI and every
+  acceptance gate do, and a check must never rest on one layer. The same rule
+  applies to every pytest command in this file.
 - **`cffi`:** in the cloud container, the system `cryptography` package is
   missing `_cffi_backend`. Without `cffi`, three tests in
   `tests/test_spec_documents.py` die with a `pyo3_runtime.PanicException`. This

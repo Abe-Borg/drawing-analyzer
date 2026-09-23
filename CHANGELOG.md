@@ -6,6 +6,43 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **The test suite's hermeticity is enforced, not requested (remediation
+  WP-02.1; U26).** A new pytest plugin, `tests/fixtures/hermetic_guard.py`,
+  registered by `tests/conftest.py`, wraps every test not marked `network`:
+  - **Sockets.** `connect`/`connect_ex` and the forward name lookups refuse
+    every destination other than loopback, the unspecified addresses and
+    `AF_UNIX`. That covers the SDK's `httpx2` transport and `urllib` alike, and
+    leaves asyncio and the browser suite working.
+  - **A swallowed attempt still fails the test.** Every refusal is recorded and
+    turns that test's teardown into an error naming the destination; the QC
+    stages catch their own exceptions (I-3), so a raise alone let a pipeline
+    test that reached for the API stay green. An attempt made outside any test
+    (at import) fails the session.
+  - **Ambient configuration is removed.** Every `*_proxy` variable (the socket
+    rule allows loopback, and the SDK was measured sending
+    `CONNECT api.anthropic.com:443` to an exported loopback `HTTPS_PROXY`), with
+    `NO_PROXY=*` so urllib cannot fall back to the Windows registry proxy. And
+    every `ANTHROPIC_*` variable, since a zero-arg `Anthropic()` also resolves
+    an auth token, a named profile, workload-identity federation and custom
+    headers; `ANTHROPIC_CONFIG_DIR` points at an empty directory, so such a
+    client now fails closed with `CredentialsError`.
+  - **The whole run is covered.** The guard is installed at configure time and
+    lifted only inside an opted-in `network` test, so module- and
+    session-scoped fixtures are guarded too. The gauntlet's module-scoped
+    `oracle` fixture, which runs the whole exhaustive pipeline, was outside the
+    old per-test key strip.
+  - **`network` is an explicit opt-in.** A bare `pytest` with a real
+    `ANTHROPIC_API_KEY` exported used to run the billable live canary. A
+    `network` test now runs only when `-m` selects it because of that marker
+    (`-m network`, as every documented canary command already does) and a
+    real key is set. It then gets the caller's own environment back.
+  - **Collection sees only the placeholder key**, even when a real one is
+    exported.
+  - **CI** passes `-m "not network"` on every pytest command. A new test fails
+    if a workflow pytest command drops it.
+
 ## [1.7.0] - 2026-09-21
 
 ### Added

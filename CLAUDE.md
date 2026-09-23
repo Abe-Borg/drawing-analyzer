@@ -44,7 +44,7 @@ The slice named in parentheses corrects the text and removes the entry here:
 ```bash
 pip install -e ".[dev]"      # engine + pytest   (GUI too: pip install -e ".[gui,dev]")
 pip install cffi             # cloud container only: its system `cryptography` lacks _cffi_backend (3 spurious test_spec_documents panics)
-python -m pytest -m "not network"   # full suite — hermetic. A bare `pytest` runs the live canary if a real ANTHROPIC_API_KEY is exported
+python -m pytest -m "not network"   # full suite — hermetic, and the guard enforces it. Still pass the -m: CI and every gate do
 python -m pytest tests/test_drawing_ledger.py                # one file
 python -m pytest tests/test_drawing_ledger.py::test_name     # one test
 drawing-analyzer             # launch the GUI   (or: python -m drawing_analyzer)
@@ -57,15 +57,53 @@ Python 3.11+. No linter/formatter is configured (CI runs ruff **correctness
 classes only** — E9/F63/F7/F82). The `network` pytest marker is reserved for
 tests that need real API access (the Phase 27 live canary,
 `tests/test_live_api_canary.py`); everything that runs by default uses the
-fakes in `tests/fixtures/fake_anthropic.py`. `conftest` skips `network` tests
-only when no real key is set and `pyproject.toml` sets no default exclusion, so
-**any entry point that spawns pytest must deselect the marker itself**:
+fakes in `tests/fixtures/fake_anthropic.py`. A `network` test runs only when
+`-m` selects it explicitly and a real key is set (the guard below), but
+`pyproject.toml` sets no default exclusion and no gate may rest on one layer, so
+**any entry point that spawns pytest must still deselect the marker itself**:
 `run_acceptance.py` routes every gate through `_pytest_cmd()`, which ANDs
-`not network` into the child's `-m`, and `tests/test_run_acceptance.py` fails if
-a bare `"pytest"` argv literal reappears anywhere else in that script. The §19.1 trust-gauntlet oracle
+`not network` into the child's `-m`, `tests/test_run_acceptance.py` fails if
+a bare `"pytest"` argv literal reappears anywhere else in that script, and
+`tests/test_hermetic_guard.py` fails if a workflow's pytest command drops
+`not network`. The §19.1 trust-gauntlet oracle
 set + all-stage scripted client live in `tests/fixtures/gauntlet.py`; release
 docs (Windows/viewer/Excel manual scripts, benchmark record, §19.9 checklist)
 live in `docs/`; `requirements-release.lock` pins release builds.
+
+**The hermetic guard (WP-02.1, `tests/fixtures/hermetic_guard.py`).** I-4 is
+enforced, not requested. `tests/conftest.py` registers the plugin; it goes up at
+`pytest_configure` and comes down only inside an opted-in `network` test's own
+runtest protocol, so collection and fixtures of **every** scope are covered —
+the gauntlet's module-scoped `oracle` runs the whole exhaustive pipeline before
+any function-scoped fixture exists, and the old per-test key strip never
+covered it. Sockets are guarded where they **connect** (`connect`/`connect_ex`
+and the forward lookups), never where they are created: asyncio's self-pipe is
+a socket pair (loopback TCP on Windows) and Playwright's sync API runs on
+asyncio. Loopback, the unspecified addresses and `AF_UNIX` pass. A refusal
+raises `ExternalNetworkBlocked` (a `RuntimeError`, so an `except OSError` cannot
+mistake it for a transient failure) **and is recorded**, and the record turns the
+test's teardown into an error naming the destination: the QC stages swallow
+their own exceptions by design (I-3), so a raise alone let a pipeline test that
+reached for the API stay green. An attempt no test owns (at import) fails the
+session. Ambient configuration goes too: every `*_proxy` variable, because the
+socket rule allows loopback and, measured, the SDK sent `CONNECT
+api.anthropic.com:443` to an exported loopback `HTTPS_PROXY`; `NO_PROXY=*` also
+stops `urllib.request.getproxies` falling back to the Windows registry, which no
+env scrub reaches. And every `ANTHROPIC_*` variable — a prefix, not a list,
+because a zero-arg `Anthropic()` resolves an auth token, a named profile,
+workload-identity federation and custom headers, and the SDK adds sources under
+that prefix — with `ANTHROPIC_CONFIG_DIR` then pointed at an empty directory:
+an explicit config dir makes profile failures propagate, so a zero-arg client
+raises `CredentialsError` instead of finding an `ant auth login` profile. The
+key keeps its old contract (a placeholder during collection — now even over an
+exported real key — and none inside a hermetic test). The opt-in rule
+(`network_selected_explicitly`) runs a `network` test only when the `-m`
+expression selects it *because of* that marker, evaluated with pytest's own
+(private) marker-expression engine so the two cannot disagree; if a pytest
+upgrade moves it the rule answers False — skip, never run — and its test fails.
+The opted-in test then gets the caller's own environment and real sockets back
+for exactly its own protocol. Child processes inherit the scrubbed environment,
+not the socket patch.
 
 ## Architecture
 
@@ -901,7 +939,9 @@ example is parked at `docs/examples/fire_protection.md`.
   exceptions, appends to `ctx.errors`, and lets the standard deliverable ship.
 - **I-4 — hermetic tests:** use `tests/fixtures/fake_anthropic.py`
   (`FakeMessage`/`FakeTextBlock`/`FakeUsage`) and the routing-client patterns
-  in existing tests. No test may hit the network or need a key.
+  in existing tests. No test may hit the network or need a key. Enforced by
+  `tests/fixtures/hermetic_guard.py`: a non-local connection or lookup fails the
+  test that made it, even when the code under test swallowed the error.
 - **I-5 — PyMuPDF isolation:** only `render.py` and `annotate.py` may import
   PyMuPDF. The README's AGPL licensing story depends on this; `anchor.py` and
   `tiling.py` work on extracted word rectangles precisely to preserve it.

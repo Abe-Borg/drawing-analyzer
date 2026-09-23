@@ -1724,11 +1724,31 @@ digests.
 python -m pytest
 ```
 
-The suite is hermetic — no API key, no network. Tests that render real PDFs are
-skipped when PyMuPDF is unavailable. `tests/test_drawing_acceptance.py` encodes
-the QC acceptance script end to end (a fresh both-checkbox run, the reviewed-PDF
-appearance streams, the stale-reference suggestion, a zero-digest-API cached
-re-run, and the raster fallback) against fake clients, so the whole findings →
+The suite is hermetic — no API key, no network — and the test harness enforces
+that rather than trusting every test to (`tests/fixtures/hermetic_guard.py`).
+Every test not marked `network` runs with:
+
+- **no external connections.** A connection or name lookup to anything other
+  than the loopback address or a local socket is refused, and the test that made
+  it fails, naming the destination, even when the code under test caught the
+  error and carried on.
+- **no ambient proxy or Anthropic credentials.** Every `*_proxy` variable and
+  every `ANTHROPIC_*` variable is removed for the run, and the SDK's config
+  directory points at an empty folder, so neither an exported key or token nor
+  an `ant auth login` profile can be picked up.
+
+The live canary (`tests/test_live_api_canary.py`) is the only `network`-marked
+file. It runs only when you select it explicitly with `-m network` **and** a
+real `ANTHROPIC_API_KEY` is set; an exported key alone does not run it, so a
+plain `python -m pytest` reports those tests as skipped. See
+[Acceptance & release gate](#acceptance--release-gate). CI passes
+`-m "not network"` on every pytest command as well.
+
+Tests that render real PDFs are skipped when PyMuPDF is unavailable.
+`tests/test_drawing_acceptance.py` encodes the QC acceptance script end to end
+(a fresh both-checkbox run, the reviewed-PDF appearance streams, the
+stale-reference suggestion, a zero-digest-API cached re-run, and the raster
+fallback) against fake clients, so the whole findings →
 verify → cloud chain is exercised without a key.
 
 The same file also carries the **Phase 27 trust gauntlet**: one deterministic
