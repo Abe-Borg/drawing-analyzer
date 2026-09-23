@@ -760,21 +760,35 @@ class VerifyResult:
     ``malformed`` / ``truncated`` / ``failed`` count the live calls that
     produced **no settled verdict** and were left UNCERTAIN — a garbled reply,
     a reply cut off by the envelope or declined, a call that failed outright.
-    They are a breakdown of ``uncertain``, not additional to it, and they are
-    observational: nothing here changes a status or the stage's completeness.
-    They exist because ``_parse_verdict_with_validity`` always knew which
-    UNCERTAINs were judgments and which were not, and threw that away at the
-    call site, so no run could say whether its UNCERTAIN share came from the
-    drawings or from the parser.
+    They are a breakdown of ``uncertain``, not additional to it. They exist
+    because ``_parse_verdict_with_validity`` always knew which UNCERTAINs were
+    judgments and which were not, and threw that away at the call site, so no
+    run could say whether its UNCERTAIN share came from the drawings or from
+    the parser.
+
+    Since remediation WP-01.1 they also decide the stage's completeness
+    (``_plans/DECISIONS.md`` D-2): the pipeline passes :attr:`eligible` and
+    :attr:`judged` to :func:`~drawing_analyzer.models.item_coverage_status`,
+    so a pass is COMPLETE only when every eligible finding got a settled
+    verdict. Counting every UNCERTAIN as judged had let a pass whose every
+    call came back malformed read COMPLETE (N5).
     """
 
     __slots__ = (
+        "_eligible", "verified", "rejected", "uncertain", "skipped",
+        "malformed", "truncated", "failed", "not_judged_ids",
+        "input_tokens", "output_tokens", "cache_hits", "cache_misses", "api_calls",
+    )
+
+    #: The additive counters :meth:`combined` sums across passes.
+    _COUNTERS = (
         "verified", "rejected", "uncertain", "skipped",
         "malformed", "truncated", "failed",
         "input_tokens", "output_tokens", "cache_hits", "cache_misses", "api_calls",
     )
 
     def __init__(self) -> None:
+        self._eligible = 0
         self.verified = 0
         self.rejected = 0
         self.uncertain = 0
@@ -782,6 +796,9 @@ class VerifyResult:
         self.malformed = 0
         self.truncated = 0
         self.failed = 0
+        #: ``qc_id`` of each finding whose live call returned no verdict, in
+        #: tally order, so a later stage can report which of them it recovered.
+        self.not_judged_ids: list[str] = []
         self.input_tokens = 0
         self.output_tokens = 0
         self.cache_hits = 0
@@ -796,7 +813,7 @@ class VerifyResult:
         if attr:
             setattr(self, attr, getattr(self, attr) + 1)
 
-    def _count_degrade(self, kind: str | None) -> None:
+    def _count_degrade(self, kind: str | None, finding: Finding | None = None) -> None:
         attr = {
             DEGRADE_MALFORMED: "malformed",
             DEGRADE_TRUNCATED: "truncated",
@@ -804,11 +821,84 @@ class VerifyResult:
         }.get(kind or "")
         if attr:
             setattr(self, attr, getattr(self, attr) + 1)
+            qc_id = getattr(finding, "qc_id", "") or ""
+            if qc_id:
+                self.not_judged_ids.append(qc_id)
+
+    @property
+    def eligible(self) -> int:
+        """Findings this pass was required to judge: D-2's denominator.
+
+        A pass sets it from its eligibility filter before making any call, so
+        a finding that escapes the tally (an unexpected error between being
+        picked up and being counted, which the pass swallows under I-3) still
+        counts against completeness. A missed count can therefore only make a
+        pass read less complete, never more. It is never less than what was
+        tallied, so a tally built without it (a test double, an older caller)
+        reads as its own count rather than as having had nothing to do.
+        """
+        tallied = self.verified + self.rejected + self.uncertain + self.skipped
+        return max(self._eligible, tallied)
+
+    @eligible.setter
+    def eligible(self, value: int) -> None:
+        self._eligible = int(value)
 
     @property
     def not_judged(self) -> int:
         """Live calls that returned no verdict (all left UNCERTAIN)."""
         return self.malformed + self.truncated + self.failed
+
+    @property
+    def judged(self) -> int:
+        """Eligible findings that obtained a settled verdict, live or cached.
+
+        VERIFIED, REJECTED and a valid NOT_VISIBLE (UNCERTAIN) are judgments.
+        The :attr:`not_judged` calls are tallied UNCERTAIN but are not, and a
+        skipped finding never reached a verdict. A cache hit is always a
+        judgment, because only settled verdicts are stored.
+        """
+        return max(0, self.verified + self.rejected + self.uncertain - self.not_judged)
+
+    @classmethod
+    def combined(cls, *results: "VerifyResult | None") -> "VerifyResult":
+        """One tally over a stage's passes (the single-crop and cross-sheet ones).
+
+        ``None``, a pass that raised, contributes nothing: the caller tests
+        that failure flag before any count (D-2).
+        """
+        out = cls()
+        for r in results:
+            if r is None:
+                continue
+            for name in cls._COUNTERS:
+                setattr(out, name, getattr(out, name) + getattr(r, name))
+            out._eligible += r.eligible
+            out.not_judged_ids.extend(r.not_judged_ids)
+        return out
+
+    def coverage_note(self, label: str = "verification") -> str | None:
+        """The stage's leading warning when an eligible finding got no verdict.
+
+        ``None`` when every eligible finding was judged, or none was eligible.
+        Skips and failed calls are counted separately. A skip obtained no
+        verdict at all (no sheet or crop, no client, a pass stopped by an auth
+        failure). A call that returned nothing usable is broken down further by
+        :meth:`degradation_note`. The line leads the stage's warnings because
+        ``run.log``, the report's stage table and the journal show only the
+        first one.
+        """
+        missing = self.eligible - self.judged
+        if missing <= 0:
+            return None
+        parts = [f"{self.skipped} skipped", f"{self.not_judged} returned no judgment"]
+        unaccounted = missing - self.skipped - self.not_judged
+        if unaccounted > 0:
+            parts.append(f"{unaccounted} not accounted for")
+        return (
+            f"{label}: {self.judged} of {self.eligible} eligible finding(s) judged; "
+            + ", ".join(parts)
+        )
 
     def degradation_note(self, label: str = "verification") -> str | None:
         """One line for the stage's warnings when any live call was not a judgment.
@@ -923,6 +1013,9 @@ def verify_findings(
     result = VerifyResult()
 
     verifiable = [f for f in findings if _is_verifiable(f)]
+    # Fixed here, before any call: completeness is judged against the filter,
+    # not against whatever the loop below managed to tally (D-2).
+    result.eligible = len(verifiable)
     if not verifiable:
         return result
     restore_provenance = _provenance_restorer(verifiable)
@@ -978,7 +1071,7 @@ def verify_findings(
                 finding, dir_name, cache_keys = in_flight.pop(fut)
                 res: _CallResult = fut.result()
                 finding.verification = res.verification
-                result._count_degrade(res.degrade)
+                result._count_degrade(res.degrade, finding)
                 if res.cacheable and cache_keys:
                     # Under the key of the contract the worker actually sent —
                     # the structured key only for a schema-bound verdict.
@@ -1480,6 +1573,7 @@ def verify_cross_findings(
     raises (I-3)."""
     result = VerifyResult()
     dual = [f for f in findings if _has_anchored_legs(f)]
+    result.eligible = len(dual)
     if not dual:
         return result
     restore_provenance = _provenance_restorer(dual)
@@ -1561,7 +1655,7 @@ def verify_cross_findings(
                 try:
                     res: _CallResult = future.result()
                     outcomes[index] = (res.verification, res.input_tokens, res.output_tokens)
-                    result._count_degrade(res.degrade)
+                    result._count_degrade(res.degrade, prepared.finding)
                     if res.cacheable:
                         # Under the key of the contract actually sent.
                         _cache_verification(
@@ -1576,6 +1670,9 @@ def verify_cross_findings(
                         "cross-verify finding %s worker failed: %s",
                         prepared.finding.id, note,
                     )
+                    # Left UNCERTAIN like any failed call, and counted as one:
+                    # uncounted, it read as a judgment (D-2).
+                    result._count_degrade(DEGRADE_FAILED, prepared.finding)
                     outcomes[index] = (
                         Verification(
                             status="UNCERTAIN", note=note,

@@ -52,6 +52,7 @@ from .models import (
     SheetGeometry,
     StageResult,
     UsageRecord,
+    item_coverage_status,
     resolve_run_configuration,
     roll_up_qc_status,
     source_page_key,
@@ -1986,8 +1987,11 @@ def _run_qc_stages(
     verify_stage = StageResult(
         stage="verification", expected=bool(qc_markups and verify_enabled)
     )
+    # ``qc_id`` of every finding whose verdict call returned no judgment. The
+    # investigation stage reports which of them it later recovered (D-2).
+    verify_not_judged: set[str] = set()
     if qc_markups and verify_enabled and entries:
-        from .verify import default_verify_model
+        from .verify import VerifyResult, default_verify_model
         from .verify import verify_findings as _run_verify
 
         _emit("STAGE_START", stage="verification", entries=len(entries))
@@ -2032,13 +2036,6 @@ def _run_qc_stages(
                 "verification: %d verified, %d rejected, %d uncertain, %d skipped",
                 vres.verified, vres.rejected, vres.uncertain, vres.skipped,
             )
-            # A live call that returned no judgment (garbled, truncated,
-            # failed) is counted UNCERTAIN like a real NOT_VISIBLE; the note
-            # keeps the two apart in run.log and the manifest. Warning, not
-            # error: observational, and it never changes the stage status.
-            degradation = vres.degradation_note()
-            if degradation:
-                verify_stage.warnings.append(degradation)
         except Exception as exc:  # noqa: BLE001 - never fatal
             errors.append(f"Verification: {exc}")
             primary_failed = True
@@ -2073,55 +2070,54 @@ def _run_qc_stages(
                     "cross-verification: %d verified, %d rejected, %d uncertain, %d skipped",
                     cres.verified, cres.rejected, cres.uncertain, cres.skipped,
                 )
-            degradation = cres.degradation_note("cross-verification")
-            if degradation:
-                verify_stage.warnings.append(degradation)
         except Exception as exc:  # noqa: BLE001 - never fatal
             errors.append(f"Cross-sheet verification: {exc}")
             cross_failed = True
             verify_stage.errors.append(str(exc))
             _log.warning("cross-sheet verification failed: %s", exc)
 
-        # The verifier returns *normally* with everything SKIPPED when the client is
-        # unavailable or no crop could be built — it does not raise. So the stage
-        # status is derived from the actual verdicts, not merely from "no exception":
-        # findings actually judged (VERIFIED/REJECTED/UNCERTAIN) make it COMPLETE;
-        # eligible findings that were *all* skipped make it PARTIAL (verification was
-        # required but could not run); zero eligible/counted findings is a valid skip.
-        # Both failure flags are tested BEFORE the counts: an exception leaves its
-        # result None, contributing nothing to ``counted``, so a crash judged by
-        # the counts alone is indistinguishable from having had nothing to do.
-        def _counts(r: "Any") -> "tuple[int, int]":
-            if r is None:
-                return 0, 0
-            judged = r.verified + r.rejected + r.uncertain
-            return judged, judged + r.skipped
-        p_judged, p_counted = _counts(vres)
-        c_judged, c_counted = _counts(cres)
-        judged, counted = p_judged + c_judged, p_counted + c_counted
-        verify_stage.items_out = judged
+        # Completeness is item coverage (D-2, remediation WP-01.1): the stage is
+        # COMPLETE only when every eligible finding, over both passes, obtained
+        # a settled verdict. The verifier returns *normally* when it could not
+        # judge — an unavailable client or a failed crop leaves a finding
+        # SKIPPED, a garbled, truncated or failed call leaves it UNCERTAIN — so
+        # the status comes from what was judged, never from "no exception".
+        # Counting every UNCERTAIN as judged let a pass whose every call came
+        # back malformed, or one verified finding beside four skipped ones,
+        # read COMPLETE (N5).
+        tally = VerifyResult.combined(vres, cres)
+        verify_stage.items_in = tally.eligible
+        verify_stage.items_out = tally.judged
+        verify_not_judged.update(tally.not_judged_ids)
+        # Both failure flags are tested BEFORE the counts: an exception leaves
+        # its result None, contributing nothing to the tally, so a crash judged
+        # by the counts alone is indistinguishable from having had nothing to do.
         if primary_failed:
             verify_stage.status = "FAILED"
         elif cross_failed:
             # Tested before the count ladder, not after it: a cross-verifier
             # that *raised* leaves ``cres`` None, so its findings never reach
-            # ``counted`` — and when only cross-sheet findings were eligible
+            # the tally — and when only cross-sheet findings were eligible
             # (``_is_verifiable`` excludes them from the single-crop pass),
-            # ``counted == 0`` read the crash as "nothing to verify" and
+            # nothing eligible read the crash as "nothing to verify" and
             # reported SKIPPED_VALID, which the roll-up accepts as a clean run.
             # An exception is never a valid skip.
             verify_stage.status = "PARTIAL"
-        elif counted == 0:
-            verify_stage.status = "SKIPPED_VALID"   # no eligible model findings
-        elif judged == 0:
-            # Eligible findings existed but every one was skipped (client down /
-            # crops failed) — the required stage did not actually verify anything.
-            verify_stage.status = "PARTIAL"
-            verify_stage.warnings.append(
-                "all eligible findings were skipped (client unavailable or crops failed)"
-            )
         else:
-            verify_stage.status = "COMPLETE"
+            # Nothing eligible: SKIPPED_VALID. Everything judged: COMPLETE
+            # (a valid NOT_VISIBLE is a judgment). Nothing judged: FAILED.
+            # Otherwise PARTIAL.
+            verify_stage.status = item_coverage_status(tally.eligible, tally.judged)
+        # The coverage line leads, since run.log, the report's stage table and
+        # the journal show only the first note. Each pass's breakdown of its
+        # calls that returned no judgment follows.
+        for note in (
+            tally.coverage_note(),
+            vres.degradation_note() if vres is not None else None,
+            cres.degradation_note("cross-verification") if cres is not None else None,
+        ):
+            if note:
+                verify_stage.warnings.append(note)
     elif qc_markups and verify_enabled:
         # Requested, but no model entries were eligible to verify (§3.3).
         verify_stage.status = "SKIPPED_VALID"
@@ -2216,6 +2212,21 @@ def _run_qc_stages(
                     investigate_stage.status = "PARTIAL"
                 else:
                     investigate_stage.status = "COMPLETE"
+                # A finding verification could not judge and investigation
+                # concluded is reported here, by the stage that recovered it.
+                # It is never written back: the verification record was final
+                # when it was finished, so a later success cannot erase an
+                # earlier failure (D-2; plan WP-01 step 8).
+                recovered = {
+                    rec.qc_id for rec in ires.per_finding
+                    if rec.outcome == "concluded" and rec.qc_id in verify_not_judged
+                }
+                if recovered:
+                    investigate_stage.warnings.append(
+                        f"recovered {len(recovered)} of {len(verify_not_judged)} "
+                        "finding(s) whose verification call returned no judgment; "
+                        f"the verification stage keeps its {verify_stage.status} status"
+                    )
                 _log.info(
                     "investigation: %d investigated — %d verified, %d rejected, "
                     "%d still uncertain (%d budget-capped)",

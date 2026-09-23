@@ -273,6 +273,11 @@ Regression cases:
 - This is implementable with the existing counters: verification is COMPLETE ⇔ eligible > 0 ∧ `skipped` = 0 ∧ `not_judged` = 0, over both the single and the cross result (`vres`, `cres`).
 - Zero eligible items is `SKIPPED_VALID`.
 - Pipeline-level tests belong in `tests/test_drawing_acceptance.py`, beside `test_a_cross_verifier_crash_is_not_a_valid_skip`.
+- *Corrected by WP-01.1 (2026-09-23).* The formula assumes every eligible item is tallied, and two paths broke that:
+  - the single-crop loop swallows an error raised after it picks a finding up, and that finding is never counted. So the denominator comes from the eligibility filters, before any call (`VerifyResult.eligible`), and COMPLETE ⇔ judged = eligible;
+  - the cross pass's defensive worker-failure branch left the finding UNCERTAIN without counting a failed call, so it read as judged. It now counts as failed.
+
+  The all-failed rule and how recovery is exposed are recorded in `DECISIONS.md` D-2.
 
 **New step: batch refusals (R2)**
 - Retry a refused batch item on the selected transport: a batch resubmit to the registry's fallback target, or to `stop_details.recommended_model` when present.

@@ -2282,6 +2282,35 @@ def roll_up_qc_status(
     return "FAILED"
 
 
+def item_coverage_status(eligible: int, judged: int) -> str:
+    """A stage's status from its required-item coverage (``_plans/DECISIONS.md`` D-2).
+
+    ``eligible`` is what the stage was required to judge, fixed by its
+    eligibility rule before any call is made; ``judged`` is how many of those
+    obtained a real judgment. A valid inconclusive result is a judgment; an
+    attempt that returned nothing usable, or no attempt at all, is not.
+
+    - nothing eligible: ``SKIPPED_VALID``;
+    - every eligible item judged: ``COMPLETE``;
+    - none judged: ``FAILED``. This is the all-failed rule: whatever the mix of
+      skipped items and failed attempts, the stage obtained no judgment;
+    - otherwise ``PARTIAL``.
+
+    The caller tests the stage's own failure flags **first**: a pass that raised
+    leaves no counts to judge, so a crash read from counts alone looks like
+    having had nothing to do. Remediation WP-01.1 applies this to verification,
+    which reported COMPLETE with every call malformed, and with one verified
+    finding beside four skipped ones (N5).
+    """
+    if eligible <= 0:
+        return "SKIPPED_VALID"
+    if judged >= eligible:
+        return "COMPLETE"
+    if judged <= 0:
+        return "FAILED"
+    return "PARTIAL"
+
+
 # --------------------------------------------------------------------------- #
 # Usage accounting (Phase 23B — §6.3 / §15.6)
 # --------------------------------------------------------------------------- #
