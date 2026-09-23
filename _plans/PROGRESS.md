@@ -314,7 +314,7 @@ report is built from it).
 | A5 | Own sheet-id detection picks a bottom-right distractor | P1 | 08.4 | open | |
 | A6 | A note id displaces an FM sheet's own id (see also N17) | P1 | 08.4 | open | |
 | A7 | A prose sheet read as the drawing index | P1 | 08.5 | open | |
-| A8 | Tag/sheet-id digits count as operands; `1e3` → 1; hyphen read as minus | P0 | 07.2 | implemented+validated | `tests/test_arithmetic_tokens_and_relationships.py` (WP-07.2, [PR #164](https://github.com/Abe-Borg/drawing-analyzer/pull/164)): the review's `SEE FP101 TOTAL 540 AT 439 GPM` (`sum [101, 540] = 439` no longer trusted), `M-101 P-3 AHU-2` (no negatives, no numbers), `1e3`/`2.5e-2`/`1E+3`/`2E1` refused by the parser and the scanner (a claim with such a term is unusable), `24x12`, `2P20A`, `10A1`, `100m2`, Unicode dashes (pinned equal to the anchor's fold set), a fraction slash and a glued vulgar fraction refused, units still parsing (`20A`, `150GPM`, `0.20 gpm/ft²`, `6-INCH`), a per-token scanner/parser agreement table; the relationship: a product transcribed as a sum (`x`, `X`, `×`, `*`), a sum as a product, four role swaps, an operand left out of a correct row, a correct subtraction, no operator, an unknown symbol, a refused number between operands, mixed operators, a label's number among the operands, operands from two rows, no result marker, and an operator the quote states but the sheet does not (FUZZY); kept: 15 stated shapes incl. TOTAL rows, a running total and a tag label first; ids, text and notes unchanged; verification eligibility, the trust note, `run_auditors`' tally, the critique and cross-QC dedups, a failure while checking one finding; and the pipeline sending two unstated relationships to the crop verifier while `TOTAL 100 + 250 = 375` stays DETERMINISTIC |
+| A8 | Tag/sheet-id digits count as operands; `1e3` → 1; hyphen read as minus | P0 | 07.2 | implemented+validated | `tests/test_arithmetic_tokens_and_relationships.py` (WP-07.2, [PR #164](https://github.com/Abe-Borg/drawing-analyzer/pull/164)): the review's `SEE FP101 TOTAL 540 AT 439 GPM` (`sum [101, 540] = 439` no longer trusted), `M-101 P-3 AHU-2` (no negatives, no numbers), `1e3`/`2.5e-2`/`1E+3`/`2E1` refused by the parser and the scanner (a claim with such a term is unusable), `24x12`, `2P20A`, `10A1`, `100m2`, Unicode dashes (pinned equal to the anchor's fold set), a fraction slash and a glued vulgar fraction refused, units still parsing (`20A`, `150GPM`, `0.20 gpm/ft²`, `6-INCH`), a per-token scanner/parser agreement table; the relationship: a product transcribed as a sum (`x`, `X`, `×`, `*`), a sum as a product, four role swaps, an operand left out of a correct row, a correct subtraction, no operator, an unknown symbol, a refused number between operands, mixed operators, a label's number among the operands, operands from two rows, no result marker, and an operator the quote states but the sheet does not (FUZZY); kept: 15 stated shapes incl. TOTAL rows, a running total and a tag label first, and a signed operand after a printed operator (`20 + -5`, `20 x +2`; the Codex review); ids, text and notes unchanged; verification eligibility, the trust note, `run_auditors`' tally, the critique and cross-QC dedups, a failure while checking one finding; and the pipeline sending two unstated relationships to the crop verifier while `TOTAL 100 + 250 = 375` stays DETERMINISTIC |
 | H1 | Sorting never recomputes repeat grouping (CLAUDE.md claims it does) | P2 | 21.2 | open | |
 | H2 | A quote-less sheet-level finding is branded "Unanchored" | P1 | 21.4 | open | |
 | H3 | Chat cost ignores final usage and web-search charges | P2 | 20.2 | open | |
@@ -502,6 +502,17 @@ what could not be verified, risks, and next steps.
     sign `[-+]` cannot read), after a fraction slash, and after `×` preceded
     by a digit. `_UNICODE_DASHES` is pinned equal to the dashes
     `anchor._normalize` folds (`anchor.py` is untouched).
+  - **Codex review, P2, fixed in this PR** ("preserve unary signs after
+    explicit operators"). `_equations` read a sign glued to an operand as a
+    second operator even when the gap already printed one, so `20 + -5 = 15`
+    joined `{+, other}` and `20 x +2 = 40` joined `{x, +}`, and both stated
+    equations were refused (UNCERTAIN, a paid crop check, and no ink in
+    verified-only mode). Root cause, not only the two examples: a glued sign
+    is the operator only when nothing is printed between the two numbers
+    (`20 +30` adds, `20 -5` subtracts); after a printed operator it is the
+    operand's own sign, already in its value. The safe direction was never
+    at stake (a refusal is not a false trust), and `20 - -5` still reads as
+    a subtraction.
   - `_scan_numbers` returns each number's span and matched text;
     `_numbers_in_text` keeps its signature and returns the values.
   - The relationship reader: `_gap_marks` (what the text between two numbers
@@ -546,7 +557,7 @@ what could not be verified, risks, and next steps.
   provenance helper to raise (a probe artifact: the old-rule recomputation
   does not see the monkeypatch; both findings are MT in the real run, as the
   tests assert).
-- **New tests:** `tests/test_arithmetic_tokens_and_relationships.py` (127):
+- **New tests:** `tests/test_arithmetic_tokens_and_relationships.py` (136):
   tag and sheet-id digits (10 texts) and hyphens (6); units that still parse,
   in the parser and the scanner (12); tokens that are not one value, refused
   by both (15); the safeguards kept; a per-token scanner/parser agreement
@@ -555,9 +566,10 @@ what could not be verified, risks, and next steps.
   → unusable); the relationship: a product as a sum (4 operator spellings), a
   sum as a product, four role swaps, an omitted operand of a correct row, a
   correct subtraction, nine unstated shapes, fifteen stated shapes kept, and
-  the FUZZY case where only the quote states the operator; the finding's id,
-  discriminator and note unchanged; the reader (14 rows) and the both-sides
-  rule; a failure while checking one finding; `run_auditors`' tally;
+  the FUZZY case where only the quote states the operator; a signed operand
+  after a printed operator still trusted (3, the Codex review below); the
+  finding's id, discriminator and note unchanged; the reader (20 rows) and the
+  both-sides rule; a failure while checking one finding; `run_auditors`' tally;
   verification eligibility and the trust note; the critique and cross-QC
   dedups; and **the pipeline**: on an exhaustive run `20 x 2 = 40` (as a sum)
   and `SEE FP101 TOTAL 540 AT 439 GPM` are each crop-verified once and keep
@@ -599,6 +611,11 @@ what could not be verified, risks, and next steps.
   - **After:** full suite **3,416 passed, 2 skipped, 10 deselected** (204 s):
     the baseline plus 127, with the same two environment skips (IPv6
     loopback; chmod as root).
+  - **After the Codex P2 fix:** full suite **3,425 passed, 2 skipped, 10
+    deselected** (203 s): the 3,416 above plus the 9 signed-operand tests. Those 9 were
+    first run on the PR head before the fix (`5d9287a`): 7 failed on
+    behaviour; the `20 + +5` row passed (a `+` beside a `+` was already one
+    operator).
   - **Browser suite:** not run separately; no report JS, HTML or chat code
     changed (the browser tests ran inside the full suite).
   - `python -m ruff check --select E9,F63,F7,F82 src tests scripts` (pinned

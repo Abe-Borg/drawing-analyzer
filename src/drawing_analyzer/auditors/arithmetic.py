@@ -556,7 +556,10 @@ def _equations(text: str) -> list[_Equation]:
     row, and ``20 20 TOTAL 40 30 30 TOTAL 70`` is two equations. A result
     followed by an operator is the next equation's first operand (a running
     total: ``0.2 x 1500 = 300 + 250 = 550``). A sign glued to an operand after
-    the first is its operator: ``20 +30`` adds, ``20 -5`` subtracts.
+    the first is its operator only when nothing else joins the two:
+    ``20 +30`` adds and ``20 -5`` subtracts, while in ``20 + -5`` and
+    ``20 x +2`` the printed operator joins them and the sign is the operand's
+    own.
     """
     s = str(text or "")
     out: list[_Equation] = []
@@ -579,10 +582,14 @@ def _equations(text: str) -> list[_Equation]:
         if "total" in marks:
             total = True
         ops = set(marks & {_PLUS, _TIMES, _OTHER})
-        if raw[:1] == "+":
-            ops.add(_PLUS)
-        elif raw[:1] == "-" and (operands or carried is not None):
-            ops.add(_OTHER)
+        if not ops:
+            # Nothing printed between the two numbers: a sign glued to this
+            # one is the operator. After a printed operator it is the
+            # operand's own sign, already in ``value``.
+            if raw[:1] == "+":
+                ops.add(_PLUS)
+            elif raw[:1] == "-" and (operands or carried is not None):
+                ops.add(_OTHER)
         if operands:
             joins.append(frozenset(ops))
         elif carried is not None and ops:

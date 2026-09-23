@@ -378,6 +378,22 @@ def test_a_relationship_the_sheet_states_is_still_trusted(kind, terms, expected,
     assert _trusted(f), f.verification
 
 
+@pytest.mark.parametrize(
+    "kind, terms, expected, quote",
+    [
+        ("sum", [20, -5], 20, "20 + -5 = 20"),
+        ("product", [20, 2], 50, "20 x +2 = 50"),
+        ("product", [20, -2], 50, "20 x -2 = 50"),
+    ],
+)
+def test_a_signed_operand_after_an_explicit_operator_is_still_trusted(kind, terms, expected, quote):
+    """Codex review on PR #164: the operand's own sign was read as a second
+    operator beside the printed one, so a stated equation was refused and sent
+    to the crop verifier for nothing."""
+    f = _one(kind, terms, expected, quote)
+    assert _trusted(f), f.verification
+
+
 def test_the_relationship_must_be_stated_on_the_sheet_not_only_in_the_quote():
     """The window anchors FUZZY: one non-numeric token differs, and it is the
     operator. The quote says ``+`` where the sheet prints ``x``; the sheet's
@@ -425,6 +441,13 @@ def test_the_finding_itself_does_not_move_only_its_trust_label():
         ("sum", [1500, "1.3"], 1950, "1500 x 1.3 = 1950", False),
         ("sum", [20, 30], 50, "20 +30 = 50", True),              # a '+' glued to the operand
         ("sum", [20, -5], 15, "20 -5 = 15", False),              # a subtraction
+        # A sign after an explicit operator is the operand's own (Codex review):
+        ("sum", [20, -5], 15, "20 + -5 = 15", True),
+        ("sum", [20, 5], 25, "20 + +5 = 25", True),
+        ("product", [20, 2], 40, "20 x +2 = 40", True),
+        ("product", [20, -2], -40, "20 x -2 = -40", True),
+        ("sum", [20, -5], 25, "20 - -5 = 25", False),            # still a subtraction
+        ("sum", [300, -50], 250, "0.2 x 1500 = 300 + -50 = 250", True),
         ("sum", [-5, 20], 15, "-5 + 20 = 15", True),             # a leading negative
         ("sum", [300, 250], 550, "0.2 x 1500 = 300 + 250 = 550", True),
         ("sum", [20, 30], 50, "20 + 30 = $50", False),           # an unrecognized symbol
