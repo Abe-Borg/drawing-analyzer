@@ -487,7 +487,8 @@ Regression matrix: `6-inch/4-inch`; `12,500/1,500`; `12,500/12500`; invalid grou
 
 **Step 6: one copy of the rule.**
 - A restated copy of the disjoint rule exists in `scripts/ab_findings_diff.py::_signature_conflicts`. After the fix it would disagree.
-- Replace it with the shared helper in `critique`, and bump the script's `RECORD_CONTRACT_VERSION`. Tests: `test_ab_findings_diff.py`, `test_ab_sweep.py`.
+- Replace it with the shared helper in `critique`. Tests: `test_ab_findings_diff.py`, `test_ab_sweep.py`.
+- **Correction (WP-04.2).** This note also said to bump the script's `RECORD_CONTRACT_VERSION`. It was written before WP-04.1 took that bump (2 → 3) for the tokenizer. A record stores the signature's tokens, and the rule is re-applied whenever two records are compared, so a rule-only change leaves a v3 record valid and WP-04.2 does not bump it. Bump it only when what a record stores changes shape or meaning.
 
 **Cache (missing from the plan).**
 - The critique cache stores post-merge findings, so any rule change must invalidate it.
@@ -502,7 +503,7 @@ Regression matrix: `6-inch/4-inch`; `12,500/1,500`; `12,500/12500`; invalid grou
 
 **CLAUDE.md.** Its statement that keeping both halves of `12'-6"` prevents the `12'-6"`/`12'-8"` merge is false (N1). Correct it in WP-04.2.
 
-Slices: WP-04.1, WP-04.2.
+Slices: WP-04.1, WP-04.2, WP-04.3. WP-04.3 was added by WP-04.2 (README step 7.3): the matrix row "repeated values in different roles" (step 4, "compare quantity roles where available") needs a role signal that nothing in the codebase extracts, so WP-04.2 recorded it as a limit in the fixtures rather than meeting it.
 
 ### WP-05 — Robust anchoring and consistent quote evidence
 

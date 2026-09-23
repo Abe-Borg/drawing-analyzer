@@ -610,11 +610,11 @@ _TAG_RE = re.compile(r"\b([A-Za-z]{1,4})-?(\d{1,4}(?:[.-]\d{1,3})?[A-Za-z]?)\b")
 #   ``24x12in``);
 # * a voltage pair: low first, joined by ``/`` (``208Y/120V`` is ``120/208volt``).
 #
-# A composite is one quantity and never shares a token with its parts. Under the
-# disjoint-set rule that is what makes ``2,4,6 in`` conflict with ``3,5,6 in``
-# rather than agree on ``6in``. A consumer must compare it whole: splitting
-# ``1,2,500`` would recreate the trailing fragment ``500`` that a malformed
-# grouping must never yield (plan WP-04 step 2).
+# A composite is one quantity and never shares a token with its parts: that is
+# what makes ``2,4,6 in`` conflict with ``3,5,6 in`` rather than agree on
+# ``6in``. A consumer must compare it whole (``signature_conflicts`` does):
+# splitting ``1,2,500`` would recreate the trailing fragment ``500`` that a
+# malformed grouping must never yield (plan WP-04 step 2).
 #
 # The critique cache stores post-merge findings, so a change here changes what a
 # stored critique means. Bump ``digest_cache._CRITIQUE_CACHE_CONTRACT`` with it;
@@ -735,10 +735,11 @@ _RANGE_TAIL_RE = re.compile(r"(?:-|\s+-\s+)(?P<hi>" + _PLAIN_NUMBER + r")")
 # compact ``V`` (``VAC`` and ``VDC`` kept apart) reads wherever it stands against
 # a number, except in a slope ratio (``3H:1V``). ``A`` is different: ``20A`` is a
 # breaker rating, but ``room 101A``, ``grid 2A``, ``keynote 3A`` and ``panel 2A``
-# are names. Under the disjoint-set rule one shared value makes two findings
-# compatible (N1), so reading a room number as a current would do more than block
-# a merge: two findings about room 101A would share ``101amp``, and a 6 in / 4 in
-# conflict between them would merge. So a compact ``A`` needs electrical context:
+# are names. Reading a room number as a current puts a quantity nobody wrote into
+# the signature: two findings about room 101A would share ``101amp``, which under
+# the disjoint-set rule WP-04.1 shipped with was enough to merge a 6 in / 4 in
+# conflict between them (N1), and under any rule makes a name part of what is
+# compared. So a compact ``A`` needs electrical context:
 # a rating label right before it (``MCA 18.2A``, ``MOCP: 25A``), or, unless a name
 # precedes the number (``panel 2A breaker``), a pole count or an overcurrent
 # device right after it (``20A/1P``, ``20A-2P``, ``20A breaker``, ``30A fused
@@ -774,8 +775,14 @@ _ABSENCE_RE = re.compile(
 def _sig_text(f: Finding) -> str:
     # Include ``supporting_quotes`` so a merge that switches the representative
     # bundle can't hide a folded member's discriminating tag/measurement: the
-    # survivor's signature retains every member's critical tokens, so a later
+    # survivor's signature retains every member's quoted tokens, so a later
     # conflicting finding ("550 gpm" after "500 gpm" folded in) is still blocked.
+    #
+    # The survivor's sets therefore GROW as it absorbs members (WP-04.2 states
+    # how the rule treats that; see ``signature_conflicts``). The complete-link
+    # checks never compare a newcomer with the grown survivor: they compare it
+    # with each member as it arrived (``_cluster``; ``Ledger.add`` over member
+    # snapshots; Pass B's survivor side over ``Ledger.member_history``).
     extra = " ".join(getattr(f, "supporting_quotes", None) or [])
     return f"{f.text or ''} {f.source_quote or ''} {extra}"
 
@@ -1030,7 +1037,8 @@ def critical_signature(f: Finding) -> dict:
     ``RunUsage.is_billable_but_unpriced`` and the two drifted within a commit.
 
     Values are sorted lists, not sets, so the record is JSON-serializable and
-    byte-stable across runs (I-7).
+    byte-stable across runs (I-7). The rule that compares two of them is
+    :func:`signature_conflicts`.
     """
     return {
         "tags": sorted(_tags(f)),
@@ -1040,30 +1048,134 @@ def critical_signature(f: Finding) -> dict:
     }
 
 
+# --- The compatibility rule (remediation WP-04.2, N1) --------------------------
+#
+# A measurement token's unit is what follows its value's last digit: every value
+# ends in a digit and no unit contains one (the representation above), so the
+# split is exact and a composite value (``2,4,6``, ``4..6``, ``24x12``,
+# ``120/208``) stays whole.
+_TOKEN_UNIT_RE = re.compile(r"(.*\d)?(\D*)", re.DOTALL)
+# Units the tokenizer keeps apart on purpose but that measure ONE kind of
+# quantity. A kind groups them so that a value shared in another kind cannot hide
+# their conflict: ``90°F`` / ``90°C`` beside a shared ``6 in`` is as much N1 as
+# ``6 in`` / ``4 in`` beside a shared ``100 psi``. This relates units without
+# converting any value -- ``12 in`` never equals ``1 ft``, ``psig`` is never
+# ``psi``, a scale is never inferred -- so it can only ever block a merge, never
+# allow one (plan WP-04 step 3: no conversion without explicit semantics). The
+# empty unit is a W×H size written without one (``24x12``), which is a length.
+#
+# Every group of units the tokenizer emits for one quantity is listed, because
+# a unit left out is a kind of its own and a value shared elsewhere hides it
+# again: ``500 gpm`` / ``12,000 gph`` beside a shared ``100 psi`` merged until
+# liquid flow was a kind (Codex review of WP-04.2). Deliberately NOT grouped,
+# because they are different quantities rather than two spellings of one:
+# ``cfm`` (air flow; a coil's water flow and its air flow are both on its
+# schedule) and real against apparent power (a transformer's kVA rating and a
+# load's kW). ``fpm``, ``hz``, ``amp``, ``gal`` and ``%`` are single units.
+_QUANTITY_KIND = {
+    "": "length", "in": "length", "ft": "length", "mm": "length", "cm": "length",
+    "°": "degree", "°f": "degree", "°c": "degree",
+    "psi": "pressure", "psig": "pressure",
+    "volt": "voltage", "vac": "voltage", "vdc": "voltage", "kv": "voltage",
+    "gpm": "liquid_flow", "gph": "liquid_flow", "gpd": "liquid_flow",
+    "hp": "real_power", "kw": "real_power",
+    "va": "apparent_power", "kva": "apparent_power",
+}
+
+
+def _tokens_by_kind(tokens: set[str]) -> dict[str, set[str]]:
+    kinds: dict[str, set[str]] = {}
+    for token in tokens:
+        unit = _TOKEN_UNIT_RE.fullmatch(str(token)).group(2)
+        kinds.setdefault(_QUANTITY_KIND.get(unit, unit), set()).add(token)
+    return kinds
+
+
+def _one_includes_the_other(a: set, b: set) -> bool:
+    """Whether neither set holds a member the other lacks."""
+    return a <= b or b <= a
+
+
+def _measurements_conflict(ma: set[str], mb: set[str]) -> bool:
+    if not ma or not mb or _one_includes_the_other(ma, mb):
+        return False                 # then every kind includes the other's too
+    if ma.isdisjoint(mb):
+        return True                  # nothing in common: the rule before WP-04.2
+    ka, kb = _tokens_by_kind(ma), _tokens_by_kind(mb)
+    return any(not _one_includes_the_other(ka[k], kb[k]) for k in ka.keys() & kb.keys())
+
+
+def signature_conflicts(a: dict, b: dict) -> list[str]:
+    """The critical axes on which two signatures conflict; ``[]`` when none do.
+
+    The one copy of the §12.1 rule. :func:`signatures_compatible` is its
+    negation, and the A/B harness reports these axis names (``tags``,
+    ``measurements``, ``absence_polarity``, ``cross_sheet_legs``, always in that
+    order) rather than restating the rule. Takes two :func:`critical_signature`
+    records rather than two findings, so a consumer that only has stored
+    signatures (a finished arm's JSON) applies the rule the live merge does.
+
+    A signal present in only one signature never conflicts. Where both carry it:
+
+    * **Measurements**, per kind (``_QUANTITY_KIND``: a unit, or a group of units
+      measuring one kind of quantity). For every kind both carry, one side's
+      tokens of that kind must include the other's. So one side may add detail
+      (a second value in a unit, another quantity) and still merge, but a value
+      on EACH side that the other lacks conflicts, however many other values they
+      share. Before WP-04.2 one shared token excused everything (N1): ``6 in``
+      and ``4 in`` beside a shared ``100 psi``, ``12'-6"`` and ``12'-8"`` (both
+      ``12ft``), ``2 in, 4 in and 6 in`` and ``3 in, 5 in and 6 in``. Two
+      signatures that share no token at all conflict whatever their kinds, as
+      before (``6 in`` / ``150 mm``, ``6 in`` / ``100 psi``). Tokens compare
+      whole: no value is converted, and a composite is never split.
+    * **Tags**: one side's tags must include the other's. A finding may name a
+      reference the other omits (corroboration), but ``P-1 + V-3`` and
+      ``P-1 + V-4`` conflict. Tags are not grouped by prefix: a prefix is too weak
+      a role signal (``LP-1`` and ``HP-1`` are both panels), so two findings that
+      each name a different extra reference are kept apart as well -- the safe
+      error.
+    * **Absence polarity** must agree ("shown" vs "not shown").
+    * **Cross-sheet legs** must be equal.
+
+    **Growing signatures.** A survivor's signature includes its supporting
+    quotes (``_sig_text``), so its sets grow as it absorbs members, and inclusion
+    then accepts any newcomer the grown set contains. The complete-link checks
+    therefore compare a newcomer with each member as it arrived, never with the
+    grown survivor: ``_cluster``, ``Ledger.add`` (member snapshots) and Pass B's
+    survivor side (``Ledger.member_history``). Three places still see a grown
+    signature: Pass B's incoming entry (B1, WP-03.1); a critique representative
+    entering the ledger, whose reads were merged upstream and whose signature
+    holds their quotes but not their texts (WP-03.5); and the A/B harness, which
+    compares final findings.
+
+    **Not compared: quantity roles.** Nothing extracts them, so ``6 in main,
+    4 in branch`` and ``4 in main, 6 in branch`` carry the same tokens and are
+    compatible (a recorded limit, WP-04.3).
+    """
+    out: list[str] = []
+    ta, tb = set(a.get("tags") or ()), set(b.get("tags") or ())
+    if ta and tb and not _one_includes_the_other(ta, tb):
+        out.append("tags")                 # a different equipment / drawing ref
+    ma, mb = set(a.get("measurements") or ()), set(b.get("measurements") or ())
+    if _measurements_conflict(ma, mb):
+        out.append("measurements")         # a different quantity
+    if bool(a.get("absence")) != bool(b.get("absence")):
+        out.append("absence_polarity")     # "shown" vs "not shown"
+    la, lb = set(a.get("leg_targets") or ()), set(b.get("leg_targets") or ())
+    if la and lb and la != lb:
+        out.append("cross_sheet_legs")     # same quote, different cross-sheet legs
+    return out
+
+
 def signatures_compatible(a: dict, b: dict) -> bool:
     """False when a critical signature conflicts — the merge is then blocked (§12.1).
 
-    Conservative: a conflict needs both findings to carry the signal and disagree
-    on it (disjoint tag sets, disjoint measurement sets, or opposite absence
-    polarity). A signal present in only one finding never blocks — "keep both" is
-    the safe error, but so is "don't over-block a real duplicate".
-
-    Takes two :func:`critical_signature` records rather than two findings, so a
-    consumer that only has stored signatures (a finished arm's JSON, a cached
-    payload) applies the same rule the live merge does.
+    The negation of :func:`signature_conflicts`, which holds the rule.
+    Conservative: a conflict needs both findings to carry the signal and
+    disagree on it. "Keep both" is the safe error, but so is "don't over-block a
+    real duplicate".
     """
-    ta, tb = set(a.get("tags") or ()), set(b.get("tags") or ())
-    if ta and tb and ta.isdisjoint(tb):
-        return False                       # different equipment / drawing refs
-    ma, mb = set(a.get("measurements") or ()), set(b.get("measurements") or ())
-    if ma and mb and ma.isdisjoint(mb):
-        return False                       # different quantities
-    if bool(a.get("absence")) != bool(b.get("absence")):
-        return False                       # "shown" vs "not shown"
-    la, lb = set(a.get("leg_targets") or ()), set(b.get("leg_targets") or ())
-    if la and lb and la != lb:
-        return False                       # same quote, different cross-sheet legs
-    return True
+    return not signature_conflicts(a, b)
 
 
 def _signatures_compatible(a: Finding, b: Finding) -> bool:

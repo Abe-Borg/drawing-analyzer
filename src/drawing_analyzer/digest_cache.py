@@ -91,7 +91,7 @@ _SCHEMA_VERSION = 10
 # The critique cache's own contract, folded into BOTH critique key builders and
 # into nothing else. A critique entry stores the POST-MERGE findings of its reads
 # (``critique.critique_cache_entry_from_result``), so the host's merge rule
-# (``critique.critical_signature``, ``signatures_compatible``, ``_is_duplicate``)
+# (``critique.critical_signature``, ``signature_conflicts``, ``_is_duplicate``)
 # is part of what a stored critique means, exactly as the prompt is. A change to
 # that rule bumps this, and only this: it invalidates the critique namespace and
 # leaves every digest, identity, plan, citation and investigation entry alone
@@ -105,7 +105,13 @@ _SCHEMA_VERSION = 10
 #   compact volts and amps, ranges and lists. An entry written before it (keyed
 #   with no term) holds merges the new tokenizer would not make, so it misses
 #   once and is re-critiqued. It is left on disk, never deleted.
-_CRITIQUE_CACHE_CONTRACT = 1
+# 2 (remediation WP-04.2, N1): the compatibility rule behind
+#   ``signatures_compatible`` (``critique.signature_conflicts``). One shared tag
+#   or value no longer makes two signatures compatible: quantities compare per
+#   kind and tags by inclusion. An entry stored under 1 holds merges the new rule
+#   would refuse (``6 in`` and ``4 in`` beside a shared ``100 psi``), so it
+#   misses once and is re-critiqued. It is left on disk, never deleted.
+_CRITIQUE_CACHE_CONTRACT = 2
 
 # Storage format and concurrency settings are intentionally separate from the
 # content schema above.  ``_SCHEMA_VERSION`` invalidates cached model results;

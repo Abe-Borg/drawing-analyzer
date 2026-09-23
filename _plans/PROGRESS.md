@@ -1,7 +1,7 @@
 # Remediation progress tracker
 
-**Next up:** Wave 1 in order: `WP-04.2`. WP-04.1 is done: it changed the quantity tokenizer and added a critique-only cache term, `digest_cache._CRITIQUE_CACHE_CONTRACT`, which WP-04.2 bumps. WP-05.3 now waits only on WP-05.2. First check the open PRs ([`README.md`](README.md), step 1). Before the next stable tag, the owner should look at O-5.
-**Last updated:** 2026-09-23 by the WP-04.1 session ([PR #157](https://github.com/Abe-Borg/drawing-analyzer/pull/157)).
+**Next up:** Wave 1 in order: `WP-03.1`. WP-04.2 is done: it replaced the compatibility rule behind the critical signature (N1) and bumped `digest_cache._CRITIQUE_CACHE_CONTRACT` to 2. WP-04 is not done: its acceptance needs quantity roles, now slice `WP-04.3` (Wave 2). WP-09.2 now waits only on WP-09.1. First check the open PRs ([`README.md`](README.md), step 1). Before the next stable tag, the owner should look at O-5.
+**Last updated:** 2026-09-23 by the WP-04.2 session ([PR #158](https://github.com/Abe-Borg/drawing-analyzer/pull/158)).
 
 This file is authoritative for **status and order**. Requirements live in
 [`drawing-analyzer-remediation-plan.md`](drawing-analyzer-remediation-plan.md).
@@ -53,7 +53,7 @@ A package is `done` only when every slice is `done` or `n/a` **and** its
 | WP-01 | Response terminal states and truthful stage completeness | P0 | 01.1–01.7 | todo |
 | WP-02 | Faithful SDK, streaming, batch and network test boundaries | P0 (enabling) | 02.1–02.5 | todo |
 | WP-03 | Durable finding identity and lossless, symmetric merging | P0 | 03.1–03.6 | todo |
-| WP-04 | Engineering quantity and tag comparison | P0 | 04.1–04.2 | todo |
+| WP-04 | Engineering quantity and tag comparison | P0 | 04.1–04.3 | todo |
 | WP-05 | Robust anchoring and consistent quote evidence | P0/P1 | 05.1–05.3 | todo |
 | WP-06 | Source-safe cross-QC and claim-preserving deduplication | P0/P1 | 06.1–06.4 | todo |
 | WP-07 | Arithmetic operand trust and strict numeric parsing | P0 | 07.1–07.3 | todo |
@@ -101,7 +101,7 @@ starting.
 | WP-01.1 | Verification is `COMPLETE` only when every eligible item was judged; failures and skips are counted separately; decides D-2 (N5) | M | — | done | [PR #155](https://github.com/Abe-Borg/drawing-analyzer/pull/155), 2026-09-23. One rule, `models.item_coverage_status` (D-2), over both passes. The denominator is fixed before any call (`VerifyResult.eligible`); skips and calls that returned no judgment are counted and surfaced separately (`coverage_note`). Investigation reports the findings it recovers and never rewrites verification's record. Tests: `tests/test_drawing_acceptance.py` (N5 block), `tests/test_drawing_verify.py` (completeness section). Residual: a finding that raises after the single-crop loop picks it up keeps its prior verdict (the report shows *Not checked*); the stage counts it "not accounted for" and stays off `COMPLETE` |
 | WP-01.2 | Shared terminal-outcome helper; the digest (real-time and batch) never admits a refusal, truncation or `stop_reason=None` read as success or into either cache level; cached refusals are rejected when read; decides D-1 (N4 digest, N27) | M/L | — | done | [PR #156](https://github.com/Abe-Borg/drawing-analyzer/pull/156), 2026-09-23. One classifier, `core.terminal_outcome.classify_stop_reason` (D-1), its vocabulary pinned by test to the SDK's `StopReason` ∪ `BetaStopReason`. Both transports share one ladder (`digest.digest_terminal_error`), one write predicate (`digest.digest_cache_admits`, both levels) and one loader (`digest.sheet_digest_from_cache_entry`, all three cache hits), which serves only a stored finished stop reason; a stored `null` and a missing key are misses (D-4 started, one migration-register row, no schema or key change). Tests: `tests/test_digest_terminal_outcome.py`, `tests/test_terminal_outcome.py`, `tests/test_drawing_acceptance.py::test_a_refused_or_unfinished_digest_holds_the_run_below_complete`. Residual: N15, an errored digest's findings still reach the ledger (WP-01.3) |
 | WP-04.1 | Quantity tokenizer: hyphenated units, thousands groups, opaque malformed tokens, `deg`/`°` (angle vs temperature), lists and ranges, W×H and V/A with a negative corpus; critique-scoped cache term (B2, B3, B12, N19) | M | — | done | [PR #157](https://github.com/Abe-Borg/drawing-analyzer/pull/157), 2026-09-23. `critique._quantity_tokens`, a scanner that reads each quantity whole. A composite (list, range, W×H size, voltage pair) is ONE token, compared whole; the representation is documented at the tokenizer and pinned by `tests/test_quantity_signature.py`. Compact `A` needs electrical context (negative corpus in the same file). Critique cache term `digest_cache._CRITIQUE_CACHE_CONTRACT = 1` inside both critique builders; A/B `RECORD_CONTRACT_VERSION` 2 → 3. Tests: `tests/test_quantity_signature.py`, the WP-04.1 section of `tests/test_drawing_cache_identity.py`, four tests in `tests/test_ab_findings_diff.py`. Residual partial signatures (loose-comma lists, `to` ranges, `and`/`or` lists, a bare `20A`) are listed in the handoff |
-| WP-04.2 | Compatibility rule over per-unit value sets and partial tag overlap; one shared `signature_conflicts` that the A/B harness also uses (N1) | M | WP-04.1 | todo | Consume WP-04.1's representation: a token is `<value><unit>`, and a composite value (`2,4,6`, `4..6`, `24x12`, `120/208`) is one member of its unit's set, never split. The rule change re-merges critiques, so bump `digest_cache._CRITIQUE_CACHE_CONTRACT` 1 → 2 and pin the new fingerprint in `tests/test_drawing_cache_identity.py` (the test prints it); bump `RECORD_CONTRACT_VERSION` only if stored records change meaning |
+| WP-04.2 | Compatibility rule over per-unit value sets and partial tag overlap; one shared `signature_conflicts` that the A/B harness also uses (N1) | M | WP-04.1 | done | [PR #158](https://github.com/Abe-Borg/drawing-analyzer/pull/158), 2026-09-23. `critique.signature_conflicts` (axes `tags`, `measurements`, `absence_polarity`, `cross_sheet_legs`); `signatures_compatible` is its negation, and the A/B harness reports its axes (its restated copy is gone). Quantities compare per kind (a unit, or one of the `_QUANTITY_KIND` groups: lengths, degrees, `psi`/`psig`, volts, liquid flow, real power, apparent power): for every kind both carry, one side's tokens must include the other's; no value is converted. Tags compare by inclusion, not by prefix. Sharing no quantity at all still conflicts. Critique contract 1 → 2, fingerprint pinned under 2; `RECORD_CONTRACT_VERSION` stays 3 (rule-only change; plan step 6 corrected). Tests: `tests/test_signature_compatibility.py`, the N1 rows and the corroboration, retention and recorded-limit tables in `tests/test_quantity_signature.py`, the WP-04.2 sections of `tests/test_ab_findings_diff.py` and `tests/test_drawing_cache_identity.py`. Roles are not compared: WP-04.3 |
 | WP-03.1 | Symmetric complete-link in Pass B, order-independent entry count (B1, count part) | S | — | todo | |
 | WP-03.2 | Deterministic total-order tie-break in `assign_qc_ids` (K5) | S | — | todo | |
 | WP-03.3 | Remove the auditor coordinator's id dedup; arithmetic claim discriminator so the ledger keeps two different same-row mismatches; Decimal claim-dedup keys (B7) | S/M | — | todo | |
@@ -129,6 +129,7 @@ starting.
 | WP-01.6 | Remaining response consumers (planner, identity, synthesis, focus, prose harvest cache writes); fallback-aware shared text join (U2; WP-09 step 6) | M | WP-01.2, WP-02.3 | todo | Also move `verify._verdict_from_response` / `_degrade_kind` onto `core.terminal_outcome` (D-1). They test `max_tokens` and `refusal` only, so an unknown stop reason or `model_context_window_exceeded` is still parsed as a verdict (WP-01.2 left verification alone: not an N4 site) |
 | WP-01.7 | Interrupted-stream outcome and usage capture (`current_message_snapshot`), threaded through the digest retry loop (U1 partial-stream part; WP-14 step 7) | M | WP-01.2, WP-02.3 | todo | |
 | WP-05.3 | Character-stream fallback tier with a quantity-aware numeric veto (B4: `6 "`, `INCHDRAIN`, `12' - 6"`, `2 %`). Matches only contiguous source words, never a "manufactured joined string" (plan §2 rule 15) | M | WP-05.2, WP-04.1 | todo | |
+| WP-04.3 | Quantity roles for repeated same-kind values: the WP-04 matrix row "repeated values in different roles" (swapped: `6 in main, 4 in branch` / `4 in main, 6 in branch`; one value in two roles: `6 in supply, 6 in return` / `6 in supply, 8 in return`) | M | WP-04.2 | todo | Added by WP-04.2 (README 7.3): WP-04's acceptance does not hold without it. Nothing extracts a quantity's role, and the signature is a set, so both pairs carry compatible tokens and the same words. Do not settle it by keeping apart every pair that carries two or more values of one kind on both sides: that splits the commonest duplicate there is, the same "500 gpm shown, 550 gpm required" from both critique reads. It needs a role signal (for example the noun a quantity qualifies) with a negative corpus. Both pairs are pinned as recorded limits in `tests/test_quantity_signature.py::_RECORDED_LIMITS`; move them to `_CONFLICTS`. A role in the stored signature changes what an A/B record stores (`RECORD_CONTRACT_VERSION` 3 → 4) and what a critique entry holds (critique contract 2 → 3). Related, and under the same bump: `critique._TAG_RE` reads the `x12` of a tight `24"x12"` as a tag, and under WP-04.2's tag inclusion that stray tag beside a different extra reference on the other finding keeps apart two findings the old rule merged |
 | WP-06.2 | Whole-set cross-QC on host handles (label shown beside handle), grounded against **uncapped** evidence text like the sharded path, claims rebound through handles, framing hashed into the key; decides D-8 if not yet decided (N6, U8, K2) | L | WP-05.1 | todo | |
 | WP-06.3 | Cross-QC terminal honesty: `stop_reason` checked, streaming, bounded raised-cap retry, bounded partial-array salvage, fact-cap and omission counters; decision recorded for N14 (U6, U7 observability, N14) | M | WP-01.2 | todo | |
 | WP-10.1 | Tile-label and display-label contract folded into the keys without invalidating unchanged entries (K1) | S | — | todo | |
@@ -323,7 +324,7 @@ report is built from it).
 | G4 | PyInstaller `collect_all` bundles stray files (key file) | P1 | 23.2 | open | |
 | G5 | Release gates test a different dependency set than ships | P1 | 23.3 | open | |
 | G6 | Installer hashed at download only, launched hours later | P1 | 24.1 | open | |
-| N1 | One shared value (`100 psi`, `12ft`) masks conflicting measurements | P0 | 04.2 | open | |
+| N1 | One shared value (`100 psi`, `12ft`) masks conflicting measurements | P0 | 04.2 | implemented+validated | `tests/test_quantity_signature.py` (the `N1 …` rows of `_CONFLICTS`, each asserted in the critique merge and the ledger; `_CORROBORATIONS`, `_NO_SHARED_QUANTITY`, `_CONSERVATIVE_RETENTION`, `_RECORDED_LIMITS`); `tests/test_signature_compatibility.py` (tags incl. sheet, grid and detail references; the per-kind table; complete-link in the critique merge, `Ledger.add` and Pass B; the rule never merges a pair the flat rule blocked); `tests/test_ab_findings_diff.py::test_a_conflict_beside_a_shared_value_is_never_an_exact_match` and `::test_a_second_tag_that_changed_is_never_an_exact_match` (WP-04.2, [PR #158](https://github.com/Abe-Borg/drawing-analyzer/pull/158)). Closes every conflict the signature can see. Still merged, as recorded limits: quantity roles (WP-04.3), a bare `12'` against `12'-6"`, and WP-04.1's partial signatures |
 | N2 | Cross-QC dedup destroys distinct claims sharing sheet/quote/legs | P0 | 06.1 | open | |
 | N3 | Reused operand membership (and fabricated quotes) give false DETERMINISTIC | P0 | 07.1 | open | |
 | N4 | Refused/truncated digests and critiques accepted and cached | P0 | 01.2, 01.4, 10.4 | open (digest part implemented+validated in 01.2; the critique part (01.4) and the cache map (10.4) stay open) | `tests/test_digest_terminal_outcome.py` (both transports, both cache levels, the read-side reject, the warm re-run of a refusal the old code cached, the delivery contract) and `tests/test_drawing_acceptance.py::test_a_refused_or_unfinished_digest_holds_the_run_below_complete` (WP-01.2, [PR #156](https://github.com/Abe-Borg/drawing-analyzer/pull/156)). Remaining: the critique (WP-01.4: `critique.outcome_from_message`, and a critique-only contract term, since critique entries store no stop reason); the cache map and the other writers' admission predicates (WP-10.4) |
@@ -341,7 +342,7 @@ report is built from it).
 | N16 | A raised-cap retry can lose the first (truncated) read | P1 | 01.3 | open | |
 | N17 | References to FM-numbered sheets are never reported as missing | P1 | 08.4 | open | |
 | N18 | Contradictory transcriptions of one quote counted as independent checks | P1 | 07.3 | open | |
-| N19 | W×H duct sizes, `20A`/`480V`, ranges and lists get no or partial signature | P0 | 04.1 | implemented+validated | `tests/test_quantity_signature.py` (the size, volt, amp, range and list tables; the negative corpus; the `N19 …` pairs; `test_a_shared_name_is_not_a_shared_quantity`) (WP-04.1, [PR #157](https://github.com/Abe-Borg/drawing-analyzer/pull/157)). Covers the named forms. By decision these still sign partially: loose-comma lists (`2, 4, 6 in`), `to` ranges and `and`/`or` lists, and a bare `20A` with no electrical context. **A conflict hidden by a shared value is N1, not N19:** a pair whose differing quantities sit beside a shared one (`6 in` / `4 in` beside `100 psi`; `12'-6"` / `12'-8"`, both `12ft`) can still merge until WP-04.2 |
+| N19 | W×H duct sizes, `20A`/`480V`, ranges and lists get no or partial signature | P0 | 04.1 | implemented+validated | `tests/test_quantity_signature.py` (the size, volt, amp, range and list tables; the negative corpus; the `N19 …` pairs; `test_a_shared_name_is_not_a_shared_quantity`) (WP-04.1, [PR #157](https://github.com/Abe-Borg/drawing-analyzer/pull/157)). Covers the named forms. By decision these still sign partially: loose-comma lists (`2, 4, 6 in`), `to` ranges and `and`/`or` lists, and a bare `20A` with no electrical context. **A conflict hidden by a shared value is N1, not N19:** a pair whose differing quantities sit beside a shared one (`6 in` / `4 in` beside `100 psi`; `12'-6"` / `12'-8"`, both `12ft`) merged until WP-04.2 fixed N1 |
 | N20 | Investigation executes and echoes pre-fallback `tool_use` blocks | P1 | 13.4 | open | |
 | N21 | Files-API failure fallbacks send full-rate requests under Economy; inline can exceed the size limit | P1 | 18.1, 18.2 | open | |
 | N22 | Code and help text claim uploads "expire server-side"; they persist until deleted | P1 | 18.4, 18.5 | open | |
@@ -388,6 +389,237 @@ report is built from it).
 Each session adds one entry at the top: date, slices and IDs, PR, what changed,
 contracts decided, cache/schema effects, validation actually run (with counts),
 what could not be verified, risks, and next steps.
+
+### 2026-09-23 — WP-04.2: the compatibility rule behind the critical signature ([PR #158](https://github.com/Abe-Borg/drawing-analyzer/pull/158))
+
+- **Slice and IDs:** WP-04.2. N1. No `DECISIONS.md` contract is decided here.
+  D-4 stays open; this slice adds one migration-register row and one sentence
+  to D-4. **WP-04 is not done** (acceptance check below): WP-04.3 is added for
+  quantity roles.
+- **What changed:**
+  - **One copy of the rule.** New `critique.signature_conflicts(a, b) ->
+    list[str]` names the conflicting axes, always in the order `tags`,
+    `measurements`, `absence_polarity`, `cross_sheet_legs` (the names the A/B
+    report already printed). `signatures_compatible` is its negation. It takes
+    two `critical_signature` records, so stored signatures are judged exactly
+    as live ones are.
+  - **Quantities, per kind.** A token's unit is what follows its value's last
+    digit (WP-04.1's representation), and a composite stays one whole token.
+    Units group into kinds (`critique._QUANTITY_KIND`): lengths (`in`, `ft`,
+    `mm`, `cm`, and the empty unit of a unitless W×H size), degrees (`°`, `°f`,
+    `°c`), pressures (`psi`, `psig`), voltages (`volt`, `vac`, `vdc`, `kv`),
+    liquid flow (`gpm`, `gph`, `gpd`), real power (`hp`, `kw`) and apparent
+    power (`va`, `kva`); every other unit is its own kind. `cfm` stays apart
+    from liquid flow, and apparent from real power, on purpose: each pair names
+    two quantities (a coil's water and air flow; a transformer's kVA rating and
+    a load's kW), not one quantity in two units. Two signatures conflict on measurements
+    when both carry some and either they share no token at all (the old flat
+    rule, kept: `6 in` / `150 mm`, `24x12` / `24x10 in`) or, for some kind both
+    carry, each holds a token of that kind the other lacks.
+  - **Two choices beyond the plan's "minimum rule" (disjoint value sets per
+    unit), and why:**
+    - *Inclusion, not disjointness.* WP-04.1's handoff lists three N1 pairs.
+      Disjoint-per-unit closes two (`12'-6"` / `12'-8"`; `6 in` / `4 in` beside
+      `100 psi`), but not the third, two lists written with a unit on every
+      element that share one element (`2 in, 4 in and 6 in` / `3 in, 5 in and
+      6 in`): the `in` values intersect. The same holds for a shown/required
+      pair sharing the shown value (`500` / `550` against `500` / `600 gpm`).
+      Inclusion blocks them and still lets one side add detail.
+    - *Kinds, not bare units.* With units alone, a conflict between two units
+      the tokenizer keeps apart on purpose was still masked by a value shared
+      in another unit: `90°F` / `90°C` beside a shared `6 in`, `20 psig` /
+      `20 psi`, `120V` / `24VAC` controls beside a shared `480V`, `6 in` /
+      `100 mm` beside `100 psi`. That is N1 again. A kind relates units without
+      converting any value (`12 in` never equals `1 ft`, `psig` is never `psi`,
+      no scale is inferred), so it can only ever block a merge. Explicit
+      fixtures for every kind: `tests/test_signature_compatibility.py::_KIND_CASES`.
+  - **Tags: inclusion, not grouped by prefix.** One finding may name a
+    reference the other omits (`P-1` / `P-1 + V-3`, `VAV-3` / `VAV-3 per
+    M-501`, a grid or a detail reference) and they merge. Two findings that
+    each name a tag the other lacks conflict: `P-1 + V-3` / `P-1 + V-4`, and
+    also `EF-1 on LP-1` / `EF-1 on HP-1`, which a prefix grouping (the per-unit
+    analogue) would have merged, since `LP` and `HP` are different prefixes of
+    one role. The cost: two findings that each name a different *kind* of
+    extra reference (`P-1 + V-3` / `P-1 per M-501`) stay apart. That is
+    deliberate conservative retention, recorded in the fixtures
+    (`_TAG_RETENTION`). Tested against sheet ids, grid references and detail
+    references in both directions.
+  - **The rule only ever blocks more.** Every pair the old flat rule blocked is
+    still blocked (`test_the_rule_blocks_every_pair_the_flat_rule_blocked`,
+    over a corpus where the old rule blocks 50+ pairs). No finding that was
+    separate before becomes merged.
+  - **Growing signatures (plan step 4 asks for a statement).** A survivor's
+    signature includes its `supporting_quotes`, so its sets grow as it absorbs
+    members, and inclusion then accepts any newcomer the grown set contains.
+    The complete-link checks never compare a newcomer with the grown survivor:
+    the critique's `_cluster` checks each read's original finding,
+    `Ledger.add` checks the member snapshots, and Pass B's survivor side reads
+    `Ledger.member_history`. Tested in all three
+    (`tests/test_signature_compatibility.py`, "Growing signatures"). Three
+    places still see a grown signature:
+    - Pass B's *incoming* entry, which is the live object (B1, WP-03.1);
+    - a critique representative entering the ledger as one finding. Its reads
+      were merged upstream, and its signature holds their quotes but not their
+      texts (B9). That is why a read whose tag sits in its quote still blocks a
+      conflicting digest finding
+      (`test_a_critique_representative_brings_its_members_quotes_into_the_ledger`),
+      and why one whose tag sits only in its text does not (WP-03.5);
+    - the A/B harness, which compares each arm's final findings.
+  - **Roles are not compared** (the matrix's "repeated values in different
+    roles"). Recorded as a limit, not handled conservatively: the conservative
+    rule (keep apart any pair with two or more values of one kind on both
+    sides) would split the commonest duplicate there is, the same "500 gpm
+    shown, 550 gpm required" from both critique reads. Pinned in
+    `tests/test_quantity_signature.py::_RECORDED_LIMITS` with the other pairs
+    that still merge: swapped roles, one value in two roles, a bare `12'`
+    against `12'-6"` (feet-inches is two tokens), and WP-04.1's partial
+    signatures (`4 to 6 in`, loose-comma lists, a bare `20A`).
+  - **A/B harness.** `_signature_conflicts`, the restated copy, is gone.
+    `_conflicting_axes` calls `critique.signature_conflicts`; `_compatible`
+    still calls `signatures_compatible`. Axis names are unchanged.
+    `RECORD_CONTRACT_VERSION` stays **3**: a record stores the signature's
+    tokens, which did not change, and the rule is re-applied whenever two
+    records are compared, so a v3 record is judged by the new rule exactly as
+    a fresh one is. The version's comment says so, and a test round-trips a
+    v3 record through JSON and gets the new verdict.
+  - **Plan corrected** (README step 7): the WP-04 verification note "Step 6"
+    said to bump `RECORD_CONTRACT_VERSION`; it was written before WP-04.1 took
+    that bump for the tokenizer. The plan's slice list now names WP-04.3.
+  - **Review follow-up (Codex P1 on this PR).** A unit left out of the kind
+    table is a kind of its own, so a shared value could still hide a conflict
+    between two units of one quantity: `500 gpm` / `12,000 gph` beside a shared
+    `100 psi` stayed compatible, and so did `5 hp` / `7.5 kW` and `500 VA` /
+    `1 kVA` beside a shared voltage. The root cause was an incomplete table, not
+    one pair, so every group of units the tokenizer emits for one quantity is
+    now listed (liquid flow, real power, apparent power) and the table's comment
+    names what stays apart on purpose (`cfm`; kVA against kW) and the units that
+    are alone (`fpm`, `hz`, `amp`, `gal`, `%`). A check over the tokenizer's
+    unit list confirmed nothing else is missing. The 10 new tests failed on this
+    PR's head before the fix; 3 more pin what stays apart. The ratchet's corpus
+    gained a gpm/gph and an hp/kW pair, each of which merges under the
+    pre-review rule and not under this one, and key 2 was re-pinned (the value
+    is new in this PR, so nothing released is edited).
+  - **Docs:** CHANGELOG (Fixed: N1, with the one-time critique re-run and the
+    visible effect; WP-04.1's "Not in this change" note points to it), CLAUDE.md
+    (the ledger paragraph describes the rule, the growth statement and the
+    limits; the `12'-6"` entry is removed from "Known-inaccurate statements",
+    since keeping both halves now does keep `12'-6"` and `12'-8"` apart), README
+    (the ledger section's N1 limit replaced by the rule and its remaining
+    limits; the critique-cache paragraph names the one-time re-run),
+    `docs/PERFORMANCE_AND_COST_VALIDATION.md` (the harness's axes now come from
+    the rule).
+- **Contracts decided:** none. D-4 (open) gains a sentence: WP-04.2 bumped the
+  critique contract to 2.
+- **Cache/schema effects:**
+  - Critique cache, both levels: `digest_cache._CRITIQUE_CACHE_CONTRACT` 1 → 2.
+    Every critique entry written under 1 misses once (it can hold a merge the
+    new rule refuses). Nothing is deleted. The next exhaustive run re-critiques
+    every sheet once; digest, identity, review-plan, citation and investigation
+    keys are byte-identical, pinned by
+    `test_wp_04_2_moves_every_critique_key_and_no_other_key` (the contract-1
+    keys are pinned in the test). One migration-register row.
+  - The merge-rule ratchet is pinned under key 2 (`63dbfe…`). Its corpus gained
+    12 rows (tag overlap, a shared list element, a shared value across one kind,
+    a flow and a power in two units, and the extra detail that still merges);
+    key 1's value is kept and noted as computed over the old corpus. Over the
+    extended corpus WP-04.1's rule fingerprints as `73da95…` (recorded in the
+    test), and this PR's rule before the review follow-up as `6aaf8a…`, so a rule change that
+    forgets the bump still fails there.
+  - No `_SCHEMA_VERSION` bump. A/B records: no change (above).
+- **Re-baselined tests:** none of the pinned tests changed outcome. The listed
+  ones (`test_duplicate_matrix`, `test_signature_measurements_carry_the_unit`,
+  `test_signature_regexes_avoid_false_positives`,
+  `test_feet_inches_keeps_both_halves_and_neither_goes_negative`,
+  `tests/test_drawing_dedup_lifecycle.py`, `tests/test_drawing_ledger.py`,
+  WP-04.1's tables, `tests/test_ab_findings_diff.py`, `tests/test_ab_sweep.py`)
+  pass unchanged. Edited without changing an assertion: the module docstring of
+  `tests/test_quantity_signature.py` and the docstring of
+  `test_a_shared_name_is_not_a_shared_quantity` (both described the old rule).
+  The ratchet gained key 2; key 1 is untouched.
+- **Validation (this container, Python 3.11.15, SDK 1.7.0, PyMuPDF 1.28.2):**
+  - **Baseline before any change:** `python -m pytest -q -m "not network"`
+    gave **2,927 passed, 2 skipped, 10 deselected** (230 s), identical to the
+    WP-04.1 handoff.
+  - **Reproduced first.** On the base code the 12 `N1 …` rows of `_CONFLICTS`,
+    the 6 tag-conflict pairs and the Pass B pair all merged.
+  - **Failing first.** The new tests, run in a `git archive` copy of
+    `origin/main` (`d5d7084`) with only the test files replaced:
+    **123 new tests: 42 failed on behaviour, 66 failed only because
+    `signature_conflicts` did not exist (the axis-name checks), and 15
+    passed.** The 15 pin what the fix keeps: 3 quantity corroborations, the
+    two no-shared-quantity pairs, the six recorded limits, the equivalence
+    beside a shared value, the Pass B fold of a one-sided reference, the A/B
+    exact match with one added reference, and the flat-rule dominance test.
+    Of the 250 existing tests in those four files, 249 passed and one failed:
+    the merge-rule ratchet, whose corpus grew.
+  - **After:** the new tests pass. Full suite **3,063 passed, 2 skipped,
+    10 deselected** (215 s): the baseline plus 136 new tests (the 123 above
+    and the review follow-up's 13), with the same two environment skips (IPv6
+    loopback; chmod as root). Before the follow-up it was 3,050.
+  - **Browser suite:** not run separately. No report JS, HTML or chat code
+    changed; the browser tests ran inside the full suite above.
+  - `ruff check --select E9,F63,F7,F82 src tests scripts` is clean.
+    F401/F811/F841 over the touched files shows two hits, both present on the
+    base (WP-22.5 territory); none is new. `scan_secrets.py` is clean over 197
+    tracked files, the new one included. `compileall src` passes.
+  - **Cost of the rule:** a synthetic 1,800-finding, 40-sheet ledger ingest
+    (25,879 signature comparisons), best of 3: 0.72 s against 0.66 s on the
+    base code, about 2 µs per comparison. The signature's own regexes dominate
+    either way.
+- **Not verified:** live API behaviour (no budget, O-4; this slice makes no
+  call). How often the retention and the limits occur on real drawings: every
+  pair is synthetic (O-10). Windows is covered by this PR's CI.
+- **Risks and residual gaps:**
+  - **A visible behaviour change, by design.** Findings that differ in a value
+    beside a shared one no longer merge. A report can show more findings, and
+    a pair the two critique reads disagreed on appears as two `SINGLETON`
+    findings instead of one `REPRODUCED` one.
+  - **Conservative retention** (pinned): the same pipe in two unit systems
+    (`6 in` / `150 mm`) or one clearance in two units (`3 ft` / `36 in`)
+    beside a shared value; two findings that each name a different extra
+    reference; a loose-comma list against the tight list of the same sizes.
+  - **Stray tags now matter more.** `_TAG_RE` reads the `x12` of a tight
+    `24"x12"` as a tag `X12` (known since the 2026-09-22 verification). Under
+    inclusion, that stray tag on one finding and a different extra reference
+    on the other (`… at grid C-4`) keep apart two findings the old rule
+    merged. Fixing `_TAG_RE` is a tag-tokenizer change, left out of scope and
+    noted on WP-04.3, which bumps the same contract.
+  - **Still merged** (pinned in `_RECORDED_LIMITS`): quantity roles (WP-04.3),
+    a bare `12'` against `12'-6"`, and WP-04.1's partial signatures.
+  - **Growth at the critique boundary:** a read whose conflicting value sits
+    only in its text is lost to the ledger's comparison when another read wins
+    the representative (B9; WP-03.5).
+- **WP-04 acceptance check (README step 7.3).** "Demonstrated conflicting pairs
+  never merge, equivalent supported spelling compares consistently, and
+  existing fraction/sign/unit safeguards remain intact. Record any deliberate
+  conservative duplicate retention in the evaluation fixtures."
+  - Every matrix pair and matrix addition is pinned, and every conflicting one
+    stays two findings, except **"repeated values in different roles"**, which
+    merges (recorded limit). So the first criterion does not hold, and
+    **WP-04 stays `todo`**, with WP-04.3 (M, Wave 2) added for roles.
+  - Equivalent spellings compare consistently: `_EQUIVALENTS`, including a
+    pair beside a shared value. The safeguards (fractions, signs, units,
+    `psig` ≠ `psi`, feet-inches) pass unchanged, and conservative retention is
+    recorded (`_CONSERVATIVE_RETENTION`, `_TAG_RETENTION`).
+  - **How WP-04.1's partial signatures bear on it:** they are outside the
+    plan's matrix (which names `4-6 in` and `2,4,6 in`, both read whole) and
+    are not supported spellings, so they do not decide the acceptance. Each is
+    still a way a real conflict can merge (`4 to 6 in` / `6 in`; two
+    loose-comma lists ending in the same size; `20A` / `30A` on a shared
+    `120V`), now pinned in `_RECORDED_LIMITS`, and a loose list against a
+    tight one is now kept apart (retention). If the owner wants them closed,
+    that is a tokenizer slice with a critique contract bump.
+- **Re-checked (U31):**
+  - The rule's live consumers are the critique's `_cluster` (through
+    `merge_self_consistency`, whose output is cached), `Ledger.add` and
+    `reconcile_post_anchor`, all through `_is_duplicate`. The A/B harness is
+    the only out-of-process one. `merge_finding_groups` has no production
+    caller (tests only). `prose_harvest` matches on `_token_overlap` only
+    (N10, WP-09.2); `cross_qc._dedup_findings` keys on ids.
+  - "The critique cache stores post-merge findings" still holds
+    (`critique_cache_entry_from_result`).
+- **Next:** WP-03.1 (Wave 1). WP-09.2 now waits only on WP-09.1; WP-03.5 waits
+  on WP-03.1 and WP-03.4; WP-04.3 (Wave 2) is available.
 
 ### 2026-09-23 — WP-04.1: the quantity tokenizer behind the critical signature ([PR #157](https://github.com/Abe-Borg/drawing-analyzer/pull/157))
 

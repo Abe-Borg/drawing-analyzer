@@ -14,9 +14,13 @@ fixed nothing. Every pair shares enough prose (``_token_overlap`` at or above
 the 0.7 duplicate threshold) that the text alone *would* merge it, so the
 signature is what decides.
 
-The compatibility rule is not this slice's (WP-04.2, N1). Under today's
-disjoint-set rule one shared value still makes two findings compatible, so the
-pairs here differ in every quantity they carry.
+The tables from WP-04.1 hold pairs that differ in every quantity they carry.
+Remediation WP-04.2 (N1) replaced the compatibility rule behind them, so the
+tables now also hold pairs whose conflict sits beside a shared value
+(``6 in`` / ``4 in`` beside a shared ``100 psi``; ``12'-6"`` / ``12'-8"``, both
+``12 ft``): the "N1" rows, and the corroboration, retention and recorded-limit
+tables at the end. The rule itself, and the tag half of it, is pinned in
+``tests/test_signature_compatibility.py``.
 
 Hermetic (I-4): pure data, no client, no PDF.
 """
@@ -407,6 +411,78 @@ _CONFLICTS = {
         "Set the invert -6 in below the datum at the cleanout",
         "Set the invert 6 in below the datum at the cleanout",
     ),
+    # N1 (WP-04.2): one shared value no longer excuses a conflicting one. Each
+    # pair below shares a quantity and merged before WP-04.2.
+    "N1 12'-6\" vs 12'-8\" (both 12 ft)": (
+        "Maintain 12'-6\" clear headroom under the main duct at the M-101 riser",
+        "Maintain 12'-8\" clear headroom under the main duct at the M-101 riser",
+    ),
+    "N1 6 in vs 4 in beside a shared 100 psi": (
+        "Pump P-1 discharge pipe is 6 in at 100 psi per the pump schedule",
+        "Pump P-1 discharge pipe is 4 in at 100 psi per the pump schedule",
+    ),
+    "N1 500 gpm vs 550 gpm beside a shared 100 psi": (
+        "Pump P-1 is scheduled at 500 gpm at 100 psi on the pump schedule for the east data hall",
+        "Pump P-1 is scheduled at 550 gpm at 100 psi on the pump schedule for the east data hall",
+    ),
+    'N1 6" x 12\' vs 6" x 14\' (both 6 in)': (
+        'Board 6" x 12\' at the east wall is cut from the wrong stock per the framing detail',
+        'Board 6" x 14\' at the east wall is cut from the wrong stock per the framing detail',
+    ),
+    # Within one unit: a list written with a unit on every element, and a
+    # shown/required pair, each sharing one value.
+    "N1 2 in, 4 in and 6 in vs 3 in, 5 in and 6 in (one shared size)": (
+        "Provide 2 in, 4 in and 6 in floor drains along the east wall of the main "
+        "mechanical room per the plumbing plan",
+        "Provide 3 in, 5 in and 6 in floor drains along the east wall of the main "
+        "mechanical room per the plumbing plan",
+    ),
+    "N1 500 gpm shown vs 550 or 600 gpm required": (
+        "Pump P-1 shows 500 gpm but the pump schedule requires 550 gpm at the design point",
+        "Pump P-1 shows 500 gpm but the pump schedule requires 600 gpm at the design point",
+    ),
+    # Units the tokenizer keeps apart but that measure one kind of quantity:
+    # a value shared elsewhere must not hide their conflict either.
+    "N1 90°F vs 90°C beside a shared 6 in": (
+        "Supply air setpoint for AHU-2 is 90°F at the 6 in duct heater per the sequence",
+        "Supply air setpoint for AHU-2 is 90°C at the 6 in duct heater per the sequence",
+    ),
+    "N1 20 psig vs 20 psi beside a shared 6 in": (
+        "Relief valve RV-1 on the 6 in main is set at 20 psig per the valve schedule",
+        "Relief valve RV-1 on the 6 in main is set at 20 psi per the valve schedule",
+    ),
+    "N1 120V vs 24VAC controls beside a shared 480V": (
+        "Motor for RTU-1 is 480V with 120V controls per the electrical schedule",
+        "Motor for RTU-1 is 480V with 24VAC controls per the electrical schedule",
+    ),
+    "N1 6 in vs 100 mm beside a shared 100 psi": (
+        "Pump P-1 discharge pipe is 6 in at 100 psi per the pump schedule",
+        "Pump P-1 discharge pipe is 100 mm at 100 psi per the pump schedule",
+    ),
+    "N1 10 ft vs 12 in clearance beside a shared 6 in": (
+        "The 6 in sprinkler main needs 10 ft clearance from the duct per the coordination plan",
+        "The 6 in sprinkler main needs 12 in clearance from the duct per the coordination plan",
+    ),
+    # Codex review, P1 on PR #158: a flow or a power written in another unit
+    # of the same quantity was a kind of its own, so a shared value hid it.
+    "N1 500 gpm vs 12,000 gph beside a shared 100 psi": (
+        "Pump P-1 is scheduled at 500 gpm at 100 psi on the pump schedule for the east "
+        "data hall chilled water loop",
+        "Pump P-1 is scheduled at 12,000 gph at 100 psi on the pump schedule for the east "
+        "data hall chilled water loop",
+    ),
+    "N1 5 hp vs 7.5 kW beside a shared 480V": (
+        "Fan EF-1 motor is 5 hp at 480V per the fan schedule for the east data hall",
+        "Fan EF-1 motor is 7.5 kW at 480V per the fan schedule for the east data hall",
+    ),
+    "N1 500 VA vs 1 kVA beside a shared 120V": (
+        "Transformer T-1 is 500 VA at 120V per the control panel schedule for the east data hall",
+        "Transformer T-1 is 1 kVA at 120V per the control panel schedule for the east data hall",
+    ),
+    "N1 24x12 vs 24x10 in beside a shared 1,200 cfm": (
+        "Duct 24x12 at 1,200 cfm conflicts with the steel beam at grid C near VAV-3",
+        "Duct 24x10 in at 1,200 cfm conflicts with the steel beam at grid C near VAV-3",
+    ),
 }
 
 
@@ -418,6 +494,17 @@ def test_conflicting_quantities_stay_two_findings(pair):
     assert sa["measurements"] and sb["measurements"], (sa, sb)
     assert not signatures_compatible(sa, sb)
     assert _surviving(a, b) == (2, 2)
+
+
+@pytest.mark.parametrize("pair", sorted(_CONFLICTS))
+def test_a_quantity_conflict_is_named_as_the_measurements_axis(pair):
+    # WP-04.2: the axes come from the rule itself (critique.signature_conflicts),
+    # which the A/B harness now reports instead of restating the rule.
+    from drawing_analyzer.critique import signature_conflicts
+
+    a, b = _CONFLICTS[pair]
+    sa, sb = critical_signature(_finding(a)), critical_signature(_finding(b))
+    assert "measurements" in signature_conflicts(sa, sb)
 
 
 # --------------------------------------------------------------------------- #
@@ -465,6 +552,10 @@ _EQUIVALENTS = {
         'Provide 2 1/2" pipe at the riser offset near grid B',
         'Provide 2.5" pipe at the riser offset near grid B',
     ),
+    "N1 6-inch = 6 in beside a shared 100 psi": (
+        "Pump P-1 discharge pipe is 6-inch at 100 psi per the pump schedule",
+        "Pump P-1 discharge pipe is 6 in at 100 psi per the pump schedule",
+    ),
 }
 
 
@@ -499,11 +590,154 @@ _SHARED_NAME_CONFLICTS = {
 
 @pytest.mark.parametrize("name", sorted(_SHARED_NAME_CONFLICTS))
 def test_a_shared_name_is_not_a_shared_quantity(name):
-    """Under today's rule one shared value makes two findings compatible (N1,
-    WP-04.2). So a compact-amp rule that read "101A" as 101 amperes would put
-    the same token in both findings and merge a 6 in drain into a 4 in one.
-    The name must contribute nothing, and the pair must stay apart."""
+    """A compact-amp rule that read "101A" as 101 amperes would put the same
+    token in both findings. Under the disjoint-set rule WP-04.1 shipped with,
+    that one shared value made them compatible and merged a 6 in drain into a
+    4 in one (N1). WP-04.2's rule would still keep this pair apart, but a name
+    must not become a quantity whatever the rule: it contributes nothing, and
+    the pair stays two findings."""
     a, b = _SHARED_NAME_CONFLICTS[name]
     assert _token_overlap(a, b) >= _TEXT_DUP_THRESHOLD
     assert _tokens(a) == ["6in"] and _tokens(b) == ["4in"]
     assert _surviving(a, b) == (2, 2)
+
+
+# --------------------------------------------------------------------------- #
+# The compatibility rule (remediation WP-04.2, N1): what still merges
+# --------------------------------------------------------------------------- #
+
+# One finding adds detail the other lacks: another quantity, a second value in
+# the same unit, or another length. That is corroboration with more evidence,
+# and it must keep merging.
+_CORROBORATIONS = {
+    "another unit added: 500 gpm vs 500 gpm at 100 psi": (
+        "Pump P-1 is scheduled at 500 gpm on the pump schedule for the east data hall",
+        "Pump P-1 is scheduled at 500 gpm at 100 psi on the pump schedule for the east data hall",
+    ),
+    "a value added in the same unit: 6 in vs 6 in, provide 8 in": (
+        "The 6 in main serving the east data hall is undersized for the design demand",
+        "The 6 in main serving the east data hall is undersized for the design demand; provide 8 in",
+    ),
+    "another length added: 12'-6\" vs 12'-6\", 10' from the wall": (
+        "Maintain 12'-6\" clear headroom under the main duct at the M-101 riser",
+        "Maintain 12'-6\" clear headroom under the main duct at the M-101 riser, 10' from the wall",
+    ),
+}
+
+
+@pytest.mark.parametrize("pair", sorted(_CORROBORATIONS))
+def test_a_quantity_one_side_adds_still_merges(pair):
+    a, b = _CORROBORATIONS[pair]
+    assert _token_overlap(a, b) >= _TEXT_DUP_THRESHOLD
+    sa, sb = critical_signature(_finding(a)), critical_signature(_finding(b))
+    assert set(sa["measurements"]) < set(sb["measurements"]), (sa, sb)
+    assert signatures_compatible(sa, sb)
+    assert _surviving(a, b) == (1, 1)
+
+
+# Two findings that share no quantity at all conflict whatever their units, as
+# they did before WP-04.2. A rule that compared only the units both sides
+# carry would have started merging these.
+_NO_SHARED_QUANTITY = {
+    "6 in vs 150 mm": (
+        "Pump P-1 discharge pipe is 6 in per the pump schedule for the east data hall",
+        "Pump P-1 discharge pipe is 150 mm per the pump schedule for the east data hall",
+    ),
+    "24x12 vs 24x10 in (no unit vs in)": (
+        "Duct 24x12 serving VAV-3 conflicts with the steel beam at grid C",
+        "Duct 24x10 in serving VAV-3 conflicts with the steel beam at grid C",
+    ),
+}
+
+
+@pytest.mark.parametrize("pair", sorted(_NO_SHARED_QUANTITY))
+def test_findings_that_share_no_quantity_stay_two(pair):
+    a, b = _NO_SHARED_QUANTITY[pair]
+    assert _token_overlap(a, b) >= _TEXT_DUP_THRESHOLD
+    sa, sb = critical_signature(_finding(a)), critical_signature(_finding(b))
+    assert sa["measurements"] and sb["measurements"]
+    assert set(sa["measurements"]).isdisjoint(sb["measurements"])
+    assert not signatures_compatible(sa, sb)
+    assert _surviving(a, b) == (2, 2)
+
+
+# Deliberate conservative duplicate retention (plan WP-04 acceptance). These
+# pairs may be one issue, but the signature cannot show it, so they stay two
+# findings. The safe error: a reviewer sees both rather than one that hides a
+# disagreement.
+_CONSERVATIVE_RETENTION = {
+    # NPS 6 is DN 150, but no value is converted between units (plan WP-04
+    # step 3): a length on each side that the other lacks conflicts.
+    "one pipe in two unit systems: 6 in vs 150 mm beside a shared 100 psi": (
+        "Pump P-1 discharge pipe is 6 in at 100 psi per the pump schedule",
+        "Pump P-1 discharge pipe is 150 mm at 100 psi per the pump schedule",
+    ),
+    "one clearance in two units: 3 ft vs 36 in beside a shared 6 in": (
+        "The 6 in sprinkler main needs 3 ft clearance from the duct per the coordination plan",
+        "The 6 in sprinkler main needs 36 in clearance from the duct per the coordination plan",
+    ),
+    # A loose-comma list signs only its last element (WP-04.1, by decision),
+    # so it cannot be told from the tight list that names the same sizes.
+    "a partial list signature against a full one: 2, 4, 6 in vs 2,4,6 in": (
+        "Provide 2, 4, 6 in floor drains at 100 psi test along the east wall of the mechanical room",
+        "Provide 2,4,6 in floor drains at 100 psi test along the east wall of the mechanical room",
+    ),
+}
+
+
+@pytest.mark.parametrize("pair", sorted(_CONSERVATIVE_RETENTION))
+def test_pairs_kept_apart_by_design(pair):
+    a, b = _CONSERVATIVE_RETENTION[pair]
+    assert _token_overlap(a, b) >= _TEXT_DUP_THRESHOLD
+    sa, sb = critical_signature(_finding(a)), critical_signature(_finding(b))
+    assert not signatures_compatible(sa, sb)
+    assert _surviving(a, b) == (2, 2)
+
+
+# Recorded limits: pairs that still merge although they may be two issues.
+# Each pins today's outcome so that a change to it is deliberate: a slice that
+# closes one flips its row into _CONFLICTS.
+_RECORDED_LIMITS = {
+    # Quantity roles are not extracted anywhere. Both findings carry {4in, 6in}
+    # and the same words, so nothing in the signature or the prose separates
+    # them (WP-04.3).
+    "swapped roles: 6 in main, 4 in branch vs 4 in main, 6 in branch": (
+        "Provide 6 in main and 4 in branch at the riser serving the east data hall",
+        "Provide 4 in main and 6 in branch at the riser serving the east data hall",
+    ),
+    # A set holds a value once, so a value repeated in two roles reads as one
+    # value, and {6in} is included in {6in, 8in} (WP-04.3).
+    "one value in two roles: 6 in supply and return vs 6 in supply, 8 in return": (
+        "Provide 6 in supply and 6 in return at the riser serving the east data hall",
+        "Provide 6 in supply and 8 in return at the riser serving the east data hall",
+    ),
+    # Feet-inches is two tokens (WP-04.1, by decision), so a bare 12' reads as
+    # the feet half with no inches given, not as 12'-0".
+    "a bare feet value: 12'-6\" vs 12'": (
+        "Maintain 12'-6\" clear headroom under the main duct at the M-101 riser",
+        "Maintain 12' clear headroom under the main duct at the M-101 riser",
+    ),
+    # WP-04.1's partial signatures, left by decision: each side signs only the
+    # quantity the tokenizer can read, and those agree.
+    "a to range signs its far end: 4 to 6 in vs 6 in": (
+        "Maintain 4 to 6 in clearance around the base of pump P-1 on the plan",
+        "Maintain 6 in clearance around the base of pump P-1 on the plan",
+    ),
+    "loose-comma lists sign their last element: 2, 4, 6 in vs 3, 5, 6 in": (
+        "Provide 2, 4, 6 in floor drains along the east wall of the main mechanical room",
+        "Provide 3, 5, 6 in floor drains along the east wall of the main mechanical room",
+    ),
+    "a bare 20A needs electrical context: 20A vs 30A on a shared 120V": (
+        "Provide 20A 120V circuit for exhaust fan EF-1 on panel LP-1",
+        "Provide 30A 120V circuit for exhaust fan EF-1 on panel LP-1",
+    ),
+}
+
+
+@pytest.mark.parametrize("pair", sorted(_RECORDED_LIMITS))
+def test_recorded_limits_still_merge(pair):
+    a, b = _RECORDED_LIMITS[pair]
+    assert _token_overlap(a, b) >= _TEXT_DUP_THRESHOLD
+    sa, sb = critical_signature(_finding(a)), critical_signature(_finding(b))
+    assert signatures_compatible(sa, sb)
+    assert _surviving(a, b) == (1, 1)

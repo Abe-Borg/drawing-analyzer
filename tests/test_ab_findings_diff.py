@@ -237,6 +237,79 @@ def test_records_are_written_under_the_wp_04_1_contract():
 
 
 # --------------------------------------------------------------------------- #
+# Remediation WP-04.2 — the compatibility rule, applied to stored signatures
+# --------------------------------------------------------------------------- #
+
+def test_a_conflict_beside_a_shared_value_is_never_an_exact_match():
+    """N1: one shared value made two signatures compatible, so a pipe size that
+    changed beside an unchanged pressure matched EXACT."""
+    for base_text, var_text in (
+        ("pump discharge is 6 in at 100 psi", "pump discharge is 4 in at 100 psi"),
+        ("maintain 12'-6\" clear headroom", "maintain 12'-8\" clear headroom"),
+    ):
+        m = _overlapping_pair(base_text, var_text)
+        assert m["counts"]["exact"] == 0, base_text
+        assert m["candidates"][0]["signature_conflicts"] == ["measurements"]
+
+
+def test_a_second_tag_that_changed_is_never_an_exact_match():
+    """N1, tags: the shared P-1 excused the changed valve."""
+    m = _overlapping_pair("duct conflicts with P-1 and V-3 routing",
+                          "duct conflicts with P-1 and V-4 routing")
+    assert m["counts"]["exact"] == 0
+    assert m["candidates"][0]["signature_conflicts"] == ["tags"]
+
+
+def test_a_reference_one_arm_adds_is_still_an_exact_match():
+    """The other direction: an arm that names one more reference, or states one
+    more quantity, found the same finding."""
+    for base_text, var_text in (
+        ("duct conflicts with P-1 routing", "duct conflicts with P-1 routing per M-501"),
+        ("pump flow is 500 gpm", "pump flow is 500 gpm at 100 psi"),
+    ):
+        m = _overlapping_pair(base_text, var_text)
+        assert m["counts"]["exact"] == 1, base_text
+        assert m["exact"][0]["text_changed"] is True
+
+
+def test_the_named_axes_come_from_the_production_rule():
+    """Plan WP-04 step 6: one copy of the rule. The harness used to restate the
+    disjoint-set test to name the axes, and that copy would have named nothing
+    for a pair the new verdict refuses: a candidate with an empty reason."""
+    import ab_findings_diff
+    from drawing_analyzer.critique import signature_conflicts
+
+    assert not hasattr(ab_findings_diff, "_signature_conflicts")
+    for base_text, var_text in (
+        ("pump discharge is 6 in at 100 psi", "pump discharge is 4 in at 100 psi"),
+        ("duct conflicts with P-1 and V-3 routing", "duct conflicts with P-1 and V-4 routing"),
+        ("duct size is not shown on the schedule", "duct size is shown on the schedule"),
+    ):
+        base = finding_records([_f(text=base_text, anchor=_rect())])
+        var = finding_records([_f(text=var_text, anchor=_rect(12.0, 12.0, 112.0, 62.0))])
+        (cand,) = match_records(base, var)["candidates"]
+        assert cand["signature_conflicts"] == signature_conflicts(
+            base[0]["critical_signature"], var[0]["critical_signature"])
+        assert cand["signature_conflicts"]
+
+
+def test_a_v3_record_is_compared_under_the_current_rule_without_a_bump():
+    """A record stores the signature's tokens, and the rule is re-applied when
+    two records are compared. WP-04.2 changed the rule, not the tokens, so a v3
+    record read back from disk still means what it says: no
+    ``RECORD_CONTRACT_VERSION`` bump (see the version's comment)."""
+    assert RECORD_CONTRACT_VERSION == 3
+    base = finding_records([_f(text="pump discharge is 6 in at 100 psi", anchor=_rect())])
+    var = finding_records([_f(text="pump discharge is 4 in at 100 psi",
+                              anchor=_rect(12.0, 12.0, 112.0, 62.0))])
+    sidecar = json.loads(json.dumps(
+        {"contract_version": RECORD_CONTRACT_VERSION, "records": base}))
+    m = match_records(sidecar["records"], var)
+    assert m["counts"]["exact"] == 0
+    assert m["candidates"][0]["signature_conflicts"] == ["measurements"]
+
+
+# --------------------------------------------------------------------------- #
 # §11.5 — "Identical count/mix with one baseline finding replaced still exposes
 #          the unmatched records"
 # --------------------------------------------------------------------------- #

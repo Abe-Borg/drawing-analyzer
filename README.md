@@ -664,7 +664,9 @@ and only it. The first exhaustive run afterwards re-runs the critique on every
 sheet once, at the cost of a cold critique pass, while digests and every other
 cached stage are still served, and the old entries are left in place. The
 quantity reading described under [the ledger](#the-findings-ledger-part-iii)
-(remediation WP-04.1) is such a change. The digest's images are gone by the time the critique runs (the batch path
+(remediation WP-04.1) was such a change, and so is the comparison rule that
+followed it (remediation WP-04.2): after upgrading past it, the first exhaustive
+run re-runs the critique on every sheet once more, while digests stay cached. The digest's images are gone by the time the critique runs (the batch path
 streams and discards them), so the critique renders each uncached sheet once more —
 but in a `use_batch` run it uploads that render **once** and runs *both* reads off
 the shared upload through the Message Batches API (the ~50% batch rate), rather than
@@ -1478,10 +1480,33 @@ findings instead of agreeing on `6 in`. `480V` and `208V` differ. `20A` counts a
 a current only beside a pole count (`20A/1P`), a breaker, fuse or disconnect, or
 a rating label (`MOCP 25A`), because `room 101A`, `grid 2A` and `panel 2A` are
 names, and a name mistaken for a quantity would make two findings about the same
-room look as if they shared one. One limit remains until the next remediation
-slice: a single shared quantity still makes two findings compatible, so a
-`6 in` / `4 in` conflict beside a shared `100 psi`, or `12'-6"` against `12'-8"`
-(both 12 ft), can still merge. A merge keeps
+room look as if they shared one.
+
+One shared quantity or tag no longer excuses a conflict beside it. A `6 in` /
+`4 in` pipe size beside a shared `100 psi`, `12'-6"` against `12'-8"` (both
+12 ft), `2 in, 4 in and 6 in` against `3 in, 5 in and 6 in`, and `P-1` with valve
+`V-3` against `P-1` with valve `V-4` all stay two findings. Quantities are
+compared by kind: a unit, or a group of units that measure one kind of quantity
+(lengths in inches, feet, millimetres or centimetres, including a duct size
+written without a unit; degrees, with or without a scale; `psi` and `psig`;
+volts, `VAC`, `VDC` and `kV`; `gpm`, `gph` and `gpd`; `hp` and `kW`; `VA` and
+`kVA`). Air flow (`cfm`) stays apart from water flow, and `kVA` from `kW`,
+because each pair names two different quantities rather than one quantity in
+two units. For each kind both findings mention, one finding's
+values must include the other's. So `90°F` against `90°C` stays two findings even
+when both mention the same `6 in` duct. No value is converted: `12 in` is never
+read as `1 ft`, and `6 in` against `150 mm` stays two findings even though the
+two may well be one pipe. Equipment tags and sheet, grid and detail references
+work the same way. One finding may add a quantity or name a reference the other
+omits (`P-1` against `P-1 per M-501`) and the two still merge, but two findings
+that each name a different extra reference (`V-3` on one, `M-501` on the other)
+stay apart. Keeping both is the safe error. A few pairs still merge, because
+nothing in the finding shows the conflict: two sizes with their roles swapped
+(`6 in main, 4 in branch` against `4 in main, 6 in branch`), because the app does
+not yet read which quantity belongs to what; a bare `12'` against `12'-6"`; and
+three spellings the app reads only in part: a range written with `to`
+(`4 to 6 in`), a list with spaces after its commas (`2, 4, 6 in`), and a bare
+`20A` with no breaker, fuse or rating beside it. A merge keeps
 **coherent grounding**: the survivor's text and quote come from one member as an
 atomic bundle — never one finding's text paired with another's quote — while the
 loser's quote is kept as a supporting quote. The **verdict rides that bundle**,
