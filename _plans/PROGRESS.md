@@ -441,7 +441,10 @@ what could not be verified, risks, and next steps.
     counting the span words only (reads numbers the quote left out, and reads
     the sheet's non-ASCII forms with ASCII rules: an en-dash `12'–6"` gave a
     phantom `12` and `6`). Three edge cases were run on the real code to show
-    the difference; the new tests pin two of them.
+    the difference (a FUZZY quote that dropped a printed `20`, an en-dash
+    dimension, a sheet's `2½"`); the new tests pin the first, plus a quote that
+    starts inside `2-1/2"`, where counting the quote alone trusts a number the
+    sheet never printed.
   - **Measured first**, as the request asked: a scratch copy of `origin/main`
     logged, for every mismatch in the full suite, today's provenance and all
     12 combinations (evidence quote / span / both × result joint / separate ×
