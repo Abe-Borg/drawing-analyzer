@@ -663,6 +663,7 @@ Regression cases: correct `20 + 20 = 40` with duplicated model operand; genuinel
 
 **Step 2.** A multiset-only fix closes the duplicated-operand case, but role swap, sum/product confusion and A8 stay DETERMINISTIC. Steps 2, 4 and 5 are all required.
 - **Done by WP-07.1 (decided with the owner):** the terms and the expected value are counted together against the printed numbers, one occurrence each, so the expected value never reuses a term's number (`20 + 30` does not state a total of 20; `20 + 30 = 20` does). Role swap, sum/product and A8 remain WP-07.2's.
+- **Done by WP-07.2:** role swap, sum/product and A8 (steps 4 and 5 below).
 
 **Step 3: decide provenance after anchoring.**
 - Today provenance is decided in `audit_arithmetic` (~479–483) **before anchoring**. It never looks at the anchor, or at whether the sheet resolved.
@@ -677,11 +678,13 @@ Regression cases: correct `20 + 20 = 40` with duplicated model operand; genuinel
 - **Correction (WP-07.1):** `::test_arithmetic_unresolved_sheet_still_records_finding_unanchored` was already UNCERTAIN on 1.7.0 and on `b3f60bb` (its quote `X` carries no operand), so it needed no re-baseline; it now asserts that. The unresolved case with a quote that carries the operands is pinned in `tests/test_arithmetic_operand_grounding.py`.
 
 **Step 4: keep relationship checks host-side.** Adding role or operator fields to the claims contract (`critique._CRITIQUE_FINDINGS_INSTRUCTION`, which is hashed into `CRITIQUE_PROMPT_VERSION`, and its cross-QC twin) would re-key every critique and cross-QC cache entry.
+- **Done by WP-07.2 (decided with the owner):** `arithmetic._relationship_grounded` requires the quote **and** the sheet's words under the matched span (the WP-07.1 evidence) each to print the claim as one equation (`_equations`): the stated value is the first number after `=` or TOTAL, the operands before it are exactly the terms (a multiset), and every join is the claim's operation (`+` for a sum; `x`/`×`/`*` for a product or factor). An operator-less list is a sum only with TOTAL (`20 20 20 TOTAL 540` stays DETERMINISTIC; with `=` alone it does not). Anything else (a subtraction or division, an unknown symbol such as `@`, a refused number between operands, mixed operators, an extra or missing operand, a swapped role) is not established and the mismatch stays MODEL_TRANSCRIBED / UNCERTAIN. Not taken: requiring an explicit operator (a TOTAL-only row would be UNCERTAIN; it moved 24 pinned claims), and reading the relationship from the quote or the span alone (a FUZZY window can differ from the sheet in its operator). The claims contract is unchanged.
 
 **Step 5: hyphens.**
 - `_NUM_IN_TEXT_RE`'s `[-+]?` reads a hyphen after a letter as a minus sign: `M-101 P-3 AHU-2` gives `[-101, -3, -2]`.
 - Keep the scanner/parser agreement test.
 - Trailing letters are units (`20A`, `150GPM`) and must still parse.
+- **Done by WP-07.2 (decided with the owner):** a letter glued before the digits makes them a tag's or sheet id's, with or without a hyphen (`FP101`, `M-101`, `AHU-2`, `A1.01`), and a hyphen after a letter is never a minus sign; letters after a number are its unit unless digits follow them directly (`24x12`, `2P20A`, `10A1`, `100m2`, `1e3`: not one value). Scientific notation is **rejected** (a term spelled `1e3` makes its claim unusable), not read as a complete token. The same refusal covers a Unicode dash (the set `anchor._normalize` folds, pinned equal), a fraction slash, `×` between digits and a glued vulgar fraction. Every change only refuses (a parse becomes `None` or stays the same), so no surviving finding's id moves. The scanner/parser agreement test is kept, and a per-token agreement table is added (`tests/test_arithmetic_tokens_and_relationships.py`).
 
 **Step 7: counters.**
 - The matched path never checks provenance, so ungrounded operands still count as "checked out OK".

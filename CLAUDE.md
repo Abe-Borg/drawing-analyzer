@@ -1229,8 +1229,27 @@ example is parked at `docs/examples/fire_protection.md`.
   only after anchoring, so a failure while deciding (an anchoring error on one
   sheet included) leaves it `UNCERTAIN`, the safe direction. A mismatch from
   `MODEL_TRANSCRIBED` terms stays `UNCERTAIN` and is crop-verified before it
-  inks as ground truth. Operand *roles* and the relationship itself (sum
-  versus product, a swapped term) are not checked yet (WP-07.2). A term that is not **one** value
+  inks as ground truth. The **relationship** is checked host-side too
+  (remediation WP-07.2, A8; the owner's rule): `_relationship_grounded`
+  needs the quote **and** the matched span's words each to print the claim as
+  one equation (`_equations`): the stated value is the first number after `=`
+  or `TOTAL`/`SUBTOTAL`, its operands are **exactly** the terms (a multiset: an
+  operand left out of a correct `20 20 20 TOTAL 60` would otherwise be a
+  DETERMINISTIC mismatch on a correct row), and every join is the claim's
+  operation (`+` for a sum; `x`/`×`/`*` for a product or factor); an
+  operator-less list is a sum only with TOTAL (`20 20 20 TOTAL 540`), never
+  with `=` alone. `_gap_marks` reads the text between numbers: a digit there is
+  a number the scan refused (`FP101`, `30%`), so the relationship is
+  unreadable, as are a subtraction or division, a symbol it does not know
+  (`@`, `$`) and mixed operators; a label's number before the operands is
+  read as one of them (`RISER 3: 20 20 20 TOTAL 540` has four, a recorded
+  cost). So a
+  product transcribed as a sum (`20 x 2 = 40` as `sum [20, 2]`), a total
+  swapped into the terms and a correct subtraction all stay `UNCERTAIN`. Both
+  sides, as for the operands: a FUZZY window may differ from the sheet in one
+  non-numeric token, and that token can be the operator. No role or operator
+  field was added to the claims contract (plan WP-07 step 4); the host reads
+  roles from the printed layout only. A term that is not **one** value
   is refused rather than truncated to its leading run (`12,5`, `12'-6"`, `1.2.3`),
   and a `%` is refused outright: a percent is a ratio, and because the bare `30` in
   `1500 SF + 30% = 1950 SF` appears literally in the quote it *cleared* the
@@ -1241,7 +1260,28 @@ example is parked at `docs/examples/fire_protection.md`.
   on either side: `20 20 20 TOTAL 540` is four numbers and `0.5, 1.5, TOTAL 2.0`
   is an operand list, while `12,5` and `10,20` stay rejected. A loose binder cost
   no wrong answers but downgraded such a list to MODEL_TRANSCRIBED and paid for a
-  crop check to re-learn what the quote already said. `_fmt` expands an integral with `format(v, "f")`, never
+  crop check to re-learn what the quote already said. Since remediation WP-07.2
+  (A8, the owner's rules) the scanner and the parser read only a token that is
+  one value. A **letter glued before** the digits makes them a tag's or sheet
+  id's (`FP101`, `A1.01`, and `M-101` / `AHU-2`, where a hyphen after a letter
+  joins the tag and is **never a minus sign**: `M-101 P-3 AHU-2` scanned as
+  -101, -3, -2 and grounded a `-3` operand); a `+` glued to a letter stays an
+  operator (`250GPM+100GPM` reads 100) except as an exponent's sign. **Letters
+  after** the number are its unit (`20A`, `150GPM`, `12IN`, `0.20 gpm/ft²`)
+  unless digits follow them directly: `1e3`, `2.5e-2`, `24x12`, `2P20A`,
+  `10A1`, `100m2` are not one value, in the parser (`_NUMERIC_TAIL_RE`) and the
+  scanner alike. **Scientific notation is rejected, not read** (`1e3` was 1, so
+  `sum ["1e3", 500] = 1600` inked "the sum of 1, 500 is 501"; `2E1` is as
+  likely a panel as an exponent), so a term spelled that way makes its claim
+  unusable. The same refusal covers a Unicode dash wherever `-` binds or
+  after a letter (`_UNICODE_DASHES`, pinned equal to the dashes
+  `anchor._normalize` folds; `−5` is refused because `[-+]` cannot read its
+  sign), a fraction slash, a `×` between digits and a vulgar fraction glued on
+  (`2½"` was read as 2). Every change only ever **refuses**: a parse becomes
+  `None` or stays what it was, and the scan only loses numbers, so no finding's
+  text, discriminator or id moves and nothing is newly trusted. Accepted cost:
+  an ASCII-squared `100m2` is refused, and a `Ø6"` (Ø is a letter) is read as a
+  tag. `_fmt` expands an integral with `format(v, "f")`, never
   `quantize`, which raises above the decimal context's 28 digits from ordinary
   string terms — inside the `Finding(...)` expression, *after* `mismatched` was
   incremented. Each claim now has its own `try` with a tally rollback: the
