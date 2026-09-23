@@ -678,6 +678,8 @@ _MERGE_RULE_CORPUS = (
     ("maintain 12'-8\" clear at the M-101 riser", ""),
     ('Provide 1/2" drain at the low point of the loop', ""),
     ('Provide 2 1/2" drain at the low point of the loop', ""),
+    ("Provide 4x25 gpm circulating pumps at the central plant", ""),
+    ('Board 6"x12\' is cut from the wrong stock', ""),
     ("Detail 5 is not shown on this sheet", "DETAIL 5"),
     ("Detail 5 is shown on this sheet", "DETAIL 5"),
 )
@@ -717,9 +719,9 @@ def _merge_rule_fingerprint() -> str:
 
 
 # Before the term existed (1.7.0 through WP-01.2) this rule fingerprinted as
-# d99acd1496c39ce4b94caf6ca09ceb9b2a8d946cb11f5cd9acaedb10054d96a5.
+# 70a2e09c50476f79c5096837430c6b4a5628a66b3df11a7ff03830135404e1e4.
 _MERGE_RULE_BY_CRITIQUE_CONTRACT = {
-    1: "205d4c9df796464804b5eb485176f2d96b0e062e26d888b9b29131aaa6eb9401",  # WP-04.1
+    1: "fa3623035836987525e786ff44597ec1cdf2cc59e1dffbff6a07ef278f3614bb",  # WP-04.1
 }
 
 

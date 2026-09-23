@@ -659,11 +659,16 @@ _VOLTAGE_PAIR = r"\d+\s*[Yy]\s*/\s*\d+"
 _PLAIN_NUMBER = r"(?:" + _THOUSANDS + r"|" + _FRACTION + r"|" + _MIXED + r"|" + _DEC + r")"
 _THOUSANDS_RE = re.compile(_THOUSANDS)
 _NUMBER_KINDS = ("vpair", "run", "frac", "mixed", "dec")
-_NUMBER_RE = re.compile(
-    _NUMBER_START + r"(?P<sign>" + _SIGN + r")(?:"
+_NUMBER_BODY = (
+    r"(?P<sign>" + _SIGN + r")(?:"
     r"(?P<vpair>" + _VOLTAGE_PAIR + r")|(?P<run>" + _COMMA_RUN + r")"
     r"|(?P<frac>" + _FRACTION + r")|(?P<mixed>" + _MIXED + r")|(?P<dec>" + _DEC + r"))"
 )
+_NUMBER_RE = re.compile(_NUMBER_START + _NUMBER_BODY)
+# The next dimension of a W×H candidate that turned out not to be a size is a
+# number of its own, but it follows an "x" that _NUMBER_START refuses, so it is
+# matched in place (see _read_quantity).
+_NUMBER_AT_RE = re.compile(_NUMBER_BODY)
 # Alpha units need a trailing word boundary (so "voltage" is not "volt", "into"
 # not "in"), and may be joined to the number by a hyphen: ``6-inch``, ``6-in.``,
 # ``a 10-foot clearance`` (B2).
@@ -710,7 +715,8 @@ _VOLT_UNITS = frozenset({"volt", "vac", "vdc"})
 # falls back to the single tokens: dimensions in different units (``6" x 12'``),
 # multiplication (``4 x 25 gpm``, a unit after the last dimension), and a
 # feet-inches W×H (``10'-6" x 12'-0"``), whose inches half can neither start nor
-# end a size.
+# end a size. The fallback keeps every dimension, tight or spaced: ``6"x12'`` is
+# ``6in`` and ``12ft``, ``4x25 gpm`` is ``25gpm`` (see _read_quantity).
 _SIZE_UNIT = r"(?:\"|'|in(?:ch(?:es)?)?\b|ft\b|feet\b|foot\b|mm\b|cm\b)"
 _SIZE_TAIL_RE = re.compile(
     r"(?P<u1>\s*-?\s*" + _SIZE_UNIT + r")?"
@@ -893,26 +899,40 @@ def _range_value(lo_raw: str, hi_raw: str) -> str:
     return f"{lo}..{hi}"
 
 
-def _read_quantity(text: str, m: re.Match) -> tuple[str | None, int]:
-    """The token for the number ``m`` found (or ``None``), and where to resume.
+def _read_quantity(text: str, m: re.Match) -> tuple[str | None, int, int | None]:
+    """The token for the number ``m`` found (or ``None``), where to resume, and
+    where a rejected W×H candidate's next dimension starts (or ``None``).
 
     Scanning resumes past the whole quantity, never inside it, so its parts are
     never read again on their own: the ``500`` in ``12,500``, the ``12`` in
-    ``24x12``, the ``6`` in ``4-6``.
+    ``24x12``, the ``6`` in ``4-6``. The exception is a W×H candidate that is
+    not a size (``6"x12'``, ``4x25 gpm``). Its next dimension is a quantity of
+    its own, and it follows an ``x`` a number may not start after, so it is
+    handed back to be read where it stands; otherwise ``12ft`` and ``25gpm``
+    would be lost.
     """
     start, end, sign = m.start(), m.end(), m.group("sign")
     kind = next(k for k in _NUMBER_KINDS if m.group(k) is not None)
     raw = m.group(kind)
     if kind == "run" and _THOUSANDS_RE.fullmatch(raw):
         kind, raw = "dec", raw.replace(",", "")
-    plain = kind in ("dec", "mixed", "frac")
-    if plain and not sign:
+    tail = None
+    if kind in ("dec", "mixed", "frac") and not sign:
         size = _SIZE_TAIL_RE.match(text, end)
         if size is not None:
             token = _size_token(text, start, raw, size)
             if token is not None:
-                return token, size.end()
-    if plain:
+                return token, size.end(), None
+            tail = size.start("d2")
+    token, resume = _read_one(text, start, end, sign, kind, raw)
+    return token, resume, tail
+
+
+def _read_one(
+    text: str, start: int, end: int, sign: str, kind: str, raw: str
+) -> tuple[str | None, int]:
+    """One number's token, a range or a value with its unit, and where it ends."""
+    if kind in ("dec", "mixed", "frac"):
         rng = _RANGE_TAIL_RE.match(text, end)
         if rng is not None:
             unit = _UNIT_RE.match(text, rng.end())
@@ -956,15 +976,19 @@ def _quantity_tokens(text: str) -> frozenset[str]:
     regex it replaced (1.9 s against 1.4 s); cached, it is faster (0.9 s).
     """
     out: set[str] = set()
-    pos = 0
+    pos, tail = 0, None
     while True:
-        m = _NUMBER_RE.search(text, pos)
+        m = _NUMBER_AT_RE.match(text, tail) if tail is not None else None
+        if m is None:
+            m = _NUMBER_RE.search(text, pos)
         if m is None:
             return frozenset(out)
-        token, end = _read_quantity(text, m)
+        token, end, tail = _read_quantity(text, m)
         if token is not None:
             out.add(token)
         pos = max(end, m.end())
+        if tail is not None and tail < pos:
+            tail = None
 
 
 def _measurements(f: Finding) -> set[str]:

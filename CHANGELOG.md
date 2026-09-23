@@ -76,7 +76,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - **Sizes, ranges, lists and voltage pairs are single quantities:** `24x12`,
     `24"x12"` (the same as `24x12 in`), `4-6 in`, `2,4,6 in`, and `120/208V`
     (the same as `208Y/120V`). A composite never shares a value with its parts,
-    so `2,4,6 in` and `3,5,6 in` no longer agree on `6 in`.
+    so `2,4,6 in` and `3,5,6 in` no longer agree on `6 in`. Something that only
+    looks like a size keeps each of its quantities: `6"x12'` is `6 in` and
+    `12 ft`, and `4x25 gpm` is `25 gpm` (both lost their second quantity before).
   - **Compact volts and amps sign.** `480V`, `24VAC` and `24VDC` sign wherever
     they follow a number, except in a slope ratio (`3H:1V`). `20A` signs only
     with electrical context: a pole count (`20A/1P`), a breaker, fuse or

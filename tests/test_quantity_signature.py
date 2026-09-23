@@ -204,7 +204,8 @@ _SAFEGUARDS = [
     # A feet-inches W×H is not a size this form can hold: its halves sign alone.
     ("elevation 10'-6\" x 12'-0\"", ["0in", "10ft", "12ft", "6in"]),
     ("elevation 12' - 6\" x 10'", ["10ft", "12ft", "6in"]),
-    ("room is 10'x12'-6\"", ["10ft", "6in"]),
+    ("elevation 12'-6\"x10'-0\"", ["0in", "10ft", "12ft", "6in"]),
+    ("room is 10'x12'-6\"", ["10ft", "12ft", "6in"]),
     ("relief set at 20 psig", ["20psig"]),           # psig is not folded into psi
     ("relief set at 20 psi", ["20psi"]),
     ("pump P-1 draws 6 amps", ["6amp"]),              # plurals fold
@@ -250,6 +251,10 @@ _NEGATIVE_CORPUS = [
     ("L4x4x1/4 angle", []),
     ("Provide 4 x 25 gpm pumps", ["25gpm"]),
     ('Board 6" x 12\'', ["12ft", "6in"]),
+    # A rejected size keeps its second dimension, tight or spaced: it follows
+    # an "x" that a number may not otherwise start after (Codex review, P1).
+    ("Provide 4x25 gpm pumps", ["25gpm"]),
+    ('Board 6"x12\' cut to length', ["12ft", "6in"]),
     ("at column 4, 10 ft from the wall", ["10ft"]),
     # Loose commas are prose punctuation as often as list separators, so they
     # never join numbers into a list ("column 4, 10 ft" above). Only a tight
@@ -389,6 +394,10 @@ _CONFLICTS = {
     "N19 2,4,6 in vs 2,4,8 in": (
         "Provide 2,4,6 in floor drains along the east wall of the main mechanical room per the plumbing plan",
         "Provide 2,4,8 in floor drains along the east wall of the main mechanical room per the plumbing plan",
+    ),
+    "N19 a rejected tight size keeps its tail: 4x25 gpm vs 4x30 gpm": (
+        "Provide 4x25 gpm circulating pumps along the east wall of the central plant",
+        "Provide 4x30 gpm circulating pumps along the east wall of the central plant",
     ),
     'item 23: 1/2" vs 2"': (
         'Provide 1/2" drain at the low point of the loop',

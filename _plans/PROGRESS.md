@@ -421,7 +421,8 @@ what could not be verified, risks, and next steps.
     - W×H sizes (`24x12`, `24 x 12`, `24×12`, `24"x12"`, `24x12-inch`,
       `600x300 mm`, `24x12x6`) with per-dimension units that must agree.
       Multiplication (`4 x 25 gpm`), mixed units (`6" x 12'`) and feet-inches
-      W×H (`10'-6" x 12'-0"`) fall back to single tokens.
+      W×H (`10'-6" x 12'-0"`) fall back to single tokens, keeping every
+      dimension in the tight form too (review follow-up below).
     - Compact volts (`480V`, `24VAC`, `24VDC`) anywhere but a slope
       (`3H:1V`). Voltage pairs (`120/208V`, `208Y/120V`, `120/208 volts`) are
       one token, low first; `120/208 volts` used to sign as the fraction
@@ -460,6 +461,16 @@ what could not be verified, risks, and next steps.
     They now state what was true when those features landed.
   - **A/B harness:** `RECORD_CONTRACT_VERSION` 2 → 3; `_signature_conflicts`
     is untouched (WP-04.2 replaces it).
+  - **Review follow-up (Codex P1 on this PR).** A tight W×H candidate that was
+    not a size lost its second dimension: the scanner resumed after the first
+    number, and a number may not start right after `x`. So `6"x12'` signed
+    only `6in` and `4x25 gpm` signed nothing (the spaced forms were fine; the
+    base code lost them too). `_read_quantity` now hands back where the next
+    dimension starts, and the scanner reads it in place (`_NUMBER_AT_RE`, the
+    same number grammar without the start guard). `6"x12'` is `{6in, 12ft}`,
+    `4x25 gpm` is `{25gpm}`, `10'x12'-6"` keeps its `12ft`. A pair such as
+    `6"x12'` / `6"x14'` still shares `6in`, so under today's rule it can still
+    merge: that is N1 (WP-04.2).
   - **Docs:** CHANGELOG (Fixed: B2, B3, B12, N19, with the one-time critique
     re-run as the visible cost), CLAUDE.md (the ledger paragraph's signature
     description, I-6 and the new term), README (the ledger section's
@@ -484,10 +495,11 @@ what could not be verified, risks, and next steps.
   contract test uses `RECORD_CONTRACT_VERSION - 1`).
 - **New guard:** `test_the_critique_contract_is_pinned_to_the_merge_rule`
   fingerprints the merge rule (signatures, the pairwise `_is_duplicate` matrix
-  and a self-consistency merge over a fixed 32-finding corpus) and pins it per
+  and a self-consistency merge over a fixed 34-finding corpus) and pins it per
   contract value. The base commit's rule fingerprints differently
-  (`d99acd…`, recorded in the test), so a rule change that forgets the bump
-  fails there.
+  (`70a2e0…`, recorded in the test), and so does this PR's head before the
+  review follow-up (`715fa2…`), so a rule change that forgets the bump fails
+  there.
 - **Validation (this container, Python 3.11.15, SDK 1.7.0, PyMuPDF 1.28.2):**
   - **Baseline before any change:** `python -m pytest -q -m "not network"`
     gave **2,726 passed, 2 skipped, 10 deselected** (238 s), identical to the
@@ -497,20 +509,22 @@ what could not be verified, risks, and next steps.
     signed `0cfm`; `90 deg F` and `90 deg C` both signed `90deg`; `24x12`,
     `20A`, `480V` and `4-6 in` signed nothing; `2,4,6 in` signed `6in`; and
     `120/208 volts` signed `0.5769230769230769230769230769volt`.
-  - **Failing first.** The 197 new tests, run in a full copy of the base
-    commit with only the new test files added: **120 failed, 77 passed**
-    (`tests/test_quantity_signature.py` 112/77; all four cache-identity tests
-    and all four A/B tests failed). The 77 pin what the fix keeps: the item-23
-    safeguards, the negative corpus, the spellings that already signed, and
-    merge outcomes the old rule already got right (`90°F`/`90°C`, `90°`/`90°F`,
+  - **Failing first.** The 201 new tests, run in a full copy of the base
+    commit with only the new test files added: **125 failed, 76 passed**
+    (`tests/test_quantity_signature.py` 117/76; all four cache-identity tests
+    and all four A/B tests failed). The review follow-up's five tests, and the
+    ratchet, also failed on this PR's head before it. The 76 pin what the fix
+    keeps: the item-23 safeguards, the negative corpus, the spellings that
+    already signed, and merge outcomes the old rule already got right
+    (`90°F`/`90°C`, `90°`/`90°F`,
     `1/2"`/`2"`, `-6 in`/`6 in`, `2 1/2"`=`2.5"`, the three shared-name pairs,
     and `2,4,6 in`/`2,4,8 in`, blocked before only because the trailing
     fragments differed). One pair (`10'x12'` against `10'x14'`) was blocked on
     the base code only by the stray `x12` tag, so the test uses the spaced
     form, which failed.
-  - **After:** the 197 new tests pass. Full suite **2,923 passed, 2 skipped,
-    10 deselected** (232 s), the baseline plus the 197 new tests, with the
-    same two environment skips (IPv6 loopback; chmod as root).
+  - **After:** the 201 new tests pass. Full suite **2,927 passed, 2 skipped, 10 deselected** (237 s), the baseline
+    plus the 201 new tests, with the same two environment skips (IPv6
+    loopback; chmod as root).
   - **Browser suite:** not run separately. No report JS, HTML or chat code
     changed; the browser tests also ran inside the full suite above.
   - `ruff check --select E9,F63,F7,F82 src tests scripts` is clean.
