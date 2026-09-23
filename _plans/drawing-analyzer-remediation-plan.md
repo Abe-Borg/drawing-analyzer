@@ -34,7 +34,7 @@ This plan does not implement application changes. The implementation agent must 
 - **Naming collisions to keep straight.** `CLAUDE.md` and `docs/` cite an earlier, completed plan: packages WP-00 … WP-08, WP-03A/WP-03B, and references such as "WP-02 §7.1", "WP-05 §10.1" and "WP-07 §12.13". Those are **not** this plan's work packages. This plan's slices are always written `WP-nn.m`. The review's findings R1 … R7 are also unrelated to the measurement packages R-01 … R-06.
 - Repository-relative paths in this document are navigation aids. Line numbers from the review are intentionally not treated as stable implementation anchors; locate the named symbols in the implementation checkout.
 - IDs `B*`, `R*`, `C*`, `$*`, `K*`, `A*`, and `H*` refer to the original report. `G*` refers to its application/packaging findings. The original report is kept, unchanged, at [`DEEP_REVIEW_2026-09.md`](DEEP_REVIEW_2026-09.md). Its line numbers are against `f5284ac`.
-- `N1` through `N9` identify additional findings from the reassessment. `N10` through `N27` are defects found when the plan was re-verified (§1.3). All are defined in section 3.
+- `N1` through `N9` identify additional findings from the reassessment. `N10` through `N27` are defects found when the plan was re-verified (§1.3). IDs from `N28` on were found during remediation and are added to §3 and §7.2 by the slice that found them. All are defined in section 3.
 - `U1` through `U32` identify the unnumbered concerns in §7.2, so that the tracker can refer to them.
 - Evidence behind the 2026-09-22 re-verification is in [`verification-2026-09-22/`](verification-2026-09-22/): per-area reports with current anchors, reproductions, and the pinned tests each change must re-baseline.
 - Preserve the distinction between a reproduced defect, a traced failure path, and an unmeasured performance or compatibility risk in all completion reports.
@@ -150,6 +150,7 @@ If a proposed change conflicts with a documented invariant, resolve the contract
 | N25 | `DRAWING_ANALYZER_CRITIQUE_RUNS ≥ 3` fabricates corroboration. `critique_3` is in neither `SOURCE_TAGS` nor `ledger._FAMILIES`, so merging a `critique_1` finding with a `critique_3` finding reads as a cross-family REPRODUCED. | P1 |
 | N26 | The chat transcript (up to 500k characters) is saved in `localStorage` on the `file://` origin, where any other local HTML file can read it. | P1 |
 | N27 | A stream that ends without `message_stop` yields `stop_reason=None` and partial text, with no exception. The digest caches it as complete. | P0 |
+| N28 | `_is_duplicate`'s geometry branch folds two different issues that quote one tag. Pass A keeps "pump P-1 voltage listed as 480 should be 208" and "pump P-1 impeller diameter conflicts with the curve" apart on purpose (both quote `PUMP P-1`, and the quote alone is not enough), but once both anchor to the tag the branch fires (same quote, rectangles overlapping, no text or claim check) and Pass B folds them. The impeller issue is lost: its text is overwritten and its quote equals the survivor's. Found by WP-03.1. | P0 |
 
 Priority meanings: P0 protects result correctness or truthful completion; P1 protects recoverability, evidence, accounting, or release integrity; P2 improves robustness, performance, and interoperability after the relevant correctness contracts are stable.
 
@@ -352,7 +353,7 @@ Slices: WP-02.1 … WP-02.5.
 
 ### WP-03 — Durable finding identity and lossless, symmetric merging
 
-**Priority:** P0. **Covers:** B1, B7, B8, B9, K5; the ledger half of N2.  
+**Priority:** P0. **Covers:** B1, B7, B8, B9, K5, N28; the ledger half of N2.  
 **Primary files:** `models.py`, `ledger.py`, `critique.py`, `auditors/__init__.py`, serialization/export consumers.  
 **Dependencies:** quantity predicate from WP-04; downstream WP-06/WP-21 depend on identity.
 
@@ -446,7 +447,7 @@ Regression cases:
 
 **Navigation.** Keying bookmarks and index destinations by `placement_id` needs no identity work; it is done in WP-21.3.
 
-Slices: WP-03.1 … WP-03.6.
+Slices: WP-03.1 … WP-03.7. WP-03.7 was added by WP-03.1 (README step 7): the regression "two `PUMP P-1` issues retain separate identities" cannot hold while the geometry branch folds two findings that quote one string whatever their texts say (N28). The fix is a decision, not a threshold: the paraphrase fold that `test_post_anchor_reconciliation_folds_a_geometric_duplicate` pins shares even fewer words than the `PUMP P-1` pair, so no text-overlap threshold separates them.
 
 ### WP-04 — Engineering quantity and tag comparison
 
@@ -1677,7 +1678,7 @@ Do not repeatedly run an expensive full suite without new edits or unresolved fa
 
 ### 7.1 Every numbered finding in the original report
 
-The current disposition of every ID below, of N1–N27 and of U1–U32 is kept in the register in [`PROGRESS.md`](PROGRESS.md). This section records where each item is addressed.
+The current disposition of every ID below, of N1–N28 and of U1–U32 is kept in the register in [`PROGRESS.md`](PROGRESS.md). This section records where each item is addressed.
 
 | Finding | Required package(s) | Completion nuance |
 |---|---|---|
@@ -1766,6 +1767,7 @@ Stable IDs `U1`–`U32` were added on 2026-09-22 so that [`PROGRESS.md`](PROGRES
 | N25 | Critique runs ≥ 3 fabricate corroboration | WP-22 (WP-22.2); mandatory. |
 | N26 | Chat transcript readable by other local files | WP-20 (WP-20.3); mandatory. |
 | N27 | Clean-EOF stream cached as a complete digest | WP-01 (WP-01.2); mandatory. |
+| N28 | Geometry branch folds two issues that quote one tag | WP-03 (WP-03.7); mandatory. |
 | U1 | Actual serving model, fallback iterations, partial-stream billing | WP-14; mandatory. |
 | U2 | Fallback text joins and selective history replay | WP-01/WP-12/WP-13/WP-19; preserve contiguous text and required block semantics. |
 | U3 | Generic output-config rejection disables task budget | WP-13; mandatory. |

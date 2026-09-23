@@ -780,9 +780,10 @@ def _sig_text(f: Finding) -> str:
     #
     # The survivor's sets therefore GROW as it absorbs members (WP-04.2 states
     # how the rule treats that; see ``signature_conflicts``). The complete-link
-    # checks never compare a newcomer with the grown survivor: they compare it
-    # with each member as it arrived (``_cluster``; ``Ledger.add`` over member
-    # snapshots; Pass B's survivor side over ``Ledger.member_history``).
+    # checks never compare a grown signature: they compare members as they
+    # arrived (``_cluster``; ``Ledger.add`` over member snapshots; Pass B over
+    # ``Ledger.member_history`` on BOTH sides since WP-03.1, so its incoming
+    # entry no longer sees one either).
     extra = " ".join(getattr(f, "supporting_quotes", None) or [])
     return f"{f.text or ''} {f.source_quote or ''} {extra}"
 
@@ -1140,13 +1141,15 @@ def signature_conflicts(a: dict, b: dict) -> list[str]:
     **Growing signatures.** A survivor's signature includes its supporting
     quotes (``_sig_text``), so its sets grow as it absorbs members, and inclusion
     then accepts any newcomer the grown set contains. The complete-link checks
-    therefore compare a newcomer with each member as it arrived, never with the
-    grown survivor: ``_cluster``, ``Ledger.add`` (member snapshots) and Pass B's
-    survivor side (``Ledger.member_history``). Three places still see a grown
-    signature: Pass B's incoming entry (B1, WP-03.1); a critique representative
-    entering the ledger, whose reads were merged upstream and whose signature
-    holds their quotes but not their texts (WP-03.5); and the A/B harness, which
-    compares final findings.
+    therefore compare members as they arrived, never a grown signature:
+    ``_cluster`` (each read's own finding), ``Ledger.add`` (member snapshots)
+    and Pass B, which compares every member of one entry's history with every
+    member of the other's (``Ledger.member_history`` on both sides). Until
+    WP-03.1 Pass B's incoming entry was its live, grown object (B1). Two places
+    still see a grown signature: a critique representative entering the
+    ledger, whose reads were merged upstream and whose signature holds their
+    quotes but not their texts (WP-03.5); and the A/B harness, which compares
+    final findings.
 
     **Not compared: quantity roles.** Nothing extracts them, so ``6 in main,
     4 in branch`` and ``4 in main, 6 in branch`` carry the same tokens and are

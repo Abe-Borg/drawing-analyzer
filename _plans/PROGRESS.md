@@ -1,7 +1,7 @@
 # Remediation progress tracker
 
-**Next up:** Wave 1 in order: `WP-03.1`. WP-04.2 is done: it replaced the compatibility rule behind the critical signature (N1) and bumped `digest_cache._CRITIQUE_CACHE_CONTRACT` to 2. WP-04 is not done: its acceptance needs quantity roles, now slice `WP-04.3` (Wave 2). WP-09.2 now waits only on WP-09.1. First check the open PRs ([`README.md`](README.md), step 1). Before the next stable tag, the owner should look at O-5.
-**Last updated:** 2026-09-23 by the WP-04.2 session ([PR #158](https://github.com/Abe-Borg/drawing-analyzer/pull/158)).
+**Next up:** Wave 1 in order: `WP-03.2`. WP-03.1 is done: Pass B's complete-link is symmetric, so the B1 case ends with the same number of entries in every ingest order (B1's count part; B1 stays open for WP-03.5). It found N28, now slice `WP-03.7` (Wave 1, after WP-03.3; it needs a decision first). WP-04 is not done: its acceptance needs quantity roles, slice `WP-04.3` (Wave 2). First check the open PRs ([`README.md`](README.md), step 1). Before the next stable tag, the owner should look at O-5.
+**Last updated:** 2026-09-23 by the WP-03.1 session ([PR #159](https://github.com/Abe-Borg/drawing-analyzer/pull/159)).
 
 This file is authoritative for **status and order**. Requirements live in
 [`drawing-analyzer-remediation-plan.md`](drawing-analyzer-remediation-plan.md).
@@ -52,7 +52,7 @@ A package is `done` only when every slice is `done` or `n/a` **and** its
 |---|---|---|---|---|
 | WP-01 | Response terminal states and truthful stage completeness | P0 | 01.1–01.7 | todo |
 | WP-02 | Faithful SDK, streaming, batch and network test boundaries | P0 (enabling) | 02.1–02.5 | todo |
-| WP-03 | Durable finding identity and lossless, symmetric merging | P0 | 03.1–03.6 | todo |
+| WP-03 | Durable finding identity and lossless, symmetric merging | P0 | 03.1–03.7 | todo |
 | WP-04 | Engineering quantity and tag comparison | P0 | 04.1–04.3 | todo |
 | WP-05 | Robust anchoring and consistent quote evidence | P0/P1 | 05.1–05.3 | todo |
 | WP-06 | Source-safe cross-QC and claim-preserving deduplication | P0/P1 | 06.1–06.4 | todo |
@@ -102,9 +102,10 @@ starting.
 | WP-01.2 | Shared terminal-outcome helper; the digest (real-time and batch) never admits a refusal, truncation or `stop_reason=None` read as success or into either cache level; cached refusals are rejected when read; decides D-1 (N4 digest, N27) | M/L | — | done | [PR #156](https://github.com/Abe-Borg/drawing-analyzer/pull/156), 2026-09-23. One classifier, `core.terminal_outcome.classify_stop_reason` (D-1), its vocabulary pinned by test to the SDK's `StopReason` ∪ `BetaStopReason`. Both transports share one ladder (`digest.digest_terminal_error`), one write predicate (`digest.digest_cache_admits`, both levels) and one loader (`digest.sheet_digest_from_cache_entry`, all three cache hits), which serves only a stored finished stop reason; a stored `null` and a missing key are misses (D-4 started, one migration-register row, no schema or key change). Tests: `tests/test_digest_terminal_outcome.py`, `tests/test_terminal_outcome.py`, `tests/test_drawing_acceptance.py::test_a_refused_or_unfinished_digest_holds_the_run_below_complete`. Residual: N15, an errored digest's findings still reach the ledger (WP-01.3) |
 | WP-04.1 | Quantity tokenizer: hyphenated units, thousands groups, opaque malformed tokens, `deg`/`°` (angle vs temperature), lists and ranges, W×H and V/A with a negative corpus; critique-scoped cache term (B2, B3, B12, N19) | M | — | done | [PR #157](https://github.com/Abe-Borg/drawing-analyzer/pull/157), 2026-09-23. `critique._quantity_tokens`, a scanner that reads each quantity whole. A composite (list, range, W×H size, voltage pair) is ONE token, compared whole; the representation is documented at the tokenizer and pinned by `tests/test_quantity_signature.py`. Compact `A` needs electrical context (negative corpus in the same file). Critique cache term `digest_cache._CRITIQUE_CACHE_CONTRACT = 1` inside both critique builders; A/B `RECORD_CONTRACT_VERSION` 2 → 3. Tests: `tests/test_quantity_signature.py`, the WP-04.1 section of `tests/test_drawing_cache_identity.py`, four tests in `tests/test_ab_findings_diff.py`. Residual partial signatures (loose-comma lists, `to` ranges, `and`/`or` lists, a bare `20A`) are listed in the handoff |
 | WP-04.2 | Compatibility rule over per-unit value sets and partial tag overlap; one shared `signature_conflicts` that the A/B harness also uses (N1) | M | WP-04.1 | done | [PR #158](https://github.com/Abe-Borg/drawing-analyzer/pull/158), 2026-09-23. `critique.signature_conflicts` (axes `tags`, `measurements`, `absence_polarity`, `cross_sheet_legs`); `signatures_compatible` is its negation, and the A/B harness reports its axes (its restated copy is gone). Quantities compare per kind (a unit, or one of the `_QUANTITY_KIND` groups: lengths, degrees, `psi`/`psig`, volts, liquid flow, real power, apparent power): for every kind both carry, one side's tokens must include the other's; no value is converted. Tags compare by inclusion, not by prefix. Sharing no quantity at all still conflicts. Critique contract 1 → 2, fingerprint pinned under 2; `RECORD_CONTRACT_VERSION` stays 3 (rule-only change; plan step 6 corrected). Tests: `tests/test_signature_compatibility.py`, the N1 rows and the corroboration, retention and recorded-limit tables in `tests/test_quantity_signature.py`, the WP-04.2 sections of `tests/test_ab_findings_diff.py` and `tests/test_drawing_cache_identity.py`. Roles are not compared: WP-04.3 |
-| WP-03.1 | Symmetric complete-link in Pass B, order-independent entry count (B1, count part) | S | — | todo | |
+| WP-03.1 | Symmetric complete-link in Pass B, order-independent entry count (B1, count part) | S | — | done | [PR #159](https://github.com/Abe-Borg/drawing-analyzer/pull/159), 2026-09-23. `ledger.reconcile_post_anchor` folds an entry only when every member of its `Ledger.member_history` is `_is_duplicate` of every member of the survivor's (both sides, each as it arrived). The B1 case ends with two entries in all six orders, under seven severity and quote-length variants; histories stay cliques; a second pass folds nothing. The candidate index cannot miss a fold (argued at `_candidates`, pinned against an index-free reference). Geometry: recorded as a recall loss, not lent (Pass B now folds only entries that absorbed nothing in Pass A). Tests: `tests/test_pass_b_complete_link.py`, `tests/test_drawing_dedup_lifecycle.py::test_pass_b_keeps_a_conflict_the_incoming_entry_absorbed`. No cache or key change. Found N28 (WP-03.7) |
 | WP-03.2 | Deterministic total-order tie-break in `assign_qc_ids` (K5) | S | — | todo | |
 | WP-03.3 | Remove the auditor coordinator's id dedup; arithmetic claim discriminator so the ledger keeps two different same-row mismatches; Decimal claim-dedup keys (B7) | S/M | — | todo | |
+| WP-03.7 | The geometry branch folds two different issues that quote one tag (N28): decide what, besides a shared quote and an overlapping rectangle, may fold two findings, and apply it in both passes | S/M | WP-03.3 | todo | Added by WP-03.1 (README step 7). **Needs a decision first.** No text-overlap threshold separates the cases: the paraphrase fold `test_post_anchor_reconciliation_folds_a_geometric_duplicate` pins shares 1 of 11 content words (0.09), the two different `PUMP P-1` issues share 3 of 12 (0.25). Options: drop the branch (loses that paraphrase fold; pin it as retention), or a claim discriminator (the general form of WP-03.3's arithmetic one). Flip `tests/test_pass_b_complete_link.py::test_recorded_limit_the_geometry_branch_folds_two_issues_that_quote_one_tag`. The merge-rule ratchet (`tests/test_drawing_cache_identity.py`) fingerprints `_is_duplicate` over unanchored findings only, so check whether a change moves it before deciding on a critique contract bump |
 | WP-07.1 | Occurrence-aware, sheet-grounded operand support; provenance decided after anchoring; a fabricated quote or unresolved sheet is never DETERMINISTIC (N3) | M | — | todo | |
 | WP-07.2 | Strict numeric tokens (tag and sheet-id digits, hyphen-as-minus, `1e3`) and host-side relationship checks (A8) | M | WP-07.1 | todo | |
 | WP-05.1 | Cross-QC grounding: a real match for every non-empty quote at word boundaries; no text means unavailable evidence; one normalizer shared with `anchor`; `_CROSS_QC_CACHE_CONTRACT` 3→4 (B5, N12 cross-QC part, N13) | M | — | todo | |
@@ -137,8 +138,8 @@ starting.
 | WP-10.3 | Planner loss metadata stored with the plan; legacy entries report loss as unknown (K4) | S/M | WP-01.1 | todo | |
 | WP-10.4 | Cache map with the admission predicate of every write; N4 read-side migration completed; migration register filled (N4 cache part; WP-10 steps 1, 7, 9) | S/M | WP-01.2, WP-01.4 | todo | |
 | WP-03.4 | Versioned `claim_id` beside the existing `id`; the inventoried consumers switched; cross-QC and prose-harvest cache restores rebound; decides D-3 (B8 identity) | L | WP-03.2 | todo | |
-| WP-03.5 | Lossless observations: upstream merges hand observations to the ledger; observations and alternative actions serialized (incl. critique cache); specificity-aware representative (B9, B1 rest) | L | WP-03.1, WP-03.4, WP-04.2 | todo | |
-| WP-03.6 | Canonical final clustering over retained observations; per-observation anchors; idempotent reconciliation (WP-03 clustering clarification) | M/L | WP-03.5 | todo | |
+| WP-03.5 | Lossless observations: upstream merges hand observations to the ledger; observations and alternative actions serialized (incl. critique cache); specificity-aware representative (B9, B1 rest) | L | WP-03.1, WP-03.4, WP-04.2 | todo | From WP-03.1: flip `tests/test_pass_b_complete_link.py::_500_EXPORTED` ("500" leaves the exports in ABC/ACB/BAC, where the generic bridge wins A's bundle). Also hand the prose harvest's matched mirror to the ledger as an observation: `prose_harvest._process_free_pending` sets `also_on` on a live entry directly, so legs attached after that entry's first merge are in no member snapshot and Pass B's complete-link cannot see them (narrow since WP-03.1: Pass B folds such an entry only through a member anchored before ingest) |
+| WP-03.6 | Canonical final clustering over retained observations; per-observation anchors; idempotent reconciliation (WP-03 clustering clarification) | M/L | WP-03.5 | todo | From WP-03.1: flip `tests/test_pass_b_complete_link.py::_BRIDGE_JOINS` (which cluster the generic bridge joins follows arrival order) and `::test_recorded_limit_a_four_finding_chain_still_counts_by_arrival_order` (entry count 2 or 3 by order). Per-observation anchors are also where the geometric recall WP-03.1 gave up comes back (`::test_a_geometric_duplicate_folds_only_between_entries_that_absorbed_nothing`) |
 | WP-06.4 | Direction-free merge for reversed cross-sheet conflicts with a stated same-claim predicate (B10) | M | WP-03.4, WP-06.1 | todo | |
 | WP-07.3 | Truthful arithmetic counters split by provenance; contradictory transcriptions of one quote flagged (N18; WP-07 step 7) | S/M | WP-07.1, WP-03.3 | todo | |
 | WP-11.3 | Source revision checked on every reopen (verify, investigate, markup) (R1 revision part) | M | WP-11.1 | todo | |
@@ -273,7 +274,7 @@ report is built from it).
 
 | ID | Summary | Pri | Slice(s) | Disposition | Evidence |
 |---|---|---|---|---|---|
-| B1 | Pass B complete-link checks one direction; a 550 gpm finding absorbs the 500 gpm one | P0 | 03.1, 03.5 | open | |
+| B1 | Pass B complete-link checks one direction; a 550 gpm finding absorbs the 500 gpm one | P0 | 03.1, 03.5 | open (count part implemented+validated in 03.1; "both measurements survive" in the exports (03.5) stays open) | `tests/test_pass_b_complete_link.py` (all six orders under seven severity and quote-length variants; entry count per variant; the history clique; idempotence; an index-free reference over generated sets) and `tests/test_drawing_dedup_lifecycle.py::test_pass_b_keeps_a_conflict_the_incoming_entry_absorbed` (WP-03.1, [PR #159](https://github.com/Abe-Borg/drawing-analyzer/pull/159)). Remaining: "500" still leaves the exports in ABC/ACB/BAC (`_500_EXPORTED`, WP-03.5); which cluster the bridge joins still follows arrival order (`_BRIDGE_JOINS`, WP-03.6) |
 | B2 | Hyphenated units (`6-inch`) get no measurement signature | P0 | 04.1 | implemented+validated | `tests/test_quantity_signature.py` (the B2 token table; the `B2 …` conflict and equivalence pairs, each asserted in the critique merge and the ledger); `tests/test_ab_findings_diff.py::test_a_changed_hyphenated_quantity_is_never_an_exact_match` (WP-04.1, [PR #157](https://github.com/Abe-Borg/drawing-analyzer/pull/157)) |
 | B3 | Thousands separators split numbers (`12,500` signs as `500`) | P0 | 04.1 | implemented+validated | `tests/test_quantity_signature.py` (the B3 token table, incl. `15,000` once signing as zero and the malformed `1,2,500` kept whole; the `B3 …` pairs); `tests/test_ab_findings_diff.py::test_thousands_grouped_quantities_compare_by_value` (WP-04.1, [PR #157](https://github.com/Abe-Borg/drawing-analyzer/pull/157)) |
 | B4 | Verbatim quotes fail to anchor on punctuation/spacing variance | P0/P1 | 05.2, 05.3 | open | |
@@ -351,6 +352,7 @@ report is built from it).
 | N25 | `DRAWING_ANALYZER_CRITIQUE_RUNS ≥ 3` fabricates cross-family corroboration | P1 | 22.2 | open | |
 | N26 | Chat transcript kept in `localStorage` on `file://`, readable by other local files | P1 | 20.3 | open | |
 | N27 | A stream that ends without `message_stop` is cached as a complete digest | P0 | 01.2 | implemented+validated | `tests/test_digest_terminal_outcome.py::test_n27_a_real_sdk_stream_that_ends_without_message_stop_is_not_a_digest` (the real SDK's stream accumulator over an in-process transport, through `digest_sheet`), plus the `stop_reason=None` cases on both transports, at both cache levels and through the pipeline (WP-01.2, [PR #156](https://github.com/Abe-Borg/drawing-analyzer/pull/156)) |
+| N28 | The geometry branch folds two different issues that quote one tag once both anchor there (`PUMP P-1` voltage / impeller); the loser's text is lost | P0 | 03.7 | open | Found by WP-03.1 and pinned as a recorded limit: `tests/test_pass_b_complete_link.py::test_recorded_limit_the_geometry_branch_folds_two_issues_that_quote_one_tag` (flip it) |
 | U1 | Serving model, fallback iterations and partial-stream billing unrecorded | P1 | 14.3, 14.6, 01.7 | open | |
 | U2 | Fallback text joins and selective history replay | P1 | 01.6, 12.1, 13.4, 19.2 | open | |
 | U3 | Generic `output_config` 400 disables task budgets process-wide | P1 | 13.1 | open | |
@@ -389,6 +391,235 @@ report is built from it).
 Each session adds one entry at the top: date, slices and IDs, PR, what changed,
 contracts decided, cache/schema effects, validation actually run (with counts),
 what could not be verified, risks, and next steps.
+
+### 2026-09-23 — WP-03.1: symmetric complete-link in Pass B ([PR #159](https://github.com/Abe-Borg/drawing-analyzer/pull/159))
+
+- **Slice and IDs:** WP-03.1. B1, count part (B1 stays `open` for WP-03.5,
+  as N4 stays open for its critique part). No `DECISIONS.md` contract is
+  decided (D-3 stays open for WP-03.4). One new finding, **N28**, recorded and
+  pinned, not fixed; it gets slice **WP-03.7** (below).
+- **What changed:**
+  - **The predicate** (`ledger.reconcile_post_anchor`). An entry `e` folds
+    into a survivor `s` only when every member of `Ledger.member_history(e)`
+    is `critique._is_duplicate` of every member of `s`'s history: Pass A's
+    all-pairs relation, over both sides, each member as it arrived. Before, the
+    live `e` alone was compared with `s`'s members. In the B1 case the live
+    `e` had handed its bundle to the generic member in Pass A, so the
+    `500 gpm` it absorbed never met the `550 gpm` survivor. `_is_duplicate` is
+    symmetric, so the outcome no longer depends on which entry sorts first. A
+    new survivor's local history is the list it was just compared through
+    (`members[id(e)] = incoming`), the same objects `member_history` returns.
+  - **Reproduced first** on `321cb8e`: ABC, ACB and BAC ended with one entry
+    and no `500` in text, quote or `supporting_quotes`; BCA, CAB and CBA kept
+    two. Now two entries in all six orders.
+  - **The candidate index cannot miss a fold** the predicate allows, argued
+    at `_candidates` and pinned. It looks survivors up by `e`'s live text
+    tokens and quote. Every accepting branch of `_is_duplicate` needs a shared
+    text token or an equal quote. The pair of representatives (the members
+    carrying each entry's live text and quote: the last bundle winner's
+    snapshot, or the live head) is always among the pairs checked, and a
+    survivor's own signals were indexed when it became one and never change
+    in Pass B, since the best-first sort means it always keeps its bundle. A
+    survivor the index skips shares nothing with that pair, so the predicate
+    would refuse it anyway. Pinned by comparing Pass B's partition with an
+    index-free reference over generated sets
+    (`test_generated_sets_keep_the_invariants_in_every_order`).
+  - **The geometry decision: record the loss, don't lend the rect.** Pass A
+    snapshots are frozen before anchoring, so they carry no rectangle, and the
+    geometry branch needs one on both sides. Two entries Pass A kept apart hold
+    a pair of members Pass A did not find to be duplicates, and a rectangle is
+    the only evidence Pass B has that Pass A lacked. So Pass B now folds only
+    entries that absorbed nothing in Pass A (or whose absorbed members were
+    anchored before ingest, as auditor findings are). Measured in
+    `test_a_geometric_duplicate_folds_only_between_entries_that_absorbed_nothing`
+    (both sides quote `CO-1` and anchor to one rectangle, too little shared
+    text for Pass A):
+
+    | Which side absorbed a Pass A member | Before | After |
+    |---|---|---|
+    | neither | folds | folds |
+    | the survivor only | stays two | stays two |
+    | the incoming entry only | folds | **stays two** |
+    | both | stays two | stays two |
+
+    Geometric duplicates share a quote, so they tie on quote length (and, with
+    one category, on id); which side was "incoming" was decided by severity,
+    then text. So before, whether two such clusters folded was arbitrary. Now
+    they never do.
+    Why not lend the resolved rect to snapshots that quote the same string
+    (the first of the three options in the plan's WP-03 verification note on
+    step 6)? The geometry branch has no text check, so it already folds two
+    different issues that quote one tag once both anchor there (N28, below),
+    and lending would extend that rule to every cluster quoting one string. And `anchor.resolve_anchors` picks among repeated
+    occurrences by each finding's own `tile`, so a lent rect is a guess about
+    where that member was. Anchoring each observation (the second option)
+    belongs to WP-03.6's per-observation anchors. Plan §2.1: conservative
+    retention over unproven merging.
+  - **What Pass B can still fold, measured** (scratch, not committed; 400
+    generated sets of 3–5 findings, all orders, none anchored before ingest):
+    0 folds involved a Pass-A-merged entry, against 1,671 on the base;
+    singleton-to-singleton folds were identical on both trees (982). Over
+    15,180 runs the new partition equalled the base's 13,646 times and was
+    strictly finer 1,534 times; it never folded a pair the base kept apart.
+    That follows from the code one fold at a time: for an incoming entry that
+    absorbed nothing, the old and new rules check the same pairs, and one that
+    absorbed something no longer folds. Only the sequence of folds can differ.
+  - **Plan corrected** (README step 7): N28 is added to plan §1.1's ID scope
+    line, §3, §7.1's range and §7.2, and to WP-03's "Covers" and slice list
+    (WP-03.1 … WP-03.7, with the reason).
+  - **Docs:**
+    - CHANGELOG: Fixed, B1 count part, with the visible effect and what stays
+      open.
+    - CLAUDE.md: the "every complete-link check" sentence now covers both
+      sides. The Pass B sentences are rewritten for the symmetric predicate,
+      the index argument, the geometry decision and the recorded limits.
+    - README: the ledger lifecycle paragraph. The visible count changes.
+    - `critique.py`: the "Growing signatures" paragraph of
+      `signature_conflicts` and the `_sig_text` comment. **Pass B's incoming
+      entry no longer sees a grown signature**; two places still do (a
+      critique representative entering the ledger, WP-03.5; the A/B harness).
+    - `ledger.py`: the `reconcile_post_anchor` docstring and the comments on
+      `_members`, `_freeze_history_head`, `_candidates` and the predicate.
+- **Contracts decided:** none.
+- **Cache/schema effects:** none, confirmed:
+  - The ledger (Pass A and Pass B) is rebuilt every run and never cached.
+  - The critique cache stores `_cluster`'s output, which this slice does not
+    touch.
+  - The merge-rule ratchet (`tests/test_drawing_cache_identity.py`)
+    fingerprints `critical_signature`, `_is_duplicate` and
+    `merge_self_consistency` over unanchored findings, all untouched. It
+    passes unchanged.
+  - `CRITIQUE_PROMPT_VERSION` hashes prompt strings, not module source, so
+    the docstring edits move no key.
+  - The downstream per-finding caches key on one finding's own content, not
+    on the fold structure. Investigation keys on id, text, quote, category,
+    severity, rect, prior note and `set_content_fingerprint`, which hashes the
+    source documents, not ledger entries. An entry the fix keeps separate is
+    a finding with its own key, as with any other change in the set.
+
+  So no cached consumer of Pass B's result exists. No key, contract or
+  `_SCHEMA_VERSION` change, and no migration-register row.
+- **Re-baselined tests:** none. Every pinned test passes unchanged:
+  - the 24 existing tests of `tests/test_drawing_dedup_lifecycle.py`, incl.
+    `test_overlapping_rects_stay_separate_without_semantic_match`,
+    `test_ingest_order_independent_entries_and_numbers`,
+    `test_complete_link_ingest_survives_representative_switch`,
+    `test_pass_b_complete_link_does_not_collapse_a_conflicting_chain`,
+    `test_the_representative_does_not_depend_on_ingest_order`,
+    `test_post_anchor_reconciliation_folds_a_geometric_duplicate`,
+    `test_pass_b_keeps_a_conflict_carried_in_text_not_the_quote` and
+    `test_a_second_merge_cannot_capture_the_first_merges_result_as_history`;
+  - `tests/test_signature_compatibility.py` (its Pass B pairs are both
+    singletons) and `tests/test_drawing_ledger.py`;
+  - `tests/test_drawing_qc_pipeline.py` and `tests/test_drawing_acceptance.py`
+    (the trust gauntlet).
+
+  The evidence's claim that the review's symmetric patch keeps both files
+  green holds again with today's larger files. Edited without changing an
+  assertion: the "Growing signatures" comment in
+  `tests/test_signature_compatibility.py`.
+- **Recorded limits** (pinned in `tests/test_pass_b_complete_link.py` so the
+  closing slice flips them deliberately; the WP-03.5, WP-03.6 and WP-03.7
+  rows name them):
+  - which cluster the generic bridge joins still follows arrival order: A's
+    in ABC/ACB/BAC, C's in BCA/CAB/CBA (`_BRIDGE_JOINS`, WP-03.6);
+  - whether `500` reaches the exports: lost in ABC/ACB/BAC, where the bridge's
+    longer quote wins A's bundle in Pass A; `500` then lives only in the
+    runtime member history (`_500_EXPORTED`, WP-03.5);
+  - a four-finding chain (A–B, B–C, C–D duplicates, every other pair in
+    conflict) still ends with two or three entries by arrival order: Pass A's
+    online clustering is greedy (WP-03.6). The count is order-independent for
+    three findings (no three-finding generated set varied: 0 of 500 in the
+    scratch search, against 21 on the base) but not beyond;
+  - N28 (next item).
+- **New finding N28** (P0; slice WP-03.7, Wave 1 after WP-03.3; plan §3 and
+  §7.2). `_is_duplicate`'s geometry branch folds two different issues that
+  quote one tag. `pump P-1 voltage listed as 480 should be 208` and
+  `pump P-1 impeller diameter conflicts with the curve`, both quoting
+  `PUMP P-1`, stay apart in Pass A (the quote alone is not enough), then fold
+  in Pass B once both anchor to the tag. The impeller issue is gone: its text
+  is overwritten and its quote equals the survivor's. WP-03's regression "two
+  `PUMP P-1` issues retain separate identities" cannot hold at the pipeline
+  level while this stands. No text-overlap threshold separates it from the
+  paraphrase fold `test_post_anchor_reconciliation_folds_a_geometric_duplicate`
+  pins (0.09 against 0.25), so WP-03.7 starts with a decision.
+- **Validation (this container, Python 3.11.15, SDK 1.7.0, PyMuPDF 1.28.2):**
+  - **Baseline before any change:** `python -m pytest -q -m "not network"`
+    gave **3,063 passed, 2 skipped, 10 deselected** (220 s) on `321cb8e`,
+    identical to the WP-04.2 handoff.
+  - **Failing first.** The 116 new tests (115 in
+    `tests/test_pass_b_complete_link.py`, plus the reverse-order twin), run in
+    a `git archive` copy of `origin/main` (`321cb8e`) with only the two test
+    files replaced, results classified from `--junitxml`:
+    - **23 failed, all on behaviour, none on import.** They are 12 of the 42
+      B1-matrix cases (`b1` ABC/ACB/BAC, `mirror` BCA/CAB/CBA,
+      `500-most-severe` BCA/CAB/CBA, `550-most-severe` ABC/ACB/BAC), 4 of the
+      7 per-variant count tests, 2 of the 8 geometry configurations (the
+      absorbing side sorting second), 3 of the 6 bridge-cluster limits (the
+      base put all three findings in one entry), the generated-sets property
+      test, and the twin.
+    - **93 passed.** They pin what the fix keeps: the other 30 matrix cases,
+      all 42 idempotence cases (idempotence held on the base too: randomized
+      searches over 1,300 generated sets, all orders, found no base
+      counterexample), the 3 control variants' counts (`review-as-written` is
+      the review's own construction, with B quoting nothing, which does not
+      fail on `main`), 6 geometry configurations, the three recorded limits
+      the fix does not change, and the check that the variants cover both
+      roles and both bundle winners.
+    - The 24 existing lifecycle tests passed on the base.
+  - **After:** the 116 new tests pass. Full suite **3,179 passed, 2 skipped,
+    10 deselected** (215 s): the baseline plus the 116 new tests, with the same
+    two environment skips (IPv6 loopback; chmod as root).
+  - **Browser suite:** not run separately. No report JS, HTML or chat code
+    changed; the browser tests ran inside the full suite.
+  - `ruff check --select E9,F63,F7,F82 src tests scripts` (the pinned 0.14.5,
+    run as `python -m ruff`: the container's `ruff` on `PATH` is 0.15.8) is
+    clean. F401/F811/F841 over the touched files shows two hits, both present
+    on the base (WP-22.5 territory); none is new. `scan_secrets.py` is clean
+    over 198 tracked files, the new one included. `compileall src` passes.
+  - **Cost:** Pass B on a synthetic 1,693-entry, 40-sheet ledger with 103
+    Pass-A-merged entries, best of 5: 418 ms against 438 ms on the base. It
+    folded 60 entries, against 63 on the base.
+- **Not verified:** live API behaviour (no budget, O-4; this slice makes no
+  call). Real drawings: every fixture is synthetic, and how often the
+  geometric recall loss occurs on a real set is unmeasured (O-10). Windows is
+  covered by this PR's CI.
+- **Risks and residual gaps:**
+  - **A visible behaviour change, by design.** A report can show one more
+    finding where a conflicting measurement used to be folded away, and a
+    same-spot duplicate of an already-merged finding now appears as its own
+    row.
+  - **Geometric recall loss (decided).** A finding that quotes the same string
+    at the same spot but is worded differently no longer folds into an entry
+    that absorbed a member in Pass A, on either side. The live pair is a
+    geometric duplicate (asserted in the test); the snapshots are not.
+  - **Legs the prose harvest attaches after a merge.**
+    `prose_harvest._process_free_pending` sets `also_on` on a live entry
+    directly, outside `_merge_into`: the only signature-relevant mutation of a
+    ledger entry between ingest and Pass B (a grep for `.also_on =`). Legs
+    attached after the entry's first merge are in no member snapshot, so
+    complete-link cannot see them on either side. Before, it could not on the
+    survivor side either. Since WP-03.1 such an entry folds only through a
+    member anchored before ingest, so the gap is narrow; noted on WP-03.5 (hand
+    the harvest's match to the ledger as an observation).
+  - **Not pairwise stricter in one contrived shape.** The old rule compared
+    the incoming entry's grown signature, which holds the winner's text and
+    every member's quote. That union can conflict where no member does. The
+    member-wise judgment is the faithful one (WP-04.2 already rules out
+    comparing grown signatures). Only an entry with a member anchored before
+    ingest could reach that case, since Pass B no longer folds any other
+    merged entry.
+- **Re-checked (U31):**
+  - Pass B's only production caller is `pipeline.py`, which swallows any
+    exception with a warning (I-3). The new tests call
+    `reconcile_post_anchor` directly.
+  - `member_history` and `adopt_members` have no other callers.
+  - `resolve_anchors` resolves each finding from its own quote and `tile`,
+    and skips findings already anchored.
+  - The investigation key's set fingerprint covers source documents, not
+    ledger entries.
+- **Next:** WP-03.2 (Wave 1). WP-03.5 now waits on WP-03.4; WP-03.7 waits on
+  WP-03.3 and needs a decision first.
 
 ### 2026-09-23 — WP-04.2: the compatibility rule behind the critical signature ([PR #158](https://github.com/Abe-Borg/drawing-analyzer/pull/158))
 

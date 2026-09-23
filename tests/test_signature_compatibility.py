@@ -355,10 +355,11 @@ def test_the_rule_blocks_every_pair_the_flat_rule_blocked():
 # --------------------------------------------------------------------------- #
 #
 # A survivor's signature includes its supporting quotes (``critique._sig_text``),
-# so its sets grow as it absorbs members. The complete-link checks compare a
-# newcomer with every member instead of with the grown survivor: the critique's
-# ``_cluster``, the ledger's ``Ledger.add`` (member snapshots) and Pass B's
-# survivor side (``Ledger.member_history``).
+# so its sets grow as it absorbs members. The complete-link checks compare
+# members as they arrived instead of a grown signature: the critique's
+# ``_cluster``, the ledger's ``Ledger.add`` (member snapshots) and Pass B
+# (``Ledger.member_history`` on both sides since WP-03.1; its incoming side is
+# tested in ``tests/test_pass_b_complete_link.py``).
 
 _P1 = "Pump P-1 suction valve conflicts with the strainer at the base of the riser"
 _P1_V3 = "Pump P-1 suction valve V-3 conflicts with the strainer at the base of the riser"

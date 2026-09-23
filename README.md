@@ -1531,6 +1531,25 @@ geometry, and only then assigns the sequential **`QC-###`** numbers — so they 
 visual order (source input order → page → top-to-bottom). Numbering strictly after
 anchoring is what makes the numbers positional.
 
+The fold after anchoring is held to the same standard as the ingest merge, on
+both sides: two entries fold only when every finding already folded into one is
+a duplicate of every finding folded into the other. Until remediation WP-03.1 it
+checked only the incoming entry's current text. So when a generic finding
+("riser pump flow per riser schedule") had merged with a `500 gpm` one and taken
+over its text, the pair could fold into a `550 gpm` finding, and `500 gpm`
+disappeared; whether it did depended on which channel reported first. Now the
+two measurements stay two findings however the channels arrive. Two gaps remain
+for later remediation work: which of the two the generic finding joins still
+follows arrival order, and where it took over the `500 gpm` finding's text,
+`500` survives only inside the run, not in the exports. The fold also uses
+position (the same quote at the same spot) only between findings that have
+absorbed nothing: a finding worded differently stays separate when either side
+has already absorbed a duplicate. That is the safe error, chosen on purpose,
+because position is no check on meaning. Between two findings that have
+absorbed nothing the fold still uses position, so two different issues about
+one pump that both quote its tag can become one finding; that is a known gap
+(N28) for later remediation work.
+
 A finding that arrives *after* the seal is an orchestration failure, and the
 ledger treats it as one whether or not it duplicates an existing entry. It is
 counted, logged, and the run is marked **incomplete** — never numbered as

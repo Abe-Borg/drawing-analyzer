@@ -153,7 +153,9 @@ class Ledger:
         # with C. Stored as **immutable snapshots** (deep copies) taken at ingest,
         # because ``_merge_into`` mutates the live survivor when a higher-quality
         # member wins — the live object would otherwise erase the earlier member's
-        # signature from this history. Runtime-only; never serialized.
+        # signature from this history. Pass B compares two entries through these
+        # histories on BOTH sides (remediation WP-03.1). Runtime-only; never
+        # serialized.
         self._members: dict[int, list[Finding]] = {}
         # Conservative per-sheet candidate indexes.  Every duplicate accepted by
         # ``_is_duplicate`` either shares at least one normalized content token
@@ -346,6 +348,11 @@ class Ledger:
         anchored entry — and ``_is_duplicate``'s geometry branch, which needs a
         rectangle on both sides, could then never fire against it. Pass B
         stopped folding rect-overlap duplicates entirely.
+
+        A head frozen here during Pass A is unanchored for the same reason, so
+        an entry that merged in Pass A does not fold on geometry in Pass B, and
+        since WP-03.1 that holds on both sides of the comparison. Decided, not
+        overlooked: see :func:`reconcile_post_anchor`.
 
         Frozen here instead: at the one moment the live object stops being an
         accurate record of what it was, which is exactly the reason the
@@ -636,6 +643,30 @@ def reconcile_post_anchor(ledger: "Ledger") -> int:
     findings sharing a table cell are never collapsed. The lower-quality member is
     merged into the survivor and dropped; deterministic (best-quality survivor,
     fixed order). Returns the number of entries folded. Only runs while SEALED.
+
+    **Symmetric complete-link** (remediation WP-03.1, review B1). An entry folds
+    into a survivor only when every member of its history duplicates every
+    member of the survivor's (:meth:`Ledger.member_history`, each member as it
+    arrived): Pass A's all-pairs relation, applied to both sides. Neither side
+    is compared through its live object, whose signature has grown and whose
+    text may be another member's. So the outcome does not depend on which of
+    two entries sorts first, a second call folds nothing, and afterwards every
+    entry's history is a clique of duplicates.
+
+    **What it can still fold, by decision.** Two entries Pass A kept apart hold
+    a pair of members Pass A did not find to be duplicates, and the only
+    evidence Pass B has that Pass A lacked is a rectangle. The snapshots that
+    record a Pass A merge are frozen before anchoring, so they carry none, and
+    the geometry branch needs one on both sides. Pass B therefore folds only
+    entries that absorbed nothing in Pass A (or whose absorbed members were
+    anchored before ingest, as auditor findings are). The resolved rect is
+    deliberately NOT lent to snapshots that quote the same string: the geometry
+    branch has no text check, so it already folds two different issues that
+    quote one tag once they anchor together, and the resolver chooses among
+    repeated occurrences by each finding's own tile, so a lent rect is a guess.
+    The cost is recall: a geometric duplicate of an entry that absorbed a
+    member in Pass A stays a separate entry. Anchoring every observation
+    belongs to canonical clustering (WP-03.6).
     """
     if ledger.state != SEALED:          # SEALED only — never re-dedup a NUMBERED ledger
         return 0
@@ -669,6 +700,16 @@ def reconcile_post_anchor(ledger: "Ledger") -> int:
                 quote_index.setdefault(quote, set()).add(sid)
 
         def _candidates(finding: Finding) -> list[Finding]:
+            # Only narrows the search; the predicate below decides. Looking a
+            # survivor up by ``finding``'s LIVE text tokens and quote cannot
+            # miss a fold the predicate allows: every accepting branch of
+            # ``_is_duplicate`` needs a shared text token or an equal quote,
+            # and the pair of representatives (the members carrying each
+            # entry's live text and quote) is among the pairs the predicate
+            # checks. A survivor's own signals were indexed when it became
+            # one, and Pass B never changes them (the survivor always keeps
+            # its bundle). A survivor the index skips shares nothing with that
+            # pair, so the predicate would refuse it anyway.
             tokens, quote = _signals(finding)
             if not tokens and not quote:
                 return survivors
@@ -680,15 +721,27 @@ def reconcile_post_anchor(ledger: "Ledger") -> int:
             return [survivor for survivor in survivors if id(survivor) in ids]
 
         for e in group:
-            # Complete-link, like the ingest pass (§12.1): fold only into a survivor
-            # whose EVERY already-folded member duplicates ``e``, so a signature-less
-            # bridge can't collapse a conflicting A+B+C chain (e.g. M-101 + generic +
-            # M-102). ``e`` is worse-or-equal (best-first sort), so ``_merge_into``
-            # keeps the survivor's bundle and never mutates its recorded members.
+            # Symmetric complete-link (§12.1, remediation WP-03.1): fold only
+            # when EVERY member of ``e``'s history duplicates EVERY member of
+            # the survivor's, each as it arrived, so a signature-less bridge
+            # can't collapse a conflicting A+B+C chain (M-101 + generic +
+            # M-102) from either end. Comparing only the live ``e`` (the old
+            # rule) never looked at what ``e`` had absorbed in Pass A: a live
+            # entry whose bundle had passed to a generic member no longer said
+            # "500 gpm", so it folded into a "550 gpm" survivor Pass A had
+            # refused, and whether it did depended on which of the two sorted
+            # first (B1). ``e`` is worse-or-equal (best-first sort), so
+            # ``_merge_into`` keeps the survivor's bundle and never mutates
+            # its recorded members.
+            incoming = ledger.member_history(e)
             match = next(
                 (
                     s for s in _candidates(e)
-                    if all(_is_duplicate(e, m) for m in members[id(s)])
+                    if all(
+                        _is_duplicate(me, ms)
+                        for me in incoming
+                        for ms in members[id(s)]
+                    )
                 ),
                 None,
             )
@@ -715,8 +768,9 @@ def reconcile_post_anchor(ledger: "Ledger") -> int:
                 # lives in ``text``, which the winning bundle overwrote. Pass A
                 # refuses those folds using exactly these snapshots; rebuilding
                 # the history from the mutated survivor let Pass B undo that
-                # refusal and destroy the conflicting value outright.
-                members[id(e)] = ledger.member_history(e)
+                # refusal and destroy the conflicting value outright. It is the
+                # history ``e`` was just compared through.
+                members[id(e)] = incoming
                 _index(e, e)
     if folded:
         _log.info("post-anchor reconciliation folded %d duplicate finding(s)", folded)

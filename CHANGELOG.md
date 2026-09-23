@@ -48,6 +48,47 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A conflict absorbed through a generic finding could still be merged away
+  after anchoring (remediation WP-03.1; B1, count part).** Once findings are
+  anchored, the findings ledger makes a second merge pass (Pass B) for
+  duplicates the first pass could not see without geometry. It checked only
+  the incoming entry's current finding against everything the other entry had
+  absorbed, and never what the incoming entry had absorbed itself. So when a
+  generic finding ("riser pump flow per riser schedule") had merged with a
+  `500 gpm` one and taken over its text (the longer quote wins the text), the
+  pair folded into a `550 gpm` finding the first pass had kept apart, and
+  `500 gpm` was gone from the text, the quote and the supporting quotes.
+  Whether it happened depended only on which of the two entries sorted first:
+  of the six orders in which the channels could report the same three
+  findings, three ended with one finding and three with two.
+
+  Now:
+  - **Both sides are checked member for member.** Two entries fold only when
+    every finding folded into one is a duplicate of every finding folded into
+    the other, each as it arrived: the rule the first pass already applies,
+    now applied to both sides. The three findings end as two entries in all
+    six orders, a second pass folds nothing, and no merged finding holds two
+    members that disagree.
+  - **Position alone no longer folds an entry that has already absorbed a
+    duplicate.** What an entry absorbed before anchoring is recorded as it
+    arrived, without a rectangle, so a finding that quotes the same text at
+    the same spot but is worded differently now stays separate when either
+    side has absorbed a duplicate. Before, it folded when the absorbing side
+    sorted second and not when it sorted first. This is deliberate: the
+    rectangle is not lent to those records, because the geometry check has no
+    text check of its own and already folds two different issues about one tag
+    once both are anchored (recorded as N28).
+
+  **Visible effect:** a report can show one more finding where a conflicting
+  measurement used to be merged away, and a same-spot duplicate of an
+  already-merged finding appears as its own row. No cache is affected: the
+  ledger is rebuilt on every run, and cached digests, critiques and verdicts
+  are unchanged. **Still open** (later remediation slices): which of the two
+  entries the generic finding joins still follows arrival order; a chain of
+  four or more findings can still end with a different number of entries in a
+  different order; and where the generic finding took over the `500 gpm`
+  finding's text, `500` survives only inside the run, not in the exports.
+
 - **One shared value or tag let two conflicting findings merge (remediation
   WP-04.2; N1).** Two findings whose prose reads alike merge only when their
   critical signatures (tags, quantities, absence polarity, cross-sheet legs) are

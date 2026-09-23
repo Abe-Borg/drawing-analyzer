@@ -379,6 +379,32 @@ def test_pass_b_keeps_a_conflict_carried_in_text_not_the_quote():
     assert has_550(led), "the conflicting measurement was destroyed"
 
 
+def test_pass_b_keeps_a_conflict_the_incoming_entry_absorbed():
+    # The reverse-order twin of the test above (review B1, remediation
+    # WP-03.1). There the entry that absorbed "500 gpm" sorts FIRST, so it is
+    # the survivor, and Pass B checks the incoming "550 gpm" against its member
+    # history. Give "550 gpm" the longer quote and the roles swap: the
+    # absorbing entry is now the INCOMING one, and Pass B compared only that
+    # live entry, whose bundle had passed to the generic member in Pass A.
+    # Nothing it compared still said "500", so it folded the chain Pass A had
+    # refused, and three of the six ingest orders ended with one entry.
+    led = Ledger()
+    led.add([_f("riser pump flow is 500 gpm per riser schedule",
+                cat="coordination", quote="RISER")], "digest_json")
+    led.add([_f("riser pump flow per riser schedule", cat="coordination",
+                quote="RISER PUMP FLOW")], "critique_1")
+    led.add([_f("riser pump flow is 550 gpm per riser schedule",
+                cat="coordination", quote="RISER PUMP FLOW SCHEDULE")], "cross_qc")
+    assert len(led) == 2                          # Pass A refused the fold
+    led.seal()
+    reconcile_post_anchor(led)
+    assert len(led) == 2, [e.text for e in led.entries]
+    # The two measurements stay in different entries, member for member.
+    for entry in led.entries:
+        members = " ".join(m.text for m in led.member_history(entry))
+        assert not ("500 gpm" in members and "550 gpm" in members), members
+
+
 # --------------------------------------------------------------------------- #
 # §14.4 — ``confidence`` must agree with ``reproduced``
 # --------------------------------------------------------------------------- #

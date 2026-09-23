@@ -737,8 +737,9 @@ reporter of last resort must never raise from inside Tk's handler.
   merge (swapped roles, since nothing extracts quantity roles, WP-04.3; a bare
   `12'` against `12'-6"`; WP-04.1's partial signatures). A survivor's signature
   grows (it includes `supporting_quotes`), which is why every complete-link check
-  compares a newcomer with each member as it arrived (`_cluster`, `Ledger.add`'s
-  snapshots, Pass B's `member_history`) and never with the grown survivor — and a
+  compares members as they arrived, on both sides, and never a grown signature
+  (`_cluster`'s reads, `Ledger.add`'s snapshots, and Pass B's `member_history`
+  for the incoming entry as well as the survivor since remediation WP-03.1) — and a
   measurement in that signature is its **value**, not its spelling: `1/2"` is
   `0.5in`, not the denominator `2in` it used to collapse to, which made *Provide
   1/2" drain* and *Provide 2" drain* one finding. `12'-6"` keeps both halves and neither goes negative, which needs TWO
@@ -783,14 +784,35 @@ reporter of last resort must never raise from inside Tk's handler.
   `reproduced=True` beside `confidence=SINGLETON`). Explicit lifecycle:
   `seal()` (OPEN→SEALED) → anchor → `reconcile_post_anchor` (Pass B) →
   `number()` (SEALED→NUMBERED assigns positional `QC-###` **after** anchoring).
-  Pass B's complete-link history comes from `Ledger.member_history`, never a
-  fresh `{id(e): [e]}` map — the live survivor may no longer carry the signature
-  of what it absorbed, and rebuilding from it let Pass B undo a fold Pass A had
-  refused, destroying a conflicting measurement that lived in `text` rather than
-  the quote. Those snapshots are taken **when a merge is about to mutate an
+  Pass B's complete-link is **symmetric** (remediation WP-03.1, B1): an entry
+  folds into a survivor only when every member of its `Ledger.member_history`
+  duplicates every member of the survivor's, never through either live object.
+  The live survivor may no longer carry the signature of what it absorbed
+  (rebuilding its history from it let Pass B undo a fold Pass A had refused,
+  destroying a conflicting measurement that lived in `text` rather than the
+  quote), and comparing the live *incoming* entry was B1 itself: its bundle had
+  passed to a generic member, so the `500 gpm` it absorbed never met the
+  `550 gpm` survivor, and whether the chain collapsed depended on which entry
+  sorted first. So the outcome no longer depends on direction, a second pass
+  folds nothing, and every history is a clique of `_is_duplicate` pairs. The
+  candidate index (each entry's live text tokens and quote) only narrows the
+  search and cannot miss a fold: the pair of representatives is always among
+  the pairs checked, and every accepting branch needs a shared token or an
+  equal quote. Those snapshots are taken **when a merge is about to mutate an
   entry**, not eagerly at ingest: anchors are resolved after ingest, so an eager
   copy is a permanently *unanchored* twin of a live entry and `_is_duplicate`'s
-  geometry branch could never fire against it. A post-seal add marks the run
+  geometry branch could never fire against it. A head frozen in Pass A is
+  unanchored all the same, and a rectangle is the only evidence Pass B has that
+  Pass A lacked, so Pass B now folds only entries that absorbed nothing in
+  Pass A (or members anchored before ingest, as auditor findings are). That
+  recall loss is **decided**: the resolved rect is not lent to same-quote
+  snapshots, because the geometry branch has no text check (it already folds
+  two different issues that quote one tag, N28) and the resolver picks among
+  repeated occurrences by each finding's own tile. Pinned in
+  `tests/test_pass_b_complete_link.py` beside the recorded limits later slices
+  flip: the generic bridge's cluster and a four-finding chain's entry count
+  still follow arrival order (WP-03.6), and `500` still leaves the exports
+  where the bridge won its bundle (WP-03.5). A post-seal add marks the run
   incomplete (no `QC-XTRA` masquerade) — including a post-seal **duplicate**,
   which used to reach neither the counter nor the log because the merge branch
   returned first, and which is counted and **dropped** rather than merged: it
