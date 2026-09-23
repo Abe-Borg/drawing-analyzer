@@ -1,7 +1,7 @@
 # Remediation progress tracker
 
 **Next up:** Wave 1 in order: `WP-03.2`. WP-03.1 is done: Pass B's complete-link is symmetric, so the B1 case ends with the same number of entries in every ingest order (B1's count part; B1 stays open for WP-03.5). It found N28, now slice `WP-03.7` (Wave 1, after WP-03.3; it needs a decision first). WP-04 is not done: its acceptance needs quantity roles, slice `WP-04.3` (Wave 2). First check the open PRs ([`README.md`](README.md), step 1). Before the next stable tag, the owner should look at O-5.
-**Last updated:** 2026-09-23 by the WP-03.1 session.
+**Last updated:** 2026-09-23 by the WP-03.1 session ([PR #159](https://github.com/Abe-Borg/drawing-analyzer/pull/159)).
 
 This file is authoritative for **status and order**. Requirements live in
 [`drawing-analyzer-remediation-plan.md`](drawing-analyzer-remediation-plan.md).
@@ -102,7 +102,7 @@ starting.
 | WP-01.2 | Shared terminal-outcome helper; the digest (real-time and batch) never admits a refusal, truncation or `stop_reason=None` read as success or into either cache level; cached refusals are rejected when read; decides D-1 (N4 digest, N27) | M/L | — | done | [PR #156](https://github.com/Abe-Borg/drawing-analyzer/pull/156), 2026-09-23. One classifier, `core.terminal_outcome.classify_stop_reason` (D-1), its vocabulary pinned by test to the SDK's `StopReason` ∪ `BetaStopReason`. Both transports share one ladder (`digest.digest_terminal_error`), one write predicate (`digest.digest_cache_admits`, both levels) and one loader (`digest.sheet_digest_from_cache_entry`, all three cache hits), which serves only a stored finished stop reason; a stored `null` and a missing key are misses (D-4 started, one migration-register row, no schema or key change). Tests: `tests/test_digest_terminal_outcome.py`, `tests/test_terminal_outcome.py`, `tests/test_drawing_acceptance.py::test_a_refused_or_unfinished_digest_holds_the_run_below_complete`. Residual: N15, an errored digest's findings still reach the ledger (WP-01.3) |
 | WP-04.1 | Quantity tokenizer: hyphenated units, thousands groups, opaque malformed tokens, `deg`/`°` (angle vs temperature), lists and ranges, W×H and V/A with a negative corpus; critique-scoped cache term (B2, B3, B12, N19) | M | — | done | [PR #157](https://github.com/Abe-Borg/drawing-analyzer/pull/157), 2026-09-23. `critique._quantity_tokens`, a scanner that reads each quantity whole. A composite (list, range, W×H size, voltage pair) is ONE token, compared whole; the representation is documented at the tokenizer and pinned by `tests/test_quantity_signature.py`. Compact `A` needs electrical context (negative corpus in the same file). Critique cache term `digest_cache._CRITIQUE_CACHE_CONTRACT = 1` inside both critique builders; A/B `RECORD_CONTRACT_VERSION` 2 → 3. Tests: `tests/test_quantity_signature.py`, the WP-04.1 section of `tests/test_drawing_cache_identity.py`, four tests in `tests/test_ab_findings_diff.py`. Residual partial signatures (loose-comma lists, `to` ranges, `and`/`or` lists, a bare `20A`) are listed in the handoff |
 | WP-04.2 | Compatibility rule over per-unit value sets and partial tag overlap; one shared `signature_conflicts` that the A/B harness also uses (N1) | M | WP-04.1 | done | [PR #158](https://github.com/Abe-Borg/drawing-analyzer/pull/158), 2026-09-23. `critique.signature_conflicts` (axes `tags`, `measurements`, `absence_polarity`, `cross_sheet_legs`); `signatures_compatible` is its negation, and the A/B harness reports its axes (its restated copy is gone). Quantities compare per kind (a unit, or one of the `_QUANTITY_KIND` groups: lengths, degrees, `psi`/`psig`, volts, liquid flow, real power, apparent power): for every kind both carry, one side's tokens must include the other's; no value is converted. Tags compare by inclusion, not by prefix. Sharing no quantity at all still conflicts. Critique contract 1 → 2, fingerprint pinned under 2; `RECORD_CONTRACT_VERSION` stays 3 (rule-only change; plan step 6 corrected). Tests: `tests/test_signature_compatibility.py`, the N1 rows and the corroboration, retention and recorded-limit tables in `tests/test_quantity_signature.py`, the WP-04.2 sections of `tests/test_ab_findings_diff.py` and `tests/test_drawing_cache_identity.py`. Roles are not compared: WP-04.3 |
-| WP-03.1 | Symmetric complete-link in Pass B, order-independent entry count (B1, count part) | S | — | done | 2026-09-23. `ledger.reconcile_post_anchor` folds an entry only when every member of its `Ledger.member_history` is `_is_duplicate` of every member of the survivor's (both sides, each as it arrived). The B1 case ends with two entries in all six orders, under seven severity and quote-length variants; histories stay cliques; a second pass folds nothing. The candidate index cannot miss a fold (argued at `_candidates`, pinned against an index-free reference). Geometry: recorded as a recall loss, not lent (Pass B now folds only entries that absorbed nothing in Pass A). Tests: `tests/test_pass_b_complete_link.py`, `tests/test_drawing_dedup_lifecycle.py::test_pass_b_keeps_a_conflict_the_incoming_entry_absorbed`. No cache or key change. Found N28 (WP-03.7) |
+| WP-03.1 | Symmetric complete-link in Pass B, order-independent entry count (B1, count part) | S | — | done | [PR #159](https://github.com/Abe-Borg/drawing-analyzer/pull/159), 2026-09-23. `ledger.reconcile_post_anchor` folds an entry only when every member of its `Ledger.member_history` is `_is_duplicate` of every member of the survivor's (both sides, each as it arrived). The B1 case ends with two entries in all six orders, under seven severity and quote-length variants; histories stay cliques; a second pass folds nothing. The candidate index cannot miss a fold (argued at `_candidates`, pinned against an index-free reference). Geometry: recorded as a recall loss, not lent (Pass B now folds only entries that absorbed nothing in Pass A). Tests: `tests/test_pass_b_complete_link.py`, `tests/test_drawing_dedup_lifecycle.py::test_pass_b_keeps_a_conflict_the_incoming_entry_absorbed`. No cache or key change. Found N28 (WP-03.7) |
 | WP-03.2 | Deterministic total-order tie-break in `assign_qc_ids` (K5) | S | — | todo | |
 | WP-03.3 | Remove the auditor coordinator's id dedup; arithmetic claim discriminator so the ledger keeps two different same-row mismatches; Decimal claim-dedup keys (B7) | S/M | — | todo | |
 | WP-03.7 | The geometry branch folds two different issues that quote one tag (N28): decide what, besides a shared quote and an overlapping rectangle, may fold two findings, and apply it in both passes | S/M | WP-03.3 | todo | Added by WP-03.1 (README step 7). **Needs a decision first.** No text-overlap threshold separates the cases: the paraphrase fold `test_post_anchor_reconciliation_folds_a_geometric_duplicate` pins shares 1 of 11 content words (0.09), the two different `PUMP P-1` issues share 3 of 12 (0.25). Options: drop the branch (loses that paraphrase fold; pin it as retention), or a claim discriminator (the general form of WP-03.3's arithmetic one). Flip `tests/test_pass_b_complete_link.py::test_recorded_limit_the_geometry_branch_folds_two_issues_that_quote_one_tag`. The merge-rule ratchet (`tests/test_drawing_cache_identity.py`) fingerprints `_is_duplicate` over unanchored findings only, so check whether a change moves it before deciding on a critique contract bump |
@@ -274,7 +274,7 @@ report is built from it).
 
 | ID | Summary | Pri | Slice(s) | Disposition | Evidence |
 |---|---|---|---|---|---|
-| B1 | Pass B complete-link checks one direction; a 550 gpm finding absorbs the 500 gpm one | P0 | 03.1, 03.5 | open (count part implemented+validated in 03.1; "both measurements survive" in the exports (03.5) stays open) | `tests/test_pass_b_complete_link.py` (all six orders under seven severity and quote-length variants; entry count per variant; the history clique; idempotence; an index-free reference over generated sets) and `tests/test_drawing_dedup_lifecycle.py::test_pass_b_keeps_a_conflict_the_incoming_entry_absorbed` (WP-03.1). Remaining: "500" still leaves the exports in ABC/ACB/BAC (`_500_EXPORTED`, WP-03.5); which cluster the bridge joins still follows arrival order (`_BRIDGE_JOINS`, WP-03.6) |
+| B1 | Pass B complete-link checks one direction; a 550 gpm finding absorbs the 500 gpm one | P0 | 03.1, 03.5 | open (count part implemented+validated in 03.1; "both measurements survive" in the exports (03.5) stays open) | `tests/test_pass_b_complete_link.py` (all six orders under seven severity and quote-length variants; entry count per variant; the history clique; idempotence; an index-free reference over generated sets) and `tests/test_drawing_dedup_lifecycle.py::test_pass_b_keeps_a_conflict_the_incoming_entry_absorbed` (WP-03.1, [PR #159](https://github.com/Abe-Borg/drawing-analyzer/pull/159)). Remaining: "500" still leaves the exports in ABC/ACB/BAC (`_500_EXPORTED`, WP-03.5); which cluster the bridge joins still follows arrival order (`_BRIDGE_JOINS`, WP-03.6) |
 | B2 | Hyphenated units (`6-inch`) get no measurement signature | P0 | 04.1 | implemented+validated | `tests/test_quantity_signature.py` (the B2 token table; the `B2 …` conflict and equivalence pairs, each asserted in the critique merge and the ledger); `tests/test_ab_findings_diff.py::test_a_changed_hyphenated_quantity_is_never_an_exact_match` (WP-04.1, [PR #157](https://github.com/Abe-Borg/drawing-analyzer/pull/157)) |
 | B3 | Thousands separators split numbers (`12,500` signs as `500`) | P0 | 04.1 | implemented+validated | `tests/test_quantity_signature.py` (the B3 token table, incl. `15,000` once signing as zero and the malformed `1,2,500` kept whole; the `B3 …` pairs); `tests/test_ab_findings_diff.py::test_thousands_grouped_quantities_compare_by_value` (WP-04.1, [PR #157](https://github.com/Abe-Borg/drawing-analyzer/pull/157)) |
 | B4 | Verbatim quotes fail to anchor on punctuation/spacing variance | P0/P1 | 05.2, 05.3 | open | |
@@ -392,7 +392,7 @@ Each session adds one entry at the top: date, slices and IDs, PR, what changed,
 contracts decided, cache/schema effects, validation actually run (with counts),
 what could not be verified, risks, and next steps.
 
-### 2026-09-23 — WP-03.1: symmetric complete-link in Pass B
+### 2026-09-23 — WP-03.1: symmetric complete-link in Pass B ([PR #159](https://github.com/Abe-Borg/drawing-analyzer/pull/159))
 
 - **Slice and IDs:** WP-03.1. B1, count part (B1 stays `open` for WP-03.5,
   as N4 stays open for its critique part). No `DECISIONS.md` contract is
@@ -448,10 +448,9 @@ what could not be verified, risks, and next steps.
     they never do.
     Why not lend the resolved rect to snapshots that quote the same string
     (the first of the three options in the plan's WP-03 verification note on
-    step 6)? The geometry branch has no text check, so it
-    already folds two different issues that quote one tag once both anchor
-    there (N28, below), and lending would extend that rule to every cluster
-    quoting one string. And `anchor.resolve_anchors` picks among repeated
+    step 6)? The geometry branch has no text check, so it already folds two
+    different issues that quote one tag once both anchor there (N28, below),
+    and lending would extend that rule to every cluster quoting one string. And `anchor.resolve_anchors` picks among repeated
     occurrences by each finding's own `tile`, so a lent rect is a guess about
     where that member was. Anchoring each observation (the second option)
     belongs to WP-03.6's per-observation anchors. Plan §2.1: conservative
@@ -564,10 +563,9 @@ what could not be verified, risks, and next steps.
       searches over 1,300 generated sets, all orders, found no base
       counterexample), the 3 control variants' counts (`review-as-written` is
       the review's own construction, with B quoting nothing, which does not
-      fail on `main`),
-      6 geometry configurations, the three recorded limits the fix does not
-      change, and the check that the variants cover both roles and both
-      bundle winners.
+      fail on `main`), 6 geometry configurations, the three recorded limits
+      the fix does not change, and the check that the variants cover both
+      roles and both bundle winners.
     - The 24 existing lifecycle tests passed on the base.
   - **After:** the 116 new tests pass. Full suite **3,179 passed, 2 skipped,
     10 deselected** (215 s): the baseline plus the 116 new tests, with the same
