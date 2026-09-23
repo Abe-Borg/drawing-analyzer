@@ -719,7 +719,11 @@ reporter of last resort must never raise from inside Tk's handler.
   signatures compatible. Quantities compare **per kind**: a unit, or one of the
   `_QUANTITY_KIND` groups of units that measure one kind of quantity (lengths
   `in`/`ft`/`mm`/`cm` and a unitless W×H size; degrees `°`/`°f`/`°c`; pressures
-  `psi`/`psig`; voltages `volt`/`vac`/`vdc`/`kv`). For every kind both carry, one
+  `psi`/`psig`; voltages `volt`/`vac`/`vdc`/`kv`; liquid flow `gpm`/`gph`/`gpd`;
+  real power `hp`/`kw`; apparent power `va`/`kva` — every group of units the
+  tokenizer emits for one quantity, since a unit left out is a kind of its own
+  and a shared value hides it again; `cfm` stays apart from liquid flow and kVA
+  from kW on purpose, as different quantities). For every kind both carry, one
   side's tokens must include the other's, and tags must include one another the
   same way; two signatures that share no quantity at all still conflict. So one
   side may add detail and still merge, but a value or tag on EACH side that the

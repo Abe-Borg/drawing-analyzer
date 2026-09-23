@@ -14,11 +14,13 @@ The rule now (``critique.signature_conflicts``, whose negation is
 * **Quantities**, compared per kind. A kind is one unit, or a group of units
   that measure one kind of quantity: lengths (``in``, ``ft``, ``mm``, ``cm``,
   and a W×H size written without a unit), degrees (``°``, ``°f``, ``°c``),
-  pressures (``psi``, ``psig``) and voltages (``volt``, ``vac``, ``vdc``,
-  ``kv``). For every kind both findings carry, one finding's tokens of that
-  kind must include the other's. Tokens compare whole: nothing is converted
-  (``12 in`` never equals ``1 ft``) and a composite is never split. Two
-  findings that share no token at all still conflict, as they always did.
+  pressures (``psi``, ``psig``), voltages (``volt``, ``vac``, ``vdc``,
+  ``kv``), liquid flow (``gpm``, ``gph``, ``gpd``), real power (``hp``,
+  ``kw``) and apparent power (``va``, ``kva``). For every kind both findings
+  carry, one finding's tokens of that kind must include the other's. Tokens
+  compare whole: nothing is converted (``12 in`` never equals ``1 ft``) and a
+  composite is never split. Two findings that share no token at all still
+  conflict, as they always did.
 * **Tags**: one finding's tags must include the other's.
 * Absence polarity and cross-sheet legs are unchanged.
 
@@ -255,9 +257,22 @@ _KIND_CASES = [
     # Voltages are one kind: a system voltage and control voltages.
     (["480volt", "120volt"], ["480volt", "24vac"], True),
     (["120/208volt"], ["120/208volt", "24vac"], False),
+    # Liquid flow is one kind (Codex review, P1 on PR #158): 500 gpm is not
+    # 12,000 gph, and no rate is converted, so 30,000 gph is not 500 gpm either.
+    (["500gpm", "100psi"], ["12000gph", "100psi"], True),
+    (["500gpm", "100psi"], ["30000gph", "100psi"], True),
+    (["500gpm"], ["500gpm", "30000gph"], False),
+    # Real power (hp, kW) is one kind, and apparent power (VA, kVA) another.
+    (["5hp", "480volt"], ["7.5kw", "480volt"], True),
+    (["500va", "120volt"], ["1kva", "120volt"], True),
+    # A transformer's kVA rating and a load's kW are different quantities, not
+    # two spellings of one, so a value shared elsewhere decides nothing about them.
+    (["75kva", "480volt"], ["60kw", "480volt"], False),
     # Every other unit is its own kind, so a shared value in another kind
-    # decides nothing about it...
+    # decides nothing about it. Air flow is one: a coil's water flow and its
+    # air flow are different quantities...
     (["500gpm", "6in"], ["500cfm", "6in"], False),
+    (["500gpm", "45°f"], ["12000cfm", "45°f"], False),
     # ...but two findings that share no token at all still conflict.
     (["6in"], ["100psi"], True),
     (["6in"], ["150mm"], True),

@@ -463,6 +463,22 @@ _CONFLICTS = {
         "The 6 in sprinkler main needs 10 ft clearance from the duct per the coordination plan",
         "The 6 in sprinkler main needs 12 in clearance from the duct per the coordination plan",
     ),
+    # Codex review, P1 on PR #158: a flow or a power written in another unit
+    # of the same quantity was a kind of its own, so a shared value hid it.
+    "N1 500 gpm vs 12,000 gph beside a shared 100 psi": (
+        "Pump P-1 is scheduled at 500 gpm at 100 psi on the pump schedule for the east "
+        "data hall chilled water loop",
+        "Pump P-1 is scheduled at 12,000 gph at 100 psi on the pump schedule for the east "
+        "data hall chilled water loop",
+    ),
+    "N1 5 hp vs 7.5 kW beside a shared 480V": (
+        "Fan EF-1 motor is 5 hp at 480V per the fan schedule for the east data hall",
+        "Fan EF-1 motor is 7.5 kW at 480V per the fan schedule for the east data hall",
+    ),
+    "N1 500 VA vs 1 kVA beside a shared 120V": (
+        "Transformer T-1 is 500 VA at 120V per the control panel schedule for the east data hall",
+        "Transformer T-1 is 1 kVA at 120V per the control panel schedule for the east data hall",
+    ),
     "N1 24x12 vs 24x10 in beside a shared 1,200 cfm": (
         "Duct 24x12 at 1,200 cfm conflicts with the steel beam at grid C near VAV-3",
         "Duct 24x10 in at 1,200 cfm conflicts with the steel beam at grid C near VAV-3",

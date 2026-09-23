@@ -59,17 +59,21 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `550 gpm` beside it;
   - `12'-6"` against `12'-8"`, which both read as `12 ft` plus inches;
   - `2 in, 4 in and 6 in` against `3 in, 5 in and 6 in`, on the shared `6 in`;
-  - `90°F` against `90°C`, `20 psig` against `20 psi`, or `6 in` against
-    `100 mm`, beside a shared `6 in` or `100 psi`;
+  - `90°F` against `90°C`, `20 psig` against `20 psi`, `6 in` against
+    `100 mm`, `500 gpm` against `12,000 gph`, or `5 hp` against `7.5 kW`,
+    beside a shared value;
   - pump `P-1` with valve `V-3` against `P-1` with valve `V-4`, on the pump.
 
   Now:
   - **Quantities are compared by kind.** A kind is a unit, or a group of units
     that measure one kind of quantity: lengths (`in`, `ft`, `mm`, `cm`, and a
     duct size written without a unit), degrees (`°`, `°F`, `°C`), `psi` and
-    `psig`, and volts (`V`, `VAC`, `VDC`, `kV`). For each kind both findings
-    mention, one finding's values must include the other's. No value is
-    converted between units: `12 in` is never `1 ft`, and a scale is never
+    `psig`, volts (`V`, `VAC`, `VDC`, `kV`), liquid flow (`gpm`, `gph`,
+    `gpd`), real power (`hp`, `kW`) and apparent power (`VA`, `kVA`). Air
+    flow (`cfm`) stays apart from liquid flow, and `kVA` from `kW`: each pair
+    names two quantities, not one quantity in two units. For each kind both
+    findings mention, one finding's values must include the other's. No value
+    is converted between units: `12 in` is never `1 ft`, and a scale is never
     inferred.
   - **Tags work the same way.** One finding may name a reference the other
     omits and the two still merge; two findings that each name a tag the other

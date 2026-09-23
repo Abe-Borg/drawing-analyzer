@@ -101,7 +101,7 @@ starting.
 | WP-01.1 | Verification is `COMPLETE` only when every eligible item was judged; failures and skips are counted separately; decides D-2 (N5) | M | — | done | [PR #155](https://github.com/Abe-Borg/drawing-analyzer/pull/155), 2026-09-23. One rule, `models.item_coverage_status` (D-2), over both passes. The denominator is fixed before any call (`VerifyResult.eligible`); skips and calls that returned no judgment are counted and surfaced separately (`coverage_note`). Investigation reports the findings it recovers and never rewrites verification's record. Tests: `tests/test_drawing_acceptance.py` (N5 block), `tests/test_drawing_verify.py` (completeness section). Residual: a finding that raises after the single-crop loop picks it up keeps its prior verdict (the report shows *Not checked*); the stage counts it "not accounted for" and stays off `COMPLETE` |
 | WP-01.2 | Shared terminal-outcome helper; the digest (real-time and batch) never admits a refusal, truncation or `stop_reason=None` read as success or into either cache level; cached refusals are rejected when read; decides D-1 (N4 digest, N27) | M/L | — | done | [PR #156](https://github.com/Abe-Borg/drawing-analyzer/pull/156), 2026-09-23. One classifier, `core.terminal_outcome.classify_stop_reason` (D-1), its vocabulary pinned by test to the SDK's `StopReason` ∪ `BetaStopReason`. Both transports share one ladder (`digest.digest_terminal_error`), one write predicate (`digest.digest_cache_admits`, both levels) and one loader (`digest.sheet_digest_from_cache_entry`, all three cache hits), which serves only a stored finished stop reason; a stored `null` and a missing key are misses (D-4 started, one migration-register row, no schema or key change). Tests: `tests/test_digest_terminal_outcome.py`, `tests/test_terminal_outcome.py`, `tests/test_drawing_acceptance.py::test_a_refused_or_unfinished_digest_holds_the_run_below_complete`. Residual: N15, an errored digest's findings still reach the ledger (WP-01.3) |
 | WP-04.1 | Quantity tokenizer: hyphenated units, thousands groups, opaque malformed tokens, `deg`/`°` (angle vs temperature), lists and ranges, W×H and V/A with a negative corpus; critique-scoped cache term (B2, B3, B12, N19) | M | — | done | [PR #157](https://github.com/Abe-Borg/drawing-analyzer/pull/157), 2026-09-23. `critique._quantity_tokens`, a scanner that reads each quantity whole. A composite (list, range, W×H size, voltage pair) is ONE token, compared whole; the representation is documented at the tokenizer and pinned by `tests/test_quantity_signature.py`. Compact `A` needs electrical context (negative corpus in the same file). Critique cache term `digest_cache._CRITIQUE_CACHE_CONTRACT = 1` inside both critique builders; A/B `RECORD_CONTRACT_VERSION` 2 → 3. Tests: `tests/test_quantity_signature.py`, the WP-04.1 section of `tests/test_drawing_cache_identity.py`, four tests in `tests/test_ab_findings_diff.py`. Residual partial signatures (loose-comma lists, `to` ranges, `and`/`or` lists, a bare `20A`) are listed in the handoff |
-| WP-04.2 | Compatibility rule over per-unit value sets and partial tag overlap; one shared `signature_conflicts` that the A/B harness also uses (N1) | M | WP-04.1 | done | [PR #158](https://github.com/Abe-Borg/drawing-analyzer/pull/158), 2026-09-23. `critique.signature_conflicts` (axes `tags`, `measurements`, `absence_polarity`, `cross_sheet_legs`); `signatures_compatible` is its negation, and the A/B harness reports its axes (its restated copy is gone). Quantities compare per kind (a unit, or one of the `_QUANTITY_KIND` groups: lengths, degrees, `psi`/`psig`, volts): for every kind both carry, one side's tokens must include the other's; no value is converted. Tags compare by inclusion, not by prefix. Sharing no quantity at all still conflicts. Critique contract 1 → 2, fingerprint pinned under 2; `RECORD_CONTRACT_VERSION` stays 3 (rule-only change; plan step 6 corrected). Tests: `tests/test_signature_compatibility.py`, the N1 rows and the corroboration, retention and recorded-limit tables in `tests/test_quantity_signature.py`, the WP-04.2 sections of `tests/test_ab_findings_diff.py` and `tests/test_drawing_cache_identity.py`. Roles are not compared: WP-04.3 |
+| WP-04.2 | Compatibility rule over per-unit value sets and partial tag overlap; one shared `signature_conflicts` that the A/B harness also uses (N1) | M | WP-04.1 | done | [PR #158](https://github.com/Abe-Borg/drawing-analyzer/pull/158), 2026-09-23. `critique.signature_conflicts` (axes `tags`, `measurements`, `absence_polarity`, `cross_sheet_legs`); `signatures_compatible` is its negation, and the A/B harness reports its axes (its restated copy is gone). Quantities compare per kind (a unit, or one of the `_QUANTITY_KIND` groups: lengths, degrees, `psi`/`psig`, volts, liquid flow, real power, apparent power): for every kind both carry, one side's tokens must include the other's; no value is converted. Tags compare by inclusion, not by prefix. Sharing no quantity at all still conflicts. Critique contract 1 → 2, fingerprint pinned under 2; `RECORD_CONTRACT_VERSION` stays 3 (rule-only change; plan step 6 corrected). Tests: `tests/test_signature_compatibility.py`, the N1 rows and the corroboration, retention and recorded-limit tables in `tests/test_quantity_signature.py`, the WP-04.2 sections of `tests/test_ab_findings_diff.py` and `tests/test_drawing_cache_identity.py`. Roles are not compared: WP-04.3 |
 | WP-03.1 | Symmetric complete-link in Pass B, order-independent entry count (B1, count part) | S | — | todo | |
 | WP-03.2 | Deterministic total-order tie-break in `assign_qc_ids` (K5) | S | — | todo | |
 | WP-03.3 | Remove the auditor coordinator's id dedup; arithmetic claim discriminator so the ledger keeps two different same-row mismatches; Decimal claim-dedup keys (B7) | S/M | — | todo | |
@@ -407,8 +407,12 @@ what could not be verified, risks, and next steps.
     digit (WP-04.1's representation), and a composite stays one whole token.
     Units group into kinds (`critique._QUANTITY_KIND`): lengths (`in`, `ft`,
     `mm`, `cm`, and the empty unit of a unitless W×H size), degrees (`°`, `°f`,
-    `°c`), pressures (`psi`, `psig`) and voltages (`volt`, `vac`, `vdc`, `kv`);
-    every other unit is its own kind. Two signatures conflict on measurements
+    `°c`), pressures (`psi`, `psig`), voltages (`volt`, `vac`, `vdc`, `kv`),
+    liquid flow (`gpm`, `gph`, `gpd`), real power (`hp`, `kw`) and apparent
+    power (`va`, `kva`); every other unit is its own kind. `cfm` stays apart
+    from liquid flow, and apparent from real power, on purpose: each pair names
+    two quantities (a coil's water and air flow; a transformer's kVA rating and
+    a load's kW), not one quantity in two units. Two signatures conflict on measurements
     when both carry some and either they share no token at all (the old flat
     rule, kept: `6 in` / `150 mm`, `24x12` / `24x10 in`) or, for some kind both
     carry, each holds a token of that kind the other lacks.
@@ -481,6 +485,20 @@ what could not be verified, risks, and next steps.
   - **Plan corrected** (README step 7): the WP-04 verification note "Step 6"
     said to bump `RECORD_CONTRACT_VERSION`; it was written before WP-04.1 took
     that bump for the tokenizer. The plan's slice list now names WP-04.3.
+  - **Review follow-up (Codex P1 on this PR).** A unit left out of the kind
+    table is a kind of its own, so a shared value could still hide a conflict
+    between two units of one quantity: `500 gpm` / `12,000 gph` beside a shared
+    `100 psi` stayed compatible, and so did `5 hp` / `7.5 kW` and `500 VA` /
+    `1 kVA` beside a shared voltage. The root cause was an incomplete table, not
+    one pair, so every group of units the tokenizer emits for one quantity is
+    now listed (liquid flow, real power, apparent power) and the table's comment
+    names what stays apart on purpose (`cfm`; kVA against kW) and the units that
+    are alone (`fpm`, `hz`, `amp`, `gal`, `%`). A check over the tokenizer's
+    unit list confirmed nothing else is missing. The 10 new tests failed on this
+    PR's head before the fix; 3 more pin what stays apart. The ratchet's corpus
+    gained a gpm/gph and an hp/kW pair, each of which merges under the
+    pre-review rule and not under this one, and key 2 was re-pinned (the value
+    is new in this PR, so nothing released is edited).
   - **Docs:** CHANGELOG (Fixed: N1, with the one-time critique re-run and the
     visible effect; WP-04.1's "Not in this change" note points to it), CLAUDE.md
     (the ledger paragraph describes the rule, the growth statement and the
@@ -500,11 +518,12 @@ what could not be verified, risks, and next steps.
     keys are byte-identical, pinned by
     `test_wp_04_2_moves_every_critique_key_and_no_other_key` (the contract-1
     keys are pinned in the test). One migration-register row.
-  - The merge-rule ratchet is pinned under key 2 (`d9bcaa…`). Its corpus gained
-    8 rows (tag overlap, a shared list element, a shared value across one kind,
-    and the extra detail that still merges); key 1's value is kept and noted as
-    computed over the old corpus. Over the extended corpus WP-04.1's rule
-    fingerprints as `978ae4…` (recorded in the test), so a rule change that
+  - The merge-rule ratchet is pinned under key 2 (`63dbfe…`). Its corpus gained
+    12 rows (tag overlap, a shared list element, a shared value across one kind,
+    a flow and a power in two units, and the extra detail that still merges);
+    key 1's value is kept and noted as computed over the old corpus. Over the
+    extended corpus WP-04.1's rule fingerprints as `73da95…` (recorded in the
+    test), and this PR's rule before the review follow-up as `6aaf8a…`, so a rule change that
     forgets the bump still fails there.
   - No `_SCHEMA_VERSION` bump. A/B records: no change (above).
 - **Re-baselined tests:** none of the pinned tests changed outcome. The listed
@@ -533,9 +552,10 @@ what could not be verified, risks, and next steps.
     exact match with one added reference, and the flat-rule dominance test.
     Of the 250 existing tests in those four files, 249 passed and one failed:
     the merge-rule ratchet, whose corpus grew.
-  - **After:** the new tests pass. Full suite **3,050 passed, 2 skipped,
-    10 deselected** (220 s): the baseline plus the 123 new tests, with the
-    same two environment skips (IPv6 loopback; chmod as root).
+  - **After:** the new tests pass. Full suite **3,063 passed, 2 skipped,
+    10 deselected** (215 s): the baseline plus 136 new tests (the 123 above
+    and the review follow-up's 13), with the same two environment skips (IPv6
+    loopback; chmod as root). Before the follow-up it was 3,050.
   - **Browser suite:** not run separately. No report JS, HTML or chat code
     changed; the browser tests ran inside the full suite above.
   - `ruff check --select E9,F63,F7,F82 src tests scripts` is clean.

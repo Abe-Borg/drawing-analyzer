@@ -1489,7 +1489,10 @@ One shared quantity or tag no longer excuses a conflict beside it. A `6 in` /
 compared by kind: a unit, or a group of units that measure one kind of quantity
 (lengths in inches, feet, millimetres or centimetres, including a duct size
 written without a unit; degrees, with or without a scale; `psi` and `psig`;
-volts, `VAC`, `VDC` and `kV`). For each kind both findings mention, one finding's
+volts, `VAC`, `VDC` and `kV`; `gpm`, `gph` and `gpd`; `hp` and `kW`; `VA` and
+`kVA`). Air flow (`cfm`) stays apart from water flow, and `kVA` from `kW`,
+because each pair names two different quantities rather than one quantity in
+two units. For each kind both findings mention, one finding's
 values must include the other's. So `90°F` against `90°C` stays two findings even
 when both mention the same `6 in` duct. No value is converted: `12 in` is never
 read as `1 ft`, and `6 in` against `150 mm` stays two findings even though the

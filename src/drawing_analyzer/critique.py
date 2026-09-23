@@ -1063,12 +1063,23 @@ _TOKEN_UNIT_RE = re.compile(r"(.*\d)?(\D*)", re.DOTALL)
 # ``psi``, a scale is never inferred -- so it can only ever block a merge, never
 # allow one (plan WP-04 step 3: no conversion without explicit semantics). The
 # empty unit is a W×H size written without one (``24x12``), which is a length.
-# Every unit not listed is a kind of its own.
+#
+# Every group of units the tokenizer emits for one quantity is listed, because
+# a unit left out is a kind of its own and a value shared elsewhere hides it
+# again: ``500 gpm`` / ``12,000 gph`` beside a shared ``100 psi`` merged until
+# liquid flow was a kind (Codex review of WP-04.2). Deliberately NOT grouped,
+# because they are different quantities rather than two spellings of one:
+# ``cfm`` (air flow; a coil's water flow and its air flow are both on its
+# schedule) and real against apparent power (a transformer's kVA rating and a
+# load's kW). ``fpm``, ``hz``, ``amp``, ``gal`` and ``%`` are single units.
 _QUANTITY_KIND = {
     "": "length", "in": "length", "ft": "length", "mm": "length", "cm": "length",
     "°": "degree", "°f": "degree", "°c": "degree",
     "psi": "pressure", "psig": "pressure",
     "volt": "voltage", "vac": "voltage", "vdc": "voltage", "kv": "voltage",
+    "gpm": "liquid_flow", "gph": "liquid_flow", "gpd": "liquid_flow",
+    "hp": "real_power", "kw": "real_power",
+    "va": "apparent_power", "kva": "apparent_power",
 }
 
 

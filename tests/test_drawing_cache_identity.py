@@ -737,6 +737,12 @@ _MERGE_RULE_CORPUS = (
     ("Supply air setpoint for AHU-2 is 90°F at the 6 in duct heater", ""),
     ("Supply air setpoint for AHU-2 is 90°C at the 6 in duct heater", ""),
     ("Supply air setpoint for AHU-2 is 90°F at the duct heater", ""),
+    ("Pump P-2 is scheduled at 500 gpm at 125 psi on the pump schedule for the east "
+     "data hall chilled water loop", ""),
+    ("Pump P-2 is scheduled at 12,000 gph at 125 psi on the pump schedule for the east "
+     "data hall chilled water loop", ""),
+    ("Fan EF-2 motor is 5 hp at 480V per the fan schedule", ""),
+    ("Fan EF-2 motor is 7.5 kW at 480V per the fan schedule", ""),
 )
 
 
@@ -780,10 +786,10 @@ def _merge_rule_fingerprint() -> str:
 # above "Added by WP-04.2". WP-04.2 added those rows, so contract 1 can no
 # longer be reproduced from this corpus; over the extended corpus, WP-04.1's
 # rule fingerprints as
-# 978ae4fc76af3b2d8e27b501fdf3c2ead48747450d8e0e600ce8e284c02c7867.
+# 73da954902650b023ab479b8e39d883d6150e3a72104ab919d8427ec8d30f29d.
 _MERGE_RULE_BY_CRITIQUE_CONTRACT = {
     1: "fa3623035836987525e786ff44597ec1cdf2cc59e1dffbff6a07ef278f3614bb",  # WP-04.1
-    2: "d9bcaad64b49b9bd1c3a10b2d473f65826b31f0124c7e1adca847e115f4cf0b8",  # WP-04.2
+    2: "63dbfe17b7cb08dc9eda2a098658dca89c9ca5432283ecad01dbf65783470dd8",  # WP-04.2
 }
 
 
