@@ -308,8 +308,19 @@ never deleted (plan §2 rule 6, WP-10).
     read side needs, so the read-side reject is the one mechanism.
 - **Still open, for WP-10.4:** the cache map with the admission predicate of
   every write (critique, identity, review plan, citation, investigation, the
-  stage caches), the critique's contract term (WP-01.4: critique entries carry
-  no stop reason), and the rest of the register.
+  stage caches), the critique's admission change (WP-01.4: critique entries
+  carry no stop reason), and the rest of the register.
+- **Added by WP-04.1: the critique namespace has its own contract term.**
+  `digest_cache._CRITIQUE_CACHE_CONTRACT` (1 since WP-04.1) is folded inside
+  both critique key builders and nothing else, from the module rather than by
+  callers, so the pre-render probe and the store cannot disagree. A critique
+  entry stores post-merge findings, so the host merge rule is part of its
+  meaning, and a change to that rule (WP-04.2) or to what a critique entry
+  admits (WP-01.4) **bumps this term**. It never adds a second one, and never
+  bumps `_SCHEMA_VERSION` (plan §2 rules 6 and 15: one mechanism per change,
+  and no global schema change without a changed contract).
+  `tests/test_drawing_cache_identity.py` pins the merge rule's fingerprint per
+  contract value, so a rule change that forgets the bump fails.
 - **Rejected shortcuts.**
   - A `_SCHEMA_VERSION` bump: it discards every paid digest.
   - A new key term for the same change, and a bump and a term together.
@@ -400,3 +411,5 @@ migration.
 | Namespace / schema | Old version | New version | Readable fields kept | Reusable content | Invalidation reason and scope | Slice / PR |
 |---|---|---|---|---|---|---|
 | Digest cache, level 1 and level 2 (`digest_cache_key_level1`, `digest_cache_key`) | schema 10 | schema 10 (no version, key or term change) | Every field | Every entry whose stored `stop_reason` is `end_turn` or `stop_sequence` | Read-side reject (N4, N27; D-4). An entry that records `refusal`, `max_tokens`, `model_context_window_exceeded`, `tool_use`, `pause_turn`, `compaction`, `null`, any other value, or no `stop_reason` key is a miss. Only those entries are affected. They stay on disk, and a finished re-read overwrites them. Released 1.6.0 and 1.7.0 could have written the refusal and `null` shapes | WP-01.2, [PR #156](https://github.com/Abe-Borg/drawing-analyzer/pull/156) |
+| Critique cache, level 1 and level 2 (`critique_cache_key_level1`, `critique_cache_key`) | schema 10, no critique term | schema 10, `critique_contract=1` (`digest_cache._CRITIQUE_CACHE_CONTRACT`) | Every field; the entry shape is unchanged | None: every critique entry written before WP-04.1 misses once | The quantity tokenizer behind `critique.critical_signature` changed (B2, B3, B12, N19), and a critique entry stores post-merge findings, so an old entry holds merges the new rule would not make. One mechanism: a new critique-scoped term folded inside both critique builders, never `_SCHEMA_VERSION`, which feeds every builder (the v10 bump did this for a signature change and re-billed every digest). Digest, identity, review-plan, citation and investigation keys are byte-identical, pinned by `tests/test_drawing_cache_identity.py`. Old entries stay on disk; the next exhaustive run re-critiques each sheet once. A later change to the merge rule bumps the same term (WP-04.2, WP-01.4) | WP-04.1, PR_LINK |
+| A/B harness arm records (`scripts/ab_findings_diff.RECORD_CONTRACT_VERSION`) | 2 | 3 | Every field | None: `load_arm_records` refuses a v2 sidecar (`RECORDS_STALE_CONTRACT`) rather than compare it | A record stores `critical_signature` computed when its arm ran, so a v2 record carries the old tokens and would report a tokenizer change as a model difference. Refused, never deleted: re-run the arm | WP-04.1, PR_LINK |

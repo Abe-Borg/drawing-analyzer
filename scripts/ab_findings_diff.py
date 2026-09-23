@@ -74,7 +74,14 @@ COMPARISON_INCOMPLETE = "INCOMPLETE"
 #: reader uses ``.get(...) or {}`` and a one-sided signal never blocks a match, so
 #: a stale record whose measurements simply vanished degrades toward "exact
 #: match" rather than erroring.
-RECORD_CONTRACT_VERSION = 2
+#:
+#: v3 (remediation WP-04.1): the quantity tokenizer behind ``critical_signature``
+#: changed. ``6-inch`` signs as ``6in`` (it signed as nothing), ``12,500 cfm`` as
+#: ``12500cfm`` (it signed as ``500cfm``), ``90 deg F`` as ``90°f`` (``90deg``,
+#: the same as ``90 deg C``), and W×H sizes, compact volts and amps, ranges and
+#: lists now sign. A v2 record carries the old tokens, so comparing it with a
+#: v3 arm would report a tokenizer change as a model or geometry difference.
+RECORD_CONTRACT_VERSION = 3
 
 _WS_RE = re.compile(r"\s+")
 

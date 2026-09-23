@@ -48,6 +48,61 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Two findings that differed only in a quantity's spelling merged into one
+  (remediation WP-04.1; B2, B3, B12, N19).** The critical signature is what
+  keeps "Provide 6 in drain" and "Provide 4 in drain" two findings when the rest
+  of the prose matches. It could not read several ordinary spellings, and a
+  quantity it cannot read never blocks a merge. So these pairs collapsed into
+  one finding, in the critique's two-read merge and in the findings ledger
+  alike, and the A/B harness reported them as an exact match:
+  - **hyphenated units:** `6-inch`, `6-in` and `6-in.` read as no quantity at
+    all (B2);
+  - **thousands separators:** `12,500 cfm` read as `500 cfm`, the same as
+    `1,500 cfm` and different from `12500 cfm`, and `15,000 cfm` read as zero
+    (B3);
+  - **degrees:** `90 deg F` and `90 deg C` read alike, the scale dropped, while
+    `90 deg F` and `90°F` did not match; `degrees F` and `degF` read as nothing
+    (B12);
+  - **sizes, electrical units, ranges and lists:** `24x12`, `20A`, `480V` and
+    `4-6 in` read as nothing, `2,4,6 in` as just `6 in`, and `120/208 volts` as
+    the fraction 120/208, about 0.58 volts (N19).
+
+  Now:
+  - **A quantity signs by its value, in one spelling.** `6-inch`, `6-in.` and
+    `6 in` are one size. `12,500` and `12500` are one number, and a grouping
+    that is not valid (`1,2,500`) is kept whole, never read as its trailing
+    `500`. `deg` is `°`, and `deg F`, `degrees F`, `degF` and `°F` are one
+    scale. A scale is never inferred, so `90°` stays apart from `90°F`.
+  - **Sizes, ranges, lists and voltage pairs are single quantities:** `24x12`,
+    `24"x12"` (the same as `24x12 in`), `4-6 in`, `2,4,6 in`, and `120/208V`
+    (the same as `208Y/120V`). A composite never shares a value with its parts,
+    so `2,4,6 in` and `3,5,6 in` no longer agree on `6 in`.
+  - **Compact volts and amps sign.** `480V`, `24VAC` and `24VDC` sign wherever
+    they follow a number, except in a slope ratio (`3H:1V`). `20A` signs only
+    with electrical context: a pole count (`20A/1P`), a breaker, fuse or
+    disconnect after it, or a rating label before it (`MOCP 25A`). `Room 101A`,
+    `grid 2A` and `panel 2A` are names, and a name read as a current would make
+    two findings about the same room look as if they shared a quantity.
+  - **The existing safeguards are unchanged:** fractions compare by value
+    (`1/2"` is not `2"`), signs are kept, feet-inches stays two quantities,
+    plurals fold, `psig` stays apart from `psi`, and the equipment-tag rule is
+    the same.
+
+  **Visible effect:** findings that differ in one of these quantities stay
+  separate, and one quantity written two ways merges. **The first exhaustive run
+  after upgrading re-runs the critique on every sheet once**, at the cost of a
+  cold critique pass, because a cached critique holds findings merged under the
+  old rule. Digests, the set identity, review plans, citation checks and
+  investigations stay cached: the change is one new critique-only key term
+  (`digest_cache._CRITIQUE_CACHE_CONTRACT`), not a schema-version bump, and the
+  old entries are left on disk. A/B arm records written before this change are
+  refused as a stale contract (`RECORD_CONTRACT_VERSION` 3); re-run those arms
+  rather than compare across it.
+
+  **Not in this change** (N1, the next slice): one shared quantity still makes
+  two findings compatible. A `6 in` / `4 in` conflict beside a shared `100 psi`,
+  or `12'-6"` against `12'-8"` (both `12 ft`), can still merge.
+
 - **A refused or unfinished sheet read counted as a digested sheet, and was
   cached (remediation WP-01.2; N4, digest part; N27).** Both digest transports
   failed a sheet only when its reply was empty or stopped at `max_tokens`.

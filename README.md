@@ -658,7 +658,13 @@ reads saw it" at the same time. A long review-profile checklist is sent **identi
 both reads (never split across them), so the two stay directly comparable.
 
 The merged critique is cached under its own key, so a re-run skips the extra
-calls. The digest's images are gone by the time the critique runs (the batch path
+calls. Because the entry holds findings already merged by the app's own
+deduplication rule, an update that changes that rule re-keys the critique cache,
+and only it. The first exhaustive run afterwards re-runs the critique on every
+sheet once, at the cost of a cold critique pass, while digests and every other
+cached stage are still served, and the old entries are left in place. The
+quantity reading described under [the ledger](#the-findings-ledger-part-iii)
+(remediation WP-04.1) is such a change. The digest's images are gone by the time the critique runs (the batch path
 streams and discards them), so the critique renders each uncached sheet once more —
 but in a `use_batch` run it uploads that render **once** and runs *both* reads off
 the shared upload through the Message Batches API (the ~50% batch rate), rather than
@@ -1459,15 +1465,23 @@ quantity. Feet-inches keeps both halves (`12'-6"` signs as 12 ft **and** 6 in,
 neither negative), and a plural unit folds to its singular so `6 amps` and `6 amp`
 are not read as a conflict. `psig` is deliberately *not* folded into `psi`: gauge
 and absolute are different measurements, and collapsing them would hide a real
-conflict rather than a formatting one. A measurement is
-compared by its **value**, not by how it was typed, so `1/2"` is half an inch and
-never the denominator — *Provide 1/2" drain* and *Provide 2" drain* are two pipe
-sizes, not one finding twice — while `2 1/2"`, `2-1/2"` and `2.5"` are one
-quantity. Feet-inches keeps both halves (`12'-6"` signs as 12 ft **and** 6 in,
-neither negative), and a plural unit folds to its singular so `6 amps` and `6 amp`
-are not read as a conflict. `psig` is deliberately *not* folded into `psi`: gauge
-and absolute are different measurements, and collapsing them would hide a real
-conflict rather than a formatting one. A merge keeps
+conflict rather than a formatting one. The same holds for the other ways drawings
+write a quantity. `6-inch`, `6-in.` and `6 in` are one size. `12,500 cfm` and
+`12500 cfm` are one flow, and a garbled grouping such as `1,2,500` is kept as
+written, never read as the `500` at its end. `45 deg` and `45°` are one angle, and
+`90 deg F`, `90 degrees F` and `90°F` are one temperature, while `90°F` and
+`90°C` are two: a scale is never guessed, so a bare `90°` is not assumed to be
+Fahrenheit. A duct size (`24x12`, `24"x12"`), a range (`4-6 in`), a list written
+without spaces (`2,4,6 in`) and a voltage system (`120/208V`, the same as
+`208Y/120V`) each count as one quantity, so `2,4,6 in` and `3,5,6 in` stay two
+findings instead of agreeing on `6 in`. `480V` and `208V` differ. `20A` counts as
+a current only beside a pole count (`20A/1P`), a breaker, fuse or disconnect, or
+a rating label (`MOCP 25A`), because `room 101A`, `grid 2A` and `panel 2A` are
+names, and a name mistaken for a quantity would make two findings about the same
+room look as if they shared one. One limit remains until the next remediation
+slice: a single shared quantity still makes two findings compatible, so a
+`6 in` / `4 in` conflict beside a shared `100 psi`, or `12'-6"` against `12'-8"`
+(both 12 ft), can still merge. A merge keeps
 **coherent grounding**: the survivor's text and quote come from one member as an
 atomic bundle — never one finding's text paired with another's quote — while the
 loser's quote is kept as a supporting quote. The **verdict rides that bundle**,

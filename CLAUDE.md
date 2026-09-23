@@ -723,7 +723,22 @@ reporter of last resort must never raise from inside Tk's handler.
   lookbehinds — a single `[A-Za-z0-9.\-]` class blocks the `101` in `M-101`
   (right) *and* the `6` in `12'-6"` (wrong, and unsafe: `12'-6"` and `12'-8"` then
   both sign as `{12ft}`). Plurals fold; `psig` deliberately does not fold into
-  `psi`); merging keeps
+  `psi`. Since remediation WP-04.1 the tokenizer is a scanner,
+  `critique._quantity_tokens` (`lru_cache`d on its text, which is the whole
+  input), that reads each quantity whole and resumes past it: hyphenated units
+  (`6-inch` is `6in`), thousands groups (`12,500` is `12500`; a tight run that is
+  not a valid grouping, `1,2,500`, is kept whole, because a token dropped never
+  blocks a merge), degrees (`deg` is `°`; `deg F`, `degF` and `°F` are `°f`; a
+  scale is never inferred), and composites, each ONE token compared whole: a W×H
+  size `24x12in`, a range `4..6in`, a tight list `2,4,6in`, a voltage pair
+  `120/208volt`. A compact `V` reads anywhere but a slope (`3H:1V`), a compact `A`
+  only beside a pole count, an overcurrent device or a rating label: a room
+  `101A` read as a current would put one shared token in two findings, and one
+  shared value makes them compatible (N1). The critique cache stores post-merge
+  findings, so this rule rides `digest_cache._CRITIQUE_CACHE_CONTRACT`, a term
+  inside both critique key builders and nothing else, never `_SCHEMA_VERSION`;
+  `tests/test_drawing_cache_identity.py` pins the rule's fingerprint to its
+  value, so a rule change that forgets the bump fails); merging keeps
   **coherent grounding** — the text/quote/tile/rect/evidence-state **and the
   verdict** are one atomic bundle from a single representative, and the loser's
   quote → `supporting_quotes`. `_grounding_quality` ranks **host-computed
@@ -1047,7 +1062,11 @@ example is parked at `docs/examples/fire_protection.md`.
 - **I-6 — cache correctness:** prompt versions are content hashes
   (`DIGEST_PROMPT_VERSION`, `CRITIQUE_PROMPT_VERSION`), so prompt edits
   auto-invalidate; `digest_cache._SCHEMA_VERSION` is manual — bump it whenever
-  what is stored or sent changes. A hash only covers what it is given: the
+  what is stored or sent changes. The critique's host merge rule is the
+  exception: it has its own term, `_CRITIQUE_CACHE_CONTRACT`, folded into the two
+  critique builders only, because the schema version feeds every builder and
+  its v10 bump re-billed every digest to invalidate critiques. A hash only
+  covers what it is given: the
   user-turn framing (sheet introduction, omitted-tile disclosure, overview and
   per-tile labels) once sat outside both, so editing it changed the request
   while every key stayed identical. Those strings now live in
