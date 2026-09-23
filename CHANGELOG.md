@@ -48,6 +48,55 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A refused or unfinished sheet read counted as a digested sheet, and was
+  cached (remediation WP-01.2; N4, digest part; N27).** Both digest transports
+  failed a sheet only when its reply was empty or stopped at `max_tokens`.
+  Three other shapes passed as complete digests and were stored at both cache
+  levels:
+  - a refusal that came back with explanatory text (`stop_reason="refusal"`);
+  - a stream that ended before its final event. The SDK then returns the
+    partial text with no stop reason and raises nothing (N27);
+  - any other stop reason, including `model_context_window_exceeded`,
+    `pause_turn` and `tool_use`.
+
+  Every cache loader also served a hit as a clean digest, so a refusal cached
+  once was served on every warm run. Now:
+  - **One shared rule decides whether a read finished.** The new
+    `core.terminal_outcome.classify_stop_reason` (D-1 in
+    `_plans/DECISIONS.md`) reads the stop reason before the text: `end_turn`
+    and `stop_sequence` are finished; a truncation, a refusal, a missing stop
+    reason, a tool or pause continuation, and anything unrecognised are not.
+    Its vocabulary is pinned by test to the installed SDK's `StopReason` and
+    `BetaStopReason`. Both transports and the batch direct-call rescue apply it
+    through one ladder, `digest.digest_terminal_error`.
+  - **Such a sheet reads as failed**, and the error names why:
+    `refused digest (stop_reason='refusal')`, `unfinished digest
+    (stop_reason=None)`, `truncated digest
+    (stop_reason='model_context_window_exceeded')`. The text that came back is
+    kept: the sheet's export file and the HTML report show it under a failed
+    status, and `combined_text` carries the one-line failure note instead, as
+    it already did for a truncation.
+  - **Neither cache level stores it.** One admission predicate,
+    `digest.digest_cache_admits`, covers the level-2 writers of both transports
+    and the level-1 store.
+  - **Nothing unfinished is served from the cache.** The three loaders now share
+    `digest.sheet_digest_from_cache_entry`, which serves an entry only when its
+    stored stop reason is `end_turn` or `stop_sequence`. An entry that records a
+    refusal, a truncation, `null` or no stop reason at all is a miss: the sheet
+    is read again, and the finished read replaces it. No schema version
+    changed, so every finished digest already cached is still served.
+  - **Retries are unchanged.** Only a `max_tokens` truncation gets the
+    raised-cap retry. A larger cap cannot finish a refusal, a stream that ended
+    early or a full context window, so those are not retried.
+
+  **Visible effect:** a sheet whose read was refused or never finished counts
+  as failed. It lowers the ok-sheet count, is named in the run's errors, and
+  holds an exhaustive run's QC status below `COMPLETE`. A refusal or cut-short
+  stream cached by an earlier version is read again on the next run instead of
+  being served. In a batch run, an item that an abandoned batch answered with a
+  refusal is now resubmitted with the other unresolved sheets, within the
+  existing bounded rounds, as an empty or cut-off item already was.
+
 - **Verification reported COMPLETE when it had judged nothing (remediation
   WP-01.1; N5).** The stage counted every `UNCERTAIN` as a judgment. But a
   garbled, truncated or declined reply and a failed call are left `UNCERTAIN`

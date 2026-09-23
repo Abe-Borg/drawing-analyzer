@@ -74,6 +74,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .core.api_config import REVIEW_MODEL_DEFAULT, output_cap_for_model
+from .core.terminal_outcome import classify_stop_reason
 from .core.tokenizer import estimate_image_tokens_total
 from .diagnostics import get_logger, request_id_of, summarize_exc
 from .digest import (
@@ -90,8 +91,10 @@ from .digest import (
     _message_usage,
     _retry_backoff_seconds,
     build_digest_request_params,
+    digest_cache_admits,
     digest_sheet,
-    findings_from_cache,
+    digest_terminal_error,
+    sheet_digest_from_cache_entry,
     stream_message,
     focus_cache_fragment,
     normalize_focus,
@@ -631,8 +634,10 @@ def _item_retry_params(
         and digest.error
         # Deliberately NOT ``and not digest.text``: a partial body is exactly
         # the case the raised cap exists to finish, and requiring emptiness let
-        # every nonempty truncation through unretried.
-        and digest.stop_reason == "max_tokens"
+        # every nonempty truncation through unretried. Only a ``max_tokens``
+        # stop qualifies: a raised cap cannot finish a refusal, a read that
+        # never reported a stop reason, or a full context window.
+        and classify_stop_reason(digest.stop_reason).raised_cap_may_finish
     ):
         old = int(params.get("max_tokens") or DEFAULT_DIGEST_MAX_TOKENS)
         raised = min(old * 2, MAX_TOKENS_RETRY_CEILING)
@@ -1722,18 +1727,16 @@ def submit_drawing_batch(
                 sheet_text=sheet.sheet_text,
             )
             hit = cache.get(cache_key)
-            if hit is not None:
-                slot.digest = SheetDigest(
-                    ref=sheet.ref,
-                    text=hit.get("text", ""),
-                    input_tokens=int(hit.get("input_tokens", 0) or 0),
-                    output_tokens=int(hit.get("output_tokens", 0) or 0),
-                    image_token_estimate=image_est,
-                    stop_reason=hit.get("stop_reason"),
-                    error=None,
-                    cached=True,
-                    findings=findings_from_cache(hit, sheet.ref),
+            # An entry that records an unfinished read is a miss: the sheet is
+            # uploaded and submitted like any other (D-4).
+            served = (
+                sheet_digest_from_cache_entry(
+                    hit, sheet.ref, image_token_estimate=image_est,
                 )
+                if hit is not None else None
+            )
+            if served is not None:
+                slot.digest = served
                 slots.append(slot)
                 _log.debug("sheet %d cache hit: %s", index, sheet.ref.display_label)
                 if progress is not None:
@@ -2117,22 +2120,20 @@ def _digest_from_message(
     cache_read_tok = int(_get(usage, "cache_read_input_tokens", 0) or 0)
     cache_write_tok = int(_get(usage, "cache_creation_input_tokens", 0) or 0)
     stop = _get(message, "stop_reason")
-    # Parity with the real-time path: a reply the model did not FINISH is not a
-    # complete digest, whether it came back empty or merely cut off. Treating a
-    # nonempty truncation as success accepted it AND cached it permanently,
-    # while ``_item_retry_params`` never saw an error to retry on.
-    if not raw_text:
-        error = f"empty digest (stop_reason={stop!r})"
-    elif stop == "max_tokens":
-        error = "truncated digest (stop_reason='max_tokens')"
-    else:
-        error = None
+    # The real-time ladder, shared rather than restated: a reply the model did
+    # not FINISH is not a complete digest, whether it came back empty, cut
+    # off, refused, or with no stop reason at all. Treating any of those as
+    # success accepted it AND cached it permanently, while
+    # ``_item_retry_params`` never saw an error to retry on.
+    error = digest_terminal_error(raw_text, stop)
     # Same transport-agnostic split as the real-time path: prose (findings block
     # stripped) becomes ``text``; structured findings ride separately (I-2).
     text, findings, findings_note = parse_findings(
         raw_text, slot.ref, getattr(slot, "rows", 0), getattr(slot, "cols", 0)
     )
-    if cache is not None and slot.cache_key and error is None and raw_text:
+    if cache is not None and slot.cache_key and digest_cache_admits(
+        error=error, text=raw_text, stop_reason=stop,
+    ):
         cache.put(
             slot.cache_key,
             {
@@ -2208,8 +2209,8 @@ def _parse_item(slot: _Slot, result: Any, *, cache: Any) -> SheetDigest:
     )
     if digest.error is not None:
         _log.warning(
-            "item %s (%s): empty digest (stop_reason=%r)",
-            slot.custom_id, slot.ref.display_label, digest.stop_reason,
+            "item %s (%s): %s",
+            slot.custom_id, slot.ref.display_label, digest.error,
         )
     else:
         _log.debug(

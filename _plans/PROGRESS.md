@@ -1,7 +1,7 @@
 # Remediation progress tracker
 
-**Next up:** Wave 1 in order: `WP-01.2` (it decides D-1 and starts D-4). WP-01.1 is done and decided D-2. `WP-02.2` is unblocked by WP-02.1 but sits in Wave 2. First check the open PRs ([`README.md`](README.md), step 1). Before the next stable tag, the owner should look at O-5.
-**Last updated:** 2026-09-23 by the WP-01.1 session ([PR #155](https://github.com/Abe-Borg/drawing-analyzer/pull/155)).
+**Next up:** Wave 1 in order: `WP-04.1`. WP-01.2 is done: it decided D-1 and started D-4, which WP-10.4 completes. Its dependants are now available in their waves: WP-01.3 and WP-01.4 (Wave 1), WP-01.5 and WP-06.3 (Wave 2), WP-12.6 (Wave 3). First check the open PRs ([`README.md`](README.md), step 1). Before the next stable tag, the owner should look at O-5.
+**Last updated:** 2026-09-23 by the WP-01.2 session ([PR #156](https://github.com/Abe-Borg/drawing-analyzer/pull/156)).
 
 This file is authoritative for **status and order**. Requirements live in
 [`drawing-analyzer-remediation-plan.md`](drawing-analyzer-remediation-plan.md).
@@ -99,7 +99,7 @@ starting.
 | Slice | Scope (IDs closed) | Size | Depends on | Status | PR / date / notes |
 |---|---|---|---|---|---|
 | WP-01.1 | Verification is `COMPLETE` only when every eligible item was judged; failures and skips are counted separately; decides D-2 (N5) | M | — | done | [PR #155](https://github.com/Abe-Borg/drawing-analyzer/pull/155), 2026-09-23. One rule, `models.item_coverage_status` (D-2), over both passes. The denominator is fixed before any call (`VerifyResult.eligible`); skips and calls that returned no judgment are counted and surfaced separately (`coverage_note`). Investigation reports the findings it recovers and never rewrites verification's record. Tests: `tests/test_drawing_acceptance.py` (N5 block), `tests/test_drawing_verify.py` (completeness section). Residual: a finding that raises after the single-crop loop picks it up keeps its prior verdict (the report shows *Not checked*); the stage counts it "not accounted for" and stays off `COMPLETE` |
-| WP-01.2 | Shared terminal-outcome helper; the digest (real-time and batch) never admits a refusal, truncation or `stop_reason=None` read as success or into either cache level; cached refusals are rejected when read; decides D-1 (N4 digest, N27) | M/L | — | todo | |
+| WP-01.2 | Shared terminal-outcome helper; the digest (real-time and batch) never admits a refusal, truncation or `stop_reason=None` read as success or into either cache level; cached refusals are rejected when read; decides D-1 (N4 digest, N27) | M/L | — | done | [PR #156](https://github.com/Abe-Borg/drawing-analyzer/pull/156), 2026-09-23. One classifier, `core.terminal_outcome.classify_stop_reason` (D-1), its vocabulary pinned by test to the SDK's `StopReason` ∪ `BetaStopReason`. Both transports share one ladder (`digest.digest_terminal_error`), one write predicate (`digest.digest_cache_admits`, both levels) and one loader (`digest.sheet_digest_from_cache_entry`, all three cache hits), which serves only a stored finished stop reason; a stored `null` and a missing key are misses (D-4 started, one migration-register row, no schema or key change). Tests: `tests/test_digest_terminal_outcome.py`, `tests/test_terminal_outcome.py`, `tests/test_drawing_acceptance.py::test_a_refused_or_unfinished_digest_holds_the_run_below_complete`. Residual: N15, an errored digest's findings still reach the ledger (WP-01.3) |
 | WP-04.1 | Quantity tokenizer: hyphenated units, thousands groups, opaque malformed tokens, `deg`/`°` (angle vs temperature), lists and ranges, W×H and V/A with a negative corpus; critique-scoped cache term (B2, B3, B12, N19) | M | — | todo | |
 | WP-04.2 | Compatibility rule over per-unit value sets and partial tag overlap; one shared `signature_conflicts` that the A/B harness also uses (N1) | M | WP-04.1 | todo | |
 | WP-03.1 | Symmetric complete-link in Pass B, order-independent entry count (B1, count part) | S | — | todo | |
@@ -112,7 +112,7 @@ starting.
 | WP-06.1 | Cross-QC prompt says category `question` with severity `low`; invalid-field counters on both paths; candidate duplicates go to the ledger instead of being destroyed (B6, N2) | S/M | — | todo | |
 | WP-09.1 | Boilerplate filter with repeatable qualifiers; negation-aware synthesis conflict extraction (B11, N11) | S | — | todo | |
 | WP-09.2 | Prose matching rejects signature-incompatible candidates; per-item outcome counters; labelled paraphrase corpus (no threshold change) (N10, U11) | M | WP-04.2, WP-09.1 | todo | |
-| WP-01.3 | Digest partial reads: a raised-cap retry never loses the first read; findings from an errored, refused or truncated digest are labelled or held out of the ledger (N15, N16) | M | WP-01.2 | todo | |
+| WP-01.3 | Digest partial reads: a raised-cap retry never loses the first read; findings from an errored, refused or truncated digest are labelled or held out of the ledger (N15, N16) | M | WP-01.2 | todo | Since WP-01.2 a refused or unfinished digest carries an error too, so N15 now also covers, for example, an N27 partial read whose unclosed findings block was salvaged: its findings still reach the ledger unlabelled. `digest.digest_terminal_error` is the ladder to extend, not restate |
 | WP-01.4 | Critique: `max_tokens`/refusal/unknown terminal states are not completed reads on either transport; critique-only cache contract term (N4 critique) | M | WP-01.2 | todo | |
 | WP-11.1 | Per-source and per-page fault isolation in the render and prescan iterators; the inventory is the page denominator; every expected page gets an outcome (R1 core) | M | — | todo | |
 | WP-11.2 | Digest-phase containment: completed paid digests, journal and manifest always ship; uploads and spool released on every exit (R1) | M | WP-11.1 | todo | |
@@ -125,8 +125,8 @@ starting.
 |---|---|---|---|---|---|
 | WP-02.2 | Real-SDK contract tests over `httpx2.MockTransport`; strict fakes that reject what the SDK rejects (betas or fallbacks on the plain namespace, non-streaming above the SDK-derived cap) (U26) | M | WP-02.1 | todo | |
 | WP-02.3 | Fidelity fixtures: nested batch errors; canceled/expired envelopes; `None` usage fields; `web_fetch_requests`; `iterations`; `cache_creation` split; `output_tokens_details`; `stop_details`; fallback blocks; serving model; SSE sequences incl. mid-stream failure and clean EOF (U26) | M | WP-02.2 | todo | |
-| WP-01.5 | Batch refusal recovery under the selected transport policy, retry bound shared with truncation retries, `stop_details` logged (R2) | M | WP-01.2 | todo | |
-| WP-01.6 | Remaining response consumers (planner, identity, synthesis, focus, prose harvest cache writes); fallback-aware shared text join (U2; WP-09 step 6) | M | WP-01.2, WP-02.3 | todo | |
+| WP-01.5 | Batch refusal recovery under the selected transport policy, retry bound shared with truncation retries, `stop_details` logged (R2) | M | WP-01.2 | todo | Since WP-01.2 the abandoned-batch harvest resolves only finished reads, so a refused item it reads back is resubmitted with the unresolved sheets, within the existing bounded rounds (as an empty or truncated one already was). Decide whether that resubmission is allowed and count it against the shared retry bound. Classify with `core.terminal_outcome` (D-1) |
+| WP-01.6 | Remaining response consumers (planner, identity, synthesis, focus, prose harvest cache writes); fallback-aware shared text join (U2; WP-09 step 6) | M | WP-01.2, WP-02.3 | todo | Also move `verify._verdict_from_response` / `_degrade_kind` onto `core.terminal_outcome` (D-1). They test `max_tokens` and `refusal` only, so an unknown stop reason or `model_context_window_exceeded` is still parsed as a verdict (WP-01.2 left verification alone: not an N4 site) |
 | WP-01.7 | Interrupted-stream outcome and usage capture (`current_message_snapshot`), threaded through the digest retry loop (U1 partial-stream part; WP-14 step 7) | M | WP-01.2, WP-02.3 | todo | |
 | WP-05.3 | Character-stream fallback tier with a quantity-aware numeric veto (B4: `6 "`, `INCHDRAIN`, `12' - 6"`, `2 %`). Matches only contiguous source words, never a "manufactured joined string" (plan §2 rule 15) | M | WP-05.2, WP-04.1 | todo | |
 | WP-06.2 | Whole-set cross-QC on host handles (label shown beside handle), grounded against **uncapped** evidence text like the sharded path, claims rebound through handles, framing hashed into the key; decides D-8 if not yet decided (N6, U8, K2) | L | WP-05.1 | todo | |
@@ -326,7 +326,7 @@ report is built from it).
 | N1 | One shared value (`100 psi`, `12ft`) masks conflicting measurements | P0 | 04.2 | open | |
 | N2 | Cross-QC dedup destroys distinct claims sharing sheet/quote/legs | P0 | 06.1 | open | |
 | N3 | Reused operand membership (and fabricated quotes) give false DETERMINISTIC | P0 | 07.1 | open | |
-| N4 | Refused/truncated digests and critiques accepted and cached | P0 | 01.2, 01.4, 10.4 | open | |
+| N4 | Refused/truncated digests and critiques accepted and cached | P0 | 01.2, 01.4, 10.4 | open (digest part implemented+validated in 01.2; the critique part (01.4) and the cache map (10.4) stay open) | `tests/test_digest_terminal_outcome.py` (both transports, both cache levels, the read-side reject, the warm re-run of a refusal the old code cached, the delivery contract) and `tests/test_drawing_acceptance.py::test_a_refused_or_unfinished_digest_holds_the_run_below_complete` (WP-01.2, [PR #156](https://github.com/Abe-Borg/drawing-analyzer/pull/156)). Remaining: the critique (WP-01.4: `critique.outcome_from_message`, and a critique-only contract term, since critique entries store no stop reason); the cache map and the other writers' admission predicates (WP-10.4) |
 | N5 | Verification COMPLETE with no judgments or with skipped items | P0 | 01.1 | implemented+validated | `tests/test_drawing_acceptance.py::test_verification_is_complete_only_when_every_eligible_finding_was_judged` (six of the plan's seven cases, plus all-truncated and all-skipped) and `::test_a_later_investigation_never_erases_the_verification_outcome` (the seventh); `tests/test_drawing_verify.py` completeness section (WP-01.1, [PR #155](https://github.com/Abe-Borg/drawing-analyzer/pull/155)) |
 | N6 | Duplicate sheet labels bind first-wins (whole-set, dedup, arithmetic, legs) | P1 | 06.2 | open | |
 | N7 | Calculator accepts malformed numbers; inexact large integers | P1 | 20.1 | open | |
@@ -349,7 +349,7 @@ report is built from it).
 | N24 | `render.list_sheets` runs on the UI thread outside the preflight lock | P1 | 15.1 | open | |
 | N25 | `DRAWING_ANALYZER_CRITIQUE_RUNS ≥ 3` fabricates cross-family corroboration | P1 | 22.2 | open | |
 | N26 | Chat transcript kept in `localStorage` on `file://`, readable by other local files | P1 | 20.3 | open | |
-| N27 | A stream that ends without `message_stop` is cached as a complete digest | P0 | 01.2 | open | |
+| N27 | A stream that ends without `message_stop` is cached as a complete digest | P0 | 01.2 | implemented+validated | `tests/test_digest_terminal_outcome.py::test_n27_a_real_sdk_stream_that_ends_without_message_stop_is_not_a_digest` (the real SDK's stream accumulator over an in-process transport, through `digest_sheet`), plus the `stop_reason=None` cases on both transports, at both cache levels and through the pipeline (WP-01.2, [PR #156](https://github.com/Abe-Borg/drawing-analyzer/pull/156)) |
 | U1 | Serving model, fallback iterations and partial-stream billing unrecorded | P1 | 14.3, 14.6, 01.7 | open | |
 | U2 | Fallback text joins and selective history replay | P1 | 01.6, 12.1, 13.4, 19.2 | open | |
 | U3 | Generic `output_config` 400 disables task budgets process-wide | P1 | 13.1 | open | |
@@ -388,6 +388,161 @@ report is built from it).
 Each session adds one entry at the top: date, slices and IDs, PR, what changed,
 contracts decided, cache/schema effects, validation actually run (with counts),
 what could not be verified, risks, and next steps.
+
+### 2026-09-23 — WP-01.2: the digest never admits a read the model did not finish ([PR #156](https://github.com/Abe-Borg/drawing-analyzer/pull/156))
+
+- **Slice and IDs:** WP-01.2. N4 (the digest part) and N27. Decides D-1
+  (response outcome). Starts D-4 (cache contract), which WP-10.4 completes.
+- **What changed:**
+  - **One terminal-outcome classifier (D-1).** New `core/terminal_outcome.py`:
+    `classify_stop_reason(stop_reason)` returns a `TerminalOutcome(kind,
+    stop_reason)`. The kinds:
+    - `FINISHED`: `end_turn`, `stop_sequence`;
+    - `TRUNCATED`: `max_tokens`, `model_context_window_exceeded`;
+    - `REFUSED`: `refusal`;
+    - `UNFINISHED`: `None`;
+    - `CONTINUATION`: `tool_use`, `pause_turn`, the beta `compaction`;
+    - `UNKNOWN`: anything else, never finished.
+
+    `raised_cap_may_finish` is true for `max_tokens` only: a larger cap cannot
+    make room in a full context window. The vocabulary is the installed SDK's
+    `StopReason` ∪ `BetaStopReason` (Opus 5 calls travel the beta namespace
+    for the refusal fallback), and a test pins the table to it, so an SDK
+    upgrade that adds a reason fails until someone classifies it.
+  - **The digest, on both transports.** One ladder, `digest.digest_terminal_error`,
+    is used by `digest_sheet` (and so batch's Files-API inline fallback) and by
+    `batch_digest._digest_from_message` (and so the direct-call rescue).
+    - A refusal, empty or with text, sets `refused digest (stop_reason='refusal')`.
+    - A `None` stop reason, a continuation or an unknown reason sets
+      `unfinished digest (stop_reason=…)`.
+    - A context-window stop sets `truncated digest
+      (stop_reason='model_context_window_exceeded')`.
+    - The messages for an empty reply and a `max_tokens` truncation are
+      unchanged.
+
+    The text is kept on the sheet in every case.
+  - **Cache writes.** One predicate, `digest.digest_cache_admits` (no error,
+    nonempty text, a finished stop reason), guards both level-2 writers and
+    the pipeline's level-1 store-under-both.
+  - **Cache reads (the N4 migration).** The three loaders that forced
+    `error=None` now share `digest.sheet_digest_from_cache_entry`, which
+    returns `None` (a miss) unless the stored stop reason is finished: level 2
+    in `digest_sheet`, level 2 in `submit_drawing_batch`, and level 1 in
+    `pipeline._level1_partition`. A rejected entry is logged, left on disk,
+    and overwritten by the finished re-read.
+  - **Retries are unchanged.** Both raised-cap retry predicates now read
+    `raised_cap_may_finish`; only `max_tokens` is retried, as before.
+  - `batch_digest._parse_item` logs the sheet's actual error rather than
+    always "empty digest".
+  - **Docs.**
+    - CHANGELOG: a Fixed entry for N4 (digest part) and N27.
+    - CLAUDE.md: the digest-path paragraph and the `core/` sentence. The N16
+      entry in its known-inaccurate list is untouched; WP-01.3 owns it.
+    - README: the QC-status overview, a rewritten *A reply the model did not
+      finish* block, and one sentence in *Stuck batches*.
+- **Contracts decided:** D-1 (decided). D-4 (started: digest admission and the
+  read side; WP-10.4 completes it). Both are in [`DECISIONS.md`](DECISIONS.md).
+- **The migration decision** (the session request asked for it to be
+  deliberate):
+  - a stored `"stop_reason": null` is the N27 shape, and a miss;
+  - an entry with no `stop_reason` key is a miss too. The clone was shallow,
+    so the check ran over the full history (464 commits, root `87326ce`):
+    - both level-2 writers have stored the key since the root commit, and the
+      level-1 store since level 1 was added (`53ab354`);
+    - every key folds `_SCHEMA_VERSION`, which has been 10 since `b8399f4`
+      (2026-09-10);
+    - the legacy JSON store was retired at schema 8 (`f4a7dd6`).
+
+    So no entry a current key can reach lacks the key, and rejecting one
+    discards no paid digest.
+  - **Correction to the session request.** `2d176bb` is not the import
+    commit. It is a 2026-09-04 Codex-review fix, and the root is `87326ce`
+    (2026-06-07). Both predate schema 10, so the conclusion does not change.
+  - **What the reject can discard.** The truncation guard (`f56796b`) also
+    predates schema 10, so the reject can only discard shapes 1.6.0 and 1.7.0
+    admitted wrongly: a refusal with text, a `null`, or another non-finished
+    stop reason. Every finished entry is still served.
+- **Cache/schema effects:** the read-side reject above, and nothing else. No
+  `_SCHEMA_VERSION` bump, no key term, no prompt change. One
+  migration-register row.
+- **Re-baselined tests:** none. No existing test double reached the digest
+  without a stop reason: each is a `FakeMessage` (which defaults to
+  `end_turn`) or sets its own, and no test relied on a stop-reason-less
+  `SheetDigest` being stored at level 1. Every existing test passed unchanged.
+- **Validation (this container, Python 3.11.15, SDK 1.7.0, PyMuPDF 1.28.2):**
+  - **Baseline before any change:** `python -m pytest -q -m "not network"`
+    gave **2,645 passed, 2 skipped, 10 deselected** (190 s), identical to the
+    WP-01.1 handoff.
+  - **Reproduced first, on the real SDK.** SDK 1.7.0 over an in-process
+    `httpx2.MockTransport` (no socket), with an SSE body that stops after a
+    text delta (no `message_delta`, no `message_stop`).
+    `get_final_message()` returned the partial text with `stop_reason=None`
+    and raised nothing. `digest_sheet` returned it with `error=None` and cached
+    it. That run is now a regression test.
+  - **Failing first.** The 61 new behaviour tests against the unfixed code: 52
+    failed, 9 passed. The 9 pin what the fix keeps:
+    - finished reads cache and are served, on both transports (6);
+    - the `max_tokens` raised-cap retry (1);
+    - the N27 control stream, with `message_stop` (1);
+    - no raised-cap resubmission for a context-window stop (1).
+
+    The 20 unit tests for the classifier could not import the new module.
+  - **After:** the new tests, 81 passed. Full suite **2,726 passed, 2 skipped,
+    10 deselected** (198 s): the baseline plus the 81 new tests, with the same
+    two environment skips (IPv6 loopback; chmod as root).
+  - **Browser suite** (the report's code is unchanged, but a refused sheet now
+    renders with a *Failed* badge): 98 collected, 98 executed and passed;
+    `check_browser_suite.py` passes.
+  - `ruff check --select E9,F63,F7,F82 src tests scripts` is clean.
+    F401/F811/F841 over the touched files shows two hits, both present on the
+    base (WP-22.5 territory); none is new. `scan_secrets.py` is clean over 195
+    tracked files, the new ones included. `compileall src` passes.
+- **Not verified:**
+  - **Live API behaviour.** There is no live budget (O-4). A real refusal's
+    shape, and a real stream ending mid-response, were not observed. N27 is
+    proven on the real SDK's accumulator over a mock transport; refusals are
+    hermetic fakes.
+  - **Windows.** Covered by this PR's CI.
+- **Risks and residual gaps:**
+  - **A visible behaviour change.** A refused or unfinished sheet now fails:
+    - it lowers the ok-sheet count and is named in `ctx.errors`;
+    - it holds the digest stage at `PARTIAL`/`FAILED`, and an exhaustive
+      run's `qc_status` below `COMPLETE`.
+
+    A warm run re-reads, and re-bills, any sheet whose cached read was a
+    refusal or a stream that ended early: once if the re-read finishes, and on
+    every run while it keeps failing. That is by design, since an unfinished
+    read is never served.
+  - **N15 (WP-01.3).** An errored digest's findings still reach the ledger
+    unlabelled. Now that refusals and unfinished reads carry an error, that
+    includes an N27 partial read whose unclosed findings block was salvaged.
+  - **N16 (WP-01.3)** is unchanged: a raised-cap retry that lands empty or
+    refused still discards the first read.
+  - **The abandoned-batch harvest** resolves only finished reads, so a refused
+    item it reads back is now resubmitted within the bounded rounds, as empty
+    and truncated items already were. Noted on WP-01.5 (R2 decides the
+    policy and the shared bound).
+  - **Verification keeps its own two-reason check.** Noted on WP-01.6.
+  - **An SDK bump can fail CI by design.**
+    `tests/test_terminal_outcome.py::test_every_sdk_stop_reason_is_classified_and_nothing_else_is`
+    fails when an `anthropic` upgrade adds or removes a stop reason, until
+    `core/terminal_outcome.py` classifies it. A Dependabot bump of the SDK then
+    needs that one-line change. The open Dependabot PRs (#136, #148) do not
+    move the SDK.
+- **Re-checked (U31):**
+  - "Digest entries already store `stop_reason`" (plan WP-01 step 3) holds
+    across the full history (above).
+  - "The level-1 put is covered only if the fix sets `error`" holds. The fix
+    sets it, and the level-1 store now tests the stop reason too, through the
+    shared predicate.
+  - The delivery contract holds, and is now pinned for both transports:
+    `pipeline._combine` drops errored prose from `combined_text`;
+    `export._sheet_document` keeps it under FAILED; the HTML report renders it
+    under a *Failed* badge.
+- **Next:** WP-04.1 (Wave 1). Newly available: WP-01.3 and WP-01.4 (Wave 1),
+  WP-01.5 and WP-06.3 (Wave 2), WP-12.6 (Wave 3). WP-10.4 still waits on
+  WP-01.4; WP-01.6, WP-01.7 and WP-13.4 wait on WP-02.3; WP-14.5 waits on
+  WP-14.4.
 
 ### 2026-09-23 — WP-01.1: verification is COMPLETE only when every eligible item was judged ([PR #155](https://github.com/Abe-Borg/drawing-analyzer/pull/155))
 

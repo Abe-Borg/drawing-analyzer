@@ -314,14 +314,35 @@ length, because an un-anchored scan let an inline ``` span open a phantom block
 that swallowed the real findings JSON into the sacred prose), or `batch_digest.py`
 (Message Batches + Files APIs, ~50% cheaper) → `digest_cache.py` (two-level
 content-keyed cache — a hit skips rendering entirely and restores parsed
-findings for free — but never a **truncated** read: both transports treat a
-reply the model did not finish as an error whether it came back *empty or merely
-cut off*, retry once at a raised cap from the shared
-`digest.MAX_TOKENS_RETRY_CEILING`, and refuse the cache write if it is still cut
-off, since a stored truncation is indistinguishable from a complete one on every
+findings for free — but never a read the model did not **finish**, remediation
+WP-01.2 / D-1). Whether a read finished is decided from `stop_reason` alone,
+before the text is looked at, by the shared
+`core.terminal_outcome.classify_stop_reason`: only `end_turn` / `stop_sequence`
+are finished; `max_tokens` and `model_context_window_exceeded` are truncations;
+`refusal` is refused even when it carries explanatory text; `None` is unfinished
+(N27: for a stream that ends without `message_stop`, the real SDK's
+`get_final_message()` returns the partial text with `stop_reason=None` and
+raises nothing); `tool_use` / `pause_turn` / the beta `compaction` are
+continuations the digest never takes; anything else is unknown, never finished.
+The table is pinned by test to the installed SDK's `StopReason` ∪
+`BetaStopReason`, since Opus 5 calls travel the beta namespace for the refusal
+fallback, so an SDK upgrade that adds a reason fails until it is classified.
+Both transports (and the batch direct-call rescue, and the Files-API inline
+fallback) share **one ladder**, `digest.digest_terminal_error` (a refusal is
+named even when empty; the text stays on the sheet for the export), **one write
+predicate**, `digest.digest_cache_admits` (both level-2 writers and the
+pipeline's level-1 store-under-both), and **one loader**,
+`digest.sheet_digest_from_cache_entry`, which returns `None` (a miss) unless the
+stored `stop_reason` is finished. A stored `null` (the N27 shape; every writer
+has stored the key since the first commit) and a missing key are both misses,
+read again and overwritten, never deleted, with no `_SCHEMA_VERSION` bump (D-4).
+Only `max_tokens` earns the raised-cap retry (`raised_cap_may_finish`; a larger
+cap cannot make room in a full context window): retried once from the shared
+`digest.MAX_TOKENS_RETRY_CEILING`, and refused by the cache if still cut off,
+since a stored truncation is indistinguishable from a complete one on every
 later run. Real-time accumulates usage across both attempts — each was billed —
 and falls back to the truncated first read if the raised-cap call cannot land, so
-the retry can only improve on that read, never lose it). The critique does **not** re-rasterize what the digest
+the retry can only improve on that read, never lose it. The critique does **not** re-rasterize what the digest
 already rendered: `render_spool.py` spools the digest's already-compressed PNG
 bytes to a private temp dir and rebuilds the same `RenderedSheet` byte-for-byte
 (nothing resized, recompressed or filtered), and the batch path adopts the
@@ -993,7 +1014,10 @@ in both modes, since hiding it billed every shared report's questions to its
 author and left a rotated-key report dead.
 
 `core/` is a shared kernel (model ids + env overrides in `api_config.py`, key
-store, pricing, tokenizer, the structured-outputs gate). The tokenizer is
+store, pricing, tokenizer, the structured-outputs gate, and
+`terminal_outcome.py`, the one stop-reason classifier: D-1, adopted so far by the
+digest's two transports only, with the other response consumers moving onto it
+in their WP-01 slices rather than growing a second copy). The tokenizer is
 estimate-only: `tiktoken` was removed — its only two callers had no callers,
 and it fetched its encoding from a third-party host on first use, which a
 locked-down workstation blocks — so the exact count is `count_tokens_via_api`

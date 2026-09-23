@@ -20,7 +20,7 @@ changed; keep the history).
 
 ---
 
-## D-1 Response outcome — `open` (to be decided by WP-01.2)
+## D-1 Response outcome — `decided` (WP-01.2, [PR #156](https://github.com/Abe-Borg/drawing-analyzer/pull/156))
 
 **Required decision (plan §4.1):** tell apart a finished response, a refusal, a
 truncation, an interrupted stream, a transport failure, a malformed result, and
@@ -35,10 +35,109 @@ and its `_refusal_fallback_available` latch; `verify._degrade_kind` and the
 `batch_digest.DigestUsageAttempt.terminal_status`, `ABANDONED_*` and
 `DETACHED*`; `investigate`'s forced close.
 
-- Decision: —
-- Rejected shortcuts: —
-- Version / cache changes: —
-- Consumers affected: —
+- **Decision.**
+  - **One classifier.** `core.terminal_outcome.classify_stop_reason(stop_reason)`
+    returns a `TerminalOutcome(kind, stop_reason)`. It reads the stop reason
+    and nothing else, and a stage asks it **first**, before it looks at text or
+    JSON. So a successful envelope, nonempty text or a parseable object never
+    overrides it. This is `verify._verdict_from_response`'s stop-reason-first
+    precedent, generalised. Callers read the raw value with their own
+    shape-tolerant accessor (`digest._get`), so SDK objects and plain dicts
+    classify alike.
+  - **The kinds.** The vocabulary is SDK 1.7.0's `anthropic.types.StopReason`
+    plus `BetaStopReason`'s `compaction`. The beta vocabulary counts because
+    every call carrying the refusal-fallback beta travels
+    `client.beta.messages`.
+
+    | Kind | `stop_reason` | Meaning |
+    |---|---|---|
+    | `FINISHED` | `end_turn`, `stop_sequence` | The only kind a stage may treat as a completed read or admit to a cache. |
+    | `TRUNCATED` | `max_tokens`, `model_context_window_exceeded` | Output was cut off. Only `max_tokens` has `raised_cap_may_finish`. |
+    | `REFUSED` | `refusal` | Declined, with or without text. |
+    | `UNFINISHED` | `None` | The reply never said how it ended: the SDK's result for a stream that ends without `message_stop` (N27). Non-streaming replies always carry a stop reason. |
+    | `CONTINUATION` | `tool_use`, `pause_turn`, `compaction` | The turn handed control back. Each stage decides what that means. |
+    | `UNKNOWN` | anything else: a future value, `""`, a non-string | Never finished. |
+
+  - **Pinned to the SDK.** `tests/test_terminal_outcome.py` asserts that the
+    table's keys equal `StopReason` ∪ `BetaStopReason`. An SDK upgrade that adds
+    a reason fails there until it is classified; meanwhile it is `UNKNOWN`,
+    which is the safe answer. Matching is strict equality: a near-miss spelling
+    is `UNKNOWN`.
+  - **`model_context_window_exceeded` is not retryable by a raised cap.** The
+    limit it hit is the context window, not `max_tokens`, and a larger cap
+    cannot make room. It is `TRUNCATED` (the output was cut off, so it is never
+    admitted) with `raised_cap_may_finish` false.
+  - **Distinctions that are not stop reasons** stay with each stage, and apply
+    only to a `FINISHED` reply:
+    - *transport failure*: the call raised, so there is no reply to classify
+      (the digest's `call_error` path; verify's `DEGRADE_FAILED`);
+    - *interrupted stream*: when the SDK returns, it is `UNFINISHED` (N27).
+      When the stream raises, it is a transport failure, and the partial read
+      is lost today; capturing it is WP-01.7;
+    - *malformed result*: a finished reply the stage cannot parse (verify's
+      `DEGRADE_MALFORMED`; the digest's findings-block `MALFORMED_*`
+      telemetry, which never fails a sheet, because the prose is the
+      deliverable);
+    - *valid inconclusive judgment*: a finished reply that parses and says it
+      cannot tell (verify's valid `NOT_VISIBLE`, judged under D-2).
+  - **Continuations are per stage.** The digest declares no tools and never
+    resumes a paused turn, so for it `CONTINUATION` is not finished. When
+    investigation (`tool_use` continues its loop) and the citation check
+    (`pause_turn` resumes) adopt the helper, they decide their own.
+  - **How the digest applies it (WP-01.2).**
+    - One ladder, `digest.digest_terminal_error(raw_text, stop_reason)`, used
+      by `digest_sheet` (also behind batch's Files-API inline fallback) and by
+      `batch_digest._digest_from_message` (also behind the direct-call
+      rescue):
+      - `REFUSED`: `refused digest (stop_reason='refusal')`, even when empty;
+      - empty text: `empty digest (stop_reason=…)`, unchanged;
+      - `FINISHED`: no error;
+      - `TRUNCATED`: `truncated digest (stop_reason=…)`, unchanged for
+        `max_tokens`;
+      - `UNFINISHED`, `CONTINUATION`, `UNKNOWN`:
+        `unfinished digest (stop_reason=…)`.
+
+      The reply's text stays on the sheet for the per-sheet export; the error
+      keeps it out of `combined_text` and out of both caches.
+    - The raised-cap retry predicate on both transports (`digest_sheet`'s
+      loop, `batch_digest._item_retry_params`) reads `raised_cap_may_finish`.
+      The behaviour is unchanged: only `max_tokens` is retried.
+    - Cache admission and the read side: D-4.
+- **Rejected shortcuts.**
+  - Treating nonempty text, or a parsed findings block, as proof of
+    completion. That was the 1.7.0 ladder.
+  - Treating `None` as "probably fine". It is exactly what the SDK returns for
+    a stream that ended before `message_stop`.
+  - Mapping an unrecognised stop reason to finished, or normalising spellings.
+  - Retrying a context-window stop at a raised cap.
+  - A refusal retry, or reading `stop_details`, in this slice. That is R2
+    (WP-01.5), which needs the transport policy and a retry bound shared with
+    the truncation retries.
+  - Changing `models.FINDINGS_PARSE_OK`. The digest legitimately salvages
+    `PARSED_UNCLOSED` at `end_turn`, and the classifier never looks at content.
+  - Moving verification onto the helper in this slice. Verification is not an
+    N4 site. Its `_verdict_from_response` / `_degrade_kind` test `max_tokens`
+    and `refusal` only, which agrees with the helper on both, but they do not
+    yet treat `None`, an unknown reason or `model_context_window_exceeded` as
+    unjudged. Recorded on WP-01.6.
+- **Version / cache changes:** see D-4 and the migration register. No prompt,
+  key or schema changed.
+- **Consumers affected.**
+  - `digest.digest_sheet`, `batch_digest._digest_from_message`,
+    `_item_retry_params` and `_parse_item`'s log line; through them the
+    Files-API inline fallback and the direct-call rescue.
+  - Downstream of the sheet's error: the digest stage's status and
+    `items_out`, `ok_sheet_count`, `ctx.errors`, the `combined_text` failure
+    note, the export's per-sheet `FAILED` status, the report's *Failed*
+    badge, `run.log`, the usage ledger (the attempt is recorded `FAILED`), and,
+    through `roll_up_qc_status`, the run's `qc_status`.
+  - The abandoned-batch harvest resolves successes only, so a refused item it
+    reads back is now resubmitted with the unresolved sheets, within the
+    existing bounded rounds, as empty and truncated items already were.
+  - Later adopters, which conform or amend here: the critique (WP-01.4), R2
+    (WP-01.5), the remaining consumers and verification (WP-01.6),
+    interrupted streams (WP-01.7), cross-QC (WP-06.3), the citation cache gate
+    (WP-12.6), investigation (WP-13.4).
 
 ## D-2 Stage accounting — `decided` (WP-01.1, [PR #155](https://github.com/Abe-Borg/drawing-analyzer/pull/155))
 
@@ -140,7 +239,7 @@ consumer inventory is in plan WP-03.
 - Version / cache changes: —
 - Consumers affected: —
 
-## D-4 Cache contract — `open` (started by WP-01.2, completed by WP-10.4)
+## D-4 Cache contract — `open`: started by WP-01.2 ([PR #156](https://github.com/Abe-Borg/drawing-analyzer/pull/156)), completed by WP-10.4
 
 **Required decision:** every cache key names the request format actually sent,
 the host validator/normalizer version, and the completeness metadata, with
@@ -156,10 +255,71 @@ never deleted (plan §2 rule 6, WP-10).
 `_request_shape_params`); `DigestCache` stage namespaces (`stage=identity`,
 `stage=review_plan`, `stage=investigation`); `stage_cache.py`.
 
-- Decision: —
-- Rejected shortcuts: —
-- Version / cache changes: see the migration register below
-- Consumers affected: —
+- **Decision, WP-01.2's part: digest cache admission and the N4 read side.**
+  - **Admission.** A digest is written to either level only when
+    `digest.digest_cache_admits(error, text, stop_reason)` holds: no error,
+    nonempty text, and a `FINISHED` stop reason (D-1). Users: the level-2
+    writers of both transports (`digest_sheet`, `_digest_from_message`) and the
+    pipeline's level-1 store-under-both. The stop reason is tested directly,
+    not only through `error`, so the write rule and the read rule are one rule.
+  - **Read side.** All three digest loaders go through
+    `digest.sheet_digest_from_cache_entry`, which returns `None` (a miss)
+    unless the entry's stored `stop_reason` is `FINISHED`. The three are level 2
+    in `digest_sheet`, level 2 in `batch_digest.submit_drawing_batch`, and
+    level 1 in `pipeline._level1_partition`. Before WP-01.2, all three forced
+    `error=None` on whatever they read.
+  - **A stored `null` and a missing key are both misses.**
+    - `"stop_reason": null` is the N27 shape. Every digest writer stores the
+      key, so `null` means the read never reported how it ended.
+    - No key at all was written by nothing in this repository's history.
+      Checked with `git log -S` over the full history (464 commits; root
+      `87326ce`, 2026-06-07, the extraction from Spec Critic):
+      - both level-2 writers have stored `"stop_reason": stop` since the root
+        commit;
+      - `cache_entry_from_digest` has stored `sd.stop_reason` since level 1
+        was added (`53ab354`, 2026-07-09);
+      - every key folds `_SCHEMA_VERSION`, which has been 10 since `b8399f4`
+        (2026-09-10), so a reachable entry was written by code from that
+        commit on;
+      - the legacy-JSON importer admits only entries at the current schema,
+        and the JSON store was retired at `f4a7dd6` (2026-07-20), at schema 8;
+      - the Spec Critic predecessor used another state directory.
+
+      So serving a keyless entry would be the one fail-open hole in a
+      fail-closed rule, and rejecting it discards no digest this application
+      paid for.
+    - The session request called `2d176bb` the import commit. It is a
+      2026-09-04 commit ("Address Codex review: three cache and accounting
+      gaps"); the root is `87326ce`. Both predate schema 10, so the
+      conclusion does not change.
+  - **What the reject can discard.** The truncation guard (`f56796b`, schema
+    9) landed before schema 10 (`b8399f4`), on the same day, so no entry a
+    released version wrote under schema 10 (1.6.0, 1.7.0) holds a nonempty
+    `max_tokens` read. The entries now rejected can only be shapes 1.6.0 and
+    1.7.0 admitted wrongly: a refusal that carried text, a `null` (N27), or
+    another non-finished stop reason. Each is read again on the next run, and
+    a finished read overwrites it. Every `end_turn` / `stop_sequence` entry is
+    still served.
+  - **Rejected entries stay on disk.** Nothing is deleted (plan §2 rule 6). A
+    sheet that keeps failing keeps missing, and is re-read each run.
+  - **No `_SCHEMA_VERSION` bump and no new key term.** The bump feeds all seven
+    key builders and would discard every paid digest. A key term would orphan
+    every finished entry as well. The stored data already carries what the
+    read side needs, so the read-side reject is the one mechanism.
+- **Still open, for WP-10.4:** the cache map with the admission predicate of
+  every write (critique, identity, review plan, citation, investigation, the
+  stage caches), the critique's contract term (WP-01.4: critique entries carry
+  no stop reason), and the rest of the register.
+- **Rejected shortcuts.**
+  - A `_SCHEMA_VERSION` bump: it discards every paid digest.
+  - A new key term for the same change, and a bump and a term together.
+  - Treating a missing `stop_reason` key as legacy and servable.
+  - Deleting a rejected entry.
+- **Version / cache changes:** see the migration register below.
+- **Consumers affected.** The three digest loaders. A rejected entry is a
+  miss, so it no longer counts in the level-1 prescan hits (`CACHE_PRESCAN`)
+  or `ctx.cached_sheet_count`, and on a warm run that sheet renders and is
+  read again.
 
 ## D-5 Run lifecycle — `open` (to be decided by WP-17.1)
 
@@ -239,4 +399,4 @@ migration.
 
 | Namespace / schema | Old version | New version | Readable fields kept | Reusable content | Invalidation reason and scope | Slice / PR |
 |---|---|---|---|---|---|---|
-| — | — | — | — | — | — | — |
+| Digest cache, level 1 and level 2 (`digest_cache_key_level1`, `digest_cache_key`) | schema 10 | schema 10 (no version, key or term change) | Every field | Every entry whose stored `stop_reason` is `end_turn` or `stop_sequence` | Read-side reject (N4, N27; D-4). An entry that records `refusal`, `max_tokens`, `model_context_window_exceeded`, `tool_use`, `pause_turn`, `compaction`, `null`, any other value, or no `stop_reason` key is a miss. Only those entries are affected. They stay on disk, and a finished re-read overwrites them. Released 1.6.0 and 1.7.0 could have written the refusal and `null` shapes | WP-01.2, [PR #156](https://github.com/Abe-Borg/drawing-analyzer/pull/156) |

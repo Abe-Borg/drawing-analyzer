@@ -28,6 +28,7 @@ from .core.api_config import (
     model_supports_effort,
     output_cap_for_model,
 )
+from .core.terminal_outcome import REFUSED, TRUNCATED, classify_stop_reason
 from .core.tokenizer import estimate_image_tokens_total
 from .diagnostics import get_logger
 from .digest_cache import digest_cache_key
@@ -1487,23 +1488,111 @@ def claims_from_cache(hit: dict, ref: SheetRef | None = None) -> list[NumericCla
     return out
 
 
-def sheet_digest_from_cache_entry(entry: dict, ref: SheetRef) -> SheetDigest:
-    """Build a cached :class:`SheetDigest` from a digest-cache ``entry`` + ``ref``.
+def digest_terminal_error(raw_text: str, stop_reason: Any) -> str | None:
+    """The sheet's error for one digest reply, or ``None`` for a finished one.
 
-    Used by the pipeline's level-1 (pre-render) cache hit — the sheet was never
-    rasterized, so there are no image sizes to estimate from and
-    ``image_token_estimate`` is 0 (nothing was sent). Otherwise byte-for-byte the
-    same cached shape :func:`digest_sheet` returns on a level-2 hit (``cached``
-    True, original token counts, findings rehydrated), so downstream can't tell
-    which cache tier served it.
+    The one ladder both transports apply: :func:`digest_sheet` (also behind
+    batch's Files-API inline fallback) and
+    ``batch_digest._digest_from_message`` (also behind the direct-call rescue).
+    So a reply cannot pass on one transport and fail on the other.
+
+    The stop reason decides first
+    (:func:`~drawing_analyzer.core.terminal_outcome.classify_stop_reason`), and
+    nonempty text never overrides it (N4, N27). Before WP-01.2 only an empty
+    reply or a ``max_tokens`` stop failed, so three shapes passed as complete
+    digests and were cached at both levels: a refusal that carried explanatory
+    text, a stream that ended without a stop reason (the SDK returns its
+    partial text with ``stop_reason=None`` and raises nothing), and any stop
+    reason the code did not know.
+
+    Whatever text came back stays on the sheet: it is real output, and the
+    per-sheet export shows it under a FAILED status. The error keeps it out of
+    ``combined_text`` (``pipeline._combine``) and out of both cache levels
+    (:func:`digest_cache_admits`). A stored partial read is the worst outcome:
+    every later run would serve it as complete, at zero cost.
     """
+    outcome = classify_stop_reason(stop_reason)
+    if outcome.kind == REFUSED:
+        # Named even when the refusal came back empty. "Declined" is the fact
+        # a reader can act on, and "empty digest" would hide it.
+        return f"refused digest (stop_reason={stop_reason!r})"
+    if not raw_text:
+        return f"empty digest (stop_reason={stop_reason!r})"
+    if outcome.finished:
+        return None
+    if outcome.kind == TRUNCATED:
+        return f"truncated digest (stop_reason={stop_reason!r})"
+    # UNFINISHED (no stop reason: a stream that ended early, N27), CONTINUATION
+    # (the digest declares no tools and never resumes a paused turn) and
+    # UNKNOWN (never finished).
+    return f"unfinished digest (stop_reason={stop_reason!r})"
+
+
+def digest_cache_admits(*, error: str | None, text: str, stop_reason: Any) -> bool:
+    """The admission predicate for every digest cache write, at both levels.
+
+    Used by the level-2 writers of both transports and by the pipeline's
+    level-1 store (store-under-both). ``text`` is what each writer already
+    required to be nonempty: the raw reply at level 2, the prose at level 1.
+
+    The stop reason is checked here as well as through ``error``, so a writer
+    applies the same rule :func:`sheet_digest_from_cache_entry` applies on the
+    way out. Nothing is stored that the loader would refuse to serve (D-4).
+    """
+    return (
+        error is None
+        and bool(text)
+        and classify_stop_reason(stop_reason).finished
+    )
+
+
+def sheet_digest_from_cache_entry(
+    entry: dict, ref: SheetRef, *, image_token_estimate: int = 0,
+) -> SheetDigest | None:
+    """The cached :class:`SheetDigest` for a digest-cache ``entry``, or ``None``.
+
+    The one loader behind all three digest cache hits: level 2 in
+    :func:`digest_sheet`, level 2 in ``batch_digest.submit_drawing_batch``, and
+    level 1 in ``pipeline._level1_partition``. Each builds the same cached shape
+    (``cached`` True, the originally recorded token counts, findings
+    rehydrated), so downstream cannot tell which tier served a sheet. A level-1
+    hit rendered nothing, so its ``image_token_estimate`` is 0.
+
+    Returns ``None``, which every caller treats as a miss, unless the entry
+    records a finished read (D-4). A hit is served with ``error=None``. Serving
+    an entry whose stored ``stop_reason`` is a refusal, a truncation or
+    anything else unfinished would turn a failed read into a clean one on every
+    warm run (N4, N27). Two shapes deserve a word:
+
+    * a stored ``null`` is the N27 shape. Every writer stores the key, so
+      ``None`` means the read never reported how it ended;
+    * an entry with no ``stop_reason`` key was written by nothing in this
+      repository's history, since every writer has stored the key since the
+      first commit. It says nothing about how the read ended, so it is a miss
+      too.
+
+    The rejected entry is left in place, never deleted. The sheet is read
+    again, and a finished read overwrites it.
+    """
+    stop = entry.get("stop_reason")
+    outcome = classify_stop_reason(stop)
+    if not outcome.finished:
+        reason = (
+            "no stop_reason recorded" if "stop_reason" not in entry
+            else f"stop_reason={stop!r} ({outcome.kind})"
+        )
+        _log.info(
+            "digest cache entry for %s not served: %s; reading the sheet again",
+            ref.display_label, reason,
+        )
+        return None
     return SheetDigest(
         ref=ref,
         text=entry.get("text", ""),
         input_tokens=int(entry.get("input_tokens", 0) or 0),
         output_tokens=int(entry.get("output_tokens", 0) or 0),
-        image_token_estimate=0,
-        stop_reason=entry.get("stop_reason"),
+        image_token_estimate=image_token_estimate,
+        stop_reason=stop,
         error=None,
         cached=True,
         findings=findings_from_cache(entry, ref),
@@ -1552,10 +1641,12 @@ def digest_sheet(
     is injectable so tests don't wait); a permanent failure returns immediately.
 
     ``cache`` (a :class:`~drawing_analyzer.digest_cache.DigestCache`, or ``None`` to
-    disable) is consulted before the API call and written only on a successful,
-    non-empty digest — so an unchanged sheet on a re-run is served from cache
-    with ``cached=True`` and no token cost. The key folds in the rendered images,
-    the model, the prompt fingerprint, and the output-shaping params.
+    disable) is consulted before the API call and written only on a finished,
+    non-empty digest (:func:`digest_cache_admits`) — so an unchanged sheet on a
+    re-run is served from cache with ``cached=True`` and no token cost, and an
+    entry that records an unfinished read is a miss
+    (:func:`sheet_digest_from_cache_entry`). The key folds in the rendered
+    images, the model, the prompt fingerprint, and the output-shaping params.
 
     ``focus`` (an optional per-run operator focus — see :func:`normalize_focus`)
     asks for one extra ``**Focus findings**`` section after the standard digest.
@@ -1588,17 +1679,11 @@ def digest_sheet(
         )
         hit = cache.get(cache_key)
         if hit is not None:
-            return SheetDigest(
-                ref=sheet.ref,
-                text=hit.get("text", ""),
-                input_tokens=int(hit.get("input_tokens", 0) or 0),
-                output_tokens=int(hit.get("output_tokens", 0) or 0),
-                image_token_estimate=image_est,
-                stop_reason=hit.get("stop_reason"),
-                error=None,
-                cached=True,
-                findings=findings_from_cache(hit, sheet.ref),
+            served = sheet_digest_from_cache_entry(
+                hit, sheet.ref, image_token_estimate=image_est,
             )
+            if served is not None:
+                return served
 
     if client is None:
         from .client import get_client as _get_client
@@ -1668,7 +1753,10 @@ def digest_sheet(
         cache_read_tok += int(_get(_usage, "cache_read_input_tokens", 0) or 0)
         cache_write_tok += int(_get(_usage, "cache_creation_input_tokens", 0) or 0)
 
-        if _get(resp, "stop_reason") != "max_tokens" or raised_cap_used:
+        # Only a ``max_tokens`` truncation qualifies: a raised cap cannot finish
+        # a refusal, a stream that ended early, or a full context window.
+        stop_outcome = classify_stop_reason(_get(resp, "stop_reason"))
+        if not stop_outcome.raised_cap_may_finish or raised_cap_used:
             break
         old_cap = int(kwargs.get("max_tokens") or max_tokens)
         raised = output_cap_for_model(
@@ -1682,17 +1770,11 @@ def digest_sheet(
 
     raw_text = _message_text(resp)
     stop = _get(resp, "stop_reason")
-
-    error: str | None = None
-    if not raw_text:
-        error = f"empty digest (stop_reason={stop!r})"
-    elif stop == "max_tokens":
-        # Still truncated after the raised cap. The partial text is returned —
-        # it is real work and the prose is better than nothing — but the sheet
-        # is marked failed so the run reports it, and the cache guard below
-        # refuses to store it. Caching a truncated read is the worst outcome:
-        # it is indistinguishable from a complete one on every later run.
-        error = "truncated digest (stop_reason='max_tokens')"
+    # A reply the model did not finish (still truncated after the raised cap,
+    # refused, a stream that ended without a stop reason, or anything else
+    # short of ``end_turn`` / ``stop_sequence``) fails the sheet. Its text is
+    # still returned: it is real output, and the per-sheet export shows it.
+    error = digest_terminal_error(raw_text, stop)
 
     # Split the findings block off the prose. ``text`` is the prose only, so
     # ``combined_text`` never sees the JSON (I-2); ``findings`` and the telemetry
@@ -1701,12 +1783,13 @@ def digest_sheet(
         raw_text, sheet.ref, sheet.rows, sheet.cols
     )
 
-    # Cache only a real, successful digest — never an empty/error result (those
-    # are transient and a re-run should re-attempt them). A digest truncated at
-    # ``max_tokens`` now sets ``error`` above and so is refused here: a stored
-    # truncation is served forever, at zero cost and indistinguishable from a
-    # complete read, which is how a cut-off sheet became permanent.
-    if cache is not None and cache_key is not None and error is None and raw_text:
+    # Cache only a finished, successful digest, never an empty or unfinished
+    # one: a re-run should re-attempt those. A stored partial read is served
+    # forever, at zero cost and indistinguishable from a complete one, which
+    # is how a cut-off or refused sheet became permanent.
+    if cache is not None and cache_key is not None and digest_cache_admits(
+        error=error, text=raw_text, stop_reason=stop,
+    ):
         cache.put(
             cache_key,
             {

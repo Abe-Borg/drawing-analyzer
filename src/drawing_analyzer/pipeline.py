@@ -36,6 +36,7 @@ from .digest import (
     DIGEST_PROMPT_VERSION,
     SheetDigest,
     cache_entry_from_digest,
+    digest_cache_admits,
     digest_sheet,
     focus_cache_fragment,
     normalize_focus,
@@ -1059,7 +1060,9 @@ def _level1_partition(
     - ``cached_by_ref`` — ``_refkey`` → a cached :class:`SheetDigest` for each hit
       (served without ever rendering, ``cached=True``);
     - ``miss_only`` — the set of ``(str(path), page_index)`` that missed, handed to
-      the render stream's ``only`` so exactly those sheets rasterize;
+      the render stream's ``only`` so exactly those sheets rasterize. An entry
+      that records an unfinished read counts as a miss
+      (:func:`~drawing_analyzer.digest.sheet_digest_from_cache_entry`);
     - ``level1_keys`` — ``_refkey`` → level-1 key, so a miss's fresh digest can be
       stored under it;
     - ``geometries`` — every sheet's lightweight geometry (hit or miss), for QC.
@@ -1087,8 +1090,11 @@ def _level1_partition(
         rk = _refkey(ref)
         level1_keys[rk] = key
         entry = cache.get(key)
-        if entry is not None:
-            cached_by_ref[rk] = sheet_digest_from_cache_entry(entry, ref)
+        served = (
+            sheet_digest_from_cache_entry(entry, ref) if entry is not None else None
+        )
+        if served is not None:
+            cached_by_ref[rk] = served
         else:
             miss_only.add(rk)
     return cached_by_ref, miss_only, level1_keys, geometries
@@ -3108,10 +3114,15 @@ def extract_drawing_context(
 
     # Store each miss's result under its level-1 key too (store-under-both), so a
     # next run recognizes the sheet pre-render and skips rasterization. Only a
-    # real, non-empty digest is stored — mirroring digest_sheet's own guard.
+    # finished, non-empty digest is stored, by the same predicate the level-2
+    # writers apply (a refused or unfinished read carries an error and is not).
     if cache is not None:
         for sd in miss_sheets:
-            if sd.error is None and (sd.text or "").strip():
+            if digest_cache_admits(
+                error=sd.error,
+                text=(sd.text or "").strip(),
+                stop_reason=sd.stop_reason,
+            ):
                 key = level1_keys.get(_refkey(sd.ref))
                 if key is not None:
                     cache.put(key, cache_entry_from_digest(sd))

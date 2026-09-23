@@ -225,7 +225,10 @@ only when every finding it had to check got a verdict. A finding it had to skip,
 or whose verdict call came back unreadable, cut off or failed, holds it at
 `PARTIAL`, or at `FAILED` when it judged none at all (see *Not every `UNCERTAIN`
 is a judgment* below). Runs that used to report `COMPLETE` with such a finding
-now report `PARTIAL`.
+now report `PARTIAL`. So is the digest: a sheet whose read the model refused, or
+never finished, is a failed sheet and holds the run below `COMPLETE`, even when
+the reply came back with text (see *A reply the model did not finish* under the
+findings block, below).
 
 ### Browsing the result
 
@@ -563,11 +566,39 @@ body leaked into the prose digest, and the prose after the inline span was
 silently dropped. A truncated block (the model cut off mid-JSON) is still
 recognised and stripped, so a partial machine block never reaches the prose.
 
-A reply the model did not finish is never treated as one it did. When a digest
-stops at `max_tokens` the request is retried once at a raised output cap; if it
-is still cut off, the sheet is reported as failed and the result is **not**
-cached — a stored truncation would otherwise be served on every later run,
-indistinguishable from a complete read. The partial prose still ships.
+**A reply the model did not finish** is never treated as one it did. Whether a
+read finished is decided from the reply's stop reason, before its text is looked
+at, because the text cannot tell: a refusal can come back with a paragraph of
+explanation, and a stream that ends before its final event still hands back
+the text received so far. Only a read that ended normally (`end_turn`, or a
+`stop_sequence`) counts. Everything else fails the sheet:
+
+- a **refusal**, with or without text: `refused digest (stop_reason='refusal')`;
+- a **truncation**: `truncated digest (stop_reason='max_tokens')`, or
+  `model_context_window_exceeded` when the model ran out of context window;
+- a read that **never reported how it ended**, which is what a stream that
+  ended before its final event looks like: `unfinished digest
+  (stop_reason=None)`;
+- a paused or tool-use turn, which the digest never continues, and any stop
+  reason the app does not recognise: `unfinished digest (stop_reason=…)`.
+
+When a digest stops at `max_tokens`, the request is first retried once at a
+raised output cap; if it is still cut off, it fails as above. The others are not
+retried, because a larger cap cannot finish a refusal, a stream that ended
+early, or a full context window. A failed read is **never cached**, at either
+level: a stored one would be served on every later run, indistinguishable from
+a complete read. Whatever text it returned is kept: the sheet's own export file
+and the HTML report show it under a *Failed* status, while `combined_text`
+carries a one-line failure note in its place. A failed sheet lowers the
+ok-sheet count, is named in the run's errors, and holds an exhaustive run's QC
+status below `COMPLETE`.
+
+The cache applies the same rule on the way out: a cached digest is served only
+if it records a finished read. An earlier version could cache a refusal that
+came with text, or a stream that ended early; such an entry, or one that
+records no stop reason at all, is now a miss, and the sheet is read again. A finished read
+then replaces it. Every finished digest already in the cache is still served,
+so upgrading re-reads only the sheets whose cached read was not finished.
 
 A tolerant parser splits this block off and **strips it from the prose**, so the
 digest text — and the `combined_text` a downstream spec reviewer consumes — is
@@ -1738,7 +1769,10 @@ sheet looked unresolved, including the ones already produced and billed. A real
 40-sheet run detached with 11 sheets in hand, resubmitted all 40, and returned
 nothing after paying for 12 digests. The harvest is bounded and never spends the
 recovery's budget: if the batch will not settle, the run resubmits everything
-exactly as it used to, which costs money but never loses sheets.
+exactly as it used to, which costs money but never loses sheets. Only a finished
+read is taken from the abandoned batch: an item it answered with an empty,
+cut-off or refused read is resubmitted with the unresolved sheets, within the
+same bounded rounds, and its billed attempt stays in the usage ledger.
 
 The run waits up to **24 hours** for a batch — the Batches API's own SLA, and
 what makes the app's "can run overnight" wording true rather than aspirational.

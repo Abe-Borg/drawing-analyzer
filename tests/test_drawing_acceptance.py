@@ -1280,6 +1280,51 @@ def test_an_empty_digest_sheet_is_reported_as_an_error(tmp_path, monkeypatch):
     assert any("empty digest" in e for e in ctx.errors), ctx.errors
 
 
+@pytest.mark.parametrize(
+    "stop, text, error",
+    [
+        pytest.param(
+            "refusal", "I can't help with reviewing this drawing sheet.",
+            "refused digest (stop_reason='refusal')", id="refusal-with-text",
+        ),
+        pytest.param(
+            None, "Sheet M-102 - Mechanical - Schedules\nEquipment sche",
+            "unfinished digest (stop_reason=None)",
+            id="stream-ended-without-a-stop-reason",
+        ),
+    ],
+)
+def test_a_refused_or_unfinished_digest_holds_the_run_below_complete(
+    tmp_path, stop, text, error,
+):
+    # N4 / N27 (WP-01.2). A refusal that carried explanatory text, or a stream
+    # that ended without a stop reason, used to count as a digested sheet: the
+    # digest stage read COMPLETE and so could the run, over a sheet the model
+    # never finished reading (I-1).
+    client = G.mini_client()
+    scripted_digest = client._digest
+
+    def _digest(request_text):
+        if "EQUIPMENT SCHEDULE" in request_text:        # sheet M-102
+            return FakeMessage(
+                content=[FakeTextBlock(text=text)], stop_reason=stop,
+                usage=FakeUsage(input_tokens=400, output_tokens=30),
+            )
+        return scripted_digest(request_text)
+
+    client._digest = _digest
+    ctx = _mini_run(tmp_path, client)
+
+    statuses = {s.stage: s.status for s in ctx.stage_results}
+    assert statuses["digest"] == "PARTIAL", statuses
+    assert ctx.qc_status != "COMPLETE"
+    assert ctx.ok_sheet_count == 1
+    assert any(error in e for e in ctx.errors), ctx.errors
+    # I-3: the sheet that did read still ships; the unfinished one does not.
+    assert "VAV-3 serves Room 120" in ctx.combined_text
+    assert text not in ctx.combined_text
+
+
 def test_a_cross_verifier_crash_is_not_a_valid_skip(tmp_path, monkeypatch):
     # ``counted == 0`` was tested before ``cross_failed``. A cross-verifier that
     # raised left its result None, contributing nothing to ``counted``, so the
