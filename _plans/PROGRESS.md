@@ -1,7 +1,7 @@
 # Remediation progress tracker
 
 **Next up:** `WP-23.1`, then Wave 1 in order (`WP-02.2` is unblocked by WP-02.1 but sits in Wave 2). First check the open PRs ([`README.md`](README.md), step 1).
-**Last updated:** 2026-09-23 by the WP-02.1 session (PR link added in a follow-up commit).
+**Last updated:** 2026-09-23 by the WP-02.1 session ([PR #153](https://github.com/Abe-Borg/drawing-analyzer/pull/153)).
 
 This file is authoritative for **status and order**. Requirements live in
 [`drawing-analyzer-remediation-plan.md`](drawing-analyzer-remediation-plan.md).
@@ -91,7 +91,7 @@ starting.
 
 | Slice | Scope (IDs closed) | Size | Depends on | Status | PR / date / notes |
 |---|---|---|---|---|---|
-| WP-02.1 | Hermetic network and credential guard for every non-`network` test (loopback and `AF_UNIX` allowed; proxy and credential variables removed); `network` becomes an explicit opt-in; `-m "not network"` in CI (U26) | S | — | done | 2026-09-23. `tests/fixtures/hermetic_guard.py` (whole-run scope; swallowed attempts fail at teardown); `tests/test_hermetic_guard.py` |
+| WP-02.1 | Hermetic network and credential guard for every non-`network` test (loopback and `AF_UNIX` allowed; proxy and credential variables removed); `network` becomes an explicit opt-in; `-m "not network"` in CI (U26) | S | — | done | [PR #153](https://github.com/Abe-Borg/drawing-analyzer/pull/153), 2026-09-23. `tests/fixtures/hermetic_guard.py` (whole-run scope; swallowed attempts fail at teardown); `tests/test_hermetic_guard.py` |
 | WP-23.1 | A stable `publish` fails unless `docs/releases/ACCEPTANCE-<ver>.md` reads SHIP or lists unexpired waivers; `environment:` on `publish`; RC tags unaffected (N8) | S | — | todo | Admin half is O-5 |
 
 ### Wave 1 — P0 correctness (independent slices first)
@@ -374,7 +374,7 @@ report is built from it).
 | U23 | Uninstall retention policy undocumented | P2 | 23.4 | open | |
 | U24 | License check tests metadata presence only, never on the shipped env | P1 | 23.5 | open | |
 | U25 | README network claim; checksum described as authenticity | P2 | 24.1 | open | |
-| U26 | Test fake fidelity, no batch canary, no socket guard | P0 | 02.1–02.4 | open (socket/credential guard and `network` opt-in implemented+validated in 02.1) | `tests/test_hermetic_guard.py` (WP-02.1). Remaining: strict fakes and real-SDK contract tests (02.2), fidelity fixtures (02.3), batch canary (02.4) |
+| U26 | Test fake fidelity, no batch canary, no socket guard | P0 | 02.1–02.4 | open (socket/credential guard and `network` opt-in implemented+validated in 02.1) | `tests/test_hermetic_guard.py` (WP-02.1, [PR #153](https://github.com/Abe-Borg/drawing-analyzer/pull/153)). Remaining: strict fakes and real-SDK contract tests (02.2), fidelity fixtures (02.3), batch canary (02.4) |
 | U27 | Narrow lint classes; production-orphaned helpers | P2 | 22.5 | open | |
 | U28 | Broken system `cryptography` wheel (container) | — | — | disproved (environment) | `pip install cffi` fixes it; README step 2 |
 | U29 | Remove `tiktoken` | — | — | already satisfied | 1.7.0 (`6dad8bf`) |
@@ -388,7 +388,7 @@ Each session adds one entry at the top: date, slices and IDs, PR, what changed,
 contracts decided, cache/schema effects, validation actually run (with counts),
 what could not be verified, risks, and next steps.
 
-### 2026-09-23 — WP-02.1: hermetic network and credential guard (PR link in the follow-up commit)
+### 2026-09-23 — WP-02.1: hermetic network and credential guard ([PR #153](https://github.com/Abe-Borg/drawing-analyzer/pull/153))
 
 - **Slice and IDs:** WP-02.1. U26, its socket-guard, credential and `network`
   opt-in part. The rest of U26 (strict fakes, fidelity fixtures, batch canary)
