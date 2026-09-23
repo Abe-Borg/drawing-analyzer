@@ -102,8 +102,14 @@ expression selects it *because of* that marker, evaluated with pytest's own
 (private) marker-expression engine so the two cannot disagree; if a pytest
 upgrade moves it the rule answers False — skip, never run — and its test fails.
 The opted-in test then gets the caller's own environment and real sockets back
-for exactly its own protocol. Child processes inherit the scrubbed environment,
-not the socket patch.
+for exactly its own protocol. No fixture crosses that boundary: pytest caches a
+module- or session-scoped fixture for every later test, so where an opted-in
+test and a hermetic one are neighbours the guard tears the whole fixture stack
+down between them (`teardown_exact(None)` in a `tryfirst` `pytest_runtest_teardown`).
+Otherwise a credential-bearing client made on the network side reached hermetic
+tests, and its finalizer — a canary's remote cleanup — ran under the guard and
+was refused. Child processes inherit the scrubbed environment, not the socket
+patch.
 
 ## Architecture
 

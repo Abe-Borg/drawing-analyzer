@@ -32,7 +32,10 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     lifted only inside an opted-in `network` test, so module- and
     session-scoped fixtures are guarded too. The gauntlet's module-scoped
     `oracle` fixture, which runs the whole exhaustive pipeline, was outside the
-    old per-test key strip.
+    old per-test key strip. No fixture crosses between an opted-in `network`
+    test and a hermetic one: the fixture stack is torn down between them, so a
+    credential-bearing object never reaches a hermetic test and a canary's
+    cleanup never runs under the guard.
   - **`network` is an explicit opt-in.** A bare `pytest` with a real
     `ANTHROPIC_API_KEY` exported used to run the billable live canary. A
     `network` test now runs only when `-m` selects it because of that marker

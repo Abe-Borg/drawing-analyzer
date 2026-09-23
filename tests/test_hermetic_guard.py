@@ -470,6 +470,25 @@ def fake_proxy():
         yield server
 
 
+def _prepare_inner(pytester, monkeypatch, injected=(), markers=("network: live API access",)):
+    """The real ``tests/conftest.py`` in a fresh directory, and a clean environment.
+
+    Starts from nothing ambient (no proxy, no ``ANTHROPIC_*``), then injects
+    ``injected`` — what a developer's shell might carry.
+    """
+    pytester.makeconftest((_REPO_ROOT / "tests" / "conftest.py").read_text(encoding="utf-8"))
+    pytester.makeini("[pytest]\nmarkers =\n" + "".join(f"    {m}\n" for m in markers))
+    for name in list(os.environ):
+        if name.lower().endswith("_proxy") or name.upper().startswith("ANTHROPIC_"):
+            monkeypatch.delenv(name, raising=False)
+    for name, value in dict(injected).items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv(
+        "PYTHONPATH",
+        os.pathsep.join(filter(None, [str(_REPO_ROOT), os.environ.get("PYTHONPATH")])),
+    )
+
+
 def _inner_session(pytester, monkeypatch, tmp_path, proxy_port, *args, with_key=True):
     """Run the real ``tests/conftest.py`` in a fresh subprocess session."""
     ambient_config = tmp_path / "ambient-anthropic-config"
@@ -477,8 +496,6 @@ def _inner_session(pytester, monkeypatch, tmp_path, proxy_port, *args, with_key=
     (ambient_config / "configs" / "default.json").write_text("{}", encoding="utf-8")
     proxy = f"http://127.0.0.1:{proxy_port}"
 
-    pytester.makeconftest((_REPO_ROOT / "tests" / "conftest.py").read_text(encoding="utf-8"))
-    pytester.makeini("[pytest]\nmarkers =\n    network: live API access\n")
     pytester.makepyfile(
         test_a_env=_INNER_ENV_FILE.format(
             placeholder=_PLACEHOLDER, ambient_config_dir=str(ambient_config)
@@ -488,11 +505,7 @@ def _inner_session(pytester, monkeypatch, tmp_path, proxy_port, *args, with_key=
         test_d_proxy=_INNER_PROXY_FILE.format(key=_INNER_KEY),
     )
 
-    # Start from nothing ambient, then inject what a developer's shell might
-    # carry: a proxy, a key, and every other credential source the SDK reads.
-    for name in list(os.environ):
-        if name.lower().endswith("_proxy") or name.upper().startswith("ANTHROPIC_"):
-            monkeypatch.delenv(name, raising=False)
+    # A proxy, a key, and every other credential source the SDK reads.
     injected = {
         "HTTPS_PROXY": proxy,
         "HTTP_PROXY": proxy,
@@ -510,12 +523,7 @@ def _inner_session(pytester, monkeypatch, tmp_path, proxy_port, *args, with_key=
         injected.update({"https_proxy": proxy, "http_proxy": proxy, "all_proxy": proxy})
     if with_key:
         injected["ANTHROPIC_API_KEY"] = _INNER_KEY
-    for name, value in injected.items():
-        monkeypatch.setenv(name, value)
-    monkeypatch.setenv(
-        "PYTHONPATH",
-        os.pathsep.join(filter(None, [str(_REPO_ROOT), os.environ.get("PYTHONPATH")])),
-    )
+    _prepare_inner(pytester, monkeypatch, injected)
     return pytester.runpytest_subprocess("-p", "no:cacheprovider", "-rA", *args, timeout=300)
 
 
@@ -545,7 +553,7 @@ def test_a_default_run_is_hermetic_end_to_end(pytester, monkeypatch, tmp_path, f
 
 def test_an_attempt_no_test_owns_fails_the_session(pytester, monkeypatch):
     """An import-time attempt is reported even when no test runs at all."""
-    pytester.makeconftest((_REPO_ROOT / "tests" / "conftest.py").read_text(encoding="utf-8"))
+    _prepare_inner(pytester, monkeypatch)
     pytester.makepyfile(
         test_import_time="""
         import socket
@@ -559,10 +567,6 @@ def test_an_attempt_no_test_owns_fails_the_session(pytester, monkeypatch):
         def test_nothing():
             pass
         """
-    )
-    monkeypatch.setenv(
-        "PYTHONPATH",
-        os.pathsep.join(filter(None, [str(_REPO_ROOT), os.environ.get("PYTHONPATH")])),
     )
     result = pytester.runpytest_subprocess("-p", "no:cacheprovider", "--collect-only", timeout=300)
     assert result.ret == pytest.ExitCode.TESTS_FAILED
@@ -588,6 +592,71 @@ def test_an_explicit_network_run_without_a_key_still_skips(
     )
     result.assert_outcomes(skipped=1, deselected=9)
     assert "ANTHROPIC_API_KEY not set" in result.stdout.str()
+
+
+_INNER_MIXED_FILE = """
+import os
+
+import pytest
+
+EVENTS = []
+
+
+@pytest.fixture(scope="module")
+def shared():
+    # True when made on the opted-in side, where the caller's key is back.
+    made_opted_in = "ANTHROPIC_API_KEY" in os.environ
+    EVENTS.append(("setup", made_opted_in))
+    yield made_opted_in
+    EVENTS.append(("teardown", "ANTHROPIC_API_KEY" in os.environ))
+
+
+@pytest.mark.network
+def test_a_network(shared):
+    assert shared is True
+
+
+@pytest.mark.local
+def test_b_hermetic(shared):
+    assert shared is False  # its own copy, never the network test's
+
+
+@pytest.mark.network
+def test_c_network_again(shared):
+    assert shared is True  # and never the hermetic test's
+
+
+@pytest.mark.local
+def test_d_each_copy_was_finalized_where_it_was_made():
+    assert EVENTS == [
+        ("setup", True), ("teardown", True),
+        ("setup", False), ("teardown", False),
+        ("setup", True), ("teardown", True),
+    ]
+"""
+
+
+def test_a_fixture_never_crosses_the_network_boundary(pytester, monkeypatch):
+    """A higher-scoped fixture is made, cached and finalized on one side only.
+
+    pytest caches a module- or session-scoped fixture for every later test that
+    asks for it. Across the boundary that let a credential-bearing object made
+    in an opted-in test reach a hermetic one, ran its finalizer (a canary's
+    remote cleanup, say) under the guard, and handed a network test a fixture
+    built without credentials. ``-m "network or local"`` selects the network
+    tests *because of* their marker, so this one session mixes both sides.
+    """
+    _prepare_inner(
+        pytester,
+        monkeypatch,
+        {"ANTHROPIC_API_KEY": _INNER_KEY},
+        markers=("network: live API access", "local: selected alongside"),
+    )
+    pytester.makepyfile(test_mixed=_INNER_MIXED_FILE)
+    result = pytester.runpytest_subprocess(
+        "-p", "no:cacheprovider", "-rA", "-m", "network or local", timeout=300
+    )
+    result.assert_outcomes(passed=4)
 
 
 # --------------------------------------------------------------------------- #

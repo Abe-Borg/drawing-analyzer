@@ -34,7 +34,10 @@ relying on each test to use the fakes:
    down only inside an opted-in ``network`` test, so collection and fixtures of
    every scope are covered. A function-scoped fixture only ever covered test
    bodies, while the gauntlet's module-scoped ``oracle`` fixture runs the whole
-   exhaustive pipeline before any function-scoped fixture exists.
+   exhaustive pipeline before any function-scoped fixture exists. And no fixture
+   crosses the boundary: where an opted-in ``network`` test and a hermetic one
+   are neighbours, the whole fixture stack is torn down between them, so each
+   side makes, caches and finalizes its own (``pytest_runtest_teardown``).
 5. **``network`` is an explicit opt-in.** An exported real key used to run the
    live canary under a bare ``pytest``. Now a ``network`` test runs only when
    the ``-m`` expression selects it *because of* that marker and a real key is
@@ -134,6 +137,11 @@ def drain_blocked_attempts(config: pytest.Config) -> list[BlockedAttempt]:
     """Consume the running test's recorded attempts (for the guard's own tests)."""
     state = config.stash[_STATE]
     return state.drain(state.current)
+
+
+def _released(item: pytest.Item) -> bool:
+    """Is this an opted-in ``network`` test (run unguarded, with the caller's env)?"""
+    return item.stash.get(_RELEASED, False)
 
 
 # --------------------------------------------------------------------------- #
@@ -365,7 +373,7 @@ def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None):
     state = item.config.stash[_STATE]
     state.current = item.nodeid
     try:
-        if item.stash.get(_RELEASED, False):
+        if _released(item):
             state.patch.undo()
             try:
                 return (yield)
@@ -376,6 +384,29 @@ def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None):
             return (yield)
     finally:
         state.current = _OUTSIDE_ANY_TEST
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_teardown(item: pytest.Item, nextitem: pytest.Item | None) -> None:
+    """Keep every fixture on one side of the network boundary.
+
+    pytest caches a module- or session-scoped fixture for every later test that
+    asks for it, so across the boundary a credential-bearing object made in an
+    opted-in test reached a hermetic one, its finalizer (a canary's remote
+    cleanup, say) ran under the guard and was refused, and a network test got a
+    fixture built without credentials. So when the next item is on the other
+    side, the whole fixture stack comes down now, inside this item's protocol:
+    every finalizer runs where its fixture was made, and the next item rebuilds
+    what it needs on its own side. Only a session mixing both sides pays for it.
+
+    ``teardown_exact(None)`` is what pytest runs after its last item: it pops the
+    whole stack even when a finalizer raises, so pytest's own teardown, which
+    runs next, finds nothing left. ``_setupstate`` is not public API; if a pytest
+    upgrade moves it, this raises in exactly the sessions it protects and
+    ``test_a_fixture_never_crosses_the_network_boundary`` fails.
+    """
+    if nextitem is not None and _released(item) != _released(nextitem):
+        item.session._setupstate.teardown_exact(None)
 
 
 @pytest.hookimpl(wrapper=True)

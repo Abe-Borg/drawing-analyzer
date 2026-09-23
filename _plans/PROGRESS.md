@@ -414,6 +414,16 @@ what could not be verified, risks, and next steps.
     `network` test's runtest protocol, which gets the caller's environment and
     real sockets back. So module- and session-scoped fixtures are covered. The
     gauntlet's `oracle` fixture was outside the old per-test key strip.
+  - **No fixture crosses the boundary** (review follow-up, Codex P2 on the PR).
+    pytest caches a higher-scoped fixture for every later test. In a session
+    mixing both sides, a credential-bearing object made in an opted-in test
+    reached hermetic tests, and its finalizer (a canary's remote cleanup) ran
+    under the guard and was refused. The guard now tears the whole fixture stack
+    down between neighbours on different sides (`pytest_runtest_teardown`,
+    `teardown_exact(None)`). Regression:
+    `test_a_fixture_never_crosses_the_network_boundary`. Before the fix it
+    failed 2 of 4 inner tests: the hermetic test received the network test's
+    copy.
   - **Opt-in.** `network_selected_explicitly`: the `-m` expression must select
     the test *because of* its `network` marker (pytest's own expression engine),
     and a real key must be set.
@@ -440,11 +450,13 @@ what could not be verified, risks, and next steps.
     the recorded baseline. Its "11 skipped" counted the 10 canaries as skips,
     which is what a bare `pytest` reports; under `-m "not network"` they are
     deselected. A recording difference, not a regression.
-  - After: **2,500 passed, 2 skipped, 10 deselected** (234 s), which is the
-    baseline plus the 50 new tests. The new skip is the IPv6-loopback test: this
-    container has no IPv6 (`EAFNOSUPPORT`). **No existing test tripped the
-    guard.**
-  - The new tests before the fix: 47 failed, 3 passed. The three that passed
+  - After, with the review follow-up: **2,501 passed, 2 skipped, 10
+    deselected** (239 s), which is the baseline plus the 51 new tests. The new
+    skip is the IPv6-loopback test: this container has no IPv6
+    (`EAFNOSUPPORT`). **No existing test tripped the guard.**
+  - The first 50 new tests before the fix: 47 failed, 3 passed (the 51st, the
+    fixture-boundary test, came with the review follow-up and failed before
+    it). The three that passed
     are the two `-m network` subprocess sessions, whose behaviour did not
     change, and the pure workflow-scanner check. Against the old conftest, the
     default-run subprocess session showed each defect:
@@ -478,7 +490,10 @@ what could not be verified, risks, and next steps.
 - **Risks and residual gaps:**
   - The opt-in rule uses pytest's private `_pytest.mark.expression` engine. If
     an upgrade moves it, the rule fails closed (the canary is skipped) and
-    `test_network_needs_an_explicit_marker_selection` fails.
+    `test_network_needs_an_explicit_marker_selection` fails. The boundary
+    teardown uses the private `session._setupstate`; if that moves, mixed
+    sessions error at teardown and
+    `test_a_fixture_never_crosses_the_network_boundary` fails.
   - Deliberately uncovered, documented in the plugin:
     - child processes get the scrubbed environment but not the socket patch;
     - UDP `sendto`;
