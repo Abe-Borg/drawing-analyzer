@@ -141,6 +141,13 @@ cross-verifier report `SKIPPED_VALID`). The Phase 23 completeness gate is **OPEN
 permanent regressions enforced by the stage statuses themselves (a failed
 reconciliation / unchecked cited claim / missing evidence leg / mutated source
 holds a required stage at PARTIAL, which the roll-up can never call COMPLETE).
+**Item coverage** (`models.item_coverage_status`, `_plans/DECISIONS.md` D-2)
+decides a stage from what it was required to judge, after the failure flags:
+nothing eligible is `SKIPPED_VALID`, everything judged `COMPLETE`, nothing
+judged `FAILED` (the all-failed rule), anything between `PARTIAL`. Verification
+is the first stage on it (remediation WP-01.1, N5). A later stage that
+recovers an item reports it on its own record and never rewrites the earlier
+one, and the roll-up does not recognise recovery.
 
 **Usage & cost (Phase 23B, §15.6).** Token/cost accounting is an **append-only**
 `RunUsage` ledger (`ctx.run_usage`): every API call/attempt appends a priced
@@ -776,9 +783,25 @@ editor and diff, and a test fails if one reappears.
   `truncated` / `failed`, a breakdown of `uncertain`, classified by
   `_degrade_kind` from the same validity flag and stop reason the parser
   already produced and the call site used to discard — and
-  `degradation_note()` becomes one stage *warning* (observational: no status
-  moves), because a run could not otherwise say whether its UNCERTAIN share came
-  from the drawings or the parser. Opt-in `output_config.format`
+  `degradation_note()` becomes one stage *warning*, because a run could not
+  otherwise say whether its UNCERTAIN share came from the drawings or the
+  parser. Those counts also **decide completeness** (remediation WP-01.1, N5,
+  D-2); until then they were observational and every UNCERTAIN counted as
+  judged, so a pass whose every call came back malformed read COMPLETE, and so
+  did one verified finding beside four skipped ones. `judged` = verified +
+  rejected + uncertain − `not_judged` (a valid NOT_VISIBLE is a judgment; a
+  cache hit always is, since only settled verdicts are stored). `eligible` is
+  set from each pass's eligibility filter **before any call** and never reads
+  below the tally, so a finding that escapes the tally (the single-crop loop
+  swallows an unexpected error after picking one up) still counts against
+  completeness. `VerifyResult.combined(vres, cres)` feeds
+  `item_coverage_status` once the failure flags are tested. `coverage_note()`
+  leads the stage's warnings, counting skips and no-judgment calls separately,
+  because run.log, the report's stage table and the journal show only the
+  first note; each pass's `degradation_note()` follows. The cross pass's
+  defensive worker-failure branch now counts `DEGRADE_FAILED`: uncounted, it
+  read as a judgment. `not_judged_ids` (the `qc_id`s) lets the investigation
+  stage report what it recovered. Opt-in `output_config.format`
   (`DRAWING_ANALYZER_VERIFY_STRUCTURED_OUTPUTS`, `VERIFY_VERDICT_SCHEMA`, enum =
   `sorted(_VERDICT_MAP)`) leaves the prompt untouched — it already asks for a
   bare object — so the structured and plain requests differ only by the schema,
@@ -837,7 +860,10 @@ editor and diff, and a test fails if one reappears.
   answered in ONE user turn, and a forced no-tools text close at the cap so a
   run never dangles; a capped/garbled outcome stays UNCERTAIN — never
   REJECTED — and is a designed stage COMPLETE; it only ever UPDATES
-  `finding.verification` in place (legal post-seal); concluded verdicts cache
+  `finding.verification` in place (legal post-seal), never the verification
+  stage's record: concluding a finding whose verdict call returned no
+  judgment adds a "recovered N of M" warning to the *investigation* stage,
+  and verification keeps its PARTIAL/FAILED (D-2); concluded verdicts cache
   in `stage=investigation` keyed on finding identity + a whole-set content
   fingerprint + model/prompt/round-budget/task-budget, complete-only admission,
   and a warm hit

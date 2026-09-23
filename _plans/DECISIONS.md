@@ -11,12 +11,16 @@ Every entry lists the existing mechanisms to build on, because plan §1 says to
 reuse sound mechanisms rather than add parallel ones. Check them against the
 current code before you rely on them.
 
+The slice named in each heading is the one `PROGRESS.md` (authoritative for
+order) and plan §4.1 assign. WP-01.1 corrected the headings of D-1, D-2, D-3,
+D-4 and D-7, which named other slices.
+
 Status values: `open` (not decided yet), `decided`, `amended` (decided, then
 changed; keep the history).
 
 ---
 
-## D-1 Response outcome — `open` (to be decided by WP-01.1)
+## D-1 Response outcome — `open` (to be decided by WP-01.2)
 
 **Required decision (plan §4.1):** tell apart a finished response, a refusal, a
 truncation, an interrupted stream, a transport failure, a malformed result, and
@@ -36,7 +40,7 @@ and its `_refusal_fallback_available` latch; `verify._degrade_kind` and the
 - Version / cache changes: —
 - Consumers affected: —
 
-## D-2 Stage accounting — `open` (to be decided by WP-01.3)
+## D-2 Stage accounting — `decided` (WP-01.1, [PR #155](https://github.com/Abe-Borg/drawing-analyzer/pull/155))
 
 **Required decision:** define eligible, judged, failed, skipped,
 deferred/canceled and recovered work independently of display labels. Zero
@@ -49,12 +53,73 @@ stage), `models.roll_up_qc_status` and the "failure flag before counts" rule in
 `CLAUDE.md`, Phase 21 `coverage_status`, `CrossQCDiscardCounts` (count-only,
 observational), `VerifyResult.degradation_note()`.
 
-- Decision: —
-- Rejected shortcuts: —
-- Version / cache changes: —
-- Consumers affected: —
+- **Decision.** WP-01.1 applies it to verification (N5). Other stages keep
+  their own ladders until their slices adopt it or amend it here.
+  - **Terms.**
+    - *Eligible*: what a stage must judge, fixed by its eligibility rule
+      before any call. For verification, every finding `_is_verifiable`
+      admits plus every finding `_has_anchored_legs` admits.
+      `VerifyResult.eligible` is set from those filters and never reads below
+      the tally, so a finding that escapes the tally still counts against
+      completeness.
+    - *Judged*: an eligible item with a real judgment. For verification, a
+      settled verdict, live or cached: VERIFIED, REJECTED, or a valid
+      NOT_VISIBLE (UNCERTAIN). A valid inconclusive result is judged.
+    - *Failed*: attempted, with no judgment. For verification, the calls
+      `_degrade_kind` classifies malformed, truncated or failed, summed as
+      `VerifyResult.not_judged`. That remains the only classifier.
+    - *Skipped*: no judgment obtained, and no failed attempt counted. For
+      verification: no sheet or crop, ambiguous sheet, evidence not saved, no
+      client, or a pass stopped by an auth failure (`VerifyResult.skipped`).
+    - *Deferred / canceled*: none exist yet. When WP-17.1 (D-5) adds
+      cancellation, a canceled item is unjudged, in its own counted bucket.
+    - *Recovered*: an item one stage left unjudged that a later stage judged.
+  - **Status rule.** One helper, `models.item_coverage_status(eligible,
+    judged)`, applied only after the stage's own failure flags. For
+    verification those are unchanged: a single-crop pass that raised is
+    FAILED, a cross pass that raised is PARTIAL.
+    - eligible = 0: `SKIPPED_VALID`;
+    - judged = eligible: `COMPLETE`;
+    - judged = 0: `FAILED`. This is the all-failed rule: no eligible item
+      obtained a judgment, whatever the mix of skips and failures;
+    - otherwise `PARTIAL`.
+  - **Surfacing.** `items_in` is eligible and `items_out` is judged. The first
+    warning is `VerifyResult.coverage_note()`, which counts skips and failed
+    attempts separately; each pass's `degradation_note()` follows with its
+    malformed/truncated/failed breakdown.
+  - **Recovery.** A stage's record is final once `_finish_stage` records it,
+    and no later stage mutates it. The recovering stage reports the recovery
+    on its own record. Investigation adds `recovered N of M finding(s) whose
+    verification call returned no judgment; the verification stage keeps its
+    <status> status`, computed from `VerifyResult.not_judged_ids` and its own
+    concluded outcomes. The roll-up does not recognise recovery: a PARTIAL or
+    FAILED verification keeps `qc_status` off COMPLETE even when investigation
+    concluded every item. A recovery-aware roll-up is not adopted. If one is
+    ever wanted, it must be derived from item outcomes and keep the original
+    failure history (plan WP-01 step 8).
+- **Rejected shortcuts.**
+  - Counting every UNCERTAIN as judged (the 1.7.0 ladder), or counting a
+    skipped item as work done.
+  - Taking the denominator from the tally alone: an item that escaped the
+    tally would drop out of it, and the stage could read COMPLETE.
+  - A second outcome classifier beside `_degrade_kind`.
+  - Rewriting verification's status after investigation. Execution order
+    would then erase the failure.
+  - Treating an all-skipped pass as `SKIPPED_VALID`: eligible work existed.
+- **Version / cache changes:** none. No key, prompt or schema changed, and
+  verification's cache admission is unchanged: only settled verdicts are
+  stored, so a cache hit is always a judgment. No migration-register row.
+- **Consumers affected.**
+  - `pipeline._run_qc_stages`: the verification status, `items_in`/`items_out`
+    and warnings; the investigation stage's recovery warning.
+  - Through `roll_up_qc_status`: `qc_status`, the GUI completion line, the
+    report banner and stage table, `run.log` and `run_manifest.json`.
+  - `scripts/ab_sweep_drawing_analyzer.py` now qualifies such an arm as
+    PARTIAL.
+  - One test pinned COMPLETE on a pass whose only call was malformed; it is
+    re-baselined (see the WP-01.1 handoff).
 
-## D-3 Finding identity — `open` (to be decided by WP-03.2)
+## D-3 Finding identity — `open` (to be decided by WP-03.4)
 
 **Required decision:** keep four things separate: physical evidence identity,
 reviewable claim identity, producer observation/provenance, and the display
@@ -75,7 +140,7 @@ consumer inventory is in plan WP-03.
 - Version / cache changes: —
 - Consumers affected: —
 
-## D-4 Cache contract — `open` (first decided by WP-01.1, completed by WP-10)
+## D-4 Cache contract — `open` (started by WP-01.2, completed by WP-10.4)
 
 **Required decision:** every cache key names the request format actually sent,
 the host validator/normalizer version, and the completeness metadata, with
@@ -127,7 +192,7 @@ copy, `pipeline._prune_stale_work_dirs` / `_tree_is_recent` (fail-safe keep).
 - Version / cache changes: —
 - Consumers affected: —
 
-## D-7 Usage — `open` (to be decided by WP-14.1)
+## D-7 Usage — `open` (to be decided by WP-14.4)
 
 **Required decision:** separate the requested model, the serving model,
 logical attempts, server iterations, known tokens, unknown usage, and cache

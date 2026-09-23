@@ -1,7 +1,7 @@
 # Remediation progress tracker
 
-**Next up:** Wave 1 in order, starting with `WP-01.1`. Wave 0 is complete. `WP-02.2` is unblocked by WP-02.1 but sits in Wave 2. First check the open PRs ([`README.md`](README.md), step 1). Before the next stable tag, the owner should look at O-5.
-**Last updated:** 2026-09-23 by the WP-23.1 session ([PR #154](https://github.com/Abe-Borg/drawing-analyzer/pull/154)).
+**Next up:** Wave 1 in order: `WP-01.2` (it decides D-1 and starts D-4). WP-01.1 is done and decided D-2. `WP-02.2` is unblocked by WP-02.1 but sits in Wave 2. First check the open PRs ([`README.md`](README.md), step 1). Before the next stable tag, the owner should look at O-5.
+**Last updated:** 2026-09-23 by the WP-01.1 session ([PR #155](https://github.com/Abe-Borg/drawing-analyzer/pull/155)).
 
 This file is authoritative for **status and order**. Requirements live in
 [`drawing-analyzer-remediation-plan.md`](drawing-analyzer-remediation-plan.md).
@@ -98,7 +98,7 @@ starting.
 
 | Slice | Scope (IDs closed) | Size | Depends on | Status | PR / date / notes |
 |---|---|---|---|---|---|
-| WP-01.1 | Verification is `COMPLETE` only when every eligible item was judged; failures and skips are counted separately; decides D-2 (N5) | M | — | todo | |
+| WP-01.1 | Verification is `COMPLETE` only when every eligible item was judged; failures and skips are counted separately; decides D-2 (N5) | M | — | done | [PR #155](https://github.com/Abe-Borg/drawing-analyzer/pull/155), 2026-09-23. One rule, `models.item_coverage_status` (D-2), over both passes. The denominator is fixed before any call (`VerifyResult.eligible`); skips and calls that returned no judgment are counted and surfaced separately (`coverage_note`). Investigation reports the findings it recovers and never rewrites verification's record. Tests: `tests/test_drawing_acceptance.py` (N5 block), `tests/test_drawing_verify.py` (completeness section). Residual: a finding that raises after the single-crop loop picks it up keeps its prior verdict (the report shows *Not checked*); the stage counts it "not accounted for" and stays off `COMPLETE` |
 | WP-01.2 | Shared terminal-outcome helper; the digest (real-time and batch) never admits a refusal, truncation or `stop_reason=None` read as success or into either cache level; cached refusals are rejected when read; decides D-1 (N4 digest, N27) | M/L | — | todo | |
 | WP-04.1 | Quantity tokenizer: hyphenated units, thousands groups, opaque malformed tokens, `deg`/`°` (angle vs temperature), lists and ranges, W×H and V/A with a negative corpus; critique-scoped cache term (B2, B3, B12, N19) | M | — | todo | |
 | WP-04.2 | Compatibility rule over per-unit value sets and partial tag overlap; one shared `signature_conflicts` that the A/B harness also uses (N1) | M | WP-04.1 | todo | |
@@ -327,7 +327,7 @@ report is built from it).
 | N2 | Cross-QC dedup destroys distinct claims sharing sheet/quote/legs | P0 | 06.1 | open | |
 | N3 | Reused operand membership (and fabricated quotes) give false DETERMINISTIC | P0 | 07.1 | open | |
 | N4 | Refused/truncated digests and critiques accepted and cached | P0 | 01.2, 01.4, 10.4 | open | |
-| N5 | Verification COMPLETE with no judgments or with skipped items | P0 | 01.1 | open | |
+| N5 | Verification COMPLETE with no judgments or with skipped items | P0 | 01.1 | implemented+validated | `tests/test_drawing_acceptance.py::test_verification_is_complete_only_when_every_eligible_finding_was_judged` (six of the plan's seven cases, plus all-truncated and all-skipped) and `::test_a_later_investigation_never_erases_the_verification_outcome` (the seventh); `tests/test_drawing_verify.py` completeness section (WP-01.1, [PR #155](https://github.com/Abe-Borg/drawing-analyzer/pull/155)) |
 | N6 | Duplicate sheet labels bind first-wins (whole-set, dedup, arithmetic, legs) | P1 | 06.2 | open | |
 | N7 | Calculator accepts malformed numbers; inexact large integers | P1 | 20.1 | open | |
 | N8 | Stable publish ignores the acceptance hold (it happened for 1.7.0) | P1 | 23.1, 23.6, O-1, O-5 | open (publish gate implemented+validated in 23.1; the O-1 and O-5 parts stay open) | `tests/test_release_acceptance_gate.py` (WP-23.1, [PR #154](https://github.com/Abe-Borg/drawing-analyzer/pull/154)). Remaining: O-1 (the published v1.7.0 and its record), O-5 (protect and confirm the `release` environment and a `v*` tag ruleset), WP-23.6 (commit and artifact binding) |
@@ -388,6 +388,150 @@ report is built from it).
 Each session adds one entry at the top: date, slices and IDs, PR, what changed,
 contracts decided, cache/schema effects, validation actually run (with counts),
 what could not be verified, risks, and next steps.
+
+### 2026-09-23 — WP-01.1: verification is COMPLETE only when every eligible item was judged ([PR #155](https://github.com/Abe-Borg/drawing-analyzer/pull/155))
+
+- **Slice and IDs:** WP-01.1. N5. Decides D-2 (stage accounting).
+- **What changed:**
+  - **One completeness rule.** New `models.item_coverage_status(eligible,
+    judged)`:
+    - nothing eligible is `SKIPPED_VALID`;
+    - everything judged is `COMPLETE`;
+    - nothing judged is `FAILED` (the all-failed rule);
+    - anything between is `PARTIAL`.
+
+    The verification ladder in `pipeline._run_qc_stages` applies it once, over
+    both passes, after the two failure flags. Those are unchanged: a
+    single-crop pass that raised is `FAILED`, a cross pass that raised is
+    `PARTIAL`.
+  - **`VerifyResult`** (`verify.py`):
+    - `eligible` is set from each pass's eligibility filter
+      (`_is_verifiable`, `_has_anchored_legs`) before any call, and never
+      reads below the tally;
+    - `judged` is verified + rejected + uncertain − `not_judged`. A valid
+      NOT_VISIBLE is a judgment, and so is a cache hit;
+    - `coverage_note()` is the stage's leading warning. It counts skips and
+      calls that returned no judgment separately, for example
+      `verification: 117 of 120 eligible finding(s) judged; 0 skipped, 3
+      returned no judgment`, and adds "N not accounted for" if the tally
+      falls short of `eligible`;
+    - `combined(vres, cres)` sums the two passes; a pass that raised adds
+      nothing;
+    - `not_judged_ids` records the `qc_id`s of the findings whose call
+      returned no judgment. `_count_degrade` records them, so `_degrade_kind`
+      stays the only classifier.
+  - **A cross worker that raised.** The cross pass's defensive branch left
+    the finding UNCERTAIN without counting a failed call, so it read as a
+    judgment. It now counts `DEGRADE_FAILED`.
+  - **Stage record.** `items_in` is now eligible and `items_out` judged (it
+    counted every UNCERTAIN). The warnings are the coverage line, then each
+    pass's `degradation_note()`, unchanged. The old "all eligible findings
+    were skipped" line is gone; the coverage line covers that case.
+  - **Recovery** (plan step 8). Investigation adds `recovered N of M
+    finding(s) whose verification call returned no judgment; the
+    verification stage keeps its <status> status` to its **own** stage. The
+    verification record is never rewritten, and the roll-up does not
+    recognise recovery.
+  - **Docs.**
+    - CHANGELOG: a Fixed entry for N5.
+    - CLAUDE.md: the "Run configuration & status" paragraph, the `verify.py`
+      paragraph ("observational: no status moves" removed) and the
+      investigation paragraph.
+    - README: the QC-status overview, and a new block in the verification
+      section that replaces the "Observational only" paragraph.
+    - The `VerifyResult` docstring, and the header comment of the parse-loss
+      tests in `tests/test_drawing_verify.py`.
+- **Contracts decided:** D-2, including the all-failed rule and how recovery is
+  exposed ([`DECISIONS.md`](DECISIONS.md)). Headings there now match this file
+  and plan §4.1 (the session request asked for this):
+  - D-1: WP-01.1 → WP-01.2;
+  - D-2: WP-01.3 → WP-01.1 (now decided);
+  - D-3: WP-03.2 → WP-03.4;
+  - D-4: "first decided by WP-01.1, completed by WP-10" → "started by
+    WP-01.2, completed by WP-10.4". WP-01.2 is the first slice that changes
+    cache admission;
+  - D-7: WP-14.1 → WP-14.4.
+- **Plan corrected:** WP-01's "Steps 6–7" verification note. Its formula,
+  COMPLETE ⇔ eligible > 0 ∧ `skipped` = 0 ∧ `not_judged` = 0, assumes every
+  eligible item is tallied, and two paths broke that (the swallowed
+  single-crop error and the uncounted cross worker failure). Nothing was
+  weakened.
+- **Cache/schema effects:** none. No key, prompt or schema changed, and
+  verification's cache admission is unchanged. No migration-register row.
+- **Re-baselined test:**
+  `tests/test_drawing_qc_pipeline.py::test_pipeline_reports_verify_parse_loss_on_the_stage_not_as_an_error`
+  pinned `COMPLETE` ("observational: status unmoved") for a pass whose only
+  call came back malformed. It now pins `FAILED`, items 1 → 0, a `PARTIAL` run,
+  and the coverage line ahead of the unchanged degradation line. That is
+  stricter, not weaker, and the test's own point (a warning, never an error)
+  is still asserted. No other existing test pinned COMPLETE on a partial
+  verification: nothing else in the suite changed.
+- **Validation (this container, Python 3.11.15, SDK 1.7.0):**
+  - **Baseline before any change:** `python -m pytest -q -m "not network"`
+    gave **2,619 passed, 2 skipped, 10 deselected** (196 s), identical to the
+    WP-23.1 handoff.
+  - **Reproduced first.** Driving `extract_drawing_context` on the gauntlet
+    mini set with a malformed verdict for its one eligible finding gave
+    verification `COMPLETE` and run `COMPLETE`; investigation then recovered
+    the finding to VERIFIED.
+  - **Failing first.** The 26 new tests against the unfixed code: 24 failed,
+    2 passed. The two that passed pin behaviour the fix keeps: an
+    all-NOT_VISIBLE pass is `COMPLETE`, and no eligible findings is
+    `SKIPPED_VALID`.
+  - **After:** full suite **2,645 passed, 2 skipped, 10 deselected** (209 s),
+    the baseline plus the 26 new tests, with the same two environment skips
+    (IPv6 loopback; chmod as root).
+  - **Browser suite** (the report's stage table renders the new values):
+    98 collected, 98 executed and passed; `check_browser_suite.py` passes.
+    It ran twice. The first run overlapped a sub-second `git stash` taken for
+    a lint comparison, so the clean foreground re-run is the evidence. Both
+    passed.
+  - `ruff check --select E9,F63,F7,F82 src tests scripts` is clean.
+    F401/F811/F841 over the touched files shows five hits, the same five as on
+    the base (WP-22.5 territory); none is new. `scan_secrets.py` is clean over
+    192 tracked files. `compileall src` passes.
+- **Not verified:**
+  - **Live API behaviour.** There is no live budget (O-4). Truncated, declined
+    and failed verdicts are the hermetic fakes the existing parse-loss tests
+    already use.
+  - **Windows.** Covered by this PR's CI.
+- **Risks and residual gaps:**
+  - **A visible behaviour change.** A run with an unjudged verification item
+    used to read `COMPLETE` and now reads `PARTIAL`. A verification that
+    judged nothing now reads `FAILED`; it read `PARTIAL` when every finding
+    was skipped, and `COMPLETE` when every call failed. The A/B sweep will
+    qualify such an arm as PARTIAL.
+  - **A finding that escapes the single-crop tally** (an error after the loop
+    picks it up, which the pass swallows under I-3) keeps its prior verdict,
+    so the report shows it *Not checked*. The stage now counts it "not
+    accounted for" and stays off `COMPLETE`. Giving it a SKIPPED verdict
+    would change the loop's end sweep and its note, so it was left out to keep
+    the slice narrow. Recorded on the slice row.
+  - **An auth-fatal call counts as skipped.** The fatal path returns SKIPPED,
+    not a degrade kind, so a call that was made and refused lands in
+    `skipped`. Both buckets are unjudged, so the status is right; only the
+    bucket is arguable. WP-01.2's terminal-outcome helper is the place to
+    revisit it.
+  - **Recovery matches on `qc_id`,** which `ledger.number()` assigns before
+    verification. A direct caller of `verify_findings` on unnumbered findings
+    records no ids, and has no investigation stage to report to.
+  - **The roll-up does not recognise recovery.** D-2 says how to add that if
+    the product ever wants it.
+- **Re-checked (U31):**
+  - "A cache hit is always a judgment" holds: `_cache_verification` stores
+    only verdicts the call marked `cacheable`, and
+    `_verification_from_cache_payload` admits only `valid_model_verdict:
+    True`. Pinned by `test_a_valid_not_visible_and_a_cache_hit_are_both_judgments`.
+  - "`skipped` counts only eligible-but-unjudged items" holds: the
+    `_is_verifiable` exclusions are never counted. Pinned by
+    `test_eligible_is_fixed_by_the_eligibility_filter`.
+  - The verify loop's "the tally always accounts for every item" is false for
+    an item that raises after being picked up (the residual above).
+  - "Failure flags before counts" is kept, and
+    `test_a_cross_verifier_crash_is_not_a_valid_skip` is unchanged.
+- **Next:** WP-01.2 (decides D-1, starts D-4). WP-10.3 (Wave 2) and WP-22.4
+  (Wave 4) waited only on WP-01.1 and are now available in their waves.
+  WP-21.4 still waits on WP-05.1 and WP-05.2.
 
 ### 2026-09-23 — WP-23.1: minimal stable-release publish gate ([PR #154](https://github.com/Abe-Borg/drawing-analyzer/pull/154))
 

@@ -220,7 +220,12 @@ reconciliation, claim-complete citations, complete evidence, and callout-overflo
 handling landed). That claim is guarded, not assumed: a failed reconciliation, an
 unchecked cited claim, a missing verification crop, or a source that changed
 mid-run each hold a required stage at `PARTIAL`, and the roll-up can never call
-such a run `COMPLETE`.
+such a run `COMPLETE`. Verification is held to the same rule: it is `COMPLETE`
+only when every finding it had to check got a verdict. A finding it had to skip,
+or whose verdict call came back unreadable, cut off or failed, holds it at
+`PARTIAL`, or at `FAILED` when it judged none at all (see *Not every `UNCERTAIN`
+is a judgment* below). Runs that used to report `COMPLETE` with such a finding
+now report `PARTIAL`.
 
 ### Browsing the result
 
@@ -997,18 +1002,71 @@ the output envelope or declined, and a call that failed outright all land on
 them apart from a real `NOT_VISIBLE`. The pass counts the live calls that
 returned no verdict (`malformed`, `truncated`, `failed`, a breakdown of the
 `UNCERTAIN` tally, never additional to it), and when any did, the verification
-stage carries one warning line in `run.log` and `run_manifest.json`:
+stage carries a warning line for that pass in `run.log` and `run_manifest.json`:
 
 ```
 verification: 3 of 120 live verdict calls returned no judgment (malformed=2, truncated=1, failed=0); each was left UNCERTAIN
 ```
 
-Observational only: no status moves and the stage's completeness is unchanged.
 It answers the question the `UNCERTAIN` share alone cannot — how much of it the
 parser or the envelope produced before you blame the drawings — and it is the
 number that says whether `DRAWING_ANALYZER_VERIFY_STRUCTURED_OUTPUTS` is worth
 turning on for your sets: a near-zero `malformed` count means the schema buys
 nothing, a persistent one is a measured quality win.
+
+**Verification is `COMPLETE` only when every eligible finding was judged.**
+In 1.7.0 those counts were observational: every `UNCERTAIN` counted as a
+judgment, so a pass whose every call came back garbled reported `COMPLETE`, and
+so did one verified finding beside four skipped ones. Now:
+
+- An **eligible** finding is one the pass had to check: any anchored finding not
+  already trusted as `DETERMINISTIC`. That includes an arithmetic mismatch
+  computed from numbers the model transcribed. A cross-sheet conflict with at
+  least two anchored legs goes to the dual-crop check. An unanchored finding
+  has nothing to crop, so it is never eligible.
+- A finding is **judged** when it got a real verdict, live or from the cache:
+  `CONFIRMED`, `CONTRADICTED`, or a genuine `NOT_VISIBLE`. An honest "can't tell
+  from this crop" is a judgment, so a pass of nothing but `NOT_VISIBLE` answers
+  is still `COMPLETE`.
+- Two kinds of eligible finding are **not judged**, and they are counted
+  separately:
+  - a **skipped** finding got no verdict at all: no sheet or crop for it, no
+    API client, or the pass stopped after an authentication failure;
+  - a finding whose call **returned no judgment**: one of the malformed,
+    truncated or failed calls counted above.
+
+The stage status follows from those counts:
+
+| What the verification pass did | Verification stage |
+|---|---|
+| Nothing was eligible | `SKIPPED_VALID` |
+| Every eligible finding judged | `COMPLETE` |
+| Some judged; some skipped or not judged | `PARTIAL` |
+| None judged | `FAILED` |
+
+A `PARTIAL` or `FAILED` verification keeps the run's QC status off `COMPLETE`.
+**This is a visible change:** a run whose verifier skipped a finding or got an
+unreadable answer used to report `COMPLETE` and now reports `PARTIAL`. The
+stage's first warning, the one `run.log`, the report's stage table and the
+journal show, says how far short it fell, before the per-pass lines above:
+
+```
+verification: 117 of 120 eligible finding(s) judged; 0 skipped, 3 returned no judgment
+```
+
+The stage table's *items in → out* column for verification now reads eligible
+findings → judged findings.
+
+The investigation loop (below) can later reach a verdict on a finding whose
+verification call returned no judgment. The finding then carries that verdict,
+and the recovery is reported on the **investigation** stage:
+
+```
+recovered 2 of 3 finding(s) whose verification call returned no judgment; the verification stage keeps its PARTIAL status
+```
+
+The verification stage keeps its own status and the run stays `PARTIAL`: a later
+success never erases an earlier failure.
 
 The verdict itself is one or two sentences, but the call runs **adaptive
 thinking at medium effort** — judging whether a crop supports a finding is a

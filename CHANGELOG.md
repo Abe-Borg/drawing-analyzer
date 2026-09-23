@@ -48,6 +48,43 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Verification reported COMPLETE when it had judged nothing (remediation
+  WP-01.1; N5).** The stage counted every `UNCERTAIN` as a judgment. But a
+  garbled, truncated or declined reply and a failed call are left `UNCERTAIN`
+  too, so a pass whose every call came back malformed read `COMPLETE`, and so
+  did the run. One verified finding beside four skipped ones read `COMPLETE`
+  as well. The 1.7.0 counters that tell these apart were observational only.
+  Now:
+  - **One rule decides the stage** (`models.item_coverage_status`, recorded as
+    D-2 in `_plans/DECISIONS.md`). Nothing eligible is `SKIPPED_VALID`. Every
+    eligible finding judged is `COMPLETE`. None judged is `FAILED`. Anything
+    between is `PARTIAL`. It covers the single-crop and cross-sheet passes
+    together, and a pass that raised is still tested before any count.
+  - **A valid `NOT_VISIBLE` is still a judgment**, so a pass of honest
+    "can't tell from this crop" answers stays `COMPLETE`. So is a cache hit,
+    because only settled verdicts are cached.
+  - **Skips and failed calls are counted separately and surfaced.** The
+    stage's first warning reads, for example, `verification: 117 of 120
+    eligible finding(s) judged; 0 skipped, 3 returned no judgment`, ahead of
+    each pass's malformed/truncated/failed breakdown. The stage's
+    *items in → out* now reads eligible → judged.
+  - **The denominator is fixed before any call**, from each pass's
+    eligibility filter (`VerifyResult.eligible`). A finding that escapes the
+    tally therefore still counts against completeness.
+  - **A cross-verification worker that raised** was left `UNCERTAIN` without
+    being counted as a call that returned no judgment, so it read as one. It
+    is now counted as a failed call.
+  - **Recovery never erases the original outcome.** When the investigation
+    loop reaches a verdict on a finding whose verification call returned no
+    judgment, the investigation stage reports it (`recovered N of M
+    finding(s) …`). The verification stage keeps its `PARTIAL`/`FAILED`, and
+    so does the run.
+
+  **Visible effect:** a run whose verifier skipped a finding or got an
+  unreadable answer used to report `COMPLETE` and now reports `PARTIAL`; a
+  verification that judged nothing reports `FAILED` (it read `PARTIAL` when
+  every finding was skipped).
+
 - **A stable tag could publish past its own acceptance hold, and did (remediation
   WP-23.1; N8).** `docs/releases/ACCEPTANCE-1.7.0.md` put the stable `v1.7.0` tag
   on HOLD, and about eight minutes after that record merged, `v1.7.0` was

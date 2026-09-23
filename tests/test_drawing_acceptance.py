@@ -1300,6 +1300,171 @@ def test_a_cross_verifier_crash_is_not_a_valid_skip(tmp_path, monkeypatch):
     assert any("injected cross-verifier crash" in e for e in ctx.errors)
 
 
+# --------------------------------------------------------------------------- #
+# N5 (remediation WP-01.1, D-2): verification is COMPLETE only when every
+# eligible finding was judged. ``judged`` counted every UNCERTAIN, but a
+# malformed, truncated or failed call is also left UNCERTAIN and judged
+# nothing; and one verified finding beside four skipped ones read COMPLETE.
+# --------------------------------------------------------------------------- #
+
+
+def _verify_tally(**counts):
+    """A ``VerifyResult`` as a pass returns it. Every eligible item is tallied
+    exactly once, so the counts alone describe the pass."""
+    import drawing_analyzer.verify as verify
+
+    tally = verify.VerifyResult()
+    for name, value in counts.items():
+        setattr(tally, name, value)
+    return tally
+
+
+def _mini_run_with_tallies(tmp_path, monkeypatch, primary, cross=None):
+    import drawing_analyzer.verify as verify
+
+    monkeypatch.setattr(verify, "verify_findings", lambda *a, **k: primary)
+    monkeypatch.setattr(
+        verify, "verify_cross_findings",
+        lambda *a, **k: cross if cross is not None else verify.VerifyResult(),
+    )
+    return _mini_run(tmp_path, G.mini_client())
+
+
+@pytest.mark.parametrize(
+    "counts,status",
+    [
+        pytest.param({"uncertain": 3, "malformed": 3}, "FAILED", id="all-malformed"),
+        pytest.param({"uncertain": 3, "failed": 3}, "FAILED", id="all-http-failures"),
+        pytest.param({"uncertain": 3, "truncated": 3}, "FAILED", id="all-truncated-or-declined"),
+        pytest.param({"uncertain": 3}, "COMPLETE", id="all-valid-not-visible"),
+        pytest.param(
+            {"verified": 2, "uncertain": 1, "failed": 1}, "PARTIAL",
+            id="some-valid-some-failed",
+        ),
+        pytest.param({"verified": 1, "skipped": 4}, "PARTIAL", id="some-valid-some-skipped"),
+        pytest.param({"skipped": 5}, "FAILED", id="all-skipped"),
+        pytest.param({}, "SKIPPED_VALID", id="no-eligible-findings"),
+    ],
+)
+def test_verification_is_complete_only_when_every_eligible_finding_was_judged(
+    tmp_path, monkeypatch, counts, status,
+):
+    ctx = _mini_run_with_tallies(tmp_path, monkeypatch, _verify_tally(**counts))
+
+    stage = {s.stage: s for s in ctx.stage_results}["verification"]
+    assert stage.status == status, (counts, stage.status, stage.warnings)
+    if status in ("COMPLETE", "SKIPPED_VALID"):
+        # A valid NOT_VISIBLE is a judgment: an all-inconclusive pass is COMPLETE.
+        assert ctx.qc_status == "COMPLETE"
+        assert stage.warnings == []
+    else:
+        assert ctx.qc_status == "PARTIAL"
+        assert "eligible finding(s) judged" in stage.warnings[0]
+    # I-3: the standard deliverable ships whatever verification did.
+    assert "VAV-3 serves Room 120" in ctx.combined_text
+
+
+def test_verification_completeness_spans_both_passes(tmp_path, monkeypatch):
+    # The single-crop pass judged all it had; the cross-sheet pass skipped one
+    # of its two conflicts. One stage, one rule, over both tallies.
+    ctx = _mini_run_with_tallies(
+        tmp_path, monkeypatch,
+        _verify_tally(verified=2, rejected=1),
+        cross=_verify_tally(verified=1, skipped=1),
+    )
+    stage = {s.stage: s for s in ctx.stage_results}["verification"]
+    assert stage.status == "PARTIAL"
+    assert (stage.items_in, stage.items_out) == (5, 4)
+    assert ctx.qc_status == "PARTIAL"
+
+
+def test_verification_surfaces_skips_and_failures_separately(tmp_path, monkeypatch):
+    # Single pass: 1 verified, 1 valid NOT_VISIBLE, 1 malformed, 1 failed call,
+    # 2 skipped. Cross pass: 1 verified, 1 skipped. So 8 eligible, 3 judged,
+    # 3 skipped (no verdict obtained) and 2 calls that returned no judgment.
+    primary = _verify_tally(
+        verified=1, uncertain=3, malformed=1, failed=1, skipped=2, api_calls=4,
+    )
+    cross = _verify_tally(verified=1, skipped=1, api_calls=1)
+    ctx = _mini_run_with_tallies(tmp_path, monkeypatch, primary, cross=cross)
+
+    stage = {s.stage: s for s in ctx.stage_results}["verification"]
+    assert stage.status == "PARTIAL"
+    assert (stage.items_in, stage.items_out) == (8, 3)
+    assert stage.errors == []
+    # The coverage line leads (run.log, the report's stage table and the
+    # journal all show the first note); each pass's breakdown follows.
+    assert stage.warnings == [
+        "verification: 3 of 8 eligible finding(s) judged; "
+        "3 skipped, 2 returned no judgment",
+        "verification: 2 of 4 live verdict calls returned no judgment "
+        "(malformed=1, truncated=0, failed=1); each was left UNCERTAIN",
+    ]
+    end = [
+        e for e in ctx.run_journal.events
+        if e.event_code == "STAGE_END" and e.stage == "verification"
+    ]
+    assert len(end) == 1
+    assert end[0].fields["status"] == "PARTIAL"
+    assert end[0].fields["items"] == "8->3"
+    assert end[0].fields["warning"] == stage.warnings[0]
+
+
+def test_a_later_investigation_never_erases_the_verification_outcome(tmp_path):
+    # The one eligible finding's verdict call comes back malformed, so the
+    # verification stage judged nothing. Investigation then concludes it.
+    # The finding's verdict improves; the verification stage's record does
+    # not, and the recovery is reported by the stage that made it.
+    client = G.mini_client(verify_verdicts=(("VAV-3", "GARBLED"),))
+    ctx = _mini_run(tmp_path, client)
+
+    stages = {s.stage: s for s in ctx.stage_results}
+    verification, investigation = stages["verification"], stages["investigation"]
+    assert client.verify_calls == 1
+    assert verification.status == "FAILED"
+    assert (verification.items_in, verification.items_out) == (1, 0)
+    assert verification.warnings[0] == (
+        "verification: 0 of 1 eligible finding(s) judged; "
+        "0 skipped, 1 returned no judgment"
+    )
+
+    vav = next(f for f in ctx.findings if f.source_quote == "VAV-3")
+    assert vav.verification.status == "VERIFIED"
+    assert vav.verification.investigated is True
+    assert investigation.status == "COMPLETE"
+    assert investigation.warnings == [
+        "recovered 1 of 1 finding(s) whose verification call returned no "
+        "judgment; the verification stage keeps its FAILED status"
+    ]
+    # The roll-up does not recognise recovery: the run stays below COMPLETE.
+    assert ctx.qc_status == "PARTIAL"
+    # The journal recorded the verification outcome once, before investigation
+    # ran, and nothing rewrote it.
+    ends = [
+        (e.stage, e.fields.get("status")) for e in ctx.run_journal.events
+        if e.event_code == "STAGE_END" and e.stage in ("verification", "investigation")
+    ]
+    assert ends == [("verification", "FAILED"), ("investigation", "COMPLETE")]
+
+
+def test_a_valid_not_visible_verdict_is_judged_and_investigating_it_is_no_recovery(tmp_path):
+    # The same finding, answered NOT_VISIBLE: a real, inconclusive judgment.
+    # Verification is COMPLETE; investigation escalates the UNCERTAIN as it
+    # always has, and that is not a recovery of anything.
+    client = G.mini_client(verify_verdicts=(("VAV-3", "NOT_VISIBLE"),))
+    ctx = _mini_run(tmp_path, client)
+
+    stages = {s.stage: s for s in ctx.stage_results}
+    assert stages["verification"].status == "COMPLETE"
+    assert (stages["verification"].items_in, stages["verification"].items_out) == (1, 1)
+    assert stages["verification"].warnings == []
+    assert stages["investigation"].status == "COMPLETE"
+    assert stages["investigation"].warnings == []
+    vav = next(f for f in ctx.findings if f.source_quote == "VAV-3")
+    assert vav.verification.status == "VERIFIED"
+    assert ctx.qc_status == "COMPLETE"
+
+
 def test_gauntlet_plan_failure_leaves_critique_on_user_profiles(tmp_path, monkeypatch):
     # Phase A: a malformed plan degrades the review_plan stage only — the
     # critique still runs, and a user-selected profile still rides its prompt.
