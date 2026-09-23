@@ -1,7 +1,7 @@
 # Remediation progress tracker
 
-**Next up:** Wave 1 in order: `WP-03.2`. WP-03.1 is done: Pass B's complete-link is symmetric, so the B1 case ends with the same number of entries in every ingest order (B1's count part; B1 stays open for WP-03.5). It found N28, now slice `WP-03.7` (Wave 1, after WP-03.3; it needs a decision first). WP-04 is not done: its acceptance needs quantity roles, slice `WP-04.3` (Wave 2). First check the open PRs ([`README.md`](README.md), step 1). Before the next stable tag, the owner should look at O-5.
-**Last updated:** 2026-09-23 by the WP-03.1 session ([PR #159](https://github.com/Abe-Borg/drawing-analyzer/pull/159)).
+**Next up:** Wave 1 in order: `WP-03.3`. WP-03.2 is done: a positional tie in the QC numbering is broken by the finding's own content, so the same findings get the same numbers whatever order they arrive in (K5). It found N29 (a merged entry's representative can follow arrival order once three or more duplicates merge), now on `WP-03.5`. `WP-03.7` (N28) waits on WP-03.3 and needs a decision first. WP-04 is not done: its acceptance needs quantity roles, slice `WP-04.3` (Wave 2). First check the open PRs ([`README.md`](README.md), step 1). Before the next stable tag, the owner should look at O-5.
+**Last updated:** 2026-09-23 by the WP-03.2 session.
 
 This file is authoritative for **status and order**. Requirements live in
 [`drawing-analyzer-remediation-plan.md`](drawing-analyzer-remediation-plan.md).
@@ -103,7 +103,7 @@ starting.
 | WP-04.1 | Quantity tokenizer: hyphenated units, thousands groups, opaque malformed tokens, `deg`/`°` (angle vs temperature), lists and ranges, W×H and V/A with a negative corpus; critique-scoped cache term (B2, B3, B12, N19) | M | — | done | [PR #157](https://github.com/Abe-Borg/drawing-analyzer/pull/157), 2026-09-23. `critique._quantity_tokens`, a scanner that reads each quantity whole. A composite (list, range, W×H size, voltage pair) is ONE token, compared whole; the representation is documented at the tokenizer and pinned by `tests/test_quantity_signature.py`. Compact `A` needs electrical context (negative corpus in the same file). Critique cache term `digest_cache._CRITIQUE_CACHE_CONTRACT = 1` inside both critique builders; A/B `RECORD_CONTRACT_VERSION` 2 → 3. Tests: `tests/test_quantity_signature.py`, the WP-04.1 section of `tests/test_drawing_cache_identity.py`, four tests in `tests/test_ab_findings_diff.py`. Residual partial signatures (loose-comma lists, `to` ranges, `and`/`or` lists, a bare `20A`) are listed in the handoff |
 | WP-04.2 | Compatibility rule over per-unit value sets and partial tag overlap; one shared `signature_conflicts` that the A/B harness also uses (N1) | M | WP-04.1 | done | [PR #158](https://github.com/Abe-Borg/drawing-analyzer/pull/158), 2026-09-23. `critique.signature_conflicts` (axes `tags`, `measurements`, `absence_polarity`, `cross_sheet_legs`); `signatures_compatible` is its negation, and the A/B harness reports its axes (its restated copy is gone). Quantities compare per kind (a unit, or one of the `_QUANTITY_KIND` groups: lengths, degrees, `psi`/`psig`, volts, liquid flow, real power, apparent power): for every kind both carry, one side's tokens must include the other's; no value is converted. Tags compare by inclusion, not by prefix. Sharing no quantity at all still conflicts. Critique contract 1 → 2, fingerprint pinned under 2; `RECORD_CONTRACT_VERSION` stays 3 (rule-only change; plan step 6 corrected). Tests: `tests/test_signature_compatibility.py`, the N1 rows and the corroboration, retention and recorded-limit tables in `tests/test_quantity_signature.py`, the WP-04.2 sections of `tests/test_ab_findings_diff.py` and `tests/test_drawing_cache_identity.py`. Roles are not compared: WP-04.3 |
 | WP-03.1 | Symmetric complete-link in Pass B, order-independent entry count (B1, count part) | S | — | done | [PR #159](https://github.com/Abe-Borg/drawing-analyzer/pull/159), 2026-09-23. `ledger.reconcile_post_anchor` folds an entry only when every member of its `Ledger.member_history` is `_is_duplicate` of every member of the survivor's (both sides, each as it arrived). The B1 case ends with two entries in all six orders, under seven severity and quote-length variants; histories stay cliques; a second pass folds nothing. The candidate index cannot miss a fold (argued at `_candidates`, pinned against an index-free reference). Geometry: recorded as a recall loss, not lent (Pass B now folds only entries that absorbed nothing in Pass A). Tests: `tests/test_pass_b_complete_link.py`, `tests/test_drawing_dedup_lifecycle.py::test_pass_b_keeps_a_conflict_the_incoming_entry_absorbed`. No cache or key change. Found N28 (WP-03.7) |
-| WP-03.2 | Deterministic total-order tie-break in `assign_qc_ids` (K5) | S | — | todo | |
+| WP-03.2 | Deterministic total-order tie-break in `assign_qc_ids` (K5) | S | — | done | 2026-09-23. `models.assign_qc_ids` keeps the positional order and breaks a tie by the content `id` (first, so a pair whose ids differ keeps its number), then the text, then `_qc_content_key`: every field but `qc_id`, with `_ARRIVAL_ORDERED_FIELDS` (`sources`, `refs`, `supporting_quotes`, `prose_item_ids`, `citations`) sorted, built only for runs the cheap key leaves tied. No existing fixture renumbered (checked by instrumenting the full suite). `qc_id` is in no cache key. Tests: `tests/test_qc_numbering_tiebreak.py`. Found N29 (WP-03.5). Still following arrival, recorded on WP-03.4: the row order of `findings.json`/`findings.csv` and of the report table among equal severity and status |
 | WP-03.3 | Remove the auditor coordinator's id dedup; arithmetic claim discriminator so the ledger keeps two different same-row mismatches; Decimal claim-dedup keys (B7) | S/M | — | todo | |
 | WP-03.7 | The geometry branch folds two different issues that quote one tag (N28): decide what, besides a shared quote and an overlapping rectangle, may fold two findings, and apply it in both passes | S/M | WP-03.3 | todo | Added by WP-03.1 (README step 7). **Needs a decision first.** No text-overlap threshold separates the cases: the paraphrase fold `test_post_anchor_reconciliation_folds_a_geometric_duplicate` pins shares 1 of 11 content words (0.09), the two different `PUMP P-1` issues share 3 of 12 (0.25). Options: drop the branch (loses that paraphrase fold; pin it as retention), or a claim discriminator (the general form of WP-03.3's arithmetic one). Flip `tests/test_pass_b_complete_link.py::test_recorded_limit_the_geometry_branch_folds_two_issues_that_quote_one_tag`. The merge-rule ratchet (`tests/test_drawing_cache_identity.py`) fingerprints `_is_duplicate` over unanchored findings only, so check whether a change moves it before deciding on a critique contract bump |
 | WP-07.1 | Occurrence-aware, sheet-grounded operand support; provenance decided after anchoring; a fabricated quote or unresolved sheet is never DETERMINISTIC (N3) | M | — | todo | |
@@ -137,8 +137,8 @@ starting.
 | WP-10.2 | Critique contract resolved per transport at probe and store; batch runs log that the structured flag is ignored (K3) | S/M | — | todo | |
 | WP-10.3 | Planner loss metadata stored with the plan; legacy entries report loss as unknown (K4) | S/M | WP-01.1 | todo | |
 | WP-10.4 | Cache map with the admission predicate of every write; N4 read-side migration completed; migration register filled (N4 cache part; WP-10 steps 1, 7, 9) | S/M | WP-01.2, WP-01.4 | todo | |
-| WP-03.4 | Versioned `claim_id` beside the existing `id`; the inventoried consumers switched; cross-QC and prose-harvest cache restores rebound; decides D-3 (B8 identity) | L | WP-03.2 | todo | |
-| WP-03.5 | Lossless observations: upstream merges hand observations to the ledger; observations and alternative actions serialized (incl. critique cache); specificity-aware representative (B9, B1 rest) | L | WP-03.1, WP-03.4, WP-04.2 | todo | From WP-03.1: flip `tests/test_pass_b_complete_link.py::_500_EXPORTED` ("500" leaves the exports in ABC/ACB/BAC, where the generic bridge wins A's bundle). Also hand the prose harvest's matched mirror to the ledger as an observation: `prose_harvest._process_free_pending` sets `also_on` on a live entry directly, so legs attached after that entry's first merge are in no member snapshot and Pass B's complete-link cannot see them (narrow since WP-03.1: Pass B folds such an entry only through a member anchored before ingest) |
+| WP-03.4 | Versioned `claim_id` beside the existing `id`; the inventoried consumers switched; cross-QC and prose-harvest cache restores rebound; decides D-3 (B8 identity) | L | WP-03.2 | todo | From WP-03.2: `investigate._candidates`, `annotate._severity_first_key`, `_set_findings_outline`, `_annotate_units` and `tile_artifacts._finding_sort_key` sort by `qc_id` before `id`, and every entry is numbered, so in a run they follow the numbering now; their `id` fallback is reached only by an unnumbered finding. Three orders still follow arrival: `pipeline._run_critique_stage`'s pre-ingest sort `(source_page_key, id)` keeps thread-completion order among ties, which becomes ledger order; `findings.json` and `findings.csv` are written in ledger order (`ctx.findings + ctx.reference_findings`, split from `ledger.number()`'s arrival-ordered list); and the report table sorts by severity and status only (`html_report._key`, a stable sort), so ties keep ledger order. Sorting `entries` by `qc_id` after `ledger.number()` would put every row in QC order, a visible change to decide here |
+| WP-03.5 | Lossless observations: upstream merges hand observations to the ledger; observations and alternative actions serialized (incl. critique cache); specificity-aware representative (B9, B1 rest, N29) | L | WP-03.1, WP-03.4, WP-04.2 | todo | From WP-03.2 (N29): `_merge_into` compares an incoming member with the live survivor, whose severity an earlier merge may have raised, so with three or more duplicates the representative follows arrival order. Choose it from the members' own qualities (their snapshots), not the live survivor's, and flip `tests/test_qc_numbering_tiebreak.py::_N29_REPRESENTATIVE` to one representative in every order. From WP-03.1: flip `tests/test_pass_b_complete_link.py::_500_EXPORTED` ("500" leaves the exports in ABC/ACB/BAC, where the generic bridge wins A's bundle). Also hand the prose harvest's matched mirror to the ledger as an observation: `prose_harvest._process_free_pending` sets `also_on` on a live entry directly, so legs attached after that entry's first merge are in no member snapshot and Pass B's complete-link cannot see them (narrow since WP-03.1: Pass B folds such an entry only through a member anchored before ingest) |
 | WP-03.6 | Canonical final clustering over retained observations; per-observation anchors; idempotent reconciliation (WP-03 clustering clarification) | M/L | WP-03.5 | todo | From WP-03.1: flip `tests/test_pass_b_complete_link.py::_BRIDGE_JOINS` (which cluster the generic bridge joins follows arrival order) and `::test_recorded_limit_a_four_finding_chain_still_counts_by_arrival_order` (entry count 2 or 3 by order). Per-observation anchors are also where the geometric recall WP-03.1 gave up comes back (`::test_a_geometric_duplicate_folds_only_between_entries_that_absorbed_nothing`) |
 | WP-06.4 | Direction-free merge for reversed cross-sheet conflicts with a stated same-claim predicate (B10) | M | WP-03.4, WP-06.1 | todo | |
 | WP-07.3 | Truthful arithmetic counters split by provenance; contradictory transcriptions of one quote flagged (N18; WP-07 step 7) | S/M | WP-07.1, WP-03.3 | todo | |
@@ -281,7 +281,7 @@ report is built from it).
 | B5 | Cross-QC quotes under 6 chars are "grounded" without a check | P0 | 05.1 | open | |
 | B6 | Cross-QC prompt asks for severity `question`; the items are dropped silently | P0 | 06.1 | open | |
 | B7 | Distinct same-row arithmetic mismatches: coordinator dedup, then a ledger geometry merge | P0 | 03.3 | open | |
-| B8 | `Finding.id` not unique; numbering, bookmarks and index links treat it as identity | P0 | 03.2, 03.4, 21.3 | open | |
+| B8 | `Finding.id` not unique; numbering, bookmarks and index links treat it as identity | P0 | 03.2, 03.4, 21.3 | open (numbering part implemented+validated in 03.2, as K5; identity (03.4) and navigation (21.3) stay open) | `tests/test_qc_numbering_tiebreak.py` (WP-03.2): the `PUMP P-1` pair gets the same numbers and evidence directories in both orders. Remaining: `claim_id` (WP-03.4); bookmark dedup and `mark_page_by_finding` keyed by the content id (WP-21.3) |
 | B9 | Merge discards the loser's text and recommended action | P0 | 03.5 | open | |
 | B10 | A→B and B→A copies of one conflict both survive | P1 | 06.4 | open | |
 | B11 | "No conflicts noted on this sheet." becomes a medium finding | P1 | 09.1 | open | |
@@ -306,7 +306,7 @@ report is built from it).
 | K2 | Cross-QC user-turn framing outside the stage key | P1 | 06.2 | open | |
 | K3 | Structured flag + batch parks a fenced merge under the structured key | P1 | 10.2 | open | |
 | K4 | Review plan PARTIAL cold, COMPLETE warm | P1 | 10.3 | open | |
-| K5 | QC numbering depends on ingest order | P0 | 03.2 | open | |
+| K5 | QC numbering depends on ingest order | P0 | 03.2 | implemented+validated | `tests/test_qc_numbering_tiebreak.py` (WP-03.2): the review's `PUMP P-1` pair in both orders, unanchored and on one rectangle, directly and through the ledger; ledger entries sharing text, quote, category and id (kept apart by absorbed members; by legs); rect-less and set-level findings in every order; generated same-sheet sets in every order (distinct texts, and repeated texts compared by claim); numbering twice; every pair the old key ordered keeps its order. Numbering follows the content it is given: N29 (WP-03.5) can still give it arrival-dependent content |
 | A1 | Any row of three 2-digit numbers becomes a CSI citation | P1 | 08.1 | open | |
 | A2 | `P-3` reported as a misspelling of `3P` | P1 | 08.1 | open | |
 | A3 | Reference auditor quadratic in references × sheets | P1 | 08.2 | open | |
@@ -353,6 +353,7 @@ report is built from it).
 | N26 | Chat transcript kept in `localStorage` on `file://`, readable by other local files | P1 | 20.3 | open | |
 | N27 | A stream that ends without `message_stop` is cached as a complete digest | P0 | 01.2 | implemented+validated | `tests/test_digest_terminal_outcome.py::test_n27_a_real_sdk_stream_that_ends_without_message_stop_is_not_a_digest` (the real SDK's stream accumulator over an in-process transport, through `digest_sheet`), plus the `stop_reason=None` cases on both transports, at both cache levels and through the pipeline (WP-01.2, [PR #156](https://github.com/Abe-Borg/drawing-analyzer/pull/156)) |
 | N28 | The geometry branch folds two different issues that quote one tag once both anchor there (`PUMP P-1` voltage / impeller); the loser's text is lost | P0 | 03.7 | open | Found by WP-03.1 and pinned as a recorded limit: `tests/test_pass_b_complete_link.py::test_recorded_limit_the_geometry_branch_folds_two_issues_that_quote_one_tag` (flip it) |
+| N29 | A merged entry's representative follows arrival order once three or more duplicates merge: an earlier merge's severity union feeds the next `_grounding_quality` comparison | P1 | 03.5 | open | Found by WP-03.2 and pinned as a recorded limit: `tests/test_qc_numbering_tiebreak.py::test_recorded_limit_a_merged_entrys_representative_follows_arrival_order` (`_N29_REPRESENTATIVE`: X's bundle in two of six orders, Z's in four; flip it) |
 | U1 | Serving model, fallback iterations and partial-stream billing unrecorded | P1 | 14.3, 14.6, 01.7 | open | |
 | U2 | Fallback text joins and selective history replay | P1 | 01.6, 12.1, 13.4, 19.2 | open | |
 | U3 | Generic `output_config` 400 disables task budgets process-wide | P1 | 13.1 | open | |
@@ -391,6 +392,208 @@ report is built from it).
 Each session adds one entry at the top: date, slices and IDs, PR, what changed,
 contracts decided, cache/schema effects, validation actually run (with counts),
 what could not be verified, risks, and next steps.
+
+### 2026-09-23 — WP-03.2: QC numbers break a positional tie by content
+
+- **Slice and IDs:** WP-03.2. K5 (implemented+validated), and with it B8's
+  numbering part; B8 stays `open` for its identity (WP-03.4) and navigation
+  (WP-21.3) parts. No `DECISIONS.md` contract is decided: the tie-break is a
+  display order, not an identity, so D-3 stays open for WP-03.4. One new
+  finding, **N29**, recorded and pinned, not fixed; it goes to **WP-03.5**.
+- **What changed:**
+  - **Reproduced first** on `2300762`. The review's pair (X "pump P-1 has no
+    isolation valve on the suction side", Y "motor horsepower for P-1
+    disagrees with the pump schedule", both quoting `PUMP P-1` on one sheet,
+    page and source, one category and severity) shares an id.
+    `assign_qc_ids([X, Y])` gave X `QC-001` and `[Y, X]` gave Y `QC-001`,
+    unanchored and on one shared rectangle alike. Through the ledger (ingest,
+    seal, both `UNANCHORED` with `quote_not_found`, Pass B, `number()`) the
+    numbers followed arrival too. Anchored to one rectangle, Pass B folds the
+    pair instead (N28).
+  - **The tie-break** (`models.assign_qc_ids`). The positional order is
+    unchanged: set-level last, then source input order, page, anchored before
+    rect-less, top, left. A tie is broken by, most significant first:
+    1. the content `id`, the old tie-break, kept first so every pair whose
+       ids differ keeps its number;
+    2. the text, as in `ledger._grounding_quality` (the precedent: id, then
+       text). It separates the K5 pair: "motor…" gets `QC-001` in both
+       orders;
+    3. `_qc_content_key`: every `Finding` field but `qc_id`, as one canonical
+       JSON string. It walks `dataclasses.fields`, so a field added later is
+       covered. `_ARRIVAL_ORDERED_FIELDS` are sorted: the four lists
+       `ledger._merge_into` unions in arrival order (`sources`, `refs`,
+       `supporting_quotes`, `prose_item_ids`) and `citations`, which the
+       citation stage writes in `refs` order. `tile` and `also_on` keep their
+       order: `[row, col]`, and one producer's legs, numbered in that order on
+       the evidence.
+  - **Why the order is total** (argued in the docstring, pinned by tests).
+    Two findings that tie on all three are equal in every field except `qc_id`
+    and the order of those five lists: the same claim with the same evidence.
+    Text and quote alone are not enough, as the session request warned: Pass A
+    keeps two entries apart when members they absorbed conflict, and the two
+    can still share text, quote, category and id. Built through the ledger in
+    all 24 orders (two critique representatives with one text and one quote
+    whose supporting quotes say 500 and 550 gpm, each absorbing the digest
+    finding that agrees with it), what separates them is their supporting
+    quotes. Three cross-QC findings with one text, one quote and different
+    legs are separated by `also_on`. Two ledger entries can also differ only
+    in members that left no trace on the live entry, since a merge keeps only
+    the representative's text (B9). Nothing after numbering reads the members:
+    `member_history` and `merge_trace` have no reader outside the ledger, and
+    Pass B runs before numbering. Such entries are interchangeable until
+    WP-03.5 serializes observations.
+  - **Cost.** The content key is built only for the runs the cheap key
+    (position, id, text) leaves tied. For 2,000 realistic findings, numbering
+    takes 4.6 ms against 2.8 ms on the base. The worst case, 2,000 findings
+    all tied on position, id and text, takes 85 ms. Building the key for every
+    finding took about 100 ms (measured, not adopted).
+  - **Docstrings corrected:** `assign_qc_ids`, whose "tie-broken by the stable
+    content id … regardless of the order they arrive in" did not hold, and
+    `Ledger.number`. `_grounding_quality`'s docstring now says its promise
+    ("regardless of ingest order for a fixed set of members") holds only
+    within one merge (N29).
+  - **Plan corrected** (README step 7): N29 is added to §3, §7.1's range,
+    §7.2, and WP-03's "Covers" and slice paragraph.
+  - **Docs:**
+    - CHANGELOG: Fixed, K5, with the visible effect, "nothing is migrated",
+      and what stays open.
+    - CLAUDE.md: the ledger lifecycle sentence gains the tie-break and the
+      no-cache-key fact; the severity-union sentence gains N29.
+    - README: the ledger lifecycle paragraph. The visible numbering of a tied
+      pair changes.
+- **Contracts decided:** none.
+- **Cache/schema effects:** none, confirmed.
+  - No cache key or model request reads `qc_id`.
+    - The verify keys (`_single_verify_cache_key`, `_cross_verify_cache_key`)
+      hash the finding's text, quote, category, severity, sheet, source, page,
+      anchor and computation metadata, and the request itself. No model
+      request carries `qc_id`: checked over `verify._build_request`,
+      `_build_dual_request` and the investigation's `_build_initial_content`
+      and `_investigation_message` (only the evidence files
+      `request.json` and `investigation.json` record it).
+    - The investigation key (`_payload_hash`) hashes `id`, text, quote,
+      category, severity, rect, prior note and `set_content_fingerprint`. A
+      cached investigation stores status, note, rounds and a tool trace of
+      source keys, rects, DPI and sha256, with no directory name: the replay
+      takes the directory from the current run's evidence or number.
+    - `qc_id` does not occur in `digest_cache.py`, `citation_check.py`,
+      `critique.py`, `cross_qc.py` or `prose_harvest.py`.
+  - The ledger is rebuilt every run.
+
+  So no key, contract or `_SCHEMA_VERSION` change, and no migration-register
+  row. A tied pair's numbers can differ from 1.7.0's, which renames its
+  evidence directories; historical exports are untouched.
+- **Re-baselined tests:** none. Every pinned test passes unchanged:
+  - `tests/test_drawing_dedup_lifecycle.py`:
+    `test_ingest_order_independent_entries_and_numbers`,
+    `test_qc_numbers_follow_source_input_order_then_position`,
+    `test_unanchored_sorts_after_anchored_on_same_sheet`,
+    `test_a_post_numbered_duplicate_is_counted_and_never_rewrites_the_entry`;
+  - `tests/test_drawing_ledger.py`: `test_ledger_freeze_assigns_stable_qc_ids`,
+    `test_ledger_post_seal_add_marks_incomplete_not_fatal`;
+  - `tests/test_drawing_markup_rich.py`: `test_qc_ids_ordered_sheet_then_position`,
+    `test_qc_ids_stable_regardless_of_input_order`,
+    `test_qc_id_round_trips_through_dict`;
+  - the gauntlet's numbering assertions in `tests/test_drawing_acceptance.py`,
+    the `QC-001`/`QC-002` pins in `tests/test_drawing_qc_pipeline.py`, and
+    every file that hard-codes `QC-0xx` (1,243 tests over 22 files, run
+    together).
+
+  A green run does not show that no fixture renumbered, so the full suite also
+  ran once in a scratch copy whose `assign_qc_ids` logged every call where the
+  new order differed from the 1.7.0 key's (position, then id). Every logged
+  call came from `tests/test_qc_numbering_tiebreak.py`. No existing fixture,
+  the gauntlet's full pipeline run included, holds a tie the new rule orders
+  differently.
+- **The consumers of `qc_id`** (session request step 3): display and order
+  only, never a cache key.
+  - Evidence directory names (`verify._reserve_evidence_dir`, reused by the
+    investigation's replay), `request.json` and `investigation.json`.
+  - The pipeline's recovered-verdict match (`qc_id in verify_not_judged`,
+    within one run).
+  - The markup tags, the index and the outline; the report's deep links; the
+    export's `qc_id` column; the tile notes.
+
+  Five sort keys order by `qc_id` before `id`: `investigate._candidates`,
+  `annotate._severity_first_key`, `_set_findings_outline`, `_annotate_units`
+  and `tile_artifacts._finding_sort_key`. Every entry in a run is numbered,
+  so these follow the numbering now; their `id` fallback is reached only by
+  an unnumbered finding.
+  Three orders still follow arrival once numbering is fixed; recorded on the
+  WP-03.4 row, not fixed here:
+  - the critique stage's pre-ingest sort `(source_page_key, id)` keeps
+    thread-completion order among ties, and that becomes ledger order;
+  - `findings.json` and `findings.csv` are written in ledger order;
+  - the report table sorts by severity and status only (a stable sort), so
+    its ties keep ledger order.
+- **New finding N29** (P1; WP-03.5, noted on its row; plan §3 and §7.2). A
+  merged entry's representative can follow arrival order.
+  - `_merge_into` computes both quality tuples before this merge's severity
+    union, which fixed the pair case
+    (`test_the_representative_does_not_depend_on_ingest_order`). But it
+    compares the incoming member with the live survivor, whose severity an
+    EARLIER merge may already have raised.
+  - Members X (22-character quote, `low`), Y (10-character quote, `high`)
+    and Z (22-character quote, `medium`) all merge into one entry. X's bundle
+    wins in XYZ and YXZ; Z's wins in the other four orders.
+  - Numbering is a function of each entry's content, so it cannot repair
+    content that was assembled in arrival order. Pinned as a recorded limit:
+    `tests/test_qc_numbering_tiebreak.py::_N29_REPRESENTATIVE`.
+- **Validation** (this container, Python 3.11.15, SDK 1.7.0, PyMuPDF 1.28.2):
+  - **Baseline before any change:** `python -m pytest -q -m "not network"`
+    gave **3,179 passed, 2 skipped, 10 deselected** (232 s) on `2300762`,
+    identical to the WP-03.1 handoff.
+  - **Failing first.** The 25 new tests were run in a `git archive` copy of
+    `origin/main` (`2300762`) with only the new test file added, and the
+    results were classified from `--junitxml`:
+    - **11 failed on behaviour:** the K5 pair directly (both placements),
+      through the ledger (unanchored; one rectangle without the fold), the
+      evidence directories, the absorbed-conflict entries, the legs entries,
+      the rect-less set, the set-level set, and both generated-set
+      properties.
+    - **3 failed only on importing the new helpers:** the content key's
+      field coverage, the list classification, and never-raises.
+    - **11 passed**, pinning what the fix keeps: the precondition (both
+      placements), the whole lifecycle on one rectangle (N28 folds the pair
+      the same way in both orders), numbering twice, every pair the old key
+      ordered, and the six N29 recorded-limit rows.
+  - **After:** the 25 new tests pass. Full suite **3,204 passed, 2 skipped,
+    10 deselected** (221 s): the baseline plus the 25 new tests, with the
+    same two environment skips (IPv6 loopback; chmod as root).
+  - The generated-set properties are not vacuous: 25 of the 60 seeded sets
+    with distinct texts tie on the old key somewhere, and 29 of the 80 with
+    repeated texts tie on id **and** text. Their floors (15 each) guard
+    against a generator change.
+  - **Browser suite:** not run separately. No report JS, HTML or chat code
+    changed; the browser tests ran inside the full suite.
+  - `python -m ruff check --select E9,F63,F7,F82 src tests scripts` (the
+    pinned 0.14.5) is clean. F401/F811/F841 over the touched source and test
+    files is clean. `scan_secrets.py` is clean over 199 tracked files, the new
+    one included. `compileall src` passes.
+- **Not verified:** live API behaviour (no budget, O-4; this slice makes no
+  call). Real drawings: every fixture is synthetic, and how often a real set
+  holds a tie the id did not break is unmeasured (O-10). Windows is covered by
+  this PR's CI.
+- **Risks and residual gaps:**
+  - **A visible change, by design.** A tied pair can be numbered the other way
+    round than in 1.7.0, and its evidence directories, tags, index rows and
+    bookmark swap with it.
+  - The third tie-break compares canonical JSON strings, so which field
+    decides between two such findings follows the alphabetical order of the
+    field names. It is deterministic, not meaningful; it is only reached when
+    id and text tie.
+  - `_canonical_json`'s `default=str` fallback only meets values no stage
+    stores (a hand-built test double). For an object whose `str` holds a
+    memory address, the order would change between processes; no `Finding`
+    field holds one.
+- **Re-checked (U31):**
+  - `assign_qc_ids` has one production caller, `Ledger.number()`. The
+    pipeline calls it once, after Pass B, outside any `try`, which is why the
+    key must never raise; it doesn't (a test covers it).
+  - `from_dict` restores a stored `qc_id`, and the new key excludes `qc_id`,
+    so a stale number never feeds the order.
+- **Next:** WP-03.3 (Wave 1). WP-03.7 waits on WP-03.3 and needs a decision
+  first; WP-03.4 now has its dependency done.
 
 ### 2026-09-23 — WP-03.1: symmetric complete-link in Pass B ([PR #159](https://github.com/Abe-Borg/drawing-analyzer/pull/159))
 

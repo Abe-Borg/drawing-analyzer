@@ -7,8 +7,10 @@ Only :mod:`render` produces these; everything else just consumes them.
 from __future__ import annotations
 
 import hashlib
+import itertools
+import json
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable
@@ -1406,6 +1408,62 @@ class ProseItem:
     mentioned_sheet_ids: list[str] = field(default_factory=list)
 
 
+# ``Finding`` fields whose ORDER records only the order things arrived in, not
+# anything the finding says. The ledger unions the first four member by member
+# as findings merge (``ledger._merge_into``), and the citation stage writes
+# ``citations`` in ``refs`` order. QC numbering compares them as sorted
+# collections, so one claim ranks the same whatever order its members arrived
+# in. Every other list keeps its order: ``tile`` is ``[row, col]``, and
+# ``also_on`` is one producer's legs, numbered in that order on the evidence.
+_ARRIVAL_ORDERED_FIELDS = frozenset(
+    {"sources", "refs", "supporting_quotes", "prose_item_ids", "citations"}
+)
+
+
+def _plain(value: Any) -> Any:
+    """``value`` as JSON-ready data: a dataclass by every field, a sequence as a list."""
+    if is_dataclass(value) and not isinstance(value, type):
+        return {fld.name: _plain(getattr(value, fld.name, None)) for fld in fields(value)}
+    if isinstance(value, (list, tuple)):
+        return [_plain(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _plain(item) for key, item in value.items()}
+    return value
+
+
+def _canonical_json(value: Any) -> str:
+    # ``default=str`` only ever meets a value no stage stores (a hand-built test
+    # double). The key must not raise: the pipeline numbers without a guard.
+    return json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
+
+
+def _qc_order_key(f: "Finding") -> tuple:
+    """Where ``f`` sits, then the two tie-breaks every finding carries cheaply
+    (its content ``id``, then its text). See :func:`assign_qc_ids`."""
+    set_level = (f.anchor_hint or "").upper() in {"SET", "SET_INDEX"} and not f.source_id
+    rect = f.anchor.rect_pdf if f.anchor is not None else None
+    # Rect-less findings sort after the anchored ones on their sheet.
+    pos = (0, float(rect[1]), float(rect[0])) if rect else (1, 0.0, 0.0)
+    return (1 if set_level else 0, source_page_key(f), pos, str(f.id or ""), str(f.text or ""))
+
+
+def _qc_content_key(f: "Finding") -> str:
+    """Everything ``f`` carries except its number, as one comparable string.
+
+    Every dataclass field, so a field added to :class:`Finding` later is covered
+    without being listed here. The :data:`_ARRIVAL_ORDERED_FIELDS` are sorted.
+    Never raises.
+    """
+    content = _plain(f)
+    if isinstance(content, dict):
+        content.pop("qc_id", None)
+        for name in _ARRIVAL_ORDERED_FIELDS:
+            items = content.get(name)
+            if isinstance(items, list):
+                content[name] = sorted(items, key=_canonical_json)
+    return _canonical_json(content)
+
+
 def assign_qc_ids(findings: list["Finding"]) -> list["Finding"]:
     """Assign sequential review numbers (``QC-001`` …) across a run's findings.
 
@@ -1414,28 +1472,53 @@ def assign_qc_ids(findings: list["Finding"]) -> list["Finding"]:
     Findings with no rectangle (sheet-level / unanchored) sort after the anchored
     ones on their sheet. **Set-level** findings (a synthesis conflict belonging to no
     source sheet, §12.4/§14.8) sort after *every* source-scoped finding, in a final
-    section of their own. The sort is deterministic — tie-broken by the stable
-    content ``id`` — so the same findings get the same numbers regardless of the
-    order they arrive in (I-7). Assigns in place and returns the same list; ids
-    are assigned exactly once per run (numbering everything, not only the inked
-    findings, so the CSV/report/index all share one namespace).
+    section of their own.
+
+    **Ties** (remediation WP-03.2, review K5). Position leaves some: two findings
+    on one sheet with no rectangle, two anchored to one rectangle, two set-level
+    findings. They are broken by each finding's own content, never by the order
+    the findings arrive in, so the same findings get the same numbers whatever
+    that order (I-7). Ranked, most significant first:
+
+    1. The content ``id``, the only tie-break before WP-03.2. It stays first,
+       so every pair whose ids differ keeps the number it had.
+    2. The text. ``compute_finding_id`` hashes the quote, not the text, when
+       there is one, so two different issues that quote one tag (``PUMP P-1``)
+       share an id (review B8), and the stable sort numbered them in arrival
+       order. The text tells them apart, as it does in
+       ``ledger._grounding_quality``, the representative's total order.
+    3. Everything else the finding carries except its number
+       (:func:`_qc_content_key`). Text and quote are not always enough: Pass A
+       keeps two entries apart when members they absorbed conflict, and the two
+       can still share text, quote, category and id. What they absorbed reaches
+       the live entries (supporting quotes, legs, provenance), so the whole
+       content orders them, with the lists whose order records only arrival
+       (:data:`_ARRIVAL_ORDERED_FIELDS`) compared as sorted collections.
+
+    The order is total over what a finding says. Two findings that tie on all
+    three are equal in every field except ``qc_id`` and the order of those
+    lists: the same claim with the same evidence, so which of them gets the
+    lower number says nothing about either. Two ledger entries can also differ
+    only in the members behind them, since a merge keeps only the
+    representative's text (review B9); nothing after numbering reads the
+    members, and ordering by them needs the observations WP-03.5 serializes.
+
+    Element 3 is computed only for the findings 1 and 2 leave tied: it
+    serializes the whole finding, about 25 times the cost of the rest of the
+    numbering.
+
+    Assigns in place and returns the same list; ids are assigned exactly once
+    per run (numbering everything, not only the inked findings, so the
+    CSV/report/index all share one namespace).
     """
-
-    def _is_set_level(f: "Finding") -> bool:
-        return (f.anchor_hint or "").upper() in {"SET", "SET_INDEX"} and not f.source_id
-
-    def _pos(f: "Finding") -> tuple:
-        rect = f.anchor.rect_pdf if f.anchor is not None else None
-        if rect:
-            return (0, float(rect[1]), float(rect[0]))
-        return (1, 0.0, 0.0)            # rect-less findings sort after anchored ones
-
-    ordered = sorted(
-        findings,
-        # Set-level findings sort last (a separate final section); within each group
-        # the usual source → page → position → id order holds.
-        key=lambda f: (1 if _is_set_level(f) else 0, source_page_key(f), _pos(f), f.id),
-    )
+    ordered: list[Finding] = []
+    for _key, run in itertools.groupby(
+        sorted(findings, key=_qc_order_key), key=_qc_order_key
+    ):
+        tied = list(run)
+        if len(tied) > 1:
+            tied.sort(key=_qc_content_key)
+        ordered.extend(tied)
     width = max(3, len(str(len(ordered))))
     for n, finding in enumerate(ordered, start=1):
         finding.qc_id = f"QC-{n:0{width}d}"

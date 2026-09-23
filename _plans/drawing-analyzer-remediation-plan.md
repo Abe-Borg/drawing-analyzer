@@ -151,6 +151,7 @@ If a proposed change conflicts with a documented invariant, resolve the contract
 | N26 | The chat transcript (up to 500k characters) is saved in `localStorage` on the `file://` origin, where any other local HTML file can read it. | P1 |
 | N27 | A stream that ends without `message_stop` yields `stop_reason=None` and partial text, with no exception. The digest caches it as complete. | P0 |
 | N28 | `_is_duplicate`'s geometry branch folds two different issues that quote one tag. Pass A keeps "pump P-1 voltage listed as 480 should be 208" and "pump P-1 impeller diameter conflicts with the curve" apart on purpose (both quote `PUMP P-1`, and the quote alone is not enough), but once both anchor to the tag the branch fires (same quote, rectangles overlapping, no text or claim check) and Pass B folds them. The impeller issue is lost: its text is overwritten and its quote equals the survivor's. Found by WP-03.1. | P0 |
+| N29 | A merged entry's representative can depend on arrival order. `_merge_into` compares each incoming member with the live survivor, whose severity an earlier merge may already have raised to the maximum. With three or more duplicates, which member's text, quote and id represent the entry then depends on the order they arrived in: members X (long quote, `low`), Y (short quote, `high`) and Z (long quote, `medium`) keep X's bundle in two of the six orders and Z's in four. The pair case is fixed and tested; this is its three-member form. Found by WP-03.2. | P1 |
 
 Priority meanings: P0 protects result correctness or truthful completion; P1 protects recoverability, evidence, accounting, or release integrity; P2 improves robustness, performance, and interoperability after the relevant correctness contracts are stable.
 
@@ -353,7 +354,7 @@ Slices: WP-02.1 … WP-02.5.
 
 ### WP-03 — Durable finding identity and lossless, symmetric merging
 
-**Priority:** P0. **Covers:** B1, B7, B8, B9, K5, N28; the ledger half of N2.  
+**Priority:** P0. **Covers:** B1, B7, B8, B9, K5, N28, N29; the ledger half of N2.  
 **Primary files:** `models.py`, `ledger.py`, `critique.py`, `auditors/__init__.py`, serialization/export consumers.  
 **Dependencies:** quantity predicate from WP-04; downstream WP-06/WP-21 depend on identity.
 
@@ -447,7 +448,7 @@ Regression cases:
 
 **Navigation.** Keying bookmarks and index destinations by `placement_id` needs no identity work; it is done in WP-21.3.
 
-Slices: WP-03.1 … WP-03.7. WP-03.7 was added by WP-03.1 (README step 7): the regression "two `PUMP P-1` issues retain separate identities" cannot hold while the geometry branch folds two findings that quote one string whatever their texts say (N28). The fix is a decision, not a threshold: the paraphrase fold that `test_post_anchor_reconciliation_folds_a_geometric_duplicate` pins shares even fewer words than the `PUMP P-1` pair, so no text-overlap threshold separates them.
+Slices: WP-03.1 … WP-03.7. WP-03.7 was added by WP-03.1 (README step 7): the regression "two `PUMP P-1` issues retain separate identities" cannot hold while the geometry branch folds two findings that quote one string whatever their texts say (N28). The fix is a decision, not a threshold: the paraphrase fold that `test_post_anchor_reconciliation_folds_a_geometric_duplicate` pins shares even fewer words than the `PUMP P-1` pair, so no text-overlap threshold separates them. N29, found by WP-03.2, belongs to WP-03.5, whose representative rule changes anyway (step 7): an incoming member is compared with the live survivor, whose severity an earlier merge may have raised, so with three or more members the representative can follow arrival order. WP-03.2's numbering is a function of each entry's content, so it cannot repair content the ledger assembled in an arrival-dependent way; the recorded limit is `tests/test_qc_numbering_tiebreak.py::test_recorded_limit_a_merged_entrys_representative_follows_arrival_order`.
 
 ### WP-04 — Engineering quantity and tag comparison
 
@@ -1678,7 +1679,7 @@ Do not repeatedly run an expensive full suite without new edits or unresolved fa
 
 ### 7.1 Every numbered finding in the original report
 
-The current disposition of every ID below, of N1–N28 and of U1–U32 is kept in the register in [`PROGRESS.md`](PROGRESS.md). This section records where each item is addressed.
+The current disposition of every ID below, of N1–N29 and of U1–U32 is kept in the register in [`PROGRESS.md`](PROGRESS.md). This section records where each item is addressed.
 
 | Finding | Required package(s) | Completion nuance |
 |---|---|---|
@@ -1768,6 +1769,7 @@ Stable IDs `U1`–`U32` were added on 2026-09-22 so that [`PROGRESS.md`](PROGRES
 | N26 | Chat transcript readable by other local files | WP-20 (WP-20.3); mandatory. |
 | N27 | Clean-EOF stream cached as a complete digest | WP-01 (WP-01.2); mandatory. |
 | N28 | Geometry branch folds two issues that quote one tag | WP-03 (WP-03.7); mandatory. |
+| N29 | A merged entry's representative follows arrival order (three or more members) | WP-03 (WP-03.5); mandatory. |
 | U1 | Actual serving model, fallback iterations, partial-stream billing | WP-14; mandatory. |
 | U2 | Fallback text joins and selective history replay | WP-01/WP-12/WP-13/WP-19; preserve contiguous text and required block semantics. |
 | U3 | Generic output-config rejection disables task budget | WP-13; mandatory. |

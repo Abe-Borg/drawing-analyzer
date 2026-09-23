@@ -1529,7 +1529,13 @@ The ledger runs an explicit lifecycle: it **ingests** while open, **seals**, the
 **anchors** every finding, folds any duplicate the ingest pass couldn't see without
 geometry, and only then assigns the sequential **`QC-###`** numbers — so they follow
 visual order (source input order → page → top-to-bottom). Numbering strictly after
-anchoring is what makes the numbers positional.
+anchoring is what makes the numbers positional. When two findings share a position
+(two with no rectangle on one sheet, or two anchored to the same spot), what they
+say decides which comes first, never which channel reported first. Until
+remediation WP-03.2, two different issues that quote one pump tag could swap
+numbers between two runs of the same drawings, because the tie-break read only the
+quote. Such a pair can now be numbered the other way round than in 1.7.0, so its
+evidence folders (named after the numbers) swap too.
 
 The fold after anchoring is held to the same standard as the ingest merge, on
 both sides: two entries fold only when every finding already folded into one is

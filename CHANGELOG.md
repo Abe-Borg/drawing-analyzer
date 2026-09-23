@@ -48,6 +48,34 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Two findings at one position were numbered in the order they arrived
+  (remediation WP-03.2; K5).** `QC-###` numbers follow position: source input
+  order, page, anchored before unanchored, top, left. When two findings shared a
+  position (two on one sheet with no rectangle, two anchored to one spot, two
+  set-level findings), the tie-break was the finding's content id, which hashes
+  the quote, not the text. So two different issues that quote one tag
+  (`PUMP P-1`) shared it, and the pair was numbered in whichever order the
+  channels reported them. Ties are now broken by the finding's own content: the
+  id first, so every pair whose ids differ keeps its number; then the text; then
+  everything else the finding carries. The provenance, reference,
+  supporting-quote, prose-item and citation lists are compared as sets there,
+  because their order only records arrival.
+  - **Visible effect.** A tied pair can be numbered the other way round than in
+    1.7.0. That swaps its evidence directories (`evidence/QC-###/`), its tags,
+    index rows and bookmark on the reviewed PDF, and the numbers on its report
+    and CSV rows. The rows keep their places in `findings.json` and
+    `findings.csv`, which are written in ledger order.
+  - **Nothing is migrated.** `qc_id` is in no cache key, so no cache is
+    invalidated, and earlier exports keep their numbers. No existing test
+    fixture renumbered.
+  - **Not in this change.** Bookmarks and index destinations are still keyed by
+    the content id (B8 navigation, WP-21.3). The row order of `findings.json`
+    and `findings.csv`, and the report table's order among findings of equal
+    severity and status, still follow ledger order, which follows arrival
+    (WP-03.4). And when three or more duplicates merge, which one represents
+    them can still depend on arrival order (N29, WP-03.5); numbering follows
+    the content it is given.
+
 - **A conflict absorbed through a generic finding could still be merged away
   after anchoring (remediation WP-03.1; B1, count part).** Once findings are
   anchored, the findings ledger makes a second merge pass (Pass B) for
