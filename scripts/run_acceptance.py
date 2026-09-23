@@ -57,13 +57,15 @@ def _run(cmd: list[str], **kw) -> int:
 
 # The §19.3 live canary (``tests/test_live_api_canary.py``) is opt-in and must
 # NEVER run as part of an acceptance check: it makes real, billed API calls.
-# ``tests/conftest.py`` skips ``network`` tests only when no real key is set,
-# and ``pyproject.toml`` sets no default marker exclusion — so a gate that
-# spawns a bare ``pytest`` while a real ``ANTHROPIC_API_KEY`` happens to be
-# exported would bill the account during a release gate. Deselecting the marker
-# in the child we spawn is the property that makes this safe; an absent key is
-# an environment accident a future gate could lose. Run the canary through its
-# own documented invocation instead:
+# ``pyproject.toml`` sets no default marker exclusion. Until WP-02.1 the suite
+# then skipped ``network`` tests only when no real key was set, so a gate that
+# spawned a bare ``pytest`` while a real ``ANTHROPIC_API_KEY`` happened to be
+# exported billed the account during a release gate. The suite's guard
+# (``tests/fixtures/hermetic_guard.py``) now also refuses a ``network`` test
+# that ``-m`` did not select explicitly, but a release gate must not rest on one
+# layer: deselecting the marker in the child we spawn is the property that
+# makes this safe, and an absent key is an environment accident a future gate
+# could lose. Run the canary through its own documented invocation instead:
 #
 #     ANTHROPIC_API_KEY=sk-ant-... pytest -m network tests/test_live_api_canary.py
 _NETWORK_DESELECT = "not network"

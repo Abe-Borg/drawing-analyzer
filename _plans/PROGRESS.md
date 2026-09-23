@@ -1,7 +1,7 @@
 # Remediation progress tracker
 
-**Next up:** `WP-02.1`, then `WP-23.1`, then Wave 1 in order. First check the open PRs ([`README.md`](README.md), step 1).
-**Last updated:** 2026-09-22 by the plan-review session ([PR #152](https://github.com/Abe-Borg/drawing-analyzer/pull/152)).
+**Next up:** `WP-23.1`, then Wave 1 in order (`WP-02.2` is unblocked by WP-02.1 but sits in Wave 2). First check the open PRs ([`README.md`](README.md), step 1).
+**Last updated:** 2026-09-23 by the WP-02.1 session ([PR #153](https://github.com/Abe-Borg/drawing-analyzer/pull/153)).
 
 This file is authoritative for **status and order**. Requirements live in
 [`drawing-analyzer-remediation-plan.md`](drawing-analyzer-remediation-plan.md).
@@ -91,7 +91,7 @@ starting.
 
 | Slice | Scope (IDs closed) | Size | Depends on | Status | PR / date / notes |
 |---|---|---|---|---|---|
-| WP-02.1 | Hermetic network and credential guard for every non-`network` test (loopback and `AF_UNIX` allowed; proxy and credential variables removed); `network` becomes an explicit opt-in; `-m "not network"` in CI (U26) | S | — | todo | |
+| WP-02.1 | Hermetic network and credential guard for every non-`network` test (loopback and `AF_UNIX` allowed; proxy and credential variables removed); `network` becomes an explicit opt-in; `-m "not network"` in CI (U26) | S | — | done | [PR #153](https://github.com/Abe-Borg/drawing-analyzer/pull/153), 2026-09-23. `tests/fixtures/hermetic_guard.py` (whole-run scope; swallowed attempts fail at teardown); `tests/test_hermetic_guard.py` |
 | WP-23.1 | A stable `publish` fails unless `docs/releases/ACCEPTANCE-<ver>.md` reads SHIP or lists unexpired waivers; `environment:` on `publish`; RC tags unaffected (N8) | S | — | todo | Admin half is O-5 |
 
 ### Wave 1 — P0 correctness (independent slices first)
@@ -374,7 +374,7 @@ report is built from it).
 | U23 | Uninstall retention policy undocumented | P2 | 23.4 | open | |
 | U24 | License check tests metadata presence only, never on the shipped env | P1 | 23.5 | open | |
 | U25 | README network claim; checksum described as authenticity | P2 | 24.1 | open | |
-| U26 | Test fake fidelity, no batch canary, no socket guard | P0 | 02.1–02.4 | open | |
+| U26 | Test fake fidelity, no batch canary, no socket guard | P0 | 02.1–02.4 | open (socket/credential guard and `network` opt-in implemented+validated in 02.1) | `tests/test_hermetic_guard.py` (WP-02.1, [PR #153](https://github.com/Abe-Borg/drawing-analyzer/pull/153)). Remaining: strict fakes and real-SDK contract tests (02.2), fidelity fixtures (02.3), batch canary (02.4) |
 | U27 | Narrow lint classes; production-orphaned helpers | P2 | 22.5 | open | |
 | U28 | Broken system `cryptography` wheel (container) | — | — | disproved (environment) | `pip install cffi` fixes it; README step 2 |
 | U29 | Remove `tiktoken` | — | — | already satisfied | 1.7.0 (`6dad8bf`) |
@@ -387,6 +387,132 @@ report is built from it).
 Each session adds one entry at the top: date, slices and IDs, PR, what changed,
 contracts decided, cache/schema effects, validation actually run (with counts),
 what could not be verified, risks, and next steps.
+
+### 2026-09-23 — WP-02.1: hermetic network and credential guard ([PR #153](https://github.com/Abe-Borg/drawing-analyzer/pull/153))
+
+- **Slice and IDs:** WP-02.1. U26, its socket-guard, credential and `network`
+  opt-in part. The rest of U26 (strict fakes, fidelity fixtures, batch canary)
+  stays with WP-02.2 … WP-02.4.
+- **What changed:**
+  - New pytest plugin `tests/fixtures/hermetic_guard.py`, registered by
+    `tests/conftest.py` through `pytest_plugins`. It replaces the conftest's
+    placeholder `pytest_configure`, its key-based skip rule and the
+    function-scoped `_enforce_hermetic_api_key` fixture.
+  - **Sockets.** `connect`/`connect_ex` and `getaddrinfo`/`gethostbyname`/`_ex`
+    refuse every non-local destination. Loopback, the unspecified addresses,
+    `localhost` and `AF_UNIX` pass; other socket families are refused. Sockets
+    are guarded at connect, not creation, so asyncio and Playwright keep working.
+  - **Recording.** A refusal raises `ExternalNetworkBlocked` (a `RuntimeError`)
+    and is recorded. A recorded attempt turns that test's teardown into an error
+    naming the destination and the test, even when the code swallowed the
+    exception (the I-3 shape). An attempt outside any test fails the session.
+  - **Environment.** Every `*_proxy` variable is removed and `NO_PROXY=*` set;
+    every `ANTHROPIC_*` variable is removed; `ANTHROPIC_CONFIG_DIR` points at an
+    empty temp dir; the placeholder key is set for collection (now even over an
+    exported real key); no key inside hermetic tests.
+  - **Scope.** Installed at configure time; lifted only inside an opted-in
+    `network` test's runtest protocol, which gets the caller's environment and
+    real sockets back. So module- and session-scoped fixtures are covered. The
+    gauntlet's `oracle` fixture was outside the old per-test key strip.
+  - **No fixture crosses the boundary** (review follow-up, Codex P2 on the PR).
+    pytest caches a higher-scoped fixture for every later test. In a session
+    mixing both sides, a credential-bearing object made in an opted-in test
+    reached hermetic tests, and its finalizer (a canary's remote cleanup) ran
+    under the guard and was refused. The guard now tears the whole fixture stack
+    down between neighbours on different sides (`pytest_runtest_teardown`,
+    `teardown_exact(None)`). Regression:
+    `test_a_fixture_never_crosses_the_network_boundary`. Before the fix it
+    failed 2 of 4 inner tests: the hermetic test received the network test's
+    copy.
+  - **Opt-in.** `network_selected_explicitly`: the `-m` expression must select
+    the test *because of* its `network` marker (pytest's own expression engine),
+    and a real key must be set.
+  - **CI.** `-m "not network"` on all three `ci.yml` pytest commands (the
+    browser job now selects `browser and not network`, the same 98 tests). A new
+    test fails if any workflow pytest command drops it.
+  - **Docs.** CLAUDE.md (commands, a guard paragraph, I-4), the README testing
+    section, CHANGELOG, `_plans/README.md` step 2. Stale comments corrected in
+    `scripts/run_acceptance.py`, `tests/test_run_acceptance.py` and
+    `tests/test_live_api_canary.py`; the `network` marker description in
+    `pyproject.toml`.
+- **Plan corrected:** WP-02 step 6 verification notes. The credential list was
+  incomplete for SDK 1.7.0 (`ANTHROPIC_CUSTOM_HEADERS` can carry an auth
+  header; also `SERVICE_ACCOUNT_ID`, `WORKSPACE_ID`, `SCOPE`). Also added: the
+  Windows/macOS proxy fallback that only `NO_PROXY=*` closes, the fail-closed
+  effect of `ANTHROPIC_CONFIG_DIR`, and the module-scoped fixture gap. Nothing
+  was weakened.
+- **Contracts decided:** none (test harness only; D-1 … D-8 untouched).
+- **Cache/schema effects:** none. No product code changed; no key, prompt or
+  schema touched; no migration-register row.
+- **Validation (this container, Python 3.11.15, SDK 1.7.0):**
+  - Baseline before the change: `python -m pytest -q -m "not network"` gives
+    **2,450 passed, 1 skipped, 10 deselected** (234 s). The pass count matches
+    the recorded baseline. Its "11 skipped" counted the 10 canaries as skips,
+    which is what a bare `pytest` reports; under `-m "not network"` they are
+    deselected. A recording difference, not a regression.
+  - After, with the review follow-up: **2,501 passed, 2 skipped, 10
+    deselected** (239 s), which is the baseline plus the 51 new tests. The new
+    skip is the IPv6-loopback test: this container has no IPv6
+    (`EAFNOSUPPORT`). **No existing test tripped the guard.**
+  - The first 50 new tests before the fix: 47 failed, 3 passed (the 51st, the
+    fixture-boundary test, came with the review follow-up and failed before
+    it). The three that passed
+    are the two `-m network` subprocess sessions, whose behaviour did not
+    change, and the pure workflow-scanner check. Against the old conftest, the
+    default-run subprocess session showed each defect:
+    - the exported key visible at collection;
+    - proxies and `ANTHROPIC_*` credentials surviving;
+    - a zero-arg client resolving them;
+    - the network test **running** with only a key exported;
+    - both swallowed attempts passing silently.
+  - The import-time-attempt test exited 0 against the old conftest.
+  - Reproduced separately before the fix: the SDK sent
+    `CONNECT api.anthropic.com:443` to an exported loopback `HTTPS_PROXY`. Its
+    regression now asserts zero connections reach the proxy.
+  - Browser suite (`-m "browser and not network"`): 98 collected, 98 executed
+    and passed; `scripts/check_browser_suite.py` passes.
+  - `ruff check --select E9,F63,F7,F82 src tests scripts`: clean.
+    `scripts/scan_secrets.py`: clean (190 tracked files, the new ones
+    included). `compileall`: OK.
+  - With a fake key exported, `pytest tests/test_live_api_canary.py` (no `-m`)
+    reports 10 skipped with the opt-in reason.
+- **Egress disclosure:** the failing-first runs made one TCP connect attempt to
+  `192.0.2.1:443` (RFC 5737 TEST-NET-1) and DNS lookups of two `.invalid` names
+  (RFC 6761). These are reserved destinations, never services. No API request
+  was made and no key was used.
+- **Not verified:**
+  - IPv6 loopback (skipped here; it runs where the CI runner has `::1`).
+  - The Windows legs: they run in this PR's CI.
+  - macOS: not in CI. The `NO_PROXY=*` reasoning for its system proxy comes
+    from the stdlib source, not from a run.
+  - A real opt-in with a real key: no live budget (O-4). It is proven in a
+    subprocess with a fake key, and nothing is sent.
+- **Risks and residual gaps:**
+  - The opt-in rule uses pytest's private `_pytest.mark.expression` engine. If
+    an upgrade moves it, the rule fails closed (the canary is skipped) and
+    `test_network_needs_an_explicit_marker_selection` fails. The boundary
+    teardown uses the private `session._setupstate`; if that moves, mixed
+    sessions error at teardown and
+    `test_a_fixture_never_crosses_the_network_boundary` fails.
+  - Deliberately uncovered, documented in the plugin:
+    - child processes get the scrubbed environment but not the socket patch;
+    - UDP `sendto`;
+    - asyncio's Windows proactor connecting a literal IP;
+    - the OS keyring: the key-store tests stub it, and the socket guard is the
+      backstop.
+  - Behaviour changes a later test author will meet:
+    - a zero-arg `Anthropic()` in a hermetic test raises `CredentialsError` at
+      construction;
+    - a module- or session-scoped fixture now sees no key at all.
+  - Size: larger than the **S** estimate in tests (~650 lines, mostly the
+    subprocess sessions). The plugin is ~400 lines including its docstrings.
+- **Re-checked (U31):** the README's "the suite is hermetic — no API key, no
+  network" holds in practice: nothing in the full run reached for the network.
+  `run_acceptance.py` still deselects `network` in every child.
+- **Next:** WP-23.1 (Wave 0), then Wave 1 in order. WP-02.2 is now unblocked (it
+  sits in Wave 2). For WP-02.2: `httpx2.MockTransport` never opens a socket, so
+  real-SDK contract tests run under the guard unchanged. Construct the client
+  with an explicit `api_key=`, since a zero-arg one now fails closed.
 
 ### 2026-09-22 — plan review and program setup ([PR #152](https://github.com/Abe-Borg/drawing-analyzer/pull/152))
 

@@ -1,7 +1,8 @@
 """Phase 27 §19.3 — the opt-in live API canary.
 
-Every test here is marked ``network``: it is **skipped unless a real
-``ANTHROPIC_API_KEY`` is set** (see ``conftest.py``) and is deliberately
+Every test here is marked ``network``: it is **skipped unless ``-m network``
+selects it and a real ``ANTHROPIC_API_KEY`` is set** (an exported key alone
+does not run it; see ``tests/fixtures/hermetic_guard.py``) and is deliberately
 excluded from CI, which runs hermetically. Run it before a release:
 
     ANTHROPIC_API_KEY=sk-ant-... python -m pytest -m network -rs -s tests/test_live_api_canary.py

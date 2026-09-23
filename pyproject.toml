@@ -48,6 +48,6 @@ testpaths = ["tests"]
 addopts = "-ra --strict-markers"
 pythonpath = ["src"]
 markers = [
-    "network: tests that require real Anthropic API access",
+    "network: tests that require real Anthropic API access (opt-in: run only when -m selects network and a real key is set; see tests/fixtures/hermetic_guard.py)",
     "browser: headless-Chromium security tests (need Playwright + a browser; run on Linux CI)",
 ]
