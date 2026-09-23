@@ -158,11 +158,15 @@ def test_a_comma_separated_operand_list_stays_text_extracted():
     assert parse_number("1,20") is None
     assert parse_number("10,20") is None
 
-    # End to end: the mismatch is still trusted as host-computed.
+    # End to end: the mismatch is still trusted as host-computed. Since
+    # remediation WP-07.1 (N3) that needs the quote on the claim's own sheet,
+    # so the sheet carries the row the quote reads.
+    sheet = _sheet("fp.pdf", 0, [_w(200, 300, "0.5,"), _w(280, 300, "1.5,"),
+                                 _w(360, 300, "TOTAL"), _w(440, 300, "2.5")])
     res = audit_arithmetic([NumericClaim(
         sheet_id="FP-101", source_name="fp.pdf", page_index=0, kind="sum",
         terms=["0.5", "1.5"], expected="2.5", quote="0.5, 1.5, TOTAL 2.5",
-    )], [])
+    )], [sheet])
     assert res.mismatched == 1
     assert res.findings[0].verification.status == "DETERMINISTIC"
     assert res.findings[0].verification.operand_origin == "TEXT_EXTRACTED"
@@ -344,8 +348,12 @@ def test_arithmetic_sum_mismatch_flags_the_540_660_lesson():
 def test_arithmetic_text_extracted_operands_stay_deterministic():
     # When the quote itself carries every operand, the operands are independently
     # validated — a mismatch is trusted DETERMINISTIC and auto-inks (§17.5).
+    # Since remediation WP-07.1 (N3) the quote must also be on the claim's sheet,
+    # which prints each operand once per use.
+    sheet = _sheet("s.pdf", 0, [_w(200 + 80 * i, 300, t) for i, t in
+                                enumerate(["AREA", "1500", "X", "1.3", "=", "1560"])])
     res = audit_arithmetic(
-        [_claim("factor", [1500, "1.3"], 1560, quote="AREA 1500 X 1.3 = 1560")], []
+        [_claim("factor", [1500, "1.3"], 1560, quote="AREA 1500 X 1.3 = 1560")], [sheet]
     )
     assert res.mismatched == 1
     f = res.findings[0]
@@ -366,8 +374,11 @@ def test_arithmetic_mixed_fraction_operand_is_text_extracted():
     # operand parser does ("2 1/2" -> 2.5, not 2 and 1/2), so a text-extracted
     # mixed-fraction operand is recognised as TEXT_EXTRACTED, not falsely marked
     # model-transcribed. 2.5 + 2.5 = 5, but the sheet states 6 -> DETERMINISTIC.
+    # Since remediation WP-07.1 (N3) the quote must be on the claim's sheet too.
+    sheet = _sheet("s.pdf", 0, [_w(200 + 80 * i, 300, t) for i, t in
+                                enumerate(["2", "1/2", "+", "2", "1/2", "=", "6"])])
     res = audit_arithmetic(
-        [_claim("sum", ["2 1/2", "2 1/2"], 6, quote="2 1/2 + 2 1/2 = 6")], []
+        [_claim("sum", ["2 1/2", "2 1/2"], 6, quote="2 1/2 + 2 1/2 = 6")], [sheet]
     )
     assert res.mismatched == 1
     f = res.findings[0]
@@ -430,9 +441,13 @@ def test_arithmetic_anchors_mismatch_via_quote():
 
 def test_arithmetic_unresolved_sheet_still_records_finding_unanchored():
     # No geometry to anchor against → finding kept, UNANCHORED (nothing dropped).
+    # It is UNCERTAIN: its quote carries no operand. A quote that does carry
+    # them is still never trusted without a sheet (remediation WP-07.1, N3;
+    # tests/test_arithmetic_operand_grounding.py).
     res = audit_arithmetic([_claim("sum", [1, 1], 9, quote="X")], [])
     assert len(res.findings) == 1
     assert res.findings[0].anchor.status == "UNANCHORED"
+    assert res.findings[0].verification.status == "UNCERTAIN"
 
 
 # --------------------------------------------------------------------------- #

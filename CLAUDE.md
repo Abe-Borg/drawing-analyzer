@@ -808,8 +808,10 @@ reporter of last resort must never raise from inside Tk's handler.
   discriminator, the absorbed arithmetic member still blocks a different claim
   from its snapshot, since every complete-link check compares member histories. `_grounding_quality` ranks **host-computed
   provenance first**, above quote length: a `DETERMINISTIC` verdict is a
-  statement about one computation over one quote, so it must not be decided
-  separately from the text it describes. It was, and the auditor holds the
+  statement about one computation over one quote (and, since remediation
+  WP-07.1, over numbers that quote's own sheet prints where it anchors), so it
+  must not be decided separately from the text it describes. It was, and the
+  auditor holds the
   *shorter* quote (it quotes only the term it computed over), so the model's
   "the sum is 560" won the bundle and inherited the host's label — skipping
   `verify._TERMINAL_STATUSES` and inking as "an exact text check, not an AI
@@ -920,7 +922,13 @@ editor and diff, and a test fails if one reappears.
   borrow a digit from the next line. The sub-phrase tier instead uses
   `_numbers_agree`, because its span is the slice verbatim and its failure mode is
   *dropping* a measurement, not mismatching one. The 0.85 threshold is a standing
-  prohibition and is asserted unchanged) →
+  prohibition and is asserted unchanged. Because of the veto, an EXACT or
+  numerically vetoed FUZZY match proves every number of the quote is printed on
+  the sheet, once per mention: `numbers_grounded(anchor)` names those methods
+  (fail-closed: a new FUZZY method grounds nothing until it carries the veto),
+  and `resolve_anchors(..., matched_text=)` hands back the sheet's own words
+  under each matched span, whole words as printed. Both exist for the
+  arithmetic auditor (remediation WP-07.1, N3); neither changes an anchor) →
   `verify.py` (high-DPI crop re-check → VERIFIED/REJECTED/UNCERTAIN; adaptive
   thinking at medium effort inside an 8k envelope — thinking shares the
   `max_tokens` budget with the answer, and the old 1k cap fit neither, so
@@ -1202,10 +1210,27 @@ example is parked at `docs/examples/fire_protection.md`.
 - **The model never calculates:** models transcribe `NumericClaim`s;
   `auditors/arithmetic.py` does the math with `Decimal` — never `eval`, never
   the model's own arithmetic. The host *operation* is always deterministic, but the
-  *operands* are trusted (`DETERMINISTIC` + auto deterministic-only ink) only when
-  the claim's quote independently carries every one (`operand_origin=TEXT_EXTRACTED`,
-  Phase 25 §17.5); a mismatch from `MODEL_TRANSCRIBED` terms stays `UNCERTAIN` and
-  is crop-verified before it inks as ground truth. A term that is not **one** value
+  *operands* are trusted (`DETERMINISTIC` + auto deterministic-only ink,
+  `operand_origin=TEXT_EXTRACTED`, Phase 25 §17.5) only when the sheet prints
+  every one where the claim's quote anchors, decided **after** the auditor's own
+  anchoring pass (remediation WP-07.1, N3): the claim resolved to a sheet; its
+  quote anchored there EXACT or FUZZY by a numerically vetoed method
+  (`anchor.numbers_grounded`; never TILE, never UNANCHORED); and the terms and
+  the stated value together fit, **one occurrence each**, the numbers that
+  **both** the quote and the sheet's words under the matched span print
+  (`arithmetic._operands_grounded`: per value the smaller count, so neither
+  the model's spelling nor the sheet's non-ASCII forms can promote on their
+  own). It was membership over the quote string, before anchoring: one printed
+  `20` supported three transcribed `20`s (`sum [20,20,20] = 40` on
+  `20 + 20 = 40` was a high-severity DETERMINISTIC mismatch on a correct
+  equation), the stated value could reuse a term's number (`20 + 30` "stated"
+  20), and a quote the sheet does not carry or a claim on no sheet at all was
+  trusted as readily. Every mismatch is built `MODEL_TRANSCRIBED` and promoted
+  only after anchoring, so a failure while deciding (an anchoring error on one
+  sheet included) leaves it `UNCERTAIN`, the safe direction. A mismatch from
+  `MODEL_TRANSCRIBED` terms stays `UNCERTAIN` and is crop-verified before it
+  inks as ground truth. Operand *roles* and the relationship itself (sum
+  versus product, a swapped term) are not checked yet (WP-07.2). A term that is not **one** value
   is refused rather than truncated to its leading run (`12,5`, `12'-6"`, `1.2.3`),
   and a `%` is refused outright: a percent is a ratio, and because the bare `30` in
   `1500 SF + 30% = 1950 SF` appears literally in the quote it *cleared* the
