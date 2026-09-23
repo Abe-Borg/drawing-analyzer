@@ -180,11 +180,11 @@ class SourceWords:
     normalized string alone cannot tell ``vav 2`` from a whole word.
     """
 
-    __slots__ = ("normalized", "_starts")
+    __slots__ = ("normalized", "_starts", "_core_starts", "_core_ends")
 
     def __init__(self, text: str) -> None:
         parts: list[str] = []
-        starts = array("l")
+        starts, core_starts, core_ends = array("l"), array("l"), array("l")
         at = 0
         for word in (text or "").split():
             norm = _normalize(word)
@@ -192,44 +192,50 @@ class SourceWords:
                 continue                    # a word of invisibles says nothing
             if parts:
                 at += 1                     # the joining space
+            core_start, core_end = word_core(norm)
             starts.append(at)
+            core_starts.append(at + core_start)
+            core_ends.append(at + core_end)
             parts.append(norm)
             at += len(norm)
         self.normalized = " ".join(parts)
+        # Each word's core is found once, here, never per occurrence: a quote
+        # can recur thousands of times inside one long whitespace-free run (a
+        # garbled or per-glyph text layer), and re-deriving the core from a
+        # slice of that word at every occurrence was quadratic in its length
+        # (Codex review).
         self._starts = starts
+        self._core_starts = core_starts
+        self._core_ends = core_ends
 
     def contains(self, quote: str) -> bool:
         """Whether ``quote`` occurs here covering whole source words.
 
-        Every occurrence is tried, so a quote printed both inside a longer
-        identifier and on its own still matches. A quote that normalizes to
-        nothing matches nothing.
+        Every occurrence that could start a word is tried, so a quote printed
+        both inside a longer identifier and on its own still matches. An
+        occurrence that starts inside a word's core rules out the rest of that
+        word, so the scan moves to the next word: the work is bounded by the
+        number of words, not by how often the quote recurs inside one. A quote
+        that normalizes to nothing matches nothing.
         """
         query = _normalize(quote)
         if not query:
             return False
         text = self.normalized
+        starts = self._starts
         at = text.find(query)
         while at != -1:
-            if self._starts_word(at) and self._ends_word(at + len(query)):
+            i = bisect_right(starts, at) - 1
+            if at > self._core_starts[i]:
+                if i + 1 == len(starts):
+                    return False
+                at = text.find(query, starts[i + 1])
+                continue
+            end = at + len(query)
+            if end >= self._core_ends[bisect_right(starts, end - 1) - 1]:
                 return True
             at = text.find(query, at + 1)
         return False
-
-    def _word(self, pos: int) -> tuple[int, int]:
-        """``[start, end)`` of the source word holding character ``pos``."""
-        i = bisect_right(self._starts, pos) - 1
-        start = self._starts[i]
-        end = self._starts[i + 1] - 1 if i + 1 < len(self._starts) else len(self.normalized)
-        return start, end
-
-    def _starts_word(self, pos: int) -> bool:
-        start, end = self._word(pos)
-        return pos - start <= word_core(self.normalized[start:end])[0]
-
-    def _ends_word(self, pos: int) -> bool:
-        start, end = self._word(pos - 1)
-        return pos - start >= word_core(self.normalized[start:end])[1]
 
 
 @lru_cache(maxsize=128)

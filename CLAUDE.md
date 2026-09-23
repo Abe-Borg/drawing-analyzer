@@ -683,7 +683,13 @@ reporter of last resort must never raise from inside Tk's handler.
   `) ] } > , ; : . ! ? " '` may stay outside it, so `P-1` is in `P-1,` and
   `(P-1)` but `VAV-2` is not in `VAV-2-1`, and `5` is not in `.5`, `-5` or
   `1.5`. `12` is not in `12,500` or `12'-6"`. No length floor: `3` grounds
-  only where a standalone `3` is printed. Accepted cost: a tag inside a list
+  only where a standalone `3` is printed. Each word's core is found once, when
+  the text is indexed, and an occurrence that starts inside a word's core skips
+  to the next word, so matching is bounded by the word count, not by how often
+  a quote recurs inside one long whitespace-free run (a garbled or per-glyph
+  text layer). Re-deriving the core per occurrence was quadratic in that run's
+  length (Codex review; pinned by a timing bound and by an equivalence check
+  against a direct reading of the rule). Accepted cost: a tag inside a list
   written without spaces (`P-1,P-2`, `M-101/M-102`) is inside one source word
   and does not match. The rule is defined once, in `anchor.py`, for WP-05.2 to
   apply to the anchor's own words; the anchor's tiers do not use it yet.

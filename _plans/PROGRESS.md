@@ -520,9 +520,26 @@ what could not be verified, risks, and next steps.
       `fold_text` import is dropped;
     - `_CROSS_QC_CACHE_CONTRACT` 3 → 4, with its reason.
   - **Speed.** Indexing a 15,000-character sheet (2,500 words) takes 3 ms, and
-    a 40,000-word one 48 ms, once per distinct text. A match takes 0.1–1.3 ms
-    per quote, every occurrence tried. The old check re-normalized the whole
-    sheet text on every call.
+    a 40,000-word one 48 ms, once per distinct text. A match takes 0.1–1.4 ms
+    per quote. The old check re-normalized the whole sheet text on every call.
+  - **Codex review, P2, fixed in this PR** ("cache word-core offsets instead of
+    slicing per occurrence"). `SourceWords.contains` re-derived a word's core
+    from a slice of that word at every occurrence of the quote, so a quote
+    recurring inside one long whitespace-free run (a garbled or per-glyph text
+    layer) cost time quadratic in the run's length. Measured on the first push
+    (`7b4ee53`), with the run between real words: 0.02 s, 0.08 s and 0.28 s for
+    runs of 50,000, 100,000 and 200,000 characters, and 10.0 s and 11.2 s for a
+    1,000,000-character run. (A run that is the whole text looked fast, because
+    CPython returns a full-length slice without copying.) Root cause, not only
+    the slice:
+    - each word's core offsets are computed once, when the text is indexed;
+    - an occurrence that starts inside a word's core skips to the next word,
+      since no match can start there, so the scan is bounded by the number of
+      words, not by how often the quote recurs inside one.
+
+    The same 1,000,000-character run now matches in 0.6 ms. No answer changes:
+    pinned against a direct reading of the rule over every table in the test
+    file and 600 generated pairs.
 - **Contracts decided:** none of D-1 … D-8. D-4 gains a note: the cross-QC
   contract term covers host-side grounding and is not split by path.
 - **Cache/schema effects:**
@@ -569,7 +586,7 @@ what could not be verified, risks, and next steps.
     `pre action`) and join the same tile (`tests/test_evidence_tail.py`,
     `tests/test_evidence_visual.py`, the new file).
   - Only the three sharded-path acceptance tests reach the classifier.
-- **New tests:** `tests/test_cross_qc_grounding.py` (92):
+- **New tests:** `tests/test_cross_qc_grounding.py` (96):
   - **B5.** Short tags on a textless sheet are unavailable; printed, they
     ground; absent, they are NOT_MATCHED, the leg is dropped and counted, and a
     conflict left with one leg is dropped. The textless leg is TILE-anchored
@@ -590,6 +607,11 @@ what could not be verified, risks, and next steps.
   - **The pipeline**: a scanned sheet's `P-1` conflict gets one dual-crop call
     with two images and ends VERIFIED, while an `AHU-7` conflict the sheet
     does not print never becomes a finding and gets no call.
+  - **Cost (the Codex review).** The matcher agrees with a direct reading of
+    the rule on every table and 600 generated pairs; a match never re-derives
+    a word's core; a quote recurring 250,000 times inside a 1,000,000-character
+    run matches in under a second (two shapes). On `7b4ee53` the last three
+    failed (10.0 s and 11.2 s) and the agreement test passed, as it should.
 - **Downstream consumers walked:**
   - **Admission and counters.** A made-up short-tag leg or fact is dropped and
     counted `*_ungrounded_quote_text_bearing_sheet`; it used to be counted
@@ -630,6 +652,8 @@ what could not be verified, risks, and next steps.
   - **After:** full suite **3,520 passed, 2 skipped, 10 deselected** (212 s): the baseline plus 95 (92 new tests
     and three new cases of the extended test), with the same two environment
     skips (IPv6 loopback; chmod as root).
+  - **After the Codex P2 fix:** full suite **3,524 passed, 2 skipped, 10
+    deselected** (216 s): the 3,520 above plus the 4 cost tests.
   - **Browser suite:** not run separately. No report JS, HTML or chat code
     changed, and the browser tests ran inside the full suite.
   - **Lint and scans:**

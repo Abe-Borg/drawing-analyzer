@@ -660,3 +660,121 @@ def test_pipeline_a_tag_leg_the_sheet_does_not_print_never_becomes_a_finding(tmp
     assert client.reconcile_calls == 1
     assert [f for f in ctx.findings if f.also_on] == []
     assert client.verify_image_counts == []
+
+
+# --------------------------------------------------------------------------- #
+# Cost: a quote recurring inside one long run (Codex review)
+# --------------------------------------------------------------------------- #
+
+
+def _reference_contains(quote: str, text: str) -> bool:
+    """The rule read directly: every occurrence tried, every core re-derived."""
+    from drawing_analyzer.anchor import word_core
+
+    words = [w for w in (_normalize(t) for t in text.split()) if w]
+    joined = " ".join(words)
+    spans, at = [], 0
+    for w in words:
+        spans.append((at, at + len(w)))
+        at += len(w) + 1
+    query = _normalize(quote)
+    if not query:
+        return False
+
+    def word_at(pos):
+        return next(s for s in spans if s[0] <= pos < s[1])
+
+    for start in range(len(joined)):
+        if not joined.startswith(query, start):
+            continue
+        ws, we = word_at(start)
+        es, ee = word_at(start + len(query) - 1)
+        if (start - ws <= word_core(joined[ws:we])[0]
+                and start + len(query) - es >= word_core(joined[es:ee])[1]):
+            return True
+    return False
+
+
+_GENERATED_TOKENS = [
+    "P-1", "(P-1)", "P-1,", "P-10", "XP-1", "P-1.", "VAV-2-1", "VAV-2", "VAV-2,",
+    "12'-6\"", ".5", "5", "-5", "0.5", "12,500", "1/2\"", "2\u00bd\"", "2-1/2\"",
+    "NOTE", "3:", "TYP.", "\u201c6\u201d", "M-101/M-102", "P-1,P-2", "((", "))", "\"",
+    "\u00d86", "300\u00d7200", "SEE", "AHU-10", "AHU-101",
+]
+
+
+def _generated_pairs(n: int = 600):
+    import random
+
+    rng = random.Random(51)
+    pairs = []
+    for _ in range(n):
+        tokens = [rng.choice(_GENERATED_TOKENS) for _ in range(rng.randint(1, 7))]
+        text = " ".join(tokens)
+        if rng.random() < 0.5:
+            lo = rng.randrange(len(tokens))
+            hi = rng.randint(lo + 1, len(tokens))
+            quote = " ".join(tokens[lo:hi])
+        else:
+            quote = rng.choice(_GENERATED_TOKENS)
+        if rng.random() < 0.3 and len(quote) > 2:          # cut into a word
+            quote = quote[1:] if rng.random() < 0.5 else quote[:-1]
+        pairs.append((quote, text))
+    return pairs
+
+
+def test_the_matcher_gives_the_rules_answer_everywhere():
+    """The fast scan changes the cost, never an answer."""
+    from drawing_analyzer.anchor import SourceWords
+
+    tables = (_CUT_A_WORD + _WHOLE_WORDS + _SAME_TEXT + _CHANGED
+              + [("3", "SEE NOTE 3 BELOW"), ("3", "SEE M-3 AND 3A BELOW"),
+                 ("TYP", "6 IN DRAIN, TYP."), ("q", "P-1 SERVES AREA A")])
+    pairs = tables + _generated_pairs()
+    grounded = 0
+    for quote, text in pairs:
+        expected = _reference_contains(quote, text)
+        assert SourceWords(text).contains(quote) is expected, (quote, text)
+        grounded += expected
+    assert 0 < grounded < len(pairs), "the pairs must exercise both answers"
+
+
+def test_the_boundary_check_never_rederives_a_words_core(monkeypatch):
+    """Each word's core is found once, when the text is indexed."""
+    from drawing_analyzer import anchor
+
+    words = anchor.SourceWords("SEE (P-1), XP-1 AND P-10; NOTE 3: VAV-2-1 TYP.")
+
+    def _refuse(_word):
+        raise AssertionError("word_core re-derived during a match")
+
+    monkeypatch.setattr(anchor, "word_core", _refuse)
+    assert words.contains("P-1") is True
+    assert words.contains("NOTE 3") is True
+    assert words.contains("VAV-2") is False
+    assert words.contains("P-10") is True
+    assert words.contains("AHU-7") is False
+
+
+@pytest.mark.parametrize("run", [
+    "XP-1" * 250_000,             # the quote recurs inside the run, never at its start
+    "P-1X" * 250_000,             # it starts the run and recurs through it
+])
+def test_a_quote_recurring_inside_one_long_run_costs_linear_time(run):
+    """A garbled or per-glyph text layer can be one whitespace-free run.
+
+    The quote recurs 250,000 times inside this 1,000,000-character word.
+    Re-deriving the word's core at every occurrence copied the whole word each
+    time: about 7 s here, and quadratic in the run's length. Only the matching
+    is timed; indexing the text is linear and happens once per sheet.
+    """
+    import time
+
+    from drawing_analyzer.anchor import SourceWords
+
+    words = SourceWords("NOTE " + run + " PUMP P-1 END")
+    t0 = time.perf_counter()
+    assert words.contains("P-1") is True            # the real one, after the run
+    assert words.contains("P-1 SERVES") is False
+    elapsed = time.perf_counter() - t0
+    assert elapsed < 1.0, f"matching is superlinear again: {elapsed:.2f}s"
