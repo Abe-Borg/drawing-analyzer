@@ -1,7 +1,7 @@
 # Remediation progress tracker
 
-**Next up:** Wave 1 in order: `WP-03.3`. WP-03.2 is done: a positional tie in the QC numbering is broken by the finding's own content, so the same findings get the same numbers whatever order they arrive in (K5). It found N29 (a merged entry's representative can follow arrival order once three or more duplicates merge), now on `WP-03.5`. `WP-03.7` (N28) waits on WP-03.3 and needs a decision first. WP-04 is not done: its acceptance needs quantity roles, slice `WP-04.3` (Wave 2). First check the open PRs ([`README.md`](README.md), step 1). Before the next stable tag, the owner should look at O-5.
-**Last updated:** 2026-09-23 by the WP-03.2 session ([PR #160](https://github.com/Abe-Borg/drawing-analyzer/pull/160)).
+**Next up:** Wave 1 in order: `WP-03.7` (N28), which needs a decision first (see its row). WP-03.3 is done: two different arithmetic mismatches on one table row both survive the auditor coordinator and the ledger, each with its own id and number, and claims are de-duplicated on exact decimals (B7). It added `Finding.claim_discriminator`, the arithmetic form of the claim discriminator WP-03.7 may generalize. WP-04 is not done: its acceptance needs quantity roles, slice `WP-04.3` (Wave 2). First check the open PRs ([`README.md`](README.md), step 1). Before the next stable tag, the owner should look at O-5.
+**Last updated:** 2026-09-23 by the WP-03.3 session ([PR #TBD]).
 
 This file is authoritative for **status and order**. Requirements live in
 [`drawing-analyzer-remediation-plan.md`](drawing-analyzer-remediation-plan.md).
@@ -104,8 +104,8 @@ starting.
 | WP-04.2 | Compatibility rule over per-unit value sets and partial tag overlap; one shared `signature_conflicts` that the A/B harness also uses (N1) | M | WP-04.1 | done | [PR #158](https://github.com/Abe-Borg/drawing-analyzer/pull/158), 2026-09-23. `critique.signature_conflicts` (axes `tags`, `measurements`, `absence_polarity`, `cross_sheet_legs`); `signatures_compatible` is its negation, and the A/B harness reports its axes (its restated copy is gone). Quantities compare per kind (a unit, or one of the `_QUANTITY_KIND` groups: lengths, degrees, `psi`/`psig`, volts, liquid flow, real power, apparent power): for every kind both carry, one side's tokens must include the other's; no value is converted. Tags compare by inclusion, not by prefix. Sharing no quantity at all still conflicts. Critique contract 1 → 2, fingerprint pinned under 2; `RECORD_CONTRACT_VERSION` stays 3 (rule-only change; plan step 6 corrected). Tests: `tests/test_signature_compatibility.py`, the N1 rows and the corroboration, retention and recorded-limit tables in `tests/test_quantity_signature.py`, the WP-04.2 sections of `tests/test_ab_findings_diff.py` and `tests/test_drawing_cache_identity.py`. Roles are not compared: WP-04.3 |
 | WP-03.1 | Symmetric complete-link in Pass B, order-independent entry count (B1, count part) | S | — | done | [PR #159](https://github.com/Abe-Borg/drawing-analyzer/pull/159), 2026-09-23. `ledger.reconcile_post_anchor` folds an entry only when every member of its `Ledger.member_history` is `_is_duplicate` of every member of the survivor's (both sides, each as it arrived). The B1 case ends with two entries in all six orders, under seven severity and quote-length variants; histories stay cliques; a second pass folds nothing. The candidate index cannot miss a fold (argued at `_candidates`, pinned against an index-free reference). Geometry: recorded as a recall loss, not lent (Pass B now folds only entries that absorbed nothing in Pass A). Tests: `tests/test_pass_b_complete_link.py`, `tests/test_drawing_dedup_lifecycle.py::test_pass_b_keeps_a_conflict_the_incoming_entry_absorbed`. No cache or key change. Found N28 (WP-03.7) |
 | WP-03.2 | Deterministic total-order tie-break in `assign_qc_ids` (K5) | S | — | done | [PR #160](https://github.com/Abe-Borg/drawing-analyzer/pull/160), 2026-09-23. `models.assign_qc_ids` keeps the positional order and breaks a tie by the content `id` (first, so a pair whose ids differ keeps its number), then the text, then `_qc_content_key`: every field but `qc_id`, with `_ARRIVAL_ORDERED_FIELDS` (`sources`, `refs`, `supporting_quotes`, `prose_item_ids`, `citations`) sorted, built only for runs the cheap key leaves tied. No existing fixture renumbered (checked by instrumenting the full suite). `qc_id` is in no cache key. Tests: `tests/test_qc_numbering_tiebreak.py`. Found N29 (WP-03.5). Still following arrival, recorded on WP-03.4: the row order of `findings.json`/`findings.csv` and of the report table among equal severity and status |
-| WP-03.3 | Remove the auditor coordinator's id dedup; arithmetic claim discriminator so the ledger keeps two different same-row mismatches; Decimal claim-dedup keys (B7) | S/M | — | todo | |
-| WP-03.7 | The geometry branch folds two different issues that quote one tag (N28): decide what, besides a shared quote and an overlapping rectangle, may fold two findings, and apply it in both passes | S/M | WP-03.3 | todo | Added by WP-03.1 (README step 7). **Needs a decision first.** No text-overlap threshold separates the cases: the paraphrase fold `test_post_anchor_reconciliation_folds_a_geometric_duplicate` pins shares 1 of 11 content words (0.09), the two different `PUMP P-1` issues share 3 of 12 (0.25). Options: drop the branch (loses that paraphrase fold; pin it as retention), or a claim discriminator (the general form of WP-03.3's arithmetic one). Flip `tests/test_pass_b_complete_link.py::test_recorded_limit_the_geometry_branch_folds_two_issues_that_quote_one_tag`. The merge-rule ratchet (`tests/test_drawing_cache_identity.py`) fingerprints `_is_duplicate` over unanchored findings only, so check whether a change moves it before deciding on a critique contract bump |
+| WP-03.3 | Remove the auditor coordinator's id dedup; arithmetic claim discriminator so the ledger keeps two different same-row mismatches; Decimal claim-dedup keys (B7) | S/M | — | done | [PR #TBD], 2026-09-23. `run_auditors` dedups nothing (the ledger decides); `audit_titleblock` keys its two-path dedup on (sheet, quote). `Finding.claim_discriminator` (additive, serialized only when set), set by the arithmetic auditor from `arithmetic.claim_content_key` (host operation, terms as a multiset of exact decimals, stated value; scheme `arithmetic/1`). `critique._claims_differ` refuses a merge when both findings carry one and they disagree, before every accepting branch of `_is_duplicate` (so Pass A and Pass B); it is folded into `id` (`compute_finding_id`'s last argument, only when non-empty) and rides the representative's bundle. All three claim dedups (arithmetic, critique, cross-QC) share `claim_content_key`. Merge-rule fingerprint unchanged; one migration-register row re-keys arithmetic investigations. Tests: `tests/test_arithmetic_claim_discriminator.py` |
+| WP-03.7 | The geometry branch folds two different issues that quote one tag (N28): decide what, besides a shared quote and an overlapping rectangle, may fold two findings, and apply it in both passes | S/M | WP-03.3 | todo | From WP-03.3: the arithmetic form of the claim discriminator exists. `Finding.claim_discriminator` is set only by the arithmetic auditor; `critique._claims_differ` refuses a merge only when BOTH findings carry one and they differ (one side alone never blocks), ahead of every branch of `_is_duplicate`. It is scoped by who sets it, not by a source tag. Generalizing it means model findings carry one: then the merge-rule ratchet moves (it fingerprints `_is_duplicate` over model findings) and the critique contract bumps; decide cross-scheme comparison (the arithmetic scheme is versioned `arithmetic/1`) and whether a model twin with a discriminator may still merge with an auditor finding. Added by WP-03.1 (README step 7). **Needs a decision first.** No text-overlap threshold separates the cases: the paraphrase fold `test_post_anchor_reconciliation_folds_a_geometric_duplicate` pins shares 1 of 11 content words (0.09), the two different `PUMP P-1` issues share 3 of 12 (0.25). Options: drop the branch (loses that paraphrase fold; pin it as retention), or a claim discriminator (the general form of WP-03.3's arithmetic one). Flip `tests/test_pass_b_complete_link.py::test_recorded_limit_the_geometry_branch_folds_two_issues_that_quote_one_tag`. The merge-rule ratchet (`tests/test_drawing_cache_identity.py`) fingerprints `_is_duplicate` over unanchored findings only, so check whether a change moves it before deciding on a critique contract bump |
 | WP-07.1 | Occurrence-aware, sheet-grounded operand support; provenance decided after anchoring; a fabricated quote or unresolved sheet is never DETERMINISTIC (N3) | M | — | todo | |
 | WP-07.2 | Strict numeric tokens (tag and sheet-id digits, hyphen-as-minus, `1e3`) and host-side relationship checks (A8) | M | WP-07.1 | todo | |
 | WP-05.1 | Cross-QC grounding: a real match for every non-empty quote at word boundaries; no text means unavailable evidence; one normalizer shared with `anchor`; `_CROSS_QC_CACHE_CONTRACT` 3→4 (B5, N12 cross-QC part, N13) | M | — | todo | |
@@ -137,11 +137,11 @@ starting.
 | WP-10.2 | Critique contract resolved per transport at probe and store; batch runs log that the structured flag is ignored (K3) | S/M | — | todo | |
 | WP-10.3 | Planner loss metadata stored with the plan; legacy entries report loss as unknown (K4) | S/M | WP-01.1 | todo | |
 | WP-10.4 | Cache map with the admission predicate of every write; N4 read-side migration completed; migration register filled (N4 cache part; WP-10 steps 1, 7, 9) | S/M | WP-01.2, WP-01.4 | todo | |
-| WP-03.4 | Versioned `claim_id` beside the existing `id`; the inventoried consumers switched; cross-QC and prose-harvest cache restores rebound; decides D-3 (B8 identity) | L | WP-03.2 | todo | From WP-03.2: `investigate._candidates`, `annotate._severity_first_key`, `_set_findings_outline`, `_annotate_units` and `tile_artifacts._finding_sort_key` sort by `qc_id` before `id`, and every entry is numbered, so in a run they follow the numbering now; their `id` fallback is reached only by an unnumbered finding. Three orders still follow arrival: `pipeline._run_critique_stage`'s pre-ingest sort `(source_page_key, id)` keeps thread-completion order among ties, which becomes ledger order; `findings.json` and `findings.csv` are written in ledger order (`ctx.findings + ctx.reference_findings`, split from `ledger.number()`'s arrival-ordered list); and the report table sorts by severity and status only (`html_report._key`, a stable sort), so ties keep ledger order. Sorting `entries` by `qc_id` after `ledger.number()` would put every row in QC order, a visible change to decide here |
+| WP-03.4 | Versioned `claim_id` beside the existing `id`; the inventoried consumers switched; cross-QC and prose-harvest cache restores rebound; decides D-3 (B8 identity) | L | WP-03.2 | todo | From WP-03.2: `investigate._candidates`, `annotate._severity_first_key`, `_set_findings_outline`, `_annotate_units` and `tile_artifacts._finding_sort_key` sort by `qc_id` before `id`, and every entry is numbered, so in a run they follow the numbering now; their `id` fallback is reached only by an unnumbered finding. Three orders still follow arrival: `pipeline._run_critique_stage`'s pre-ingest sort `(source_page_key, id)` keeps thread-completion order among ties, which becomes ledger order; `findings.json` and `findings.csv` are written in ledger order (`ctx.findings + ctx.reference_findings`, split from `ledger.number()`'s arrival-ordered list); and the report table sorts by severity and status only (`html_report._key`, a stable sort), so ties keep ledger order. Sorting `entries` by `qc_id` after `ledger.number()` would put every row in QC order, a visible change to decide here. From WP-03.3: `Finding.claim_discriminator` exists (arithmetic only, folded into `id`); decide whether `claim_id` builds on it (D-3 records it as an input). The A/B harness's `identity_key` hashes quote-or-text, not the discriminator, so two mismatches on one row still share an A/B identity (`scripts/ab_findings_diff.py`, in this slice's consumer inventory) |
 | WP-03.5 | Lossless observations: upstream merges hand observations to the ledger; observations and alternative actions serialized (incl. critique cache); specificity-aware representative (B9, B1 rest, N29) | L | WP-03.1, WP-03.4, WP-04.2 | todo | From WP-03.2 (N29): `_merge_into` compares an incoming member with the live survivor, whose severity an earlier merge may have raised, so with three or more duplicates the representative follows arrival order. Choose it from the members' own qualities (their snapshots), not the live survivor's, and flip `tests/test_qc_numbering_tiebreak.py::_N29_REPRESENTATIVE` to one representative in every order. From WP-03.1: flip `tests/test_pass_b_complete_link.py::_500_EXPORTED` ("500" leaves the exports in ABC/ACB/BAC, where the generic bridge wins A's bundle). Also hand the prose harvest's matched mirror to the ledger as an observation: `prose_harvest._process_free_pending` sets `also_on` on a live entry directly, so legs attached after that entry's first merge are in no member snapshot and Pass B's complete-link cannot see them (narrow since WP-03.1: Pass B folds such an entry only through a member anchored before ingest) |
 | WP-03.6 | Canonical final clustering over retained observations; per-observation anchors; idempotent reconciliation (WP-03 clustering clarification) | M/L | WP-03.5 | todo | From WP-03.1: flip `tests/test_pass_b_complete_link.py::_BRIDGE_JOINS` (which cluster the generic bridge joins follows arrival order) and `::test_recorded_limit_a_four_finding_chain_still_counts_by_arrival_order` (entry count 2 or 3 by order). Per-observation anchors are also where the geometric recall WP-03.1 gave up comes back (`::test_a_geometric_duplicate_folds_only_between_entries_that_absorbed_nothing`) |
 | WP-06.4 | Direction-free merge for reversed cross-sheet conflicts with a stated same-claim predicate (B10) | M | WP-03.4, WP-06.1 | todo | |
-| WP-07.3 | Truthful arithmetic counters split by provenance; contradictory transcriptions of one quote flagged (N18; WP-07 step 7) | S/M | WP-07.1, WP-03.3 | todo | |
+| WP-07.3 | Truthful arithmetic counters split by provenance; contradictory transcriptions of one quote flagged (N18; WP-07 step 7) | S/M | WP-07.1, WP-03.3 | todo | From WP-03.3: the "claim dedup keys move to Decimals" part of WP-07 step 7 is done (`arithmetic.claim_content_key`, shared by all three claim dedups). Since WP-03.3 two contradictory mismatch transcriptions of one quote (different terms) are two findings, where the coordinator used to keep the first one silently; a contradictory pair where one read matches and the other does not still counts one matched and one mismatched (N18 as reproduced) |
 | WP-11.3 | Source revision checked on every reopen (verify, investigate, markup) (R1 revision part) | M | WP-11.1 | todo | |
 
 ### Wave 3 — P1 evidence quality: auditors, citations, investigation
@@ -280,8 +280,8 @@ report is built from it).
 | B4 | Verbatim quotes fail to anchor on punctuation/spacing variance | P0/P1 | 05.2, 05.3 | open | |
 | B5 | Cross-QC quotes under 6 chars are "grounded" without a check | P0 | 05.1 | open | |
 | B6 | Cross-QC prompt asks for severity `question`; the items are dropped silently | P0 | 06.1 | open | |
-| B7 | Distinct same-row arithmetic mismatches: coordinator dedup, then a ledger geometry merge | P0 | 03.3 | open | |
-| B8 | `Finding.id` not unique; numbering, bookmarks and index links treat it as identity | P0 | 03.2, 03.4, 21.3 | open (numbering part implemented+validated in 03.2, as K5; identity (03.4) and navigation (21.3) stay open) | `tests/test_qc_numbering_tiebreak.py` (WP-03.2, [PR #160](https://github.com/Abe-Borg/drawing-analyzer/pull/160)): the `PUMP P-1` pair gets the same numbers and evidence directories in both orders. Remaining: `claim_id` (WP-03.4); bookmark dedup and `mark_page_by_finding` keyed by the content id (WP-21.3) |
+| B7 | Distinct same-row arithmetic mismatches: coordinator dedup, then a ledger geometry merge | P0 | 03.3 | implemented+validated | `tests/test_arithmetic_claim_discriminator.py` (WP-03.3, [PR #TBD]): the review's pair and the `[30,30]=500` pair through `run_auditors` (two findings, two ids, `arithmetic_mismatched == len(findings)`); `run_auditors` → `Ledger.add` → seal → Pass B → `number()` in both orders, anchored and on an unresolved sheet, DETERMINISTIC beside UNCERTAIN, each keeping its own id, text, verdict and number; three mismatches on one row in all six orders; the text, quote and geometry branches each refused in Pass A, and geometry in Pass B; an absorbed member's discriminator blocking a generic bridge; true duplicates still merge (a model twin, with the auditor winning the bundle; one claim read twice); Decimal claim keys in all three dedups, incl. unparseable terms |
+| B8 | `Finding.id` not unique; numbering, bookmarks and index links treat it as identity | P0 | 03.2, 03.4, 21.3 | open (numbering part implemented+validated in 03.2, as K5; identity (03.4) and navigation (21.3) stay open) | `tests/test_qc_numbering_tiebreak.py` (WP-03.2, [PR #160](https://github.com/Abe-Borg/drawing-analyzer/pull/160)): the `PUMP P-1` pair gets the same numbers and evidence directories in both orders. Since WP-03.3 two arithmetic mismatches on one row get distinct ids (the claim discriminator is folded in; `tests/test_arithmetic_claim_discriminator.py`), and two id dedups are gone (`run_auditors`; `audit_titleblock` now keys on sheet and quote); model findings are unchanged. Remaining: `claim_id` (WP-03.4); bookmark dedup and `mark_page_by_finding` keyed by the content id (WP-21.3) |
 | B9 | Merge discards the loser's text and recommended action | P0 | 03.5 | open | |
 | B10 | A→B and B→A copies of one conflict both survive | P1 | 06.4 | open | |
 | B11 | "No conflicts noted on this sheet." becomes a medium finding | P1 | 09.1 | open | |
@@ -392,6 +392,186 @@ report is built from it).
 Each session adds one entry at the top: date, slices and IDs, PR, what changed,
 contracts decided, cache/schema effects, validation actually run (with counts),
 what could not be verified, risks, and next steps.
+
+### 2026-09-23 — WP-03.3: distinct same-row arithmetic mismatches survive ([PR #TBD])
+
+- **Slice and IDs:** WP-03.3. B7 (implemented+validated). B8 stays `open`: two
+  arithmetic mismatches on one row no longer share an id, but `claim_id`
+  (WP-03.4) and navigation (WP-21.3) remain. No `DECISIONS.md` contract is
+  decided: D-3 stays open for WP-03.4 and records the discriminator as an
+  input; D-4 gains a WP-03.3 note; three migration-register rows.
+- **What changed:**
+  - **Reproduced first** on `37cbd98` (scratch script, both trees). Claims
+    `sum [20,20,20] = 540` (operands on the row: DETERMINISTIC) and
+    `sum [30,30] = 500` (UNCERTAIN), and the review's
+    `factor [1500, "1.3"] = 2000`, on the quote `20 20 20 TOTAL 540`:
+    `audit_arithmetic` gave two findings with one id (`915ec7e11272`),
+    `run_auditors` kept one with `arithmetic_mismatched == 2`, and with the
+    coordinator bypassed `Ledger.add` folded them in both orders into the
+    DETERMINISTIC one. `20` against `"20.0"` gave `checked=2, mismatched=2`
+    and two same-id findings. **Correction:** `540` against `"540"` did not
+    reproduce: `str(540) == "540"`, so those already shared a key. The gaps
+    were `20` against `"20.0"` or the JSON float `20.0`, `1200` against
+    `"1,200"`, terms in another order, and `factor` against `product`.
+  - **The coordinator** (`auditors.run_auditors`) no longer de-duplicates. The
+    ledger decides: a true cross-auditor duplicate (one quote, one rectangle)
+    still becomes one entry with both tags (pinned). `audit_titleblock`'s
+    two-path dedup keys on `(source_page_key, source_quote)` instead of the id;
+    behaviour-identical today (both paths build the same sheet id and
+    category), and pinned against an id that folds the text.
+  - **The discriminator.** `Finding.claim_discriminator: str = ""`, appended
+    last. The choice: an additive field, not derived host-side, because the
+    only host-side source would be the finding's display text, and because it
+    must survive serialization (`findings.json`) and ride a merge. `to_dict`
+    emits it only when set (the `citation` precedent), so every other finding
+    and every critique/cross-QC cache entry serializes byte-identically;
+    `from_dict` defaults it to `""`.
+    - Its value is `auditors.arithmetic.arithmetic_claim_discriminator`:
+      `arithmetic/1:<operation>:<terms>=<stated>`, from `claim_content_key`
+      (the host operation, with `factor` as `product`; the terms as a sorted
+      multiset, since both operations commute; exact decimals by
+      `canonical_decimal`, never rounded at 28 digits and never raising).
+    - `critique._claims_differ` refuses a merge when BOTH findings carry one
+      and they differ. It runs in `_is_duplicate` before every accepting
+      branch, so it holds in Pass A and Pass B. One side alone never blocks,
+      so an auditor finding still merges with its model twin and wins the
+      bundle (the three pinned tests pass unchanged, and a new one uses the
+      real auditor's output).
+    - Folded into `id`: `compute_finding_id` takes it as a last argument,
+      appended after `\x01` only when non-empty (the `source_id` precedent),
+      so every other id is byte-identical (`tests/test_drawing_models.py`,
+      `tests/test_source_identity.py` pass unchanged). `Finding.__post_init__`
+      and `digest._rebind_cached_finding` pass it.
+    - It rides the representative's bundle in `ledger._merge_into` and
+      `critique._representative`, with the id it is folded into. When the
+      bundle goes to a member without one, the absorbed arithmetic member
+      still blocks a different claim from its snapshot (pinned with a generic
+      bridge that duplicates both mismatches).
+    - Scoped by who sets it: only the arithmetic auditor. Designed to
+      generalize (WP-03.7): a versioned scheme, a producer-neutral field, a
+      rule that needs both sides.
+  - **Decimal claim keys.** All three claim dedups share `claim_content_key`:
+    `arithmetic._claim_dedup_key` (the last before any count or finding),
+    `critique._dedup_claims` and `cross_qc._dedup_claims`. The request named
+    two; cross-QC has its own copy (it does not call the critique's) with the
+    same `str()` keys, so it moved too (plan text corrected, README step 7).
+    An unparseable term keeps its raw spelling behind a `raw:` tag, so it never
+    collapses two different claims and never equals a number.
+    `critique._dedup_claims`' source part (`source_name.lower()`, page) is
+    **not** a DA-001 defect: it only ever sees one sheet's reads (both callers
+    of `result_from_outcomes` are per sheet), so that part is constant; noted
+    in its docstring. The Decimal change touched the same tuple (the kind,
+    terms and expected elements), and left the source part alone.
+- **Contracts decided:** none (D-3 input recorded; D-4 note added).
+- **Cache/schema effects** (three migration-register rows):
+  - **Investigation** (`stage=investigation`): the key hashes `id`, and every
+    arithmetic finding's id changed. Only a mismatch checked against
+    model-transcribed numbers that stays UNCERTAIN and anchored after
+    verification is ever investigated, so only those entries miss once (a paid
+    re-investigation, exhaustive runs only). One mechanism: the id change
+    itself; no term, no `_SCHEMA_VERSION` bump.
+  - **Critique** (stored claims): no change. A stored entry can hold two
+    spellings of one claim; the arithmetic auditor collapses them exactly as a
+    cold run would (one entry is one sheet). The merge-rule ratchet
+    (`tests/test_drawing_cache_identity.py`) passes unchanged, so the critique
+    contract stays at 2: `_claims_differ` only fires on two findings that both
+    carry a discriminator, and no critique finding does.
+  - **Cross-QC** (stored claims): no change, with one narrow residual,
+    accepted and recorded: this dedup compares the quote lowercased and the
+    auditor's does not, so two transcriptions whose quotes differ in case AND
+    whose numbers are spelled differently are counted twice from a stored
+    entry and once cold (the tally only; their findings share a discriminator
+    and merge in the ledger, checked). WP-05.1's planned bump (3 → 4) retires
+    those entries.
+  - Not affected: the verify keys (no `id`), the citation check (arithmetic
+    findings carry no `refs`), the digest cache (`_SCHEMA_VERSION` untouched),
+    the A/B record contract (a record stores `finding_id` as a reference and
+    an unchanged `critical_signature`).
+- **Re-baselined tests:** none. Every pinned test the request listed passes
+  unchanged: `tests/test_drawing_auditors.py` (the stats contract; the
+  540/660 lesson; `deduplicates_repeated_claims`; `anchors_mismatch_via_quote`;
+  `unresolved_sheet_still_records_finding_unanchored`; the three
+  `run_auditors` tests, incl. "no two findings share an id"; the title-block
+  tests), `tests/test_drawing_dedup_lifecycle.py` (85, 252, 307),
+  `tests/test_drawing_ledger.py` (69, 85), the gauntlet's
+  `test_gauntlet_deterministic_auditors_fired`, `tests/test_drawing_cross_qc.py`,
+  `tests/test_source_identity.py`, `tests/test_drawing_cache_identity.py` and
+  `tests/test_qc_numbering_tiebreak.py`. The new tests do not pin operand
+  provenance where WP-07.1 changes it: the lifecycle test compares each
+  entry's verdict with what the auditor gives its claim alone, and asserts
+  DETERMINISTIC only for the anchored row.
+- **Fixture effects, checked by instrumenting the full suite** (a scratch copy
+  whose hooks logged every merge `_claims_differ` newly refused, every claim
+  any of the three dedups newly collapsed or newly kept, every finding the old
+  coordinator id dedup would have dropped, and every title-block call where
+  the old and new keys disagree). **All 82 events came from
+  `tests/test_arithmetic_claim_discriminator.py`**; no existing test produced
+  one. The hooks were exercised: over the gauntlet, pipeline, auditor, ledger
+  and lifecycle suites, 81 `run_auditors` calls, 7 of them with arithmetic
+  findings, and never two discriminated findings compared with each other. So
+  the existing corpus cannot show this change, which is why the new file
+  covers the matrix.
+- **Validation** (this container, Python 3.11.15, SDK 1.7.0, PyMuPDF 1.28.2):
+  - **Baseline before any change:** `python -m pytest -q -m "not network"`
+    gave **3,204 passed, 2 skipped, 10 deselected** (208 s) on `37cbd98`,
+    identical to the WP-03.2 handoff.
+  - **Failing first.** The new file (28 tests) was run in a `git archive` copy
+    of `origin/main` (`37cbd98`) with only that file added, classified from
+    `--junitxml`:
+    - **20 failed on behaviour:** distinct ids (both second claims); both
+      mismatches through `run_auditors` (both); the tally against retained
+      findings; the coordinator handing both twins to the ledger; the
+      title-block key; the lifecycle in both orders (anchored, unresolved);
+      three mismatches in six orders; the three branches; Pass B after
+      ingest; the absorbed member's discriminator; a model twin joining its
+      own mismatch; one claim read twice; Decimal dedup in the auditor, the
+      critique and cross-QC.
+    - **5 failed only on the new API:** the 5-argument `compute_finding_id`,
+      the new field (round trip, bundle), the new helpers
+      (`arithmetic_claim_discriminator`, `claim_value_key`).
+    - **3 passed**, pinning what the fix keeps: the auditor still merges with
+      its model twin and wins the bundle; findings without a discriminator
+      merge as before; an unparseable term never collapses two claims.
+  - **After:** the 28 new tests pass. Full suite **3,232 passed, 2 skipped,
+    10 deselected** (203 s): the baseline plus 28, with the same two
+    environment skips (IPv6 loopback; chmod as root).
+  - **Browser suite:** not run separately; no report JS, HTML or chat code
+    changed (the browser tests ran inside the full suite).
+  - `python -m ruff check --select E9,F63,F7,F82 src tests scripts` (pinned
+    0.14.5) is clean. F401/F811/F841 over the touched files finds two unused
+    imports, both on `origin/main` already and on lines this change does not
+    touch (`arithmetic._wtext`, `critique.DEFAULT_DIGEST_MAX_TOKENS`; WP-22.5).
+    `scan_secrets.py` is clean over 200 tracked files, the new one included.
+    `compileall src` passes.
+- **Docs:** CHANGELOG (Fixed, B7, with the visible effect and the cache
+  note); CLAUDE.md (the auditors paragraph, the `_is_duplicate` gate and the
+  bundle in the ledger paragraph, "one claim" in the model-never-calculates
+  invariant); README (the auditors intro, the numeric-claims contract, the
+  ledger merge paragraph); the plan's WP-03 step 5 note (the third dedup; the
+  `540` correction).
+- **Not verified:** live API behaviour (no budget, O-4; this slice makes no
+  call). Real drawings: how often two mismatches share a row is unmeasured
+  (O-10). Windows is covered by this PR's CI.
+- **Risks and residual gaps:**
+  - **Visible changes, by design.** A row with two different mistakes shows
+    two findings. Every arithmetic finding's id changes (CSV `id` column,
+    `markup_manifest.json` `finding_id`), and `findings.json` gains a
+    `claim_discriminator` key on arithmetic findings only.
+  - Two reads that transcribe one relationship with contradictory terms now
+    produce two findings where the coordinator kept the first. Honest (the
+    reads disagree), and N18's flagging is WP-07.3's.
+  - A model twin that duplicates two different mismatches joins whichever
+    arrives first (the generic-bridge limit, WP-03.6); both mismatches still
+    survive. Not observed with realistic wording: the twin in the tests
+    matches only its own mismatch in every order.
+  - The A/B harness's `identity_key` does not see the discriminator (noted on
+    WP-03.4).
+- **Re-checked (U31):** every other id-keyed dedup over findings
+  (`cross_qc._dedup_findings`, `references._audit_sheet`'s quote dedup) is
+  outside this slice and unchanged; `run_auditors`'s only production caller
+  ingests its findings straight into the ledger.
+- **Next:** WP-03.7 (N28), which needs a decision first; its row now records
+  what the arithmetic discriminator settles and what generalizing it costs.
 
 ### 2026-09-23 — WP-03.2: QC numbers break a positional tie by content ([PR #160](https://github.com/Abe-Borg/drawing-analyzer/pull/160))
 

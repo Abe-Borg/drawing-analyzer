@@ -69,8 +69,16 @@ def run_auditors(
     ``claims`` (from the critique / cross-sheet QC passes) feed the arithmetic
     auditor; omit them and arithmetic simply contributes nothing. Each auditor runs
     inside its own guard so a single failure degrades to "that auditor found
-    nothing" rather than sinking the battery (I-3). Findings are de-duplicated by
-    content id (two auditors can't emit the same reference twice).
+    nothing" rather than sinking the battery (I-3).
+
+    Every finding every auditor returns is handed on: the ledger decides what is
+    a duplicate (remediation WP-03.3, review B7). This used to de-duplicate by
+    content id, and the id hashes sheet, category and quote, so two different
+    arithmetic mismatches on one table row were one finding here while
+    ``arithmetic_mismatched`` still counted two. A true duplicate from two
+    auditors (one quote, one rectangle) still becomes one ledger entry with both
+    provenance tags. Each auditor de-duplicates its own output where it can
+    report one thing twice.
     """
     from ..diagnostics import get_logger
 
@@ -116,21 +124,11 @@ def run_auditors(
     stats["sheet_index_findings"] = len(idx_findings)
     findings.extend(idx_findings)
 
-    # Collapse any exact-duplicate finding (same sheet + category + quote → same id)
-    # two auditors might both surface — deterministic, first-wins order.
-    seen: set[str] = set()
-    deduped: list[Finding] = []
-    for f in findings:
-        if f.id in seen:
-            continue
-        seen.add(f.id)
-        deduped.append(f)
-
     log.info(
         "auditors: %d finding(s) [ref=%d arith=%d/%d naming=%d titleblock=%d index=%d]",
-        len(deduped), stats.get("reference_findings", 0),
+        len(findings), stats.get("reference_findings", 0),
         stats.get("arithmetic_matched", 0), stats.get("arithmetic_checked", 0),
         stats.get("naming_findings", 0), stats.get("titleblock_findings", 0),
         stats.get("sheet_index_findings", 0),
     )
-    return AuditorResults(findings=deduped, stats=stats)
+    return AuditorResults(findings=findings, stats=stats)

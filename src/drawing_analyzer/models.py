@@ -820,7 +820,11 @@ FINDINGS_PARSE_OK = frozenset({FINDINGS_PARSED_CLOSED, FINDINGS_PARSED_UNCLOSED}
 
 
 def compute_finding_id(
-    sheet_id: str, category: str, quote_or_text: str, source_id: str = ""
+    sheet_id: str,
+    category: str,
+    quote_or_text: str,
+    source_id: str = "",
+    claim_discriminator: str = "",
 ) -> str:
     """Stable short id for a finding: ``sha1(sheet_id + category + quote/text)``.
 
@@ -834,6 +838,14 @@ def compute_finding_id(
     and quote can never collide on one artifact/evidence id. It is appended (not
     interleaved) and only when non-empty, so a legacy/single-source finding with
     no ``source_id`` keeps its historical id exactly.
+
+    ``claim_discriminator`` — :attr:`Finding.claim_discriminator`, when the
+    producer can state exactly what the finding asserts (remediation WP-03.3,
+    review B7: two arithmetic mismatches on one table row quote the same string
+    and used to share an id). The same precedent: appended last, only when
+    non-empty, so every finding without one keeps its id exactly. Its separator
+    is ``\\x01``, not ``\\x00``, so a discriminator can never hash like a
+    ``source_id``.
     """
     h = hashlib.sha1()
     h.update(sheet_id.encode("utf-8"))
@@ -844,6 +856,9 @@ def compute_finding_id(
     if source_id:
         h.update(b"\x00")
         h.update(source_id.encode("utf-8"))
+    if claim_discriminator:
+        h.update(b"\x01")
+        h.update(claim_discriminator.encode("utf-8"))
     return h.hexdigest()[:12]
 
 
@@ -1256,12 +1271,22 @@ class Finding:
     # "" = not assessed (older payload, or a channel that does not classify).
     # Appended last — see the positional-order note on RenderedSheet.
     evidence_state: str = ""
+    # Remediation WP-03.3 (review B7): what exactly this finding asserts, in a
+    # canonical form, set only by a producer that can state it exactly. Today
+    # that is the arithmetic auditor (``auditors.arithmetic.
+    # arithmetic_claim_discriminator``: the host operation, the terms as a
+    # multiset of exact decimals, the stated value). Two findings that BOTH carry
+    # one and disagree are never duplicates (``critique._is_duplicate``), and it
+    # is folded into ``id``. It is a statement about ``text``, so it rides the
+    # representative's bundle in a merge. "" (every model finding, every older
+    # payload) never blocks anything. Appended last, like ``evidence_state``.
+    claim_discriminator: str = ""
 
     def __post_init__(self) -> None:
         if not self.id:
             self.id = compute_finding_id(
                 self.sheet_id, self.category, self.source_quote or self.text,
-                self.source_id,
+                self.source_id, self.claim_discriminator,
             )
 
     @property
@@ -1305,6 +1330,10 @@ class Finding:
         }
         if self.citation is not None:
             out["citation"] = self.citation.to_dict()
+        # Only when set, like ``citation``: every finding without one (every
+        # model finding) serializes byte-identically to the payloads before it.
+        if self.claim_discriminator:
+            out["claim_discriminator"] = self.claim_discriminator
         return out
 
     @classmethod
@@ -1345,6 +1374,7 @@ class Finding:
                 if isinstance(a, dict)
             ],
             id=d.get("id", ""),
+            claim_discriminator=str(d.get("claim_discriminator", "") or ""),
         )
 
 

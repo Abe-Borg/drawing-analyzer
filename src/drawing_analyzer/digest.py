@@ -1348,7 +1348,8 @@ def _rebind_cached_finding(f: Finding, ref: SheetRef) -> Finding:
     if was_fallback:
         f.sheet_id = _fallback_sheet_id(ref)
     f.id = compute_finding_id(
-        f.sheet_id, f.category, f.source_quote or f.text, f.source_id
+        f.sheet_id, f.category, f.source_quote or f.text, f.source_id,
+        f.claim_discriminator,
     )
     return f
 
