@@ -1680,6 +1680,22 @@ produce a ledger entry.** Synthesis prose contributes its conflict statements
 the same way, anchored on the first sheet each names and dual-anchored when a
 second sheet is named.
 
+**Filler and assurances are not findings** (remediation WP-09.1). An item that
+only says there is nothing to report ("No conflicts noted on this sheet.",
+"None apparent on this sheet.", "No cross-discipline items noted for this
+sheet.") is dropped before any structuring call, so it never becomes a margin
+callout. It is recognized only when *every* word is on a closed list, so a
+finding that names a tag, a size or anything else ("No isolation valve is
+shown.") is always kept. Likewise, a synthesis sentence that mentions a
+conflict only to say there is none ("No conflicts were found between M-101 and
+P-101.") is not harvested as a conflict. It is still harvested if it names a
+real conflict elsewhere or contrasts ("…, but M-101 shows 500 gpm and P-101
+shows 550 gpm"). Synthesis sentences are read section by section, so a heading
+never becomes part of one. Both drops are counted in the run record's prose
+carry-through counts (`filtered` for filler, `assurances` for synthesis
+assurances), and neither counts as a lost item. Wording outside the lists
+("No duct conflicts noted.") is kept and structured, as before.
+
 ## Deterministic auditors
 
 Alongside the model reads, the analyzer runs a **battery of deterministic,

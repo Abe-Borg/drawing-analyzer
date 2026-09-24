@@ -607,14 +607,40 @@ reporter of last resort must never raise from inside Tk's handler.
   cross-auditor duplicate (one quote, one rectangle) still becomes one ledger
   entry with both tags. `audit_titleblock`'s own two-path dedup keys on
   (sheet, quote) explicitly, never on the id, which is not an identity (B8));
-  `prose_harvest.py` — whose boilerplate filter is anchored at **both** ends
+  `prose_harvest.py` — whose filler filter is anchored at **both** ends
   (P8 item 6: anchored only at the start, it discarded every real finding that
   *opened* with No/None/Nothing/N/A, which is how an absence finding naturally
   opens), with the length floor at 8 and a `filtered` count so a drop cannot
   vanish — `expected` is built from what survived the filter, so `missing` read 0
   and `complete` was True over a real loss. That count is **observational** (the
   §7.2 discard-counter contract): filler is not a lost finding, so it feeds
-  neither. `prose_harvest.py` (mirrors prose Coordination/Conflict items,
+  neither. Since remediation WP-09.1 (B11, N11; the owner's rules) filler and
+  synthesis assurances share **one closed vocabulary** in two anchored forms.
+  `_TRIVIAL_RE` is a WHOLE item of listed words (`none`/`n/a`/`nothing
+  [further]`, or `no` + up to two listed modifiers + a listed noun; an optional
+  listed label; up to four listed qualifiers in any order), applied by
+  `_split_items`, the one filter site, so filler reaches neither the
+  structuring call nor the degraded entry. It used to allow one qualifier and
+  no modifier, so "No conflicts noted on this sheet." cost a Sonnet call and,
+  with no client, became a medium margin callout. `_is_assurance` (synthesis
+  only) drops a statement only when every conflict signal sits inside an
+  `_ASSURANCE_RE` span ("no [modifiers] <conflict noun> [between <sheet ids,
+  discipline names, listed words>] [were] <detection word>", "nothing
+  inconsistent", "there are no <noun>", "found no <noun>", a conflict label
+  right before one) and no contrast word appears (but, however, except, other
+  than...). The noun must be the head (`no conflict resolution is shown`
+  stays), and the phrase before the verb is closed, since an open one swallowed
+  a clause. An unlisted word keeps the item: the safe direction, a paid call as
+  before. Synthesis items are split per section with the report's
+  `split_into_sections` (read, not changed). A heading used to join an item
+  (N31): glued to a bullet, it made a false dual-anchored conflict, and in
+  paragraph layouts it defeated the assurance rule. A dropped assurance is
+  counted in `HarvestResult.assurances`, observational like `filtered`
+  (`run_manifest.json` `prose_accounting`). Ordinals count kept items, so
+  dropping filler before a real item moves that item's `prose_item_id` once;
+  no cache key holds one (the structuring key hashes the item, the sheet id,
+  the text layer and the source binding), so `_HARVEST_CACHE_CONTRACT` stays 1.
+  `prose_harvest.py` (mirrors prose Coordination/Conflict items,
   synthesis conflicts, and opted-in focus items into findings — match first,
   one small structuring call for stragglers on **Sonnet 5** at `EFFORT_LOW`,
   degraded sheet-level entry on failure; opt-in structured outputs

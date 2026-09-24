@@ -241,6 +241,30 @@ counts, so a warm run shows the same warning.
 - Measured before deciding: the suite's fixtures produce no refused item (84
   validator calls), so no pinned status moved under either option.
 
+Added by WP-09.1: **the prose harvest's dropped synthesis assurances are
+counted observationally** (the owner's decision; N11). The harvest's ladder is
+unchanged: `missing` (an enumerated item that reached no ledger entry) alone
+holds the stage at PARTIAL. `HarvestResult.assurances` counts the synthesis
+statements that carry a conflict signal only inside an assurance ("No
+conflicts were found between M-101 and P-101.", "No conflicts noted."), which
+the harvest does not take as conflicts. It has the contract of `filtered`
+(P8 item 6): it reaches `prose_accounting` in `run.log` and `run_manifest.json`
+and feeds neither `missing` nor `complete`.
+- Why not D-2's item rule: an assurance is not an item the stage was required
+  to carry through. It is never enumerated, like filler, so it is outside the
+  denominator; the count exists so a rule that drops a real conflict is
+  visible in the manifest.
+- `filtered` keeps its meaning (the digest's Coordination/Conflict lines the
+  filter removed). Since WP-09.1 it also counts filler with repeated
+  qualifiers or a listed modifier (B11), which used to pass the filter.
+- Considered and not taken: folding the assurances into `filtered` (one
+  number, but `filtered` would stop meaning only digest lines); not counting
+  them (a log line only, so a misfiring rule could not be audited from the
+  manifest).
+- A run whose only prose items were filler or assurances enumerates nothing,
+  so its prose-harvest stage reads `SKIPPED_VALID`, as any run with no prose
+  items did before.
+
 ## D-3 Finding identity — `open` (to be decided by WP-03.4)
 
 **Required decision:** keep four things separate: physical evidence identity,

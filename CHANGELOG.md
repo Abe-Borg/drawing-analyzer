@@ -48,6 +48,67 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Section filler became a paid call and a medium margin note, and a
+  synthesis sentence saying there was no conflict became a conflict
+  (remediation WP-09.1; B11, N11, N31).** The prose harvest mirrors the
+  digest's Coordination/Conflict prose, and the set synthesis's conflict
+  statements, into findings. Three gaps:
+  - **B11.** The filler filter allowed one closing word after "No conflicts"
+    and nothing before the noun. So "No conflicts noted on this sheet.", "No
+    conflicts identified at this time.", "None apparent on this sheet." and "No
+    cross-discipline items noted for this sheet." all passed it. Each cost a
+    Sonnet structuring call on an exhaustive run. With no API client or a failed
+    call, each was ingested verbatim as a medium, sheet-level finding: a margin
+    callout announcing that nothing was wrong.
+  - **N11.** Synthesis conflict extraction matched conflict words anywhere. So
+    "No conflicts were found between M-101 and P-101." became a paid
+    structuring call and a conflict clouded on both sheets. And "The mechanical
+    and plumbing sheets are consistent; no conflicts were identified at this
+    time." became a medium set-level conflict in `Drawing_Set_Review_Notes.pdf`.
+  - **N31, found while measuring N11.** Synthesis items were split from the
+    whole Markdown text, so a heading joined an item. Glued to the bullet above
+    it, "**Cross-sheet / cross-discipline conflicts**" made that bullet a
+    conflict naming its sheets, with no negation involved. In paragraph layouts
+    under `###` or bold headings, the whole run was one item.
+
+  Now, decided with the owner (see the WP-09.1 handoff in
+  `_plans/PROGRESS.md`):
+  - filler is a **closed vocabulary**: the whole item must be `none`, `n/a`,
+    `nothing [further]`, or `no` + up to two listed modifiers
+    (cross-discipline, coordination, other, new...) + a listed noun (conflicts,
+    issues, items, discrepancies...), with an optional listed label
+    ("Coordination items:") and up to four listed qualifiers in any order
+    (noted, identified, at this time, on this sheet, with other disciplines...).
+    An item with any other word is kept, so "No isolation valve is shown." and
+    every other absence finding survive;
+  - a synthesis statement is an **assurance**, and is not harvested, only
+    when every conflict word it carries sits inside a listed assurance form
+    ("no conflicts were found", "there are no discrepancies", "found no
+    conflicts", "nothing inconsistent") and it carries no contrast word (but,
+    however, except, other than...). "No conflicts were resolved between M-101
+    and FP-101; both remain open", "X conflicts with Y; no other conflicts
+    were found" and "No conflicts were found, but M-101 shows 500 gpm and P-101
+    shows 550 gpm" are still conflicts;
+  - synthesis items are read **section by section**, with the report's own
+    section grammar, so a heading never joins one;
+  - each dropped assurance is **counted** (`assurances` in the prose
+    carry-through counts of `run.log` and `run_manifest.json`), and filler in
+    `filtered`, as before. Neither is a lost item.
+
+  **Visible effect:** no margin callout or set-level note announces that
+  nothing is wrong, and `Drawing_Set_Review_Notes.pdf` is not written when an
+  assurance was its only content. A run whose only prose items were filler
+  now reports the prose-harvest stage as a valid skip. **Calls saved:** one
+  Sonnet structuring call per filler line, and per synthesis assurance that
+  names a sheet, on each exhaustive run. **Accepted limits**, recorded as
+  tests: wording outside the lists is kept and structured, as before ("No duct
+  conflicts noted.", "No items requiring coordination.", "M-101 does not
+  conflict with P-101.", "Checked M-101 against P-101 for conflicts; none were
+  found."). **Ids and cache:** once filler before a real item is dropped, that
+  item's ordinal and `prose_item_id` (in `findings.json`) change once. No cache
+  key holds one, so no stored structuring result is re-billed and no cache
+  contract moves.
+
 - **Cross-sheet QC dropped every uncertain conflict unseen, and folded
   different conflicts that quote the same strings into one (remediation
   WP-06.1; B6, N2).** Two gaps:
