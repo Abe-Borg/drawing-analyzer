@@ -655,6 +655,18 @@ what could not be verified, risks, and next steps.
     skips (IPv6 loopback; chmod as root).
   - **After the Codex P2 fix:** full suite **3,524 passed, 2 skipped, 10
     deselected** (216 s): the 3,520 above plus the 4 cost tests.
+  - **Windows CI, fixed in this PR.** On `cc03bff` the Windows leg errored in
+    setup and teardown of both long-run cost cases. Their parameter was the
+    1,000,000-character run itself, and pytest names a test after a string
+    parameter. Windows refuses a `PYTEST_CURRENT_TEST` longer than 32,767
+    characters (`ValueError`). Each error report then printed the
+    million-character name, and the job log shows about seven minutes between
+    those lines, so the job crawled instead of failing. The parameter is now the
+    four-character unit and the run is built inside the test; the longest test
+    id in the suite is 216 characters. Reproduced here with a scratch plugin
+    that gives `os.putenv` Windows' limit: 4 errors before, 2 passed after.
+    Full suite after: **3,524 passed, 2 skipped, 10 deselected** (224 s),
+    unchanged, and the same under the plugin (216 s).
   - **Browser suite:** not run separately. No report JS, HTML or chat code
     changed, and the browser tests ran inside the full suite.
   - **Lint and scans:**

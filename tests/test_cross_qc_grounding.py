@@ -756,23 +756,27 @@ def test_the_boundary_check_never_rederives_a_words_core(monkeypatch):
     assert words.contains("AHU-7") is False
 
 
-@pytest.mark.parametrize("run", [
-    "XP-1" * 250_000,             # the quote recurs inside the run, never at its start
-    "P-1X" * 250_000,             # it starts the run and recurs through it
+@pytest.mark.parametrize("unit", [
+    "XP-1",                       # the quote recurs inside the run, never at its start
+    "P-1X",                       # it starts the run and recurs through it
 ])
-def test_a_quote_recurring_inside_one_long_run_costs_linear_time(run):
+def test_a_quote_recurring_inside_one_long_run_costs_linear_time(unit):
     """A garbled or per-glyph text layer can be one whitespace-free run.
 
     The quote recurs 250,000 times inside this 1,000,000-character word.
     Re-deriving the word's core at every occurrence copied the whole word each
     time: about 7 s here, and quadratic in the run's length. Only the matching
     is timed; indexing the text is linear and happens once per sheet.
+
+    The run is built here, never passed as the parameter: pytest names a test
+    after a string parameter, and a 1,000,000-character name cannot be set as
+    ``PYTEST_CURRENT_TEST`` on Windows (32,767 characters at most).
     """
     import time
 
     from drawing_analyzer.anchor import SourceWords
 
-    words = SourceWords("NOTE " + run + " PUMP P-1 END")
+    words = SourceWords("NOTE " + unit * 250_000 + " PUMP P-1 END")
     t0 = time.perf_counter()
     assert words.contains("P-1") is True            # the real one, after the run
     assert words.contains("P-1 SERVES") is False
