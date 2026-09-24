@@ -21,12 +21,19 @@ class SheetRef:
     """Identifies one sheet: a single page within a source PDF.
 
     ``source_id`` is the **host-owned** identity of the input this page belongs
-    to (``"SRC-0001"`` …), assigned once per accepted input by
-    :func:`render.list_sheets` (DA-001). It is what disambiguates two inputs
+    to (``"SRC-0001"`` …), assigned once per accepted input by the inventory
+    (:func:`render.inspect_inputs`; :func:`render.list_sheets` derives the same
+    ids from the accepted paths, DA-001). It is what disambiguates two inputs
     that share a basename: ``source_name`` is display-only and *not* authority.
     It defaults to ``""`` so hand-built refs (older callers, tests that don't
     care about isolation) keep working; every collision-safe lookup falls back
     to ``source_name`` when ``source_id`` is blank (see :func:`source_page_key`).
+
+    The pages a run owes are the inventory's (remediation WP-11.1; D-8):
+    :func:`render.inventory_sheet_refs` builds one ref per page of every
+    accepted document without reopening a file, and ``page_count`` is the
+    inventory's count, so ``display_label`` (model-visible, in no cache key)
+    reads ``page k/N`` against the revision the run set out to read.
     """
 
     pdf_path: Path
@@ -87,6 +94,41 @@ def source_page_key(obj: Any) -> tuple[str, int]:
     name = getattr(obj, "source_name", "") or ""
     page = int(getattr(obj, "page_index", 0) or 0)
     return (sid or name, page)
+
+
+@dataclass(frozen=True)
+class UnreadPage:
+    """An expected page the digest could not read, and why (remediation WP-11.1, R1).
+
+    The owner's rule: a page the run owes (one page of an accepted inventory
+    document, D-8) that produced no digest is not a failed read (there was no
+    read, and a :class:`~drawing_analyzer.digest.SheetDigest` claims one), so it
+    is this typed record instead: ``DrawingContext.unread_pages``, exported as
+    ``unread_pages`` in ``run_manifest.json`` and listed in run.log's Sheets
+    section, beside one ``PAGE_UNREAD`` journal event. ``reason`` is path-free by
+    construction (exception type names and page counts only), and the record
+    holds no path, so :meth:`to_dict` is portable.
+    """
+
+    source_id: str
+    source_name: str
+    page_index: int          # zero-based
+    page_count: int          # the inventory's count
+    reason: str
+
+    @property
+    def display_label(self) -> str:
+        """The same ``name (page k/N)`` label a :class:`SheetRef` shows."""
+        return f"{self.source_name} (page {self.page_index + 1}/{self.page_count})"
+
+    def to_dict(self) -> dict:
+        return {
+            "source_id": self.source_id,
+            "sheet": self.display_label,
+            "page_index": int(self.page_index),
+            "page_count": int(self.page_count),
+            "reason": self.reason,
+        }
 
 
 # ---------------------------------------------------------------------------

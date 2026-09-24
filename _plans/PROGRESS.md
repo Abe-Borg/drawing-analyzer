@@ -1,7 +1,7 @@
 # Remediation progress tracker
 
-**Next up:** Wave 1 in order: `WP-11.1` (R1 core: per-source and per-page fault isolation in the render and prescan iterators; the inventory is the page denominator; every expected page gets an outcome). It depends on nothing. WP-01.4 is done: a critique read the model did not finish (cut off, refused, ended early, a continuation or an unknown stop) is not a completed read on either transport and keeps nothing; the critique stage counts reads under D-2's item rule (one finished read of two is PARTIAL, none is FAILED), its usage record agrees, and the critique cache contract went 2 → 3 (N4, critique part). WP-10.4 (Wave 2) is now available: its dependencies WP-01.2 and WP-01.4 are done. WP-01 is not done: WP-01.5 (Wave 2), WP-01.6 and WP-01.7 (Wave 2, waiting on WP-02.3) remain. WP-09 is not done: WP-09.3 (N32, Wave 3) remains. WP-06 is not done: WP-06.2 and WP-06.3 (Wave 2) are available, and WP-06.4 still waits on WP-03.4. WP-05 is not done: WP-05.3 remains (Wave 2, available). WP-07 is not done: WP-07.3 (Wave 2, available). WP-03 is not done: WP-03.4, WP-03.5 and WP-03.6 remain (Wave 2); WP-03.5 also carries the measured N30 exposure of cross-QC's same-pair conflicts. WP-04 is not done: its acceptance needs quantity roles, slice `WP-04.3` (Wave 2). First check the open PRs ([`README.md`](README.md), step 1). Before the next stable tag, the owner should look at O-5.
-**Last updated:** 2026-09-24 by the WP-01.4 session ([PR #171](https://github.com/Abe-Borg/drawing-analyzer/pull/171)).
+**Next up:** Wave 1 in order: `WP-11.2` (R1: digest-phase containment: the completed paid digests, the journal and the manifest always ship, and the uploads and render spool are released on every exit). Its dependency WP-11.1 is done: the inventory's pages are the workload (D-8's page part, decided), a source that cannot be opened again or a page that cannot be read no longer ends the run (each such page is an `UnreadPage` with one `PAGE_UNREAD` event, and one line per source), the prescan routes what it cannot scan to the render path, a changed page count fails the missing pages or names the extra ones, and the critique takes the same pages (R1 core). WP-11.3 (Wave 2, revision on reopen) is now available. WP-10.4 (Wave 2) is available: its dependencies WP-01.2 and WP-01.4 are done. WP-01 is not done: WP-01.5 (Wave 2), WP-01.6 and WP-01.7 (Wave 2, waiting on WP-02.3) remain. WP-09 is not done: WP-09.3 (N32, Wave 3) remains. WP-06 is not done: WP-06.2 and WP-06.3 (Wave 2) are available, and WP-06.4 still waits on WP-03.4; WP-06.2 completes D-8. WP-05 is not done: WP-05.3 remains (Wave 2, available). WP-07 is not done: WP-07.3 (Wave 2, available). WP-03 is not done: WP-03.4, WP-03.5 and WP-03.6 remain (Wave 2); WP-03.5 also carries the measured N30 exposure of cross-QC's same-pair conflicts. WP-04 is not done: its acceptance needs quantity roles, slice `WP-04.3` (Wave 2). WP-11 is not done: WP-11.2 and WP-11.3 remain. First check the open PRs ([`README.md`](README.md), step 1). Before the next stable tag, the owner should look at O-5.
+**Last updated:** 2026-09-24 by the WP-11.1 session (PR-PLACEHOLDER).
 
 This file is authoritative for **status and order**. Requirements live in
 [`drawing-analyzer-remediation-plan.md`](drawing-analyzer-remediation-plan.md).
@@ -115,8 +115,8 @@ starting.
 | WP-09.2 | Prose matching rejects signature-incompatible candidates; per-item outcome counters; labelled paraphrase corpus (no threshold change) (N10, U11) | M | WP-04.2, WP-09.1 | done | [PR #169](https://github.com/Abe-Borg/drawing-analyzer/pull/169), 2026-09-24. **Rules decided by the owner (eight choices, measured first):** (1) `_match_entry` refuses a candidate at or above 0.7 whose critical signature conflicts with the item's (`prose_harvest._veto_axes`: `critique.signature_conflicts` over `critique.critical_signature`, the one rule), signing "text against text": the item from its text and its synthesis legs, the candidate from its text, quote and legs with its `anchor_hint` set aside (measured: a bare-text item refused 5 of the suite's 17 matches, its own quote-less twins, and broke two pinned tests; the item taking the candidate's placement switched the polarity axis off against every SHEET entry); (2) the next-best compatible candidate wins; (3) a refused item is a straggler (a structuring call or a degraded entry; the calls accepted); (4) N32 goes to its own slice, WP-09.3; (5) every enumerated item has one `ProseItemOutcome` (`HarvestResult.outcomes`: channel, outcome, call, folded, refused), the counters are the number of items with each outcome (`_record_outcome`; an ingest that raised used to count one item structured and degraded, fixed), and `vetoed`, `folded`, `filtered_focus` and a per-channel `by_channel` table reach `prose_accounting` (`run.log` one line per channel, `run_manifest.json`), all observational (D-2 note); (6) suppressed items are counted per channel, focus filler included whether or not focus is harvested (new `filtered_focus`), with no ids; (7) a straggler the ledger folds keeps its outcome and is counted `folded`; (8) the labelled corpus pins its numbers at 0.5 to 0.9 with and without the veto, `_MATCH_OVERLAP == 0.7` asserted. No cache contract or key moves (`_HARVEST_CACHE_CONTRACT` stays 1). Tests: `tests/test_prose_match_signatures.py`, `tests/test_prose_paraphrase_corpus.py`, `tests/test_drawing_acceptance.py::test_gauntlet_prose_outcomes_are_exact`. No pinned test re-baselined; no fixture changes outcome (instrumented). Recorded limits: a SHEET absence with no absence word takes a presence item; a refused presence item that degrades to a SHEET entry can fold into an absence entry in the ledger (`_is_absence`); near misses the signature cannot read (corpus) |
 | WP-01.3 | Digest partial reads: a raised-cap retry never loses the first read; findings from an errored, refused or truncated digest are labelled or held out of the ledger (N15, N16) | M | WP-01.2 | done | [PR #170](https://github.com/Abe-Borg/drawing-analyzer/pull/170), 2026-09-24. **Rules decided by the owner (seven choices, two rounds, measured first):** (1) one rank decides which read a sheet keeps, on both transports (`digest.keep_digest_read`, over `digest._read_rank`): finished > a partial read with content (prose or findings) > refused > nothing (empty, errored envelope, a raise); the later read wins a tie, so of two partial reads the raised-cap one is kept and of two content-free reads the fresher error; reads are never mixed (I-2); every attempt's usage is kept; applied by the real-time retry in `digest_sheet` and by `batch_digest._replace_result_with_attempt_history` at all five sites; (2) the kept read's error names the discarded attempt (`; retry: <its error>`, `; retry failed: <error>` for a raise, the batch direct rescue included, `; N retries, the last: …` for several); (3) the stalled-batch harvest holds a partial read (`digest.is_partial_read`) as the sheet's result while the sheet is still rescued (rescue list from `harvest.resolved`); (4) N15: an unfinished read's findings are held out of the review (`models.review_findings` / `held_out_findings`), listed in the sheet's own export file and report card, and counted observationally (`ctx.digest_findings_held_out`, a digest-stage warning, `findings_held_out` on `SHEET_DIGESTED` and the run.log *Sheets* line, the manifest's `digest_findings_held_out`; D-2 note). No cache contract, key, prompt or schema moved (only finished reads are cached, pinned for both transports). Tests: `tests/test_digest_partial_reads.py` (75). Re-baselined: `tests/test_drawing_digest.py::test_a_failed_retry_keeps_the_truncated_first_read` (its error gains the raise's text, approved). Found and fixed here beyond the request's description: a batch resubmission that comes back as an errored envelope also wiped the first read, and the harvest dropped a cut-off read with prose. Found, not fixed: the advisory set-identity corpus reads an errored sheet's text (WP-01.6 note) |
 | WP-01.4 | Critique: `max_tokens`/refusal/unknown terminal states are not completed reads on either transport; critique-only cache contract term (N4 critique) | M | WP-01.2 | done | [PR #171](https://github.com/Abe-Borg/drawing-analyzer/pull/171), 2026-09-24. **Rules decided by the owner (six choices, two rounds, measured first):** (1) a critique read the model did not finish (D-1: anything but `end_turn`/`stop_sequence`; the critique declares no tools, so `tool_use`/`pause_turn`/`compaction` too) keeps **nothing**, like a malformed read: no findings, no claims for the arithmetic auditor; its tokens stay billed. The one fix site, `critique.outcome_from_message`, reads the stop reason first on both transports; (2) the critique stage adopts **D-2's item rule**: its items are reads (eligible = sheets x requested reads, judged = finished with a valid findings object; a cache hit counts all its reads), COMPLETE only when every read was judged, FAILED when none was (it read PARTIAL), else PARTIAL; a coverage line leads the warnings and `critique.critique_shortfall` names each short sheet (`pipeline._CritiqueReadTally`, a `read_tally` sink on `_run_critique_stage`). This closes the gap: a sheet whose surviving read shipped findings kept `error=None` and read COMPLETE, cached nothing and was re-billed every warm run; (3) the per-sheet usage record agrees (COMPLETE only when every read counted, FAILED when none did, else PARTIAL); (4) one ladder: `digest.digest_terminal_error(..., noun="critique")` (`empty critique (…)` kept, the digest's wording unchanged); (5) no stored per-read stop reasons; (6) the stage's items are reads (eligible -> judged). `digest_cache._CRITIQUE_CACHE_CONTRACT` 2 -> 3 (one register row; the unchanged merge-rule fingerprint pinned under 3; the contract-2 keys pinned). `FINDINGS_PARSE_OK`, `_SCHEMA_VERSION` and the merge rule unchanged. Tests: `tests/test_critique_terminal_outcome.py` (128), the WP-01.4 section of `tests/test_drawing_cache_identity.py` (2). No pinned assertion re-baselined (one data row: the fingerprint under 3). Instrumented over the whole suite: only critique stage items (reads), 12 all-failed critiques PARTIAL -> FAILED and their usage records moved |
-| WP-11.1 | Per-source and per-page fault isolation in the render and prescan iterators; the inventory is the page denominator; every expected page gets an outcome (R1 core) | M | — | todo | |
-| WP-11.2 | Digest-phase containment: completed paid digests, journal and manifest always ship; uploads and spool released on every exit (R1) | M | WP-11.1 | todo | |
+| WP-11.1 | Per-source and per-page fault isolation in the render and prescan iterators; the inventory is the page denominator; every expected page gets an outcome (R1 core) | M | — | done | PR-PLACEHOLDER, 2026-09-24. **Rules decided by the owner (six choices, two rounds, measured first):** (1) the pages a run owes are the inventory's, built without reopening a file (`render.inventory_sheet_refs`, `InputInventory.expected_page_counts`), and D-8's page part is decided narrowly (a sheet the run owes is one page `(source_id, page_index)` of an accepted inventory document); (2) both iterators take `expected_pages`: a source that will not open again fails every expected page with one shared `render.SourceUnreadableError`, a page past the source's current end fails with `render.PageNotInSourceError`, and a source none of whose pages is wanted is never opened; (3) an unread page is a typed record (`models.UnreadPage`: `ctx.unread_pages`, `unread_pages` in `run_manifest.json`, a `NOT READ` line in run.log's Sheets section) plus one `PAGE_UNREAD` event, so every expected page ends with exactly one per-page event; a page neither yielded nor reported gets one too; (4) `ctx.errors` and the digest stage's errors say a source-level failure once per source, a page failure once per page; (5) the prescan is best effort: what it cannot scan goes to the render path (the one reporter), and `_GeometryOmissionSink(order=)` adds a routed page's geometry in page order; (6) a source with more pages is read for its inventoried pages and named in one run error (the stage stays COMPLETE, the run PARTIAL), fewer pages fail the missing ones; labels keep the inventory's count, the render identity the opened file's; (7) the critique takes the same refs (`list_sheets` only as a direct caller's fallback): a source lost after the digest is critiqued from the spooled renders or retained uploads, and on Hybrid each page it cannot obtain is named with the reason. No key, prompt or schema moved (`tests/test_drawing_cache_identity.py` unchanged); `run_manifest.json` gains `unread_pages`. Tests: `tests/test_source_page_isolation.py` (77). No pinned test re-baselined; outside the new file only the critique's degraded line in the 2 fixtures with an unrenderable page (it now names the reason) and 3 `PAGE_UNREAD` events moved (instrumented) |
+| WP-11.2 | Digest-phase containment: completed paid digests, journal and manifest always ship; uploads and spool released on every exit (R1) | M | WP-11.1 | todo | From WP-11.1: a source or page that fails after the inventory no longer raises out of the digest phase (the iterators report it page by page), so the measured aborts are gone; what remains is an unexpected exception anywhere else inside it. `_digest_sheets_concurrent` still loses its paid `results` on one; `submit_drawing_batch` (`batch_digest.py`) still has no DA-034 cleanup guard (its twin `submit_critique_batch` does); the render spool is created before the digest and closed only in the critique stage's `finally`, and retained uploads are released only there, so an exception before the critique leaks both; `help_content.py`'s "released on every exit path" is still false. `results` in `_digest_sheets_concurrent` is sized by `total` and can no longer overflow: with `expected_pages` the stream never yields more sheets than it was asked for. When the phase fails, keep the `_UnreadPages` contract: every page the run owed still ends with a digest or an `UnreadPage` |
 | WP-16.1 | Key store: BOM-safe load, repair of BOM values already in the keyring, shape check, migration that never deletes the only good copy (G3) | S/M | — | todo | |
 | WP-16.2 | Run-scoped client snapshot passed from `gui._worker`; key entry disabled while busy; the key is no longer written to `os.environ` (G2) | M | — | todo | |
 
@@ -131,7 +131,7 @@ starting.
 | WP-01.7 | Interrupted-stream outcome and usage capture (`current_message_snapshot`), threaded through the digest retry loop (U1 partial-stream part; WP-14 step 7) | M | WP-01.2, WP-02.3 | todo | |
 | WP-05.3 | Character-stream fallback tier with a quantity-aware numeric veto (B4: `6 "`, `INCHDRAIN`, `12' - 6"`, `2 %`). Matches only contiguous source words, never a "manufactured joined string" (plan §2 rule 15) | M | WP-05.2, WP-04.1 | todo | From WP-05.2: the four cases are pinned UNANCHORED in `tests/test_anchor_whole_words.py::test_recorded_limit_the_character_stream_cases_are_wp_05_3s`; flip them. Build on what WP-05.2 left: every tier matches whole source words through `anchor.SourceWords` (words folded by `anchor.fold_word`, each keeping its sheet word's `index`), and the window refuses a quote measurement inside part of a word (`_measurements_whole`). A new tier is its own method, so `numbers_grounded` fails closed for it until it carries the veto. Also pinned there as a recorded limit, present before for unbracketed text: the sub-phrase veto reads digit-bearing tokens only, so a sub-phrase can drop a unit printed as its own word (`150 GPM 568 L/S` anchors FUZZY on `150 GPM (568`); the quantity-aware veto should refuse it. Keep cross-QC and the anchor agreeing (the agreement table in that file) or record each difference with the owner |
 | WP-04.3 | Quantity roles for repeated same-kind values: the WP-04 matrix row "repeated values in different roles" (swapped: `6 in main, 4 in branch` / `4 in main, 6 in branch`; one value in two roles: `6 in supply, 6 in return` / `6 in supply, 8 in return`) | M | WP-04.2 | todo | Added by WP-04.2 (README 7.3): WP-04's acceptance does not hold without it. Nothing extracts a quantity's role, and the signature is a set, so both pairs carry compatible tokens and the same words. Do not settle it by keeping apart every pair that carries two or more values of one kind on both sides: that splits the commonest duplicate there is, the same "500 gpm shown, 550 gpm required" from both critique reads. It needs a role signal (for example the noun a quantity qualifies) with a negative corpus. Both pairs are pinned as recorded limits in `tests/test_quantity_signature.py::_RECORDED_LIMITS`; move them to `_CONFLICTS`. A role in the stored signature changes what an A/B record stores (`RECORD_CONTRACT_VERSION` 3 → 4) and what a critique entry holds (critique contract 2 → 3). Related, and under the same bump: `critique._TAG_RE` reads the `x12` of a tight `24"x12"` as a tag, and under WP-04.2's tag inclusion that stray tag beside a different extra reference on the other finding keeps apart two findings the old rule merged |
-| WP-06.2 | Whole-set cross-QC on host handles (label shown beside handle), grounded against **uncapped** evidence text like the sharded path, claims rebound through handles, framing hashed into the key; decides D-8 if not yet decided (N6, U8, K2) | L | WP-05.1 | todo | From WP-05.1: ground through `classify_quote_evidence` (a real, whole-word match at any length on the anchor's normalizer), not a second check. The gauntlet's whole-set `CROSS_CONFLICT` quotes (`VAV-7 COOLING 12 KW`, `PANEL LP-2 FED FROM MDP`) are printed as whole lines on their sheets, so they stay grounded. What the whole-set path admits is host-side binding: bump `_CROSS_QC_CACHE_CONTRACT` (4 since WP-05.1), not a key term From WP-06.1: the contract is 6. The refused-item counts are a separate record (`CrossQCResult.invalid`, both paths), so making `discards` non-None on the whole-set path touches nothing of it. That path still drops an item it cannot place on two sheets without a counter (an INFO line, now separate from the refused-item warning); count it with the grounding counters (the sharded path's `findings_dropped_under_two_legs`) when `discards` becomes non-None there. `_drop_exact_repeats` keys on the whole finding, so it is label-free; it needs nothing from D-8 |
+| WP-06.2 | Whole-set cross-QC on host handles (label shown beside handle), grounded against **uncapped** evidence text like the sharded path, claims rebound through handles, framing hashed into the key; decides D-8 if not yet decided (N6, U8, K2) | L | WP-05.1 | todo | From WP-05.1: ground through `classify_quote_evidence` (a real, whole-word match at any length on the anchor's normalizer), not a second check. The gauntlet's whole-set `CROSS_CONFLICT` quotes (`VAV-7 COOLING 12 KW`, `PANEL LP-2 FED FROM MDP`) are printed as whole lines on their sheets, so they stay grounded. What the whole-set path admits is host-side binding: bump `_CROSS_QC_CACHE_CONTRACT` (4 since WP-05.1), not a key term From WP-06.1: the contract is 6. The refused-item counts are a separate record (`CrossQCResult.invalid`, both paths), so making `discards` non-None on the whole-set path touches nothing of it. That path still drops an item it cannot place on two sheets without a counter (an INFO line, now separate from the refused-item warning); count it with the grounding counters (the sharded path's `findings_dropped_under_two_legs`) when `discards` becomes non-None there. `_drop_exact_repeats` keys on the whole finding, so it is label-free; it needs nothing from D-8 From WP-11.1: D-8's page part is decided (`DECISIONS.md`): a sheet the run owes is one page `(source_id, page_index)` of an accepted inventory document, keyed by `models.source_page_key`, the pages a run owes are exactly the inventory's (`render.inventory_sheet_refs`), the inventory's `content_sha256` is the revision the run set out to read, and human sheet ids and the `page k/N` label are display metadata. This slice completes D-8: bind every evidence leg and the whole-set handles to that identity (N6's first-wins label maps, the colliding `stem-pN` fallback ids), amending D-8 there if the page part needs to move |
 | WP-06.3 | Cross-QC terminal honesty: `stop_reason` checked, streaming, bounded raised-cap retry, bounded partial-array salvage, fact-cap and omission counters; decision recorded for N14 (U6, U7 observability, N14) | M | WP-01.2 | todo | From WP-06.1 (found, not fixed): `_parse_facts` skips a fact that is not an object with no counter, on the same line as the 40-fact cap (`if not isinstance(item, dict) or len(out) >= DEFAULT_MAP_MAX_FACTS`); count both there. A leg in `also_on` that is not an object is skipped silently too (on the sharded path a finding it leaves under two legs is counted, `findings_dropped_under_two_legs`). WP-06.1 made refused findings observational and cached with their counts (the owner's decision, D-2 note); N14's decision (cache a degraded result with its status, or not) is still this slice's |
 | WP-10.1 | Tile-label and display-label contract folded into the keys without invalidating unchanged entries (K1) | S | — | todo | |
 | WP-10.2 | Critique contract resolved per transport at probe and store; batch runs log that the structured flag is ignored (K3) | S/M | — | todo | |
@@ -142,7 +142,7 @@ starting.
 | WP-03.6 | Canonical final clustering over retained observations; per-observation anchors; idempotent reconciliation (WP-03 clustering clarification) | M/L | WP-03.5 | todo | From WP-03.1: flip `tests/test_pass_b_complete_link.py::_BRIDGE_JOINS` (which cluster the generic bridge joins follows arrival order) and `::test_recorded_limit_a_four_finding_chain_still_counts_by_arrival_order` (entry count 2 or 3 by order). From WP-03.7: the geometric recall WP-03.1 gave up does not come back. A rectangle is resolved from the quote, so it is evidence of where, never of which claim (D-3 input); per-observation anchors map evidence and must not merge two observations (`tests/test_pass_b_complete_link.py::test_a_same_spot_pair_never_folds_on_position`). Pass B now folds nothing Pass A refused, so canonical clustering may replace it rather than extend it |
 | WP-06.4 | Direction-free merge for reversed cross-sheet conflicts with a stated same-claim predicate (B10) | M | WP-03.4, WP-06.1 | todo | From WP-06.1: cross-QC collapses only findings identical in every field (`_drop_exact_repeats`) and hands every other report to the ledger. So a re-report of one conflict phrased very differently (a shard and the reconciler, or two reconcile pair calls: a within-group conflict comes back from every pair its group is in) reaches the ledger twice, and stays two entries when the texts agree too little (overlap 0.118 in `tests/test_cross_qc_validation_and_dedup.py::test_n2_a_re_report_phrased_apart_reaches_the_ledger_twice`, pinned as the accepted cost). The same-claim predicate this slice states should fold it without folding the N2 pair (`test_n2_the_acceptance_pair_survives_*`, which must stay two) |
 | WP-07.3 | Truthful arithmetic counters split by provenance; contradictory transcriptions of one quote flagged (N18; WP-07 step 7) | S/M | WP-07.1, WP-03.3 | todo | From WP-07.2: the matched path (`result.matched`) still checks neither provenance nor the relationship, so a claim whose operands or operation the sheet does not state still counts as "checked out OK"; and a claim with a refused term (`1e3`, `24x12`) now counts `unusable` instead of `checked`, so `arithmetic_checked` can read lower on the same claims. From WP-03.3: the "claim dedup keys move to Decimals" part of WP-07 step 7 is done (`arithmetic.claim_content_key`, shared by all three claim dedups). Since WP-03.3 two contradictory mismatch transcriptions of one quote (different terms) are two findings, where the coordinator used to keep the first one silently; a contradictory pair where one read matches and the other does not still counts one matched and one mismatched (N18 as reproduced) |
-| WP-11.3 | Source revision checked on every reopen (verify, investigate, markup) (R1 revision part) | M | WP-11.1 | todo | |
+| WP-11.3 | Source revision checked on every reopen (verify, investigate, markup) (R1 revision part) | M | WP-11.1 | todo | From WP-11.1: D-8's page part names the inventory's `content_sha256` as the revision the run set out to read; binding a reopen to it is this slice's. WP-11.1 checks only the page count: a page past the source's current end is unread (`PageNotInSourceError`) and extra pages are not read, with one run error naming the source; a same-count rewrite is still read without a word until the markup's `detect_mutations` (and never on a standard run). The digest's level-1 identity already re-hashes a source whose stat drifted (`current_content_sha256`), so no stale cache hit is served. `iter_region_crops` (verify) and the investigation reopen without a revision check |
 
 ### Wave 3 — P1 evidence quality: auditors, citations, investigation
 
@@ -206,7 +206,7 @@ starting.
 | WP-20.3 | Reader key and transcript storage policy validated in Chromium; in-memory where isolation cannot be shown (N26, U19) | S/M | — | todo | |
 | WP-20.4 | Bounded report context with index and retrieval tools; 400-sheet fixture; duplicate labels (U17) | L | WP-19.1 | todo | |
 | WP-20.5 | History budgeting at complete exchange boundaries (U17) | M | WP-19.1, WP-20.4 | todo | |
-| WP-15.1 | Preflight runs without profiles, has no render-identity hashing and holds the lock around every PyMuPDF use; per-file source ids (\$3, N23, N24) | M | — | todo | |
+| WP-15.1 | Preflight runs without profiles, has no render-identity hashing and holds the lock around every PyMuPDF use; per-file source ids (\$3, N23, N24) | M | — | todo | From WP-11.1: the run's workload is now the inventory's pages (`render.inventory_sheet_refs`); the GUI's pre-run sheet count still reopens every file with `list_sheets` on the UI thread (`gui.py`, N24), which skips a file it cannot open silently, so its count can disagree with the run's for such a file. `iter_sheet_prescan` gained `expected_pages` (best effort, no raise); `profiles.preflight_scan` does not pass it, so it keeps the old contract and still wraps each file in a `try` |
 | WP-15.2 | Hybrid spool: consume it or never create it (R6) | S | — | todo | |
 | WP-15.3 | Text and prompt/framing overhead priced per stage from `text_chars` (\$2) | S/M | WP-15.1 | todo | |
 | WP-15.4 | Reasoning-inclusive output bands and a calibration script with an aggregate fixture (\$1) | M | WP-14.5, WP-22.2 | todo | |
@@ -287,7 +287,7 @@ report is built from it).
 | B10 | A→B and B→A copies of one conflict both survive | P1 | 06.4 | open | |
 | B11 | "No conflicts noted on this sheet." becomes a medium finding | P1 | 09.1 | implemented+validated | `tests/test_prose_filler_and_assurances.py` (WP-09.1, [PR #168](https://github.com/Abe-Borg/drawing-analyzer/pull/168)): the review's four strings and 21 equivalent wordings are filler (`test_b11_review_strings_are_filler`, `test_b11_equivalent_wording_is_filler`), counted in `filtered`, and make no structuring call and no ledger entry with a client, without one, or when the call fails (`test_b11_filler_*`); 45 real findings survive (`test_real_findings_survive_the_filter`), and everything the old filter dropped is still dropped (`test_the_new_filter_drops_everything_the_old_one_did`) |
 | B12 | `deg`/`°` sign differently; `90 deg F` vs `90 deg C` compatible | P0 | 04.1 | implemented+validated | `tests/test_quantity_signature.py` (the B12 token table; the `B12 …` pairs, incl. no inferred scale); `tests/test_ab_findings_diff.py::test_a_changed_temperature_scale_is_never_an_exact_match` (WP-04.1, [PR #157](https://github.com/Abe-Borg/drawing-analyzer/pull/157)) |
-| R1 | Source unreadable after inventory aborts the whole run | P0/P1 | 11.1, 11.2, 11.3 | open | |
+| R1 | Source unreadable after inventory aborts the whole run | P0/P1 | 11.1, 11.2, 11.3 | open (core implemented+validated in 11.1; digest-phase containment (11.2) and the revision check on reopen (11.3) stay open) | `tests/test_source_page_isolation.py` (WP-11.1, PR-PLACEHOLDER), by the owner's rules: the second, the first and every source removed after the inventory, and one locked (`PermissionError`), on real time, batch and Hybrid, cold and cached: the run returns a context and a closed journal, the surviving sheets are digested and exportable, each lost page has an `UnreadPage` and one `PAGE_UNREAD` event, one source line in `ctx.errors` and the digest stage's errors, the stage counts the inventory's pages (PARTIAL; FAILED when nothing survived), no path anywhere; a paid digest before the loss is kept (usage, export, manifest); the zero-sheet exit only for a set with nothing accepted; a page failing in the prescan (identity, word count, geometry) is read, one failing in both (page load, text) or in the render only is unread with one page line; fewer and more pages (both transports, both cache paths); a 5-page source is one line; a page neither yielded nor reported still has an outcome; a cached source that vanishes after the prescan costs nothing; the critique over a source lost after the digest (COMPLETE from the spool or retained uploads; Hybrid names each page with its reason); an unchanged set's refs equal `list_sheets` and a cached re-run renders nothing. Remaining: WP-11.2 (other exceptions inside the digest phase, upload and spool release), WP-11.3 (revision on reopen) |
 | R2 | Refused batch item never retried or rescued | P1 | 01.5 | open | |
 | R3 | Canceled/errored envelopes lose attempt records (harvest and terminal path) | P1 | 14.1 | open | |
 | R4 | Chat commits an unrun `server_tool_use`; history poisoned, persisted | P1 | 19.1, 19.2 | open | |
@@ -396,6 +396,289 @@ report is built from it).
 Each session adds one entry at the top: date, slices and IDs, PR, what changed,
 contracts decided, cache/schema effects, validation actually run (with counts),
 what could not be verified, risks, and next steps.
+
+### 2026-09-24 — WP-11.1: a source or page that fails after the inventory no longer ends the run (PR-PLACEHOLDER)
+
+- **Slice and IDs:** WP-11.1. R1, the core (implemented+validated); R1 stays
+  open for WP-11.2 (digest-phase containment) and WP-11.3 (the revision check
+  on reopen). **Contract decided:** D-8's page part (narrowly; WP-06.2
+  completes it). D-2 gains a note (the digest stage's eligible items are the
+  inventory's pages). No migration-register row: no key, prompt or schema moved.
+  **WP-11 is not done:** WP-11.2 and WP-11.3 remain, so there is no package
+  acceptance check.
+- **Base.** `main` = `origin/main` = `a7dd050`; no drift. Baseline **4,325
+  passed, 2 skipped, 10 deselected** (279 s), identical to the WP-01.4 handoff.
+  The two skips are IPv6 loopback and chmod as root.
+- **Reproduced first** (scratch probes in a `git archive` copy of `origin/main`,
+  the suite's fakes and hermetic guard applying; a source "vanished" by being
+  unlinked, or locked by a monkeypatched `PermissionError`, inside a wrapper
+  around `pipeline.inspect_inputs`), each as the request stated:
+  - **Real time**, two one-page sources, the second unlinked: `FileNotFoundError`
+    out of `extract_drawing_context` after one paid digest, no context, journal
+    or export; with a `DigestCache` it raises before any call; the first source
+    unlinked, the same with no call. A locked second source: `PermissionError`
+    after two paid digests (two-page sources).
+  - **Batch**, two two-page sources, the second unlinked: raises after 4
+    uploads, 0 deleted, no batch created; with a cache, at the prescan with no
+    upload.
+  - **A page whose prescan geometry, identity, word count, page load or text
+    extraction raises** (cache on): the whole run raises.
+  - **The page count changed after the inventory**, both cache paths: 3 → 2
+    reads COMPLETE, `sheet_count` 2, digest items (2, 2), no error line,
+    labels "page k/2", the inventory still says 3; 3 → 4 digests four pages,
+    COMPLETE.
+  - **Every source unlinked**: the zero-sheet exit ("No readable PDF pages
+    found") although the journal recorded both files as `INPUT_ACCEPTED`.
+  - **The critique** (exhaustive, a source unlinked between the digest and the
+    critique): with a cache the stage reads FAILED (items 0/0) through its
+    catch-all and its error and `ctx.errors` carry `no such file: '<absolute
+    path>'` (the exported artifacts scrub it); without one it reads PARTIAL
+    with "N not accounted for", naming no sheet (measured on real time, Hybrid
+    and Economy). The markup skip works.
+  - **The naive fix** (catch-and-continue in both iterators, a per-page
+    continue in the prescan): every abort became a silent COMPLETE (batch,
+    second source gone: `sheet_count` 2, digest COMPLETE 2/2, no error, run
+    COMPLETE); a failed prescan page read digest PARTIAL (3, 2) with no error
+    line and a COMPLETE run.
+  - **The denominator alone**: 3 → 2 reads digest PARTIAL (3, 2) with no error
+    line, so the run reads COMPLETE; 3 → 4 without a cache raises
+    `IndexError` in `_digest_sheets_concurrent`. **Correction to the request:**
+    with a cache 3 → 4 reads items **(3, 3)**, not (3, 4): the fourth page is
+    digested and billed (4 calls), then dropped by the merge, which builds
+    `sheets` from the inventory refs.
+  - **The bare rule**: every outcome as the request stated (batch, second gone:
+    PARTIAL (4, 2), two page lines, run PARTIAL; 3 → 2 PARTIAL (3, 2) with
+    `A.pdf (page 3/3): page could not be rendered (IndexError)`; 3 → 4
+    COMPLETE over three pages, the added page unmentioned; every source gone:
+    FAILED (2, 0), run FAILED, one line per page; the critique PARTIAL 4/2 "not
+    accounted for", naming no sheet).
+- **Facts confirmed, not assumed** (an instrumented scratch copy of
+  `origin/main`: append-only wrapper blocks at the end of `render.py`,
+  `pipeline.py` and `digest_cache.py`, logging behind `WP11_LOG` with the test
+  name; the whole suite, 4,325 passed, no outcome changed):
+  - **The hooks ran** 1,659 PDF opens (by caller), 395 `list_sheets` calls, 247
+    render iterators, 176 prescans, 242 contexts, 239 digest totals, 153
+    critique stages, 102 + 55 level-1 partitions, 111 geometry-sink appends,
+    1,009 cache gets and 567 puts.
+  - **The suite has only 6 page errors**, in 4 tests, all a render-time
+    pathological page (`ValueError`); no prescan page failure, no source that
+    fails after the inventory, no context that raised, no sink append without a
+    record, and the digest's `items_in` equals `sheet_count` in every context.
+    So every behaviour this slice changes is guarded only by the new tests.
+  - **The render and prescan paths are exercised by 34 test files.**
+- **The decision, made by the owner before any code** (AskUserQuestion, two
+  rounds, six choices, each as recommended). Measured first: one scratch
+  implementation of the core rule with each open choice switchable by
+  environment variable, run instrumented over the 34 render-path files plus
+  `test_run_journal`, `test_render_telemetry`, `test_drawing_export`,
+  `test_drawing_html_report` and `test_drawing_usage` (2,066 tests), diffed
+  test by test against the base, and a 28-case table (every required and edge
+  case) run through the base, the bare rule and each option:
+
+  | option | pinned tests failing | events moved over the suite |
+  |---|---|---|
+  | **typed record + a `PAGE_UNREAD` event (chosen)** | **0** | **one event in 3 tests; the critique's degraded line in 2** |
+  | typed record only | 0 | the critique's degraded line in 2 |
+  | placeholder `SheetDigest` | 0 | 3 tests: `ctx.sheets` +1, `combined_text` "Sheet 1/1" → "Sheet 1/2, 2/2", `SHEET_DIGESTED` +1 |
+  | one line per page (vs **per source, chosen**) | 0 | none (no source failure in the suite) |
+  | prescan terminal (vs **routed to render, chosen**) | 0 | none |
+  | read the extra pages / fail the whole source (vs **read the inventoried pages + a line, chosen**) | 0 | none |
+  | critique keeps `list_sheets` (vs **the inventory's pages, chosen**) | 0 | the degraded line reverts |
+
+  The case table decided each choice: a lost 5-page source is 1 line (per
+  source) or 5; a failed prescan identity, word count or geometry reads the
+  page (COMPLETE 3/3, geometry kept) when routed and loses it (PARTIAL 3/2, no
+  geometry) when terminal; 3 → 4 pages reads COMPLETE 3/3 with a run error,
+  COMPLETE 4/4 with no word (extra pages billed), or FAILED 3/0 (the whole
+  source); the critique over a lost source is COMPLETE 6/6 from the spool or
+  retained uploads (real time, Economy) and names each page on Hybrid, or
+  FAILED with a raw path / "not accounted for" with `list_sheets`.
+  - **An unread page is a typed record plus one event.** Not taken: the record
+    without the event; a placeholder `SheetDigest` (it claims a read; the usage
+    loop, call counts and the identity corpus would need to skip it, and the
+    corpus change re-keys the identity cache for such sets).
+  - **One line per source** for a source-level failure. Not taken: one per page.
+  - **Prescan failures route to render.** Not taken: terminal in the prescan.
+  - **More pages: read the inventoried ones, one line names the source** (the
+    run PARTIAL, the stage COMPLETE). Not taken: read the extra pages (the
+    denominator moves after the fact); fail the whole source (revision binding
+    by page count, WP-11.3's).
+  - **Round 2:** D-8's page part decided narrowly (not taken: left open with a
+    note); the critique takes the inventory's pages (not taken: keep
+    `list_sheets`).
+  - **Not asked (stated):** labels keep the inventory's count and the render
+    identity the opened file's (so no key moves); a source none of whose pages
+    is wanted is never opened; a page neither yielded nor reported still gets
+    an `UnreadPage` ("no render outcome was recorded").
+- **What changed:**
+  - **`render.py`** (still the only PDF importer with `annotate.py`, I-5):
+    `SourceUnreadableError` and `PageNotInSourceError` (path-free `str()`),
+    `inventory_sheet_refs`, `_expected_count`, `_open_source`;
+    `iter_rendered_sheets(..., expected_pages=, on_page_count_changed=)` and
+    `iter_sheet_prescan(..., expected_pages=)` as above; without
+    `expected_pages` both keep the old contract and raise. Docstrings of
+    `list_sheets`, `_classify_input` and both iterators.
+  - **`source_registry.py`:** `InputInventory.expected_page_counts()`.
+  - **`models.py`:** `UnreadPage` (frozen; `display_label`, `to_dict()`, no
+    path); the `SheetRef` docstring.
+  - **`pipeline.py`:** the workload from `inventory_sheet_refs` (no
+    `list_sheets` call); `_UnreadPages` (`page_failed`, `page_count_changed`,
+    `settle`, `lines`, `notes`) and `_unread_reason`, `_page_ranges`;
+    `_GeometryOmissionSink(order=)`; `expected_pages` /
+    `on_page_count_changed` through `_rendered_stream` and both transports;
+    `refs` / `expected_pages` on `_level1_partition`,
+    `_critique_level1_partition` and `_run_critique_stage` (its unobtainable
+    pages name the reason: `…: no critique input could be obtained: <reason>`);
+    the per-sheet loop walks the refs and emits `PAGE_UNREAD` for a page with no
+    digest; the digest stage's warnings carry the more-pages line;
+    `DrawingContext.unread_pages`.
+  - **`run_journal.py`:** run.log's Sheets section (`; N page(s) not read` and a
+    `NOT READ` line per page, sanitized with the private roots).
+  - **`export.py`:** `unread_pages` in `run_manifest.json`
+    (`_unread_page_entries`, through the sanitize boundary).
+  - **Not changed:** the digest stage's ladder, `derive_run_outcome`, the
+    zero-sheet exit (it remains for a set with nothing accepted), the level-1
+    and level-2 keys, `_SCHEMA_VERSION`, every prompt, the report and the GUI.
+- **Contracts decided:** D-8's page part; a D-2 note.
+- **Cache/schema effects: none.** An unchanged set's refs equal `list_sheets`
+  field for field (pinned: `test_refs_equal_list_sheets`), and the render
+  identity keeps the opened file's page count (pinned:
+  `test_prescan_identity_uses_file_count`), so every level-1 and level-2 key is
+  byte-identical: `tests/test_drawing_cache_identity.py` passes unchanged.
+  `run_manifest.json` gains one additive key, `unread_pages`.
+- **Re-baselined tests: none.** No existing test file was edited; the original
+  files pass unchanged against the fixed tree (the full suite below).
+- **New tests:** `tests/test_source_page_isolation.py` (77):
+  - **the workload:** the refs equal `list_sheets` (same-basename sources, a
+    rejected and a duplicate input) and are built with no open;
+  - **the iterators:** a missing source reports every expected page (within
+    `only`) with one shared error, path-free; a legacy call still raises; a
+    source with no wanted page is never opened; fewer pages report
+    `PageNotInSourceError`; more pages report the change once and read only the
+    expected pages; one bad page keeps the good ones; the prescan skips what it
+    cannot scan, raises without `expected_pages`, and keeps the opened file's
+    count in the identity; the sink inserts a routed page in page order;
+  - **a lost source:** second, first and every source, on real time, batch
+    and Hybrid (exhaustive), cold and cached (18), and a locked one (6):
+    context and journal, the survivors digested, a record and an event per
+    lost page, one source line in `ctx.errors` and the stage's errors, the
+    inventory's count, PARTIAL or FAILED, path-free; batch uploads only the
+    survivors; the paid digest kept (usage, export, manifest, run.log); every
+    source lost is not the zero-sheet exit, which remains for nothing accepted;
+    all lost on an exhaustive Hybrid run;
+  - **cardinality:** a 5-page source is one line, five records and events; a
+    page failure stays per page; the partial wording (`2 of its 5 page(s)`);
+    the first outcome wins; an unreached page gets one;
+  - **the prescan:** identity, word count and geometry failures are read with
+    their geometry; page load and text failures are one render line; a
+    render-only failure; a cached source vanishing after the prescan costs
+    nothing;
+  - **the page count:** fewer and more, real time and batch, cold and cached;
+    one line when both the prescan and the render open the source;
+  - **the critique:** real time and Economy read a lost source from the
+    digest's images (COMPLETE 6/6), Hybrid names each page with its reason,
+    the fallback to `list_sheets` for a direct caller, and the run's critique
+    never calls it;
+  - **surfaces:** the record's `to_dict`, the events in page order and
+    `RUN_END`, run.log's Sheets section; an unchanged set is unchanged; a
+    cached re-run renders nothing.
+
+  Against a `git archive` copy of `origin/main`, classified from `--junitxml`:
+  **54 fail on behaviour, 17 only on the new API** (`expected_pages`,
+  `inventory_sheet_refs`, `_UnreadPages`, `UnreadPage`, `order=`), **6 pass**,
+  pinning what the fix keeps: both iterators still raise for a caller with no
+  inventory, the zero-sheet exit for nothing accepted, the critique's
+  `list_sheets` fallback, an unchanged set's output, and a cached re-run that
+  renders nothing.
+- **Fixture effects, instrumented over the whole fixed suite** (the same hooks,
+  diffed test by test against the base run): outside the new file every hook
+  ran exactly as often, except `list_sheets` (16 calls, from 395: the pipeline
+  and the critique no longer call it) and the PDF opens (1,116, from 1,659: no
+  recount; the iterators' opens are 531 against 535, the difference being the
+  sources skipped because none of their pages was wanted). No status, item
+  count, usage record, QC number, ledger count, cache get or put, page error or
+  `ctx.errors` entry moved. What moved: one `PAGE_UNREAD` event in the 3
+  fixtures with a page that does not render
+  (`test_pipeline_batch_records_an_unrenderable_page`,
+  `test_a_sheet_the_critique_cannot_obtain_degrades_its_stage`,
+  `test_pipeline_a_sheet_with_no_input_is_skipped`), and in the last two the
+  critique's degraded line gains the reason (`…: no critique input could be
+  obtained: page could not be rendered (ValueError)`; both assert a
+  substring). The gauntlet (`run_acceptance.py`'s oracle) is unchanged.
+- **Downstream consumers walked:** `total` (progress, `_resolve_workers`,
+  `miss_total`, `results` in `_digest_sheets_concurrent`, which can no longer
+  overflow, the critique's `total` and tally, `_run_qc_stages`' progress,
+  `sheet_count`, `RUN_END`'s `sheets_total`); the merge; `ctx.sheets`,
+  `ok_sheet_count`, `cached_sheet_count` (unchanged in meaning);
+  `ctx.errors`; the digest stage (items, status, errors, warnings);
+  `SHEET_DIGESTED` and `PAGE_UNREAD`; `derive_run_outcome` (unchanged: an
+  error line makes the run PARTIAL, no read sheet FAILED); run.log's Sheets
+  section and outcome line; `run_manifest.json`; the export (`00_index.md`'s
+  counts and error list, the per-sheet files for read sheets only); the
+  report and the GUI (their failed count is `sheet_count - ok`, so an unread
+  page counts as failed); the usage ledger (an unread page appends no record);
+  the A/B harness (qualifies an arm by stage status; still counts sheets with
+  `list_sheets`, unchanged); the gauntlet.
+- **Validation** (this container, Python 3.11.15, SDK 1.7.0, PyMuPDF 1.28.2):
+  - Baseline before any change: **4,325 passed, 2 skipped, 10 deselected**
+    (279 s) on `a7dd050`.
+  - The new file: 77 passed.
+  - Full suite after: **4,402 passed, 2 skipped, 10 deselected** (310 s): the
+    baseline plus the 77 new tests, with the same two environment skips.
+  - Browser suite: 98 collected, 98 executed and passed;
+    `check_browser_suite.py` passes.
+  - `python -m ruff check --select E9,F63,F7,F82 src tests scripts` (pinned
+    0.14.5) is clean. F401/F811/F841 over the touched files finds one hit, on
+    `main` already: `pipeline.normalize_specs_text` (WP-22.5).
+    `scan_secrets.py` is clean over 212 tracked files, the new one included.
+    `compileall src` passes. No invisible code point in the added lines (only
+    the em dash, ellipsis and section sign these files already use).
+- **Docs:**
+  - **CHANGELOG** (Fixed): R1 (core), with the visible effect.
+  - **CLAUDE.md:** a passage beside the other `render.py` passages (*The
+    inventory's pages are the workload*).
+  - **README:** *Resilient inputs* gains a file that fails after it was
+    accepted.
+  - **The plan:** a WP-11.1 note under "Step 2: no page may vanish".
+  - **DECISIONS:** D-8's page part and the D-2 note.
+  - **PROGRESS:** this entry; the WP-11.1 row; the R1 row; notes on WP-11.2,
+    WP-11.3, WP-06.2 and WP-15.1; the Next-up line.
+  - **Docstrings:** `list_sheets`, `_classify_input`, both iterators,
+    `SheetRef`, `_rendered_stream`, `_GeometryOmissionSink`, both digest
+    transports, both level-1 partitions, `_run_critique_stage`.
+- **Not verified:** live API behaviour (no budget, O-4; this slice makes no
+  call). A real network-share drop or antivirus lock was not reproduced; the
+  shapes are an unlinked file and a monkeypatched `PermissionError`. Windows is
+  covered by this PR's CI (every loss happens while no document is open on it).
+- **Risks and residual gaps:**
+  - **Visible changes, by design.** A run that used to raise now returns a
+    PARTIAL or FAILED context; a source rewritten with more pages makes the run
+    PARTIAL with one line, and one with fewer pages makes it PARTIAL with the
+    missing pages named; the digest stage counts the inventory's pages;
+    run.log's Sheets section, the manifest and the event trace list unread
+    pages; the critique names an unobtainable page's reason.
+  - **Same-count rewrites are still read without a word** until WP-11.3 (the
+    markup's `detect_mutations` flags them; a standard run does not).
+  - **Other exceptions inside the digest phase still lose the paid results,
+    uploads and spool** (WP-11.2).
+  - **Two sources with one basename** give two identically named source lines
+    ("M-101.pdf: …"); the records and events carry the source id. Labels were
+    already ambiguous that way (N6, WP-06.2).
+- **Re-checked (U31):** the pathological page keeps its behaviour (the
+  iterator dimension-checks before rasterizing; pinned tests unchanged); the
+  inventory's accepted ids equal `list_sheets`' (`assign_source_ids` over the
+  accepted paths); the prescan's stat-gated re-hash (§10.6) and the level-1
+  keys are untouched; `iter_region_crops` and `iter_sheet_cost_bases` were
+  already guarded and are unchanged.
+- **Found, not fixed:**
+  - the GUI's pre-run sheet count still reopens every file with `list_sheets`
+    on the UI thread (N24) and skips a file it cannot open silently, so it can
+    disagree with the run's count for such a file (WP-15.1 note);
+  - `scripts/measure_evidence_coverage.py` could pass `expected_pages` and drop
+    its `list_sheets` workaround (out of scope; `test_evidence_coverage.py`
+    unchanged and green).
+- **Next:** WP-11.2 (Wave 1; its dependency is this slice). WP-11.3 (Wave 2) is
+  now available.
 
 ### 2026-09-24 — WP-01.4: a critique read the model did not finish is not a completed read ([PR #171](https://github.com/Abe-Borg/drawing-analyzer/pull/171))
 

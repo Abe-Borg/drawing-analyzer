@@ -48,6 +48,63 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A source that failed after the inventory ended the whole run, and a page
+  the run owed could vanish without a word (remediation WP-11.1; R1, core).**
+  The input inventory opens every selected file once and records each accepted
+  document's page count and revision. The run then reopened every file to
+  count again (skipping, silently, one it could not open), and both page
+  iterators opened their files unguarded. So a source deleted, moved or locked
+  (a network-share hiccup, an antivirus or backup lock) after the inventory
+  raised out of the run with no context, journal or export: on real time after
+  paying for the sheets digested before it, on batch after uploading their
+  images. One page the cache prescan could not read ended the run the same
+  way. And a source re-exported with fewer pages read `COMPLETE` over the pages
+  that were left, while one with more pages had its extra pages read and
+  billed although the inventory never counted them.
+
+  Now, decided with the owner (see the WP-11.1 handoff in
+  `_plans/PROGRESS.md`):
+  - **The inventory's pages are the workload** (D-8, the page part): built
+    from its records without reopening a file (`render.inventory_sheet_refs`),
+    so the digest stage counts the inventory's pages and a source that fails
+    later stays in the count.
+  - **A source that cannot be opened again, or a page that cannot be read, no
+    longer ends the run: it is reported and the rest ships.** Every page the run
+    owed and could not read is listed with its reason: `unread_pages` in
+    `run_manifest.json`, a `NOT READ` line in run.log's *Sheets* section, and
+    one `PAGE_UNREAD` event in the run's journal. `ctx.errors` (and so the
+    export's error list and the app's issue list) says it once per source,
+    for example `B.pdf: the source could not be opened again
+    (FileNotFoundError); its 2 page(s) were not read`, and once per page for a
+    single page that would not render, as before. The run and the digest stage
+    read `PARTIAL`, or `FAILED` when no page could be read; the zero-sheet exit
+    ("No readable PDF pages found") remains for a set with nothing accepted.
+  - **A page the cache prescan cannot scan is read anyway**: it goes to the
+    render path like a cache miss, and its sheet geometry comes from its
+    render. A source the prescan cannot open is reported once, by the render
+    path.
+  - **A source whose page count changed after the inventory**: a missing page
+    is reported (`A.pdf: has 2 page(s) now, 3 at the inventory; page 3 was not
+    read`); extra pages are not read, and one line names the source, so the run
+    reads `PARTIAL` (`A.pdf: has 4 page(s) now, 3 at the inventory; only the 3
+    inventoried page(s) were read`). Sheet labels keep the inventory's count
+    (`page k/3`). Checking a source's revision on every reopen is still to come
+    (WP-11.3).
+  - **The critique reads the inventory's pages too.** A source lost after the
+    digest is critiqued from the digest's own images where the run kept them
+    (Fast and Economy), and on Hybrid each page it cannot obtain is named in the
+    critique stage with its reason. It used to fail the whole critique stage
+    with the file's absolute path in the error list (with a cache), or count
+    the missing reads as "not accounted for" and name no sheet.
+
+  No cache key, prompt or schema changed: an unchanged set's refs, level-1 and
+  level-2 keys and output are byte-identical (`tests/test_drawing_cache_identity.py`
+  unchanged). `run_manifest.json` gains one additive key, `unread_pages`.
+  Tests: `tests/test_source_page_isolation.py`. Still open under R1: keeping
+  the paid digests when something else goes wrong inside the digest phase, and
+  releasing its uploads and spool on every exit (WP-11.2), and the revision
+  check on every reopen (WP-11.3).
+
 - **A critique read the model did not finish counted as a completed read, and
   was cached (remediation WP-01.4; N4, critique part).** Each critique read's
   stop reason was read only to word an empty reply. So on both transports a

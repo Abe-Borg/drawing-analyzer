@@ -511,6 +511,39 @@ after verification.
 - **No cache or key change** from the rule itself (D-4's WP-01.4 note covers
   the admission change).
 
+Added by WP-11.1: **the digest stage's eligible items are the inventory's
+pages** (the owner's decisions; R1). The digest stage already had D-2's shape
+(`items_in` the sheets the run set out to read, `items_out` the sheets read;
+COMPLETE when every one was read, FAILED when none was, else PARTIAL), and its
+ladder is unchanged. What changed is the count behind `items_in`: it is the
+inventory's pages (D-8's page part), no longer a recount by reopening the files
+that silently skipped one it could not open, so a source lost after the
+inventory used to be on neither side of the ratio, and a source rewritten with
+fewer pages read COMPLETE.
+- **Terms for the digest.** *Eligible*: every page of every accepted inventory
+  document. *Judged*: a page with a digest that read (`SheetDigest.ok`).
+  *Failed*: a page whose read errored or came back empty (a `SheetDigest` with
+  an error). An **unread page** (no digest at all: its source could not be
+  opened again, it is past its source's current end, it would not load or
+  render, or no outcome was recorded) is an eligible item with no judgment and
+  no read, so it counts against completeness like a failed read; it is surfaced
+  as a `models.UnreadPage` (`ctx.unread_pages`, `unread_pages` in
+  `run_manifest.json`, a `NOT READ` line in run.log's Sheets section) and one
+  `PAGE_UNREAD` journal event, never as a `SheetDigest` (which claims a read).
+- **One line per source** for a source-level failure in `ctx.errors` and the
+  stage's errors (sorted and bounded, as before); the per-page detail rides the
+  records and events.
+- **A source with more pages than the inventory counted** is observational for
+  the stage (one warning; every page the run owed was read, so it stays
+  COMPLETE) and one run error, so the run reads PARTIAL.
+- **The critique** (WP-01.4's note) counts `runs` x the inventory's pages as its
+  eligible reads, as before through `total`; since it now takes the same pages,
+  a page it cannot obtain is *skipped* and named in its errors with the reason,
+  where a source it could not reopen used to be "not accounted for".
+- Measured before deciding: under every option offered, no pinned test moved;
+  the chosen shape adds one `PAGE_UNREAD` event in the 3 fixtures with a page
+  that does not render.
+
 ## D-3 Finding identity — `open` (to be decided by WP-03.4)
 
 **Required decision:** keep four things separate: physical evidence identity,
@@ -803,7 +836,7 @@ TTLs. Missing usage is unknown, never zero, and nothing is counted twice
 - Version / cache changes: —
 - Consumers affected: —
 
-## D-8 Source identity — `open` (to be decided by WP-06.2 or WP-11.1, whichever lands first)
+## D-8 Source identity — `open`: the page part decided by WP-11.1, completed by WP-06.2
 
 **Required decision:** resolve every sheet and every evidence leg to exactly
 one physical input revision and page, never merely a human sheet label (N6).
@@ -816,10 +849,64 @@ labels (`digest:SRC-0001:p0`), sharded cross-QC handles,
 handle-comparison sites use), Phase 18C source-mutation detection on the
 markup reopen.
 
-- Decision: —
-- Rejected shortcuts: —
-- Version / cache changes: —
-- Consumers affected: —
+- **Decision, WP-11.1's part: the pages a run owes** (the owner's decision,
+  asked before any code, measured first; R1). WP-11.1 landed before WP-06.2, so
+  it decides the part it implements, narrowly.
+  - **A sheet the run owes is one page `(source_id, page_index)` of an ACCEPTED
+    inventory document**, keyed by `models.source_page_key` (its `source_id` is
+    the inventory's `SRC-####`). The pipeline's run-local merge key
+    (`_refkey`: `(str(path), page_index)`) names the same page.
+  - **The pages a run owes are exactly the inventory's.**
+    `render.inventory_sheet_refs(inventory)` builds them from the accepted
+    documents' page counts, in input order, **without reopening a file**, and
+    both page iterators take `InputInventory.expected_page_counts()`. No stage
+    recounts by reopening: the pipeline no longer calls `list_sheets` (it
+    skipped a file it could not open), and the critique takes the same refs
+    (`list_sheets` stays only as its fallback for a direct caller).
+  - **The inventory's `content_sha256` (with `byte_size` and
+    `initial_mtime_ns`) is the revision the run set out to read.** This slice
+    does not bind a reopen to it (WP-11.3). What it does bind: a page past the
+    source's current end is unread (`render.PageNotInSourceError`), extra pages
+    are not read and one run error names the source, and the level-1 render
+    identity keeps hashing the bytes on disk at prescan time with the opened
+    file's own page count (unchanged, §10.6), so no key moves.
+  - **Human sheet ids and the `page k/N` label stay display metadata.**
+    `SheetRef.page_count` is the inventory's count, so the label follows the
+    revision the run set out to read; it is model-visible and in no key (K1,
+    WP-10.1).
+  - **Every page the run owes ends with an outcome**: a digest, or a
+    `models.UnreadPage` with a path-free reason (D-2's WP-11.1 note).
+- **Still open, for WP-06.2 (and named):** binding every evidence leg and the
+  whole-set cross-QC's handles to this identity instead of a human label
+  (first-wins label maps, N6); the colliding `stem-pN` fallback ids. Revision
+  binding on every reopen (verify, investigate, markup) is WP-11.3's, under
+  this decision's revision clause.
+- **Rejected shortcuts** (each measured on `a7dd050`):
+  - catching the open in both iterators and continuing, with the denominator
+    from `list_sheets`: every abort became a silent `COMPLETE` (batch, second
+    source gone: 2 of 4 pages, digest COMPLETE 2/2, no error line);
+  - the inventory denominator with the iterators unchanged: a source rewritten
+    with fewer pages read digest PARTIAL with no error line and a COMPLETE run;
+    with more pages the real-time path raised `IndexError` without a cache,
+    and with one the extra page was digested, billed and dropped by the merge;
+  - reading a changed source's extra pages: the denominator moves after the
+    fact, and pages the inventory never counted are billed;
+  - failing a whole source on a page-count change: revision binding by page
+    count alone, while a same-count rewrite is still read until WP-11.3.
+- **Version / cache changes:** none. For an unchanged set the refs equal
+  `list_sheets` field for field, and the render identity keeps the opened
+  file's count, so every level-1 and level-2 key is byte-identical
+  (`tests/test_drawing_cache_identity.py` passes unchanged). No
+  migration-register row. `run_manifest.json` gains one additive key,
+  `unread_pages`.
+- **Consumers affected:** the pipeline's `total` and everything built on it
+  (the digest stage's `items_in`, `ctx.sheet_count`, `RUN_END`'s
+  `sheets_total`, the critique's eligible reads, progress), the two iterators
+  (`expected_pages`), `_level1_partition` and `_critique_level1_partition`
+  (an expected page they could not scan is a miss), `_GeometryOmissionSink`
+  (inserts a routed page's geometry in page order), `ctx.unread_pages`,
+  run.log's Sheets section, `run_manifest.json`, and the failed count of the GUI
+  and the report (`sheet_count - ok_sheet_count`).
 
 ---
 

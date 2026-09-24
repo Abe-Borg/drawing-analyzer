@@ -524,6 +524,20 @@ def _held_out_summary(ctx: Any) -> dict:
     return {"total": sum(by_sheet.values()), "by_sheet": by_sheet}
 
 
+def _unread_page_entries(ctx: Any, roots: "tuple[str, ...]" = ()) -> list[dict]:
+    """``ctx.unread_pages`` for the manifest (remediation WP-11.1).
+
+    Each record's ``to_dict()`` holds no path; it still passes the manifest's
+    sanitize boundary, so a hand-built or duck-typed record cannot leak one.
+    """
+    entries = []
+    for page in getattr(ctx, "unread_pages", None) or []:
+        to_dict = getattr(page, "to_dict", None)
+        if callable(to_dict):
+            entries.append(_sanitize_json(to_dict(), roots))
+    return entries
+
+
 def _source_entries(ctx: Any, roots: "tuple[str, ...]" = ()) -> list[dict]:
     """The §6.1 input inventory for the manifest — **no absolute paths, no
     content hashes** (§18.4 keeps the source SHA private by default; the
@@ -684,6 +698,11 @@ def build_run_manifest(
         # finish, held out of the review, per portable sheet key. Counts only;
         # always measured (every run digests), so zero means none.
         "digest_findings_held_out": _held_out_summary(ctx),
+        # Remediation WP-11.1 (R1): every page the run owed (the inventory's
+        # pages) that produced no digest, in page order, with the reason.
+        # Portable by construction (source id, label, counts, a path-free
+        # reason); always measured, so an empty list means every page was read.
+        "unread_pages": _unread_page_entries(ctx, roots),
         "evidence": evidence_summary(findings + reference),
         "markup_coverage": _receipt_summary(ctx, roots),
         "errors": [

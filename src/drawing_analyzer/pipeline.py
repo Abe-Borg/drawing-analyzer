@@ -52,6 +52,7 @@ from .models import (
     RunUsage,
     SheetGeometry,
     StageResult,
+    UnreadPage,
     UsageRecord,
     held_out_findings,
     item_coverage_status,
@@ -60,7 +61,15 @@ from .models import (
     roll_up_qc_status,
     source_page_key,
 )
-from .render import inspect_inputs, iter_rendered_sheets, iter_sheet_prescan, list_sheets
+from .render import (
+    PageNotInSourceError,
+    SourceUnreadableError,
+    inspect_inputs,
+    inventory_sheet_refs,
+    iter_rendered_sheets,
+    iter_sheet_prescan,
+    list_sheets,
+)
 from .run_journal import RunJournal, collect_environment, derive_run_outcome
 from .source_registry import (
     EST_BYTES_PER_SHEET,
@@ -622,6 +631,13 @@ class DrawingContext:
     # stage. The findings themselves are listed in the sheet's own export file
     # and report card, never in the ledger.
     digest_findings_held_out: dict = field(default_factory=dict)
+    # Remediation WP-11.1 (R1): every page the run owed (the inventory's pages,
+    # D-8) that produced no digest, as a :class:`UnreadPage` in page order: a
+    # source that could not be opened again, a page past its source's current
+    # end, a page that would not load or render. Exported as ``unread_pages``
+    # in run_manifest.json and listed in run.log's Sheets section; each also
+    # has one PAGE_UNREAD journal event. Empty when every page was read.
+    unread_pages: list = field(default_factory=list)
 
     @property
     def total_estimated_cost(self) -> Any:
@@ -778,6 +794,8 @@ def _rendered_stream(
     tile_sink: "Any" = None,
     render_sink: "Any" = None,
     journal: "Any" = None,
+    expected_pages: "dict[str, int] | None" = None,
+    on_page_count_changed: "Any" = None,
 ) -> "Any":
     """Stream :class:`RenderedSheet`, capturing each sheet's lightweight geometry.
 
@@ -800,10 +818,19 @@ def _rendered_stream(
     the numbers are what a near-blank byte threshold (or a render-target change)
     has to be chosen against. Emission is best-effort: telemetry must never sink
     a render (I-3).
+
+    ``expected_pages`` / ``on_page_count_changed`` (remediation WP-11.1, R1)
+    pass the inventory's page counts through to
+    :func:`~drawing_analyzer.render.iter_rendered_sheets`, so the stream reads
+    exactly the pages the run owes and never yields more than it was asked
+    for; a source that cannot be opened again, or a page past its source's
+    current end, is reported through ``on_page_error`` like any page that
+    would not render.
     """
     for rendered in iter_rendered_sheets(
         paths, rows=rows, cols=cols, overlap_frac=overlap_frac, only=only,
-        on_page_error=on_page_error,
+        on_page_error=on_page_error, expected_pages=expected_pages,
+        on_page_count_changed=on_page_count_changed,
     ):
         if journal is not None:
             try:
@@ -846,18 +873,193 @@ class _GeometryOmissionSink:
     asks the run.log to carry) is unknown at capture time. When a cache *miss*
     then renders for real, :func:`_rendered_stream` "appends" the freshly built
     :class:`SheetGeometry` here and only the render-time ``omitted_tile_count``
-    is copied onto the prescan record — the list itself never grows (the
-    prescan set is already complete), and never-rendered cache hits honestly
+    is copied onto the prescan record, and never-rendered cache hits honestly
     keep ``None``.
+
+    Since remediation WP-11.1 the prescan is best effort: a page it could not
+    scan is routed to the render path, so a render can arrive with no prescan
+    record. Given ``order`` (``_refkey`` -> the page's position among the pages
+    the run owes), the sink adds that page's render-time geometry at its place
+    in page order, so the QC stages still have it; a page not in ``order`` is
+    ignored, and without ``order`` the list never grows (the old contract).
     """
 
-    def __init__(self, geometries: "list[SheetGeometry]") -> None:
+    def __init__(
+        self,
+        geometries: "list[SheetGeometry]",
+        order: "dict[tuple[str, int], int] | None" = None,
+    ) -> None:
+        self._geometries = geometries
+        self._order = order
         self._by_key = {source_page_key(g.ref): g for g in geometries}
 
     def append(self, geom: "SheetGeometry") -> None:
         existing = self._by_key.get(source_page_key(geom.ref))
-        if existing is not None and geom.omitted_tile_count is not None:
-            existing.omitted_tile_count = geom.omitted_tile_count
+        if existing is not None:
+            if geom.omitted_tile_count is not None:
+                existing.omitted_tile_count = geom.omitted_tile_count
+            return
+        rank = None if self._order is None else self._order.get(_refkey(geom.ref))
+        if rank is None:
+            return
+        position = len(self._geometries)
+        for index, other in enumerate(self._geometries):
+            if self._order.get(_refkey(other.ref), position) > rank:
+                position = index
+                break
+        self._geometries.insert(position, geom)
+        self._by_key[source_page_key(geom.ref)] = geom
+
+
+def _unread_reason(exc: "BaseException | None") -> str:
+    """Why an expected page produced no digest: path-free by construction."""
+    if exc is None:
+        return _UnreadPages.UNREACHED
+    if isinstance(exc, (SourceUnreadableError, PageNotInSourceError)):
+        return str(exc)
+    return f"page could not be rendered ({type(exc).__name__})"
+
+
+def _page_ranges(numbers: "list[int]") -> str:
+    """``[3, 4, 5, 9]`` -> ``"3-5, 9"`` (one-based page numbers, sorted)."""
+    runs: list[list[int]] = []
+    for n in sorted(set(numbers)):
+        if runs and n == runs[-1][1] + 1:
+            runs[-1][1] = n
+        else:
+            runs.append([n, n])
+    return ", ".join(str(a) if a == b else f"{a}-{b}" for a, b in runs)
+
+
+class _UnreadPages:
+    """Every expected page the digest could not read, and why (remediation WP-11.1, R1).
+
+    Filled by the render path's ``on_page_error`` (the batch path calls it from
+    its prefetch thread, hence the lock; the first outcome for a page wins) and
+    ``on_page_count_changed``. The owner's rules:
+
+    - :meth:`settle` turns every page the run owes that has no digest into a
+      :class:`~drawing_analyzer.models.UnreadPage`, in page order; a page the
+      render path neither yielded nor reported still gets one ("no render
+      outcome was recorded"), so no expected page can drop out of the account;
+    - :meth:`lines` is what ``ctx.errors`` and the digest stage's errors say:
+      **one line per source** for a source-level failure (it could not be
+      opened again; it has fewer pages now), one line per page otherwise, as
+      page failures always read;
+    - :meth:`notes` names each source that has more pages than the inventory
+      counted: only the inventoried pages were read.
+    """
+
+    UNREACHED = "no render outcome was recorded"
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._failed: dict[tuple[str, int], "BaseException | None"] = {}
+        self._count_changes: dict[str, tuple[int, int]] = {}
+        self._records: list[UnreadPage] = []
+
+    def page_failed(self, ref: Any, exc: BaseException) -> None:
+        with self._lock:
+            self._failed.setdefault(_refkey(ref), exc)
+
+    def page_count_changed(self, path: Any, expected: int, actual: int) -> None:
+        with self._lock:
+            self._count_changes.setdefault(str(path), (int(expected), int(actual)))
+
+    def settle(self, refs: "list[Any]", *, read: "set[tuple[str, int]]") -> "list[UnreadPage]":
+        """The :class:`UnreadPage` records: every page in ``refs`` not in ``read``."""
+        records: list[UnreadPage] = []
+        with self._lock:
+            for ref in refs:
+                key = _refkey(ref)
+                if key in read:
+                    continue
+                exc = self._failed.setdefault(key, None)
+                records.append(UnreadPage(
+                    source_id=str(getattr(ref, "source_id", "") or ""),
+                    source_name=str(ref.source_name),
+                    page_index=int(ref.page_index),
+                    page_count=int(ref.page_count),
+                    reason=_unread_reason(exc),
+                ))
+            self._records = records
+        return records
+
+    def lines(self, refs: "list[Any]") -> "list[str]":
+        """The error lines, in page order: one per source-level failure, else per page."""
+        owed: dict[str, int] = {}
+        for ref in refs:
+            owed[str(ref.pdf_path)] = owed.get(str(ref.pdf_path), 0) + 1
+        by_path: dict[str, list[tuple[Any, "BaseException | None"]]] = {}
+        unread_refs = []
+        unread_keys = {source_page_key(r) for r in self._records}
+        for ref in refs:
+            if source_page_key(ref) not in unread_keys:
+                continue
+            exc = self._failed.get(_refkey(ref))
+            unread_refs.append((ref, exc))
+            by_path.setdefault(str(ref.pdf_path), []).append((ref, exc))
+        out: list[str] = []
+        said: set[tuple[str, str]] = set()
+        for ref, exc in unread_refs:
+            path_key = str(ref.pdf_path)
+            name = ref.source_name
+            if isinstance(exc, SourceUnreadableError):
+                if (path_key, "open") in said:
+                    continue
+                said.add((path_key, "open"))
+                lost = sum(
+                    1 for _r, e in by_path[path_key] if isinstance(e, SourceUnreadableError)
+                )
+                total = owed.get(path_key, lost)
+                share = (
+                    f"its {total} page(s) were not read" if lost == total
+                    else f"{lost} of its {total} page(s) were not read"
+                )
+                out.append(f"{name}: {exc}; {share}")
+            elif isinstance(exc, PageNotInSourceError):
+                if (path_key, "missing") in said:
+                    continue
+                said.add((path_key, "missing"))
+                pages = [
+                    r.page_index + 1 for r, e in by_path[path_key]
+                    if isinstance(e, PageNotInSourceError)
+                ]
+                which = (
+                    f"page {pages[0]} was not read" if len(pages) == 1
+                    else f"pages {_page_ranges(pages)} were not read"
+                )
+                out.append(
+                    f"{name}: has {exc.actual} page(s) now, {exc.expected} at the "
+                    f"inventory; {which}"
+                )
+            elif exc is None:
+                out.append(f"{ref.display_label}: page was not read ({self.UNREACHED})")
+            else:
+                out.append(
+                    f"{ref.display_label}: page could not be rendered ({type(exc).__name__})"
+                )
+        return out
+
+    def notes(self, refs: "list[Any]") -> "list[str]":
+        """One line per source with more pages than the inventory counted, in input order."""
+        out: list[str] = []
+        seen: set[str] = set()
+        for ref in refs:
+            path_key = str(ref.pdf_path)
+            if path_key in seen:
+                continue
+            seen.add(path_key)
+            change = self._count_changes.get(path_key)
+            if change is None:
+                continue
+            expected, actual = change
+            if actual > expected:
+                out.append(
+                    f"{ref.source_name}: has {actual} page(s) now, {expected} at the "
+                    f"inventory; only the {expected} inventoried page(s) were read"
+                )
+        return out
 
 
 def _digest_sheets_concurrent(
@@ -883,13 +1085,17 @@ def _digest_sheets_concurrent(
     tile_sink: "Any" = None,
     render_sink: "Any" = None,
     journal: "Any" = None,
+    expected_pages: "dict[str, int] | None" = None,
+    on_page_count_changed: "Any" = None,
 ) -> list[SheetDigest]:
     """Real-time path: render sequentially, digest on a bounded thread pool.
 
     Rendering (PyMuPDF, fast, not thread-safe to share) streams on the calling
     thread; the slow per-sheet digests run concurrently. ``results`` is filled by
     page index so the assembled order is deterministic, and at most ``workers``
-    rendered sheets are held in flight, bounding memory on a large set.
+    rendered sheets are held in flight, bounding memory on a large set. The
+    stream reads only the pages the run owes (``expected_pages``, remediation
+    WP-11.1), so it never yields more sheets than ``total`` counts.
     """
     workers = _resolve_workers(max_workers, total)
     results: list[SheetDigest | None] = [None] * total
@@ -927,6 +1133,8 @@ def _digest_sheets_concurrent(
                 paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
                 geometry_sink=geometry_sink, only=only, on_page_error=on_page_error,
                 tile_sink=tile_sink, render_sink=render_sink, journal=journal,
+                expected_pages=expected_pages,
+                on_page_count_changed=on_page_count_changed,
             )
         ):
             in_flight.add(executor.submit(_run, index, rendered))
@@ -963,6 +1171,8 @@ def _digest_sheets_via_batch(
     reusable_upload_sink: "list[Any] | None" = None,
     on_page_error: "Any" = None,
     journal: "Any" = None,
+    expected_pages: "dict[str, int] | None" = None,
+    on_page_count_changed: "Any" = None,
 ) -> list[SheetDigest]:
     """Batch path: render-stream → Files-API upload → one Message Batch.
 
@@ -1002,6 +1212,11 @@ def _digest_sheets_via_batch(
             # depending only on transport.
             on_page_error=on_page_error,
             journal=journal,
+            # Remediation WP-11.1 (R1): the stream reads the pages the run owes
+            # and reports a source it cannot open again page by page, so one
+            # lost source no longer raises into the upload loop.
+            expected_pages=expected_pages,
+            on_page_count_changed=on_page_count_changed,
         ),
         client=client,
         model=model,
@@ -1067,6 +1282,8 @@ def _level1_partition(
     focus: str | None,
     specs_text: str | None = None,
     snapshot_by_path: "dict[str, tuple[str, int, int]] | None" = None,
+    refs: "list[Any] | None" = None,
+    expected_pages: "dict[str, int] | None" = None,
 ) -> "tuple[dict, set, dict, list]":
     """Pre-render level-1 cache scan (Phase 9).
 
@@ -1083,6 +1300,14 @@ def _level1_partition(
     - ``level1_keys`` — ``_refkey`` → level-1 key, so a miss's fresh digest can be
       stored under it;
     - ``geometries`` — every sheet's lightweight geometry (hit or miss), for QC.
+
+    ``refs`` / ``expected_pages`` (remediation WP-11.1, R1; the owner's rule)
+    make the scan best effort: it scans exactly the pages the run owes, and
+    every one of ``refs`` it could not scan (a page that would not load or
+    extract, an identity or geometry failure, a source it could not open) is a
+    **miss**, so the render path reads it and decides its outcome, and a
+    routed page's geometry reaches the QC stages from its render. Such a page
+    has no level-1 key, so its fresh digest is stored at level 2 only.
     """
     cached_by_ref: dict[tuple[str, int], SheetDigest] = {}
     miss_only: set[tuple[str, int]] = set()
@@ -1091,7 +1316,8 @@ def _level1_partition(
     focus_frag = focus_cache_fragment(focus)
     specs_frag = specs_cache_fragment(specs_text)
     for ref, identity, geometry in iter_sheet_prescan(
-        paths, rows=rows, cols=cols, overlap_frac=overlap_frac, snapshot_by_path=snapshot_by_path
+        paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
+        snapshot_by_path=snapshot_by_path, expected_pages=expected_pages,
     ):
         geometries.append(geometry)
         key = digest_cache_key_level1(
@@ -1114,6 +1340,10 @@ def _level1_partition(
             cached_by_ref[rk] = served
         else:
             miss_only.add(rk)
+    for ref in refs or ():
+        rk = _refkey(ref)
+        if rk not in cached_by_ref:
+            miss_only.add(rk)               # not scanned: the render path decides
     return cached_by_ref, miss_only, level1_keys, geometries
 
 
@@ -1240,6 +1470,8 @@ def _critique_level1_partition(
     runs: int,
     profiles_key: str | None,
     snapshot_by_path: "dict[str, tuple[str, int, int]] | None" = None,
+    refs: "list[Any] | None" = None,
+    expected_pages: "dict[str, int] | None" = None,
 ) -> "tuple[dict, set, dict]":
     """Pre-render level-1 cache scan for the critique stage (Phase 19B, §11.5).
 
@@ -1259,6 +1491,10 @@ def _critique_level1_partition(
     next working structured run looks. The caller rebuilds the key from the
     identity with the live latch state, the same correction the level-2 key needs
     in ``critique_sheet_self_consistent``.
+
+    ``refs`` / ``expected_pages`` (remediation WP-11.1): the same best-effort
+    scan as :func:`_level1_partition`: every one of ``refs`` it could not scan
+    is a miss, so the stage's render path obtains it or names it.
     """
     from .critique import (
         CRITIQUE_PROMPT_VERSION,
@@ -1279,7 +1515,8 @@ def _critique_level1_partition(
     # does) needs no assumption about the caller's path-list ordering.
     portable_by_key: dict[tuple[str, int], tuple[str, int]] = {}
     for ref, identity, _geom in iter_sheet_prescan(
-        paths, rows=rows, cols=cols, overlap_frac=overlap_frac, snapshot_by_path=snapshot_by_path
+        paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
+        snapshot_by_path=snapshot_by_path, expected_pages=expected_pages,
     ):
         key = critique_cache_key_level1(
             identity,
@@ -1307,6 +1544,10 @@ def _critique_level1_partition(
             cached_by_ref[rk] = critique_result_from_entry(entry, ref)
         else:
             miss_only.add(rk)
+    for ref in refs or ():
+        rk = _refkey(ref)
+        if rk not in cached_by_ref:
+            miss_only.add(rk)               # not scanned: the render path decides
     return cached_by_ref, miss_only, level1_identities, portable_by_key
 
 
@@ -1402,6 +1643,8 @@ def _run_critique_stage(
     render_spool: Any = None,
     reusable_uploads: "list[Any] | None" = None,
     read_tally: "_CritiqueReadTally | None" = None,
+    refs: "list[Any] | None" = None,
+    expected_pages: "dict[str, int] | None" = None,
 ) -> tuple[list[Finding], list[NumericClaim], list[str]]:
     """Critique every sheet (Phase 11): self-consistent critique, cached two ways.
 
@@ -1436,6 +1679,15 @@ def _run_critique_stage(
     self-consistency reads, every billed read included, and reads COMPLETE only
     when every requested read finished and parsed (FAILED when none did,
     otherwise PARTIAL), so it says what the stage says.
+
+    ``refs`` / ``expected_pages`` (remediation WP-11.1, the owner's rule): the
+    pages the run owes, from the inventory, and their counts. The stage
+    critiques exactly those pages and never reopens files to count them, so a
+    source lost after the digest stays in its account: its sheets are read from
+    the digest's own spooled renders or retained uploads where those exist, and
+    a page it cannot obtain is named in ``degraded`` with the reason the render
+    path gave. Without ``refs`` (a direct caller) the stage lists the pages
+    itself with ``list_sheets``, which skips a file it cannot open.
     """
     from .critique import (
         CRITIQUE_PROMPT_VERSION,
@@ -1466,6 +1718,7 @@ def _run_critique_stage(
         cached_by_ref, only, level1_identities, portable_by_key = _critique_level1_partition(
             paths, rows=rows, cols=cols, overlap_frac=overlap_frac, cache=cache,
             model=model, runs=runs, profiles_key=profiles_key, snapshot_by_path=snapshot_by_path,
+            refs=refs, expected_pages=expected_pages,
         )
         if cached_by_ref:
             _log.info(
@@ -1482,7 +1735,14 @@ def _run_critique_stage(
     # silently by ``_ordered_inputs``, so the stage reported COMPLETE having
     # never critiqued them (I-1). Folded into ``degraded`` once the generator
     # is exhausted, which both transports do before this function returns.
-    unobtained: list[str] = []
+    unobtained: list[tuple[str, tuple[str, int]]] = []
+    # Why the render path could not produce a page (remediation WP-11.1): the
+    # first reason per page, named in its degraded line. Path-free.
+    unobtained_reasons: dict[tuple[str, int], str] = {}
+
+    def _critique_page_error(ref: Any, exc: BaseException) -> None:
+        unobtained_reasons.setdefault(_refkey(ref), _unread_reason(exc))
+
     done = 0
 
     def _record_critique(res: Any, portable: "tuple[str, int]") -> None:
@@ -1598,9 +1858,11 @@ def _run_critique_stage(
         Batch runs adopt terminal digest uploads; real-time runs pop byte-exact
         renders from the local spool. A cache hit, mismatched grid, unavailable
         manifest, or failed spool write falls back to the historical renderer.
-        The merge follows ``list_sheets`` order regardless of reuse availability.
+        The merge follows the run's page order (the inventory's pages, or
+        ``list_sheets`` for a caller that passed none) regardless of reuse
+        availability.
         """
-        ordered_refs = list_sheets(paths)
+        ordered_refs = list(refs) if refs is not None else list_sheets(paths)
         target = (
             set(only)
             if only is not None
@@ -1612,7 +1874,8 @@ def _run_critique_stage(
             """Render one failed staged/reusable page without misassigning another."""
             for candidate in iter_rendered_sheets(
                 paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
-                only={expected},
+                only={expected}, expected_pages=expected_pages,
+                on_page_error=_critique_page_error,
             ):
                 if _refkey(candidate.ref) == expected:
                     return candidate
@@ -1628,7 +1891,8 @@ def _run_critique_stage(
             fresh_keys = target - set(provided)
             fresh_iter = iter(iter_rendered_sheets(
                 paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
-                only=fresh_keys,
+                only=fresh_keys, expected_pages=expected_pages,
+                on_page_error=_critique_page_error,
             ))
             pending = None
 
@@ -1670,7 +1934,7 @@ def _run_critique_stage(
                 if item is not None:
                     yield item
                 else:
-                    unobtained.append(getattr(ref, "display_label", str(key)))
+                    unobtained.append((getattr(ref, "display_label", str(key)), key))
 
         if use_batch:
             reusable_by_ref: dict[tuple[str, int], Any] = {}
@@ -1765,9 +2029,13 @@ def _run_critique_stage(
     # Reconcile what was critiqued against what was asked for. A sheet the
     # merge could never obtain reached neither ``_ingest_miss`` nor the
     # executor's except arm, so nothing else in this function can see it.
-    for label in sorted(unobtained):
+    for label, key in sorted(unobtained):
         tally.add_unobtained()
-        degraded.append(f"{label}: no critique input could be obtained")
+        reason = unobtained_reasons.get(key)
+        degraded.append(
+            f"{label}: no critique input could be obtained"
+            + (f": {reason}" if reason else "")
+        )
         _log.warning("critique input unavailable for a sheet: %s", label)
     tally.finish(total)
 
@@ -3040,7 +3308,14 @@ def extract_drawing_context(
         )
 
     paths = inventory.accepted_paths
-    refs = list_sheets(paths)
+    # The inventory's pages are the workload (remediation WP-11.1, R1; D-8):
+    # built from its records without reopening a file. ``list_sheets`` reopened
+    # every file and silently skipped one it could not open, so a source that
+    # vanished or locked after the inventory dropped out of ``total`` and of
+    # everything built on it; now each of its pages stays owed and gets an
+    # outcome, and the iterators read exactly these pages (``expected_pages``).
+    refs = inventory_sheet_refs(inventory)
+    expected_pages = inventory.expected_page_counts()
     total = len(refs)
     file_count = len(inventory.accepted_documents)
 
@@ -3056,13 +3331,16 @@ def extract_drawing_context(
     }
 
     # Page-level render failures (§10.5) are recorded and the page is excluded,
-    # but the rest of the set still processes — never a whole-run abort.
-    page_error_lines: list[str] = []
+    # but the rest of the set still processes — never a whole-run abort. Since
+    # remediation WP-11.1 (R1) so is a source that cannot be opened again after
+    # the inventory (every one of its expected pages) and a page past its
+    # source's current end. The render path is the one reporter: the prescan
+    # routes whatever it cannot scan to it. Lines and records are settled once
+    # the digest phase is over (``_UnreadPages``).
+    unread = _UnreadPages()
 
     def _on_page_error(ref: Any, exc: Exception) -> None:
-        page_error_lines.append(
-            f"{ref.display_label}: page could not be rendered ({type(exc).__name__})"
-        )
+        unread.page_failed(ref, exc)
 
     _log.info(
         "===== run start: %d file(s), %d sheet(s) | model=%s path=%s cache=%s "
@@ -3129,6 +3407,7 @@ def extract_drawing_context(
             model=model, max_tokens=max_tokens, use_thinking=use_thinking,
             effort=effort, focus=focus or None, specs_text=specs_text or None,
             snapshot_by_path=snapshot_by_path,
+            refs=refs, expected_pages=expected_pages,
         )
         if need_geometry:
             sheet_geometries.extend(prescan_geoms)
@@ -3136,7 +3415,11 @@ def extract_drawing_context(
         # stream must not re-capture — but a freshly-rendered MISS still merges
         # its render-only fact (the omitted-blank-tile count, §18.2) into the
         # prescan record via the update sink; cache hits keep None (unknown).
-        geometry_sink = _GeometryOmissionSink(sheet_geometries)
+        # A page the prescan could not scan was routed to render (WP-11.1): the
+        # sink adds its render-time geometry at its place in page order.
+        geometry_sink = _GeometryOmissionSink(
+            sheet_geometries, order={_refkey(r): i for i, r in enumerate(refs)}
+        )
         prescan_hits = len(cached_by_ref)
         render_forced = config.save_tile_artifacts and only is not None
         if render_forced:
@@ -3231,6 +3514,8 @@ def extract_drawing_context(
                 geometry_sink=geometry_sink, only=only, tile_sink=tile_sink,
                 reusable_upload_sink=reusable_uploads,
                 on_page_error=_on_page_error, journal=journal,
+                expected_pages=expected_pages,
+                on_page_count_changed=unread.page_count_changed,
             )
         else:
             miss_sheets = _digest_sheets_concurrent(
@@ -3241,7 +3526,8 @@ def extract_drawing_context(
                 focus=focus or None, specs_text=specs_text or None,
                 geometry_sink=geometry_sink, only=only, tile_sink=tile_sink,
                 on_page_error=_on_page_error, render_sink=render_sink,
-                journal=journal,
+                journal=journal, expected_pages=expected_pages,
+                on_page_count_changed=unread.page_count_changed,
             )
 
     # Store each miss's result under its level-1 key too (store-under-both), so a
@@ -3264,10 +3550,23 @@ def extract_drawing_context(
     for sd in miss_sheets:
         by_ref[_refkey(sd.ref)] = sd
     sheets = [by_ref[_refkey(r)] for r in refs if _refkey(r) in by_ref]
+    # Every page the run owes ends with an outcome (remediation WP-11.1, R1): a
+    # digest, or an UnreadPage carrying the reason the render path gave ("no
+    # render outcome was recorded" when it gave none). The lines say it once
+    # per source for a source-level failure and once per page otherwise (the
+    # owner's cardinality rule); a source with more pages than the inventory
+    # counted is named once, since only its inventoried pages were read.
+    unread_pages = unread.settle(refs, read=set(by_ref))
+    unread_by_key = {source_page_key(page): page for page in unread_pages}
+    page_error_lines = unread.lines(refs)
+    page_count_notes = unread.notes(refs)
 
     # Seed the run errors with the inventory rejections and any page-level
     # render failures (§10.5 / §10.7) so a partial run explains what it dropped.
-    errors: list[str] = list(inventory_errors) + list(page_error_lines) + specs_errors
+    errors: list[str] = (
+        list(inventory_errors) + list(page_error_lines) + list(page_count_notes)
+        + specs_errors
+    )
     # Typed per-stage outcomes for the pre-ledger stages (synthesis, critique,
     # cross-QC); the ledger stages append theirs inside ``_run_qc_stages`` (§15.4).
     stage_results: list[StageResult] = []
@@ -3298,7 +3597,20 @@ def extract_drawing_context(
     # N15 (remediation WP-01.3): the findings of each read the model did not
     # finish, held out of the review, by portable sheet key.
     findings_held_out: dict[str, int] = {}
-    for sd in sheets:
+    for ref in refs:
+        sd = by_ref.get(_refkey(ref))
+        if sd is None:
+            # A page the run owed and could not read (remediation WP-11.1): one
+            # PAGE_UNREAD in page order beside the SHEET_DIGESTED events, so
+            # every expected page ends with exactly one per-page event. It made
+            # no call, so it records no usage.
+            page = unread_by_key[source_page_key(ref)]
+            journal.emit(
+                "PAGE_UNREAD", stage="digest", level="WARNING",
+                sheet=page.display_label, source=page.source_id or "-",
+                reason=page.reason,
+            )
+            continue
         # A cached sheet made no API call, so it costs zero tokens *this run* — its
         # record carries the cache-hit metadata but zero billed tokens. A fresh
         # digest records its actual reported usage (billable even if it errored).
@@ -3431,6 +3743,9 @@ def extract_drawing_context(
     # items_in counts the sheets the run set out to read, not the ones that
     # survived rendering, so a page that never produced a SheetDigest at all
     # stays visible here instead of vanishing from both sides of the ratio.
+    # Since remediation WP-11.1 that is the inventory's page count (D-2's
+    # eligible items), no longer a recount that skipped a source it could not
+    # reopen; an unread page is an eligible item with no judgment.
     digest_stage.items_in = total
     digest_stage.items_out = ok_sheets
     called = [s for s in sheets if not s.cached]
@@ -3462,6 +3777,10 @@ def extract_drawing_context(
                 + list(page_error_lines)
             )[:5]
         )
+    # A source with more pages than the inventory counted: every page the run
+    # owed was read, so the stage keeps its status, but it names the source
+    # (the same line is a run error, so the run reads PARTIAL; WP-11.1).
+    digest_stage.warnings.extend(page_count_notes)
     if findings_held_out:
         # Observational (D-2 note): each such sheet is already a failed one.
         digest_stage.warnings.append(
@@ -3783,6 +4102,9 @@ def extract_drawing_context(
                 render_spool=render_spool,
                 reusable_uploads=reusable_uploads,
                 read_tally=read_tally,
+                # The run's pages (WP-11.1): the stage never reopens files to
+                # count them, so a source lost after the digest stays owed.
+                refs=refs, expected_pages=expected_pages,
             )
             numeric_claims.extend(c_claims)
             if read_tally.eligible is None:
@@ -4228,6 +4550,7 @@ def extract_drawing_context(
         cross_qc_discards=cross_qc_discards,
         cross_qc_invalid=cross_qc_invalid,
         digest_findings_held_out=dict(sorted(findings_held_out.items())),
+        unread_pages=unread_pages,
     )
 
 
