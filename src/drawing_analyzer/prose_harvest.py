@@ -26,11 +26,19 @@ least one in-set sheet, anchored on the first named sheet and dual-anchored
 are harvested only behind ``focus_findings_to_markups`` (default OFF — a focus
 is often not QC).
 
+Section **filler** ("No conflicts noted on this sheet.") and synthesis
+**assurances** ("No conflicts were found between M-101 and P-101.") are not QC
+items (remediation WP-09.1: B11, N11). One closed vocabulary recognizes both,
+so neither costs a structuring call or becomes a ledger entry, and each is
+counted observationally (``filtered``, ``assurances``). Anything outside the
+vocabulary is kept, the safe direction.
+
 The prose itself is never modified — it is *mirrored* into the ledger, not
 moved (I-2). PDF-engine-free (I-5); real-time only (stragglers are few).
 """
 from __future__ import annotations
 
+import bisect
 import hashlib
 import json
 import os
@@ -125,12 +133,34 @@ def _resolve_harvest_workers(max_workers: int | None, total: int) -> int:
 
 _LIST_ITEM_RE = re.compile(r"^(\s*)(?:[-*+•]|\d+[.)])\s+(.*)$")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.;])\s+(?=[A-Z0-9(])")
-# Items that are section boilerplate, not findings ("None noted.", "N/A").
+# --------------------------------------------------------------------------- #
+# Section filler and synthesis assurances (remediation WP-09.1: B11, N11)
+# --------------------------------------------------------------------------- #
 #
-# Anchored at BOTH ends (P8 item 6). The old pattern anchored only at the start,
-# so any real finding that *opened* with one of these words was discarded as
-# boilerplate — and an absence finding naturally opens that way. All five of these
-# realistic phrasings were being dropped:
+# One closed vocabulary, used in two anchored forms (the owner's rules):
+#
+# * ``_TRIVIAL_RE`` is section FILLER: a whole item made of listed words ("No
+#   conflicts noted on this sheet.", "None apparent on this sheet.", "No
+#   cross-discipline items noted for this sheet."). ``_split_items`` applies it,
+#   the one filter site every channel shares, so filler reaches neither the
+#   structuring call nor the degraded entry (plan WP-09 step 3).
+# * ``_ASSURANCE_RE`` finds the SPANS of a synthesis statement that say a
+#   conflict is absent ("no conflicts were found", "there are no
+#   discrepancies"). A statement whose every conflict signal sits inside one,
+#   and whose every other word is a listed frame word (``_FRAME_WORDS``), is an
+#   assurance, not a conflict (``_is_assurance``, N11).
+#
+# Every word comes from a listed set; nothing guesses at content. An item that
+# carries a tag, a number, a sheet id or any unlisted word is not filler; a
+# conflict noun qualified by an unlisted word ("no duct conflicts were found")
+# is not an assurance, and neither is an assurance beside any unlisted word ("…,
+# yet M-101 lists 500 gpm"). Each refusal keeps the item: the safe direction
+# (plan section 2.1), at the cost of a structuring call, as before. The same
+# words decide which synthesis headings are mere labels (``_LABEL_RE``).
+#
+# The filler test is anchored at BOTH ends (P8 item 6). Anchored only at the
+# start, it discarded every real finding that *opened* with one of these words,
+# and an absence finding naturally opens that way:
 #
 #   "None of the sprinkler heads under the duct have clearance shown"
 #   "No conflicts were resolved between M-101 and FP-101; both remain open"
@@ -138,25 +168,229 @@ _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.;])\s+(?=[A-Z0-9(])")
 #   "N/A per the mechanical schedule, but the FP drawings require a 4 inch drain"
 #   "No issues flagged earlier are addressed by the revised riser diagram"
 #
-# Now the whole item must be the boilerplate phrase plus at most a short
-# closing word, so "None noted." still goes and "None of the sprinkler heads…"
-# stays.
+# Until WP-09.1 it allowed one qualifier after the noun and no modifier before
+# it (B11), so the review's four strings passed it. Each cost a structuring
+# call and, with no client or a failed call, became a medium sheet-level margin
+# callout announcing that nothing was wrong.
+
+# A hyphen, and the Unicode hyphens and dashes a model may type (U+2010-U+2014).
+_DASH = r"[\-\u2010-\u2014]"
+
+#: Words that may qualify the noun: "no <modifier> <modifier> <noun>".
+_FILLER_MODIFIERS = (
+    "other", "further", "additional", "new", "known", "obvious", "apparent",
+    "significant", "major", "notable", "specific", "outstanding", "open",
+    "remaining", "unresolved", "coordination", "discipline", "disciplinary",
+    "trade", "design", "drawing", "sheet", "qc", "code",
+    rf"cross{_DASH}?\s?(?:discipline|disciplinary|sheet)",
+    rf"(?:inter|multi){_DASH}?(?:discipline|disciplinary)",
+)
+#: The conflict nouns. Each carries a ``_CONFLICT_SIGNALS`` stem, and every
+#: stem with a noun form has one here (both pinned by
+#: ``tests/test_prose_filler_and_assurances.py``).
+_CONFLICT_NOUNS = (
+    r"conflicts?", r"contradictions?", r"disagreements?", r"mismatch(?:es)?",
+    r"discrepanc\w*", r"inconsistenc(?:y|ies)", r"divergences?",
+)
+#: The conflict adjectives of "nothing <adjective>".
+_CONFLICT_ADJECTIVES = (
+    "inconsistent", "conflicting", "contradictory", "divergent", "mismatched",
+)
+#: What section filler is about: the conflict nouns and these.
+_FILLER_NOUNS = _CONFLICT_NOUNS + (
+    r"issues?", r"items?", r"notes?", r"findings?", r"concerns?", r"comments?",
+    r"problems?", r"clash(?:es)?", r"deficienc(?:y|ies)", r"errors?",
+    r"observations?",
+)
+_AUXILIARIES = (
+    "were", "was", "are", "is", r"ha(?:ve|s|d)\s+been", r"(?:could|can)\s+be",
+)
+#: What a reviewer did not find: "no conflicts [were] <detected>".
+_DETECTED = (
+    "noted", "found", "reported", "identified", "observed", "apparent",
+    "detected", "seen", "evident", "flagged", r"exists?", r"remains?",
+)
+_DISCIPLINES = (
+    "architectural", "structural", "mechanical", "electrical", "plumbing",
+    rf"fire(?:\s|{_DASH})protection", "civil", "landscape",
+    r"telecom(?:munications)?", "technology",
+)
+_DOCUMENTS = (
+    r"disciplines?", r"trades?", r"sheets?", r"drawings?", r"plans?",
+    r"schedules?", r"backgrounds?", "set",
+)
+_PLACES = ("sheet", "drawing", "page", "plan", "set", "discipline", "review")
+#: A word that carries a digit, read one way only: the characters before its
+#: first digit, that digit, the rest. Possessive, so a pattern that repeats it
+#: can never re-split one word and backtrack exponentially (an ambiguous form
+#: took minutes on "M-101 / " repeated in a heading).
+_DIGIT_WORD = r"(?:[^\W\d]|[./-])*+\d[\w./-]*+"
+#: A sheet id, or a tag shaped like one: it starts with a letter and carries a
+#: digit (``M-101``, ``FP-101``, ``A1.01``). A measurement starts with its value
+#: (``500``, ``6in``) and is never one.
+_ID = rf"[^\W\d_]{_DIGIT_WORD}"
+#: The only words an assurance may carry outside its spans: sheet ids,
+#: discipline, document and place names, a few function words, "are
+#: consistent", "at this time". Any other word keeps the statement, since it
+#: may state the very conflict the assurance denies: a contrast ("but", "yet",
+#: "nevertheless", "while"), a value, a component, a "not" (the Codex review of
+#: WP-09.1: "No conflicts were found, yet M-101 lists 500 gpm and P-101 lists
+#: 550 gpm." was dropped whole). A closed list, like the rest of this
+#: vocabulary, so no list of contrast words has to be complete.
+_FRAME_WORDS = (
+    "the", "a", "an", "and", "or", "of", "on", "in", "at", "to", "for", "from",
+    "with", "within", "between", "among", "across", "this", "these", "those",
+    "any", "all", "both", "each", "its", "their", "other", "overall",
+    "are", "is", "was", "were", "be", "been", r"appears?", r"seems?",
+    "consistent", "coordinated", "aligned",
+    "time", "present", "currently", "so", "far", "date", "fire", "protection",
+) + _DISCIPLINES + _DOCUMENTS + _PLACES
+
+
+def _alt(words: Iterable[str]) -> str:
+    return "(?:" + "|".join(words) + ")"
+
+
+# Up to two modifiers ("cross-sheet / cross-discipline" writes a slash between).
+_MODIFIERS = rf"(?:{_alt(_FILLER_MODIFIERS)}(?:\s*/\s*|\s+)){{0,2}}"
+
+
+def _no_phrase(nouns: str) -> str:
+    """``no`` + up to two modifiers + a noun, optionally ``, / or / and`` another."""
+    return (
+        rf"no\s+{_MODIFIERS}{nouns}"
+        rf"(?:\s*(?:,|/|\bor\b|\band\b)\s*{_MODIFIERS}{nouns})?"
+    )
+
+
+_AUX = _alt(_AUXILIARIES)
+_SEEN = _alt(_DETECTED)
+_FILLER_QUALIFIER = "|".join((
+    rf"(?:{_AUX}\s+)?{_SEEN}",
+    r"to\s+(?:report|note)",
+    r"at\s+this\s+time|at\s+present|currently|so\s+far|to\s+date",
+    rf"(?:on|for|in|within|from)\s+(?:this|the)\s+{_alt(_PLACES)}",
+    r"(?:with|between|across|among|and)\s+(?:the\s+)?(?:other\s+)?"
+    rf"(?:{_alt(_DISCIPLINES)}(?:\s+{_alt(_DOCUMENTS)})?|{_alt(_DOCUMENTS)})",
+))
+# Section filler, not findings (B11): the WHOLE item is an optional listed
+# label ("Coordination items:"), the subject, then up to four listed
+# qualifiers in any order.
 _TRIVIAL_RE = re.compile(
-    r"^\W*(?:none|n/?a|nothing"
-    r"|no\s+(?:conflicts?|issues?|items?|discrepanc\w*|notes?|findings?))"
-    r"(?:\s+(?:noted|found|reported|identified|observed|apparent"
-    r"|to\s+report|at\s+this\s+time|on\s+this\s+sheet))?"
-    r"\W*$",
+    rf"^\W*(?:{_MODIFIERS}{_alt(_FILLER_NOUNS)}\W*?[:\u2013\u2014]\W*)?"
+    r"(?:none|n/?a|nothing(?:\s+(?:further|else|more|additional|significant"
+    r"|notable))?"
+    rf"|{_no_phrase(_alt(_FILLER_NOUNS))})"
+    rf"(?:[\s,;]+(?:{_FILLER_QUALIFIER})){{0,4}}\W*$",
     re.I,
 )
+
+# The conflict noun must be the head of its phrase: what follows it is the
+# end, a punctuation mark, a preposition, a conjunction or the verb. So "no
+# conflict resolution is shown" is not an assurance: its head is "resolution".
+_HEAD_FOLLOWERS = (
+    "between", "among", "across", "with", "on", "in", "within", "for", "at",
+    "to", "from", "and", "or",
+) + _AUXILIARIES + _DETECTED
+_NO_CONFLICT = (
+    _no_phrase(_alt(_CONFLICT_NOUNS))
+    + rf"(?=\s*(?:[.,;:!?)]|$)|\s+{_alt(_HEAD_FOLLOWERS)}\b)"
+)
+# Between the noun and its verb, only a phrase of sheet ids, discipline names
+# and a few listed words ("between M-101 and P-101", "between the fire
+# protection and mechanical sheets"). An open phrase can swallow a clause:
+# "No conflicts between M-101 and P-101 resolve the pump question and none
+# were found on E-201" is not an assurance.
+_PHRASE_WORD = (
+    rf"(?:{_DIGIT_WORD}|the|and|or|of|on|in|any|both|these|those|this|its"
+    rf"|their|other|{_alt(_DISCIPLINES)}|{_alt(_DOCUMENTS)})"
+)
+_PHRASE = (
+    r"(?:\s+(?:between|among|across|with|on|in|within|for|from)"
+    rf"(?:\s+{_PHRASE_WORD}){{1,8}}?)"
+)
+_ASSURANCE = "|".join((
+    # "no conflicts [between M-101 and P-101] [were] found"
+    rf"\b{_NO_CONFLICT}{_PHRASE}?(?:\s+{_AUX})?\s+{_SEEN}\b",
+    # "nothing inconsistent [was found]"
+    rf"\bnothing\s+(?:(?:else|further)\s+)?{_alt(_CONFLICT_ADJECTIVES)}\b"
+    rf"(?:\s+{_AUX}\s+{_SEEN}\b)?",
+    # "there are no conflicts"
+    r"\bthere\s+(?:is|are|was|were|appears?\s+to\s+be|seems?\s+to\s+be)\s+"
+    + _NO_CONFLICT,
+    # "found no conflicts"
+    r"\b(?:found|noted|identified|observed|detected|revealed|shows?|showed"
+    r"|indicates?|indicated)\s+" + _NO_CONFLICT,
+))
+# A label naming a conflict ("Cross-sheet conflicts:") directly before an
+# assurance belongs to it.
+_ASSURANCE_RE = re.compile(
+    rf"^\W*{_MODIFIERS}{_alt(_CONFLICT_NOUNS)}\W*?[:\u2013\u2014]\W*"
+    rf"(?={_ASSURANCE})|{_ASSURANCE}",
+    re.I,
+)
+_FRAME_TOKEN_RE = re.compile(rf"{_alt(_FRAME_WORDS)}|{_ID}", re.I)
+# A word: starts and ends on a letter or digit, and may carry ' . / - inside
+# (``doesn't``, ``M-101``, ``A1.01``); the punctuation around it is not a word.
+_WORD_RE = re.compile(r"[^\W_](?:[\w'./-]*[^\W_])?")
+
+# A synthesis heading is a LABEL when it names a section ("Cross-sheet /
+# cross-discipline conflicts", "Conflicts between M-101 and P-101", "M-101 /
+# P-101 discrepancies"). Any other heading says something ("M-101 conflicts with
+# P-101.") and is an item of its own (the Codex review of WP-09.1: dropping
+# every heading lost a conflict written as a whole-line bold sentence). A label
+# is the noun phrase of the filler vocabulary without its "no": listed
+# modifiers, adjectives and nouns, after an optional pair of sheet ids (or a
+# single one with no "with" after it) and before listed qualifiers or sheet
+# ids. A statement starts with its subject, so an unlisted word before the
+# noun, or a single sheet id followed by "with" ("M-101 conflicts with P-101"),
+# makes it one. An unlisted label is read as an item: noise, never a lost
+# conflict.
+_LABEL_ADJECTIVES = (
+    "potential", "possible", "key", "critical", "primary", "identified",
+    "stale", "tag", "schedule", "reference", "equipment", "dimensional",
+    "detail",
+) + _CONFLICT_ADJECTIVES
+_LABEL_NOUNS = _FILLER_NOUNS + (
+    r"references?", rf"cross{_DASH}?\s?references?", r"tags?", "coordination",
+)
+_IDS = rf"{_ID}(?:\s*(?:/|&|,|\band\b|\bor\b|\bvs\.?|\bversus\b)\s*{_ID})*+"
+#: What a label may say it is: "Summary of conflicts", "Conflict review".
+_LABEL_KINDS = (
+    "summary", "review", "overview", "list", "log", "register", "table",
+    "check",
+)
+_LABEL_PHRASE = (
+    rf"{_MODIFIERS}(?:{_alt(_LABEL_ADJECTIVES)}\s+)?{_alt(_LABEL_NOUNS)}"
+    rf"(?:\s+{_alt(_LABEL_KINDS)})?"
+)
+_LABEL_RE = re.compile(
+    # An optional pair of sheet ids ("M-101 / P-101 ..."), or a single one when
+    # no "with" follows: "FP-101 conflicts" names a section, "M-101 conflicts
+    # with P-101" says something.
+    rf"^\W*(?:{_ID}(?:\s*(?:/|&|,|\band\b|\bvs\.?|\bversus\b)\s*{_ID})++\s+"
+    rf"|{_ID}\s+(?!.*\bwith\b))?"
+    rf"(?:{_alt(_LABEL_KINDS)}\s+of\s+(?:the\s+)?)?"
+    rf"{_LABEL_PHRASE}(?:\s*(?:,|/|&|\band\b|\bor\b)\s*{_LABEL_PHRASE}){{0,3}}"
+    rf"(?:[\s,;]+(?:{_FILLER_QUALIFIER}"
+    r"|requiring\s+(?:resolution|coordination|attention|action|review)"
+    r"|to\s+(?:resolve|review|coordinate|address|confirm)"
+    r"|during\s+(?:the\s+)?(?:review|coordination)"
+    r"|\(\s*(?:none|n/?a|nil)\s*\)"
+    rf"|(?:between|among|across|with|on|in|for|of|from)\s+{_IDS}"
+    rf"|\(\s*{_IDS}\s*\))){{0,4}}\W*$",
+    re.I,
+)
+
 # A floor low enough to keep a terse real finding. At 20 it discarded
 # "Drain is undersized" (19), "6 inch drain wrong" (18), "VAV-3 blocks duct" (17)
-# and "No clearance" (12); the boilerplate filter above, not a length guess, is
-# what removes section filler, so this only has to stop single-token fragments.
+# and "No clearance" (12); the filler test above, not a length guess, is what
+# removes section filler, so this only has to stop single-token fragments.
 _MIN_ITEM_CHARS = 8
 
 # Synthesis harvest keeps conflict statements only (§17): an item must carry one
-# of these signals (mirrors the report's conflict classification keywords).
+# of these signals (mirrors the report's conflict classification keywords) and
+# carry it outside an assurance (N11, ``_is_assurance``).
 _CONFLICT_SIGNALS = (
     "conflict", "contradic", "disagree", "mismatch", "discrepan", "inconsist",
     "differs", "diverg", "does not match", "doesn't match", "stale",
@@ -178,8 +412,15 @@ def harvest_model() -> str:
 # --------------------------------------------------------------------------- #
 
 
-def _split_items(body: str) -> "tuple[list[str], int]":
-    """Discrete items from one section body: list markers, else sentences."""
+def _split_items(body: str) -> "tuple[list[str], list[str]]":
+    """Discrete items from one section body (list markers, else sentences),
+    and the filler removed from them.
+
+    The ONE filter site (plan WP-09 steps 1-3): digest, focus and synthesis
+    prose all pass through it, so an item it removes (a fragment under
+    ``_MIN_ITEM_CHARS``, or whole-item filler, ``_TRIVIAL_RE``) reaches neither
+    the structuring call nor the degraded entry.
+    """
     lines = (body or "").replace("\r\n", "\n").split("\n")
     items: list[str] = []
     current: list[str] = []
@@ -201,8 +442,14 @@ def _split_items(body: str) -> "tuple[list[str], int]":
     if not saw_marker:
         text = " ".join(l.strip() for l in lines if l.strip())
         items = [s.strip() for s in _SENTENCE_SPLIT_RE.split(text) if s.strip()]
-    kept = [i for i in items if len(i) >= _MIN_ITEM_CHARS and not _TRIVIAL_RE.match(i)]
-    return kept, len(items) - len(kept)
+    kept: list[str] = []
+    removed: list[str] = []
+    for item in items:
+        if len(item) < _MIN_ITEM_CHARS or _TRIVIAL_RE.match(item):
+            removed.append(item)
+        else:
+            kept.append(item)
+    return kept, removed
 
 
 def extract_prose_items(digest_text: str) -> list[tuple[str, str]]:
@@ -227,10 +474,14 @@ def count_filtered_prose_lines(digest_text: str) -> int:
 
     Purely **observational** — the same contract as WP-02 §7.2's cross-QC discard
     counters. It feeds the harvest accounting so a run can state how much the
-    boilerplate/length filter took, and it deliberately feeds neither ``missing``
+    filler/length filter took, and it deliberately feeds neither ``missing``
     nor ``complete``: a line this filter removes is section filler, not a finding
     that went astray, so counting it as a loss would make every clean run
-    incomplete.
+    incomplete. Since remediation WP-09.1 (B11) that includes filler with
+    repeated qualifiers or a listed modifier ("No conflicts noted on this
+    sheet.", "No cross-discipline items noted for this sheet."), which used to
+    pass the filter. Synthesis assurances are counted apart, by
+    :func:`count_synthesis_assurances`.
 
     It exists because the reconcile in :func:`harvest_prose_findings` builds
     ``expected`` from the items that already **survived** the filter, so a dropped
@@ -244,7 +495,7 @@ def count_filtered_prose_lines(digest_text: str) -> int:
     for header, body in split_into_sections(digest_text or ""):
         if classify_section(header) not in ("coordination", "conflict"):
             continue
-        total += _split_items(body)[1]
+        total += len(_split_items(body)[1])
     return total
 
 
@@ -260,25 +511,123 @@ def extract_focus_items(digest_text: str) -> list[str]:
     return out
 
 
+def _signal_spans(low: str) -> list[tuple[int, int]]:
+    """Where each ``_CONFLICT_SIGNALS`` stem occurs in lowercased ``low``."""
+    spans: list[tuple[int, int]] = []
+    for sig in _CONFLICT_SIGNALS:
+        start = 0
+        while (pos := low.find(sig, start)) >= 0:
+            spans.append((pos, pos + len(sig)))
+            start = pos + 1
+    return spans
+
+
+def _has_conflict_signal(item: str) -> bool:
+    low = item.lower()
+    return any(sig in low for sig in _CONFLICT_SIGNALS)
+
+
+def _is_assurance(item: str) -> bool:
+    """Whether ``item`` only says that a conflict is absent (N11; the owner's rule).
+
+    True when the item carries a conflict signal, every signal it carries sits
+    inside an ``_ASSURANCE_RE`` span, and every word outside those spans is a
+    listed frame word (``_FRAME_WORDS``: sheet ids, discipline and document
+    names, a few function words). So "No conflicts were found between M-101
+    and P-101." is an assurance, and these are not: "No conflicts were
+    resolved between M-101 and FP-101; both remain open" (resolving is not a
+    detection word), "X conflicts with Y; no other conflicts were found" (the
+    first signal sits outside), "does not match" (no assurance form), "No
+    conflicts were found, but M-101 shows 500 gpm and P-101 shows 550 gpm." and
+    "..., yet M-101 lists 500 gpm ..." (unlisted words: a contrast, values).
+    """
+    low = item.lower()
+    signals = _signal_spans(low)
+    if not signals:
+        return False
+    spans = [m.span() for m in _ASSURANCE_RE.finditer(low)]
+    starts = [start for start, _end in spans]
+    for start, end in signals:
+        # Matches never overlap, so only the last span that starts at or
+        # before the signal can hold it.
+        i = bisect.bisect_right(starts, start) - 1
+        if i < 0 or spans[i][1] < end:
+            return False
+    outside: list[str] = []
+    previous = 0
+    for start, end in spans:
+        outside.append(low[previous:start])
+        previous = end
+    outside.append(low[previous:])
+    return all(
+        _FRAME_TOKEN_RE.fullmatch(word)
+        for word in _WORD_RE.findall(" ".join(outside))
+    )
+
+
+def _is_label(header: str) -> bool:
+    """Whether a synthesis heading names a section rather than saying something."""
+    return bool(_LABEL_RE.match(header or ""))
+
+
+def _synthesis_statements(synthesis_text: str) -> "tuple[list[str], int]":
+    """The synthesis's conflict statements, and how many assurances it held.
+
+    Items are split per section with the report's ``split_into_sections``
+    (read, not changed), so a section heading never joins an item (N31): glued
+    to the previous bullet, a "Cross-sheet conflicts" heading became a conflict
+    of its own, and in paragraph layouts the whole run was one item that no
+    assurance rule could read. A heading that is not a label (``_is_label``) is
+    an item of its own, before its section's items, so a conflict written as a
+    whole-line bold sentence ("**M-101 conflicts with P-101.**") is still read
+    (the Codex review of WP-09.1). Each section body goes through
+    ``_split_items``, the one filter site, and so does such a heading. A
+    statement is kept when it carries a conflict signal and is not an
+    assurance (``_is_assurance``). Counted as assurances: filler that names a
+    conflict ("No conflicts noted.") and every statement ``_is_assurance``
+    drops. Both extractors and the count go through this one helper, so they
+    cannot disagree.
+    """
+    statements: list[str] = []
+    assurances = 0
+    for header, body in split_into_sections(synthesis_text or ""):
+        kept, removed = _split_items(body)
+        if header and not _is_label(header):
+            heading_kept, heading_removed = _split_items(header)
+            kept = heading_kept + kept
+            removed = heading_removed + removed
+        assurances += sum(
+            1 for item in removed
+            if _TRIVIAL_RE.match(item) and _has_conflict_signal(item)
+        )
+        for item in kept:
+            if not _has_conflict_signal(item):
+                continue
+            if _is_assurance(item):
+                assurances += 1
+            else:
+                statements.append(item)
+    return statements, assurances
+
+
 def extract_synthesis_conflicts(
     synthesis_text: str, sheet_ids: Iterable[str]
 ) -> list[tuple[str, list[str]]]:
     """Conflict statements from the synthesis prose → ``(item, named_sheet_ids)``.
 
-    Keeps only items that carry a conflict signal AND name at least one in-set
-    sheet id (order of ids = order of first mention, so the first is the
-    primary anchor sheet and the second becomes the ``also_on`` leg). Items
-    naming no resolvable sheet are skipped (logged by the caller) — a synthesis
-    conflict with no sheet has nowhere on the PDF to live.
+    Keeps only items that carry a conflict signal outside an assurance (N11)
+    AND name at least one in-set sheet id (order of ids = order of first
+    mention, so the first is the primary anchor sheet and the second becomes
+    the ``also_on`` leg). Items naming no resolvable sheet are skipped (logged
+    by the caller) — a synthesis conflict with no sheet has nowhere on the PDF
+    to live. "No conflicts were found between M-101 and P-101." names two
+    sheets and is still not a conflict (:func:`_synthesis_statements`).
     """
     ids = sorted({s.upper() for s in sheet_ids if s}, key=lambda s: (-len(s), s))
     if not ids or not (synthesis_text or "").strip():
         return []
     out: list[tuple[str, list[str]]] = []
-    for item in _split_items(synthesis_text)[0]:
-        low = item.lower()
-        if not any(sig in low for sig in _CONFLICT_SIGNALS):
-            continue
+    for item in _synthesis_statements(synthesis_text)[0]:
         mentioned = _id_mentions(item.upper(), ids)
         if not mentioned:
             continue
@@ -291,24 +640,38 @@ def extract_set_level_synthesis_conflicts(
 ) -> list[str]:
     """Synthesis conflict statements that name **no** resolvable in-set sheet (§14.8).
 
-    The complement of :func:`extract_synthesis_conflicts`: same conflict-signal
-    filter, but these items reference no sheet the set contains, so they belong to
-    no single source. Instead of being dropped (the old behavior — a real conflict
-    silently lost), they become **set-level** findings written to the deterministic
-    ``Drawing_Set_Review_Notes.pdf``. Returns the verbatim items.
+    The complement of :func:`extract_synthesis_conflicts`: same statements
+    (a conflict signal outside an assurance, N11), but these items reference
+    no sheet the set contains, so they belong to no single source. Instead of
+    being dropped (the old behavior — a real conflict silently lost), they
+    become **set-level** findings written to the deterministic
+    ``Drawing_Set_Review_Notes.pdf``. An assurance ("The sheets are consistent;
+    no conflicts were identified at this time.") is not one. Returns the
+    verbatim items.
     """
     ids = sorted({s.upper() for s in sheet_ids if s}, key=lambda s: (-len(s), s))
     if not (synthesis_text or "").strip():
         return []
     out: list[str] = []
-    for item in _split_items(synthesis_text)[0]:
-        low = item.lower()
-        if not any(sig in low for sig in _CONFLICT_SIGNALS):
-            continue
+    for item in _synthesis_statements(synthesis_text)[0]:
         if ids and _id_mentions(item.upper(), ids):
             continue                 # names an in-set sheet → handled as SOURCE-scoped
         out.append(item)
     return out
+
+
+def count_synthesis_assurances(synthesis_text: str) -> int:
+    """How many synthesis statements only said a conflict is absent (N11).
+
+    "No conflicts were found between M-101 and P-101.", "No conflicts noted."
+    and the like: statements that carry a conflict signal only inside an
+    assurance, so the harvest does not take them as conflicts. The contract of
+    :func:`count_filtered_prose_lines`: purely **observational**, it feeds the
+    accounting (``HarvestResult.assurances``) and neither ``missing`` nor
+    ``complete``, because an assurance is not a finding that went astray. It
+    exists so a rule that drops a real conflict can be seen in the manifest.
+    """
+    return _synthesis_statements(synthesis_text)[1]
 
 
 # Characters that can continue a drawing id past a candidate match: "A-1"
@@ -715,6 +1078,12 @@ class HarvestResult:
     #: the filter, so without this a filter that ate real findings still reported
     #: ``missing == 0``.
     filtered: int = 0
+    #: Synthesis statements that mention a conflict only to say there is none
+    #: ("No conflicts were found between M-101 and P-101."), so the harvest did
+    #: not take them as conflicts (remediation WP-09.1, N11). The contract of
+    #: ``filtered``: observational, it feeds neither ``missing`` nor
+    #: ``complete`` (see :func:`count_synthesis_assurances`).
+    assurances: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
     cache_hits: int = 0
@@ -745,6 +1114,7 @@ class HarvestResult:
             "skipped": self.skipped,
             "missing": self.missing,
             "filtered": self.filtered,
+            "assurances": self.assurances,
             "complete": self.complete,
         }
 
@@ -931,6 +1301,9 @@ def _enumerate_pending(
                 pending.append(_Pending(pi, ref, sid_label, sheet_text, "focus_prose", "question", []))
         else:
             result.excluded_focus += len(focus_items)   # present, intentionally not harvested
+
+    # --- synthesis assurances: counted, never harvested (N11) -------------------
+    result.assurances += count_synthesis_assurances(synthesis_text)
 
     # --- synthesis conflicts naming an in-set sheet (SOURCE-scoped; dual-anchored) --
     for ordinal, (item, sids) in enumerate(
@@ -1217,8 +1590,9 @@ def harvest_prose(
 
     _log.info(
         "prose harvest: %d item(s) — %d matched, %d structured, %d degraded, "
-        "%d set-level, %d excluded-focus, %d filtered, %d MISSING",
+        "%d set-level, %d excluded-focus, %d filtered, %d assurances, %d MISSING",
         result.items, result.matched, result.structured, result.degraded,
-        result.set_level, result.excluded_focus, result.filtered, result.missing,
+        result.set_level, result.excluded_focus, result.filtered,
+        result.assurances, result.missing,
     )
     return result

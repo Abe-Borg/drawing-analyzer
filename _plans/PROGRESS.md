@@ -1,7 +1,7 @@
 # Remediation progress tracker
 
-**Next up:** Wave 1 in order: `WP-09.1` (B11, N11: the boilerplate filter and negation-aware synthesis conflict extraction), which has no dependencies. WP-06.1 is done: the cross-QC persona asks for category `question` with severity `low` (B6; validation unchanged), every refused item is counted once under its first reason on both paths as a stage warning that changes no status (`CrossQCInvalidCounts`, `run_manifest.json` `cross_qc_invalid`), and only findings identical in every field collapse before the ledger (N2; the owner's rules), with `_CROSS_QC_CACHE_CONTRACT` 5 → 6. WP-06 is not done: WP-06.2 and WP-06.3 (Wave 2) are available, and WP-06.4 still waits on WP-03.4. WP-05 is not done: WP-05.3 remains (Wave 2, available). WP-07 is not done: WP-07.3 (Wave 2, available). WP-03 is not done: WP-03.4, WP-03.5 and WP-03.6 remain (Wave 2); WP-03.5 now also carries the measured N30 exposure of cross-QC's same-pair conflicts. WP-04 is not done: its acceptance needs quantity roles, slice `WP-04.3` (Wave 2). First check the open PRs ([`README.md`](README.md), step 1). Before the next stable tag, the owner should look at O-5.
-**Last updated:** 2026-09-24 by the WP-06.1 session ([PR #167](https://github.com/Abe-Borg/drawing-analyzer/pull/167)).
+**Next up:** Wave 1 in order: `WP-09.2` (N10, U11: `_match_entry` rejects a candidate whose critical signature conflicts, per-item outcome counters and a labelled paraphrase corpus, with no threshold change). Its dependencies, WP-04.2 and WP-09.1, are done. WP-09.1 is done: section filler is a closed vocabulary that the synthesis assurance rule shares (B11, N11), synthesis items are split per section (N31, found and fixed there), and dropped assurances are counted observationally (`assurances`); no cache contract moved. WP-06 is not done: WP-06.2 and WP-06.3 (Wave 2) are available, and WP-06.4 still waits on WP-03.4. WP-05 is not done: WP-05.3 remains (Wave 2, available). WP-07 is not done: WP-07.3 (Wave 2, available). WP-03 is not done: WP-03.4, WP-03.5 and WP-03.6 remain (Wave 2); WP-03.5 now also carries the measured N30 exposure of cross-QC's same-pair conflicts. WP-04 is not done: its acceptance needs quantity roles, slice `WP-04.3` (Wave 2). First check the open PRs ([`README.md`](README.md), step 1). Before the next stable tag, the owner should look at O-5.
+**Last updated:** 2026-09-24 by the WP-09.1 session ([PR #168](https://github.com/Abe-Borg/drawing-analyzer/pull/168)).
 
 This file is authoritative for **status and order**. Requirements live in
 [`drawing-analyzer-remediation-plan.md`](drawing-analyzer-remediation-plan.md).
@@ -111,8 +111,8 @@ starting.
 | WP-05.1 | Cross-QC grounding: a real match for every non-empty quote at word boundaries; no text means unavailable evidence; one normalizer shared with `anchor`; `_CROSS_QC_CACHE_CONTRACT` 3→4 (B5, N12 cross-QC part, N13) | M | — | done | [PR #165](https://github.com/Abe-Borg/drawing-analyzer/pull/165), 2026-09-23. **Rules decided by the owner (four choices, measured first):** (1) a match covers whole source words: it may start and end only on a word's core (`anchor.word_core`: the whitespace-delimited word without leading `( [ { < " '` or trailing `) ] } > , ; : . ! ? " '`); (2) the rule is defined once, in `anchor.py`, for WP-05.2 to apply to `_Stream`'s words; (3) the evidence is normalized one source word at a time with the unchanged `anchor._normalize` (`anchor.SourceWords`, exactly `_normalize(text)`), and `cross_qc._norm_for_match` is `_normalize`, so the tile join folds the same way; (4) any length gets a real match (no floor). `classify_quote_evidence` asks in the plan's order: no quote, no usable text (`_sheet_is_textless`, now on the normalizer), the match, the word-free tile, NOT_MATCHED. Accepted cost: a tag inside a list written without spaces (`P-1,P-2`) does not match. `_CROSS_QC_CACHE_CONTRACT` 3 → 4 (one migration-register row; retires the WP-03.3 and WP-07.2 stored-claims residuals). No anchor changes: `_normalize` is untouched and every anchor test passes unchanged. Tests: `tests/test_cross_qc_grounding.py`; `tests/test_evidence_visual.py::test_a_recovered_finding_reaches_verification_and_investigation` extended to `P-1`, `AHU-1`, `M-101`; the three contract tripwires re-baselined |
 | WP-05.2 | Anchor punctuation folding and a source-word-boundary rule (B4: `PSI,`, `NOTE 3:`, `(568 L/MIN)`; N12 anchor part: `VAV-2` in `VAV-2-1`) | M | — | done | [PR #166](https://github.com/Abe-Borg/drawing-analyzer/pull/166), 2026-09-24. **Rules decided by the owner (four choices, measured first):** (1) whole source words in every tier: EXACT and the sub-phrase tier match through `anchor.SourceWords` (the WP-05.1 `word_core`, the matcher cross-QC uses), a fuzzy window starts and ends on whole words (`_Stream.on_word_edges`), and inside a window a quote's measurement may not match part of a sheet word (`anchor._measurements_whole`); measured: a boundary on EXACT alone moves every refused match to the window at 100% overlap, and window edges alone miss the 17-token note; (2) `anchor.fold_word` folds leading `( [ {` and trailing `) ] } , ; : . ! ?` off every word, sheet and quote alike (never `"` `'` `<` `>` `%` `/` `-` or a leading `.`); (3) cross-QC grounds through the same matcher, and its fact-tile join keys on the same folded form (Codex review, fixed in this PR), `_CROSS_QC_CACHE_CONTRACT` 4 → 5 (one register row); (4) a folded match keeps EXACT/`exact`, so `numbers_grounded` holds. `anchor._normalize` untouched. Tests: `tests/test_anchor_whole_words.py` (incl. one agreement table through both matchers). Re-baselined: three arithmetic tests (given the case they model), the three contract tripwires, and two WP-05.1 tests (its reference matcher and its join-key normalizer test). Recorded limits: a letter-only tag (`VAV-A` in `VAV-A-1`) in a long window; a sub-phrase dropping a unit printed as its own word; B4's four character-stream cases (WP-05.3) |
 | WP-06.1 | Cross-QC prompt says category `question` with severity `low`; invalid-field counters on both paths; candidate duplicates go to the ledger instead of being destroyed (B6, N2) | S/M | — | done | [PR #167](https://github.com/Abe-Borg/drawing-analyzer/pull/167), 2026-09-24. **Rules decided by the owner (four choices, measured first):** (1) a refused item is **observational**: a stage warning after the status-deciding ones, the stage keeps its status, the result is cached with its counts (D-2 note); (2) the counts are a **separate record**, `CrossQCInvalidCounts` (`CrossQCResult.invalid`), filled on both paths, so `discards is None` keeps meaning "grounding not measured" on the whole-set path; `run_manifest.json` carries `cross_qc_invalid`; (3) each refused item counts **once, under the first check it fails** (`cross_qc._invalid_field`, shared by both validators: not an object, category, severity, text), and a whitespace-only fact quote is dropped and counted `facts_no_quote` (the WP-05.1 note, resolved); (4) **only findings identical in every field collapse** (`_drop_exact_repeats` replaced `_dedup_findings`), and the ledger decides the rest. The persona asks for category `question` with severity `low`; validation is unchanged. `_CROSS_QC_CACHE_CONTRACT` 5 → 6 beside the prompt edit (two changes, two mechanisms; D-4 note, one register row). Tests: `tests/test_cross_qc_validation_and_dedup.py`. Re-baselined: the three contract tripwires only. Recorded limits: a re-report phrased apart stays two ledger entries (WP-06.4); a terse same-pair conflict folds in the ledger (N30, WP-03.5) |
-| WP-09.1 | Boilerplate filter with repeatable qualifiers; negation-aware synthesis conflict extraction (B11, N11) | S | — | todo | |
-| WP-09.2 | Prose matching rejects signature-incompatible candidates; per-item outcome counters; labelled paraphrase corpus (no threshold change) (N10, U11) | M | WP-04.2, WP-09.1 | todo | |
+| WP-09.1 | Boilerplate filter with repeatable qualifiers; negation-aware synthesis conflict extraction (B11, N11) | S | — | done | [PR #168](https://github.com/Abe-Borg/drawing-analyzer/pull/168), 2026-09-24. **Rules decided by the owner (six choices, measured first):** (1) filler is a **closed vocabulary**: `_TRIVIAL_RE` drops an item only when the whole item is `none` / `n/a` / `nothing [further]` or `no` + up to two listed modifiers + a listed noun, with an optional listed label and up to four listed qualifiers in any order; any other word keeps it; (2) **one vocabulary, two anchored forms**: the same word lists build the whole-item filter (`_split_items`, the one filter site) and the synthesis assurance spans (`_ASSURANCE_RE`); (3) a synthesis statement is an **assurance** (`_is_assurance`) only when every conflict signal sits inside an assurance span ("no [modifiers] <conflict noun> [between <sheet ids, discipline names, listed words>] [were] <detection word>", "nothing inconsistent", "there are no <noun>", "found no <noun>", a conflict label right before one), the noun is the head, and every other word is a listed frame word (sheet ids, discipline and document names, a few function words; since the Codex review, which found a contrast list missing `yet`, `nevertheless` and `while`); (4) synthesis items are split **per section** with the report's `split_into_sections` (N31, found and fixed here), and a heading that is not a listed label is an item of its own (Codex review: a whole-line bold conflict was lost); (5) dropped assurances are counted in `HarvestResult.assurances`, observational like `filtered` (D-2 note); (6) ordinals count the kept items, so dropping filler before a real item moves that item's `prose_item_id` once. No cache contract, key, prompt or schema moves (`_HARVEST_CACHE_CONTRACT` stays 1). Tests: `tests/test_prose_filler_and_assurances.py` (207). No pinned test re-baselined; no fixture item changed decision. Recorded limits (kept, a paid call as before): wording outside the lists ("No duct conflicts noted.", "No items requiring coordination.", "M-101 does not conflict with P-101.", "Checked M-101 against P-101 for conflicts; none were found.") |
+| WP-09.2 | Prose matching rejects signature-incompatible candidates; per-item outcome counters; labelled paraphrase corpus (no threshold change) (N10, U11) | M | WP-04.2, WP-09.1 | todo | From WP-09.1: filler and synthesis assurances are dropped before enumeration, so they carry no `prose_item_id`. Plan step 4's "suppressed as trivial" is so far two run-level counts, `filtered` (digest Coordination/Conflict lines) and `assurances` (synthesis); a per-item outcome for them needs a decision (a count per channel, or ids for items never enumerated). Focus-section filler is still counted nowhere (it never was). `_match_entry` is untouched. The must-keep corpora in `tests/test_prose_filler_and_assurances.py` (45 real findings, 30 real synthesis conflicts) are ready inputs for the labelled corpus. Also N32 (found by WP-09.1): a digest heading that states something is never read; `prose_harvest._is_label` is the synthesis channel's test to reuse, and fixing it moves the ordinals of that section's items. And `_id_mentions` is quadratic in the number of mentions (pre-existing: 4,000 mentions of two ids in one item take 0.8 s on `main`); bound it if a synthesis item can carry that many |
 | WP-01.3 | Digest partial reads: a raised-cap retry never loses the first read; findings from an errored, refused or truncated digest are labelled or held out of the ledger (N15, N16) | M | WP-01.2 | todo | Since WP-01.2 a refused or unfinished digest carries an error too, so N15 now also covers, for example, an N27 partial read whose unclosed findings block was salvaged: its findings still reach the ledger unlabelled. `digest.digest_terminal_error` is the ladder to extend, not restate |
 | WP-01.4 | Critique: `max_tokens`/refusal/unknown terminal states are not completed reads on either transport; critique-only cache contract term (N4 critique) | M | WP-01.2 | todo | The critique-only term exists since WP-04.1 (`digest_cache._CRITIQUE_CACHE_CONTRACT`, folded inside both critique builders). Bump it for this admission change rather than adding a second term (D-4), and pin the merge-rule fingerprint under the new value in `tests/test_drawing_cache_identity.py` |
 | WP-11.1 | Per-source and per-page fault isolation in the render and prescan iterators; the inventory is the page denominator; every expected page gets an outcome (R1 core) | M | — | todo | |
@@ -284,7 +284,7 @@ report is built from it).
 | B8 | `Finding.id` not unique; numbering, bookmarks and index links treat it as identity | P0 | 03.2, 03.4, 21.3 | open (numbering part implemented+validated in 03.2, as K5; identity (03.4) and navigation (21.3) stay open) | `tests/test_qc_numbering_tiebreak.py` (WP-03.2, [PR #160](https://github.com/Abe-Borg/drawing-analyzer/pull/160)): the `PUMP P-1` pair gets the same numbers and evidence directories in both orders. Since WP-03.3 two arithmetic mismatches on one row get distinct ids (the claim discriminator is folded in; `tests/test_arithmetic_claim_discriminator.py`), and two id dedups are gone (`run_auditors`; `audit_titleblock` now keys on sheet and quote); model findings are unchanged. Since WP-03.7 (N28) every pair of different issues quoting one string reaches the exports as two entries; they still share one content id, so the navigation part below now applies to each such pair (numbers and evidence directories are distinct, pinned in `tests/test_position_is_not_sameness.py`). Remaining: `claim_id` (WP-03.4); bookmark dedup and `mark_page_by_finding` keyed by the content id (WP-21.3) |
 | B9 | Merge discards the loser's text and recommended action | P0 | 03.5 | open | |
 | B10 | A→B and B→A copies of one conflict both survive | P1 | 06.4 | open | |
-| B11 | "No conflicts noted on this sheet." becomes a medium finding | P1 | 09.1 | open | |
+| B11 | "No conflicts noted on this sheet." becomes a medium finding | P1 | 09.1 | implemented+validated | `tests/test_prose_filler_and_assurances.py` (WP-09.1, [PR #168](https://github.com/Abe-Borg/drawing-analyzer/pull/168)): the review's four strings and 21 equivalent wordings are filler (`test_b11_review_strings_are_filler`, `test_b11_equivalent_wording_is_filler`), counted in `filtered`, and make no structuring call and no ledger entry with a client, without one, or when the call fails (`test_b11_filler_*`); 45 real findings survive (`test_real_findings_survive_the_filter`), and everything the old filter dropped is still dropped (`test_the_new_filter_drops_everything_the_old_one_did`) |
 | B12 | `deg`/`°` sign differently; `90 deg F` vs `90 deg C` compatible | P0 | 04.1 | implemented+validated | `tests/test_quantity_signature.py` (the B12 token table; the `B12 …` pairs, incl. no inferred scale); `tests/test_ab_findings_diff.py::test_a_changed_temperature_scale_is_never_an_exact_match` (WP-04.1, [PR #157](https://github.com/Abe-Borg/drawing-analyzer/pull/157)) |
 | R1 | Source unreadable after inventory aborts the whole run | P0/P1 | 11.1, 11.2, 11.3 | open | |
 | R2 | Refused batch item never retried or rescued | P1 | 01.5 | open | |
@@ -335,7 +335,7 @@ report is built from it).
 | N8 | Stable publish ignores the acceptance hold (it happened for 1.7.0) | P1 | 23.1, 23.6, O-1, O-5 | open (publish gate implemented+validated in 23.1; the O-1 and O-5 parts stay open) | `tests/test_release_acceptance_gate.py` (WP-23.1, [PR #154](https://github.com/Abe-Borg/drawing-analyzer/pull/154)). Remaining: O-1 (the published v1.7.0 and its record), O-5 (protect and confirm the `release` environment and a `v*` tag ruleset), WP-23.6 (commit and artifact binding) |
 | N9 | Overflow-note index/bookmark links land at the page top, not the row | P2 | 21.3 | open | |
 | N10 | Prose-harvest matching ignores measurement signatures (4 in absorbed by 6 in) | P0 | 09.2 | open | |
-| N11 | Synthesis conflict extraction is negation-blind | P1 | 09.1 | open | |
+| N11 | Synthesis conflict extraction is negation-blind | P1 | 09.1 | implemented+validated | `tests/test_prose_filler_and_assurances.py` (WP-09.1, [PR #168](https://github.com/Abe-Borg/drawing-analyzer/pull/168)): the two review sentences and 14 equivalents are not conflicts (`test_n11_*`), make no call and no entry, and are counted in `assurances` (`test_a_dropped_assurance_is_counted_observationally`); 30 real conflicts that carry a "no", a negated verb, a contrast or a value beside an assurance survive (`test_real_synthesis_conflicts_survive`), with their anchors, and the gauntlet's set-level conflict is unchanged; through the pipeline: `test_pipeline_filler_and_assurances_cost_nothing` |
 | N12 | Matches ignore word boundaries (`VAV-2` inside `VAV-2-1`; `AHU-10` inside `AHU-101`) | P0 | 05.1, 05.2 | implemented+validated | Cross-QC part: `tests/test_cross_qc_grounding.py` (WP-05.1, [PR #165](https://github.com/Abe-Borg/drawing-analyzer/pull/165)): `AHU-10`/`AHU-101`, `VAV-2-1`/`VAV-2-10`, `VAV-2`/`VAV-2-1`, `AHU-1`/`AHU-1-2`, `P-1`/`P-10`, `P-1`/`XP-1`, `M-101`/`M-101A`, two long quotes ending inside a tag, a quote starting inside a word, and a tag inside a list written without spaces never ground; `P-1,`, `(P-1)`, `P-1.`, `P-1:`, `NOTE 3:`, `568 L/MIN` in `(568 L/MIN)` and a tag printed both alone and inside a longer one still do; the leg is dropped. Anchor part: `tests/test_anchor_whole_words.py` (WP-05.2, [PR #166](https://github.com/Abe-Borg/drawing-analyzer/pull/166)): `VAV-2` on `VAV-2-1 SERVES ROOM 12`, `AHU-1` on `SEE AHU-1-2 SCHEDULE`, `ACCESS PANEL AT VAV-2` on `…VAV-2-1 TYP` and `2-1 SERVES` on `VAV-2-1 SERVES ROOM` (EXACT before) and the 17-token note quoting `VAV-2` or `AHU-1` against one printing `VAV-2-1` or `AHU-1-2` (FUZZY before) never anchor, nor `1/2" PIPE` on `2-1/2" PIPE` or a sub-phrase starting inside a word; a tag printed both alone and inside a longer one anchors `exact` on the one alone, in both orders; WP-05.1's cut-word and whole-word tables run through the anchor; verification and investigation no longer see the N12 finding; the pipeline makes it a `[QUOTE NOT FOUND]` callout with no verification call. Recorded limit: a letter-only tag (`VAV-A` in `VAV-A-1`) inside a long window |
 | N13 | Cross-QC and anchor normalizers disagree (curly quotes, `½`, `×`, `Ø`) | P1 | 05.1 | implemented+validated | `tests/test_cross_qc_grounding.py` (WP-05.1, [PR #165](https://github.com/Abe-Borg/drawing-analyzer/pull/165)): `PROVIDE 6” DRAIN`, `2½"`↔`2-1/2"` (both ways, and `2 1/2"`), `O6`↔`Ø6`, `300×200`↔`300x200`, primes, curly quotes, a fraction slash, a non-breaking hyphen, a hyphen written as a space and a zero-width space all ground; `.5`/`5`, `5`/`0.5`, `5`/`-5`, `1`/`1.5`, `12`/`12,500`, `2"`/`1/2"`, `2`/`2½"`, `12`/`12'-6"`, `30`/`30%`, a changed number and a changed unit never do; `cross_qc._norm_for_match` is `anchor._normalize`; the per-word normalization equals the whole-string one over a Unicode corpus; a reconciled leg joins its fact across a curly inch mark, and two facts spelled that way with different tiles collide and give no tile |
 | N14 | Degraded cross-QC never cached: re-billed every warm run, run stays PARTIAL | P1 | 06.3, 25.4 | open | |
@@ -355,6 +355,8 @@ report is built from it).
 | N28 | The geometry branch folds two different issues that quote one tag once both anchor there (`PUMP P-1` voltage / impeller); the loser's text is lost | P0 | 03.7 | implemented+validated | `tests/test_position_is_not_sameness.py` (WP-03.7, [PR #162](https://github.com/Abe-Borg/drawing-analyzer/pull/162)): the pair on one rectangle, through the lifecycle in both orders with its numbers and evidence directories, through the pipeline (two digest findings quoting `VAV-3`), and between findings anchored before ingest (Pass A); the predicate reads no rectangle; Pass B adds no fold over generated sets. The recorded limit is flipped: `tests/test_pass_b_complete_link.py::test_two_issues_that_quote_one_tag_stay_apart_after_anchoring`. The pair still shares one content `id` (B8: WP-03.4, WP-21.3) |
 | N29 | A merged entry's representative follows arrival order once three or more duplicates merge: an earlier merge's severity union feeds the next `_grounding_quality` comparison | P1 | 03.5 | open | Found by WP-03.2 and pinned as a recorded limit: `tests/test_qc_numbering_tiebreak.py::test_recorded_limit_a_merged_entrys_representative_follows_arrival_order` (`_N29_REPRESENTATIVE`: X's bundle in two of six orders, Z's in four; flip it) |
 | N30 | The quote branch (equal quote, text overlap ≥ 0.4) folds two different issues that share boilerplate wording (`PUMP P-1` impeller / selected flow, overlap 0.5); the loser's text is lost | P1 | 03.5 | open | Found by WP-03.7 while measuring N28 (not fixed there; reproduced in its handoff). WP-03.5's lossless observations keep the loser's text; keeping the two apart needs a rule backed by labelled evidence (O-10), not a new threshold (U11). Since WP-06.1 cross-QC hands the ledger every distinct conflict, and its texts name both sheets: on a synthetic corpus the ledger folds 45 of 66 terse same-pair conflicts (4 of 66 in full sentences, 0 without sheet names); pinned: `tests/test_cross_qc_validation_and_dedup.py::test_recorded_limit_n30_a_terse_same_pair_conflict_folds_in_the_ledger` |
+| N31 | A synthesis section heading joins an item: glued to the bullet above it, "**Cross-sheet / cross-discipline conflicts**" makes that bullet a conflict naming its sheets; in paragraph layouts under `###` or bold headings the whole run is one item, which no negation rule can read | P1 | 09.1 | implemented+validated | Found by WP-09.1 while measuring N11 (6 layouts; 3 affected) and fixed there ([PR #168](https://github.com/Abe-Borg/drawing-analyzer/pull/168)) by the owner's decision: synthesis items are split per section with the report's `split_into_sections` (read, not changed). `tests/test_prose_filler_and_assurances.py::test_a_section_header_never_joins_a_synthesis_item` (3 layouts), `::test_a_real_conflict_under_a_header_is_extracted_alone`, `::test_pipeline_filler_and_assurances_cost_nothing` (a glued heading, end to end), `::test_a_label_heading_is_never_a_conflict` (40 labels); a heading that states a conflict is still read (`::test_a_heading_that_states_a_conflict_is_still_read`, `::test_codex_a_whole_line_bold_conflict_is_harvested`; Codex review) |
+| N32 | A digest heading that states something is never read: `split_into_sections` makes a whole-line bold sentence (or a `###` heading) inside the digest a section header, so its text is neither a prose item nor counted, and the section it starts is classified by it | P2 | 09.2 | open | Found by WP-09.1 from the Codex review of its synthesis split (P2), where the same defect was a regression and is fixed (a heading that is not a listed label is an item of its own). In the digest channel it predates WP-09.1 and is not fixed there: the digest prompt fixes the section structure, so a bold statement inside a Coordination/Conflict section is rare. `prose_harvest._LABEL_RE` / `_is_label` is the shared test to reuse; the ordinals of the section's items would move |
 | U1 | Serving model, fallback iterations and partial-stream billing unrecorded | P1 | 14.3, 14.6, 01.7 | open | |
 | U2 | Fallback text joins and selective history replay | P1 | 01.6, 12.1, 13.4, 19.2 | open | |
 | U3 | Generic `output_config` 400 disables task budgets process-wide | P1 | 13.1 | open | |
@@ -393,6 +395,354 @@ report is built from it).
 Each session adds one entry at the top: date, slices and IDs, PR, what changed,
 contracts decided, cache/schema effects, validation actually run (with counts),
 what could not be verified, risks, and next steps.
+
+### 2026-09-24 — WP-09.1: section filler and synthesis assurances are not findings ([PR #168](https://github.com/Abe-Borg/drawing-analyzer/pull/168))
+
+- **Slice and IDs:** WP-09.1. B11 and N11 (implemented+validated), and N31
+  (found while measuring N11, fixed here by the owner's decision, added to
+  plan §3 and §7.2). No `DECISIONS.md` contract is decided (none of D-1 …
+  D-8); D-2 gains a note (the owner's decision: the dropped synthesis
+  assurances are counted observationally). No migration-register row: no cache
+  contract, key, prompt or schema moved. WP-09 is not done (WP-09.2 remains),
+  so there is no package acceptance check.
+- **Base.** `main` = `origin/main` = `2be7034`; no drift. Baseline **3,787
+  passed, 2 skipped, 10 deselected** (261 s), identical to the WP-06.1 handoff.
+  The two skips are IPv6 loopback and chmod as root.
+- **Reproduced first** (a probe on `2be7034` with the fixtures of
+  `tests/test_drawing_ledger.py`), each as the request stated:
+  - **B11.** All four review strings pass `_TRIVIAL_RE` and survive
+    `extract_prose_items`; `harvest_prose(client=None)` turns each into a
+    degraded entry: medium, coordination, `anchor_hint` SHEET.
+  - **N11.** "No conflicts were found between M-101 and P-101." is a
+    dual-anchored item (M-101, P-101); "The mechanical and plumbing sheets are
+    consistent; no conflicts were identified at this time." is a medium
+    set-level conflict.
+  - **Kept today:** "No isolation valve is shown.", the P8 item 6 corpus, the
+    terse corpus, the gauntlet's `PROSE_DEGRADED`; the two must-survive
+    synthesis sentences are extracted (the gauntlet's set-level one; "No
+    conflicts were resolved…" dual-anchored).
+  - **Ordinals.** With "No conflicts noted on this sheet." before "Duct riser
+    blocks the corridor door." both are kept (ordinals 0 and 1).
+- **Facts confirmed, not assumed:**
+  - **One filter site for section bodies.** `_split_items` is called by the
+    digest, focus and synthesis extractors and by `count_filtered_prose_lines`,
+    and by nothing outside `prose_harvest.py` (grep over `src`, `tests`,
+    `scripts`).
+  - **The synthesis text is the raw model Markdown** (`pipeline.py`:
+    `synthesis_text = result.text`), and the synthesis prompt asks for "short
+    subsections / bullets". `_split_items` ran over the whole text, so a
+    heading joined an item (N31, below).
+  - **No cache key holds a `prose_item_id`.** The structuring key hashes the
+    prompt, the item, the category hint, the sheet id, the capped text layer,
+    the source binding and the request shape; the verification keys hash
+    named finding fields (text, quote, category, severity, sheet and source
+    ids, page, computation); the investigation key reads `id`, text, quote and
+    the source fingerprint; `compute_finding_id` hashes sheet, category and
+    quote-or-text. So `_HARVEST_CACHE_CONTRACT` stays 1 (pinned:
+    `test_no_structuring_cache_key_holds_a_prose_item_id`).
+  - **Readers of `prose_item_ids`:** `findings.json` and the per-sheet JSON
+    (`Finding.to_dict`), the harvest's in-run reconciliation, the ledger's
+    union on merge, QC numbering's last tie-break (`_qc_content_key`, reached
+    only by entries tied on position, `id` and text), and the report's
+    `prose×N` chip (a count, no id). No script reads them.
+  - **`Drawing_Set_Review_Notes.pdf`** is written only when set-level findings
+    exist (`pipeline.py`, markup stage), so an assurance that was its only
+    content no longer produces it.
+  - **A run with no enumerated item** reads prose harvest `SKIPPED_VALID`, and
+    the roll-up treats it like COMPLETE (`models.roll_up_qc_status`).
+  - **`run.log`** renders every accounting key outside its fixed list, so
+    `assurances` appears without a renderer change.
+- **The decision, made by the owner before any code** (AskUserQuestion, two
+  rounds, with measured options). Chosen, each as recommended:
+  - **Filler: a closed vocabulary.** The whole item must be `none` / `n/a` /
+    `nothing [further]`, or `no` + up to two listed modifiers + a listed noun,
+    with an optional listed label ("Coordination items:") and up to four listed
+    qualifiers in any order. Not taken: repeatable qualifiers only (misses
+    review string 4 and 14 of 16 equivalents measured then; it needs a
+    modifier slot); an open modifier slot (also drops "No P-1 issues noted.",
+    "No sprinkler items noted on this sheet.", "No fire-rated items noted on
+    this sheet.": a content guess).
+  - **One vocabulary, two anchored forms** (plan §4.2). Not taken: two
+    independent regexes (two authors for one word list); one predicate per
+    clause (measured: fails the first N11 sentence, since "between M-101 and
+    P-101" is not filler vocabulary).
+  - **Assurance: spans plus a contrast guard** (the guard became a closed list
+    of frame words after the Codex review, below). Not taken: the minimal form
+    only ("no <noun> [were] <detected>"; drops 8 of 22 edge cases against 13);
+    also negated verbs ("does not conflict with"; loses the elliptical real
+    conflict "The pump on M-101 does not conflict with P-101; the valve on
+    E-201 does."). Measured before asking: without the contrast guard 3 real
+    conflicts are lost ("No conflicts were found, but M-101 shows 500 gpm and
+    P-101 shows 550 gpm."); without the head-noun check 3 more ("No conflict
+    resolution is shown…"); with an open phrase before the verb, one more ("No
+    conflicts between M-101 and P-101 resolve the pump question and none were
+    found on E-201.").
+  - **Headings: split the synthesis per section here** (N31). Not taken:
+    recording it for a later slice (the N11 fix would then hold only for
+    heading-free synthesis).
+  - **Counting: a count of its own**, `HarvestResult.assurances`,
+    observational. Not taken: folding it into `filtered` (which would stop
+    meaning only digest lines); not counting (not auditable from the
+    manifest).
+  - **Ordinals: accept the one-time shift.** Not taken: ordinals over every
+    split item (a wider one-time shift, and `ordinal` changes meaning).
+- **Measured first**, as the request asked:
+  - **A case table** of 76 digest items (the 4 review strings, 16 equivalents,
+    the 12 existing boilerplate strings, 44 real findings, 31 of them with
+    no/not/none/without elsewhere) and 45 synthesis sentences (the 2 N11
+    sentences, 21 that must survive, 22 edge cases) through every option, plus
+    6 synthesis layouts. The chosen rule drops every required case, keeps
+    every must-keep case, drops 13 of the 22 edge cases and keeps 9 (recorded
+    limits, below).
+  - **An instrumented run** of a scratch copy of `origin/main` logging every
+    split item (raw and kept, by caller), every synthesis extraction, every
+    harvest result (accounting, calls, cache hits, entries with texts and
+    `prose_item_ids`), every structuring call, every numbering (count, QC
+    numbers, texts, prose ids) and every prose-harvest stage record, with the
+    test name. The hooks ran **258 splits, 244 synthesis extractions, 116
+    harvests, 72 structuring calls, 259 numberings and 186 stage records**.
+    Evaluated offline under every option: **no fixture item changes decision**
+    (144 digest/focus split events, 46 distinct items in 52 tests; 244
+    synthesis extractions in 107 tests, 116 of them with text), the evaluator
+    reproducing the base filter exactly. So no option could move a pinned test; the case table
+    decided.
+- **What changed** (`prose_harvest.py` only; it still imports no PDF engine,
+  and the prose digest is untouched, I-2):
+  - **The vocabulary** (new): `_DASH` (written as `\u` escapes),
+    `_FILLER_MODIFIERS`, `_CONFLICT_NOUNS`, `_CONFLICT_ADJECTIVES`,
+    `_FILLER_NOUNS`, `_AUXILIARIES`, `_DETECTED`, `_DISCIPLINES`,
+    `_DOCUMENTS`, `_PLACES`, `_ID`, `_FRAME_WORDS`, the label words
+    (`_LABEL_ADJECTIVES`, `_LABEL_NOUNS`, `_LABEL_KINDS`), and the builders
+    `_alt`, `_MODIFIERS`, `_no_phrase`.
+  - **`_TRIVIAL_RE`** rebuilt from it (the whole-item filler form). Pinned: it
+    drops everything the old one dropped (`test_the_new_filter_drops_everything_the_old_one_did`).
+  - **`_ASSURANCE_RE`** (new; the synthesis spans), `_FRAME_TOKEN_RE`,
+    `_WORD_RE`, `_signal_spans`, `_has_conflict_signal`, `_is_assurance`
+    (linear: spans are looked up by `bisect`), `_LABEL_RE` and `_is_label`.
+  - **`_split_items`** returns the removed items instead of their count (its
+    only callers are in the module); `count_filtered_prose_lines` takes their
+    length.
+  - **`_synthesis_statements`** (new): per section (`split_into_sections`),
+    through `_split_items`, keeping signal-bearing statements that are not
+    assurances and counting the rest; a heading that is not a label is an item
+    of its own, before its section's items. Both extractors and
+    `count_synthesis_assurances` (new, public) go through it.
+  - **`HarvestResult.assurances`**, in `accounting()`; `_enumerate_pending`
+    adds `count_synthesis_assurances(synthesis_text)`; the summary log line
+    names it.
+  - Docstrings: the module docstring, the vocabulary comment (replacing the
+    `_TRIVIAL_RE` comment), `_split_items`, `count_filtered_prose_lines`, both
+    extractors, `HarvestResult.assurances`.
+- **Codex review (P1, P2), both fixed in this PR** (reviewed commit
+  `d867de2`; the fix and its tests in the follow-up push):
+  - **P1: "Recognize additional contrast conjunctions before dropping
+    assurances."** Reproduced: "No conflicts were found, yet M-101 lists 500
+    gpm and P-101 lists 550 gpm." was dropped whole, and so were the
+    `nevertheless`, `nonetheless` and contrastive `while` forms. **Root cause,
+    not only the example:** no list of contrast words is complete, and a
+    statement with no connective at all ("No conflicts were found; no valve is
+    shown on P-101.", "..., and M-101 lists 500 gpm while ...") was dropped the
+    same way. **Fix:** the contrast list is gone; outside its assurance spans
+    a statement may carry only listed frame words (`_FRAME_WORDS`: sheet ids,
+    discipline, document and place names, a few function words, "are
+    consistent", "at this time"). Any other word (a contrast, a value, a
+    component, a "not") keeps it. This narrows the owner's rule in the safe
+    direction and keeps its intent (a qualification keeps the statement);
+    measured, it changes nothing on the 45-sentence case table or the six
+    layouts, and every dropped case above still drops.
+  - **P2: "Preserve conflict-bearing bold lines when splitting sections."**
+    Reproduced: `**M-101 conflicts with P-101.**` was harvested on `main` in a
+    paragraph layout and lost after the per-section split (in a bulleted
+    layout `main` lost it too). **Fix:** a heading that is not a listed label
+    is an item of its own. A label (`_LABEL_RE`) is the filler noun phrase
+    without its "no" (listed modifiers, adjectives and nouns, "Summary of
+    ...", "... review"), after an optional pair of sheet ids (or a single one
+    with no "with" after it), before listed qualifiers or sheet ids. So
+    "Cross-sheet / cross-discipline conflicts", "Conflicts between M-101 and
+    P-101" and "FP-101 conflicts" stay labels, while "M-101 conflicts with
+    P-101", "VAV-7 capacity mismatch (M-101 vs E-201)" and "Pump rating
+    discrepancy between FP-101 and M-101" are read. Losing a conflict is worse
+    than noise, so an unlisted label is read as an item (noise, the recorded
+    limit below); probing 13 unusual labels found 7 such leaks, and the
+    listed words now cover them. The same defect in the digest channel predates
+    WP-09.1 and is recorded as N32, not fixed here.
+  - **Found while timing the P2 fix, fixed before pushing:** the first label
+    grammar used an ambiguous id pattern (`[a-z][\w./-]*\d[\w./-]*`, which can
+    split one id several ways) inside a repeated group, and a heading repeating
+    "M-101 / " backtracked exponentially (minutes for one heading). Every
+    digit-bearing word is now read one way only and possessively
+    (`_DIGIT_WORD`, `_ID`; Python 3.11 is the floor), the id lists are
+    possessive, and the speed test carries those headings. Measured linear on
+    twelve adversarial shapes (doubling the input doubles the time), except
+    one that `_id_mentions` makes quadratic; that is pre-existing (4,000
+    mentions of two ids take 0.8 s on `main` too) and noted on WP-09.2.
+  - **Failing first:** the new tests against the reviewed commit fail exactly
+    where the fix acts: **20 on behaviour** (9 missed-contrast statements, 9
+    statement headings, Codex's example, a heading that is an assurance), 187
+    pass (every label and every earlier test).
+- **Contracts decided:** none of D-1 … D-8; a D-2 note.
+- **Cache/schema effects: none.** The structuring cache key of every surviving
+  item is unchanged (pinned), so no stored structuring result is re-billed and
+  `_HARVEST_CACHE_CONTRACT` stays 1. No prompt, `Finding` field, key or schema
+  changed. One additive accounting key, `assurances`, in `prose_accounting`
+  (`run.log`, `run_manifest.json`). Fewer calls: one Sonnet structuring call
+  saved per filler line, and per synthesis assurance that names a sheet, on
+  each exhaustive run.
+- **Ids.** A dropped item before a real one moves that item's ordinal and
+  `prose_item_id` once (the owner's choice; pinned for a digest item and a
+  synthesis conflict). Measured over the suite: no fixture's id moved (every
+  harvest's entry ids are identical in the fixed run).
+- **Re-baselined tests: none.** Checked both ways:
+  - the 11 pinned files the request named (`test_drawing_ledger`,
+    `test_drawing_acceptance`, `test_drawing_qc_pipeline`,
+    `test_drawing_usage`, `test_structured_outputs`, `test_drawing_synthesis`,
+    `test_pipeline_stage_overlap`, `test_qc_numbering_tiebreak`,
+    `test_drawing_export`, `test_run_journal`, `test_drawing_html_report`),
+    unedited, against the fixed tree: **526 passed**;
+  - the new file against a `git archive` copy of `origin/main`, classified
+    from `--junitxml`: **108 failed on behaviour, 5 only on the new API**
+    (`count_synthesis_assurances`, `_CONFLICT_NOUNS`, the `assurances` key),
+    **94 passed**. The passes pin what the fix keeps: the 45 real findings,
+    the 5 filler limits, the old filter's language, the real synthesis
+    conflicts, the assurance limits, the anchors, the gauntlet, the cache key
+    and the speed bound.
+- **Fixture effects, instrumented over the whole fixed suite** (the same hooks,
+  diffed test by test against the base run): **outside the new file nothing
+  moves.** The same 116 harvest results (every count, call, cache hit, entry,
+  entry text and `prose_item_ids`), 72 structuring calls, 259 numberings (entry
+  counts, QC numbers, texts, prose ids), 186 prose-harvest stage records
+  (status, warnings, errors, items) and 244 synthesis extractions; `assurances`
+  is 0 in every harvest. Re-run on the final code (after the Codex fixes):
+  the same result, and 3,994 passed (the baseline plus the 207 new tests).
+  The gauntlet (`run_acceptance.py`'s oracle) is unchanged: its prose, its
+  synthesis and its one set-level entry.
+- **New tests:** `tests/test_prose_filler_and_assurances.py` (207):
+  - **B11:** the four strings and 21 equivalent wordings are filler and
+    counted in `filtered`; no structuring call with a client, no entry without
+    one, and no degraded entry when the call fails; focus filler is not
+    harvested; everything the old filter dropped is still dropped.
+  - **Kept:** 45 real findings (the P8 item 6 and terse corpora, the
+    gauntlet's prose, 33 findings with no/not/none/without/nothing); 5 filler
+    wordings outside the lists (recorded limits).
+  - **N11:** the two review sentences and 14 equivalents are not conflicts;
+    no call and no entry; a real conflict beside an assurance is still
+    harvested with its leg; 30 real conflicts survive (9 added by the Codex
+    review: a contrast, a value or a second clause); 9 assurance wordings
+    outside the grammar stay conflicts (recorded limits); the anchors of "No
+    conflicts were resolved…" and the gauntlet's synthesis are unchanged.
+  - **N31:** three heading layouts (glued bullet, `###` paragraphs, bold
+    paragraphs) yield no conflict; a real conflict under a heading is
+    extracted alone; a plain label line of listed words belongs to the
+    assurance after it, and one with a sheet id keeps the statement; 40 label
+    headings are never conflicts, 9 statement headings are read in three
+    layouts, a heading that is an assurance is counted (Codex review); the
+    value sentence after an assurance, split off at "; M", is a recorded
+    limit.
+  - **Counting:** `assurances` counts assurances and conflict-naming filler
+    in synthesis, is observational, and is apart from `filtered`.
+  - **Ordinals:** the survivor's ordinal and id (digest and synthesis); no
+    structuring cache key holds an id.
+  - **One vocabulary:** every noun-form conflict signal has an assurance noun,
+    every assurance noun carries a signal, and the signal list is pinned.
+  - **Bounded work:** adversarial inputs of 20,000 repeats run well inside a
+    time bound; measured linear (doubling the input doubles the time) on ten
+    adversarial shapes.
+  - **Pipeline:** filler on both sheets and a synthesis of assurances under a
+    glued heading: no harvest call, no prose finding, no notes PDF, the stage
+    `SKIPPED_VALID`, `filtered` 4 and `assurances` 2 in the context,
+    `run_manifest.json` and `run.log`; with a real set-level conflict added,
+    exactly that one set-level entry and the notes PDF.
+- **Downstream consumers walked:**
+  - **Structuring calls and their cache:** a dropped item never reaches
+    `_structure_item`; a surviving item's key is unchanged.
+  - **The ledger:** no entry for a dropped item; nothing else moves (QC
+    numbers follow position, and no fixture numbering changed).
+  - **Degraded margin callouts and `Drawing_Set_Review_Notes.pdf`:** none for
+    filler or an assurance (pinned end to end).
+  - **The stage record, `run.log`, `run_manifest.json`:** `items_in` counts
+    fewer items; a run with none reads `SKIPPED_VALID`; `prose_accounting`
+    gains `assurances` (pinned).
+  - **Exports and the report:** fewer prose entries; the report's `prose×N`
+    chip counts ids, never reads one.
+  - **The gauntlet** (`run_acceptance.py`): unchanged (above).
+- **Validation** (this container, Python 3.11.15, SDK 1.7.0, PyMuPDF 1.28.2):
+  - Baseline before any change: **3,787 passed, 2 skipped, 10 deselected**
+    (261 s) on `2be7034`.
+  - The new file: 207 passed; the 11 pinned files: 526 passed.
+  - Full suite after: **3,994 passed, 2 skipped, 10 deselected** (260 s):
+    the baseline plus the 207 new tests, with the same two environment skips.
+  - CI on the first push (`1be03d0`) was green on every job: tests on Linux
+    (3.11, 3.12) and Windows (3.11), the headless-Chromium report suite, the
+    secret scan and static analysis, the build. The push with the Codex fixes
+    re-runs it.
+  - Browser suite: not run separately. No report JS, HTML or chat code
+    changed, and the browser tests ran inside the full suite.
+  - `python -m ruff check --select E9,F63,F7,F82 src tests scripts` (pinned
+    0.14.5) is clean; F401/F811/F841 over the two touched Python files is
+    clean. `scan_secrets.py` is clean over 207 tracked files, the new one
+    included. `compileall src` passes.
+- **Docs:**
+  - **CHANGELOG** (Fixed): B11, N11 and N31, with the visible effect, the calls
+    saved, the accepted limits and the id/cache note.
+  - **CLAUDE.md:** the `prose_harvest.py` passage.
+  - **README:** "Prose harvest — the legacy channel's guarantee" (a paragraph
+    on filler and assurances).
+  - **The plan:** N31 in §3 and §7.2, WP-09's "Covers" line, and a WP-09.1
+    note under "Steps 1–3" (a repeatable qualifier alone was not enough; the
+    synthesis channel needed negation awareness and a per-section split).
+  - **DECISIONS:** the D-2 note.
+  - **PROGRESS:** this entry; the WP-09.1, B11, N11 and new N31 rows; a note
+    on WP-09.2; the Next-up line.
+- **Not verified:** live API behaviour (no budget, O-4; this slice makes no
+  call). Not measurable without real drawings (O-10): how often the digest and
+  synthesis models write filler or assurances outside the vocabulary (each is
+  a paid structuring call, as before), and how often a real finding is written
+  entirely in listed words. Windows is covered by this PR's CI.
+- **Risks and residual gaps:**
+  - **A real finding written entirely in listed words is dropped** (the
+    owner's definition of filler: every word listed). None was found in the
+    corpora; the lists hold no content nouns, and any tag, number or sheet id
+    keeps an item.
+  - **Recorded limits (kept, a paid call as before):** filler with an
+    unlisted word ("No duct conflicts noted.", "No items requiring
+    coordination.", "No coordination required.", "No action required.", "No
+    conflicts noted on this sheet or with other disciplines."); assurances
+    outside the grammar ("M-101 does not conflict with P-101.", "No duct
+    conflicts were found…", "No apparent conflicts between M-101 and P-101.",
+    "No conflicts shown between…", "Checked M-101 against P-101 for
+    conflicts; none were found.", "Previously reported conflicts … were not
+    found in this revision.", "M-101 and P-101 were reviewed for conflicts and
+    none were identified.", "No stale references were found on M-101.", "No
+    conflicts between the pump schedule on M-101 and P-101 were found.").
+  - **An unlisted label heading is read as an item** (Codex review: losing a
+    conflict is worse than noise). A label outside the listed words that
+    carries a conflict word becomes a set-level note, or a source-scoped item
+    if it names a sheet. The listed words cover every label probed (40,
+    pinned).
+  - **A value sentence split off after an assurance** ("No conflicts were
+    found; M-101 lists 500 gpm and P-101 lists 550 gpm.": the splitter ends a
+    sentence at "; M") carries no conflict word, so it is not harvested, as on
+    `main` (pinned as a recorded limit; `main` also made the assurance half a
+    set-level note).
+  - **A plain label line** (not a Markdown heading) still joins the next
+    sentence. Made of listed words ("Cross-sheet conflicts:") it belongs to
+    the assurance after it, like an inline bold label; with any other word
+    ("Conflicts on M-101:", then "None identified.") its conflict word keeps
+    the statement a conflict, the safe direction (pinned:
+    `test_a_label_line_before_an_assurance`).
+- **Re-checked (U31):** the structuring prompt, the structured-outputs gate,
+  `_match_entry` and `_MATCH_OVERLAP` (WP-09.2's), the degraded and set-level
+  entries, the report's section grammar and "Issues only" keywords, and the
+  ledger are untouched.
+- **Found, not fixed:**
+  - focus-section filler is counted nowhere (with the focus harvest on, it is
+    dropped silently, as "None noted." always was); a note on WP-09.2, whose
+    per-item outcome counters cover it;
+  - **N32** (new, P2): a digest heading that states something is never read
+    (`split_into_sections` makes it a section header); the synthesis channel's
+    fix (`_is_label`) is the test to reuse. Added to the register, plan §3 and
+    §7.2, and noted on WP-09.2.
+- **Next:** WP-09.2 (Wave 1; its dependencies WP-04.2 and WP-09.1 are done).
 
 ### 2026-09-24 — WP-06.1: an uncertain conflict is a low question, refused items are counted, distinct conflicts reach the ledger ([PR #167](https://github.com/Abe-Borg/drawing-analyzer/pull/167))
 
