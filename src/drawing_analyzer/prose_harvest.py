@@ -147,14 +147,16 @@ _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.;])\s+(?=[A-Z0-9(])")
 # * ``_ASSURANCE_RE`` finds the SPANS of a synthesis statement that say a
 #   conflict is absent ("no conflicts were found", "there are no
 #   discrepancies"). A statement whose every conflict signal sits inside one,
-#   and which carries no contrast word, is an assurance, not a conflict
-#   (``_is_assurance``, N11).
+#   and whose every other word is a listed frame word (``_FRAME_WORDS``), is an
+#   assurance, not a conflict (``_is_assurance``, N11).
 #
 # Every word comes from a listed set; nothing guesses at content. An item that
-# carries a tag, a number, a sheet id or any unlisted word is not filler, and a
+# carries a tag, a number, a sheet id or any unlisted word is not filler; a
 # conflict noun qualified by an unlisted word ("no duct conflicts were found")
-# is not an assurance. Both refusals keep the item: the safe direction (plan
-# section 2.1), at the cost of a structuring call, as before.
+# is not an assurance, and neither is an assurance beside any unlisted word ("…,
+# yet M-101 lists 500 gpm"). Each refusal keeps the item: the safe direction
+# (plan section 2.1), at the cost of a structuring call, as before. The same
+# words decide which synthesis headings are mere labels (``_LABEL_RE``).
 #
 # The filler test is anchored at BOTH ends (P8 item 6). Anchored only at the
 # start, it discarded every real finding that *opened* with one of these words,
@@ -218,14 +220,31 @@ _DOCUMENTS = (
     r"schedules?", r"backgrounds?", "set",
 )
 _PLACES = ("sheet", "drawing", "page", "plan", "set", "discipline", "review")
-#: A contrast or an exception keeps a statement even when its only conflict
-#: signal sits in an assurance: "No conflicts were found, but M-101 shows
-#: 500 gpm and P-101 shows 550 gpm."
-_CONTRAST_WORDS = (
-    "but", "however", "though", "although", "except", "excepting",
-    r"other\s+than", r"apart\s+from", r"aside\s+from", "besides", "whereas",
-    "unless",
-)
+#: A word that carries a digit, read one way only: the characters before its
+#: first digit, that digit, the rest. Possessive, so a pattern that repeats it
+#: can never re-split one word and backtrack exponentially (an ambiguous form
+#: took minutes on "M-101 / " repeated in a heading).
+_DIGIT_WORD = r"(?:[^\W\d]|[./-])*+\d[\w./-]*+"
+#: A sheet id, or a tag shaped like one: it starts with a letter and carries a
+#: digit (``M-101``, ``FP-101``, ``A1.01``). A measurement starts with its value
+#: (``500``, ``6in``) and is never one.
+_ID = rf"[^\W\d_]{_DIGIT_WORD}"
+#: The only words an assurance may carry outside its spans: sheet ids,
+#: discipline, document and place names, a few function words, "are
+#: consistent", "at this time". Any other word keeps the statement, since it
+#: may state the very conflict the assurance denies: a contrast ("but", "yet",
+#: "nevertheless", "while"), a value, a component, a "not" (the Codex review of
+#: WP-09.1: "No conflicts were found, yet M-101 lists 500 gpm and P-101 lists
+#: 550 gpm." was dropped whole). A closed list, like the rest of this
+#: vocabulary, so no list of contrast words has to be complete.
+_FRAME_WORDS = (
+    "the", "a", "an", "and", "or", "of", "on", "in", "at", "to", "for", "from",
+    "with", "within", "between", "among", "across", "this", "these", "those",
+    "any", "all", "both", "each", "its", "their", "other", "overall",
+    "are", "is", "was", "were", "be", "been", r"appears?", r"seems?",
+    "consistent", "coordinated", "aligned",
+    "time", "present", "currently", "so", "far", "date", "fire", "protection",
+) + _DISCIPLINES + _DOCUMENTS + _PLACES
 
 
 def _alt(words: Iterable[str]) -> str:
@@ -283,7 +302,7 @@ _NO_CONFLICT = (
 # "No conflicts between M-101 and P-101 resolve the pump question and none
 # were found on E-201" is not an assurance.
 _PHRASE_WORD = (
-    r"(?:[\w./-]*\d[\w./-]*|the|and|or|of|on|in|any|both|these|those|this|its"
+    rf"(?:{_DIGIT_WORD}|the|and|or|of|on|in|any|both|these|those|this|its"
     rf"|their|other|{_alt(_DISCIPLINES)}|{_alt(_DOCUMENTS)})"
 )
 _PHRASE = (
@@ -310,7 +329,58 @@ _ASSURANCE_RE = re.compile(
     rf"(?={_ASSURANCE})|{_ASSURANCE}",
     re.I,
 )
-_CONTRAST_RE = re.compile(rf"\b{_alt(_CONTRAST_WORDS)}\b", re.I)
+_FRAME_TOKEN_RE = re.compile(rf"{_alt(_FRAME_WORDS)}|{_ID}", re.I)
+# A word: starts and ends on a letter or digit, and may carry ' . / - inside
+# (``doesn't``, ``M-101``, ``A1.01``); the punctuation around it is not a word.
+_WORD_RE = re.compile(r"[^\W_](?:[\w'./-]*[^\W_])?")
+
+# A synthesis heading is a LABEL when it names a section ("Cross-sheet /
+# cross-discipline conflicts", "Conflicts between M-101 and P-101", "M-101 /
+# P-101 discrepancies"). Any other heading says something ("M-101 conflicts with
+# P-101.") and is an item of its own (the Codex review of WP-09.1: dropping
+# every heading lost a conflict written as a whole-line bold sentence). A label
+# is the noun phrase of the filler vocabulary without its "no": listed
+# modifiers, adjectives and nouns, after an optional pair of sheet ids (or a
+# single one with no "with" after it) and before listed qualifiers or sheet
+# ids. A statement starts with its subject, so an unlisted word before the
+# noun, or a single sheet id followed by "with" ("M-101 conflicts with P-101"),
+# makes it one. An unlisted label is read as an item: noise, never a lost
+# conflict.
+_LABEL_ADJECTIVES = (
+    "potential", "possible", "key", "critical", "primary", "identified",
+    "stale", "tag", "schedule", "reference", "equipment", "dimensional",
+    "detail",
+) + _CONFLICT_ADJECTIVES
+_LABEL_NOUNS = _FILLER_NOUNS + (
+    r"references?", rf"cross{_DASH}?\s?references?", r"tags?", "coordination",
+)
+_IDS = rf"{_ID}(?:\s*(?:/|&|,|\band\b|\bor\b|\bvs\.?|\bversus\b)\s*{_ID})*+"
+#: What a label may say it is: "Summary of conflicts", "Conflict review".
+_LABEL_KINDS = (
+    "summary", "review", "overview", "list", "log", "register", "table",
+    "check",
+)
+_LABEL_PHRASE = (
+    rf"{_MODIFIERS}(?:{_alt(_LABEL_ADJECTIVES)}\s+)?{_alt(_LABEL_NOUNS)}"
+    rf"(?:\s+{_alt(_LABEL_KINDS)})?"
+)
+_LABEL_RE = re.compile(
+    # An optional pair of sheet ids ("M-101 / P-101 ..."), or a single one when
+    # no "with" follows: "FP-101 conflicts" names a section, "M-101 conflicts
+    # with P-101" says something.
+    rf"^\W*(?:{_ID}(?:\s*(?:/|&|,|\band\b|\bvs\.?|\bversus\b)\s*{_ID})++\s+"
+    rf"|{_ID}\s+(?!.*\bwith\b))?"
+    rf"(?:{_alt(_LABEL_KINDS)}\s+of\s+(?:the\s+)?)?"
+    rf"{_LABEL_PHRASE}(?:\s*(?:,|/|&|\band\b|\bor\b)\s*{_LABEL_PHRASE}){{0,3}}"
+    rf"(?:[\s,;]+(?:{_FILLER_QUALIFIER}"
+    r"|requiring\s+(?:resolution|coordination|attention|action|review)"
+    r"|to\s+(?:resolve|review|coordinate|address|confirm)"
+    r"|during\s+(?:the\s+)?(?:review|coordination)"
+    r"|\(\s*(?:none|n/?a|nil)\s*\)"
+    rf"|(?:between|among|across|with|on|in|for|of|from)\s+{_IDS}"
+    rf"|\(\s*{_IDS}\s*\))){{0,4}}\W*$",
+    re.I,
+)
 
 # A floor low enough to keep a terse real finding. At 20 it discarded
 # "Drain is undersized" (19), "6 inch drain wrong" (18), "VAV-3 blocks duct" (17)
@@ -461,17 +531,19 @@ def _is_assurance(item: str) -> bool:
     """Whether ``item`` only says that a conflict is absent (N11; the owner's rule).
 
     True when the item carries a conflict signal, every signal it carries sits
-    inside an ``_ASSURANCE_RE`` span, and no contrast word appears. So "No
-    conflicts were found between M-101 and P-101." is an assurance, and these
-    are not: "No conflicts were resolved between M-101 and FP-101; both remain
-    open" (resolving is not a detection word), "X conflicts with Y; no other
-    conflicts were found" (the first signal sits outside), "does not match" (no
-    assurance form), "No conflicts were found, but M-101 shows 500 gpm and
-    P-101 shows 550 gpm." (a contrast).
+    inside an ``_ASSURANCE_RE`` span, and every word outside those spans is a
+    listed frame word (``_FRAME_WORDS``: sheet ids, discipline and document
+    names, a few function words). So "No conflicts were found between M-101
+    and P-101." is an assurance, and these are not: "No conflicts were
+    resolved between M-101 and FP-101; both remain open" (resolving is not a
+    detection word), "X conflicts with Y; no other conflicts were found" (the
+    first signal sits outside), "does not match" (no assurance form), "No
+    conflicts were found, but M-101 shows 500 gpm and P-101 shows 550 gpm." and
+    "..., yet M-101 lists 500 gpm ..." (unlisted words: a contrast, values).
     """
     low = item.lower()
     signals = _signal_spans(low)
-    if not signals or _CONTRAST_RE.search(low):
+    if not signals:
         return False
     spans = [m.span() for m in _ASSURANCE_RE.finditer(low)]
     starts = [start for start, _end in spans]
@@ -481,27 +553,49 @@ def _is_assurance(item: str) -> bool:
         i = bisect.bisect_right(starts, start) - 1
         if i < 0 or spans[i][1] < end:
             return False
-    return True
+    outside: list[str] = []
+    previous = 0
+    for start, end in spans:
+        outside.append(low[previous:start])
+        previous = end
+    outside.append(low[previous:])
+    return all(
+        _FRAME_TOKEN_RE.fullmatch(word)
+        for word in _WORD_RE.findall(" ".join(outside))
+    )
+
+
+def _is_label(header: str) -> bool:
+    """Whether a synthesis heading names a section rather than saying something."""
+    return bool(_LABEL_RE.match(header or ""))
 
 
 def _synthesis_statements(synthesis_text: str) -> "tuple[list[str], int]":
     """The synthesis's conflict statements, and how many assurances it held.
 
     Items are split per section with the report's ``split_into_sections``
-    (read, not changed), so a section header never joins an item: glued to the
-    previous bullet, a "Cross-sheet conflicts" header became a conflict of its
-    own, and in paragraph layouts the whole run was one item that no assurance
-    rule could read. Each section body goes through ``_split_items``, the one
-    filter site. A statement is kept when it carries a conflict signal and is
-    not an assurance (``_is_assurance``). Counted as assurances: filler that
-    names a conflict ("No conflicts noted.") and every statement
-    ``_is_assurance`` drops. Both extractors and the count go through this one
-    helper, so they cannot disagree.
+    (read, not changed), so a section heading never joins an item (N31): glued
+    to the previous bullet, a "Cross-sheet conflicts" heading became a conflict
+    of its own, and in paragraph layouts the whole run was one item that no
+    assurance rule could read. A heading that is not a label (``_is_label``) is
+    an item of its own, before its section's items, so a conflict written as a
+    whole-line bold sentence ("**M-101 conflicts with P-101.**") is still read
+    (the Codex review of WP-09.1). Each section body goes through
+    ``_split_items``, the one filter site, and so does such a heading. A
+    statement is kept when it carries a conflict signal and is not an
+    assurance (``_is_assurance``). Counted as assurances: filler that names a
+    conflict ("No conflicts noted.") and every statement ``_is_assurance``
+    drops. Both extractors and the count go through this one helper, so they
+    cannot disagree.
     """
     statements: list[str] = []
     assurances = 0
-    for _header, body in split_into_sections(synthesis_text or ""):
+    for header, body in split_into_sections(synthesis_text or ""):
         kept, removed = _split_items(body)
+        if header and not _is_label(header):
+            heading_kept, heading_removed = _split_items(header)
+            kept = heading_kept + kept
+            removed = heading_removed + removed
         assurances += sum(
             1 for item in removed
             if _TRIVIAL_RE.match(item) and _has_conflict_signal(item)

@@ -1689,9 +1689,13 @@ finding that names a tag, a size or anything else ("No isolation valve is
 shown.") is always kept. Likewise, a synthesis sentence that mentions a
 conflict only to say there is none ("No conflicts were found between M-101 and
 P-101.") is not harvested as a conflict. It is still harvested if it names a
-real conflict elsewhere or contrasts ("…, but M-101 shows 500 gpm and P-101
-shows 550 gpm"). Synthesis sentences are read section by section, so a heading
-never becomes part of one. Both drops are counted in the run record's prose
+real conflict elsewhere, or if it says anything beyond sheet names and a few
+listed words, such as a contrast or a value ("…, yet M-101 lists 500 gpm and
+P-101 lists 550 gpm"). Synthesis sentences are read section by section, so a
+heading never becomes part of one; a heading that states a conflict ("**M-101
+conflicts with P-101.**") is read as a sentence of its own, while a heading
+that only names a section ("Cross-sheet conflicts") is not. Both drops are
+counted in the run record's prose
 carry-through counts (`filtered` for filler, `assurances` for synthesis
 assurances), and neither counts as a lost item. Wording outside the lists
 ("No duct conflicts noted.") is kept and structured, as before.

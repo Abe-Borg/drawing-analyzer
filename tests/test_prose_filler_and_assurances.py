@@ -13,11 +13,14 @@ The owner's rules (2026-09-24, measured first; ``_plans/PROGRESS.md``):
 2. **One vocabulary, two forms.** The same word lists build the whole-item
    test and the synthesis assurance spans.
 3. **A synthesis statement is an assurance** only when every conflict signal
-   it carries sits inside an assurance span and it carries no contrast word
-   (``but``, ``however``, ``except``, ``other than`` ...). The conflict noun must
-   be the head: ``no conflict resolution is shown`` is not an assurance.
+   it carries sits inside an assurance span and every other word is a listed
+   frame word (sheet ids, discipline and document names, a few function
+   words), so a contrast (``but``, ``yet``, ``nevertheless``, ``while``), a
+   value or a component keeps it (the Codex review). The conflict noun must be
+   the head: ``no conflict resolution is shown`` is not an assurance.
 4. **Synthesis items are split per section** (the report's
-   ``split_into_sections``), so a header never joins an item.
+   ``split_into_sections``), so a header never joins an item; a heading that
+   is not a listed label is an item of its own (the Codex review).
 5. **A dropped assurance is counted** in ``HarvestResult.assurances``,
    observationally (it feeds neither ``missing`` nor ``complete``); B11 filler
    counts in ``filtered`` as before.
@@ -205,6 +208,21 @@ _SYNTHESIS_CONFLICTS = [
     "No conflicts between M-101 and P-101 resolve the pump question and none "
     "were found on E-201.",
     "No conflicts could be resolved between M-101 and P-101.",
+    # The Codex review: any word outside the listed frame keeps the statement,
+    # a contrast the old list lacked, a value, or a second clause.
+    "No conflicts were found, yet M-101 lists 500 gpm and P-101 lists 550 gpm.",
+    "No conflicts were found; nevertheless M-101 lists 500 gpm and P-101 lists "
+    "550 gpm.",
+    "No conflicts were found, nonetheless M-101 lists 500 gpm and P-101 lists "
+    "550 gpm.",
+    "No conflicts were found between M-101 and P-101, while E-201 shows a 20 A "
+    "breaker where M-101 shows 30 A.",
+    "No conflicts were found; the pump on M-101 lists 500 gpm and P-101 lists "
+    "550 gpm.",
+    "No conflicts were found, and M-101 lists 500 gpm while P-101 lists 550 gpm.",
+    "No conflicts were found; no valve is shown on P-101.",
+    "No conflicts were found between M-101 and P-101; the pump on M-101 is larger.",
+    "No discrepancies were noted, still the riser on M-101 lacks a valve.",
 ]
 
 # Assurance-like wording outside the closed grammar: still a conflict item
@@ -476,6 +494,94 @@ def test_a_section_header_never_joins_a_synthesis_item(text):
     assert extract_set_level_synthesis_conflicts(text, _IDS) == []
 
 
+# Headings that name a section: never an item (N31), whatever follows them.
+_LABELS = [
+    "Cross-sheet / cross-discipline conflicts", "Cross-sheet conflicts",
+    "Conflicts", "Conflicts:", "Conflicts / discrepancies",
+    "Conflicts and discrepancies", "Conflicts & discrepancies", "Discrepancies",
+    "Potential conflicts", "Key conflicts", "Critical discrepancies",
+    "Conflicts found", "Identified conflicts", "Conflicts between disciplines",
+    "Conflicts between M-101 and P-101", "M-101 / P-101 conflicts",
+    "M-101 vs P-101 discrepancies", "Stale references", "Tag mismatches",
+    "Schedule discrepancies", "Cross-discipline conflicts and coordination",
+    "Coordination and conflicts", "Conflicts requiring resolution",
+    "Inconsistencies", "Open conflicts", "Unresolved discrepancies",
+    "Mismatched references", "Conflicts with other disciplines",
+    "Cross-sheet conflicts (M-101 / P-101)", "Summary of conflicts",
+    "Conflicts summary", "Conflicts noted during review", "Conflicts to resolve",
+    "FP-101 conflicts", "Conflicts (none)", "Conflict review",
+    "Review of discrepancies", "Notable conflicts", "Possible discrepancies",
+    "Cross-sheet conflicts identified",
+]
+
+# Headings that say something (the Codex review): each is an item of its own.
+_STATEMENT_HEADINGS = [
+    "M-101 conflicts with P-101.",
+    "M-101 conflicts with P-101",
+    "The fire pump rating on FP-101 conflicts with the schedule",
+    "FP-101 pump rating disagrees with M-101",
+    "Pump P-1 flow differs between M-101 and P-101",
+    "Note: the riser on M-101 contradicts P-101.",
+    "M-101 contradicts P-101",
+    "VAV-7 capacity mismatch (M-101 vs E-201)",
+    "Pump rating discrepancy between FP-101 and M-101",
+]
+
+
+@pytest.mark.parametrize("label", _LABELS, ids=_ids("label-", _LABELS))
+def test_a_label_heading_is_never_a_conflict(label):
+    for text in (
+        f"**{label}**\n- Chilled water on M-101 continues on P-101.\n",
+        f"### {label}\nChilled water on M-101 continues on P-101.\n",
+    ):
+        assert _extracted(text) == [], text
+
+
+@pytest.mark.parametrize("heading", _STATEMENT_HEADINGS,
+                         ids=_ids("statement-", _STATEMENT_HEADINGS))
+def test_a_heading_that_states_a_conflict_is_still_read(heading):
+    # Every layout, including a bulleted one, where the text of a heading was
+    # never read before.
+    for text in (
+        f"**{heading}**\n\nMore text.\n",
+        f"### {heading}\nMore text.\n",
+        f"Overview.\n\n**{heading}**\n\n- A bullet on M-101.\n",
+    ):
+        assert [item for item, _ids_ in _extracted(text)] == [heading], text
+
+
+def test_codex_a_whole_line_bold_conflict_is_harvested():
+    assert extract_synthesis_conflicts("**M-101 conflicts with P-101.**", _IDS) == [
+        ("M-101 conflicts with P-101.", ["M-101", "P-101"])
+    ]
+    ledger = Ledger()
+    res = harvest_prose(ledger, [], _two_sheet_geoms(), client=None,
+                        synthesis_text="**M-101 conflicts with P-101.**",
+                        sleep=lambda *_: None)
+    assert res.items == 1 and len(ledger) == 1
+    assert [leg.sheet_id for leg in ledger.entries[0].also_on] == ["P-101"]
+
+
+def test_a_heading_that_is_an_assurance_is_counted_not_harvested():
+    from drawing_analyzer.prose_harvest import count_synthesis_assurances
+
+    text = "**No conflicts were found between M-101 and P-101.**\n\nMore text.\n"
+    assert _extracted(text) == []
+    assert count_synthesis_assurances(text) == 1
+
+
+def test_recorded_limit_a_value_sentence_after_an_assurance_is_not_read():
+    # The splitter ends a sentence at "; M" (a capital follows), so the values
+    # are a sentence of their own, and synthesis harvests only sentences that
+    # carry a conflict word (section 17), as on main. main also turned the
+    # assurance half into a set-level note; now it is counted.
+    from drawing_analyzer.prose_harvest import count_synthesis_assurances
+
+    text = "No conflicts were found; M-101 lists 500 gpm and P-101 lists 550 gpm."
+    assert _extracted(text) == []
+    assert count_synthesis_assurances(text) == 1
+
+
 def test_a_real_conflict_under_a_header_is_extracted_alone():
     text = (
         "### Cross-sheet conflicts\n"
@@ -657,11 +763,21 @@ def test_the_grammar_is_fast_on_long_adversarial_input():
         "no conflicts " * 20_000,
         "Nothing " + "inconsistent " * 20_000,
     ]
+    # Headings that repeat sheet ids: an ambiguous id pattern inside the label
+    # grammar backtracked exponentially on these (minutes for one heading).
+    long_headings = [
+        "**" + "M-101 / " * 20_000 + "conflicts**",
+        "**" + "M-101 / " * 20_000 + "x**",
+        "### Conflicts between " + "M-101, " * 20_000 + "x",
+    ]
     start = time.perf_counter()
     for item in long_items:
         extract_prose_items(f"**Coordination**\n- {item}")
         extract_synthesis_conflicts(item, _IDS)
         extract_set_level_synthesis_conflicts(item, _IDS)
+    for heading in long_headings:
+        extract_synthesis_conflicts(heading, _IDS)
+        extract_set_level_synthesis_conflicts(heading, _IDS)
     assert time.perf_counter() - start < 5.0
 
 

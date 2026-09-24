@@ -627,14 +627,22 @@ reporter of last resort must never raise from inside Tk's handler.
   `_ASSURANCE_RE` span ("no [modifiers] <conflict noun> [between <sheet ids,
   discipline names, listed words>] [were] <detection word>", "nothing
   inconsistent", "there are no <noun>", "found no <noun>", a conflict label
-  right before one) and no contrast word appears (but, however, except, other
-  than...). The noun must be the head (`no conflict resolution is shown`
-  stays), and the phrase before the verb is closed, since an open one swallowed
-  a clause. An unlisted word keeps the item: the safe direction, a paid call as
-  before. Synthesis items are split per section with the report's
-  `split_into_sections` (read, not changed). A heading used to join an item
-  (N31): glued to a bullet, it made a false dual-anchored conflict, and in
-  paragraph layouts it defeated the assurance rule. A dropped assurance is
+  right before one) and every other word is a listed frame word
+  (`_FRAME_WORDS`: sheet ids, discipline and document names, a few function
+  words, "are consistent"). So a contrast, a value or a second clause keeps
+  it; a list of contrast words missed `yet`, `nevertheless` and `while`
+  (Codex review). The noun must be the head (`no conflict resolution is
+  shown` stays), and the phrase before the verb is closed, since an open one
+  swallowed a clause. An unlisted word keeps the item: the safe direction, a
+  paid call as before. Synthesis items are split per section with the
+  report's `split_into_sections` (read, not changed). A heading used to join
+  an item (N31): glued to a bullet, it made a false dual-anchored conflict,
+  and in paragraph layouts it defeated the assurance rule. A heading that is
+  not a listed label (`_LABEL_RE`: the filler noun phrase without its "no",
+  after an optional pair of sheet ids, or a single one with no "with" after
+  it) is an item of its own, so a whole-line bold "**M-101 conflicts with
+  P-101.**" is read (Codex review). An unlisted label is read too: noise, never
+  a lost conflict. A dropped assurance is
   counted in `HarvestResult.assurances`, observational like `filtered`
   (`run_manifest.json` `prose_accounting`). Ordinals count kept items, so
   dropping filler before a real item moves that item's `prose_item_id` once;

@@ -154,6 +154,7 @@ If a proposed change conflicts with a documented invariant, resolve the contract
 | N29 | A merged entry's representative can depend on arrival order. `_merge_into` compares each incoming member with the live survivor, whose severity an earlier merge may already have raised to the maximum. With three or more duplicates, which member's text, quote and id represent the entry then depends on the order they arrived in: members X (long quote, `low`), Y (short quote, `high`) and Z (long quote, `medium`) keep X's bundle in two of the six orders and Z's in four. The pair case is fixed and tested; this is its three-member form. Found by WP-03.2. | P1 |
 | N30 | The quote branch of `_is_duplicate` (an equal quote plus text overlap of 0.4 or more) also folds two different issues that share boilerplate wording. "pump P-1 impeller diameter conflicts with the curve" and "pump P-1 selected flow conflicts with the curve at 480", both quoting `PUMP P-1`, overlap 0.5 and merge in Pass A; the impeller text is lost, and with an equal quote nothing of it reaches `supporting_quotes`. The same class as N28 on a text branch; no threshold is evidence-backed (U11). Found by WP-03.7. | P1 |
 | N31 | Synthesis items are split from the whole Markdown text, so a section heading joins an item. Glued to the bullet above it (no blank line), "**Cross-sheet / cross-discipline conflicts**" makes that bullet a conflict naming its sheets, a paid structuring item with no negation involved; in paragraph layouts under `###` or bold headings the whole run is one item, so no negation rule can read an assurance inside it. Found by WP-09.1 while measuring N11 (the synthesis prompt asks for "short subsections / bullets"). | P1 |
+| N32 | A digest heading that states something is never read. `split_into_sections` makes a whole-line bold sentence (or a `###` heading) inside the digest a section header, so its text is neither a prose item nor counted, and it decides the category of the section it starts. The synthesis channel had the same defect after WP-09.1's per-section split and keeps such a heading as an item since that PR's Codex review. Found by WP-09.1. | P2 |
 
 Priority meanings: P0 protects result correctness or truthful completion; P1 protects recoverability, evidence, accounting, or release integrity; P2 improves robustness, performance, and interoperability after the relevant correctness contracts are stable.
 
@@ -772,7 +773,7 @@ Slices: WP-08.1 … WP-08.5.
 
 ### WP-09 — Prose harvesting without empty findings or unnecessary duplication
 
-**Priority:** P1 (N10 is P0). **Covers:** B11, N10, N11, N31; prose-match threshold concern (U11).  
+**Priority:** P1 (N10 is P0). **Covers:** B11, N10, N11, N31, N32; prose-match threshold concern (U11).  
 **Primary files:** `prose_harvest.py`, ledger ingestion; existing harvest tests.  
 **Dependencies:** WP-01/WP-03; preserve the new structured-output gate.
 
@@ -794,7 +795,7 @@ Implementation:
 **Steps 1–3: one filter site.**
 - `prose_harvest._split_items` already filters before both the model call and the degraded entry, so only one filter site (`_TRIVIAL_RE`) changes. A regex with a repeatable qualifier passed a 7-boilerplate / 7-real test corpus.
 - The synthesis channel is negation-blind (N11): `extract_synthesis_conflicts` and `extract_set_level_synthesis_conflicts` substring-match `_CONFLICT_SIGNALS`.
-- *Done by WP-09.1 (2026-09-24; the owner's rules, see its handoff).* A repeatable qualifier alone was not enough: "No cross-discipline items noted for this sheet." needs a modifier slot, and without one 14 of 16 equivalent wordings still passed. The filter became a closed vocabulary, still applied at the one filter site, and it shares that vocabulary with the synthesis rule (plan §4.2). The synthesis channel needed two more changes: negation awareness (`_is_assurance`: every conflict signal inside an assurance span, the conflict noun as the head, a closed phrase before the verb, and no contrast word; measured, each of those three guards prevents losing real conflicts), and splitting per section, because a heading joined an item (N31, found while measuring). Step 4's "suppressed as trivial" is so far a run-level count (`filtered`, `assurances`); per-item outcomes are WP-09.2's.
+- *Done by WP-09.1 (2026-09-24; the owner's rules, see its handoff).* A repeatable qualifier alone was not enough: "No cross-discipline items noted for this sheet." needs a modifier slot, and without one 14 of 16 equivalent wordings still passed. The filter became a closed vocabulary, still applied at the one filter site, and it shares that vocabulary with the synthesis rule (plan §4.2). The synthesis channel needed two more changes: negation awareness (`_is_assurance`: every conflict signal inside an assurance span, the conflict noun as the head, a closed phrase before the verb, and a contrast guard; measured, each of those three guards prevents losing real conflicts), and splitting per section, because a heading joined an item (N31, found while measuring). The Codex review of the PR found two gaps, fixed in it: a list of contrast words is never complete (`yet`, `nevertheless`, `while`), so the guard became a closed list of frame words that alone may sit outside the spans; and dropping every heading lost a conflict written as a whole-line bold sentence, so a heading that is not a listed label is an item of its own. The same heading defect in the digest channel predates WP-09.1 (N32). Step 4's "suppressed as trivial" is so far a run-level count (`filtered`, `assurances`); per-item outcomes are WP-09.2's.
 
 **Step 5 (N10): the threshold already suppresses distinct issues.**
 - `_match_entry` never checks critical signatures.
@@ -1699,7 +1700,7 @@ Do not repeatedly run an expensive full suite without new edits or unresolved fa
 
 ### 7.1 Every numbered finding in the original report
 
-The current disposition of every ID below, of N1–N31 and of U1–U32 is kept in the register in [`PROGRESS.md`](PROGRESS.md). This section records where each item is addressed.
+The current disposition of every ID below, of N1–N32 and of U1–U32 is kept in the register in [`PROGRESS.md`](PROGRESS.md). This section records where each item is addressed.
 
 | Finding | Required package(s) | Completion nuance |
 |---|---|---|
@@ -1792,6 +1793,7 @@ Stable IDs `U1`–`U32` were added on 2026-09-22 so that [`PROGRESS.md`](PROGRES
 | N29 | A merged entry's representative follows arrival order (three or more members) | WP-03 (WP-03.5); mandatory. |
 | N30 | The quote branch folds two different issues that share boilerplate wording | WP-03 (WP-03.5: the loser's text survives as an observation); a rule that keeps them apart needs labelled evidence (O-10). |
 | N31 | A synthesis section heading joins an item | WP-09 (WP-09.1); mandatory. |
+| N32 | A digest heading that states something is never read | WP-09 (WP-09.2, or a slice of its own); mandatory. |
 | U1 | Actual serving model, fallback iterations, partial-stream billing | WP-14; mandatory. |
 | U2 | Fallback text joins and selective history replay | WP-01/WP-12/WP-13/WP-19; preserve contiguous text and required block semantics. |
 | U3 | Generic output-config rejection disables task budget | WP-13; mandatory. |

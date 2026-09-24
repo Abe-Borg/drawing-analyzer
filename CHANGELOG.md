@@ -84,13 +84,17 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - a synthesis statement is an **assurance**, and is not harvested, only
     when every conflict word it carries sits inside a listed assurance form
     ("no conflicts were found", "there are no discrepancies", "found no
-    conflicts", "nothing inconsistent") and it carries no contrast word (but,
-    however, except, other than...). "No conflicts were resolved between M-101
-    and FP-101; both remain open", "X conflicts with Y; no other conflicts
-    were found" and "No conflicts were found, but M-101 shows 500 gpm and P-101
-    shows 550 gpm" are still conflicts;
+    conflicts", "nothing inconsistent") and every other word is a listed frame
+    word (sheet ids, discipline and document names, a few function words). "No
+    conflicts were resolved between M-101 and FP-101; both remain open", "X
+    conflicts with Y; no other conflicts were found", "No conflicts were found,
+    but M-101 shows 500 gpm and P-101 shows 550 gpm" and "..., yet M-101 lists
+    500 gpm..." are still conflicts;
   - synthesis items are read **section by section**, with the report's own
-    section grammar, so a heading never joins one;
+    section grammar, so a heading never joins one. A heading that states a
+    conflict ("**M-101 conflicts with P-101.**") is read as a sentence of its
+    own; one that only names a section ("Cross-sheet conflicts", "Conflicts
+    between M-101 and P-101") is not;
   - each dropped assurance is **counted** (`assurances` in the prose
     carry-through counts of `run.log` and `run_manifest.json`), and filler in
     `filtered`, as before. Neither is a lost item.
