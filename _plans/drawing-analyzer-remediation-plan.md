@@ -263,6 +263,7 @@ Regression cases:
 - **Do not bump `digest_cache._SCHEMA_VERSION`.** It feeds all seven key builders, so a bump would discard every paid digest.
 - The delivery contract is unchanged; state it in tests. `pipeline._combine` drops errored prose from `combined_text`, and `export._sheet_document` keeps it under a FAILED status.
 - N15: `_run_qc_stages` (~1734) ingests findings from errored digests. Label them, or hold them out of the ledger.
+  - *Decided by WP-01.3 (2026-09-24, the owner): hold them out.* `models.review_findings` / `held_out_findings` split a sheet's findings on `sd.error`; the ledger ingests only the first, so an unfinished read's findings are never numbered, anchored, verified, inked or exported as findings. That is how every other consumer already treated the sheet (`combined_text`, cross-QC, the prose harvest, synthesis, focus, the planner). The sheet's own export file and its report card list them under FAILED, and the run counts them observationally (D-2 note). Measured: no fixture ingested one (0 of 189 ingests), so no pinned test moved.
 
 **Step 4: critique**
 - The single fix site is `critique.outcome_from_message`. Real-time, batch, L1 and L2 all flow through it.
@@ -273,6 +274,9 @@ Regression cases:
 - Add the requirement "a retry never loses the first read".
 - Today, real-time falls back to the first read only when the retry *raises* (~1644–1658).
 - Batch `_replace_result_with_attempt_history` replaces the result wholesale.
+- *Corrected and decided by WP-01.3 (2026-09-24).*
+  - Two more batch losses, reproduced: a resubmission that comes back as an **errored envelope** (no reply) replaced the first read too (real time kept it on a raise), and the abandoned-batch **harvest** dropped an item that came back cut off with prose (it parked only the usage), so a rescue that came back worse, or never landed, lost it.
+  - The requirement as decided by the owner: a retry never loses a *better* read. One helper, `digest.keep_digest_read`, ranks each read (finished > a partial read with content > refused > nothing) and keeps the later read only when it ranks at least as high, on both transports and at every batch site (the primary collect, the follow-up batch, the fresh-batch rounds, the direct rescue, the harvest, which now holds a partial read). Of two partial reads the raised-cap one wins, so "never loses the first read" holds literally except against an equal-rank later read. The kept read's error names the discarded attempt (`; retry: …`, `; retry failed: …`, `; N retries, the last: …`). D-1 note in `DECISIONS.md`.
 
 **Steps 6–7: completeness rule**
 - This is implementable with the existing counters: verification is COMPLETE ⇔ eligible > 0 ∧ `skipped` = 0 ∧ `not_judged` = 0, over both the single and the cross result (`vres`, `cres`).

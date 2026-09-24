@@ -1,7 +1,7 @@
 # Remediation progress tracker
 
-**Next up:** Wave 1 in order: `WP-01.3` (N15, N16: a raised-cap retry never loses the first read; findings from an errored, refused or truncated digest are labelled or held out of the ledger). Its dependency, WP-01.2, is done. WP-09.2 is done: a prose item joins an existing finding only when their critical signatures agree (N10, text against text, the next-best compatible candidate wins), every enumerated item has one recorded outcome, and a labelled corpus is the evidence for the unchanged 0.7 threshold (U11); no cache contract moved. WP-09 is not done: WP-09.3 (N32, a digest heading that states something, Wave 3) remains. WP-06 is not done: WP-06.2 and WP-06.3 (Wave 2) are available, and WP-06.4 still waits on WP-03.4. WP-05 is not done: WP-05.3 remains (Wave 2, available). WP-07 is not done: WP-07.3 (Wave 2, available). WP-03 is not done: WP-03.4, WP-03.5 and WP-03.6 remain (Wave 2); WP-03.5 also carries the measured N30 exposure of cross-QC's same-pair conflicts. WP-04 is not done: its acceptance needs quantity roles, slice `WP-04.3` (Wave 2). First check the open PRs ([`README.md`](README.md), step 1). Before the next stable tag, the owner should look at O-5.
-**Last updated:** 2026-09-24 by the WP-09.2 session ([PR #169](https://github.com/Abe-Borg/drawing-analyzer/pull/169)).
+**Next up:** Wave 1 in order: `WP-01.4` (N4 critique: a critique read cut off at `max_tokens`, refused or with an unknown stop is not a completed read on either transport; the critique-only cache contract term is bumped). Its dependency, WP-01.2, is done. WP-01.3 is done: a retry never loses a better read (one rank, `digest.keep_digest_read`, on both transports and at every batch recovery site, the harvest included; the kept read's error names the discarded attempt), and an unfinished read's findings are held out of the review, listed in the sheet's own file and report card and counted (N16, N15); no cache contract moved. WP-01 is not done: WP-01.4 (Wave 1), WP-01.5 (Wave 2), WP-01.6 and WP-01.7 (Wave 2, waiting on WP-02.3) remain. WP-09 is not done: WP-09.3 (N32, Wave 3) remains. WP-06 is not done: WP-06.2 and WP-06.3 (Wave 2) are available, and WP-06.4 still waits on WP-03.4. WP-05 is not done: WP-05.3 remains (Wave 2, available). WP-07 is not done: WP-07.3 (Wave 2, available). WP-03 is not done: WP-03.4, WP-03.5 and WP-03.6 remain (Wave 2); WP-03.5 also carries the measured N30 exposure of cross-QC's same-pair conflicts. WP-04 is not done: its acceptance needs quantity roles, slice `WP-04.3` (Wave 2). First check the open PRs ([`README.md`](README.md), step 1). Before the next stable tag, the owner should look at O-5.
+**Last updated:** 2026-09-24 by the WP-01.3 session ([PR #170](https://github.com/Abe-Borg/drawing-analyzer/pull/170)).
 
 This file is authoritative for **status and order**. Requirements live in
 [`drawing-analyzer-remediation-plan.md`](drawing-analyzer-remediation-plan.md).
@@ -113,7 +113,7 @@ starting.
 | WP-06.1 | Cross-QC prompt says category `question` with severity `low`; invalid-field counters on both paths; candidate duplicates go to the ledger instead of being destroyed (B6, N2) | S/M | — | done | [PR #167](https://github.com/Abe-Borg/drawing-analyzer/pull/167), 2026-09-24. **Rules decided by the owner (four choices, measured first):** (1) a refused item is **observational**: a stage warning after the status-deciding ones, the stage keeps its status, the result is cached with its counts (D-2 note); (2) the counts are a **separate record**, `CrossQCInvalidCounts` (`CrossQCResult.invalid`), filled on both paths, so `discards is None` keeps meaning "grounding not measured" on the whole-set path; `run_manifest.json` carries `cross_qc_invalid`; (3) each refused item counts **once, under the first check it fails** (`cross_qc._invalid_field`, shared by both validators: not an object, category, severity, text), and a whitespace-only fact quote is dropped and counted `facts_no_quote` (the WP-05.1 note, resolved); (4) **only findings identical in every field collapse** (`_drop_exact_repeats` replaced `_dedup_findings`), and the ledger decides the rest. The persona asks for category `question` with severity `low`; validation is unchanged. `_CROSS_QC_CACHE_CONTRACT` 5 → 6 beside the prompt edit (two changes, two mechanisms; D-4 note, one register row). Tests: `tests/test_cross_qc_validation_and_dedup.py`. Re-baselined: the three contract tripwires only. Recorded limits: a re-report phrased apart stays two ledger entries (WP-06.4); a terse same-pair conflict folds in the ledger (N30, WP-03.5) |
 | WP-09.1 | Boilerplate filter with repeatable qualifiers; negation-aware synthesis conflict extraction (B11, N11) | S | — | done | [PR #168](https://github.com/Abe-Borg/drawing-analyzer/pull/168), 2026-09-24. **Rules decided by the owner (six choices, measured first):** (1) filler is a **closed vocabulary**: `_TRIVIAL_RE` drops an item only when the whole item is `none` / `n/a` / `nothing [further]` or `no` + up to two listed modifiers + a listed noun, with an optional listed label and up to four listed qualifiers in any order; any other word keeps it; (2) **one vocabulary, two anchored forms**: the same word lists build the whole-item filter (`_split_items`, the one filter site) and the synthesis assurance spans (`_ASSURANCE_RE`); (3) a synthesis statement is an **assurance** (`_is_assurance`) only when every conflict signal sits inside an assurance span ("no [modifiers] <conflict noun> [between <sheet ids, discipline names, listed words>] [were] <detection word>", "nothing inconsistent", "there are no <noun>", "found no <noun>", a conflict label right before one), the noun is the head, and every other word is a listed frame word (sheet ids, discipline and document names, a few function words; since the Codex review, which found a contrast list missing `yet`, `nevertheless` and `while`); (4) synthesis items are split **per section** with the report's `split_into_sections` (N31, found and fixed here), and a heading that is not a listed label is an item of its own (Codex review: a whole-line bold conflict was lost); (5) dropped assurances are counted in `HarvestResult.assurances`, observational like `filtered` (D-2 note); (6) ordinals count the kept items, so dropping filler before a real item moves that item's `prose_item_id` once. No cache contract, key, prompt or schema moves (`_HARVEST_CACHE_CONTRACT` stays 1). Tests: `tests/test_prose_filler_and_assurances.py` (207). No pinned test re-baselined; no fixture item changed decision. Recorded limits (kept, a paid call as before): wording outside the lists ("No duct conflicts noted.", "No items requiring coordination.", "M-101 does not conflict with P-101.", "Checked M-101 against P-101 for conflicts; none were found.") |
 | WP-09.2 | Prose matching rejects signature-incompatible candidates; per-item outcome counters; labelled paraphrase corpus (no threshold change) (N10, U11) | M | WP-04.2, WP-09.1 | done | [PR #169](https://github.com/Abe-Borg/drawing-analyzer/pull/169), 2026-09-24. **Rules decided by the owner (eight choices, measured first):** (1) `_match_entry` refuses a candidate at or above 0.7 whose critical signature conflicts with the item's (`prose_harvest._veto_axes`: `critique.signature_conflicts` over `critique.critical_signature`, the one rule), signing "text against text": the item from its text and its synthesis legs, the candidate from its text, quote and legs with its `anchor_hint` set aside (measured: a bare-text item refused 5 of the suite's 17 matches, its own quote-less twins, and broke two pinned tests; the item taking the candidate's placement switched the polarity axis off against every SHEET entry); (2) the next-best compatible candidate wins; (3) a refused item is a straggler (a structuring call or a degraded entry; the calls accepted); (4) N32 goes to its own slice, WP-09.3; (5) every enumerated item has one `ProseItemOutcome` (`HarvestResult.outcomes`: channel, outcome, call, folded, refused), the counters are the number of items with each outcome (`_record_outcome`; an ingest that raised used to count one item structured and degraded, fixed), and `vetoed`, `folded`, `filtered_focus` and a per-channel `by_channel` table reach `prose_accounting` (`run.log` one line per channel, `run_manifest.json`), all observational (D-2 note); (6) suppressed items are counted per channel, focus filler included whether or not focus is harvested (new `filtered_focus`), with no ids; (7) a straggler the ledger folds keeps its outcome and is counted `folded`; (8) the labelled corpus pins its numbers at 0.5 to 0.9 with and without the veto, `_MATCH_OVERLAP == 0.7` asserted. No cache contract or key moves (`_HARVEST_CACHE_CONTRACT` stays 1). Tests: `tests/test_prose_match_signatures.py`, `tests/test_prose_paraphrase_corpus.py`, `tests/test_drawing_acceptance.py::test_gauntlet_prose_outcomes_are_exact`. No pinned test re-baselined; no fixture changes outcome (instrumented). Recorded limits: a SHEET absence with no absence word takes a presence item; a refused presence item that degrades to a SHEET entry can fold into an absence entry in the ledger (`_is_absence`); near misses the signature cannot read (corpus) |
-| WP-01.3 | Digest partial reads: a raised-cap retry never loses the first read; findings from an errored, refused or truncated digest are labelled or held out of the ledger (N15, N16) | M | WP-01.2 | todo | Since WP-01.2 a refused or unfinished digest carries an error too, so N15 now also covers, for example, an N27 partial read whose unclosed findings block was salvaged: its findings still reach the ledger unlabelled. `digest.digest_terminal_error` is the ladder to extend, not restate |
+| WP-01.3 | Digest partial reads: a raised-cap retry never loses the first read; findings from an errored, refused or truncated digest are labelled or held out of the ledger (N15, N16) | M | WP-01.2 | done | [PR #170](https://github.com/Abe-Borg/drawing-analyzer/pull/170), 2026-09-24. **Rules decided by the owner (seven choices, two rounds, measured first):** (1) one rank decides which read a sheet keeps, on both transports (`digest.keep_digest_read`, over `digest._read_rank`): finished > a partial read with content (prose or findings) > refused > nothing (empty, errored envelope, a raise); the later read wins a tie, so of two partial reads the raised-cap one is kept and of two content-free reads the fresher error; reads are never mixed (I-2); every attempt's usage is kept; applied by the real-time retry in `digest_sheet` and by `batch_digest._replace_result_with_attempt_history` at all five sites; (2) the kept read's error names the discarded attempt (`; retry: <its error>`, `; retry failed: <error>` for a raise, the batch direct rescue included, `; N retries, the last: …` for several); (3) the stalled-batch harvest holds a partial read (`digest.is_partial_read`) as the sheet's result while the sheet is still rescued (rescue list from `harvest.resolved`); (4) N15: an unfinished read's findings are held out of the review (`models.review_findings` / `held_out_findings`), listed in the sheet's own export file and report card, and counted observationally (`ctx.digest_findings_held_out`, a digest-stage warning, `findings_held_out` on `SHEET_DIGESTED` and the run.log *Sheets* line, the manifest's `digest_findings_held_out`; D-2 note). No cache contract, key, prompt or schema moved (only finished reads are cached, pinned for both transports). Tests: `tests/test_digest_partial_reads.py` (75). Re-baselined: `tests/test_drawing_digest.py::test_a_failed_retry_keeps_the_truncated_first_read` (its error gains the raise's text, approved). Found and fixed here beyond the request's description: a batch resubmission that comes back as an errored envelope also wiped the first read, and the harvest dropped a cut-off read with prose. Found, not fixed: the advisory set-identity corpus reads an errored sheet's text (WP-01.6 note) |
 | WP-01.4 | Critique: `max_tokens`/refusal/unknown terminal states are not completed reads on either transport; critique-only cache contract term (N4 critique) | M | WP-01.2 | todo | The critique-only term exists since WP-04.1 (`digest_cache._CRITIQUE_CACHE_CONTRACT`, folded inside both critique builders). Bump it for this admission change rather than adding a second term (D-4), and pin the merge-rule fingerprint under the new value in `tests/test_drawing_cache_identity.py` |
 | WP-11.1 | Per-source and per-page fault isolation in the render and prescan iterators; the inventory is the page denominator; every expected page gets an outcome (R1 core) | M | — | todo | |
 | WP-11.2 | Digest-phase containment: completed paid digests, journal and manifest always ship; uploads and spool released on every exit (R1) | M | WP-11.1 | todo | |
@@ -126,8 +126,8 @@ starting.
 |---|---|---|---|---|---|
 | WP-02.2 | Real-SDK contract tests over `httpx2.MockTransport`; strict fakes that reject what the SDK rejects (betas or fallbacks on the plain namespace, non-streaming above the SDK-derived cap) (U26) | M | WP-02.1 | todo | |
 | WP-02.3 | Fidelity fixtures: nested batch errors; canceled/expired envelopes; `None` usage fields; `web_fetch_requests`; `iterations`; `cache_creation` split; `output_tokens_details`; `stop_details`; fallback blocks; serving model; SSE sequences incl. mid-stream failure and clean EOF (U26) | M | WP-02.2 | todo | |
-| WP-01.5 | Batch refusal recovery under the selected transport policy, retry bound shared with truncation retries, `stop_details` logged (R2) | M | WP-01.2 | todo | Since WP-01.2 the abandoned-batch harvest resolves only finished reads, so a refused item it reads back is resubmitted with the unresolved sheets, within the existing bounded rounds (as an empty or truncated one already was). Decide whether that resubmission is allowed and count it against the shared retry bound. Classify with `core.terminal_outcome` (D-1) |
-| WP-01.6 | Remaining response consumers (planner, identity, synthesis, focus, prose harvest cache writes); fallback-aware shared text join (U2; WP-09 step 6) | M | WP-01.2, WP-02.3 | todo | Also move `verify._verdict_from_response` / `_degrade_kind` onto `core.terminal_outcome` (D-1). They test `max_tokens` and `refusal` only, so an unknown stop reason or `model_context_window_exceeded` is still parsed as a verdict (WP-01.2 left verification alone: not an N4 site) |
+| WP-01.5 | Batch refusal recovery under the selected transport policy, retry bound shared with truncation retries, `stop_details` logged (R2) | M | WP-01.2 | todo | Since WP-01.2 the abandoned-batch harvest resolves only finished reads, so a refused item it reads back is resubmitted with the unresolved sheets, within the existing bounded rounds (as an empty or truncated one already was). Decide whether that resubmission is allowed and count it against the shared retry bound. Classify with `core.terminal_outcome` (D-1) From WP-01.3: the harvest now holds an unfinished read that carries prose or findings as the sheet's result (still unresolved, still resubmitted), and parks every other harvested item for its usage as before, a refusal included (a refused read ranks below a partial read and above nothing in `digest._read_rank`). A refusal retry under R2 lands through `_replace_result_with_attempt_history`, so it can only replace a held read it outranks, and the kept read's error names it when it comes back worse. The stalled path's rescue list is built from `harvest.resolved` |
+| WP-01.6 | Remaining response consumers (planner, identity, synthesis, focus, prose harvest cache writes); fallback-aware shared text join (U2; WP-09 step 6) | M | WP-01.2, WP-02.3 | todo | Also move `verify._verdict_from_response` / `_degrade_kind` onto `core.terminal_outcome` (D-1). They test `max_tokens` and `refusal` only, so an unknown stop reason or `model_context_window_exceeded` is still parsed as a verdict (WP-01.2 left verification alone: not an N4 site) From WP-01.3 (found, not fixed): `set_identity._sheet_block` puts an errored sheet's digest text into the identity corpus whenever it has any (the error line only when it has none), so a refusal's explanation or a truncated read's prose reaches the advisory identity call, while every other consumer skips that sheet (`combined_text`, cross-QC, the prose harvest, synthesis, focus, the planner; and since WP-01.3 the ledger, N15). Decide whether the corpus should skip it too (it re-keys the identity cache for such a set: the corpus is a key input) |
 | WP-01.7 | Interrupted-stream outcome and usage capture (`current_message_snapshot`), threaded through the digest retry loop (U1 partial-stream part; WP-14 step 7) | M | WP-01.2, WP-02.3 | todo | |
 | WP-05.3 | Character-stream fallback tier with a quantity-aware numeric veto (B4: `6 "`, `INCHDRAIN`, `12' - 6"`, `2 %`). Matches only contiguous source words, never a "manufactured joined string" (plan §2 rule 15) | M | WP-05.2, WP-04.1 | todo | From WP-05.2: the four cases are pinned UNANCHORED in `tests/test_anchor_whole_words.py::test_recorded_limit_the_character_stream_cases_are_wp_05_3s`; flip them. Build on what WP-05.2 left: every tier matches whole source words through `anchor.SourceWords` (words folded by `anchor.fold_word`, each keeping its sheet word's `index`), and the window refuses a quote measurement inside part of a word (`_measurements_whole`). A new tier is its own method, so `numbers_grounded` fails closed for it until it carries the veto. Also pinned there as a recorded limit, present before for unbracketed text: the sub-phrase veto reads digit-bearing tokens only, so a sub-phrase can drop a unit printed as its own word (`150 GPM 568 L/S` anchors FUZZY on `150 GPM (568`); the quantity-aware veto should refuse it. Keep cross-QC and the anchor agreeing (the agreement table in that file) or record each difference with the owner |
 | WP-04.3 | Quantity roles for repeated same-kind values: the WP-04 matrix row "repeated values in different roles" (swapped: `6 in main, 4 in branch` / `4 in main, 6 in branch`; one value in two roles: `6 in supply, 6 in return` / `6 in supply, 8 in return`) | M | WP-04.2 | todo | Added by WP-04.2 (README 7.3): WP-04's acceptance does not hold without it. Nothing extracts a quantity's role, and the signature is a set, so both pairs carry compatible tokens and the same words. Do not settle it by keeping apart every pair that carries two or more values of one kind on both sides: that splits the commonest duplicate there is, the same "500 gpm shown, 550 gpm required" from both critique reads. It needs a role signal (for example the noun a quantity qualifies) with a negative corpus. Both pairs are pinned as recorded limits in `tests/test_quantity_signature.py::_RECORDED_LIMITS`; move them to `_CONFLICTS`. A role in the stored signature changes what an A/B record stores (`RECORD_CONTRACT_VERSION` 3 → 4) and what a critique entry holds (critique contract 2 → 3). Related, and under the same bump: `critique._TAG_RE` reads the `x12` of a tight `24"x12"` as a tag, and under WP-04.2's tag inclusion that stray tag beside a different extra reference on the other finding keeps apart two findings the old rule merged |
@@ -173,7 +173,7 @@ starting.
 | WP-14.2 | TTL-split cache-write accounting from `usage.cache_creation`; per-TTL pricing; stale pricing comment fixed (C3) | S/M | WP-02.3 | todo | |
 | WP-14.3 | One shared response-metadata reader: serving model, `iterations`, `stop_details`, `fallback_credit`, `output_tokens_details`, `web_fetch_requests` (U1) | M | WP-02.3 | todo | |
 | WP-14.4 | `UsageRecord` known/unknown usage through the single `is_billable_but_unpriced` rule; `by_model` decision; pricing date on every surface; decides D-7 (WP-14 steps 4, 8) | M | WP-14.3 | todo | |
-| WP-14.5 | Per-attempt usage records from every stage result type (WP-14 step 3) | L | WP-14.4, WP-01.2 | todo | |
+| WP-14.5 | Per-attempt usage records from every stage result type (WP-14 step 3) | L | WP-14.4, WP-01.2 | todo | From WP-01.3: the real-time digest's raised-cap retry is still one usage record carrying both attempts' summed tokens (batch keeps one record per attempt). Since WP-01.3 the discarded attempt is named in the sheet's error, but it has no attempt record of its own on real time |
 | WP-14.6 | Serving model carried through cache payloads (additive field) and the manifest (U1 provenance) | M | WP-14.3, WP-14.4 | todo | |
 | WP-16.3 | `_persist_key` reentrancy guard; Forget saved key; export never reloads a cleared key (U20) | S/M | WP-16.1 | todo | |
 | WP-17.1 | Cancel: cancel event, Cancel button, batch cancel and harvest with no resubmit, honest quit wording, partial export; decides D-5 (G1 core) | M/L | WP-16.2 | todo | |
@@ -191,7 +191,7 @@ starting.
 | WP-22.2 | Critique read count resolved once; `critique_N` tags counted as one family (N25, U15) | S/M | — | todo | |
 | WP-22.3 | One shared `refs` coercion replacing the three that disagree (U16) | S | — | todo | |
 | WP-22.4 | Supported configuration matrix; required-stage roll-up cannot report COMPLETE with missing stages (U14, U15) | M | WP-01.1 | todo | |
-| WP-22.5 | Hygiene: stale descriptions, "Spec Critic" docstrings, F401/F811/F841/B017 lint step in both workflows; removal only of helpers that mislead, never incidental API removal; `count_tokens_via_api` kept (U27) | S | — | todo |From WP-09.2 (found, not fixed): F401 also finds `count_annotations` imported unused in `tests/test_drawing_acceptance.py` (the gauntlet section's imports), on `main` already, beside the ones earlier handoffs listed (`arithmetic._wtext`, `critique.DEFAULT_DIGEST_MAX_TOKENS`, `pipeline.normalize_specs_text`, `annotate.ANNOTATION_COMPONENTS`, `pathlib.Path` in `tests/test_drawing_dedup_lifecycle.py`, nine in `tests/test_evidence_visual.py`) |
+| WP-22.5 | Hygiene: stale descriptions, "Spec Critic" docstrings, F401/F811/F841/B017 lint step in both workflows; removal only of helpers that mislead, never incidental API removal; `count_tokens_via_api` kept (U27) | S | — | todo |From WP-09.2 (found, not fixed): F401 also finds `count_annotations` imported unused in `tests/test_drawing_acceptance.py` (the gauntlet section's imports), on `main` already, beside the ones earlier handoffs listed (`arithmetic._wtext`, `critique.DEFAULT_DIGEST_MAX_TOKENS`, `pipeline.normalize_specs_text`, `annotate.ANNOTATION_COMPONENTS`, `pathlib.Path` in `tests/test_drawing_dedup_lifecycle.py`, nine in `tests/test_evidence_visual.py`) From WP-01.3 (found, not fixed): F401 also finds `SheetDigest` imported unused in `tests/test_drawing_digest.py`, on `main` already |
 
 ### Wave 5 — P1/P2 report, chat, estimates, packaging, updates
 
@@ -340,8 +340,8 @@ report is built from it).
 | N12 | Matches ignore word boundaries (`VAV-2` inside `VAV-2-1`; `AHU-10` inside `AHU-101`) | P0 | 05.1, 05.2 | implemented+validated | Cross-QC part: `tests/test_cross_qc_grounding.py` (WP-05.1, [PR #165](https://github.com/Abe-Borg/drawing-analyzer/pull/165)): `AHU-10`/`AHU-101`, `VAV-2-1`/`VAV-2-10`, `VAV-2`/`VAV-2-1`, `AHU-1`/`AHU-1-2`, `P-1`/`P-10`, `P-1`/`XP-1`, `M-101`/`M-101A`, two long quotes ending inside a tag, a quote starting inside a word, and a tag inside a list written without spaces never ground; `P-1,`, `(P-1)`, `P-1.`, `P-1:`, `NOTE 3:`, `568 L/MIN` in `(568 L/MIN)` and a tag printed both alone and inside a longer one still do; the leg is dropped. Anchor part: `tests/test_anchor_whole_words.py` (WP-05.2, [PR #166](https://github.com/Abe-Borg/drawing-analyzer/pull/166)): `VAV-2` on `VAV-2-1 SERVES ROOM 12`, `AHU-1` on `SEE AHU-1-2 SCHEDULE`, `ACCESS PANEL AT VAV-2` on `…VAV-2-1 TYP` and `2-1 SERVES` on `VAV-2-1 SERVES ROOM` (EXACT before) and the 17-token note quoting `VAV-2` or `AHU-1` against one printing `VAV-2-1` or `AHU-1-2` (FUZZY before) never anchor, nor `1/2" PIPE` on `2-1/2" PIPE` or a sub-phrase starting inside a word; a tag printed both alone and inside a longer one anchors `exact` on the one alone, in both orders; WP-05.1's cut-word and whole-word tables run through the anchor; verification and investigation no longer see the N12 finding; the pipeline makes it a `[QUOTE NOT FOUND]` callout with no verification call. Recorded limit: a letter-only tag (`VAV-A` in `VAV-A-1`) inside a long window |
 | N13 | Cross-QC and anchor normalizers disagree (curly quotes, `½`, `×`, `Ø`) | P1 | 05.1 | implemented+validated | `tests/test_cross_qc_grounding.py` (WP-05.1, [PR #165](https://github.com/Abe-Borg/drawing-analyzer/pull/165)): `PROVIDE 6” DRAIN`, `2½"`↔`2-1/2"` (both ways, and `2 1/2"`), `O6`↔`Ø6`, `300×200`↔`300x200`, primes, curly quotes, a fraction slash, a non-breaking hyphen, a hyphen written as a space and a zero-width space all ground; `.5`/`5`, `5`/`0.5`, `5`/`-5`, `1`/`1.5`, `12`/`12,500`, `2"`/`1/2"`, `2`/`2½"`, `12`/`12'-6"`, `30`/`30%`, a changed number and a changed unit never do; `cross_qc._norm_for_match` is `anchor._normalize`; the per-word normalization equals the whole-string one over a Unicode corpus; a reconciled leg joins its fact across a curly inch mark, and two facts spelled that way with different tiles collide and give no tile |
 | N14 | Degraded cross-QC never cached: re-billed every warm run, run stays PARTIAL | P1 | 06.3, 25.4 | open | |
-| N15 | Findings from errored/refused/truncated digests ingested unlabelled | P1 | 01.3 | open | |
-| N16 | A raised-cap retry can lose the first (truncated) read | P1 | 01.3 | open | |
+| N15 | Findings from errored/refused/truncated digests ingested unlabelled | P1 | 01.3 | implemented+validated | `tests/test_digest_partial_reads.py` (WP-01.3, [PR #170](https://github.com/Abe-Borg/drawing-analyzer/pull/170)), by the owner's rule (held out, listed, counted): through the pipeline, an exhaustive run with one sheet's read truncated, refused, ended early or out of context window holds its findings out of the ledger (no QC number, anchor, verification, placement; not in `findings.json`, `findings.csv` or `markup_manifest.json`; not a report finding row) while the finished sheet's finding is numbered as before (`test_n15_exhaustive_run_holds_the_findings_out`), the same on a standard run (`test_n15_standard_run_holds_the_findings_out`); the sheet's own export file lists them under FAILED and its report card lists them escaped (`test_sheet_file_lists_held_out_findings_under_failed`, `test_report_card_lists_held_out_findings_escaped`); counted in `ctx.digest_findings_held_out`, a digest-stage warning, `findings_held_out` in run.log and `digest_findings_held_out` in `run_manifest.json` (`test_run_log_sheet_line_counts_held_out_findings`, `test_manifest_held_out_summary`); a finished run holds nothing out (`test_n15_a_finished_run_holds_nothing_out`); with N16, the kept first read's findings are held out (`test_n15_and_n16_the_kept_first_read_is_held_out`) |
+| N16 | A raised-cap retry can lose the first (truncated) read | P1 | 01.3 | implemented+validated | `tests/test_digest_partial_reads.py` (WP-01.3, [PR #170](https://github.com/Abe-Borg/drawing-analyzer/pull/170)), by the owner's rule (one rank, later wins ties, the discarded attempt named): real time, a retry that comes back empty, refused (with and without text) or raises keeps the first read's prose, findings and stop reason, with both attempts' usage, and names the retry (`test_rt_worse_retry_keeps_first_read`, `test_rt_raising_retry_names_the_failure`), for a closed and a salvaged unclosed block; a partial or finished retry still wins (`test_rt_partial_retry_replaces_partial_first`, `test_rt_finished_retry_wins_and_is_cached`); an empty first read takes the retry (`test_rt_empty_first_read_takes_the_retry`); never spliced (`test_rt_never_splices_two_reads`); batch, on both recovery transports, the follow-up batch and the fresh-batch rounds (`test_batch_worse_retry_keeps_first_read`, incl. an errored envelope), the direct rescue landing worse or raising (`test_direct_rescue_*`), several discarded rounds counted (`test_several_discarded_retries_are_counted`), the best read kept across rounds (`test_multiround_keeps_the_best_read_so_far`), the harvest holding a partial read against a worse or unreached rescue (`test_harvested_partial_read_survives_*`), a content-free harvested read still parked; the one helper over a 20-case table (`test_keep_digest_read_table`); nothing new cached on either transport (`test_a_kept_partial_read_is_never_cached`) |
 | N17 | References to FM-numbered sheets are never reported as missing | P1 | 08.4 | open | |
 | N18 | Contradictory transcriptions of one quote counted as independent checks | P1 | 07.3 | open | |
 | N19 | W×H duct sizes, `20A`/`480V`, ranges and lists get no or partial signature | P0 | 04.1 | implemented+validated | `tests/test_quantity_signature.py` (the size, volt, amp, range and list tables; the negative corpus; the `N19 …` pairs; `test_a_shared_name_is_not_a_shared_quantity`) (WP-04.1, [PR #157](https://github.com/Abe-Borg/drawing-analyzer/pull/157)). Covers the named forms. By decision these still sign partially: loose-comma lists (`2, 4, 6 in`), `to` ranges and `and`/`or` lists, and a bare `20A` with no electrical context. **A conflict hidden by a shared value is N1, not N19:** a pair whose differing quantities sit beside a shared one (`6 in` / `4 in` beside `100 psi`; `12'-6"` / `12'-8"`, both `12ft`) merged until WP-04.2 fixed N1 |
@@ -396,6 +396,292 @@ report is built from it).
 Each session adds one entry at the top: date, slices and IDs, PR, what changed,
 contracts decided, cache/schema effects, validation actually run (with counts),
 what could not be verified, risks, and next steps.
+
+### 2026-09-24 — WP-01.3: a retry never loses a better read; an unfinished read's findings stay out of the review ([PR #170](https://github.com/Abe-Borg/drawing-analyzer/pull/170))
+
+- **Slice and IDs:** WP-01.3. N16 and N15 (implemented+validated). No
+  `DECISIONS.md` contract is decided (none of D-1 … D-8); D-1 gains a note (the
+  rule on which read a sheet keeps extends the digest's handling) and D-2 a
+  note (the held-out count is observational). No migration-register row: no
+  cache contract, key, prompt or schema moved. **WP-01 is not done:** WP-01.4
+  … WP-01.7 remain, so there is no package acceptance check.
+- **Base.** `main` = `origin/main` = `b4d275f`; no drift. Baseline **4,120
+  passed, 2 skipped, 10 deselected** (253 s), identical to the WP-09.2 handoff.
+  The two skips are IPv6 loopback and chmod as root.
+- **Reproduced first** (a probe on `b4d275f` with the suite's fakes), each as the
+  request stated, and two more batch losses:
+  - **N16, real time.** A first read cut off at `max_tokens` with prose and a
+    findings block (closed, or unclosed and salvaged as `PARSED_UNCLOSED`),
+    then a retry that returns empty, refused (with or without text),
+    unfinished (`None`), truncated again or an unknown stop: the sheet carries
+    the retry's text, findings, stop reason and error, and the first read is
+    gone although both were billed (tokens 400/80 summed). A retry that raises
+    keeps the first read (the pinned test).
+  - **N16, batch.** Through `collect_drawing_batch` on both recovery transports,
+    the direct rescue and `_recover_via_batch_resubmit`: every returned read
+    replaced the first read wholesale (the usage attempts were kept). **Not in
+    the request:** a resubmission that comes back as an *errored envelope*
+    (`invalid_request_error`) replaced it too, where real time keeps the first
+    read on a raise; and the abandoned-batch harvest read a stalled item back
+    cut off with prose, parked only its usage and dropped the read, so a rescue
+    that came back worse lost it, and one that raised left "drawing batch not
+    collected (stalled)". Multi-round (primary `api_error`, round 1 cut off with
+    prose, round 2 refused, empty or errored) lost round 1's prose.
+  - **N15.** The gauntlet mini set with M-102's digest ending `max_tokens`,
+    `refusal`, `None` or `model_context_window_exceeded` after a complete
+    findings block: on an exhaustive run its finding became `QC-004`, anchored
+    EXACT, VERIFIED and clouded; on a standard run `QC-002`, in `findings.json`.
+  - **Correction to the session request.** Line 1566 of `batch_digest.py` is not
+    the inline fallback: it is `_resubmit_failed_items`' follow-up-batch loop.
+    The inline fallback (`submit_drawing_batch._serve_inline`) calls
+    `digest_sheet`, so the real-time fix covers it.
+- **Facts confirmed, not assumed** (an instrumented scratch copy of
+  `origin/main`, the whole suite, with the test name; 4,120 passed, the
+  instrumentation changed no outcome):
+  - **The hooks ran** 333 `digest_sheet` results, 8 real-time raised-cap
+    retries (7 tests), 141 batch replacements (primary collect 93, direct
+    rescue 21, fresh-batch rounds 16, harvest 6, follow-up batch 5), 133 batch
+    parses, 1 parked harvest (content-free), 101 collects, 189 ingests, 262
+    numberings, 189 digest-stage records and 189 contexts.
+  - **No fixture has two reads that differ.** All 8 real-time retries return
+    the same content twice; of the 141 replacements, a rule could change the
+    choice only in 5 follow-up-batch events (empty after empty, errored after
+    errored), and only a rule that keeps the earlier read on a tie does.
+  - **No fixture ingests an errored digest's findings:** 0 of 189 ingests
+    (12 had an errored sheet, all with 0 findings).
+  - **Caches.** An errored digest is never cached at either level
+    (`digest_cache_admits` requires no error and a finished stop reason), and
+    `cache_entry_from_digest` serves only finished reads; so neither fix needs
+    a key, contract or `_SCHEMA_VERSION` change. Pinned for both transports
+    (`test_a_kept_partial_read_is_never_cached`).
+  - **Readers of `SheetDigest.findings`:** the ingest, `cache_entry_from_digest`
+    (finished reads only) and the `SHEET_DIGESTED` journal count. Every other
+    consumer that turns a digest into review content skips an errored sheet:
+    `_combine`, cross-QC, the prose harvest, synthesis, focus, the review
+    planner. The exception is the advisory set-identity corpus (below).
+  - **Nothing parses the digest error strings** (grep over `src`), so naming a
+    discarded attempt in them is safe for code; only tests pin them.
+- **The decision, made by the owner before any code** (AskUserQuestion, two
+  rounds, with measured options). Chosen, each as recommended:
+  - **Which read a sheet keeps: one rank, the later read wins a tie.**
+    Measured with each rule applied over the 25 digest-exercising test files
+    (1,405 tests):
+
+    | rule | pinned tests failing | downstream events moved |
+    |---|---|---|
+    | finished only (A) | 1 (`test_rescue_skipped_when_followup_rejects_permanently`) | 0 |
+    | first wins ties (A2, the literal reading) | 0 | 0 |
+    | **rank, later wins ties (B, chosen)** | **0** | **0** |
+    | rank, first wins ties (C) | 1 (the same) | 0 |
+    | the request's literal order (P) | 0 | 0 |
+    | hold N15 out | 0 | 0 |
+
+    Through the 18-case table: A loses the retry's content whenever the first
+    read was empty (4 cases); A2 and C keep the smaller-cap read of two
+    partials; P lets an empty read replace an unfinished read with prose. Not
+    taken: A, A2. Not offered: a union of both reads' findings (two
+    transcriptions of one sheet beside prose that describes only one).
+  - **The error names both** (`; retry: <its error>`; `; retry failed:
+    <error>` for a raise). Not taken: the kept read's own error with the retry
+    only in the diagnostics log (on real time the retry would then appear
+    nowhere in the export). One pinned test re-baselined, approved.
+  - **The harvest holds a partial read.** Not taken: deferring it to WP-01.5.
+  - **N15: hold out, listed in the sheet's file.** Not taken: hold out and
+    count only; label them (a new `Finding` field, a markup prefix, a report
+    note, a CSV column that re-baselines
+    `test_findings_csv_provenance_columns_appended_at_tail`, a ledger merge
+    rule for the label, and the prose harvest's skip left disagreeing); split
+    by kind.
+  - **Round 2:** the count is an observational warning (not taken: the
+    manifest and sheet line only); the findings are listed in the sheet file
+    **and** its report card (not taken: the sheet file only); several
+    discarded attempts read `; N retries, the last: …` (not taken: every one,
+    which grows with `DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS`; only the
+    latest).
+- **What changed:**
+  - **`digest.py`** (still imports no PDF engine; the prose is never spliced,
+    I-2): `_read_rank` and its four ranks, `_name_discarded_retry`,
+    `keep_digest_read` (the one helper), `is_partial_read`,
+    `note_failed_retry`; `SheetDigest.read_error` and `retries_discarded`
+    (runtime only); `digest_sheet` builds each reply as a read (`_read_of`)
+    and keeps the better one, names a raised retry, sums both attempts' usage
+    onto the kept read, and admits to the cache only a finished kept read.
+  - **`batch_digest.py`:** `_replace_result_with_attempt_history(...,
+    served_by=)` keeps the better read (merging every attempt record onto it)
+    and sets `served_by` only for the kept read; its five callers pass
+    `served_by` instead of setting it first; the direct rescue names a rescue
+    call that raised on the read it keeps; the harvest holds a partial read
+    through the helper and parks the rest; the stalled path's rescue list comes
+    from `harvest.resolved`. Docstrings of the helper, the rescue, the harvest,
+    `_park_usage_attempts` and `_resubmit_failed_items`.
+  - **`models.py`:** `review_findings` / `held_out_findings` (duck-typed, one
+    split on `sd.error`).
+  - **`pipeline.py`:** the ingest takes `review_findings`;
+    `DrawingContext.digest_findings_held_out`; the per-sheet loop adds
+    `findings_held_out` to `SHEET_DIGESTED` and fills the count; the digest
+    stage's warning; the `_run_qc_stages` docstring.
+  - **`export.py`:** `_sheet_document` lists held-out findings after the prose
+    (`_held_out_line`); `run_manifest.json` gains `digest_findings_held_out`
+    (`_held_out_summary`: `{"total", "by_sheet"}`, portable keys, counts only).
+  - **`html_report.py`:** `_held_out_block` on the sheet card (escaped,
+    `data-category="other"`). **`run_journal.py`:** the *Sheets* line says
+    "N finding(s) held out of the review".
+- **Contracts decided:** none of D-1 … D-8; a D-1 note and a D-2 note.
+- **Cache/schema effects: none.** Admission is unchanged: only a finished read
+  is stored, at either level, whichever read a sheet keeps (pinned on both
+  transports). The new `SheetDigest` fields are never serialized.
+  `run_manifest.json` gains one additive key; `findings.json` and
+  `findings.csv` are unchanged in shape.
+- **Re-baselined tests: one**, approved:
+  `tests/test_drawing_digest.py::test_a_failed_retry_keeps_the_truncated_first_read`
+  (its expected error gains `; retry failed: permanent 400 on the raised cap`;
+  every other assertion is unchanged). Checked both ways:
+  - the original pinned files, unedited, against the fixed tree (the 25 files
+    that exercise the digest, plus `test_drawing_usage`, `test_run_journal`,
+    `test_drawing_export`, `test_drawing_html_report`): **1 failed, 1,659
+    passed, 1 skipped**, the one failure being that test;
+  - the new file against a `git archive` copy of `origin/main`, classified from
+    `--junitxml`: **33 failed on behaviour, 28 only on the new API**
+    (`keep_digest_read`, `ctx.digest_findings_held_out`,
+    `html_report._held_out_block`, `export._held_out_summary`), **14 passed**.
+    The passes pin what the fix keeps: a later partial read still replaces a
+    partial one (real time ×4, batch ×2), a finished retry wins and is cached
+    (×3), an empty first read takes the retry (×3), the fresher error of two
+    content-free reads, and a content-free harvested read still parked.
+- **Fixture effects, instrumented over the whole fixed suite** (the same hooks
+  as wrappers at each module's end, diffed test by test against the base run):
+  outside the new file, events moved in **two tests**:
+  `test_a_failed_retry_keeps_the_truncated_first_read` (re-baselined) and
+  `tests/test_drawing_batch.py::test_rescue_failure_keeps_the_batch_error`,
+  whose kept batch error now reads `api_error: Internal Server Error; retry
+  failed: still broken` (it asserts a substring, unchanged). A third,
+  `test_rescue_stops_instead_of_sleeping_past_the_budget`, calls the rescue
+  directly: sheet 0's error now names the budget-stopped rescue (`; retry
+  failed: 503 service unavailable (…)`); it asserts object identity, which
+  holds. No ledger count, QC number, digest-stage status, ok-sheet count,
+  error list or usage record moved anywhere else; every hook ran as often as in
+  the base run (333, 262, 189, 189, 189, 133, 101), and all **148 read choices
+  outside the new file keep the later read, as before**. The gauntlet
+  (`run_acceptance.py`'s oracle) is unchanged.
+- **New tests:** `tests/test_digest_partial_reads.py` (75):
+  - **N16, real time:** a worse retry (empty, refused with and without text)
+    keeps the first read, whole, named, both attempts billed, for a closed and
+    a salvaged block; a raise is named; partial retries (truncated again,
+    ended early, unknown, context window) and a finished retry win; an empty
+    first read takes the retry; never spliced.
+  - **N16, batch:** on both recovery transports, a worse follow-up or
+    fresh-batch round (empty, refused, an errored envelope) keeps the first
+    read with every attempt; a partial or finished round wins (cached); the
+    direct rescue landing worse or raising; two discarded rounds counted; the
+    best read kept across rounds; the fresher error of two content-free reads;
+    the harvest holding a partial read against a worse rescue (four variants)
+    and an unreached one, and parking a content-free one.
+  - **The helper:** a 20-case table, and a finished read never named.
+  - **N15, through the pipeline:** an exhaustive run with each of four
+    unfinished stops (held out of the ledger, markups, `findings.json`,
+    `findings.csv`, `markup_manifest.json` and the report's rows; listed in the
+    sheet file and report card; counted in ctx, the stage warning, run.log and
+    the manifest); a standard run; a finished run holds nothing out; with N16,
+    the kept first read's findings held out.
+  - **Units:** the report card escapes, the sheet file's layout, the run.log
+    line, the manifest summary (five shapes).
+  - **Caches:** a kept partial read is never cached, real time and batch.
+- **Downstream consumers walked:**
+  - **The digest stage** (status, `items_out`, errors): unchanged in status
+    (a kept partial read is still a failed sheet); its errors carry the named
+    attempt; one new warning when findings were held out.
+  - **`ok_sheet_count`, `ctx.errors`:** counts unchanged; an error string can
+    carry a named attempt.
+  - **`combined_text` (`_combine`):** unchanged (the failure line quotes the
+    error, which may now name the retry).
+  - **The per-sheet export (`_sheet_document`):** the kept read's prose, the
+    named error, and the held-out list.
+  - **The report:** the sheet card's Failed badge and prose as before, plus the
+    held-out block; the findings table never includes them.
+  - **The usage ledger and its attempts:** real time sums both attempts onto
+    the kept read (one record, as before); batch merges every attempt record
+    onto the kept read (pinned: `BATCH` / `BATCH` / `REAL_TIME` in order).
+  - **The level-1 store:** unchanged predicate; a kept partial read is not
+    stored.
+  - **The ledger ingest, QC numbering, markups, exports:** an errored sheet
+    contributes no findings; nothing else moves (instrumented).
+  - **`run.log`, `run_manifest.json`:** the error, the `SHEET_DIGESTED`
+    field, the *Sheets* line, the stage warning, the manifest key.
+  - **The gauntlet:** no digest sabotage in it; unchanged.
+- **Validation** (this container, Python 3.11.15, SDK 1.7.0, PyMuPDF 1.28.2):
+  - Baseline before any change: **4,120 passed, 2 skipped, 10 deselected**
+    (253 s) on `b4d275f`.
+  - The new file: 75 passed.
+  - Full suite after: **4,195 passed, 2 skipped, 10 deselected** (254 s): the
+    baseline plus the 75 new tests, with the same two environment skips.
+  - Browser suite (the report card changed): 98 collected, 98 executed and
+    passed; `check_browser_suite.py` passes.
+  - `python -m ruff check --select E9,F63,F7,F82 src tests scripts` (pinned
+    0.14.5) is clean. F401/F811/F841 over the touched files finds only two
+    hits, both on `main` already: `pipeline.normalize_specs_text` (listed on
+    WP-22.5) and `SheetDigest` in `tests/test_drawing_digest.py` (new to the
+    list, added to WP-22.5). `scan_secrets.py` is clean over 210 tracked files,
+    the new one included. `compileall src` passes. No invisible code point in
+    the added lines (only the em dash, ellipsis and middle dot these modules
+    already use).
+- **Docs:**
+  - **CHANGELOG** (Fixed): N16 and N15, with the visible effect, the rule, the
+    named error, the harvest, the listing and counts, and no cache effect.
+  - **CLAUDE.md:** the digest-path passage (the retry sentence is replaced by
+    the rank rule) and the harvest sentence; the ledger passage (the N15
+    ingest rule); the N16 entry removed from "Known-inaccurate statements".
+  - **README:** "A reply the model did not finish" gains *A retry never costs a
+    sheet a better read* and *The findings of an unfinished read are held out
+    of the review*; "Stuck batches" says a cut-off read with content is kept
+    for its sheet.
+  - **The plan:** WP-01.3 notes under the N15 bullet of "Step 3" and under
+    "Step 5: retries (N16)" (the two extra batch losses; the requirement as
+    decided).
+  - **DECISIONS:** the D-1 note and the D-2 note.
+  - **PROGRESS:** this entry; the WP-01.3 row; the N15 and N16 rows; notes on
+    WP-01.5, WP-01.6, WP-14.5 and WP-22.5; the Next-up line.
+  - **Docstrings:** `digest_sheet`, `keep_digest_read` and its helpers,
+    `_replace_result_with_attempt_history`, `_rescue_failed_items_sync`,
+    `_harvest_abandoned_batch`, `_park_usage_attempts`,
+    `_resubmit_failed_items`, `_run_qc_stages`, `review_findings`,
+    `held_out_findings`, `_sheet_document`, `_held_out_block`.
+- **Not verified:** live API behaviour (no budget, O-4; this slice makes no
+  call). A real refusal or truncation mid-findings-block was not observed; the
+  shapes are the suite's fakes. How often a real raised-cap retry lands worse
+  than the first read is not measurable without real drawings (O-10). Windows
+  is covered by this PR's CI.
+- **Risks and residual gaps:**
+  - **Visible changes, by design.** A sheet's error can now carry `; retry: …`,
+    `; retry failed: …` or `; N retries, the last: …` (in `ctx.errors`,
+    `run.log`, the report's stage table and the sheet's file). A sheet with a
+    held partial read whose rescue never landed reports the read's own error
+    instead of "drawing batch not collected (…)". An unfinished read's findings
+    leave `findings.json`, `findings.csv`, the markups and the report's table
+    and appear only in the sheet's file and card, so an exhaustive run can show
+    fewer findings than before when a sheet's read did not finish.
+  - **Real time keeps one usage record per sheet**, summing both attempts:
+    the discarded attempt is named in the error but has no record of its own
+    (noted on WP-14.5).
+  - **Two partial reads:** the later is kept, so the first read's prose is
+    replaced when the raised-cap read is itself cut off (the owner's
+    tie-break; pinned).
+  - **A refused harvested read is parked**, not held (a partial read outranks
+    a refusal, and R2 decides refusal retries: WP-01.5 note).
+- **Re-checked (U31):** D-1's classifier and ladder (`classify_stop_reason`,
+  `digest_terminal_error`), the admission predicate and the loader, the retry
+  predicates (`raised_cap_may_finish`, `_item_retry_params`), the abandoned
+  markers (`_mark_batch_abandoned` still skips a responded slot), the
+  `_combine` delivery contract and `models.FINDINGS_PARSE_OK` are untouched;
+  the prose harvest's skip of an errored sheet (1567) is unchanged and now
+  agrees with the ledger (the owner's hold-out rule is the same rule, so it
+  needs no change).
+- **Found, not fixed:**
+  - `set_identity._sheet_block` puts an errored sheet's text (a refusal's
+    explanation, a truncated read's prose) into the advisory identity corpus
+    whenever it has any; every other consumer skips that sheet (WP-01.6 note);
+  - F401: `SheetDigest` imported unused in `tests/test_drawing_digest.py`, on
+    `main` already (WP-22.5 note).
+- **Next:** WP-01.4 (Wave 1; its dependency WP-01.2 is done).
 
 ### 2026-09-24 — WP-09.2: a prose item joins a finding only when they make the same claim ([PR #169](https://github.com/Abe-Borg/drawing-analyzer/pull/169))
 

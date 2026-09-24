@@ -48,6 +48,70 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A retry could throw away a sheet's better read, and the findings of a read
+  the model did not finish were reviewed like any other (remediation WP-01.3;
+  N16, N15).**
+  - **N16.** When a digest was cut off at `max_tokens`, the retry at a raised
+    output cap replaced the first read whatever it returned. A retry that came
+    back empty, refused or with no stop reason discarded the first read's prose
+    and findings, although both reads were billed; only a retry that *raised*
+    on the real-time path kept the first read. The batch transport was worse:
+    every recovery step (the follow-up batch, the fresh-batch rounds, the
+    direct-call rescue) replaced the sheet's result wholesale, an errored batch
+    envelope included, and a stalled batch's item that had come back cut off
+    with prose was read back and then dropped (only its usage was kept), so a
+    rescue that came back worse, or never landed, lost it too.
+  - **N15.** A digest the model did not finish (truncated, refused, a stream
+    that ended early, an unknown stop) still had its findings block parsed,
+    and those findings went into the ledger unlabelled: an exhaustive run
+    numbered, anchored, verified and marked them up (reproduced: `QC-004`,
+    clouded on the drawing), and a standard run exported them in
+    `findings.json`. Every other consumer already skipped such a sheet:
+    `combined_text`, cross-sheet QC, the prose harvest, synthesis, focus and
+    the review planner.
+
+  Now, decided with the owner (see the WP-01.3 handoff in
+  `_plans/PROGRESS.md`):
+  - **One rule for which read a sheet keeps**, on both transports
+    (`digest.keep_digest_read`): finished, then a read that did not finish but
+    carries prose or findings, then a refusal, then nothing (an empty reply,
+    an errored batch envelope, a call that failed). A later read replaces the
+    one the sheet holds only when it ranks at least as high, so a worse retry
+    never displaces a partial read, and of two partial reads the raised-cap
+    one wins. The reads are never mixed (I-2): the kept read's text, findings,
+    stop reason and error move together. Every attempt's usage is kept.
+  - **The kept read's error names the discarded attempt**:
+    `truncated digest (stop_reason='max_tokens'); retry: refused digest
+    (stop_reason='refusal')`, `…; retry failed: <error>` when the retry call
+    raised (the real-time retry, and now the batch direct-call rescue), and
+    `…; 3 retries, the last: …` when several recovery attempts came back worse.
+    So the error in `ctx.errors`, `run.log`, the report's stage table and the
+    sheet's export file says what happened to the retry.
+  - **A stalled batch's partial read is held** for its sheet while the sheet
+    is still resubmitted, so the resubmission can only improve on it; a sheet
+    whose resubmission never lands keeps that read and its own error instead
+    of "drawing batch not collected". A read with no content is parked for its
+    usage as before.
+  - **An unfinished read's findings are held out of the review.** They get no
+    QC number, markup or verification and are not in `findings.json`,
+    `findings.csv`, `markup_manifest.json` or the report's findings table. The
+    sheet's own export file (`NN_<name>_pN.md`) and its card in the HTML
+    report list them under its *Failed* status, as they keep its prose. The run
+    counts them, observationally (every such sheet has already failed the
+    digest stage): a digest-stage warning, a `findings_held_out` field on the
+    sheet's `SHEET_DIGESTED` event and a count on its *Sheets* line in
+    `run.log`, `ctx.digest_findings_held_out`, and `digest_findings_held_out`
+    in `run_manifest.json` (per portable sheet id, counts only).
+
+  No cache key, contract, prompt or schema moved: only a finished read is ever
+  cached, at either level, whichever read a sheet keeps (pinned for both
+  transports). A finished read, and every run whose reads all finish, is
+  unchanged: instrumented over the whole suite, no ledger count, QC number,
+  digest-stage status, ok-sheet count or usage record moved outside the new
+  tests. One pinned test gained the raise's text in its expected error
+  (`test_a_failed_retry_keeps_the_truncated_first_read`). New tests:
+  `tests/test_digest_partial_reads.py`.
+
 - **A prose sentence that stated a different value, tag or polarity was
   absorbed into an existing finding (remediation WP-09.2; N10, U11).** The
   prose harvest mirrors the digest's Coordination/Conflict prose, and the set

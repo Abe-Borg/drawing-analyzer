@@ -163,6 +163,7 @@ from .models import (
     TRUST_REASON_NO_QUOTE,
     TRUST_REASON_NO_TEXT,
     TRUST_REASON_NOT_FOUND,
+    held_out_findings,
     reduced_trust_reason,
 )
 from .run_journal import redact_for_display
@@ -1187,6 +1188,43 @@ def _card(
     )
 
 
+def _held_out_block(sheet: Any) -> str:
+    """The findings a read the model did not finish reported, listed on its card.
+
+    Held out of the review (remediation WP-01.3, N15;
+    :func:`~drawing_analyzer.models.held_out_findings`): they have no QC number,
+    no row in the findings table and no markup, so the card lists them beside
+    the prose it keeps, with the same fields (severity, category, text, quote)
+    as the sheet's own export file (``export._held_out_line``). ``""`` for
+    every other sheet. Model content, escaped, never redacted (I-2).
+    """
+    held = held_out_findings(sheet)
+    if not held:
+        return ""
+    items = []
+    for f in held:
+        severity = str(getattr(f, "severity", "") or "").strip() or "?"
+        category = str(getattr(f, "category", "") or "").strip() or "?"
+        text = " ".join(str(getattr(f, "text", "") or "").split())
+        quote = " ".join(str(getattr(f, "source_quote", "") or "").split())
+        item = (
+            f"<li><strong>{html.escape(severity)}</strong> · "
+            f"{html.escape(category)}: {html.escape(text)}"
+        )
+        if quote:
+            item += f" <code>{html.escape(quote)}</code>"
+        items.append(item + "</li>")
+    return (
+        '<section class="block block-held-out" data-category="other">'
+        f"<p><strong>Findings held out of the review ({len(held)})</strong></p>"
+        '<p class="muted">The model did not finish reading this sheet, so the '
+        "review did not take the findings this read reported: they have no QC "
+        "number, markup or verification, and are not in the findings table. "
+        "Check them against the sheet.</p>"
+        f"<ul>{''.join(items)}</ul></section>"
+    )
+
+
 def _rawtext_block(geometry: Any) -> str:
     """A collapsed block carrying the sheet's raw extracted text layer.
 
@@ -1256,6 +1294,7 @@ def _sheet_card(
             '<section class="block" data-category="other">'
             '<p class="muted">(empty digest)</p></section>'
         )
+    body += _held_out_block(sheet)
     body += _rawtext_block(geometry)
 
     title = (

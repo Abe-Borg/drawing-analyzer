@@ -139,6 +139,64 @@ and its `_refusal_fallback_available` latch; `verify._degrade_kind` and the
     interrupted streams (WP-01.7), cross-QC (WP-06.3), the citation cache gate
     (WP-12.6), investigation (WP-13.4).
 
+Added by WP-01.3: **which read a sheet keeps, when a later attempt lands**
+(N16; the owner's rule, decided with measured options). It extends the digest's
+handling above and restates none of it.
+- **One helper, both transports.** `digest.keep_digest_read(kept, later)`
+  returns the read the sheet keeps. The real-time raised-cap retry in
+  `digest_sheet` calls it with the two reads, and so does every batch site that
+  folds a new read into a sheet's result, through
+  `batch_digest._replace_result_with_attempt_history`: the primary collect, the
+  follow-up batch, the fresh-batch rounds, the direct-call rescue and the
+  abandoned-batch harvest.
+- **The order** (`digest._read_rank`, over the verdicts that already exist):
+  finished (the ladder set no error) > a partial read with content (prose or
+  findings; any non-finished kind but `REFUSED`: truncated, unfinished,
+  unknown, continuation) > refused (with or without text) > nothing (an empty
+  reply, an errored batch envelope, a transport failure). The later read wins
+  when it ranks at least as high: of two partial reads the raised-cap one (twice
+  the room), of two content-free reads the fresher error (it says why recovery
+  stopped).
+- **Never mixed (I-2).** The kept read's text, findings, findings note, stop
+  reason and error move together. Usage is not the read's: real time sums
+  every attempt onto the kept read, batch merges every attempt record onto it.
+- **The kept read names what it outlived.** `_name_discarded_retry` appends to
+  its error `"; retry: <the discarded read's error>"`, or `"; retry failed:
+  <cleaned error>"` for a call that raised (`note_failed_retry`: the real-time
+  retry and the batch direct rescue), and `"; N retries, the last: …"` for
+  several (bounded however many resubmission rounds an override allows).
+  `SheetDigest.read_error` keeps the read's own error and `retries_discarded`
+  the count; both are runtime-only. A finished read is never given a suffix.
+- **Retry decisions still read the latest attempt.** `_item_retry_params` is
+  handed each round's own digest, so a discarded empty `max_tokens` read still
+  earns the next raised cap. `served_by` names the batch that returned the read
+  kept.
+- **The harvest holds a partial read.** An abandoned batch's item that did not
+  finish but carries content (`digest.is_partial_read`) becomes the sheet's
+  result through the same helper while the sheet stays unresolved, so the
+  rescue can only improve on it; the stalled path's rescue list comes from
+  `harvest.resolved`. A content-free item is parked for its usage as before.
+- **Measured before deciding** (the WP-01.3 handoff): the options were "finished
+  only" (fails `test_rescue_skipped_when_followup_rejects_permanently` and lets
+  an empty first read beat a retry with prose), "the first read wins ties"
+  (the literal reading; drops the raised-cap read of two partials), the chosen
+  order, and the session request's literal order (truncated with text above
+  "the rest", which lets an empty read replace an unfinished read with prose).
+  Over the whole suite the chosen order changed no read choice: every one of
+  the 148 decisions outside the new tests keeps the later read, as before.
+- **Rejected:** a union of both reads' findings (two transcriptions of one sheet
+  beside prose that describes only one); choosing by text length (a content
+  heuristic); keeping the first read unless the retry finished (above).
+- **Version / cache changes:** none. Admission is unchanged
+  (`digest_cache_admits`): only a finished read is stored, at either level,
+  whichever read a sheet keeps, so no key, contract or schema moved and there
+  is no migration-register row.
+- **Consumers affected:** the sheet's `error` (so `ctx.errors`, `run.log`, the
+  digest stage's errors, the report's stage table and the per-sheet export
+  status), its text and findings (the per-sheet export, the report card, and
+  through D-2's WP-01.3 note the held-out count), and `served_by` in the batch
+  collect log.
+
 ## D-2 Stage accounting — `decided` (WP-01.1, [PR #155](https://github.com/Abe-Borg/drawing-analyzer/pull/155))
 
 **Required decision:** define eligible, judged, failed, skipped,
@@ -301,6 +359,29 @@ harvest's ladder is unchanged: `missing` alone holds the stage at PARTIAL.
   holds the item, its section hint, the sheet id, the capped text layer, the
   source binding and the contract, never a match decision, so an item the
   veto sends to structuring is an ordinary miss.
+
+Added by WP-01.3: **the findings held out of an unfinished read are counted
+observationally** (N15; the owner's decision). A read the model did not finish
+(any sheet whose digest carries an error) hands the review none of its findings
+(`models.review_findings` / `held_out_findings`, the one split); they are
+listed in the sheet's own export file and its report card. The count is
+`DrawingContext.digest_findings_held_out` (portable sheet key → count), a
+digest-stage warning placed after the stage's errors, a `findings_held_out`
+field on the sheet's `SHEET_DIGESTED` event (and its *Sheets* line in
+`run.log`), and `digest_findings_held_out` (`{"total", "by_sheet"}`) in
+`run_manifest.json`.
+- Why not D-2's item rule: every held-out finding sits on a sheet the digest
+  stage already counts as failed (`items_out` excludes it; the stage is PARTIAL
+  or FAILED), so no status could move; and the findings are not items the
+  digest stage was required to judge.
+- Considered and not taken: the count without the stage warning (manifest and
+  sheet line only); listing the findings in the sheet file only (the report
+  card lists them too, so the two agree); labelling them and ingesting them (a
+  new `Finding` field through the ledger, the markup, the report and the CSV,
+  with a merge rule for the label, and the prose harvest's skip of the same
+  sheet left disagreeing); holding out only a refusal's.
+- No cache or key change: the level-1 and level-2 digest caches store only
+  finished reads (D-4), which hold nothing out.
 
 ## D-3 Finding identity — `open` (to be decided by WP-03.4)
 

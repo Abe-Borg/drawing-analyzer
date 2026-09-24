@@ -29,9 +29,6 @@ Remediation slices are always written `WP-nn.m`.
 The slice named in parentheses corrects the text and removes the entry here:
 - HTML report: grouping "recomputes after every sort/filter". It does not after a
   sort (H1; WP-21.2).
-- Digest truncation: the raised-cap retry "can only improve on that read, never
-  lose it". A retry that lands empty or refused discards the first read (N16;
-  WP-01.3).
 - Geometry-aware image tokens: the GUI prices from real page shapes once the
   profile preflight has run. In a default install the preflight never runs,
   because no profiles ship (N23; WP-15.1).
@@ -337,9 +334,31 @@ Only `max_tokens` earns the raised-cap retry (`raised_cap_may_finish`; a larger
 cap cannot make room in a full context window): retried once from the shared
 `digest.MAX_TOKENS_RETRY_CEILING`, and refused by the cache if still cut off,
 since a stored truncation is indistinguishable from a complete one on every
-later run. Real-time accumulates usage across both attempts — each was billed —
-and falls back to the truncated first read if the raised-cap call cannot land, so
-the retry can only improve on that read, never lose it. The critique does **not** re-rasterize what the digest
+later run. **A retry never loses a better read** (remediation WP-01.3, N16; a
+D-1 note): which read a sheet keeps is decided by ONE helper,
+`digest.keep_digest_read`, on both transports: the real-time raised-cap retry
+in `digest_sheet`, and every batch site that folds a new read into a sheet's
+result (`batch_digest._replace_result_with_attempt_history`: the primary
+collect, the follow-up batch, the fresh-batch rounds, the direct rescue, the
+harvest). `_read_rank` orders the ladder's outcomes (it restates none): finished
+(no error) > a partial read with content (prose or findings: truncated,
+unfinished, unknown, continuation) > refused > nothing (empty, an errored
+envelope, a raise); the later read wins a tie, so of two partial reads the
+raised-cap one is kept, and between two content-free reads the fresher error
+(it says why recovery stopped; pinned by
+`test_rescue_skipped_when_followup_rejects_permanently`). Reads are never mixed
+(I-2): the winner's text, findings, note, stop reason and error move together.
+When the held read wins, its error names the discarded attempt
+(`_name_discarded_retry`): `"<own>; retry: <its error>"`, `"; retry failed:
+<error>"` for a call that raised (`note_failed_retry`: the real-time retry and
+the batch direct rescue), `"; N retries, the last: …"` for several;
+`SheetDigest.read_error` keeps the own error and `retries_discarded` the count,
+both runtime-only. A retry decision still reads the LATEST read
+(`_item_retry_params` is given the round's own digest), and `served_by` is set
+only when the new read is the one kept. Real-time accumulates usage across both
+attempts — each was billed — whichever read is kept, and the batch attempt
+records merge onto the kept read. It used to be the later read, always, unless
+the retry call itself raised. The critique does **not** re-rasterize what the digest
 already rendered: `render_spool.py` spools the digest's already-compressed PNG
 bytes to a private temp dir and rebuilds the same `RenderedSheet` byte-for-byte
 (nothing resized, recompressed or filtered), and the batch path adopts the
@@ -363,7 +382,12 @@ back between the cancel and the rescue list at all three sites (primary,
 resubmission, follow-up — the last re-billing at full real-time rate). It
 resolves **successes only**: an item that came back empty still needs the
 rescue, but its billed attempt is parked on the slot
-(`_park_usage_attempts`) so §15.6 keeps it. Its time is **additional**, added
+(`_park_usage_attempts`) so §15.6 keeps it. An item that did not finish but
+carries content (`digest.is_partial_read`) is instead **held** as the sheet's
+result through the replacement helper (N16), still unresolved, so the rescue
+can only improve on it; the stalled path builds its rescue list from
+`harvest.resolved`, not from an empty result, and a sheet the rescue never
+reaches keeps that read rather than "not collected". Its time is **additional**, added
 back to each caller's start mark rather than deducted — it competes with the
 rescue for the same seconds exactly on the `detached` path, and charging it
 there turned a 3/3 recovery into 0/3, trading re-billing for lost sheets. A
@@ -885,7 +909,18 @@ reporter of last resort must never raise from inside Tk's handler.
   **5 → 6**; the persona edit also re-keys every entry through the prompt text
   the key holds, a second change with its own mechanism.
 - ***`ledger.py` is the exclusive findings container*** (Part III §16): every
-  channel ingests into it with source tags. Dedup is conservative and lossless
+  channel ingests into it with source tags. The digest's JSON findings come only
+  from a read the model finished (remediation WP-01.3, N15; the owner's rule):
+  `models.review_findings` / `held_out_findings` split a sheet's findings on
+  `sd.error`, so a truncated, refused or unfinished read's findings are held
+  out (never numbered, anchored, verified, inked or exported as findings), as
+  every other consumer already skips that sheet (`_combine`, cross-QC, the prose
+  harvest, synthesis, focus, the planner; only the advisory identity corpus
+  reads its text). The sheet's own export file (`export._sheet_document`) and
+  report card (`html_report._held_out_block`) list them under FAILED, and the
+  run counts them observationally (`ctx.digest_findings_held_out`, a
+  digest-stage warning, `findings_held_out` on `SHEET_DIGESTED`, the manifest's
+  `digest_findings_held_out`; D-2 note). Dedup is conservative and lossless
   (Phase 20 §12): a tile is never sufficient and a rectangle is not read at all
   (remediation WP-03.7, below) — merges need semantic
   sameness with **compatible critical signatures** (`critique.critical_signature`:

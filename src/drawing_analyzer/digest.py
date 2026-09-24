@@ -733,6 +733,14 @@ class SheetDigest:
     # (mirrors input_tokens/output_tokens on a hit).
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+    # Remediation WP-01.3 (N16): later attempts at this sheet that came back
+    # worse than this read and were discarded (:func:`keep_digest_read`,
+    # :func:`note_failed_retry`). ``error`` names them; ``read_error`` is this
+    # read's own error before the first was named, kept so the count can be
+    # restated. Runtime only: no cache entry stores them, and a cache hit is
+    # always a finished read, which never has any.
+    read_error: str | None = None
+    retries_discarded: int = 0
 
     @property
     def ok(self) -> bool:
@@ -1547,6 +1555,117 @@ def digest_cache_admits(*, error: str | None, text: str, stop_reason: Any) -> bo
     )
 
 
+# How good one read of a sheet is, for choosing between two reads of the same
+# sheet (remediation WP-01.3, N16; the owner's rule, a D-1 note). Higher wins.
+_READ_NOTHING = 0     # no content: an empty reply, an errored batch envelope
+_READ_REFUSED = 1     # declined, with or without explanatory text
+_READ_PARTIAL = 2     # did not finish, but carries prose or findings
+_READ_FINISHED = 3    # the ladder set no error
+
+
+def _read_rank(sd: SheetDigest) -> int:
+    """Rank one read (:data:`_READ_FINISHED` … :data:`_READ_NOTHING`).
+
+    Reads the verdicts that already exist rather than restating them: finished
+    is :func:`digest_terminal_error` having set no error, refused is the D-1
+    classifier's kind. So this is an order over the ladder's outcomes, not a
+    second ladder. A read "has content" when it kept prose or findings; a
+    truncated read, a stream that ended early (N27), an unknown or a
+    continuation stop all rank as one partial read. An errored batch envelope
+    or a transport failure carries no stop reason and no content.
+    """
+    if sd.error is None:
+        return _READ_FINISHED
+    if classify_stop_reason(sd.stop_reason).kind == REFUSED:
+        return _READ_REFUSED
+    if (sd.text or "").strip() or sd.findings:
+        return _READ_PARTIAL
+    return _READ_NOTHING
+
+
+def _name_discarded_retry(kept: SheetDigest, outcome: str) -> None:
+    """Name one more discarded later attempt in ``kept.error`` (N16).
+
+    ``outcome`` follows the word "retry": ``": <its error>"`` for a read that
+    came back worse, ``" failed: <error>"`` for a call that raised. One
+    discarded attempt reads ``"<own error>; retry: …"``; several read
+    ``"<own error>; N retries, the last: …"`` (the owner's rule: bounded
+    however many recovery rounds a batch runs). A finished read is never
+    given a retry: a later attempt cannot outrank it, and a finished read is
+    never retried, so nothing is discarded against one.
+    """
+    if kept.error is None:
+        return
+    if kept.retries_discarded == 0:
+        kept.read_error = kept.error
+    kept.retries_discarded += 1
+    own = kept.read_error or ""
+    if kept.retries_discarded == 1:
+        kept.error = f"{own}; retry{outcome}"
+    else:
+        kept.error = f"{own}; {kept.retries_discarded} retries, the last{outcome}"
+
+
+def keep_digest_read(kept: SheetDigest | None, later: SheetDigest) -> SheetDigest:
+    """Which of two reads of one sheet the sheet keeps: ``kept`` or ``later``.
+
+    Remediation WP-01.3 (N16): a retry never loses a better read. The one rule
+    both transports apply, to the real-time raised-cap retry in
+    :func:`digest_sheet` and to every batch site that folds a new read into a
+    sheet's result (``batch_digest._replace_result_with_attempt_history``: the
+    primary collect, the follow-up batch, the fresh-batch rounds, the direct
+    rescue, the abandoned-batch harvest). Before it, a retry that came back
+    empty, refused or unfinished replaced a truncated first read wholesale,
+    losing prose and findings that were billed.
+
+    ``later`` wins when it ranks at least as high as ``kept``
+    (:func:`_read_rank`): finished, then a partial read with content, then a
+    refusal, then nothing. So a refusal, an empty reply or an errored envelope
+    never displaces a partial read, and of two partial reads the later one (a
+    raised cap's, with twice the room) wins, as does the later of two reads
+    with no content (the fresher error: it says why recovery stopped).
+
+    Reads are never mixed (I-2): the winner's text, findings, note, stop
+    reason and error stay together. When ``kept`` wins, the discarded read is
+    named in its error (:func:`_name_discarded_retry`). Usage is the caller's:
+    real time sums every attempt, batch merges the attempt records onto
+    whichever read is kept.
+    """
+    if kept is None or _read_rank(later) >= _read_rank(kept):
+        return later
+    _name_discarded_retry(kept, f": {later.error}")
+    _log.info(
+        "digest for %s kept its earlier read (%s); a later attempt came back "
+        "worse and was discarded: %s",
+        kept.ref.display_label, kept.read_error, later.error,
+    )
+    return kept
+
+
+def is_partial_read(sd: SheetDigest) -> bool:
+    """True for a read the model did not finish that still carries content.
+
+    Prose or findings, from a truncated read, a stream that ended early, an
+    unknown or a continuation stop (:func:`_read_rank`). What the abandoned-
+    batch harvest holds for its sheet so a rescue can only improve on it (N16).
+    """
+    return _read_rank(sd) == _READ_PARTIAL
+
+
+def note_failed_retry(kept: SheetDigest, failure: str) -> None:
+    """Name a retry that raised in the read the sheet keeps (N16).
+
+    The real-time raised-cap retry and the batch direct-call rescue send a
+    call that can raise instead of returning a read; the sheet then keeps what
+    it had, and its error says so: ``"<own error>; retry failed: <failure>"``.
+    """
+    _name_discarded_retry(kept, f" failed: {failure}")
+    _log.info(
+        "digest for %s kept its earlier read (%s); the retry failed: %s",
+        kept.ref.display_label, kept.read_error, failure,
+    )
+
+
 def sheet_digest_from_cache_entry(
     entry: dict, ref: SheetRef, *, image_token_estimate: int = 0,
 ) -> SheetDigest | None:
@@ -1641,6 +1760,15 @@ def digest_sheet(
     re-attempted up to ``max_retries`` times with exponential backoff (``sleep``
     is injectable so tests don't wait); a permanent failure returns immediately.
 
+    A read cut off at ``max_tokens`` gets one retry at a raised cap. The retry
+    never loses a better read (remediation WP-01.3, N16): the sheet keeps the
+    better of the two by :func:`keep_digest_read` (finished, then a partial
+    read with content, then a refusal, then nothing; the later read wins a
+    tie), never a mix of them (I-2), and a first read that is kept names the
+    retry in its error (``"; retry: <its error>"``, or ``"; retry failed:
+    <error>"`` when the retry raised). The token counts are both attempts',
+    whichever read is kept.
+
     ``cache`` (a :class:`~drawing_analyzer.digest_cache.DigestCache`, or ``None`` to
     disable) is consulted before the API call and written only on a finished,
     non-empty digest (:func:`digest_cache_admits`) — so an unchanged sheet on a
@@ -1709,7 +1837,8 @@ def digest_sheet(
     # The digest runs adaptive thinking at effort "high" and thinking shares
     # this envelope, so a dense sheet reaches the cap in the ordinary case.
     raised_cap_used = False
-    truncated_resp = None            # the first read, kept if the retry cannot land
+    first_resp = None                # the first read, once the retry is sent
+    retry_error: Exception | None = None   # the raised-cap retry raised
     in_tok = out_tok = cache_read_tok = cache_write_tok = 0
     while True:
         attempt = 0
@@ -1728,7 +1857,7 @@ def digest_sheet(
                 break
 
         if resp is None:
-            if truncated_resp is None:
+            if first_resp is None:
                 return SheetDigest(
                     ref=sheet.ref,
                     text="",
@@ -1738,15 +1867,14 @@ def digest_sheet(
                     output_tokens=out_tok,
                 )
             # The RAISED-CAP retry failed, but the first read is still in hand.
-            # Falling through to it keeps the truncated prose shipping (I-3)
-            # instead of turning a partial digest into an empty one — the retry
-            # exists to improve on that read, never to risk losing it.
-            resp = truncated_resp
+            # The sheet keeps it (I-3), and its error names the failure (N16).
+            retry_error = call_error
             break
 
         # Usage accumulates across attempts. Each response was billed, so
         # reading only the last one would under-report every recovered
         # truncation in the ledger, the run totals and the cost estimate.
+        # Whichever read the sheet keeps, it carries both attempts' usage.
         att_in, att_out = _message_usage(resp)
         in_tok += att_in
         out_tok += att_out
@@ -1767,52 +1895,67 @@ def digest_sheet(
             break                  # no headroom left to grant; not a retry
         kwargs = {**kwargs, "max_tokens": raised}
         raised_cap_used = True
-        truncated_resp = resp
+        first_resp = resp
 
-    raw_text = _message_text(resp)
-    stop = _get(resp, "stop_reason")
-    # A reply the model did not finish (still truncated after the raised cap,
-    # refused, a stream that ended without a stop reason, or anything else
-    # short of ``end_turn`` / ``stop_sequence``) fails the sheet. Its text is
-    # still returned: it is real output, and the per-sheet export shows it.
-    error = digest_terminal_error(raw_text, stop)
+    def _read_of(message: Any) -> tuple[SheetDigest, str]:
+        """One reply as the sheet's read, and its raw text (for admission).
 
-    # Split the findings block off the prose. ``text`` is the prose only, so
-    # ``combined_text`` never sees the JSON (I-2); ``findings`` and the telemetry
-    # note ride separately. A parse problem never marks the sheet failed.
-    text, findings, findings_note = parse_findings(
-        raw_text, sheet.ref, sheet.rows, sheet.cols
-    )
+        A reply the model did not finish (truncated, refused, a stream that
+        ended without a stop reason, or anything else short of ``end_turn`` /
+        ``stop_sequence``) carries an error. Its text is still kept: it is
+        real output, and the per-sheet export shows it. The findings block is
+        split off the prose, so ``combined_text`` never sees the JSON (I-2);
+        a parse problem never marks the sheet failed.
+        """
+        raw = _message_text(message)
+        stop = _get(message, "stop_reason")
+        prose, found, note = parse_findings(raw, sheet.ref, sheet.rows, sheet.cols)
+        return SheetDigest(
+            ref=sheet.ref,
+            text=prose,
+            image_token_estimate=image_est,
+            stop_reason=stop,
+            error=digest_terminal_error(raw, stop),
+            findings=found,
+            findings_note=note,
+        ), raw
+
+    if first_resp is None:
+        sd, raw_text = _read_of(resp)
+    elif retry_error is not None:
+        sd, raw_text = _read_of(first_resp)
+        note_failed_retry(sd, _clean_error(retry_error))
+    else:
+        # The retry landed: the sheet keeps the better of the two reads, never
+        # a mix of them (N16, :func:`keep_digest_read`). A retry that came back
+        # empty, refused or failed used to replace the first read wholesale.
+        first, first_raw = _read_of(first_resp)
+        later, later_raw = _read_of(resp)
+        sd = keep_digest_read(first, later)
+        raw_text = later_raw if sd is later else first_raw
+    sd.input_tokens = in_tok
+    sd.output_tokens = out_tok
+    sd.cache_read_tokens = cache_read_tok
+    sd.cache_write_tokens = cache_write_tok
 
     # Cache only a finished, successful digest, never an empty or unfinished
     # one: a re-run should re-attempt those. A stored partial read is served
     # forever, at zero cost and indistinguishable from a complete one, which
-    # is how a cut-off or refused sheet became permanent.
+    # is how a cut-off or refused sheet became permanent. Whichever read the
+    # sheet keeps, only a finished one is admitted.
     if cache is not None and cache_key is not None and digest_cache_admits(
-        error=error, text=raw_text, stop_reason=stop,
+        error=sd.error, text=raw_text, stop_reason=sd.stop_reason,
     ):
         cache.put(
             cache_key,
             {
-                "text": text,
+                "text": sd.text,
                 "input_tokens": in_tok,
                 "output_tokens": out_tok,
-                "stop_reason": stop,
-                "findings": [f.to_dict() for f in findings],
+                "stop_reason": sd.stop_reason,
+                "findings": [f.to_dict() for f in sd.findings],
                 "created_ts": time.time(),
             },
         )
 
-    return SheetDigest(
-        ref=sheet.ref,
-        text=text,
-        input_tokens=in_tok,
-        output_tokens=out_tok,
-        image_token_estimate=image_est,
-        stop_reason=stop,
-        error=error,
-        findings=findings,
-        findings_note=findings_note,
-        cache_read_tokens=cache_read_tok,
-        cache_write_tokens=cache_write_tok,
-    )
+    return sd

@@ -94,6 +94,9 @@ from .digest import (
     digest_cache_admits,
     digest_sheet,
     digest_terminal_error,
+    is_partial_read,
+    keep_digest_read,
+    note_failed_retry,
     sheet_digest_from_cache_entry,
     stream_message,
     focus_cache_fragment,
@@ -366,22 +369,38 @@ def _replace_result_with_attempt_history(
     results: list,
     slot: "_Slot",
     digest: SheetDigest,
-) -> None:
-    """Replace a recovery result while retaining every earlier attempt.
+    *,
+    served_by: str = "",
+) -> SheetDigest:
+    """Fold a new read of a sheet into its result, keeping every attempt.
 
-    Three histories merge here, oldest first: responses already recorded on the
-    result being replaced, the non-billable records of any batch abandoned
-    under this slot since (drained from the slot so they are recorded exactly
-    once), and this digest's own response.
+    The sheet keeps the better of the read it holds and ``digest``
+    (:func:`~drawing_analyzer.digest.keep_digest_read`, remediation WP-01.3,
+    N16), the one rule the real-time raised-cap retry applies too. A new read
+    used to replace the result wholesale, so a raised-cap resubmission, a
+    fresh-batch round or a direct rescue that came back empty, refused or
+    errored discarded a truncated read's prose and findings that were billed.
+    When the held read wins, its error names the discarded attempt.
+
+    Three histories merge here, oldest first, onto whichever read is kept:
+    responses already recorded on the held result, the non-billable records of
+    any batch abandoned under this slot since (drained from the slot so they
+    are recorded exactly once), and this digest's own response. ``served_by``
+    (the batch, or the direct rescue, that returned ``digest``) is recorded on
+    the slot only when ``digest`` is the read kept. Returns the kept read.
     """
     previous = results[slot.index]
     prior = list(getattr(previous, "usage_attempts", ()) or ()) if previous else []
     abandoned = _drain_abandoned_attempts(slot)
     current = list(getattr(digest, "usage_attempts", ()) or ())
     merged = prior + abandoned + current
+    kept = keep_digest_read(previous, digest)
     if merged:
-        setattr(digest, "usage_attempts", merged)
-    results[slot.index] = digest
+        setattr(kept, "usage_attempts", merged)
+    results[slot.index] = kept
+    if kept is digest and served_by:
+        slot.served_by = served_by
+    return kept
 
 
 def _drain_abandoned_attempts(slot: "_Slot") -> list[DigestUsageAttempt]:
@@ -730,12 +749,13 @@ def _park_usage_attempts(slot: "_Slot", digest: SheetDigest) -> None:
     """Hold a harvested-but-unusable item's BILLED attempt records on the slot.
 
     An item can come back ``succeeded`` from the batch and still yield no
-    usable digest (empty or truncated). That attempt was charged, so dropping
+    usable digest (empty, or refused). That attempt was charged, so dropping
     it because its text is unusable would understate the run — the §15.6 ledger
     describes work that HAPPENED. The slot is not resolved by it, so the sheet
     still goes to the rescue; the records ride along and are merged into
     whatever digest finally lands
-    (:func:`_replace_result_with_attempt_history`).
+    (:func:`_replace_result_with_attempt_history`). A read with content that
+    did not finish is not parked but held as the sheet's result (N16).
     """
     attempts = list(getattr(digest, "usage_attempts", ()) or ())
     if not attempts:
@@ -842,10 +862,15 @@ def _harvest_abandoned_batch(
     * **Bounded, and never at the rescue's expense.** A batch that does not
       settle, an unreadable ``results()``, or any exception returns an empty set
       and the caller resubmits everything, exactly as it does today.
-    * **Successes only.** An item that came back errored or empty does not
-      resolve its slot — it still needs the rescue — but its billed attempt
-      records are parked on the slot (:func:`_park_usage_attempts`) rather than
-      dropped, because that attempt really was charged.
+    * **Successes only.** An item that came back errored, empty or unfinished
+      does not resolve its slot — it still needs the rescue. Its billed
+      attempt is never dropped, because it really was charged: a read the
+      model did not finish that carries prose or findings is held as the
+      sheet's result (:func:`_replace_result_with_attempt_history`,
+      remediation WP-01.3, N16), so the rescue can only improve on it and a
+      rescue that never lands leaves it rather than "not collected"; any other
+      item's attempt records are parked on the slot
+      (:func:`_park_usage_attempts`).
     * **Never fatal.** Recovery is best-effort; a harvest failure can only cost
       the optimization, never the run (I-3).
     """
@@ -900,11 +925,20 @@ def _harvest_abandoned_batch(
             continue
         responded.add(slot.index)
         if digest.error is not None:
-            _park_usage_attempts(slot, digest)
+            if is_partial_read(digest):
+                # A read the model did not finish but that carries prose or
+                # findings is held as the sheet's result (N16), so the rescue
+                # it still gets can only improve on it; one the rescue never
+                # reaches keeps it instead of "not collected". The slot stays
+                # unresolved.
+                _replace_result_with_attempt_history(
+                    results, slot, digest, served_by=batch_id,
+                )
+            else:
+                _park_usage_attempts(slot, digest)
             billed_but_unusable += 1
             continue
-        slot.served_by = batch_id
-        _replace_result_with_attempt_history(results, slot, digest)
+        _replace_result_with_attempt_history(results, slot, digest, served_by=batch_id)
         harvested.add(slot.index)
     _log.info(
         "harvested %d/%d completed sheet(s) from abandoned batch %s (status=%s, "
@@ -956,8 +990,11 @@ def _rescue_failed_items_sync(
     further sheet is attempted. Sheets not reached keep their batch error. A
     transient failure on a rescue call is retried with the real-time digest
     policy (:data:`~drawing_analyzer.digest.DEFAULT_DIGEST_MAX_RETRIES`,
-    exponential backoff); a permanent one keeps that sheet's — fresher —
-    batch error. Returns the number of sheets recovered.
+    exponential backoff); a permanent one keeps that sheet's batch-round read
+    or error, which then names the failed rescue (remediation WP-01.3, N16).
+    A rescue that lands keeps the better of the two reads
+    (:func:`_replace_result_with_attempt_history`), so a partial batch read
+    survives an empty or refused rescue. Returns the number of sheets recovered.
     """
     started = time.monotonic()
     recovered = 0
@@ -972,6 +1009,7 @@ def _rescue_failed_items_sync(
             break
         attempt = 0
         message = None
+        call_error: Exception | None = None
         while True:
             try:
                 # Streamed rather than a plain ``create`` (via the shared
@@ -987,6 +1025,7 @@ def _rescue_failed_items_sync(
                 message = stream_message(client, params)
                 break
             except Exception as exc:  # noqa: BLE001 - retried if transient; else the batch error stands
+                call_error = exc
                 if _is_transient_error(exc) and attempt < DEFAULT_DIGEST_MAX_RETRIES:
                     backoff = _retry_backoff_seconds(attempt)
                     remaining = max_elapsed_seconds - (time.monotonic() - started)
@@ -1018,22 +1057,30 @@ def _rescue_failed_items_sync(
                 )
                 break
         if message is None:
-            continue  # the sheet keeps its batch-round error
+            # The sheet keeps its batch-round read (or error), and that read's
+            # error names the rescue that failed (N16), as a real-time
+            # raised-cap retry that raises is named.
+            held = results[slot.index]
+            if call_error is not None and held is not None:
+                note_failed_retry(held, _clean_error(call_error))
+            continue
         digest = _digest_from_message(
             slot, message, cache=cache, transport="REAL_TIME",
             attempt_number=slot.attempts_submitted,
             request_or_custom_id=request_id_of(message) or (slot.custom_id or ""),
         )
-        # Not a batch at all — say so rather than crediting some batch id with
-        # a digest a full-rate direct call produced.
-        slot.served_by = "direct-call rescue"
         # This sheet was digested by a synchronous real-time call, not the Batches
         # API, so it is billed at the full rate — mark it so the usage ledger does
         # not apply the 50% batch discount to it (Phase 23B pricing correctness).
         digest.rescued = True
-        # Even an empty-digest result is fresher provenance than the batch
-        # error it replaces, and its stop_reason names what happened.
-        _replace_result_with_attempt_history(results, slot, digest)
+        # The sheet keeps the better of its batch-round read and this one
+        # (N16): a partial read survives an empty or refused rescue, while an
+        # empty result still replaces a batch error that carried no content.
+        # Not a batch at all when it is kept — say so rather than crediting
+        # some batch id with a digest a full-rate direct call produced.
+        _replace_result_with_attempt_history(
+            results, slot, digest, served_by="direct-call rescue",
+        )
         if digest.error is None:
             recovered += 1
             _log.info(
@@ -1285,10 +1332,12 @@ def _recover_via_batch_resubmit(
                 still.append((slot, params))
                 continue
             digest = _parse_item(slot, res, cache=cache)
-            slot.served_by = retry_id
-            # Fresher provenance than the error it replaces, even if still empty
-            # — and a batch digest, so no ``rescued`` full-rate flag.
-            _replace_result_with_attempt_history(results, slot, digest)
+            # The sheet keeps the better of the read it holds and this round's
+            # (N16); a batch digest, so no ``rescued`` full-rate flag. Whether
+            # to go another round is still decided by this round's read.
+            _replace_result_with_attempt_history(
+                results, slot, digest, served_by=retry_id,
+            )
             if digest.error is None:
                 recovered += 1
                 continue
@@ -1343,8 +1392,9 @@ def _resubmit_failed_items(
     (:func:`_rescue_failed_items_sync`): one synchronous Messages call per
     item, reusing the same params and still-uploaded ``file_id``s, so a
     Batches-backend outage no longer zeroes the run. A sheet the rescue can't
-    recover keeps its (fresher) error rather than looping, so a systemic
-    outage still ends with clean per-sheet errors.
+    recover keeps its best read, or its fresher error when no read carried
+    content (:func:`_replace_result_with_attempt_history`, N16), rather than
+    looping, so a systemic outage still ends with clean per-sheet errors.
     Returns ``True`` when the uploaded files are safe to delete afterwards;
     ``False`` when the follow-up batch detached (still running remotely, so it
     still needs the files — mirroring the primary batch's detach policy).
@@ -1560,10 +1610,10 @@ def _resubmit_failed_items(
             rescue.append((slot, params))
             continue
         digest = _parse_item(slot, res, cache=cache)
-        slot.served_by = retry_id
         if digest.error is None:
             recovered += 1
-        _replace_result_with_attempt_history(results, slot, digest)
+        # The better of the first round's read and this one (N16).
+        _replace_result_with_attempt_history(results, slot, digest, served_by=retry_id)
         # An item still failing retryably after BOTH batch rounds is the batch
         # backend itself erroring — hand it to the direct-call rescue. Passing
         # the follow-up round's params keeps the empty-at-max_tokens cap
@@ -2331,10 +2381,10 @@ def collect_drawing_batch(
                 for result in client.messages.batches.results(batch.batch_id):
                     raw[_get(result, "custom_id")] = result
                 for slot in submitted:
-                    slot.served_by = batch.batch_id
                     _replace_result_with_attempt_history(
                         results, slot,
                         _parse_item(slot, raw.get(slot.custom_id), cache=cache),
+                        served_by=batch.batch_id,
                     )
                 files_released = True
                 if retry_failed_items:
@@ -2422,10 +2472,13 @@ def collect_drawing_batch(
                 # every later ``remaining`` is measured from, so the rescue gets
                 # exactly the budget it had before the harvest existed.
                 collect_started += harvest.elapsed
+                # Every sheet the harvest did not resolve, including one it
+                # holds a partial read for (N16): the rescue can only improve
+                # on that read (``_replace_result_with_attempt_history``).
                 rescue = [
                     (slot, slot.params)
                     for slot in submitted
-                    if results[slot.index] is None and slot.params is not None
+                    if slot.index not in harvest.resolved and slot.params is not None
                 ]
                 _mark_batch_abandoned(
                     [slot for slot, _ in rescue
