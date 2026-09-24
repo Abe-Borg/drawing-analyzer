@@ -605,6 +605,14 @@ class DrawingContext:
     # cross-QC did not run, or ran on the whole-set (<=40) path, which performs
     # no host-side grounding — empty means "not measured", never "none dropped".
     cross_qc_discards: dict = field(default_factory=dict)
+    # Remediation WP-06.1 (B6): the cross-QC items the host refused for an
+    # invalid field, per reason, recorded on BOTH paths. Empty when the stage
+    # made no call (it did not run, had fewer than two readable sheets or no
+    # client) or served a result cached before the record existed: "not
+    # recorded", never "none refused", which all zeros says (a call that
+    # failed before parsing refused nothing; its error is recorded apart).
+    # Observational, like the discards.
+    cross_qc_invalid: dict = field(default_factory=dict)
 
     @property
     def total_estimated_cost(self) -> Any:
@@ -3703,6 +3711,8 @@ def extract_drawing_context(
     # WP-02 §7.2. Empty means the measurement was not taken — cross-QC did not
     # run, or ran on the whole-set (<=40) path, which does no host grounding.
     cross_qc_discards: dict = {}
+    # Remediation WP-06.1. Recorded on both paths; empty = not recorded.
+    cross_qc_invalid: dict = {}
     cross_stage = StageResult(stage="cross_qc", expected=config.run_cross_qc)
     if config.run_cross_qc:
         if cross_future is None:
@@ -3728,6 +3738,9 @@ def extract_drawing_context(
             # by which the measurement reaches an artifact.
             if getattr(cross_res, "discards", None) is not None:
                 cross_qc_discards = cross_res.discards.to_dict()
+            refused = getattr(cross_res, "invalid", None)
+            if refused is not None:
+                cross_qc_invalid = refused.to_dict()
             # DA-015/DA-028: a sharded run is COMPLETE only when every shard and the
             # cross-shard reconciliation completed and the text budget was not
             # degraded — a failed shard/reconciliation or a silent truncation holds
@@ -3756,6 +3769,14 @@ def extract_drawing_context(
                 cross_res, "reconciliation_completed", True
             ):
                 cross_stage.warnings.append("cross-shard reconciliation incomplete")
+            # Remediation WP-06.1 (B6): items the host refused for an invalid
+            # field are a warning, never a status (the owner's decision; the
+            # counts are observational, like the discards). Placed after the
+            # warnings that decide the status, which lead, as verification's
+            # coverage note does (D-2); run.log and the report's stage table
+            # show the first note and count the rest.
+            if refused is not None and refused.note():
+                cross_stage.warnings.append(refused.note())
             cross_stage.status = "COMPLETE" if cross_complete else "PARTIAL"
         except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
             errors.append(f"Cross-sheet QC: {exc}")
@@ -4044,6 +4065,7 @@ def extract_drawing_context(
         input_inventory=inventory,
         prose_accounting=qc.prose_accounting,
         cross_qc_discards=cross_qc_discards,
+        cross_qc_invalid=cross_qc_invalid,
     )
 
 

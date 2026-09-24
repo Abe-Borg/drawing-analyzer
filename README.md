@@ -907,6 +907,35 @@ indistinguishable from a set that simply had fewer. A failed shard, a failed
 reconciliation, or a degraded budget holds the stage at `PARTIAL` while its
 findings stay usable.
 
+**Uncertain conflicts, refused items and repeats.** When the model is not sure
+two sheets truly conflict, it reports the conflict as a low-severity
+**question**: category `question`, severity `low`, clouded on both sheets on the
+*Low severity* layer. (Before remediation WP-06.1 the prompt asked for a
+severity of `question`, which is a category, not a severity. The host refuses
+any severity but high, medium or low, so exactly those uncertain conflicts were
+dropped, with no count and nothing in the log beyond a routine line, in a stage
+that read complete and was cached.) The host still refuses an item whose shape,
+category, severity or text is invalid, and now **counts** each one, once, under
+the first check that refused it, on both paths. A run that refused items shows a
+stage warning such as *"2 returned item(s) refused for an invalid field
+(severity 2)"* in `run.log` and the report's stage table, and
+`run_manifest.json` carries the counts as `cross_qc_invalid`. The warning never
+changes the stage's status, and a cached result keeps its counts, so a warm run
+shows the same warning.
+
+Two *different* conflicts that quote the same strings on the same two sheets
+(a pump's missing isolation valve and its motor horsepower, both quoting
+`PUMP P-1`) now both survive: before remediation WP-06.1 the pass kept only the
+first of any two conflicts that shared a primary sheet, category, quote and
+legs, whatever they said. Now only reports identical in every field collapse,
+and the findings ledger decides the rest, with the same rule it applies to
+every other channel. The shard calls, the reconciler and the reconcile pair
+calls can each report the same conflict; the ledger folds such re-reports when
+their texts agree, but two reports of one conflict phrased very differently
+stay two findings (the safe error: a real second conflict looks the same to the
+host). Each conflict kept is inked on both sheets and, on an exhaustive run,
+gets its own dual-crop verification call.
+
 Its findings carry **dual anchors**: a primary anchor on one sheet plus one or
 more `also_on` legs on the other sheets in the conflict, each resolved to its own
 sheet (via the set's title-block sheet-ids). The markup writer then clouds
@@ -2216,11 +2245,16 @@ when the recorded acceptance evidence says so (Phase 27, §19.9). The pieces:
   before the findings cap became loss-aware were stored as `complete` after a
   silent truncation, 3 because sheet handles are canonicalized before matching,
   4 because grounding became a real, whole-word match on the anchor's
-  normalizer (remediation WP-05.1), and 5 because that match now folds the
+  normalizer (remediation WP-05.1), 5 because that match now folds the
   brackets and sentence punctuation around each word, as one matcher with the
-  anchor (remediation WP-05.2). Each is a host-side change that no key input
-  covers, so each one made every stored cross-QC result miss once. None of them
-  records the two evidence changes above.
+  anchor (remediation WP-05.2), and 6 because distinct conflicts that quote the
+  same strings are no longer folded into one before the findings ledger, a
+  fact whose quote is only whitespace is no longer sent to the reconciler, and
+  a stored result now carries its count of refused items (remediation WP-06.1;
+  its prompt fix also re-keys every entry, through the prompt text the key
+  holds). Each is a host-side change that no key input covers, so each one made
+  every stored cross-QC result miss once. None of them records the two evidence
+  changes above.
 - **Evidence coverage (zero API calls):**
   `python scripts/measure_evidence_coverage.py --pdf SET.pdf [--export-dir DIR]`
   scans a set without rendering or calling the API and reports how much evidence

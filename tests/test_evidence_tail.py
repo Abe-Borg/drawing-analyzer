@@ -512,8 +512,14 @@ def test_no_cross_qc_contract_bump_was_needed():
     brackets and sentence punctuation off every word, the anchor's own rule,
     which changes which legs and facts are admitted for byte-identical inputs.
     Still nothing from WP-03A.
+
+    It reads 6 since **remediation WP-06.1** (B6, N2): only findings identical
+    in every field collapse (two different conflicts that quote the same
+    strings are no longer folded into one), a whitespace-only fact quote is
+    no longer sent to the reconciler, and the stored result carries its
+    refused-item counts, for byte-identical inputs. Still nothing from WP-03A.
     """
-    assert X._CROSS_QC_CACHE_CONTRACT == 5
+    assert X._CROSS_QC_CACHE_CONTRACT == 6
 
 
 # --------------------------------------------------------------------------- #

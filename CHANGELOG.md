@@ -48,6 +48,58 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Cross-sheet QC dropped every uncertain conflict unseen, and folded
+  different conflicts that quote the same strings into one (remediation
+  WP-06.1; B6, N2).** Two gaps:
+  - **B6.** The cross-QC prompt told the model, when unsure that two sheets
+    truly conflict, to "lower the severity to `question`". `question` is a
+    category; a severity is high, medium or low, and the host refuses anything
+    else. So exactly the conflicts that sentence targeted were dropped, with no
+    count, nothing in the log beyond a routine line (on sets of 40 sheets or
+    fewer only), a stage that read complete, and a result that was cached.
+  - **N2.** Before the findings ledger saw them, the pass kept only the first
+    of any conflicts that shared a primary sheet, category, quote and legs, and
+    that key had no text. Two different conflicts about one pump that quote
+    `PUMP P-1` on both sheets (a missing isolation valve, a motor horsepower
+    that disagrees with the schedule) became one, and the second was lost; so
+    was a second report's higher severity or its recommended action.
+
+  Now, decided with the owner (see the WP-06.1 handoff in
+  `_plans/PROGRESS.md`):
+  - the prompt asks for **category `question` with severity `low`**, and the
+    host still refuses any other severity (validation stays strict);
+  - every refused item is **counted**, once, under the first reason it failed
+    (not an object, category, severity, text), on both paths. The count is a
+    stage warning, never a status: it appears in `run.log` and the report's
+    stage table, and `run_manifest.json` carries it as `cross_qc_invalid`. A
+    cached result keeps its counts;
+  - only reports **identical in every field** collapse; every other report
+    reaches the findings ledger, which decides whether two are one, with the
+    same rule it applies to every other channel;
+  - a map fact whose quote is only whitespace is dropped as having no quote
+    (`facts_no_quote`), like an empty one, instead of being sent to the
+    reconciler as a fact with no text to compare.
+
+  **Visible effect:** uncertain conflicts now appear as low-severity questions,
+  clouded on both sheets on the *Low severity* layer. Distinct conflicts that
+  share a quote no longer vanish: each is its own `QC-###`, inked on both
+  sheets. A dropped item is counted and shown as a stage warning. On an
+  exhaustive run each conflict kept is a dual-crop verification call (and an
+  investigation if the crop cannot settle it), so a set with such conflicts
+  makes more calls than before: new paid work, by design. **Accepted limits**,
+  recorded as tests: two reports of one conflict phrased very differently (by a
+  shard and the reconciler, or by two reconcile calls) stay two findings, since
+  nothing on the host can tell them from two real conflicts (remediation
+  WP-06.4); and the ledger still folds two different conflicts whose terse
+  texts both name the same two sheets (N30, remediation WP-03.5).
+
+  **Cache:** the prompt edit re-keys every cross-QC entry, and the host-side
+  change bumps `cross_qc._CROSS_QC_CACHE_CONTRACT` 5 → 6. Every stored
+  cross-QC result misses once: one paid cross-QC pass per set on the next run
+  (one Opus call for 40 sheets or fewer; the map and reconcile calls above).
+  Digest, critique, identity, review-plan, citation, verification and
+  investigation entries are all kept. See `_plans/DECISIONS.md`.
+
 - **The anchor clouded a tag inside a longer one, and could not place a quote
   that differed from the sheet only in punctuation (remediation WP-05.2; B4's
   punctuation part, N12's anchor part).** The anchor places each finding's

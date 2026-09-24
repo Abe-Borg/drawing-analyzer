@@ -622,6 +622,11 @@ def build_run_manifest(
         # path. Absent/empty means the measurement was not taken (cross-QC did
         # not run, or ran on the whole-set path, which does no host grounding).
         "cross_qc_discards": dict(getattr(ctx, "cross_qc_discards", None) or {}),
+        # Remediation WP-06.1 (B6): the cross-QC items refused for an invalid
+        # field, per reason, on both paths. Counts only. Empty means nothing
+        # was recorded (cross-QC made no call); all zeros means it refused
+        # nothing.
+        "cross_qc_invalid": dict(getattr(ctx, "cross_qc_invalid", None) or {}),
         "evidence": evidence_summary(findings + reference),
         "markup_coverage": _receipt_summary(ctx, roots),
         "errors": [

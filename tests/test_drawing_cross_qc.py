@@ -963,12 +963,19 @@ def test_cross_qc_contract_bumped_for_the_norm_id_fold():
     # sentence punctuation off every word (the anchor's own rule, one matcher),
     # so a leg quoting `RATED 175 PSI TYP` against `RATED 175 PSI, TYP.` is now
     # admitted. Host-side binding again, for byte-identical request inputs.
-    assert X._CROSS_QC_CACHE_CONTRACT == 5
+    #
+    # 6 since remediation WP-06.1 (B6, N2): only findings identical in every
+    # field collapse now (two different conflicts quoting the same strings on
+    # the same sheets are no longer folded into one), a whitespace-only fact
+    # quote is no longer sent to the reconciler, and the stored result carries
+    # its refused-item counts. Host-side binding again, for byte-identical
+    # request inputs.
+    assert X._CROSS_QC_CACHE_CONTRACT == 6
     geom = _geom("a.pdf", "M-101")
     entries = [("M-101", "digest", "text", geom)]
     current = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")
     import pytest as _pytest
-    for previous in (2, 3, 4):
+    for previous in (2, 3, 4, 5):
         with _pytest.MonkeyPatch.context() as mp:
             mp.setattr(X, "_CROSS_QC_CACHE_CONTRACT", previous)
             legacy = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")

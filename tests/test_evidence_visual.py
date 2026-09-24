@@ -655,4 +655,9 @@ def test_contract_counter_is_not_bumped_by_this_package():
     # sentence punctuation off every word, the anchor's rule, which changes
     # which legs and facts are admitted for byte-identical inputs. WP-03B still
     # added nothing.
-    assert X._CROSS_QC_CACHE_CONTRACT == 5
+    #
+    # 6 since remediation WP-06.1 (B6, N2): only findings identical in every
+    # field collapse, a whitespace-only fact quote is no longer sent to the
+    # reconciler, and the stored result carries its refused-item counts, for
+    # byte-identical inputs. WP-03B still added nothing.
+    assert X._CROSS_QC_CACHE_CONTRACT == 6
