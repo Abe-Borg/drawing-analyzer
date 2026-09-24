@@ -685,6 +685,53 @@ def test_a_critique_entry_from_wp_04_1_misses_and_is_never_deleted(tmp_path):
         reopened.close()
 
 
+# The critique keys WP-04.2 wrote (``critique_contract=2``) for the same inputs.
+# WP-01.4 (N4) changed which reads a critique entry may hold: a read the model
+# did not finish (cut off, refused, ended early, an unknown stop) no longer
+# counts, and an entry stores no stop reason to check on the way out, so the
+# contract went to 3. Every entry stored under 2 must miss once, and no other
+# key may move.
+_CRITIQUE_KEYS_UNDER_CONTRACT_2 = {
+    "critique_l2": "bbd4c6ee8316c8e8a3c455d0bf744da610cd649f4ad112a16fb6062bde14a2e8",
+    "critique_l1": "352574ba8bfbd70370459e94740d2976ccef863caffbee65f5a8de328abd5d7f",
+    "critique_l2_profiles_structured":
+        "1fd5bcffc18ef45d54407596b2e1740fb2ababf22da0ab64d899b325a8599884",
+    "critique_l1_profiles_structured":
+        "ca38e3b973bbf13be4ecfb31be0d80461246844031ccc5667563f7db3d1fcd1a",
+}
+
+
+def test_wp_01_4_moves_every_critique_key_and_no_other_key():
+    now = _current_keys()
+    for name in _CRITIQUE_KEYS:
+        assert now[name] != _CRITIQUE_KEYS_UNDER_CONTRACT_2[name], (
+            f"{name}: an entry that may hold an unfinished read would still hit")
+    for name in _OTHER_KEYS:
+        assert now[name] == _KEYS_BEFORE_WP_04_1[name], f"{name}: a paid entry was orphaned"
+
+
+def test_a_critique_entry_from_wp_04_2_misses_and_is_never_deleted(tmp_path):
+    path = tmp_path / "digest_cache.json"
+    cache = DigestCache(path, persist=True)
+    stale = {"findings": [], "claims": [], "runs": 2, "requested_runs": 2,
+             "completed_runs": 2, "input_tokens": 1, "output_tokens": 1}
+    cache.put(_CRITIQUE_KEYS_UNDER_CONTRACT_2["critique_l1"], stale)
+    cache.put(_CRITIQUE_KEYS_UNDER_CONTRACT_2["critique_l2"], stale)
+    cache.put(_KEYS_BEFORE_WP_04_1["digest_l1"], {"text": "digest", "stop_reason": "end_turn"})
+    cache.close()
+
+    reopened = DigestCache(path, persist=True)
+    try:
+        now = _current_keys()
+        assert reopened.get(now["critique_l1"]) is None
+        assert reopened.get(now["critique_l2"]) is None
+        assert reopened.get(now["digest_l1"]) == {"text": "digest", "stop_reason": "end_turn"}
+        assert reopened.get(_CRITIQUE_KEYS_UNDER_CONTRACT_2["critique_l1"]) == stale
+        assert reopened.get(_CRITIQUE_KEYS_UNDER_CONTRACT_2["critique_l2"]) == stale
+    finally:
+        reopened.close()
+
+
 # The merge rule a stored critique was produced under, fingerprinted over a
 # fixed corpus: the critical signature of every finding, the pairwise duplicate
 # verdict, and the self-consistency merge of the corpus read as two reads. A
@@ -790,6 +837,10 @@ def _merge_rule_fingerprint() -> str:
 _MERGE_RULE_BY_CRITIQUE_CONTRACT = {
     1: "fa3623035836987525e786ff44597ec1cdf2cc59e1dffbff6a07ef278f3614bb",  # WP-04.1
     2: "63dbfe17b7cb08dc9eda2a098658dca89c9ca5432283ecad01dbf65783470dd8",  # WP-04.2
+    # WP-01.4 bumped the contract for what an entry may hold (only reads the
+    # model finished), not for the merge rule, which is unchanged: the same
+    # fingerprint as under 2.
+    3: "63dbfe17b7cb08dc9eda2a098658dca89c9ca5432283ecad01dbf65783470dd8",  # WP-01.4
 }
 
 

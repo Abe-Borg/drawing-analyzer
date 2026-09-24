@@ -441,7 +441,11 @@ def _outcome_from_envelope(
     success): the merge runs over surviving reads and this sheet is honestly marked
     partial. A ``succeeded`` envelope is handed to the shared
     :func:`~drawing_analyzer.critique.outcome_from_message`, so a batched read is
-    judged, provenance-stamped, and billed identically to a real-time one.
+    judged, provenance-stamped, and billed identically to a real-time one. That
+    includes the stop reason (D-1; remediation WP-01.4, N4): ``succeeded`` means
+    the request was served, not that the model finished, so a read inside it
+    cut off at ``max_tokens``, refused, with no stop reason or with an unknown
+    one fails there, however complete its findings object looks.
     """
     if env is None:
         return CritiqueRunOutcome(
@@ -557,9 +561,11 @@ def collect_critique_batch(
                     label=slot.ref.display_label,
                 )
                 slot.result = res
-                # Cache only a *complete* result — every requested read parsed. A
-                # partial (a read failed) is returned but never frozen under the
-                # full-runs key (DA-008), mirroring the real-time path. The write is
+                # Cache only a *complete* result — every requested read finished
+                # and parsed (remediation WP-01.4: a read the model did not finish
+                # never counts). A partial (a read failed) is returned but never
+                # frozen under the full-runs key (DA-008), mirroring the real-time
+                # path. The write is
                 # best-effort: a cache I/O failure must never discard this (or any
                 # not-yet-merged) already-collected result by unwinding the loop.
                 if (

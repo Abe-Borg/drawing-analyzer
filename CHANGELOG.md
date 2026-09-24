@@ -48,6 +48,70 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A critique read the model did not finish counted as a completed read, and
+  was cached (remediation WP-01.4; N4, critique part).** Each critique read's
+  stop reason was read only to word an empty reply. So on both transports a
+  read cut off at `max_tokens` or the context window, a refusal, a stream that
+  ended without a stop reason, a `tool_use` / `pause_turn` / `compaction`
+  continuation and any unknown stop counted as a complete read whenever its
+  findings object parsed (a closed block, an explicit `{"findings": []}`, or an
+  unclosed block whose JSON was complete). It was merged as corroboration (a
+  finding both reads raised read `REPRODUCED`), stored at both cache levels and
+  served on every later run as a complete critique. Separately, a sheet whose
+  second read failed outright beside a first read that shipped findings read
+  `COMPLETE`: it was never cached, so every warm run critiqued and billed it
+  again, and read `COMPLETE` each time.
+
+  Now, decided with the owner (see the WP-01.4 handoff in
+  `_plans/PROGRESS.md`):
+  - **Only a read the model finished counts** (`end_turn`, `stop_sequence`;
+    D-1). `critique.outcome_from_message`, the one place both transports and
+    both cache levels judge a read, reads the stop reason first through the
+    digest's ladder, now given a noun
+    (`digest.digest_terminal_error(..., noun="critique")`): `truncated critique
+    (stop_reason='max_tokens')`, `refused critique (stop_reason='refusal')`
+    (named even when the reply is empty), `unfinished critique
+    (stop_reason=None)`; an empty reply still reads `empty critique
+    (stop_reason=…)`. The digest's wording is unchanged.
+  - **Such a read keeps nothing**, like a malformed read: its findings are not
+    merged and its numeric claims never reach the arithmetic check. Its tokens
+    are still counted. The sheet's finished read still ships its findings,
+    marked `NOT_ASSESSED_PARTIAL`.
+  - **The critique stage counts reads** (D-2's item rule, which verification
+    already follows). Its items are the requested reads (sheets × 2) and the
+    ones the model finished with a valid findings object (the stage table's
+    `4 → 3`); it is `COMPLETE` only when every read counted, `FAILED` when none
+    did (it used to read `PARTIAL`), and `PARTIAL` otherwise. Its first warning
+    says what fell short (`critique: 3 of 4 requested read(s) judged; 0
+    skipped, 1 returned no judgment`), and its errors name each short sheet
+    (`M-101.pdf (page 1/1): 1 of 2 critique read(s) finished: truncated
+    critique (stop_reason='max_tokens')`). A cached sheet counts both reads.
+  - **The sheet's usage record agrees**: `COMPLETE` (and `parse_success`) only
+    when every read counted, `FAILED` when none did, else `PARTIAL`. It used to
+    read the sheet's error alone, so a sheet with one failed read recorded
+    `COMPLETE`, and one with none recorded `PARTIAL`.
+  - **Only a critique whose every read finished is cached**, at either level,
+    on either transport, and the critique cache's contract term
+    (`digest_cache._CRITIQUE_CACHE_CONTRACT`) goes from 2 to 3, so an entry
+    written before this, which may hold a cut-off read merged as a complete
+    one, is not served. Nothing is deleted, and no other cache key moves:
+    digest, identity, review-plan, citation and investigation entries are
+    still served. The entry's shape is unchanged (it stores no stop reasons).
+
+  **Visible effect:** the next exhaustive run re-runs the critique on every
+  sheet once (one cold critique pass; with the unreleased WP-04.1 and WP-04.2
+  bumps, a 1.7.0 install pays it once for all three). A sheet whose critique
+  read was cut off, refused or ended early is named in the critique stage's
+  errors and holds the stage, and so the run's QC status, below `COMPLETE`, and
+  it is read again (and billed) on each run until a run finishes both reads. A
+  critique in which no read counted reads `FAILED` instead of `PARTIAL`. The
+  critique stage's items in `run.log`, the report's stage table and
+  `run_manifest.json` count reads, not findings. No pinned test assertion
+  changed: the one edit to a pinned file pins the unchanged merge-rule
+  fingerprint under contract 3. New tests:
+  `tests/test_critique_terminal_outcome.py`, and the WP-01.4 section of
+  `tests/test_drawing_cache_identity.py`.
+
 - **A retry could throw away a sheet's better read, and the findings of a read
   the model did not finish were reviewed like any other (remediation WP-01.3;
   N16, N15).**

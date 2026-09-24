@@ -139,7 +139,9 @@ holds a required stage at PARTIAL, which the roll-up can never call COMPLETE).
 decides a stage from what it was required to judge, after the failure flags:
 nothing eligible is `SKIPPED_VALID`, everything judged `COMPLETE`, nothing
 judged `FAILED` (the all-failed rule), anything between `PARTIAL`. Verification
-is the first stage on it (remediation WP-01.1, N5). A later stage that
+is the first stage on it (remediation WP-01.1, N5), the critique the second
+(remediation WP-01.4, N4: its items are reads, and only a read the model
+finished with a valid findings object is judged). A later stage that
 recovers an item reports it on its own record and never rewrites the earlier
 one, and the roll-up does not recognise recovery.
 
@@ -529,7 +531,34 @@ reporter of last resort must never raise from inside Tk's handler.
   section (I-2). Identity also feeds `check_citations(identity=)` (merged
   editions + jurisdiction line) and `cross_sheet_qc(identity=)` (preamble).
 - *Finders:* the digest's findings block; `critique.py` (a second full-coverage
-  vision read, run twice — self-consistency merge sets `reproduced`; on the
+  vision read, run twice — self-consistency merge sets `reproduced`. **Only a
+  read the model finished counts** (remediation WP-01.4, N4; the owner's
+  rules): `critique.outcome_from_message`, the one site both transports and
+  both cache levels flow through, reads the stop reason first through the
+  digest's ladder with the noun `critique`
+  (`digest.digest_terminal_error(..., noun="critique")`), so a read cut off
+  at `max_tokens` or the context window, refused (named even when empty), with
+  no stop reason (N27), a continuation (the critique declares no tools) or an
+  unknown stop is FAILED however complete its findings object looks, and
+  keeps nothing, like a malformed read: no findings, no claims for the
+  arithmetic auditor; its tokens stay billed. It used to count whenever the
+  object parsed (`PARSED_UNCLOSED` included; `FINDINGS_PARSE_OK` is unchanged,
+  the digest salvages that shape at `end_turn`), merge as corroboration and be
+  cached at both levels. `CritiqueResult.read_errors` (runtime-only) keeps
+  each failed read's error, and `critique.critique_shortfall` names a sheet
+  short of its requested reads even when its surviving read shipped findings
+  (`error` stays `None` there). The critique stage adopts **D-2's item rule**
+  (`pipeline._CritiqueReadTally`, filled through `_run_critique_stage`'s
+  `read_tally` sink): its items are reads, eligible = sheets × requested reads
+  (never below the tally), judged = reads the model finished with a valid
+  findings object (a cache hit counts all its reads), each other read failed
+  or, for a sheet with no input, skipped; COMPLETE only when every read was
+  judged, FAILED when none was (it read PARTIAL), else PARTIAL, and a
+  coverage line (`critique: 3 of 4 requested read(s) judged; 0 skipped, 1
+  returned no judgment`) leads the warnings. One finished read of two used to
+  read COMPLETE, cache nothing and be re-billed on every warm run. The
+  per-sheet usage record agrees: COMPLETE only when every read counted,
+  FAILED when none did, else PARTIAL. On the
   real-time path the two byte-identical reads prompt-cache their shared image
   prefix when `runs>=2`, so the second bills it at ~0.1× — cache write/read tokens
   ride the ledger; the parallel batch path stays uncached, and `use_batch` resolves
@@ -972,7 +1001,9 @@ reporter of last resort must never raise from inside Tk's handler.
   only beside a pole count, an overcurrent device or a rating label: a room
   `101A` read as a current would put a quantity nobody wrote into two findings'
   signatures. The critique cache stores post-merge findings, so the tokenizer and
-  the rule ride `digest_cache._CRITIQUE_CACHE_CONTRACT` (2 since WP-04.2), a term
+  the rule ride `digest_cache._CRITIQUE_CACHE_CONTRACT` (2 since WP-04.2; 3
+  since remediation WP-01.4, which changed which reads an entry may hold and
+  not the rule, so the same fingerprint is pinned under 3), a term
   inside both critique key builders and nothing else, never `_SCHEMA_VERSION`;
   `tests/test_drawing_cache_identity.py` pins the rule's fingerprint to its
   value, so a rule change that forgets the bump fails). One more gate precedes
@@ -1392,8 +1423,10 @@ author and left a rotated-key report dead.
 `core/` is a shared kernel (model ids + env overrides in `api_config.py`, key
 store, pricing, tokenizer, the structured-outputs gate, and
 `terminal_outcome.py`, the one stop-reason classifier: D-1, adopted so far by the
-digest's two transports only, with the other response consumers moving onto it
-in their WP-01 slices rather than growing a second copy). The tokenizer is
+digest's two transports and, since remediation WP-01.4, the critique's (through
+the digest's ladder, `digest_terminal_error(..., noun="critique")`), with the
+other response consumers moving onto it in their WP-01 slices rather than
+growing a second copy). The tokenizer is
 estimate-only: `tiktoken` was removed — its only two callers had no callers,
 and it fetched its encoding from a third-party host on first use, which a
 locked-down workstation blocks — so the exact count is `count_tokens_via_api`
@@ -1423,8 +1456,9 @@ example is parked at `docs/examples/fire_protection.md`.
 - **I-6 — cache correctness:** prompt versions are content hashes
   (`DIGEST_PROMPT_VERSION`, `CRITIQUE_PROMPT_VERSION`), so prompt edits
   auto-invalidate; `digest_cache._SCHEMA_VERSION` is manual — bump it whenever
-  what is stored or sent changes. The critique's host merge rule is the
-  exception: it has its own term, `_CRITIQUE_CACHE_CONTRACT`, folded into the two
+  what is stored or sent changes. The critique's host merge rule, and which
+  reads a critique entry may hold (remediation WP-01.4), are the
+  exception: they have their own term, `_CRITIQUE_CACHE_CONTRACT`, folded into the two
   critique builders only, because the schema version feeds every builder and
   its v10 bump re-billed every digest to invalidate critiques. A hash only
   covers what it is given: the

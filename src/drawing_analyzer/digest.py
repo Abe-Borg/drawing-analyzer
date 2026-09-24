@@ -1497,13 +1497,22 @@ def claims_from_cache(hit: dict, ref: SheetRef | None = None) -> list[NumericCla
     return out
 
 
-def digest_terminal_error(raw_text: str, stop_reason: Any) -> str | None:
+def digest_terminal_error(
+    raw_text: str, stop_reason: Any, *, noun: str = "digest"
+) -> str | None:
     """The sheet's error for one digest reply, or ``None`` for a finished one.
 
     The one ladder both transports apply: :func:`digest_sheet` (also behind
     batch's Files-API inline fallback) and
     ``batch_digest._digest_from_message`` (also behind the direct-call rescue).
     So a reply cannot pass on one transport and fail on the other.
+
+    ``noun`` names what the reply was. The critique applies the same ladder to
+    each of its reads with ``noun="critique"`` (remediation WP-01.4, N4;
+    ``critique.outcome_from_message``, behind both critique transports), so a
+    critique read's error reads ``refused critique (…)``, ``empty critique
+    (…)``, ``truncated critique (…)`` or ``unfinished critique (…)``, and the
+    rule is stated once.
 
     The stop reason decides first
     (:func:`~drawing_analyzer.core.terminal_outcome.classify_stop_reason`), and
@@ -1524,17 +1533,17 @@ def digest_terminal_error(raw_text: str, stop_reason: Any) -> str | None:
     if outcome.kind == REFUSED:
         # Named even when the refusal came back empty. "Declined" is the fact
         # a reader can act on, and "empty digest" would hide it.
-        return f"refused digest (stop_reason={stop_reason!r})"
+        return f"refused {noun} (stop_reason={stop_reason!r})"
     if not raw_text:
-        return f"empty digest (stop_reason={stop_reason!r})"
+        return f"empty {noun} (stop_reason={stop_reason!r})"
     if outcome.finished:
         return None
     if outcome.kind == TRUNCATED:
-        return f"truncated digest (stop_reason={stop_reason!r})"
+        return f"truncated {noun} (stop_reason={stop_reason!r})"
     # UNFINISHED (no stop reason: a stream that ended early, N27), CONTINUATION
-    # (the digest declares no tools and never resumes a paused turn) and
-    # UNKNOWN (never finished).
-    return f"unfinished digest (stop_reason={stop_reason!r})"
+    # (neither the digest nor the critique declares tools or resumes a paused
+    # turn) and UNKNOWN (never finished).
+    return f"unfinished {noun} (stop_reason={stop_reason!r})"
 
 
 def digest_cache_admits(*, error: str | None, text: str, stop_reason: Any) -> bool:

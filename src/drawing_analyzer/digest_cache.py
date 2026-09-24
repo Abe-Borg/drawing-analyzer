@@ -92,8 +92,9 @@ _SCHEMA_VERSION = 10
 # into nothing else. A critique entry stores the POST-MERGE findings of its reads
 # (``critique.critique_cache_entry_from_result``), so the host's merge rule
 # (``critique.critical_signature``, ``signature_conflicts``, ``_is_duplicate``)
-# is part of what a stored critique means, exactly as the prompt is. A change to
-# that rule bumps this, and only this: it invalidates the critique namespace and
+# is part of what a stored critique means, exactly as the prompt is, and so is
+# the rule for which reads may be merged into it (their admission). A change to
+# either bumps this, and only this: it invalidates the critique namespace and
 # leaves every digest, identity, plan, citation and investigation entry alone
 # (plan §2 rule 6). It rides both levels for the reason ``structured_key`` does:
 # level 1 is probed before rendering and answers first, so a term on level 2
@@ -111,7 +112,15 @@ _SCHEMA_VERSION = 10
 #   kind and tags by inclusion. An entry stored under 1 holds merges the new rule
 #   would refuse (``6 in`` and ``4 in`` beside a shared ``100 psi``), so it
 #   misses once and is re-critiqued. It is left on disk, never deleted.
-_CRITIQUE_CACHE_CONTRACT = 2
+# 3 (remediation WP-01.4, N4): a critique read the model did not finish (cut
+#   off at ``max_tokens`` or the context window, refused, a stream that ended
+#   without a stop reason, a continuation or an unknown stop) no longer counts
+#   as a completed read, even when its findings object parsed. An entry stored
+#   under 2 can hold such a read merged as a complete, corroborating one, and
+#   stores no stop reason to check on the way out, so it misses once and is
+#   re-critiqued. It is left on disk, never deleted. The merge rule itself is
+#   unchanged (its fingerprint is pinned under 3 as it was under 2).
+_CRITIQUE_CACHE_CONTRACT = 3
 
 # Storage format and concurrency settings are intentionally separate from the
 # content schema above.  ``_SCHEMA_VERSION`` invalidates cached model results;
@@ -319,7 +328,8 @@ def critique_cache_key_level1(
 
     ``_CRITIQUE_CACHE_CONTRACT`` is folded here and in :func:`critique_cache_key`
     unconditionally, from the module, never passed by a caller, so the probe and
-    the store cannot disagree about which merge rule an entry was produced under.
+    the store cannot disagree about which merge rule, or which rule for the
+    reads it may hold (remediation WP-01.4), an entry was produced under.
     """
     h = hashlib.sha256()
     for part in (
@@ -398,9 +408,10 @@ def critique_cache_key(
     one re-read each way instead of invalidating both sides.
 
     ``_CRITIQUE_CACHE_CONTRACT`` versions the host merge rule the stored
-    findings were produced under (see its definition). It is folded on every
-    call, unlike ``profiles_key`` and ``structured_key``: its whole purpose is
-    to make every entry written under an older rule miss.
+    findings were produced under, and which reads the merge may take (only
+    reads the model finished, since remediation WP-01.4; see its definition).
+    It is folded on every call, unlike ``profiles_key`` and ``structured_key``:
+    its whole purpose is to make every entry written under an older rule miss.
     """
     h = hashlib.sha256()
     for part in (
