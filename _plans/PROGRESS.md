@@ -109,7 +109,7 @@ starting.
 | WP-07.1 | Occurrence-aware, sheet-grounded operand support; provenance decided after anchoring; a fabricated quote or unresolved sheet is never DETERMINISTIC (N3) | M | — | done | [PR #163](https://github.com/Abe-Borg/drawing-analyzer/pull/163), 2026-09-23. **Rule decided with the owner (three choices, measured first):** a mismatch is TEXT_EXTRACTED / DETERMINISTIC only when the claim resolved to a sheet, its quote anchored there EXACT or FUZZY by a numerically vetoed method (`anchor.numbers_grounded`, fail-closed on method; never TILE or UNANCHORED), and the terms and the stated value together fit, one occurrence each, the numbers that both the quote and the sheet's words under the matched span print (`arithmetic._operands_grounded`, per value the smaller count; `anchor.resolve_anchors(matched_text=)`). Every mismatch is built MODEL_TRANSCRIBED and promoted after the auditor's own anchoring pass; a failure while deciding, or anchoring one sheet, leaves it UNCERTAIN. Ids, text, severity and the verification note's wording are unchanged; no cache or key effect. Tests: `tests/test_arithmetic_operand_grounding.py`; the three pinned `audit_arithmetic(..., [])` tests re-baselined with sheet words |
 | WP-07.2 | Strict numeric tokens (tag and sheet-id digits, hyphen-as-minus, `1e3`) and host-side relationship checks (A8) | M | WP-07.1 | done | [PR #164](https://github.com/Abe-Borg/drawing-analyzer/pull/164), 2026-09-23. **Rules decided with the owner (three choices, measured first):** (1) scientific notation is rejected (`1e3`, `2.5e-2`, `2E1` are not one value; a term spelled that way makes its claim unusable); (2) digits glued after a letter, with or without a hyphen, are a tag's (`FP101`, `M-101`, `AHU-2`, `A1.01`) and a hyphen after a letter is never a minus sign; letters after a number are its unit (`20A`, `150GPM`) unless digits follow them directly (`24x12`, `2P20A`, `10A1`, `100m2`: refused), in `parse_number` (`_NUMERIC_TAIL_RE`) and the scanner (`_head_denies`) alike, with Unicode dashes, the fraction slash, `×` between digits and glued vulgar fractions refused the same way; (3) `arithmetic._relationship_grounded`: the quote AND the sheet's words under the span each print the claim as one equation (`_equations`: the result is the first number after `=` or TOTAL, the operands are exactly the terms, every join is `+` for a sum or `x`/`×`/`*` for a product; an operator-less list is a sum only with TOTAL). Every change only refuses, so no surviving finding's text or id moves; no cache key changes (one stored-claims residual in the migration register). Tests: `tests/test_arithmetic_tokens_and_relationships.py`; no pinned test re-baselined |
 | WP-05.1 | Cross-QC grounding: a real match for every non-empty quote at word boundaries; no text means unavailable evidence; one normalizer shared with `anchor`; `_CROSS_QC_CACHE_CONTRACT` 3→4 (B5, N12 cross-QC part, N13) | M | — | done | [PR #165](https://github.com/Abe-Borg/drawing-analyzer/pull/165), 2026-09-23. **Rules decided by the owner (four choices, measured first):** (1) a match covers whole source words: it may start and end only on a word's core (`anchor.word_core`: the whitespace-delimited word without leading `( [ { < " '` or trailing `) ] } > , ; : . ! ? " '`); (2) the rule is defined once, in `anchor.py`, for WP-05.2 to apply to `_Stream`'s words; (3) the evidence is normalized one source word at a time with the unchanged `anchor._normalize` (`anchor.SourceWords`, exactly `_normalize(text)`), and `cross_qc._norm_for_match` is `_normalize`, so the tile join folds the same way; (4) any length gets a real match (no floor). `classify_quote_evidence` asks in the plan's order: no quote, no usable text (`_sheet_is_textless`, now on the normalizer), the match, the word-free tile, NOT_MATCHED. Accepted cost: a tag inside a list written without spaces (`P-1,P-2`) does not match. `_CROSS_QC_CACHE_CONTRACT` 3 → 4 (one migration-register row; retires the WP-03.3 and WP-07.2 stored-claims residuals). No anchor changes: `_normalize` is untouched and every anchor test passes unchanged. Tests: `tests/test_cross_qc_grounding.py`; `tests/test_evidence_visual.py::test_a_recovered_finding_reaches_verification_and_investigation` extended to `P-1`, `AHU-1`, `M-101`; the three contract tripwires re-baselined |
-| WP-05.2 | Anchor punctuation folding and a source-word-boundary rule (B4: `PSI,`, `NOTE 3:`, `(568 L/MIN)`; N12 anchor part: `VAV-2` in `VAV-2-1`) | M | — | done | [PR #166](https://github.com/Abe-Borg/drawing-analyzer/pull/166), 2026-09-24. **Rules decided by the owner (four choices, measured first):** (1) whole source words in every tier: EXACT and the sub-phrase tier match through `anchor.SourceWords` (the WP-05.1 `word_core`, the matcher cross-QC uses), a fuzzy window starts and ends on whole words (`_Stream.on_word_edges`), and inside a window a quote's measurement may not match part of a sheet word (`anchor._measurements_whole`); measured: a boundary on EXACT alone moves every refused match to the window at 100% overlap, and window edges alone miss the 17-token note; (2) `anchor.fold_word` folds leading `( [ {` and trailing `) ] } , ; : . ! ?` off every word, sheet and quote alike (never `"` `'` `<` `>` `%` `/` `-` or a leading `.`); (3) cross-QC grounds through the same matcher, `_CROSS_QC_CACHE_CONTRACT` 4 → 5 (one register row); (4) a folded match keeps EXACT/`exact`, so `numbers_grounded` holds. `anchor._normalize` untouched. Tests: `tests/test_anchor_whole_words.py` (incl. one agreement table through both matchers). Re-baselined: three arithmetic tests (given the case they model), the three contract tripwires, and the WP-05.1 reference matcher. Recorded limits: a letter-only tag (`VAV-A` in `VAV-A-1`) in a long window; a sub-phrase dropping a unit printed as its own word; B4's four character-stream cases (WP-05.3) |
+| WP-05.2 | Anchor punctuation folding and a source-word-boundary rule (B4: `PSI,`, `NOTE 3:`, `(568 L/MIN)`; N12 anchor part: `VAV-2` in `VAV-2-1`) | M | — | done | [PR #166](https://github.com/Abe-Borg/drawing-analyzer/pull/166), 2026-09-24. **Rules decided by the owner (four choices, measured first):** (1) whole source words in every tier: EXACT and the sub-phrase tier match through `anchor.SourceWords` (the WP-05.1 `word_core`, the matcher cross-QC uses), a fuzzy window starts and ends on whole words (`_Stream.on_word_edges`), and inside a window a quote's measurement may not match part of a sheet word (`anchor._measurements_whole`); measured: a boundary on EXACT alone moves every refused match to the window at 100% overlap, and window edges alone miss the 17-token note; (2) `anchor.fold_word` folds leading `( [ {` and trailing `) ] } , ; : . ! ?` off every word, sheet and quote alike (never `"` `'` `<` `>` `%` `/` `-` or a leading `.`); (3) cross-QC grounds through the same matcher, and its fact-tile join keys on the same folded form (Codex review, fixed in this PR), `_CROSS_QC_CACHE_CONTRACT` 4 → 5 (one register row); (4) a folded match keeps EXACT/`exact`, so `numbers_grounded` holds. `anchor._normalize` untouched. Tests: `tests/test_anchor_whole_words.py` (incl. one agreement table through both matchers). Re-baselined: three arithmetic tests (given the case they model), the three contract tripwires, and two WP-05.1 tests (its reference matcher and its join-key normalizer test). Recorded limits: a letter-only tag (`VAV-A` in `VAV-A-1`) in a long window; a sub-phrase dropping a unit printed as its own word; B4's four character-stream cases (WP-05.3) |
 | WP-06.1 | Cross-QC prompt says category `question` with severity `low`; invalid-field counters on both paths; candidate duplicates go to the ledger instead of being destroyed (B6, N2) | S/M | — | todo | From WP-05.1 (found, not fixed): `_parse_facts` drops a fact only when `exact_quote` is empty (`if not exact_quote`), so a whitespace-only one is classified (blank, so TEXT_EVIDENCE_UNAVAILABLE) and **admitted** at reduced trust, counted in `facts_admitted_no_text_evidence` although it is a no-quote fact (`facts_no_quote`) and useless to the reconciler. `_finding_from_handles` already tests `.strip()` for legs. Present before WP-05.1; an invalid-field counter's job |
 | WP-09.1 | Boilerplate filter with repeatable qualifiers; negation-aware synthesis conflict extraction (B11, N11) | S | — | todo | |
 | WP-09.2 | Prose matching rejects signature-incompatible candidates; per-item outcome counters; labelled paraphrase corpus (no threshold change) (N10, U11) | M | WP-04.2, WP-09.1 | todo | |
@@ -522,10 +522,29 @@ what could not be verified, risks, and next steps.
     - Docstrings: the module docstring (the tiers, and its false "folds most
       of them"), `_NUMBER_GROUNDING_METHODS`, `resolve_anchors`.
   - **`cross_qc.py`:** `_CROSS_QC_CACHE_CONTRACT` 4 → 5 with its reason, and
-    the `_grounded` docstring. Its code is unchanged: `_grounded` already
-    called `source_words(text).contains(quote)`. The fact-tile join keeps
-    `_normalize`: it compares two model-written quotes and does not use the
-    word fold.
+    the `_grounded` docstring (`_grounded` already called
+    `source_words(text).contains(quote)`, so grounding needed no code change).
+    The fact-tile join keys on the same folded form (`_norm_for_match` is
+    `anchor._fold_text`), and a quote that folds to nothing joins nothing:
+    the Codex review, below.
+  - **Codex review, P2, fixed in this PR** ("use the folded form for cross-QC
+    fact tile joins"). The first push kept `_norm_for_match` (the join key) on
+    `_normalize` alone. So a leg that grounded only through the fold (the fact
+    recorded `RATED 175 PSI, TYP.`, the reconcile call quoted `RATED 175 PSI
+    TYP`) lost its fact's tile, which on a scanned sheet is its only location:
+    UNANCHORED, and no crop check. And two facts spelled apart only by that
+    punctuation, in different tiles, did not collide, so a leg took one tile
+    by guess. Both reproduced on the first push (`7e2f4c4`). Root cause, not
+    only the example: the join key is the matcher's own form, so the two can
+    never again disagree on what is "the same text"; a quote that folds to
+    nothing (a comma, brackets, blanks) names no text and joins nothing, which
+    also closes a join WP-05.1 left open (a blank leg quote inherited a
+    whitespace-only fact's tile). Instrumented over the whole suite: 69 lookup
+    builds and 14 lookup sites (legs without a model tile label), of which 5
+    builds and 1 site change, all in the new tests. Re-baselined:
+    `tests/test_cross_qc_grounding.py::test_n13_cross_qc_matches_with_the_anchors_normalizer`,
+    which pinned the join key as `_normalize` alone; it now reads the rule
+    directly (the inline `_fold`), and still checks the N13 folds.
 - **Speed.** Measured on synthetic dense sheets with 60 quotes each:
   - 3,000 words: 0.05 s, against 0.07 s on `origin/main`;
   - 15,000 words: 0.23 s, against 0.35 s.
@@ -548,7 +567,7 @@ what could not be verified, risks, and next steps.
   - No other key, prompt version, schema or finding id changed.
     `tests/test_drawing_cache_identity.py`, `tests/test_source_identity.py` and
     `tests/test_ab_findings_diff.py` pass unchanged.
-- **Re-baselined tests (7)**, each with its reason recorded in the test:
+- **Re-baselined tests (8)**, each with its reason recorded in the test:
   - **Arithmetic, each given the case it models under the new rule:**
     - `tests/test_arithmetic_operand_grounding.py::test_a_fuzzy_anchor_with_the_numeric_veto_grounds_its_operands`:
       its one differing token was `TEST:`, which now folds and so no longer
@@ -566,14 +585,18 @@ what could not be verified, risks, and next steps.
   - **`tests/test_cross_qc_grounding.py::test_the_matcher_gives_the_rules_answer_everywhere`:**
     its reference matcher, `_reference_contains` ("the rule read directly"),
     gains the fold. It is written out inline, so the base can still import it.
+  - **`tests/test_cross_qc_grounding.py::test_n13_cross_qc_matches_with_the_anchors_normalizer`**
+    (with the Codex fix): the join key is the folded form, read inline the same
+    way.
 
   **Checked both ways:**
   - `origin/main`'s versions of the five edited files, run against the fixed
-    tree, fail exactly these 7; the other 254 pass, including all of
+    tree, fail exactly these 8; the other 253 pass, including all of
     `tests/test_drawing_anchor.py`, unchanged.
-  - The edited files, run against the base, fail 5 (the tripwires, the
-    reference matcher, the `2-1/2"` case). The other 220 pass, including the
-    two arithmetic re-baselines, whose new constructions hold on both trees.
+  - The edited files, run against the base, fail 6 (the tripwires, the
+    reference matcher, the join-key test, the `2-1/2"` case). The other 219
+    pass, including the two arithmetic re-baselines, whose new constructions
+    hold on both trees.
 - **Fixture effects, instrumented over the whole fixed suite** (at 197 new
   tests, before the five punctuation-only cases). A scratch copy loaded
   `origin/main`'s `anchor.py` beside the new one.
@@ -584,7 +607,7 @@ what could not be verified, risks, and next steps.
     re-baselined `2-1/2"` sub-case.
   - 10 grounding verdicts, 1 arithmetic promotion and 1 renumbering change,
     all in the new file.
-- **New tests:** `tests/test_anchor_whole_words.py` (202 tests):
+- **New tests:** `tests/test_anchor_whole_words.py` (207 tests):
   - **B4:** the three pairs and the tag forms, with the span as printed;
     quote-side punctuation; `"` `'` `<` `>` left outside a match's ends; a lone
     punctuation word; verbatim quotes unchanged; the veto over a punctuated
@@ -597,14 +620,17 @@ what could not be verified, risks, and next steps.
     separated unit.
   - **Agreement:** one table of 102 rows through both matchers (EXACT exactly
     where cross-QC grounds); cross-QC admits such legs and facts; the WP-05.1
-    `P-1,` disagreement is closed; a punctuation-only quote matches nothing.
+    `P-1,` disagreement is closed; a punctuation-only quote matches nothing;
+    the tile join (a reconciled leg inherits its fact's tile across folded
+    punctuation and is then crop-verifiable; two such spellings in different
+    tiles collide; a quote that folds to nothing locates nothing).
   - **The rule is defined once** (the fold sets pinned against word_core's).
   - **Consumers:** arithmetic both ways; verification and investigation both
     ways; the pipeline.
   - **Cost:** the anchor over one long run.
 
   **Failing first:** run in a `git archive` copy of `origin/main` and
-  classified from `--junitxml`: **81 failed on behaviour, 2 only on the new API**
+  classified from `--junitxml`: **86 failed on behaviour, 2 only on the new API**
   (`WORD_LEADING_FOLD`, `SourceWords(words=)`), **119 passed**. The passes pin
   what the fix keeps: the negatives, the whole-word matches, the recorded
   limits, the agreement rows that already agreed, and the cost guard.
@@ -648,7 +674,9 @@ what could not be verified, risks, and next steps.
   - The full suite after the change:
     - **3,721 passed, 2 skipped, 10 deselected** (222 s), with 197 new tests;
     - **3,726 passed, 2 skipped, 10 deselected** after the five
-      punctuation-only cases (203 s; the final count).
+      punctuation-only cases (203 s; the first push);
+    - **3,731 passed, 2 skipped, 10 deselected** with the Codex fix's five
+      join tests (213 s; the final count).
 
     The same two environment skips (IPv6 loopback; chmod as root).
   - Browser suite: not run separately. No report JS, HTML or chat code

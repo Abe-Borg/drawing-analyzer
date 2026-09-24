@@ -387,9 +387,20 @@ _NORMALIZER_CORPUS = [
 
 
 def test_n13_cross_qc_matches_with_the_anchors_normalizer():
-    """One policy: the grounding match and the tile join both use it."""
+    """One policy: the grounding match and the tile join both use it.
+
+    Since remediation WP-05.2 that policy is the anchor's normalizer applied
+    word by word, then each word's edge brackets and sentence punctuation
+    folded (:func:`_fold`), the form ``anchor.SourceWords`` matches in. The
+    tile join keys on it (the Codex review of WP-05.2), so it is read here
+    directly, word by word, rather than as ``_normalize`` alone.
+    """
     for text in _NORMALIZER_CORPUS:
-        assert X._norm_for_match(text) == _normalize(text), text
+        expected = " ".join(w for w in (_fold(_normalize(t)) for t in text.split()) if w)
+        assert X._norm_for_match(text) == expected, text
+    # The N13 folds are all still in it.
+    assert X._norm_for_match("PROVIDE 6\u201d DRAIN") == X._norm_for_match('PROVIDE 6" DRAIN')
+    assert X._norm_for_match('2\u00bd" PIPE, TYP.') == X._norm_for_match('2-1/2" PIPE TYP')
 
 
 def test_n13_per_word_normalization_is_exactly_the_anchors_result():

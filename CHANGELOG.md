@@ -79,7 +79,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `5`). Such a match is still an exact one, so an arithmetic claim whose
     quote needed it can be trusted;
   - cross-sheet QC checks its quotes with the same matcher, so the two agree:
-    a quote QC finds on a sheet, the anchor places there.
+    a quote QC finds on a sheet, the anchor places there. A reconciled leg also
+    keeps the location of the fact it came from across that punctuation (on a
+    scanned sheet that location is all it has to be crop-verified by), and two
+    facts that differ only in punctuation, in different places, no longer hand
+    a leg one of their locations by guess.
 
   **Visible effect:** a finding whose quote differs from the sheet only in
   punctuation is now clouded where it used to be a `[QUOTE NOT FOUND]` callout,

@@ -42,13 +42,16 @@ from drawing_analyzer.anchor import numbers_grounded, resolve_anchors, resolve_c
 from drawing_analyzer.auditors.arithmetic import audit_arithmetic
 from drawing_analyzer.cross_qc import (
     CrossQCDiscardCounts,
+    CrossQCFact,
     _finding_from_handles,
     _parse_facts,
     classify_quote_evidence,
+    fact_tile_lookup,
 )
 from drawing_analyzer.investigate import _candidates
 from drawing_analyzer.models import (
     EVIDENCE_TEXT_GROUNDED,
+    EVIDENCE_UNAVAILABLE,
     ConflictLeg,
     MODEL_TRANSCRIBED,
     TEXT_EXTRACTED,
@@ -390,6 +393,48 @@ def test_cross_qc_admits_a_fact_quoted_without_the_brackets():
     )
     assert [f.evidence_state for f in facts] == [EVIDENCE_TEXT_GROUNDED]
     assert counts.facts_accepted == 1
+
+
+def _fact(handle: str, quote: str, tile) -> CrossQCFact:
+    return CrossQCFact(sheet_handle=handle, sheet_id="M-1", discipline="m", entity_or_tag="RV",
+                       attribute="rating", value="v", exact_quote=quote, tile=tile)
+
+
+def test_a_reconciled_leg_joins_its_fact_across_folded_punctuation():
+    """The tile join keys on the matcher's own form (the Codex review of this
+    slice). The fact recorded ``RATED 175 PSI, TYP.`` and the reconcile call
+    quoted it without the punctuation. On a scanned sheet that tile is the
+    leg's only location: without it the leg stays UNANCHORED and no crop check
+    can see the conflict."""
+    scan, other = _sheet([], "scan.pdf"), _sheet(_line("PUMP P-1 RATED 150 PSI, TYP."), "b.pdf")
+    lookup = fact_tile_lookup([_fact("S001", "RATED 175 PSI, TYP.", [1, 0]),
+                               _fact("S002", "RATED 150 PSI, TYP.", [0, 1])])
+    finding = _finding_from_handles(
+        {"category": "conflict", "severity": "high", "text": "ratings disagree",
+         "sheet_handle": "S001", "source_quote": "RATED 175 PSI TYP",
+         "also_on": [{"sheet_handle": "S002", "source_quote": "RATED 150 PSI, TYP."}]},
+        {"S001": ("S001", scan), "S002": ("S002", other)}, None, lookup,
+    )
+    assert finding is not None and finding.evidence_state == EVIDENCE_UNAVAILABLE
+    assert finding.tile == [1, 0], "the leg did not inherit its fact's tile"
+    resolve_anchors([finding], scan)
+    resolve_conflict_legs([finding], {("scan.pdf", 0): scan, ("b.pdf", 0): other})
+    assert (finding.anchor.status, finding.anchor.method) == ("TILE", "tile_no_text_evidence")
+    assert _has_anchored_legs(finding), "the dual-crop check cannot see it"
+
+
+def test_two_facts_spelled_apart_only_by_punctuation_collide():
+    """The same text to the matcher, in two tiles: ambiguous, so no tile."""
+    facts = [_fact("S001", "RATED 175 PSI, TYP.", [0, 0]), _fact("S001", "RATED 175 PSI TYP", [1, 1])]
+    assert fact_tile_lookup(facts) == {}
+    assert fact_tile_lookup(list(reversed(facts))) == {}
+
+
+@pytest.mark.parametrize("quote", [",", "( )", "   "], ids=["comma", "brackets", "blank"])
+def test_a_fact_quote_that_folds_to_nothing_locates_nothing(quote):
+    """It names no text, so no leg can join it (a blank leg quote used to join
+    a whitespace-only fact's tile)."""
+    assert fact_tile_lookup([_fact("S001", quote, [1, 1])]) == {}
 
 
 @pytest.mark.parametrize("quote", [",", "(", ".", "))", ": :"])

@@ -707,13 +707,18 @@ reporter of last resort must never raise from inside Tk's handler.
   anchor places EXACT on the same words (pinned by one shared table in
   `tests/test_anchor_whole_words.py`); WP-05.1 had left them disagreeing
   (`P-1` grounded in `SEE P-1, TYP` and went UNANCHORED on the drawing).
-  `_norm_for_match` **is** `anchor._normalize`, so the fact-tile join folds
+  `_norm_for_match` **is** the matcher's own form (`anchor._fold_text`:
+  `_normalize` word by word, each word folded), so the fact-tile join folds
   what the anchor folds (N13: curly quotes, primes, vulgar fractions, `×`,
-  `Ø`, infix hyphens): a leg quoting `6”` joins the fact that printed `6"`, and
-  two facts spelled that way on one sheet with different tiles now collide and
-  lose the tile. The join compares two model-written quotes and does not use
-  the word fold. Host-side binding, so `_CROSS_QC_CACHE_CONTRACT` **3 → 4**,
-  and **4 → 5** for the fold (WP-05.2).
+  `Ø`, infix hyphens; and since WP-05.2 each word's brackets and sentence
+  punctuation): a leg quoting `6”` joins the fact that printed `6"`, a leg
+  quoting `RATED 175 PSI TYP` joins the fact that recorded `RATED 175 PSI,
+  TYP.`, and two facts spelled either way on one sheet with different tiles
+  collide and lose the tile. A quote that folds to nothing names no text and
+  joins nothing. WP-05.2's first push kept the join on `_normalize` alone, so
+  a leg that grounded only through the fold lost its fact's tile, which on a
+  scanned sheet is its only location (Codex review). Host-side binding, so
+  `_CROSS_QC_CACHE_CONTRACT` **3 → 4**, and **4 → 5** for the fold (WP-05.2).
   Reduced trust must **reach verification**, so the location travels in three
   parts: the shard-map prompt requests `tile_label` per fact and leg
   (`CrossQCFact.tile`, resolved on that leg's own grid); `fact_tile_lookup`
