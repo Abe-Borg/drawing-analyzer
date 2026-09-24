@@ -511,7 +511,7 @@ after verification.
 - **No cache or key change** from the rule itself (D-4's WP-01.4 note covers
   the admission change).
 
-Added by WP-11.1: **the digest stage's eligible items are the inventory's
+Added by WP-11.1 ([PR #172](https://github.com/Abe-Borg/drawing-analyzer/pull/172)): **the digest stage's eligible items are the inventory's
 pages** (the owner's decisions; R1). The digest stage already had D-2's shape
 (`items_in` the sheets the run set out to read, `items_out` the sheets read;
 COMPLETE when every one was read, FAILED when none was, else PARTIAL), and its
@@ -836,7 +836,7 @@ TTLs. Missing usage is unknown, never zero, and nothing is counted twice
 - Version / cache changes: —
 - Consumers affected: —
 
-## D-8 Source identity — `open`: the page part decided by WP-11.1, completed by WP-06.2
+## D-8 Source identity — `open`: the page part decided by WP-11.1 ([PR #172](https://github.com/Abe-Borg/drawing-analyzer/pull/172)), completed by WP-06.2
 
 **Required decision:** resolve every sheet and every evidence leg to exactly
 one physical input revision and page, never merely a human sheet label (N6).
