@@ -303,6 +303,46 @@ one cross-sheet hyperlink made every sheet re-key whenever any sheet changed.
 Nothing about the destination is hashed and nothing needs to be — the reference
 already rides the referencing annot object, so retargeting still moves the key.
 
+**The inventory's pages are the workload (remediation WP-11.1, R1; D-8).** The
+pages a run owes are exactly the inventory's: `render.inventory_sheet_refs`
+builds one `SheetRef` per page of every ACCEPTED document from its records,
+**without reopening a file**, and `InputInventory.expected_page_counts()` is what
+both iterators take as `expected_pages`. The pipeline no longer calls
+`list_sheets` (it reopened every file and silently skipped one it could not open,
+so a source lost after the inventory dropped out of `total` and of everything
+built on it); the critique takes the same `refs` and keeps `list_sheets` only as
+the fallback for a caller that passes none. With `expected_pages`,
+`iter_rendered_sheets` reads exactly the inventory's pages and labels each ref
+with the inventory's count (`page k/N`, model-visible, in no key); a source it
+cannot open again fails every expected page within `only` through
+`on_page_error` with **one shared** `SourceUnreadableError` (path-free: the
+cause's type name); a page past the source's current end fails with
+`PageNotInSourceError`; a count that differs is reported once through
+`on_page_count_changed` and extra pages are not read; and a source none of whose
+expected pages is in `only` is never opened (a source whose pages were all cache
+hits can vanish after the prescan at no cost). `iter_sheet_prescan` with
+`expected_pages` is **best effort**: it does not yield a page it cannot scan
+(page load, text or word count, the identity, geometry) or any page of a source
+it cannot open, and `_level1_partition` / `_critique_level1_partition` turn
+every expected ref it did not yield into a miss, so the render path is the
+**one reporter** and a page whose only problem was the prescan's own step is
+still read; `_GeometryOmissionSink(order=...)` inserts such a page's render-time
+geometry in page order. The render identity keeps the **opened file's** page
+count, so every level-1 key is byte-identical for an unchanged set. Without
+`expected_pages` both iterators keep the old contract and raise (callers with no
+inventory wrap them: `profiles.preflight_scan`,
+`scripts/measure_evidence_coverage.py`). The pipeline's `_UnreadPages` records
+every page with no digest as a `models.UnreadPage` (`ctx.unread_pages`,
+`unread_pages` in `run_manifest.json`, a `NOT READ` line in run.log's Sheets
+section) plus one `PAGE_UNREAD` event in page order beside the
+`SHEET_DIGESTED` events, so every expected page ends with exactly one per-page
+event; a page the render path neither yielded nor reported still gets one ("no
+render outcome was recorded"). `ctx.errors` and the digest stage's errors say a
+source-level failure **once per source** and a page failure once per page; a
+source with more pages than the inventory counted is one run error and one
+digest-stage warning (the stage stays COMPLETE, the run PARTIAL). Revision
+binding on reopen is WP-11.3's; digest-phase containment is WP-11.2's.
+
 **Digest path:** `tiling.py` (pure geometry) → `render.py` (rasterization) →
 `digest.py` (prompt + tolerant findings-block parser — fences are **line-anchored**,
 accept 3+ backticks or tildes, and a closer must match its opener's character and

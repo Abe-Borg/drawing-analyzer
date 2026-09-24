@@ -693,7 +693,10 @@ def _sheet_lines(ctx: Any, roots: "tuple[str, ...]" = ()) -> list[str]:
     from .models import held_out_findings
 
     sheets = list(getattr(ctx, "sheets", None) or [])
-    if not sheets:
+    # Remediation WP-11.1 (R1): the pages the run owed and could not read have
+    # no SheetDigest; they are listed after the sheets, with their reason.
+    unread = list(getattr(ctx, "unread_pages", None) or [])
+    if not sheets and not unread:
         return ["  (no sheets)"]
     geoms: dict[Any, Any] = {}
     for g in getattr(ctx, "sheet_geometries", None) or []:
@@ -706,6 +709,7 @@ def _sheet_lines(ctx: Any, roots: "tuple[str, ...]" = ()) -> list[str]:
     drift = sum(1 for s in sheets if getattr(s, "findings_note", ""))
     lines = [
         f"  {len(sheets)} sheet(s): {ok} ok, {len(sheets) - ok} failed, {cached} from cache"
+        + (f"; {len(unread)} page(s) not read" if unread else "")
         + (f"; findings-parser drift on {drift} sheet(s)" if drift else "")
     ]
     for s in sheets:
@@ -744,6 +748,14 @@ def _sheet_lines(ctx: Any, roots: "tuple[str, ...]" = ()) -> list[str]:
         if error:
             bits.append(sanitize_text(error, max_chars=160, private_roots=roots))
         lines.append(f"  {label:<40} {status:<9} " + " · ".join(bits))
+    for page in unread:
+        label = sanitize_text(
+            getattr(page, "display_label", "") or "page", max_chars=80, private_roots=roots
+        )
+        reason = sanitize_text(
+            getattr(page, "reason", "") or "not read", max_chars=160, private_roots=roots
+        )
+        lines.append(f"  {label:<40} {'NOT READ':<9} {reason}")
     return lines
 
 

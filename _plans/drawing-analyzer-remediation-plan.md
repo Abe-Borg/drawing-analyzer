@@ -905,6 +905,13 @@ Regression cases: second source removed/locked after inventory; corrupt middle p
 - Route such a page to render, or give it a terminal per-page failure.
 - Take the denominator from `inventory.accepted_documents[].page_count`, because `list_sheets` reopens files and skips failures.
 - Model the fix on `render.iter_region_crops`, which is already guarded.
+- **WP-11.1 note (2026-09-24, the owner's rules; measured on `a7dd050`).** Neither half works alone. Catching the open and continuing in both iterators, with the denominator still from `list_sheets`, turned every abort into a silent `COMPLETE` (batch, second source gone: digest COMPLETE 2/2, no error line). The inventory denominator with the iterators unchanged left a source rewritten with fewer pages at digest PARTIAL with no error line (so the run read COMPLETE); with more pages the real-time path raised `IndexError` without a cache, and with one the extra page was digested, billed and dropped by the merge. What was decided and built:
+  - the pages a run owes are the inventory's, built without reopening a file (`render.inventory_sheet_refs`; D-8's page part), and both iterators read exactly those pages (`expected_pages`);
+  - a source that will not open again fails every expected page with one shared `SourceUnreadableError`; a page past the source's current end fails with `PageNotInSourceError`; a source with more pages is read for its inventoried pages and named in one run error;
+  - the prescan is best effort and routes whatever it cannot scan (a page, or a source it cannot open) to the render path, the one reporter, instead of a terminal failure: a page whose only problem is the prescan's own step is still read, and the geometry sink adds its render-time geometry in page order;
+  - an unread page is a typed record (`UnreadPage`: `ctx.unread_pages`, `unread_pages` in `run_manifest.json`, run.log's Sheets section) plus one `PAGE_UNREAD` event, never a placeholder `SheetDigest`; `ctx.errors` says a source-level failure once per source (step 6);
+  - the critique takes the same pages, so a source lost after the digest is critiqued from the digest's own spooled renders or retained uploads where they exist, and each page it cannot obtain is named with the reason.
+  Evidence: `tests/test_source_page_isolation.py`; the handoff in `PROGRESS.md`.
 
 **Step 4: what containment must do.**
 1. Return the already-paid results of `_digest_sheets_concurrent`.

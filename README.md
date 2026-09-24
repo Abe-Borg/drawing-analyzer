@@ -2087,6 +2087,44 @@ deliverable for the good files. A single unreadable *page* inside an otherwise
 good PDF is likewise skipped rather than failing the whole file, and a
 pathological (oversized/NaN) page box is caught before it can exhaust memory.
 
+**A file that fails after it was accepted does not end the run either.** The
+pages the run owes are the ones the up-front classification counted: every
+page of every accepted file, counted once and never recounted by reopening the
+files. So if an accepted file is deleted, moved, or locked by another program
+(a network-share hiccup, an antivirus scan, a backup tool) partway through the
+run, or re-exported with a different number of pages, the run carries on with
+the other files and tells you exactly what it could not read:
+
+- **A file that cannot be opened again** is reported once, for example
+  `B.pdf: the source could not be opened again (FileNotFoundError); its 12
+  page(s) were not read`, and every one of its pages is listed as *not read*.
+  The sheets already analyzed (and paid for) ship as usual.
+- **A page that cannot be read** is reported on its own line, as before, and
+  the rest of its file is still analyzed.
+- **A file that now has fewer pages** reports the missing ones (`A.pdf: has 2
+  page(s) now, 3 at the inventory; page 3 was not read`). **A file that now has
+  more pages** is read for the pages that were counted, and one line names it
+  (`… only the 3 inventoried page(s) were read`): the file changed under the
+  run, so re-run it to read the new pages. Sheet labels keep the counted total
+  (`page k/3`).
+- **The cache pre-scan is best effort**: a page it cannot scan is simply read
+  like a sheet that was not cached, so a problem in that step alone never
+  loses a page.
+- **The critique** works from the same list of pages. A file that disappears
+  after its sheets were analyzed is still critiqued from the images the
+  analysis already made where the run kept them (Fast and Economy modes);
+  on Hybrid, which renders again, each page it cannot get is named in the
+  critique stage with the reason.
+
+Where it shows up: the error list (and run.log's *Errors*), run.log's *Sheets*
+section (a `NOT READ` line per page with its reason), `unread_pages` in
+`run_manifest.json`, and one `PAGE_UNREAD` event per page in run.log's event
+trace, so every page the run owed ends with exactly one per-page event (a
+digest or a not-read record). The run reads `PARTIAL` (`FAILED` when no page at
+all could be read), and the digest stage counts the pages the run owed against
+the pages it read. "No readable PDF pages found" is reserved for a selection in
+which nothing was accepted at all.
+
 Each source is also fingerprinted at the start of the run, and re-checked just
 before its reviewed PDF is written. If a source file **changes on disk mid-run**
 (e.g. it's re-exported while a long QC pass is running), it is left un-marked —
