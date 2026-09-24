@@ -48,6 +48,61 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A prose sentence that stated a different value, tag or polarity was
+  absorbed into an existing finding (remediation WP-09.2; N10, U11).** The
+  prose harvest mirrors the digest's Coordination/Conflict prose, and the set
+  synthesis's conflict statements, into findings. A prose item whose words
+  overlapped a finding already on its sheet by 0.7 or more was taken as a
+  restatement of it: the finding gained the item's provenance, and the item got
+  no finding of its own. Nothing checked what the two claimed. So "Provide 4
+  inch drain at column line 4." joined "Provide 6 inch drain at column line 4."
+  (overlap 0.857), a 165 psi relief setting joined a 150 psi one beside a shared
+  175 psi rating, pump P-2 joined pump P-1, and 550 gpm joined 500 gpm. The
+  second claim reached no ledger entry, no markup and no export.
+
+  Now, decided with the owner (see the WP-09.2 handoff in
+  `_plans/PROGRESS.md`):
+  - a candidate whose **critical signature** conflicts with the item's is
+    refused: the same rule the findings ledger merges by (values compared per
+    kind of quantity, tags, shown / not shown, cross-sheet legs), never a
+    second copy of it. Shown / not shown is read from both texts: a finding's
+    sheet-level placement says where its mark goes, not what it claims, so "The
+    isolation valve is shown ..." no longer joins a sheet-level "... is not
+    shown ..." note. A synthesis conflict's second sheet is part of its
+    signature, so it no longer joins a conflict with a different sheet;
+  - when the best candidate is refused, the **next-best compatible** one at 0.7
+    or above still matches (the veto only removes incompatible findings);
+  - an item with no compatible candidate becomes **its own finding**, like any
+    unmatched item: one Sonnet structuring call (or a cache hit), or its
+    verbatim sheet-level note without an API client. The finding it used to
+    join is unchanged.
+
+  **Visible effect:** a prose line that states a different value, tag, polarity
+  or sheet pair than an existing finding is now a finding of its own, with its
+  own QC number, markup and export row. **Calls:** one Sonnet structuring call
+  per refused item on an exhaustive run; none of the test suite's fixtures
+  changes (measured). **Counting:** every enumerated prose item now has
+  exactly one recorded outcome (matched, structured, degraded, set-level or
+  missing, with the structuring call it cost, whether the ledger folded its
+  finding into an existing one, and how many candidates the signature
+  refused). The prose carry-through counts in `run.log` and `run_manifest.json`
+  gain `vetoed`, `folded`, `filtered_focus` (Focus-findings filler, counted
+  nowhere before) and a per-channel table (`by_channel`, one `run.log` line per
+  channel), all informational: only `missing` still marks the harvest
+  incomplete. **Also fixed:** an item whose ledger ingest failed was counted
+  both structured and degraded. **The match threshold is unchanged (U11):** a
+  labelled corpus of 47 hand pairs and 990 pairs of real findings is the
+  evidence for any later change (at 0.7, the refusal keeps 20 of 25 near misses
+  apart that the threshold alone absorbed 19 of, and costs 4 of 22 restatements
+  a structuring call; `tests/test_prose_paraphrase_corpus.py`). **Accepted
+  limits**, recorded as tests: a near miss the signature cannot read ("fire
+  damper" / "smoke damper", "2-hour" / "1-hour") still joins; a sheet-level
+  absence written without an absence word still takes a presence item; and a
+  refused presence item that degrades to a sheet-level note can still fold into
+  an absence finding, because the ledger reads a sheet-level placement as an
+  absence (the fold is counted). **Ids and cache:** no prose item id, cache key
+  or cache contract changes.
+
 - **Section filler became a paid call and a medium margin note, and a
   synthesis sentence saying there was no conflict became a conflict
   (remediation WP-09.1; B11, N11, N31).** The prose harvest mirrors the

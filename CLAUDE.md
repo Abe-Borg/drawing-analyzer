@@ -651,7 +651,38 @@ reporter of last resort must never raise from inside Tk's handler.
   `prose_harvest.py` (mirrors prose Coordination/Conflict items,
   synthesis conflicts, and opted-in focus items into findings — match first,
   one small structuring call for stragglers on **Sonnet 5** at `EFFORT_LOW`,
-  degraded sheet-level entry on failure; opt-in structured outputs
+  degraded sheet-level entry on failure. **The match is signature-vetoed**
+  (remediation WP-09.2, N10; the owner's rules): `_match_entry` takes the
+  candidates whose `_match_score` (token overlap with the entry's text or
+  quote) reaches `_MATCH_OVERLAP` (0.7, unchanged: U11), best first, ties in
+  ledger order, and refuses each whose critical signature conflicts with the
+  item's (`_veto_axes`: `critique.signature_conflicts` over
+  `critique.critical_signature`, the ONE copy of the rule, never restated).
+  The item is signed from its text and its synthesis legs; the candidate from
+  its text, quote and legs with its `anchor_hint` set aside ("text against
+  text": `_is_absence` reads SHEET as an absence, and a placement is not a
+  claim, so signing the item with the candidate's placement switched the
+  polarity axis off against every SHEET entry, while a bare-text item refused
+  its own quote-less twin, 5 of the suite's 17 matches). The next-best
+  compatible candidate wins; with none the item is a straggler. Only
+  candidates are signed (bounded work), and both callers read the one
+  function: the free path (`_process_free_pending`, which passes a `refused`
+  sink) and `active_chain_count`, which decides the parallel path. Every
+  enumerated item gets exactly one `ProseItemOutcome` (`HarvestResult.outcomes`:
+  channel, outcome in `PROSE_OUTCOMES`, the structuring `call` it cost,
+  `folded`, `refused`) through `_record_outcome`, the only place an outcome
+  counter moves, called once the ledger holds the finding (an ingest that
+  raised used to count an item structured and then degraded). `vetoed`,
+  `folded`, `filtered_focus` (focus filler, counted whether or not focus is
+  harvested) and `by_channel()` (per channel: each outcome plus `suppressed`,
+  i.e. filtered lines, focus filler and assurances, which have no id) reach
+  `prose_accounting`; `run_journal._prose_channel_lines` renders the table one
+  line per channel. All observational (D-2 note): only `missing` decides the
+  stage. The labelled evidence for the threshold is
+  `tests/test_prose_paraphrase_corpus.py`. Recorded limits: a SHEET absence with
+  no absence word takes a presence item, and a refused presence item that
+  degrades to a SHEET entry can still fold into an absence entry in the ledger
+  (its `_is_absence` reading, unchanged; counted `folded`). Opt-in structured outputs
   (`DRAWING_ANALYZER_HARVEST_STRUCTURED_OUTPUTS`): `HARVEST_STRUCTURED_SYSTEM_PROMPT`
   is ONE substitution on the fenced prompt with an import-time assert,
   `HARVEST_FINDING_SCHEMA` mirrors the prompt's field list one-for-one as a

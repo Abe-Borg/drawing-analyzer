@@ -154,7 +154,7 @@ If a proposed change conflicts with a documented invariant, resolve the contract
 | N29 | A merged entry's representative can depend on arrival order. `_merge_into` compares each incoming member with the live survivor, whose severity an earlier merge may already have raised to the maximum. With three or more duplicates, which member's text, quote and id represent the entry then depends on the order they arrived in: members X (long quote, `low`), Y (short quote, `high`) and Z (long quote, `medium`) keep X's bundle in two of the six orders and Z's in four. The pair case is fixed and tested; this is its three-member form. Found by WP-03.2. | P1 |
 | N30 | The quote branch of `_is_duplicate` (an equal quote plus text overlap of 0.4 or more) also folds two different issues that share boilerplate wording. "pump P-1 impeller diameter conflicts with the curve" and "pump P-1 selected flow conflicts with the curve at 480", both quoting `PUMP P-1`, overlap 0.5 and merge in Pass A; the impeller text is lost, and with an equal quote nothing of it reaches `supporting_quotes`. The same class as N28 on a text branch; no threshold is evidence-backed (U11). Found by WP-03.7. | P1 |
 | N31 | Synthesis items are split from the whole Markdown text, so a section heading joins an item. Glued to the bullet above it (no blank line), "**Cross-sheet / cross-discipline conflicts**" makes that bullet a conflict naming its sheets, a paid structuring item with no negation involved; in paragraph layouts under `###` or bold headings the whole run is one item, so no negation rule can read an assurance inside it. Found by WP-09.1 while measuring N11 (the synthesis prompt asks for "short subsections / bullets"). | P1 |
-| N32 | A digest heading that states something is never read. `split_into_sections` makes a whole-line bold sentence (or a `###` heading) inside the digest a section header, so its text is neither a prose item nor counted, and it decides the category of the section it starts. The synthesis channel had the same defect after WP-09.1's per-section split and keeps such a heading as an item since that PR's Codex review. Found by WP-09.1. | P2 |
+| N32 | A digest heading that states something is never read. `split_into_sections` makes a whole-line bold sentence (or a `###` heading) inside the digest a section header, so its text is neither a prose item nor counted, and it decides the category of the section it starts. The synthesis channel had the same defect after WP-09.1's per-section split and keeps such a heading as an item since that PR's Codex review. Found by WP-09.1. Measured by WP-09.2: because the heading classifies the section it starts, the real bullets under it are lost too when it carries no Coordination/Conflict keyword (2 of 4 layouts probed). | P2 |
 
 Priority meanings: P0 protects result correctness or truthful completion; P1 protects recoverability, evidence, accounting, or release integrity; P2 improves robustness, performance, and interoperability after the relevant correctness contracts are stable.
 
@@ -803,10 +803,13 @@ Implementation:
   - "165 psi" is absorbed into "150 psi", because a shared "175 psi" masks the difference (that is N1).
 - `_match_entry` must reject candidates that fail `critique.signatures_compatible(critical_signature(…))`, reusing the shared rule.
 - Depends on WP-04.2.
+- *Done by WP-09.2 (2026-09-24; the owner's rules, see its handoff).* `_match_entry` refuses every candidate at or above 0.7 whose signature conflicts with the item's (`_veto_axes`, over `critique.signature_conflicts`), and the next-best compatible candidate wins; a refused item is a straggler. What the rule is given was the decision the step left open, because `critique._is_absence` reads `anchor_hint == "SHEET"` as an absence: the item is signed from its text and its synthesis legs, and the candidate with its placement set aside ("text against text"). Measured over the suite (17 free matches, 75 chain probes) and a 24-case table: signing the item as bare text refused 5 true restatements (its own quote-less twins) and broke two pinned tests; giving it the candidate's placement switched the polarity axis off against every SHEET entry (an opposite-polarity item joined a degraded one). Steps 4 and 5's instrumentation (per-item outcomes, `vetoed`, `folded`, `filtered_focus`, a per-channel table) and the labelled corpus (`tests/test_prose_paraphrase_corpus.py`) landed with it; the threshold is unchanged (U11). Recorded limits: a SHEET absence with no absence word takes a presence item, and a refused presence item that degrades to a SHEET entry can still fold into an absence entry in the ledger (`_is_absence`, which the ledger's merges read; not changed).
 
 **Step 6** is implemented with WP-01.6.
 
-Slices: WP-09.1, WP-09.2.
+**N32** (the digest channel's heading defect) is WP-09.3's (the owner's routing, 2026-09-24). Measured by WP-09.2: `_is_label` cannot be reused as it is, since 6 of the digest's 8 standard section names ("Scope / systems shown", "Equipment & schedules", "Plan content", ...) are not listed labels; and a heading that states something also classifies the section it starts, so the real items under it can be lost too (2 of 4 layouts probed). It needs a statement-versus-section-name rule for the digest and a decision on which category governs the section after a statement heading.
+
+Slices: WP-09.1, WP-09.2, WP-09.3.
 
 ### WP-10 — Complete cache keys, faithful metadata, and targeted migration
 
@@ -1793,7 +1796,7 @@ Stable IDs `U1`–`U32` were added on 2026-09-22 so that [`PROGRESS.md`](PROGRES
 | N29 | A merged entry's representative follows arrival order (three or more members) | WP-03 (WP-03.5); mandatory. |
 | N30 | The quote branch folds two different issues that share boilerplate wording | WP-03 (WP-03.5: the loser's text survives as an observation); a rule that keeps them apart needs labelled evidence (O-10). |
 | N31 | A synthesis section heading joins an item | WP-09 (WP-09.1); mandatory. |
-| N32 | A digest heading that states something is never read | WP-09 (WP-09.2, or a slice of its own); mandatory. |
+| N32 | A digest heading that states something is never read | WP-09 (WP-09.3, the owner's routing); mandatory. |
 | U1 | Actual serving model, fallback iterations, partial-stream billing | WP-14; mandatory. |
 | U2 | Fallback text joins and selective history replay | WP-01/WP-12/WP-13/WP-19; preserve contiguous text and required block semantics. |
 | U3 | Generic output-config rejection disables task budget | WP-13; mandatory. |
@@ -1804,7 +1807,7 @@ Stable IDs `U1`–`U32` were added on 2026-09-22 so that [`PROGRESS.md`](PROGRES
 | U8 | Whole-set grounding absent | WP-05/WP-06; mandatory. |
 | U9 | Live but idle work-directory pruning | WP-18; validate with synthetic liveness fixtures. |
 | U10 | Mentioned versus adopted codes; limited edition families | WP-12; mandatory distinction and bounded grammar coverage. |
-| U11 | Prose match threshold/call prevalence | WP-09 instrumentation; change the threshold only with labeled evidence. The signature check on the match itself is mandatory (N10). |
+| U11 | Prose match threshold/call prevalence | WP-09 instrumentation; change the threshold only with labeled evidence. The signature check on the match itself is mandatory (N10). Instrumented and labelled by WP-09.2 (per-item outcomes; `tests/test_prose_paraphrase_corpus.py`), threshold unchanged. |
 | U12 | Investigation truncation, Unicode IDs | WP-13; mandatory handling and bounded recovery. Duplicate detected ids must not bind first-wins. |
 | U13 | Quadratic redaction and path-scrub gaps | WP-22; mandatory. |
 | U14 | Empty required-stage/status cases | WP-22; defensive hardening, separately labeled from N5. |

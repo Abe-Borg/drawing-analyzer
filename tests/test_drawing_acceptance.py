@@ -749,6 +749,24 @@ def test_gauntlet_every_prose_item_accounted(oracle):
     assert oracle.client.harvest_calls == 2        # one per straggler, no more
 
 
+def test_gauntlet_prose_outcomes_are_exact(oracle):
+    # Remediation WP-09.2 (N10): the signature veto refuses nothing in the
+    # gauntlet, so its prose outcomes are exactly what they were, and each
+    # enumerated item has one outcome in the per-channel table.
+    acc = oracle.ctx.prose_accounting
+    assert (acc["items"], acc["matched"], acc["structured"], acc["degraded"],
+            acc["set_level"], acc["missing"]) == (4, 1, 1, 1, 1, 0)
+    assert (acc["vetoed"], acc["folded"], acc["filtered"], acc["filtered_focus"],
+            acc["assurances"]) == (0, 0, 0, 0, 0)
+    row = dict.fromkeys(("matched", "structured", "degraded", "set_level", "missing",
+                         "suppressed"), 0)
+    assert acc["by_channel"] == {
+        "digest_prose_coordination": {**row, "matched": 1, "structured": 1, "degraded": 1},
+        "synthesis_prose": {**row, "set_level": 1},
+    }
+    assert oracle.client.harvest_calls == 2
+
+
 # ---- assertion 8: the cross-sheet conflict lands on every leg ----------------
 
 
