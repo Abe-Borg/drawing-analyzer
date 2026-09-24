@@ -667,17 +667,32 @@ def test_pipeline_a_tag_leg_the_sheet_does_not_print_never_becomes_a_finding(tmp
 # --------------------------------------------------------------------------- #
 
 
+def _fold(word: str) -> str:
+    """Remediation WP-05.2: a normalized word loses the brackets and sentence
+    punctuation at its edges (never ``"``, ``'``, ``<`` or ``>``)."""
+    start, end = 0, len(word)
+    while start < end and word[start] in "([{":
+        start += 1
+    while end > start and word[end - 1] in ")]},;:.!?":
+        end -= 1
+    return " ".join(word[start:end].split())
+
+
 def _reference_contains(quote: str, text: str) -> bool:
-    """The rule read directly: every occurrence tried, every core re-derived."""
+    """The rule read directly: every occurrence tried, every core re-derived.
+
+    Each word, of the text and of the quote, is normalized and folded
+    (:func:`_fold`, remediation WP-05.2); a word left with nothing is skipped.
+    """
     from drawing_analyzer.anchor import word_core
 
-    words = [w for w in (_normalize(t) for t in text.split()) if w]
+    words = [w for w in (_fold(_normalize(t)) for t in text.split()) if w]
     joined = " ".join(words)
     spans, at = [], 0
     for w in words:
         spans.append((at, at + len(w)))
         at += len(w) + 1
-    query = _normalize(quote)
+    query = " ".join(w for w in (_fold(_normalize(t)) for t in quote.split()) if w)
     if not query:
         return False
 

@@ -136,7 +136,14 @@ _TEXT_LAYER_BUDGET = 4_000
 # would keep serving legs the rule now refuses. One mechanism: no key term was
 # added. It also retires the stored-claims residuals the migration register
 # records for remediation WP-03.3 and WP-07.2: those entries miss once.
-_CROSS_QC_CACHE_CONTRACT = 4
+#
+# Bumped to 5 (remediation WP-05.2; B4, N12): the same match now folds the
+# brackets and sentence punctuation off every word, of the sheet's text and of
+# the quote (``anchor.fold_word``), because cross-QC and the anchor match
+# through one matcher (the owner's decision). A leg quoting ``RATED 175 PSI
+# TYP`` against ``RATED 175 PSI, TYP.`` is now admitted, for byte-identical
+# request inputs. One mechanism: no key term was added.
+_CROSS_QC_CACHE_CONTRACT = 5
 DEFAULT_CROSS_QC_WORKERS = 3
 _CROSS_QC_WORKERS_ENV = "DRAWING_ANALYZER_CROSS_QC_WORKERS"
 
@@ -516,10 +523,14 @@ def _grounded(quote: str, sheet_text: str) -> bool:
     owner's rules). A quote under six characters used to be accepted without a
     check (B5), so a tag such as ``AHU-7`` counted as grounded on a sheet that
     does not print it; and a longer one by a plain substring test, so ``AHU-10``
-    grounded inside ``AHU-101`` (N12). The match now uses the anchor's
-    normalizer and may leave out only the punctuation around a source word
-    (:class:`anchor.SourceWords`). An ungrounded quote is a hallucination signal
-    and must not become a trusted dual-anchor leg (§16.1).
+    grounded inside ``AHU-101`` (N12). The match uses the anchor's normalizer
+    and may leave out only the punctuation around a source word
+    (:class:`anchor.SourceWords`). It is the matcher the anchor's EXACT tier
+    uses (remediation WP-05.2), so each word's brackets and sentence
+    punctuation fold on both sides (``RATED 175 PSI TYP`` grounds in ``RATED
+    175 PSI, TYP.``) and the two agree on what is printed. An ungrounded quote
+    is a hallucination signal and must not become a trusted dual-anchor leg
+    (§16.1).
     """
     return source_words(sheet_text or "").contains(quote)
 
