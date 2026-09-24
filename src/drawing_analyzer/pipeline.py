@@ -53,8 +53,10 @@ from .models import (
     SheetGeometry,
     StageResult,
     UsageRecord,
+    held_out_findings,
     item_coverage_status,
     resolve_run_configuration,
+    review_findings,
     roll_up_qc_status,
     source_page_key,
 )
@@ -613,6 +615,13 @@ class DrawingContext:
     # failed before parsing refused nothing; its error is recorded apart).
     # Observational, like the discards.
     cross_qc_invalid: dict = field(default_factory=dict)
+    # Remediation WP-01.3 (N15): findings parsed from a read the model did not
+    # finish, held out of the review (``models.held_out_findings``), per
+    # portable sheet key (``SRC-0001:p0``) -> count. Empty when none was.
+    # Observational (a D-2 note): every such sheet already failed the digest
+    # stage. The findings themselves are listed in the sheet's own export file
+    # and report card, never in the ledger.
+    digest_findings_held_out: dict = field(default_factory=dict)
 
     @property
     def total_estimated_cost(self) -> Any:
@@ -1701,7 +1710,12 @@ def _run_qc_stages(
     findings ledger** — the digest's JSON findings, the critique reads, the
     cross-sheet conflicts, the deterministic auditors, and the harvested prose
     (digest Coordination/Conflict items, synthesis conflicts, opted-in focus
-    items). Ingest merges duplicates (unioning provenance); anchoring runs, then
+    items). The digest's findings come only from reads the model finished: a
+    sheet whose digest carries an error keeps its findings out of the review
+    (remediation WP-01.3, N15; :func:`~drawing_analyzer.models.review_findings`),
+    as the prose harvest already skips that sheet's prose; the run counts them
+    and the sheet's own export file lists them. Ingest merges duplicates
+    (unioning provenance); anchoring runs, then
     ``number()`` assigns the run's positional ``QC-###`` numbers; verification, the
     citation check, and the markup writer then consume the ledger and nothing else.
     At the end of a markup run every entry is accounted for — clouded, margin
@@ -1746,7 +1760,11 @@ def _run_qc_stages(
     prose_accounting: dict = {}
 
     # --- ingest: every channel lands in the ledger ---------------------------
-    digest_findings = [f for sd in sheets for f in getattr(sd, "findings", None) or []]
+    # A read the model did not finish (truncated, refused, a stream that ended
+    # early) hands the review none of its findings: they are held out, as that
+    # sheet's prose already is from combined_text, cross-QC, the prose harvest,
+    # synthesis and focus (remediation WP-01.3, N15; ``models.review_findings``).
+    digest_findings = [f for sd in sheets for f in review_findings(sd)]
     ledger.add(digest_findings, "digest_json")
 
     # Critique findings already carry real per-read provenance (``critique_1`` /
@@ -3172,6 +3190,9 @@ def extract_drawing_context(
     run_usage = RunUsage()
     img_tok = 0
     geom_by_key = {source_page_key(g.ref): g for g in sheet_geometries}
+    # N15 (remediation WP-01.3): the findings of each read the model did not
+    # finish, held out of the review, by portable sheet key.
+    findings_held_out: dict[str, int] = {}
     for sd in sheets:
         # A cached sheet made no API call, so it costs zero tokens *this run* — its
         # record carries the cache-hit metadata but zero billed tokens. A fresh
@@ -3277,6 +3298,10 @@ def extract_drawing_context(
                 sheet_fields["omitted_tiles"] = geom.omitted_tile_count
         if getattr(sd, "findings_note", ""):
             sheet_fields["parser_note"] = sd.findings_note
+        held = held_out_findings(sd)
+        if held:
+            sheet_fields["findings_held_out"] = len(held)
+            findings_held_out[f"{skey[0]}:p{skey[1]}"] = len(held)
         if sd.error:
             sheet_fields["error"] = sd.error
         elif not sd.ok:
@@ -3331,6 +3356,14 @@ def extract_drawing_context(
                 ]
                 + list(page_error_lines)
             )[:5]
+        )
+    if findings_held_out:
+        # Observational (D-2 note): each such sheet is already a failed one.
+        digest_stage.warnings.append(
+            f"held out {sum(findings_held_out.values())} finding(s) from "
+            f"{len(findings_held_out)} sheet(s) whose read did not finish: not "
+            "numbered, marked up, verified or exported; each sheet's own file "
+            "lists them"
         )
     _finish_stage(stage_results, journal, digest_stage)
 
@@ -4066,6 +4099,7 @@ def extract_drawing_context(
         prose_accounting=qc.prose_accounting,
         cross_qc_discards=cross_qc_discards,
         cross_qc_invalid=cross_qc_invalid,
+        digest_findings_held_out=dict(sorted(findings_held_out.items())),
     )
 
 

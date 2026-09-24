@@ -673,6 +673,37 @@ def reduced_trust_reason(obj: Any) -> str:
     return TRUST_REASON_NO_TEXT
 
 
+def review_findings(sd: Any) -> list["Finding"]:
+    """The findings a sheet's digest hands to the review (remediation WP-01.3, N15).
+
+    All of them when the sheet's read finished; none when its digest carries
+    an error (a read the model did not finish: truncated, refused, a stream
+    that ended early, an unknown stop). Those are :func:`held_out_findings`.
+    The one rule behind the ledger ingest and every count and listing of what
+    was held out, so they cannot disagree. Duck-typed, like the export.
+    """
+    if getattr(sd, "error", None) is not None:
+        return []
+    return list(getattr(sd, "findings", None) or [])
+
+
+def held_out_findings(sd: Any) -> list["Finding"]:
+    """The findings of a read the model did not finish, held out of the review (N15).
+
+    The owner's rule: they are never ingested into the ledger, so never
+    numbered, anchored, verified, marked up or exported as findings, which is
+    how every other consumer already treats an errored sheet (``combined_text``,
+    cross-QC, the prose harvest, synthesis, focus, the review planner). The
+    sheet's own export file and its report card list them under its FAILED
+    status, as they keep its prose, and the run counts them
+    (``DrawingContext.digest_findings_held_out``). The complement of
+    :func:`review_findings`.
+    """
+    if getattr(sd, "error", None) is None:
+        return []
+    return list(getattr(sd, "findings", None) or [])
+
+
 def sheet_evidence_text(sheet: Any) -> str:
     """The text a **host-side** check may treat as this sheet's source evidence.
 

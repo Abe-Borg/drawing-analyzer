@@ -690,6 +690,8 @@ def _input_lines(ctx: Any, roots: "tuple[str, ...]" = ()) -> list[str]:
 
 
 def _sheet_lines(ctx: Any, roots: "tuple[str, ...]" = ()) -> list[str]:
+    from .models import held_out_findings
+
     sheets = list(getattr(ctx, "sheets", None) or [])
     if not sheets:
         return ["  (no sheets)"]
@@ -734,6 +736,11 @@ def _sheet_lines(ctx: Any, roots: "tuple[str, ...]" = ()) -> list[str]:
             bits.append(
                 f"parser: {sanitize_text(note, max_chars=120, private_roots=roots)}"
             )
+        # Remediation WP-01.3 (N15): a read the model did not finish keeps its
+        # findings out of the review; say how many, beside the error.
+        held = held_out_findings(s)
+        if held:
+            bits.append(f"{len(held)} finding(s) held out of the review")
         if error:
             bits.append(sanitize_text(error, max_chars=160, private_roots=roots))
         lines.append(f"  {label:<40} {status:<9} " + " · ".join(bits))

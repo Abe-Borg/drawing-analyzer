@@ -686,5 +686,10 @@ def test_a_failed_retry_keeps_the_truncated_first_read():
     assert len(client.messages.calls) == 2
     assert sd.text.startswith("Real prose")          # the first read still ships
     assert not sd.ok                                  # but the sheet is reported
-    assert sd.error == "truncated digest (stop_reason='max_tokens')"
+    # Its own error, and the retry that failed (remediation WP-01.3, N16: the
+    # owner's rule names a discarded attempt in the kept read's error).
+    assert sd.error == (
+        "truncated digest (stop_reason='max_tokens'); "
+        "retry failed: permanent 400 on the raised cap"
+    )
     assert (sd.input_tokens, sd.output_tokens) == (100, 20)   # only what billed

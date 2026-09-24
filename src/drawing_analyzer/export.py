@@ -45,6 +45,7 @@ from typing import Any
 from .html_report import build_html_report
 from .models import (
     PRIMARY_LEG_ID,
+    held_out_findings,
     name_is_taken,
     receipt_status_counts,
     record_name,
@@ -117,13 +118,32 @@ def _sheet_status(sheet: Any, roots: "tuple[str, ...]" = ()) -> str:
     return "OK"
 
 
+def _held_out_line(finding: Any) -> str:
+    """One held-out finding as a Markdown bullet: severity, category, text, quote.
+
+    Model content, verbatim (the prose beside it is not redacted either, I-2).
+    """
+    severity = str(getattr(finding, "severity", "") or "").strip() or "?"
+    category = str(getattr(finding, "category", "") or "").strip() or "?"
+    text = " ".join(str(getattr(finding, "text", "") or "").split())
+    quote = " ".join(str(getattr(finding, "source_quote", "") or "").split())
+    line = f"- **{severity}** · {category}: {text}"
+    if quote:
+        line += f' (quote: "{quote}")'
+    return line
+
+
 def _sheet_document(
     index: int, total: int, sheet: Any, roots: "tuple[str, ...]" = ()
 ) -> str:
     """One sheet's Markdown file: heading, status/token line, then digest text.
 
     A failed sheet has no digest text, so its error is rendered as the body — the
-    operator gets one file per sheet either way (nothing silently dropped).
+    operator gets one file per sheet either way (nothing silently dropped). A
+    read the model did not finish keeps its prose here under FAILED, and the
+    findings it reported are listed after it: they are held out of the review
+    (remediation WP-01.3, N15; :func:`~drawing_analyzer.models.held_out_findings`),
+    so this file is the one place they appear.
     """
     ref = _ref_of(sheet)
     label = getattr(ref, "display_label", None) or f"Sheet {index}/{total}"
@@ -145,6 +165,19 @@ def _sheet_document(
         )
     else:
         lines.append("> (empty digest)")
+    held = held_out_findings(sheet)
+    if held:
+        lines += [
+            "",
+            f"## Findings held out of the review ({len(held)})",
+            "",
+            "The model did not finish reading this sheet (see Status), so the "
+            "review did not take the findings this read reported: they have no "
+            "QC number, markup or verification, and are not in findings.json or "
+            "findings.csv. Check them against the sheet.",
+            "",
+        ]
+        lines.extend(_held_out_line(f) for f in held)
     lines.append("")
     return "\n".join(lines)
 
@@ -471,6 +504,26 @@ def _stage_dict(sr: Any) -> dict:
     }
 
 
+def _held_out_summary(ctx: Any) -> dict:
+    """``{"total": N, "by_sheet": {"SRC-0001:p0": n}}`` for the run manifest.
+
+    From ``ctx.digest_findings_held_out`` (remediation WP-01.3, N15), which
+    the pipeline fills from :func:`~drawing_analyzer.models.held_out_findings`.
+    A context without the field (an older or hand-built one) reports zero.
+    """
+    raw = getattr(ctx, "digest_findings_held_out", None) or {}
+    by_sheet: dict[str, int] = {}
+    if isinstance(raw, dict):
+        for key, count in sorted(raw.items(), key=lambda kv: str(kv[0])):
+            try:
+                n = int(count)
+            except (TypeError, ValueError):
+                continue
+            if n > 0:
+                by_sheet[str(key)] = n
+    return {"total": sum(by_sheet.values()), "by_sheet": by_sheet}
+
+
 def _source_entries(ctx: Any, roots: "tuple[str, ...]" = ()) -> list[dict]:
     """The §6.1 input inventory for the manifest — **no absolute paths, no
     content hashes** (§18.4 keeps the source SHA private by default; the
@@ -627,6 +680,10 @@ def build_run_manifest(
         # was recorded (cross-QC made no call); all zeros means it refused
         # nothing.
         "cross_qc_invalid": dict(getattr(ctx, "cross_qc_invalid", None) or {}),
+        # Remediation WP-01.3 (N15): findings from reads the model did not
+        # finish, held out of the review, per portable sheet key. Counts only;
+        # always measured (every run digests), so zero means none.
+        "digest_findings_held_out": _held_out_summary(ctx),
         "evidence": evidence_summary(findings + reference),
         "markup_coverage": _receipt_summary(ctx, roots),
         "errors": [

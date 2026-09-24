@@ -593,6 +593,39 @@ carries a one-line failure note in its place. A failed sheet lowers the
 ok-sheet count, is named in the run's errors, and holds an exhaustive run's QC
 status below `COMPLETE`.
 
+**A retry never costs a sheet a better read.** Every read of a sheet is ranked:
+a finished read first, then a read that did not finish but carries prose or
+findings, then a refusal, then nothing (an empty reply, an errored batch item, a
+call that failed). A retry replaces the read the sheet holds only when it ranks
+at least as high. So a raised-cap retry that comes back empty, refused or failed
+leaves the first read's prose and findings in place, and of two cut-off reads
+the raised-cap one, which had twice the room, is kept. The two reads are never
+mixed. The kept read's error then says what happened to the retry:
+`truncated digest (stop_reason='max_tokens'); retry: refused digest
+(stop_reason='refusal')`, or `…; retry failed: <error>` when the retry call
+itself failed. The batch transport applies the same rule at every step of its
+recovery (the follow-up batch, the fresh-batch rounds, the direct-call rescue,
+and a stalled batch's items read back before it is resubmitted) and writes
+`…; 3 retries, the last: …` when several recovery attempts came back worse.
+Every attempt's usage is still counted, whichever read is kept. Before this, the
+later read replaced the earlier one whenever it came back at all, so a retry
+that came back empty or refused threw away a partial read that had been paid
+for.
+
+**The findings of an unfinished read are held out of the review.** A read the
+model did not finish can still carry a findings block: the model writes it last,
+so a reply cut off or refused just after it still parses. Those findings are
+not the review's. They get no QC number, no markup and no verification, and
+they are not in `findings.json`, `findings.csv` or the report's findings table,
+just as the sheet's prose is kept out of `combined_text`, cross-sheet QC, the
+prose harvest and the synthesis. The sheet's own export file and its card in the
+HTML report list them under the *Failed* status, so nothing the model reported
+is lost, and the run counts them: a warning on the digest stage, a
+`findings_held_out` count on the sheet's line in `run.log`, and
+`digest_findings_held_out` in `run_manifest.json`. Before this, they were
+reviewed, numbered and marked up like any other finding, with nothing to say
+the read behind them was incomplete.
+
 The cache applies the same rule on the way out: a cached digest is served only
 if it records a finished read. An earlier version could cache a refusal that
 came with text, or a stream that ended early; such an entry, or one that
@@ -2045,7 +2078,11 @@ recovery's budget: if the batch will not settle, the run resubmits everything
 exactly as it used to, which costs money but never loses sheets. Only a finished
 read is taken from the abandoned batch: an item it answered with an empty,
 cut-off or refused read is resubmitted with the unresolved sheets, within the
-same bounded rounds, and its billed attempt stays in the usage ledger.
+same bounded rounds, and its billed attempt stays in the usage ledger. A cut-off
+read that carries prose or findings is also kept for its sheet, so the
+resubmission can only improve on it; if no resubmission lands, the sheet keeps
+that read and its own error rather than reporting the batch as not collected
+(see *A retry never costs a sheet a better read*).
 
 The run waits up to **24 hours** for a batch — the Batches API's own SLA, and
 what makes the app's "can run overnight" wording true rather than aspirational.
