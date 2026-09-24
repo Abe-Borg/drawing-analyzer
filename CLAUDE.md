@@ -555,7 +555,11 @@ reporter of last resort must never raise from inside Tk's handler.
   surfaces per item after the batch is built and billed, so the transport that
   cannot degrade does not opt in);
   `cross_qc.py` (text-only cross-sheet conflict hunt; dual anchors via
-  `also_on` legs); `auditors/` (five deterministic zero-API auditors over the
+  `also_on` legs; an uncertain conflict is category `question` with severity
+  `low`, the one pair the validators accept, since remediation WP-06.1: the
+  persona once asked for severity `question` and every such item was refused
+  unseen (B6); only findings identical in every field collapse before the
+  ledger (`_drop_exact_repeats`, N2), below); `auditors/` (five deterministic zero-API auditors over the
   text layers, **all** grounded on the shared `auditors/sheet_ids.py` grammar
   foundation — Phase 25 §17.2/17.3: `id_signature`/`learn_grammar` learn the set's
   hyphenated/compact/dotted numbering convention, `classify_reference` +
@@ -718,7 +722,8 @@ reporter of last resort must never raise from inside Tk's handler.
   joins nothing. WP-05.2's first push kept the join on `_normalize` alone, so
   a leg that grounded only through the fold lost its fact's tile, which on a
   scanned sheet is its only location (Codex review). Host-side binding, so
-  `_CROSS_QC_CACHE_CONTRACT` **3 → 4**, and **4 → 5** for the fold (WP-05.2).
+  `_CROSS_QC_CACHE_CONTRACT` **3 → 4**, and **4 → 5** for the fold (WP-05.2)
+  (6 since remediation WP-06.1, below).
   Reduced trust must **reach verification**, so the location travels in three
   parts: the shard-map prompt requests `tile_label` per fact and leg
   (`CrossQCFact.tile`, resolved on that leg's own grid); `fact_tile_lookup`
@@ -761,8 +766,8 @@ reporter of last resort must never raise from inside Tk's handler.
   map is keyed by `detect_sheet_id` and so already canonical: an uncanonical lookup
   matched **nothing**, and the claim resolved to no sheet at all. That
   canonicalization is host-side binding no key input covers, so it carries
-  `_CROSS_QC_CACHE_CONTRACT` **2 → 3** (4 since remediation WP-05.1 and 5
-  since WP-05.2, above).
+  `_CROSS_QC_CACHE_CONTRACT` **2 → 3** (4 since remediation WP-05.1, 5
+  since WP-05.2, above, and 6 since WP-06.1, below).
   Cross-QC also carries **count-only discard counters** on the sharded path
   (`CrossQCDiscardCounts`, WP-02 §7.2): how many legs/facts the host dropped and
   why — unresolved handle, quote absent, quote present but unmatched, split by
@@ -773,7 +778,47 @@ reporter of last resort must never raise from inside Tk's handler.
   before the field existed has none) — never "nothing was discarded". It exists
   because `_finding_from_handles` / `_parse_facts` drop before `CrossQCResult`
   is built, so a run that kept 3 findings and one that kept 3 after dropping 40
-  ungrounded legs were previously indistinguishable.
+  ungrounded legs were previously indistinguishable. A fact whose quote is only
+  whitespace is `facts_no_quote` and dropped, like an empty one (remediation
+  WP-06.1; it was admitted as a no-text fact and sent to the reconciler).
+  **Refused items are counted on both paths** (remediation WP-06.1, B6;
+  `CrossQCInvalidCounts`, `CrossQCResult.invalid`): `_invalid_field` is the one
+  field check both validators apply, in a fixed order (not an object, category,
+  severity, text), and each refused item counts once, under the first check it
+  fails, so the counts sum to the items lost (the owner's rules). The accepted
+  set is unchanged: validation stays strict (plan §7, B6). Items are read only
+  from a list (`_findings_array`): a `findings` string beside a map call's
+  facts would otherwise count each character as a refused item. A separate record,
+  not a `discards` field, so `discards is None` keeps meaning "grounding not
+  measured" on the whole-set path until WP-06.2 grounds it; run-level only
+  (an item is refused before its sheets resolve). **Observational** (the
+  owner's decision, D-2 note): the pipeline adds `note()` as a cross-QC stage
+  warning after the warnings that decide the status, the stage keeps its
+  status, and `_put_cross_qc_cache` still admits the result, whose payload
+  carries the counts, so a warm run shows the same warning. It reaches
+  `ctx.cross_qc_invalid` and `run_manifest.json` (`cross_qc_invalid`: empty
+  when the stage made no call, all zeros when it refused nothing). Before, the
+  loss was an INFO line on the whole-set path only, lumped with unplaceable
+  items, in a stage that read COMPLETE and was cached.
+  **Only identical findings collapse** before the ledger (remediation WP-06.1,
+  N2; the owner's decision): `_drop_exact_repeats` keeps the first of findings
+  whose whole `to_dict()` is equal and hands every other report to the ledger,
+  which decides whether two are one. It replaced `_dedup_findings`, whose key
+  (primary sheet, category, primary quote, sorted legs) had no text, so two
+  different conflicts quoting the same strings on the same sheets (a pump's
+  missing isolation valve and its motor horsepower, both quoting `PUMP P-1`)
+  became one before the ledger saw them, and a second report's higher severity
+  or action went with it. The shard calls, the reconciler and the reconcile pair
+  calls (a within-group conflict comes back from every pair its group is in)
+  can each report one conflict, so repeats are expected: identical copies
+  collapse here, and a re-report phrased differently reaches the ledger, which
+  folds it when the texts agree enough and keeps both when they do not (the
+  accepted cost until WP-06.4 states a same-claim predicate). The ledger's own
+  N30 still folds two different conflicts whose terse texts both name the same
+  two sheets (the prompt asks every text to name them): recorded, WP-03.5's.
+  Host-side binding for byte-identical inputs, so `_CROSS_QC_CACHE_CONTRACT`
+  **5 → 6**; the persona edit also re-keys every entry through the prompt text
+  the key holds, a second change with its own mechanism.
 - ***`ledger.py` is the exclusive findings container*** (Part III §16): every
   channel ingests into it with source tags. Dedup is conservative and lossless
   (Phase 20 §12): a tile is never sufficient and a rectangle is not read at all

@@ -17,7 +17,10 @@ conflicts **and** a set of compact grounded ``CrossQCFact`` s (the comparable da
 points another shard might contradict); then a final **reconciliation** call
 compares the facts across *all* shards, so a conflict whose two sheets fall in
 different shards is still found (the old "shard and union" silently missed those).
-If the facts exceed one call, a balanced reduction tree carries them forward.
+If the facts exceed one call, they are split into half-cap groups and every pair
+of groups is reconciled, so any two facts meet in at least one call
+(:func:`_reconcile_facts`; this docstring called it "a balanced reduction tree"
+until remediation WP-06.1).
 
 **Opaque handles (§16.1).** Source identity stays host-owned: in the sharded path
 the model sees a request-local opaque ``sheet_handle`` (``S001`` …), never a
@@ -35,12 +38,23 @@ never a silent slice. The same now holds for the per-response findings cap
 reported ``complete``, which on a large set — where cross-sheet coordination
 conflicts matter most — is indistinguishable from a set that simply had fewer.
 
+**Refused items and repeats (remediation WP-06.1; B6, N2).** An item whose
+shape, category, severity or text the host refuses is dropped, as before, and
+now counted on both paths (:class:`CrossQCInvalidCounts`), so a response that
+lost items no longer reads like a clean empty one. The counts are observational:
+a stage warning, never a status. Findings identical in every field collapse
+(:func:`_drop_exact_repeats`); every other report reaches the findings ledger,
+which decides whether two are one. The old key (primary sheet, category, quote,
+legs) had no text, so two different conflicts quoting the same strings on the
+same sheets became one before the ledger could see them.
+
 Additive and non-fatal (I-3): a failure is recorded and the standard deliverable
 ships. PDF-engine-free (I-5) — it reads the already-extracted geometry/text.
 """
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -107,7 +121,8 @@ DEFAULT_CROSS_QC_MAX_TOKENS = CROSS_QC_OUTPUT_CAP
 DEFAULT_CROSS_QC_MAX_FINDINGS = 60
 # Per-shard cap on the compact facts a map call emits (bounds the reconcile input).
 DEFAULT_MAP_MAX_FACTS = 40
-# Facts one reconciliation call compares at once; above it, a balanced tree reduces.
+# Facts one reconciliation call compares at once; above it, every pair of
+# half-cap groups is reconciled (``_reconcile_facts``).
 MAX_FACTS_PER_RECONCILE = 400
 # Cap each sheet's text layer in the prompt (the digest already summarizes it). The
 # omitted characters are counted and surfaced (DA-028) — never silently dropped.
@@ -146,7 +161,19 @@ _TEXT_LAYER_BUDGET = 4_000
 # review), so such a leg also inherits its fact's tile, and two facts spelled
 # apart only by that punctuation in different tiles now collide and give none.
 # One mechanism: no key term was added.
-_CROSS_QC_CACHE_CONTRACT = 5
+#
+# Bumped to 6 (remediation WP-06.1; B6, N2): what is stored changes again for
+# byte-identical request inputs. Two different conflicts that quote the same
+# strings on the same sheets used to be folded into one by ``_dedup_findings``;
+# now only findings identical in every field collapse and the ledger decides the
+# rest. A fact whose quote is only whitespace is dropped as having no quote
+# instead of being sent to the reconciler, and the stored result carries its
+# refused-item counts. The persona edit (B6) also re-keys every entry, through
+# the prompt text the key already holds: that is a second change with its own
+# mechanism, not a bump and a key term for one change (plan §2 rule 15). If the
+# prompt edit were ever reverted, this bump still keeps a warm entry from
+# serving a finding set the host no longer produces.
+_CROSS_QC_CACHE_CONTRACT = 6
 DEFAULT_CROSS_QC_WORKERS = 3
 _CROSS_QC_WORKERS_ENV = "DRAWING_ANALYZER_CROSS_QC_WORKERS"
 
@@ -192,8 +219,9 @@ sheets;
 
 Ground every conflict in the actual text: quote the exact conflicting string from \
 EACH sheet involved. Report only conflicts you can substantiate from the provided \
-text; when you are not certain two sheets truly conflict, lower the severity to \
-`question`. Judge across sheets only — a single-sheet issue is out of scope."""
+text; when you are not certain two sheets truly conflict, report it with category \
+`question` and severity `low`. Judge across sheets only — a single-sheet issue is \
+out of scope."""
 
 _CROSS_QC_TASK = (
     "Now report the cross-sheet conflicts in this set, following the FINDINGS "
@@ -406,6 +434,80 @@ class CrossQCDiscardCounts:
         return obj
 
 
+# The words each refusal reason reads as in the stage warning, in field order.
+_INVALID_REASON_LABELS = {
+    "findings_not_object": "not an object",
+    "findings_invalid_category": "category",
+    "findings_invalid_severity": "severity",
+    "findings_invalid_text": "text",
+}
+
+
+@dataclass
+class CrossQCInvalidCounts:
+    """Returned items the host refused for an invalid field (remediation WP-06.1, B6).
+
+    The persona prompt used to tell the model, when unsure that two sheets
+    conflict, to "lower the severity to `question`". ``question`` is a category,
+    and both validators refuse a severity that is not high, medium or low, so
+    exactly the items that sentence targeted were dropped: no counter, an INFO
+    line on the whole-set path only, a stage that read COMPLETE, a result that
+    was cached. The prompt now asks for category ``question`` with severity
+    ``low``, and validation stays strict (plan §7, B6). This record is how a
+    refusal stays observable, distinct from a clean empty response (plan WP-06
+    step 5). The owner's rules:
+
+    - Each refused item counts **once**, under the first check that refused it
+      (:func:`_invalid_field`: not an object, then the category, the severity,
+      the text), so the counts sum to the items lost.
+    - Recorded on **both** paths, unlike :class:`CrossQCDiscardCounts`, whose
+      grounding counters the whole-set path does not measure (U8, WP-06.2).
+    - Run-level only: an item is refused before any of its sheets is resolved.
+    - **Observational** (``_plans/DECISIONS.md`` D-2): nothing here feeds
+      ``complete`` or ``budget_degraded``. The pipeline turns a non-zero total
+      into a stage warning and the stage keeps its status; the cached result
+      carries the counts, so a warm run shows the same warning.
+    - Counts only, never item text.
+    """
+
+    findings_not_object: int = 0
+    findings_invalid_category: int = 0
+    findings_invalid_severity: int = 0
+    findings_invalid_text: int = 0
+
+    def bump(self, name: str) -> None:
+        setattr(self, name, getattr(self, name) + 1)
+
+    def merge(self, other: "CrossQCInvalidCounts") -> None:
+        """Fold another record in (map shards and reconcile calls accumulate)."""
+        for f in fields(self):
+            setattr(self, f.name, getattr(self, f.name) + getattr(other, f.name))
+
+    @property
+    def total(self) -> int:
+        """How many returned items were refused."""
+        return sum(getattr(self, f.name) for f in fields(self))
+
+    def note(self) -> str:
+        """The stage warning, or ``""`` when nothing was refused."""
+        if not self.total:
+            return ""
+        reasons = ", ".join(
+            f"{_INVALID_REASON_LABELS[f.name]} {getattr(self, f.name)}"
+            for f in fields(self) if getattr(self, f.name)
+        )
+        return f"{self.total} returned item(s) refused for an invalid field ({reasons})"
+
+    def to_dict(self) -> dict:
+        return {f.name: getattr(self, f.name) for f in fields(self)}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "CrossQCInvalidCounts":
+        d = d or {}
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: int(v or 0) for k, v in d.items() if k in known})
+
+
 def sheet_counter_key(geom: Any) -> str:
     """A portable ``"SRC-0001:p0"`` key for one sheet — never a path.
 
@@ -450,6 +552,13 @@ class CrossQCResult:
     and completed, and whether the text budget was degraded (§16.2). ``complete`` is
     False when any shard or the reconciliation failed, or the budget was degraded —
     the pipeline then holds the stage at PARTIAL while still using the findings.
+
+    ``findings`` are every conflict the host kept, with only findings identical
+    in every field collapsed (remediation WP-06.1, N2): two reports of one
+    conflict phrased differently are both here, and the findings ledger decides
+    whether they are one. ``invalid`` counts the returned items the host refused
+    for an invalid field (B6); like ``discards`` it is observational and never
+    touches ``complete``.
     """
 
     findings: list[Finding] = field(default_factory=list)
@@ -472,9 +581,14 @@ class CrossQCResult:
     findings_omitted: int = 0
     budget_degraded: bool = False
     cached: bool = False
-    # WP-02 §7.2. ``None`` = not recorded (a result cached before this existed),
-    # which is not the same as "nothing was discarded".
+    # WP-02 §7.2. ``None`` = not recorded (a result cached before this existed,
+    # or the whole-set path, which grounds nothing yet), which is not the same
+    # as "nothing was discarded".
     discards: "CrossQCDiscardCounts | None" = None
+    # Remediation WP-06.1 (B6): items refused for an invalid field, recorded on
+    # both paths. ``None`` = not recorded (a result cached before it existed),
+    # never "nothing was refused". Observational: it feeds no status.
+    invalid: "CrossQCInvalidCounts | None" = None
 
 
 # --------------------------------------------------------------------------- #
@@ -639,23 +753,63 @@ def _quote(v: Any) -> str:
     return v if isinstance(v, str) else ""
 
 
-def _validate_cross_item(item: Any, sheet_map: dict[str, Any]) -> Finding | None:
-    """Build a dual-anchored :class:`Finding` from one whole-set cross-QC item.
+def _findings_array(obj: dict) -> list:
+    """The response's ``findings`` items, or ``[]`` when that field is no list.
 
-    Requires a recognized category/severity, non-empty text, and at least **two**
-    of the item's referenced sheet ids (primary + ``also_on``) that resolve in the
-    set. The first resolvable ref becomes the primary; the rest become ``also_on``
-    legs. An item that can't be placed on two real sheets is dropped.
+    Only a list holds items. Iterating a string would hand each character to a
+    validator, and since remediation WP-06.1 every refused item is counted, so
+    ``"findings": "none"`` beside a map call's facts would read as four refused
+    items. A value that is not a list was always read as no findings; it still is.
+    """
+    items = obj.get("findings")
+    return items if isinstance(items, list) else []
+
+
+def _invalid_field(item: Any) -> str:
+    """The first reason ``item`` cannot become a finding, or ``""`` (remediation WP-06.1).
+
+    The one field check both validators apply, so the whole-set and sharded
+    paths refuse, and count, the same items. The checks run in a fixed order
+    (not an object, then the category, the severity, the text), and an item is
+    counted under the first one it fails. The accepted set is exactly what it
+    was: a severity must be high, medium or low whatever a prompt once asked for
+    (plan §7, B6: fix the prompt, keep validation strict). Returns a
+    :class:`CrossQCInvalidCounts` field name.
     """
     if not isinstance(item, dict):
+        return "findings_not_object"
+    if str(item.get("category", "")).strip().lower() not in _MODEL_FINDING_CATEGORIES:
+        return "findings_invalid_category"
+    if str(item.get("severity", "")).strip().lower() not in _FINDING_SEVERITIES:
+        return "findings_invalid_severity"
+    text = item.get("text", "")
+    if not isinstance(text, str) or not text.strip():
+        return "findings_invalid_text"
+    return ""
+
+
+def _validate_cross_item(
+    item: Any, sheet_map: dict[str, Any],
+    invalid: "CrossQCInvalidCounts | None" = None,
+) -> Finding | None:
+    """Build a dual-anchored :class:`Finding` from one whole-set cross-QC item.
+
+    Requires a recognized category/severity and non-empty text
+    (:func:`_invalid_field`, counted in ``invalid`` when refused), and at least
+    **two** of the item's referenced sheet ids (primary + ``also_on``) that
+    resolve in the set. The first resolvable ref becomes the primary; the rest
+    become ``also_on`` legs. An item that can't be placed on two real sheets is
+    dropped; that is a binding outcome, not a refused field, and is not counted
+    here.
+    """
+    reason = _invalid_field(item)
+    if reason:
+        if invalid is not None:
+            invalid.bump(reason)
         return None
     category = str(item.get("category", "")).strip().lower()
     severity = str(item.get("severity", "")).strip().lower()
     text = item.get("text", "")
-    if category not in _MODEL_FINDING_CATEGORIES or severity not in _FINDING_SEVERITIES:
-        return None
-    if not isinstance(text, str) or not text.strip():
-        return None
 
     # Keep each ref's raw dict so its tile_label is resolved against ITS OWN
     # sheet's grid once the sheet is bound (Phase 25 §17.1).
@@ -781,23 +935,25 @@ def _finding_from_handles(
     entry_by_handle: dict[str, tuple],
     counts: "CrossQCDiscardCounts | None" = None,
     tile_lookup: dict | None = None,
+    invalid: "CrossQCInvalidCounts | None" = None,
 ) -> Finding | None:
     """Build a dual-anchored :class:`Finding` from a handle-keyed item (map/reconcile).
 
-    Resolves each opaque ``sheet_handle`` against the request manifest (an unknown
-    handle is dropped — never authority) and **validates the quote is grounded** in
-    the referenced sheet's text before trusting the leg (§16.1). Needs >= 2 distinct
+    Refuses an invalid field first, exactly as the whole-set validator does
+    (:func:`_invalid_field`, counted in ``invalid``). Then resolves each opaque
+    ``sheet_handle`` against the request manifest (an unknown handle is
+    dropped — never authority) and **validates the quote is grounded** in the
+    referenced sheet's text before trusting the leg (§16.1). Needs >= 2 distinct
     grounded sheets or it is dropped.
     """
-    if not isinstance(item, dict):
+    reason = _invalid_field(item)
+    if reason:
+        if invalid is not None:
+            invalid.bump(reason)
         return None
     category = str(item.get("category", "")).strip().lower()
     severity = str(item.get("severity", "")).strip().lower()
     text = item.get("text", "")
-    if category not in _MODEL_FINDING_CATEGORIES or severity not in _FINDING_SEVERITIES:
-        return None
-    if not isinstance(text, str) or not text.strip():
-        return None
 
     def _handle(d: dict) -> str:
         return str(d.get("sheet_handle", "") or d.get("handle", "")).strip()
@@ -1120,7 +1276,7 @@ def _call(
 def _one_cross_qc_call(
     entries: list[tuple], sheet_map: dict[str, Any], *,
     client: Any, model: str, max_retries: int, sleep: Any, budget: _Budget,
-    preamble: str = "",
+    preamble: str = "", invalid: "CrossQCInvalidCounts | None" = None,
 ) -> tuple[list[Finding], list[NumericClaim], int, int, str | None]:
     """Whole-set cross-QC call over ``entries`` → ``(findings, claims, in, out, err)``."""
     raw, in_tok, out_tok, err = _call(
@@ -1134,15 +1290,23 @@ def _one_cross_qc_call(
     if obj is None:
         return [], parse_numeric_claims(raw), in_tok, out_tok, _NO_FINDINGS_OBJECT
     findings: list[Finding] = []
-    dropped = 0
-    for item in obj.get("findings") or []:
-        f = _validate_cross_item(item, sheet_map)
+    refused = CrossQCInvalidCounts()
+    unplaceable = 0
+    for item in _findings_array(obj):
+        before = refused.total
+        f = _validate_cross_item(item, sheet_map, refused)
         if f is None:
-            dropped += 1
+            # A refused field is counted (and logged by the caller, once per
+            # run); what remains is an item that could not be placed on two
+            # sheets of the set.
+            if refused.total == before:
+                unplaceable += 1
             continue
         findings.append(f)
-    if dropped:
-        _log.info("cross-qc parse: dropped %d unplaceable/invalid finding(s)", dropped)
+    if invalid is not None:
+        invalid.merge(refused)
+    if unplaceable:
+        _log.info("cross-qc parse: dropped %d unplaceable finding(s)", unplaceable)
     return _cap_findings(findings, budget), parse_numeric_claims(raw), in_tok, out_tok, None
 
 
@@ -1151,6 +1315,7 @@ def _map_call(
     discipline_by_handle: dict, *,
     client: Any, model: str, max_retries: int, sleep: Any, budget: _Budget,
     preamble: str = "", counts: "CrossQCDiscardCounts | None" = None,
+    invalid: "CrossQCInvalidCounts | None" = None,
 ) -> tuple[list[Finding], list[NumericClaim], list[CrossQCFact], int, int, str | None]:
     """One shard-map call → local findings + claims + grounded facts (handle-keyed)."""
     raw, in_tok, out_tok, err = _call(
@@ -1165,8 +1330,9 @@ def _map_call(
         claims = _resolve_claim_handles(parse_numeric_claims(raw), entry_by_handle)
         return [], claims, [], in_tok, out_tok, _NO_FINDINGS_OBJECT
     findings = _cap_findings([
-        f for item in (obj.get("findings") or [])
-        if (f := _finding_from_handles(item, entry_by_handle, counts)) is not None
+        f for item in _findings_array(obj)
+        if (f := _finding_from_handles(item, entry_by_handle, counts, invalid=invalid))
+        is not None
     ], budget)
     claims = _resolve_claim_handles(parse_numeric_claims(raw), entry_by_handle)
     facts = _parse_facts(obj, entry_by_handle, discipline_by_handle, counts)
@@ -1182,6 +1348,11 @@ def _parse_facts(
     Each fact's handle must resolve in the request manifest and its ``exact_quote``
     must be grounded in that sheet's retained text (§16.1) — an ungrounded or
     unresolvable fact is dropped so the reconciler only compares trusted data.
+    A quote of nothing but whitespace is no quote (remediation WP-06.1, found by
+    WP-05.1): it is dropped and counted ``facts_no_quote``, like an empty one.
+    It used to be classified (blank, so TEXT_EVIDENCE_UNAVAILABLE), admitted at
+    reduced trust, counted as a no-text admission and sent to the reconciler,
+    which compares quotes and could do nothing with it.
     """
     out: list[CrossQCFact] = []
     for item in (obj.get("facts") or []):
@@ -1195,7 +1366,7 @@ def _parse_facts(
             continue
         sheet_id, geom = entry
         exact_quote = _quote(item.get("exact_quote", ""))
-        if not exact_quote:
+        if not exact_quote.strip():          # empty or whitespace: no quote
             if counts is not None:
                 counts.bump("facts_no_quote", geom)
             continue
@@ -1236,6 +1407,7 @@ def _reconcile_call(
     manifest: list[tuple], facts: list[CrossQCFact], entry_by_handle: dict, *,
     client: Any, model: str, max_retries: int, sleep: Any, budget: _Budget,
     preamble: str = "", counts: "CrossQCDiscardCounts | None" = None,
+    invalid: "CrossQCInvalidCounts | None" = None,
 ) -> tuple[list[Finding], list[NumericClaim], int, int, str | None]:
     """One reconciliation call comparing ``facts`` across the whole manifest."""
     raw, in_tok, out_tok, err = _call(
@@ -1254,8 +1426,8 @@ def _reconcile_call(
     # inherit a tile from evidence actually placed in front of the model.
     lookup = fact_tile_lookup(facts)
     findings = _cap_findings([
-        f for item in (obj.get("findings") or [])
-        if (f := _finding_from_handles(item, entry_by_handle, counts, lookup))
+        f for item in _findings_array(obj)
+        if (f := _finding_from_handles(item, entry_by_handle, counts, lookup, invalid))
         is not None
     ], budget)
     claims = _resolve_claim_handles(parse_numeric_claims(raw), entry_by_handle)
@@ -1271,7 +1443,7 @@ def _reconcile_facts(
     manifest: list[tuple], facts: list[CrossQCFact], entry_by_handle: dict, *,
     client: Any, model: str, max_retries: int, sleep: Any, budget: _Budget,
     preamble: str = "", counts: "CrossQCDiscardCounts | None" = None,
-    max_workers: int | None = None,
+    max_workers: int | None = None, invalid: "CrossQCInvalidCounts | None" = None,
 ) -> tuple[list[Finding], list[NumericClaim], int, int, bool]:
     """Reconcile all facts, comparing across groups when they overflow one call.
 
@@ -1280,9 +1452,11 @@ def _reconcile_facts(
     **half-cap** groups and reconciled over **every pair** of groups — each pair's
     union is ≤ the cap (no truncation), and every pair of facts is co-present in at
     least one call, so a cross-group conflict is never missed (a plain "compare each
-    group to itself" tree would silently drop cross-group pairs). Findings are
-    deduped by the caller. ``completed`` is False if any reconcile call failed or
-    the pair fan-out had to be capped.
+    group to itself" tree would silently drop cross-group pairs). A conflict
+    within one group can come back from every pair call that group is in; the
+    caller collapses only identical copies and the findings ledger judges the
+    rest (remediation WP-06.1). ``completed`` is False if any reconcile call
+    failed or the pair fan-out had to be capped.
     """
     if not facts:
         return [], [], 0, 0, True
@@ -1290,7 +1464,7 @@ def _reconcile_facts(
         f, c, i, o, err = _reconcile_call(
             manifest, facts, entry_by_handle,
             client=client, model=model, max_retries=max_retries, sleep=sleep,
-            budget=budget, preamble=preamble, counts=counts,
+            budget=budget, preamble=preamble, counts=counts, invalid=invalid,
         )
         return f, c, i, o, err is None
 
@@ -1316,14 +1490,16 @@ def _reconcile_facts(
         # thread pool, and ``+=`` on a shared counter across threads would lose
         # increments.
         local_counts = CrossQCDiscardCounts()
+        local_invalid = CrossQCInvalidCounts()
         try:
             return (*_reconcile_call(
                 manifest, union, entry_by_handle,
                 client=client, model=model, max_retries=max_retries, sleep=sleep,
                 budget=budget, preamble=preamble, counts=local_counts,
-            ), local_counts)
+                invalid=local_invalid,
+            ), local_counts, local_invalid)
         except Exception as exc:  # noqa: BLE001 - preserve additive semantics
-            return [], [], 0, 0, _clean_error(exc), local_counts
+            return [], [], 0, 0, _clean_error(exc), local_counts, local_invalid
 
     workers = _resolve_cross_qc_workers(max_workers, len(pair_inputs))
     if workers == 1:
@@ -1337,11 +1513,13 @@ def _reconcile_facts(
     all_f: list[Finding] = []
     all_c: list[NumericClaim] = []
     tot_in = tot_out = 0
-    for f, c, in_t, out_t, err, local_counts in pair_results:
+    for f, c, in_t, out_t, err, local_counts, local_invalid in pair_results:
         tot_in += in_t
         tot_out += out_t
         if counts is not None:
             counts.merge(local_counts)
+        if invalid is not None:
+            invalid.merge(local_invalid)
         if err is not None:
             completed = False
         all_f.extend(f)
@@ -1370,23 +1548,34 @@ def _shard_by_discipline(entries: list[tuple]) -> list[list[tuple]]:
     return shards
 
 
-def _dedup_findings(findings: list[Finding]) -> list[Finding]:
-    """De-duplicate by the FULL conflict (primary + legs), normalized.
+def _drop_exact_repeats(findings: list[Finding]) -> list[Finding]:
+    """Keep the first of findings identical in every field; keep all others (N2).
 
-    Keying on ``Finding.id`` alone would collapse two distinct conflicts sharing a
-    primary quote; keying on the full leg set keeps them apart while merging the
-    same conflict reported by two shards (or a shard + the reconciler)."""
-    def _key(f: Finding) -> tuple:
-        legs = tuple(sorted(
-            (_norm_id(l.sheet_id), (l.source_quote or "").strip().lower())
-            for l in f.also_on
-        ))
-        return (_norm_id(f.sheet_id), f.category, (f.source_quote or "").strip().lower(), legs)
+    Remediation WP-06.1, the owner's decision. The shard calls, the reconciler
+    and the reconcile pair calls can each report the same conflict, so repeats
+    are expected. An identical copy carries nothing its first does not, so it
+    is dropped here and nothing is lost. Everything else goes to the findings
+    ledger, which decides whether two findings are one (``critique._is_duplicate``:
+    text agreement, compatible signatures, the legs).
 
-    seen: set[tuple] = set()
+    This replaced ``_dedup_findings``, which kept the first finding per
+    (primary sheet, category, primary quote, sorted legs). That key has no
+    text, so two *different* conflicts quoting the same strings on the same
+    sheets (a pump's missing isolation valve and its motor horsepower, both
+    quoting ``PUMP P-1``) became one before the ledger saw them (N2); a second
+    report's higher severity or its action went with it. The accepted cost: a
+    re-report of one conflict phrased differently reaches the ledger twice, and
+    the ledger keeps both when their texts agree too little to fold. A rule
+    that folds those needs a same-claim predicate (WP-06.4).
+
+    "Identical" is the whole serialized finding (:meth:`Finding.to_dict`, which
+    covers every field). Order is kept, and so is the first copy, so the output
+    is deterministic (I-7).
+    """
+    seen: set[str] = set()
     out: list[Finding] = []
     for f in findings:
-        key = _key(f)
+        key = json.dumps(f.to_dict(), sort_keys=True, default=str)
         if key in seen:
             continue
         seen.add(key)
@@ -1502,6 +1691,9 @@ def _cross_qc_from_cache(payload: dict) -> CrossQCResult | None:
             discards=(CrossQCDiscardCounts.from_dict(raw_discards)
                       if isinstance(raw_discards := payload.get("discards"), dict)
                       else None),
+            invalid=(CrossQCInvalidCounts.from_dict(raw_invalid)
+                     if isinstance(raw_invalid := payload.get("invalid"), dict)
+                     else None),
         )
     except (TypeError, ValueError):
         return None
@@ -1538,8 +1730,24 @@ def _put_cross_qc_cache(cache: Any, key: str, result: CrossQCResult) -> None:
             # recorded" rather than as a zeroed counter set.
             **({"discards": result.discards.to_dict()}
                if result.discards is not None else {}),
+            # Remediation WP-06.1: the refused-item counts ride the entry, so a
+            # warm run shows the same stage warning as the run that paid for it
+            # (the counts are observational, so a result that refused items is
+            # still admitted, as the owner decided).
+            **({"invalid": result.invalid.to_dict()}
+               if result.invalid is not None else {}),
         },
     )
+
+
+def _log_refused(invalid: CrossQCInvalidCounts) -> None:
+    """Log a run's refused items once, at WARNING (remediation WP-06.1, B6).
+
+    Before, only the whole-set path logged them, at INFO, lumped with items
+    that could not be placed on two sheets; the sharded path said nothing.
+    """
+    if invalid.total:
+        _log.warning("cross-qc: %s", invalid.note())
 
 
 # --------------------------------------------------------------------------- #
@@ -1623,21 +1831,24 @@ def cross_sheet_qc(
             return CrossQCResult(error=_clean_error(exc))
 
     budget = _Budget()
+    # Remediation WP-06.1 (B6): refused items are counted on both paths.
+    invalid = CrossQCInvalidCounts()
 
     # ---- Small set: one whole-set call (unchanged, complete). ----
     if len(entries) <= MAX_SHEETS_SINGLE_CALL:
         findings, claims, in_tok, out_tok, err = _one_cross_qc_call(
             entries, sheet_map, client=client, model=model,
             max_retries=max_retries, sleep=sleep, budget=budget,
-            preamble=preamble,
+            preamble=preamble, invalid=invalid,
         )
-        deduped = _dedup_findings(findings)
+        kept = _drop_exact_repeats(findings)
         _log.info(
             "cross-qc: %d conflict finding(s) across %d sheet(s), 1 call",
-            len(deduped), len(entries),
+            len(kept), len(entries),
         )
+        _log_refused(invalid)
         result = CrossQCResult(
-            findings=deduped, claims=_dedup_claims(claims),
+            findings=kept, claims=_dedup_claims(claims),
             input_tokens=in_tok, output_tokens=out_tok, error=err,
             shards_planned=1, shards_completed=0 if err else 1,
             complete=err is None and not budget.degraded,
@@ -1645,6 +1856,7 @@ def cross_sheet_qc(
             text_chars_omitted=budget.omitted,
             findings_omitted=budget.findings_omitted,
             budget_degraded=budget.degraded,
+            invalid=invalid,
         )
         _put_cross_qc_cache(cache, cache_key, result)
         return result
@@ -1681,14 +1893,17 @@ def cross_sheet_qc(
     def _run_map(shard: list[tuple]):
         local_budget = _Budget()
         local_counts = CrossQCDiscardCounts()
+        local_invalid = CrossQCInvalidCounts()
         try:
             return (*_map_call(
                 shard, entry_by_handle, handle_by_key, discipline_by_handle,
                 client=client, model=model, max_retries=max_retries, sleep=sleep,
                 budget=local_budget, preamble=preamble, counts=local_counts,
-            ), local_budget, local_counts)
+                invalid=local_invalid,
+            ), local_budget, local_counts, local_invalid)
         except Exception as exc:  # noqa: BLE001 - one shard never sinks the pass
-            return [], [], [], 0, 0, _clean_error(exc), local_budget, local_counts
+            return ([], [], [], 0, 0, _clean_error(exc), local_budget, local_counts,
+                    local_invalid)
 
     workers = _resolve_cross_qc_workers(max_workers, len(shards))
     if workers == 1:
@@ -1698,9 +1913,11 @@ def cross_sheet_qc(
             # Deterministic input-order fold; only execution is parallel.
             map_results = list(pool.map(_run_map, shards))
 
-    for f, c, facts, in_tok, out_tok, err, local_budget, local_counts in map_results:
+    for (f, c, facts, in_tok, out_tok, err, local_budget, local_counts,
+         local_invalid) in map_results:
         _fold_budget(budget, local_budget)
         discards.merge(local_counts)
+        invalid.merge(local_invalid)
         total_in += in_tok
         total_out += out_tok
         if err is not None:
@@ -1725,7 +1942,7 @@ def cross_sheet_qc(
             manifest, all_facts, entry_by_handle,
             client=client, model=model, max_retries=max_retries, sleep=sleep,
             budget=budget, preamble=preamble, counts=discards,
-            max_workers=max_workers,
+            max_workers=max_workers, invalid=invalid,
         )
         total_in += r_in
         total_out += r_out
@@ -1740,7 +1957,7 @@ def cross_sheet_qc(
             "reconciliation had nothing to compare"
         )
 
-    deduped = _dedup_findings(all_findings)
+    kept = _drop_exact_repeats(all_findings)
     complete = (
         shards_completed == len(shards)
         and reconciliation_completed
@@ -1749,12 +1966,13 @@ def cross_sheet_qc(
     _log.info(
         "cross-qc: %d conflict finding(s) across %d sheet(s), %d/%d shard(s) + "
         "reconcile(%s) over %d fact(s)%s",
-        len(deduped), len(entries), shards_completed, len(shards),
+        len(kept), len(entries), shards_completed, len(shards),
         "ok" if reconciliation_completed else "incomplete", len(all_facts),
         "" if not budget.degraded else f"; budget degraded ({budget.omitted} chars omitted)",
     )
+    _log_refused(invalid)
     result = CrossQCResult(
-        findings=deduped,
+        findings=kept,
         claims=_dedup_claims(all_claims),
         input_tokens=total_in,
         output_tokens=total_out,
@@ -1771,6 +1989,7 @@ def cross_sheet_qc(
         findings_omitted=budget.findings_omitted,
         budget_degraded=budget.degraded,
         discards=discards,
+        invalid=invalid,
     )
     _put_cross_qc_cache(cache, cache_key, result)
     return result

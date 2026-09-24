@@ -594,6 +594,8 @@ Regression matrix: A-to-B/B-to-A same claim; same legs/different claims; three-l
 
 **Acceptance:** valve and horsepower issues both survive; reversed duplicates produce one finding with complete leg coverage; no source is selected merely because its label appeared first; validation loss and omitted evidence remain observable.
 
+*Acceptance note (WP-06.1, 2026-09-24).* "Valve and horsepower issues both survive" now holds in cross-QC on both paths, and through the ledger for the review's texts (overlap 0.273, and 0.353 when both texts name the two sheets). It does not yet hold end to end for every phrasing: two different conflicts whose texts are terse and both name the same two sheets, as the cross-QC prompt asks, share enough tokens to reach the ledger's equal-quote line (0.462 for "Pump P-1 has an isolation valve on M-101 that E-101 omits." against "Pump P-1 motor is 10 HP on M-101 but 15 HP on E-101."), and the ledger folds them. That is N30 (WP-03.5), pinned as a recorded limit in `tests/test_cross_qc_validation_and_dedup.py`. On a synthetic corpus of twelve distinct P-1 issues between M-101 and E-101 it folds 0 of 66 pairs without sheet names, 4 of 66 with them in full sentences, and 45 of 66 in one terse clause each. WP-06 needs WP-03.5's half before this line holds for every phrasing; the criterion is unchanged.
+
 **Verification notes (2026-09-22).** Evidence: [`verification-2026-09-22/03-anchor-crossqc.md`](verification-2026-09-22/03-anchor-crossqc.md).
 - **Status.** B6, B10, N2, N6 and K2 reproduced, as were the review's §4 cross-QC items.
 
@@ -609,13 +611,14 @@ Keep the human id visible beside each handle (`S001 = M-101`, as the reconcile m
 **Step 4 cannot fix B10 as written.**
 - `Ledger.add` buckets entries by primary `source_page_key`, and `_is_duplicate` requires the same primary sheet and equal `leg_targets`. So A→B and B→A are never compared.
 - B10 needs either a predicate that treats the leg set symmetrically, or a symmetric merge inside cross-QC that unions legs and quotes.
-- For N2 alone, handing duplicates to the ledger instead of the destructive dedup is enough.
+- For N2 alone, handing duplicates to the ledger instead of the destructive dedup is enough. *Done in WP-06.1 (the owner's decision):* only findings identical in every field collapse in cross-QC (`_drop_exact_repeats`), and the ledger decides the rest. The accepted cost: a re-report of one conflict phrased very differently (a shard and the reconciler, or two reconcile pair calls) reaches the ledger twice and stays two findings when the texts agree too little; folding it needs the same-claim predicate below (WP-06.4). The ledger's own quote branch still folds some *different* conflicts (N30; see the acceptance note).
 - The acceptance line "reversed duplicates produce one finding" needs a stated same-claim predicate. The shard and the reconciler phrase the same conflict differently.
 
 **Step 5: invisible loss.**
 - Today the loss is invisible: the stage reads COMPLETE, there is only an INFO log line, and the result is cached.
 - `_finding_from_handles` rejects invalid fields without any counter. Add an invalid-field counter to `CrossQCDiscardCounts` on both paths.
 - One prompt edit fixes both the whole-set and the map prompts, and the prompt hash invalidates the cache.
+- *Done in WP-06.1, with the owner's decisions.* The persona asks for category `question` with severity `low`; validation is unchanged. The counter is **not** a `CrossQCDiscardCounts` field: it is a separate record, `CrossQCInvalidCounts` (`CrossQCResult.invalid`), filled on both paths, so `discards is None` keeps meaning "grounding not measured" on the whole-set path until step 6 makes it non-None. Each refused item counts once, under the first check it fails (not an object, category, severity, text). It is observational: a stage warning, never a status, and the result is still cached with its counts (holding the stage PARTIAL would be N14's shape or pre-empt WP-06.3's N14 decision). `run_manifest.json` carries it as `cross_qc_invalid`. The prompt edit re-keys every entry, and the host-side changes of the same slice bump `_CROSS_QC_CACHE_CONTRACT` 5 → 6 (two changes, two mechanisms; `DECISIONS.md` D-4). A fact whose quote is only whitespace is now dropped and counted `facts_no_quote`.
 
 **Step 6 reverses a recorded decision.**
 - WP-03A scoped the whole-set path out of grounding (`test_evidence_tail.py::test_forty_entries_take_the_whole_set_path_unchanged`).
