@@ -19,13 +19,19 @@ reads of the same sheet disagree at the margins, and that disagreement is signal
 one run raised is kept (more markups is better) but flagged ``reproduced=False``.
 The merge (:func:`merge_self_consistency`) deduplicates by position and text; the
 downstream verification pass and the report *surface* the ``reproduced`` flag but
-it never suppresses a finding.
+it never suppresses a finding. Only a read the model **finished** counts (D-1;
+remediation WP-01.4, N4): a read cut off, refused, ended early or stopped for
+any other reason fails like a malformed one and keeps nothing
+(:func:`outcome_from_message`), so the surviving read's findings are marked
+``NOT_ASSESSED_PARTIAL`` and the pipeline's critique stage counts the sheet
+short of its reads.
 
 Caching: the *merged* critique result is cached under its own
 (:func:`drawing_analyzer.digest_cache.critique_cache_key`, a distinct namespace
 from the digest) so a re-run skips the model calls. The run-to-run sampling
 variance the merge feeds on is not reproducible, so only the merged outcome is
-stored — never an individual run.
+stored — never an individual run — and only when every requested read finished
+and parsed.
 
 Isolation (I-5): this module imports no PDF engine. It consumes already-rendered
 :class:`~drawing_analyzer.models.RenderedSheet` objects and reuses the digest's
@@ -65,6 +71,7 @@ from .digest import (
     stream_message,
     build_user_content,
     claims_from_cache,
+    digest_terminal_error,
     findings_from_cache,
     parse_findings_detailed,
     parse_numeric_claims,
@@ -1466,11 +1473,16 @@ def merge_finding_groups(groups: list[list[Finding]]) -> list[Finding]:
 class CritiqueRunOutcome:
     """One critique READ's outcome, stamped with its provenance at production (§6.5).
 
-    A read is a **success** (``status == "COMPLETE"``) only when it returned a
+    A read is a **success** (``status == "COMPLETE"``) only when the model
+    finished it (``end_turn`` / ``stop_sequence``, D-1) **and** it returned a
     valid findings schema — a genuine ``{"findings": …}``, including an explicit
-    ``{"findings": []}`` clean result. Nonempty prose, a missing findings object, a
-    truncated body, or malformed JSON is a **failure** (``status == "FAILED"``),
-    never an empty success (DA-008). ``run_id`` (``critique_1`` / ``critique_2``) is
+    ``{"findings": []}`` clean result. A read cut off at ``max_tokens`` or the
+    context window, refused, ended without a stop reason, stopped for a
+    continuation or an unknown reason is a **failure** even when its findings
+    object parsed (remediation WP-01.4, N4), and so are nonempty prose, a
+    missing findings object, a truncated body and malformed JSON
+    (``status == "FAILED"``, never an empty success, DA-008). A failed read
+    keeps nothing: no findings and no claims. ``run_id`` (``critique_1`` / ``critique_2``) is
     the read's provenance; each of its findings is stamped ``sources=[run_id]`` at
     production so the ``critique×N`` corroboration is read from real provenance, not
     re-inferred downstream. ``input_tokens`` / ``output_tokens`` are the read's
@@ -1510,9 +1522,17 @@ class CritiqueResult:
     same cache entry as the merged findings.
 
     ``requested_runs`` is how many reads were asked for; ``completed_runs`` how many
-    returned a valid parse. A result is only cached (and only labeled a complete
-    self-consistency read) when ``completed_runs == requested_runs`` (§14.4).
-    ``runs`` is retained as an alias of ``completed_runs`` for back-compat.
+    the model finished with a valid parse (remediation WP-01.4, N4: a read it
+    did not finish never counts, D-1). A result is only cached (and only
+    labeled a complete self-consistency read) when ``completed_runs ==
+    requested_runs`` (§14.4). ``runs`` is retained as an alias of
+    ``completed_runs`` for back-compat.
+
+    ``read_errors`` is the error of every read that did not count, in read
+    order: runtime-only, never cached (a stored result has none). ``error`` is
+    set only when no read counted, or when the reads that did produced no
+    finding (see :func:`result_from_outcomes`); a sheet short of its requested
+    reads is told apart by :func:`critique_shortfall`.
     """
 
     findings: list[Finding] = field(default_factory=list)
@@ -1534,6 +1554,9 @@ class CritiqueResult:
     # the usage ledger prices it REAL_TIME rather than at the batch rate — the
     # critique analogue of ``SheetDigest.rescued`` (Phase 23C).
     rescued: bool = False
+    # The errors of the reads that did not count, in read order. Runtime-only:
+    # never written to a cache entry (remediation WP-01.4).
+    read_errors: list[str] = field(default_factory=list)
 
 
 def critique_result_from_entry(entry: dict, ref: Any) -> CritiqueResult:
@@ -1564,11 +1587,20 @@ def critique_cache_entry_from_result(res: CritiqueResult) -> dict:
     """The cache-entry dict for a **complete** critique result (every tier shares it).
 
     Only ever called for a full self-consistency result — every requested read
-    returned a valid parse (``completed_runs == requested_runs``). A partial result
-    (a read failed, or produced a malformed/truncated/prose body) is returned to the
-    caller but **never** cached (§14.4): freezing it under the full-runs key would
-    permanently deny the requested self-consistency or, worse, cache a malformed read
-    as a clean/corroborated sheet. Mirrors ``cache_entry_from_digest``.
+    was finished by the model and returned a valid parse (``completed_runs ==
+    requested_runs``). A partial result (a read failed, did not finish, or
+    produced a malformed/truncated/prose body) is returned to the caller but
+    **never** cached (§14.4): freezing it under the full-runs key would
+    permanently deny the requested self-consistency or, worse, cache a malformed
+    or cut-off read as a clean/corroborated sheet. Mirrors
+    ``cache_entry_from_digest``.
+
+    The entry records no stop reason (the owner's decision, remediation
+    WP-01.4): every read an entry holds finished, which the admission above
+    guarantees, so a per-read stop reason would carry nothing. Which reads an
+    entry may hold is versioned by ``digest_cache._CRITIQUE_CACHE_CONTRACT``
+    (3 since WP-01.4), folded into both critique keys, so an entry written when
+    a cut-off read still counted misses instead of being checked on the way out.
     """
     return {
         "findings": [f.to_dict() for f in res.findings],
@@ -1591,13 +1623,35 @@ def outcome_from_message(
     The transport-agnostic heart of a critique read, shared by the real-time
     :func:`_critique_read` and the Message-Batches collector
     (:mod:`drawing_analyzer.batch_critique`, Phase 23C) so a batched read is judged,
-    provenance-stamped, and billed **identically** to a real-time one. A read is a
-    **success** only when the response carried a valid findings schema (an explicit
-    ``{"findings": []}`` counts). An empty body, nonempty prose with no block, a
-    missing findings object, a truncated body, or malformed JSON is a **failure** —
-    never an empty success (so it is neither merged as a clean read nor cached as
-    corroborated). Every success stamps its findings ``sources=[run_id]`` at
-    production; billed tokens are recorded even on a parse failure (§14.4).
+    provenance-stamped, and billed **identically** to a real-time one. It is the
+    single place a critique read is judged, so both transports and both cache
+    levels follow from it.
+
+    The stop reason decides **first** (D-1; remediation WP-01.4, N4), through
+    the digest's one ladder with the noun ``critique``
+    (:func:`~drawing_analyzer.digest.digest_terminal_error`): only
+    ``end_turn`` and ``stop_sequence`` finish a read. A read cut off at
+    ``max_tokens`` or the context window, refused (named even when empty), a
+    stream that ended without a stop reason (N27), a continuation
+    (``tool_use``, ``pause_turn``, ``compaction``: the critique declares no
+    tools and never resumes a paused turn) or an unknown stop is a **failure**,
+    however complete its findings object looks. Before WP-01.4 the stop reason
+    was read only to word an empty body, so such a read counted whenever its
+    object parsed (a closed block, an explicit ``{"findings": []}``, or an
+    unclosed block whose JSON was complete, ``PARSED_UNCLOSED``), was merged
+    as corroboration and was cached at both levels. A failed read keeps
+    nothing, like a malformed one (the owner's decision): no findings and no
+    claims, so nothing of it reaches the merge or the arithmetic auditor.
+    ``models.FINDINGS_PARSE_OK`` is unchanged: the digest legitimately salvages
+    ``PARSED_UNCLOSED`` at ``end_turn``, and so does a finished critique read.
+
+    A finished read is a **success** only when the response carried a valid
+    findings schema (an explicit ``{"findings": []}`` counts). An empty body,
+    nonempty prose with no block, a missing findings object, a truncated body,
+    or malformed JSON is a **failure** — never an empty success (so it is
+    neither merged as a clean read nor cached as corroborated). Every success
+    stamps its findings ``sources=[run_id]`` at production; billed tokens are
+    recorded on every outcome, failed ones included (§14.4, plan §2 rule 8).
 
     ``structured`` says the read was taken under ``output_config.format``, whose
     response carries no fence. It is threaded in rather than sniffed from the
@@ -1621,15 +1675,16 @@ def outcome_from_message(
     _usage = _get(message, "usage")
     cr = int(_get(_usage, "cache_read_input_tokens", 0) or 0)
     cw = int(_get(_usage, "cache_creation_input_tokens", 0) or 0)
-    if not raw:
-        # An empty body (e.g. adaptive thinking consumed the whole token budget)
-        # is a *failed* read, not a clean sheet — so the run counts as failed (not
-        # merged, not cached) and is re-attempted next time.
-        stop = _get(message, "stop_reason")
+    # The stop reason first, before the text is looked at (D-1): a read the
+    # model did not finish is a *failed* read, not merged, not cached, and read
+    # again next time. The ladder also fails an empty body (e.g. adaptive
+    # thinking consumed the whole token budget), still worded "empty critique".
+    terminal = digest_terminal_error(raw, _get(message, "stop_reason"), noun="critique")
+    if terminal is not None:
         return CritiqueRunOutcome(
             run_id=run_id, status="FAILED", input_tokens=in_tok, output_tokens=out_tok,
             cache_read_tokens=cr, cache_write_tokens=cw,
-            error=f"empty critique (stop_reason={stop!r})",
+            error=terminal,
         )
     # A critique read is successful ONLY if it parsed a valid findings schema. A
     # nonempty-prose / missing-object / truncated / malformed response is a failure,
@@ -1790,12 +1845,17 @@ def result_from_outcomes(
 
     ``all_outcomes`` is **every** requested read's outcome — successes and failures
     alike — so billed tokens are summed across all of them (a response that billed
-    tokens but failed to parse still counts, §14.4) while only the successful reads
-    are merged. Shared by the real-time :func:`critique_sheet_self_consistent` and
-    the Message-Batches collector (Phase 23C) so a batched sheet is merged, billed,
-    and marked partial byte-for-byte the same way. Caching is left to the caller
-    (it owns the cache key); a result is complete only when every requested read
+    tokens but failed to parse, or that the model did not finish, still counts,
+    §14.4) while only the successful reads are merged. Shared by the real-time
+    :func:`critique_sheet_self_consistent` and the Message-Batches collector
+    (Phase 23C) so a batched sheet is merged, billed, and marked partial
+    byte-for-byte the same way. Caching is left to the caller (it owns the cache
+    key); a result is complete only when every requested read finished and
     parsed (``completed_runs == requested_runs``).
+
+    Every failed read's error is kept on ``read_errors`` (remediation WP-01.4),
+    so a sheet whose surviving read shipped findings, and which therefore keeps
+    ``error=None``, can still say why it is short (:func:`critique_shortfall`).
     """
     total_in = sum(oc.input_tokens for oc in all_outcomes)
     total_out = sum(oc.output_tokens for oc in all_outcomes)
@@ -1816,6 +1876,7 @@ def result_from_outcomes(
             requested_runs=requested_runs,
             completed_runs=0,
             error="; ".join(errors) or "critique produced no result",
+            read_errors=errors,
         )
 
     # The findings of the SUCCESSFUL reads (each already stamped sources=[run_id]).
@@ -1851,7 +1912,32 @@ def result_from_outcomes(
             "; ".join(errors)
             or f"critique partial: only {len(ok)}/{requested_runs} read(s) valid, no findings"
         ) if partial_empty else None,
+        read_errors=errors,
     )
+
+
+def critique_shortfall(res: Any) -> str | None:
+    """Why one sheet's critique fell short of its requested reads, or ``None``.
+
+    ``None`` when every requested read counted. Otherwise the result's own
+    ``error`` when it carries one (no read counted, or the reads that did found
+    nothing: the wording the stage has always shown), else ``"<n> of <m>
+    critique read(s) finished: <each failed read's error>"``. That last shape
+    is the one the stage used to miss (remediation WP-01.4, the owner's D-2
+    rule): a sheet whose surviving read shipped findings keeps ``error=None``
+    (its findings are marked ``NOT_ASSESSED_PARTIAL``), so a stage that read
+    only ``error`` called a sheet with one of two reads COMPLETE, cached
+    nothing, and critiqued it again on every warm run.
+    """
+    completed = int(getattr(res, "completed_runs", 0) or 0)
+    requested = int(getattr(res, "requested_runs", 0) or 0)
+    error = getattr(res, "error", None)
+    if error:
+        return error
+    if completed >= requested:
+        return None
+    reasons = "; ".join(getattr(res, "read_errors", None) or []) or "no reason recorded"
+    return f"{completed} of {requested} critique read(s) finished: {reasons}"
 
 
 def critique_sheet_self_consistent(
@@ -1944,12 +2030,13 @@ def critique_sheet_self_consistent(
         return result
 
     # Cache only a *complete* self-consistency result — every requested read
-    # returned a VALID parse. A partial result (a read failed or produced a
-    # malformed/truncated body) is returned to the caller (so this run still
-    # produces findings) but never cached: freezing it under the full-runs key would
-    # permanently deny the requested self-consistency, or cache a malformed read as
-    # a clean/corroborated sheet (DA-008). Mirrors digest_sheet refusing to cache
-    # transient/degraded reads.
+    # finished and returned a VALID parse. A partial result (a read failed, was
+    # not finished by the model, or produced a malformed/truncated body) is
+    # returned to the caller (so this run still produces findings) but never
+    # cached: freezing it under the full-runs key would permanently deny the
+    # requested self-consistency, or cache a malformed or cut-off read as a
+    # clean/corroborated sheet (DA-008; remediation WP-01.4, N4). Mirrors
+    # digest_sheet refusing to cache transient/degraded reads.
     if cache is not None and cache_key is not None and result.completed_runs == runs:
         # Re-read the latch: a rejection during the reads above means these
         # outcomes came back under the fenced contract, whatever this run set out

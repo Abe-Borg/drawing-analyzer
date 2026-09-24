@@ -1310,6 +1310,78 @@ def _critique_level1_partition(
     return cached_by_ref, miss_only, level1_identities, portable_by_key
 
 
+@dataclass
+class _CritiqueReadTally:
+    """The critique stage's read coverage (``_plans/DECISIONS.md`` D-2).
+
+    Remediation WP-01.4, the owner's rule: the critique's items are its
+    **reads**. Every sheet the run set out to read is critiqued ``runs`` times,
+    and each read is exactly one of:
+
+    - *judged*: the model finished it and it returned a valid findings object
+      (a cache hit counts all of its reads, since only complete results are
+      stored);
+    - *failed*: attempted, no judgment (cut off, refused, ended early, a
+      continuation or unknown stop, malformed, raised, an errored or
+      uncollected batch item);
+    - *skipped*: no attempt, because no critique input could be obtained for
+      its sheet.
+
+    ``eligible`` is ``runs`` x the sheets the run set out to read, set when the
+    stage finishes and never below what it tallied; ``None`` means the stage
+    reported no counts (a stand-in stage in a test), and the caller keeps the
+    degraded-list rule. :func:`~drawing_analyzer.models.item_coverage_status`
+    turns it into the stage's status.
+    """
+
+    runs: int = 0
+    sheets: int = 0
+    judged: int = 0
+    failed: int = 0
+    skipped: int = 0
+    eligible: "int | None" = None
+
+    def add_result(self, res: Any) -> None:
+        """One sheet's result: its finished reads are judged, the rest failed."""
+        judged = min(max(int(getattr(res, "completed_runs", 0) or 0), 0), self.runs)
+        self.sheets += 1
+        self.judged += judged
+        self.failed += self.runs - judged
+
+    def add_raised(self) -> None:
+        """A sheet whose critique call raised: every read failed."""
+        self.sheets += 1
+        self.failed += self.runs
+
+    def add_unobtained(self) -> None:
+        """A sheet with no critique input: every read skipped."""
+        self.sheets += 1
+        self.skipped += self.runs
+
+    def finish(self, total: int) -> None:
+        self.eligible = self.runs * max(int(total or 0), self.sheets)
+
+    def coverage_note(self) -> "str | None":
+        """The stage's leading warning when a requested read was not judged.
+
+        The critique twin of ``VerifyResult.coverage_note``: it leads the
+        warnings because ``run.log``, the report's stage table and the journal
+        show only the first one. ``None`` when every read was judged.
+        """
+        eligible = self.eligible or 0
+        missing = eligible - self.judged
+        if missing <= 0:
+            return None
+        parts = [f"{self.skipped} skipped", f"{self.failed} returned no judgment"]
+        unaccounted = missing - self.skipped - self.failed
+        if unaccounted > 0:
+            parts.append(f"{unaccounted} not accounted for")
+        return (
+            f"critique: {self.judged} of {eligible} requested read(s) judged; "
+            + ", ".join(parts)
+        )
+
+
 def _run_critique_stage(
     paths: list[Path],
     *,
@@ -1329,6 +1401,7 @@ def _run_critique_stage(
     on_status: StatusCallback | None = None,
     render_spool: Any = None,
     reusable_uploads: "list[Any] | None" = None,
+    read_tally: "_CritiqueReadTally | None" = None,
 ) -> tuple[list[Finding], list[NumericClaim], list[str]]:
     """Critique every sheet (Phase 11): self-consistent critique, cached two ways.
 
@@ -1345,12 +1418,24 @@ def _run_critique_stage(
     deterministically so the pooled result is independent of completion order (I-7).
     ``claims`` are the numeric relationships the critique transcribed (Phase 14), fed
     to the deterministic arithmetic auditor. ``degraded`` names every sheet whose
-    critique was incomplete — a partial/malformed read (``res.error``) or a sheet
-    whose critique call raised — so the caller can hold the stage at PARTIAL
-    (§3.3: incomplete critique reads are never a valid skip; Phase 27 gauntlet
-    regression). Per-sheet usage is appended to ``run_usage`` (§15.6): a
+    critique was incomplete — fewer reads finished and parsed than were requested
+    (:func:`~drawing_analyzer.critique.critique_shortfall`: a failed, malformed or
+    unfinished read, even beside a surviving read that shipped findings), a sheet
+    whose critique call raised, or one with no critique input — so the caller can
+    hold the stage off COMPLETE (§3.3: incomplete critique reads are never a valid
+    skip; Phase 27 gauntlet regression). Until remediation WP-01.4 only
+    ``res.error`` degraded a sheet, and a sheet whose surviving read shipped
+    findings keeps ``error=None``, so one finished read of two read COMPLETE.
+
+    ``read_tally`` (a :class:`_CritiqueReadTally`), when given, receives the
+    stage's read coverage for D-2's item rule: every sheet contributes its
+    ``runs`` reads as judged, failed or skipped, and ``eligible`` is set before
+    returning. Per-sheet usage is appended to ``run_usage`` (§15.6): a
     ``critique`` record per sheet (``CACHE`` for a hit — zero billed tokens — else
-    ``REAL_TIME``); each record aggregates the sheet's two self-consistency reads.
+    ``REAL_TIME`` or ``BATCH``); each record aggregates the sheet's
+    self-consistency reads, every billed read included, and reads COMPLETE only
+    when every requested read finished and parsed (FAILED when none did,
+    otherwise PARTIAL), so it says what the stage says.
     """
     from .critique import (
         CRITIQUE_PROMPT_VERSION,
@@ -1361,6 +1446,7 @@ def _run_critique_stage(
         critique_model,
         critique_runs,
         critique_sheet_self_consistent,
+        critique_shortfall,
         critique_structured_outputs_enabled,
     )
     from .digest_cache import critique_cache_key_level1
@@ -1369,6 +1455,8 @@ def _run_critique_stage(
     model = critique_model()
     runs = critique_runs()
     profiles_key = profiles_cache_fragment(profiles or [])
+    tally = read_tally if read_tally is not None else _CritiqueReadTally()
+    tally.runs = runs
 
     cached_by_ref: dict[tuple[str, int], Any] = {}
     level1_identities: dict[tuple[str, int], str] = {}
@@ -1405,6 +1493,11 @@ def _run_critique_stage(
         verbatim into run_manifest.json (Phase 26A §18.4/§10.4).
         """
         cached = bool(getattr(res, "cached", False))
+        completed = int(getattr(res, "completed_runs", 0) or 0)
+        if critique_shortfall(res) is None:
+            terminal = "COMPLETE"
+        else:
+            terminal = "PARTIAL" if completed > 0 else "FAILED"
         # A batched sheet bills at the batch rate; a cache hit bills nothing; a
         # rescued (real-time fallback) sheet — or any real-time run — bills the
         # full rate (§15.6). Same transport rule as the digest path so the ledger's
@@ -1430,14 +1523,18 @@ def _run_critique_stage(
             cache_read_tokens=0 if cached else getattr(res, "cache_read_tokens", 0),
             cache_write_tokens=0 if cached else getattr(res, "cache_write_tokens", 0),
             cache_hit=cached,
-            parse_success=(getattr(res, "error", None) is None),
-            terminal_status=(
-                "COMPLETE" if getattr(res, "error", None) is None else "PARTIAL"
-            ),
+            # The record says what the stage says (remediation WP-01.4, the
+            # owner's rule): COMPLETE only when every requested read finished
+            # and parsed, FAILED when none did, otherwise PARTIAL. It used to
+            # read ``error`` alone, so a sheet whose second read failed beside
+            # a first that shipped findings recorded COMPLETE.
+            parse_success=(terminal == "COMPLETE"),
+            terminal_status=terminal,
         )
 
     # Cached hits contribute findings/claims with no render and no token cost.
     for rk, res in cached_by_ref.items():
+        tally.add_result(res)
         findings.extend(res.findings)
         claims.extend(res.claims)
         _record_critique(res, portable_by_key.get(rk, (Path(rk[0]).name, rk[1])))
@@ -1449,9 +1546,14 @@ def _run_critique_stage(
         """Pool one freshly-critiqued sheet's result (shared by both transports)."""
         nonlocal done
         done += 1
-        if res.error:
-            degraded.append(f"{getattr(ref, 'display_label', ref)}: {res.error}")
-            _log.warning("critique degraded for a sheet: %s", res.error)
+        tally.add_result(res)
+        # Short of its requested reads, not only errored (remediation
+        # WP-01.4): a sheet whose surviving read shipped findings keeps
+        # ``error=None``, and used to read as a complete critique.
+        shortfall = critique_shortfall(res)
+        if shortfall:
+            degraded.append(f"{getattr(ref, 'display_label', ref)}: {shortfall}")
+            _log.warning("critique degraded for a sheet: %s", shortfall)
         findings.extend(res.findings)
         claims.extend(res.claims)
         _record_critique(res, source_page_key(ref))
@@ -1644,6 +1746,7 @@ def _run_critique_stage(
                         res = fut.result()
                     except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
                         done += 1
+                        tally.add_raised()
                         degraded.append(f"{getattr(ref, 'display_label', ref)}: {exc}")
                         _log.warning("critique failed for a sheet: %s", exc)
                         continue
@@ -1663,8 +1766,10 @@ def _run_critique_stage(
     # merge could never obtain reached neither ``_ingest_miss`` nor the
     # executor's except arm, so nothing else in this function can see it.
     for label in sorted(unobtained):
+        tally.add_unobtained()
         degraded.append(f"{label}: no critique input could be obtained")
         _log.warning("critique input unavailable for a sheet: %s", label)
+    tally.finish(total)
 
     findings.sort(key=lambda f: (source_page_key(f), f.id))
     # I-7: ``claims`` was pooled in thread-completion order (both the cache-hit
@@ -3668,6 +3773,7 @@ def extract_drawing_context(
                     len(all_profiles),
                     ", ".join(p.name for p in all_profiles),
                 )
+            read_tally = _CritiqueReadTally()
             critique_findings, c_claims, critique_degraded = _run_critique_stage(
                 paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
                 client=client, cache=cache, progress=progress, total=total,
@@ -3676,16 +3782,40 @@ def extract_drawing_context(
                 use_batch=critique_use_batch, on_log=on_log, on_status=on_status,
                 render_spool=render_spool,
                 reusable_uploads=reusable_uploads,
+                read_tally=read_tally,
             )
             numeric_claims.extend(c_claims)
-            critique_stage.items_out = len(critique_findings)
+            if read_tally.eligible is None:
+                # A stand-in stage that reported no read counts (tests replace
+                # ``_run_critique_stage``): only its degraded list can speak.
+                critique_stage.items_out = len(critique_findings)
+                critique_stage.status = "PARTIAL" if critique_degraded else "COMPLETE"
+            else:
+                # D-2's item rule (remediation WP-01.4, the owner's decision):
+                # the items are the requested reads, the judged ones those the
+                # model finished with a valid findings object. COMPLETE only
+                # when every read was judged, FAILED when none was (the
+                # all-failed rule; it read PARTIAL before), else PARTIAL. So
+                # one finished read of two is never a complete critique, which
+                # it was whenever the surviving read shipped findings.
+                critique_stage.items_in = read_tally.eligible
+                critique_stage.items_out = read_tally.judged
+                critique_stage.status = item_coverage_status(
+                    read_tally.eligible, read_tally.judged
+                )
+                if critique_degraded and critique_stage.status == "COMPLETE":
+                    critique_stage.status = "PARTIAL"   # a named sheet is never complete
+                note = read_tally.coverage_note()
+                if note:
+                    critique_stage.warnings.append(note)
             if critique_degraded:
                 # §3.3 (Phase 27 gauntlet regression): an incomplete critique read —
-                # one of a sheet's two self-consistency reads failed/parsed
-                # malformed, or a sheet's critique call raised — is never a valid
-                # skip. The useful findings stay, but the stage (and therefore the
-                # run) can no longer claim a complete exhaustive critique.
-                critique_stage.status = "PARTIAL"
+                # one of a sheet's self-consistency reads failed, was not finished
+                # or parsed malformed, or a sheet's critique call raised — is
+                # never a valid skip. The useful findings stay, but the stage (and
+                # therefore the run) can no longer claim a complete exhaustive
+                # critique.
+                #
                 # Sorted: the pool's completion order must not leak into the
                 # exported stage record (I-7).
                 critique_stage.errors.extend(sorted(critique_degraded)[:5])
@@ -3695,8 +3825,6 @@ def extract_drawing_context(
                 )
                 errors.append(msg)
                 _log.warning("%s", msg)
-            else:
-                critique_stage.status = "COMPLETE"
         except Exception as exc:  # noqa: BLE001 - additive stage, never fatal
             errors.append(f"Critique: {exc}")
             critique_stage.status = "FAILED"

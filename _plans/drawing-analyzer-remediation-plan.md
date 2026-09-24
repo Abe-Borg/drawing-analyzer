@@ -269,6 +269,10 @@ Regression cases:
 - The single fix site is `critique.outcome_from_message`. Real-time, batch, L1 and L2 all flow through it.
 - Do **not** change `FINDINGS_PARSE_OK`. The digest legitimately salvages `PARSED_UNCLOSED` at `end_turn`.
 - Critique cache entries carry no `stop_reason`, so add a critique-only contract term.
+  - *Corrected and decided by WP-01.4 (2026-09-24, the owner).*
+    - The term already existed (WP-04.1 added `digest_cache._CRITIQUE_CACHE_CONTRACT`), so WP-01.4 bumped it, 2 → 3, and added none. No read-side reject beside it, and no stored stop reasons: every admitted read finished, so they would carry nothing.
+    - The fix: `outcome_from_message` reads the stop reason first, through the digest's ladder with a noun (`digest_terminal_error(..., noun="critique")`), and a read that is not `FINISHED` fails and keeps nothing (no findings, no claims), like a malformed read; its tokens stay billed.
+    - **A consumer the step did not name.** Making a cut-off read fail was not enough on its own. `result_from_outcomes` keeps `error=None` for a sheet whose surviving read shipped findings, and `pipeline._run_critique_stage._ingest_miss` degraded a sheet on `error` alone. So a sheet with one finished read and one failed read read COMPLETE, cached nothing and was re-critiqued on every warm run (measured on `feb85b4` with the second read raising a 400). The owner's decision: the critique stage adopts D-2's item rule (its items are reads; judged = finished and parsed; all failed → FAILED), and the per-sheet usage record agrees. See D-1's and D-2's WP-01.4 notes.
 
 **Step 5: retries (N16)**
 - Add the requirement "a retry never loses the first read".

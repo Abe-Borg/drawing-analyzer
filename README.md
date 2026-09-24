@@ -228,7 +228,11 @@ is a judgment* below). Runs that used to report `COMPLETE` with such a finding
 now report `PARTIAL`. So is the digest: a sheet whose read the model refused, or
 never finished, is a failed sheet and holds the run below `COMPLETE`, even when
 the reply came back with text (see *A reply the model did not finish* under the
-findings block, below).
+findings block, below). And so is the critique: it is `COMPLETE` only when every
+requested read of every sheet finished with a valid findings object, `FAILED`
+when none did, and `PARTIAL` otherwise, so a sheet whose second read was cut off
+or failed no longer reads as a complete critique (see *The critique stage counts
+reads* under the critique pass).
 
 ### Browsing the result
 
@@ -633,6 +637,13 @@ records no stop reason at all, is now a miss, and the sheet is read again. A fin
 then replaces it. Every finished digest already in the cache is still served,
 so upgrading re-reads only the sheets whose cached read was not finished.
 
+**The critique's reads follow the same rule.** Each of the two critique reads is
+judged by its stop reason first, with the same wording (`truncated critique
+(stop_reason='max_tokens')`, `refused critique (stop_reason='refusal')`, …), and
+a read the model did not finish is a failed read even when its findings object
+parsed. What that means for the critique's merge, its stage status and its
+cache is under [Self-consistency](#critique-pass-the-reviewer).
+
 A tolerant parser splits this block off and **strips it from the prose**, so the
 digest text — and the `combined_text` a downstream spec reviewer consumes — is
 byte-for-byte what it was before the block existed (the prose digest is sacred).
@@ -669,10 +680,20 @@ closing fence**) is recognised and stripped, so a partial machine block can neve
 leak into the sacred prose (DA-009).
 
 **Self-consistency.** The critique runs **twice**. A read counts as a real read
-only if it returned a valid findings schema — an explicit `{"findings": []}`
-included; a prose-only, truncated, or malformed body is a *failed* read, never an
-empty success, so it is never merged as a clean sheet or cached as corroborated
-(DA-008). Each read stamps its own provenance (`critique_1` / `critique_2`) at
+only if the model **finished** it (it stopped with `end_turn` or a
+`stop_sequence`) **and** it returned a valid findings schema — an explicit
+`{"findings": []}` included; a prose-only, truncated, or malformed body is a
+*failed* read, never an empty success, so it is never merged as a clean sheet or
+cached as corroborated (DA-008). A read the model did not finish is a failed read
+too, however complete its findings object looks: one cut off at the output cap
+or the context window, a refusal, a stream that ended without saying how, or a
+turn that stopped for a tool or any reason the app does not recognise (the
+critique uses no tools). Such a read keeps nothing: its findings are not merged
+and its numeric claims never reach the arithmetic check, exactly like a
+malformed read, while its tokens are still counted in the run's usage. Before
+remediation WP-01.4 it counted whenever its findings object parsed, so a
+cut-off read could corroborate the other one and be cached as a complete
+critique. Each read stamps its own provenance (`critique_1` / `critique_2`) at
 production, and the merge follows the honest verdict: a finding both valid reads
 surface is `REPRODUCED` (`reproduced = true`); one only a single read raised is a
 `SINGLETON` (`reproduced = false`) but *kept* (more markups is better); and when a
@@ -690,6 +711,21 @@ entry can never read "corroborated by two channels" and "only one of the two
 reads saw it" at the same time. A long review-profile checklist is sent **identically** to
 both reads (never split across them), so the two stay directly comparable.
 
+**The critique stage counts reads.** Its status comes from how many of the
+requested reads (sheets × 2) the model finished with a valid findings object: all
+of them is `COMPLETE`, none is `FAILED`, anything between is `PARTIAL`, and the
+stage table shows the two numbers as its items (`4 → 3`). A cached sheet counts
+both of its reads, since only complete critiques are stored. The stage's first
+warning says what fell short, for example `critique: 3 of 4 requested read(s)
+judged; 0 skipped, 1 returned no judgment`, and its errors name each short sheet
+with the reason (`M-101.pdf (page 1/1): 1 of 2 critique read(s) finished:
+truncated critique (stop_reason='max_tokens')`). The sheet's usage record says
+the same: `COMPLETE` only when both reads counted. Before remediation WP-01.4 a
+sheet whose surviving read shipped findings read `COMPLETE` beside a read that
+had failed outright, was never cached, and was critiqued (and billed) again on
+every warm run while still reading `COMPLETE`; and a critique in which no read
+counted read `PARTIAL`.
+
 The merged critique is cached under its own key, so a re-run skips the extra
 calls. Because the entry holds findings already merged by the app's own
 deduplication rule, an update that changes that rule re-keys the critique cache,
@@ -699,7 +735,15 @@ cached stage are still served, and the old entries are left in place. The
 quantity reading described under [the ledger](#the-findings-ledger-part-iii)
 (remediation WP-04.1) was such a change, and so is the comparison rule that
 followed it (remediation WP-04.2): after upgrading past it, the first exhaustive
-run re-runs the critique on every sheet once more, while digests stay cached. The digest's images are gone by the time the critique runs (the batch path
+run re-runs the critique on every sheet once more, while digests stay cached. So
+is the rule that a read the model did not finish no longer counts (remediation
+WP-01.4): an entry written before it may hold such a read, merged as a complete
+one, so it is not served, and the first exhaustive run after upgrading re-runs
+the critique on every sheet once (none of these three changes has shipped in a
+release yet, so a 1.7.0 install pays that cold pass once for all three). Only a
+critique whose every read the model finished is stored, at either level, on
+either transport, so a sheet whose read keeps getting cut off is read again,
+and billed, on each run until one run finishes both reads. The digest's images are gone by the time the critique runs (the batch path
 streams and discards them), so the critique renders each uncached sheet once more —
 but in a `use_batch` run it uploads that render **once** and runs *both* reads off
 the shared upload through the Message Batches API (the ~50% batch rate), rather than
