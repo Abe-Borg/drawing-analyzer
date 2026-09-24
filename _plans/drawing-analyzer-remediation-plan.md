@@ -537,6 +537,7 @@ Required negatives: changed numbers, signs, units, operand multiplicity, embedde
 - So `PROVIDE 6” DRAIN`, `2½"`↔`2-1/2"`, `Ø6` and `300×200` are NOT_MATCHED in cross-QC, and the leg is dropped (N13).
 - `cross_qc.fact_tile_lookup` also joins on `_norm_for_match`.
 - Use one policy for both.
+- **Done by WP-05.1 (decided with the owner):** `cross_qc._norm_for_match` is `anchor._normalize`, unchanged, for grounding and for the tile join. Cross-QC grounds against a string, so the evidence is normalized one whitespace-delimited source word at a time (`anchor.SourceWords`): that is exactly `_normalize(text)` (pinned over a Unicode corpus) and keeps where each word starts, which step 3 needs. Not taken: factoring out a shared fold without the infix-hyphen step (lowercasing before or after that step differs on rare Unicode, so the two views would not provably be one normalizer).
 
 **Step 2: the numeric veto.**
 - The existing veto compares exact whitespace tokens. After a character-stream match it would reject three of the seven required positives: `6"` vs `6`+`"`, `2%` vs `2`+`%`, and `12'-6"` vs `12'`,`-`,`6"`.
@@ -547,6 +548,7 @@ Required negatives: changed numbers, signs, units, operand multiplicity, embedde
 - This is not only about short quotes. Cross-QC `_grounded` is a substring test with no word boundaries at any length: `AHU-10` grounds in `AHU-101`.
 - `anchor.py`'s infix-hyphen folding lets `VAV-2` EXACT-match inside `VAV-2-1`, and `AHU-1` inside `AHU-1-2` (N12).
 - Require matched spans to start and end on source-word boundaries; `_Stream.word_of` makes this possible.
+- **Done for cross-QC by WP-05.1 (decided with the owner):** a match must cover whole source words. It may start and end only on a word's core (`anchor.word_core`: the word without leading `( [ { < " '` or trailing `) ] } > , ; : . ! ? " '`), so `P-1` is in `P-1,` and `(P-1)`, while `5` is not in `.5` or `-5` and `12` is not in `12,500` or `12'-6"`. **Correction:** cross-QC matches a string, not word tuples, so `_Stream.word_of` is not available there; its source words are the evidence's whitespace-delimited words (`anchor.SourceWords`). The rule is defined once in `anchor.py`, and WP-05.2 applies the same `word_core` to `_Stream`'s words. Every non-empty quote gets a real match at any length (no floor). Accepted cost: a tag inside a list written without spaces (`P-1,P-2`, `M-101/M-102`) does not match. Not taken: a character-context rule (it grounds tight lists that the anchor cannot place), and "not a letter or digit, and not a hyphen or dot followed by an alphanumeric" alone (it lets `12` ground in `12,500` and `2"` in `1/2"`).
 
 **Negatives.** Add a leading decimal: `.5` must not become `5`.
 

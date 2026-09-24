@@ -402,18 +402,26 @@ def test_reduced_trust_without_a_reported_tile_is_still_unanchored():
 # --------------------------------------------------------------------------- #
 
 
-def test_a_recovered_finding_reaches_verification_and_investigation():
-    """Asserted against the real gatekeepers, not a copy of their conditions."""
+@pytest.mark.parametrize("quote", [SCANNED_QUOTE, "P-1", "AHU-1", "M-101"])
+def test_a_recovered_finding_reaches_verification_and_investigation(quote):
+    """Asserted against the real gatekeepers, not a copy of their conditions.
+
+    Remediation WP-05.1 (B5) extends it to the short tags cross-QC quotes most,
+    and takes each state from the real classifier: a quote under six characters
+    used to be TEXT_GROUNDED even on a sheet with no text, so the tile fallback
+    never fired and the finding died UNANCHORED.
+    """
     scanned = _geom("scan.pdf", "AS-1", text="", words=[])
     other = _geom("b.pdf", "B-1", text="", words=[])
     f = Finding(sheet_id="AS-1", source_name="scan.pdf", page_index=0,
                 category="conflict", severity="high", text="t",
-                source_quote=SCANNED_QUOTE, tile=[0, 1],
-                evidence_state=EVIDENCE_UNAVAILABLE,
+                source_quote=quote, tile=[0, 1],
+                evidence_state=classify_quote_evidence(quote, scanned, [0, 1]),
                 also_on=[ConflictLeg(sheet_id="B-1", source_name="b.pdf",
-                                     page_index=0, source_quote=SCANNED_QUOTE,
+                                     page_index=0, source_quote=quote,
                                      tile=[1, 1],
-                                     evidence_state=EVIDENCE_UNAVAILABLE)])
+                                     evidence_state=classify_quote_evidence(
+                                         quote, other, [1, 1]))])
     resolve_anchors([f], scanned)
     resolve_conflict_legs([f], {("b.pdf", 0): other, ("scan.pdf", 0): scanned})
 
@@ -636,4 +644,10 @@ def test_contract_counter_is_not_bumped_by_this_package():
     # fold — host-side binding that no key input covers). WP-03B added nothing to
     # it, which is what this tripwire keeps honest: a bump has to be justified
     # here before the value moves again.
-    assert X._CROSS_QC_CACHE_CONTRACT == 3
+    #
+    # 4 since remediation WP-05.1 (B5, N12, N13): grounding became a real,
+    # whole-word match on the anchor's normalizer, which changes which legs and
+    # facts are admitted, and the `evidence_state` stored on each, for
+    # byte-identical inputs. Host-side binding again, so the contract, not a key
+    # term. Still not this package's: WP-03B added nothing.
+    assert X._CROSS_QC_CACHE_CONTRACT == 4

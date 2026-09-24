@@ -887,7 +887,14 @@ conflict whose two sheets fell in different shards is still found (a plain
 shard-and-union would miss it). The model sees only request-local **opaque
 handles** in the sharded path — never source identity — and every fact/leg quote is
 validated against the retained source text before it is trusted, so an ungrounded
-quote never becomes a dual-anchor finding. Each sheet's text layer is budgeted with
+quote never becomes a dual-anchor finding. That check is a real match at every
+length, and the match must cover whole words: `AHU-10` is not found inside
+`AHU-101`, nor `VAV-2` inside `VAV-2-1`, nor `5` inside `.5`, while `P-1,` and
+`(P-1)` still count as `P-1`. It folds text exactly the way the anchor resolver
+does (curly quotes and inch marks, primes, `½`, `×`, `Ø`, a hyphen written as
+a space), so a quote that differs from the sheet only in those is not thrown
+away. (Before remediation WP-05.1 a quote under six characters, which is most
+equipment tags, was accepted without any check.) Each sheet's text layer is budgeted with
 the omission **counted and surfaced** (never a silent truncation) — and so is the
 per-response findings cap: a response carrying more conflicts than the cap used
 to be truncated with no counter and still report itself complete, which on a
@@ -2133,6 +2140,14 @@ when the recorded acceptance evidence says so (Phase 27, §19.9). The pieces:
   for. A quote that fails to match text the sheet's own region *does* have is
   unchanged: that stays the hallucination signal.
 
+  A short quote gets the same check as a long one (remediation WP-05.1). An
+  equipment tag such as `P-1` used to count as found on any sheet, textless or
+  not. On a scanned sheet that hid it from the recovery above: the leg was
+  marked text-grounded, could not be placed, and never reached the crop check.
+  On a sheet that does not print the tag, a made-up tag leg was kept as if it
+  had been checked. Now a tag on a scanned sheet is admitted at reduced trust
+  and crop-checked, and a tag the sheet's text does not contain is dropped.
+
   Grounding therefore has **three** outcomes, not two, and the third is the one
   a boolean used to swallow:
 
@@ -2155,7 +2170,9 @@ when the recorded acceptance evidence says so (Phase 27, §19.9). The pieces:
   scanned or hybrid sheets can show more verification calls, more investigation
   rounds, and a higher total than the same set produced before, with nothing
   having gone wrong. That is the trade: the alternative was dropping real
-  findings silently.
+  findings silently. Since remediation WP-05.1 that includes the equipment tags
+  and sheet numbers cross-sheet QC quotes most: one dual-crop call per such
+  conflict on a scanned sheet, where there used to be none.
 - **What each evidence change did to the cross-QC cache, and why they differ.**
   Recovering quotes past the prompt cap added the uncapped text's digest to the
   cache key **only for a sheet that is actually truncated** — for every other
@@ -2164,10 +2181,13 @@ when the recorded acceptance evidence says so (Phase 27, §19.9). The pieces:
   changed what a cached entry *means*, so every entry had to go; that
   invalidation comes from the edited map prompt, which rides every cross-QC key,
   rather than from a second mechanism bolted on beside it. Note that
-  `_CROSS_QC_CACHE_CONTRACT` sits at 2 for an unrelated reason — entries written
+  `_CROSS_QC_CACHE_CONTRACT` moved for other reasons: 2 because entries written
   before the findings cap became loss-aware were stored as `complete` after a
-  silent truncation — so that number is not the record of either evidence
-  change.
+  silent truncation, 3 because sheet handles are canonicalized before matching,
+  and 4 because grounding became a real, whole-word match on the anchor's
+  normalizer (remediation WP-05.1). Each is a host-side change that no key
+  input covers, so each one made every stored cross-QC result miss once. None
+  of them records the two evidence changes above.
 - **Evidence coverage (zero API calls):**
   `python scripts/measure_evidence_coverage.py --pdf SET.pdf [--export-dir DIR]`
   scans a set without rendering or calling the API and reports how much evidence

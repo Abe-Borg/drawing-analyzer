@@ -60,6 +60,7 @@ from .core.api_config import (
     phase_output_cap,
 )
 from . import tiling
+from .anchor import _normalize, source_words
 from .diagnostics import get_logger
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
@@ -94,7 +95,7 @@ from .stage_cache import (
 )
 from .auditors.arithmetic import claim_content_key
 from .auditors.references import detect_sheet_id
-from .auditors.sheet_ids import fold_text, normalize_sheet_id
+from .auditors.sheet_ids import normalize_sheet_id
 
 _log = get_logger()
 
@@ -124,7 +125,18 @@ _TEXT_LAYER_BUDGET = 4_000
 # therefore the stored result for byte-identical request inputs. A warm entry
 # written under the old normalization would keep serving the smaller finding set.
 # One mechanism for one change: no key field was added beside this.
-_CROSS_QC_CACHE_CONTRACT = 3
+#
+# Bumped to 4 (remediation WP-05.1; B5, N12, N13): grounding is host-side too.
+# A quote under six characters used to count as grounded without a check, a
+# longer one by a substring test that ignored word boundaries, on a fold that
+# disagreed with the anchor's. The real, whole-word match on the anchor's
+# normalizer changes, for byte-identical request inputs, which legs and facts
+# are admitted, the ``evidence_state`` stored on each, the discard counters, and
+# which fact a reconciled leg takes its tile from. A warm entry written under 3
+# would keep serving legs the rule now refuses. One mechanism: no key term was
+# added. It also retires the stored-claims residuals the migration register
+# records for remediation WP-03.3 and WP-07.2: those entries miss once.
+_CROSS_QC_CACHE_CONTRACT = 4
 DEFAULT_CROSS_QC_WORKERS = 3
 _CROSS_QC_WORKERS_ENV = "DRAWING_ANALYZER_CROSS_QC_WORKERS"
 
@@ -410,8 +422,12 @@ def _sheet_is_textless(geom: Any) -> bool:
     can still hold a pasted raster detail whose text is absent from the layer.
     This asks the narrower, decidable question — was there any text at all to
     match? — and leaves the hybrid split to the §7.1 tile analysis.
+
+    "Text" is what the matching normalizer leaves of it (remediation WP-05.1):
+    a layer of nothing but zero-width characters has nothing a quote could
+    match, so it counts as none. :func:`classify_quote_evidence` asks here.
     """
-    return not sheet_evidence_text(geom).strip()
+    return not source_words(sheet_evidence_text(geom)).normalized
 
 
 @dataclass
@@ -481,22 +497,31 @@ def _fallback_id(ref: Any) -> str:
 
 
 def _norm_for_match(text: str) -> str:
-    """Fold text for a lenient grounded-quote check (dashes, case, whitespace)."""
-    return " ".join(fold_text(text or "").split()).casefold()
+    """The one matching normalizer: :func:`anchor._normalize` (remediation WP-05.1).
+
+    Grounding and the fact-tile join both fold through it, so cross-QC and the
+    anchor agree on what counts as the same text (N13). It used to be
+    ``fold_text`` alone, which left curly quotes, primes, vulgar fractions, the
+    multiplication and diameter signs and infix hyphens unfolded, so a leg
+    quoting ``PROVIDE 6<curly inch mark> DRAIN``, or ``2-1/2"`` against a
+    printed vulgar fraction, was dropped as not found.
+    """
+    return _normalize(text)
 
 
 def _grounded(quote: str, sheet_text: str) -> bool:
-    """True when ``quote`` (non-trivial) actually appears in the sheet's text layer.
+    """True when ``quote`` occurs in ``sheet_text`` covering whole source words.
 
-    A short/blank quote can't be meaningfully grounded, so it is accepted (the
-    downstream anchor pass still tiers it). Longer quotes must appear verbatim
-    (modulo whitespace/dash/case folding) — an ungrounded quote is a hallucination
-    signal and must not become a trusted dual-anchor leg (§16.1).
+    A real match for every quote, whatever its length (remediation WP-05.1, the
+    owner's rules). A quote under six characters used to be accepted without a
+    check (B5), so a tag such as ``AHU-7`` counted as grounded on a sheet that
+    does not print it; and a longer one by a plain substring test, so ``AHU-10``
+    grounded inside ``AHU-101`` (N12). The match now uses the anchor's
+    normalizer and may leave out only the punctuation around a source word
+    (:class:`anchor.SourceWords`). An ungrounded quote is a hallucination signal
+    and must not become a trusted dual-anchor leg (§16.1).
     """
-    q = _norm_for_match(quote)
-    if len(q) < 6:
-        return True
-    return q in _norm_for_match(sheet_text)
+    return source_words(sheet_text or "").contains(quote)
 
 
 def _tile_has_words(geom: Any, tile: "list[int] | None") -> bool:
@@ -566,17 +591,24 @@ def classify_quote_evidence(
     extracted words instead. Without a reported location no such claim can be
     made, so the sheet-level answer stands: absence of a location is not
     evidence that the region was pixels.
+
+    The order is the plan's (remediation WP-05.1, WP-05 step 4): no quote, then
+    no text, then the match. The match used to come first and accepted any
+    quote under six characters without a check, so a short tag such as ``P-1``
+    was TEXT_GROUNDED on a scanned sheet (B5): its tile fallback never fired,
+    and the tags cross-QC quotes most never reached verification. Every
+    non-empty quote now gets a real match, at any length, covering whole source
+    words (:func:`_grounded`).
     """
-    evidence = sheet_evidence_text(geom)
     if not (quote or "").strip():
         # Nothing to check. Never grounded (trigger 3); the reviewer-facing
         # reason is chosen from the finding, since "no searchable text" would be
         # a lie on a sheet that has plenty.
         return EVIDENCE_UNAVAILABLE
-    if _grounded(quote, evidence):
-        return EVIDENCE_TEXT_GROUNDED
-    if not evidence.strip():
+    if _sheet_is_textless(geom):
         return EVIDENCE_UNAVAILABLE          # scanned sheet: nothing to match
+    if _grounded(quote, sheet_evidence_text(geom)):
+        return EVIDENCE_TEXT_GROUNDED
     if not _tile_has_words(geom, tile):
         return EVIDENCE_UNAVAILABLE          # hybrid: this region is pixels only
     return EVIDENCE_NOT_MATCHED
@@ -688,9 +720,11 @@ def fact_tile_lookup(facts: "list[CrossQCFact]") -> dict:
     The join key is safe because the reconcile prompt already requires that
     "both quotes must come verbatim from the facts": the location is *derived*
     from evidence the model already committed to, never supplied by it. Quotes
-    are folded with the same :func:`_norm_for_match` grounding uses, so the join
-    tolerates exactly the cosmetic variation grounding does. A miss yields no
-    tile and today's behaviour.
+    are folded with the same :func:`_norm_for_match` grounding uses (the
+    anchor's normalizer since remediation WP-05.1), so the join tolerates
+    exactly the cosmetic variation grounding does: a reconciled leg quoting a
+    curly inch mark joins the fact that printed a straight one. A miss yields
+    no tile and today's behaviour.
 
     **The key is not unique.** One sheet can carry the same short quote
     ("150 gpm", "TYP.") in two places, and the map stage reports each as its own

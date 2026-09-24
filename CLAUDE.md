@@ -659,6 +659,45 @@ reporter of last resort must never raise from inside Tk's handler.
   a quote unmatched on text the sheet *does* have stays a discard, the
   hallucination signal. An absent quote is `TEXT_EVIDENCE_UNAVAILABLE`, never
   implicitly grounded (trigger 3, closed).
+  **The match is real at every length and covers whole source words**
+  (remediation WP-05.1; B5, N12, N13; the owner's rules). `classify_quote_evidence`
+  asks in the plan's order: no quote → unavailable; no usable text
+  (`_sheet_is_textless`: nothing survives the matching normalizer, so a layer
+  of zero-width characters is none) → unavailable; `_grounded` → grounded; a
+  word-free reported tile → unavailable; else `NOT_MATCHED_IN_TEXT`. `_grounded`
+  used to accept any quote under six folded characters without a check, and was
+  asked *before* the no-text test, so a short tag (`P-1`, `AHU-7`) was
+  `TEXT_GROUNDED` on a scanned sheet and on a sheet that does not print it: a
+  hallucinated tag leg was kept and counted as grounded, and a scanned sheet's
+  tag leg never got the tile fallback, so the tags cross-QC quotes most never
+  reached verification. At six characters and more it was a plain substring
+  test, so `AHU-10` grounded inside `AHU-101`. It is now
+  `anchor.SourceWords.contains` over `anchor.source_words(text)` (cached per
+  text): each whitespace-delimited source word is normalized on its own with
+  the anchor's unchanged `_normalize` and the words are joined, which is exactly
+  `_normalize(text)` (pinned over a Unicode corpus) and also keeps where each
+  word starts. The normalizer puts spaces *inside* a word (`VAV-2-1` is
+  `vav 2 1`), so the normalized string alone cannot tell `vav 2` from a whole
+  word. A match must start and end on a source word's **core**
+  (`anchor.word_core`): only a word's leading `( [ { < " '` and trailing
+  `) ] } > , ; : . ! ? " '` may stay outside it, so `P-1` is in `P-1,` and
+  `(P-1)` but `VAV-2` is not in `VAV-2-1`, and `5` is not in `.5`, `-5` or
+  `1.5`. `12` is not in `12,500` or `12'-6"`. No length floor: `3` grounds
+  only where a standalone `3` is printed. Each word's core is found once, when
+  the text is indexed, and an occurrence that starts inside a word's core skips
+  to the next word, so matching is bounded by the word count, not by how often
+  a quote recurs inside one long whitespace-free run (a garbled or per-glyph
+  text layer). Re-deriving the core per occurrence was quadratic in that run's
+  length (Codex review; pinned by a timing bound and by an equivalence check
+  against a direct reading of the rule). Accepted cost: a tag inside a list
+  written without spaces (`P-1,P-2`, `M-101/M-102`) is inside one source word
+  and does not match. The rule is defined once, in `anchor.py`, for WP-05.2 to
+  apply to the anchor's own words; the anchor's tiers do not use it yet.
+  `_norm_for_match` **is** `anchor._normalize`, so the fact-tile join folds
+  what the anchor folds (N13: curly quotes, primes, vulgar fractions, `×`,
+  `Ø`, infix hyphens): a leg quoting `6”` joins the fact that printed `6"`, and
+  two facts spelled that way on one sheet with different tiles now collide and
+  lose the tile. Host-side binding, so `_CROSS_QC_CACHE_CONTRACT` **3 → 4**.
   Reduced trust must **reach verification**, so the location travels in three
   parts: the shard-map prompt requests `tile_label` per fact and leg
   (`CrossQCFact.tile`, resolved on that leg's own grid); `fact_tile_lookup`
@@ -701,7 +740,7 @@ reporter of last resort must never raise from inside Tk's handler.
   map is keyed by `detect_sheet_id` and so already canonical: an uncanonical lookup
   matched **nothing**, and the claim resolved to no sheet at all. That
   canonicalization is host-side binding no key input covers, so it carries
-  `_CROSS_QC_CACHE_CONTRACT` **2 → 3**.
+  `_CROSS_QC_CACHE_CONTRACT` **2 → 3** (4 since remediation WP-05.1, above).
   Cross-QC also carries **count-only discard counters** on the sharded path
   (`CrossQCDiscardCounts`, WP-02 §7.2): how many legs/facts the host dropped and
   why — unresolved handle, quote absent, quote present but unmatched, split by
@@ -906,7 +945,13 @@ reading `2-1/2"` — a 2.5 inch drain quoted as a 21 inch one. `_CHAR_FOLD` also
 covers the fraction slash, division slash and multiplication sign. Every
 invisible code point in `anchor.py` and `auditors/sheet_ids.py` is written as a
 `\uXXXX` **escape**, never a literal: as literals they are invisible in every
-editor and diff, and a test fails if one reappears.
+editor and diff, and a test fails if one reappears. `_normalize` is the **one**
+matching normalizer: cross-QC grounding and its fact-tile join use it too
+(remediation WP-05.1, N13), through `SourceWords`, which also holds the one
+whole-source-word rule (`word_core`, `WORD_LEADING_PUNCTUATION`,
+`WORD_TRAILING_PUNCTUATION`). The anchor's own tiers do not apply that rule
+yet: `VAV-2` still EXACT-matches inside `VAV-2-1` until WP-05.2 applies
+`word_core` to `_Stream`'s words.
 
 - *Disposition:* `anchor.py` (quote → PDF rect, tiered
   EXACT/FUZZY/TILE/UNANCHORED — UNANCHORED is the hallucination signal. Both fuzzy
