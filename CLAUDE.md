@@ -691,13 +691,34 @@ reporter of last resort must never raise from inside Tk's handler.
   length (Codex review; pinned by a timing bound and by an equivalence check
   against a direct reading of the rule). Accepted cost: a tag inside a list
   written without spaces (`P-1,P-2`, `M-101/M-102`) is inside one source word
-  and does not match. The rule is defined once, in `anchor.py`, for WP-05.2 to
-  apply to the anchor's own words; the anchor's tiers do not use it yet.
-  `_norm_for_match` **is** `anchor._normalize`, so the fact-tile join folds
+  and does not match. The rule is defined once, in `anchor.py`, and since
+  remediation WP-05.2 (B4, N12; the owner's rules) `SourceWords` is **one
+  matcher** for cross-QC and the anchor's EXACT and sub-phrase tiers: before
+  words compare, each word of the text and of the quote loses the brackets and
+  sentence punctuation at its edges (`anchor.fold_word`: leading `( [ {`,
+  trailing `) ] } , ; : . ! ?`; never `"` `'`, which are inch and foot marks,
+  `<` `>`, `%`, `/`, `-` or a leading `.`), so `RATED 175 PSI TYP` grounds in
+  `RATED 175 PSI, TYP.`, `150 GPM 568 L/MIN` in `150 GPM (568 L/MIN)`, and a
+  quote-side `P-1,` on a printed `P-1`; a word that folds to nothing (a lone
+  comma) takes no part. At a match's two ends `word_core` still leaves the
+  text's own `"` `'` `<` `>` outside it. `normalized` stays the per-word
+  `_normalize` join (what `_sheet_is_textless` reads); the match runs over the
+  folded words (`folded`). A quote cross-QC grounds is therefore one the
+  anchor places EXACT on the same words (pinned by one shared table in
+  `tests/test_anchor_whole_words.py`); WP-05.1 had left them disagreeing
+  (`P-1` grounded in `SEE P-1, TYP` and went UNANCHORED on the drawing).
+  `_norm_for_match` **is** the matcher's own form (`anchor._fold_text`:
+  `_normalize` word by word, each word folded), so the fact-tile join folds
   what the anchor folds (N13: curly quotes, primes, vulgar fractions, `×`,
-  `Ø`, infix hyphens): a leg quoting `6”` joins the fact that printed `6"`, and
-  two facts spelled that way on one sheet with different tiles now collide and
-  lose the tile. Host-side binding, so `_CROSS_QC_CACHE_CONTRACT` **3 → 4**.
+  `Ø`, infix hyphens; and since WP-05.2 each word's brackets and sentence
+  punctuation): a leg quoting `6”` joins the fact that printed `6"`, a leg
+  quoting `RATED 175 PSI TYP` joins the fact that recorded `RATED 175 PSI,
+  TYP.`, and two facts spelled either way on one sheet with different tiles
+  collide and lose the tile. A quote that folds to nothing names no text and
+  joins nothing. WP-05.2's first push kept the join on `_normalize` alone, so
+  a leg that grounded only through the fold lost its fact's tile, which on a
+  scanned sheet is its only location (Codex review). Host-side binding, so
+  `_CROSS_QC_CACHE_CONTRACT` **3 → 4**, and **4 → 5** for the fold (WP-05.2).
   Reduced trust must **reach verification**, so the location travels in three
   parts: the shard-map prompt requests `tile_label` per fact and leg
   (`CrossQCFact.tile`, resolved on that leg's own grid); `fact_tile_lookup`
@@ -740,7 +761,8 @@ reporter of last resort must never raise from inside Tk's handler.
   map is keyed by `detect_sheet_id` and so already canonical: an uncanonical lookup
   matched **nothing**, and the claim resolved to no sheet at all. That
   canonicalization is host-side binding no key input covers, so it carries
-  `_CROSS_QC_CACHE_CONTRACT` **2 → 3** (4 since remediation WP-05.1, above).
+  `_CROSS_QC_CACHE_CONTRACT` **2 → 3** (4 since remediation WP-05.1 and 5
+  since WP-05.2, above).
   Cross-QC also carries **count-only discard counters** on the sharded path
   (`CrossQCDiscardCounts`, WP-02 §7.2): how many legs/facts the host dropped and
   why — unresolved handle, quote absent, quote present but unmatched, split by
@@ -949,12 +971,36 @@ editor and diff, and a test fails if one reappears. `_normalize` is the **one**
 matching normalizer: cross-QC grounding and its fact-tile join use it too
 (remediation WP-05.1, N13), through `SourceWords`, which also holds the one
 whole-source-word rule (`word_core`, `WORD_LEADING_PUNCTUATION`,
-`WORD_TRAILING_PUNCTUATION`). The anchor's own tiers do not apply that rule
-yet: `VAV-2` still EXACT-matches inside `VAV-2-1` until WP-05.2 applies
-`word_core` to `_Stream`'s words.
+`WORD_TRAILING_PUNCTUATION`) and, since remediation WP-05.2, the one word fold
+(`fold_word`, `WORD_LEADING_FOLD`, `WORD_TRAILING_FOLD`: the edge sets minus
+`"` `'` `<` `>`, pinned). `SourceWords` is built from a string (cross-QC) or
+from a sheet's words (the anchor: each word's text split on whitespace, every
+piece keeping its word's index), and the anchor's tiers all apply the rule, so
+`VAV-2` no longer matches inside `VAV-2-1` anywhere. `_normalize` itself is
+unchanged (`auditors.arithmetic._UNICODE_DASHES` is pinned to its dash fold).
 
 - *Disposition:* `anchor.py` (quote → PDF rect, tiered
-  EXACT/FUZZY/TILE/UNANCHORED — UNANCHORED is the hallucination signal. Both fuzzy
+  EXACT/FUZZY/TILE/UNANCHORED — UNANCHORED is the hallucination signal. Every
+  tier matches **whole source words** (remediation WP-05.2, N12; the owner's
+  rules): EXACT and the sub-phrase tier through `SourceWords` (so a quote
+  cross-QC grounds is one the anchor places EXACT), a fuzzy window must start
+  on a source word's first token and end on one's last
+  (`_Stream.on_word_edges`: without it every match EXACT refused for cutting
+  a word fell through to the window at 100% overlap), and inside a window a
+  quote's measurement may not match part of a sheet word
+  (`_measurements_whole`): the 17-token `…AT VAV-2 FOR…` note against one
+  printing `VAV-2-1` has whole-word edges, so only this refuses it, and so is
+  `1/2" PIPE` on `2-1/2" PIPE`. It reads numbers, so a letter-only tag
+  (`VAV-A` inside `VAV-A-1`) in a long window is a recorded limit; and it
+  checks the numeric veto's greedy alignment, so a number that could align
+  either inside a longer tag or to a standalone copy nearby may be refused
+  (the safe direction). Words fold on both sides before they compare
+  (`fold_word`, B4), so the veto reads `175` in `175,`; a folded match stays
+  `exact` (the owner's decision): the fold never removes a digit, sign,
+  decimal point, unit mark or `%`, so `numbers_grounded` holds and the
+  arithmetic auditor reads the sheet's words as printed (`540.`, `(540)`).
+  What needs a character stream (`6 "`, `2 %`, `INCHDRAIN`, `12' - 6"`) is
+  remediation WP-05.3's. Both fuzzy
   tiers carry the **numeric veto** (P7 item 30): token overlap is blind to a
   swapped digit, so on `PROVIDE 6 INCH DRAIN AT COLUMN LINE 4` every one-number
   substitution scored 6/7 = 0.857, cleared the 0.85 floor, and clouded a wrong

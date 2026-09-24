@@ -208,11 +208,15 @@ def test_a_quote_printed_twice_on_its_sheet_still_grounds_the_claim():
 
 
 def test_a_fuzzy_anchor_with_the_numeric_veto_grounds_its_operands():
-    """One non-numeric token differs (``TEST:`` against ``TEST``): the sliding
+    """One non-numeric token differs (``TESTS`` against ``TEST``): the sliding
     window anchors FUZZY and places every number of the quote on its own sheet
-    token, so the operands are grounded."""
+    token, so the operands are grounded.
+
+    It read ``TEST:`` until remediation WP-05.2, which folds sentence
+    punctuation off every word, so a colon no longer differs: that quote now
+    anchors EXACT (``tests/test_anchor_whole_words.py``)."""
     printed = ["FLOW", "TEST", "20", "20", "20", "TOTAL", "540", "GPM", "AT", "RISER", "3"]
-    quote = "FLOW TEST: 20 20 20 TOTAL 540 GPM AT RISER 3"
+    quote = "FLOW TESTS 20 20 20 TOTAL 540 GPM AT RISER 3"
     f = _one(_claim("sum", [20, 20, 20], 540, quote), [_sheet(_row(printed))])
     assert (f.anchor.status, f.anchor.method) == ("FUZZY", "fuzzy_window")
     assert _trusted(f), f.verification
@@ -230,16 +234,28 @@ def test_the_quote_bounds_the_support_even_where_the_sheet_prints_more():
 
 
 def test_the_sheet_must_print_the_operand_the_quote_reads():
-    """The quote starts in the middle of a printed dimension: the sheet reads
-    ``2-1/2" + 2-1/2" = 4"`` and the model quoted ``1/2" + 2 1/2" = 4"``, which
-    anchors EXACT (the tokens match from the dimension's second half on). The
-    quote reads a 0.5 the sheet never printed: the sheet's words under the span
-    print 2-1/2 there. Counting the quote alone trusted it."""
-    printed = ['2-1/2"', "+", '2-1/2"', "=", '4"']
-    quote = '1/2" + 2 1/2" = 4"'
-    f = _one(_claim("sum", ["1/2", "2 1/2"], 4, quote), [_sheet(_row(printed))])
+    """The quote reads a number the sheet does not print there. The sheet
+    writes ``2½" + 2½" = 4"`` and the model quoted ``2-1/2" + 2-1/2" = 4"``,
+    which anchors EXACT (the anchor's normalizer folds the vulgar fraction), but
+    the sheet's own words under the span do not print a 2-1/2 the host reads as
+    one value (a vulgar fraction glued to a digit is refused). Counting the
+    quote alone trusted it.
+
+    The case used to be a quote that starts in the middle of a printed
+    dimension (``1/2" + 2 1/2" = 4"`` on ``2-1/2" + 2-1/2" = 4"``), which
+    anchored EXACT from the dimension's second half on. Since remediation
+    WP-05.2 a match covers whole source words, so that quote does not anchor at
+    all (N12), and stays model-transcribed."""
+    printed = ['2\u00bd"', "+", '2\u00bd"', "=", '4"']
+    quote = '2-1/2" + 2-1/2" = 4"'
+    f = _one(_claim("sum", ["2-1/2", "2-1/2"], 4, quote), [_sheet(_row(printed))])
     assert f.anchor.status == "EXACT"
     assert _transcribed(f), f.verification
+
+    cut = _one(_claim("sum", ["1/2", "2 1/2"], 4, '1/2" + 2 1/2" = 4"'),
+               [_sheet(_row(['2-1/2"', "+", '2-1/2"', "=", '4"']))])
+    assert cut.anchor.status == "UNANCHORED"
+    assert _transcribed(cut), cut.verification
 
 
 # --------------------------------------------------------------------------- #
@@ -280,7 +296,7 @@ def test_resolve_anchors_reports_the_sheet_words_each_quote_matched():
                        category="conflict", severity="low", text="t",
                        source_quote=quote, **kw)
 
-    exact = _f('1/2" + 2 1/2" = 4"')
+    exact = _f('2 1/2" + 2 1/2" = 4"')
     missing = _f("NOT ON THIS SHEET AT ALL")
     graphics = _f("", tile=[0, 0])
     pre = _f("FLOW TEST", anchor=Anchor(status="EXACT", rect_pdf=[1, 1, 2, 2], method="t"))
@@ -290,8 +306,11 @@ def test_resolve_anchors_reports_the_sheet_words_each_quote_matched():
     resolve_anchors([exact, missing, graphics, pre], sheet, matched_text=matched)
     resolve_anchors(plain, sheet)
 
-    # Whole source words, as printed, in reading order: the span starts inside
-    # the first dimension and reports all of it.
+    # Whole source words, as printed, in reading order: the quote writes each
+    # dimension ``2 1/2"`` and the sheet ``2-1/2"``, which is what is reported.
+    # (The quote used to start inside the first dimension, ``1/2" + 2 1/2"``;
+    # since remediation WP-05.2 a match covers whole words, so that one does
+    # not anchor.)
     assert matched == {id(exact): '2-1/2" + 2-1/2" = 4"'}
     # The keyword changes no anchor.
     for a, b in zip((exact, missing, graphics), plain):

@@ -507,8 +507,13 @@ def test_no_cross_qc_contract_bump_was_needed():
     became a real, whole-word match on the anchor's normalizer, which changes
     which legs and facts are admitted, and the ``evidence_state`` stored on
     each, for byte-identical inputs. Still nothing from WP-03A.
+
+    It reads 5 since **remediation WP-05.2** (B4, N12): that match folds
+    brackets and sentence punctuation off every word, the anchor's own rule,
+    which changes which legs and facts are admitted for byte-identical inputs.
+    Still nothing from WP-03A.
     """
-    assert X._CROSS_QC_CACHE_CONTRACT == 4
+    assert X._CROSS_QC_CACHE_CONTRACT == 5
 
 
 # --------------------------------------------------------------------------- #

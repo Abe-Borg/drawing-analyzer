@@ -60,7 +60,7 @@ from .core.api_config import (
     phase_output_cap,
 )
 from . import tiling
-from .anchor import _normalize, source_words
+from .anchor import _fold_text, source_words
 from .diagnostics import get_logger
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
@@ -136,7 +136,17 @@ _TEXT_LAYER_BUDGET = 4_000
 # would keep serving legs the rule now refuses. One mechanism: no key term was
 # added. It also retires the stored-claims residuals the migration register
 # records for remediation WP-03.3 and WP-07.2: those entries miss once.
-_CROSS_QC_CACHE_CONTRACT = 4
+#
+# Bumped to 5 (remediation WP-05.2; B4, N12): the same match now folds the
+# brackets and sentence punctuation off every word, of the sheet's text and of
+# the quote (``anchor.fold_word``), because cross-QC and the anchor match
+# through one matcher (the owner's decision). A leg quoting ``RATED 175 PSI
+# TYP`` against ``RATED 175 PSI, TYP.`` is now admitted, for byte-identical
+# request inputs. The fact-tile join keys on the same folded form (Codex
+# review), so such a leg also inherits its fact's tile, and two facts spelled
+# apart only by that punctuation in different tiles now collide and give none.
+# One mechanism: no key term was added.
+_CROSS_QC_CACHE_CONTRACT = 5
 DEFAULT_CROSS_QC_WORKERS = 3
 _CROSS_QC_WORKERS_ENV = "DRAWING_ANALYZER_CROSS_QC_WORKERS"
 
@@ -497,16 +507,23 @@ def _fallback_id(ref: Any) -> str:
 
 
 def _norm_for_match(text: str) -> str:
-    """The one matching normalizer: :func:`anchor._normalize` (remediation WP-05.1).
+    """The one matching form: the anchor's (remediation WP-05.1 and WP-05.2).
 
-    Grounding and the fact-tile join both fold through it, so cross-QC and the
-    anchor agree on what counts as the same text (N13). It used to be
-    ``fold_text`` alone, which left curly quotes, primes, vulgar fractions, the
-    multiplication and diameter signs and infix hyphens unfolded, so a leg
-    quoting ``PROVIDE 6<curly inch mark> DRAIN``, or ``2-1/2"`` against a
-    printed vulgar fraction, was dropped as not found.
+    Each word normalized with :func:`anchor._normalize` and folded
+    (:func:`anchor.fold_word`), which is how :class:`anchor.SourceWords`
+    compares a quote with a sheet. The fact-tile join keys on it, so a
+    reconciled leg joins its fact wherever grounding would call the two the
+    same text (N13). It used to be ``fold_text`` alone, which left curly
+    quotes, primes, vulgar fractions, the multiplication and diameter signs and
+    infix hyphens unfolded, so a leg quoting ``PROVIDE 6<curly inch mark>
+    DRAIN``, or ``2-1/2"`` against a printed vulgar fraction, was dropped as not
+    found. Then (WP-05.1 to WP-05.2's first push) it was ``_normalize`` alone,
+    which kept the word fold out of the join: a leg that grounded only through
+    the fold (``RATED 175 PSI TYP`` against a fact that recorded ``RATED 175
+    PSI, TYP.``) lost its fact's tile, and two such spellings in different tiles
+    did not collide (Codex review).
     """
-    return _normalize(text)
+    return _fold_text(text)
 
 
 def _grounded(quote: str, sheet_text: str) -> bool:
@@ -516,10 +533,14 @@ def _grounded(quote: str, sheet_text: str) -> bool:
     owner's rules). A quote under six characters used to be accepted without a
     check (B5), so a tag such as ``AHU-7`` counted as grounded on a sheet that
     does not print it; and a longer one by a plain substring test, so ``AHU-10``
-    grounded inside ``AHU-101`` (N12). The match now uses the anchor's
-    normalizer and may leave out only the punctuation around a source word
-    (:class:`anchor.SourceWords`). An ungrounded quote is a hallucination signal
-    and must not become a trusted dual-anchor leg (§16.1).
+    grounded inside ``AHU-101`` (N12). The match uses the anchor's normalizer
+    and may leave out only the punctuation around a source word
+    (:class:`anchor.SourceWords`). It is the matcher the anchor's EXACT tier
+    uses (remediation WP-05.2), so each word's brackets and sentence
+    punctuation fold on both sides (``RATED 175 PSI TYP`` grounds in ``RATED
+    175 PSI, TYP.``) and the two agree on what is printed. An ungrounded quote
+    is a hallucination signal and must not become a trusted dual-anchor leg
+    (§16.1).
     """
     return source_words(sheet_text or "").contains(quote)
 
@@ -720,11 +741,13 @@ def fact_tile_lookup(facts: "list[CrossQCFact]") -> dict:
     The join key is safe because the reconcile prompt already requires that
     "both quotes must come verbatim from the facts": the location is *derived*
     from evidence the model already committed to, never supplied by it. Quotes
-    are folded with the same :func:`_norm_for_match` grounding uses (the
-    anchor's normalizer since remediation WP-05.1), so the join tolerates
-    exactly the cosmetic variation grounding does: a reconciled leg quoting a
-    curly inch mark joins the fact that printed a straight one. A miss yields
-    no tile and today's behaviour.
+    are compared in the matcher's own form (:func:`_norm_for_match`: the
+    anchor's normalizer and word fold, remediation WP-05.1 and WP-05.2), so
+    the join tolerates exactly the variation grounding does: a reconciled leg
+    quoting a curly inch mark joins the fact that printed a straight one, and
+    one that leaves out a comma joins the fact that kept it. A quote that folds
+    to nothing names no text, so it locates nothing and joins nothing. A miss
+    yields no tile and today's behaviour.
 
     **The key is not unique.** One sheet can carry the same short quote
     ("150 gpm", "TYP.") in two places, and the map stage reports each as its own
@@ -740,7 +763,10 @@ def fact_tile_lookup(facts: "list[CrossQCFact]") -> dict:
     for fact in facts or []:
         if fact.tile is None:
             continue
-        key = (_norm_id(fact.sheet_handle), _norm_for_match(fact.exact_quote))
+        quote = _norm_for_match(fact.exact_quote)
+        if not quote:
+            continue
+        key = (_norm_id(fact.sheet_handle), quote)
         tile = list(fact.tile)
         prior = seen.get(key, _MISSING)
         if prior is _MISSING:
@@ -802,7 +828,9 @@ def _finding_from_handles(
         # the *region* the quote was read from, not of the sheet as a whole.
         tile = _resolve_tile(raw, getattr(geom, "rows", 0), getattr(geom, "cols", 0))
         if tile is None and tile_lookup:
-            tile = tile_lookup.get((_norm_id(handle), _norm_for_match(quote)))
+            match_quote = _norm_for_match(quote)
+            if match_quote:
+                tile = tile_lookup.get((_norm_id(handle), match_quote))
         # WP-03A grounds against the host's *source* evidence, not the capped
         # string the model saw. WP-03B turns the verdict into three states, so a
         # sheet that could never satisfy a text check is not treated as refuting

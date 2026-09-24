@@ -892,9 +892,13 @@ length, and the match must cover whole words: `AHU-10` is not found inside
 `AHU-101`, nor `VAV-2` inside `VAV-2-1`, nor `5` inside `.5`, while `P-1,` and
 `(P-1)` still count as `P-1`. It folds text exactly the way the anchor resolver
 does (curly quotes and inch marks, primes, `½`, `×`, `Ø`, a hyphen written as
-a space), so a quote that differs from the sheet only in those is not thrown
-away. (Before remediation WP-05.1 a quote under six characters, which is most
-equipment tags, was accepted without any check.) Each sheet's text layer is budgeted with
+a space, and the brackets and sentence punctuation around each word, so
+`RATED 175 PSI TYP` is found in `RATED 175 PSI, TYP.`), so a quote that
+differs from the sheet only in those is not thrown away. Since remediation
+WP-05.2 the check and the anchor resolver are one matcher, so a quote this
+check finds is one the anchor places on the same words. (Before remediation
+WP-05.1 a quote under six characters, which is most equipment tags, was
+accepted without any check.) Each sheet's text layer is budgeted with
 the omission **counted and surfaced** (never a silent truncation) — and so is the
 per-response findings cap: a response carrying more conflicts than the cap used
 to be truncated with no counter and still report itself complete, which on a
@@ -926,19 +930,33 @@ a rectangle on its page — in the canonical **`PAGE_VIEW_V2`** coordinate space
 (see [Rotation & page boxes](#rotation--page-boxes)), offline and with no model
 call, using a tiered strategy that records which tier fired:
 
-- **EXACT** — the normalized quote matches a run of words verbatim. When the
-  quote appears more than once on the sheet (the *"BATTERY ROOM in two schedule
-  rows"* trap), the occurrence inside the tile the model reported is preferred;
-  if that still doesn't settle it, the finding is flagged `exact_ambiguous`.
-- **FUZZY** — no exact run, but a sliding window of words overlaps the quote's
-  tokens ≥ 85%, or the longest distinctive sub-phrase (≥ 3 tokens) of the quote
-  appears verbatim. Whitespace/linebreak artifacts and Unicode punctuation (dashes,
-  curly quotes, the `2 1/2"` vs `2-1/2"` and `″`/`"` inch marks, the `Ø` diameter
-  symbol) are the usual reason exact fails; normalization folds most of them —
-  including **vulgar fractions**, which need care: Unicode normalization expands
-  `½` to `1⁄2` with no separating space, so `2½"` used to become `21⁄2"` —
-  twenty-one halves — and could never match a sheet reading `2-1/2"`. On a pipe
-  size that is the difference between a 2.5 inch drain and a 21 inch one.
+- **EXACT** — the normalized quote matches a run of whole words verbatim. When
+  the quote appears more than once on the sheet (the *"BATTERY ROOM in two
+  schedule rows"* trap), the occurrence inside the tile the model reported is
+  preferred; if that still doesn't settle it, the finding is flagged
+  `exact_ambiguous`.
+- **FUZZY** — no exact run, but a sliding window of whole words overlaps the
+  quote's tokens ≥ 85%, or the longest distinctive sub-phrase (≥ 3 tokens) of the
+  quote appears verbatim as whole words. Whitespace/linebreak artifacts and Unicode
+  punctuation (dashes, curly quotes, the `2 1/2"` vs `2-1/2"` and `″`/`"` inch
+  marks, the `Ø` diameter symbol) are the usual reason exact fails, and
+  normalization folds them — including **vulgar fractions**, which need care:
+  Unicode normalization expands `½` to `1⁄2` with no separating space, so `2½"`
+  used to become `21⁄2"` — twenty-one halves — and could never match a sheet
+  reading `2-1/2"`. On a pipe size that is the difference between a 2.5 inch
+  drain and a 21 inch one.
+
+  Since remediation WP-05.2 the **brackets and sentence punctuation around each
+  word** fold too (`( [ {` before a word, `) ] } , ; : . ! ?` after it), on the
+  sheet and in the quote alike: `RATED 175 PSI TYP` matches `RATED 175 PSI,
+  TYP.`, `NOTE 3` matches `NOTE 3:`, `150 GPM 568 L/MIN` matches `150 GPM (568
+  L/MIN)`, and `P-1` matches `SEE (P-1), TYP`. Each of those used to go
+  unanchored, and so was drawn as the hallucination signal. Such a match still
+  counts as EXACT. Quote marks (`"` and `'`, which are also inch and foot marks),
+  `<`, `>`, `%`, `/` and a leading `.` never fold, so `6"` never matches `6'` and
+  `.5` never matches `5`. What folding cannot fix, and what still goes unanchored
+  for now: a mark extracted as its own word (`6 "`, `2 %`), words merged by
+  extraction (`INCHDRAIN`), and a split dimension (`12' - 6"`).
 
   A fuzzy match must additionally clear the **numeric veto**. Token overlap is
   blind to the substitution that matters most on a drawing: swap one digit and
@@ -955,6 +973,19 @@ call, using a tiered strategy that records which tier fired:
   quote carrying no digits is unaffected, and ordinary transcription variance (an
   extra word on the sheet, an abbreviation, a paraphrase) still matches. The 85%
   threshold itself is unchanged: this is a veto, not a stricter score.
+
+  **Every tier matches whole words** (remediation WP-05.2). A hyphen inside a tag
+  splits it for matching (`VAV-2-1` reads as `vav 2 1`), and a quote used to be
+  able to match the start, end or middle of one printed word, so a finding about
+  `VAV-2` was clouded on `VAV-2-1` — the wrong equipment. Now `VAV-2` is found
+  only where `VAV-2` is printed as a word, and a tag printed both alone and inside
+  a longer one is clouded where it stands alone. A fuzzy window must also start
+  and end on whole words, and a quoted number may not match part of a printed
+  word inside it, so a long note quoting `VAV-2` is not placed on the same note
+  printing `VAV-2-1`, nor `1/2" PIPE` on `2-1/2" PIPE`. A quote that cut off the
+  start of a hyphenated word (`ACTION VALVE` on `PRE-ACTION VALVE`) is placed
+  only on the words it covers whole. One known limit: a tag that differs only in
+  letters (`VAV-A` in a long note printing `VAV-A-1`) can still match fuzzily.
 - **TILE** — a graphics-only finding (empty quote) is anchored to its reported
   tile's rectangle: coarse, but honest.
 - **UNANCHORED** — a *non-empty* quote that matches nothing anywhere. This is the
@@ -2184,10 +2215,12 @@ when the recorded acceptance evidence says so (Phase 27, §19.9). The pieces:
   `_CROSS_QC_CACHE_CONTRACT` moved for other reasons: 2 because entries written
   before the findings cap became loss-aware were stored as `complete` after a
   silent truncation, 3 because sheet handles are canonicalized before matching,
-  and 4 because grounding became a real, whole-word match on the anchor's
-  normalizer (remediation WP-05.1). Each is a host-side change that no key
-  input covers, so each one made every stored cross-QC result miss once. None
-  of them records the two evidence changes above.
+  4 because grounding became a real, whole-word match on the anchor's
+  normalizer (remediation WP-05.1), and 5 because that match now folds the
+  brackets and sentence punctuation around each word, as one matcher with the
+  anchor (remediation WP-05.2). Each is a host-side change that no key input
+  covers, so each one made every stored cross-QC result miss once. None of them
+  records the two evidence changes above.
 - **Evidence coverage (zero API calls):**
   `python scripts/measure_evidence_coverage.py --pdf SET.pdf [--export-dir DIR]`
   scans a set without rendering or calling the API and reports how much evidence

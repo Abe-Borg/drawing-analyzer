@@ -48,6 +48,69 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The anchor clouded a tag inside a longer one, and could not place a quote
+  that differed from the sheet only in punctuation (remediation WP-05.2; B4's
+  punctuation part, N12's anchor part).** The anchor places each finding's
+  quote on its sheet, and what it places decides what is clouded, what is
+  crop-verified and investigated, and which arithmetic numbers are trusted.
+  Two gaps:
+  - **B4.** Punctuation stayed glued to each word of the sheet (`PSI,`,
+    `(568`, `3:`), so a quote that is the sheet's text apart from that
+    punctuation (`RATED 175 PSI TYP` on `RATED 175 PSI, TYP.`, `NOTE 3` on
+    `NOTE 3:`, `150 GPM 568 L/MIN` on `150 GPM (568 L/MIN)`, `P-1` on
+    `SEE P-1, TYP`) was not found: a `[QUOTE NOT FOUND]` callout, the
+    hallucination signal, and no crop check;
+  - **N12.** A hyphen inside a tag splits it for matching (`VAV-2-1` reads as
+    `vav 2 1`), and a quote could match the start, end or middle of one
+    printed word. `VAV-2` was clouded on `VAV-2-1`, `AHU-1` on `AHU-1-2`, and a
+    long note quoting `VAV-2` on the same note printing `VAV-2-1`.
+
+  Now, decided with the owner (see the WP-05.2 handoff in
+  `_plans/PROGRESS.md`):
+  - every tier of the anchor matches **whole words**, the rule cross-sheet QC
+    has used since WP-05.1: the exact and sub-phrase tiers match through the
+    same matcher, a fuzzy window must start and end on a whole word, and inside
+    a window a quoted number may not match part of a printed word
+    (`1/2" PIPE` is never placed on `2-1/2" PIPE`);
+  - brackets and sentence punctuation (`( [ {` before a word, `) ] } , ; : .
+    ! ?` after it) are folded off every word, on the sheet and in the quote
+    alike. Never folded: `"` and `'` (inch and foot marks, so `6"` never
+    matches `6'`), `<` and `>`, `%`, `/`, `-`, and a leading `.` (`.5` is not
+    `5`). Such a match is still an exact one, so an arithmetic claim whose
+    quote needed it can be trusted;
+  - cross-sheet QC checks its quotes with the same matcher, so the two agree:
+    a quote QC finds on a sheet, the anchor places there. A reconciled leg also
+    keeps the location of the fact it came from across that punctuation (on a
+    scanned sheet that location is all it has to be crop-verified by), and two
+    facts that differ only in punctuation, in different places, no longer hand
+    a leg one of their locations by guess.
+
+  **Visible effect:** a finding whose quote differs from the sheet only in
+  punctuation is now clouded where it used to be a `[QUOTE NOT FOUND]` callout,
+  and on an exhaustive run it gets a crop verification call (plus an
+  investigation if the crop cannot settle it) where there was none. A finding
+  that quotes a tag printed only inside a longer one (`VAV-2` on a sheet that
+  prints only `VAV-2-1`) is no longer clouded on the wrong equipment: it is a
+  `[QUOTE NOT FOUND]` callout, and it loses the crop check it used to get. A
+  tag printed both alone and inside a longer one is clouded where it is printed
+  alone. A quote that cut off the start of a hyphenated word (`ACTION VALVE` on
+  `PRE-ACTION VALVE`) is placed only on the words it covers whole. Moving an
+  anchor can change the `QC-###` numbers on that sheet (they follow position).
+  A cross-sheet conflict leg that differs from its sheet only in punctuation is
+  kept instead of dropped. Accepted limits, recorded as tests: a letter-only tag
+  (`VAV-A` inside `VAV-A-1`) in a long fuzzy window still anchors there; an
+  inch or percent mark extracted as its own word (`6 "`, `2 %`), words merged
+  by extraction (`INCHDRAIN`) and a split dimension (`12' - 6"`) still do not
+  anchor (remediation WP-05.3).
+
+  **Cache:** the anchor stage is not cached. A finding whose anchor moved is
+  re-checked once, because the verification and investigation keys carry the
+  anchor (that is new paid work, by design, on an exhaustive run). Cross-sheet
+  QC's admission changed, so `cross_qc._CROSS_QC_CACHE_CONTRACT` goes 4 → 5
+  and every stored cross-QC result misses once (no release has shipped
+  contract 4, so the two bumps cost one miss). Digest, critique, identity,
+  review-plan and citation entries are all kept. See `_plans/DECISIONS.md`.
+
 - **Cross-sheet QC accepted short quotes unchecked, matched inside longer
   words, and folded text differently from the anchor (remediation WP-05.1;
   B5, N12 cross-QC part, N13).** On a large set (over 40 sheets) cross-sheet QC
@@ -102,8 +165,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   entries are all kept. See `_plans/DECISIONS.md`.
 
   **Not in this change:** the anchor resolver's own word boundaries and
-  punctuation folding (B4 and N12's anchor part, WP-05.2: `VAV-2` still anchors
-  inside `VAV-2-1` on the drawing); grounding on the whole-set path (WP-06.2).
+  punctuation folding (B4 and N12's anchor part: fixed by WP-05.2, the entry
+  above); grounding on the whole-set path (WP-06.2).
 
 - **Tag digits, `1e3` and the wrong operation could still make a trusted
   arithmetic mismatch (remediation WP-07.2; A8).** After WP-07.1 a mismatch was

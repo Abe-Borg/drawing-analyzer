@@ -650,4 +650,9 @@ def test_contract_counter_is_not_bumped_by_this_package():
     # facts are admitted, and the `evidence_state` stored on each, for
     # byte-identical inputs. Host-side binding again, so the contract, not a key
     # term. Still not this package's: WP-03B added nothing.
-    assert X._CROSS_QC_CACHE_CONTRACT == 4
+    #
+    # 5 since remediation WP-05.2 (B4, N12): that match now folds brackets and
+    # sentence punctuation off every word, the anchor's rule, which changes
+    # which legs and facts are admitted for byte-identical inputs. WP-03B still
+    # added nothing.
+    assert X._CROSS_QC_CACHE_CONTRACT == 5
