@@ -1,7 +1,7 @@
 # Remediation progress tracker
 
-**Next up:** Wave 1 in order: `WP-09.2` (N10, U11: `_match_entry` rejects a candidate whose critical signature conflicts, per-item outcome counters and a labelled paraphrase corpus, with no threshold change). Its dependencies, WP-04.2 and WP-09.1, are done. WP-09.1 is done: section filler is a closed vocabulary that the synthesis assurance rule shares (B11, N11), synthesis items are split per section (N31, found and fixed there), and dropped assurances are counted observationally (`assurances`); no cache contract moved. WP-06 is not done: WP-06.2 and WP-06.3 (Wave 2) are available, and WP-06.4 still waits on WP-03.4. WP-05 is not done: WP-05.3 remains (Wave 2, available). WP-07 is not done: WP-07.3 (Wave 2, available). WP-03 is not done: WP-03.4, WP-03.5 and WP-03.6 remain (Wave 2); WP-03.5 now also carries the measured N30 exposure of cross-QC's same-pair conflicts. WP-04 is not done: its acceptance needs quantity roles, slice `WP-04.3` (Wave 2). First check the open PRs ([`README.md`](README.md), step 1). Before the next stable tag, the owner should look at O-5.
-**Last updated:** 2026-09-24 by the WP-09.1 session ([PR #168](https://github.com/Abe-Borg/drawing-analyzer/pull/168)).
+**Next up:** Wave 1 in order: `WP-01.3` (N15, N16: a raised-cap retry never loses the first read; findings from an errored, refused or truncated digest are labelled or held out of the ledger). Its dependency, WP-01.2, is done. WP-09.2 is done: a prose item joins an existing finding only when their critical signatures agree (N10, text against text, the next-best compatible candidate wins), every enumerated item has one recorded outcome, and a labelled corpus is the evidence for the unchanged 0.7 threshold (U11); no cache contract moved. WP-09 is not done: WP-09.3 (N32, a digest heading that states something, Wave 3) remains. WP-06 is not done: WP-06.2 and WP-06.3 (Wave 2) are available, and WP-06.4 still waits on WP-03.4. WP-05 is not done: WP-05.3 remains (Wave 2, available). WP-07 is not done: WP-07.3 (Wave 2, available). WP-03 is not done: WP-03.4, WP-03.5 and WP-03.6 remain (Wave 2); WP-03.5 also carries the measured N30 exposure of cross-QC's same-pair conflicts. WP-04 is not done: its acceptance needs quantity roles, slice `WP-04.3` (Wave 2). First check the open PRs ([`README.md`](README.md), step 1). Before the next stable tag, the owner should look at O-5.
+**Last updated:** 2026-09-24 by the WP-09.2 session ([PR #169](https://github.com/Abe-Borg/drawing-analyzer/pull/169)).
 
 This file is authoritative for **status and order**. Requirements live in
 [`drawing-analyzer-remediation-plan.md`](drawing-analyzer-remediation-plan.md).
@@ -58,7 +58,7 @@ A package is `done` only when every slice is `done` or `n/a` **and** its
 | WP-06 | Source-safe cross-QC and claim-preserving deduplication | P0/P1 | 06.1–06.4 | todo |
 | WP-07 | Arithmetic operand trust and strict numeric parsing | P0 | 07.1–07.3 | todo |
 | WP-08 | Reference, naming, sheet-ID and drawing-index auditors | P1 | 08.1–08.5 | todo |
-| WP-09 | Prose harvesting without empty findings or unnecessary duplication | P1 (N10 is P0) | 09.1–09.2 | todo |
+| WP-09 | Prose harvesting without empty findings or unnecessary duplication | P1 (N10 is P0) | 09.1–09.3 | todo |
 | WP-10 | Complete cache keys, faithful metadata and targeted migration | P0/P1 | 10.1–10.4 | todo |
 | WP-11 | Inventory-driven source and page fault isolation | P0/P1 | 11.1–11.3 | todo |
 | WP-12 | Citation parsing, full-text editions and honest adoption evidence | P1 | 12.1–12.6 | todo |
@@ -112,7 +112,7 @@ starting.
 | WP-05.2 | Anchor punctuation folding and a source-word-boundary rule (B4: `PSI,`, `NOTE 3:`, `(568 L/MIN)`; N12 anchor part: `VAV-2` in `VAV-2-1`) | M | — | done | [PR #166](https://github.com/Abe-Borg/drawing-analyzer/pull/166), 2026-09-24. **Rules decided by the owner (four choices, measured first):** (1) whole source words in every tier: EXACT and the sub-phrase tier match through `anchor.SourceWords` (the WP-05.1 `word_core`, the matcher cross-QC uses), a fuzzy window starts and ends on whole words (`_Stream.on_word_edges`), and inside a window a quote's measurement may not match part of a sheet word (`anchor._measurements_whole`); measured: a boundary on EXACT alone moves every refused match to the window at 100% overlap, and window edges alone miss the 17-token note; (2) `anchor.fold_word` folds leading `( [ {` and trailing `) ] } , ; : . ! ?` off every word, sheet and quote alike (never `"` `'` `<` `>` `%` `/` `-` or a leading `.`); (3) cross-QC grounds through the same matcher, and its fact-tile join keys on the same folded form (Codex review, fixed in this PR), `_CROSS_QC_CACHE_CONTRACT` 4 → 5 (one register row); (4) a folded match keeps EXACT/`exact`, so `numbers_grounded` holds. `anchor._normalize` untouched. Tests: `tests/test_anchor_whole_words.py` (incl. one agreement table through both matchers). Re-baselined: three arithmetic tests (given the case they model), the three contract tripwires, and two WP-05.1 tests (its reference matcher and its join-key normalizer test). Recorded limits: a letter-only tag (`VAV-A` in `VAV-A-1`) in a long window; a sub-phrase dropping a unit printed as its own word; B4's four character-stream cases (WP-05.3) |
 | WP-06.1 | Cross-QC prompt says category `question` with severity `low`; invalid-field counters on both paths; candidate duplicates go to the ledger instead of being destroyed (B6, N2) | S/M | — | done | [PR #167](https://github.com/Abe-Borg/drawing-analyzer/pull/167), 2026-09-24. **Rules decided by the owner (four choices, measured first):** (1) a refused item is **observational**: a stage warning after the status-deciding ones, the stage keeps its status, the result is cached with its counts (D-2 note); (2) the counts are a **separate record**, `CrossQCInvalidCounts` (`CrossQCResult.invalid`), filled on both paths, so `discards is None` keeps meaning "grounding not measured" on the whole-set path; `run_manifest.json` carries `cross_qc_invalid`; (3) each refused item counts **once, under the first check it fails** (`cross_qc._invalid_field`, shared by both validators: not an object, category, severity, text), and a whitespace-only fact quote is dropped and counted `facts_no_quote` (the WP-05.1 note, resolved); (4) **only findings identical in every field collapse** (`_drop_exact_repeats` replaced `_dedup_findings`), and the ledger decides the rest. The persona asks for category `question` with severity `low`; validation is unchanged. `_CROSS_QC_CACHE_CONTRACT` 5 → 6 beside the prompt edit (two changes, two mechanisms; D-4 note, one register row). Tests: `tests/test_cross_qc_validation_and_dedup.py`. Re-baselined: the three contract tripwires only. Recorded limits: a re-report phrased apart stays two ledger entries (WP-06.4); a terse same-pair conflict folds in the ledger (N30, WP-03.5) |
 | WP-09.1 | Boilerplate filter with repeatable qualifiers; negation-aware synthesis conflict extraction (B11, N11) | S | — | done | [PR #168](https://github.com/Abe-Borg/drawing-analyzer/pull/168), 2026-09-24. **Rules decided by the owner (six choices, measured first):** (1) filler is a **closed vocabulary**: `_TRIVIAL_RE` drops an item only when the whole item is `none` / `n/a` / `nothing [further]` or `no` + up to two listed modifiers + a listed noun, with an optional listed label and up to four listed qualifiers in any order; any other word keeps it; (2) **one vocabulary, two anchored forms**: the same word lists build the whole-item filter (`_split_items`, the one filter site) and the synthesis assurance spans (`_ASSURANCE_RE`); (3) a synthesis statement is an **assurance** (`_is_assurance`) only when every conflict signal sits inside an assurance span ("no [modifiers] <conflict noun> [between <sheet ids, discipline names, listed words>] [were] <detection word>", "nothing inconsistent", "there are no <noun>", "found no <noun>", a conflict label right before one), the noun is the head, and every other word is a listed frame word (sheet ids, discipline and document names, a few function words; since the Codex review, which found a contrast list missing `yet`, `nevertheless` and `while`); (4) synthesis items are split **per section** with the report's `split_into_sections` (N31, found and fixed here), and a heading that is not a listed label is an item of its own (Codex review: a whole-line bold conflict was lost); (5) dropped assurances are counted in `HarvestResult.assurances`, observational like `filtered` (D-2 note); (6) ordinals count the kept items, so dropping filler before a real item moves that item's `prose_item_id` once. No cache contract, key, prompt or schema moves (`_HARVEST_CACHE_CONTRACT` stays 1). Tests: `tests/test_prose_filler_and_assurances.py` (207). No pinned test re-baselined; no fixture item changed decision. Recorded limits (kept, a paid call as before): wording outside the lists ("No duct conflicts noted.", "No items requiring coordination.", "M-101 does not conflict with P-101.", "Checked M-101 against P-101 for conflicts; none were found.") |
-| WP-09.2 | Prose matching rejects signature-incompatible candidates; per-item outcome counters; labelled paraphrase corpus (no threshold change) (N10, U11) | M | WP-04.2, WP-09.1 | todo | From WP-09.1: filler and synthesis assurances are dropped before enumeration, so they carry no `prose_item_id`. Plan step 4's "suppressed as trivial" is so far two run-level counts, `filtered` (digest Coordination/Conflict lines) and `assurances` (synthesis); a per-item outcome for them needs a decision (a count per channel, or ids for items never enumerated). Focus-section filler is still counted nowhere (it never was). `_match_entry` is untouched. The must-keep corpora in `tests/test_prose_filler_and_assurances.py` (45 real findings, 30 real synthesis conflicts) are ready inputs for the labelled corpus. Also N32 (found by WP-09.1): a digest heading that states something is never read; `prose_harvest._is_label` is the synthesis channel's test to reuse, and fixing it moves the ordinals of that section's items. And `_id_mentions` is quadratic in the number of mentions (pre-existing: 4,000 mentions of two ids in one item take 0.8 s on `main`); bound it if a synthesis item can carry that many |
+| WP-09.2 | Prose matching rejects signature-incompatible candidates; per-item outcome counters; labelled paraphrase corpus (no threshold change) (N10, U11) | M | WP-04.2, WP-09.1 | done | [PR #169](https://github.com/Abe-Borg/drawing-analyzer/pull/169), 2026-09-24. **Rules decided by the owner (eight choices, measured first):** (1) `_match_entry` refuses a candidate at or above 0.7 whose critical signature conflicts with the item's (`prose_harvest._veto_axes`: `critique.signature_conflicts` over `critique.critical_signature`, the one rule), signing "text against text": the item from its text and its synthesis legs, the candidate from its text, quote and legs with its `anchor_hint` set aside (measured: a bare-text item refused 5 of the suite's 17 matches, its own quote-less twins, and broke two pinned tests; the item taking the candidate's placement switched the polarity axis off against every SHEET entry); (2) the next-best compatible candidate wins; (3) a refused item is a straggler (a structuring call or a degraded entry; the calls accepted); (4) N32 goes to its own slice, WP-09.3; (5) every enumerated item has one `ProseItemOutcome` (`HarvestResult.outcomes`: channel, outcome, call, folded, refused), the counters are the number of items with each outcome (`_record_outcome`; an ingest that raised used to count one item structured and degraded, fixed), and `vetoed`, `folded`, `filtered_focus` and a per-channel `by_channel` table reach `prose_accounting` (`run.log` one line per channel, `run_manifest.json`), all observational (D-2 note); (6) suppressed items are counted per channel, focus filler included whether or not focus is harvested (new `filtered_focus`), with no ids; (7) a straggler the ledger folds keeps its outcome and is counted `folded`; (8) the labelled corpus pins its numbers at 0.5 to 0.9 with and without the veto, `_MATCH_OVERLAP == 0.7` asserted. No cache contract or key moves (`_HARVEST_CACHE_CONTRACT` stays 1). Tests: `tests/test_prose_match_signatures.py`, `tests/test_prose_paraphrase_corpus.py`, `tests/test_drawing_acceptance.py::test_gauntlet_prose_outcomes_are_exact`. No pinned test re-baselined; no fixture changes outcome (instrumented). Recorded limits: a SHEET absence with no absence word takes a presence item; a refused presence item that degrades to a SHEET entry can fold into an absence entry in the ledger (`_is_absence`); near misses the signature cannot read (corpus) |
 | WP-01.3 | Digest partial reads: a raised-cap retry never loses the first read; findings from an errored, refused or truncated digest are labelled or held out of the ledger (N15, N16) | M | WP-01.2 | todo | Since WP-01.2 a refused or unfinished digest carries an error too, so N15 now also covers, for example, an N27 partial read whose unclosed findings block was salvaged: its findings still reach the ledger unlabelled. `digest.digest_terminal_error` is the ladder to extend, not restate |
 | WP-01.4 | Critique: `max_tokens`/refusal/unknown terminal states are not completed reads on either transport; critique-only cache contract term (N4 critique) | M | WP-01.2 | todo | The critique-only term exists since WP-04.1 (`digest_cache._CRITIQUE_CACHE_CONTRACT`, folded inside both critique builders). Bump it for this admission change rather than adding a second term (D-4), and pin the merge-rule fingerprint under the new value in `tests/test_drawing_cache_identity.py` |
 | WP-11.1 | Per-source and per-page fault isolation in the render and prescan iterators; the inventory is the page denominator; every expected page gets an outcome (R1 core) | M | — | todo | |
@@ -163,6 +163,7 @@ starting.
 | WP-08.3 | Reference phrase and list recall with per-target quote spans; dead `sug` removed (A4) | M | WP-08.2 | todo | |
 | WP-08.4 | Label-aware own-ID ranking with surfaced ambiguity; FM handling, including references to missing FM sheets (A5, A6, N17) | M | WP-08.2 | todo | |
 | WP-08.5 | Drawing-index region detection; partial-package handling in both directions (A7) | M | WP-08.4 | todo | |
+| WP-09.3 | A digest heading that states something is read: a statement-versus-section-name rule for the digest channel, and which category governs the section after a statement heading (N32) | S/M | WP-09.2 | todo | Added by WP-09.2 (the owner's routing). Measured on `main` (`36dd865`): a whole-line bold or `###` heading inside a digest is a section header (`html_report.split_into_sections`), so its statement is neither an item nor counted, and it classifies the section it starts (`classify_section`): with no Coordination/Conflict keyword in it, the real bullets under it are lost too (2 of 4 layouts probed: `**The riser blocks the corridor door at grid 5.**` made the next bullet `other`, `### Duct riser blocks the corridor door.` made it `dimensions`). `prose_harvest._is_label` (the synthesis channel's test) cannot be reused as it is: 6 of the digest's 8 standard section names (`Scope / systems shown`, `Equipment & schedules`, `Plan content`, `Key dimensions, ...`, `General notes, keynotes, and callouts`, `Focus findings`) are not listed labels. Decide with the owner, measured first. Fixing it moves the ordinals of the section's items (no cache key holds one). WP-09's acceptance waits on this slice. Carried from WP-09.1/09.2 (not reached by any input measured): `prose_harvest._id_mentions` is quadratic in the number of mentions (4,000 mentions of two ids in one item take 0.8 s on `main`); bound it if a synthesis item can carry that many |
 
 ### Wave 4 — P1 lifecycle, accounting, resources, diagnostics
 
@@ -190,7 +191,7 @@ starting.
 | WP-22.2 | Critique read count resolved once; `critique_N` tags counted as one family (N25, U15) | S/M | — | todo | |
 | WP-22.3 | One shared `refs` coercion replacing the three that disagree (U16) | S | — | todo | |
 | WP-22.4 | Supported configuration matrix; required-stage roll-up cannot report COMPLETE with missing stages (U14, U15) | M | WP-01.1 | todo | |
-| WP-22.5 | Hygiene: stale descriptions, "Spec Critic" docstrings, F401/F811/F841/B017 lint step in both workflows; removal only of helpers that mislead, never incidental API removal; `count_tokens_via_api` kept (U27) | S | — | todo | |
+| WP-22.5 | Hygiene: stale descriptions, "Spec Critic" docstrings, F401/F811/F841/B017 lint step in both workflows; removal only of helpers that mislead, never incidental API removal; `count_tokens_via_api` kept (U27) | S | — | todo |From WP-09.2 (found, not fixed): F401 also finds `count_annotations` imported unused in `tests/test_drawing_acceptance.py` (the gauntlet section's imports), on `main` already, beside the ones earlier handoffs listed (`arithmetic._wtext`, `critique.DEFAULT_DIGEST_MAX_TOKENS`, `pipeline.normalize_specs_text`, `annotate.ANNOTATION_COMPONENTS`, `pathlib.Path` in `tests/test_drawing_dedup_lifecycle.py`, nine in `tests/test_evidence_visual.py`) |
 
 ### Wave 5 — P1/P2 report, chat, estimates, packaging, updates
 
@@ -334,7 +335,7 @@ report is built from it).
 | N7 | Calculator accepts malformed numbers; inexact large integers | P1 | 20.1 | open | |
 | N8 | Stable publish ignores the acceptance hold (it happened for 1.7.0) | P1 | 23.1, 23.6, O-1, O-5 | open (publish gate implemented+validated in 23.1; the O-1 and O-5 parts stay open) | `tests/test_release_acceptance_gate.py` (WP-23.1, [PR #154](https://github.com/Abe-Borg/drawing-analyzer/pull/154)). Remaining: O-1 (the published v1.7.0 and its record), O-5 (protect and confirm the `release` environment and a `v*` tag ruleset), WP-23.6 (commit and artifact binding) |
 | N9 | Overflow-note index/bookmark links land at the page top, not the row | P2 | 21.3 | open | |
-| N10 | Prose-harvest matching ignores measurement signatures (4 in absorbed by 6 in) | P0 | 09.2 | open | |
+| N10 | Prose-harvest matching ignores measurement signatures (4 in absorbed by 6 in) | P0 | 09.2 | implemented+validated | `tests/test_prose_match_signatures.py` (WP-09.2, [PR #169](https://github.com/Abe-Borg/drawing-analyzer/pull/169)): the four measured cases (4/6 inch, 165/150 psi beside a shared 175 psi, P-2/P-1, 550/500 gpm) no longer match, against a plain or a SHEET entry (`test_n10_a_distinct_claim_is_not_matched`, and the axis each is refused on), and each becomes its own entry, structured with a client and degraded without one, with the entry it used to join unchanged (`test_n10_with_a_client_*`, `test_n10_without_a_client_*`); an opposite-polarity item is refused against a plain or a degraded entry, both directions; a synthesis item is refused against a conflict with other legs; the next-best compatible candidate wins; both callers agree (two refused items run as two parallel chains, and the sequential and parallel paths build the same ledger); end to end through the pipeline (`test_pipeline_a_distinct_prose_claim_is_its_own_finding`). Kept: restatements, twins, the gauntlet (`test_gauntlet_prose_outcomes_are_exact`). Recorded limits: a SHEET absence with no absence word; a refused presence item degraded to SHEET folds into an absence entry (counted `folded`) |
 | N11 | Synthesis conflict extraction is negation-blind | P1 | 09.1 | implemented+validated | `tests/test_prose_filler_and_assurances.py` (WP-09.1, [PR #168](https://github.com/Abe-Borg/drawing-analyzer/pull/168)): the two review sentences and 14 equivalents are not conflicts (`test_n11_*`), make no call and no entry, and are counted in `assurances` (`test_a_dropped_assurance_is_counted_observationally`); 30 real conflicts that carry a "no", a negated verb, a contrast or a value beside an assurance survive (`test_real_synthesis_conflicts_survive`), with their anchors, and the gauntlet's set-level conflict is unchanged; through the pipeline: `test_pipeline_filler_and_assurances_cost_nothing` |
 | N12 | Matches ignore word boundaries (`VAV-2` inside `VAV-2-1`; `AHU-10` inside `AHU-101`) | P0 | 05.1, 05.2 | implemented+validated | Cross-QC part: `tests/test_cross_qc_grounding.py` (WP-05.1, [PR #165](https://github.com/Abe-Borg/drawing-analyzer/pull/165)): `AHU-10`/`AHU-101`, `VAV-2-1`/`VAV-2-10`, `VAV-2`/`VAV-2-1`, `AHU-1`/`AHU-1-2`, `P-1`/`P-10`, `P-1`/`XP-1`, `M-101`/`M-101A`, two long quotes ending inside a tag, a quote starting inside a word, and a tag inside a list written without spaces never ground; `P-1,`, `(P-1)`, `P-1.`, `P-1:`, `NOTE 3:`, `568 L/MIN` in `(568 L/MIN)` and a tag printed both alone and inside a longer one still do; the leg is dropped. Anchor part: `tests/test_anchor_whole_words.py` (WP-05.2, [PR #166](https://github.com/Abe-Borg/drawing-analyzer/pull/166)): `VAV-2` on `VAV-2-1 SERVES ROOM 12`, `AHU-1` on `SEE AHU-1-2 SCHEDULE`, `ACCESS PANEL AT VAV-2` on `…VAV-2-1 TYP` and `2-1 SERVES` on `VAV-2-1 SERVES ROOM` (EXACT before) and the 17-token note quoting `VAV-2` or `AHU-1` against one printing `VAV-2-1` or `AHU-1-2` (FUZZY before) never anchor, nor `1/2" PIPE` on `2-1/2" PIPE` or a sub-phrase starting inside a word; a tag printed both alone and inside a longer one anchors `exact` on the one alone, in both orders; WP-05.1's cut-word and whole-word tables run through the anchor; verification and investigation no longer see the N12 finding; the pipeline makes it a `[QUOTE NOT FOUND]` callout with no verification call. Recorded limit: a letter-only tag (`VAV-A` in `VAV-A-1`) inside a long window |
 | N13 | Cross-QC and anchor normalizers disagree (curly quotes, `½`, `×`, `Ø`) | P1 | 05.1 | implemented+validated | `tests/test_cross_qc_grounding.py` (WP-05.1, [PR #165](https://github.com/Abe-Borg/drawing-analyzer/pull/165)): `PROVIDE 6” DRAIN`, `2½"`↔`2-1/2"` (both ways, and `2 1/2"`), `O6`↔`Ø6`, `300×200`↔`300x200`, primes, curly quotes, a fraction slash, a non-breaking hyphen, a hyphen written as a space and a zero-width space all ground; `.5`/`5`, `5`/`0.5`, `5`/`-5`, `1`/`1.5`, `12`/`12,500`, `2"`/`1/2"`, `2`/`2½"`, `12`/`12'-6"`, `30`/`30%`, a changed number and a changed unit never do; `cross_qc._norm_for_match` is `anchor._normalize`; the per-word normalization equals the whole-string one over a Unicode corpus; a reconciled leg joins its fact across a curly inch mark, and two facts spelled that way with different tiles collide and give no tile |
@@ -356,7 +357,7 @@ report is built from it).
 | N29 | A merged entry's representative follows arrival order once three or more duplicates merge: an earlier merge's severity union feeds the next `_grounding_quality` comparison | P1 | 03.5 | open | Found by WP-03.2 and pinned as a recorded limit: `tests/test_qc_numbering_tiebreak.py::test_recorded_limit_a_merged_entrys_representative_follows_arrival_order` (`_N29_REPRESENTATIVE`: X's bundle in two of six orders, Z's in four; flip it) |
 | N30 | The quote branch (equal quote, text overlap ≥ 0.4) folds two different issues that share boilerplate wording (`PUMP P-1` impeller / selected flow, overlap 0.5); the loser's text is lost | P1 | 03.5 | open | Found by WP-03.7 while measuring N28 (not fixed there; reproduced in its handoff). WP-03.5's lossless observations keep the loser's text; keeping the two apart needs a rule backed by labelled evidence (O-10), not a new threshold (U11). Since WP-06.1 cross-QC hands the ledger every distinct conflict, and its texts name both sheets: on a synthetic corpus the ledger folds 45 of 66 terse same-pair conflicts (4 of 66 in full sentences, 0 without sheet names); pinned: `tests/test_cross_qc_validation_and_dedup.py::test_recorded_limit_n30_a_terse_same_pair_conflict_folds_in_the_ledger` |
 | N31 | A synthesis section heading joins an item: glued to the bullet above it, "**Cross-sheet / cross-discipline conflicts**" makes that bullet a conflict naming its sheets; in paragraph layouts under `###` or bold headings the whole run is one item, which no negation rule can read | P1 | 09.1 | implemented+validated | Found by WP-09.1 while measuring N11 (6 layouts; 3 affected) and fixed there ([PR #168](https://github.com/Abe-Borg/drawing-analyzer/pull/168)) by the owner's decision: synthesis items are split per section with the report's `split_into_sections` (read, not changed). `tests/test_prose_filler_and_assurances.py::test_a_section_header_never_joins_a_synthesis_item` (3 layouts), `::test_a_real_conflict_under_a_header_is_extracted_alone`, `::test_pipeline_filler_and_assurances_cost_nothing` (a glued heading, end to end), `::test_a_label_heading_is_never_a_conflict` (40 labels); a heading that states a conflict is still read (`::test_a_heading_that_states_a_conflict_is_still_read`, `::test_codex_a_whole_line_bold_conflict_is_harvested`; Codex review) |
-| N32 | A digest heading that states something is never read: `split_into_sections` makes a whole-line bold sentence (or a `###` heading) inside the digest a section header, so its text is neither a prose item nor counted, and the section it starts is classified by it | P2 | 09.2 | open | Found by WP-09.1 from the Codex review of its synthesis split (P2), where the same defect was a regression and is fixed (a heading that is not a listed label is an item of its own). In the digest channel it predates WP-09.1 and is not fixed there: the digest prompt fixes the section structure, so a bold statement inside a Coordination/Conflict section is rare. `prose_harvest._LABEL_RE` / `_is_label` is the shared test to reuse; the ordinals of the section's items would move |
+| N32 | A digest heading that states something is never read: `split_into_sections` makes a whole-line bold sentence (or a `###` heading) inside the digest a section header, so its text is neither a prose item nor counted, and the section it starts is classified by it | P2 | 09.3 | open | Found by WP-09.1 from the Codex review of its synthesis split (P2), where the same defect was a regression and is fixed (a heading that is not a listed label is an item of its own). In the digest channel it predates WP-09.1 and is not fixed there: the digest prompt fixes the section structure, so a bold statement inside a Coordination/Conflict section is rare. `prose_harvest._LABEL_RE` / `_is_label` is the shared test to reuse; the ordinals of the section's items would move. Routed to WP-09.3 by the owner (WP-09.2): measured broader, since a statement heading with no Coordination/Conflict keyword also makes the bullets under it `other` (2 of 4 layouts), and `_is_label` does not fit the digest (6 of its 8 standard section names are not listed labels) |
 | U1 | Serving model, fallback iterations and partial-stream billing unrecorded | P1 | 14.3, 14.6, 01.7 | open | |
 | U2 | Fallback text joins and selective history replay | P1 | 01.6, 12.1, 13.4, 19.2 | open | |
 | U3 | Generic `output_config` 400 disables task budgets process-wide | P1 | 13.1 | open | |
@@ -367,7 +368,7 @@ report is built from it).
 | U8 | Whole-set cross-QC path does no grounding | P0/P1 | 06.2 | open | |
 | U9 | Pruning can reap a live-but-idle run's work dir | P1 | 18.3 | open | |
 | U10 | Mentioned vs adopted codes; missing edition families | P1 | 12.3, 12.5 | open | |
-| U11 | Prose-match threshold and call prevalence (see N10) | P1 | 09.2 | open | |
+| U11 | Prose-match threshold and call prevalence (see N10) | P1 | 09.2 | implemented+validated | WP-09.2 ([PR #169](https://github.com/Abe-Borg/drawing-analyzer/pull/169)): instrumented (every enumerated item has one outcome with the structuring call it cost, the candidates the veto refused and whether its finding folded; `vetoed`, `folded` and the per-channel table in `run.log` and `run_manifest.json`) and labelled (`tests/test_prose_paraphrase_corpus.py`: 47 hand pairs, 22 same and 25 different, and the 45 must-keep findings pairwise, 990 different pairs; pinned at 0.5 to 0.9 with and without the veto; at 0.7 without the veto 22/22 same match and 19/25 different are absorbed, with it 18/22 and 5/25; 0/990 either way). Threshold unchanged (`test_the_match_threshold_is_unchanged`); lowering it is a later decision that must read the corpus |
 | U12 | Investigation truncation; Unicode sheet ids; first-wins duplicate ids | P1 | 13.1, 13.4 | open | |
 | U13 | Quadratic `redact_secrets`; path-scrub gaps | P1 | 22.1 | open | |
 | U14 | Empty or partial required-stage lists roll up COMPLETE | P2 | 22.4 | open | |
@@ -395,6 +396,348 @@ report is built from it).
 Each session adds one entry at the top: date, slices and IDs, PR, what changed,
 contracts decided, cache/schema effects, validation actually run (with counts),
 what could not be verified, risks, and next steps.
+
+### 2026-09-24 — WP-09.2: a prose item joins a finding only when they make the same claim ([PR #169](https://github.com/Abe-Borg/drawing-analyzer/pull/169))
+
+- **Slice and IDs:** WP-09.2. N10 and U11 (implemented+validated). N32 is
+  routed to a new slice, WP-09.3, by the owner (below); it is not fixed here.
+  No `DECISIONS.md` contract is decided (none of D-1 … D-8); D-2 gains a note
+  (the owner's decision: the per-item outcomes and the new counts are
+  observational). No migration-register row: no cache contract, key, prompt or
+  schema moved. **WP-09 is not done:** WP-09.3 (N32) remains (acceptance check
+  below).
+- **Base.** `main` = `origin/main` = `36dd865`; no drift. Baseline **3,994
+  passed, 2 skipped, 10 deselected** (262 s), identical to the WP-09.1 handoff.
+  The two skips are IPv6 loopback and chmod as root.
+- **Reproduced first** (a probe on `36dd865`), each as the request stated:
+  - **N10.** `_match_entry` returns the entry for all four cases, and
+    `signature_conflicts` over a text-only item names the axis: 4/6 inch
+    (0.857, `measurements`), 165/150 psi beside a shared 175 psi (0.818,
+    `measurements`), P-2/P-1 (0.750, `tags`), 550/500 gpm (0.818,
+    `measurements`). The paraphrase "6 inch drain required at column line 4."
+    (0.750) has no conflict.
+  - **SHEET.** "Duct riser blocks the corridor door." against an identical
+    SHEET entry scores 1.0 and conflicts on `absence_polarity` when the item is
+    signed as text alone.
+  - **N32** (for the routing question): a statement heading inside a digest
+    section is lost, and with no Coordination/Conflict keyword it also makes
+    the bullets under it `other` (`**The riser blocks the corridor door at
+    grid 5.**`) or `dimensions` (`### Duct riser blocks the corridor door.`),
+    so they are lost too: 2 of 4 layouts probed. And `_is_label` returns False
+    for 6 of the digest's 8 standard section names (`Scope / systems shown`,
+    `Equipment & schedules`, `Plan content`, `Key dimensions, ...`, `General
+    notes, keynotes, and callouts`, `Focus findings`).
+  - **A miscount found while designing the record:** an item whose ledger
+    ingest raised was counted `structured` (before the add) and then
+    `degraded` (by the reconcile that recovered it): `items 1`, `structured
+    1`, `degraded 1`. Fixed here (below).
+- **Facts confirmed, not assumed** (an instrumented scratch copy of
+  `origin/main`, the whole suite, with the test name):
+  - **The hooks ran 131 harvests, 165 `_match_entry` calls from 55 tests (90
+    on the free path, 75 in `active_chain_count`), 77 structuring calls, 73
+    ingests, 261 numberings and 188 prose-harvest stage records.** 17
+    free-path matches in 8 tests; no call had two candidates at 0.7 or above
+    (so "the best is refused, a lower one is compatible" is never exercised
+    by a fixture); no candidate had absorbed a member (history length 1
+    everywhere).
+  - **Suite totals:** items 100, matched 17, structured 53, degraded 20,
+    set-level 10, excluded focus 2, filtered 24, assurances 10, missing 0.
+  - **Duplicate outcomes:** 1 of 53 structured ingests folded (in
+    `test_no_structuring_cache_key_holds_a_prose_item_id`); none of the 20
+    degraded ones.
+  - **Caches.** The structuring key (`_structure_item._cache_key`) holds the
+    user text (the item, its section hint, the sheet id, the capped text
+    layer), the source binding, the contract and the request parameters, never
+    a match decision, so an item the veto sends to structuring is an ordinary
+    miss, never a stale hit (pinned:
+    `test_a_refused_item_keys_its_structuring_call_like_any_straggler`).
+    `_HARVEST_CACHE_CONTRACT` stays 1. No other cache stores a match outcome:
+    the critique and cross-QC entries are written before the harvest runs; the
+    investigation key reads the finding's id, text, quote, category,
+    severity, rect, prior verification note and the set fingerprint, and the
+    verification keys hash named finding fields, none of them `sources`,
+    `prose_item_ids` or a match. A newly separate finding is new paid work
+    downstream (a verification crop, a citation check of its refs), not a
+    re-key.
+  - **Consumers of `prose_accounting`:** only `run_journal._prose_lines`
+    (which printed any extra key as `f"{k} {acc[k]}"`, so a nested table would
+    have printed its repr) and `export.build_run_manifest` (copies the dict).
+- **The decision, made by the owner before any code** (AskUserQuestion, two
+  rounds, with measured options). Chosen, each as recommended:
+  - **Signing: "text against text", with legs.** The item is signed from its
+    text and its synthesis legs; the candidate from its text, quote,
+    supporting quotes and legs, with its `anchor_hint` set aside, since
+    `critique._is_absence` reads SHEET as an absence and a placement is not a
+    claim. Measured, with the veto actually applied, over the 15 test files
+    that run a harvest (1,095 tests) and a 24-case table:
+
+    | option | suite: matches refused | pinned tests failing | extra calls | case table |
+    |---|---|---|---|---|
+    | text only (A) | 5 of 17 (quote-less twins, `absence_polarity`) | 2 | 5 | 18/24 |
+    | candidate's placement (B) | 0 | 0 | 0 | 18/24 |
+    | B + legs (D) | 0 | 0 | 0 | 19/24 |
+    | text against text (E) | 0 | 0 | 0 | 20/24 |
+    | **E + legs (F, chosen)** | **0** | **0** | **0** | **21/24** |
+    | item as SHEET (C, not offered) | 8 of 17; 6 of 10 chain matches flip | 3 | 4 (+2 entries, 2 tests renumbered) | 17/24 |
+
+    B misses an opposite-polarity item against a degraded or quote-less entry
+    in both directions (the axis can never fire against SHEET); E and F read
+    them from the texts. Every option but A misses a presence item against a
+    SHEET absence written with no absence word, and A refuses five true
+    restatements. The legs (D, F) are what refuse a synthesis item against a
+    conflict with other legs (C refuses it too, but only through its SHEET
+    absence).
+  - **The best candidate refused: the next-best compatible one wins** (the veto
+    only removes incompatible entries from the pool). Not taken: none (any
+    refusal makes a straggler). In the table each policy gets one of the two
+    configurations right, and the one "none" gets right is the threshold's own
+    weakness (a compatible other claim at 0.714 is absorbed with no veto
+    involved).
+  - **A refused item with no compatible candidate is a straggler; the calls
+    are accepted.** Not taken: a degraded entry without a call.
+  - **N32: its own slice, WP-09.3.** Not taken: in this PR.
+  - **The record: both, observational.** One `ProseItemOutcome` per
+    enumerated item in `HarvestResult.outcomes` (channel, outcome, call,
+    folded, refused); `vetoed`, `folded`, `filtered_focus` and the per-channel
+    table `by_channel` in `prose_accounting`. Not taken: per-channel counts
+    only; the per-item records in `run_manifest.json` too.
+  - **Suppressed items: counts per channel, focus always.** Not taken: focus
+    filler counted only when focus is harvested; ids from a separate id space.
+  - **Duplicate outcomes: `folded`, per item and counted**, the item keeping
+    its outcome. Not taken: a separate `folded` outcome.
+  - **The corpus: pairs plus the sweep, pinned.** Not taken: pinned at 0.7
+    only.
+  - **Not asked (stated):** the veto compares the item with the live candidate
+    (the plan's literal rule), not with each member of the candidate's
+    `Ledger.member_history`. Measured: it changes nothing in the suite, since
+    no candidate had absorbed a member. A matched item changes no claim of the
+    entry (it adds provenance), so asking whether the item agrees with what
+    the entry states, its grown signature included, is the question.
+- **What changed:**
+  - **`prose_harvest.py`** (it still imports no PDF engine, and the prose
+    digest is untouched, I-2):
+    - `_match_score` (new; the old score) and `_veto_axes` (new; the signing
+      above, over `critique.signature_conflicts` and
+      `critique.critical_signature`, the one rule).
+    - `_match_entry(item, entries, *, also_on=(), refused=None)`: candidates
+      at or above `_MATCH_OVERLAP`, best score first and ties in ledger order,
+      the first compatible one wins; only candidates are signed (plan section
+      2 rule 14; pinned by `test_bounded_work_only_candidates_are_signed`).
+      Both callers pass the item's legs; the free path passes a `refused`
+      sink, `active_chain_count` does not.
+    - `PROSE_OUTCOMES`, `ProseItemOutcome` (new) and `_record_outcome`, the
+      only place an outcome counter moves, called once the ledger holds the
+      finding; `_add_to_ledger` (a fold is an add that left the entry count
+      unchanged, exact before the seal) and `_call_of`. `_Pending` gains
+      `refused` and `call` (the call a reconciled item cost is kept).
+    - `HarvestResult` gains `filtered_focus`, `vetoed`, `folded`, `outcomes`,
+      `suppressed` and `by_channel()`; `accounting()` exports the three counts
+      and `by_channel`.
+    - `_filtered_prose_lines_by_channel` (new; `count_filtered_prose_lines` is
+      its sum, unchanged), `_focus_split` (new; `extract_focus_items` and the
+      new public `count_filtered_focus_lines` share it), and
+      `_enumerate_pending` fills the per-channel suppressed counts.
+    - The reconcile and `missing` record outcomes; the summary log line names
+      `filtered-focus`, `vetoed` and `folded`.
+    - Docstrings: the module docstring (mechanism 2, the outcome record), the
+      `_MATCH_OVERLAP` comment (U11), `_match_entry`, `_veto_axes`,
+      `HarvestResult`, `accounting()`, `count_filtered_focus_lines`.
+  - **`run_journal.py`:** `_prose_lines` keeps `by_channel` out of the generic
+    extras and renders it through `_prose_channel_lines`, one line per channel
+    ("digest coordination: matched 2 · structured 1"); a malformed table
+    renders what it can and never raises.
+  - **Not changed:** `_MATCH_OVERLAP` (0.7), `signature_conflicts`,
+    `_is_absence`, the tokenizer, the ledger and `_is_duplicate`, the
+    structuring prompt and its structured-outputs gate, the filler and
+    assurance vocabulary, the pipeline's usage records (D-7), the report.
+- **Contracts decided:** none of D-1 … D-8; a D-2 note.
+- **Cache/schema effects: none.** No key, contract, prompt version or schema
+  moved (`_HARVEST_CACHE_CONTRACT` stays 1); the new `HarvestResult` fields are
+  run-local and never cached. `prose_accounting` gains three counts and a
+  nested table (`run.log`, `run_manifest.json`), additive. No prose item id
+  moved: the enumeration and its ordinals are unchanged.
+- **Re-baselined tests: none.** Checked both ways:
+  - the 12 pinned files (`test_drawing_ledger`, `test_drawing_acceptance`,
+    `test_prose_filler_and_assurances`, `test_drawing_qc_pipeline`,
+    `test_drawing_export`, `test_run_journal`, `test_structured_outputs`,
+    `test_drawing_usage`, `test_pipeline_stage_overlap`,
+    `test_qc_numbering_tiebreak`, `test_drawing_synthesis`,
+    `test_drawing_html_report`) against the fixed tree: **734 passed**. The
+    only edit to them is one new test in `test_drawing_acceptance.py`
+    (`test_gauntlet_prose_outcomes_are_exact`); no existing test changed;
+  - the new tests against a `git archive` copy of `origin/main`, classified
+    from `--junitxml`: **28 failed on behaviour, 81 only on the new API**
+    (`_veto_axes`, `_match_score`, the `also_on`/`refused` keywords,
+    `HarvestResult.outcomes`/`vetoed`/`folded`/`filtered_focus`,
+    `count_filtered_focus_lines`, the new accounting keys), **17 passed**. The
+    passes pin what the fix keeps: the seven restatements (a paraphrase
+    against a plain and against a degraded entry, a degraded twin, an absence
+    twin, a critique absence, the gauntlet's, the five-item test's), a free
+    match with no call, the entry a match leaves unchanged but for its
+    provenance, legs lent to an entry without legs, ties in ledger order, a
+    malformed channel table, the recorded limit, the threshold and the
+    corpus's shape.
+- **Fixture effects, instrumented over the whole fixed suite** (the same hooks,
+  diffed test by test against the base run): **outside the new tests nothing
+  moves.** The same 131 harvest results (every count, call, cache hit and
+  miss, token count, entry, text, prose id, source and hint), 261 numberings
+  (entry counts, QC numbers, texts, prose ids, sources), 188 prose-harvest
+  stage records (status, warnings, errors, items), 73 ingests, 77 structuring
+  calls and 165 match results. Over those harvests: `vetoed` 0, `folded` 1 (the
+  fold above), `filtered_focus` 2 (`test_b11_filler_in_a_focus_section_is_not_harvested`,
+  twice). Every harvest's outcomes add up to its counters (164 of 164,
+  new tests included). The gauntlet (`run_acceptance.py`'s oracle) is
+  unchanged: 4 items, 1 matched, 1 structured, 1 degraded, 1 set-level, 2
+  calls, pinned exactly now.
+- **New tests** (126):
+  - `tests/test_prose_match_signatures.py` (67): **N10** the four cases
+    against a plain and a SHEET entry, with the axis each is refused on; each
+    becomes its own entry with a client (one call, structured) and without
+    one (degraded), the entry it used to join untouched. **Kept:** seven
+    restatements, and a free match with no call. **Polarity:** an
+    opposite-polarity item refused against a plain entry and against a
+    degraded one, both directions; the recorded limit. **Legs:** a synthesis
+    item refused against a conflict with other legs, still matching (and
+    lending its leg to) an entry without legs, and the veto reading the legs.
+    **Candidates:** the next-best compatible one wins, the refused ones are
+    reported, none when all are refused, ties in ledger order, a next-best
+    match records its refusal. **Both callers:** two refused items on two
+    pages run as two parallel chains, and the sequential and parallel paths
+    build the same ledger and the same outcomes. **Outcomes:** one per item,
+    adding up to the counters; channel, call, fold and refusals; a structured
+    straggler the ledger folds is counted `folded`; the recorded limit of a
+    refused presence item degraded into an absence entry (vetoed, degraded,
+    folded); an item whose ingest failed counted once, keeping its live
+    call; a cache hit; the `missing` outcome. **Suppressed:** per channel,
+    focus filler counted with the focus harvest on and off, the focus counter
+    and the extractor agreeing; the table adds up; the new counts are
+    observational. **run.log** renders the table one line per channel, and a
+    malformed table never sinks the log. **Cache:** a refused item keys its
+    structuring call like any straggler. **End to end** through the pipeline:
+    two QC findings, one harvest call, `vetoed 1`, the stage COMPLETE,
+    `run_manifest.json` equal to the context's accounting, `run.log`'s channel
+    line. **Bounded work:** of 201 entries only the one candidate is signed.
+  - `tests/test_prose_paraphrase_corpus.py` (58): the labelled corpus (47 hand
+    pairs: 22 same, 25 different; the 45 must-keep findings pairwise, 990
+    different), `_MATCH_OVERLAP == 0.7`, the sweep pinned at 0.5 to 0.9 with
+    and without the veto, the five near misses the veto lets through and the
+    four restatements it refuses (each set pinned exactly, as recorded
+    limits), and `_match_entry` agreeing with the score and the veto on every
+    pair.
+  - `tests/test_drawing_acceptance.py::test_gauntlet_prose_outcomes_are_exact`
+    (1).
+- **The corpus's numbers** (U11; the evidence for a later threshold decision,
+  O-10 for real drawings):
+
+  | threshold | same matched, no veto | different absorbed, no veto | same matched, veto | different absorbed, veto | must-keep absorbed (no veto / veto) |
+  |---|---|---|---|---|---|
+  | 0.5 | 22/22 | 25/25 | 18/22 | 8/25 | 3 / 1 of 990 |
+  | 0.6 | 22/22 | 24/25 | 18/22 | 7/25 | 0 / 0 |
+  | **0.7** | **22/22** | **19/25** | **18/22** | **5/25** | **0 / 0** |
+  | 0.8 | 18/22 | 8/25 | 15/22 | 1/25 | 0 / 0 |
+  | 0.9 | 15/22 | 4/25 | 14/22 | 1/25 | 0 / 0 |
+
+  Let through at 0.7 (no signal the signature reads): a fire vs a smoke
+  damper, a 2-hour vs a 1-hour wall (`hour` is not a unit the tokenizer
+  reads), a drain vs a vent of one size, "piped" vs "not piped" (not an
+  absence phrase `_ABSENCE_RE` reads), and one side naming an extra sheet (tag
+  inclusion). Refused restatements (a structuring call each, the safe
+  direction): "does not show" vs "not shown", "has no clearance" vs "No
+  clearance is shown", "No sprinkler heads are shown" vs "are not shown", "has
+  no fire wrap" vs "is missing" (`_ABSENCE_RE` reads one wording and not the
+  other). The hand pairs are synthetic; real rates need O-10.
+- **Downstream consumers walked:**
+  - **Both `_match_entry` callers:** one function, legs passed by both;
+    pinned by the parallel-chain test.
+  - **`matched` and the new counters:** from `_record_outcome` only.
+  - **The matched entry:** a match still adds only `sources`, `prose_item_ids`
+    and legs it lacked (pinned); a refused item adds nothing to it.
+  - **The reconcile:** records its outcome; unchanged otherwise.
+  - **The ledger's Pass A fold of a straggler:** a refused item's structured
+    finding stays separate when its signature conflicts; a quote-less or
+    degraded one is SHEET-placed, which the ledger reads as an absence (the
+    recorded limit; counted `folded`).
+  - **QC numbering:** a newly separate finding takes a positional number; no
+    fixture numbering moved.
+  - **Margin callouts and `Drawing_Set_Review_Notes.pdf`:** a refused item
+    degraded without a client is a margin callout like any degraded item;
+    set-level items are not matched, so the notes PDF is unchanged.
+  - **`run.log`, `run_manifest.json`:** the channel table and three counts
+    (pinned end to end); the exports and the report list each finding as
+    before (a newly separate one is one more row).
+  - **The gauntlet:** unchanged (above).
+- **Validation** (this container, Python 3.11.15, SDK 1.7.0, PyMuPDF 1.28.2):
+  - Baseline before any change: **3,994 passed, 2 skipped, 10 deselected**
+    (262 s) on `36dd865`.
+  - The new files: 67 + 58 passed; the 12 pinned files: 734 passed.
+  - Full suite after: **4,120 passed, 2 skipped, 10 deselected** (250 s):
+    the baseline plus the 126 new tests, with the same two environment skips.
+  - Browser suite: not run separately. No report JS, HTML or chat code
+    changed, and the browser tests ran inside the full suite.
+  - `python -m ruff check --select E9,F63,F7,F82 src tests scripts` (pinned
+    0.14.5) is clean. F401/F811/F841 over the touched files finds only
+    `count_annotations` in `tests/test_drawing_acceptance.py`, on `main` already
+    (noted on WP-22.5). `scan_secrets.py` is clean over 209 tracked files, the
+    two new ones included. `compileall src` passes.
+- **Docs:**
+  - **CHANGELOG** (Fixed): N10 and U11, with the visible effect, the calls,
+    the new counts, the corpus numbers, the limits, and no id or cache effect.
+  - **CLAUDE.md:** the `prose_harvest.py` passage (the signature veto, the
+    one-copy rule it reuses, the outcome record, the limits).
+  - **README:** "Prose harvest — the legacy channel's guarantee": mechanism
+    (2) needs the same claim, and two paragraphs on the veto and on the
+    recorded outcomes.
+  - **The plan:** a WP-09.2 note under "Step 5 (N10)"; N32 routed to WP-09.3
+    (the WP-09 slice list, §3 and §7.2, with the measured facts); the U11 row.
+  - **DECISIONS:** the D-2 note.
+  - **PROGRESS:** this entry; the WP-09.2 row; the new WP-09.3 row (Wave 3);
+    the WP-09 package row (slices 09.1–09.3); the N10, U11 and N32 rows; the
+    Next-up line.
+- **WP-09 acceptance check (README step 7.3).** "boilerplate creates neither a
+  finding nor a paid structuring request; meaningful absences survive;
+  degraded entries retain useful provenance; structured/plain cache separation
+  remains correct; a measured threshold change cannot suppress distinct
+  issues."
+  - Boilerplate and meaningful absences: hold (WP-09.1's tests, unchanged).
+  - Degraded entries retain useful provenance: hold. A degraded entry carries
+    the item verbatim, its channel as `sources`, its `prose_item_id`, the
+    sheet binding and a verification note, and now its outcome record says
+    why (the call it cost: none, or a live call whose reply was unusable).
+  - Structured/plain cache separation: holds (`tests/test_structured_outputs.py`'s
+    harvest tests pass unchanged; no key moved).
+  - A measured threshold change cannot suppress distinct issues: no change
+    was made; the corpus is the measurement any change must read, and the
+    veto refuses every signature-distinct candidate at any threshold. It
+    cannot refuse what the signature does not read (the five pinned limits).
+  - **But WP-09 covers N32, which is WP-09.3's**, so **WP-09 stays `todo`**
+    until that slice lands. Step 6 is WP-01.6's (plan).
+- **Not verified:** live API behaviour (no budget, O-4; this slice makes no
+  call). Not measurable without real drawings (O-10): how often a real prose
+  item is refused (each is a structuring call), how often a refused item's
+  finding folds in the ledger anyway, and the corpus's rates on real prose.
+  Windows is covered by this PR's CI.
+- **Risks and residual gaps:**
+  - **More paid calls, by design:** one Sonnet structuring call per refused
+    item on an exhaustive run (none in the fixtures).
+  - **The SHEET reading, recorded:** the ledger's `_is_absence` reads a SHEET
+    placement as an absence, so a refused presence item that becomes a
+    quote-less or degraded finding can still fold into an absence entry
+    (counted `folded`, pinned). Changing that reading is not this slice's: the
+    ledger's merges read it too.
+  - **Signature-blind near misses** still join at 0.7 (the five pinned).
+  - **Absence wording:** `_ABSENCE_RE` reads some negations and not others, so
+    a restatement across two wordings costs a call (four pinned), and a
+    "not piped" / "piped" pair is not refused.
+- **Re-checked (U31):** the structuring prompt, the structured-outputs gate
+  and cache fold-in, the filler and assurance vocabulary and its recorded
+  limits, `signature_conflicts`, `_is_absence`, the tokenizer, the ledger and
+  the report's section grammar are untouched.
+- **Found, not fixed:** nothing new beyond N32's measured scope (WP-09.3's
+  row) and the recorded limits above. `_id_mentions` stays quadratic in the
+  number of mentions (the WP-09.1 note). This slice did not touch it and
+  measured no input that reaches it, so it is left, and the note moves to
+  WP-09.3's row, the next slice in `prose_harvest.py`.
+- **Next:** WP-01.3 (Wave 1; its dependency WP-01.2 is done).
 
 ### 2026-09-24 — WP-09.1: section filler and synthesis assurances are not findings ([PR #168](https://github.com/Abe-Borg/drawing-analyzer/pull/168))
 

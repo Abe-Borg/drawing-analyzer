@@ -265,6 +265,43 @@ and feeds neither `missing` nor `complete`.
   so its prose-harvest stage reads `SKIPPED_VALID`, as any run with no prose
   items did before.
 
+Added by WP-09.2: **the prose harvest's per-item outcomes and its new counts
+are observational** (the owner's decision; N10, plan WP-09 steps 4 and 5). The
+harvest's ladder is unchanged: `missing` alone holds the stage at PARTIAL.
+- **The record.** Every enumerated item gets exactly one `ProseItemOutcome` in
+  `HarvestResult.outcomes`: its channel, its outcome (`matched`, `structured`,
+  `degraded`, `set_level` or `missing`, `PROSE_OUTCOMES`), the structuring
+  call it cost (`none`, `cache` or `live`, kept when the item later degrades),
+  whether its finding folded into an entry the ledger already held, and how
+  many match candidates the signature veto refused. The counters of the same
+  names are the number of items with each outcome: `_record_outcome` is the
+  only place they move, and it runs once the ledger holds the item's finding
+  (an ingest that raised used to count one item `structured` and then
+  `degraded`).
+- **What is exported.** `vetoed` (items with at least one refused candidate),
+  `folded`, `filtered_focus` (Focus-findings filler, counted whether or not
+  focus items are harvested; counted nowhere before) and `by_channel` (per
+  channel: each outcome, and `suppressed`) reach `prose_accounting`, so
+  `run.log` (one line per channel) and `run_manifest.json`. The per-item
+  records stay internal, as `expected_ids` does.
+- **Suppressed items have no id.** Filler, synthesis assurances and focus
+  filler are never enumerated, so they are counted per channel, not given ids
+  from a second id space; a kept item's ordinal does not move again.
+- Why not D-2's item rule: nothing in the new counts is an eligible item left
+  unjudged. A vetoed item still becomes a finding (a straggler), a folded one
+  still reaches the ledger through the fold (its id rides the survivor), and a
+  suppressed line was never enumerated, so it is outside the denominator. The
+  counts exist so the veto's cost (a structuring call per refused item) and
+  the ledger's folds can be read from the manifest.
+- Considered and not taken: per-channel counts only; the per-item records in
+  `run_manifest.json` too; ids for suppressed items; a separate `folded`
+  outcome instead of a flag (then `structured` would stop counting every item
+  a call structured); focus filler counted only when focus is harvested.
+- No cache or key change (no migration-register row): the structuring key
+  holds the item, its section hint, the sheet id, the capped text layer, the
+  source binding and the contract, never a match decision, so an item the
+  veto sends to structuring is an ordinary miss.
+
 ## D-3 Finding identity — `open` (to be decided by WP-03.4)
 
 **Required decision:** keep four things separate: physical evidence identity,

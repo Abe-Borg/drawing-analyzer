@@ -1671,8 +1671,9 @@ mechanisms make the mirror a guarantee: (1) the digest prompt requires every
 prose Coordination/Conflict item to also appear in the JSON block; (2) the
 harvester splits those prose sections into items (using the same section
 grammar as the report's "⚠ Issues only" filter) and fuzzy-matches each against
-the same-sheet ledger entries — a match just tags provenance, free; (3) each
-unmatched straggler gets **one small structuring call** (item + the sheet's
+the same-sheet ledger entries — a match just tags provenance, free, but only
+when the two make the same claim (their critical signatures agree, below); (3)
+each unmatched straggler gets **one small structuring call** (item + the sheet's
 text layer → one finding with a verbatim quote), and if even that fails a
 **degraded entry** is ingested — the prose item verbatim, sheet-level — which
 still reaches the PDF as a margin callout. **No prose QC item can fail to
@@ -1699,6 +1700,38 @@ counted in the run record's prose
 carry-through counts (`filtered` for filler, `assurances` for synthesis
 assurances), and neither counts as a lost item. Wording outside the lists
 ("No duct conflicts noted.") is kept and structured, as before.
+
+**A match needs the same claim, not only the same words** (remediation
+WP-09.2). Word overlap cannot see a changed value: "Provide 4 inch drain at
+column line 4." overlaps "Provide 6 inch drain at column line 4." by 0.857, and
+used to be taken as a restatement of it, so the 4 inch claim reached no finding
+of its own. A candidate is now refused when its **critical signature**
+conflicts with the item's, under the same rule the findings ledger merges by
+(values compared per kind of quantity, tags such as `P-1` / `P-2`, shown / not
+shown, and a synthesis conflict's second sheet). Shown / not shown is read from
+both texts: a finding's sheet-level placement says where its mark goes, not
+what it claims. When the best candidate is refused, the next-best compatible
+one (still at 0.7 or above) matches; with none, the item is a straggler like
+any other, one structuring call or a degraded note, so a distinct claim always
+becomes a finding. The 0.7 threshold itself is unchanged: a labelled corpus of
+restatements and near misses (`tests/test_prose_paraphrase_corpus.py`) records
+what it matches with and without the refusal, as evidence for any later change.
+Accepted limits, recorded as tests: a near miss the signature cannot read ("fire
+damper" / "smoke damper", "2-hour" / "1-hour") still joins, and a refused
+presence item that degrades to a sheet-level note can still fold into an
+absence finding in the ledger, which reads a sheet-level placement as an
+absence.
+
+**Every enumerated prose item's outcome is recorded.** The run record's prose
+carry-through counts (`run.log`, `run_manifest.json`) say, per channel (digest
+coordination, digest conflict, focus, synthesis), how many items were matched,
+structured, degraded, set-level or missing, and how many were suppressed as
+filler or as an assurance (`by_channel`, one `run.log` line per channel). Beside
+them: `vetoed` (items for which the signature refused a textual match),
+`folded` (stragglers whose finding the ledger folded into one it already held)
+and `filtered_focus` (Focus-findings filler, counted whether or not focus items
+are harvested). All of them are informational: only `missing`, an item that
+reached no finding at all, marks the harvest incomplete.
 
 ## Deterministic auditors
 

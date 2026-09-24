@@ -853,6 +853,19 @@ def _ledger_lines(ctx: Any, roots: "tuple[str, ...]" = ()) -> list[str]:
     return lines
 
 
+# The prose harvest's per-channel table (remediation WP-09.2): the channel
+# keys it uses, as a reader names them, and the columns in the order printed.
+_PROSE_CHANNEL_LABELS = {
+    "digest_prose_coordination": "digest coordination",
+    "digest_prose_conflict": "digest conflict",
+    "focus_prose": "focus",
+    "synthesis_prose": "synthesis",
+}
+_PROSE_CHANNEL_COLUMNS = (
+    "matched", "structured", "degraded", "set_level", "missing", "suppressed",
+)
+
+
 def _prose_lines(ctx: Any) -> list[str]:
     acc = dict(getattr(ctx, "prose_accounting", None) or {})
     if not acc:
@@ -862,12 +875,37 @@ def _prose_lines(ctx: Any) -> list[str]:
         "set_level", "excluded_focus", "skipped", "missing",
     )
     parts = [f"{k.replace('_', ' ')} {_int(acc[k])}" for k in order if k in acc]
-    extra = [k for k in acc if k not in order and k != "complete"]
+    extra = [k for k in acc if k not in order and k not in ("complete", "by_channel")]
     parts += [f"{k} {acc[k]}" for k in sorted(extra)]
     line = "  " + " · ".join(parts)
     if acc.get("missing"):
         line += "   << unaccounted items — exhaustive QC is incomplete (§14.9)"
-    return [line]
+    return [line, *_prose_channel_lines(acc.get("by_channel"))]
+
+
+def _prose_channel_lines(table: Any) -> list[str]:
+    """One readable line per harvest channel: what became of its items.
+
+    The table is a dict of dicts, so the generic ``extra`` rendering above would
+    print its repr. A malformed table (a duck-typed context) renders what it
+    can and never raises: a row that is not a dict is skipped, a count that is
+    not a number reads 0.
+    """
+    if not isinstance(table, dict):
+        return []
+    lines: list[str] = []
+    for channel in sorted(table, key=str):
+        row = table[channel]
+        if not isinstance(row, dict):
+            continue
+        parts = [
+            f"{column.replace('_', ' ')} {_int(row.get(column))}"
+            for column in _PROSE_CHANNEL_COLUMNS
+            if _int(row.get(column))
+        ]
+        label = _PROSE_CHANNEL_LABELS.get(channel, str(channel))
+        lines.append(f"    {label}: " + (" · ".join(parts) if parts else "none"))
+    return lines
 
 
 def render_run_log(
