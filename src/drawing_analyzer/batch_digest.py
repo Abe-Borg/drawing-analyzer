@@ -958,6 +958,76 @@ def _harvest_abandoned_batch(
     )
 
 
+def _abandon_after_collect_error(
+    batch: "DrawingBatch",
+    results: list,
+    *,
+    client: Any,
+    cache: Any,
+    status: str | None,
+    sleep: Callable[[float], None],
+    max_elapsed_seconds: float,
+    cleanup_in_background: bool,
+) -> None:
+    """Keep what a batch finished and release what is safe, after a collect error.
+
+    Remediation WP-11.2 (R1; the owner's rule: harvest, then release). Called
+    by :func:`collect_drawing_batch` when an unexpected exception escapes it
+    after the submit: the caller's progress or log callback during the poll,
+    the stalled-batch branch, a parse or cache error. The disposition is the
+    abandon path's (DA-034, DA-035):
+
+    - a batch whose ``status`` (the poll's, or one retrieve's) is terminal
+      releases its files; one that is not is canceled (best effort, like
+      :func:`_cancel_batch` everywhere) and releases its files only once the
+      cancel is accepted. A batch this cannot cancel may still be running and
+      needs them, so they stay;
+    - before the release, :func:`_harvest_abandoned_batch` reads back what the
+      batch finished into ``results`` (and, when a cache is active, the
+      cache): those reads were billed, and the error happened after them.
+
+    No caller callback is used, since it may be what failed. Never raises: the
+    caller propagates its own exception after this returns.
+    """
+    try:
+        if status not in ("ended", "failed", "expired", "canceled"):
+            try:
+                status = _normalize_status(_get(
+                    client.messages.batches.retrieve(batch.batch_id),
+                    "processing_status",
+                ))
+            except Exception as exc:  # noqa: BLE001 - treated as still running
+                _log.warning(
+                    "batch %s status unknown after a collection error: %s",
+                    batch.batch_id, summarize_exc(exc),
+                )
+                status = None
+        settled = status in ("ended", "failed", "expired", "canceled") or _cancel_batch(
+            client, batch.batch_id,
+        )
+        if not settled:
+            _log.warning(
+                "batch %s may still be running after a collection error; its "
+                "uploaded files are kept for it", batch.batch_id,
+            )
+            return
+        _harvest_abandoned_batch(
+            [s for s in batch.submitted_slots if results[s.index] is None],
+            results,
+            batch_id=batch.batch_id,
+            client=client, cache=cache, on_log=None, sleep=sleep,
+            budget_seconds=_harvest_budget_seconds(max_elapsed_seconds),
+        )
+        _release_uploaded_files(
+            client, _take_slot_upload_ids(batch.slots),
+            in_background=cleanup_in_background, on_log=None,
+        )
+    except Exception as exc:  # noqa: BLE001 - never masks the caller's error
+        _log.warning(
+            "cleanup after a batch collection error failed: %s", summarize_exc(exc),
+        )
+
+
 def _rescue_failed_items_sync(
     rescue: list[tuple[_Slot, dict]],
     results: list,
@@ -1662,6 +1732,7 @@ def submit_drawing_batch(
     on_status: StatusCallback | None = None,
     focus: str | None = None,
     specs_text: str | None = None,
+    slots_out: "list[_Slot] | None" = None,
 ) -> DrawingBatch:
     """Render-stream → cache-or-upload → submit one Message Batch.
 
@@ -1686,13 +1757,27 @@ def submit_drawing_batch(
     unavailable inline fallback (:func:`_serve_inline`) runs sequentially on
     the calling thread instead, so it gets the real caching benefit via
     :func:`~drawing_analyzer.digest.digest_sheet`'s own default.
+
+    **Cleanup (DA-034, remediation WP-11.2).** Any unexpected error that escapes
+    the upload loop (the caller's progress or status callback, a cache, a
+    request that could not be built) deletes every file uploaded so far,
+    including a sheet whose images landed before its slot was recorded, then
+    propagates: no batch will ever reference them. It used to propagate with
+    every upload still remote; ``submit_critique_batch`` already had this guard.
+    ``slots_out`` (an empty list), when given, is the list the slots are
+    recorded in, so a caller that contains the error keeps what was resolved
+    before it: cache hits, and the inline digests the Files-API fallback read
+    (real time, paid).
     """
     focus = normalize_focus(focus)
     focus_fragment = focus_cache_fragment(focus)
     specs_text = normalize_specs_text(specs_text)
     specs_fragment = specs_cache_fragment(specs_text)
-    slots: list[_Slot] = []
+    slots: list[_Slot] = [] if slots_out is None else slots_out
     reqs: list[dict] = []
+    # A sheet whose upload landed but whose slot is not recorded yet; the guard
+    # below deletes its files too.
+    in_progress: _Slot | None = None
 
     # Upload circuit breaker. After MAX_CONSECUTIVE_FATAL_UPLOAD_FAILURES
     # sheets in a row fail with the same credential/route-level status, the
@@ -1756,203 +1841,220 @@ def submit_drawing_batch(
         if progress is not None:
             progress(slot.index + 1, total or 0, f"{verb} {sheet.ref.display_label}")
 
-    for index, sheet in enumerate(iter_prefetched_sheets(rendered_sheets)):
-        image_est = estimate_image_tokens_total(sheet.image_sizes, model=model)
-        slot = _Slot(
-            index=index, ref=sheet.ref, image_estimate=image_est,
-            rows=getattr(sheet, "rows", 0), cols=getattr(sheet, "cols", 0),
-        )
+    try:
+        for index, sheet in enumerate(iter_prefetched_sheets(rendered_sheets)):
+            image_est = estimate_image_tokens_total(sheet.image_sizes, model=model)
+            slot = _Slot(
+                index=index, ref=sheet.ref, image_estimate=image_est,
+                rows=getattr(sheet, "rows", 0), cols=getattr(sheet, "cols", 0),
+            )
 
-        cache_key: str | None = None
-        if cache is not None:
-            cache_key = digest_cache_key(
-                sheet,
-                model=model,
-                prompt_version=DIGEST_PROMPT_VERSION,
-                max_tokens=max_tokens,
-                effort=effort,
-                use_thinking=use_thinking,
-                focus=focus_fragment,
-                specs=specs_fragment,
-                sheet_text=sheet.sheet_text,
-            )
-            hit = cache.get(cache_key)
-            # An entry that records an unfinished read is a miss: the sheet is
-            # uploaded and submitted like any other (D-4).
-            served = (
-                sheet_digest_from_cache_entry(
-                    hit, sheet.ref, image_token_estimate=image_est,
+            cache_key: str | None = None
+            if cache is not None:
+                cache_key = digest_cache_key(
+                    sheet,
+                    model=model,
+                    prompt_version=DIGEST_PROMPT_VERSION,
+                    max_tokens=max_tokens,
+                    effort=effort,
+                    use_thinking=use_thinking,
+                    focus=focus_fragment,
+                    specs=specs_fragment,
+                    sheet_text=sheet.sheet_text,
                 )
-                if hit is not None else None
-            )
-            if served is not None:
-                slot.digest = served
-                slots.append(slot)
-                _log.debug("sheet %d cache hit: %s", index, sheet.ref.display_label)
-                if progress is not None:
-                    progress(index + 1, total or 0, f"Cached {sheet.ref.display_label}")
+                hit = cache.get(cache_key)
+                # An entry that records an unfinished read is a miss: the sheet is
+                # uploaded and submitted like any other (D-4).
+                served = (
+                    sheet_digest_from_cache_entry(
+                        hit, sheet.ref, image_token_estimate=image_est,
+                    )
+                    if hit is not None else None
+                )
+                if served is not None:
+                    slot.digest = served
+                    slots.append(slot)
+                    _log.debug("sheet %d cache hit: %s", index, sheet.ref.display_label)
+                    if progress is not None:
+                        progress(index + 1, total or 0, f"Cached {sheet.ref.display_label}")
+                    continue
+
+            # Files API confirmed unavailable (consecutive 404s already proved the
+            # /v1/files route is down while Messages/Batches is healthy): inline this
+            # sheet's images as base64 rather than attempt a doomed upload. Sits
+            # after the cache check so cached sheets are still served for free.
+            if inline_fallback_active:
+                _serve_inline(slot, sheet)
                 continue
 
-        # Files API confirmed unavailable (consecutive 404s already proved the
-        # /v1/files route is down while Messages/Batches is healthy): inline this
-        # sheet's images as base64 rather than attempt a doomed upload. Sits
-        # after the cache check so cached sheets are still served for free.
-        if inline_fallback_active:
-            _serve_inline(slot, sheet)
-            continue
+            # Breaker tripped on a credential rejection (401/403): the same
+            # rejection will hit every remaining upload, and an inline request would
+            # fail identically, so mark the sheet (keeping the per-sheet report
+            # complete) without spending more requests. Sits after the cache check
+            # so cached sheets are still served even when the Files API is dead.
+            if uploads_disabled_error is not None:
+                slot.digest = SheetDigest(
+                    ref=sheet.ref,
+                    text="",
+                    image_token_estimate=image_est,
+                    error=uploads_disabled_error,
+                )
+                slots.append(slot)
+                _log.debug(
+                    "sheet %d upload skipped (uploads disabled): %s",
+                    index, sheet.ref.display_label,
+                )
+                if progress is not None:
+                    progress(index + 1, total or 0, f"Upload skipped: {sheet.ref.display_label}")
+                continue
 
-        # Breaker tripped on a credential rejection (401/403): the same
-        # rejection will hit every remaining upload, and an inline request would
-        # fail identically, so mark the sheet (keeping the per-sheet report
-        # complete) without spending more requests. Sits after the cache check
-        # so cached sheets are still served even when the Files API is dead.
-        if uploads_disabled_error is not None:
-            slot.digest = SheetDigest(
-                ref=sheet.ref,
-                text="",
-                image_token_estimate=image_est,
-                error=uploads_disabled_error,
-            )
-            slots.append(slot)
-            _log.debug(
-                "sheet %d upload skipped (uploads disabled): %s",
-                index, sheet.ref.display_label,
-            )
-            if progress is not None:
-                progress(index + 1, total or 0, f"Upload skipped: {sheet.ref.display_label}")
-            continue
+            # Per-image status (status-line only) so a sheet's tens-of-seconds,
+            # multi-image upload — and any transient-503 retry wave within it — shows
+            # continuous motion instead of a frozen line. Built only when a status
+            # sink is wired, so the no-callback path (and the tests) is unchanged.
+            on_image = None
+            if on_status is not None:
+                def on_image(pos, n, retrying, *, _k=index + 1, _label=sheet.ref.display_label):
+                    verb = "Retrying" if retrying else "Uploading"
+                    tail = " after overload" if retrying else ""
+                    on_status(f"[{_k}/{total}] {verb} image {pos}/{n}{tail} — {_label}")
 
-        # Per-image status (status-line only) so a sheet's tens-of-seconds,
-        # multi-image upload — and any transient-503 retry wave within it — shows
-        # continuous motion instead of a frozen line. Built only when a status
-        # sink is wired, so the no-callback path (and the tests) is unchanged.
-        on_image = None
-        if on_status is not None:
-            def on_image(pos, n, retrying, *, _k=index + 1, _label=sheet.ref.display_label):
-                verb = "Retrying" if retrying else "Uploading"
-                tail = " after overload" if retrying else ""
-                on_status(f"[{_k}/{total}] {verb} image {pos}/{n}{tail} — {_label}")
+            try:
+                upload = upload_sheet_images(client, sheet, on_image=on_image)
+            except Exception as exc:  # noqa: BLE001 - one sheet's upload failing is captured, not fatal
+                rid = request_id_of(exc)
+                hint = upload_failure_hint(exc)
+                status = run_fatal_upload_status(exc)
 
-        try:
-            upload = upload_sheet_images(client, sheet, on_image=on_image)
-        except Exception as exc:  # noqa: BLE001 - one sheet's upload failing is captured, not fatal
-            rid = request_id_of(exc)
-            hint = upload_failure_hint(exc)
-            status = run_fatal_upload_status(exc)
+                # A Files-API 404 means the upload route is unavailable while the
+                # Messages/Batches API (this batch's own transport) is healthy, so
+                # inline this sheet's images as base64 rather than lose it. The
+                # breaker still counts the consecutive 404s: once it trips, every
+                # remaining sheet skips the doomed upload and goes straight to the
+                # inline path above. No sheet is dropped — only the upload attempts
+                # stop. (Cache hits never reach here, so they carry no signal.)
+                if upload_failure_allows_inline_fallback(exc):
+                    _log.warning(
+                        "sheet %d Files-API upload 404'd; inlining images as base64: "
+                        "%s (%s)",
+                        index, sheet.ref.display_label, summarize_exc(exc),
+                    )
+                    _serve_inline(slot, sheet)
+                    fatal_streak = fatal_streak + 1 if status == last_fatal_status else 1
+                    last_fatal_status = status
+                    if (
+                        fatal_streak >= MAX_CONSECUTIVE_FATAL_UPLOAD_FAILURES
+                        and not inline_fallback_active
+                    ):
+                        inline_fallback_active = True
+                        _log.warning(
+                            "Files API unreachable after %d consecutive HTTP 404 "
+                            "upload failure(s); inlining images as base64 for the "
+                            "remaining sheets%s",
+                            fatal_streak, f" — {hint}" if hint else "",
+                        )
+                    continue
 
-            # A Files-API 404 means the upload route is unavailable while the
-            # Messages/Batches API (this batch's own transport) is healthy, so
-            # inline this sheet's images as base64 rather than lose it. The
-            # breaker still counts the consecutive 404s: once it trips, every
-            # remaining sheet skips the doomed upload and goes straight to the
-            # inline path above. No sheet is dropped — only the upload attempts
-            # stop. (Cache hits never reach here, so they carry no signal.)
-            if upload_failure_allows_inline_fallback(exc):
+                # Credential-level (401/403) or non-fatal failure: capture it on the
+                # sheet and continue. The request-id (when the SDK carried one) and
+                # the actionable hint are surfaced on the sheet error so the GUI's
+                # per-sheet line — not just the diagnostics file — names the exact
+                # call to quote and what to check.
+                error = f"image upload failed: {_clean_error(exc)}"
+                if rid:
+                    error += f" (request-id {rid})"
+                if hint:
+                    error += f" — {hint}"
+                slot.digest = SheetDigest(
+                    ref=sheet.ref,
+                    text="",
+                    image_token_estimate=image_est,
+                    error=error,
+                )
+                slots.append(slot)
                 _log.warning(
-                    "sheet %d Files-API upload 404'd; inlining images as base64: "
-                    "%s (%s)",
+                    "sheet %d upload failed (%s): %s",
                     index, sheet.ref.display_label, summarize_exc(exc),
                 )
-                _serve_inline(slot, sheet)
+                if progress is not None:
+                    progress(index + 1, total or 0, f"Upload failed: {sheet.ref.display_label}")
+
+                # Breaker accounting: only an unbroken run of the SAME
+                # credential/route-level status trips it; any other failure
+                # (transient retries exhausted, payload-shaped 4xx) resets the
+                # streak because it says nothing about the next sheet's fate.
+                if status is None:
+                    fatal_streak = 0
+                    last_fatal_status = None
+                    continue
                 fatal_streak = fatal_streak + 1 if status == last_fatal_status else 1
                 last_fatal_status = status
-                if (
-                    fatal_streak >= MAX_CONSECUTIVE_FATAL_UPLOAD_FAILURES
-                    and not inline_fallback_active
-                ):
-                    inline_fallback_active = True
+                if fatal_streak >= MAX_CONSECUTIVE_FATAL_UPLOAD_FAILURES:
+                    uploads_disabled_error = (
+                        f"image upload skipped: uploads stopped after {fatal_streak} "
+                        f"consecutive HTTP {status} upload failures"
+                    )
+                    if hint:
+                        uploads_disabled_error += f" — {hint}"
                     _log.warning(
-                        "Files API unreachable after %d consecutive HTTP 404 "
-                        "upload failure(s); inlining images as base64 for the "
-                        "remaining sheets%s",
-                        fatal_streak, f" — {hint}" if hint else "",
+                        "disabling Files-API uploads for the remaining sheets after "
+                        "%d consecutive HTTP %d failures (last: %s)",
+                        fatal_streak, status, summarize_exc(exc),
                     )
                 continue
 
-            # Credential-level (401/403) or non-fatal failure: capture it on the
-            # sheet and continue. The request-id (when the SDK carried one) and
-            # the actionable hint are surfaced on the sheet error so the GUI's
-            # per-sheet line — not just the diagnostics file — names the exact
-            # call to quote and what to check.
-            error = f"image upload failed: {_clean_error(exc)}"
-            if rid:
-                error += f" (request-id {rid})"
-            if hint:
-                error += f" — {hint}"
-            slot.digest = SheetDigest(
+            # A successful upload proves the Files API is reachable with this key,
+            # so any accumulated run-fatal streak was intermittent after all —
+            # reset it, keeping the breaker true to its "consecutive" contract.
+            # (Cache hits never reach here, so they carry no signal either way.)
+            fatal_streak = 0
+            last_fatal_status = None
+
+            custom_id = f"sheet__{index}"
+            slot.custom_id = custom_id
+            slot.cache_key = cache_key
+            slot.file_ids = list(upload.file_ids)
+            slot.reusable_upload = ReusableSheetUpload(
                 ref=sheet.ref,
-                text="",
-                image_token_estimate=image_est,
-                error=error,
+                rows=getattr(sheet, "rows", 0),
+                cols=getattr(sheet, "cols", 0),
+                content=list(upload.content),
+                file_ids=list(upload.file_ids),
             )
+            in_progress = slot
+            slot.params = build_digest_request_params(
+                upload.content,
+                model=model,
+                max_tokens=max_tokens,
+                use_thinking=use_thinking,
+                effort=effort,
+                focus=focus,
+                specs_text=specs_text,
+                cache_specs=False,
+            )
+            reqs.append({"custom_id": custom_id, "params": slot.params})
             slots.append(slot)
-            _log.warning(
-                "sheet %d upload failed (%s): %s",
-                index, sheet.ref.display_label, summarize_exc(exc),
+            in_progress = None
+            _log.debug(
+                "sheet %d uploaded %d image(s) as %s: %s",
+                index, len(upload.file_ids), custom_id, sheet.ref.display_label,
             )
             if progress is not None:
-                progress(index + 1, total or 0, f"Upload failed: {sheet.ref.display_label}")
-
-            # Breaker accounting: only an unbroken run of the SAME
-            # credential/route-level status trips it; any other failure
-            # (transient retries exhausted, payload-shaped 4xx) resets the
-            # streak because it says nothing about the next sheet's fate.
-            if status is None:
-                fatal_streak = 0
-                last_fatal_status = None
-                continue
-            fatal_streak = fatal_streak + 1 if status == last_fatal_status else 1
-            last_fatal_status = status
-            if fatal_streak >= MAX_CONSECUTIVE_FATAL_UPLOAD_FAILURES:
-                uploads_disabled_error = (
-                    f"image upload skipped: uploads stopped after {fatal_streak} "
-                    f"consecutive HTTP {status} upload failures"
-                )
-                if hint:
-                    uploads_disabled_error += f" — {hint}"
-                _log.warning(
-                    "disabling Files-API uploads for the remaining sheets after "
-                    "%d consecutive HTTP %d failures (last: %s)",
-                    fatal_streak, status, summarize_exc(exc),
-                )
-            continue
-
-        # A successful upload proves the Files API is reachable with this key,
-        # so any accumulated run-fatal streak was intermittent after all —
-        # reset it, keeping the breaker true to its "consecutive" contract.
-        # (Cache hits never reach here, so they carry no signal either way.)
-        fatal_streak = 0
-        last_fatal_status = None
-
-        custom_id = f"sheet__{index}"
-        slot.custom_id = custom_id
-        slot.cache_key = cache_key
-        slot.file_ids = list(upload.file_ids)
-        slot.reusable_upload = ReusableSheetUpload(
-            ref=sheet.ref,
-            rows=getattr(sheet, "rows", 0),
-            cols=getattr(sheet, "cols", 0),
-            content=list(upload.content),
-            file_ids=list(upload.file_ids),
-        )
-        slot.params = build_digest_request_params(
-            upload.content,
-            model=model,
-            max_tokens=max_tokens,
-            use_thinking=use_thinking,
-            effort=effort,
-            focus=focus,
-            specs_text=specs_text,
-            cache_specs=False,
-        )
-        reqs.append({"custom_id": custom_id, "params": slot.params})
-        slots.append(slot)
-        _log.debug(
-            "sheet %d uploaded %d image(s) as %s: %s",
-            index, len(upload.file_ids), custom_id, sheet.ref.display_label,
-        )
-        if progress is not None:
-            progress(index + 1, total or 0, f"Uploaded {sheet.ref.display_label}")
+                progress(index + 1, total or 0, f"Uploaded {sheet.ref.display_label}")
+    except Exception:  # noqa: BLE001 - clean up before propagating (DA-034)
+        # No batch exists yet, so no request will ever reference these uploads:
+        # delete every one, the unrecorded sheet's included, then propagate
+        # (remediation WP-11.2; the twin of submit_critique_batch's guard).
+        # ``delete_files`` is best-effort and never itself raises.
+        owned = list(slots) + ([in_progress] if in_progress is not None else [])
+        leaked = _take_slot_upload_ids(owned)
+        if leaked:
+            _log.warning(
+                "drawing batch submit stopped before a batch existed; deleting "
+                "%d uploaded file(s)", len(leaked),
+            )
+            delete_files(client, leaked)
+        raise
 
     batch_id: str | None = None
     if reqs:
@@ -2284,6 +2386,7 @@ def collect_drawing_batch(
     retry_failed_items: bool = False,
     recovery_transport: str = RECOVERY_DIRECT,
     reusable_upload_sink: list[ReusableSheetUpload] | None = None,
+    results_out: list | None = None,
 ) -> list[SheetDigest]:
     """Poll the batch to completion and assemble per-sheet digests in page order.
 
@@ -2332,6 +2435,18 @@ def collect_drawing_batch(
     discount) and never issues a real-time call. The pipeline passes
     ``RECOVERY_BATCH`` so a stalled/sick batch is retried as a batch rather than
     silently dropping the run to real-time pricing.
+
+    **An unexpected error anywhere after the submit (remediation WP-11.2, R1;
+    the owner's rule)** is handled like an abandoned batch before it
+    propagates (:func:`_abandon_after_collect_error`): what the batch finished
+    is read back (it was billed), then the files are released if the batch is
+    terminal or its cancel was accepted, and kept for it otherwise. The guard
+    used to cover only the read-back of a terminal batch, so an error during
+    the poll (the caller's progress or log callback among others) left every
+    upload remote and read nothing back. ``results_out`` (an empty list), when
+    given, is the page-ordered result list itself, so a caller that contains
+    the error keeps every digest resolved before it, the harvested ones
+    included.
     """
     # ``None`` means "the app's bound", resolved HERE rather than as a keyword
     # default so ``DRAWING_ANALYZER_BATCH_MAX_ELAPSED_HOURS`` is read per call
@@ -2343,63 +2458,227 @@ def collect_drawing_batch(
     # 0..n-1 in page order) so a divergent display ``total`` can never
     # mis-size or drop a result.
     results: list[SheetDigest | None] = [None] * len(batch.slots)
+    if results_out is not None:
+        results_out[:] = results
+        results = results_out
     for slot in batch.slots:
         if slot.digest is not None:
             results[slot.index] = slot.digest
 
     submitted = batch.submitted_slots
     if batch.batch_id and submitted:
-        cached_done = sum(1 for s in batch.slots if s.digest is not None)
-        collect_started = time.monotonic()
-        # With recovery enabled, hold back a slice of the budget from the
-        # poll — so a batch that never terminates leaves the direct-call
-        # rescue room to run — and watch for a stalled batch (request counts
-        # frozen for an hour). Without recovery there is nothing useful to do
-        # earlier, so the poll keeps the whole bound and only the elapsed
-        # detach applies, exactly as before.
-        poll_budget: float = max_elapsed_seconds
-        stall_timeout: float | None = None
-        if retry_failed_items:
-            poll_budget = max_elapsed_seconds - _rescue_reserve_seconds(
-                max_elapsed_seconds
+        status: str | None = None
+        try:
+            cached_done = sum(1 for s in batch.slots if s.digest is not None)
+            collect_started = time.monotonic()
+            # With recovery enabled, hold back a slice of the budget from the
+            # poll — so a batch that never terminates leaves the direct-call
+            # rescue room to run — and watch for a stalled batch (request counts
+            # frozen for an hour). Without recovery there is nothing useful to do
+            # earlier, so the poll keeps the whole bound and only the elapsed
+            # detach applies, exactly as before.
+            poll_budget: float = max_elapsed_seconds
+            stall_timeout: float | None = None
+            if retry_failed_items:
+                poll_budget = max_elapsed_seconds - _rescue_reserve_seconds(
+                    max_elapsed_seconds
+                )
+                stall_timeout = _stall_timeout_seconds(first_watch=True)
+            status = _poll_until_terminal(
+                client,
+                batch.batch_id,
+                total=batch.total,
+                cached_done=cached_done,
+                progress=progress,
+                on_log=on_log,
+                sleep=sleep,
+                max_elapsed_seconds=poll_budget,
+                stall_timeout_seconds=stall_timeout,
             )
-            stall_timeout = _stall_timeout_seconds(first_watch=True)
-        status = _poll_until_terminal(
-            client,
-            batch.batch_id,
-            total=batch.total,
-            cached_done=cached_done,
-            progress=progress,
-            on_log=on_log,
-            sleep=sleep,
-            max_elapsed_seconds=poll_budget,
-            stall_timeout_seconds=stall_timeout,
-        )
-        if status in ("ended", "failed", "expired", "canceled"):
-            try:
-                raw = {}
-                for result in client.messages.batches.results(batch.batch_id):
-                    raw[_get(result, "custom_id")] = result
-                for slot in submitted:
-                    _replace_result_with_attempt_history(
-                        results, slot,
-                        _parse_item(slot, raw.get(slot.custom_id), cache=cache),
-                        served_by=batch.batch_id,
+            if status in ("ended", "failed", "expired", "canceled"):
+                try:
+                    raw = {}
+                    for result in client.messages.batches.results(batch.batch_id):
+                        raw[_get(result, "custom_id")] = result
+                    for slot in submitted:
+                        _replace_result_with_attempt_history(
+                            results, slot,
+                            _parse_item(slot, raw.get(slot.custom_id), cache=cache),
+                            served_by=batch.batch_id,
+                        )
+                    files_released = True
+                    if retry_failed_items:
+                        # The follow-up round spends what's LEFT of this call's
+                        # collection budget — the bound the caller gave applies to
+                        # the whole collect, not per batch round.
+                        remaining = max_elapsed_seconds - (time.monotonic() - collect_started)
+                        files_released = _resubmit_failed_items(
+                            batch, results, raw,
+                            client=client, cache=cache, progress=progress,
+                            on_log=on_log, sleep=sleep,
+                            max_elapsed_seconds=remaining,
+                            recovery_transport=recovery_transport,
+                        )
+                    if files_released:
+                        _finish_digest_uploads(
+                            batch,
+                            client=client,
+                            reusable_upload_sink=reusable_upload_sink,
+                            cleanup_in_background=cleanup_in_background,
+                            on_log=on_log,
+                        )
+                except Exception:  # noqa: BLE001 - clean up before propagating (DA-034)
+                    # An unexpected error while collecting a *terminal* batch —
+                    # ``results()`` or the follow-up round raising, a parse blowing
+                    # up — must not leak the uploaded files (DA-034). The batch is
+                    # terminal (no longer processing), so its files are safe to delete
+                    # unconditionally; do so best-effort, then re-raise (unchanged
+                    # control flow — collect raised here before this guard too, just
+                    # leakily).
+                    leaked = _take_slot_upload_ids(batch.slots)
+                    _release_uploaded_files(
+                        client, leaked,
+                        in_background=cleanup_in_background, on_log=on_log,
                     )
-                files_released = True
+                    raise
+            else:
+                # The batch never reached a terminal state: request counts frozen
+                # past the stall window ("stalled"), the poll bound hit
+                # ("detached"), or the poll endpoint failing repeatedly
+                # ("poll_failed"). This is the failure that used to zero a run —
+                # two real runs (50 and 20 sheets) sat `in_progress` with zero
+                # completions for 4h and returned nothing, despite every upload
+                # and request in hand being valid. With recovery enabled the
+                # batch is abandoned for good: best-effort canceled (its results
+                # will never be read, so left running it only burns quota) and
+                # every unresolved sheet recovered on the same still-uploaded
+                # file_ids, spending what remains of the collection budget (the poll
+                # held back a rescue reserve for exactly this). The recovery
+                # transport decides HOW: RECOVERY_BATCH (the pipeline) resubmits the
+                # sheets as fresh batches so the run keeps the 50% discount and never
+                # drops to real-time; RECOVERY_DIRECT digests them via full-rate
+                # direct calls. Without recovery the original behavior stands: files
+                # retained for the still-running batch, and a clear, retriable
+                # per-sheet error.
+                canceled = False
                 if retry_failed_items:
-                    # The follow-up round spends what's LEFT of this call's
-                    # collection budget — the bound the caller gave applies to
-                    # the whole collect, not per batch round.
-                    remaining = max_elapsed_seconds - (time.monotonic() - collect_started)
-                    files_released = _resubmit_failed_items(
-                        batch, results, raw,
-                        client=client, cache=cache, progress=progress,
+                    canceled = _cancel_batch(client, batch.batch_id, on_log=on_log)
+                    # Harvest BEFORE building the rescue list (DA-035). A cancel is
+                    # asynchronous, so the sheets this batch already finished — and
+                    # billed — are still readable; without this the rescue list is
+                    # every submitted slot, and each completed sheet is paid for
+                    # twice.
+                    #
+                    # This is also why a still-MOVING detached batch is cancelled
+                    # like any other rather than left alone to finish: the Batches
+                    # API serves ``results()`` only once a batch has ENDED, so the
+                    # cancel is what makes its completed sheets readable at all.
+                    # Leaving a healthy-but-slow batch running looks generous and
+                    # strands every sheet it had already been paid for — this run
+                    # cannot read them, and a later run submits a new batch rather
+                    # than collecting this one. The moving/frozen split is
+                    # therefore diagnostic (it names which happened in the log, the
+                    # per-sheet error and the ledger's terminal status), not a
+                    # different disposition.
+                    harvest = _harvest_abandoned_batch(
+                        [s for s in submitted if results[s.index] is None],
+                        results,
+                        batch_id=batch.batch_id,
+                        client=client, cache=cache,
                         on_log=on_log, sleep=sleep,
-                        max_elapsed_seconds=remaining,
-                        recovery_transport=recovery_transport,
+                        budget_seconds=_harvest_budget_seconds(max_elapsed_seconds),
                     )
-                if files_released:
+                    # The harvest's time is additional, not deducted: move the mark
+                    # every later ``remaining`` is measured from, so the rescue gets
+                    # exactly the budget it had before the harvest existed.
+                    collect_started += harvest.elapsed
+                    # Every sheet the harvest did not resolve, including one it
+                    # holds a partial read for (N16): the rescue can only improve
+                    # on that read (``_replace_result_with_attempt_history``).
+                    rescue = [
+                        (slot, slot.params)
+                        for slot in submitted
+                        if slot.index not in harvest.resolved and slot.params is not None
+                    ]
+                    _mark_batch_abandoned(
+                        [slot for slot, _ in rescue
+                         if slot.index not in harvest.responded],
+                        batch_id=batch.batch_id, status=status,
+                    )
+                    if rescue:
+                        remaining = max_elapsed_seconds - (
+                            time.monotonic() - collect_started
+                        )
+                        if recovery_transport == RECOVERY_BATCH:
+                            _log.info(
+                                "recovering %d sheet(s) from the %s batch via fresh "
+                                "batch resubmission (%.0fs of collection budget left)",
+                                len(rescue), status, max(0.0, remaining),
+                            )
+                            if on_log is not None:
+                                on_log(
+                                    f"Drawing batch {status}; resubmitting "
+                                    f"{len(rescue)} sheet(s) as a fresh batch"
+                                )
+                            n, files_safe = _recover_via_batch_resubmit(
+                                rescue, results,
+                                batch_total=batch.total,
+                                client=client, cache=cache, progress=progress,
+                                on_log=on_log, sleep=sleep,
+                                max_elapsed_seconds=remaining,
+                                stall_timeout_seconds=_stall_timeout_seconds(first_watch=False),
+                            )
+                            _log.info(
+                                "batch-resubmit recovery recovered %d/%d sheet(s) "
+                                "from the %s batch", n, len(rescue), status,
+                            )
+                            if on_log is not None:
+                                on_log(
+                                    f"Recovered {n} of {len(rescue)} sheet(s) via "
+                                    "batch resubmission"
+                                )
+                            # Retain the files if any resubmission may still be
+                            # running (its cancel did not land) — same policy as a
+                            # primary batch whose cancel failed.
+                            canceled = canceled and files_safe
+                        else:
+                            _log.info(
+                                "digesting %d sheet(s) from the %s batch via direct "
+                                "Messages calls (%.0fs of collection budget left)",
+                                len(rescue), status, max(0.0, remaining),
+                            )
+                            if on_log is not None:
+                                on_log(
+                                    f"Drawing batch {status}; digesting "
+                                    f"{len(rescue)} sheet(s) directly"
+                                )
+                            n = _rescue_failed_items_sync(
+                                rescue, results,
+                                client=client, cache=cache, sleep=sleep,
+                                max_elapsed_seconds=remaining,
+                            )
+                            _log.info(
+                                "direct-call rescue recovered %d/%d sheet(s) from "
+                                "the %s batch", n, len(rescue), status,
+                            )
+                            if on_log is not None:
+                                on_log(f"Recovered {n} of {len(rescue)} sheet(s) directly")
+                tail = (
+                    f"remote batch id={batch.batch_id} was canceled"
+                    if canceled
+                    else f"remote batch id={batch.batch_id} may still be running"
+                )
+                for slot in submitted:
+                    if results[slot.index] is None:
+                        results[slot.index] = SheetDigest(
+                            ref=slot.ref,
+                            text="",
+                            image_token_estimate=slot.image_estimate,
+                            error=f"drawing batch not collected ({status}); {tail}",
+                        )
+                if canceled:
+                    # The canceled batch can no longer need the uploaded files,
+                    # and anything the rescue produced is already in hand.
                     _finish_digest_uploads(
                         batch,
                         client=client,
@@ -2407,165 +2686,13 @@ def collect_drawing_batch(
                         cleanup_in_background=cleanup_in_background,
                         on_log=on_log,
                     )
-            except Exception:  # noqa: BLE001 - clean up before propagating (DA-034)
-                # An unexpected error while collecting a *terminal* batch —
-                # ``results()`` or the follow-up round raising, a parse blowing
-                # up — must not leak the uploaded files (DA-034). The batch is
-                # terminal (no longer processing), so its files are safe to delete
-                # unconditionally; do so best-effort, then re-raise (unchanged
-                # control flow — collect raised here before this guard too, just
-                # leakily).
-                leaked = _take_slot_upload_ids(batch.slots)
-                _release_uploaded_files(
-                    client, leaked,
-                    in_background=cleanup_in_background, on_log=on_log,
-                )
-                raise
-        else:
-            # The batch never reached a terminal state: request counts frozen
-            # past the stall window ("stalled"), the poll bound hit
-            # ("detached"), or the poll endpoint failing repeatedly
-            # ("poll_failed"). This is the failure that used to zero a run —
-            # two real runs (50 and 20 sheets) sat `in_progress` with zero
-            # completions for 4h and returned nothing, despite every upload
-            # and request in hand being valid. With recovery enabled the
-            # batch is abandoned for good: best-effort canceled (its results
-            # will never be read, so left running it only burns quota) and
-            # every unresolved sheet recovered on the same still-uploaded
-            # file_ids, spending what remains of the collection budget (the poll
-            # held back a rescue reserve for exactly this). The recovery
-            # transport decides HOW: RECOVERY_BATCH (the pipeline) resubmits the
-            # sheets as fresh batches so the run keeps the 50% discount and never
-            # drops to real-time; RECOVERY_DIRECT digests them via full-rate
-            # direct calls. Without recovery the original behavior stands: files
-            # retained for the still-running batch, and a clear, retriable
-            # per-sheet error.
-            canceled = False
-            if retry_failed_items:
-                canceled = _cancel_batch(client, batch.batch_id, on_log=on_log)
-                # Harvest BEFORE building the rescue list (DA-035). A cancel is
-                # asynchronous, so the sheets this batch already finished — and
-                # billed — are still readable; without this the rescue list is
-                # every submitted slot, and each completed sheet is paid for
-                # twice.
-                #
-                # This is also why a still-MOVING detached batch is cancelled
-                # like any other rather than left alone to finish: the Batches
-                # API serves ``results()`` only once a batch has ENDED, so the
-                # cancel is what makes its completed sheets readable at all.
-                # Leaving a healthy-but-slow batch running looks generous and
-                # strands every sheet it had already been paid for — this run
-                # cannot read them, and a later run submits a new batch rather
-                # than collecting this one. The moving/frozen split is
-                # therefore diagnostic (it names which happened in the log, the
-                # per-sheet error and the ledger's terminal status), not a
-                # different disposition.
-                harvest = _harvest_abandoned_batch(
-                    [s for s in submitted if results[s.index] is None],
-                    results,
-                    batch_id=batch.batch_id,
-                    client=client, cache=cache,
-                    on_log=on_log, sleep=sleep,
-                    budget_seconds=_harvest_budget_seconds(max_elapsed_seconds),
-                )
-                # The harvest's time is additional, not deducted: move the mark
-                # every later ``remaining`` is measured from, so the rescue gets
-                # exactly the budget it had before the harvest existed.
-                collect_started += harvest.elapsed
-                # Every sheet the harvest did not resolve, including one it
-                # holds a partial read for (N16): the rescue can only improve
-                # on that read (``_replace_result_with_attempt_history``).
-                rescue = [
-                    (slot, slot.params)
-                    for slot in submitted
-                    if slot.index not in harvest.resolved and slot.params is not None
-                ]
-                _mark_batch_abandoned(
-                    [slot for slot, _ in rescue
-                     if slot.index not in harvest.responded],
-                    batch_id=batch.batch_id, status=status,
-                )
-                if rescue:
-                    remaining = max_elapsed_seconds - (
-                        time.monotonic() - collect_started
-                    )
-                    if recovery_transport == RECOVERY_BATCH:
-                        _log.info(
-                            "recovering %d sheet(s) from the %s batch via fresh "
-                            "batch resubmission (%.0fs of collection budget left)",
-                            len(rescue), status, max(0.0, remaining),
-                        )
-                        if on_log is not None:
-                            on_log(
-                                f"Drawing batch {status}; resubmitting "
-                                f"{len(rescue)} sheet(s) as a fresh batch"
-                            )
-                        n, files_safe = _recover_via_batch_resubmit(
-                            rescue, results,
-                            batch_total=batch.total,
-                            client=client, cache=cache, progress=progress,
-                            on_log=on_log, sleep=sleep,
-                            max_elapsed_seconds=remaining,
-                            stall_timeout_seconds=_stall_timeout_seconds(first_watch=False),
-                        )
-                        _log.info(
-                            "batch-resubmit recovery recovered %d/%d sheet(s) "
-                            "from the %s batch", n, len(rescue), status,
-                        )
-                        if on_log is not None:
-                            on_log(
-                                f"Recovered {n} of {len(rescue)} sheet(s) via "
-                                "batch resubmission"
-                            )
-                        # Retain the files if any resubmission may still be
-                        # running (its cancel did not land) — same policy as a
-                        # primary batch whose cancel failed.
-                        canceled = canceled and files_safe
-                    else:
-                        _log.info(
-                            "digesting %d sheet(s) from the %s batch via direct "
-                            "Messages calls (%.0fs of collection budget left)",
-                            len(rescue), status, max(0.0, remaining),
-                        )
-                        if on_log is not None:
-                            on_log(
-                                f"Drawing batch {status}; digesting "
-                                f"{len(rescue)} sheet(s) directly"
-                            )
-                        n = _rescue_failed_items_sync(
-                            rescue, results,
-                            client=client, cache=cache, sleep=sleep,
-                            max_elapsed_seconds=remaining,
-                        )
-                        _log.info(
-                            "direct-call rescue recovered %d/%d sheet(s) from "
-                            "the %s batch", n, len(rescue), status,
-                        )
-                        if on_log is not None:
-                            on_log(f"Recovered {n} of {len(rescue)} sheet(s) directly")
-            tail = (
-                f"remote batch id={batch.batch_id} was canceled"
-                if canceled
-                else f"remote batch id={batch.batch_id} may still be running"
+        except Exception:  # noqa: BLE001 - clean up before propagating (DA-034)
+            _abandon_after_collect_error(
+                batch, results, client=client, cache=cache, status=status,
+                sleep=sleep, max_elapsed_seconds=max_elapsed_seconds,
+                cleanup_in_background=cleanup_in_background,
             )
-            for slot in submitted:
-                if results[slot.index] is None:
-                    results[slot.index] = SheetDigest(
-                        ref=slot.ref,
-                        text="",
-                        image_token_estimate=slot.image_estimate,
-                        error=f"drawing batch not collected ({status}); {tail}",
-                    )
-            if canceled:
-                # The canceled batch can no longer need the uploaded files,
-                # and anything the rescue produced is already in hand.
-                _finish_digest_uploads(
-                    batch,
-                    client=client,
-                    reusable_upload_sink=reusable_upload_sink,
-                    cleanup_in_background=cleanup_in_background,
-                    on_log=on_log,
-                )
+            raise
 
     slot_by_index = {s.index: s for s in batch.slots}
     for i, digest in enumerate(results):

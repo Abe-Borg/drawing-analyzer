@@ -118,6 +118,7 @@ _log = get_logger()
 
 
 _stage_executor_state = threading.local()
+_run_release_state = threading.local()
 
 
 #: How long a ``drawing_qc_*`` work directory may sit in the system temp dir
@@ -275,6 +276,80 @@ def _close_stage_executor(executor: ThreadPoolExecutor) -> None:
     if active is not None and executor in active:
         active.remove(executor)
     executor.shutdown(wait=True)
+
+
+def _with_run_release(fn):
+    """Release the run's temporary resources on every return or raise.
+
+    Remediation WP-11.2 (R1). The render spool (a private temp directory) and
+    the digest uploads retained for the critique (Economy) are created before
+    the digest phase and consumed by the critique stage, whose ``finally``
+    releases them. Every exit before that ``finally`` left both behind: a run
+    whose digest phase stopped early returns before the critique, and an
+    exception between the digest and the critique propagates past it. The
+    spool then waited for garbage collection; the remote files stayed until
+    someone deleted them. A release registered with :func:`_register_run_release`
+    runs here, whatever the exit; on the normal path the critique's own
+    release has already made it a no-op. The shape of
+    :func:`_with_stage_executor_cleanup`, and every release is idempotent.
+    """
+    @wraps(fn)
+    def _wrapped(*args, **kwargs):
+        parent = getattr(_run_release_state, "releases", None)
+        active: list[Callable[[], None]] = []
+        _run_release_state.releases = active
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            for release in reversed(active):
+                try:
+                    release()
+                except Exception as exc:  # noqa: BLE001 - a release never masks the run's outcome
+                    _log.warning("run resource release failed: %s", exc)
+            _run_release_state.releases = parent
+
+    return _wrapped
+
+
+def _register_run_release(release: Callable[[], None]) -> None:
+    active = getattr(_run_release_state, "releases", None)
+    if active is not None:
+        active.append(release)
+
+
+def _release_retained_uploads(
+    reusable_uploads: "list[Any] | None", *, client: Any, on_log: "Any" = None,
+) -> None:
+    """Delete every retained digest upload no critique request adopted (DA-034).
+
+    Cache hits, grid mismatches, and any sheet not reached after an additive
+    critique failure still belong to the pipeline. Adopted manifests return no
+    IDs, so every remote file has one and only one cleanup owner. Idempotent:
+    the list is emptied, and a manifest releases its IDs at most once.
+    """
+    if not reusable_uploads:
+        return
+    try:
+        cleanup_client = client
+        if cleanup_client is None:
+            from .client import get_client as _get_client
+
+            cleanup_client = _get_client()
+        unclaimed_ids = [
+            file_id
+            for reusable in reusable_uploads
+            for file_id in reusable.release_ids()
+        ]
+        if unclaimed_ids:
+            from .batch_digest import _release_uploaded_files
+
+            _release_uploaded_files(
+                cleanup_client, unclaimed_ids,
+                in_background=True, on_log=on_log,
+            )
+    except Exception as cleanup_exc:  # noqa: BLE001 - cleanup is additive
+        _log.warning("retained digest-upload cleanup failed: %s", cleanup_exc)
+    reusable_uploads.clear()
 
 
 def _digest_transport(*, cached: bool, rescued: bool, use_batch: bool) -> str:
@@ -948,6 +1023,14 @@ class _UnreadPages:
       page failures always read;
     - :meth:`notes` names each source that has more pages than the inventory
       counted: only the inventoried pages were read.
+
+    Remediation WP-11.2 (R1): once the digest phase stopped on an unexpected
+    error (:meth:`stop`), a page with no outcome is one the phase never
+    reached. Its record names the failure (``not read: the digest phase
+    stopped early (<Type>)``, the owner's wording) and :meth:`lines` says
+    nothing for it: the one run-level line counts those pages
+    (:attr:`not_reached`). A page that failed on its own keeps its own reason
+    and line.
     """
 
     UNREACHED = "no render outcome was recorded"
@@ -957,6 +1040,13 @@ class _UnreadPages:
         self._failed: dict[tuple[str, int], "BaseException | None"] = {}
         self._count_changes: dict[str, tuple[int, int]] = {}
         self._records: list[UnreadPage] = []
+        self._stopped_by: "str | None" = None
+        self.not_reached = 0
+
+    def stop(self, error_type: str) -> None:
+        """The phase stopped on an unexpected error of type ``error_type``."""
+        with self._lock:
+            self._stopped_by = error_type
 
     def page_failed(self, ref: Any, exc: BaseException) -> None:
         with self._lock:
@@ -969,20 +1059,26 @@ class _UnreadPages:
     def settle(self, refs: "list[Any]", *, read: "set[tuple[str, int]]") -> "list[UnreadPage]":
         """The :class:`UnreadPage` records: every page in ``refs`` not in ``read``."""
         records: list[UnreadPage] = []
+        not_reached = 0
         with self._lock:
             for ref in refs:
                 key = _refkey(ref)
                 if key in read:
                     continue
                 exc = self._failed.setdefault(key, None)
+                reason = _unread_reason(exc)
+                if exc is None and self._stopped_by is not None:
+                    reason = f"not read: the digest phase stopped early ({self._stopped_by})"
+                    not_reached += 1
                 records.append(UnreadPage(
                     source_id=str(getattr(ref, "source_id", "") or ""),
                     source_name=str(ref.source_name),
                     page_index=int(ref.page_index),
                     page_count=int(ref.page_count),
-                    reason=_unread_reason(exc),
+                    reason=reason,
                 ))
             self._records = records
+            self.not_reached = not_reached
         return records
 
     def lines(self, refs: "list[Any]") -> "list[str]":
@@ -1034,6 +1130,8 @@ class _UnreadPages:
                     f"inventory; {which}"
                 )
             elif exc is None:
+                if self._stopped_by is not None:
+                    continue        # the phase's one run-level line counts it
                 out.append(f"{ref.display_label}: page was not read ({self.UNREACHED})")
             else:
                 out.append(
@@ -1062,6 +1160,138 @@ class _UnreadPages:
         return out
 
 
+def _digest_phase_line(
+    error_type: str, *, total: int, not_reached: int, read: int, cached: bool,
+) -> str:
+    """The one run-level line a contained digest-phase failure adds (WP-11.2, R1).
+
+    The owner's rules: one line; the exception's type name only, so it is
+    path-free by construction (the traceback goes to the diagnostics log); the
+    count of pages the phase never reached (each also an ``UnreadPage`` and a
+    ``PAGE_UNREAD`` event); and what the run kept (plan WP-11 step 7): the
+    pages read are exported, and with a digest cache they are cached, so a
+    re-run does not pay for them again. Every surface that shows ``ctx.errors``
+    shows it: the GUI's issue list, run.log, the report and the manifest.
+    """
+    if not_reached:
+        line = (
+            f"Digest phase stopped early by an unexpected error ({error_type}): "
+            f"{not_reached} of {total} page(s) were not read; no later stage ran"
+        )
+    else:
+        line = (
+            f"Digest phase hit an unexpected error ({error_type}) after reaching "
+            "every page; no later stage ran"
+        )
+    if read:
+        line += f"; the {read} page(s) read are exported"
+        if cached:
+            line += " and cached, so a re-run does not pay for them again"
+    return line
+
+
+def _stopped_run_context(
+    *,
+    config: Any,
+    journal: Any,
+    errors: list[str],
+    stage_results: "list[StageResult]",
+    run_usage: Any,
+    img_tok: int,
+    sheets: "list[SheetDigest]",
+    total: int,
+    file_count: int,
+    focus: str,
+    specs_text: str,
+    sheet_geometries: "list[SheetGeometry]",
+    qc_work_dir: "Path | None",
+    inventory: Any,
+    findings_held_out: "dict[str, int]",
+    unread_pages: list,
+    paths: "list[Path]",
+    client: Any,
+    cache: Any,
+) -> "DrawingContext":
+    """Finish a run whose digest phase stopped early (remediation WP-11.2, R1).
+
+    The owner's rules: the digests in hand ship; no later stage makes a call,
+    reopens a source or writes a reviewed PDF, and none is recorded (as the
+    block and zero-sheet exits record none), so an exhaustive run's QC status
+    rolls up from the FAILED digest stage alone; the read sheets' digest
+    findings are still ingested, anchored and numbered offline, exactly as a
+    standard run does (DA-012), so ``findings.json`` never reads empty beside
+    digests that reported findings; the journal closes with ``RUN_END``, whose
+    ``stopped`` field names the phase; and the context goes to the exporter
+    like any other. The caller's progress callback is not called again: it may
+    be what failed.
+    """
+    findings: list[Finding] = []
+    try:
+        qc = _run_qc_stages(
+            sheets=sheets, geometries=sheet_geometries, pdf_paths=paths,
+            config=resolve_run_configuration(), run_usage=run_usage,
+            client=client, qc_work_dir=qc_work_dir, progress=None, total=total,
+            errors=errors, journal=journal, cache=cache,
+        )
+        findings = list(qc.findings)
+    except Exception as exc:  # noqa: BLE001 - the findings are additive (I-3)
+        _log.warning("offline ledger after a stopped digest phase failed: %s", exc)
+    qc_status = roll_up_qc_status(
+        config, stage_results, "NOT_REQUESTED",
+        completeness_gate_open=EXHAUSTIVE_QC_COMPLETENESS_GATE_OPEN,
+    )
+    ok_count = sum(1 for s in sheets if s.ok)
+    _log.info(
+        "===== run stopped after the digest phase: %d/%d ok, %d issue(s) =====",
+        ok_count, total, len(errors),
+    )
+    for err in errors:
+        _log.warning("issue: %s", err)
+    cost = run_usage.total_estimated_cost
+    journal.emit(
+        "USAGE_TOTALS",
+        input_tokens=run_usage.total_input_tokens,
+        output_tokens=run_usage.total_output_tokens,
+        cache_hits=run_usage.cache_hits,
+        estimated_cost=str(cost) if cost is not None else "n/a",
+    )
+    run_outcome = derive_run_outcome(
+        ok_sheets=ok_count, error_count=len(errors), qc_status=qc_status,
+        coverage_status="NOT_REQUESTED",
+    )
+    journal.emit(
+        "RUN_END",
+        level="ERROR" if run_outcome == "FAILED" else "WARNING",
+        outcome=run_outcome, status=qc_status, coverage="NOT_REQUESTED",
+        errors=len(errors), sheets_ok=ok_count, sheets_total=total,
+        stopped="digest",
+    )
+    journal.finish(run_outcome)
+    return DrawingContext(
+        combined_text=_combine(sheets, file_count=file_count),
+        sheets=sheets,
+        file_count=file_count,
+        sheet_count=total,
+        total_input_tokens=run_usage.total_input_tokens,
+        total_output_tokens=run_usage.total_output_tokens,
+        total_image_token_estimate=img_tok,
+        errors=errors,
+        focus=focus,
+        project_specifications=specs_text,
+        findings=findings,
+        sheet_geometries=sheet_geometries,
+        qc_work_dir=qc_work_dir,
+        run_configuration=config,
+        stage_results=stage_results,
+        qc_status=qc_status,
+        run_usage=run_usage,
+        run_journal=journal,
+        input_inventory=inventory,
+        digest_findings_held_out=dict(sorted(findings_held_out.items())),
+        unread_pages=unread_pages,
+    )
+
+
 def _digest_sheets_concurrent(
     paths: list[Path],
     *,
@@ -1087,6 +1317,7 @@ def _digest_sheets_concurrent(
     journal: "Any" = None,
     expected_pages: "dict[str, int] | None" = None,
     on_page_count_changed: "Any" = None,
+    collected: "list[SheetDigest] | None" = None,
 ) -> list[SheetDigest]:
     """Real-time path: render sequentially, digest on a bounded thread pool.
 
@@ -1096,6 +1327,16 @@ def _digest_sheets_concurrent(
     rendered sheets are held in flight, bounding memory on a large set. The
     stream reads only the pages the run owes (``expected_pages``, remediation
     WP-11.1), so it never yields more sheets than ``total`` counts.
+
+    ``collected`` (remediation WP-11.2, R1) receives every digest as it is
+    collected, so a caller keeps them when this raises. ``digest_sheet``
+    captures an API failure on its sheet, but anything else (the caller's
+    ``progress`` callback, a cache, a sheet raising outside the call) used to
+    lose every result in hand, while the pool's exit still waited for, and
+    billed, the reads in flight. Now nothing new is rendered or submitted once
+    something raises; each read in flight is waited for and every one that
+    finished is kept (the owner's rule), then the exception propagates. The
+    render stream is closed here, on the thread that created it.
     """
     workers = _resolve_workers(max_workers, total)
     results: list[SheetDigest | None] = [None] * total
@@ -1114,6 +1355,18 @@ def _digest_sheets_concurrent(
             specs_text=specs_text,
         )
 
+    def _keep(index: int, sd: SheetDigest) -> None:
+        results[index] = sd
+        if collected is not None:
+            collected.append(sd)
+
+    stream = _rendered_stream(
+        paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
+        geometry_sink=geometry_sink, only=only, on_page_error=on_page_error,
+        tile_sink=tile_sink, render_sink=render_sink, journal=journal,
+        expected_pages=expected_pages,
+        on_page_count_changed=on_page_count_changed,
+    )
     with ThreadPoolExecutor(max_workers=workers) as executor:
         in_flight: set = set()
 
@@ -1123,27 +1376,36 @@ def _digest_sheets_concurrent(
             for fut in finished:
                 in_flight.discard(fut)
                 index, sd = fut.result()
-                results[index] = sd
+                _keep(index, sd)
                 completed += 1
                 if progress is not None:
                     progress(completed, total, f"Analyzed {sd.ref.display_label}")
 
-        for index, rendered in enumerate(
-            _rendered_stream(
-                paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
-                geometry_sink=geometry_sink, only=only, on_page_error=on_page_error,
-                tile_sink=tile_sink, render_sink=render_sink, journal=journal,
-                expected_pages=expected_pages,
-                on_page_count_changed=on_page_count_changed,
-            )
-        ):
-            in_flight.add(executor.submit(_run, index, rendered))
-            while len(in_flight) >= workers:
+        try:
+            for index, rendered in enumerate(stream):
+                in_flight.add(executor.submit(_run, index, rendered))
+                while len(in_flight) >= workers:
+                    _collect_one()
+            while in_flight:
                 _collect_one()
-        while in_flight:
-            _collect_one()
+        except BaseException:
+            # Keep the reads already paid for: wait for each one in flight (the
+            # pool's exit would wait for it anyway) and keep it if it finished.
+            for fut in list(in_flight):
+                try:
+                    index, sd = fut.result()
+                except Exception:  # noqa: BLE001 - that sheet has no digest
+                    continue
+                _keep(index, sd)
+            in_flight.clear()
+            raise
+        finally:
+            try:
+                stream.close()
+            except Exception as exc:  # noqa: BLE001 - never mask the outcome
+                _log.debug("render stream close failed: %s", exc)
 
-    # Every slot is now populated (digest_sheet never raises); order preserved.
+    # Every slot of a sheet that produced a digest is populated; order preserved.
     return [sd for sd in results if sd is not None]
 
 
@@ -1173,6 +1435,7 @@ def _digest_sheets_via_batch(
     journal: "Any" = None,
     expected_pages: "dict[str, int] | None" = None,
     on_page_count_changed: "Any" = None,
+    collected: "list[SheetDigest] | None" = None,
 ) -> list[SheetDigest]:
     """Batch path: render-stream → Files-API upload → one Message Batch.
 
@@ -1182,6 +1445,12 @@ def _digest_sheets_via_batch(
     client creation to ``digest_sheet``). ``geometry_sink`` captures each sheet's
     lightweight geometry as it renders (before the batch discards the rendered
     sheet), so the QC stages survive the upload.
+
+    ``collected`` (remediation WP-11.2, R1) receives, when either step raises,
+    every digest already in hand: the cache hits and inline reads the submit
+    resolved (``slots_out``), or everything the collect read back, harvest
+    included (``results_out``). Both functions clean up after themselves
+    before they propagate (DA-034); this only keeps what they had.
     """
     from .batch_digest import (
         RECOVERY_BATCH,
@@ -1201,66 +1470,78 @@ def _digest_sheets_via_batch(
         def on_log(msg: str, level: str = "info") -> None:
             progress(total, total, msg)
 
-    batch = submit_drawing_batch(
-        _rendered_stream(
-            paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
-            geometry_sink=geometry_sink, only=only, tile_sink=tile_sink,
-            # Threaded through like the real-time path: without it an
-            # un-renderable page vanished from a batch run with no entry in
-            # ctx.errors, while the identical real-time run recorded it and
-            # went PARTIAL — the same set reporting two different truths
-            # depending only on transport.
-            on_page_error=on_page_error,
-            journal=journal,
-            # Remediation WP-11.1 (R1): the stream reads the pages the run owes
-            # and reports a source it cannot open again page by page, so one
-            # lost source no longer raises into the upload loop.
-            expected_pages=expected_pages,
-            on_page_count_changed=on_page_count_changed,
-        ),
-        client=client,
-        model=model,
-        max_tokens=max_tokens,
-        use_thinking=use_thinking,
-        effort=effort,
-        cache=cache,
-        progress=progress,
-        total=total,
-        on_status=on_status,
-        focus=focus,
-        specs_text=specs_text,
-    )
-    # Run the post-batch file cleanup off the calling thread: the digests are
-    # already in hand, and deleting a few hundred uploaded images one-by-one
-    # (slower still under the Files-API overload that drove the run) would
-    # otherwise leave the UI frozen for minutes after the work is really done.
-    # Retry the batch's own per-item failures (server-side 500s/overload,
-    # expired items, thinking-ate-the-budget empty digests) while the uploaded
-    # file_ids are still alive — a real run lost 10 of 33 sheets to exactly
-    # these one-shot failures. The same opt-in covers a batch that never
-    # terminates at all (two real runs sat `in_progress` with zero completions
-    # for the full 4h bound and returned nothing): the stuck batch is canceled
-    # and every sheet recovered instead of the run coming back empty.
-    #
-    # ``recovery_transport=RECOVERY_BATCH``: recovery ALWAYS stays on the batch
-    # transport. An unresolved sheet (per-item failure, or a stalled/sick batch)
-    # is resubmitted as a fresh batch — bounded rounds, each with its own stall
-    # watch — so it keeps the 50% batch discount and the run never silently
-    # degrades to full-rate real-time calls. When the rounds/budget are spent,
-    # unreached sheets keep a clean, retriable batch error (never a real-time
-    # call). Override the round ceiling with
-    # ``DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS``.
-    return collect_drawing_batch(
-        batch,
-        client=client,
-        cache=cache,
-        progress=progress,
-        on_log=on_log,
-        cleanup_in_background=True,
-        retry_failed_items=True,
-        recovery_transport=RECOVERY_BATCH,
-        reusable_upload_sink=reusable_upload_sink,
-    )
+    slots_out: list = []
+    results_out: list = []
+    try:
+        batch = submit_drawing_batch(
+            _rendered_stream(
+                paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
+                geometry_sink=geometry_sink, only=only, tile_sink=tile_sink,
+                # Threaded through like the real-time path: without it an
+                # un-renderable page vanished from a batch run with no entry in
+                # ctx.errors, while the identical real-time run recorded it and
+                # went PARTIAL — the same set reporting two different truths
+                # depending only on transport.
+                on_page_error=on_page_error,
+                journal=journal,
+                # Remediation WP-11.1 (R1): the stream reads the pages the run owes
+                # and reports a source it cannot open again page by page, so one
+                # lost source no longer raises into the upload loop.
+                expected_pages=expected_pages,
+                on_page_count_changed=on_page_count_changed,
+            ),
+            client=client,
+            model=model,
+            max_tokens=max_tokens,
+            use_thinking=use_thinking,
+            effort=effort,
+            cache=cache,
+            progress=progress,
+            total=total,
+            on_status=on_status,
+            focus=focus,
+            specs_text=specs_text,
+            slots_out=slots_out,
+        )
+        # Run the post-batch file cleanup off the calling thread: the digests are
+        # already in hand, and deleting a few hundred uploaded images one-by-one
+        # (slower still under the Files-API overload that drove the run) would
+        # otherwise leave the UI frozen for minutes after the work is really done.
+        # Retry the batch's own per-item failures (server-side 500s/overload,
+        # expired items, thinking-ate-the-budget empty digests) while the uploaded
+        # file_ids are still alive — a real run lost 10 of 33 sheets to exactly
+        # these one-shot failures. The same opt-in covers a batch that never
+        # terminates at all (two real runs sat `in_progress` with zero completions
+        # for the full 4h bound and returned nothing): the stuck batch is canceled
+        # and every sheet recovered instead of the run coming back empty.
+        #
+        # ``recovery_transport=RECOVERY_BATCH``: recovery ALWAYS stays on the batch
+        # transport. An unresolved sheet (per-item failure, or a stalled/sick batch)
+        # is resubmitted as a fresh batch — bounded rounds, each with its own stall
+        # watch — so it keeps the 50% batch discount and the run never silently
+        # degrades to full-rate real-time calls. When the rounds/budget are spent,
+        # unreached sheets keep a clean, retriable batch error (never a real-time
+        # call). Override the round ceiling with
+        # ``DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS``.
+        return collect_drawing_batch(
+            batch,
+            client=client,
+            cache=cache,
+            progress=progress,
+            on_log=on_log,
+            cleanup_in_background=True,
+            retry_failed_items=True,
+            recovery_transport=RECOVERY_BATCH,
+            reusable_upload_sink=reusable_upload_sink,
+            results_out=results_out,
+        )
+    except BaseException:
+        if collected is not None:
+            if results_out:
+                collected.extend(r for r in results_out if r is not None)
+            else:
+                collected.extend(s.digest for s in slots_out if s.digest is not None)
+        raise
 
 
 def _refkey(ref: Any) -> tuple[str, int]:
@@ -2943,6 +3224,7 @@ def _tally_line(
 
 
 @_with_stage_executor_cleanup
+@_with_run_release
 def extract_drawing_context(
     pdf_paths: list[Path],
     *,
@@ -3394,156 +3676,202 @@ def extract_drawing_context(
         workers=_resolve_workers(max_workers, total),
     )
 
-    # Level-1 cache pre-scan (Phase 9): recognize unchanged sheets *before*
-    # rendering and skip rasterization for them (the dominant re-run cost). Only
-    # when a cache is active — with no cache every sheet renders as before, and
-    # geometry (for the QC stages) is captured during that render.
+    # Remediation WP-11.2 (R1; the owner's rules): an unexpected exception
+    # anywhere in the digest phase (the prescan, either transport's dispatch,
+    # the level-1 store, the accounting below) ends the PHASE, not the run. It
+    # used to propagate out of this function: the paid digests it had
+    # collected, their usage and their journal events were lost, and no
+    # run.log, run_manifest.json or export was written. Now the digests in
+    # hand are kept (both transports fill ``digests_in_hand`` as they go and
+    # keep the reads in flight), every other page the run owed becomes an
+    # UnreadPage naming the failure, the digest stage reads FAILED (its own
+    # failure flag before its counts, D-2), and the run stops after the phase
+    # (below). Only ``Exception`` is contained: KeyboardInterrupt and
+    # SystemExit still end the run, and ``_with_run_release`` still removes the
+    # spool and releases the retained uploads on the way out.
     cached_by_ref: dict[tuple[str, int], SheetDigest] = {}
     level1_keys: dict[tuple[str, int], str] = {}
     only: set[tuple[str, int]] | None = None
-    if cache is not None:
-        cached_by_ref, only, level1_keys, prescan_geoms = _level1_partition(
-            paths, rows=rows, cols=cols, overlap_frac=overlap_frac, cache=cache,
-            model=model, max_tokens=max_tokens, use_thinking=use_thinking,
-            effort=effort, focus=focus or None, specs_text=specs_text or None,
-            snapshot_by_path=snapshot_by_path,
-            refs=refs, expected_pages=expected_pages,
-        )
-        if need_geometry:
-            sheet_geometries.extend(prescan_geoms)
-        # The pre-scan already captured geometry for every sheet, so the render
-        # stream must not re-capture — but a freshly-rendered MISS still merges
-        # its render-only fact (the omitted-blank-tile count, §18.2) into the
-        # prescan record via the update sink; cache hits keep None (unknown).
-        # A page the prescan could not scan was routed to render (WP-11.1): the
-        # sink adds its render-time geometry at its place in page order.
-        geometry_sink = _GeometryOmissionSink(
-            sheet_geometries, order={_refkey(r): i for i, r in enumerate(refs)}
-        )
-        prescan_hits = len(cached_by_ref)
-        render_forced = config.save_tile_artifacts and only is not None
-        if render_forced:
-            # Tile artifacts need real pixels: bypass the level-1 render skip and
-            # rasterize every sheet. The level-2 (PNG-keyed) cache still serves
-            # each unchanged sheet's digest with zero API calls on both
-            # transports, so the bypass costs rasterization only.
-            only = None
-            cached_by_ref = {}
-        if render_forced:
-            _log.info(
-                "level-1 cache: %d/%d sheet(s) hit — rendering anyway for tile "
-                "artifacts (digests still served from cache)",
-                prescan_hits, total,
-            )
-        else:
-            _log.info(
-                "level-1 cache: %d/%d sheet(s) hit — skipping render for them",
-                prescan_hits, total,
-            )
-        journal.emit(
-            "CACHE_PRESCAN", stage="digest", hits=prescan_hits, total=total,
-            **({"render_forced": True} if render_forced else {}),
-        )
-        if cached_by_ref and progress is not None:
-            progress(
-                len(cached_by_ref), total,
-                f"{len(cached_by_ref)} sheet(s) from cache — skipping render",
-            )
-
-    miss_total = total if only is None else len(only)
-
-    # Tile-artifact staging sink (save_tile_artifacts): writes each rendered
-    # sheet's overview + tile PNGs into the work dir the moment the render
-    # stream produces them — the only point the bytes exist on both transports.
-    # Additive and non-fatal (I-3): a failed save records itself on the stage
-    # and lets the digest proceed untouched.
     tile_sink = None
     tile_stage: StageResult | None = None
     tile_counts = {"sheets": 0, "files": 0}
-    if config.save_tile_artifacts:
-        tile_stage = StageResult(stage="tile_artifacts", expected=False)
-        tiles_root = qc_work_dir / TILES_DIRNAME
-        journal.emit("STAGE_START", stage="tile_artifacts", sheets=total)
-
-        def tile_sink(rendered: Any) -> None:
-            try:
-                tile_counts["files"] += stage_rendered_sheet(rendered, tiles_root)
-                tile_counts["sheets"] += 1
-            except Exception as exc:  # I-3: never abort the digest
-                tile_stage.errors.append(
-                    f"failed to stage {rendered.ref.display_label}: {exc}"
-                )
-
-    # A real-time exhaustive run used to discard every digest render and open /
-    # extract / rasterize the PDF a second time for critique.  Spool the exact
-    # already-compressed PNGs to a private temporary directory instead.  This is
-    # deliberately run-local (the durable digest/critique caches remain the
-    # correctness boundary) and only enabled when critique will consume it.
     render_spool = None
     render_sink = None
-    reusable_uploads = (
-        [] if config.run_critique and use_batch and critique_use_batch else None
-    )
-    if config.run_critique and not use_batch:
-        try:
-            from .render_spool import RenderedSheetSpool
-
-            render_spool = RenderedSheetSpool()
-
-            def render_sink(rendered: Any) -> None:
-                if not render_spool.put(_refkey(rendered.ref), rendered):
-                    _log.warning(
-                        "render reuse staging unavailable for %s; critique will rerender",
-                        rendered.ref.display_label,
-                    )
-        except Exception as exc:  # noqa: BLE001 - optimization is never required
-            _log.warning("render reuse spool unavailable; critique will rerender: %s", exc)
-            render_spool = None
-            render_sink = None
-
+    reusable_uploads = None
     miss_sheets: list[SheetDigest] = []
-    if miss_total > 0:
-        if use_batch:
-            miss_sheets = _digest_sheets_via_batch(
-                paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
-                client=client, model=model, max_tokens=max_tokens,
-                use_thinking=use_thinking, effort=effort, cache=cache,
-                progress=progress, total=miss_total, on_log=on_log,
-                on_status=on_status, focus=focus or None,
-                specs_text=specs_text or None,
-                geometry_sink=geometry_sink, only=only, tile_sink=tile_sink,
-                reusable_upload_sink=reusable_uploads,
-                on_page_error=_on_page_error, journal=journal,
-                expected_pages=expected_pages,
-                on_page_count_changed=unread.page_count_changed,
+    digests_in_hand: list[SheetDigest] = []
+    # The type name of the exception that stopped the phase (the owner's
+    # wording rule: path-free by construction); the traceback goes to the log.
+    phase_error: str | None = None
+    try:
+        # Level-1 cache pre-scan (Phase 9): recognize unchanged sheets *before*
+        # rendering and skip rasterization for them (the dominant re-run cost). Only
+        # when a cache is active — with no cache every sheet renders as before, and
+        # geometry (for the QC stages) is captured during that render.
+        if cache is not None:
+            cached_by_ref, only, level1_keys, prescan_geoms = _level1_partition(
+                paths, rows=rows, cols=cols, overlap_frac=overlap_frac, cache=cache,
+                model=model, max_tokens=max_tokens, use_thinking=use_thinking,
+                effort=effort, focus=focus or None, specs_text=specs_text or None,
+                snapshot_by_path=snapshot_by_path,
+                refs=refs, expected_pages=expected_pages,
             )
-        else:
-            miss_sheets = _digest_sheets_concurrent(
-                paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
-                client=client, model=model, max_tokens=max_tokens,
-                use_thinking=use_thinking, effort=effort, cache=cache,
-                progress=progress, total=miss_total, max_workers=max_workers,
-                focus=focus or None, specs_text=specs_text or None,
-                geometry_sink=geometry_sink, only=only, tile_sink=tile_sink,
-                on_page_error=_on_page_error, render_sink=render_sink,
-                journal=journal, expected_pages=expected_pages,
-                on_page_count_changed=unread.page_count_changed,
+            if need_geometry:
+                sheet_geometries.extend(prescan_geoms)
+            # The pre-scan already captured geometry for every sheet, so the render
+            # stream must not re-capture — but a freshly-rendered MISS still merges
+            # its render-only fact (the omitted-blank-tile count, §18.2) into the
+            # prescan record via the update sink; cache hits keep None (unknown).
+            # A page the prescan could not scan was routed to render (WP-11.1): the
+            # sink adds its render-time geometry at its place in page order.
+            geometry_sink = _GeometryOmissionSink(
+                sheet_geometries, order={_refkey(r): i for i, r in enumerate(refs)}
             )
+            prescan_hits = len(cached_by_ref)
+            render_forced = config.save_tile_artifacts and only is not None
+            if render_forced:
+                # Tile artifacts need real pixels: bypass the level-1 render skip and
+                # rasterize every sheet. The level-2 (PNG-keyed) cache still serves
+                # each unchanged sheet's digest with zero API calls on both
+                # transports, so the bypass costs rasterization only.
+                only = None
+                cached_by_ref = {}
+            if render_forced:
+                _log.info(
+                    "level-1 cache: %d/%d sheet(s) hit — rendering anyway for tile "
+                    "artifacts (digests still served from cache)",
+                    prescan_hits, total,
+                )
+            else:
+                _log.info(
+                    "level-1 cache: %d/%d sheet(s) hit — skipping render for them",
+                    prescan_hits, total,
+                )
+            journal.emit(
+                "CACHE_PRESCAN", stage="digest", hits=prescan_hits, total=total,
+                **({"render_forced": True} if render_forced else {}),
+            )
+            if cached_by_ref and progress is not None:
+                progress(
+                    len(cached_by_ref), total,
+                    f"{len(cached_by_ref)} sheet(s) from cache — skipping render",
+                )
+
+        miss_total = total if only is None else len(only)
+
+        # Tile-artifact staging sink (save_tile_artifacts): writes each rendered
+        # sheet's overview + tile PNGs into the work dir the moment the render
+        # stream produces them — the only point the bytes exist on both transports.
+        # Additive and non-fatal (I-3): a failed save records itself on the stage
+        # and lets the digest proceed untouched.
+        if config.save_tile_artifacts:
+            tile_stage = StageResult(stage="tile_artifacts", expected=False)
+            tiles_root = qc_work_dir / TILES_DIRNAME
+            journal.emit("STAGE_START", stage="tile_artifacts", sheets=total)
+
+            def tile_sink(rendered: Any) -> None:
+                try:
+                    tile_counts["files"] += stage_rendered_sheet(rendered, tiles_root)
+                    tile_counts["sheets"] += 1
+                except Exception as exc:  # I-3: never abort the digest
+                    tile_stage.errors.append(
+                        f"failed to stage {rendered.ref.display_label}: {exc}"
+                    )
+
+        # A real-time exhaustive run used to discard every digest render and open /
+        # extract / rasterize the PDF a second time for critique.  Spool the exact
+        # already-compressed PNGs to a private temporary directory instead.  This is
+        # deliberately run-local (the durable digest/critique caches remain the
+        # correctness boundary) and only enabled when critique will consume it.
+        # The critique stage releases the spool and the retained uploads; every
+        # other exit releases them through ``_with_run_release`` (WP-11.2).
+        reusable_uploads = (
+            [] if config.run_critique and use_batch and critique_use_batch else None
+        )
+        if reusable_uploads is not None:
+            _register_run_release(
+                lambda: _release_retained_uploads(reusable_uploads, client=client)
+            )
+        if config.run_critique and not use_batch:
+            try:
+                from .render_spool import RenderedSheetSpool
+
+                render_spool = RenderedSheetSpool()
+                _register_run_release(render_spool.close)
+
+                def render_sink(rendered: Any) -> None:
+                    if not render_spool.put(_refkey(rendered.ref), rendered):
+                        _log.warning(
+                            "render reuse staging unavailable for %s; critique will rerender",
+                            rendered.ref.display_label,
+                        )
+            except Exception as exc:  # noqa: BLE001 - optimization is never required
+                _log.warning("render reuse spool unavailable; critique will rerender: %s", exc)
+                render_spool = None
+                render_sink = None
+
+        if miss_total > 0:
+            if use_batch:
+                miss_sheets = _digest_sheets_via_batch(
+                    paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
+                    client=client, model=model, max_tokens=max_tokens,
+                    use_thinking=use_thinking, effort=effort, cache=cache,
+                    progress=progress, total=miss_total, on_log=on_log,
+                    on_status=on_status, focus=focus or None,
+                    specs_text=specs_text or None,
+                    geometry_sink=geometry_sink, only=only, tile_sink=tile_sink,
+                    reusable_upload_sink=reusable_uploads,
+                    on_page_error=_on_page_error, journal=journal,
+                    expected_pages=expected_pages,
+                    on_page_count_changed=unread.page_count_changed,
+                    collected=digests_in_hand,
+                )
+            else:
+                miss_sheets = _digest_sheets_concurrent(
+                    paths, rows=rows, cols=cols, overlap_frac=overlap_frac,
+                    client=client, model=model, max_tokens=max_tokens,
+                    use_thinking=use_thinking, effort=effort, cache=cache,
+                    progress=progress, total=miss_total, max_workers=max_workers,
+                    focus=focus or None, specs_text=specs_text or None,
+                    geometry_sink=geometry_sink, only=only, tile_sink=tile_sink,
+                    on_page_error=_on_page_error, render_sink=render_sink,
+                    journal=journal, expected_pages=expected_pages,
+                    on_page_count_changed=unread.page_count_changed,
+                    collected=digests_in_hand,
+                )
+    except Exception as exc:  # noqa: BLE001 - contained: the phase stops, the run ships
+        phase_error = type(exc).__name__
+        miss_sheets = list(digests_in_hand)
+        _log.warning(
+            "digest phase stopped early by an unexpected error (%s); %d digest(s) "
+            "in hand are kept", phase_error, len(miss_sheets), exc_info=True,
+        )
 
     # Store each miss's result under its level-1 key too (store-under-both), so a
     # next run recognizes the sheet pre-render and skips rasterization. Only a
     # finished, non-empty digest is stored, by the same predicate the level-2
     # writers apply (a refused or unfinished read carries an error and is not).
-    if cache is not None:
-        for sd in miss_sheets:
-            if digest_cache_admits(
-                error=sd.error,
-                text=(sd.text or "").strip(),
-                stop_reason=sd.stop_reason,
-            ):
-                key = level1_keys.get(_refkey(sd.ref))
-                if key is not None:
-                    cache.put(key, cache_entry_from_digest(sd))
+    # After a contained failure it stores the digests in hand, so a re-run
+    # renders and reads only what this run did not (WP-11.2).
+    if cache is not None and miss_sheets:
+        try:
+            for sd in miss_sheets:
+                if digest_cache_admits(
+                    error=sd.error,
+                    text=(sd.text or "").strip(),
+                    stop_reason=sd.stop_reason,
+                ):
+                    key = level1_keys.get(_refkey(sd.ref))
+                    if key is not None:
+                        cache.put(key, cache_entry_from_digest(sd))
+        except Exception as exc:  # noqa: BLE001 - contained, as above
+            if phase_error is None:
+                phase_error = type(exc).__name__
+            _log.warning(
+                "level-1 digest store failed (%s)", type(exc).__name__, exc_info=True,
+            )
+    if phase_error is not None:
+        unread.stop(phase_error)
 
     # Merge cached + freshly-digested sheets, restoring original (page) order.
     by_ref = dict(cached_by_ref)
@@ -3552,41 +3880,34 @@ def extract_drawing_context(
     sheets = [by_ref[_refkey(r)] for r in refs if _refkey(r) in by_ref]
     # Every page the run owes ends with an outcome (remediation WP-11.1, R1): a
     # digest, or an UnreadPage carrying the reason the render path gave ("no
-    # render outcome was recorded" when it gave none). The lines say it once
-    # per source for a source-level failure and once per page otherwise (the
-    # owner's cardinality rule); a source with more pages than the inventory
-    # counted is named once, since only its inventoried pages were read.
+    # render outcome was recorded" when it gave none; since WP-11.2, the phase's
+    # failure for a page it never reached). The lines say it once per source for
+    # a source-level failure and once per page otherwise (the owner's
+    # cardinality rule); a source with more pages than the inventory counted is
+    # named once, since only its inventoried pages were read. A stopped phase
+    # adds one run-level line, first after the inventory's, for every page it
+    # never reached (the owner's rule: one line, the type name only).
     unread_pages = unread.settle(refs, read=set(by_ref))
     unread_by_key = {source_page_key(page): page for page in unread_pages}
     page_error_lines = unread.lines(refs)
     page_count_notes = unread.notes(refs)
+    phase_line = (
+        _digest_phase_line(
+            phase_error, total=total, not_reached=unread.not_reached,
+            read=sum(1 for s in sheets if s.ok), cached=cache is not None,
+        )
+        if phase_error is not None else None
+    )
 
     # Seed the run errors with the inventory rejections and any page-level
     # render failures (§10.5 / §10.7) so a partial run explains what it dropped.
     errors: list[str] = (
-        list(inventory_errors) + list(page_error_lines) + list(page_count_notes)
-        + specs_errors
+        list(inventory_errors) + ([phase_line] if phase_line else [])
+        + list(page_error_lines) + list(page_count_notes) + specs_errors
     )
     # Typed per-stage outcomes for the pre-ledger stages (synthesis, critique,
     # cross-QC); the ledger stages append theirs inside ``_run_qc_stages`` (§15.4).
     stage_results: list[StageResult] = []
-    if tile_stage is not None:
-        # expected=False keeps the roll-up from ever scoring this additive
-        # debug-artifact stage — a failed dump must not degrade a clean run.
-        if tile_stage.errors:
-            tile_stage.status = "FAILED"
-            extra = len(tile_stage.errors) - 1
-            errors.append(
-                "tile artifacts: " + tile_stage.errors[0]
-                + (f" (+{extra} more sheet(s))" if extra else "")
-            )
-        elif tile_counts["sheets"] > 0:
-            tile_stage.status = "COMPLETE"
-        else:
-            tile_stage.status = "SKIPPED_VALID"  # requested, nothing rendered
-        tile_stage.items_in = tile_counts["sheets"]
-        tile_stage.items_out = tile_counts["files"]
-        _finish_stage(stage_results, journal, tile_stage)
     # Append-only usage ledger (§15.6): every API call/attempt below appends a
     # priced record; the run's token/cost totals are *derived* sums over it, so no
     # stage can overwrite another's counters. ``img_tok`` is a separate informational
@@ -3597,199 +3918,290 @@ def extract_drawing_context(
     # N15 (remediation WP-01.3): the findings of each read the model did not
     # finish, held out of the review, by portable sheet key.
     findings_held_out: dict[str, int] = {}
-    for ref in refs:
-        sd = by_ref.get(_refkey(ref))
-        if sd is None:
-            # A page the run owed and could not read (remediation WP-11.1): one
-            # PAGE_UNREAD in page order beside the SHEET_DIGESTED events, so
-            # every expected page ends with exactly one per-page event. It made
-            # no call, so it records no usage.
-            page = unread_by_key[source_page_key(ref)]
+    ok_sheets = sum(1 for s in sheets if s.ok)
+    # The accounting is contained too (WP-11.2). It runs in two passes, which
+    # emit exactly what one pass did: first every page's outcome (its error line
+    # and its one per-page event), then the usage records, which emit no event.
+    # So the failure this can realistically meet, a usage number that is not a
+    # number, still leaves every page with its event and the stage unrecorded,
+    # which the fallback below then records as the owner's rule says.
+    try:
+        if tile_stage is not None:
+            # expected=False keeps the roll-up from ever scoring this additive
+            # debug-artifact stage — a failed dump must not degrade a clean run.
+            if tile_stage.errors:
+                tile_stage.status = "FAILED"
+                extra = len(tile_stage.errors) - 1
+                errors.append(
+                    "tile artifacts: " + tile_stage.errors[0]
+                    + (f" (+{extra} more sheet(s))" if extra else "")
+                )
+            elif tile_counts["sheets"] > 0:
+                tile_stage.status = "COMPLETE"
+            else:
+                tile_stage.status = "SKIPPED_VALID"  # requested, nothing rendered
+            tile_stage.items_in = tile_counts["sheets"]
+            tile_stage.items_out = tile_counts["files"]
+            _finish_stage(stage_results, journal, tile_stage)
+        if phase_line is not None:
             journal.emit(
-                "PAGE_UNREAD", stage="digest", level="WARNING",
-                sheet=page.display_label, source=page.source_id or "-",
-                reason=page.reason,
+                "DIGEST_PHASE_STOPPED", stage="digest", level="ERROR",
+                error_type=phase_error, pages_read=ok_sheets,
+                pages_not_read=unread.not_reached,
             )
-            continue
-        # A cached sheet made no API call, so it costs zero tokens *this run* — its
-        # record carries the cache-hit metadata but zero billed tokens. A fresh
-        # digest records its actual reported usage (billable even if it errored).
-        cached = bool(getattr(sd, "cached", False))
-        sheet_transport = _digest_transport(
-            cached=cached, rescued=bool(getattr(sd, "rescued", False)),
-            use_batch=use_batch,
-        )
-        # The recorded instance uses the PORTABLE sheet identity (SRC-#### +
-        # page), never the pdf path — usage records are exported verbatim into
-        # run_manifest.json (Phase 26A §18.4), and an absolute path in a
-        # ``stage_instance`` would leak the user's directory layout (§10.4).
-        skey = source_page_key(sd.ref)
-        usage_attempts = list(getattr(sd, "usage_attempts", ()) or ())
-        if usage_attempts and not cached:
-            # Batch recovery can produce more than one billable response for a
-            # sheet (for example, an empty max_tokens response followed by a
-            # raised-cap retry, possibly ending in a real-time rescue). Preserve
-            # each response as its own record so Batch and real-time rates are
-            # applied independently. The runtime-only metadata is deliberately
-            # absent on cache hits and never enters cache serialization.
-            #
-            # Attempts marked non-billable were submitted but never answered —
-            # a batch abandoned mid-flight. They are recorded (§15.6 wants every
-            # attempt) but carry no tokens, so the image estimate must count
-            # only the responses that actually came back; multiplying it by
-            # abandoned rounds would invent image tokens nobody was charged for.
-            img_tok += sd.image_token_estimate * sum(
-                1 for a in usage_attempts if getattr(a, "billable", True)
+        for ref in refs:
+            sd = by_ref.get(_refkey(ref))
+            if sd is None:
+                # A page the run owed and could not read (remediation WP-11.1): one
+                # PAGE_UNREAD in page order beside the SHEET_DIGESTED events, so
+                # every expected page ends with exactly one per-page event. It made
+                # no call, so it records no usage.
+                page = unread_by_key[source_page_key(ref)]
+                journal.emit(
+                    "PAGE_UNREAD", stage="digest", level="WARNING",
+                    sheet=page.display_label, source=page.source_id or "-",
+                    reason=page.reason,
+                )
+                continue
+            cached = bool(getattr(sd, "cached", False))
+            skey = source_page_key(sd.ref)
+            if sd.error:
+                errors.append(f"{sd.ref.display_label}: {sd.error}")
+            elif not sd.ok:
+                # ``sd.ok`` is error-free AND non-empty, so an error-free sheet
+                # whose digest came back empty is a failed sheet. It used to reach
+                # the journal and nothing else, leaving ctx.errors — and every
+                # surface built from it — undercounting the sheets the run never
+                # actually read.
+                errors.append(f"{sd.ref.display_label}: empty digest")
+            # One journal event per sheet, in deterministic page order (§18.2):
+            # success, cache hit/miss, digest size, findings count, plus the
+            # geometry-side facts (raster/vector, text-layer length, omitted tiles)
+            # when this run rendered/prescanned them. Counts and flags only — never
+            # digest text or quotes.
+            # Classified by ``sd.ok`` (error-free AND non-empty): an error-free
+            # sheet whose digest came back empty is a failure for accounting
+            # purposes, matching run.log's Sheets section and ok_sheet_count.
+            sheet_fields: dict[str, Any] = {
+                "sheet": sd.ref.display_label,
+                "source": skey[0],
+                "status": "OK" if sd.ok else "FAILED",
+                "cached": cached,
+                "digest_chars": len(sd.text or ""),
+                "findings": len(getattr(sd, "findings", None) or []),
+            }
+            # Why the model stopped. Omitted while it is the ordinary end_turn, so
+            # the common line stays short — but a run that hit the cap used to leave
+            # nothing at all in run.log, which is what made a truncated digest
+            # invisible after the fact.
+            if getattr(sd, "stop_reason", None) not in (None, "", "end_turn"):
+                sheet_fields["stop_reason"] = sd.stop_reason
+            geom = geom_by_key.get(source_page_key(sd.ref))
+            if geom is not None:
+                sheet_fields["layer"] = "raster" if geom.is_raster else "vector"
+                sheet_fields["text_layer_chars"] = len(geom.sheet_text or "")
+                if getattr(geom, "omitted_tile_count", None) is not None:
+                    sheet_fields["omitted_tiles"] = geom.omitted_tile_count
+            if getattr(sd, "findings_note", ""):
+                sheet_fields["parser_note"] = sd.findings_note
+            held = held_out_findings(sd)
+            if held:
+                sheet_fields["findings_held_out"] = len(held)
+                findings_held_out[f"{skey[0]}:p{skey[1]}"] = len(held)
+            if sd.error:
+                sheet_fields["error"] = sd.error
+            elif not sd.ok:
+                sheet_fields["error"] = "(empty digest)"
+            journal.emit(
+                "SHEET_DIGESTED", stage="digest",
+                level="INFO" if sd.ok else "WARNING", **sheet_fields,
             )
-            for usage_attempt in usage_attempts:
+        for ref in refs:
+            sd = by_ref.get(_refkey(ref))
+            if sd is None:
+                continue
+            # A cached sheet made no API call, so it costs zero tokens *this run* — its
+            # record carries the cache-hit metadata but zero billed tokens. A fresh
+            # digest records its actual reported usage (billable even if it errored).
+            cached = bool(getattr(sd, "cached", False))
+            sheet_transport = _digest_transport(
+                cached=cached, rescued=bool(getattr(sd, "rescued", False)),
+                use_batch=use_batch,
+            )
+            # The recorded instance uses the PORTABLE sheet identity (SRC-#### +
+            # page), never the pdf path — usage records are exported verbatim into
+            # run_manifest.json (Phase 26A §18.4), and an absolute path in a
+            # ``stage_instance`` would leak the user's directory layout (§10.4).
+            skey = source_page_key(sd.ref)
+            usage_attempts = list(getattr(sd, "usage_attempts", ()) or ())
+            if usage_attempts and not cached:
+                # Batch recovery can produce more than one billable response for a
+                # sheet (for example, an empty max_tokens response followed by a
+                # raised-cap retry, possibly ending in a real-time rescue). Preserve
+                # each response as its own record so Batch and real-time rates are
+                # applied independently. The runtime-only metadata is deliberately
+                # absent on cache hits and never enters cache serialization.
+                #
+                # Attempts marked non-billable were submitted but never answered —
+                # a batch abandoned mid-flight. They are recorded (§15.6 wants every
+                # attempt) but carry no tokens, so the image estimate must count
+                # only the responses that actually came back; multiplying it by
+                # abandoned rounds would invent image tokens nobody was charged for.
+                img_tok += sd.image_token_estimate * sum(
+                    1 for a in usage_attempts if getattr(a, "billable", True)
+                )
+                for usage_attempt in usage_attempts:
+                    _record_usage(
+                        run_usage, family="digest",
+                        instance=f"digest:{skey[0]}:p{skey[1]}",
+                        model=model,
+                        transport=getattr(usage_attempt, "transport", sheet_transport),
+                        input_tokens=getattr(usage_attempt, "input_tokens", 0),
+                        output_tokens=getattr(usage_attempt, "output_tokens", 0),
+                        cache_read_tokens=getattr(usage_attempt, "cache_read_tokens", 0),
+                        cache_write_tokens=getattr(usage_attempt, "cache_write_tokens", 0),
+                        parse_success=bool(getattr(usage_attempt, "parse_success", True)),
+                        terminal_status=getattr(
+                            usage_attempt, "terminal_status", "COMPLETE"
+                        ),
+                        attempt=int(getattr(usage_attempt, "attempt_number", 1) or 1),
+                        request_id=getattr(
+                            usage_attempt, "request_or_custom_id", ""
+                        ),
+                    )
+            else:
+                if not cached:
+                    img_tok += sd.image_token_estimate
                 _record_usage(
                     run_usage, family="digest",
                     instance=f"digest:{skey[0]}:p{skey[1]}",
                     model=model,
-                    transport=getattr(usage_attempt, "transport", sheet_transport),
-                    input_tokens=getattr(usage_attempt, "input_tokens", 0),
-                    output_tokens=getattr(usage_attempt, "output_tokens", 0),
-                    cache_read_tokens=getattr(usage_attempt, "cache_read_tokens", 0),
-                    cache_write_tokens=getattr(usage_attempt, "cache_write_tokens", 0),
-                    parse_success=bool(getattr(usage_attempt, "parse_success", True)),
-                    terminal_status=getattr(
-                        usage_attempt, "terminal_status", "COMPLETE"
-                    ),
-                    attempt=int(getattr(usage_attempt, "attempt_number", 1) or 1),
-                    request_id=getattr(
-                        usage_attempt, "request_or_custom_id", ""
-                    ),
+                    transport=sheet_transport,
+                    input_tokens=0 if cached else sd.input_tokens,
+                    output_tokens=0 if cached else sd.output_tokens,
+                    cache_read_tokens=0 if cached else getattr(sd, "cache_read_tokens", 0),
+                    cache_write_tokens=0 if cached else getattr(sd, "cache_write_tokens", 0),
+                    cache_hit=cached,
+                    parse_success=(sd.error is None),
+                    terminal_status="FAILED" if sd.error else "COMPLETE",
                 )
+        # §3.3 — the digest was the one stage with no StageResult, so a sheet it
+        # failed to read reached ctx.errors and the journal but never
+        # ``roll_up_qc_status``: an exhaustive run could report COMPLETE over a
+        # sheet it never analyzed, contradicting I-1. ``expected=True`` is the
+        # honest value (every mode digests) and is safe, because the roll-up
+        # returns early on a non-exhaustive run — it is only ever read where the
+        # digest genuinely is required.
+        #
+        # This replaces a hand-written STAGE_END rather than joining it: two
+        # STAGE_END events for one stage make ``RunJournal.stage_durations()``
+        # pair the START with the second and lose the duration.
+        digest_stage = StageResult(stage="digest", expected=True)
+        # items_in counts the sheets the run set out to read, not the ones that
+        # survived rendering, so a page that never produced a SheetDigest at all
+        # stays visible here instead of vanishing from both sides of the ratio.
+        # Since remediation WP-11.1 that is the inventory's page count (D-2's
+        # eligible items), no longer a recount that skipped a source it could not
+        # reopen; an unread page is an eligible item with no judgment.
+        digest_stage.items_in = total
+        digest_stage.items_out = ok_sheets
+        called = [s for s in sheets if not s.cached]
+        digest_stage.calls_planned = len(called)
+        digest_stage.calls_succeeded = sum(1 for s in called if s.ok)
+        digest_stage.calls_failed = sum(1 for s in called if not s.ok)
+        if phase_line is not None:
+            # The stage's own failure flag, tested before its counts (D-2; the
+            # owner's rule for a contained failure, WP-11.2): FAILED whatever
+            # was read, the failure its first error. Items keep their meaning.
+            digest_stage.status = "FAILED"
+            digest_stage.errors.append(phase_line)
+        elif not total:
+            digest_stage.status = "SKIPPED_VALID"
+        elif ok_sheets == total:
+            digest_stage.status = "COMPLETE"
+        elif ok_sheets:
+            digest_stage.status = "PARTIAL"
         else:
-            if not cached:
-                img_tok += sd.image_token_estimate
-            _record_usage(
-                run_usage, family="digest",
-                instance=f"digest:{skey[0]}:p{skey[1]}",
-                model=model,
-                transport=sheet_transport,
-                input_tokens=0 if cached else sd.input_tokens,
-                output_tokens=0 if cached else sd.output_tokens,
-                cache_read_tokens=0 if cached else getattr(sd, "cache_read_tokens", 0),
-                cache_write_tokens=0 if cached else getattr(sd, "cache_write_tokens", 0),
-                cache_hit=cached,
-                parse_success=(sd.error is None),
-                terminal_status="FAILED" if sd.error else "COMPLETE",
+            digest_stage.status = "FAILED"
+        if digest_stage.status not in ("COMPLETE", "SKIPPED_VALID"):
+            # Both ways a sheet can be missing, because ``items_in`` counts them
+            # both. A sheet that digested badly has a SheetDigest carrying its
+            # error; a page that never rendered has NO SheetDigest at all, so it
+            # exists only in ``page_error_lines`` — reading just ``sheets`` left the
+            # commonest render failure showing as a degraded stage with no
+            # explanation in the journal, run.log or the report's stage table.
+            # Bounded and sorted for I-7, as the critique stage does with its own.
+            digest_stage.errors.extend(
+                sorted(
+                    [
+                        f"{s.ref.display_label}: {s.error or 'empty digest'}"
+                        for s in sheets if not s.ok
+                    ]
+                    + list(page_error_lines)
+                )[:5]
             )
-        if sd.error:
-            errors.append(f"{sd.ref.display_label}: {sd.error}")
-        elif not sd.ok:
-            # ``sd.ok`` is error-free AND non-empty, so an error-free sheet
-            # whose digest came back empty is a failed sheet. It used to reach
-            # the journal and nothing else, leaving ctx.errors — and every
-            # surface built from it — undercounting the sheets the run never
-            # actually read.
-            errors.append(f"{sd.ref.display_label}: empty digest")
-        # One journal event per sheet, in deterministic page order (§18.2):
-        # success, cache hit/miss, digest size, findings count, plus the
-        # geometry-side facts (raster/vector, text-layer length, omitted tiles)
-        # when this run rendered/prescanned them. Counts and flags only — never
-        # digest text or quotes.
-        # Classified by ``sd.ok`` (error-free AND non-empty): an error-free
-        # sheet whose digest came back empty is a failure for accounting
-        # purposes, matching run.log's Sheets section and ok_sheet_count.
-        sheet_fields: dict[str, Any] = {
-            "sheet": sd.ref.display_label,
-            "source": skey[0],
-            "status": "OK" if sd.ok else "FAILED",
-            "cached": cached,
-            "digest_chars": len(sd.text or ""),
-            "findings": len(getattr(sd, "findings", None) or []),
-        }
-        # Why the model stopped. Omitted while it is the ordinary end_turn, so
-        # the common line stays short — but a run that hit the cap used to leave
-        # nothing at all in run.log, which is what made a truncated digest
-        # invisible after the fact.
-        if getattr(sd, "stop_reason", None) not in (None, "", "end_turn"):
-            sheet_fields["stop_reason"] = sd.stop_reason
-        geom = geom_by_key.get(source_page_key(sd.ref))
-        if geom is not None:
-            sheet_fields["layer"] = "raster" if geom.is_raster else "vector"
-            sheet_fields["text_layer_chars"] = len(geom.sheet_text or "")
-            if getattr(geom, "omitted_tile_count", None) is not None:
-                sheet_fields["omitted_tiles"] = geom.omitted_tile_count
-        if getattr(sd, "findings_note", ""):
-            sheet_fields["parser_note"] = sd.findings_note
-        held = held_out_findings(sd)
-        if held:
-            sheet_fields["findings_held_out"] = len(held)
-            findings_held_out[f"{skey[0]}:p{skey[1]}"] = len(held)
-        if sd.error:
-            sheet_fields["error"] = sd.error
-        elif not sd.ok:
-            sheet_fields["error"] = "(empty digest)"
-        journal.emit(
-            "SHEET_DIGESTED", stage="digest",
-            level="INFO" if sd.ok else "WARNING", **sheet_fields,
+        # A source with more pages than the inventory counted: every page the run
+        # owed was read, so the stage keeps its status, but it names the source
+        # (the same line is a run error, so the run reads PARTIAL; WP-11.1).
+        digest_stage.warnings.extend(page_count_notes)
+        if findings_held_out:
+            # Observational (D-2 note): each such sheet is already a failed one.
+            digest_stage.warnings.append(
+                f"held out {sum(findings_held_out.values())} finding(s) from "
+                f"{len(findings_held_out)} sheet(s) whose read did not finish: not "
+                "numbered, marked up, verified or exported; each sheet's own file "
+                "lists them"
+            )
+        _finish_stage(stage_results, journal, digest_stage)
+    except Exception as exc:  # noqa: BLE001 - contained: the accounting failed
+        _log.warning(
+            "digest accounting failed (%s)", type(exc).__name__, exc_info=True,
         )
-    ok_sheets = sum(1 for s in sheets if s.ok)
-    # §3.3 — the digest was the one stage with no StageResult, so a sheet it
-    # failed to read reached ctx.errors and the journal but never
-    # ``roll_up_qc_status``: an exhaustive run could report COMPLETE over a
-    # sheet it never analyzed, contradicting I-1. ``expected=True`` is the
-    # honest value (every mode digests) and is safe, because the roll-up
-    # returns early on a non-exhaustive run — it is only ever read where the
-    # digest genuinely is required.
-    #
-    # This replaces a hand-written STAGE_END rather than joining it: two
-    # STAGE_END events for one stage make ``RunJournal.stage_durations()``
-    # pair the START with the second and lose the duration.
-    digest_stage = StageResult(stage="digest", expected=True)
-    # items_in counts the sheets the run set out to read, not the ones that
-    # survived rendering, so a page that never produced a SheetDigest at all
-    # stays visible here instead of vanishing from both sides of the ratio.
-    # Since remediation WP-11.1 that is the inventory's page count (D-2's
-    # eligible items), no longer a recount that skipped a source it could not
-    # reopen; an unread page is an eligible item with no judgment.
-    digest_stage.items_in = total
-    digest_stage.items_out = ok_sheets
-    called = [s for s in sheets if not s.cached]
-    digest_stage.calls_planned = len(called)
-    digest_stage.calls_succeeded = sum(1 for s in called if s.ok)
-    digest_stage.calls_failed = sum(1 for s in called if not s.ok)
-    if not total:
-        digest_stage.status = "SKIPPED_VALID"
-    elif ok_sheets == total:
-        digest_stage.status = "COMPLETE"
-    elif ok_sheets:
-        digest_stage.status = "PARTIAL"
-    else:
-        digest_stage.status = "FAILED"
-    if digest_stage.status not in ("COMPLETE", "SKIPPED_VALID"):
-        # Both ways a sheet can be missing, because ``items_in`` counts them
-        # both. A sheet that digested badly has a SheetDigest carrying its
-        # error; a page that never rendered has NO SheetDigest at all, so it
-        # exists only in ``page_error_lines`` — reading just ``sheets`` left the
-        # commonest render failure showing as a degraded stage with no
-        # explanation in the journal, run.log or the report's stage table.
-        # Bounded and sorted for I-7, as the critique stage does with its own.
-        digest_stage.errors.extend(
-            sorted(
-                [
-                    f"{s.ref.display_label}: {s.error or 'empty digest'}"
-                    for s in sheets if not s.ok
-                ]
-                + list(page_error_lines)
-            )[:5]
+        if phase_line is None:
+            # The accounting is the phase's first failure: every page was
+            # reached, so the line says so (the owner's wording), in the same
+            # place a collection failure puts it.
+            phase_error = type(exc).__name__
+            phase_line = _digest_phase_line(
+                phase_error, total=total, not_reached=0, read=ok_sheets,
+                cached=cache is not None,
+            )
+            errors.insert(len(inventory_errors), phase_line)
+            journal.emit(
+                "DIGEST_PHASE_STOPPED", stage="digest", level="ERROR",
+                error_type=phase_error, pages_read=ok_sheets, pages_not_read=0,
+            )
+        # One digest record, FAILED, the failure its first error. The stage's
+        # own record can only have landed if ``_finish_stage`` raised after it
+        # appended; that record is corrected rather than joined by a second.
+        recorded = next((sr for sr in stage_results if sr.stage == "digest"), None)
+        if recorded is not None:
+            recorded.status = "FAILED"
+            if phase_line not in recorded.errors:
+                recorded.errors.insert(0, phase_line)
+        else:
+            failed_stage = StageResult(
+                stage="digest", expected=True, status="FAILED",
+                items_in=total, items_out=ok_sheets, errors=[phase_line],
+            )
+            try:
+                _finish_stage(stage_results, journal, failed_stage)
+            except Exception:  # noqa: BLE001 - the record, at least, is kept
+                if failed_stage not in stage_results:
+                    stage_results.append(failed_stage)
+    if phase_error is not None:
+        # The owner's rule: a contained failure stops the run after the digest
+        # phase. No later stage makes a call, reopens a source or writes a
+        # reviewed PDF; the context below ships what the phase produced.
+        return _stopped_run_context(
+            config=config, journal=journal, errors=errors,
+            stage_results=stage_results, run_usage=run_usage, img_tok=img_tok,
+            sheets=sheets, total=total, file_count=file_count, focus=focus,
+            specs_text=specs_text, sheet_geometries=sheet_geometries,
+            qc_work_dir=qc_work_dir, inventory=inventory,
+            findings_held_out=findings_held_out, unread_pages=unread_pages,
+            paths=paths, client=client, cache=cache,
         )
-    # A source with more pages than the inventory counted: every page the run
-    # owed was read, so the stage keeps its status, but it names the source
-    # (the same line is a run error, so the run reads PARTIAL; WP-11.1).
-    digest_stage.warnings.extend(page_count_notes)
-    if findings_held_out:
-        # Observational (D-2 note): each such sheet is already a failed one.
-        digest_stage.warnings.append(
-            f"held out {sum(findings_held_out.values())} finding(s) from "
-            f"{len(findings_held_out)} sheet(s) whose read did not finish: not "
-            "numbered, marked up, verified or exported; each sheet's own file "
-            "lists them"
-        )
-    _finish_stage(stage_results, journal, digest_stage)
 
     # Independent text-only set stages can spend their network latency behind
     # identity → planning → critique. Their results are deliberately *not*
@@ -4156,34 +4568,11 @@ def extract_drawing_context(
             if render_spool is not None:
                 render_spool.close()
                 render_spool = None
-            if reusable_uploads:
-                # Cache hits, grid mismatches, and any sheet not reached after
-                # an additive critique failure still belong to the pipeline.
-                # Adopted manifests return no IDs, so every remote file has one
-                # and only one cleanup owner.
-                try:
-                    cleanup_client = client
-                    if cleanup_client is None:
-                        from .client import get_client as _get_client
-
-                        cleanup_client = _get_client()
-                    unclaimed_ids = [
-                        file_id
-                        for reusable in reusable_uploads
-                        for file_id in reusable.release_ids()
-                    ]
-                    if unclaimed_ids:
-                        from .batch_digest import _release_uploaded_files
-
-                        _release_uploaded_files(
-                            cleanup_client, unclaimed_ids,
-                            in_background=True, on_log=on_log,
-                        )
-                except Exception as cleanup_exc:  # noqa: BLE001 - stage is additive
-                    _log.warning(
-                        "retained digest-upload cleanup failed: %s", cleanup_exc,
-                    )
-                reusable_uploads.clear()
+            # Cache hits, grid mismatches, and any sheet not reached after an
+            # additive critique failure still belong to the pipeline. The same
+            # release runs on every other exit of the run (``_with_run_release``,
+            # remediation WP-11.2), where this one has already emptied the list.
+            _release_retained_uploads(reusable_uploads, client=client, on_log=on_log)
     _finish_stage(stage_results, journal, critique_stage)
 
     # Cross-sheet QC pass (Phase 13): a deliberate whole-set conflict hunt over the

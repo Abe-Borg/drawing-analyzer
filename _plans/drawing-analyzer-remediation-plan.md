@@ -920,6 +920,20 @@ Regression cases: second source removed/locked after inventory; corrupt middle p
 
 The help text's "released on every exit path" is false today.
 
+- **WP-11.2 note (2026-09-25, the owner's rules; measured on `0aa2758`).** WP-11.1 took away the source and page aborts. Each other exception inside the phase still raised out of the run in all 22 cases measured (real time, batch, Hybrid and Economy, cold and cached). The three items above were each true, plus two more:
+  - the batch **collect** poll sat outside `collect_drawing_batch`'s guard: a poll failure left 6 of 6 uploads, cancelled nothing and read back none of the 3 billed reads;
+  - with a cache, a re-run rendered every page again, since the level-1 store ran only after a successful phase.
+
+  What was decided and built:
+  - an unexpected `Exception` stops the **phase**, not the run: the digests in hand ship (real time keeps the reads in flight), every page not reached is an `UnreadPage` naming the failure, one run-level line gives the type name only and says what was kept (step 7), the digest stage reads FAILED, and the run stops after the digest phase with the read sheets' findings recorded offline. The context goes to the normal exporter.
+  - `KeyboardInterrupt` and `SystemExit` still end the run (WP-17.1, D-5).
+  - the level-1 store runs over the digests in hand.
+  - the submit guard (item 2).
+  - the collect guard covers the whole body: harvest what finished, then release, and keep the files of a batch it cannot cancel.
+  - the spool and the retained uploads are released on every exit of the run, `KeyboardInterrupt` included (item 3).
+
+  The help text and the README now list only the exits that are covered. Their "expire server-side" wording is WP-18.4's (N22). Evidence: `tests/test_digest_phase_containment.py`; the handoff in `PROGRESS.md`.
+
 Slices: WP-11.1 … WP-11.3.
 
 ### WP-12 — Citation parsing, full-text editions, and honest adoption evidence

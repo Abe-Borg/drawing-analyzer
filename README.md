@@ -411,9 +411,13 @@ PDFs → list sheets → render (overview + 6×6 tiles) + extract vector text la
   each uncached sheet's images upload once and *both* self-consistency reads
   reference that one shared upload (distinct `custom_id`s), so the reviewer earns
   the same batch rate and the sheet is neither re-rendered nor re-uploaded per read.
-  The uploaded files are released on every exit — a fully-collected batch, a
-  confirmed cancel, or an unexpected collection error (best-effort cancel, then
-  release); a batch this run can't cancel keeps its files to expire server-side.
+  The uploaded files are released when a batch is fully collected, when it is
+  cancelled, and when an unexpected error stops its submission or its
+  collection. A submission that stops before its batch exists deletes what it
+  uploaded. A collection that stops cancels the batch if it is still running,
+  then releases; the digest's collection first reads the batch's status once
+  and reads back what finished (and was paid for). A batch this run can't
+  cancel keeps its files to expire server-side.
 - **Hybrid mode** uses real-time digests (`use_batch=False`) and Batch critique
   (`critique_use_batch=True`). Standard analysis therefore starts immediately;
   exhaustive QC can still wait for its two critique reads in the shared queue.
@@ -2124,6 +2128,36 @@ digest or a not-read record). The run reads `PARTIAL` (`FAILED` when no page at
 all could be read), and the digest stage counts the pages the run owed against
 the pages it read. "No readable PDF pages found" is reserved for a selection in
 which nothing was accepted at all.
+
+**An unexpected error while the sheets are being read does not lose the sheets
+already read.** A file or page that cannot be read is handled per file or per
+page, as above. Something else can still go wrong in that step: a bug, the
+digest cache, a batch that cannot be polled, or a status callback that raises.
+Then the run stops after the reading step instead of crashing:
+
+- **Every sheet already read (and paid for) is kept** and exported as usual,
+  with run.log and run_manifest.json. On real time, reads already sent are
+  waited for and kept. The read sheets' findings are recorded and numbered as
+  on a standard run.
+- **Nothing later runs**: no critique, cross-sheet check, verification or
+  reviewed PDF, so the run costs nothing more.
+- **Every page it never reached is listed as not read**, with the reason
+  `not read: the digest phase stopped early (RuntimeError)`.
+- **One line in the error list says what happened and what was kept**, for
+  example `Digest phase stopped early by an unexpected error (RuntimeError): 2
+  of 3 page(s) were not read; no later stage ran; the 1 page(s) read are
+  exported and cached, so a re-run does not pay for them again`. It names only
+  the kind of error, never its message, which can carry a folder name. The
+  full traceback is in the diagnostics log.
+- **The digest stage reads `FAILED`.** The run reads `PARTIAL`, or `FAILED`
+  when nothing was read.
+
+With the cache on, a re-run reads only the pages this run did not. Ctrl+C
+still ends the run at once. On every way out, Ctrl+C included, the run removes
+the two things it kept for the critique: the render spool (a temporary folder
+of page images, Fast and Hybrid) and the Economy uploads (deleted from
+Anthropic's file storage). How a batch's own uploads are released is described
+under Economy mode above.
 
 Each source is also fingerprinted at the start of the run, and re-checked just
 before its reviewed PDF is written. If a source file **changes on disk mid-run**
