@@ -2152,8 +2152,11 @@ Then the run stops after the reading step instead of crashing:
 - **The digest stage reads `FAILED`.** The run reads `PARTIAL`, or `FAILED`
   when nothing was read.
 
-With the cache on, a re-run reads only the pages this run did not. Ctrl+C
-still ends the run at once. On every way out, Ctrl+C included, the run removes
+With the cache on, a re-run reads only the pages this run did not (the line
+leaves out its "cached" promise when the cache itself was what failed). A
+failure while recording one sheet's usage costs only that sheet's record, and
+a cache that fails to save a sheet never loses the sheet itself. Ctrl+C still
+ends the run at once. On every way out, Ctrl+C included, the run removes
 the two things it kept for the critique: the render spool (a temporary folder
 of page images, Fast and Hybrid) and the Economy uploads (deleted from
 Anthropic's file storage). How a batch's own uploads are released is described

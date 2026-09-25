@@ -1955,16 +1955,25 @@ def digest_sheet(
     if cache is not None and cache_key is not None and digest_cache_admits(
         error=sd.error, text=raw_text, stop_reason=sd.stop_reason,
     ):
-        cache.put(
-            cache_key,
-            {
-                "text": sd.text,
-                "input_tokens": in_tok,
-                "output_tokens": out_tok,
-                "stop_reason": sd.stop_reason,
-                "findings": [f.to_dict() for f in sd.findings],
-                "created_ts": time.time(),
-            },
-        )
+        # Advisory (remediation WP-11.2): the read is finished and paid for, so
+        # a cache that raises must not take it with it. ``DigestCache`` never
+        # raises here; an injected cache can.
+        try:
+            cache.put(
+                cache_key,
+                {
+                    "text": sd.text,
+                    "input_tokens": in_tok,
+                    "output_tokens": out_tok,
+                    "stop_reason": sd.stop_reason,
+                    "findings": [f.to_dict() for f in sd.findings],
+                    "created_ts": time.time(),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - a cache write is advisory
+            _log.warning(
+                "digest cache write failed for %s (%s); the read is kept",
+                sheet.ref.display_label, type(exc).__name__,
+            )
 
     return sd

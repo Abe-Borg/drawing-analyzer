@@ -450,9 +450,38 @@ def test_a_failure_after_every_page_was_reached(tmp_path, monkeypatch):
 
     assert client.digest_calls == 3
     assert ctx.ok_sheet_count == 3 and ctx.unread_pages == []
-    assert ctx.errors == [_line("RuntimeError", total=3, unread=0, read=3, cached=True)]
+    # The cache is what failed, so the line does not promise a free re-run.
+    assert ctx.errors == [_line("RuntimeError", total=3, unread=0, read=3)]
     stage = _stage(ctx)
     assert (stage.status, stage.items_in, stage.items_out) == ("FAILED", 3, 3)
+    _assert_closed(ctx, "PARTIAL")
+
+
+class _PutFails(DigestCache):
+    """A cache whose every write raises (and whose reads find nothing)."""
+
+    def __init__(self):
+        super().__init__(None, persist=False)
+
+    def put(self, key, value):
+        raise RuntimeError("cache write failed")
+
+
+@pytest.mark.parametrize("transport", ["realtime", "batch"])
+def test_a_cache_whose_writes_fail_loses_no_paid_read(tmp_path, transport):
+    paths = _three(tmp_path)
+    client = _Client()
+    ctx = _run(paths, client, transport=transport, cache=_PutFails())
+
+    # A digest's own cache write is advisory: every paid read is kept, with
+    # its usage, on both transports (the batch harvest included).
+    assert client.digest_calls == 3
+    assert ctx.ok_sheet_count == 3 and ctx.unread_pages == []
+    assert len([r for r in ctx.run_usage.records if r.stage_family == "digest"]) == 3
+    # The level-1 store still raises, which stops the run after the phase,
+    # and the line does not promise a free re-run.
+    assert ctx.errors == [_line("RuntimeError", total=3, unread=0, read=3)]
+    assert _stage(ctx).status == "FAILED"
     _assert_closed(ctx, "PARTIAL")
 
 
@@ -473,11 +502,41 @@ def test_an_accounting_failure_still_closes_the_run(tmp_path, monkeypatch):
 
     assert ctx.ok_sheet_count == 3
     assert ctx.errors == [_line("TypeError", total=3, unread=0, read=3)]
-    assert _stage(ctx).status == "FAILED"
+    stage = _stage(ctx)
+    assert (stage.status, stage.items_in, stage.items_out) == ("FAILED", 3, 3)
+    assert stage.errors[0] == ctx.errors[0]
+    # Only the failing record is missing: the sheets after it are still billed.
+    assert [r.stage_instance for r in ctx.run_usage.records if r.stage_family == "digest"] == [
+        "digest:SRC-0001:p0", "digest:SRC-0003:p0",
+    ]
     # Every page still ends with exactly one per-page event.
     assert _per_page_events(ctx) == [
         ("SHEET_DIGESTED", f"{c}.pdf (page 1/1)") for c in "ABC"
     ]
+    _assert_closed(ctx, "PARTIAL")
+
+
+def test_an_event_failure_costs_only_its_own_page(tmp_path, monkeypatch):
+    paths = _three(tmp_path)
+    real = pl.held_out_findings
+
+    def _held(sd):
+        if sd.ref.source_name == "B.pdf":
+            raise TypeError("a finding could not be read")
+        return real(sd)
+
+    monkeypatch.setattr(pl, "held_out_findings", _held)
+    ctx = _run(paths, _Client())
+
+    assert ctx.ok_sheet_count == 3
+    assert ctx.errors == [_line("TypeError", total=3, unread=0, read=3)]
+    assert _stage(ctx).status == "FAILED"
+    # B's event is the one lost; the pages after it keep theirs, and every
+    # sheet keeps its usage record.
+    assert _per_page_events(ctx) == [
+        ("SHEET_DIGESTED", "A.pdf (page 1/1)"), ("SHEET_DIGESTED", "C.pdf (page 1/1)"),
+    ]
+    assert len([r for r in ctx.run_usage.records if r.stage_family == "digest"]) == 3
     _assert_closed(ctx, "PARTIAL")
 
 

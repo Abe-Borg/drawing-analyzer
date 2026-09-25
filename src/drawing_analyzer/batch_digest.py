@@ -2286,17 +2286,25 @@ def _digest_from_message(
     if cache is not None and slot.cache_key and digest_cache_admits(
         error=error, text=raw_text, stop_reason=stop,
     ):
-        cache.put(
-            slot.cache_key,
-            {
-                "text": text,
-                "input_tokens": in_tok,
-                "output_tokens": out_tok,
-                "stop_reason": stop,
-                "findings": [f.to_dict() for f in findings],
-                "created_ts": time.time(),
-            },
-        )
+        # Advisory (remediation WP-11.2): the item was billed, so a cache that
+        # raises must not lose it, in the collect or in its harvest.
+        try:
+            cache.put(
+                slot.cache_key,
+                {
+                    "text": text,
+                    "input_tokens": in_tok,
+                    "output_tokens": out_tok,
+                    "stop_reason": stop,
+                    "findings": [f.to_dict() for f in findings],
+                    "created_ts": time.time(),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - a cache write is advisory
+            _log.warning(
+                "digest cache write failed for %s (%s); the read is kept",
+                slot.ref.display_label, type(exc).__name__,
+            )
     digest = SheetDigest(
         ref=slot.ref,
         text=text,

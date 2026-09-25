@@ -105,6 +105,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - **The render spool and the retained digest uploads are released on every
     exit of the run**, including an exception after the digest phase and
     `KeyboardInterrupt`.
+  - **A digest's own cache write is advisory.** A cache that raises from
+    `put` no longer loses the paid read it was storing: on real time the read
+    is kept, and on batch the collect and its read-back keep every billed
+    item. The line promises a free re-run only when the cache did not fail.
+  - **One sheet whose usage or event cannot be recorded costs only its own
+    record.** Every other read keeps its usage record and every other page its
+    event; the first such failure still stops the run after the phase.
 
   No cache key, prompt, schema or manifest key changed; `run_manifest.json`'s
   existing `unread_pages` lists the pages not reached. Tests:

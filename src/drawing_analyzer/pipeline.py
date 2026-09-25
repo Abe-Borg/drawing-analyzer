@@ -3853,6 +3853,7 @@ def extract_drawing_context(
     # writers apply (a refused or unfinished read carries an error and is not).
     # After a contained failure it stores the digests in hand, so a re-run
     # renders and reads only what this run did not (WP-11.2).
+    level1_store_failed = False
     if cache is not None and miss_sheets:
         try:
             for sd in miss_sheets:
@@ -3865,6 +3866,7 @@ def extract_drawing_context(
                     if key is not None:
                         cache.put(key, cache_entry_from_digest(sd))
         except Exception as exc:  # noqa: BLE001 - contained, as above
+            level1_store_failed = True
             if phase_error is None:
                 phase_error = type(exc).__name__
             _log.warning(
@@ -3872,6 +3874,10 @@ def extract_drawing_context(
             )
     if phase_error is not None:
         unread.stop(phase_error)
+    # What the phase line may promise (plan step 7): with a digest cache, the
+    # pages read are cached and a re-run does not pay for them again. Not when
+    # the cache is what failed: then a re-run may pay.
+    cached_claim = cache is not None and not level1_store_failed
 
     # Merge cached + freshly-digested sheets, restoring original (page) order.
     by_ref = dict(cached_by_ref)
@@ -3894,7 +3900,7 @@ def extract_drawing_context(
     phase_line = (
         _digest_phase_line(
             phase_error, total=total, not_reached=unread.not_reached,
-            read=sum(1 for s in sheets if s.ok), cached=cache is not None,
+            read=sum(1 for s in sheets if s.ok), cached=cached_claim,
         )
         if phase_error is not None else None
     )
@@ -3919,12 +3925,34 @@ def extract_drawing_context(
     # finish, held out of the review, by portable sheet key.
     findings_held_out: dict[str, int] = {}
     ok_sheets = sum(1 for s in sheets if s.ok)
-    # The accounting is contained too (WP-11.2). It runs in two passes, which
-    # emit exactly what one pass did: first every page's outcome (its error line
-    # and its one per-page event), then the usage records, which emit no event.
-    # So the failure this can realistically meet, a usage number that is not a
-    # number, still leaves every page with its event and the stage unrecorded,
-    # which the fallback below then records as the owner's rule says.
+    # The accounting is contained too (WP-11.2), page by page. It runs in two
+    # passes, which emit exactly what one pass did: first every page's outcome
+    # (its error line and its one per-page event), then the usage records, which
+    # emit no event. A page whose event or usage cannot be recorded (a usage
+    # number that is not a number) costs only that record: every other page
+    # keeps its event and every other read its usage. The first such failure is
+    # the phase's own when it had none, so the run still stops after the phase
+    # (the owner's rule) and the digest stage reads FAILED.
+    accounting_errors: list[Exception] = []
+
+    def _accounting_stopped(exc: Exception) -> None:
+        """An accounting failure is the phase's failure when it had none yet."""
+        nonlocal phase_error, phase_line
+        if phase_line is not None:
+            return
+        # Every page was reached, so the line says so (the owner's wording), in
+        # the same place a collection failure puts it.
+        phase_error = type(exc).__name__
+        phase_line = _digest_phase_line(
+            phase_error, total=total, not_reached=0, read=ok_sheets,
+            cached=cached_claim,
+        )
+        errors.insert(len(inventory_errors), phase_line)
+        journal.emit(
+            "DIGEST_PHASE_STOPPED", stage="digest", level="ERROR",
+            error_type=phase_error, pages_read=ok_sheets, pages_not_read=0,
+        )
+
     try:
         if tile_stage is not None:
             # expected=False keeps the roll-up from ever scoring this additive
@@ -3950,141 +3978,157 @@ def extract_drawing_context(
                 pages_not_read=unread.not_reached,
             )
         for ref in refs:
-            sd = by_ref.get(_refkey(ref))
-            if sd is None:
-                # A page the run owed and could not read (remediation WP-11.1): one
-                # PAGE_UNREAD in page order beside the SHEET_DIGESTED events, so
-                # every expected page ends with exactly one per-page event. It made
-                # no call, so it records no usage.
-                page = unread_by_key[source_page_key(ref)]
+            try:
+                sd = by_ref.get(_refkey(ref))
+                if sd is None:
+                    # A page the run owed and could not read (remediation WP-11.1): one
+                    # PAGE_UNREAD in page order beside the SHEET_DIGESTED events, so
+                    # every expected page ends with exactly one per-page event. It made
+                    # no call, so it records no usage.
+                    page = unread_by_key[source_page_key(ref)]
+                    journal.emit(
+                        "PAGE_UNREAD", stage="digest", level="WARNING",
+                        sheet=page.display_label, source=page.source_id or "-",
+                        reason=page.reason,
+                    )
+                    continue
+                cached = bool(getattr(sd, "cached", False))
+                skey = source_page_key(sd.ref)
+                if sd.error:
+                    errors.append(f"{sd.ref.display_label}: {sd.error}")
+                elif not sd.ok:
+                    # ``sd.ok`` is error-free AND non-empty, so an error-free sheet
+                    # whose digest came back empty is a failed sheet. It used to reach
+                    # the journal and nothing else, leaving ctx.errors — and every
+                    # surface built from it — undercounting the sheets the run never
+                    # actually read.
+                    errors.append(f"{sd.ref.display_label}: empty digest")
+                # One journal event per sheet, in deterministic page order (§18.2):
+                # success, cache hit/miss, digest size, findings count, plus the
+                # geometry-side facts (raster/vector, text-layer length, omitted tiles)
+                # when this run rendered/prescanned them. Counts and flags only — never
+                # digest text or quotes.
+                # Classified by ``sd.ok`` (error-free AND non-empty): an error-free
+                # sheet whose digest came back empty is a failure for accounting
+                # purposes, matching run.log's Sheets section and ok_sheet_count.
+                sheet_fields: dict[str, Any] = {
+                    "sheet": sd.ref.display_label,
+                    "source": skey[0],
+                    "status": "OK" if sd.ok else "FAILED",
+                    "cached": cached,
+                    "digest_chars": len(sd.text or ""),
+                    "findings": len(getattr(sd, "findings", None) or []),
+                }
+                # Why the model stopped. Omitted while it is the ordinary end_turn, so
+                # the common line stays short — but a run that hit the cap used to leave
+                # nothing at all in run.log, which is what made a truncated digest
+                # invisible after the fact.
+                if getattr(sd, "stop_reason", None) not in (None, "", "end_turn"):
+                    sheet_fields["stop_reason"] = sd.stop_reason
+                geom = geom_by_key.get(source_page_key(sd.ref))
+                if geom is not None:
+                    sheet_fields["layer"] = "raster" if geom.is_raster else "vector"
+                    sheet_fields["text_layer_chars"] = len(geom.sheet_text or "")
+                    if getattr(geom, "omitted_tile_count", None) is not None:
+                        sheet_fields["omitted_tiles"] = geom.omitted_tile_count
+                if getattr(sd, "findings_note", ""):
+                    sheet_fields["parser_note"] = sd.findings_note
+                held = held_out_findings(sd)
+                if held:
+                    sheet_fields["findings_held_out"] = len(held)
+                    findings_held_out[f"{skey[0]}:p{skey[1]}"] = len(held)
+                if sd.error:
+                    sheet_fields["error"] = sd.error
+                elif not sd.ok:
+                    sheet_fields["error"] = "(empty digest)"
                 journal.emit(
-                    "PAGE_UNREAD", stage="digest", level="WARNING",
-                    sheet=page.display_label, source=page.source_id or "-",
-                    reason=page.reason,
+                    "SHEET_DIGESTED", stage="digest",
+                    level="INFO" if sd.ok else "WARNING", **sheet_fields,
                 )
-                continue
-            cached = bool(getattr(sd, "cached", False))
-            skey = source_page_key(sd.ref)
-            if sd.error:
-                errors.append(f"{sd.ref.display_label}: {sd.error}")
-            elif not sd.ok:
-                # ``sd.ok`` is error-free AND non-empty, so an error-free sheet
-                # whose digest came back empty is a failed sheet. It used to reach
-                # the journal and nothing else, leaving ctx.errors — and every
-                # surface built from it — undercounting the sheets the run never
-                # actually read.
-                errors.append(f"{sd.ref.display_label}: empty digest")
-            # One journal event per sheet, in deterministic page order (§18.2):
-            # success, cache hit/miss, digest size, findings count, plus the
-            # geometry-side facts (raster/vector, text-layer length, omitted tiles)
-            # when this run rendered/prescanned them. Counts and flags only — never
-            # digest text or quotes.
-            # Classified by ``sd.ok`` (error-free AND non-empty): an error-free
-            # sheet whose digest came back empty is a failure for accounting
-            # purposes, matching run.log's Sheets section and ok_sheet_count.
-            sheet_fields: dict[str, Any] = {
-                "sheet": sd.ref.display_label,
-                "source": skey[0],
-                "status": "OK" if sd.ok else "FAILED",
-                "cached": cached,
-                "digest_chars": len(sd.text or ""),
-                "findings": len(getattr(sd, "findings", None) or []),
-            }
-            # Why the model stopped. Omitted while it is the ordinary end_turn, so
-            # the common line stays short — but a run that hit the cap used to leave
-            # nothing at all in run.log, which is what made a truncated digest
-            # invisible after the fact.
-            if getattr(sd, "stop_reason", None) not in (None, "", "end_turn"):
-                sheet_fields["stop_reason"] = sd.stop_reason
-            geom = geom_by_key.get(source_page_key(sd.ref))
-            if geom is not None:
-                sheet_fields["layer"] = "raster" if geom.is_raster else "vector"
-                sheet_fields["text_layer_chars"] = len(geom.sheet_text or "")
-                if getattr(geom, "omitted_tile_count", None) is not None:
-                    sheet_fields["omitted_tiles"] = geom.omitted_tile_count
-            if getattr(sd, "findings_note", ""):
-                sheet_fields["parser_note"] = sd.findings_note
-            held = held_out_findings(sd)
-            if held:
-                sheet_fields["findings_held_out"] = len(held)
-                findings_held_out[f"{skey[0]}:p{skey[1]}"] = len(held)
-            if sd.error:
-                sheet_fields["error"] = sd.error
-            elif not sd.ok:
-                sheet_fields["error"] = "(empty digest)"
-            journal.emit(
-                "SHEET_DIGESTED", stage="digest",
-                level="INFO" if sd.ok else "WARNING", **sheet_fields,
-            )
+            except Exception as exc:  # noqa: BLE001 - this page's record only
+                accounting_errors.append(exc)
+                _log.warning(
+                    "digest accounting failed for %s (event): %s",
+                    ref.display_label, type(exc).__name__, exc_info=True,
+                )
         for ref in refs:
-            sd = by_ref.get(_refkey(ref))
-            if sd is None:
-                continue
-            # A cached sheet made no API call, so it costs zero tokens *this run* — its
-            # record carries the cache-hit metadata but zero billed tokens. A fresh
-            # digest records its actual reported usage (billable even if it errored).
-            cached = bool(getattr(sd, "cached", False))
-            sheet_transport = _digest_transport(
-                cached=cached, rescued=bool(getattr(sd, "rescued", False)),
-                use_batch=use_batch,
-            )
-            # The recorded instance uses the PORTABLE sheet identity (SRC-#### +
-            # page), never the pdf path — usage records are exported verbatim into
-            # run_manifest.json (Phase 26A §18.4), and an absolute path in a
-            # ``stage_instance`` would leak the user's directory layout (§10.4).
-            skey = source_page_key(sd.ref)
-            usage_attempts = list(getattr(sd, "usage_attempts", ()) or ())
-            if usage_attempts and not cached:
-                # Batch recovery can produce more than one billable response for a
-                # sheet (for example, an empty max_tokens response followed by a
-                # raised-cap retry, possibly ending in a real-time rescue). Preserve
-                # each response as its own record so Batch and real-time rates are
-                # applied independently. The runtime-only metadata is deliberately
-                # absent on cache hits and never enters cache serialization.
-                #
-                # Attempts marked non-billable were submitted but never answered —
-                # a batch abandoned mid-flight. They are recorded (§15.6 wants every
-                # attempt) but carry no tokens, so the image estimate must count
-                # only the responses that actually came back; multiplying it by
-                # abandoned rounds would invent image tokens nobody was charged for.
-                img_tok += sd.image_token_estimate * sum(
-                    1 for a in usage_attempts if getattr(a, "billable", True)
+            try:
+                sd = by_ref.get(_refkey(ref))
+                if sd is None:
+                    continue
+                # A cached sheet made no API call, so it costs zero tokens *this run* — its
+                # record carries the cache-hit metadata but zero billed tokens. A fresh
+                # digest records its actual reported usage (billable even if it errored).
+                cached = bool(getattr(sd, "cached", False))
+                sheet_transport = _digest_transport(
+                    cached=cached, rescued=bool(getattr(sd, "rescued", False)),
+                    use_batch=use_batch,
                 )
-                for usage_attempt in usage_attempts:
+                # The recorded instance uses the PORTABLE sheet identity (SRC-#### +
+                # page), never the pdf path — usage records are exported verbatim into
+                # run_manifest.json (Phase 26A §18.4), and an absolute path in a
+                # ``stage_instance`` would leak the user's directory layout (§10.4).
+                skey = source_page_key(sd.ref)
+                usage_attempts = list(getattr(sd, "usage_attempts", ()) or ())
+                if usage_attempts and not cached:
+                    # Batch recovery can produce more than one billable response for a
+                    # sheet (for example, an empty max_tokens response followed by a
+                    # raised-cap retry, possibly ending in a real-time rescue). Preserve
+                    # each response as its own record so Batch and real-time rates are
+                    # applied independently. The runtime-only metadata is deliberately
+                    # absent on cache hits and never enters cache serialization.
+                    #
+                    # Attempts marked non-billable were submitted but never answered —
+                    # a batch abandoned mid-flight. They are recorded (§15.6 wants every
+                    # attempt) but carry no tokens, so the image estimate must count
+                    # only the responses that actually came back; multiplying it by
+                    # abandoned rounds would invent image tokens nobody was charged for.
+                    img_tok += sd.image_token_estimate * sum(
+                        1 for a in usage_attempts if getattr(a, "billable", True)
+                    )
+                    for usage_attempt in usage_attempts:
+                        _record_usage(
+                            run_usage, family="digest",
+                            instance=f"digest:{skey[0]}:p{skey[1]}",
+                            model=model,
+                            transport=getattr(usage_attempt, "transport", sheet_transport),
+                            input_tokens=getattr(usage_attempt, "input_tokens", 0),
+                            output_tokens=getattr(usage_attempt, "output_tokens", 0),
+                            cache_read_tokens=getattr(usage_attempt, "cache_read_tokens", 0),
+                            cache_write_tokens=getattr(usage_attempt, "cache_write_tokens", 0),
+                            parse_success=bool(getattr(usage_attempt, "parse_success", True)),
+                            terminal_status=getattr(
+                                usage_attempt, "terminal_status", "COMPLETE"
+                            ),
+                            attempt=int(getattr(usage_attempt, "attempt_number", 1) or 1),
+                            request_id=getattr(
+                                usage_attempt, "request_or_custom_id", ""
+                            ),
+                        )
+                else:
+                    if not cached:
+                        img_tok += sd.image_token_estimate
                     _record_usage(
                         run_usage, family="digest",
                         instance=f"digest:{skey[0]}:p{skey[1]}",
                         model=model,
-                        transport=getattr(usage_attempt, "transport", sheet_transport),
-                        input_tokens=getattr(usage_attempt, "input_tokens", 0),
-                        output_tokens=getattr(usage_attempt, "output_tokens", 0),
-                        cache_read_tokens=getattr(usage_attempt, "cache_read_tokens", 0),
-                        cache_write_tokens=getattr(usage_attempt, "cache_write_tokens", 0),
-                        parse_success=bool(getattr(usage_attempt, "parse_success", True)),
-                        terminal_status=getattr(
-                            usage_attempt, "terminal_status", "COMPLETE"
-                        ),
-                        attempt=int(getattr(usage_attempt, "attempt_number", 1) or 1),
-                        request_id=getattr(
-                            usage_attempt, "request_or_custom_id", ""
-                        ),
+                        transport=sheet_transport,
+                        input_tokens=0 if cached else sd.input_tokens,
+                        output_tokens=0 if cached else sd.output_tokens,
+                        cache_read_tokens=0 if cached else getattr(sd, "cache_read_tokens", 0),
+                        cache_write_tokens=0 if cached else getattr(sd, "cache_write_tokens", 0),
+                        cache_hit=cached,
+                        parse_success=(sd.error is None),
+                        terminal_status="FAILED" if sd.error else "COMPLETE",
                     )
-            else:
-                if not cached:
-                    img_tok += sd.image_token_estimate
-                _record_usage(
-                    run_usage, family="digest",
-                    instance=f"digest:{skey[0]}:p{skey[1]}",
-                    model=model,
-                    transport=sheet_transport,
-                    input_tokens=0 if cached else sd.input_tokens,
-                    output_tokens=0 if cached else sd.output_tokens,
-                    cache_read_tokens=0 if cached else getattr(sd, "cache_read_tokens", 0),
-                    cache_write_tokens=0 if cached else getattr(sd, "cache_write_tokens", 0),
-                    cache_hit=cached,
-                    parse_success=(sd.error is None),
-                    terminal_status="FAILED" if sd.error else "COMPLETE",
+            except Exception as exc:  # noqa: BLE001 - this page's record only
+                accounting_errors.append(exc)
+                _log.warning(
+                    "digest accounting failed for %s (usage): %s",
+                    ref.display_label, type(exc).__name__, exc_info=True,
                 )
+        if accounting_errors:
+            _accounting_stopped(accounting_errors[0])
         # §3.3 — the digest was the one stage with no StageResult, so a sheet it
         # failed to read reached ctx.errors and the journal but never
         # ``roll_up_qc_status``: an exhaustive run could report COMPLETE over a
@@ -4157,20 +4201,7 @@ def extract_drawing_context(
         _log.warning(
             "digest accounting failed (%s)", type(exc).__name__, exc_info=True,
         )
-        if phase_line is None:
-            # The accounting is the phase's first failure: every page was
-            # reached, so the line says so (the owner's wording), in the same
-            # place a collection failure puts it.
-            phase_error = type(exc).__name__
-            phase_line = _digest_phase_line(
-                phase_error, total=total, not_reached=0, read=ok_sheets,
-                cached=cache is not None,
-            )
-            errors.insert(len(inventory_errors), phase_line)
-            journal.emit(
-                "DIGEST_PHASE_STOPPED", stage="digest", level="ERROR",
-                error_type=phase_error, pages_read=ok_sheets, pages_not_read=0,
-            )
+        _accounting_stopped(exc)
         # One digest record, FAILED, the failure its first error. The stage's
         # own record can only have landed if ``_finish_stage`` raised after it
         # appended; that record is corrected rather than joined by a second.

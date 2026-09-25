@@ -360,20 +360,30 @@ prohibition). What is kept:
   hits, inline reads) or `collect_drawing_batch(results_out=)` (everything read
   back, the harvest included).
 - **The cache.** The level-1 store runs over the digests in hand, so a re-run
-  renders and reads only the rest.
+  renders and reads only the rest. Both level-2 writers (`digest_sheet`'s and
+  the batch parse's) are advisory: a cache whose `put` raises no longer takes
+  the paid read with it, on real time or in the batch collect and its harvest
+  (Codex review). `DigestCache.put` already swallowed its own errors; an
+  injected cache need not.
 - **One outcome per page.** `_UnreadPages.stop(type)` gives each page the phase
   never reached the reason `not read: the digest phase stopped early (<Type>)`
   and no per-page line; a page that failed on its own keeps its own.
 - **One line.** `_digest_phase_line` adds it after the inventory's lines: the
   exception's type name only (path-free by construction; the traceback goes to
   the log), the count not reached, and what was kept ("the N page(s) read are
-  exported [and cached, so a re-run does not pay for them again]"). It is the
-  digest stage's first error, and one `DIGEST_PHASE_STOPPED` event records it.
+  exported [and cached, so a re-run does not pay for them again]"). The cache
+  clause needs a cache whose level-1 store did not fail (`cached_claim`): when
+  the cache is what failed, a re-run may pay. It is the digest stage's first
+  error, and one `DIGEST_PHASE_STOPPED` event records it.
 - **The stage reads FAILED whatever was read** (its failure flag before its
-  counts, D-2). The accounting is contained too, in two passes: every page's
-  error line and per-page event first, the usage records second, so a failure
-  in the second still leaves each page its event. The fallback records the
-  FAILED stage, correcting the stage's own record if it already landed.
+  counts, D-2). The accounting is contained page by page, in two passes: every
+  page's error line and per-page event first, the usage records second, each
+  page in its own `try`. A page whose event or usage cannot be recorded costs
+  only that record (Codex review: one bad usage number used to drop every
+  later sheet's usage), and the first such failure becomes the phase's
+  (`_accounting_stopped`), so the run still stops. A failure outside the
+  per-page records falls back to recording the FAILED stage, correcting the
+  stage's own record if it already landed.
 
 `_stopped_run_context` then ends the run. No later stage makes a call, reopens
 a source or writes a reviewed PDF, and none is recorded (as the block and
