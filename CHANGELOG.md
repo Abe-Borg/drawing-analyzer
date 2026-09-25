@@ -59,12 +59,12 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `run_manifest.json` or export was written. Measured on `main` over 22
   hermetic cases (real time, batch, Hybrid and Economy, cold and cached),
   every one raised. Along the way:
-  - A batch submit that failed before its batch existed deleted none of the
-    images it had uploaded (4 of 4 left).
+  - A batch submit whose upload loop failed deleted none of the images it had
+    uploaded (4 of 4 left); only a failed batch create already cleaned up.
   - A batch poll that failed deleted none of the batch's files (6 of 6 left)
     and did not cancel a batch that was still running.
   - A Fast or Hybrid exhaustive run left its render spool directory in the
-    system temp directory.
+    system temp directory until the exception was garbage-collected.
   - An Economy exhaustive run that raised before the critique left the digest
     uploads retained for the critique.
 

@@ -426,11 +426,12 @@ what could not be verified, risks, and next steps.
   - **Batch collect**, the progress callback raising at the poll: 6 uploads,
     0 deleted, 1 batch whose 3 reads were billed and none read back, and no
     cancel.
-  - **Fast exhaustive** (render spool), B raising: the spool directory stayed
-    while the exception was held and went only at garbage collection; the
-    critique made 0 calls (the control made 6).
-  - **Economy exhaustive**, B raising: 6 retained uploads, 0 deleted (the
-    control deleted 6 of 6).
+  - **Fast exhaustive** (render spool), the digest stage's own record raising
+    (`_finish_stage`) after every read, before the critique: the spool
+    directory stayed while the exception was held and went only at garbage
+    collection; the critique made 0 calls (the control made 6).
+  - **Economy exhaustive**, the same injection: 6 retained uploads, 0 deleted
+    (the control deleted 6 of 6).
 - **Facts confirmed, not assumed.** An instrumented scratch copy of
   `origin/main` added append-only wrapper blocks at the end of `pipeline.py`,
   `batch_digest.py`, `file_upload.py` and `render_spool.py`, logging the test
@@ -439,8 +440,11 @@ what could not be verified, risks, and next steps.
   - **The hooks ran** 303 contexts, 247 real-time and 35 batch digest phases,
     145 submits, 139 collects, 304 sheet uploads and 164 pipeline spools.
   - **Every context returned.** The only 2 exceptions were the DA-034 direct
-    tests (`submit_drawing_batch` and `collect_drawing_batch` raising after
-    their cleanup), and every pipeline spool was closed by the critique stage.
+    tests, each raising after its cleanup:
+    `test_submit_create_failure_deletes_every_uploaded_file` (a failed batch
+    create, whose guard already existed; the upload loop had none) and
+    `test_collect_results_error_releases_files_before_propagating`. Every
+    pipeline spool was closed by the critique stage.
     So no fixture reaches the containment, and every behaviour this slice adds
     is guarded only by the new tests.
   - **The digest cache swallows its own I/O errors.** The realistic triggers
@@ -460,14 +464,15 @@ what could not be verified, risks, and next steps.
     nothing read; `KeyboardInterrupt`; an exception after the phase; a
     callback that stays broken.
 
-  Under every variant no pinned test moved, and the containment never fired in
-  them. The one event that moved is a release of zero files in
-  `test_collect_results_error_releases_files_before_propagating` (the collect
-  guard runs after that test's own release). "Release only" did not move it.
+  Under every variant no pinned test moved, and the pipeline's containment
+  never fired in them. The new collect guard fired once, in
+  `test_collect_results_error_releases_files_before_propagating`, after that
+  test's own release: one release of zero files, the only event that moved.
+  Only the variant that left the collect side alone did not add it.
   The case table decided:
   - **On failure: stop after the digest phase.** All 22 cases return except
-    `KeyboardInterrupt` and the exception after the phase, and the critique
-    makes 0 calls. Not taken:
+    `KeyboardInterrupt` and the two exceptions after the phase, and the
+    critique makes 0 calls. Not taken:
     - continue over the read sheets: the critique also read the pages the
       digest never reached (Fast/Hybrid: 6 critique calls, 4 for pages with no
       digest; Economy: 12 uploads), and a callback that stays broken (3 cases)
