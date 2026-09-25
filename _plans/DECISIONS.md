@@ -544,7 +544,7 @@ fewer pages read COMPLETE.
   the chosen shape adds one `PAGE_UNREAD` event in the 3 fixtures with a page
   that does not render.
 
-Added by WP-11.2: **a digest phase stopped by an unexpected error reads FAILED,
+Added by WP-11.2 ([PR #173](https://github.com/Abe-Borg/drawing-analyzer/pull/173)): **a digest phase stopped by an unexpected error reads FAILED,
 whatever was read** (the owner's decision; R1). D-2 tests a stage's own failure
 flag before its counts, and a contained failure in the digest phase is that
 flag. It covers anything but a source or page failure: the prescan, either
@@ -826,7 +826,7 @@ the app must never falsely promise that billing stopped (WP-17).
 `qc_status`, the batch `DETACHED` / `DETACHED_MOVING` / `ABANDONED_*`
 dispositions, `_harvest_abandoned_batch`, the GUI's `_on_close_request`.
 
-**Input from WP-11.2** (not a decision of this contract). A digest phase
+**Input from WP-11.2** ([PR #173](https://github.com/Abe-Borg/drawing-analyzer/pull/173); not a decision of this contract). A digest phase
 stopped by an unexpected `Exception` ends the run after the phase, with a
 closed journal (`RUN_END` `stopped="digest"`) and an exportable partial
 context. `KeyboardInterrupt` and `SystemExit` are deliberately not contained,
