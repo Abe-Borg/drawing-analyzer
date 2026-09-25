@@ -1092,8 +1092,9 @@ RUNTIME_TRANSPARENCY = HelpDocument(
                 "at roughly half the price."
             ),
             _bullet(
-                "Uploaded files are released on every exit path — a finished batch, a "
-                "cancelled one, or a collection error. A batch that can't be cancelled "
+                "Uploaded files are released when a batch finishes, when it is "
+                "cancelled, and when sending or collecting it stops on an error (a batch "
+                "still running is cancelled first). A batch that can't be cancelled "
                 "leaves its files to expire on Anthropic's side."
             ),
             _bullet(

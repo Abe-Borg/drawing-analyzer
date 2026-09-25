@@ -48,6 +48,76 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **An unexpected error inside the digest phase lost every paid digest, and
+  left the phase's temporary files and uploads behind (remediation WP-11.2;
+  R1, digest-phase containment).** WP-11.1 contained the failures of a source
+  or a page. Anything else that raised while the sheets were being read (a
+  progress or status callback, the digest cache, the level-1 store, a batch
+  poll or results read, the per-sheet accounting) propagated out of
+  `extract_drawing_context`. The digests already collected and billed, their
+  usage and their journal events were lost, and no `run.log`,
+  `run_manifest.json` or export was written. Measured on `main` over 22
+  hermetic cases (real time, batch, Hybrid and Economy, cold and cached),
+  every one raised. Along the way:
+  - A batch submit whose upload loop failed deleted none of the images it had
+    uploaded (4 of 4 left); only a failed batch create already cleaned up.
+  - A batch poll that failed deleted none of the batch's files (6 of 6 left)
+    and did not cancel a batch that was still running.
+  - A Fast or Hybrid exhaustive run left its render spool directory in the
+    system temp directory until the exception was garbage-collected.
+  - An Economy exhaustive run that raised before the critique left the digest
+    uploads retained for the critique.
+
+  Now, decided with the owner (see the WP-11.2 handoff in
+  `_plans/PROGRESS.md`):
+  - **The phase stops; the run ships.** The digests in hand are kept: each
+    transport hands the pipeline what it has as it goes, and on real time
+    each read already in flight is waited for and kept. Every page the phase
+    never reached becomes a not-read page whose reason names the failure
+    (`not read: the digest phase stopped early (RuntimeError)`). The run then
+    stops after the digest phase: no later stage makes a call, reopens a
+    source or writes a reviewed PDF. The read sheets' digest findings are
+    still recorded, anchored and numbered offline, as on a standard run
+    (DA-012). The context goes to the exporter like any other, with `run.log`
+    and `run_manifest.json`. Only `Exception` is contained: Ctrl+C
+    (`KeyboardInterrupt`) and `SystemExit` still end the run.
+  - **One line says what happened**, first after the inventory's lines, for
+    example `Digest phase stopped early by an unexpected error (RuntimeError):
+    2 of 3 page(s) were not read; no later stage ran; the 1 page(s) read are
+    exported and cached, so a re-run does not pay for them again`. It names
+    only the exception's type, so it is path-free by construction; the
+    traceback goes to the diagnostics log. The same line leads the digest
+    stage's errors, and one `DIGEST_PHASE_STOPPED` event records it in the
+    journal. `RUN_END` carries `stopped="digest"`.
+  - **The digest stage reads `FAILED` whatever was read** (its failure flag
+    is tested before its counts, D-2). The run reads `PARTIAL`, or `FAILED`
+    when nothing was read. An exhaustive run's QC status is `FAILED`; a
+    standard run's stays `NOT_REQUESTED`.
+  - **A re-run pays only for what this run did not read.** The level-1 cache
+    store now runs over the digests in hand, so with a cache a re-run renders
+    and reads only the pages this run did not.
+  - **Uploads are released when the submit or the collect stops on an
+    error.** A submit that stops before its batch exists deletes every image
+    it uploaded. A collect that stops on an unexpected error reads the batch's
+    status once. It cancels the batch if it is still running, reads back what
+    finished, then releases the files; a batch it cannot cancel keeps its
+    files, as before.
+  - **The render spool and the retained digest uploads are released on every
+    exit of the run**, including an exception after the digest phase and
+    `KeyboardInterrupt`.
+  - **A digest's own cache write is advisory.** A cache that raises from
+    `put` no longer loses the paid read it was storing: on real time the read
+    is kept, and on batch the collect and its read-back keep every billed
+    item. The line promises a free re-run only when the cache did not fail.
+  - **One sheet whose usage or event cannot be recorded costs only its own
+    record.** Every other read keeps its usage record and every other page its
+    event; the first such failure still stops the run after the phase.
+
+  No cache key, prompt, schema or manifest key changed; `run_manifest.json`'s
+  existing `unread_pages` lists the pages not reached. Tests:
+  `tests/test_digest_phase_containment.py`. Still open under R1: the revision
+  check on every reopen (WP-11.3).
+
 - **A source that failed after the inventory ended the whole run, and a page
   the run owed could vanish without a word (remediation WP-11.1; R1, core).**
   The input inventory opens every selected file once and records each accepted

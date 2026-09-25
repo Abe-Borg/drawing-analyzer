@@ -341,7 +341,75 @@ render outcome was recorded"). `ctx.errors` and the digest stage's errors say a
 source-level failure **once per source** and a page failure once per page; a
 source with more pages than the inventory counted is one run error and one
 digest-stage warning (the stage stays COMPLETE, the run PARTIAL). Revision
-binding on reopen is WP-11.3's; digest-phase containment is WP-11.2's.
+binding on reopen is WP-11.3's.
+
+**An unexpected error inside the digest phase stops the phase, not the run
+(remediation WP-11.2, R1; the owner's rules).** WP-11.1 contains a source or
+page failure. Anything else that raises inside the phase is caught in
+`extract_drawing_context`: the prescan, either transport, a caller's
+`progress` / `on_status` callback, the cache, the level-1 store, the per-sheet
+accounting. It catches `Exception` only: `KeyboardInterrupt` and `SystemExit`
+still end the run (cancel is WP-17.1's, D-5). The `except BaseException`
+blocks added here all re-raise, so they are cleanups, not catches (the §2
+prohibition). What is kept:
+- **The digests in hand.** Both transports fill a caller's `collected` list as
+  they go. `_digest_sheets_concurrent`, once something raises, renders and
+  submits nothing new, waits for each read in flight and keeps each that
+  finished, and closes the render stream on its own thread.
+  `_digest_sheets_via_batch` reads `submit_drawing_batch(slots_out=)` (cache
+  hits, inline reads) or `collect_drawing_batch(results_out=)` (everything read
+  back, the harvest included).
+- **The cache.** The level-1 store runs over the digests in hand, so a re-run
+  renders and reads only the rest. Both level-2 writers (`digest_sheet`'s and
+  the batch parse's) are advisory: a cache whose `put` raises no longer takes
+  the paid read with it, on real time or in the batch collect and its harvest
+  (Codex review). `DigestCache.put` already swallowed its own errors; an
+  injected cache need not.
+- **One outcome per page.** `_UnreadPages.stop(type)` gives each page the phase
+  never reached the reason `not read: the digest phase stopped early (<Type>)`
+  and no per-page line; a page that failed on its own keeps its own.
+- **One line.** `_digest_phase_line` adds it after the inventory's lines: the
+  exception's type name only (path-free by construction; the traceback goes to
+  the log), the count not reached, and what was kept ("the N page(s) read are
+  exported [and cached, so a re-run does not pay for them again]"). The cache
+  clause needs a cache whose level-1 store did not fail (`cached_claim`): when
+  the cache is what failed, a re-run may pay. It is the digest stage's first
+  error, and one `DIGEST_PHASE_STOPPED` event records it.
+- **The stage reads FAILED whatever was read** (its failure flag before its
+  counts, D-2). The accounting is contained page by page, in two passes: every
+  page's error line and per-page event first, the usage records second, each
+  page in its own `try`. A page whose event or usage cannot be recorded costs
+  only that record (Codex review: one bad usage number used to drop every
+  later sheet's usage), and the first such failure becomes the phase's
+  (`_accounting_stopped`), so the run still stops. A failure outside the
+  per-page records falls back to recording the FAILED stage, correcting the
+  stage's own record if it already landed.
+
+`_stopped_run_context` then ends the run. No later stage makes a call, reopens
+a source or writes a reviewed PDF, and none is recorded (as the block and
+zero-sheet exits record none), so an exhaustive run's QC status is FAILED from
+the digest stage alone. The read sheets' digest findings are still ingested,
+anchored and numbered offline (`_run_qc_stages` with the standard
+configuration, DA-012), so `findings.json` never reads empty beside digests
+that reported findings. `RUN_END` carries `stopped="digest"`. The caller's
+progress callback is not called again, since it may be what failed. The
+context goes to the exporter like any other.
+
+Uploads and spool:
+- `submit_drawing_batch` has the DA-034 outer guard its critique twin already
+  had: a loop failure before a batch exists deletes every upload the submit
+  owns, the slot in progress included.
+- `collect_drawing_batch`'s guard covers its whole body
+  (`_abandon_after_collect_error`, the abandon path's rule): one status read
+  unless the poll already saw a terminal one, a best-effort cancel when not
+  terminal, the DA-035 harvest of what finished (no caller callback), then the
+  release. A batch it cannot cancel keeps its files.
+- Both still raise after their cleanup.
+- `@_with_run_release` (the `_with_stage_executor_cleanup` shape, a
+  thread-local registry) runs each release registered during the run on every
+  exit, `KeyboardInterrupt` included: the render spool's `close` and
+  `_release_retained_uploads`. On the normal path the critique's own `finally`
+  has already emptied both, and each release is idempotent.
 
 **Digest path:** `tiling.py` (pure geometry) → `render.py` (rasterization) →
 `digest.py` (prompt + tolerant findings-block parser — fences are **line-anchored**,

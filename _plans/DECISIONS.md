@@ -544,6 +544,36 @@ fewer pages read COMPLETE.
   the chosen shape adds one `PAGE_UNREAD` event in the 3 fixtures with a page
   that does not render.
 
+Added by WP-11.2 ([PR #173](https://github.com/Abe-Borg/drawing-analyzer/pull/173)): **a digest phase stopped by an unexpected error reads FAILED,
+whatever was read** (the owner's decision; R1). D-2 tests a stage's own failure
+flag before its counts, and a contained failure in the digest phase is that
+flag. It covers anything but a source or page failure: the prescan, either
+transport, a caller's callback, the cache, the level-1 store, the accounting.
+- **Items keep their meaning.** `items_in` is the inventory's pages and
+  `items_out` the pages read. The failure is the stage's first error, the same
+  line `ctx.errors` carries once (the exception's type name only).
+- **Unreached pages.** A page the phase never reached is an unread page whose
+  reason names the failure (`not read: the digest phase stopped early
+  (<Type>)`). It has no per-page line: the one run-level line counts it. A page
+  that failed on its own keeps its own reason and line.
+- **Why FAILED even when every page was read.** In 5 of the 22 cases measured
+  every page was read before the failure (a level-1 store, a batch poll, a
+  cached run). The run stops after the phase with no QC stage recorded, so the
+  digest stage alone decides an exhaustive run's QC status. Under the item rule
+  capped at PARTIAL, such a run reads QC PARTIAL ("Completed with QC
+  warnings"). Uncapped, 2 Economy cases where no QC stage ran read COMPLETE
+  ("Exhaustive QC complete"). FAILED reads QC FAILED. The run outcome is
+  unchanged in kind: PARTIAL when a page was read, FAILED when none was.
+- **Considered and not taken:** the item rule capped at PARTIAL; the item rule
+  uncapped (a false COMPLETE).
+- **Measured before deciding:** no pinned test moved under any option (2,109
+  tests in the 41 files that reach the digest phase, its transports or the
+  spool); the containment never fires in them.
+- **No cache, key, prompt or schema change.** `run_manifest.json` gains no
+  key: its `unread_pages` lists the pages not reached, and the journal gains one
+  event type (`DIGEST_PHASE_STOPPED`) and a `stopped` field on `RUN_END`. No
+  migration-register row.
+
 ## D-3 Finding identity — `open` (to be decided by WP-03.4)
 
 **Required decision:** keep four things separate: physical evidence identity,
@@ -795,6 +825,19 @@ the app must never falsely promise that billing stopped (WP-17).
 **Existing mechanisms:** `run_journal.RunJournal` (RUN_START … RUN_END),
 `qc_status`, the batch `DETACHED` / `DETACHED_MOVING` / `ABANDONED_*`
 dispositions, `_harvest_abandoned_batch`, the GUI's `_on_close_request`.
+
+**Input from WP-11.2** ([PR #173](https://github.com/Abe-Borg/drawing-analyzer/pull/173); not a decision of this contract). A digest phase
+stopped by an unexpected `Exception` ends the run after the phase, with a
+closed journal (`RUN_END` `stopped="digest"`) and an exportable partial
+context. `KeyboardInterrupt` and `SystemExit` are deliberately not contained,
+since cancel is this contract's. On such an exit:
+- no context or journal is returned;
+- `@_with_run_release` still removes the render spool and releases the
+  retained digest uploads;
+- the real-time digest waits for its reads in flight before propagating, as
+  the pool's exit always did;
+- a batch in flight is neither cancelled nor harvested, and its uploads stay:
+  the submit and collect guards catch `Exception` only.
 
 - Decision: —
 - Rejected shortcuts: —

@@ -1,7 +1,7 @@
 # Remediation progress tracker
 
-**Next up:** Wave 1 in order: `WP-11.2` (R1: digest-phase containment: the completed paid digests, the journal and the manifest always ship, and the uploads and render spool are released on every exit). Its dependency WP-11.1 is done: the inventory's pages are the workload (D-8's page part, decided), a source that cannot be opened again or a page that cannot be read no longer ends the run (each such page is an `UnreadPage` with one `PAGE_UNREAD` event, and one line per source), the prescan routes what it cannot scan to the render path, a changed page count fails the missing pages or names the extra ones, and the critique takes the same pages (R1 core). WP-11.3 (Wave 2, revision on reopen) is now available. WP-10.4 (Wave 2) is available: its dependencies WP-01.2 and WP-01.4 are done. WP-01 is not done: WP-01.5 (Wave 2), WP-01.6 and WP-01.7 (Wave 2, waiting on WP-02.3) remain. WP-09 is not done: WP-09.3 (N32, Wave 3) remains. WP-06 is not done: WP-06.2 and WP-06.3 (Wave 2) are available, and WP-06.4 still waits on WP-03.4; WP-06.2 completes D-8. WP-05 is not done: WP-05.3 remains (Wave 2, available). WP-07 is not done: WP-07.3 (Wave 2, available). WP-03 is not done: WP-03.4, WP-03.5 and WP-03.6 remain (Wave 2); WP-03.5 also carries the measured N30 exposure of cross-QC's same-pair conflicts. WP-04 is not done: its acceptance needs quantity roles, slice `WP-04.3` (Wave 2). WP-11 is not done: WP-11.2 and WP-11.3 remain. First check the open PRs ([`README.md`](README.md), step 1). Before the next stable tag, the owner should look at O-5.
-**Last updated:** 2026-09-24 by the WP-11.1 session ([PR #172](https://github.com/Abe-Borg/drawing-analyzer/pull/172)).
+**Next up:** Wave 1 in order: `WP-16.1` (G3: BOM-safe key store and a migration that never deletes the only good copy; no dependency), then `WP-16.2` (G2: a run-scoped client snapshot). WP-11.2 is done: an unexpected error inside the digest phase stops the phase, not the run (the paid digests in hand, the journal and the export ship; every page not reached is an `UnreadPage`; one path-free line; the digest stage reads FAILED; the run stops after the phase), a batch submit or collect that stops on an error releases its uploads (the collect after reading back what finished), and the render spool and retained uploads are released on every exit (R1, containment). WP-11.3 (Wave 2, revision on reopen) is available and is the last of R1. WP-10.4 (Wave 2) is available: its dependencies WP-01.2 and WP-01.4 are done. WP-01 is not done: WP-01.5 (Wave 2), WP-01.6 and WP-01.7 (Wave 2, waiting on WP-02.3) remain. WP-09 is not done: WP-09.3 (N32, Wave 3) remains. WP-06 is not done: WP-06.2 and WP-06.3 (Wave 2) are available, and WP-06.4 still waits on WP-03.4; WP-06.2 completes D-8. WP-05 is not done: WP-05.3 remains (Wave 2, available). WP-07 is not done: WP-07.3 (Wave 2, available). WP-03 is not done: WP-03.4, WP-03.5 and WP-03.6 remain (Wave 2); WP-03.5 also carries the measured N30 exposure of cross-QC's same-pair conflicts. WP-04 is not done: its acceptance needs quantity roles, slice `WP-04.3` (Wave 2). WP-11 is not done: WP-11.3 remains. First check the open PRs ([`README.md`](README.md), step 1). Before the next stable tag, the owner should look at O-5.
+**Last updated:** 2026-09-25 by the WP-11.2 session ([PR #173](https://github.com/Abe-Borg/drawing-analyzer/pull/173)).
 
 This file is authoritative for **status and order**. Requirements live in
 [`drawing-analyzer-remediation-plan.md`](drawing-analyzer-remediation-plan.md).
@@ -116,7 +116,7 @@ starting.
 | WP-01.3 | Digest partial reads: a raised-cap retry never loses the first read; findings from an errored, refused or truncated digest are labelled or held out of the ledger (N15, N16) | M | WP-01.2 | done | [PR #170](https://github.com/Abe-Borg/drawing-analyzer/pull/170), 2026-09-24. **Rules decided by the owner (seven choices, two rounds, measured first):** (1) one rank decides which read a sheet keeps, on both transports (`digest.keep_digest_read`, over `digest._read_rank`): finished > a partial read with content (prose or findings) > refused > nothing (empty, errored envelope, a raise); the later read wins a tie, so of two partial reads the raised-cap one is kept and of two content-free reads the fresher error; reads are never mixed (I-2); every attempt's usage is kept; applied by the real-time retry in `digest_sheet` and by `batch_digest._replace_result_with_attempt_history` at all five sites; (2) the kept read's error names the discarded attempt (`; retry: <its error>`, `; retry failed: <error>` for a raise, the batch direct rescue included, `; N retries, the last: …` for several); (3) the stalled-batch harvest holds a partial read (`digest.is_partial_read`) as the sheet's result while the sheet is still rescued (rescue list from `harvest.resolved`); (4) N15: an unfinished read's findings are held out of the review (`models.review_findings` / `held_out_findings`), listed in the sheet's own export file and report card, and counted observationally (`ctx.digest_findings_held_out`, a digest-stage warning, `findings_held_out` on `SHEET_DIGESTED` and the run.log *Sheets* line, the manifest's `digest_findings_held_out`; D-2 note). No cache contract, key, prompt or schema moved (only finished reads are cached, pinned for both transports). Tests: `tests/test_digest_partial_reads.py` (75). Re-baselined: `tests/test_drawing_digest.py::test_a_failed_retry_keeps_the_truncated_first_read` (its error gains the raise's text, approved). Found and fixed here beyond the request's description: a batch resubmission that comes back as an errored envelope also wiped the first read, and the harvest dropped a cut-off read with prose. Found, not fixed: the advisory set-identity corpus reads an errored sheet's text (WP-01.6 note) |
 | WP-01.4 | Critique: `max_tokens`/refusal/unknown terminal states are not completed reads on either transport; critique-only cache contract term (N4 critique) | M | WP-01.2 | done | [PR #171](https://github.com/Abe-Borg/drawing-analyzer/pull/171), 2026-09-24. **Rules decided by the owner (six choices, two rounds, measured first):** (1) a critique read the model did not finish (D-1: anything but `end_turn`/`stop_sequence`; the critique declares no tools, so `tool_use`/`pause_turn`/`compaction` too) keeps **nothing**, like a malformed read: no findings, no claims for the arithmetic auditor; its tokens stay billed. The one fix site, `critique.outcome_from_message`, reads the stop reason first on both transports; (2) the critique stage adopts **D-2's item rule**: its items are reads (eligible = sheets x requested reads, judged = finished with a valid findings object; a cache hit counts all its reads), COMPLETE only when every read was judged, FAILED when none was (it read PARTIAL), else PARTIAL; a coverage line leads the warnings and `critique.critique_shortfall` names each short sheet (`pipeline._CritiqueReadTally`, a `read_tally` sink on `_run_critique_stage`). This closes the gap: a sheet whose surviving read shipped findings kept `error=None` and read COMPLETE, cached nothing and was re-billed every warm run; (3) the per-sheet usage record agrees (COMPLETE only when every read counted, FAILED when none did, else PARTIAL); (4) one ladder: `digest.digest_terminal_error(..., noun="critique")` (`empty critique (…)` kept, the digest's wording unchanged); (5) no stored per-read stop reasons; (6) the stage's items are reads (eligible -> judged). `digest_cache._CRITIQUE_CACHE_CONTRACT` 2 -> 3 (one register row; the unchanged merge-rule fingerprint pinned under 3; the contract-2 keys pinned). `FINDINGS_PARSE_OK`, `_SCHEMA_VERSION` and the merge rule unchanged. Tests: `tests/test_critique_terminal_outcome.py` (128), the WP-01.4 section of `tests/test_drawing_cache_identity.py` (2). No pinned assertion re-baselined (one data row: the fingerprint under 3). Instrumented over the whole suite: only critique stage items (reads), 12 all-failed critiques PARTIAL -> FAILED and their usage records moved |
 | WP-11.1 | Per-source and per-page fault isolation in the render and prescan iterators; the inventory is the page denominator; every expected page gets an outcome (R1 core) | M | — | done | [PR #172](https://github.com/Abe-Borg/drawing-analyzer/pull/172), 2026-09-24. **Rules decided by the owner (six choices, two rounds, measured first):** (1) the pages a run owes are the inventory's, built without reopening a file (`render.inventory_sheet_refs`, `InputInventory.expected_page_counts`), and D-8's page part is decided narrowly (a sheet the run owes is one page `(source_id, page_index)` of an accepted inventory document); (2) both iterators take `expected_pages`: a source that will not open again fails every expected page with one shared `render.SourceUnreadableError`, a page past the source's current end fails with `render.PageNotInSourceError`, and a source none of whose pages is wanted is never opened; (3) an unread page is a typed record (`models.UnreadPage`: `ctx.unread_pages`, `unread_pages` in `run_manifest.json`, a `NOT READ` line in run.log's Sheets section) plus one `PAGE_UNREAD` event, so every expected page ends with exactly one per-page event; a page neither yielded nor reported gets one too; (4) `ctx.errors` and the digest stage's errors say a source-level failure once per source, a page failure once per page; (5) the prescan is best effort: what it cannot scan goes to the render path (the one reporter), and `_GeometryOmissionSink(order=)` adds a routed page's geometry in page order; (6) a source with more pages is read for its inventoried pages and named in one run error (the stage stays COMPLETE, the run PARTIAL), fewer pages fail the missing ones; labels keep the inventory's count, the render identity the opened file's; (7) the critique takes the same refs (`list_sheets` only as a direct caller's fallback): a source lost after the digest is critiqued from the spooled renders or retained uploads, and on Hybrid each page it cannot obtain is named with the reason. No key, prompt or schema moved (`tests/test_drawing_cache_identity.py` unchanged); `run_manifest.json` gains `unread_pages`. Tests: `tests/test_source_page_isolation.py` (77). No pinned test re-baselined; outside the new file only the critique's degraded line in the 2 fixtures with an unrenderable page (it now names the reason) and 3 `PAGE_UNREAD` events moved (instrumented) |
-| WP-11.2 | Digest-phase containment: completed paid digests, journal and manifest always ship; uploads and spool released on every exit (R1) | M | WP-11.1 | todo | From WP-11.1: a source or page that fails after the inventory no longer raises out of the digest phase (the iterators report it page by page), so the measured aborts are gone; what remains is an unexpected exception anywhere else inside it. `_digest_sheets_concurrent` still loses its paid `results` on one; `submit_drawing_batch` (`batch_digest.py`) still has no DA-034 cleanup guard (its twin `submit_critique_batch` does); the render spool is created before the digest and closed only in the critique stage's `finally`, and retained uploads are released only there, so an exception before the critique leaks both; `help_content.py`'s "released on every exit path" is still false. `results` in `_digest_sheets_concurrent` is sized by `total` and can no longer overflow: with `expected_pages` the stream never yields more sheets than it was asked for. When the phase fails, keep the `_UnreadPages` contract: every page the run owed still ends with a digest or an `UnreadPage` |
+| WP-11.2 | Digest-phase containment: completed paid digests, journal and manifest always ship; uploads and spool released on every exit (R1) | M | WP-11.1 | done | [PR #173](https://github.com/Abe-Borg/drawing-analyzer/pull/173), 2026-09-25. **Rules decided by the owner (eight choices, two rounds, measured first):** (1) an unexpected `Exception` inside the digest phase stops the phase, not the run: the digests in hand ship (both transports fill a `collected` list; real time keeps each read in flight), every page not reached is an `UnreadPage` (`not read: the digest phase stopped early (<Type>)`), and `_stopped_run_context` ends the run after the phase: no later stage makes a call, reopens a source or writes a reviewed PDF, none is recorded, the read sheets' digest findings are ledgered offline (DA-012), `RUN_END` carries `stopped="digest"`, and the context goes to the normal exporter; (2) the digest stage reads FAILED whatever was read (D-2 note); (3) the collect side harvests what finished, then releases (`_abandon_after_collect_error`; a batch it cannot cancel keeps its files); (4) `Exception` only: `KeyboardInterrupt` and `SystemExit` still end the run (D-5 input note); (5) one run-level line after the inventory's, type name only, path-free (`_digest_phase_line`); (6) the phase's unreached pages carry that reason and no per-page line; (7) the reads in flight are kept; (8) the line says what was kept ("the N page(s) read are exported and cached, so a re-run does not pay for them again"). Also: the level-1 store runs over the digests in hand (a re-run renders and reads only the rest); `submit_drawing_batch` gains the DA-034 outer guard (`slots_out=`), `collect_drawing_batch` a guard over its whole body (`results_out=`); `@_with_run_release` releases the render spool and the retained uploads on every exit. Review round 1 (Codex): both level-2 cache writes are advisory (a raising `put` lost the paid read on real time and every billed item in the batch collect and harvest), the accounting is recorded page by page (one bad usage record dropped every later sheet's usage), and the line's cache promise needs a level-1 store that did not fail. No key, prompt, schema or manifest key moved. Tests: `tests/test_digest_phase_containment.py` (36). No pinned test re-baselined; outside the new file only one release of zero files moved (instrumented) |
 | WP-16.1 | Key store: BOM-safe load, repair of BOM values already in the keyring, shape check, migration that never deletes the only good copy (G3) | S/M | — | todo | |
 | WP-16.2 | Run-scoped client snapshot passed from `gui._worker`; key entry disabled while busy; the key is no longer written to `os.environ` (G2) | M | — | todo | |
 
@@ -142,7 +142,7 @@ starting.
 | WP-03.6 | Canonical final clustering over retained observations; per-observation anchors; idempotent reconciliation (WP-03 clustering clarification) | M/L | WP-03.5 | todo | From WP-03.1: flip `tests/test_pass_b_complete_link.py::_BRIDGE_JOINS` (which cluster the generic bridge joins follows arrival order) and `::test_recorded_limit_a_four_finding_chain_still_counts_by_arrival_order` (entry count 2 or 3 by order). From WP-03.7: the geometric recall WP-03.1 gave up does not come back. A rectangle is resolved from the quote, so it is evidence of where, never of which claim (D-3 input); per-observation anchors map evidence and must not merge two observations (`tests/test_pass_b_complete_link.py::test_a_same_spot_pair_never_folds_on_position`). Pass B now folds nothing Pass A refused, so canonical clustering may replace it rather than extend it |
 | WP-06.4 | Direction-free merge for reversed cross-sheet conflicts with a stated same-claim predicate (B10) | M | WP-03.4, WP-06.1 | todo | From WP-06.1: cross-QC collapses only findings identical in every field (`_drop_exact_repeats`) and hands every other report to the ledger. So a re-report of one conflict phrased very differently (a shard and the reconciler, or two reconcile pair calls: a within-group conflict comes back from every pair its group is in) reaches the ledger twice, and stays two entries when the texts agree too little (overlap 0.118 in `tests/test_cross_qc_validation_and_dedup.py::test_n2_a_re_report_phrased_apart_reaches_the_ledger_twice`, pinned as the accepted cost). The same-claim predicate this slice states should fold it without folding the N2 pair (`test_n2_the_acceptance_pair_survives_*`, which must stay two) |
 | WP-07.3 | Truthful arithmetic counters split by provenance; contradictory transcriptions of one quote flagged (N18; WP-07 step 7) | S/M | WP-07.1, WP-03.3 | todo | From WP-07.2: the matched path (`result.matched`) still checks neither provenance nor the relationship, so a claim whose operands or operation the sheet does not state still counts as "checked out OK"; and a claim with a refused term (`1e3`, `24x12`) now counts `unusable` instead of `checked`, so `arithmetic_checked` can read lower on the same claims. From WP-03.3: the "claim dedup keys move to Decimals" part of WP-07 step 7 is done (`arithmetic.claim_content_key`, shared by all three claim dedups). Since WP-03.3 two contradictory mismatch transcriptions of one quote (different terms) are two findings, where the coordinator used to keep the first one silently; a contradictory pair where one read matches and the other does not still counts one matched and one mismatched (N18 as reproduced) |
-| WP-11.3 | Source revision checked on every reopen (verify, investigate, markup) (R1 revision part) | M | WP-11.1 | todo | From WP-11.1: D-8's page part names the inventory's `content_sha256` as the revision the run set out to read; binding a reopen to it is this slice's. WP-11.1 checks only the page count: a page past the source's current end is unread (`PageNotInSourceError`) and extra pages are not read, with one run error naming the source; a same-count rewrite is still read without a word until the markup's `detect_mutations` (and never on a standard run). The digest's level-1 identity already re-hashes a source whose stat drifted (`current_content_sha256`), so no stale cache hit is served. `iter_region_crops` (verify) and the investigation reopen without a revision check |
+| WP-11.3 | Source revision checked on every reopen (verify, investigate, markup) (R1 revision part) | M | WP-11.1 | todo | From WP-11.1: D-8's page part names the inventory's `content_sha256` as the revision the run set out to read; binding a reopen to it is this slice's. WP-11.1 checks only the page count: a page past the source's current end is unread (`PageNotInSourceError`) and extra pages are not read, with one run error naming the source; a same-count rewrite is still read without a word until the markup's `detect_mutations` (and never on a standard run). The digest's level-1 identity already re-hashes a source whose stat drifted (`current_content_sha256`), so no stale cache hit is served. `iter_region_crops` (verify) and the investigation reopen without a revision check From WP-11.2: a digest phase stopped by an unexpected error ends the run after the phase, so no stage that reopens a source (verify, investigate, markup) runs on such a run; the revision check matters only on runs that finish the phase |
 
 ### Wave 3 — P1 evidence quality: auditors, citations, investigation
 
@@ -172,22 +172,22 @@ starting.
 | WP-14.1 | Every non-succeeded batch envelope keeps a non-billable attempt record; the harvest counts only `succeeded` as responded (R3, incl. terminal path) | S | — | todo | |
 | WP-14.2 | TTL-split cache-write accounting from `usage.cache_creation`; per-TTL pricing; stale pricing comment fixed (C3) | S/M | WP-02.3 | todo | |
 | WP-14.3 | One shared response-metadata reader: serving model, `iterations`, `stop_details`, `fallback_credit`, `output_tokens_details`, `web_fetch_requests` (U1) | M | WP-02.3 | todo | |
-| WP-14.4 | `UsageRecord` known/unknown usage through the single `is_billable_but_unpriced` rule; `by_model` decision; pricing date on every surface; decides D-7 (WP-14 steps 4, 8) | M | WP-14.3 | todo | |
+| WP-14.4 | `UsageRecord` known/unknown usage through the single `is_billable_but_unpriced` rule; `by_model` decision; pricing date on every surface; decides D-7 (WP-14 steps 4, 8) | M | WP-14.3 | todo | From WP-11.2 (found, not fixed): a real-time read whose `digest_sheet` raised after the API call returned (the paid read, then an error outside the call's own capture; its level-2 cache write is advisory since WP-11.2, so not that) leaves no usage record, since the exception carries no usage; the phase now stops and ships, so that spend is the one the run cannot report (D-7) |
 | WP-14.5 | Per-attempt usage records from every stage result type (WP-14 step 3) | L | WP-14.4, WP-01.2 | todo | From WP-01.3: the real-time digest's raised-cap retry is still one usage record carrying both attempts' summed tokens (batch keeps one record per attempt). Since WP-01.3 the discarded attempt is named in the sheet's error, but it has no attempt record of its own on real time From WP-01.4: the critique's per-sheet record aggregates its reads (both reads' tokens), and since WP-01.4 its `terminal_status` is COMPLETE only when every read counted, FAILED when none did, else PARTIAL (`parse_success` only for COMPLETE). A per-read record would carry each read's own outcome (a cut-off read beside a finished one is one PARTIAL record today) |
 | WP-14.6 | Serving model carried through cache payloads (additive field) and the manifest (U1 provenance) | M | WP-14.3, WP-14.4 | todo | |
 | WP-16.3 | `_persist_key` reentrancy guard; Forget saved key; export never reloads a cleared key (U20) | S/M | WP-16.1 | todo | |
-| WP-17.1 | Cancel: cancel event, Cancel button, batch cancel and harvest with no resubmit, honest quit wording, partial export; decides D-5 (G1 core) | M/L | WP-16.2 | todo | |
+| WP-17.1 | Cancel: cancel event, Cancel button, batch cancel and harvest with no resubmit, honest quit wording, partial export; decides D-5 (G1 core) | M/L | WP-16.2 | todo | From WP-11.2: `KeyboardInterrupt` and `SystemExit` are deliberately not contained (D-5 input note): the spool and the retained uploads are released, but a batch in flight is neither cancelled nor harvested and its uploads stay, since the submit and collect guards catch `Exception` only. Found, not fixed: `collect_drawing_batch`'s error guards (the terminal branch's and WP-11.2's) release a batch's files while a follow-up or resubmission batch that reuses them may still run, and a resubmission in flight at the error is neither cancelled nor read back |
 | WP-17.2 | Keyless atomic job record (batch ids, `custom_id` → source/page/cache key, upload ids); relaunch lists unresolved jobs and offers remote cancel (G1) | M | WP-17.1 | todo | |
 | WP-17.3 | Harvest recorded jobs' results into `DigestCache` after fingerprint validation (G1) | M | WP-17.2 | todo | |
 | WP-17.4 | Crash matrix, unresolved-submission reconciliation, instance lock/lease (G1) | L | WP-17.3 | todo | |
 | WP-18.1 | Files-API failure never becomes full-rate work under Economy on either transport; recovery policy threaded into the submit functions (N21, U4) | M | — | todo | |
 | WP-18.2 | Inline request size guard in the shared builder (authorized fallback and Fast/Hybrid) (U4) | S/M | WP-18.1 | todo | |
 | WP-18.3 | Work-dir and render-spool leases so a live run is never pruned (U9) | M | — | todo | |
-| WP-18.4 | Upload error classification; truthful retention text ("files persist until deleted") (N22) | S | — | todo | |
+| WP-18.4 | Upload error classification; truthful retention text ("files persist until deleted") (N22) | S | — | todo | From WP-11.2: `help_content.py` and the README now list only the upload-release exits that are covered (a finished, a cancelled, a submit or collect stopped by an error); their "expire on Anthropic's side" / "expire server-side" wording is left for this slice. Found, not fixed: `file_upload.upload_sheet_images` calls `on_image` after an image lands, and if it raises that image's id never reaches `by_position`, so the partial-upload cleanup cannot delete it; the submit then records the callback's exception as the sheet's upload failure. With a status sink that keeps raising, every uploaded image of every sheet leaks. `ImageProgress`'s comment says the callback "never affects the upload result" |
 | WP-18.5 | Durable upload ownership and bounded reclaim of provably app-owned orphans (U5) | M/L | WP-17.2, WP-14.4 | todo | |
 | WP-19.1 | Pair-aware chat history normalization at Stop, commit, cap exit, catch, save and restore; `pause_turn` rounds merged; transcript v1 accepted and repaired (R4) | M | — | todo | |
 | WP-19.2 | Mixed client/server tool and pause semantics; replay canary written (run blocked on O-4) (R4, U2) | S/M | WP-19.1 | todo | Running the canary is O-4 |
-| WP-22.1 | Linear secret redaction (incl. `RedactingFormatter`); path scrub handles URLs, doubled separators, `\\?\` and UNC (U13) | M | — | todo | |
+| WP-22.1 | Linear secret redaction (incl. `RedactingFormatter`); path scrub handles URLs, doubled separators, `\\?\` and UNC (U13) | M | — | todo | From WP-11.2 (found, not fixed): sixteen stage catch-alls in `pipeline.py` append `str(exc)` to `ctx.errors` (`Critique: {exc}` among them), so a path or secret in an exception message reaches the context; the exported artifacts scrub it (`redact_for_display`), the GUI's log panel prints it as is. WP-11.2's digest-phase line names the type only |
 | WP-22.2 | Critique read count resolved once; `critique_N` tags counted as one family (N25, U15) | S/M | — | todo | |
 | WP-22.3 | One shared `refs` coercion replacing the three that disagree (U16) | S | — | todo | |
 | WP-22.4 | Supported configuration matrix; required-stage roll-up cannot report COMPLETE with missing stages (U14, U15) | M | WP-01.1 | todo | |
@@ -287,7 +287,7 @@ report is built from it).
 | B10 | A→B and B→A copies of one conflict both survive | P1 | 06.4 | open | |
 | B11 | "No conflicts noted on this sheet." becomes a medium finding | P1 | 09.1 | implemented+validated | `tests/test_prose_filler_and_assurances.py` (WP-09.1, [PR #168](https://github.com/Abe-Borg/drawing-analyzer/pull/168)): the review's four strings and 21 equivalent wordings are filler (`test_b11_review_strings_are_filler`, `test_b11_equivalent_wording_is_filler`), counted in `filtered`, and make no structuring call and no ledger entry with a client, without one, or when the call fails (`test_b11_filler_*`); 45 real findings survive (`test_real_findings_survive_the_filter`), and everything the old filter dropped is still dropped (`test_the_new_filter_drops_everything_the_old_one_did`) |
 | B12 | `deg`/`°` sign differently; `90 deg F` vs `90 deg C` compatible | P0 | 04.1 | implemented+validated | `tests/test_quantity_signature.py` (the B12 token table; the `B12 …` pairs, incl. no inferred scale); `tests/test_ab_findings_diff.py::test_a_changed_temperature_scale_is_never_an_exact_match` (WP-04.1, [PR #157](https://github.com/Abe-Borg/drawing-analyzer/pull/157)) |
-| R1 | Source unreadable after inventory aborts the whole run | P0/P1 | 11.1, 11.2, 11.3 | open (core implemented+validated in 11.1; digest-phase containment (11.2) and the revision check on reopen (11.3) stay open) | `tests/test_source_page_isolation.py` (WP-11.1, [PR #172](https://github.com/Abe-Borg/drawing-analyzer/pull/172)), by the owner's rules: the second, the first and every source removed after the inventory, and one locked (`PermissionError`), on real time, batch and Hybrid, cold and cached: the run returns a context and a closed journal, the surviving sheets are digested and exportable, each lost page has an `UnreadPage` and one `PAGE_UNREAD` event, one source line in `ctx.errors` and the digest stage's errors, the stage counts the inventory's pages (PARTIAL; FAILED when nothing survived), no path anywhere; a paid digest before the loss is kept (usage, export, manifest); the zero-sheet exit only for a set with nothing accepted; a page failing in the prescan (identity, word count, geometry) is read, one failing in both (page load, text) or in the render only is unread with one page line; fewer and more pages (both transports, both cache paths); a 5-page source is one line; a page neither yielded nor reported still has an outcome; a cached source that vanishes after the prescan costs nothing; the critique over a source lost after the digest (COMPLETE from the spool or retained uploads; Hybrid names each page with its reason); an unchanged set's refs equal `list_sheets` and a cached re-run renders nothing. Remaining: WP-11.2 (other exceptions inside the digest phase, upload and spool release), WP-11.3 (revision on reopen) |
+| R1 | Source unreadable after inventory aborts the whole run | P0/P1 | 11.1, 11.2, 11.3 | open (core implemented+validated in 11.1; digest-phase containment implemented+validated in 11.2; the revision check on reopen (11.3) stays open) | `tests/test_source_page_isolation.py` (WP-11.1, [PR #172](https://github.com/Abe-Borg/drawing-analyzer/pull/172)), by the owner's rules: the second, the first and every source removed after the inventory, and one locked (`PermissionError`), on real time, batch and Hybrid, cold and cached: the run returns a context and a closed journal, the surviving sheets are digested and exportable, each lost page has an `UnreadPage` and one `PAGE_UNREAD` event, one source line in `ctx.errors` and the digest stage's errors, the stage counts the inventory's pages (PARTIAL; FAILED when nothing survived), no path anywhere; a paid digest before the loss is kept (usage, export, manifest); the zero-sheet exit only for a set with nothing accepted; a page failing in the prescan (identity, word count, geometry) is read, one failing in both (page load, text) or in the render only is unread with one page line; fewer and more pages (both transports, both cache paths); a 5-page source is one line; a page neither yielded nor reported still has an outcome; a cached source that vanishes after the prescan costs nothing; the critique over a source lost after the digest (COMPLETE from the spool or retained uploads; Hybrid names each page with its reason); an unchanged set's refs equal `list_sheets` and a cached re-run renders nothing. `tests/test_digest_phase_containment.py` (WP-11.2, [PR #173](https://github.com/Abe-Borg/drawing-analyzer/pull/173)), by the owner's rules: an unexpected exception from the digest, a progress callback, the prescan, the level-1 store, the accounting, a batch submit loop, poll or results read, on real time, batch, Hybrid and Economy, cold and cached: the run returns a closed context (`RUN_END` `stopped="digest"`) and exports it; every paid digest in hand is kept (usage, `SHEET_DIGESTED`, `findings.json`), a read in flight included; each page not reached is an `UnreadPage` naming the failure with one `PAGE_UNREAD` event; one path-free line (type name only) says what was not read and what was kept; the digest stage reads FAILED; no later stage makes a call; a cached re-run reads only what was not read; a submit failure before its batch deletes every upload; a collect failure reads back what finished, cancels a running batch and releases (a batch it cannot cancel keeps its files); the spool and retained uploads are released on every exit, `KeyboardInterrupt` and an exception after the phase included, and `KeyboardInterrupt` still ends the run. Remaining: WP-11.3 (revision on reopen) |
 | R2 | Refused batch item never retried or rescued | P1 | 01.5 | open | |
 | R3 | Canceled/errored envelopes lose attempt records (harvest and terminal path) | P1 | 14.1 | open | |
 | R4 | Chat commits an unrun `server_tool_use`; history poisoned, persisted | P1 | 19.1, 19.2 | open | |
@@ -396,6 +396,318 @@ report is built from it).
 Each session adds one entry at the top: date, slices and IDs, PR, what changed,
 contracts decided, cache/schema effects, validation actually run (with counts),
 what could not be verified, risks, and next steps.
+
+### 2026-09-25 — WP-11.2: an unexpected error inside the digest phase stops the phase, not the run ([PR #173](https://github.com/Abe-Borg/drawing-analyzer/pull/173))
+
+- **Slice and IDs:** WP-11.2. R1, digest-phase containment (implemented+validated).
+  R1 stays open for WP-11.3 (the revision check on reopen). No contract is
+  newly decided. D-2 gains a note (a digest phase stopped by an unexpected
+  error reads FAILED, whatever was read) and D-5 an input note (what
+  `KeyboardInterrupt` leaves). No migration-register row: no key, prompt or
+  schema moved. **WP-11 is not done:** WP-11.3 remains, so there is no package
+  acceptance check.
+- **Base.** `main` = `origin/main` = `0aa2758`; no drift at the start or before
+  the push. Baseline **4,402 passed, 2 skipped, 10 deselected** (269 s),
+  identical to the WP-11.1 handoff. The two skips are IPv6 loopback and chmod
+  as root.
+- **Reproduced first.** Scratch probes ran in a copy of `origin/main`, with the
+  suite's fakes and the hermetic guard applying. Each fact was as the request
+  stated:
+  - **Real time**, three one-page sources, `digest_sheet` raising on B: the
+    `RuntimeError` left `extract_drawing_context` after 1 paid read, with no
+    context, journal or export. It was the same with a `DigestCache`. The
+    re-run rendered all 3 pages and made 2 calls: A came from the level-2 cache
+    only, since the level-1 store runs after the phase.
+  - **Two workers**, with C finished when B raised: 2 reads billed, both
+    discarded.
+  - **A progress callback that raises** ended the run after 1 paid read.
+  - **Batch submit**, the progress callback raising at B's upload: 4 uploads,
+    0 deleted, no batch.
+  - **Batch collect**, the progress callback raising at the poll: 6 uploads,
+    0 deleted, 1 batch whose 3 reads were billed and none read back, and no
+    cancel.
+  - **Fast exhaustive** (render spool), the digest stage's own record raising
+    (`_finish_stage`) after every read, before the critique: the spool
+    directory stayed while the exception was held and went only at garbage
+    collection; the critique made 0 calls (the control made 6).
+  - **Economy exhaustive**, the same injection: 6 retained uploads, 0 deleted
+    (the control deleted 6 of 6).
+- **Facts confirmed, not assumed.** An instrumented scratch copy of
+  `origin/main` added append-only wrapper blocks at the end of `pipeline.py`,
+  `batch_digest.py`, `file_upload.py` and `render_spool.py`, logging the test
+  name behind `WP112_LOG`. Over the whole suite (4,402 passed, no outcome
+  changed):
+  - **The hooks ran** 303 contexts, 247 real-time and 35 batch digest phases,
+    145 submits, 139 collects, 304 sheet uploads and 164 pipeline spools.
+  - **Every context returned.** The only 2 exceptions were the DA-034 direct
+    tests, each raising after its cleanup:
+    `test_submit_create_failure_deletes_every_uploaded_file` (a failed batch
+    create, whose guard already existed; the upload loop had none) and
+    `test_collect_results_error_releases_files_before_propagating`. Every
+    pipeline spool was closed by the critique stage.
+    So no fixture reaches the containment, and every behaviour this slice adds
+    is guarded only by the new tests.
+  - **The digest cache swallows its own I/O errors.** The realistic triggers
+    are the caller's callbacks, an injected cache or client, and bugs; a
+    keyless real-time run raises `ValueError` from inside `digest_sheet` (the
+    lazy client), which containment now also catches.
+- **The decision, made by the owner before any code** (AskUserQuestion, two
+  rounds, eight choices, each as recommended). Measured first:
+  - one scratch implementation with each open choice switchable by
+    environment variable;
+  - run instrumented over the 41 test files that reach the digest phase, its
+    transports or the spool (2,109 tests), diffed test by test against the
+    base;
+  - a 22-case table run through the base and 15 variants: real time, batch,
+    Hybrid and Economy; cold and cached; a raising digest, callback, prescan,
+    level-1 store, accounting, poll and results read; a read in flight;
+    nothing read; `KeyboardInterrupt`; an exception after the phase; a
+    callback that stays broken.
+
+  Under every variant no pinned test moved, and the pipeline's containment
+  never fired in them. The new collect guard fired once, in
+  `test_collect_results_error_releases_files_before_propagating`, after that
+  test's own release: one release of zero files, the only event that moved.
+  Only the variant that left the collect side alone did not add it.
+  The case table decided:
+  - **On failure: stop after the digest phase.** All 22 cases return except
+    `KeyboardInterrupt` and the two exceptions after the phase, and the
+    critique makes 0 calls. Not taken:
+    - continue over the read sheets: the critique also read the pages the
+      digest never reached (Fast/Hybrid: 6 critique calls, 4 for pages with no
+      digest; Economy: 12 uploads), and a callback that stays broken (3 cases)
+      escaped outside the phase and lost the context again;
+    - finalize and re-raise: no context, run.log, manifest or export.
+  - **Stage status: FAILED whatever was read.** Not taken: the item rule
+    capped at PARTIAL (an exhaustive run whose QC never ran reads "Completed
+    with QC warnings", 5 cases); the item rule uncapped (a false COMPLETE,
+    "Exhaustive QC complete", 2 Economy cases).
+  - **Collect side: harvest, then release.** A poll raising on an ended batch
+    reads back 3 of 3 and releases 6 of 6; on a running one the cancel is
+    accepted, then 3 of 3 and 6 of 6. Not taken: release only (the 3 billed
+    reads lost in all 4 collect cases); leave it to WP-17 (6 uploads leak and a
+    running batch is not cancelled).
+  - **Exceptions: `Exception` only.** Not taken: `BaseException` (a Ctrl+C
+    mid-digest returned a context as if the run had finished normally, and a
+    native panic would be continued past, which MEASUREMENT_PACKAGES §2
+    forbids without a boundary analysis).
+  - **Round 2.** The line gives the type name only (not taken: type and
+    sanitized message; the path scrub has known gaps, U13). One run-level line,
+    and each unreached page's reason names the failure (not taken: today's "no
+    render outcome was recorded"; one line per page). Keep what completes in
+    flight (not taken: also cancel unstarted reads, measured identical, since
+    the pool never queues a read behind a busy worker). Step 7 is in the
+    run-level line (not taken: a GUI-only sentence; nothing).
+- **What changed:**
+  - **`pipeline.py`:**
+    - `extract_drawing_context` contains the digest phase (region 1: the
+      prescan, tile staging, the spool, the dispatch; then the level-1 store
+      over the digests in hand; region 2: the accounting in two passes).
+    - `_digest_phase_line` and `_stopped_run_context` (the stop: the offline
+      ledger, the roll-up, `USAGE_TOTALS`, `RUN_END` `stopped="digest"`).
+    - `_UnreadPages.stop` and `not_reached`.
+    - `collected=` on both transports; the real-time pool keeps what is in
+      flight and closes the render stream on its own thread.
+    - `@_with_run_release`, `_register_run_release` and
+      `_release_retained_uploads`, which the critique's `finally` now calls too
+      (same behaviour).
+    - Review round 1: each page's event and each sheet's usage are recorded in
+      their own `try` (`_accounting_stopped` makes the first failure the
+      phase's), and the line's cache clause needs a level-1 store that did not
+      fail (`cached_claim`).
+  - **`batch_digest.py`:**
+    - `submit_drawing_batch(slots_out=)` with the DA-034 outer guard (the
+      slot in progress included);
+    - `collect_drawing_batch(results_out=)` with the guard over its whole body
+      and `_abandon_after_collect_error`;
+    - `_digest_from_message`'s level-2 write is advisory (review round 1).
+  - **`digest.py`:** `digest_sheet`'s level-2 write is advisory (review round
+    1).
+  - **`help_content.py`:** the upload bullet lists the exits that are covered.
+  - **Not changed:** `derive_run_outcome`, the digest stage's ladder for a
+    phase that did not stop, the zero-sheet and block exits, every key,
+    `_SCHEMA_VERSION`, every prompt, `run_manifest.json`'s keys, the report,
+    and the GUI. A stopped run returns a context, so the GUI's worker hands it
+    to `_on_done`, which enables Export All unconditionally, and never to
+    `_on_error` (read from `gui.py`).
+- **Contracts decided:** none newly; the D-2 note and the D-5 input note.
+- **Cache/schema effects: none.** No key term, contract counter or stored shape
+  moved (`tests/test_drawing_cache_identity.py` unchanged). The level-1 store
+  now also runs after a contained failure, over the digests in hand, under the
+  same predicate (`digest_cache_admits`). `run_manifest.json` gains no key: its
+  `unread_pages` lists the pages not reached. The journal gains one event type
+  (`DIGEST_PHASE_STOPPED`) and a `stopped` field on `RUN_END`.
+- **Re-baselined tests: none.** No existing test file was edited.
+- **New tests:** `tests/test_digest_phase_containment.py` (36; 33 in the
+  first push, 3 from review round 1):
+  - **real time** (6): a raising digest keeps the paid read, exports (with
+    `findings.json` carrying the read sheet's finding, run.log and the
+    manifest), and a cached re-run renders and reads only the two pages not
+    read; a read in flight is kept; a raising progress callback; nothing read
+    is a FAILED run;
+  - **the phase** (8): a level-1 store failure after every page was reached
+    (the line makes no cache promise); a cache whose every write raises loses
+    no paid read (real time, batch); an accounting failure (the second usage
+    record) still closes the run with a FAILED stage while the other sheets
+    keep their usage; an event failure costs only its own page's event; a
+    prescan failure leaves every page unread; a cached run keeps every cached
+    digest; `KeyboardInterrupt` still ends the run and the spool is removed;
+  - **batch submit** (5): a loop failure deletes every upload; the resolved
+    slots reach the caller; a failure between an upload and its slot deletes
+    it; the upload loop through the pipeline; an inline read survives a submit
+    failure;
+  - **batch collect** (6): a poll failure reads back the finished batch (and
+    the cache); the read-back reaches the caller; a poll failure cancels a
+    running batch; a batch it cannot cancel keeps its files; a poll and a
+    results failure through the pipeline;
+  - **exhaustive and after the phase** (5): Fast and Hybrid stop and release
+    the spool; Economy releases every upload; an exception after the phase
+    still releases the spool and the retained uploads;
+  - **callbacks** (2): a callback that stays broken does not lose the run
+    (real time, Economy);
+  - **wording and cardinality** (3): the line and the reasons are path-free
+    (an exception whose message carries a folder name); one line for every page
+    not read; a page that failed on its own keeps its reason;
+  - **a clean run is unchanged** (1).
+
+  Against the copy of `origin/main`, classified from `--junitxml`: **29 fail on
+  behaviour, 2 only on the new API** (`slots_out`, `results_out`), and **2
+  pass**, pinning what the fix keeps: a batch it cannot cancel keeps its files,
+  and a clean run is unchanged.
+- **Fixture effects, instrumented over the whole fixed suite** (the same hooks,
+  diffed test by test against the base run; measured on the first push and
+  again after review round 1, with the same result): outside the new file,
+  every one of the 402 tests with a record is identical except
+  `test_collect_results_error_releases_files_before_propagating`, which gains
+  one release of zero files from `_abandon_after_collect_error` (its own
+  cleanup already released them). All 303 contexts return with the same
+  statuses, errors, unread pages, stages and usage records. Every hook, upload,
+  delete, spool and exception count is unchanged. In the new file, 28 contexts
+  return and 3 raise (`KeyboardInterrupt` and the two exceptions after the
+  phase).
+- **Downstream consumers walked:**
+  - the merge and the settle; `ctx.errors` (order: the inventory's lines, the
+    phase line, page lines, count notes, specification errors);
+  - the digest stage (items, status, errors), `SHEET_DIGESTED` / `PAGE_UNREAD`
+    / `DIGEST_PHASE_STOPPED`, `RUN_END`;
+  - `roll_up_qc_status` (an exhaustive run reads FAILED, a standard run
+    NOT_REQUESTED) and `derive_run_outcome` (PARTIAL, or FAILED with nothing
+    read);
+  - run.log (the stage table lists only the recorded stages, so the digest
+    stage; the anchor pass's events stay in the trace, as on a standard run;
+    the outcome line reads "PARTIAL — QC incomplete" on an exhaustive run);
+    `run_manifest.json`; the export (`findings.json` whenever geometry exists);
+  - the GUI (`_on_done`, the issue list); the usage ledger (every paid read
+    kept keeps its record);
+  - the level-1 and level-2 caches; the critique's own release (now a no-op on
+    the second call).
+- **Review round 1 (Codex, three findings, all verified and fixed):**
+  - **P1, real time:** a level-2 cache `put` that raised inside `digest_sheet`
+    after the paid read made the future raise, and the containment skipped it:
+    the read and its usage were lost. Reproduced with a cache whose every
+    write raises: 1 of 3 reads made and 0 kept. Fixed by making the write
+    advisory (logged), as `DigestCache.put` already is.
+  - **P1, batch:** the same `put` in `_digest_from_message` failed the collect,
+    and the harvest re-parsed through the same cache and failed each item: 0 of
+    3 billed items kept. Fixed at the same root (the write is advisory), so the
+    collect and the harvest keep every item.
+  - **P2, usage:** one `_record_usage` that raised abandoned the rest of the
+    usage loop, so later sheets' records were missing (1 of 3 kept). Each
+    sheet's usage, and each page's event, is now recorded in its own `try`; the
+    first failure still stops the run after the phase.
+  - Found while fixing: with a cache that fails every write, the line would
+    have promised "cached, so a re-run does not pay for them again". The cache
+    clause now needs a level-1 store that did not fail; the level-1 test that
+    fails only level-1 writes now expects no promise (it under-claims there,
+    since its level-2 writes worked, and is never false).
+  - 5 tests failed before the fix for exactly these reasons (the 3 new ones,
+    the accounting test's added usage assertion, and the level-1 test's line)
+    and pass after it.
+- **Validation** (this container, Python 3.11.15, SDK 1.7.0, PyMuPDF 1.28.2):
+  - Baseline before any change: **4,402 passed, 2 skipped, 10 deselected**
+    (269 s) on `0aa2758`.
+  - The new file: 36 passed (33 in the first push). The 41 pinned files:
+    2,108 passed, 1 skipped, before and after.
+  - Full suite after: **4,435 passed, 2 skipped, 10 deselected** (271 s): the
+    baseline plus the 33 new tests, with the same two environment skips. After
+    review round 1: **4,438 passed, 2 skipped, 10 deselected** (259 s), the 3
+    added tests.
+  - The browser suite was not run: no report or JavaScript changed.
+  - `ruff check --select E9,F63,F7,F82 src tests scripts` (pinned 0.14.5) is
+    clean. F401/F811/F841 over the touched files finds one hit, on `main`
+    already: `pipeline.normalize_specs_text` (WP-22.5).
+  - `scan_secrets.py` is clean over the tracked files, the new one included.
+    `compileall src` passes.
+- **Docs:**
+  - **CHANGELOG** (Fixed): R1, digest-phase containment.
+  - **CLAUDE.md:** a passage after WP-11.1's (*An unexpected error inside the
+    digest phase stops the phase, not the run*).
+  - **README:** *Resilient inputs* gains the digest-phase paragraph. The
+    Economy-mode paragraph's "released on every exit" is corrected to the exits
+    that are covered; its "expire server-side" is left for WP-18.4 (N22).
+  - **`help_content.py`:** the same correction to the upload bullet.
+  - **The plan:** a WP-11.2 note under "Step 4: what containment must do".
+  - **DECISIONS:** the D-2 note and the D-5 input note.
+  - **PROGRESS:** this entry; the WP-11.2 row; the R1 row; notes on WP-11.3,
+    WP-17.1, WP-18.4 and WP-22.1; the Next-up line.
+- **Not verified:** live API behaviour (no budget, O-4; this slice makes no
+  call). Windows is covered by this PR's CI. The shapes are injected: a
+  monkeypatched `digest_sheet`, callback, cache, level-1 store,
+  `_record_usage`, poll and `results()`.
+- **Risks and residual gaps:**
+  - **Visible changes, by design.** A run that used to raise now returns a
+    PARTIAL or FAILED context and exports it; the digest stage reads FAILED
+    with one line; an exhaustive run's QC status is FAILED and no QC stage is
+    recorded; the pages not reached are listed.
+  - **A library call with no API key** used to raise `ValueError:
+    ANTHROPIC_API_KEY environment variable not set` out of the run (the lazy
+    client inside `digest_sheet`). It now returns a FAILED run whose line names
+    `ValueError` only; the message is in the diagnostics log. The owner chose
+    the type name over the message with this example in front of them. The GUI
+    refuses to start a run without a key (`_on_process`), so it never gets
+    here.
+  - **`KeyboardInterrupt` / `SystemExit` still end the run without a context**
+    (by the owner's rule; cancel is WP-17.1's, D-5). The spool and the
+    retained uploads are released; a batch in flight is neither cancelled nor
+    harvested, and its uploads stay.
+  - **A page whose event cannot be built** has no per-page event (pinned);
+    every other page keeps its own, and every read its usage.
+  - **An exception after the digest phase** still propagates (as before); only
+    the release of the spool and the retained uploads is new there.
+- **Re-checked (U31):**
+  - the critique's own release is unchanged (it now calls the shared helper,
+    and a second call is a no-op);
+  - the DA-034 direct tests pass unchanged, including the terminal branch's
+    own guard;
+  - the submit guard deletes the slot in progress, whose upload is not yet in
+    `slots`;
+  - `_harvest_abandoned_batch` is reused as it is (budget, cache and the N16
+    replacement helper);
+  - `stream.close()` runs on the rendering thread (PyMuPDF is not thread-safe).
+- **Found, not fixed:**
+  - **An upload's progress callback that raises loses that file's id.**
+    `file_upload.upload_sheet_images` calls `on_image` after an image lands;
+    if it raises, the image's id never reaches `by_position`, so the partial
+    upload cleanup cannot delete it. With a status sink that keeps raising,
+    each uploaded image of each sheet leaks. `ImageProgress`'s comment says the
+    callback "never affects the upload result" (WP-18 note).
+  - **The collect's error guards release a batch's files while a follow-up or
+    resubmission batch may still use them**, and a resubmission in flight at
+    the error is neither cancelled nor read back. This is the terminal branch's
+    existing guard and the new one alike (WP-17.1 note).
+  - **Sixteen stage catch-alls append `str(exc)` to `ctx.errors`**, the
+    critique's (`Critique: {exc}`) among them. The exported artifacts scrub it
+    (`redact_for_display`), and the GUI's log panel shows it as is (WP-22.1
+    note).
+  - **A paid read whose `digest_sheet` raised after the API call** for a reason
+    other than its cache write (now advisory) leaves no usage record, since the
+    exception carries no usage (D-7, WP-14.4).
+  - **A stopped run with nothing read** still has a header-only
+    `combined_text`, like any run with no digest.
+  - **The help text's "expire on Anthropic's side"** and the README's "expire
+    server-side" remain (N22, WP-18.4).
+- **Next:** WP-16.1 (Wave 1, no dependency), then WP-16.2. WP-11.3 (Wave 2) is
+  available and is the last of R1.
 
 ### 2026-09-24 — WP-11.1: a source or page that fails after the inventory no longer ends the run ([PR #172](https://github.com/Abe-Borg/drawing-analyzer/pull/172))
 
