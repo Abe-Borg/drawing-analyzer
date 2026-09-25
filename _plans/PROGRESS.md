@@ -575,13 +575,14 @@ what could not be verified, risks, and next steps.
   pass**, pinning what the fix keeps: a batch it cannot cancel keeps its files,
   and a clean run is unchanged.
 - **Fixture effects, instrumented over the whole fixed suite** (the same hooks,
-  diffed test by test against the base run): outside the new file, every one of
-  the 402 tests with a record is identical except
+  diffed test by test against the base run; measured on the first push and
+  again after review round 1, with the same result): outside the new file,
+  every one of the 402 tests with a record is identical except
   `test_collect_results_error_releases_files_before_propagating`, which gains
   one release of zero files from `_abandon_after_collect_error` (its own
   cleanup already released them). All 303 contexts return with the same
   statuses, errors, unread pages, stages and usage records. Every hook, upload,
-  delete, spool and exception count is unchanged. In the new file, 25 contexts
+  delete, spool and exception count is unchanged. In the new file, 28 contexts
   return and 3 raise (`KeyboardInterrupt` and the two exceptions after the
   phase).
 - **Downstream consumers walked:**
@@ -625,8 +626,8 @@ what could not be verified, risks, and next steps.
 - **Validation** (this container, Python 3.11.15, SDK 1.7.0, PyMuPDF 1.28.2):
   - Baseline before any change: **4,402 passed, 2 skipped, 10 deselected**
     (269 s) on `0aa2758`.
-  - The new file: 36 passed (33 in the first push). The 41 pinned files: 2,108 passed, 1 skipped,
-    before and after.
+  - The new file: 36 passed (33 in the first push). The 41 pinned files:
+    2,108 passed, 1 skipped, before and after.
   - Full suite after: **4,435 passed, 2 skipped, 10 deselected** (271 s): the
     baseline plus the 33 new tests, with the same two environment skips. After
     review round 1: **4,438 passed, 2 skipped, 10 deselected** (259 s), the 3
