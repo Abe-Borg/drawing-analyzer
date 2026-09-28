@@ -1,7 +1,7 @@
 # Remediation progress tracker
 
-**Next up:** Wave 1 in order: `WP-16.1` (G3: BOM-safe key store and a migration that never deletes the only good copy; no dependency), then `WP-16.2` (G2: a run-scoped client snapshot). WP-11.2 is done: an unexpected error inside the digest phase stops the phase, not the run (the paid digests in hand, the journal and the export ship; every page not reached is an `UnreadPage`; one path-free line; the digest stage reads FAILED; the run stops after the phase), a batch submit or collect that stops on an error releases its uploads (the collect after reading back what finished), and the render spool and retained uploads are released on every exit (R1, containment). WP-11.3 (Wave 2, revision on reopen) is available and is the last of R1. WP-10.4 (Wave 2) is available: its dependencies WP-01.2 and WP-01.4 are done. WP-01 is not done: WP-01.5 (Wave 2), WP-01.6 and WP-01.7 (Wave 2, waiting on WP-02.3) remain. WP-09 is not done: WP-09.3 (N32, Wave 3) remains. WP-06 is not done: WP-06.2 and WP-06.3 (Wave 2) are available, and WP-06.4 still waits on WP-03.4; WP-06.2 completes D-8. WP-05 is not done: WP-05.3 remains (Wave 2, available). WP-07 is not done: WP-07.3 (Wave 2, available). WP-03 is not done: WP-03.4, WP-03.5 and WP-03.6 remain (Wave 2); WP-03.5 also carries the measured N30 exposure of cross-QC's same-pair conflicts. WP-04 is not done: its acceptance needs quantity roles, slice `WP-04.3` (Wave 2). WP-11 is not done: WP-11.3 remains. First check the open PRs ([`README.md`](README.md), step 1). Before the next stable tag, the owner should look at O-5.
-**Last updated:** 2026-09-25 by the WP-11.2 session ([PR #173](https://github.com/Abe-Borg/drawing-analyzer/pull/173)).
+**Next up:** Wave 1: `WP-16.2` (G2: a run-scoped client snapshot, the key entry disabled while busy, the key no longer written to `os.environ`; no dependency). WP-16.1 is done: a key file saved "UTF-8 with BOM" no longer breaks the saved key (one normalizer and one `sk-ant-` shape check for a key file, the keyring, `save_api_key` and the GUI field; a BOM value already in the keyring is repaired; a file that is not a key is kept and named; a migration deletes only the files that hold the key it verified; value-free notes in the GUI and diagnostics logs; G3). WP-16.3 (Wave 4) is now unblocked: its dependency WP-16.1 is done. WP-11.3 (Wave 2, revision on reopen) is available and is the last of R1. WP-10.4 (Wave 2) is available: its dependencies WP-01.2 and WP-01.4 are done. WP-01 is not done: WP-01.5 (Wave 2), WP-01.6 and WP-01.7 (Wave 2, waiting on WP-02.3) remain. WP-09 is not done: WP-09.3 (N32, Wave 3) remains. WP-06 is not done: WP-06.2 and WP-06.3 (Wave 2) are available, and WP-06.4 still waits on WP-03.4; WP-06.2 completes D-8. WP-05 is not done: WP-05.3 remains (Wave 2, available). WP-07 is not done: WP-07.3 (Wave 2, available). WP-03 is not done: WP-03.4, WP-03.5 and WP-03.6 remain (Wave 2); WP-03.5 also carries the measured N30 exposure of cross-QC's same-pair conflicts. WP-04 is not done: its acceptance needs quantity roles, slice `WP-04.3` (Wave 2). WP-11 is not done: WP-11.3 remains. First check the open PRs ([`README.md`](README.md), step 1). Before the next stable tag, the owner should look at O-5.
+**Last updated:** 2026-09-28 by the WP-16.1 session.
 
 This file is authoritative for **status and order**. Requirements live in
 [`drawing-analyzer-remediation-plan.md`](drawing-analyzer-remediation-plan.md).
@@ -117,8 +117,8 @@ starting.
 | WP-01.4 | Critique: `max_tokens`/refusal/unknown terminal states are not completed reads on either transport; critique-only cache contract term (N4 critique) | M | WP-01.2 | done | [PR #171](https://github.com/Abe-Borg/drawing-analyzer/pull/171), 2026-09-24. **Rules decided by the owner (six choices, two rounds, measured first):** (1) a critique read the model did not finish (D-1: anything but `end_turn`/`stop_sequence`; the critique declares no tools, so `tool_use`/`pause_turn`/`compaction` too) keeps **nothing**, like a malformed read: no findings, no claims for the arithmetic auditor; its tokens stay billed. The one fix site, `critique.outcome_from_message`, reads the stop reason first on both transports; (2) the critique stage adopts **D-2's item rule**: its items are reads (eligible = sheets x requested reads, judged = finished with a valid findings object; a cache hit counts all its reads), COMPLETE only when every read was judged, FAILED when none was (it read PARTIAL), else PARTIAL; a coverage line leads the warnings and `critique.critique_shortfall` names each short sheet (`pipeline._CritiqueReadTally`, a `read_tally` sink on `_run_critique_stage`). This closes the gap: a sheet whose surviving read shipped findings kept `error=None` and read COMPLETE, cached nothing and was re-billed every warm run; (3) the per-sheet usage record agrees (COMPLETE only when every read counted, FAILED when none did, else PARTIAL); (4) one ladder: `digest.digest_terminal_error(..., noun="critique")` (`empty critique (…)` kept, the digest's wording unchanged); (5) no stored per-read stop reasons; (6) the stage's items are reads (eligible -> judged). `digest_cache._CRITIQUE_CACHE_CONTRACT` 2 -> 3 (one register row; the unchanged merge-rule fingerprint pinned under 3; the contract-2 keys pinned). `FINDINGS_PARSE_OK`, `_SCHEMA_VERSION` and the merge rule unchanged. Tests: `tests/test_critique_terminal_outcome.py` (128), the WP-01.4 section of `tests/test_drawing_cache_identity.py` (2). No pinned assertion re-baselined (one data row: the fingerprint under 3). Instrumented over the whole suite: only critique stage items (reads), 12 all-failed critiques PARTIAL -> FAILED and their usage records moved |
 | WP-11.1 | Per-source and per-page fault isolation in the render and prescan iterators; the inventory is the page denominator; every expected page gets an outcome (R1 core) | M | — | done | [PR #172](https://github.com/Abe-Borg/drawing-analyzer/pull/172), 2026-09-24. **Rules decided by the owner (six choices, two rounds, measured first):** (1) the pages a run owes are the inventory's, built without reopening a file (`render.inventory_sheet_refs`, `InputInventory.expected_page_counts`), and D-8's page part is decided narrowly (a sheet the run owes is one page `(source_id, page_index)` of an accepted inventory document); (2) both iterators take `expected_pages`: a source that will not open again fails every expected page with one shared `render.SourceUnreadableError`, a page past the source's current end fails with `render.PageNotInSourceError`, and a source none of whose pages is wanted is never opened; (3) an unread page is a typed record (`models.UnreadPage`: `ctx.unread_pages`, `unread_pages` in `run_manifest.json`, a `NOT READ` line in run.log's Sheets section) plus one `PAGE_UNREAD` event, so every expected page ends with exactly one per-page event; a page neither yielded nor reported gets one too; (4) `ctx.errors` and the digest stage's errors say a source-level failure once per source, a page failure once per page; (5) the prescan is best effort: what it cannot scan goes to the render path (the one reporter), and `_GeometryOmissionSink(order=)` adds a routed page's geometry in page order; (6) a source with more pages is read for its inventoried pages and named in one run error (the stage stays COMPLETE, the run PARTIAL), fewer pages fail the missing ones; labels keep the inventory's count, the render identity the opened file's; (7) the critique takes the same refs (`list_sheets` only as a direct caller's fallback): a source lost after the digest is critiqued from the spooled renders or retained uploads, and on Hybrid each page it cannot obtain is named with the reason. No key, prompt or schema moved (`tests/test_drawing_cache_identity.py` unchanged); `run_manifest.json` gains `unread_pages`. Tests: `tests/test_source_page_isolation.py` (77). No pinned test re-baselined; outside the new file only the critique's degraded line in the 2 fixtures with an unrenderable page (it now names the reason) and 3 `PAGE_UNREAD` events moved (instrumented) |
 | WP-11.2 | Digest-phase containment: completed paid digests, journal and manifest always ship; uploads and spool released on every exit (R1) | M | WP-11.1 | done | [PR #173](https://github.com/Abe-Borg/drawing-analyzer/pull/173), 2026-09-25. **Rules decided by the owner (eight choices, two rounds, measured first):** (1) an unexpected `Exception` inside the digest phase stops the phase, not the run: the digests in hand ship (both transports fill a `collected` list; real time keeps each read in flight), every page not reached is an `UnreadPage` (`not read: the digest phase stopped early (<Type>)`), and `_stopped_run_context` ends the run after the phase: no later stage makes a call, reopens a source or writes a reviewed PDF, none is recorded, the read sheets' digest findings are ledgered offline (DA-012), `RUN_END` carries `stopped="digest"`, and the context goes to the normal exporter; (2) the digest stage reads FAILED whatever was read (D-2 note); (3) the collect side harvests what finished, then releases (`_abandon_after_collect_error`; a batch it cannot cancel keeps its files); (4) `Exception` only: `KeyboardInterrupt` and `SystemExit` still end the run (D-5 input note); (5) one run-level line after the inventory's, type name only, path-free (`_digest_phase_line`); (6) the phase's unreached pages carry that reason and no per-page line; (7) the reads in flight are kept; (8) the line says what was kept ("the N page(s) read are exported and cached, so a re-run does not pay for them again"). Also: the level-1 store runs over the digests in hand (a re-run renders and reads only the rest); `submit_drawing_batch` gains the DA-034 outer guard (`slots_out=`), `collect_drawing_batch` a guard over its whole body (`results_out=`); `@_with_run_release` releases the render spool and the retained uploads on every exit. Review round 1 (Codex): both level-2 cache writes are advisory (a raising `put` lost the paid read on real time and every billed item in the batch collect and harvest), the accounting is recorded page by page (one bad usage record dropped every later sheet's usage), and the line's cache promise needs a level-1 store that did not fail. No key, prompt, schema or manifest key moved. Tests: `tests/test_digest_phase_containment.py` (36). No pinned test re-baselined; outside the new file only one release of zero files moved (instrumented) |
-| WP-16.1 | Key store: BOM-safe load, repair of BOM values already in the keyring, shape check, migration that never deletes the only good copy (G3) | S/M | — | todo | |
-| WP-16.2 | Run-scoped client snapshot passed from `gui._worker`; key entry disabled while busy; the key is no longer written to `os.environ` (G2) | M | — | todo | |
+| WP-16.1 | Key store: BOM-safe load, repair of BOM values already in the keyring, shape check, migration that never deletes the only good copy (G3) | S/M | — | done | 2026-09-28. **Rules decided by the owner (eleven choices, three rounds, measured first):** (1) one normalizer, `core.api_key_format.normalize_api_key`: whitespace and Unicode format characters (Cf) stripped from both ends only; (2) one shape check, `looks_like_api_key`: a full match of the diagnostics redactor's `sk-ant-[A-Za-z0-9_-]+`, now one shared constant (`ANTHROPIC_KEY_RE`), no length floor; (3) it applies to migration, save and the keyring; (4) a key file that fails it is not used, not migrated and kept, and the next location is tried; (5) a keyring entry stored un-normalized is rewritten through the verified round-trip (if that fails, the entry is left and the clean key is used for the session); (6) a keyring entry that fails the check is not served and not deleted; (7) a migration deletes only the files that hold the key it verified (`_migrate_legacy_file_key` → `_remove_key_files_holding`), and save keeps its every-location rule (pinned); (8) a UTF-16 file is decoded, and an unreadable, non-UTF-8 or >64 KiB file is skipped and named; (9) every note (`KeyNote`, from `load_api_key_with_notes`; `load_api_key_from_file` unchanged) goes to the GUI activity log and the diagnostics log, and names the file, never the value; (10) the status stays "loaded"/"no key"; (11) the GUI field shows the normalized value (real Tk measured: no re-entry). No cache, key, prompt or schema moved. Tests: the WP-16.1 sections of `tests/test_api_key_store.py` (66) and `tests/test_gui_lifecycle.py` (8). No pinned test re-baselined; only the 12 store tests reach the store (instrumented), and their events are unchanged |
+| WP-16.2 | Run-scoped client snapshot passed from `gui._worker`; key entry disabled while busy; the key is no longer written to `os.environ` (G2) | M | — | todo | From WP-16.1: the env path is neither normalized nor checked (the hermetic guard's placeholder `test-key-not-real-do-not-use` is not a key): an exported `ANTHROPIC_API_KEY` with a BOM or a trailing CR is still sent as is, and it pre-fills the GUI field unnormalized (the field's trace is added after the `StringVar` is built). A value typed into the field that fails the shape check is still applied to the session (`_on_key_changed` sets the env for any non-empty normalized value; only `save_api_key` refuses it). Use `core.api_key_format` for whatever the snapshot decides, never a second rule |
 
 ### Wave 2 — P0 remainder, test fidelity, cache contracts, identity
 
@@ -175,7 +175,7 @@ starting.
 | WP-14.4 | `UsageRecord` known/unknown usage through the single `is_billable_but_unpriced` rule; `by_model` decision; pricing date on every surface; decides D-7 (WP-14 steps 4, 8) | M | WP-14.3 | todo | From WP-11.2 (found, not fixed): a real-time read whose `digest_sheet` raised after the API call returned (the paid read, then an error outside the call's own capture; its level-2 cache write is advisory since WP-11.2, so not that) leaves no usage record, since the exception carries no usage; the phase now stops and ships, so that spend is the one the run cannot report (D-7) |
 | WP-14.5 | Per-attempt usage records from every stage result type (WP-14 step 3) | L | WP-14.4, WP-01.2 | todo | From WP-01.3: the real-time digest's raised-cap retry is still one usage record carrying both attempts' summed tokens (batch keeps one record per attempt). Since WP-01.3 the discarded attempt is named in the sheet's error, but it has no attempt record of its own on real time From WP-01.4: the critique's per-sheet record aggregates its reads (both reads' tokens), and since WP-01.4 its `terminal_status` is COMPLETE only when every read counted, FAILED when none did, else PARTIAL (`parse_success` only for COMPLETE). A per-read record would carry each read's own outcome (a cut-off read beside a finished one is one PARTIAL record today) |
 | WP-14.6 | Serving model carried through cache payloads (additive field) and the manifest (U1 provenance) | M | WP-14.3, WP-14.4 | todo | |
-| WP-16.3 | `_persist_key` reentrancy guard; Forget saved key; export never reloads a cleared key (U20) | S/M | WP-16.1 | todo | |
+| WP-16.3 | `_persist_key` reentrancy guard; Forget saved key; export never reloads a cleared key (U20) | S/M | WP-16.1 | todo | From WP-16.1: `_persist_key` retries a refused save (a value that is not a key) on every `<FocusOut>`/`<Return>` and logs the refusal each time, since `_persisted_key` does not move. The export loads (`gui.py` `_on_save_html`, `_export_all_worker`) call `load_api_key_from_file`, which now normalizes, may repair the keyring or migrate a file, and writes its notes to the diagnostics log on every export. A refused key file is kept by rule and named at each launch while the keyring holds no key; Forget should cover it (plan step 6: "legacy files where authorized") |
 | WP-17.1 | Cancel: cancel event, Cancel button, batch cancel and harvest with no resubmit, honest quit wording, partial export; decides D-5 (G1 core) | M/L | WP-16.2 | todo | From WP-11.2: `KeyboardInterrupt` and `SystemExit` are deliberately not contained (D-5 input note): the spool and the retained uploads are released, but a batch in flight is neither cancelled nor harvested and its uploads stay, since the submit and collect guards catch `Exception` only. Found, not fixed: `collect_drawing_batch`'s error guards (the terminal branch's and WP-11.2's) release a batch's files while a follow-up or resubmission batch that reuses them may still run, and a resubmission in flight at the error is neither cancelled nor read back |
 | WP-17.2 | Keyless atomic job record (batch ids, `custom_id` → source/page/cache key, upload ids); relaunch lists unresolved jobs and offers remote cancel (G1) | M | WP-17.1 | todo | |
 | WP-17.3 | Harvest recorded jobs' results into `DigestCache` after fingerprint validation (G1) | M | WP-17.2 | todo | |
@@ -187,7 +187,7 @@ starting.
 | WP-18.5 | Durable upload ownership and bounded reclaim of provably app-owned orphans (U5) | M/L | WP-17.2, WP-14.4 | todo | |
 | WP-19.1 | Pair-aware chat history normalization at Stop, commit, cap exit, catch, save and restore; `pause_turn` rounds merged; transcript v1 accepted and repaired (R4) | M | — | todo | |
 | WP-19.2 | Mixed client/server tool and pause semantics; replay canary written (run blocked on O-4) (R4, U2) | S/M | WP-19.1 | todo | Running the canary is O-4 |
-| WP-22.1 | Linear secret redaction (incl. `RedactingFormatter`); path scrub handles URLs, doubled separators, `\\?\` and UNC (U13) | M | — | todo | From WP-11.2 (found, not fixed): sixteen stage catch-alls in `pipeline.py` append `str(exc)` to `ctx.errors` (`Critique: {exc}` among them), so a path or secret in an exception message reaches the context; the exported artifacts scrub it (`redact_for_display`), the GUI's log panel prints it as is. WP-11.2's digest-phase line names the type only |
+| WP-22.1 | Linear secret redaction (incl. `RedactingFormatter`); path scrub handles URLs, doubled separators, `\\?\` and UNC (U13) | M | — | todo | From WP-11.2 (found, not fixed): sixteen stage catch-alls in `pipeline.py` append `str(exc)` to `ctx.errors` (`Critique: {exc}` among them), so a path or secret in an exception message reaches the context; the exported artifacts scrub it (`redact_for_display`), the GUI's log panel prints it as is. WP-11.2's digest-phase line names the type only From WP-16.1 (found, not fixed): the diagnostics file handler is attached only to the `drawing_analyzer.diagnostics` logger (`propagate=False`), so `core.api_config`'s and `core.tokenizer`'s `getLogger(__name__)` warnings (a model id that fell through to conservative defaults, the refusal fallback latched off, `count_tokens_via_api` failures) reach only Python's last-resort stderr handler, which a windowed build does not have, and never the diagnostics log. The key store logs to the diagnostics logger by name for that reason |
 | WP-22.2 | Critique read count resolved once; `critique_N` tags counted as one family (N25, U15) | S/M | — | todo | |
 | WP-22.3 | One shared `refs` coercion replacing the three that disagree (U16) | S | — | todo | |
 | WP-22.4 | Supported configuration matrix; required-stage roll-up cannot report COMPLETE with missing stages (U14, U15) | M | WP-01.1 | todo | |
@@ -322,7 +322,7 @@ report is built from it).
 | H4 | ALL-CAPS notes fill the identity code windows | P1 | 12.4 | open | |
 | G1 | No Cancel; quitting leaves a batch billing, nothing resumable | P1 | 17.1–17.4 | open | |
 | G2 | Key entry live during a run; every stage re-reads the environment | P1 | 16.2 | open | |
-| G3 | BOM key migrated into the keyring, legacy file deleted | P1 | 16.1 | open | |
+| G3 | BOM key migrated into the keyring, legacy file deleted | P1 | 16.1 | implemented+validated | `tests/test_api_key_store.py` WP-16.1 section (p1 BOM file migrates the clean key and the next launch serves it; p3 the wire never carries the BOM, through the real SDK over `httpx2.MockTransport`; p5 a migration keeps a file holding a different key; p6, p7, p11 a file that is not a key is refused and kept; p8 UTF-16 decoded; p9 format characters at the ends stripped; p10 a keyring entry stored with a BOM is repaired; p13; save normalizes and refuses a value that is not a key; no note, log record, exception or output carries the key) and `tests/test_gui_lifecycle.py` WP-16.1 section (the field shows, applies and saves the normalized key) (WP-16.1) |
 | G4 | PyInstaller `collect_all` bundles stray files (key file) | P1 | 23.2 | open | |
 | G5 | Release gates test a different dependency set than ships | P1 | 23.3 | open | |
 | G6 | Installer hashed at download only, launched hours later | P1 | 24.1 | open | |
@@ -396,6 +396,307 @@ report is built from it).
 Each session adds one entry at the top: date, slices and IDs, PR, what changed,
 contracts decided, cache/schema effects, validation actually run (with counts),
 what could not be verified, risks, and next steps.
+
+### 2026-09-28 — WP-16.1: a key file saved "UTF-8 with BOM" no longer breaks the saved key, and a migration keeps what it did not verify
+
+- **Slice and IDs:** WP-16.1. G3 (implemented+validated). No `DECISIONS.md`
+  contract covers credentials, and none was opened (as the request asked); the
+  owner's choices are recorded here as the owner's rules. No migration-register
+  row: no cache, key, prompt or schema moved. **WP-16 is not done:** WP-16.2 and
+  WP-16.3 remain, so there is no package acceptance check. The two acceptance
+  clauses this slice owns hold: "BOM migration preserves the usable key" (p1,
+  p13) and "failed migration preserves the original" (a store that cannot be
+  verified deletes nothing; a refused file is kept).
+- **Base.** `main` = `origin/main` = `b07172b`; no drift at the start or before
+  the push. Baseline **4,438 passed, 2 skipped, 10 deselected**
+  (313 s), identical to the WP-11.2 handoff. The two skips are IPv6 loopback
+  and chmod as root. SDK 1.7.0 and httpx2 2.13.1, unchanged, so p3 stands as
+  measured.
+- **Reproduced first.** Scratch probes ran as a `tests/test_probe_*.py` in a
+  `git archive` copy of `origin/main`, so the suite's fakes, conftest and
+  hermetic guard applied. Both key locations were redirected into `tmp_path`,
+  the keyring was a dict-backed stand-in for the `keyring` module (so the
+  store's own `_keyring_get`, which strips, ran), and the fake key was built at
+  runtime. Only each value's class was recorded. Every fact was as the request
+  stated:
+  - **p1:** a BOM file with a working keyring returns the BOM value (length
+    102), the keyring holds it, and the file is deleted; the next load serves
+    it from the keyring.
+  - **p2:** with no keyring, the BOM value is returned and the file kept.
+  - **p3:** `anthropic.Anthropic(api_key=BOM + key)` over
+    `httpx2.MockTransport` sends an `x-api-key` of 104 bytes starting
+    `ef bb bf` (the 401 is the mock's). Also measured: a two-line value
+    (p7), `hello world` (p11) and a key with a zero-width space inside are
+    sent as they are over the mock. What a real transport or the real API does
+    with them was not measured.
+  - **p4:** `save_api_key(BOM + key)` stores the BOM value.
+  - **p5:** a BOM value in the config-dir file and a different valid key in the
+    exe-dir file: the BOM value wins and is migrated, and both files are
+    deleted.
+  - **p6:** a BOM-only file returns `'﻿'` (truthy: "loaded"), is migrated
+    and deleted.
+  - **p7:** a key followed by `"\n# my work key"`: the newline is kept, the
+    value migrated and the file deleted.
+  - **p8:** a UTF-16 LE file: the decode error is swallowed, `""` returned, the
+    file kept, and nothing is logged or printed.
+  - **p9:** a zero-width space before the key and a word joiner after it are
+    kept, migrated, and the file deleted.
+  - **p10:** a keyring entry holding a BOM value is served as is and never
+    repaired (0 writes).
+  - **p11:** `hello world` is migrated as the key and the file deleted.
+  - **p12:** `"﻿".isspace()` and `"​".isspace()` are False;
+    `str.strip()` strips NBSP; `utf-8-sig` removes one leading BOM only.
+  - **p13:** a backend that drops the BOM on read fails the round-trip, so the
+    BOM value is used for the session and the file kept.
+  - **The GUI field** (the fake-toolkit harness): a paste of `BOM + key + " "`
+    set the environment to the BOM value, and `_persist_key` saved it; the
+    status read "set", then "saved".
+- **Facts confirmed, not assumed.**
+  - **Only one test file reaches the store.** An instrumented scratch copy of
+    `origin/main` added an append-only wrapper block at the end of
+    `core/api_key_store.py`, behind `WP161_LOG`, with the test name. It logged
+    every keyring set and read, every file read, unlink and chmod on a key
+    path, and every load and save outcome, with each value's class only. A
+    module-class `__setattr__` wrapped whatever a test monkeypatched in. Over
+    the whole suite (4,438 passed, no outcome changed): the module was
+    imported once, and 44 events came from the 12 tests of
+    `tests/test_api_key_store.py` and nowhere else: 11 keyring sets, 10 reads,
+    3 file reads, 4 unlinks, 2 chmods, 5 loads, 9 saves.
+  - **The pinned fixtures:** `key_file` (24) and `working_keyring` (41) each
+    redirect one location, so nothing covered p5; `working_keyring`'s read does
+    not strip. All 12 tests' fake keys match `sk-ant-[A-Za-z0-9_-]+`, the
+    shortest `sk-ant-x`. `test_save_with_working_keyring_removes_stale_plaintext_file`
+    (166) pins save's every-location rule. (`test_save_tightens_preexisting_loose_file`
+    writes `old-key` to the file, but save overwrites it and nothing loads it.)
+  - **The env path:** the hermetic guard sets
+    `ANTHROPIC_API_KEY=test-key-not-real-do-not-use`, which is not a key.
+  - **The field rewrite does not re-enter.** Measured with real Tk 8.6 and the
+    pinned customtkinter 6.0.0 under Xvfb (a uv-installed standalone Python
+    3.11.13 with tkinter; the container's Python has none): a `set` inside the
+    variable's own write trace runs no trace (one callback per edit, depth 1;
+    Tcl disables a variable's traces while one runs). The entry then shows the
+    normalized value, with the cursor at the end after a paste, on a plain
+    `tkinter.Entry` and on a `CTkEntry` alike.
+  - **Layering:** `core/` imports nothing from the package top level;
+    `diagnostics` already imports `core.app_paths`; the diagnostics file handler
+    is attached only to the `drawing_analyzer.diagnostics` logger
+    (`propagate=False`).
+- **The decision, made by the owner before any code** (AskUserQuestion, three
+  rounds, eleven choices, each as recommended). Measured first:
+  - a switchable scratch implementation, each open choice an environment knob;
+  - the base and 20 variants, each varying one knob from the recommended set,
+    run over the pinned files (`tests/test_api_key_store.py`,
+    `tests/test_gui_lifecycle.py`) with the instrumentation, and diffed test by
+    test against the base;
+  - a 27-case table (p1-p13 with variants, six save cases, the GUI field)
+    through every variant.
+
+  **No pinned test moved under any variant**, in outcome or events, except
+  "equal files only, save too", which fails the pinned save test (166).
+  (The first diff showed three tests moving under every variant. That was an
+  artifact of the hook logging `read_text` only, while the scratch read bytes;
+  with `read_bytes` logged too, nothing moved.) The case table decided:
+  - **Normalizer: whitespace and Cf at both ends.** Not taken: BOM only (p9
+    refused with a note; a paste starting with a zero-width space refused at
+    save); Cf removed anywhere (a zero-width space inside a key loads silently,
+    past the evidence).
+  - **Shape: `sk-ant-` + `[A-Za-z0-9_-]+`, no floor, the redactor's pattern.**
+    Not taken: charset only (one-word junk and the placeholder pass); no
+    whitespace/control characters (almost any single word passes); none (p7
+    and p11 migrate and their files are deleted). Accepted cost: a future key
+    format without `sk-ant-` is refused at migration and at save (it is still
+    applied to the session from the field).
+  - **Where: migration, save and the keyring.** Not taken: migration and save
+    (p11k's `hello world` served every launch); migration only (s1: `hello
+    world` saved).
+  - **A failing file: refused, kept, not used, named.** Not taken: used this
+    session only (p7's two-line value and p11 sent to the API; p5b's junk
+    config file wins over a good exe-dir key); migrated (today).
+  - **Round 2.** Repair by a verified rewrite (not taken: normalize on read
+    only; the BOM value stays stored for good). A failing keyring entry is
+    ignored and named (not taken: served with a warning, every call then
+    fails; served silently). A migration deletes only equal files, save
+    unchanged (not taken: equal files for save too, which re-baselines 166;
+    the source file only, which leaves a plaintext duplicate of the migrated
+    key; every location, which loses p5's other key). UTF-16 is decoded (not
+    taken: skipped with a diagnostic; skipped silently).
+  - **Round 3.** Notes in the GUI activity log and the diagnostics log (not
+    taken: diagnostics only, where the user sees "no key" with no reason). The
+    status stays "loaded"/"no key" (not taken: a new "check key file"). The
+    field shows the normalized value (not taken: keep what was typed, where
+    Show can reveal a value that is not the one in use).
+- **What changed:**
+  - **`core/api_key_format.py` (new, stdlib-only leaf):** `ANTHROPIC_KEY_RE`,
+    `normalize_api_key`, `looks_like_api_key`.
+  - **`diagnostics.py`:** the redactor's key pattern is that constant (the same
+    compiled object).
+  - **`core/api_key_store.py`:**
+    - `KeyNote`, `KeyLoadResult`, `load_api_key_with_notes`;
+      `load_api_key_from_file` returns its key (contract unchanged);
+    - `_key_from_keyring` (normalize, check, repair);
+    - `_key_from_files` and `_read_key_file` (a 64 KiB bounded read, UTF-16 or
+      UTF-8, every skip named);
+    - `_migrate_legacy_file_key` keeps its name and now removes only the files
+      holding its key (`_remove_key_files_holding`);
+    - `_key_file_present` (see review below);
+    - `save_api_key` normalizes and refuses a value that is not a key, with a
+      value-free `ValueError`;
+    - every note is logged to the diagnostics logger by name.
+
+    Unchanged: `_keyring_get` (the backend seam: `.strip()`, which the
+    verified round-trip reads and the pinned fixtures replace),
+    `_keyring_set`, `_keyring_store_verified`, `_remove_key_files` (save),
+    `_write_key_file`, `secure_backend_available`.
+  - **`gui.py`:**
+    - `_load_api_key` keeps the notes when it loads from the store (the env
+      still wins, unnormalized: WP-16.2);
+    - `_report_key_at_startup` holds the moved status lines and shows the
+      notes first;
+    - `_on_key_changed` normalizes and rewrites the field when it differs;
+    - `_persist_key` normalizes;
+    - the key comment (426-428) now says a plain-text file needs consent.
+  - **`tests/conftest.py`:** the stale "the GUI has no unit tests" comment.
+- **Contracts decided:** none in `DECISIONS.md` (the owner's rules above).
+- **Cache/schema effects: none.** The key store is outside every cache; no
+  key, prompt, schema or manifest key moved.
+- **Re-baselined tests: none.** Every pinned test passes unchanged.
+- **New tests: 74.**
+  - **`tests/test_api_key_store.py`, WP-16.1 section (66):**
+    - the normalizer and shape tables;
+    - one test per probe the rules change (p1-p11, p13), with p5, p7, p8, p9,
+      p10 and p11 in several shapes;
+    - the oversized, unreadable and non-UTF file, and a store that cannot be
+      verified;
+    - the migration helper, and the two review cases (a presence that cannot
+      be told, a file unreadable after a migration);
+    - save: normalizes (keyring and consented file), refuses a value that is
+      not a key, keeps its every-location rule;
+    - notes reach the diagnostics log;
+    - no note, log record (root and diagnostics loggers), exception message or
+      captured output carries the key, over 13 scenarios; the test asserts it
+      saw words and records, so it is not vacuous.
+
+    It adds a two-location fixture and a `keyring`-module stand-in, so the
+    store's own read (which strips) runs.
+  - **`tests/test_gui_lifecycle.py`, WP-16.1 section (8):**
+    - the field shows, applies and saves the normalized key, with a `_TclVar`
+      modelling Tcl's traces and a re-entrant variant;
+    - a clean key is not rewritten;
+    - a field of invisible characters is "no key";
+    - a refused save says so without the value;
+    - the startup load keeps the notes;
+    - the startup status shows them.
+
+  Classified against the copy of `origin/main` from `--junitxml`, and again
+  with a shim putting today's behaviour behind the new names, so "fails on
+  behaviour" is not confused with "the name is missing":
+  - **56 fail on behaviour;**
+  - **16 fail only on the new API** (the normalizer and shape unit rows that
+    today's `strip()` would pass, the notes-to-diagnostics test, the
+    clean-entry test);
+  - **2 pass**, pinning save's every-location rule and that a clean key is
+    never rewritten in the field.
+- **Fixture effects, instrumented over the whole fixed suite:** the same hooks, with a
+  hook on `Path.open` since the store now reads bytes, diffed test by test
+  against the base run:
+  - **Outcomes:** all 4,512 tests pass, and the module is imported once.
+  - **Which tests reach the store:** the 12 pinned tests, 36 of the new store
+    tests and 2 of the new GUI tests (the startup load and the refused save),
+    and nothing else.
+  - **Events:** of the 12 pinned tests, 11 have identical events.
+    `test_load_migrates_legacy_file_into_keyring` makes one extra read of the
+    file it migrated, because the cleanup re-reads every key file to confirm it
+    still holds the verified key before deleting it. That is deliberate: it
+    never deletes a file that changed after it was read. Its outcome is
+    unchanged.
+- **Case table on the fix:** the 27 cases match the decided scratch variant in
+  26. The one difference is deliberate and pinned: in p5b the refused config
+  file is named once, not a second time as "left in place".
+- **Probes on the fix:** p1, p2, p4-p11 and p13 and the GUI field give the
+  fixed outcomes. p3 is the SDK's own behaviour with a BOM value handed to it,
+  unchanged; `test_p3_the_wire_never_carries_the_bom` shows the store no longer
+  hands it one.
+- **Review before push (own diff):**
+  - `_migrate_legacy_file_key` had become unused while still encoding the old
+    every-location rule. It now takes the new rule and the load goes through
+    it.
+  - `Path.exists()` re-raises a permission error, so a presence check outside
+    any `try` in the new post-migration cleanup could have ended a load after
+    a migration that worked. `_key_file_present` treats "cannot tell" as
+    present, so the read names it.
+  - The empty-file note now says "or holds only spaces or invisible
+    characters".
+
+  Three tests pin these; all three fail on `origin/main` on behaviour.
+- **Validation** (this container, Python 3.11.15, SDK 1.7.0, PyMuPDF 1.28.2):
+  - Baseline before any change: **4,438 passed, 2 skipped, 10 deselected**
+    (313 s) on `b07172b`.
+  - The two touched test files: 98 passed (24 pinned, 74 new).
+  - Full suite after the first implementation: **4,509 passed, 2 skipped, 10
+    deselected** (318 s), the baseline plus the 71 tests at that point. After
+    the review fixes: **4,512 passed, 2 skipped, 10 deselected** (312 s), the
+    baseline plus the 74 new tests. The same two environment skips (IPv6
+    loopback, chmod as root).
+  - `python -m compileall -q src`: clean.
+  - `ruff check --select E9,F63,F7,F82 src tests scripts` (0.14.5): clean.
+    F401/F811/F841 over the touched source and test files: clean.
+  - `python scripts/scan_secrets.py`: clean (214 tracked files, the new
+    module included). The fake keys are built at runtime, and no test id
+    carries one (the parametrized tables have ids).
+  - The probes and the case table on the final code are identical to the first
+    implementation's.
+  - The browser suite was not run: no report or JavaScript changed.
+- **Docs:**
+  - **CHANGELOG** (Fixed): G3.
+  - **README:** the key paragraph (111-115: the keyring, a plain-text file only
+    with consent), and a paragraph on normalization, the `sk-ant-` rule and the
+    migration.
+  - **`help_content.py`:** the credential bullet says a legacy key file moves
+    only when it holds a key, and anything else is kept and named.
+  - **CLAUDE.md:** a key-store passage after the GUI lifecycle paragraph; the
+    `core/` kernel list names `api_key_format.py`.
+  - **The plan:** a WP-16.1 note under WP-16's Step 3.
+  - **PROGRESS:** this entry; the WP-16.1 row; the G3 row; notes on WP-16.2,
+    WP-16.3 and WP-22.1; the Next-up line.
+- **Not verified:**
+  - live API behaviour (no budget, O-4; this slice makes no call), including
+    what the real API answers to a BOM, a newline or a space in `x-api-key`;
+  - what Windows Credential Manager (`WinVaultKeyring`) does with a BOM or
+    other format characters: O-8's, and not claimed. The repair relies only on
+    the verified round-trip, whatever the backend does;
+  - the frozen build's keyring (WP-23.2).
+
+  Windows is covered by this PR's CI (`gates-windows` is tag-only; `ci.yml`'s
+  Windows leg runs the hermetic suite).
+- **Risks and residual gaps:**
+  - **Visible changes, by design:**
+    - a key file that is not a key (p7's comment line included) is no longer
+      loaded, and the user sees "no key" plus a line naming the file;
+    - a keyring entry that is not a key is no longer served;
+    - a value typed into the field that is not a key is applied to the session
+      but not saved, and "could not be saved" is logged (the status reads
+      "not saved").
+  - **A future key format without `sk-ant-`** is refused at migration and at
+    save (the owner's accepted cost). The diagnostics redactor would not
+    recognise it either, by name or by value, unless it sits in a named field;
+    one constant now governs both.
+  - **The env path** is neither normalized nor checked (WP-16.2).
+  - **A save still removes every key file**, a different key's included (the
+    owner's rule; pinned).
+  - **The store logs its notes on every load:** the launch, and each export
+    reload (WP-16.3).
+- **Found, not fixed:**
+  - **`core.api_config`'s and `core.tokenizer`'s warnings never reach the
+    diagnostics log.** They log through `getLogger(__name__)`, while the file
+    handler is attached only to `drawing_analyzer.diagnostics`
+    (`propagate=False`). So "a model id fell through to conservative
+    defaults", "refusal fallback unavailable" and `count_tokens_via_api`
+    failures reach only Python's last-resort stderr handler, which a windowed
+    build does not have (WP-22.1 note).
+  - **`_persist_key` retries a refused save on every focus change**, logging
+    the refusal each time (WP-16.3 note).
+- **Next:** WP-16.2 (Wave 1, no dependency). WP-16.3 (Wave 4) is unblocked.
+  WP-11.3 and WP-10.4 (Wave 2) are available.
 
 ### 2026-09-25 — WP-11.2: an unexpected error inside the digest phase stops the phase, not the run ([PR #173](https://github.com/Abe-Borg/drawing-analyzer/pull/173))
 

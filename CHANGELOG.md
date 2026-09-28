@@ -48,6 +48,59 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A key file saved "UTF-8 with BOM" broke the saved key for good, and a
+  migration could delete the only copy of a key (remediation WP-16.1; G3).**
+  The key store read a legacy key file as UTF-8 and trimmed it with
+  `str.strip()`, which keeps a byte-order mark (U+FEFF is not whitespace). The
+  BOM-prefixed value passed the keyring's verified round-trip, was migrated,
+  and every key file was deleted, so every call then failed authentication
+  (the SDK sends the BOM's three bytes in `x-api-key`) and the keyring served
+  the broken value on every launch. Measured on `main`, beside it:
+  - a migration deleted **every** key file, so a valid key in the second
+    location was lost along with the BOM file;
+  - a file holding only a BOM read as a key ("loaded"), and one with a comment
+    line after the key, or plain junk (`hello world`), was migrated and deleted;
+  - a UTF-16 file (Notepad's "UTF-16 LE") was skipped with no trace;
+  - a zero-width space before the key and a word joiner after it were kept;
+  - `save_api_key` and the GUI key field stored a pasted BOM;
+  - a keyring entry already holding a BOM was served as is on every launch.
+
+  Now, decided with the owner (see the WP-16.1 handoff in
+  `_plans/PROGRESS.md`):
+  - **One normalizer** (`core.api_key_format.normalize_api_key`) strips
+    whitespace and every Unicode format character (the BOM, a zero-width
+    space, a word joiner) from both ends. It serves a key file, a keyring
+    entry, `save_api_key` and the GUI field. A character of that kind inside
+    the value is left in place, so the shape check refuses it.
+  - **One shape check** (`looks_like_api_key`): the whole normalized value is
+    `sk-ant-` followed by key characters. It is the diagnostics redactor's own
+    pattern, now one shared constant, and has no length floor. It applies to a
+    migration, a save and the keyring.
+  - **A key file that fails it is not used, not migrated and left in place**,
+    and the loader tries the next location. An empty file (or one holding only
+    spaces or invisible characters) is skipped.
+  - **A UTF-16 file is decoded.** Any other file that is not UTF-8, is larger
+    than 64 KiB or cannot be read is skipped and named.
+  - **A migration deletes only the key files that hold the key it just
+    verified in the keyring**; a file holding anything else is kept and named.
+    Saving a key from the GUI still removes every key file, as before.
+  - **A keyring entry stored with a BOM is repaired**: it is rewritten through
+    the verified round-trip and served clean. If the rewrite fails, the entry
+    is left and the clean key is used for this session. An entry that is not a
+    key is not served (the key files are tried next) and not deleted.
+  - **The user is told**, in the activity log after startup and in the
+    diagnostics log, what was refused, repaired, kept or skipped. Each line
+    names the file (or the OS keyring) and the reason, never the value, and so
+    does `save_api_key`'s refusal. The key status still reads "loaded" or
+    "no key".
+  - **The GUI field shows the normalized value**, so the field, the key in use
+    and the key saved agree.
+
+  `load_api_key_with_notes()` returns the key and those notes;
+  `load_api_key_from_file()` keeps its contract. No cache, prompt or schema
+  changed. Tests: `tests/test_api_key_store.py` (WP-16.1 section) and
+  `tests/test_gui_lifecycle.py` (WP-16.1 section).
+
 - **An unexpected error inside the digest phase lost every paid digest, and
   left the phase's temporary files and uploads behind (remediation WP-11.2;
   R1, digest-phase containment).** WP-11.1 contained the failures of a source

@@ -39,8 +39,10 @@ def _tkinter_available() -> bool:
 
 # Test files that import the GUI (customtkinter / tkinter) at module scope are
 # skipped at collection time when ``tkinter`` is missing (common in CI without
-# the python3-tk system package). None today — the GUI has no unit tests — but
-# the hook stays so adding one is a one-line change here.
+# the python3-tk system package). None today: the GUI's unit tests
+# (``tests/test_gui_lifecycle.py``) inject a fake toolkit instead of importing
+# the real one, so they run without tkinter. The hook stays so adding a test
+# that does import it is a one-line change here.
 _GUI_DEPENDENT_TESTS: set[str] = set()
 
 
