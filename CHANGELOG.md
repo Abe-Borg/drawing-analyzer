@@ -8,6 +8,21 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`anthropic` bumped to 1.8.0.** A routine SDK maintenance bump — 1.8.0 is a
+  bugfix/feature release (a Python 3.13 unclosed-stream crash fix, tool-runner
+  fixes, and native SDK typing for `claude-opus-5-5`) with no breaking changes
+  for this app's usage. Cache diagnostics (`core/api_config.py`) also dropped
+  the now-retired `cache-diagnosis-2026-04-07` `anthropic-beta` header, since
+  Anthropic moved that feature to GA on 2026-09-23 and the header is no longer
+  required (a request that still sends it keeps working, so this is a pure
+  simplification — that code path has no call sites today). `pyproject.toml`'s
+  pin, `requirements.txt`, and `requirements-release.lock` regenerated
+  accordingly (`anthropic`, plus the transitive `httpcore2`/`httpx2`/
+  `platformdirs` bumps a clean resolve picked up). Full hermetic test suite
+  green against a real `anthropic==1.8.0` install (4339 passed, 6 skipped —
+  same Playwright/IPv6/root-permission-bit skips as before, unrelated to this
+  change).
+
 - **The test suite's hermeticity is enforced, not requested (remediation
   WP-02.1; U26).** A new pytest plugin, `tests/fixtures/hermetic_guard.py`,
   registered by `tests/conftest.py`, wraps every test not marked `network`:
