@@ -1212,16 +1212,23 @@ def extract_cache_usage(usage) -> dict[str, int]:
 
 
 # ---------------------------------------------------------------------------
-# Cache diagnostics (beta, opt-in observability)
+# Cache diagnostics (GA, opt-in observability)
 # ---------------------------------------------------------------------------
 #
-# The ``cache-diagnosis-2026-04-07`` beta lets a request carry a
-# ``diagnostics.previous_message_id`` and receive a ``diagnostics`` object on
-# the response that fingerprints the current and previous request and reports
-# the first point of prompt-prefix divergence — i.e. *why* a cache hit did not
-# occur. It is a debugging aid for the cache-breakpoint-stability invariant
-# this app cares about, NOT a request-shape change, so it stays default-off and
-# is requested only when an operator is actively investigating a miss.
+# ``diagnostics.previous_message_id`` on a request returns a ``diagnostics``
+# object on the response that fingerprints the current and previous request
+# and reports the first point of prompt-prefix divergence — i.e. *why* a
+# cache hit did not occur. It is a debugging aid for the
+# cache-breakpoint-stability invariant this app cares about, NOT a
+# request-shape change, so it stays default-off and is requested only when an
+# operator is actively investigating a miss.
+#
+# GA as of 2026-09-23 (verified against Anthropic's cache-diagnostics docs):
+# the earlier ``cache-diagnosis-2026-04-07`` beta header is no longer
+# required — a bare ``diagnostics`` body param is enough, and the response
+# always carries a ``diagnostics`` field (``null`` when not requested). A
+# request that still sends the retired beta header keeps working, so this is
+# a pure simplification, not a behavior change for anyone already using it.
 #
 # Constraints worth remembering at the call site:
 #   - First-party Claude API only (unavailable on Bedrock / Vertex).
@@ -1231,6 +1238,9 @@ def extract_cache_usage(usage) -> dict[str, int]:
 #     message id to reference).
 
 ENV_CACHE_DIAGNOSTICS = "DRAWING_ANALYZER_CACHE_DIAGNOSTICS"
+# Retired 2026-09-23 (cache diagnostics went GA): no longer sent, but kept as
+# a named constant for anyone cross-referencing older run logs or requests
+# that still carry it.
 CACHE_DIAGNOSTICS_BETA = "cache-diagnosis-2026-04-07"
 
 # Mirrors the disable-token convention used by the diagnostics / cache modules.
@@ -1241,7 +1251,7 @@ def cache_diagnostics_enabled() -> bool:
     """Whether to request prompt-cache diagnostics. Default OFF.
 
     Opt-in via ``DRAWING_ANALYZER_CACHE_DIAGNOSTICS`` set to any truthy,
-    non-disable value. Off by default because it is a beta, first-party-only
+    non-disable value. Off by default because it is a first-party-only
     observability feature that only an operator chasing a cache miss needs;
     leaving it off keeps the request byte-identical to today.
     """
@@ -1261,26 +1271,27 @@ def cache_diagnostics_params(
     ``previous_message_id`` is supplied — the feature is meaningless without a
     prior message to diff against, so an isolated call cleanly no-ops.
 
-    The body param rides the SDK ``extra_body`` seam and the beta rides
-    ``extra_headers`` (``anthropic-beta``) so this stays correct on SDK
-    versions that do not yet model ``diagnostics`` natively — the same
+    The body param rides the SDK ``extra_body`` seam so this stays correct on
+    SDK versions that do not yet model ``diagnostics`` natively — the same
     transport-seam discipline the verification request builder already uses.
+    ``extra_headers`` is always ``None``: the feature is GA and needs no
+    ``anthropic-beta`` header (see the module comment above).
     """
     if not previous_message_id or not cache_diagnostics_enabled():
         return None, None
     extra_body = {"diagnostics": {"previous_message_id": previous_message_id}}
-    extra_headers = {"anthropic-beta": CACHE_DIAGNOSTICS_BETA}
-    return extra_body, extra_headers
+    return extra_body, None
 
 
 def extract_cache_diagnostics(message) -> dict | None:
-    """Pull the beta ``diagnostics`` object off a response message, if present.
+    """Pull the ``diagnostics`` object off a response message, if present.
 
-    Defensive by construction: the SDK ``Message`` model is configured
-    ``extra="allow"``, so an unmodeled ``diagnostics`` field round-trips as an
-    attribute. Returns ``None`` when absent (the common case, or the feature
-    disabled) or on any access/serialization error — a diagnostics read must
-    never sink a verification.
+    Defensive by construction: on SDK versions that do not yet model the GA
+    ``diagnostics`` field natively, the ``Message`` model is configured
+    ``extra="allow"``, so it round-trips as a plain attribute either way.
+    Returns ``None`` when absent (the common case, or the feature disabled)
+    or on any access/serialization error — a diagnostics read must never sink
+    a verification.
     """
     try:
         diag = getattr(message, "diagnostics", None)
