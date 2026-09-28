@@ -1351,7 +1351,10 @@ RUNTIME_TRANSPARENCY = HelpDocument(
                 "API key — stored in your operating system's credential manager (Windows "
                 "Credential Manager, macOS Keychain, Secret Service on Linux). If none is "
                 "available it is NOT quietly written to disk: the app asks first, and "
-                "declining keeps it for the session only."
+                "declining keeps it for the session only. A key file from an older "
+                "setup is moved into the credential manager only when it holds a key, "
+                "and a file holding anything else is left in place and named in the "
+                "activity log."
             ),
             _bullet(
                 "Exports — the report, the reviewed PDFs, the evidence crops, the "

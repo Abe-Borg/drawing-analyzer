@@ -1186,6 +1186,16 @@ Implementation:
 - Also repair entries that are already corrupted. The legacy file is gone, and `_keyring_get` serves the BOM value first.
 - Normalize the GUI field and `save_api_key` too.
 
+**WP-16.1 note (2026-09-28): steps 3 and 4 as the owner decided them.** Details and the options not taken are in the WP-16.1 handoff in `PROGRESS.md`.
+- **One normalizer and one shape check** live in the leaf `core/api_key_format.py`. The normalizer strips whitespace and Unicode format characters (Cf) from both ends only. The check is a full match of the diagnostics redactor's own `sk-ant-[A-Za-z0-9_-]+`, one shared constant, with no length floor. Both serve a key file, the keyring value, `save_api_key` and the GUI field, and the field shows the normalized value.
+- **The check applies to migration, save and the keyring.** A key file that fails it is not used, not migrated and kept. A keyring entry that fails it is not served (the files are tried next) and not deleted. Save refuses it with a value-free `ValueError`.
+- **Repair** (this step's first note): a keyring entry that normalizes differently is rewritten through the verified round-trip. If the rewrite fails, the entry is left and the normalized key is used for the session.
+- **Step 4:** a migration deletes only the files whose normalized content equals the key it just verified; others are kept and named. `save_api_key` keeps its every-location rule (pinned).
+- **Loading:** a UTF-16 file is decoded. A file over 64 KiB, not UTF-8/UTF-16 or unreadable is skipped and named.
+- **Reporting:** every refusal, repair, kept file and skipped file is a value-free `KeyNote`, shown in the GUI activity log and written to the diagnostics log (`load_api_key_with_notes`; `load_api_key_from_file` keeps its contract).
+- **Acceptance:** "BOM migration preserves the usable key" holds (p1, p13), and so does "failed migration preserves the original" (no verified store deletes nothing; a refused file is kept).
+- **The env path is not checked.** It is WP-16.2's, and the hermetic guard's placeholder is not a key.
+
 **Step 8 (with WP-23.2).**
 - The self-check must use a throwaway service name. Using the real `DrawingAnalyzer/anthropic_api_key` entry would clobber a user's saved key.
 - Assert `WinVaultKeyring` explicitly, because import errors are swallowed.

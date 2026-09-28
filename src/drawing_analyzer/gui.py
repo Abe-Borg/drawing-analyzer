@@ -81,6 +81,8 @@ from .core.api_config import REVIEW_MODEL_DEFAULT
 from .core.api_key_store import (
     SecureKeyStorageUnavailable,
     load_api_key_from_file,
+    load_api_key_with_notes,
+    normalize_api_key,
     save_api_key,
 )
 from .core.app_paths import api_key_paths, app_config_dir
@@ -382,8 +384,16 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         Returns the resolved key (or ``""``) so the caller can both flip the
         ``_has_key`` flag and pre-fill the key field. The env var wins over the
         saved store, matching the precedence the rest of the app expects.
+
+        What the store refused, repaired or kept (WP-16.1) is held in
+        ``_key_load_notes`` until the activity log exists
+        (:meth:`_report_key_at_startup`).
         """
-        key = os.environ.get("ANTHROPIC_API_KEY") or load_api_key_from_file()
+        self._key_load_notes = ()
+        key = os.environ.get("ANTHROPIC_API_KEY")
+        if not key:
+            loaded = load_api_key_with_notes()
+            key, self._key_load_notes = loaded.key, loaded.notes
         if key:
             os.environ["ANTHROPIC_API_KEY"] = key
         return key
@@ -425,7 +435,8 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
 
         # API key — paste a key here when ANTHROPIC_API_KEY isn't set in the
         # environment. It applies the moment it's entered (no button), and is
-        # saved (OS keyring, or a local key file) when editing finishes.
+        # saved to the OS keyring when editing finishes; a plain-text key file
+        # is written only with the user's consent (DA-032).
         # Collapsed on launch when a key is already loaded (the common case);
         # expanded when there's none, so a first-run user is prompted for it.
         self._key_sec = CollapsibleSection(
@@ -846,6 +857,17 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
                 f"below to view it any time.",
                 level="info",
             )
+        self._report_key_at_startup()
+
+    def _report_key_at_startup(self) -> None:
+        """Say what the key store did, then whether a key is loaded.
+
+        The store's notes (a key file refused or kept, a keyring entry repaired;
+        WP-16.1) name the file and the reason, never the value. They come first,
+        so the one-line status that follows reads as their outcome.
+        """
+        for note in self._key_load_notes:
+            self._log(note.text, level="warning" if note.warning else "muted")
         if not self._has_key:
             self._set_key_status("no key", COLORS["warning"])
             self._log(
@@ -1108,8 +1130,18 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         and rebuilds its cached client when the key changes, so setting the env
         var is enough. Writing to disk is deferred to :meth:`_persist_key` (on
         finish) so a half-typed key is never persisted.
+
+        The value is normalized first (WP-16.1: a paste from a "UTF-8 with BOM"
+        file carries an invisible BOM), and the field is rewritten to show it,
+        so the field, the key in use and the key saved agree. Tcl runs no trace
+        on a variable while one of its traces is running, so the ``set`` does
+        not re-enter this method (measured with Tk 8.6 and customtkinter); and
+        normalizing is idempotent, so a toolkit that did would stop at once.
         """
-        key = self._key_var.get().strip()
+        raw = self._key_var.get()
+        key = normalize_api_key(raw)
+        if key != raw:
+            self._key_var.set(key)
         if key:
             os.environ["ANTHROPIC_API_KEY"] = key
             self._has_key = True
@@ -1136,7 +1168,7 @@ class DrawingAnalyzerApp(_CTkDnDRoot):
         silently written to a plaintext file — the user is asked for explicit
         informed consent; declining keeps the key session-only.
         """
-        key = self._key_var.get().strip()
+        key = normalize_api_key(self._key_var.get())
         if not key or key == self._persisted_key:
             return
         try:

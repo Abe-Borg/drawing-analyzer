@@ -110,9 +110,20 @@ export ANTHROPIC_API_KEY=sk-ant-...
 
 Or skip the env var and paste the key into the **Anthropic API Key** field at the
 top of the GUI — it takes effect as soon as you enter it (no extra step), and is
-saved (OS keyring when available, otherwise a local key file) once you finish
-editing so it's remembered next launch. The env var still takes precedence when
+saved to your OS keyring (Windows Credential Manager, macOS Keychain, Secret
+Service) once you finish editing so it's remembered next launch. Where no
+secure keyring works, the app asks before writing a plain-text key file; decline
+and the key lasts for this session only. The env var still takes precedence when
 both are set.
+
+Spaces and invisible characters around a key (a byte-order mark from Notepad's
+"UTF-8 with BOM", a zero-width space from a web page) are removed wherever a key
+enters: the field, a saved key, and a legacy `drawing_analyzer_api_key.txt` key
+file (UTF-8 or UTF-16). A key must start with `sk-ant-` to be saved, or to be
+loaded from the keyring or a key file (the environment variable is used as set).
+A legacy key file is moved into the keyring only when it holds such a key, and
+only the key files that hold that same key are then deleted; a file holding
+anything else is left in place and named in the activity log, never quoted.
 
 ## Usage
 

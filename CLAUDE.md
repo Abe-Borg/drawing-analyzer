@@ -602,6 +602,48 @@ prints to the stderr that does not exist). Both reporters swallow every failure 
 their own channels: a broken dialog must not trap the user in the window, and the
 reporter of last resort must never raise from inside Tk's handler.
 
+**API key store (remediation WP-16.1, G3; the owner's rules).** A key file saved
+"UTF-8 with BOM" was loaded with the BOM (U+FEFF is not whitespace), passed the
+keyring's verified round-trip, was migrated and every key file deleted: every
+call then failed authentication, for good. Every value that enters from a person
+now goes through ONE normalizer and ONE shape check, both in the stdlib-only leaf
+`core/api_key_format.py` (so `diagnostics` can import the pattern without pulling
+in `keyring`):
+- `normalize_api_key` strips whitespace and every Unicode format character
+  (category Cf) from **both ends only**. A Cf character inside a value stays, so
+  the check refuses it rather than the normalizer editing a key.
+- `looks_like_api_key` is a full match of `ANTHROPIC_KEY_RE`
+  (`sk-ant-[A-Za-z0-9_\-]+`, no length floor), the same compiled object the
+  diagnostics redactor uses. Never restate it.
+
+They serve a key file, the value served from the keyring, `save_api_key` and the
+GUI field (`_on_key_changed` rewrites the field to the normalized value: Tcl runs
+no trace while one of a variable's traces runs, measured, so the `set` does not
+re-enter). `_keyring_get` stays the backend seam (`.strip()` only): the verified
+round-trip compares against it and the pinned fixtures replace it; the served
+value is normalized on top, and an entry that normalizes differently is rewritten
+through `_keyring_store_verified`. The env path is not checked (WP-16.2; the
+hermetic guard's placeholder is not a key).
+
+The rules:
+- A key file that fails the check is **not used, not migrated and left in place**,
+  and the next location is tried.
+- A UTF-16 file (UTF-16 BOM) is decoded. A file over 64 KiB, not UTF-8/UTF-16 or
+  unreadable is skipped, and so is an empty one.
+- A migration (`_migrate_legacy_file_key` → `_remove_key_files_holding`) deletes
+  **only the files that hold the key it just verified**. `save_api_key` still
+  removes every location (`_remove_key_files`, pinned).
+- A keyring entry that fails the check is not served and not deleted.
+
+Presence goes through `_key_file_present`, since `Path.exists()` re-raises a
+permission error. Everything refused, repaired, kept or skipped becomes a
+`KeyNote` (`load_api_key_with_notes()`; `load_api_key_from_file()` keeps its
+contract). Each note is logged to the diagnostics logger **by name**
+(`core` imports nothing from the package top level) and shown by
+`_report_key_at_startup`. A note or an exception message names the file and the
+reason, never the value; `_persist_key` logs `{exc}` verbatim, so this is
+load-bearing.
+
 **QC stack** (each stage optional and independently cached):
 
 - *Planning (Phase A §20, universal reviewer):* `set_identity.py` — one text-only
@@ -1529,7 +1571,7 @@ in both modes, since hiding it billed every shared report's questions to its
 author and left a rotated-key report dead.
 
 `core/` is a shared kernel (model ids + env overrides in `api_config.py`, key
-store, pricing, tokenizer, the structured-outputs gate, and
+store with its `api_key_format.py` normalizer and shape check, pricing, tokenizer, the structured-outputs gate, and
 `terminal_outcome.py`, the one stop-reason classifier: D-1, adopted so far by the
 digest's two transports and, since remediation WP-01.4, the critique's (through
 the digest's ladder, `digest_terminal_error(..., noun="critique")`), with the
