@@ -28,6 +28,9 @@ AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppVerName={#MyAppName} {#MyAppVersion}
 AppPublisher={#MyAppPublisher}
+; Also stamped into Setup.exe's version info (VersionInfoCopyright defaults to
+; it). Keep it equal to the README's Licensing section.
+AppCopyright=Copyright (C) 2026 {#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}/releases/latest

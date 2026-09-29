@@ -67,6 +67,28 @@ def test_the_license_text_reads_the_same_in_any_encoding():
     _LICENSE.read_bytes().decode("ascii")
 
 
+def test_the_script_text_the_installer_shows_is_ascii():
+    """The license summary and the copyright come from the script itself, so
+    they are held to the same rule as LICENSE: plain ASCII, so a stray ``©`` or
+    curly quote cannot be mangled by however ISCC decodes the script."""
+    label = _directives("messages").get("licenselabel3", "")
+    copyright_ = _directives("setup").get("appcopyright", "")
+    (label + copyright_).encode("ascii")
+
+
+def test_the_copyright_matches_the_readme():
+    """``AppCopyright`` goes into Setup.exe's version info; it names the same
+    year and holder as the README's Licensing section."""
+    readme = (_REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    year, holder = re.search(r"Copyright © (\d{4}) ([^;.]+)", readme).groups()
+    script = _ISS.read_text(encoding="utf-8")
+    defines = dict(re.findall(r'^#define\s+(\w+)\s+"([^"]*)"', script, re.MULTILINE))
+    copyright_ = re.sub(
+        r"\{#(\w+)\}", lambda m: defines[m.group(1)], _directives("setup").get("appcopyright", "")
+    )
+    assert copyright_ == f"Copyright (C) {year} {holder.strip()}", copyright_
+
+
 def test_the_license_page_summarises_the_license():
     """The text above the license names it and the missing warranty, like the
     About panel (tests/test_help_content.py) and the README do."""

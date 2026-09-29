@@ -23,6 +23,11 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `docs/RELEASE_WINDOWS.md`, row 3A.1 of `docs/WINDOWS_ACCEPTANCE.md` and the
   About panel say so. `release.yml` also builds the installer on a PR that
   changes `LICENSE`, since the installer now embeds it.
+- **The installer carries the copyright.** `installer.iss` sets `AppCopyright`
+  (`Copyright (C) 2026 Abraham Borg`), which Inno Setup also writes into
+  Setup.exe's version info. `tests/test_installer_license.py` pins it equal to
+  the README's Licensing section, and holds the license page's summary and the
+  copyright to the same plain-ASCII rule as `LICENSE`.
 
 ### Changed
 
