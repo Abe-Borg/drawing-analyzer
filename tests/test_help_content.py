@@ -350,7 +350,7 @@ def doc_blocks(section: HelpSection):
         # How to use — the operator's actual workflow surfaces.
         ("how_to_use", ["API key", "Analyze", "focus", "QC Markups", "Export All", "HTML Report"]),
         # How it works — the real pipeline vocabulary.
-        ("how_it_works", ["sheet", "text layer", "tiles", "Opus 5", "Batch", "synthesis"]),
+        ("how_it_works", ["sheet", "text layer", "tiles", "Opus 5.5", "Batch", "synthesis"]),
         # Why trust it — the trust mechanisms that exist in the code.
         (
             "why_trust_it",

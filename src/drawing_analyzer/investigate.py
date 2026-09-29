@@ -205,13 +205,13 @@ on what you actually saw"}"""
 
 
 # Whether this process may still send the advisory task budget. The beta is
-# documented for Opus 5, but an org without it enabled would get a 400 on every
-# turn — which, on a stage designed to be additive and non-fatal (I-3), would
-# silently disable investigations altogether rather than degrade. So the first
-# such rejection turns the feature off for the process and the run continues on
-# the plain streaming transport, with the host-side round cap still enforcing a
-# bound. Only a budget-specific rejection flips it; transient errors re-raise to
-# the caller's existing retry.
+# documented for Opus 5 and Opus 5.5, but an org without it enabled would get a
+# 400 on every turn — which, on a stage designed to be additive and non-fatal
+# (I-3), would silently disable investigations altogether rather than degrade.
+# So the first such rejection turns the feature off for the process and the run
+# continues on the plain streaming transport, with the host-side round cap still
+# enforcing a bound. Only a budget-specific rejection flips it; transient errors
+# re-raise to the caller's existing retry.
 _task_budget_available = True
 
 _TASK_BUDGET_REJECTION_MARKERS = ("task_budget", "task-budgets", "output_config")
@@ -315,7 +315,7 @@ def _investigation_message_turn(client: Any, kwargs: dict, *, task_budget: int) 
         config["task_budget"] = {"type": "tokens", "total": int(task_budget)}
         budgeted = {**kwargs, "output_config": config, "betas": [TASK_BUDGET_BETA]}
         try:
-            # Also opts into (and self-heals) the Opus 5 refusal fallback —
+            # Also opts into (and self-heals) the refusal fallback —
             # see call_with_refusal_fallback — orthogonally to the task-budget
             # rejection handled below.
             return call_with_refusal_fallback(

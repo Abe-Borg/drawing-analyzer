@@ -466,7 +466,7 @@ _HOW_IT_WORKS = HelpDocument(
             _para(
                 "Each sheet is rendered to an overview image plus a 6×6 grid of "
                 "high-resolution tiles and sent, together with its text layer, to Claude "
-                "Opus 5 in a single request. The model returns a structured Markdown "
+                "Opus 5.5 in a single request. The model returns a structured Markdown "
                 "digest plus a machine-readable findings block."
             ),
             _bullet(
@@ -979,24 +979,24 @@ RUNTIME_TRANSPARENCY = HelpDocument(
                 "variable if your firm standardizes on something else."
             ),
             _bullet(
-                "Claude Opus 5 — reading the sheets, the critique, working out the set's "
-                "identity, writing the review plan, the cross-sheet conflict hunt, and the "
-                "investigation loop. The deep-reasoning work."
+                "Claude Opus 5.5 — reading the sheets, the critique, writing the review "
+                "plan, the set-level synthesis and focus report, the cross-sheet conflict "
+                "hunt, and the investigation loop. The deep-reasoning work."
             ),
             _bullet(
-                "Claude Sonnet 5 — the first verification look at each finding. Smaller, "
+                "Claude Sonnet 5.5 — the first verification look at each finding. Smaller, "
                 "faster and cheaper, because the question is narrow: does this one thing "
                 "hold in this one crop? It also runs the report's Ask-AI assistant, which "
-                "needs to fetch web pages — a thing Opus 5 cannot do."
+                "searches and fetches web pages on the reader's own key, where half the "
+                "price matters."
             ),
             _bullet(
-                "Sonnet 5 also runs three stages outright: the set-identity read "
+                "Sonnet 5.5 also runs three stages outright: the set-identity read "
                 "(advisory only, with a deterministic regex backstop), the prose "
                 "harvest's structuring call (the item is already found — all that "
                 "is left is restating one sentence in the findings format), and "
-                "the citation check. That last one is a capability choice rather "
-                "than a cost one: checking a code citation needs to fetch the page, "
-                "which Opus 5 cannot do."
+                "the citation check, which fetches the cited code section and reads "
+                "it — narrow work that does not need the flagship."
             ),
             _bullet(
                 "Escalation is one-way and upward. A finding the smaller model could not "

@@ -84,7 +84,7 @@ _log = get_logger()
 # One crop image + a short prompt, answered with a 1-2 sentence JSON verdict.
 #
 # The output itself is tiny, but adaptive thinking draws from the SAME
-# ``max_tokens`` envelope as the answer — and on Opus 5 / Sonnet 5 thinking runs
+# ``max_tokens`` envelope as the answer — and on the 5 / 5.5 models thinking runs
 # whether or not the request asks for it (omitting the key does not disable it).
 # The previous 1k cap therefore had to fit the reasoning *and* the verdict, and
 # frequently fit neither: an empty body parses as no verdict, which degrades to
@@ -342,7 +342,7 @@ def _build_request(
         "system": VERIFY_SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": content}],
     }
-    # Explicit, never implicit: on Opus 5 / Sonnet 5 an omitted ``thinking`` key
+    # Explicit, never implicit: on the 5 / 5.5 models an omitted ``thinking`` key
     # runs adaptive anyway, so saying nothing is not the same as saying no.
     apply_thinking_config(kwargs, model=model, phase=PHASE_VERIFICATION)
     apply_effort_config(kwargs, model=model, phase=PHASE_VERIFICATION)

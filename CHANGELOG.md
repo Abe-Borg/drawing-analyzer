@@ -31,6 +31,78 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **The models are now Claude Opus 5.5 and Claude Sonnet 5.5.** Every stage
+  that ran on Opus 5 now runs on Opus 5.5 (`claude-opus-5-5`): the digest,
+  critique, review plan, synthesis, focus report, cross-sheet QC and the
+  investigation loop. Every stage that ran on Sonnet 5 now runs on Sonnet 5.5
+  (`claude-sonnet-5-5`): verification, set identity, the prose harvest, the
+  citation check and the report's Ask-AI chat. Each `DRAWING_ANALYZER_*_MODEL`
+  override still works, and Opus 5 and Sonnet 5 stay fully registered (they are
+  also the 5.5 models' refusal-fallback targets). What changed with the switch:
+  - **Registry.** Both models are in `_MODEL_CAPABILITIES`: 1M context, 128k
+    output, all five effort levels, hi-res vision, structured outputs, both
+    `_20260209` web tools. Opus 5.5 has web fetch again, which Opus 5 lacks;
+    Anthropic's web-fetch reference is written against `claude-opus-5-5`.
+  - **Pricing** (checked against Anthropic's pricing page on 2026-09-29;
+    `PRICING_EFFECTIVE_DATE` moved there). Opus 5.5 is $4/$20 per million
+    tokens, cache writes $5 (5-minute) / $8 (1-hour), cache reads $0.20, batch
+    $2/$10. Sonnet 5.5 is Sonnet 5's $2/$10. Opus 5.5 reads its cache at 0.05x
+    input where every other model reads at 0.1x, so the read rate is now per
+    model (`ModelPrice.cache_read_multiplier`). The ledger, the cost-confirm
+    dialog's wording and the chat widget's cost readout all use it.
+  - **`price_for` no longer reads `claude-opus-5-5` as an Opus 5 variant.** The
+    prefix fallback that resolves dated and `-fast` ids treated any `-`-delimited
+    suffix as a variant, so an unregistered Opus 5.5 id priced at Opus 5's
+    $5/$25. A short all-digit segment is now a version number (a different
+    model, unpriced until registered); an eight-digit date still resolves.
+  - **Refusal fallback.** Both new models declare
+    `supports_refusal_fallback`, as Anthropic recommends for them, so every
+    real-time call now opts into `fallbacks: "default"`, the Sonnet stages
+    included (they used to be plain-namespace calls). Opus 5.5 declines in
+    more categories than Opus 5 (`bio` and `reasoning_extraction` join
+    `cyber`), and its fallback goes to Opus 5 or Opus 4.8. Sonnet 5.5's retries
+    only `cyber` and `frontier_llm` declines, on Sonnet 5.
+    `DRAWING_ANALYZER_REFUSAL_FALLBACK=0` still turns it off, and the README
+    now lists it. A fallback-served Opus 5.5 call bills at the substitute's
+    $5/$25 while the ledger prices the requested model (the recorded limit
+    remediation WP-14.3 owns), so it is under-stated by a fifth.
+  - **Request shape.** Nothing the 5.5 models reject is sent: every request
+    states `thinking: {"type": "adaptive"}` (neither model accepts
+    `{"type": "disabled"}`) and an explicit effort level (Opus 5.5's own
+    default is `medium`), and the only `tool_choice` is `none` (forced `any` /
+    `tool` are rejected). Effort levels are unchanged. Their levels do not
+    map 1:1 onto the 5 generation's, so an A/B run is the way to re-tune them.
+  - **Preserved thinking.** The 5.5 models bind each thinking block to the
+    system prompt, tools and messages it was produced with, and for accounts
+    created on or after 2026-08-31 the API rejects a replayed block after any
+    of those changed. The investigation loop already only appends (a new test
+    pins it: same system prompt and tools on every turn, the forced close
+    included, each request extending the last, thinking echoed as received).
+    The report chat did not always: a transcript loaded from a different
+    report, saved by the same run exported under another chat model or app
+    version, or trimmed to fit browser storage, replayed blocks bound to a
+    conversation that no longer matched, so every later question would have
+    failed. Such a transcript is now resumed without its thinking blocks, all
+    of them. A turn left empty takes its whole exchange with it (dropping the
+    turn alone left its unanswered question mid-thread, where the API merges
+    it into the next question). Each saved transcript records a
+    key of the request prefix its blocks were produced under (`report.prefix`:
+    model, thinking setting, system prompt and tools), and only a transcript
+    with the same report id, the same key and nothing trimmed replays them
+    as-is; one saved before the key existed is resumed without them. Five
+    browser tests cover it.
+  - **Tests.** The capability, pricing, SDK-contract, strict-fake and
+    response-shape tests now cover both models alongside the older ones. Tests
+    that pinned Opus 5 figures either use the new defaults or pin Opus 5
+    explicitly where the figure was captured on it. The one recorded limit
+    whose dollar figures moved
+    (`test_recorded_limit_the_cache_write_ttl_split_is_priced_at_one_rate`) is
+    re-priced at Opus 5.5's rates, and its docstring keeps the Opus 5 figures.
+    The limit itself is unchanged.
+  - **Caches.** The model is part of every cache key, so the first run after
+    upgrading reads and bills every sheet again once, then caches as before.
+  - README, CLAUDE.md, the in-app help and the GUI copy name the new models.
+
 - **The test suite's hermeticity is enforced, not requested (remediation
   WP-02.1; U26).** A new pytest plugin, `tests/fixtures/hermetic_guard.py`,
   registered by `tests/conftest.py`, wraps every test not marked `network`:

@@ -123,7 +123,7 @@ def run_checklists(profiles: list[Profile] | None, runs: int) -> list[str]:
 # Back-compat alias for the private spelling used before Phase 23C made it public.
 _run_checklists = run_checklists
 
-# Critique shares the digest's output-shaping defaults: Opus 5, adaptive
+# Critique shares the digest's output-shaping defaults: Opus 5.5, adaptive
 # thinking, effort high, 16k max_tokens (full coverage, deliberate reasoning).
 # Decoupled from the digest cap: the critique is a second full-coverage read of
 # the same images and deserves its own envelope, not whatever the digest is set

@@ -12,6 +12,8 @@ from drawing_analyzer.core.pricing import (
     friendly_model_name,
     price_for,
 )
+from drawing_analyzer.focus import default_focus_model
+from drawing_analyzer.synthesis import default_synthesis_model
 from drawing_analyzer.cost import (
     _ASSUMED_FOCUS_OUTPUT_TOKENS as FOCUS_OUT,
     _ASSUMED_FOCUS_SECTION_TOKENS_PER_SHEET as FOCUS_PER_SHEET,
@@ -43,6 +45,33 @@ def test_price_for_exact_and_unknown():
     assert price_for("claude-haiku-4-5").output_per_mtok == 5.0
     assert price_for("totally-made-up") is None
     assert price_for("") is None
+
+
+def test_price_for_the_5_5_models():
+    # Opus 5.5 is $4/$20 with cache reads at $0.20 — 0.05x, not the 0.1x every
+    # other model here reads at. Sonnet 5.5 is Sonnet 5's $2/$10, standard read.
+    opus = price_for("claude-opus-5-5")
+    assert (opus.input_per_mtok, opus.output_per_mtok) == (4.0, 20.0)
+    assert opus.cache_read_multiplier == 0.05
+    assert opus.cache_read_per_mtok == pytest.approx(0.20)
+    sonnet = price_for("claude-sonnet-5-5")
+    assert (sonnet.input_per_mtok, sonnet.output_per_mtok) == (2.0, 10.0)
+    assert sonnet.cache_read_per_mtok == pytest.approx(0.20)
+    assert price_for("claude-opus-5").cache_read_per_mtok == pytest.approx(0.50)
+    assert friendly_model_name("claude-opus-5-5") == "Opus 5.5"
+    assert friendly_model_name("claude-sonnet-5-5") == "Sonnet 5.5"
+
+
+def test_a_minor_version_is_a_different_model_not_a_variant():
+    # "claude-opus-5-5" is "claude-opus-5" plus "-5": before Opus 5.5 had its
+    # own row the delimiter rule priced it as an Opus 5 variant, $5/$25 against
+    # a real $4/$20. A short numeric segment names another model; a date suffix
+    # (eight digits) or a word ("fast") names a variant.
+    assert price_for("claude-opus-5-6") is None
+    assert price_for("claude-sonnet-5-6") is None
+    assert price_for("claude-opus-5-5-20261101") == MODEL_PRICING["claude-opus-5-5"]
+    assert price_for("claude-opus-5-20260101") == MODEL_PRICING["claude-opus-5"]
+    assert price_for("claude-opus-5-5-fast") == MODEL_PRICING["claude-opus-5-5"]
 
 
 def test_price_for_resolves_suffixed_variant():
@@ -182,8 +211,10 @@ def test_drawing_estimate_batch_keeps_synthesis_at_realtime_rate():
         10, model=OPUS, batch=True, synthesize=True
     )
     synth_input = 10 * OUT_PER_SHEET + PROMPT_PER_SHEET
+    # Synthesis is priced at ITS model, which follows the review default, not
+    # at the digest's ``model=`` argument.
     expected_delta = estimate_request_cost(
-        synth_input, SYNTH_OUT, model=OPUS, batch=False
+        synth_input, SYNTH_OUT, model=default_synthesis_model(), batch=False
     )
     assert with_synthesis.total_cost - without.total_cost == pytest.approx(expected_delta)
 
@@ -201,7 +232,7 @@ def test_drawing_estimate_batch_keeps_focus_report_at_realtime_rate():
     )
     focus_input = digest_output + PROMPT_PER_SHEET
     focus_cost = estimate_request_cost(
-        focus_input, FOCUS_OUT, model=OPUS, batch=False
+        focus_input, FOCUS_OUT, model=default_focus_model(), batch=False
     )
     assert focused.total_cost == pytest.approx(digest_cost + focus_cost)
 
@@ -569,14 +600,22 @@ def test_no_dialog_claims_the_qc_stages_always_bill():
         assert "whole set" in text
 
 
-def test_the_copy_fix_moved_no_price():
+def test_the_copy_fix_moved_no_price(monkeypatch):
     """§9.3 case 8, second half. Wording only — every total is unchanged.
 
     Values captured from the estimator before the copy edit. If one of these
     moves, someone "corrected" arithmetic the plan established is already
     correct (§2.4), and the batch/real-time relationship below is the property
     that would silently invert.
+
+    They were captured on Opus 5, so every Opus-routed stage is pinned to it
+    here: the defaults moved to Opus 5.5, whose lower rates move the totals
+    without touching the arithmetic. (The Sonnet stages cost the same on
+    Sonnet 5.5 as on Sonnet 5.)
     """
+    for stage in ("SYNTHESIS", "FOCUS", "CRITIQUE", "CROSS_QC", "REVIEW_PLAN",
+                  "INVESTIGATION"):
+        monkeypatch.setenv(f"DRAWING_ANALYZER_{stage}_MODEL", OPUS)
     assert estimate_drawing_set_cost(
         10, file_count=1, model=OPUS, batch=True, spec_chars=40_000
     ).total_cost == pytest.approx(5.10, abs=0.005)

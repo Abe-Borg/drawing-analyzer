@@ -1,6 +1,6 @@
 """Pre-run cost estimate for a drawing set (feeds the cost-confirm dialog).
 
-Reading drawings is the app's most expensive action — one Opus 5 vision call
+Reading drawings is the app's most expensive action — one Opus 5.5 vision call
 per sheet, each carrying the overview image plus every grid tile. This estimates
 the spend *before* the run so the GUI can surface it and let the operator
 confirm or cancel. It is deliberately a rough, slightly-high estimate (the image
@@ -21,9 +21,11 @@ from .models import (
 )
 from .core.tokenizer import estimate_image_tokens_total
 from .core.pricing import (
+    CACHE_READ_MULTIPLIER,
     PRICING_EFFECTIVE_DATE,
     estimate_request_cost,
     friendly_model_name,
+    price_for,
     usage_record_cost,
 )
 from . import tiling
@@ -313,8 +315,8 @@ def estimate_drawing_set_cost(
     none) is priced separately at the cache-aware rate (see
     :func:`_specs_cost_contribution`) rather than folded into the flat 1x
     ``input_tokens`` sum above — it rides a system-prompt block that is
-    cache-written once and cache-read (~0.1x) on every sheet after, so pricing
-    it at the flat rate would overstate what it actually costs.
+    cache-written once and cache-read (~0.1x, 0.05x on Opus 5.5) on every sheet
+    after, so pricing it at the flat rate would overstate what it actually costs.
     """
     # WP-05 §10.2. Synthesis and the focus report have their own runtime
     # resolvers (``DRAWING_ANALYZER_SYNTHESIS_MODEL`` / ``…_FOCUS_MODEL``), and
@@ -434,6 +436,12 @@ def format_drawing_cost_prompt(est: DrawingCostEstimate) -> str:
         _basis_line(est.shape_aware, est.unmeasured_pages),
     ]
     if est.spec_chars:
+        # The read multiplier is the model's own: 0.1x on most models, 0.05x on
+        # Opus 5.5, so a fixed "0.1x" would overstate the default model's read.
+        price = price_for(est.model)
+        read_rate = (
+            price.cache_read_multiplier if price is not None else CACHE_READ_MULTIPLIER
+        )
         # WP-04 §9.2. The old line promised a ~0.1x prompt-cache read on BOTH
         # transports. On the batch path there is no cache breakpoint at all —
         # ``batch_digest.submit_drawing_batch`` always passes
@@ -448,9 +456,9 @@ def format_drawing_cost_prompt(est: DrawingCostEstimate) -> str:
             + ("billed as ordinary batch input on every sheet (the batch path "
                "sets no prompt-cache breakpoint)."
                if est.batch else
-               "usually cached after the first sheet(s) (~0.1x rate); sheets "
-               "sent before the first response lands, and any sheet after the "
-               "cache expires, pay the write rate instead.")
+               f"usually cached after the first sheet(s) (~{read_rate:g}x rate); "
+               "sheets sent before the first response lands, and any sheet after "
+               "the cache expires, pay the write rate instead.")
         )
     if est.total_cost is not None:
         batch_note = (
@@ -704,11 +712,13 @@ def _critique_prefix_costs(
     WP-05 §10.2. ``critique_sheet_self_consistent`` sets ``cache_prefix = runs >= 2``
     (``critique.py``), which attaches an ephemeral breakpoint to the shared image
     prefix on the **real-time** path. So read 1 cache-*writes* that ~90k-token
-    prefix at 1.25x and reads 2..N serve it at 0.1x — while this estimator was
-    billing all N at the ordinary 1x rate.
+    prefix at 1.25x and reads 2..N serve it at the model's read rate (0.1x, or
+    0.05x on Opus 5.5) — while this estimator was billing all N at the ordinary
+    1x rate.
 
     The error runs in both directions, which is why it needs a band rather than a
-    correction. For ``runs=2`` the multipliers are:
+    correction. For ``runs=2`` the multipliers are (at the standard 0.1x read;
+    on Opus 5.5 reuse is 1.25 + 0.05 = 1.30):
 
     ===============  ==========================
     scenario          prefix read-equivalents
@@ -899,8 +909,8 @@ def estimate_exhaustive_run_cost(
     # ``estimate_image_tokens`` clamps at a per-model cap — 4784 on a
     # hi-resolution model, 1568 on a standard-tier one — so reusing the digest's
     # count for a critique pointed at a standard-tier model is a ~3x error
-    # (§2.4). Latent today, since Opus 5 and Sonnet 5 share the tier, and
-    # reachable through one env var.
+    # (§2.4). Latent today, since the Opus and Sonnet 5.5 models share the
+    # tier, and reachable through one env var.
     from .critique import critique_runs
 
     runs = critique_runs()

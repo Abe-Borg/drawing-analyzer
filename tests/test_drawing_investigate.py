@@ -576,7 +576,7 @@ def test_budget_env_overrides(monkeypatch):
 
 
 def test_investigation_model_env_override(monkeypatch):
-    assert investigation_model() == "claude-opus-5"  # the escalation tier
+    assert investigation_model() == "claude-opus-5-5"  # the escalation tier
     monkeypatch.setenv("DRAWING_ANALYZER_INVESTIGATION_MODEL", "claude-sonnet-5")
     assert investigation_model() == "claude-sonnet-5"
 
@@ -593,6 +593,57 @@ def test_system_prompt_and_tools_ride_every_request():
         assert text == INVESTIGATE_SYSTEM_PROMPT
     names = [t["name"] for t in client.calls[0]["tools"]]
     assert names == ["crop_region", "find_text", "view_sheet"]
+
+
+def _plain(value):
+    """A request fragment as comparable data: SDK blocks dumped, cache markers
+    dropped (moving a ``cache_control`` marker is not an edit)."""
+    if hasattr(value, "model_dump"):
+        value = value.model_dump()
+    if isinstance(value, dict):
+        return {k: _plain(v) for k, v in value.items() if k != "cache_control"}
+    if isinstance(value, list):
+        return [_plain(v) for v in value]
+    return value
+
+
+def test_the_loop_only_appends_so_its_thinking_blocks_stay_valid():
+    """Preserved thinking (Opus 5.5, the escalation default; Sonnet 5.5 too).
+
+    A thinking block is bound to the system prompt, the tools and every message
+    before it. Replaying one after any of those changed is a 400 on the accounts
+    the API enforces the check for, and this loop replays its whole history on
+    every turn. So every request, the forced text-only close included, carries
+    the same system prompt and tool list, each extends the one before, and the
+    assistant turn goes back exactly as it arrived, thinking block first.
+    """
+    from anthropic.types import ThinkingBlock
+
+    thought = ThinkingBlock(type="thinking", thinking="", signature="c2lnbmVk")
+
+    def responder(kw, n):
+        if _tool_result_turns(kw) >= 2:
+            return _verdict()
+        return FakeMessage(
+            content=[thought, FakeToolUseBlock(
+                name="crop_region", input={"rect": [10, 10, 300, 200]}, id=f"toolu_{n}")],
+            stop_reason="tool_use",
+            usage=FakeUsage(input_tokens=100, output_tokens=20),
+        )
+
+    client = _LoopClient(responder)
+    _run_one(client, max_rounds=2)
+
+    calls = client.calls
+    assert len(calls) == 3
+    assert calls[-1].get("tool_choice") == {"type": "none"}     # the forced close
+    for call in calls[1:]:
+        assert _plain(call["system"]) == _plain(calls[0]["system"])
+        assert _plain(call["tools"]) == _plain(calls[0]["tools"])
+    for before, after in zip(calls, calls[1:]):
+        prefix = _plain(before["messages"])
+        assert _plain(after["messages"])[:len(prefix)] == prefix
+    assert _plain(calls[1]["messages"][1]["content"][0]) == _plain(thought)
 
 
 def test_multi_turn_requests_cache_initial_image_and_rolling_evidence_prefix():

@@ -47,7 +47,7 @@ from tests.fixtures.sdk_transport import (
 
 pytest_plugins = ["pytester"]
 
-OPUS = "claude-opus-5"
+OPUS = "claude-opus-5-5"
 _MSG = [{"role": "user", "content": "x"}]
 
 
