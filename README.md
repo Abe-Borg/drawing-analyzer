@@ -48,9 +48,10 @@ Opus 5 does not support, and Sonnet 5.5 has it at half Opus 5.5's price, which
 matters because the reader's key pays — and can be overridden with
 `DRAWING_ANALYZER_CHAT_MODEL`. Sonnet 5.5 ties each of its thinking blocks to the
 conversation it was produced in, so a transcript loaded from a different report,
-or one trimmed to fit browser storage, is resumed without its thinking blocks
-(the text and tool calls stay): on the accounts the API enforces that check for,
-replaying them would make every later question fail. It runs at a fixed `high`
+saved by a report built with another chat model or app version, or trimmed to fit
+browser storage, is resumed without its thinking blocks (the text and tool calls
+stay; an exchange whose only answer was thinking is dropped): on the accounts the
+API enforces that check for, replaying them would make every later question fail. It runs at a fixed `high`
 reasoning effort: there is deliberately no per-question "deep" switch, because
 asking a reader to predict, before seeing the answer, whether their question
 deserves more reasoning is a question they cannot answer. The footer meter reports how much

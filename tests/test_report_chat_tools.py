@@ -14,6 +14,7 @@ import glob
 import json
 import os
 import pathlib
+import re
 from datetime import datetime
 
 import pytest
@@ -2167,22 +2168,45 @@ def test_control_tool_turn_really_makes_two_requests(page, tmp_path):
 
 # --------------------------------------------------------------------------- #
 # Preserved thinking. Sonnet 5.5 (the chat default) and Opus 5.5 bind every
-# thinking block to the conversation it was produced in: the system prompt, the
-# tools and every earlier message. A transcript that is not replayed exactly
-# (another report's, or one trimmed to fit storage) would replay stale blocks,
-# which the API rejects with a 400 on the accounts it enforces the check for.
+# thinking block to the conversation it was produced in: the model, the system
+# prompt, the tools and every earlier message. A transcript that is not replayed
+# exactly (another report's, one saved under another request prefix, or one
+# trimmed to fit storage) would replay stale blocks, which the API rejects with
+# a 400 on the accounts it enforces the check for.
 # --------------------------------------------------------------------------- #
 
 _SIGNED = {"type": "thinking", "thinking": "REASONINGSUMMARY about VAV-3",
            "signature": "c2lnbmF0dXJl"}
 
 
-def _transcript(report_id, *, truncated=False):
+def _thinking_turn(text: str) -> str:
+    """A streamed answer that opens with a signed thinking block, as the API sends one."""
+    return _sse([
+        {"type": "content_block_start", "index": 0,
+         "content_block": {"type": "thinking", "thinking": "", "signature": ""}},
+        {"type": "content_block_delta", "index": 0,
+         "delta": {"type": "thinking_delta", "thinking": _SIGNED["thinking"]}},
+        {"type": "content_block_delta", "index": 0,
+         "delta": {"type": "signature_delta", "signature": _SIGNED["signature"]}},
+        {"type": "content_block_stop", "index": 0},
+        {"type": "content_block_start", "index": 1,
+         "content_block": {"type": "text", "text": ""}},
+        {"type": "content_block_delta", "index": 1,
+         "delta": {"type": "text_delta", "text": text}},
+        {"type": "content_block_stop", "index": 1},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}},
+    ])
+
+
+def _transcript(report_id, *, truncated=False, prefix=None):
+    report = {"report_id": report_id, "title": "t", "generated": "g",
+              "sources": ["a.pdf"], "model": "claude-sonnet-5-5"}
+    if prefix is not None:
+        report["prefix"] = prefix
     return {
         "kind": "drawing_analyzer_chat_transcript",
         "schema_version": 1,
-        "report": {"report_id": report_id, "title": "t", "generated": "g",
-                   "sources": ["a.pdf"], "model": "claude-sonnet-5-5"},
+        "report": report,
         "saved_at": "2026-09-29T08:00:00.000Z",
         "truncated": truncated,
         "turns": [
@@ -2205,6 +2229,12 @@ def _transcript(report_id, *, truncated=False):
             # Stopped while it was still thinking: nothing but a thinking block.
             {"message": {"role": "assistant", "content": [dict(_SIGNED)]},
              "display": {"notes": ["⏹ Stopped."]}},
+            # ...and the conversation went on after it.
+            {"message": {"role": "user", "content": "third question"},
+             "display": {"text": "third question", "excerpt": ""}},
+            {"message": {"role": "assistant", "content": [
+                {"type": "text", "text": "third answer"}]},
+             "display": {"notes": []}},
         ],
     }
 
@@ -2237,21 +2267,102 @@ def _follow_up(page):
     return page.evaluate("window.__REQ")[-1]["messages"]
 
 
-def test_a_whole_transcript_from_this_report_replays_its_thinking_unchanged(page, tmp_path):
+def _shown(page):
+    return page.eval_on_selector("#da-chat-msgs", "el => el.textContent")
+
+
+def test_a_thread_this_report_saved_replays_its_thinking_unchanged(page, tmp_path):
     # The same conversation, exactly: the blocks are valid and carry reasoning
     # the model can use, so they go back byte for byte.
+    _load(page, _chat_doc(), tmp_path, queue=[_thinking_turn("first answer")])
+    _ask_and_settle(page, "first question", expect="first answer")
+    # The saved thread records the prefix its blocks are bound to.
+    assert re.fullmatch(r"[0-9a-f]{8}-\d+", _stored(page)["report"]["prefix"])
+
+    page.reload()
+    page.click("#da-chat-fab")
+    page.wait_for_selector(".da-user", timeout=5000)
+    # The reasoning summary is on screen, and goes back byte for byte.
+    assert "REASONINGSUMMARY" in _shown(page)
+    sent = _follow_up(page)
+    assert [m["role"] for m in sent] == ["user", "assistant", "user"]
+    assert sent[1]["content"][0] == _SIGNED
+
+
+@pytest.mark.parametrize("prefix", ["own", None, "00000000-1"],
+                         ids=["same-prefix", "no-prefix", "another-prefix"])
+def test_a_thread_of_this_report_keeps_its_thinking_only_under_the_same_prefix(
+        page, tmp_path, prefix):
+    # The report id stays the same when one run is exported twice, under
+    # another DRAWING_ANALYZER_CHAT_MODEL or by another build with another
+    # system prompt or tool list. Only the recorded prefix tells those apart.
+    # A transcript without one was written before it existed, so its blocks
+    # cannot be shown to hold.
     page.on("dialog", lambda d: d.accept())
     doc = _chat_doc()
-    _load(page, doc, tmp_path, queue=[_text_turn("ok.")])
-    transcript = _transcript(_report_id(doc))
+    _load(page, doc, tmp_path, queue=[_text_turn("warmed up."), _text_turn("ok.")])
+    _ask_and_settle(page, "warm up", expect="warmed up.")
+    own = _stored(page)["report"]["prefix"]
+    assert own
+    transcript = _transcript(_report_id(doc), prefix=own if prefix == "own" else prefix)
     transcript["turns"] = transcript["turns"][:4]   # ends on a finished answer
-    _load_file(page, tmp_path, transcript)
+    page.set_input_files(
+        "#da-chat-load-input",
+        files=[{"name": "chat.json", "mimeType": "application/json",
+                "buffer": json.dumps(transcript).encode()}],
+    )
+    page.wait_for_function(
+        "() => document.getElementById('da-chat-msgs').textContent"
+        ".indexOf('first question') !== -1",
+        timeout=5000,
+    )
 
-    # The reasoning summary is on screen, and goes back byte for byte.
-    assert "REASONINGSUMMARY" in page.eval_on_selector("#da-chat-msgs", "el => el.textContent")
     sent = _follow_up(page)
-    assert sent[1]["content"][0] == _SIGNED
-    assert _block_types(sent).count("redacted_thinking") == 1
+    types = _block_types(sent)
+    if prefix == "own":
+        assert "REASONINGSUMMARY" in _shown(page)
+        assert sent[1]["content"][0] == _SIGNED
+        assert types.count("redacted_thinking") == 1
+    else:
+        assert "REASONINGSUMMARY" not in _shown(page)
+        assert "thinking" not in types and "redacted_thinking" not in types
+        assert sent[1]["content"][0] == {"type": "text", "text": "Checking."}
+    assert [m["role"] for m in sent] == ["user", "assistant", "user", "assistant", "user"]
+
+
+def test_the_same_run_exported_under_another_chat_model_drops_the_old_thinking(
+        page, tmp_path, monkeypatch):
+    # One run exported twice keeps its report id, so the thread saved by the
+    # first export is restored into the second. Its blocks were produced for
+    # the first export's model and must not reach the second one's.
+    import importlib
+
+    from drawing_analyzer.core import api_config
+    first = _chat_doc()
+    _load(page, first, tmp_path, queue=[_thinking_turn("first answer")])
+    _ask_and_settle(page, "first question", expect="first answer")
+    assert "REASONINGSUMMARY" in json.dumps(_stored(page)["turns"])
+
+    monkeypatch.setenv("DRAWING_ANALYZER_CHAT_MODEL", "claude-opus-5-5")
+    importlib.reload(api_config)
+    importlib.reload(hr)
+    try:
+        second = _chat_doc()
+    finally:
+        monkeypatch.delenv("DRAWING_ANALYZER_CHAT_MODEL", raising=False)
+        importlib.reload(api_config)
+        importlib.reload(hr)
+    assert _report_id(second) == _report_id(first)
+    (tmp_path / "report.html").write_text(second, encoding="utf-8")
+    page.reload()
+    page.click("#da-chat-fab")
+    page.wait_for_selector(".da-user", timeout=5000)
+    assert "first answer" in _shown(page) and "REASONINGSUMMARY" not in _shown(page)
+
+    sent = _follow_up(page)
+    assert page.evaluate("window.__REQ")[-1]["model"] == "claude-opus-5-5"
+    assert [m["role"] for m in sent] == ["user", "assistant", "user"]
+    assert sent[1]["content"] == [{"type": "text", "text": "first answer"}]
 
 
 def test_a_transcript_from_another_report_is_resumed_without_thinking(page, tmp_path):
@@ -2263,38 +2374,48 @@ def test_a_transcript_from_another_report_is_resumed_without_thinking(page, tmp_
     _load_file(page, tmp_path, _transcript("deadbeefdeadbeef"))
 
     # The screen shows the thread that will be sent: no reasoning summary, and
-    # not the question whose only answer was thinking.
-    shown = page.eval_on_selector("#da-chat-msgs", "el => el.textContent")
+    # not the exchange whose only answer was thinking.
+    shown = _shown(page)
     assert "REASONINGSUMMARY" not in shown and "second question" not in shown
+    assert "third question" in shown and "third answer" in shown
     sent = _follow_up(page)
     types = _block_types(sent)
     assert "thinking" not in types and "redacted_thinking" not in types
     # The visible work stays: the tool call, its answer and the text.
     assert types.count("tool_use") == 1 and types.count("tool_result") == 1
     assert sent[1]["content"][0] == {"type": "text", "text": "Checking."}
-    # The turn that was only thinking had nothing left to send: an empty
-    # assistant message is a 400, and the unanswered question before it is
-    # rewound like any other unfinished tail.
+    # The turn that was only thinking had nothing left to send, and an empty
+    # assistant message is a 400. Its whole exchange goes, not just the turn:
+    # the question before it would otherwise sit unanswered in the middle of
+    # the thread, two user turns in a row, which the API merges into one, so
+    # "second question" would reach the model as part of the third.
     assert all(m["content"] for m in sent)
-    assert [m["role"] for m in sent] == ["user", "assistant", "user", "assistant", "user"]
-    assert _sent_text(sent[-1]) == "follow up"
+    assert [m["role"] for m in sent] == [
+        "user", "assistant", "user", "assistant", "user", "assistant", "user"]
+    assert [_sent_text(sent[i]) for i in (0, 4, 6)] == [
+        "first question", "third question", "follow up"]
     # ...and the thread saved for the next visit is the one that was sent.
     assert "thinking" not in json.dumps(_stored(page)["turns"])
 
 
 def test_a_trimmed_transcript_restored_from_storage_is_resumed_without_thinking(page, tmp_path):
     # Trimming to fit localStorage drops the OLDEST turns, so every block that
-    # survives was produced with history in front of it that is now gone.
+    # survives was produced with history in front of it that is now gone. The
+    # prefix is this page's own, so the trim alone decides it.
     doc = _chat_doc()
-    stored = _transcript(_report_id(doc), truncated=True)
+    _load(page, doc, tmp_path, queue=[_text_turn("warmed up.")])
+    _ask_and_settle(page, "warm up", expect="warmed up.")
+    stored = _transcript(_report_id(doc), truncated=True,
+                         prefix=_stored(page)["report"]["prefix"])
     stored["turns"] = stored["turns"][:4]
-    page.add_init_script(
-        "localStorage.setItem(" + json.dumps("da-chat-tx-" + _report_id(doc)) + ", "
-        + json.dumps(json.dumps(stored)) + ");"
+    page.evaluate(
+        "([k, v]) => localStorage.setItem(k, v)",
+        ["da-chat-tx-" + _report_id(doc), json.dumps(stored)],
     )
-    _load(page, doc, tmp_path, queue=[_text_turn("ok.")])
+    page.reload()
     page.click("#da-chat-fab")
     page.wait_for_selector(".da-user", timeout=5000)
+    assert "oldest messages were dropped" in _shown(page)
 
     sent = _follow_up(page)
     types = _block_types(sent)

@@ -1735,13 +1735,24 @@ pops run first. `activeStream` is released **by identity**, so a stream
 settling after its thread was replaced cannot clear the new turn's handle.
 A transcript that cannot be replayed verbatim is resumed **without its thinking
 blocks** (`resumableTurns`): on the chat default, Sonnet 5.5 (as on Opus 5.5),
-a thinking block is bound to the system prompt, tools and every earlier message
-it was produced with, so one loaded from another report or trimmed to fit
-localStorage (its oldest turns gone) would make the next question a 400, and
-every one after it, on the accounts the API enforces the check for. All of them
-go, never some (a block may only be removed from the front of the run); a turn
-left empty is dropped (an empty assistant message is a 400) and the tail is
-rewound as usual. A whole transcript from this report replays its blocks as-is.
+a thinking block is bound to the model, system prompt, tools and every earlier
+message it was produced with, so one loaded from another report, saved under
+another request prefix or trimmed to fit localStorage (its oldest turns gone)
+would make the next question a 400, and every one after it, on the accounts the
+API enforces the check for. Verbatim takes three things: the same report id,
+nothing trimmed, and the same **prefix key** (`requestPrefixKey`: FNV-1a plus
+length over the request's model, `thinking`, system blocks and tools, cache
+markers left out), which every saved transcript records as `report.prefix`. The
+report id alone is not enough: one run exported twice (another
+`DRAWING_ANALYZER_CHAT_MODEL`, another build's prompt or tool list) keeps it
+(Codex review). A missing key never matches. All blocks go, never some (a block
+may only be removed from the front of the run). A turn left empty takes its
+whole exchange with it, back to the reader turn that opened it: an empty
+assistant message is a 400, and dropping the turn alone left two user turns in
+a row mid-thread, where `dropUnansweredTail` never looks (Codex review). The
+API merges consecutive user turns rather than refusing them, so that shape
+failed silently: the unanswered question reached the model as part of the
+next one.
 The request shape is resolved host-side from the capability registry —
 `thinking`, `webSearch` and `webFetch` all ride `CFG` and the browser omits
 what the model will not take, because `DRAWING_ANALYZER_CHAT_MODEL` is

@@ -79,12 +79,18 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     pins it: same system prompt and tools on every turn, the forced close
     included, each request extending the last, thinking echoed as received).
     The report chat did not always: a transcript loaded from a different
-    report, or trimmed to fit browser storage, replayed blocks bound to a
+    report, saved by the same run exported under another chat model or app
+    version, or trimmed to fit browser storage, replayed blocks bound to a
     conversation that no longer matched, so every later question would have
     failed. Such a transcript is now resumed without its thinking blocks, all
-    of them, with a turn left empty dropped and the tail rewound; a whole
-    transcript from the same report still replays them as-is. Three browser
-    tests cover it.
+    of them. A turn left empty takes its whole exchange with it (dropping the
+    turn alone left its unanswered question mid-thread, where the API merges
+    it into the next question). Each saved transcript records a
+    key of the request prefix its blocks were produced under (`report.prefix`:
+    model, thinking setting, system prompt and tools), and only a transcript
+    with the same report id, the same key and nothing trimmed replays them
+    as-is; one saved before the key existed is resumed without them. Five
+    browser tests cover it.
   - **Tests.** The capability, pricing, SDK-contract, strict-fake and
     response-shape tests now cover both models alongside the older ones. Tests
     that pinned Opus 5 figures either use the new defaults or pin Opus 5
