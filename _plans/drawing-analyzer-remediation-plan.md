@@ -341,7 +341,7 @@ Implementation:
 - the `_FakeBatches.create` copies that accept `betas`: seven in `tests/test_drawing_batch.py` and six more in four other files, 13 in all *(corrected by WP-02.2; this read "the seven")*, and `_messages_stream(betas=)` in `tests/test_drawing_batch.py`;
 - `_BetaMessagesProxy`, which silently pops `betas`, and the 16 test-local sites in 7 files that pop `betas`/`fallbacks`.
 
-*WP-02.2 note (2026-09-29, the owner's rules).* Steps 1-3 are done for requests; the response-side fixtures of step 3 (nested errors, canceled/expired envelopes) are WP-02.3's.
+*WP-02.2 note (2026-09-29, the owner's rules; [PR #178](https://github.com/Abe-Borg/drawing-analyzer/pull/178)).* Steps 1-3 are done for requests; the response-side fixtures of step 3 (nested errors, canceled/expired envelopes) are WP-02.3's.
 - **Measured first:** production sends no request the SDK refuses.
   - Over the whole suite: 2,370 production calls into fakes, 254 batch submits, 1,225 uploads.
   - Through the real SDK: 475 requests over 21 scenarios, identical on SDK 1.7.0 and 1.8.0.
