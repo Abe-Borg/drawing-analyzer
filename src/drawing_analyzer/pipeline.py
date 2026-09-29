@@ -4249,9 +4249,10 @@ def extract_drawing_context(
         max_workers=max_workers, total=total, client=client, cache=cache,
     )
     if overlap_stages:
-        # ``extract_drawing_context`` normally receives ``client=None`` from the
-        # GUI. Resolve exactly one SDK client on the calling thread so concurrent
-        # stages never race the process-wide lazy client factory.
+        # A library caller may pass ``client=None`` (the GUI passes its run's
+        # client since remediation WP-16.2). Resolve exactly one SDK client on
+        # the calling thread so concurrent stages never race the process-wide
+        # lazy client factory.
         if client is None:
             try:
                 from .client import get_client as _get_client

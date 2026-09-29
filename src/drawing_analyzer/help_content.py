@@ -220,7 +220,13 @@ _HOW_TO_USE = HelpDocument(
             _bullet(
                 "It is remembered for next launch in your OS keyring (or, only with "
                 "your explicit consent, a local file). An environment variable always "
-                "wins over a saved key."
+                "wins over a saved key: it fills the field at launch."
+            ),
+            _bullet(
+                "An analysis keeps the key it started with: the field is locked "
+                "until the run ends. The app keeps the key out of its own "
+                "environment, so it does not pass it on to programs it starts (a key "
+                "you set system-wide is visible to every program anyway)."
             ),
             _bullet(
                 "Don't have a key yet? Click “How do I get one?” beside the key field "
