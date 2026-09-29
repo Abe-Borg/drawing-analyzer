@@ -135,7 +135,15 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     it** (an autouse fixture joins the release thread at teardown); 2 to 4 of
     the suite's 80 releases used to make their `files.delete` calls inside the
     next test.
-INJECTION_PLACEHOLDER
+  - **Measured by injected production regressions** (the WP-02 acceptance
+    clause this slice owns: tests fail for missed terminal guards, realistic
+    canceled envelopes and duplicated usage), over the 56 test files that
+    exercise the pipeline, the batch path or the fakes. Today's suite, then
+    with this slice: a stop reason of `None` read as finished, 36 → 39; a
+    canceled or expired item parsed as succeeded, 0 → 1; the nested batch error
+    read as flat, 0 → 8; a reader that assumes every envelope carries `error`,
+    0 → 4; `iterations` added to the totals, 0 → 2; a batch attempt recorded
+    twice, 17 → 18.
 
 ### Fixed
 
