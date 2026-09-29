@@ -701,8 +701,8 @@ what could not be verified, risks, and next steps.
     new contract tests add 78 deletes, and background deletes land in a
     neighbouring test's window as on the base.
 - **Probes on the fix:** s2 re-run over the fixed tree: the same 475 requests
-  over the 21 scenarios, 0 differences. s0/s3/s4 read only the SDK and
-  unchanged product code.
+  over the 21 scenarios, 0 differences. The SDK-fact probes, s3 and s4 read
+  only the SDK and unchanged product code.
 - **Validation** (this container: Python 3.11.15, SDK 1.7.0, `httpx2` 2.13.1,
   PyMuPDF 1.28.2):
   - Baseline before any change: **4,545 passed, 2 skipped, 10 deselected**.
