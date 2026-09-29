@@ -262,6 +262,98 @@ above and restates none of it.
   cache levels on both transports, the stage status and the per-sheet usage
   record (D-2's WP-01.4 note).
 
+Added by WP-01.5: **a refused batch item is recovered under the selected
+transport, inside one per-sheet retry budget** (R2; the owner's rules, decided
+in two rounds with measured options and a case table per option). It conforms
+to the decision above and restates none of it: a `REFUSED` read is still a
+failed read, and `stop_details` is still informational, never the verdict.
+- **Measured first** (zero API calls, the real SDK over `AnthropicAPIStub`, SDK
+  1.7.0 and again 1.8.0 in a scratch venv, identical):
+  - the plain `RefusalStopDetails` declares only `category`, `explanation` and
+    `type`, but allows extras, so `recommended_model` survives on a batch
+    result as a pydantic extra. The API sets it only when a server-side
+    fallback attempt could not run (the SDK's own docstring), and a batch item
+    cannot carry `fallbacks`, so in practice it is absent on a batch refusal;
+  - a refusal was failed and never retried at the primary collect, the
+    fresh-batch rounds, the follow-up batch and the direct rescue, whatever its
+    category; the abandoned-batch harvest resubmitted it to the same model;
+    nothing read `stop_details`;
+  - retries per sheet, worst case: 5 submissions on `RECOVERY_BATCH` (primary
+    + 4 rounds, already shared by transient, expired, raised-cap and abandoned
+    rounds), 2 batch items + 3 real-time calls on `RECOVERY_DIRECT`, 6 calls on
+    the real-time digest (2 attempts × (1 + 2 transient));
+  - a prototype swap stored the fallback read under the requested model's key
+    at both levels, a warm run served it free, and the ledger labelled it with
+    the requested model (same price for Opus 4.8).
+- **The gate: a registry route per category.**
+  `ModelCapabilities.refusal_fallback_routes` (pairs of category and target;
+  `api_config.refusal_fallback_target`). Opus 5 declares `cyber` → Opus 4.8,
+  Anthropic's server-side route for Opus 5's cyber-only classifiers. Nothing
+  else is retried: another category, `null` (the model's own decline), no
+  `stop_details`, a model without a route (Sonnet 5 included). A named
+  unrouted category is said in the error: `…; not retried: no fallback for
+  category 'bio' on claude-opus-5`. `supports_refusal_fallback` (the
+  server-side opt-in) is a separate capability and is unchanged.
+- **The target:** `recommended_model` when it names a registered model other
+  than the refuser, else the route's; the request is rebuilt for it
+  (`digest.retarget_digest_request`, the builder's rules). **The gate decides
+  whether, the target decides where**: a registered hint does not open an
+  unrouted category. (The round-2 preview's "route target: any" row read as
+  "whatever the route's target is"; the owner's gate choice says everything
+  unrouted is not retried, so the gate applies first. No batch refusal
+  carries the hint in practice, so this changes nothing measured.)
+- **Once per sheet.** A refusal from an item already sent to a fallback ends
+  it (`refused digest on claude-opus-4-8 (…)`); the chain refused.
+- **One per-sheet retry budget** (`_Slot.retries`, `_within_retry_budget`,
+  `_count_retry`): every resubmission of a sheet, whatever the reason and at
+  every site, counts one; the direct rescue counts once per sheet. The budget
+  is `DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS` (default 4, no new knob), so
+  the pipeline's worst case is unchanged. The real-time digest keeps its own
+  retries (the server-side fallback covers its refusals).
+- **The harvest asks the same predicate.** A refusal it reads is held (it ranks
+  above nothing, so a fallback that comes back worse or never lands leaves it
+  named) and goes to its fallback, or is final. A permanent error it reads is
+  final (held, not resubmitted; it was resubmitted once). An item the
+  harvest's own cancel stopped (`canceled`), a transient or expired item and a
+  truncated one are resubmitted as they were submitted, as before.
+  `_HarvestOutcome.final`, `.retry`, `.rescue_params`. This amends WP-01.3's
+  "a content-free item is parked": a refusal is now held.
+- **The selected transport.** `RECOVERY_BATCH` (the pipeline): a refused sheet
+  is only ever a batch item. `RECOVERY_DIRECT` is the full-rate policy a caller
+  selects: a refused sheet takes any failed item's path. A refusal from the
+  primary gets its fallback item in the follow-up batch; the rescue takes, on
+  its fallback, whatever still fails after that batch, including a refusal the
+  follow-up itself returned, and everything when the follow-up cannot run or
+  stalls. (The round-2 preview said "only if that batch cannot run or stalls";
+  the follow-up-refusal case is the same rule, measured after implementation
+  and pinned.)
+- **Cache admission:** a finished fallback read is admitted under the requested
+  model's key, like the server-side fallback's. No key, entry or schema
+  changed, so no migration-register row. The ledger still labels the attempt
+  with the requested model: a recorded limit for WP-14.3.
+- **`billing_error` is permanent**; `request_too_large` (the API's 413 type, not
+  an SDK batch type) stays permanent.
+- **Logged, no secrets.** The ladder takes `category=` and a refusal's error
+  names it on both digest transports and the critique; the diagnostics log
+  carries category, hint, target and explanation (`redact_secrets`, one line,
+  200 characters). Nothing new in the manifest.
+- **The batch critique:** an errored read keeps its type through the digest's
+  one helper (`_batch_item_error_text(noun="item")`). Retrying failed batch
+  critique reads, and WP-01.4's raised-cap question, is a new row, WP-01.8.
+- **Rejected:** retrying every refusal (a model's own decline re-read
+  elsewhere); a guessed Sonnet 5 route; sending `recommended_model` verbatim
+  (an unregistered id may 400); a refusal round outside the budget; storing
+  under the serving model's key or not caching (a refusal plus a fallback paid
+  on every run); a `served_model` field in the entry (it changes what is
+  stored; WP-14.3's); `billing_error` transient; the explanation in the error or
+  the manifest; direct rescue only when passed explicitly (a sentinel default).
+- **Consumers affected:** the refused sheet's error (its category, and the
+  fallback's naming), `ctx.errors`, `run.log`, the report and the per-sheet
+  export through it; the digest stage's status (a recovered sheet is no longer
+  a failure); both cache levels (a finished fallback read is stored); the usage
+  ledger (one more attempt record, labelled with the requested model); the
+  critique's failed-read errors (the type).
+
 ## D-2 Stage accounting — `decided` (WP-01.1, [PR #155](https://github.com/Abe-Borg/drawing-analyzer/pull/155))
 
 **Required decision:** define eligible, judged, failed, skipped,

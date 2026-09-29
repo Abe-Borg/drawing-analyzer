@@ -174,6 +174,70 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A refused batch sheet was lost, and a `billing_error` was resubmitted like
+  a server blip (remediation WP-01.5; R2).** On the batch transport (the GUI's
+  default) a sheet the model refused came back failed and was never retried:
+  not at the collect, not in the fresh-batch rounds, the follow-up batch or
+  the direct rescue. The server-side refusal fallback cannot help there,
+  because the Batches API rejects the `fallbacks` parameter. The one place a
+  refusal was resubmitted, the abandoned-batch harvest, sent it again to the
+  same model. Nothing read the refusal's `stop_details`. Separately,
+  `billing_error` (one of the SDK's nine batch error types) was missing from
+  the permanent set, so an out-of-credit item was resubmitted up to four
+  times, and a batch critique read that came back errored lost its error type.
+
+  Now, decided with the owner (see the WP-01.5 handoff in
+  `_plans/PROGRESS.md`):
+  - **A refused batch sheet is retried on a fallback model, as a batch item,
+    when the registry routes its category.** A new registry field,
+    `ModelCapabilities.refusal_fallback_routes`, maps a refusal's
+    `stop_details.category` to a target. Opus 5 routes `cyber` to Opus 4.8,
+    the same route the server-side fallback takes. Opus 4.8 takes the same
+    request at the same price. Every other category, a refusal with no
+    category (the model's own decline) and a model with no route are not
+    retried; a named category says why in the sheet's error (`…; not retried:
+    no fallback for category 'bio' on claude-opus-5`). The target is
+    `stop_details.recommended_model` when it names another registered model,
+    else the route's. The request is rebuilt for it (effort, thinking and
+    output cap), and only the model changes for Opus 4.8. A fallback that
+    refuses too ends it (`refused digest on claude-opus-4-8 (…)`). A fallback
+    that comes back worse is named on the refusal (`…; retry on
+    claude-opus-4-8: …`).
+  - **One retry budget per sheet.** Every resubmission of a sheet counts one,
+    whatever the reason (a server error, an expired item, a raised output cap,
+    a refusal fallback, an abandoned batch) and wherever it happens (a
+    fresh-batch round, the follow-up batch, the direct rescue). The budget is
+    `DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS` (default 4, unchanged), so
+    the pipeline's worst case is still 5 submissions per sheet. A refusal is
+    retried at most once.
+  - **The selected transport holds.** The pipeline's batch recovery never
+    re-reads a refused sheet at the full real-time rate. A direct caller that
+    selects the full-rate `RECOVERY_DIRECT` policy gets a refused sheet
+    through the same path as any failed one.
+  - **The abandoned-batch harvest asks the same rule.** A refusal it reads goes
+    to its fallback, or stays the sheet's result when it has none. A permanent
+    error it reads is no longer resubmitted. An item the harvest's own cancel
+    stopped is resubmitted as before.
+  - **`billing_error` is permanent**: named, not resubmitted.
+    `request_too_large`, the API's 413 type, stays permanent.
+  - **The category is named** in every refused read's error, on both digest
+    transports and the critique: `refused digest (stop_reason='refusal',
+    category='cyber')`. The diagnostics log records the category, the
+    recommended model, the target and the explanation. The explanation is
+    redacted, kept to one line and capped at 200 characters.
+  - **A batch critique read that errored keeps its type** (`overloaded_error:
+    …`). Its retries are a new slice, WP-01.8.
+
+  **Visible effect:** on the batch transport, a sheet refused in the cyber
+  category costs one more batch item on Opus 4.8. Once that read finishes, the
+  sheet is cached under the requested model's key, like any finished digest,
+  so a warm run does not pay again. The usage ledger still labels that attempt
+  `claude-opus-5` (the price is the same); reading the serving model is
+  WP-14.3's. The only pinned text that moved is the refusal error of
+  `test_response_shapes.py::test_a_refused_digest_fails_its_sheet_and_is_read_again`,
+  which now names its category. Two recorded limits were flipped. New tests:
+  `tests/test_batch_refusal_recovery.py`.
+
 - **An edit to the API key field during a run no longer reaches the run's later
   stages, and the key is no longer handed to child processes (remediation
   WP-16.2; G2).** The GUI wrote the field's key into `ANTHROPIC_API_KEY` on every

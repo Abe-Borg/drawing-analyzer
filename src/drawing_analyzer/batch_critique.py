@@ -55,6 +55,7 @@ from .batch_digest import (
     LogCallback,
     ProgressCallback,
     StatusCallback,
+    _batch_item_error_text,
     _batch_max_elapsed_seconds,
     _cancel_batch,
     _poll_until_terminal,
@@ -454,11 +455,13 @@ def _outcome_from_envelope(
         )
     rr = _get(env, "result")
     if _get(rr, "type") != "succeeded":
-        rtype = _get(rr, "type", "errored")
-        error = _get(rr, "error", None)
-        inner = _get(error, "error", error) if error is not None else None
-        detail = str(_get(inner, "message", "") or "").strip() or f"batch item {rtype}"
-        return CritiqueRunOutcome(run_id=run_id, status="FAILED", error=detail)
+        # The digest's one item-error helper (remediation WP-01.5): an errored
+        # read names its type with its message (``overloaded_error: …``), as a
+        # digest item does; the type used to be dropped. A canceled or expired
+        # read keeps its wording, ``batch item canceled``.
+        return CritiqueRunOutcome(
+            run_id=run_id, status="FAILED", error=_batch_item_error_text(rr, noun="item"),
+        )
     return outcome_from_message(
         _get(rr, "message"), run_id=run_id, ref=ref, rows=rows, cols=cols
     )

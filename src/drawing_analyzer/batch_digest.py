@@ -64,6 +64,14 @@ recovers every unresolved sheet through the same ``recovery_transport`` — the
 pipeline's ``RECOVERY_BATCH`` resubmits them as fresh batches (never real-time),
 so a stuck Batches backend is retried as a batch instead of degrading the run
 to full-price direct calls or losing it.
+
+Refused-item recovery (remediation WP-01.5, R2): the server-side refusal
+fallback cannot serve a batch item (the API rejects ``fallbacks`` there), so a
+sheet the model refused is resubmitted by the host, through the same recovery
+paths, on the model the registry routes its ``stop_details.category`` to
+(:func:`_refusal_retry_params`; Opus 5 routes ``cyber`` to Opus 4.8), once.
+Every resubmission of a sheet, whatever the reason and wherever it happens,
+spends one retry of a single per-sheet budget (:func:`_within_retry_budget`).
 """
 from __future__ import annotations
 
@@ -73,8 +81,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from .core.api_config import REVIEW_MODEL_DEFAULT, output_cap_for_model
-from .core.terminal_outcome import classify_stop_reason
+from .core.api_config import (
+    REVIEW_MODEL_DEFAULT,
+    is_registered_model,
+    output_cap_for_model,
+    refusal_fallback_target,
+)
+from .core.terminal_outcome import REFUSED, classify_stop_reason
 from .core.tokenizer import estimate_image_tokens_total
 from .diagnostics import get_logger, request_id_of, summarize_exc
 from .digest import (
@@ -91,12 +104,15 @@ from .digest import (
     _message_usage,
     _retry_backoff_seconds,
     build_digest_request_params,
+    describe_refusal,
     digest_cache_admits,
     digest_sheet,
     digest_terminal_error,
     is_partial_read,
     keep_digest_read,
     note_failed_retry,
+    refusal_details,
+    retarget_digest_request,
     sheet_digest_from_cache_entry,
     stream_message,
     focus_cache_fragment,
@@ -503,6 +519,18 @@ class _Slot:
     # Number of Messages attempts accepted/submitted for this sheet. Failed
     # batch-level submits do not increment it; direct-call transient retries do.
     attempts_submitted: int = 0
+    # Remediation WP-01.5 (R2; the owner's rules): the resubmissions of this
+    # sheet so far, whatever the reason (a transient or expired item, a raised
+    # cap, a refusal fallback, an abandoned batch), at every site: a fresh
+    # batch round, the follow-up batch, a direct-call rescue (one per rescued
+    # sheet, however many transient retries its call makes). Bounded by the
+    # one per-sheet retry budget, :func:`_max_batch_resubmit_rounds`.
+    retries: int = 0
+    # The params of this sheet's latest submission (``None``: the primary's,
+    # ``params``). A read parsed from it knows the model it was sent to, so a
+    # refusal fallback's read is worded and named with its model, and a
+    # fallback that refuses too is not retried again.
+    last_params: dict | None = None
 
 
 @dataclass
@@ -582,17 +610,38 @@ def _finish_digest_uploads(
         )
 
 
-def _batch_item_error_text(result_obj: Any) -> str:
-    """Human-readable error for a non-succeeded batch item (no repr noise)."""
+def _item_error_type(result_obj: Any) -> str:
+    """An ``errored`` item's error type, read where the API nests it.
+
+    The item's ``error`` is an error *response* (``type: "error"``) whose own
+    ``error`` carries the type (WP-02.3), so ``result.error.type`` is not it.
+    Tolerant of a flat shape (``result.error.type`` holding the type) too.
+    Empty for an item with no error (``canceled``, ``expired``).
+    """
+    error = _get(result_obj, "error", None)
+    if error is None:
+        return ""
+    inner = _get(error, "error", error)
+    return str(_get(inner, "type", "") or "")
+
+
+def _batch_item_error_text(result_obj: Any, *, noun: str = "request") -> str:
+    """Human-readable error for a non-succeeded batch item (no repr noise).
+
+    ``<type>: <message>`` for an errored item, else ``batch <noun> <result
+    type>``. The one helper for both batch transports (remediation WP-01.5):
+    the critique passes ``noun="item"`` and keeps its ``batch item canceled``
+    wording, and gains the type it used to drop.
+    """
     rtype = _get(result_obj, "type", "errored") or "errored"
     error = _get(result_obj, "error", None)
     if error is not None:
         inner = _get(error, "error", error)
-        etype = str(_get(inner, "type", "") or "")
+        etype = _item_error_type(result_obj)
         emsg = str(_get(inner, "message", "") or "").strip()
         if emsg:
             return f"{etype}: {emsg}" if etype else emsg
-    return f"batch request {rtype}"
+    return f"batch {noun} {rtype}"
 
 
 # Batch-item error types that are PERMANENT: the request itself was rejected,
@@ -600,10 +649,18 @@ def _batch_item_error_text(result_obj: Any) -> str:
 # on an ``errored`` item — ``api_error``, ``overloaded_error``, and whatever
 # transient types the future brings — is a server-side blip the Batches docs
 # call "safe to retry", and an ``expired`` item is explicitly "resubmit".
+#
+# ``billing_error`` is one of the SDK's nine batch error types (``ErrorObject``)
+# and a rejection of the ACCOUNT: the identical item fails the same way while
+# the account is out of credit, so it is permanent (remediation WP-01.5, the
+# owner's rule; it was resubmitted like a server blip). ``request_too_large``
+# is not one of the nine: it is the API's 413 type, kept as a permanent
+# rejection (the owner's rule), since an item so typed can only fail again.
 _PERMANENT_ITEM_ERROR_TYPES = frozenset(
     {
         "invalid_request_error",
         "authentication_error",
+        "billing_error",
         "permission_error",
         "not_found_error",
         "request_too_large",
@@ -635,6 +692,13 @@ def _item_retry_params(
     doubling starts from it, so evaluating a follow-up-round failure keeps
     raising the cap (2x → 4x, bounded by :data:`MAX_TOKENS_RETRY_CEILING`)
     instead of re-proposing the exact cap that just came back empty.
+
+    A fourth shape since remediation WP-01.5 (R2): a "succeeded" item the model
+    REFUSED is resubmitted on its fallback model when the registry routes its
+    category (:func:`_refusal_retry_params`), once per sheet. Whether any of
+    these is actually resubmitted is also bounded by the sheet's one retry
+    budget, which every site checks before it resubmits
+    (:func:`_within_retry_budget`).
     """
     params = slot.params if params is None else params
     if params is None:
@@ -643,10 +707,14 @@ def _item_retry_params(
     if rtype == "expired":
         return params
     if rtype == "errored":
-        error = _get(result_obj, "error", None)
-        inner = _get(error, "error", error) if error is not None else None
-        etype = str(_get(inner, "type", "") or "")
-        return None if etype in _PERMANENT_ITEM_ERROR_TYPES else params
+        return None if _item_error_type(result_obj) in _PERMANENT_ITEM_ERROR_TYPES else params
+    if (
+        rtype == "succeeded"
+        and digest is not None
+        and digest.error
+        and classify_stop_reason(digest.stop_reason).kind == REFUSED
+    ):
+        return _refusal_retry_params(slot, result_obj, digest, params)
     if (
         rtype == "succeeded"
         and digest is not None
@@ -688,10 +756,127 @@ def _is_retryable_server_failure(result_obj: Any) -> bool:
         return True
     if rtype != "errored":
         return False
-    error = _get(result_obj, "error", None)
-    inner = _get(error, "error", error) if error is not None else None
-    etype = str(_get(inner, "type", "") or "")
-    return etype not in _PERMANENT_ITEM_ERROR_TYPES
+    return _item_error_type(result_obj) not in _PERMANENT_ITEM_ERROR_TYPES
+
+
+def _fallback_model_of(slot: "_Slot") -> str | None:
+    """The model a refusal fallback sent this sheet's latest submission to.
+
+    ``None`` while the sheet is still on its requested model. Read from the
+    latest submission's params, so a read parsed from it is worded with the
+    model that produced it (remediation WP-01.5).
+    """
+    requested = str((slot.params or {}).get("model") or "")
+    submitted = str((slot.last_params or slot.params or {}).get("model") or "")
+    if requested and submitted and submitted != requested:
+        return submitted
+    return None
+
+
+def _note_not_retried(digest: SheetDigest, reason: str) -> None:
+    """Say in a refused read's error why it was not retried (WP-01.5).
+
+    Only for a refusal that names a category with no route: the owner's rule
+    words it ``…; not retried: no fallback for category 'bio' on <model>``.
+    Idempotent, so a read judged twice is not annotated twice.
+    """
+    note = f"; not retried: {reason}"
+    if digest.error and note not in digest.error:
+        digest.error += note
+
+
+def _refusal_retry_params(
+    slot: "_Slot", result_obj: Any, digest: SheetDigest, params: dict,
+) -> dict | None:
+    """The fallback request for a refused batch item, or ``None`` (R2).
+
+    Remediation WP-01.5 (the owner's rules). The ``fallbacks`` parameter is
+    rejected on the Batches API, so a batch item gets no server-side
+    fallback; the host resubmits it instead, as a batch item, on the model
+    the registry routes its ``stop_details.category`` to:
+
+    * **The gate** is :func:`~drawing_analyzer.core.api_config.refusal_fallback_target`:
+      a category with no route (for Opus 5, everything but ``cyber``), no
+      category at all (``null``, the model's own decline, or no
+      ``stop_details``) and a model that declares no route are not retried.
+    * **The target** is ``stop_details.recommended_model`` when it names a
+      registered model other than the one that refused, else the route's.
+      The gate decides whether, the target decides where, so the hint never
+      opens an unrouted category. On a batch item the hint is absent in
+      practice: the API sets it only when a server-side fallback attempt
+      could not run.
+    * **Once per sheet.** A refusal from an item that was already sent to a
+      fallback means the whole chain refused, and ends there.
+
+    The request is rebuilt for the target
+    (:func:`~drawing_analyzer.digest.retarget_digest_request`), so it is one
+    the target takes. The decision, the category, the hint, the target and
+    the explanation go to the diagnostics log (:func:`~drawing_analyzer.digest.describe_refusal`);
+    the sheet's error already names the category.
+    """
+    model = str(params.get("model") or "")
+    requested = str((slot.params or {}).get("model") or "")
+    label = f"{slot.custom_id} ({slot.ref.display_label})"
+    details = refusal_details(_get(result_obj, "message"))
+    category = details.category if details is not None else None
+    if requested and model != requested:
+        _log.info(
+            "refused digest for %s on the fallback %s too (%s); not retried",
+            label, model, describe_refusal(details),
+        )
+        return None
+    route = refusal_fallback_target(model, category)
+    if route is None:
+        if category:
+            _note_not_retried(digest, f"no fallback for category {category!r} on {model}")
+        _log.info(
+            "refused digest for %s not retried: no fallback route on %s (%s)",
+            label, model, describe_refusal(details),
+        )
+        return None
+    target = route
+    hint = details.recommended_model if details is not None else None
+    if hint and hint != model and is_registered_model(hint):
+        target = hint
+    elif hint and hint != route:
+        _log.info(
+            "refused digest for %s: recommended_model %r is not a registered "
+            "model other than %s; using the route's %s",
+            label, hint, model, route,
+        )
+    _log.info(
+        "refused digest for %s (%s): retrying on %s",
+        label, describe_refusal(details), target,
+    )
+    return retarget_digest_request(params, target)
+
+
+def _within_retry_budget(items: list, *, where: str) -> list:
+    """The ``(slot, params)`` items whose sheet has a retry left (WP-01.5).
+
+    The one per-sheet retry budget (the owner's rule):
+    :func:`_max_batch_resubmit_rounds`, default
+    :data:`DEFAULT_MAX_BATCH_RESUBMIT_ROUNDS`, shared by every reason a sheet
+    is resubmitted and checked at every site before it resubmits. A sheet
+    whose budget is spent keeps the read it has.
+    """
+    budget = _max_batch_resubmit_rounds()
+    kept = []
+    for slot, params in items:
+        if slot.retries < budget:
+            kept.append((slot, params))
+        else:
+            _log.warning(
+                "%s: %s (%s) keeps its read; its retry budget (%d) is spent",
+                where, slot.custom_id, slot.ref.display_label, budget,
+            )
+    return kept
+
+
+def _count_retry(slot: "_Slot", params: dict) -> None:
+    """Record one resubmission of ``slot`` with ``params`` (WP-01.5)."""
+    slot.retries += 1
+    slot.last_params = params
 
 
 def _rescue_reserve_seconds(max_elapsed_seconds: float) -> float:
@@ -818,11 +1003,32 @@ class _HarvestOutcome:
     Those still need recovery, but their attempt was **served, not abandoned**,
     so they must be excluded from :func:`_mark_batch_abandoned` — see
     :func:`_park_usage_attempts`.
+
+    Remediation WP-01.5 (the owner's rule: the harvest asks the same
+    predicate). ``final`` names the responded slots the caller must NOT
+    resubmit: a permanent error, or a refusal :func:`_item_retry_params` does
+    not retry. Their read is the sheet's result. ``retry`` maps a responded
+    slot to the params its resubmission must carry when they are not the ones
+    it was submitted with: a refusal's fallback item. Every other unresolved
+    slot is resubmitted as it was submitted, as before.
     """
 
     resolved: frozenset[int] = frozenset()
     responded: frozenset[int] = frozenset()
     elapsed: float = 0.0
+    final: frozenset[int] = frozenset()
+    retry: dict = field(default_factory=dict)
+
+    def rescue_params(self, slot: "_Slot", params: dict) -> dict | None:
+        """What to resubmit ``slot`` with after this harvest, or ``None``.
+
+        ``None`` for a slot the harvest resolved or holds as final; the
+        refusal's fallback params when it has them; else ``params``, the
+        request the caller would have resubmitted anyway.
+        """
+        if slot.index in self.resolved or slot.index in self.final:
+            return None
+        return self.retry.get(slot.index, params)
 
 
 def _harvest_abandoned_batch(
@@ -870,7 +1076,12 @@ def _harvest_abandoned_batch(
       remediation WP-01.3, N16), so the rescue can only improve on it and a
       rescue that never lands leaves it rather than "not collected"; any other
       item's attempt records are parked on the slot
-      (:func:`_park_usage_attempts`).
+      (:func:`_park_usage_attempts`). Since remediation WP-01.5 a refusal is
+      held too, and the harvest asks the retry predicate about what it read:
+      a permanent error, or a refusal it does not retry, is ``final`` (held,
+      not resubmitted); a refusal it retries carries its fallback params in
+      ``retry``. The caller builds its list with
+      :meth:`_HarvestOutcome.rescue_params`.
     * **Never fatal.** Recovery is best-effort; a harvest failure can only cost
       the optimization, never the run (I-3).
     """
@@ -910,6 +1121,8 @@ def _harvest_abandoned_batch(
         return _HarvestOutcome(elapsed=time.monotonic() - started)
     harvested: set[int] = set()
     responded: set[int] = set()
+    final: set[int] = set()
+    retry: dict[int, dict] = {}
     billed_but_unusable = 0
     for slot in targets:
         res = raw.get(slot.custom_id)
@@ -925,26 +1138,55 @@ def _harvest_abandoned_batch(
             continue
         responded.add(slot.index)
         if digest.error is not None:
-            if is_partial_read(digest):
+            billed_but_unusable += 1
+            # Remediation WP-01.5 (the owner's rule): the harvest asks the
+            # retry predicate about what it read. A permanent error, or a
+            # refusal the predicate does not retry, is not resubmitted; a
+            # refusal it retries goes to its fallback. Everything else is
+            # resubmitted as it was submitted, as before (an item this cancel
+            # stopped reads ``canceled`` and must be).
+            rr = _get(res, "result")
+            refused = classify_stop_reason(digest.stop_reason).kind == REFUSED
+            fallback: dict | None = None
+            if refused:
+                fallback = _item_retry_params(
+                    slot, rr, digest, params=slot.last_params or slot.params,
+                )
+                is_final = fallback is None
+            else:
+                is_final = (_get(rr, "type") == "errored"
+                            and _item_error_type(rr) in _PERMANENT_ITEM_ERROR_TYPES)
+            if is_final:
+                # Final: the read is the sheet's result, never "not collected".
+                final.add(slot.index)
+                _replace_result_with_attempt_history(
+                    results, slot, digest, served_by=batch_id,
+                )
+                continue
+            if fallback is not None:
+                retry[slot.index] = fallback
+            if refused or is_partial_read(digest):
                 # A read the model did not finish but that carries prose or
                 # findings is held as the sheet's result (N16), so the rescue
                 # it still gets can only improve on it; one the rescue never
-                # reaches keeps it instead of "not collected". The slot stays
-                # unresolved.
+                # reaches keeps it instead of "not collected". A refusal is
+                # held too (it ranks above nothing), so a fallback that comes
+                # back worse, or never lands, leaves the refusal named. The
+                # slot stays unresolved.
                 _replace_result_with_attempt_history(
                     results, slot, digest, served_by=batch_id,
                 )
             else:
                 _park_usage_attempts(slot, digest)
-            billed_but_unusable += 1
             continue
         _replace_result_with_attempt_history(results, slot, digest, served_by=batch_id)
         harvested.add(slot.index)
     _log.info(
         "harvested %d/%d completed sheet(s) from abandoned batch %s (status=%s, "
-        "%d returned no usable digest); %d sheet(s) still need recovery",
+        "%d returned no usable digest, %d not to be resubmitted); %d sheet(s) "
+        "still need recovery",
         len(harvested), len(targets), batch_id, status, billed_but_unusable,
-        len(targets) - len(harvested),
+        len(final), len(targets) - len(harvested) - len(final),
     )
     if on_log is not None and harvested:
         on_log(
@@ -955,6 +1197,8 @@ def _harvest_abandoned_batch(
         resolved=frozenset(harvested),
         responded=frozenset(responded),
         elapsed=time.monotonic() - started,
+        final=frozenset(final),
+        retry=retry,
     )
 
 
@@ -1065,10 +1309,17 @@ def _rescue_failed_items_sync(
     A rescue that lands keeps the better of the two reads
     (:func:`_replace_result_with_attempt_history`), so a partial batch read
     survives an empty or refused rescue. Returns the number of sheets recovered.
+
+    Each rescued sheet spends one of its retries (remediation WP-01.5, the
+    owner's rule: one per-sheet budget at every site), however many transient
+    retries its call makes; a sheet whose budget is spent is not rescued and
+    keeps its read. A refused sheet reaches here only under ``RECOVERY_DIRECT``
+    (the full-rate policy a caller selects), carrying its fallback params.
     """
     started = time.monotonic()
     recovered = 0
     out_of_budget = False
+    budget = _max_batch_resubmit_rounds()
     for pos, (slot, params) in enumerate(rescue):
         if out_of_budget or time.monotonic() - started >= max_elapsed_seconds:
             _log.warning(
@@ -1077,6 +1328,14 @@ def _rescue_failed_items_sync(
                 len(rescue) - pos, len(rescue),
             )
             break
+        if slot.retries >= budget:
+            _log.warning(
+                "direct-call rescue skipped for %s (%s): its retry budget (%d) is "
+                "spent; keeping its read", slot.custom_id, slot.ref.display_label,
+                budget,
+            )
+            continue
+        _count_retry(slot, params)
         attempt = 0
         message = None
         call_error: Exception | None = None
@@ -1132,7 +1391,9 @@ def _rescue_failed_items_sync(
             # raised-cap retry that raises is named.
             held = results[slot.index]
             if call_error is not None and held is not None:
-                note_failed_retry(held, _clean_error(call_error))
+                note_failed_retry(
+                    held, _clean_error(call_error), model=_fallback_model_of(slot),
+                )
             continue
         digest = _digest_from_message(
             slot, message, cache=cache, transport="REAL_TIME",
@@ -1271,6 +1532,12 @@ def _recover_via_batch_resubmit(
     resubmission may still be referencing the shared uploaded files, so the
     caller may release them. ``files_safe`` goes ``False`` only when a
     non-terminal resubmission could not be canceled (it may still be running).
+
+    Two bounds, one value (remediation WP-01.5, the owner's rule): the round
+    ceiling bounds the fresh batches this submits, a rejected submit included,
+    and the per-sheet retry budget bounds how often each sheet is resubmitted,
+    whatever the reason and at whichever site (:func:`_within_retry_budget`).
+    A refused sheet rides the same rounds on its fallback model.
     """
     started = time.monotonic()
     recovered = 0
@@ -1278,6 +1545,7 @@ def _recover_via_batch_resubmit(
     pending = list(items)
     max_rounds = _max_batch_resubmit_rounds()
     for round_no in range(1, max_rounds + 1):
+        pending = _within_retry_budget(pending, where=f"batch-resubmit round {round_no}")
         if not pending:
             break
         budget_left = max_elapsed_seconds - (time.monotonic() - started)
@@ -1315,10 +1583,12 @@ def _recover_via_batch_resubmit(
             continue
         retry_id = _get(mb, "id")
         # The batch submission was accepted; each item now has one additional
-        # Messages attempt. A rejected batch-level submit above is not billable
-        # per item and intentionally does not advance this counter.
-        for slot, _params in pending:
+        # Messages attempt, and its sheet spent one retry (WP-01.5). A
+        # rejected batch-level submit above is not billable per item and
+        # intentionally advances neither.
+        for slot, params in pending:
             slot.attempts_submitted += 1
+            _count_retry(slot, params)
         _log.info(
             "batch-resubmit round %d submitted: id=%s items=%d request_id=%s",
             round_no, retry_id, len(reqs), request_id_of(mb),
@@ -1354,14 +1624,15 @@ def _recover_via_batch_resubmit(
                 budget_seconds=_harvest_budget_seconds(max_elapsed_seconds),
             )
             started += harvest.elapsed  # additional time, not deducted
-            if harvest.resolved:
-                recovered += len(harvest.resolved)
-                pending = [
-                    (s, prm) for s, prm in pending
-                    if s.index not in harvest.resolved
-                ]
-                if not pending:
-                    break
+            recovered += len(harvest.resolved)
+            # What the harvest resolved or holds as final is not carried
+            # forward; a refusal it read goes on with its fallback (WP-01.5).
+            pending = [
+                (s, again) for s, prm in pending
+                if (again := harvest.rescue_params(s, prm)) is not None
+            ]
+            if not pending:
+                break
             _mark_batch_abandoned(
                 [slot for slot, _ in pending
                  if slot.index not in harvest.responded],
@@ -1580,6 +1851,9 @@ def _resubmit_failed_items(
         )
         return True
 
+    retry = _within_retry_budget(retry, where="follow-up batch")
+    if not retry:
+        return True
     _log.info("resubmitting %d failed batch item(s) in a follow-up batch", len(retry))
     if on_log is not None:
         on_log(f"Retrying {len(retry)} failed sheet(s) in a follow-up batch")
@@ -1597,8 +1871,9 @@ def _resubmit_failed_items(
         _rescue_remaining(retry)
         return True
     retry_id = _get(mb, "id")
-    for slot, _params in retry:
+    for slot, params in retry:
         slot.attempts_submitted += 1
+        _count_retry(slot, params)
     _log.info(
         "follow-up batch submitted: id=%s items=%d request_id=%s",
         retry_id, len(reqs), request_id_of(mb),
@@ -1637,11 +1912,10 @@ def _resubmit_failed_items(
                 budget_seconds=_harvest_budget_seconds(max_elapsed_seconds),
             )
             started += harvest.elapsed  # additional time, not deducted
-            if harvest.resolved:
-                retry = [
-                    (s, prm) for s, prm in retry
-                    if s.index not in harvest.resolved
-                ]
+            retry = [
+                (s, again) for s, prm in retry
+                if (again := harvest.rescue_params(s, prm)) is not None
+            ]
             _mark_batch_abandoned(
                 [slot for slot, _ in retry
                  if slot.index not in harvest.responded],
@@ -2265,6 +2539,11 @@ def _digest_from_message(
     Shared by the batch item parse (:func:`_parse_item`) and the direct-call
     rescue (:func:`_rescue_failed_items_sync`), so a rescued digest is shaped —
     and cached, under the same key — exactly as if the batch had returned it.
+
+    A read of a refusal fallback (remediation WP-01.5) is worded with the model
+    it was sent to (``refused digest on claude-opus-4-8 (…)``) and carries it
+    as ``fallback_model``; a finished one is cached under the slot's key, the
+    requested model's (the owner's rule), like the server-side fallback's.
     """
     raw_text = _message_text(message)
     in_tok, out_tok = _message_usage(message)
@@ -2272,12 +2551,23 @@ def _digest_from_message(
     cache_read_tok = int(_get(usage, "cache_read_input_tokens", 0) or 0)
     cache_write_tok = int(_get(usage, "cache_creation_input_tokens", 0) or 0)
     stop = _get(message, "stop_reason")
+    fallback = _fallback_model_of(slot)
+    noun = f"digest on {fallback}" if fallback else "digest"
+    details = refusal_details(message)
     # The real-time ladder, shared rather than restated: a reply the model did
     # not FINISH is not a complete digest, whether it came back empty, cut
     # off, refused, or with no stop reason at all. Treating any of those as
     # success accepted it AND cached it permanently, while
-    # ``_item_retry_params`` never saw an error to retry on.
-    error = digest_terminal_error(raw_text, stop)
+    # ``_item_retry_params`` never saw an error to retry on. A refusal names
+    # its stop_details category (WP-01.5).
+    error = digest_terminal_error(
+        raw_text, stop, noun=noun, category=details.category if details else None,
+    )
+    if classify_stop_reason(stop).kind == REFUSED:
+        _log.info(
+            "refused %s for %s (%s): %s", noun, slot.custom_id,
+            slot.ref.display_label, describe_refusal(details),
+        )
     # Same transport-agnostic split as the real-time path: prose (findings block
     # stripped) becomes ``text``; structured findings ride separately (I-2).
     text, findings, findings_note = parse_findings(
@@ -2317,6 +2607,7 @@ def _digest_from_message(
         findings_note=findings_note,
         cache_read_tokens=cache_read_tok,
         cache_write_tokens=cache_write_tok,
+        fallback_model=fallback,
     )
     return _attach_usage_attempt(
         digest,
@@ -2360,6 +2651,7 @@ def _parse_item(slot: _Slot, result: Any, *, cache: Any) -> SheetDigest:
             text="",
             image_token_estimate=slot.image_estimate,
             error=item_error,
+            fallback_model=_fallback_model_of(slot),
         )
     message = _get(rr, "message")
     digest = _digest_from_message(
@@ -2603,10 +2895,14 @@ def collect_drawing_batch(
                     # Every sheet the harvest did not resolve, including one it
                     # holds a partial read for (N16): the rescue can only improve
                     # on that read (``_replace_result_with_attempt_history``).
+                    # A sheet the harvest holds as final (a permanent error, a
+                    # refusal not retried) is not rescued, and a refusal it
+                    # read goes to its fallback (remediation WP-01.5).
                     rescue = [
-                        (slot, slot.params)
+                        (slot, again)
                         for slot in submitted
-                        if slot.index not in harvest.resolved and slot.params is not None
+                        if slot.params is not None
+                        and (again := harvest.rescue_params(slot, slot.params)) is not None
                     ]
                     _mark_batch_abandoned(
                         [slot for slot, _ in rescue

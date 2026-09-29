@@ -617,7 +617,8 @@ explanation, and a stream that ends before its final event still hands back
 the text received so far. Only a read that ended normally (`end_turn`, or a
 `stop_sequence`) counts. Everything else fails the sheet:
 
-- a **refusal**, with or without text: `refused digest (stop_reason='refusal')`;
+- a **refusal**, with or without text: `refused digest (stop_reason='refusal',
+  category='cyber')`, naming the refusal's category when the API gives one;
 - a **truncation**: `truncated digest (stop_reason='max_tokens')`, or
   `model_context_window_exceeded` when the model ran out of context window;
 - a read that **never reported how it ended**, which is what a stream that
@@ -627,9 +628,12 @@ the text received so far. Only a read that ended normally (`end_turn`, or a
   reason the app does not recognise: `unfinished digest (stop_reason=…)`.
 
 When a digest stops at `max_tokens`, the request is first retried once at a
-raised output cap; if it is still cut off, it fails as above. The others are not
-retried, because a larger cap cannot finish a refusal, a stream that ended
-early, or a full context window. A failed read is **never cached**, at either
+raised output cap; if it is still cut off, it fails as above. A larger cap cannot
+finish a refusal, a stream that ended early, or a full context window, so none
+of those gets one. A refusal on a real-time call has already had Anthropic's
+server-side fallback (Opus 5 re-runs a declined request on the recommended model
+inside the same call). A refusal on the batch transport is covered below. A
+failed read is **never cached**, at either
 level: a stored one would be served on every later run, indistinguishable from
 a complete read. Whatever text it returned is kept: the sheet's own export file
 and the HTML report show it under a *Failed* status, while `combined_text`
@@ -655,6 +659,31 @@ Every attempt's usage is still counted, whichever read is kept. Before this, the
 later read replaced the earlier one whenever it came back at all, so a retry
 that came back empty or refused threw away a partial read that had been paid
 for.
+
+**A refused batch sheet is retried on a fallback model, once.** The Batches API
+does not accept the server-side fallback, so on the batch transport (the GUI's
+default) the app does it itself. When a sheet comes back refused in a category
+the model's registry entry routes, the sheet is resubmitted as one more batch
+item on the route's model. For Opus 5 that is a `cyber` refusal, sent to
+Opus 4.8, which takes the same request at the same price. The app's batch
+recovery never sends it to a full-price real-time call. Other categories, and a
+refusal with no category,
+are not retried; a named one says why (`…; not retried: no fallback for category
+'bio' on claude-opus-5`). A fallback that refuses too ends it: `refused digest
+on claude-opus-4-8 (…)`. When the fallback read finishes, the sheet is cached
+like any finished digest, so a later run does not pay again. The diagnostics log
+records the refusal's category, the model it went to, and the API's explanation,
+redacted and cut to one line.
+
+**One retry budget per sheet.** On the batch transport, every resubmission of a
+sheet counts against one budget, whatever the reason and wherever it happens.
+The reasons are a server error or an expired item, a raised output cap, a
+refusal fallback, and a batch abandoned as stuck. The places are a fresh-batch
+round, the follow-up batch and a direct-call rescue.
+`DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS` sets it (default 4), so a sheet is
+submitted at most five times. A batch item that fails on the account itself
+(`billing_error`) is named and not resubmitted, like any other rejection of the
+request.
 
 **The findings of an unfinished read are held out of the review.** A read the
 model did not finish can still carry a findings block: the model writes it last,
@@ -2086,7 +2115,7 @@ runs.
 | `DRAWING_ANALYZER_PROFILES_DIR` | `~/.drawing_analyzer/profiles` | User review-profile directory (wins over packaged profiles on name). |
 | `DRAWING_ANALYZER_USE_BATCH` | off | Opt every run into the Message Batches transport (~50% token-rate discount with the same model/prompt/review contract) without editing call sites. An explicit `use_batch=` argument still wins. |
 | `DRAWING_ANALYZER_BATCH_STALL_TIMEOUT_MIN` | `25` first watch, `60` after | Minutes of **completely frozen** batch request counts before the batch is abandoned and its sheets resubmitted. Setting this applies one value to every watch (see [Stuck batches](#stuck-batches-and-the-stall-watch)). |
-| `DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS` | `4` | Fresh batches the recovery transport will submit for the sheets a stuck batch left unresolved, before the run keeps a clean retriable batch error. |
+| `DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS` | `4` | Fresh batches the recovery transport will submit for the sheets a stuck batch left unresolved, before the run keeps a clean retriable batch error. Also each sheet's retry budget: how many times one sheet may be resubmitted, for any reason (a server error, a raised output cap, a refusal fallback, an abandoned batch), on either recovery path. |
 | `DRAWING_ANALYZER_BATCH_MAX_ELAPSED_HOURS` | `24` | Hours a batch run will wait before detaching from the remote batch. The default is the Batches API's own SLA. Lower it to cap wall clock; a malformed or non-positive value falls back to the default, and any override is floored at one minute. The cost dialog quotes whatever this resolves to. |
 | `DRAWING_ANALYZER_MAX_WORKERS` | `4` | Real-time digest concurrency (`1` = sequential). |
 | `DRAWING_ANALYZER_STAGE_OVERLAP` | auto | Overlap independent set-level calls for the real SDK client; `0` disables it and `1` explicitly opts a thread-safe custom client in. `DRAWING_ANALYZER_MAX_WORKERS=1` remains fully sequential. |
@@ -2231,13 +2260,16 @@ sheet looked unresolved, including the ones already produced and billed. A real
 nothing after paying for 12 digests. The harvest is bounded and never spends the
 recovery's budget: if the batch will not settle, the run resubmits everything
 exactly as it used to, which costs money but never loses sheets. Only a finished
-read is taken from the abandoned batch: an item it answered with an empty,
-cut-off or refused read is resubmitted with the unresolved sheets, within the
-same bounded rounds, and its billed attempt stays in the usage ledger. A cut-off
-read that carries prose or findings is also kept for its sheet, so the
-resubmission can only improve on it; if no resubmission lands, the sheet keeps
-that read and its own error rather than reporting the batch as not collected
-(see *A retry never costs a sheet a better read*).
+read is taken from the abandoned batch: an item it answered with an empty or
+cut-off read is resubmitted with the unresolved sheets, within the same bounded
+rounds, and its billed attempt stays in the usage ledger. A refused read goes to
+its fallback model when its category has one, and otherwise stays the sheet's
+result. An item rejected outright (a permanent error such as
+`invalid_request_error`) is not resubmitted either, since it would fail the same
+way. A cut-off read that carries prose or findings, or a refusal, is also kept
+for its sheet, so the resubmission can only improve on it; if no resubmission
+lands, the sheet keeps that read and its own error rather than reporting the
+batch as not collected (see *A retry never costs a sheet a better read*).
 
 The run waits up to **24 hours** for a batch — the Batches API's own SLA, and
 what makes the app's "can run overnight" wording true rather than aspirational.
@@ -2263,7 +2295,8 @@ consecutive frozen hours before its third batch completed in 589 s — 2 h 16 m 
 wall clock for ~25 min of work. Set `DRAWING_ANALYZER_BATCH_STALL_TIMEOUT_MIN`
 to apply one window to every watch (an operator who names a threshold means it
 for the whole run); `DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS` bounds how many
-fresh batches recovery will try before the sheets keep a clean retriable error.
+fresh batches recovery will try before the sheets keep a clean retriable error,
+and how many times any one sheet is resubmitted.
 
 While a batch is queued the run is **not** silent: a heartbeat every five
 minutes reports elapsed time, items done, and how long the watch will keep

@@ -373,6 +373,20 @@ class ModelCapabilities:
     # decisions live. Default ``False`` so an unregistered id is never sent a
     # parameter its platform may reject.
     supports_refusal_fallback: bool = False
+    # Which refusals a HOST retry may re-send, and to which model, keyed by
+    # ``stop_details.category`` (remediation WP-01.5, R2; the owner's rules).
+    # The server-side fallback above cannot serve a Message Batches item (the
+    # API rejects ``fallbacks`` there), so a refused batch item is recovered by
+    # resubmitting it as a batch item on the route's target
+    # (:func:`refusal_fallback_target`). A route per category, not one target,
+    # because the categories come from different classifiers and only some
+    # have a documented substitute: a model's own decline (category ``null``)
+    # is not a classifier's, and re-sending it elsewhere is not the fix. Pairs
+    # of ``(category, target)``, a tuple so the dataclass stays hashable. Empty
+    # (the default) means "no host retry", so an unregistered id never has a
+    # request re-sent on its behalf. ``tests/test_batch_refusal_recovery.py``
+    # holds every target to the registry and to the source's request shape.
+    refusal_fallback_routes: tuple[tuple[str, str], ...] = ()
     # Whether the model accepts the ``web_search_20260209`` server tool — the
     # dynamic-filtering variant this app sends, and the only one it sends.
     # Deliberately NOT "does this model support web search at all": Haiku 4.5
@@ -430,6 +444,13 @@ _MODEL_CAPABILITIES: dict[str, ModelCapabilities] = {
         # model whose platform has not enabled the beta would trip the
         # process-wide self-healing latch for everyone.
         supports_refusal_fallback=True,
+        # The same fact for a host retry (a refused batch item; remediation
+        # WP-01.5): Opus 5's classifiers are cyber-only, and Anthropic's
+        # server-side ``"default"`` route sends a cyber refusal to Opus 4.8,
+        # which takes the identical request (effort, thinking, output cap,
+        # hi-res vision) at the identical price. No other category has a
+        # documented route for Opus 5, so none is retried.
+        refusal_fallback_routes=(("cyber", MODEL_OPUS_48),),
         supports_structured_outputs=True,
     ),
     MODEL_SONNET_5: ModelCapabilities(
@@ -558,6 +579,36 @@ def model_capabilities(model: str) -> ModelCapabilities:
         return caps
     _warn_unknown_model(model)
     return _DEFAULT_CAPABILITIES
+
+
+def is_registered_model(model: str) -> bool:
+    """Whether ``model`` is in the capability registry (no warning either way).
+
+    A registered model has a known request shape, so a request rebuilt for it
+    is one it accepts. The refusal recovery uses it to decide whether
+    ``stop_details.recommended_model`` may be the retry target (remediation
+    WP-01.5).
+    """
+    return model in _MODEL_CAPABILITIES
+
+
+def refusal_fallback_target(model: str, category: Any) -> str | None:
+    """The model a host retry re-sends ``model``'s refusal to, or ``None``.
+
+    Read from ``ModelCapabilities.refusal_fallback_routes`` by the refusal's
+    ``stop_details.category`` (remediation WP-01.5, R2; the owner's rules): a
+    category with no route, a missing category (``null``, or no
+    ``stop_details`` at all) and an unregistered model all answer ``None``,
+    which means the refusal is not retried. Strict equality, like the
+    stop-reason classifier: a near-miss spelling has no route.
+    """
+    caps = _MODEL_CAPABILITIES.get(model)
+    if caps is None or not isinstance(category, str):
+        return None
+    for routed, target in caps.refusal_fallback_routes:
+        if routed == category:
+            return target
+    return None
 
 
 def model_supports_adaptive_thinking(model: str) -> bool:
@@ -1324,7 +1375,11 @@ def extract_cache_diagnostics(message) -> dict | None:
 # already uses the synchronous/streaming transport: the inline Files-API-outage
 # fallback and the direct-call batch rescue (:mod:`drawing_analyzer.batch_digest`,
 # via :func:`drawing_analyzer.digest.stream_message`), verification escalation,
-# and the investigation loop.
+# and the investigation loop. A refused batch item is recovered by the host
+# instead, as a batch item on the route ``ModelCapabilities.refusal_fallback_routes``
+# declares (remediation WP-01.5; ``batch_digest._refusal_retry_params``). A
+# batch refusal carries no ``stop_details.recommended_model`` in practice: the
+# API sets it only when a server-side fallback attempt could not run.
 REFUSAL_FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 ENV_REFUSAL_FALLBACK = "DRAWING_ANALYZER_REFUSAL_FALLBACK"

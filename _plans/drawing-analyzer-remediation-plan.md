@@ -298,6 +298,12 @@ Regression cases:
 - Share one retry bound with the truncation retries.
 - Log `stop_details`.
 - Decide cache admission for a digest served by a host-swapped model. WP-14 covers only server-side fallback.
+- *Corrected and decided by WP-01.5 (2026-09-29, the owner; D-1's WP-01.5 note).*
+  - **Correction: `recommended_model` is not a batch field in practice.** Only the beta `BetaRefusalStopDetails` declares it; the plain `RefusalStopDetails` a batch result is read with keeps it as a pydantic extra (measured on SDK 1.7.0 and 1.8.0). The API sets it only when a server-side fallback attempt could not run, i.e. on a request that carried `fallbacks`, which a batch item cannot. So "the registry's fallback target" is what a batch refusal is retried on. The registry had no such target (Opus 4.8 was named only in a comment); it is now `ModelCapabilities.refusal_fallback_routes`, a route per `stop_details.category`: Opus 5 declares `cyber` → Opus 4.8, and nothing else is retried. `recommended_model` is still honoured when it names another registered model, but it never opens an unrouted category.
+  - **The shared bound** is one per-sheet retry budget (`DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS`, default 4) that counts every resubmission of a sheet at every site: a fresh-batch round, the follow-up batch, the direct rescue, whatever the reason (transient, expired, raised cap, refusal fallback, abandoned batch). A refusal is retried once. On the pipeline's transport the rounds already bounded every reason together, so its measured worst case (5 submissions per sheet) is unchanged; the real-time digest's retries are not in it, since its refusals are the server-side fallback's.
+  - **An unnamed site: the abandoned-batch harvest.** It resubmitted a refusal it read to the same model, and a permanent error too. It now asks the same predicate: a refusal goes to its fallback or is final, a permanent error is final.
+  - **Cache admission:** under the requested model's key, like the server-side fallback's; no key moved. The ledger's model label is WP-14.3's (a recorded limit).
+  - **Inherited items:** `billing_error` is permanent; a batch critique read's error keeps its type. Retrying a failed batch critique read (errored, expired, refused, and WP-01.4's raised-cap question) is a new slice, WP-01.8.
 
 **Text join (U2)**
 - `digest._message_text`, imported by 11 modules, joins blocks with `"\n"`.

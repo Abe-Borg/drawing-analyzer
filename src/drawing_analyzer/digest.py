@@ -30,7 +30,7 @@ from .core.api_config import (
 )
 from .core.terminal_outcome import REFUSED, TRUNCATED, classify_stop_reason
 from .core.tokenizer import estimate_image_tokens_total
-from .diagnostics import get_logger
+from .diagnostics import get_logger, redact_secrets
 from .digest_cache import digest_cache_key
 from .models import (
     CLAIM_KINDS,
@@ -699,6 +699,35 @@ def build_digest_request_params(
     return params
 
 
+def retarget_digest_request(params: dict[str, Any], model: str) -> dict[str, Any]:
+    """``params`` (a digest request) rebuilt for ``model``; the input is not changed.
+
+    The refusal recovery's request (remediation WP-01.5, R2): a refused batch
+    item is resubmitted on another model, and the request must be one that
+    model accepts. The same rules as :func:`build_digest_request_params`, so
+    the result equals the request built for ``model`` from the same content:
+    ``thinking`` stays only when ``model`` takes it, ``effort`` is clamped to
+    its levels (dropped when it takes none), and ``max_tokens`` is clamped to
+    its output cap (:func:`output_cap_for_model`, which every retry site
+    applies). System prompt and content are untouched, so the retried item
+    reads the same pixels and text.
+    """
+    out = {**params, "model": model}
+    requested = int(params.get("max_tokens") or DEFAULT_DIGEST_MAX_TOKENS)
+    out["max_tokens"] = output_cap_for_model(model, requested=requested)
+    if "thinking" in out and not model_supports_adaptive_thinking(model):
+        del out["thinking"]
+    output_config = dict(params.get("output_config") or {})
+    effort = output_config.pop("effort", None)
+    if effort and model_supports_effort(model):
+        output_config["effort"] = clamp_effort_for_model(effort, model)
+    if output_config:
+        out["output_config"] = output_config
+    else:
+        out.pop("output_config", None)
+    return out
+
+
 @dataclass
 class SheetDigest:
     """Result of digesting one sheet."""
@@ -741,6 +770,14 @@ class SheetDigest:
     # always a finished read, which never has any.
     read_error: str | None = None
     retries_discarded: int = 0
+    # Remediation WP-01.5 (R2): the model a host refusal fallback sent this
+    # read to, when it is not the requested one (a refused batch item
+    # resubmitted on its route's target). It words the read's own error
+    # (``refused digest on <model> (...)``) and names it when it is discarded
+    # (``; retry on <model>: ...``). Runtime only: a finished fallback read is
+    # cached under the requested model's key and no entry stores the model
+    # (the owner's rule; the serving model is WP-14.3's).
+    fallback_model: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -768,6 +805,72 @@ def _message_text(resp: Any) -> str:
             if text:
                 parts.append(text)
     return "\n".join(parts).strip()
+
+
+@dataclass(frozen=True)
+class RefusalDetails:
+    """What a refusal's ``stop_details`` says (remediation WP-01.5, R2).
+
+    ``category`` is the policy category (``cyber``, ``bio``, ``frontier_llm``,
+    ``reasoning_extraction``, ``general_harms``, or ``None``: the model's own
+    decline, or none available). ``recommended_model`` is a beta field the API
+    sets only when a server-side fallback attempt could not run; the plain
+    namespace keeps it as an extra (measured on SDK 1.7.0 and 1.8.0), so it is
+    read on both. ``explanation`` is server text, "not guaranteed stable".
+    """
+
+    category: str | None = None
+    explanation: str | None = None
+    recommended_model: str | None = None
+
+
+def refusal_details(resp: Any) -> RefusalDetails | None:
+    """The reply's ``stop_details``, or ``None`` when it carries none.
+
+    Shape-tolerant like every reader here (an SDK model on either namespace,
+    or a plain dict). Informational only: the stop reason decides whether a
+    reply is a refusal (D-1), never ``stop_details``, which can be ``None``
+    even on one.
+    """
+    details = _get(resp, "stop_details")
+    if details is None:
+        return None
+
+    def _text(key: str) -> str | None:
+        value = _get(details, key)
+        return value if isinstance(value, str) and value else None
+
+    return RefusalDetails(
+        category=_text("category"),
+        explanation=_text("explanation"),
+        recommended_model=_text("recommended_model"),
+    )
+
+
+# The refusal log line's cap on the server's explanation (the owner's rule:
+# redacted, one line, capped).
+REFUSAL_EXPLANATION_MAX_CHARS = 200
+
+
+def describe_refusal(details: RefusalDetails | None) -> str:
+    """One diagnostics-log line for a refusal's ``stop_details``.
+
+    The explanation is server text, so it is passed through the shared
+    ``redact_secrets`` boundary, collapsed to one line and capped at
+    :data:`REFUSAL_EXPLANATION_MAX_CHARS` before it is quoted. Never put in a
+    sheet's error: the error names the category only.
+    """
+    if details is None:
+        return "no stop_details"
+    explanation = details.explanation
+    if explanation is not None:
+        explanation = " ".join(redact_secrets(explanation).split())
+        explanation = explanation[:REFUSAL_EXPLANATION_MAX_CHARS]
+    return (
+        f"category={details.category!r}, "
+        f"recommended_model={details.recommended_model!r}, "
+        f"explanation={explanation!r}"
+    )
 
 
 def _message_usage(resp: Any) -> tuple[int, int]:
@@ -1498,7 +1601,7 @@ def claims_from_cache(hit: dict, ref: SheetRef | None = None) -> list[NumericCla
 
 
 def digest_terminal_error(
-    raw_text: str, stop_reason: Any, *, noun: str = "digest"
+    raw_text: str, stop_reason: Any, *, noun: str = "digest", category: Any = None,
 ) -> str | None:
     """The sheet's error for one digest reply, or ``None`` for a finished one.
 
@@ -1528,11 +1631,19 @@ def digest_terminal_error(
     ``combined_text`` (``pipeline._combine``) and out of both cache levels
     (:func:`digest_cache_admits`). A stored partial read is the worst outcome:
     every later run would serve it as complete, at zero cost.
+
+    ``category`` is a refusal's ``stop_details.category``
+    (:func:`refusal_details`); a refusal names it, ``refused digest
+    (stop_reason='refusal', category='cyber')`` (remediation WP-01.5, the
+    owner's rule), and the wording is unchanged when there is none. It is
+    never consulted for any other stop reason.
     """
     outcome = classify_stop_reason(stop_reason)
     if outcome.kind == REFUSED:
         # Named even when the refusal came back empty. "Declined" is the fact
         # a reader can act on, and "empty digest" would hide it.
+        if isinstance(category, str) and category:
+            return f"refused {noun} (stop_reason={stop_reason!r}, category={category!r})"
         return f"refused {noun} (stop_reason={stop_reason!r})"
     if not raw_text:
         return f"empty {noun} (stop_reason={stop_reason!r})"
@@ -1636,13 +1747,16 @@ def keep_digest_read(kept: SheetDigest | None, later: SheetDigest) -> SheetDiges
 
     Reads are never mixed (I-2): the winner's text, findings, note, stop
     reason and error stay together. When ``kept`` wins, the discarded read is
-    named in its error (:func:`_name_discarded_retry`). Usage is the caller's:
-    real time sums every attempt, batch merges the attempt records onto
-    whichever read is kept.
+    named in its error (:func:`_name_discarded_retry`), with the model it was
+    sent to when a refusal fallback sent it elsewhere (``"; retry on
+    claude-opus-4-8: …"``, remediation WP-01.5). Usage is the caller's: real
+    time sums every attempt, batch merges the attempt records onto whichever
+    read is kept.
     """
     if kept is None or _read_rank(later) >= _read_rank(kept):
         return later
-    _name_discarded_retry(kept, f": {later.error}")
+    on = f" on {later.fallback_model}" if later.fallback_model else ""
+    _name_discarded_retry(kept, f"{on}: {later.error}")
     _log.info(
         "digest for %s kept its earlier read (%s); a later attempt came back "
         "worse and was discarded: %s",
@@ -1661,14 +1775,17 @@ def is_partial_read(sd: SheetDigest) -> bool:
     return _read_rank(sd) == _READ_PARTIAL
 
 
-def note_failed_retry(kept: SheetDigest, failure: str) -> None:
+def note_failed_retry(kept: SheetDigest, failure: str, *, model: str | None = None) -> None:
     """Name a retry that raised in the read the sheet keeps (N16).
 
     The real-time raised-cap retry and the batch direct-call rescue send a
     call that can raise instead of returning a read; the sheet then keeps what
     it had, and its error says so: ``"<own error>; retry failed: <failure>"``.
+    ``model`` names a refusal fallback's target (``"; retry on <model> failed:
+    …"``, remediation WP-01.5).
     """
-    _name_discarded_retry(kept, f" failed: {failure}")
+    on = f" on {model}" if model else ""
+    _name_discarded_retry(kept, f"{on} failed: {failure}")
     _log.info(
         "digest for %s kept its earlier read (%s); the retry failed: %s",
         kept.ref.display_label, kept.read_error, failure,
@@ -1919,12 +2036,23 @@ def digest_sheet(
         raw = _message_text(message)
         stop = _get(message, "stop_reason")
         prose, found, note = parse_findings(raw, sheet.ref, sheet.rows, sheet.cols)
+        details = refusal_details(message)
+        if classify_stop_reason(stop).kind == REFUSED:
+            # A refusal on the real-time path already had the server-side
+            # fallback (Opus 5); the host does not re-send it (WP-01.5 is the
+            # batch transport's). Logged, category in the error.
+            _log.info(
+                "refused digest for %s: %s", sheet.ref.display_label,
+                describe_refusal(details),
+            )
         return SheetDigest(
             ref=sheet.ref,
             text=prose,
             image_token_estimate=image_est,
             stop_reason=stop,
-            error=digest_terminal_error(raw, stop),
+            error=digest_terminal_error(
+                raw, stop, category=details.category if details else None,
+            ),
             findings=found,
             findings_note=note,
         ), raw
