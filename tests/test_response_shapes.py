@@ -229,7 +229,8 @@ def test_recorded_limit_a_billing_error_is_resubmitted_like_a_transient_one(tmp_
     """Recorded limit (WP-01.5, the batch retry policy): ``billing_error`` is a
     rejection of the account, not a server blip, but ``_PERMANENT_ITEM_ERROR_TYPES``
     does not name it, so the item is resubmitted in a follow-up batch. WP-01.5
-    classifies it with the shared retry bound; this becomes one round."""
+    decides it with the shared retry bound; classified as permanent, this
+    becomes one round."""
     stub = AnthropicAPIStub(_script()._route,
                             batch_result=_item_once(R.errored("billing_error", "credit balance")))
 
