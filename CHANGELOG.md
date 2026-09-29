@@ -8,24 +8,26 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- **The Windows installer shows the license and asks the user to accept it.**
-  `DrawingAnalyzerSetup.exe` had no license page: it installed without saying
-  what license the software is under, and the license text was not installed
-  with the app. `packaging/windows/installer.iss` now sets `LicenseFile` to the
-  repo's `LICENSE`, so Inno Setup shows its License Agreement page with the full
-  AGPL-3.0 text, and **Next** stays disabled until the user chooses
-  **I accept the agreement**. The text above the box names the license
-  (AGPL-3.0-or-later) and says there is no warranty, in no more characters than
-  Inno Setup's default label, the text the page lays that label out for (Codex
-  review: a longer one risks being clipped). The license is installed beside
-  the app as `LICENSE.txt` (AGPL section 4), and `AppCopyright` stamps the
-  copyright into the installer's version info. An in-app update runs the
-  installer interactively, so it shows the page again; a `/SILENT` install
-  skips it, as it skips every page. `tests/test_installer_license.py` pins the
-  page, the label and its length, the installed file, the copyright (equal to
-  the README's) and that everything the page displays is ASCII, since Inno
-  Setup reads a text file without a BOM as ANSI.
-  Manual check: `docs/WINDOWS_ACCEPTANCE.md` 3A.7.
+- **The Windows installer shows the license and needs the user to accept it.**
+  `installer.iss` had no license page: nothing in the wizard named the AGPL,
+  and the installed app folder held no copy of it. It now sets `LicenseFile` to
+  the repository `LICENSE`, so the wizard opens on a License Agreement page. The
+  page shows a plain-words summary (AGPL-3.0-or-later, no warranty, what
+  modified versions owe) above the full text. "I do not accept the agreement" is
+  preselected and Next stays disabled until the user selects "I accept the
+  agreement". The page appears on every install and on every update the in-app
+  updater launches; only a `/SILENT` or `/VERYSILENT` command-line install skips
+  it. A copy of the license is installed with the app as `LICENSE.txt` (AGPL §4
+  and §6), and the uninstaller removes it. `tests/test_installer_license.py`
+  pins the page, its summary, and the installed copy. The README install steps,
+  `docs/RELEASE_WINDOWS.md`, row 3A.1 of `docs/WINDOWS_ACCEPTANCE.md` and the
+  About panel say so. `release.yml` also builds the installer on a PR that
+  changes `LICENSE`, since the installer now embeds it.
+- **The installer carries the copyright.** `installer.iss` sets `AppCopyright`
+  (`Copyright (C) 2026 Abraham Borg`), which Inno Setup also writes into
+  Setup.exe's version info. `tests/test_installer_license.py` pins it equal to
+  the README's Licensing section, and holds the license page's summary and the
+  copyright to the same plain-ASCII rule as `LICENSE`.
 
 ### Changed
 

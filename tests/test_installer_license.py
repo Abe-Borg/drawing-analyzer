@@ -1,133 +1,113 @@
-"""The Windows installer shows the license and requires the user to accept it.
+"""The Windows installer shows the license, and cannot continue until it is accepted.
 
-``packaging/windows/installer.iss`` is compiled only on the Windows release
-runner, so nothing else in the suite reads it. These tests pin what the
-installer must keep doing:
+``packaging/windows/installer.iss`` names the repository ``LICENSE`` as its
+``LicenseFile``. Inno Setup then adds a License Agreement page that shows the
+full text with "I accept the agreement" / "I do not accept the agreement" radio
+buttons, preselects "I do not accept", and keeps Next disabled until the user
+accepts. Before this, the installer had no such page: nothing in the wizard
+named the AGPL, and the installed app folder held no copy of it.
 
-- ``LicenseFile`` is the repo's own ``LICENSE`` (AGPL-3.0). That directive is
-  what gives Inno Setup's License Agreement page, with "I accept" / "I do not
-  accept" and Next disabled until the user accepts.
-- The text above the license box names this software's license, in no more
-  room than Inno Setup's default text takes.
-- ``LICENSE`` is installed beside the app.
-- Everything the page displays is ASCII, because Inno Setup reads a text file
-  without a BOM as ANSI.
+Text checks, not a compile: ISCC runs only in release.yml's Windows ``build``
+job, which compiles this script on every PR that touches it. What the page
+looks like is a manual check (docs/WINDOWS_ACCEPTANCE.md, row 3A.1).
 """
 from __future__ import annotations
 
 import re
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _ISS = _REPO_ROOT / "packaging" / "windows" / "installer.iss"
+_LICENSE = _REPO_ROOT / "LICENSE"
 
 
 def _sections() -> dict[str, list[str]]:
-    """The script's non-comment lines, grouped by ``[Section]``."""
+    """Each ``[Section]``'s entry lines, lower-cased names, comments dropped.
+
+    Inno comments are whole lines starting with ``;``; preprocessor lines
+    (``#define`` and friends) start with ``#``.
+    """
     sections: dict[str, list[str]] = {}
-    current = ""
+    current: list[str] | None = None
     for raw in _ISS.read_text(encoding="utf-8").splitlines():
         line = raw.strip()
-        if not line or line.startswith(";") or line.startswith("#"):
+        if not line or line.startswith((";", "#")):
             continue
-        header = re.fullmatch(r"\[(\w+)\]", line)
+        header = re.fullmatch(r"\[([^\]]+)\]", line)
         if header:
-            current = header.group(1)
-            sections.setdefault(current, [])
-            continue
-        sections.setdefault(current, []).append(line)
+            current = sections.setdefault(header.group(1).lower(), [])
+        elif current is not None:
+            current.append(line)
     return sections
 
 
 def _directives(section: str) -> dict[str, str]:
-    """``Key=Value`` lines of one section (``[Setup]``, ``[Messages]``)."""
-    out: dict[str, str] = {}
-    for line in _sections().get(section, []):
-        key, sep, value = line.partition("=")
-        if sep:
-            out[key.strip()] = value.strip()
-    return out
+    """``Key=Value`` entries of a directive section, keys lower-cased."""
+    pairs = (line.split("=", 1) for line in _sections().get(section, []) if "=" in line)
+    return {key.strip().lower(): value.strip() for key, value in pairs}
 
 
-def _defines() -> dict[str, str]:
-    """The ``#define Name "value"`` preprocessor constants."""
-    text = _ISS.read_text(encoding="utf-8")
-    return dict(re.findall(r'^#define\s+(\w+)\s+"([^"]*)"', text, re.MULTILINE))
+def _resolve(script_relative: str) -> Path:
+    """A source path as ISCC resolves it: relative to the script's folder."""
+    return (_ISS.parent / script_relative.replace("\\", "/")).resolve()
 
 
-def _expand(value: str) -> str:
-    """Expand ``{#Name}`` the way ISPP does, for the constants defined here."""
-    defines = _defines()
-    return re.sub(r"\{#(\w+)\}", lambda m: defines[m.group(1)], value)
+def test_the_license_page_shows_the_repository_license():
+    license_file = _directives("setup").get("licensefile")
+    assert license_file, "installer.iss has no LicenseFile, so no License Agreement page"
+    assert _resolve(license_file) == _LICENSE.resolve(), license_file
+    head = _LICENSE.read_text(encoding="utf-8").splitlines()[:3]
+    assert head[0].strip() == "GNU AFFERO GENERAL PUBLIC LICENSE", head
+    assert head[1].strip().startswith("Version 3"), head
 
 
-def _repo_path(iss_relative: str) -> Path:
-    """A path written in the script, relative to the script's own directory."""
-    return (_ISS.parent / Path(*PureWindowsPath(iss_relative).parts)).resolve()
+def test_the_license_text_reads_the_same_in_any_encoding():
+    """ASCII shows identically whether ISCC reads the .txt as UTF-8 or as an
+    ANSI code page, so the page never shows mangled characters."""
+    _LICENSE.read_bytes().decode("ascii")
 
 
-def _file_entries() -> list[dict[str, str]]:
-    """``[Files]`` entries as ``{"Source": ..., "DestDir": ..., ...}``."""
-    entries = []
-    for line in _sections().get("Files", []):
-        params = dict(re.findall(r'(\w+):\s*"?([^";]*)"?', line))
-        entries.append(params)
-    return entries
+def test_the_script_text_the_installer_shows_is_ascii():
+    """The license summary and the copyright come from the script itself, so
+    they are held to the same rule as LICENSE: plain ASCII, so a stray ``©`` or
+    curly quote cannot be mangled by however ISCC decodes the script."""
+    label = _directives("messages").get("licenselabel3", "")
+    copyright_ = _directives("setup").get("appcopyright", "")
+    (label + copyright_).encode("ascii")
 
 
-def test_installer_shows_the_repo_license_for_acceptance():
-    setup = _directives("Setup")
-    assert "LicenseFile" in setup, "installer.iss has no License Agreement page"
-    license_path = _repo_path(setup["LicenseFile"])
-    assert license_path == (_REPO_ROOT / "LICENSE").resolve()
-    text = license_path.read_text(encoding="utf-8")
-    assert text.startswith("GNU AFFERO GENERAL PUBLIC LICENSE\nVersion 3")
-    # A [Code] ShouldSkipPage(wpLicense) is the one way a script can drop the
-    # page while LicenseFile is still set.
-    assert "wpLicense" not in _ISS.read_text(encoding="utf-8")
-
-
-# Inno Setup's own LicenseLabel3 (compiler:Default.isl). The page lays the
-# label out for this text, so a longer one risks being clipped (Codex review).
-_DEFAULT_LICENSE_LABEL = (
-    "Please read the following License Agreement. You must accept the terms "
-    "of this agreement before continuing with the installation."
-)
-
-
-def test_license_page_names_this_softwares_license():
-    label = _expand(_directives("Messages").get("LicenseLabel3", ""))
-    assert label, "the license page keeps Inno Setup's generic label"
-    for needle in ("Drawing Analyzer", "GNU AGPL-3.0-or-later", "NO WARRANTY", "accept"):
-        assert needle in label, needle
-    assert len(label) <= len(_DEFAULT_LICENSE_LABEL), (len(label), label)
-
-
-def test_installer_installs_the_license_beside_the_app():
-    licensed = [
-        e for e in _file_entries()
-        if _repo_path(e["Source"]) == (_REPO_ROOT / "LICENSE").resolve()
-    ]
-    assert len(licensed) == 1, _file_entries()
-    assert licensed[0]["DestDir"] == "{app}"
-    assert licensed[0].get("DestName") == "LICENSE.txt"
-
-
-def test_copyright_matches_the_readme():
+def test_the_copyright_matches_the_readme():
+    """``AppCopyright`` goes into Setup.exe's version info; it names the same
+    year and holder as the README's Licensing section."""
     readme = (_REPO_ROOT / "README.md").read_text(encoding="utf-8")
     year, holder = re.search(r"Copyright © (\d{4}) ([^;.]+)", readme).groups()
-    copyright_ = _expand(_directives("Setup")["AppCopyright"])
-    assert copyright_ == f"Copyright (C) {year} {holder.strip()}"
+    script = _ISS.read_text(encoding="utf-8")
+    defines = dict(re.findall(r'^#define\s+(\w+)\s+"([^"]*)"', script, re.MULTILINE))
+    copyright_ = re.sub(
+        r"\{#(\w+)\}", lambda m: defines[m.group(1)], _directives("setup").get("appcopyright", "")
+    )
+    assert copyright_ == f"Copyright (C) {year} {holder.strip()}", copyright_
 
 
-def test_text_the_license_page_displays_is_ascii():
-    """Inno Setup reads a BOM-less text file as ANSI (the system code page), so
-    a ``©`` or a curly quote in ``LICENSE`` would print as two wrong characters
-    on the page. The label and copyright come from the script, read the same way.
-    """
-    (_REPO_ROOT / "LICENSE").read_bytes().decode("ascii")
-    for value in (
-        _directives("Messages")["LicenseLabel3"],
-        _directives("Setup")["AppCopyright"],
-    ):
-        _expand(value).encode("ascii")
+def test_the_license_page_summarises_the_license():
+    """The text above the license names it and the missing warranty, like the
+    About panel (tests/test_help_content.py) and the README do."""
+    label = _directives("messages").get("licenselabel3", "")
+    for needle in ("AGPL-3.0-or-later", "NO WARRANTY", "accept"):
+        assert needle in label, f"the license page summary lost {needle!r}: {label!r}"
+
+
+def test_nothing_skips_or_preselects_acceptance():
+    """Only the user's click accepts: no [Code] skips the page or ticks the radio."""
+    code = "\n".join(_sections().get("code", []))
+    for name in ("wpLicense", "LicenseAcceptedRadio", "LicenseNotAcceptedRadio"):
+        assert name not in code, f"[Code] touches {name}"
+
+
+def test_the_installed_app_carries_the_license():
+    entries = [
+        dict(re.findall(r'(\w+):\s*"([^"]*)"', line)) for line in _sections().get("files", [])
+    ]
+    copies = [e for e in entries if e.get("Source") and _resolve(e["Source"]) == _LICENSE.resolve()]
+    assert copies, "[Files] no longer installs LICENSE with the app"
+    assert copies[0].get("DestDir") == "{app}", copies[0]

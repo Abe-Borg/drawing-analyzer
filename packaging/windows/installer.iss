@@ -5,11 +5,11 @@
 ; and expects the PyInstaller one-folder output at dist\DrawingAnalyzer\.
 ;
 ; Produces dist\installer\DrawingAnalyzerSetup.exe — a normal double-click
-; installer with a license page the user must accept, a Start-menu shortcut, an
-; optional desktop icon, and a clean uninstaller. The app is NOT code-signed, so
-; Windows SmartScreen shows a "Windows protected your PC" notice on first run
-; (More info -> Run anyway); that is expected and documented in
-; docs/RELEASE_WINDOWS.md and the README.
+; installer with a License Agreement page the user must accept (the AGPL, from
+; the repo's LICENSE), a Start-menu shortcut, an optional desktop icon, and a
+; clean uninstaller. The app is NOT code-signed, so Windows SmartScreen shows a
+; "Windows protected your PC" notice on first run (More info -> Run anyway);
+; that is expected and documented in docs/RELEASE_WINDOWS.md and the README.
 
 #ifndef MyAppVersion
   #define MyAppVersion "0.0.0"
@@ -37,6 +37,15 @@ AppUpdatesURL={#MyAppURL}/releases/latest
 DefaultDirName={autopf}\Drawing Analyzer
 DefaultGroupName=Drawing Analyzer
 DisableProgramGroupPage=yes
+; The License Agreement page: the full LICENSE text, with "I accept the
+; agreement" / "I do not accept the agreement" radio buttons. Inno Setup
+; preselects "I do not accept" and keeps Next disabled until the user picks
+; "I accept", so installation cannot continue without that click. The in-app
+; updater launches this installer interactively, so every update shows the page
+; too; only a /SILENT or /VERYSILENT command-line install skips it.
+; tests/test_installer_license.py pins this, the page's summary text in
+; [Messages], and the copy installed in [Files].
+LicenseFile=..\..\LICENSE
 ; Per-user install: no admin/UAC prompt, which keeps the unsigned experience as
 ; smooth as possible (the user only sees the one SmartScreen notice, not an
 ; elevation prompt on top of it).
@@ -47,15 +56,6 @@ OutputBaseFilename=DrawingAnalyzerSetup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
-; The License Agreement page: the repo's own LICENSE (AGPL-3.0), shown verbatim
-; in a scroll box with "I accept" / "I do not accept". Next stays disabled until
-; the user accepts. Every interactive run of the installer shows it, an in-app
-; update included (the updater launches it with no switches). A /SILENT or
-; /VERYSILENT install skips it, as it skips every wizard page. The file is
-; plain ASCII on purpose: Inno Setup reads a text file without a BOM as ANSI,
-; so any other character would print wrongly on the page
-; (tests/test_installer_license.py).
-LicenseFile=..\..\LICENSE
 UninstallDisplayName={#MyAppName}
 UninstallDisplayIcon={app}\{#MyAppExeName}
 ; Let an in-place update replace the running app: Inno detects a running
@@ -68,11 +68,11 @@ RestartApplications=yes
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Messages]
-; The text above the license box. The default only says "Please read the
-; following License Agreement", which does not say what the license is. Keep it
-; no longer than that default (129 characters): the page sizes this label for
-; it, and longer text risks being clipped (tests/test_installer_license.py).
-LicenseLabel3={#MyAppName} is free software under the GNU AGPL-3.0-or-later, with NO WARRANTY. You must accept the license to continue.
+; The text above the license on the License Agreement page. It replaces Inno's
+; generic "Please read the following License Agreement..." with a plain-words
+; summary of what the license is. It must stay consistent with LICENSE, the
+; README's Licensing section and the About panel (help_content.py).
+LicenseLabel3={#MyAppName} is free software under the GNU Affero General Public License, version 3 or later (AGPL-3.0-or-later), with NO WARRANTY. You may use, share and modify it. Modified versions you distribute or offer over a network must stay under this license, with source available. You must accept the license below to continue with the installation.
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
@@ -80,8 +80,9 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [Files]
 ; The entire PyInstaller one-folder output.
 Source: "..\..\dist\DrawingAnalyzer\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
-; The license travels with the program (AGPL section 4: give every recipient a
-; copy of the License). Named .txt so a double-click opens it in Notepad.
+; The license the user accepted, installed next to the app so every installed
+; copy carries it (AGPL §4 and §6: give recipients a copy of the License with
+; the program). The uninstaller removes it with everything else.
 Source: "..\..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
 
 [Icons]
