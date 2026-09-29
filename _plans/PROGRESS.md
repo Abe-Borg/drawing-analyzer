@@ -636,11 +636,12 @@ what could not be verified, risks, and next steps.
     and pop; every GUI-driven run passes a client; no `get_client()` call
     happens inside any run; the children launched by the new tests see no key.
 - **Case table on the fix:** identical to the decided variant R in every case
-  except the status label: the word is "locked while analyzing" (R's knob
-  printed a placeholder), and the unlock restores what the label showed, read
-  from the label. R read it from a record that the case table's stub label
-  bypassed; the first implementation had the same weakness and was changed
-  before the push (review, below).
+  except the status label: the word is "locked while analyzing" (R's knob used
+  "in use by this run"), and the unlock restores what the label showed only
+  while it still shows the lock word, read from the label itself (C04: a status
+  written during the run stays). The first implementation read it from a record
+  the case table's stub label bypassed, and was changed before the push
+  (review, below).
 - **Probes on the fix:** q1-q6, q9 and q11 unchanged (the library path and the
   pipeline, by design); q7 now shows `key_entry` disabled, Show untouched, and
   `api_key` passed to the worker; q10 shows both exports keep a session-only
