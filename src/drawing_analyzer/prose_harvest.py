@@ -61,7 +61,7 @@ from typing import Any, Iterable
 
 from .core.api_config import (
     HARVEST_OUTPUT_CAP,
-    MODEL_SONNET_5,
+    MODEL_SONNET_55,
     PHASE_HARVEST,
     apply_effort_config,
     apply_thinking_config,
@@ -119,7 +119,7 @@ _MATCH_OVERLAP = 0.7
 # The structuring call (mechanism 3): small, low-effort, tolerant-parsed.
 #
 # The old 800-token cap paired with a comment claiming "thinking off" — but the
-# request never set ``thinking`` at all, and on Opus 5 / Sonnet 5 an omitted key
+# request never set ``thinking`` at all, and on the 5 / 5.5 models an omitted key
 # runs adaptive thinking rather than disabling it. Reasoning and answer shared
 # 800 tokens, so a straggler that needed any thought at all came back empty and
 # fell through to the degraded sheet-level entry. Thinking is now explicit and
@@ -414,13 +414,13 @@ _CONFLICT_SIGNALS = (
 
 
 def harvest_model() -> str:
-    """The structuring-call model (``DRAWING_ANALYZER_HARVEST_MODEL``, else Sonnet 5).
+    """The structuring-call model (``DRAWING_ANALYZER_HARVEST_MODEL``, else Sonnet 5.5).
 
     Turning one prose sentence into a structured ``Finding`` is formatting, not
     judgment: the item has already been found, and the host re-binds it to its
-    sheet afterwards. Sonnet 5 covers it at a fraction of the flagship's cost.
+    sheet afterwards. Sonnet 5.5 covers it at a fraction of the flagship's cost.
     """
-    return os.environ.get("DRAWING_ANALYZER_HARVEST_MODEL") or MODEL_SONNET_5
+    return os.environ.get("DRAWING_ANALYZER_HARVEST_MODEL") or MODEL_SONNET_55
 
 
 # --------------------------------------------------------------------------- #
@@ -966,7 +966,7 @@ HARVEST_STRUCTURED_PROMPT_VERSION = hashlib.sha256(
     ).encode("utf-8")
 ).hexdigest()[:16]
 
-# Its own latch: this is a text-only Sonnet 5 call, and a rejection on the
+# Its own latch: this is a text-only Sonnet 5.5 call, and a rejection on the
 # critique's 37-image vision request says nothing about it (nor the reverse).
 STRUCTURED_OUTPUTS = StructuredOutputsGate(
     "prose_harvest", "DRAWING_ANALYZER_HARVEST_STRUCTURED_OUTPUTS"

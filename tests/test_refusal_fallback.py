@@ -18,6 +18,8 @@ import pytest
 from drawing_analyzer.core import api_config as api
 from tests.fixtures.fake_anthropic import BETA, PLAIN, checked_entry
 
+OPUS_55 = "claude-opus-5-5"
+SONNET_55 = "claude-sonnet-5-5"
 OPUS_5 = "claude-opus-5"
 OPUS_48 = "claude-opus-4-8"
 SONNET_5 = "claude-sonnet-5"
@@ -36,16 +38,19 @@ def _reset_latch():
 # --------------------------------------------------------------------------- #
 
 
-def test_attaches_beta_and_param_for_opus_5():
-    kwargs = {"model": OPUS_5, "max_tokens": 1024, "messages": []}
-    out = api.apply_refusal_fallback(kwargs, model=OPUS_5)
+@pytest.mark.parametrize("model", [OPUS_55, SONNET_55, OPUS_5])
+def test_attaches_beta_and_param_for_a_declaring_model(model):
+    kwargs = {"model": model, "max_tokens": 1024, "messages": []}
+    out = api.apply_refusal_fallback(kwargs, model=model)
     assert out["betas"] == [api.REFUSAL_FALLBACK_BETA]
     assert out["fallbacks"] == "default"
-    assert kwargs == {"model": OPUS_5, "max_tokens": 1024, "messages": []}  # not mutated
+    assert kwargs == {"model": model, "max_tokens": 1024, "messages": []}  # not mutated
 
 
+# The fallback TARGETS do not declare it: Opus 4.8 (for Opus 5 and 5.5) and
+# Sonnet 5 (for Sonnet 5.5). Nor do models without the classifiers.
 @pytest.mark.parametrize("model", [SONNET_5, OPUS_48, "claude-haiku-4-5", ""])
-def test_untouched_for_every_model_but_opus_5(model):
+def test_untouched_for_a_model_that_does_not_declare_it(model):
     kwargs = {"model": model, "max_tokens": 1024}
     out = api.apply_refusal_fallback(kwargs, model=model)
     assert out is kwargs  # same object: no betas/fallbacks attached
@@ -238,6 +243,15 @@ def test_transient_error_propagates_without_being_swallowed():
 
 def test_opus_5_declares_the_capability_in_the_registry():
     assert api.model_capabilities(OPUS_5).supports_refusal_fallback is True
+
+
+def test_the_5_5_defaults_declare_it():
+    """Both defaults run safety classifiers Anthropic recommends the
+    ``"default"`` fallback for, so every real-time stage carries it now,
+    the Sonnet ones (identity, verification, harvest, citation) included."""
+    assert api.model_capabilities(api.REVIEW_MODEL_DEFAULT).supports_refusal_fallback is True
+    assert api.model_capabilities(api.VERIFICATION_MODEL_DEFAULT).supports_refusal_fallback is True
+    assert {api.REVIEW_MODEL_DEFAULT, api.VERIFICATION_MODEL_DEFAULT} == {OPUS_55, SONNET_55}
 
 
 def test_the_gate_follows_the_capability_not_the_model_id(monkeypatch):

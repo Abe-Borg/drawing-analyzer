@@ -44,7 +44,7 @@ from tests.test_sdk_contract import _TRANSPORTS, _script, stage_of  # noqa: E402
 from tests.test_sdk_contract import _fresh_latches  # noqa: E402,F401
 
 M101 = "VAV-3"                      # M-101's distinctive text: in every request about it
-OPUS = "claude-opus-5"
+OPUS = "claude-opus-5-5"
 
 
 # --------------------------------------------------------------------------- #
@@ -57,15 +57,16 @@ def _about_m101(params: dict) -> bool:
 
 
 def _run(tmp_path: Path, stub: AnthropicAPIStub, transport: str = "fast", *,
-         full: bool = True, cache: DigestCache | None = None, work: str = "work"):
+         full: bool = True, cache: DigestCache | None = None, work: str = "work",
+         model: str | None = None):
     """The mini set through ``stub``: the whole exhaustive stack, or (``full``
-    False) the digest alone."""
+    False) the digest alone; on ``model`` when given, else the review default."""
     use_batch, critique_batch = _TRANSPORTS[transport]
-    extra = {}
+    extra = {} if model is None else {"model": model}
     if full:
         work_dir = tmp_path / work
         work_dir.mkdir()
-        extra = dict(synthesize=True, focus="equipment coordination", qc_markups=True,
+        extra.update(synthesize=True, focus="equipment coordination", qc_markups=True,
                      qc_work_dir=work_dir)
     return pl.extract_drawing_context(
         build_mini_set(tmp_path), client=stub.client(), rows=2, cols=2,
@@ -74,11 +75,13 @@ def _run(tmp_path: Path, stub: AnthropicAPIStub, transport: str = "fast", *,
     )
 
 
-def _warm_calls(tmp_path: Path, transport: str = "fast", *, full: bool = True) -> dict[str, int]:
+def _warm_calls(tmp_path: Path, transport: str = "fast", *, full: bool = True,
+                model: str | None = None) -> dict[str, int]:
     """Re-run over the same cache with ordinary replies: the requests each stage
     made, so a read that was cached made none."""
     stub = AnthropicAPIStub(_script()._route)
-    _run(tmp_path, stub, transport, full=full, cache=DigestCache(tmp_path / "cache.sqlite"), work="warm")
+    _run(tmp_path, stub, transport, full=full, cache=DigestCache(tmp_path / "cache.sqlite"), work="warm",
+         model=model)
     return _calls(stub)
 
 
@@ -375,21 +378,23 @@ def test_recorded_limit_the_cache_write_ttl_split_is_priced_at_one_rate(tmp_path
     """Recorded limit (WP-14.2, C3): the reply splits its 1,000 cache-write
     tokens 300 at the 5-minute rate and 700 at the 1-hour rate
     (``usage.cache_creation``), but nothing reads the split: each record is
-    priced at its one ``cache_write_ttl``. At Opus 5's rates ($5/M input, $25/M
-    output, $0.50/M cache read, $6.25/M 5-minute and $10/M 1-hour cache write),
-    a digest record (500 in, 90 out, 400 read) costs $0.011200 flat and
-    $0.013825 split. The investigation's record sums its two turns (1-hour
+    priced at its one ``cache_write_ttl``. At Opus 5.5's rates ($4/M input,
+    $20/M output, $0.20/M cache read, $5/M 5-minute and $8/M 1-hour cache
+    write), a digest record (500 in, 90 out, 400 read) costs $0.008880 flat and
+    $0.010980 split. The investigation's record sums its two turns (1-hour
     breakpoint: 160 in, 32 out, 800 read, 2,000 written, split 600 and 1,400):
-    $0.022000 flat, $0.019750 split. WP-14.2 prices by the split: these become
-    the split figures."""
+    $0.017440 flat, $0.015640 split. WP-14.2 prices by the split: these become
+    the split figures. (First recorded at Opus 5's rates: $0.011200 / $0.013825
+    and $0.022000 / $0.019750. Re-priced for the Opus 5.5 default; the limit is
+    unchanged.)"""
     stub = AnthropicAPIStub(_shaped(_script(), _cache_split))
 
     ctx = _run(tmp_path, stub)
 
     assert [(r.cache_read_tokens, r.cache_write_tokens, r.cache_write_ttl, r.estimated_cost)
-            for r in _records(ctx, "digest")] == [(400, 1000, None, Decimal("0.011200"))] * 2
+            for r in _records(ctx, "digest")] == [(400, 1000, None, Decimal("0.008880"))] * 2
     [inv] = _records(ctx, "investigate")
-    assert (inv.cache_write_tokens, inv.cache_write_ttl, inv.estimated_cost) == (2000, "1h", Decimal("0.0220000"))
+    assert (inv.cache_write_tokens, inv.cache_write_ttl, inv.estimated_cost) == (2000, "1h", Decimal("0.017440"))
 
 
 def test_recorded_limit_web_fetch_requests_are_not_counted(tmp_path):
@@ -408,7 +413,7 @@ def test_recorded_limit_web_fetch_requests_are_not_counted(tmp_path):
 
 
 def test_recorded_limit_the_serving_model_is_not_read(tmp_path):
-    """Recorded limit (WP-14.3 and WP-14.6, U1): every Opus 5 reply was served
+    """Recorded limit (WP-14.3 and WP-14.6, U1): every Opus 5.5 reply was served
     by Opus 4.8 (``message.model``, as after a refusal fallback), but the
     ledger names the requested model. WP-14.3 reads the serving model and
     WP-14.6 carries it to the manifest: these records name claude-opus-4-8."""
@@ -510,11 +515,12 @@ def test_a_refused_batch_item_is_resubmitted_on_the_fallback_model(tmp_path):
     here), inside the shared per-sheet retry budget, never in real time; the
     finished read is cached under the requested model's key, so the warm run
     asks nothing. It was failed and never retried (WP-02.3's recorded limit,
-    flipped here)."""
+    flipped here). On Opus 5, the one model that declares a host route (the
+    5.5 defaults declare none: ``test_batch_refusal_recovery``)."""
     stub = AnthropicAPIStub(_shaped(_script(), _refusal, stages={"digest"},
                                     when=_first(lambda p: stage_of(p) == "digest" and _about_m101(p))))
 
-    ctx = _run(tmp_path, stub, "batch", full=False)
+    ctx = _run(tmp_path, stub, "batch", full=False, model="claude-opus-5")
 
     assert _sheet(ctx, "M-101").error is None
     rounds = _batch_items(stub, "digest")
@@ -522,7 +528,7 @@ def test_a_refused_batch_item_is_resubmitted_on_the_fallback_model(tmp_path):
     assert rounds[1][0]["params"]["model"] == "claude-opus-4-8"
     assert _statuses(ctx)["digest"] == "COMPLETE"
     assert "digest" not in _calls(stub)                                # never real time
-    assert _warm_calls(tmp_path, "batch", full=False) == {}
+    assert _warm_calls(tmp_path, "batch", full=False, model="claude-opus-5") == {}
 
 
 # --------------------------------------------------------------------------- #

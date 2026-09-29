@@ -293,7 +293,12 @@ failed read, and `stop_details` is still informational, never the verdict.
   `stop_details`, a model without a route (Sonnet 5 included). A named
   unrouted category is said in the error: `…; not retried: no fallback for
   category 'bio' on claude-opus-5`. `supports_refusal_fallback` (the
-  server-side opt-in) is a separate capability and is unchanged.
+  server-side opt-in) is a separate capability and is unchanged. The Opus 5.5
+  and Sonnet 5.5 defaults, registered after this decision (merged into the
+  slice's PR), declare no route: a batch item refused on one is not retried.
+  Whether they get routes, and which, is open for the owner (Sonnet 5.5's
+  server-side fallback retries `cyber` and `frontier_llm` on Sonnet 5;
+  Opus 5.5's targets are Opus 5 and Opus 4.8, per category).
 - **The target:** `recommended_model` when it names a registered model other
   than the refuser, else the route's; the request is rebuilt for it
   (`digest.retarget_digest_request`, the builder's rules). **The gate decides

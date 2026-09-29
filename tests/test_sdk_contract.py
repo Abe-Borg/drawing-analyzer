@@ -58,9 +58,10 @@ from tests.fixtures.fake_anthropic import (  # noqa: E402
 from tests.fixtures.gauntlet import build_mini_set, mini_client  # noqa: E402
 from tests.fixtures.sdk_transport import AnthropicAPIStub, error_400  # noqa: E402
 
-OPUS = api.MODEL_OPUS_5
-REGISTERED = (api.MODEL_OPUS_5, api.MODEL_SONNET_5, api.MODEL_OPUS_48,
-              api.MODEL_SONNET_46, api.MODEL_HAIKU_45)
+OPUS = api.MODEL_OPUS_55
+REGISTERED = (api.MODEL_OPUS_55, api.MODEL_SONNET_55, api.MODEL_OPUS_5,
+              api.MODEL_SONNET_5, api.MODEL_OPUS_48, api.MODEL_SONNET_46,
+              api.MODEL_HAIKU_45)
 FALLBACK_BETA = api.REFUSAL_FALLBACK_BETA
 TASK_BUDGET_BETA = inv.TASK_BUDGET_BETA
 _TRANSPORTS = {           # (use_batch, critique_use_batch)
@@ -453,6 +454,10 @@ def test_a_rejected_feature_is_reissued_without_it_and_sent(tmp_path, monkeypatc
 def test_structured_outputs_ride_the_namespace_of_their_model(tmp_path, monkeypatch):
     for name in _STRUCTURED_ENV:
         monkeypatch.setenv(name, "1")
+    # Both 5.5 defaults declare the refusal fallback, so every default stage is
+    # on the beta namespace. Verification is pinned to Sonnet 5, which does not,
+    # so a structured request on the plain namespace is still covered.
+    monkeypatch.setenv("DRAWING_ANALYZER_VERIFY_MODEL", api.MODEL_SONNET_5)
     stub = AnthropicAPIStub(_script()._route)
 
     ctx = _run(tmp_path, stub)
@@ -462,9 +467,10 @@ def test_structured_outputs_ride_the_namespace_of_their_model(tmp_path, monkeypa
     for stage in ("critique", "prose_harvest", "verification"):
         records = by_stage[stage]
         assert records and all("format" in (r["body"].get("output_config") or {}) for r in records)
-    # Opus 5 critique on the beta namespace, Sonnet 5 harvest/verify on plain.
-    assert all(r["query"] == "beta=true" for r in by_stage["critique"])
-    assert all(r["query"] == "" for r in by_stage["verification"] + by_stage["prose_harvest"])
+    # Opus 5.5 critique and Sonnet 5.5 harvest on the beta namespace, the
+    # pinned Sonnet 5 verification on plain.
+    assert all(r["query"] == "beta=true" for r in by_stage["critique"] + by_stage["prose_harvest"])
+    assert all(r["query"] == "" for r in by_stage["verification"])
 
 
 # --------------------------------------------------------------------------- #

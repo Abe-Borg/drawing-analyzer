@@ -24,7 +24,7 @@ ANTHROPIC_API_KEY=... python scripts/benchmark_drawing_analyzer.py \
 ```bash
 # Price both arms first — spends nothing, needs no API key
 python scripts/ab_sweep_drawing_analyzer.py --pdf setA/M-101.pdf \
-    --variant DRAWING_ANALYZER_CRITIQUE_MODEL=claude-sonnet-5 --estimate
+    --variant DRAWING_ANALYZER_CRITIQUE_MODEL=claude-sonnet-5-5 --estimate
 
 # Then run it (billable, both arms cold)
 ANTHROPIC_API_KEY=... python scripts/ab_sweep_drawing_analyzer.py \

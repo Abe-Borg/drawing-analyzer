@@ -1342,7 +1342,7 @@ def _rescue_failed_items_sync(
         while True:
             try:
                 # Streamed rather than a plain ``create`` (via the shared
-                # ``stream_message``, which also applies the Opus 5 refusal
+                # ``stream_message``, which also applies the refusal
                 # fallback — see its docstring): the rescue may carry a raised
                 # max_tokens cap (up to ``MAX_TOKENS_RETRY_CEILING``) for an
                 # empty-at-max_tokens item, and the SDK refuses a non-streaming

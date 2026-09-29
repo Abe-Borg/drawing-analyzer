@@ -10,7 +10,9 @@ owner's rules, recorded in ``_plans/DECISIONS.md`` (D-1's WP-01.5 note):
 * **The gate is a registry route per category.**
   ``ModelCapabilities.refusal_fallback_routes`` declares, per refusing model,
   which ``stop_details.category`` has a fallback and to which model. Opus 5
-  declares ``cyber`` -> Opus 4.8; everything else is not retried.
+  declares ``cyber`` -> Opus 4.8; everything else is not retried. The 5.5
+  defaults declare no route yet, so a batch item refused on one fails with its
+  category named.
 * **The target** is ``stop_details.recommended_model`` when it names a
   registered model other than the one that refused, else the route's target.
   The request is rebuilt for it (``digest.retarget_digest_request``).
@@ -54,6 +56,8 @@ from tests.test_sdk_contract import _fresh_latches, assert_request_contract  # n
 OPUS = "claude-opus-5"
 OPUS_48 = "claude-opus-4-8"
 SONNET = "claude-sonnet-5"
+OPUS_55 = "claude-opus-5-5"
+SONNET_55 = "claude-sonnet-5-5"
 PROSE = "## M-10x\nA digest body.\n\n```json\n{\"findings\": []}\n```"
 CATEGORIES = ("cyber", "bio", "frontier_llm", "reasoning_extraction", "general_harms")
 UNROUTED = tuple(c for c in CATEGORIES if c != "cyber")
@@ -131,13 +135,13 @@ def _sheet0(per_attempt):
     return batch_result
 
 
-def _collect(stub, monkeypatch, *, transport, n: int = 2, cache=None):
-    """Submit ``n`` sheets and collect them with recovery on."""
+def _collect(stub, monkeypatch, *, transport, n: int = 2, cache=None, model: str = OPUS):
+    """Submit ``n`` sheets on ``model`` and collect them with recovery on."""
     clock = _Clock()
     monkeypatch.setattr(BD.time, "monotonic", clock.monotonic)
     client = stub.client()
     batch = BD.submit_drawing_batch([_make_sheet(i) for i in range(n)], client=client,
-                                    model=OPUS, cache=cache, total=n)
+                                    model=model, cache=cache, total=n)
     return BD.collect_drawing_batch(batch, client=client, cache=cache, sleep=clock.sleep,
                                     retry_failed_items=True, recovery_transport=transport,
                                     max_elapsed_seconds=100_000)
@@ -166,16 +170,19 @@ def test_opus_5_routes_cyber_refusals_to_opus_4_8_and_nothing_else():
     assert api.refusal_fallback_target(OPUS, "cyber") == OPUS_48
     for category in UNROUTED + (None, "", "a_future_category"):
         assert api.refusal_fallback_target(OPUS, category) is None, category
-    for model in (SONNET, OPUS_48, "claude-sonnet-4-6", "claude-haiku-4-5", "claude-unregistered-9"):
+    for model in (OPUS_55, SONNET_55, SONNET, OPUS_48, "claude-sonnet-4-6", "claude-haiku-4-5",
+                  "claude-unregistered-9"):
         for category in CATEGORIES:
             assert api.refusal_fallback_target(model, category) is None, (model, category)
 
 
 def test_supports_refusal_fallback_is_unchanged():
-    # The server-side opt-in and the host route are two capabilities.
+    # The server-side opt-in and the host route are two capabilities: WP-01.5
+    # moved neither the set that opts in (the 5.5 models joined it with the
+    # move to the 5.5 defaults) nor any request that set sends.
     declaring = {m for m in api._MODEL_CAPABILITIES
                  if api.model_capabilities(m).supports_refusal_fallback}
-    assert declaring == {OPUS}
+    assert declaring == {OPUS_55, SONNET_55, OPUS}
 
 
 def test_every_route_is_a_registered_model_that_takes_the_source_request():
@@ -343,6 +350,21 @@ def test_a_refusal_with_no_category_is_not_retried(monkeypatch, details):
     sd, _ = _collect(stub, monkeypatch, transport=BD.RECOVERY_BATCH)
     assert len(_items(stub)) == 1
     assert sd.error == "refused digest (stop_reason='refusal')"
+
+
+@pytest.mark.parametrize("model", [OPUS_55, SONNET_55], ids=["opus-5-5", "sonnet-5-5"])
+def test_a_cyber_refusal_on_a_55_model_is_not_retried(monkeypatch, model):
+    # The 5.5 models (the defaults since they were registered) declare no host
+    # route, so a cyber refusal on one is not resubmitted and says so, as any
+    # unrouted refusal. Declaring a route for them is the owner's call; this
+    # pins today's registry.
+    stub = AnthropicAPIStub(_ok, batch_result=_sheet0(
+        lambda k, p: _refusal_envelope(p, "cyber") if k == 1 else None))
+    sd, other = _collect(stub, monkeypatch, transport=BD.RECOVERY_BATCH, model=model)
+    assert len(_items(stub)) == 1 and not _realtime(stub)
+    assert sd.error == ("refused digest (stop_reason='refusal', category='cyber'); "
+                        f"not retried: no fallback for category 'cyber' on {model}")
+    assert other.ok
 
 
 @pytest.mark.parametrize(
@@ -593,10 +615,11 @@ def test_an_unfinished_fallback_read_is_not_cached(monkeypatch, tmp_path):
 
 def test_recorded_limit_a_fallback_read_is_labelled_with_the_requested_model(tmp_path):
     """Recorded limit (WP-14.3, U1): a host fallback read served by Opus 4.8 is
-    recorded in the usage ledger under the requested model (claude-opus-5), as
-    the server-side fallback's is (``test_response_shapes::test_recorded_limit_
-    the_serving_model_is_not_read``). Same price today ($5/$25). WP-14.3 reads
-    the serving model: this record names claude-opus-4-8."""
+    recorded in the usage ledger under the requested model (claude-opus-5, the
+    one model with a host route, so the run names it), as the server-side
+    fallback's is (``test_response_shapes::test_recorded_limit_the_serving_
+    model_is_not_read``). Same price today ($5/$25). WP-14.3 reads the serving
+    model: this record names claude-opus-4-8."""
     import drawing_analyzer.pipeline as pl
     from tests.fixtures.gauntlet import build_mini_set
     from tests.test_response_shapes import _about_m101, _first, _records, _shaped
@@ -611,7 +634,8 @@ def test_recorded_limit_a_fallback_read_is_labelled_with_the_requested_model(tmp
     stub = AnthropicAPIStub(_shaped(_script(), refusal, stages={"digest"},
                                     when=_first(lambda p: stage_of(p) == "digest" and _about_m101(p))))
     ctx = pl.extract_drawing_context(build_mini_set(tmp_path), client=stub.client(), rows=2, cols=2,
-                                     cache=DigestCache(tmp_path / "cache.sqlite"), use_batch=True)
+                                     cache=DigestCache(tmp_path / "cache.sqlite"), use_batch=True,
+                                     model=OPUS)
     m101 = [r for r in _records(ctx, "digest") if r.stage_instance == "digest:SRC-0001:p0"]
     assert [(r.attempt_number, r.model, r.terminal_status) for r in m101] == [
         (1, OPUS, "FAILED"), (2, OPUS, "COMPLETE")]

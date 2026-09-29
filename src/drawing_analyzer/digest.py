@@ -1,6 +1,6 @@
 """Per-sheet vision digest: one rendered drawing sheet -> structured text.
 
-Each sheet is sent to Claude Opus 5 in a *single* request carrying the
+Each sheet is sent to Claude Opus 5.5 in a *single* request carrying the
 overview image plus all grid tiles, so the model reads the whole sheet at once.
 The model auto-detects the sheet number and discipline from the title block and
 emits a structured text digest suitable for splicing into the spec reviewer's
@@ -675,7 +675,7 @@ def build_digest_request_params(
     real-time path (:func:`digest_sheet`) and the batch path
     (:mod:`drawing_analyzer.batch_digest`), so the two can't drift on model /
     thinking / effort. ``thinking`` and ``output_config`` are attached only when
-    the model supports them (Opus 5 supports both; an unknown override
+    the model supports them (Opus 5.5 supports both; an unknown override
     silently omits them, never producing an API-rejected request). ``focus``
     (an optional per-run operator focus) and ``specs_text`` (optional uploaded
     project specifications) ride only on the system prompt, so the user
@@ -926,8 +926,9 @@ def stream_message(client: Any, kwargs: dict[str, Any]) -> Any:
     path in :mod:`drawing_analyzer.batch_digest`, which has streamed for exactly
     this reason since the empty-at-``max_tokens`` retry started raising caps.
 
-    Opus 5 requests additionally opt into the server-side refusal fallback,
-    self-healing if the platform rejects it (:func:`call_with_refusal_fallback`)
+    Requests to a model that declares it (Opus 5.5, Sonnet 5.5, Opus 5)
+    additionally opt into the server-side refusal fallback, self-healing if the
+    platform rejects it (:func:`call_with_refusal_fallback`)
     — a plain read of ``kwargs["model"]``, so every caller (digest, critique,
     review plan, synthesis, focus, the batch rescue) gets it for free without
     touching its own request-building code.

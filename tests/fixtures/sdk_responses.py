@@ -29,7 +29,7 @@ from anthropic.types import ErrorObject
 # Messages
 # --------------------------------------------------------------------------- #
 
-MODEL = "claude-opus-5"
+MODEL = "claude-opus-5-5"
 
 
 def text(value: str) -> dict:

@@ -2924,7 +2924,12 @@ def _chat_bootstrap_html(
         # tells a reader whether the next question still fits.
         "contextWindow": caps.context_window,
         "rates": (
-            {"in": price.input_per_mtok, "out": price.output_per_mtok}
+            {
+                "in": price.input_per_mtok,
+                "out": price.output_per_mtok,
+                # Not a fixed share of ``in``: Opus 5.5 reads its cache at 0.05x.
+                "cacheRead": price.cache_read_per_mtok,
+            }
             if price
             else None
         ),
@@ -4240,12 +4245,14 @@ _CHAT_JS = r"""
   })();
 
   // Session token/cost readout. The dollar figure is an ESTIMATE and is labelled
-  // as one: cache reads bill at ~0.1x input and writes at 1.25x (5-minute) or 2x
-  // (1-hour), and `cache_creation_input_tokens` does not say which TTL produced
-  // it — with both TTLs in play here that is a band, not a figure. So the cost is
-  // shown as a range and the raw token counts sit beside it, which is what makes
-  // the number honest and what makes a regression visible: if cacheWrite is large
-  // on every question, the report block is not being cached.
+  // as one: cache reads bill at the model's read rate (CFG.rates.cacheRead, from
+  // the pricing table: 0.1x input on most models, 0.05x on Opus 5.5) and writes
+  // at 1.25x (5-minute) or 2x (1-hour), and `cache_creation_input_tokens` does
+  // not say which TTL produced it — with both TTLs in play here that is a band,
+  // not a figure. So the cost is shown as a range and the raw token counts sit
+  // beside it, which is what makes the number honest and what makes a regression
+  // visible: if cacheWrite is large on every question, the report block is not
+  // being cached.
   function fmtTokens(n){
     if(n >= 1000000) return (n / 1000000).toFixed(1).replace(/\.0$/, '') + 'M';
     if(n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k';
@@ -4314,9 +4321,11 @@ _CHAT_JS = r"""
       fmtTokens(sessionUsage.output) + ' out'
     ];
     if(CFG.rates && CFG.rates.in && CFG.rates.out){
+      var readRate = (typeof CFG.rates.cacheRead === 'number')
+        ? CFG.rates.cacheRead : CFG.rates.in * 0.1;
       var base = (sessionUsage.input / 1e6) * CFG.rates.in
         + (sessionUsage.output / 1e6) * CFG.rates.out
-        + (sessionUsage.cacheRead / 1e6) * CFG.rates.in * 0.1;
+        + (sessionUsage.cacheRead / 1e6) * readRate;
       var lo = base + (sessionUsage.cacheWrite / 1e6) * CFG.rates.in * 1.25;
       var hi = base + (sessionUsage.cacheWrite / 1e6) * CFG.rates.in * 2;
       var span = (lo.toFixed(2) === hi.toFixed(2))
@@ -5166,7 +5175,7 @@ _CHAT_JS = r"""
   // ----------------------------------------------------- transcript: shape
   // One JSON document, the same whether it lands in localStorage or in a file:
   //
-  //   {schema_version, kind, report:{report_id,title,generated,sources,model},
+  //   {schema_version, kind, report:{report_id,title,generated,sources,model,prefix},
   //    saved_at, truncated, turns:[{message, display?}, ...]}
   //
   // `turns[i].message` is the VERBATIM Messages API message, so
@@ -5193,7 +5202,10 @@ _CHAT_JS = r"""
         title: CFG.title || '',
         generated: CFG.generated || '',
         sources: (CFG.sources || []).slice(),
-        model: CFG.model || ''
+        model: CFG.model || '',
+        // What this thread's thinking blocks are bound to (see
+        // requestPrefixKey), so a later load can tell whether they still hold.
+        prefix: requestPrefixKey() || ''
       },
       saved_at: new Date().toISOString(),
       truncated: false,
@@ -5391,13 +5403,99 @@ _CHAT_JS = r"""
     }
     return turns.slice(0, end);
   }
+  // Preserved thinking. On Claude Sonnet 5.5 and Opus 5.5 a thinking block is
+  // bound to the conversation it was produced in: the system prompt, the tools
+  // and every message before it. A whole transcript this report wrote replays
+  // exactly that conversation. One saved from a different report (another
+  // system prompt) or trimmed to fit browser storage (its oldest turns are gone)
+  // does not, and for an account the API enforces the check on, the next
+  // question would be a 400, and so would every one after it. Such a thread is
+  // resumed without its thinking blocks, the API's own recovery: text and tool
+  // calls stay, and the model works from the visible turns. ALL of them go,
+  // never some: a block may only be removed from the front of the run, so
+  // dropping some would break the rest. A turn that was nothing but thinking is
+  // left empty, and an empty assistant message is a 400, so the exchange it
+  // ended is rewound whole, as an unfinished exchange at the tail always is.
+  // The screen shows what the thread holds.
+  //
+  // The report id alone does not prove the prefix is the same: it leaves out
+  // the chat model and the request itself, and one run exported twice (another
+  // DRAWING_ANALYZER_CHAT_MODEL, another build's system prompt or tool list)
+  // keeps its id. So a transcript records the key of the prefix its blocks were
+  // produced under, and only a match replays them. A transcript with no key (one
+  // written before the key existed) never matches.
+  var PREFIX_KEY;
+  function requestPrefixKey(){
+    if(PREFIX_KEY !== undefined) return PREFIX_KEY;
+    try {
+      var req = buildRequest(false);
+      // Cache markers are not part of the bound prefix. The thinking setting is
+      // keyed too, though the model already decides it: a false mismatch only
+      // costs the old reasoning, while a false match fails every question.
+      var text = JSON.stringify(
+        {model: req.model, thinking: req.thinking || null, system: req.system, tools: req.tools},
+        function(k, v){ return k === 'cache_control' ? undefined : v; });
+      var h = 0x811c9dc5;                    // FNV-1a, 32-bit
+      for(var i = 0; i < text.length; i++){
+        h ^= text.charCodeAt(i);
+        h = Math.imul(h, 0x01000193) >>> 0;
+      }
+      PREFIX_KEY = ('0000000' + h.toString(16)).slice(-8) + '-' + text.length;
+    } catch(e){
+      PREFIX_KEY = null;                     // unknown: never claim a match
+    }
+    return PREFIX_KEY;
+  }
+  function replaysVerbatim(data){
+    var rep = (data && data.report) || {};
+    var key = requestPrefixKey();
+    return data.truncated !== true
+      && String(rep.report_id || '') === String(CFG.reportId || '')
+      && !!key && rep.prefix === key;
+  }
+  function withoutThinking(m){
+    if(!m || m.role !== 'assistant' || !Array.isArray(m.content)) return m;
+    var kept = m.content.filter(function(b){
+      return !b || (b.type !== 'thinking' && b.type !== 'redacted_thinking');
+    });
+    return kept.length === m.content.length ? m : {role: m.role, content: kept};
+  }
+  function resumableTurns(data){
+    var turns = data.turns;
+    if(!replaysVerbatim(data)){
+      turns = [];
+      var start = 0;         // where the current exchange's reader turn sits
+      var skipping = false;  // the rest of a rewound exchange
+      data.turns.forEach(function(turn){
+        if(isReaderTurn(turn)){ start = turns.length; skipping = false; }
+        if(skipping) return;
+        var m = turn && turn.message;
+        var sent = withoutThinking(m);
+        if(sent !== m){
+          if(!sent.content.length){
+            // Dropping only this turn would leave two user turns in a row (the
+            // question or tool result before it, then the next question) in
+            // the MIDDLE of the thread, where dropUnansweredTail never looks.
+            // The API merges them, so the unanswered question would read as
+            // part of the next one.
+            turns.length = start;
+            skipping = true;
+            return;
+          }
+          turn = Object.assign({}, turn, {message: sent});
+        }
+        turns.push(turn);
+      });
+    }
+    return dropUnansweredTail(turns);
+  }
   function adoptTranscript(data, hint){
     turnGen++;                       // retire any in-flight turn's cleanup
     if(aborter) aborter.abort();
     clearPendingSelection();
     clearTermHighlight();
     while(msgs.children.length > 1) msgs.removeChild(msgs.lastChild);
-    replayTranscript(dropUnansweredTail(data.turns));
+    replayTranscript(resumableTurns(data));
     if(hint) addMsg('da-hint', hint);
     saveTranscript();
   }
@@ -5413,7 +5511,7 @@ _CHAT_JS = r"""
       dropStoredTranscript();
       return;
     }
-    var turns = dropUnansweredTail(data.turns);
+    var turns = resumableTurns(data);
     if(!turns.length) return;
     replayTranscript(turns);
     addMsg('da-hint', 'Restored your previous conversation from this browser.'

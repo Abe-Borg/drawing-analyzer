@@ -139,12 +139,12 @@ FakeServerToolUseBlock = _sdk_model(
     {"id": "srvtoolu_fake_1", "type": "server_tool_use"}, required=("name", "input"),
 )
 
-#: A Messages API response. ``model`` defaults to ``claude-opus-5`` but is not
+#: A Messages API response. ``model`` defaults to ``claude-opus-5-5`` but is not
 #: recorded as given, so the stub serves the requested model for it.
 FakeMessage = _sdk_model(
     anthropic.types.Message, "FakeMessage",
-    {"stop_reason": "end_turn", "usage": FakeUsage, "model": "claude-opus-5", "id": "msg_fake_1",
-     "role": "assistant", "type": "message", "stop_sequence": None},
+    {"stop_reason": "end_turn", "usage": FakeUsage, "model": "claude-opus-5-5",
+     "id": "msg_fake_1", "role": "assistant", "type": "message", "stop_sequence": None},
     required=("content",), implicit=("model",),
 )
 
