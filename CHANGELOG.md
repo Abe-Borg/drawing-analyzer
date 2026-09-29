@@ -68,9 +68,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     the beta proxy, the 13 batch-create fakes (`checked_batch_create`, no
     `betas` parameter), and the 7 test-local fakes behind the 16 sites that
     popped `betas`/`fallbacks`. Their plain and beta namespaces are now separate
-    entry points, each checked as its own (`sdk_namespaces`). A structural test
-    keeps a new fake from popping `betas`/`fallbacks` or taking a `betas`
-    parameter.
+    entry points, each checked as its own (`sdk_namespaces`); a fake built by
+    hand wraps its entries with `checked_entry`. An autouse guard
+    (`tests/conftest.py`, `sdk_checked_guard`) fails any test in which
+    production reaches a Messages entry point that is neither checked nor the
+    real SDK's, and structural tests keep a new fake from popping
+    `betas`/`fallbacks`, taking a `betas` parameter, or leaving a batch fake
+    undecorated.
   - **Contract tests** (`tests/test_sdk_contract.py`, over the new in-process
     API stub `tests/fixtures/sdk_transport.py`, `httpx2.MockTransport`) send
     every stage's requests through the real SDK: every transport, every

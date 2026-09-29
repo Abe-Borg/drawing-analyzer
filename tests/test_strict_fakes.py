@@ -438,6 +438,90 @@ def test_no_test_fake_accepts_a_betas_parameter():
     assert offenders == []
 
 
+def _decorator_names(node) -> set[str]:
+    names = set()
+    for dec in node.decorator_list:
+        if isinstance(dec, ast.Name):
+            names.add(dec.id)
+        elif isinstance(dec, ast.Attribute):
+            names.add(dec.attr)
+    return names
+
+
+def test_every_batch_create_fake_is_sdk_checked():
+    """A fake ``messages.batches.create`` (a function taking a keyword-only
+    ``requests``) goes through the shared check, in the tests and in the
+    benchmark script's fakes alike. Production submits at four sites, so
+    this is a scan rather than the dispatch guard below."""
+    sources = list(_test_sources())
+    for path in sorted((_TESTS.parent / "scripts").glob("*.py")):
+        sources.append((path, ast.parse(path.read_text(encoding="utf-8"), filename=str(path))))
+    fakes, unchecked = [], []
+    for path, tree in sources:
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and "requests" in [a.arg for a in node.args.kwonlyargs]:
+                fakes.append(f"{path.name}:{node.lineno}")
+                if "checked_batch_create" not in _decorator_names(node):
+                    unchecked.append(f"{path.name}:{node.lineno}")
+    assert len(fakes) >= 14                          # the scan sees the batch fakes
+    assert unchecked == []
+
+
+# --------------------------------------------------------------------------- #
+# The guard: production never reaches an unchecked Messages fake
+# --------------------------------------------------------------------------- #
+
+
+class _Unchecked:
+    """The shape Codex's review found: a fake ``create`` taking ``**kwargs``."""
+
+    def create(self, **kwargs):
+        return _reply(**kwargs)
+
+
+def _send(client, **extra):
+    return api.call_with_refusal_fallback(
+        client, {"model": "claude-sonnet-5", "max_tokens": 16, "messages": _BASE["messages"],
+                 **extra},
+        model="claude-sonnet-5", method="create",
+    )
+
+
+def test_the_guard_records_an_unchecked_fake_production_reaches(sdk_checked_guard):
+    # The unchecked fake takes a keyword the SDK refuses; only the guard sees it.
+    _send(SimpleNamespace(messages=_Unchecked()), temperature=0)
+
+    assert sdk_checked_guard == ["plain.create -> _Unchecked.create"]
+    sdk_checked_guard.clear()          # deliberate: this test's own finding
+
+
+def test_the_guard_passes_a_checked_fake_and_the_real_sdk(sdk_checked_guard):
+    checked = SimpleNamespace(messages=SimpleNamespace(
+        create=fa.checked_entry("plain", "create", _Unchecked().create)))
+    _send(checked)
+    with pytest.raises(TypeError, match="unexpected keyword argument 'temperature'"):
+        _send(checked, temperature=0)
+
+    from tests.fixtures.sdk_transport import AnthropicAPIStub
+
+    stub = AnthropicAPIStub(lambda params: _reply())
+    _send(stub.client())
+    assert [r["path"] for r in stub.requests] == ["/v1/messages"]
+    assert sdk_checked_guard == []
+
+
+def test_the_guard_leaves_a_missing_namespace_to_production(sdk_checked_guard):
+    # A fake with no beta namespace fails in production with AttributeError;
+    # that is the test's subject, not an unchecked entry.
+    with pytest.raises(AttributeError):
+        api.call_with_refusal_fallback(
+            SimpleNamespace(messages=_Messages()),
+            {"model": OPUS, "max_tokens": 16, "messages": _BASE["messages"]},
+            model=OPUS, method="create",
+        )
+    assert sdk_checked_guard == []
+
+
 def test_the_structural_scans_see_the_suite():
     # Non-vacuous: the scans read the files that hold the suite's fakes.
     names = {path.name for path, _ in _test_sources()}

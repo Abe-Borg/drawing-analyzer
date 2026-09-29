@@ -349,7 +349,7 @@ Implementation:
 - **Strictness:** one shared check, `fake_anthropic.check_sdk_request`.
   - The keyword rule is the installed SDK method's signature.
   - The cap is derived from the SDK's public `create` once per model.
-- **Scope:** every fake production reaches goes through it. Plain and beta are separate, each checked as its own namespace.
+- **Scope:** every fake production reaches goes through it. Plain and beta are separate, each checked as its own namespace. An autouse guard (`sdk_checked_guard`) fails a test in which production reaches an unchecked Messages entry; batch fakes are held by a scan.
 - **Contract tests:** `tests/test_sdk_contract.py` over `tests/fixtures/sdk_transport.py`, with a tripwire over the measured facts.
 - **Regressions, measured by injection over the 40 affected files:**
   - critique to `create`: 115 tests fail (4 before);

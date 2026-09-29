@@ -124,7 +124,7 @@ starting.
 
 | Slice | Scope (IDs closed) | Size | Depends on | Status | PR / date / notes |
 |---|---|---|---|---|---|
-| WP-02.2 | Real-SDK contract tests over `httpx2.MockTransport`; strict fakes that reject what the SDK rejects (betas or fallbacks on the plain namespace, non-streaming above the SDK-derived cap) (U26) | M | WP-02.1 | done | [PR #178](https://github.com/Abe-Borg/drawing-analyzer/pull/178), 2026-09-29. **Rules decided by the owner (eight choices, two rounds, measured first; the per-builder assertions delegated):** (1) a fake entry point accepts exactly the keywords the installed SDK method's signature lists and raises the SDK's own `TypeError` for any other (a missing required argument is not checked); (2) the non-streaming cap is derived from the SDK's public `create` once per model (`fake_anthropic.sdk_nonstreaming_limit`), never a literal or the private helper; (3) every fake production reaches routes through one shared check (`fake_anthropic.check_sdk_request`): the mixins and the beta proxy, the 13 batch-create fakes (`@checked_batch_create`, no `betas` parameter), and the 7 test-local fakes behind the 16 pop sites; (4) their plain and beta namespaces are separate entry points, each checked as its own (`sdk_namespaces`); (5) contract tests in `tests/test_sdk_contract.py` over a shared stub, `tests/fixtures/sdk_transport.py` (`AnthropicAPIStub`); (6) the per-request assertions: namespace and `anthropic-beta` header, `fallbacks` and the task budget with their betas, non-streaming within the SDK's cap, no beta on batches and uploads, and each latch flip plus structured outputs; (7) derive from the installed SDK, with one tripwire pinning the measured facts (the cap literal 21,333); (8) batch item params are checked by the contract tests only (the SDK does not check them). Measured: production sends no request the SDK refuses (2,370 production calls into fakes over the whole suite; 475 requests through the real SDK over 21 scenarios, identical on 1.7.0 and 1.8.0). No product code, cache, key, prompt or schema moved. Tests: `tests/test_strict_fakes.py` (121), `tests/test_sdk_contract.py` (56). No pinned test re-baselined; no existing test changed outcome (instrumented). Structural tests forbid a new fake that pops `betas`/`fallbacks` or takes a `betas` parameter |
+| WP-02.2 | Real-SDK contract tests over `httpx2.MockTransport`; strict fakes that reject what the SDK rejects (betas or fallbacks on the plain namespace, non-streaming above the SDK-derived cap) (U26) | M | WP-02.1 | done | [PR #178](https://github.com/Abe-Borg/drawing-analyzer/pull/178), 2026-09-29. **Rules decided by the owner (eight choices, two rounds, measured first; the per-builder assertions delegated):** (1) a fake entry point accepts exactly the keywords the installed SDK method's signature lists and raises the SDK's own `TypeError` for any other (a missing required argument is not checked); (2) the non-streaming cap is derived from the SDK's public `create` once per model (`fake_anthropic.sdk_nonstreaming_limit`), never a literal or the private helper; (3) every fake production reaches routes through one shared check (`fake_anthropic.check_sdk_request`): the mixins and the beta proxy, the 13 batch-create fakes (`@checked_batch_create`, no `betas` parameter), and the 7 test-local fakes behind the 16 pop sites; (4) their plain and beta namespaces are separate entry points, each checked as its own (`sdk_namespaces`); (5) contract tests in `tests/test_sdk_contract.py` over a shared stub, `tests/fixtures/sdk_transport.py` (`AnthropicAPIStub`); (6) the per-request assertions: namespace and `anthropic-beta` header, `fallbacks` and the task budget with their betas, non-streaming within the SDK's cap, no beta on batches and uploads, and each latch flip plus structured outputs; (7) derive from the installed SDK, with one tripwire pinning the measured facts (the cap literal 21,333); (8) batch item params are checked by the contract tests only (the SDK does not check them). Measured: production sends no request the SDK refuses (2,370 production calls into fakes over the whole suite; 475 requests through the real SDK over 21 scenarios, identical on 1.7.0 and 1.8.0). No product code, cache, key, prompt or schema moved. Tests: `tests/test_strict_fakes.py` (125), `tests/test_sdk_contract.py` (56). No pinned test re-baselined; no existing test changed outcome (instrumented). Enforced: an autouse guard (`tests/conftest.py`, `sdk_checked_guard`) fails a test in which production reaches a Messages entry point that is neither `fake_anthropic.checked_entry`'s nor the real SDK's (Codex review round 1: 21 production calls in five `**kwargs` fakes had escaped the first version's scans; converted), and structural scans forbid a fake that pops `betas`/`fallbacks`, takes a `betas` parameter, or leaves a batch `create` undecorated |
 | WP-02.3 | Fidelity fixtures: nested batch errors; canceled/expired envelopes; `None` usage fields; `web_fetch_requests`; `iterations`; `cache_creation` split; `output_tokens_details`; `stop_details`; fallback blocks; serving model; SSE sequences incl. mid-stream failure and clean EOF (U26) | M | WP-02.2 | todo | From WP-02.2: build the response-side fixtures on `tests/fixtures/sdk_transport.py` (`AnthropicAPIStub`), which already serves the real SDK JSON and complete SSE streams, batches (every item `succeeded`, `ended` at the first retrieve, results at a `results_url`), uploads and deletes. It has no errored, canceled or expired item, no partial stream and no `None` usage field; `message_sse` always ends with `message_stop`, so a truncated sequence needs a parameter, not a second emitter. Measured (found, not fixed): the fakes' response blocks (`FakeToolUseBlock` and the other dataclasses) are not SDK models, so a fake response echoed into the next request (the investigation's assistant turn) could not be serialized by the real SDK (41 tests fail if every fake request is built by the real SDK); production echoes SDK models and is unaffected, and the contract tests cover the real path. Also: 8 `files.delete` calls over the suite ran from the batch release thread after their test had ended (tests that do not patch `batch_digest._run_in_background`), so per-test attribution misses them; harmless today. The strict checks refuse only what the SDK refuses: an item param in a batch the SDK sends as is (the API rejects `fallbacks` there) is asserted by the contract tests only (the owner's rule) |
 | WP-01.5 | Batch refusal recovery under the selected transport policy, retry bound shared with truncation retries, `stop_details` logged (R2) | M | WP-01.2 | todo | Since WP-01.2 the abandoned-batch harvest resolves only finished reads, so a refused item it reads back is resubmitted with the unresolved sheets, within the existing bounded rounds (as an empty or truncated one already was). Decide whether that resubmission is allowed and count it against the shared retry bound. Classify with `core.terminal_outcome` (D-1) From WP-01.3: the harvest now holds an unfinished read that carries prose or findings as the sheet's result (still unresolved, still resubmitted), and parks every other harvested item for its usage as before, a refusal included (a refused read ranks below a partial read and above nothing in `digest._read_rank`). A refusal retry under R2 lands through `_replace_result_with_attempt_history`, so it can only replace a held read it outranks, and the kept read's error names it when it comes back worse. The stalled path's rescue list is built from `harvest.resolved` From WP-01.4 (recorded, not done): a critique read cut off at `max_tokens` now fails and is not retried. A raised-cap retry for it is possible (`critique.DEFAULT_CRITIQUE_MAX_TOKENS` is 64,000 and `digest.MAX_TOKENS_RETRY_CEILING` 128,000; the real-time critique already streams through `digest.stream_message`), but it is not in N4's row and would need this slice's shared retry bound (plan step 5), on both critique transports (a batch item would need a resubmission). Decide it here with the digest's, or give it its own row. Only `max_tokens` could qualify (`raised_cap_may_finish`); a refused critique read is R2's policy question too |
 | WP-01.6 | Remaining response consumers (planner, identity, synthesis, focus, prose harvest cache writes); fallback-aware shared text join (U2; WP-09 step 6) | M | WP-01.2, WP-02.3 | todo | Also move `verify._verdict_from_response` / `_degrade_kind` onto `core.terminal_outcome` (D-1). They test `max_tokens` and `refusal` only, so an unknown stop reason or `model_context_window_exceeded` is still parsed as a verdict (WP-01.2 left verification alone: not an N4 site) From WP-01.3 (found, not fixed): `set_identity._sheet_block` puts an errored sheet's digest text into the identity corpus whenever it has any (the error line only when it has none), so a refusal's explanation or a truncated read's prose reaches the advisory identity call, while every other consumer skips that sheet (`combined_text`, cross-QC, the prose harvest, synthesis, focus, the planner; and since WP-01.3 the ledger, N15). Decide whether the corpus should skip it too (it re-keys the identity cache for such a set: the corpus is a key input) |
@@ -609,8 +609,10 @@ what could not be verified, risks, and next steps.
     - `check_sdk_request(namespace, method, kwargs)`, which raises the SDK's
       `TypeError` or `ValueError` and skips the cap when the call passes
       `timeout`, as the SDK does;
-    - `_checked`, the entry-point wrapper, with a `contextvars` marker so a
-      beta call forwarded to a shared `create` is not re-checked as plain;
+    - `checked_entry`, the entry-point wrapper (named `_checked` and private
+      in the first push; public, with an `sdk_checked` marker, since review
+      round 1), with a `contextvars` marker so a beta call forwarded to a
+      shared `create` is not re-checked as plain;
     - `checked_batch_create` and `sdk_namespaces`;
     - `StreamingMessagesMixin` checks its `stream` and wraps a subclass's own
       `create` at class definition (`__init_subclass__`); `add_stream` checks
@@ -634,12 +636,63 @@ what could not be verified, risks, and next steps.
   - **New `tests/fixtures/sdk_transport.py`:** `AnthropicAPIStub(route,
     reject=)`, the in-process API for the real SDK (see CLAUDE.md), and
     `error_400`.
+- **Review round 1 (Codex, P2 on `tests/test_strict_fakes.py`): fixed in this
+  PR.** The finding: a fake whose `messages` is a plain class with
+  `create(**kwargs)`, not the mixin, passed both scans, so "every fake
+  production reaches" did not hold (its example: the citation fake in
+  `tests/test_drawing_markup_rich.py`).
+  - **Measured on the PR's tree** (every production dispatch and batch submit,
+    classified by the entry it reached): of 3,167 calls, 2,686 reached a
+    checked fake, 458 the real SDK (the contract tests, the N27 tests) and 2 a
+    deliberately missing beta namespace. **21 reached an unchecked entry**, in
+    five fakes:
+    - `test_refusal_fallback._FakeClient` (8);
+    - the two beta-namespace wrappers in `test_drawing_investigate` (8; they
+      forward to the checked proxy after their own logic);
+    - the citation fake Codex named (3);
+    - the benchmark script's `OfflineClient` (1);
+    - this PR's own deliberate batch wrapper (1).
+    No batch fake was unchecked.
+  - **Fix, within the owner's scope rule** (every fake production reaches goes
+    through the one check):
+    - the entry wrapper is public, `fake_anthropic.checked_entry(namespace,
+      method, handler, *, header=False)`, and marks each entry
+      `sdk_checked = True`;
+    - the five fakes route through it: `checked_entry` for the hand-built
+      namespaces (the refusal-fallback fake keeps recording `betas`; the
+      investigation wrappers still decide on them), `StreamingMessagesMixin`
+      for the citation fake and the benchmark's `_Msgs`;
+    - **an autouse guard**, `sdk_checked_guard` in `tests/conftest.py`, wraps
+      `core.api_config._dispatch_messages`. It records any Messages entry
+      production reaches that is neither checked nor the real SDK's, and
+      fails the test at teardown. It records because a stage swallows its own
+      exceptions. The list is the fixture's value, so a test doing it on
+      purpose clears it, and a missing namespace stays production's
+      `AttributeError`;
+    - a scan: every batch-create fake (a function with a keyword-only
+      `requests`) in the tests and the scripts is `@checked_batch_create`.
+  - **New tests (4):**
+    - the batch scan (on `origin/main` it fails on behaviour: 14 undecorated
+      fakes);
+    - the guard records the shape Codex found (a `**kwargs` fake taking
+      `temperature`);
+    - it passes a checked fake and the real SDK;
+    - it leaves a missing namespace to production.
+    The three guard tests need the new fixture.
+  - **Validation:** the full suite, guard active in every test: **4,726
+    passed, 2 skipped, 10 deselected** (378 s), the 4,722 before plus the 4
+    new; no test tripped the guard. `compileall`, ruff E9/F63/F7/F82 and the
+    secret scan clean. F401/F841 over the newly touched files: five
+    pre-existing findings (`investigation_tools`, `order`, `executed` in
+    `test_drawing_investigate.py`; `Path` in `test_drawing_markup_rich.py`;
+    `n_sources` in `scripts/benchmark_drawing_analyzer.py`), all on
+    `origin/main` already (WP-22.5).
 - **Contracts decided:** none in `DECISIONS.md` (the owner's rules above).
 - **Cache/schema effects: none.** No product code changed.
 - **Re-baselined tests: none.** No existing test changed outcome (instrumented,
   below). The edits to existing test files change fakes, not assertions.
-- **New tests: 177.**
-  - **`tests/test_strict_fakes.py` (121):**
+- **New tests: 177** in the first push (181 with review round 1's 4, above).
+  - **`tests/test_strict_fakes.py` (121, then 125):**
     - every kind of fake entry point (the mixin's create and stream, bound and
       unbound; `add_stream`; the beta proxy; the split plain and beta entries)
       × 9 cases, each against the real SDK computed live over a transport
@@ -709,7 +762,8 @@ what could not be verified, risks, and next steps.
   - The two new files: 177 passed. Every touched test file passes.
   - Full suite: **4,722 passed, 2 skipped, 10 deselected** (407 s), the
     baseline plus the 177 new tests, the same two environment skips.
-    Instrumented run of the fix: the same counts (444 s).
+    Instrumented run of the fix: the same counts (444 s). After review round
+    1: **4,726 passed, 2 skipped, 10 deselected** (378 s).
   - `python -m compileall -q src`: clean.
   - `ruff check --select E9,F63,F7,F82 src tests scripts` (0.14.5): clean.
     F401/F811/F841 over the touched files: two pre-existing F401s

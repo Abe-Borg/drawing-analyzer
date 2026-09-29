@@ -125,14 +125,30 @@ regressed from `digest.stream_message` to a plain `create` was green.
   header) and keeps `fallbacks` (the body); `add_stream` checks both. A
   test-local fake builds its namespaces with `sdk_namespaces(create=, stream=,
   batches=, files=)`: plain and beta are separate entry points, each checked as
-  its own namespace, both routed to the fake's handlers. A batch fake's `create`
-  is decorated `@checked_batch_create` and takes `requests` only. A
-  `contextvars` marker keeps a beta call forwarded to a shared `create` from
-  being checked again as a plain one.
+  its own namespace, both routed to the fake's handlers; a fake assembled by
+  hand wraps each entry with `checked_entry(namespace, method, handler)` (the
+  one wrapper all of these use; `header=True` drops `betas` before the handler,
+  as the wire does). A batch fake's `create` is decorated `@checked_batch_create`
+  and takes `requests` only. A `contextvars` marker keeps a beta call forwarded
+  to a shared `create` from being checked again as a plain one.
+- **Enforced, not requested.** The autouse fixture `sdk_checked_guard`
+  (`tests/conftest.py`) wraps `core.api_config._dispatch_messages`, the one
+  place every real-time request passes, and fails the test at teardown when
+  production reached a Messages entry point that is neither `checked_entry`'s
+  (`sdk_checked is True`) nor the real SDK's. It records rather than raises,
+  because a stage swallows its own exceptions (I-3). A test that does so on
+  purpose clears the list, which is the fixture's value. A namespace the fake
+  lacks stays production's `AttributeError`. Batch submits happen at four
+  sites, so their fakes are held by a scan instead (a function with a
+  keyword-only `requests` must be `@checked_batch_create`). The first version
+  had only the pop/`betas` scans: a `**kwargs` fake on the plain namespace
+  passed them, and 21 production calls in five fakes reached one (Codex
+  review, measured).
 - `tests/test_strict_fakes.py` holds every kind of fake entry point to the real
   SDK case by case (computed live, over a transport that sends nothing, with its
-  own cap bisection as the oracle). Two structural tests fail if any test file
-  pops `betas`/`fallbacks` or defines a `betas` parameter.
+  own cap bisection as the oracle). Structural tests fail if any test file pops
+  `betas`/`fallbacks`, defines a `betas` parameter, or has an undecorated batch
+  fake.
 - `tests/test_sdk_contract.py` sends production's own requests through the real
   SDK over `tests/fixtures/sdk_transport.py` (`AnthropicAPIStub`: an in-process
   API behind `httpx2.MockTransport`, JSON or SSE for `/v1/messages`, batches with

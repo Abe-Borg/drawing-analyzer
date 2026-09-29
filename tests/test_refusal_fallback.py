@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 from drawing_analyzer.core import api_config as api
+from tests.fixtures.fake_anthropic import BETA, PLAIN, checked_entry
 
 OPUS_5 = "claude-opus-5"
 OPUS_48 = "claude-opus-4-8"
@@ -106,10 +107,16 @@ class _FakeClient:
         self.plain_calls: list[dict] = []
         self.beta_calls: list[dict] = []
         self._beta_raises = beta_raises
-        self.messages = SimpleNamespace(create=self._plain_create, stream=self._plain_stream)
-        self.beta = SimpleNamespace(
-            messages=SimpleNamespace(create=self._beta_create, stream=self._beta_stream)
+        # Each namespace's entry points are checked against the SDK's own
+        # (remediation WP-02.2); the beta ones keep ``betas`` for the record.
+        self.messages = SimpleNamespace(
+            create=checked_entry(PLAIN, "create", self._plain_create),
+            stream=checked_entry(PLAIN, "stream", self._plain_stream),
         )
+        self.beta = SimpleNamespace(messages=SimpleNamespace(
+            create=checked_entry(BETA, "create", self._beta_create),
+            stream=checked_entry(BETA, "stream", self._beta_stream),
+        ))
 
     def _plain_create(self, **kw):
         self.plain_calls.append(kw)

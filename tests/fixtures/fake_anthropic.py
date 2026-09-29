@@ -517,11 +517,18 @@ _CHECKED_AS: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 )
 
 
-def _checked(namespace: str, method: str, handler: Any, *, header: bool = False) -> Any:
+def checked_entry(namespace: str, method: str, handler: Any, *, header: bool = False) -> Any:
     """``handler`` behind an SDK-checked entry point for ``namespace``.
 
+    The one wrapper every fake entry point production reaches goes through
+    (the mixins, the beta proxy and :func:`sdk_namespaces` use it; a fake
+    assembled by hand wraps its own entries with it). ``tests/conftest.py``
+    fails a test in which production reaches a Messages entry point that is
+    neither this nor the real SDK's.
+
     ``header``: drop ``betas`` before the handler sees the call. On the beta
-    namespace it is the ``anthropic-beta`` header, not part of the body.
+    namespace it is the ``anthropic-beta`` header, not part of the body. A
+    fake that records the betas it was sent keeps the default.
     """
     def entry(*args: Any, **kwargs: Any) -> Any:
         if _CHECKED_AS.get() is None:
@@ -535,6 +542,7 @@ def _checked(namespace: str, method: str, handler: Any, *, header: bool = False)
             _CHECKED_AS.reset(token)
 
     entry.__wrapped__ = handler  # type: ignore[attr-defined]
+    entry.sdk_checked = True  # type: ignore[attr-defined]
     return entry
 
 
@@ -549,6 +557,7 @@ def checked_batch_create(create: Any) -> Any:
         check_sdk_request(PLAIN, "batches.create", kwargs)
         return create(*args, requests=kwargs["requests"])
 
+    entry.sdk_checked = True  # type: ignore[attr-defined]
     return entry
 
 
@@ -572,8 +581,8 @@ def sdk_namespaces(
     for method, handler in (("create", create), ("stream", stream)):
         if handler is None:
             continue
-        setattr(messages, method, _checked(PLAIN, method, handler))
-        setattr(beta_messages, method, _checked(BETA, method, handler, header=True))
+        setattr(messages, method, checked_entry(PLAIN, method, handler))
+        setattr(beta_messages, method, checked_entry(BETA, method, handler, header=True))
     return messages, SimpleNamespace(messages=beta_messages, files=files)
 
 
@@ -628,7 +637,7 @@ class _StreamDescriptor:
         def stream(**kwargs: Any) -> FinalMessageStream:
             return FinalMessageStream(target.create(**kwargs))
 
-        return _checked(PLAIN, "stream", stream)
+        return checked_entry(PLAIN, "stream", stream)
 
 
 class StreamingMessagesMixin:
@@ -654,9 +663,9 @@ class StreamingMessagesMixin:
         super().__init_subclass__(**kwargs)
         raw = cls.__dict__.get("create")
         if isinstance(raw, staticmethod):
-            cls.create = staticmethod(_checked(PLAIN, "create", raw.__func__))
+            cls.create = staticmethod(checked_entry(PLAIN, "create", raw.__func__))
         elif callable(raw):
-            cls.create = _checked(PLAIN, "create", raw)
+            cls.create = checked_entry(PLAIN, "create", raw)
 
 
 def add_stream(messages_obj: Any) -> Any:
@@ -666,8 +675,8 @@ def add_stream(messages_obj: Any) -> Any:
     ``create`` and the new ``stream`` are the plain namespace's, checked.
     """
     create = messages_obj.create
-    messages_obj.create = _checked(PLAIN, "create", create)
-    messages_obj.stream = _checked(
+    messages_obj.create = checked_entry(PLAIN, "create", create)
+    messages_obj.stream = checked_entry(
         PLAIN, "stream", lambda **kwargs: FinalMessageStream(create(**kwargs)),
     )
     return messages_obj
@@ -687,8 +696,8 @@ class _BetaMessagesProxy:
 
     def __init__(self, messages: Any) -> None:
         self._messages = messages
-        self.create = _checked(BETA, "create", self._create, header=True)
-        self.stream = _checked(BETA, "stream", self._stream, header=True)
+        self.create = checked_entry(BETA, "create", self._create, header=True)
+        self.stream = checked_entry(BETA, "stream", self._stream, header=True)
 
     def _create(self, **kwargs: Any) -> Any:
         return self._messages.create(**kwargs)
