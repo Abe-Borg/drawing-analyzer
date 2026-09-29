@@ -738,7 +738,7 @@ what could not be verified, risks, and next steps.
     shared builders, not every hand-built fake, to the SDK.
   - The production tests run the mini set (two sheets); the sharded cross-QC
     path and the stalled-batch harvest are exercised by the older fakes.
-  - Suite time: +133 tests, about 60 s (the production tests run the whole
+  - Suite time: +154 tests, about 60 s (the production tests run the whole
     stack, about 1 s each).
 - **Found, not fixed** (each pinned by a recorded-limit test that the owner
   flips, and noted on the owner's row):
