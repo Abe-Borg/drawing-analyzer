@@ -246,6 +246,56 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The set-level calls kept and cached replies the model did not finish, and
+  a reply split by the refusal fallback read with a line break inside a word
+  (remediation WP-01.6; N4, N27, U2).** The review plan, the set identity, the
+  cross-sheet synthesis, the focus report and the prose harvest's structuring
+  call never read the stop reason: a reply cut off at `max_tokens` or the
+  context window, one with no stop reason (a stream that ended early), a
+  continuation or an unknown reason was used, and cached, whenever its content
+  parsed, and the synthesis and focus report kept a refusal's explanation as
+  their text (the synthesis stage read COMPLETE) and cached it. Verification
+  checked only `max_tokens` and `refusal`, so any other unfinished reply was
+  parsed as a verdict and cached. And `digest._message_text` joined every text
+  block with `"\n"`: a streamed reply declined part way comes back
+  `[text, fallback, text]` with the fallback model continuing the partial text,
+  so `12` + ` inches` read `1\n2 inches`, a boundary inside the findings JSON
+  lost the sheet's findings (and the read was cached as finished), and a
+  critique read split that way failed although it was good.
+
+  Now, decided with the owner (see the WP-01.6 handoff in
+  `_plans/PROGRESS.md`):
+  - **One text join, `core.reply_text.reply_text`.** Two text blocks with a
+    `fallback` block between them join with nothing; any other two with
+    `"\n"`, as before, so a reply without a fallback block reads byte-identical.
+    `digest._message_text` is gone; every module that read it reads this.
+  - **Every one of the five asks the stop reason first**
+    (`digest.unfinished_reply_error`, over the one classifier and the digest's
+    ladder). A reply the model did not finish is not used and not cached: the
+    plan and the identity fail; the synthesis and the focus report fail and
+    ship no text, and the billed reply is recorded as one FAILED usage attempt;
+    a harvest item keeps its verbatim sheet-level entry, under either
+    structured-outputs contract (plan WP-09 step 6). The error names what
+    happened: `refused synthesis (stop_reason='refusal', category='cyber')`,
+    `truncated review plan (stop_reason='max_tokens')`, `unfinished identity
+    (stop_reason=None)`. A finished reply that fails its parse keeps its old
+    wording.
+  - **Verification** uses the same classifier: every unfinished reply is "no
+    verdict" (`no verdict (context window exceeded)`, `no verdict (unfinished:
+    stop_reason=…)`; the two existing notes are unchanged), counted with the
+    truncated calls, never cached.
+  - **The identity corpus** gives a failed sheet its failure line and its PDF
+    text only, never its digest text.
+  - **Cache.** The synthesis, focus and harvest stage terms move 1 -> 2, so an
+    entry an earlier version stored from an unfinished reply (a refusal served
+    as the overview on every warm run, say) misses once; nothing is deleted.
+    The planner, identity and verification keys are unchanged (recorded
+    residuals). No `_SCHEMA_VERSION` change; digest and critique keys are
+    byte-identical.
+
+  Tests: `tests/test_reply_text.py`, `tests/test_consumer_terminal_outcomes.py`,
+  and five recorded limits flipped in `tests/test_response_shapes.py`.
+
 - **A refused batch sheet was lost, and a `billing_error` was resubmitted like
   a server blip (remediation WP-01.5; R2).** On the batch transport (the GUI's
   default) a sheet the model refused came back failed and was never retried:

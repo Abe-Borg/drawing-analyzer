@@ -818,7 +818,10 @@ class _RecordingCache:
 def test_a_refused_item_keys_its_structuring_call_like_any_straggler():
     from drawing_analyzer.prose_harvest import _HARVEST_CACHE_CONTRACT
 
-    assert _HARVEST_CACHE_CONTRACT == 1
+    # WP-09.2 needed no bump (1). Remediation WP-01.6 moved it to 2 for its
+    # own change, what an entry may hold (the owner's decision); the rule this
+    # test pins, a refused item keys like any straggler, is unchanged.
+    assert _HARVEST_CACHE_CONTRACT == 2
     refused_cache, plain_cache = _RecordingCache(), _RecordingCache()
     ledger = Ledger()
     ledger.add([_f("Provide 6 inch drain at column line 4.", cat="coordination")],

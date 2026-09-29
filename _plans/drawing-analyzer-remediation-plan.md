@@ -253,6 +253,11 @@ Regression cases:
   - `review_planner.py`, `set_identity.py`, `synthesis.py`, `focus.py`, `prose_harvest.py`;
   - `cross_qc._call`, which checks only for an empty reply.
 - Treat `stop_reason=None` as "not finished" (N27). That is what the real SDK returns for a stream that ended without `message_stop`.
+- *Corrected and done by WP-01.6 (2026-09-29, the owner's rules; D-1's WP-01.6 note).*
+  - **Verification was only half on the classifier's side.** It tested `max_tokens` and `refusal` alone, so a context-window stop, `None`, a continuation or an unknown reason was parsed as a verdict and cached (measured). It now reads `core.terminal_outcome` in both functions; every kind but `FINISHED` is "no verdict" under the existing `truncated` counter (D-2 unchanged).
+  - **The five consumers**, measured through the real SDK: under every non-finished kind each kept and cached whatever parsed, and synthesis and the focus report kept a refusal's explanation as their text. Each now asks `digest.unfinished_reply_error` first (the digest's ladder, a noun per stage) and keeps and caches nothing on a non-finished read: the planner and identity fail, synthesis and focus fail with no text (their billed reply one FAILED usage record), a harvest item degrades. Their terms moved where one existed (synthesis, focus, harvest: 1 -> 2).
+  - **An unnamed consumer: the identity corpus** carried an errored sheet's digest text (a refusal's explanation, a cut-off read's prose). It now carries the sheet's failure line and its text-layer windows only (the owner's decision).
+  - `cross_qc._call` stays WP-06.3's; its replies already read through the new join.
 
 **Step 3: digest fix sites and migration**
 - Fix sites:
@@ -309,6 +314,10 @@ Regression cases:
 - `digest._message_text`, imported by 11 modules, joins blocks with `"\n"`.
 - `[text, fallback, text]` therefore yields "12\n inches". A boundary inside the findings JSON makes it MALFORMED.
 - One shared helper must handle fallback boundaries. WP-12.1's citation splits use it too.
+- *Verified and done by WP-01.6 (2026-09-29, the owner's rules).*
+  - **Confirmed:** 11 modules imported it (plus the digest itself); no Python module joined reply text any other way. The report's chat widget renders each block in its own element and sends no `fallbacks`, so no fallback block reaches it.
+  - **Where the substitute's text resumes (Anthropic's docs, and the SDK measured on both namespaces, SDK 1.7.0 and 1.8.0):** a *streamed* reply declined part way keeps the partial, marks the boundary with a `fallback` block and the fallback model continues from the partial output, so the split can fall mid-word. A *non-streamed* one omits the partial and answers from scratch: `[fallback, text]`. The plain namespace parses the block as a `TextBlock` whose `type` is `"fallback"`, so a join must read `type`, never the class. (`tests/fixtures/sdk_responses.splice_fallback` builds the streamed shape for non-streamed replies too; the join reads both correctly.)
+  - **The helper:** `core.reply_text.reply_text(resp, *, between="\n")`: nothing across a fallback block, `between` elsewhere (unchanged `"\n"`), so a reply without a fallback block reads byte-identical. `_message_text` is gone. WP-12.1 passes `between=""` for its citation splits.
 
 **Other notes**
 - The regression "stream interruption before output / after text / after complete JSON" needs WP-02.3's SSE fixtures. *(Available since WP-02.3: `message_sse(cut=, end=)` through the real SDK and `FinalMessageStream(cut=, end=)`; `tests/test_response_shapes.py` pins today's behaviour as recorded limits for WP-01.6 and WP-01.7.)*
@@ -316,7 +325,7 @@ Regression cases:
   - Capturing it is WP-01.7, together with WP-14 step 7.
 - Cross-QC terminal handling is implemented in WP-06.3, on this package's helper.
 
-Slices: WP-01.1 … WP-01.7 in [`PROGRESS.md`](PROGRESS.md).
+Slices: WP-01.1 … WP-01.8 in [`PROGRESS.md`](PROGRESS.md).
 
 ### WP-02 — Faithful SDK, streaming, batch, and network test boundaries
 
@@ -851,7 +860,7 @@ Implementation:
 - Depends on WP-04.2.
 - *Done by WP-09.2 (2026-09-24; the owner's rules, see its handoff).* `_match_entry` refuses every candidate at or above 0.7 whose signature conflicts with the item's (`_veto_axes`, over `critique.signature_conflicts`), and the next-best compatible candidate wins; a refused item is a straggler. What the rule is given was the decision the step left open, because `critique._is_absence` reads `anchor_hint == "SHEET"` as an absence: the item is signed from its text and its synthesis legs, and the candidate with its placement set aside ("text against text"). Measured over the suite (17 free matches, 75 chain probes) and a 24-case table: signing the item as bare text refused 5 true restatements (its own quote-less twins) and broke two pinned tests; giving it the candidate's placement switched the polarity axis off against every SHEET entry (an opposite-polarity item joined a degraded one). Steps 4 and 5's instrumentation (per-item outcomes, `vetoed`, `folded`, `filtered_focus`, a per-channel table) and the labelled corpus (`tests/test_prose_paraphrase_corpus.py`) landed with it; the threshold is unchanged (U11). Recorded limits: a SHEET absence with no absence word takes a presence item, and a refused presence item that degrades to a SHEET entry can still fold into an absence entry in the ledger (`_is_absence`, which the ledger's merges read; not changed).
 
-**Step 6** is implemented with WP-01.6.
+**Step 6** is implemented with WP-01.6. *Done by WP-01.6 (2026-09-29):* `prose_harvest._structure_item` asks the stop reason first (`digest.unfinished_reply_error`) before either parse, so a reply the model did not finish is never structured or cached under the fenced or the structured contract (a schema never overrides it); the item takes its degraded entry. `_HARVEST_CACHE_CONTRACT` 1 -> 2 retires entries stored under the old rule.
 
 **N32** (the digest channel's heading defect) is WP-09.3's (the owner's routing, 2026-09-24). Measured by WP-09.2: `_is_label` cannot be reused as it is, since 6 of the digest's 8 standard section names ("Scope / systems shown", "Equipment & schedules", "Plan content", ...) are not listed labels; and a heading that states something also classifies the section it starts, so the real items under it can be lost too (2 of 4 layouts probed). It needs a statement-versus-section-name rule for the digest and a decision on which category governs the section after a statement heading.
 

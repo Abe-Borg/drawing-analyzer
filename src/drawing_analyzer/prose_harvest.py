@@ -70,6 +70,7 @@ from .core.api_config import (
     phase_output_cap,
     thinking_config_for,
 )
+from .core.reply_text import reply_text
 from .core.structured_outputs import StructuredOutputsGate, attach_format
 from .critique import _token_overlap, critical_signature, signature_conflicts
 from .diagnostics import get_logger
@@ -78,12 +79,12 @@ from .digest import (
     _MODEL_FINDING_CATEGORIES,
     _clean_error,
     _is_transient_error,
-    _message_text,
     _message_usage,
     _retry_backoff_seconds,
     _tolerant_json_object,
     _validate_finding_item,
     scan_structured_blocks,
+    unfinished_reply_error,
 )
 from .html_report import classify_section, split_into_sections
 from .ledger import Ledger
@@ -129,7 +130,13 @@ DEFAULT_HARVEST_MAX_RETRIES = 2
 # The sheet text layer sent with a structuring call (a straggler needs context,
 # not the whole sheet).
 _HARVEST_TEXT_CAP = 6_000
-_HARVEST_CACHE_CONTRACT = 1
+# The structuring cache's host contract. 2 since remediation WP-01.6 (plan
+# WP-09 step 6; the owner's decision): an entry holds only a structuring reply
+# the model finished, under the contract actually sent. One written under 1
+# may hold a finding from a cut-off, refused or unfinished reply and stores no
+# stop reason, so every entry written under 1 misses once. Never
+# ``_SCHEMA_VERSION`` (D-4).
+_HARVEST_CACHE_CONTRACT = 2
 DEFAULT_HARVEST_WORKERS = 4
 _HARVEST_WORKERS_ENV = "DRAWING_ANALYZER_HARVEST_WORKERS"
 
@@ -1116,7 +1123,16 @@ def _structure_item(
             return None, 0, 0, False, True
 
     in_tok, out_tok = _message_usage(resp)
-    raw = _message_text(resp)
+    raw = reply_text(resp)
+    # The stop reason first (D-1; plan WP-09 step 6, remediation WP-01.6): a
+    # reply the model did not finish is never structured or cached, under
+    # either contract. A schema constrains the shape of what was written, not
+    # whether it was finished, so it never overrides this. The item takes its
+    # degraded verbatim entry, and the call is still counted as billed.
+    unfinished = unfinished_reply_error(resp, raw or "", noun="harvest structuring reply")
+    if unfinished is not None:
+        _log.warning("prose-harvest: %s; the item keeps its verbatim entry", unfinished)
+        return None, in_tok, out_tok, False, True
     obj: dict | None = None
     for c in scan_structured_blocks(raw or ""):
         candidate = _tolerant_json_object(c.body)

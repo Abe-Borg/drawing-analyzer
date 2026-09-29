@@ -59,6 +59,7 @@ from .core.api_config import (
     system_prompt_with_cache,
     tools_with_cache,
 )
+from .core.reply_text import reply_text
 from .diagnostics import get_logger
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
@@ -67,7 +68,6 @@ from .digest import (
     _error_status,
     _image_block,
     _is_transient_error,
-    _message_text,
     _message_usage,
     _retry_backoff_seconds,
     _tolerant_json_object,
@@ -1079,7 +1079,7 @@ def _investigate_one(
             # A genuine NOT_VISIBLE conclusion and a garbled reply both map to
             # UNCERTAIN through parse_verdict — distinguish them on the raw
             # verdict token so garble is "not_concluded", never a conclusion.
-            text = _message_text(resp)
+            text = reply_text(resp)
             obj = _tolerant_json_object(text)
             raw = (
                 str(obj.get("verdict", "")).strip().upper()

@@ -4763,6 +4763,19 @@ def extract_drawing_context(
                 synthesis_stage.status = "FAILED"
                 synthesis_stage.errors.append(str(result.error))
                 _log.warning("synthesis: failed: %s", result.error)
+                if getattr(result, "replied", False):
+                    # A reply that came back and was not used (refused, cut
+                    # off, unfinished, empty) was still billed: one FAILED
+                    # attempt, as the planner and identity record theirs
+                    # (remediation WP-01.6). A refusal kept as the overview
+                    # used to be recorded COMPLETE.
+                    _record_usage(
+                        run_usage, family="synthesis", instance="synthesis",
+                        model=synthesis_model or default_synthesis_model(),
+                        input_tokens=result.input_tokens,
+                        output_tokens=result.output_tokens,
+                        parse_success=False, terminal_status="FAILED",
+                    )
             else:
                 # Fewer than two readable sheets — an applicable, valid skip (§3.3).
                 synthesis_stage.status = "SKIPPED_VALID"
@@ -4837,6 +4850,16 @@ def extract_drawing_context(
             ):
                 errors.append(f"Focus report: {fresult.error}")
                 _log.warning("focus report: failed: %s", fresult.error)
+                if getattr(fresult, "replied", False):
+                    # Billed although not used: one FAILED attempt (as
+                    # synthesis above; remediation WP-01.6).
+                    _record_usage(
+                        run_usage, family="focus", instance="focus",
+                        model=focus_model or default_focus_model(),
+                        input_tokens=fresult.input_tokens,
+                        output_tokens=fresult.output_tokens,
+                        parse_success=False, terminal_status="FAILED",
+                    )
             else:
                 focus_status = "SKIPPED_VALID"
                 _log.info(

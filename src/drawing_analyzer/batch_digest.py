@@ -87,6 +87,7 @@ from .core.api_config import (
     output_cap_for_model,
     refusal_fallback_target,
 )
+from .core.reply_text import reply_text
 from .core.terminal_outcome import REFUSED, classify_stop_reason
 from .core.tokenizer import estimate_image_tokens_total
 from .diagnostics import get_logger, request_id_of, summarize_exc
@@ -100,7 +101,6 @@ from .digest import (
     _clean_error,
     _get,
     _is_transient_error,
-    _message_text,
     _message_usage,
     _retry_backoff_seconds,
     build_digest_request_params,
@@ -2545,7 +2545,7 @@ def _digest_from_message(
     as ``fallback_model``; a finished one is cached under the slot's key, the
     requested model's (the owner's rule), like the server-side fallback's.
     """
-    raw_text = _message_text(message)
+    raw_text = reply_text(message)
     in_tok, out_tok = _message_usage(message)
     usage = _get(message, "usage")
     cache_read_tok = int(_get(usage, "cache_read_input_tokens", 0) or 0)

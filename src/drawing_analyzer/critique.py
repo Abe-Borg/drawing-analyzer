@@ -55,6 +55,7 @@ from .core.api_config import (
     model_supports_adaptive_thinking,
     model_supports_effort,
 )
+from .core.reply_text import reply_text
 from .core.structured_outputs import StructuredOutputsGate, attach_format
 from .core.terminal_outcome import REFUSED, classify_stop_reason
 from .diagnostics import get_logger
@@ -66,7 +67,6 @@ from .digest import (
     _clean_error,
     _get,
     _is_transient_error,
-    _message_text,
     _message_usage,
     _retry_backoff_seconds,
     stream_message,
@@ -1666,7 +1666,7 @@ def outcome_from_message(
     present, so a structured request whose constraint did not take and came back
     fenced anyway still parses on the ordinary path.
     """
-    raw = _message_text(message)
+    raw = reply_text(message)
     in_tok, out_tok = _message_usage(message)
     # Prompt-cache split (L2): on a cache hit/write the API reports the cached
     # image prefix in these separate counters and ``input_tokens`` is only the

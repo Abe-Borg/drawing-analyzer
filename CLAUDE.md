@@ -221,8 +221,8 @@ were 0, every batch item `succeeded`, a stream that always reached
 - **A mishandled shape is pinned, not fixed** (`tests/test_response_shapes.py`):
   what production gets right is asserted, and each defect is a
   `test_recorded_limit_*` that asserts today's behaviour and names the slice
-  that flips it (WP-01.6, WP-01.7, WP-06.3, WP-13.4, WP-14.1, WP-14.2,
-  WP-14.3; WP-01.5 flipped its two). A fix fails the test; the owner
+  that flips it (WP-01.7, WP-06.3, WP-13.4, WP-14.1, WP-14.2, WP-14.3;
+  WP-01.5 flipped its two, WP-01.6 its five). A fix fails the test; the owner
   re-baselines it.
 - **A background upload release finishes inside its test**: the autouse
   `background_release_joined` (`tests/conftest.py`) joins, at teardown, every
@@ -736,6 +736,50 @@ retried, and the harvest resubmitted it to the same model. Now:
   `noun="item"` and now keeps an errored read's type. Retrying a failed batch
   critique read is WP-01.8's.
 
+**One text join, and the remaining response consumers (remediation WP-01.6,
+U2, D-1; the owner's rules).**
+- **The join.** `core.reply_text.reply_text(resp, *, between="\n")` is the only
+  reader of a reply's text blocks; `digest._message_text` is gone and its 11
+  importers and the digest read this (a structural test fails if any module
+  tests a block for `type == "text"` itself). A streamed reply declined part
+  way comes back `[text, fallback, text]`, and the fallback model *continues*
+  the partial text, mid-word or inside the findings JSON (Anthropic's docs;
+  measured through the real SDK on 1.7.0 and 1.8.0, both namespaces, Opus 5.5
+  and Sonnet 5.5). So two text blocks with a `fallback` block anywhere between
+  them join with nothing; any other two with `between` (`"\n"`, as before), so
+  a reply without a fallback block reads byte-identical. A non-streamed decline
+  omits the partial (`[fallback, text]`). The plain namespace parses a
+  `fallback` block as a `TextBlock` with `type="fallback"`: read `type`, never
+  the class. WP-12.1 passes `between=""` for citation splits.
+- **The consumers.** The review planner, set identity, synthesis, the focus
+  report and the prose harvest's structuring call read no stop reason and
+  cached whatever parsed (synthesis and the focus report kept a refusal's
+  explanation as their text). Each now asks `digest.unfinished_reply_error`
+  first: `None` for a `FINISHED` reply (the stage's own parse then decides, in
+  its own wording), else the digest's ladder with the stage's noun (`refused
+  synthesis (stop_reason='refusal', category='cyber')`, `truncated identity
+  (…)`, `unfinished review plan (stop_reason=None)`). A non-finished read keeps
+  nothing and is cached by none: the planner and identity fail; synthesis and
+  the focus report fail with no text (nothing shipped, nothing harvested) and
+  their billed reply is one FAILED usage record (`result.replied`; a failed
+  one recorded nothing before); a harvest item takes its degraded entry, under
+  either structured-outputs contract (plan WP-09 step 6).
+- **Verification** reads the same classifier: every kind but `FINISHED` is "no
+  verdict", counted under the existing `truncated` counter (its meaning widened
+  to "did not finish"); the notes `no verdict (truncated at max_tokens)` and
+  `no verdict (declined by the model)` stay, and a context-window stop, `None`,
+  a continuation or an unknown reason now read `no verdict (context window
+  exceeded)` / `no verdict (unfinished: stop_reason=…)` instead of being parsed
+  as a verdict and cached. D-2 unchanged.
+- **The identity corpus** skips an errored sheet's digest text (its `[digest
+  failed: …]` line and its text-layer windows stay), so a refusal's
+  explanation no longer reaches the identity call.
+- **Cache:** `_SYNTHESIS_CACHE_CONTRACT`, `_FOCUS_CACHE_CONTRACT` and
+  `_HARVEST_CACHE_CONTRACT` are 2 (what an entry may hold changed; none stores
+  a stop reason). The planner, identity and verification keys have no term and
+  were left (recorded residuals, `_plans/DECISIONS.md`); the corpus rule
+  re-keys identity only for a set with an errored sheet that carried text.
+
 **CI gates (P9 item 42).** `pytest -m browser` writes a JUnit report and
 `scripts/check_browser_suite.py` fails the job below a floor of genuinely
 *executed* tests. Every test in that suite skips itself when Chromium will not
@@ -895,7 +939,8 @@ raise, after the paid digest and critique. Now:
 
 - *Planning (Phase A §20, universal reviewer):* `set_identity.py` — one text-only
   call over a budgeted corpus (every digest head + early text layers + verbatim
-  windows around each code-edition mention) → a bounded `SetIdentity`
+  windows around each code-edition mention; an errored sheet gives its `[digest
+  failed: …]` line, never its text, since remediation WP-01.6) → a bounded `SetIdentity`
   (disciplines, sheet→discipline map, jurisdiction, language, units, adopted
   codes with evidence quotes; the regex edition harvest unions in as
   `origin="regex"` — the backstop the model can't argue away). **Advisory only**:
@@ -1097,7 +1142,8 @@ raise, after the paid digest and critique. Now:
   (`run_manifest.json` `prose_accounting`). Ordinals count kept items, so
   dropping filler before a real item moves that item's `prose_item_id` once;
   no cache key holds one (the structuring key hashes the item, the sheet id,
-  the text layer and the source binding), so `_HARVEST_CACHE_CONTRACT` stays 1.
+  the text layer and the source binding), so WP-09.1 left
+  `_HARVEST_CACHE_CONTRACT` at 1 (it is 2 since remediation WP-01.6, below).
   `prose_harvest.py` (mirrors prose Coordination/Conflict items,
   synthesis conflicts, and opted-in focus items into findings — match first,
   one small structuring call for stragglers on **Sonnet 5.5** at `EFFORT_LOW`,
@@ -1600,7 +1646,9 @@ unchanged (`auditors.arithmetic._UNICODE_DASHES` is pinned to its dash fold).
   returns no verdict is now **counted** on `VerifyResult` — `malformed` /
   `truncated` / `failed`, a breakdown of `uncertain`, classified by
   `_degrade_kind` from the same validity flag and stop reason the parser
-  already produced and the call site used to discard — and
+  already produced and the call site used to discard (the stop reason through
+  `core.terminal_outcome` since remediation WP-01.6: `truncated` is every kind
+  but `FINISHED`) — and
   `degradation_note()` becomes one stage *warning*, because a run could not
   otherwise say whether its UNCERTAIN share came from the drawings or the
   parser. Those counts also **decide completeness** (remediation WP-01.1, N5,
@@ -1843,10 +1891,13 @@ author and left a rotated-key report dead.
 store with its `api_key_format.py` normalizer and shape check, pricing, tokenizer, the structured-outputs gate, and
 `terminal_outcome.py`, the one stop-reason classifier: D-1, adopted so far by the
 digest's two transports and, since remediation WP-01.4, the critique's (through
-the digest's ladder, `digest_terminal_error(..., noun="critique")`), and since
-WP-01.5 the batch refusal recovery (a `REFUSED` read is what it retries), with the
-other response consumers moving onto it in their WP-01 slices rather than
-growing a second copy). The tokenizer is
+the digest's ladder, `digest_terminal_error(..., noun="critique")`), since
+WP-01.5 the batch refusal recovery (a `REFUSED` read is what it retries), and
+since WP-01.6 the review planner, set identity, synthesis, the focus report, the
+prose harvest's structuring call and verification (below), with cross-QC
+(WP-06.3), the citation cache gate (WP-12.6) and the investigation (WP-13.4)
+moving onto it in their own slices rather than growing a second copy), and
+`reply_text.py`, the one text join (below). The tokenizer is
 estimate-only: `tiktoken` was removed — its only two callers had no callers,
 and it fetched its encoding from a third-party host on first use, which a
 locked-down workstation blocks — so the exact count is `count_tokens_via_api`
