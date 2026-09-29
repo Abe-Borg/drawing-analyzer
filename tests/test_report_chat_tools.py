@@ -2163,3 +2163,141 @@ def test_control_tool_turn_really_makes_two_requests(page, tmp_path):
           queue=[_tool_use_turn(), _text_turn("second round ran")])
     _ask(page, "search for something")
     assert len(page.evaluate("window.__REQ")) == 2, page.evaluate("window.__REQ.length")
+
+
+# --------------------------------------------------------------------------- #
+# Preserved thinking. Sonnet 5.5 (the chat default) and Opus 5.5 bind every
+# thinking block to the conversation it was produced in: the system prompt, the
+# tools and every earlier message. A transcript that is not replayed exactly
+# (another report's, or one trimmed to fit storage) would replay stale blocks,
+# which the API rejects with a 400 on the accounts it enforces the check for.
+# --------------------------------------------------------------------------- #
+
+_SIGNED = {"type": "thinking", "thinking": "REASONINGSUMMARY about VAV-3",
+           "signature": "c2lnbmF0dXJl"}
+
+
+def _transcript(report_id, *, truncated=False):
+    return {
+        "kind": "drawing_analyzer_chat_transcript",
+        "schema_version": 1,
+        "report": {"report_id": report_id, "title": "t", "generated": "g",
+                   "sources": ["a.pdf"], "model": "claude-sonnet-5-5"},
+        "saved_at": "2026-09-29T08:00:00.000Z",
+        "truncated": truncated,
+        "turns": [
+            {"message": {"role": "user", "content": "first question"},
+             "display": {"text": "first question", "excerpt": ""}},
+            {"message": {"role": "assistant", "content": [
+                dict(_SIGNED),
+                {"type": "text", "text": "Checking."},
+                {"type": "tool_use", "id": "c1", "name": "calculate",
+                 "input": {"expression": "2*3"}}]},
+             "display": {"notes": []}},
+            {"message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "c1", "content": "6"}]}},
+            {"message": {"role": "assistant", "content": [
+                {"type": "redacted_thinking", "data": "b3BhcXVl"},
+                {"type": "text", "text": "first answer"}]},
+             "display": {"notes": []}},
+            {"message": {"role": "user", "content": "second question"},
+             "display": {"text": "second question", "excerpt": ""}},
+            # Stopped while it was still thinking: nothing but a thinking block.
+            {"message": {"role": "assistant", "content": [dict(_SIGNED)]},
+             "display": {"notes": ["⏹ Stopped."]}},
+        ],
+    }
+
+
+def _block_types(messages):
+    return [
+        b.get("type")
+        for m in messages if isinstance(m.get("content"), list)
+        for b in m["content"] if isinstance(b, dict)
+    ]
+
+
+def _report_id(doc):
+    start = doc.index('id="da-chat-config"')
+    return json.loads(doc[doc.index(">", start) + 1: doc.index("</script>", start)])["reportId"]
+
+
+def _load_file(page, tmp_path, transcript):
+    path = tmp_path / "chat_history.json"
+    path.write_text(json.dumps(transcript), encoding="utf-8")
+    page.click("#da-chat-fab")
+    page.set_input_files("#da-chat-load-input", str(path))
+    page.wait_for_selector(".da-user", timeout=5000)
+
+
+def _follow_up(page):
+    page.fill("#da-chat-input", "follow up")
+    page.click("#da-chat-send")
+    _wait_turn(page)
+    return page.evaluate("window.__REQ")[-1]["messages"]
+
+
+def test_a_whole_transcript_from_this_report_replays_its_thinking_unchanged(page, tmp_path):
+    # The same conversation, exactly: the blocks are valid and carry reasoning
+    # the model can use, so they go back byte for byte.
+    page.on("dialog", lambda d: d.accept())
+    doc = _chat_doc()
+    _load(page, doc, tmp_path, queue=[_text_turn("ok.")])
+    transcript = _transcript(_report_id(doc))
+    transcript["turns"] = transcript["turns"][:4]   # ends on a finished answer
+    _load_file(page, tmp_path, transcript)
+
+    # The reasoning summary is on screen, and goes back byte for byte.
+    assert "REASONINGSUMMARY" in page.eval_on_selector("#da-chat-msgs", "el => el.textContent")
+    sent = _follow_up(page)
+    assert sent[1]["content"][0] == _SIGNED
+    assert _block_types(sent).count("redacted_thinking") == 1
+
+
+def test_a_transcript_from_another_report_is_resumed_without_thinking(page, tmp_path):
+    # Another report means another system prompt, so every block in it is bound
+    # to a conversation this one is not. All of them go, not some: a block can
+    # only be dropped from the front of the run.
+    page.on("dialog", lambda d: d.accept())
+    _load(page, _chat_doc(), tmp_path, queue=[_text_turn("ok.")])
+    _load_file(page, tmp_path, _transcript("deadbeefdeadbeef"))
+
+    # The screen shows the thread that will be sent: no reasoning summary, and
+    # not the question whose only answer was thinking.
+    shown = page.eval_on_selector("#da-chat-msgs", "el => el.textContent")
+    assert "REASONINGSUMMARY" not in shown and "second question" not in shown
+    sent = _follow_up(page)
+    types = _block_types(sent)
+    assert "thinking" not in types and "redacted_thinking" not in types
+    # The visible work stays: the tool call, its answer and the text.
+    assert types.count("tool_use") == 1 and types.count("tool_result") == 1
+    assert sent[1]["content"][0] == {"type": "text", "text": "Checking."}
+    # The turn that was only thinking had nothing left to send: an empty
+    # assistant message is a 400, and the unanswered question before it is
+    # rewound like any other unfinished tail.
+    assert all(m["content"] for m in sent)
+    assert [m["role"] for m in sent] == ["user", "assistant", "user", "assistant", "user"]
+    assert _sent_text(sent[-1]) == "follow up"
+    # ...and the thread saved for the next visit is the one that was sent.
+    assert "thinking" not in json.dumps(_stored(page)["turns"])
+
+
+def test_a_trimmed_transcript_restored_from_storage_is_resumed_without_thinking(page, tmp_path):
+    # Trimming to fit localStorage drops the OLDEST turns, so every block that
+    # survives was produced with history in front of it that is now gone.
+    doc = _chat_doc()
+    stored = _transcript(_report_id(doc), truncated=True)
+    stored["turns"] = stored["turns"][:4]
+    page.add_init_script(
+        "localStorage.setItem(" + json.dumps("da-chat-tx-" + _report_id(doc)) + ", "
+        + json.dumps(json.dumps(stored)) + ");"
+    )
+    _load(page, doc, tmp_path, queue=[_text_turn("ok.")])
+    page.click("#da-chat-fab")
+    page.wait_for_selector(".da-user", timeout=5000)
+
+    sent = _follow_up(page)
+    types = _block_types(sent)
+    assert "thinking" not in types and "redacted_thinking" not in types
+    assert types.count("tool_use") == 1
+    assert [m["role"] for m in sent] == ["user", "assistant", "user", "assistant", "user"]

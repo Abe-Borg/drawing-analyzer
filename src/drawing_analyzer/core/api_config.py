@@ -5,29 +5,30 @@ beta headers, web-search tool configuration, and request-shape policy
 (prompt caching, adaptive thinking, effort).
 
 Model identifiers may be overridden via env vars:
-    DRAWING_ANALYZER_MODEL                — review (default Opus 5).
+    DRAWING_ANALYZER_MODEL                — review (default Opus 5.5).
     DRAWING_ANALYZER_VERIFICATION_MODEL          — verification initial pass
-                                               (default Sonnet 5).
+                                               (default Sonnet 5.5).
     DRAWING_ANALYZER_VERIFY_MODEL                — legacy verification alias;
                                                takes precedence when set.
-    DRAWING_ANALYZER_VERIFICATION_ESCALATION_MODEL — escalation (default Opus 5).
+    DRAWING_ANALYZER_VERIFICATION_ESCALATION_MODEL — escalation (default Opus 5.5).
     DRAWING_ANALYZER_INVESTIGATION_MODEL  — the agentic investigation loop
                                               (default: the escalation model).
     DRAWING_ANALYZER_IDENTITY_MODEL       — the set-identity harvest
-                                              (default Sonnet 5; advisory-only,
+                                              (default Sonnet 5.5; advisory-only,
                                               with a regex edition backstop).
     DRAWING_ANALYZER_HARVEST_MODEL        — the prose-straggler structuring call
-                                              (default Sonnet 5; pure
+                                              (default Sonnet 5.5; pure
                                               structuring at low effort).
     DRAWING_ANALYZER_CITATION_MODEL       — the citation check (default
-                                              Sonnet 5; needs web fetch, which
+                                              Sonnet 5.5; needs web fetch, which
                                               Opus 5 lacks).
     DRAWING_ANALYZER_CHAT_MODEL           — the in-report Q&A assistant
-                                              (default Sonnet 5; needs web
+                                              (default Sonnet 5.5; needs web
                                               fetch, which Opus 5 lacks).
-    DRAWING_ANALYZER_REFUSAL_FALLBACK     — the Opus 5 server-side refusal
-                                              fallback (default on; any falsy
-                                              value disables it — see
+    DRAWING_ANALYZER_REFUSAL_FALLBACK     — the server-side refusal fallback for
+                                              every model that declares it
+                                              (default on; any falsy value
+                                              disables it — see
                                               apply_refusal_fallback).
 """
 from __future__ import annotations
@@ -43,20 +44,33 @@ _log = logging.getLogger(__name__)
 # Model identifiers (centralized)
 # ---------------------------------------------------------------------------
 
-MODEL_OPUS_5 = "claude-opus-5"
-MODEL_SONNET_5 = "claude-sonnet-5"
-# Previous generation. No longer a default anywhere, but still active models
+MODEL_OPUS_55 = "claude-opus-5-5"
+MODEL_SONNET_55 = "claude-sonnet-5-5"
+# Previous generations. No longer a default anywhere, but still active models
 # and still fully registered below, so pinning one via a
 # ``DRAWING_ANALYZER_*_MODEL`` env var keeps full capabilities instead of
-# falling through to the conservative unknown-model defaults.
+# falling through to the conservative unknown-model defaults. Opus 5 and
+# Opus 4.8 are also the refusal-fallback targets for Opus 5.5, and Sonnet 5 is
+# Sonnet 5.5's, so a fallback-served reply always comes from a registered model.
+MODEL_OPUS_5 = "claude-opus-5"
+MODEL_SONNET_5 = "claude-sonnet-5"
 MODEL_OPUS_48 = "claude-opus-4-8"
 MODEL_SONNET_46 = "claude-sonnet-4-6"
 MODEL_HAIKU_45 = "claude-haiku-4-5"
 
 # Review runs on the current Opus flagship; verification runs on Sonnet for
-# every finding it checks. Defaults track the newest generation (Opus 5 /
-# Sonnet 5). Override any of these via the matching ``DRAWING_ANALYZER_*_MODEL``
+# every finding it checks. Defaults track the newest generation (Opus 5.5 /
+# Sonnet 5.5). Override any of these via the matching ``DRAWING_ANALYZER_*_MODEL``
 # env var.
+#
+# The 5.5 models reject two request shapes their predecessors accepted, and
+# the pipeline sends neither: ``thinking: {"type": "disabled"}`` (every request
+# states ``{"type": "adaptive"}``, see :func:`thinking_config_for`) and a forced
+# ``tool_choice`` of ``any`` / ``tool`` (its only ``tool_choice`` is the
+# investigation loop's ``none`` for the closing turn, which they accept). They
+# also bind each thinking block to the conversation it was produced in (the
+# system prompt, the tools and every earlier message), so a multi-turn caller
+# must only append to its history; the investigation loop does.
 #
 # WP-07 §12.13: this comment used to say verification "reserves Opus for
 # escalation on CRITICAL/HIGH UNVERIFIED findings". Three things were wrong
@@ -70,15 +84,15 @@ MODEL_HAIKU_45 = "claude-haiku-4-5"
 # all — the statuses are VERIFIED / REJECTED / UNCERTAIN / DETERMINISTIC /
 # SKIPPED. A reader tuning cost from this comment would have looked for a
 # severity gate that was never there.
-REVIEW_MODEL_DEFAULT = os.environ.get("DRAWING_ANALYZER_MODEL", MODEL_OPUS_5)
-CROSS_CHECK_MODEL_DEFAULT = MODEL_SONNET_5
+REVIEW_MODEL_DEFAULT = os.environ.get("DRAWING_ANALYZER_MODEL", MODEL_OPUS_55)
+CROSS_CHECK_MODEL_DEFAULT = MODEL_SONNET_55
 VERIFICATION_MODEL_DEFAULT = os.environ.get(
-    "DRAWING_ANALYZER_VERIFICATION_MODEL", MODEL_SONNET_5
+    "DRAWING_ANALYZER_VERIFICATION_MODEL", MODEL_SONNET_55
 )
 
 # Model used when escalating a low-confidence/high-severity verification.
 VERIFICATION_ESCALATION_MODEL = os.environ.get(
-    "DRAWING_ANALYZER_VERIFICATION_ESCALATION_MODEL", MODEL_OPUS_5
+    "DRAWING_ANALYZER_VERIFICATION_ESCALATION_MODEL", MODEL_OPUS_55
 )
 
 # The Q&A assistant embedded in the HTML report (html_report.py) calls the API
@@ -86,19 +100,21 @@ VERIFICATION_ESCALATION_MODEL = os.environ.get(
 # `web_search_20260209` / `web_fetch_20260209` server tools and adaptive
 # thinking.
 #
-# This is why chat is the one role that does NOT default to Opus 5: web fetch is
-# not available on Opus 5 (Anthropic's Opus 5 migration guide lists it as one of
-# two exceptions to Opus 4.8 feature parity, alongside Priority Tier). Sending
-# the tool anyway is a 400, which would break the widget on every question.
-# Sonnet 5 supports both server tools plus adaptive thinking, and is cheaper —
-# which matters more here than elsewhere, since this call is billed to the
-# report *reader's* key, not the run's.
+# Chat does NOT default to the Opus flagship. It began as a capability rule: web
+# fetch is not available on Opus 5 (Anthropic's Opus 5 migration guide lists it
+# as one of two exceptions to Opus 4.8 feature parity, alongside Priority Tier),
+# and sending the tool anyway is a 400 that would break the widget on every
+# question. Opus 5.5 has web fetch again (Anthropic's web-fetch reference is
+# written against ``claude-opus-5-5``), so on the 5.5 generation the reason is
+# cost: Sonnet 5.5 supports both server tools plus adaptive thinking at half
+# Opus 5.5's price, which matters more here than elsewhere, since this call is
+# billed to the report *reader's* key, not the run's.
 #
 # The requirement is enforced, not just documented: ``supports_web_fetch`` in
 # the capability registry gates the emitted tool list (html_report.py), so an
 # override to a model without web fetch degrades to search-only rather than
 # 400-ing, and a test asserts this default keeps both capabilities.
-CHAT_MODEL_DEFAULT = os.environ.get("DRAWING_ANALYZER_CHAT_MODEL", MODEL_SONNET_5)
+CHAT_MODEL_DEFAULT = os.environ.get("DRAWING_ANALYZER_CHAT_MODEL", MODEL_SONNET_55)
 
 
 # Opus family membership. This set answers exactly one question — "is this
@@ -108,9 +124,9 @@ CHAT_MODEL_DEFAULT = os.environ.get("DRAWING_ANALYZER_CHAT_MODEL", MODEL_SONNET_
 #
 # It is NOT a capability proxy. Output ceilings, effort levels, and the hi-res
 # vision tier are all per-model facts that live in ``_MODEL_CAPABILITIES`` —
-# Sonnet 5, for instance, matches Opus on all three. Register a new model
-# there; only add it here if it should be treated as an escalation tier.
-OPUS_MODELS = frozenset({MODEL_OPUS_5, MODEL_OPUS_48})
+# Sonnet 5 and Sonnet 5.5, for instance, match Opus on all three. Register a new
+# model there; only add it here if it should be treated as an escalation tier.
+OPUS_MODELS = frozenset({MODEL_OPUS_55, MODEL_OPUS_5, MODEL_OPUS_48})
 
 
 # ---------------------------------------------------------------------------
@@ -270,8 +286,8 @@ def assert_extended_output_allowed(
 
     The threshold is the *selected model's* baseline (non-beta) output ceiling
     (TRUST_AUDIT P2-3), derived from the single :func:`output_cap_for_model`
-    source of truth — 128k on Opus 5 / Sonnet 5 / Opus 4.8 / Sonnet 4.6, 64k
-    on Haiku. Passing ``model`` makes the guard correct for the 64k tier
+    source of truth — 128k on Opus 5.5 / Sonnet 5.5 / Opus 5 / Sonnet 5 /
+    Opus 4.8 / Sonnet 4.6, 64k on Haiku. Passing ``model`` makes the guard correct for the 64k tier
     (whose baseline is below the old hardcoded 128k threshold, so a 64k–128k
     request on such a model without the beta would have slipped past). When
     ``model`` is omitted the guard falls back to the highest baseline ceiling
@@ -323,8 +339,9 @@ EFFORT_XHIGH = "xhigh"
 EFFORT_MAX = "max"
 
 # The two rosters currently in play. Per Anthropic's effort reference:
-# ``xhigh`` is available on Opus 5 / Opus 4.8 / Opus 4.7 (and Fable/Mythos 5)
-# and on Sonnet 5; Sonnet 4.6 supports ``max`` but not ``xhigh``.
+# ``xhigh`` is available on Opus 5.5 / Opus 5 / Opus 4.8 / Opus 4.7 (and
+# Fable/Mythos 5) and on Sonnet 5.5 / Sonnet 5; Sonnet 4.6 supports ``max`` but
+# not ``xhigh``.
 _EFFORT_LEVELS_FULL = frozenset(
     {EFFORT_LOW, EFFORT_MEDIUM, EFFORT_HIGH, EFFORT_XHIGH, EFFORT_MAX}
 )
@@ -356,7 +373,8 @@ class ModelCapabilities:
     # Whether the model accepts the ``web_fetch_*`` server tool. NOT implied by
     # web-search support or by generation: Opus 5 supports web search but not
     # web fetch (one of the two documented exceptions to its otherwise-complete
-    # Opus 4.8 feature parity), while Sonnet 5 supports both. Sending the tool
+    # Opus 4.8 feature parity), while its successor Opus 5.5 supports both, as
+    # do Sonnet 5 and Sonnet 5.5. Sending the tool
     # to a model without it is a 400 that kills the whole request, so any
     # caller assembling a tool list must gate on this. Default ``False`` so an
     # unregistered model never has the tool sent on its behalf.
@@ -388,7 +406,8 @@ class ModelCapabilities:
     # flag on a tool definition. One capability for both because the API ships
     # them as one feature with one model roster — a model that takes a
     # constrained response takes a constrained tool argument. Anthropic lists
-    # Opus 5, Opus 4.8, Sonnet 5 and Haiku 4.5 as supported; Sonnet 4.6 is
+    # Opus 5.5, Opus 5, Opus 4.8, Sonnet 5.5, Sonnet 5 and Haiku 4.5 as
+    # supported; Sonnet 4.6 is
     # absent from that roster and so declares ``False`` here even though it is
     # otherwise a current model, which is exactly why this is a registry
     # capability and not a generation test (the same rule
@@ -404,12 +423,58 @@ class ModelCapabilities:
 
 
 # Profiles verified against Anthropic's models overview and effort reference.
-# The models overview states that Opus 5, Opus 4.8, Opus 4.7, Opus 4.6,
-# Sonnet 5, and Sonnet 4.6 all support 300k batch output via the
-# ``output-300k-2026-03-24`` header, and lists a 128k synchronous max output
-# and 1M context for each. Registering a model here is what unlocks its full
-# capabilities; unregistered ids fall through to the conservative defaults.
+# The models overview states that Opus 5.5, Opus 5, Opus 4.8, Opus 4.7,
+# Opus 4.6, Sonnet 5.5, Sonnet 5, and Sonnet 4.6 all support 300k batch output
+# via the ``output-300k-2026-03-24`` header, and lists a 128k synchronous max
+# output and 1M context for each. Registering a model here is what unlocks its
+# full capabilities; unregistered ids fall through to the conservative defaults.
 _MODEL_CAPABILITIES: dict[str, ModelCapabilities] = {
+    MODEL_OPUS_55: ModelCapabilities(
+        # Opus 5.5 is Opus 5's successor with the same context window, output
+        # ceiling and tokenizer, so every flag but web fetch matches Opus 5's.
+        # The rest of what differs is request policy, not capability: thinking
+        # cannot be disabled at all (this app never tries), a forced
+        # ``tool_choice`` is a 400 (never sent), and the API's default effort is
+        # ``medium`` rather than ``high`` (every request here states its level).
+        supports_adaptive_thinking=True,
+        max_output_tokens=MAX_OUTPUT_TOKENS_128K,
+        supports_extended_output_beta=True,
+        context_window=1_000_000,
+        supported_effort_levels=_EFFORT_LEVELS_FULL,
+        supports_hires_vision=True,
+        # Unlike Opus 5, Opus 5.5 takes web fetch: Anthropic's web-fetch tool
+        # reference is written against ``claude-opus-5-5``, and its migration
+        # guide lists no tool exception against Opus 4.8 (only Priority Tier).
+        supports_web_fetch=True,
+        supports_web_search=True,
+        # Its classifiers are broader than Opus 5's (``bio`` and
+        # ``reasoning_extraction`` join ``cyber``), and the fallback routes a
+        # decline to Opus 5 or Opus 4.8 by category. A ``reasoning_extraction``
+        # decline is not retried.
+        supports_refusal_fallback=True,
+        supports_structured_outputs=True,
+    ),
+    MODEL_SONNET_55: ModelCapabilities(
+        # Sonnet 5's successor: same tokenizer, output ceiling, context window
+        # and tools. Its effort levels are recalibrated (the same name no
+        # longer buys the same amount of thinking), which changes cost, not
+        # which levels are accepted.
+        supports_adaptive_thinking=True,
+        max_output_tokens=MAX_OUTPUT_TOKENS_128K,
+        supports_extended_output_beta=True,
+        context_window=1_000_000,
+        supported_effort_levels=_EFFORT_LEVELS_FULL,
+        supports_hires_vision=True,
+        supports_web_fetch=True,
+        supports_web_search=True,
+        # Sonnet 5.5 declines in five categories (``cyber``, ``bio``,
+        # ``frontier_llm``, ``reasoning_extraction``, ``general_harms``). The
+        # ``"default"`` fallback, which is the form this app sends, retries the
+        # ``cyber`` and ``frontier_llm`` declines on Sonnet 5 and returns the
+        # rest as refusals.
+        supports_refusal_fallback=True,
+        supports_structured_outputs=True,
+    ),
     MODEL_OPUS_5: ModelCapabilities(
         supports_adaptive_thinking=True,
         max_output_tokens=MAX_OUTPUT_TOKENS_128K,
@@ -425,9 +490,10 @@ _MODEL_CAPABILITIES: dict[str, ModelCapabilities] = {
         supports_web_search=True,
         # Opus 5's elevated safety classifiers can decline a request outright
         # (``stop_reason="refusal"``, HTTP 200), which is what the fallback
-        # exists to absorb. Deliberately the only model that declares it: Opus
-        # 4.8 is the fallback TARGET, not a source, and turning it on for a
-        # model whose platform has not enabled the beta would trip the
+        # exists to absorb. Declared only for the models Anthropic recommends
+        # the ``"default"`` fallback on (Opus 5.5, Opus 5, Sonnet 5.5): Opus 4.8
+        # and Sonnet 5 are fallback TARGETS, not sources, and turning it on for
+        # a model whose platform has not enabled the beta would trip the
         # process-wide self-healing latch for everyone.
         supports_refusal_fallback=True,
         supports_structured_outputs=True,
@@ -604,9 +670,10 @@ def model_supports_extended_output_beta(model: str) -> bool:
     """Whether ``model`` is eligible for the 300k batch-output beta.
 
     The extended-output decision must read from the capability
-    registry rather than testing ``model in OPUS_MODELS``: Opus 5, Opus 4.8,
-    Sonnet 5, and Sonnet 4.6 all support the ``output-300k-2026-03-24`` beta
-    on Message Batches, which a family-style check would wrongly exclude.
+    registry rather than testing ``model in OPUS_MODELS``: Opus 5.5, Opus 5,
+    Opus 4.8, Sonnet 5.5, Sonnet 5, and Sonnet 4.6 all support the
+    ``output-300k-2026-03-24`` beta on Message Batches, which a family-style
+    check would wrongly exclude.
 
     NOT WIRED: no production caller today (only ``tests/test_model_capabilities.py``).
     The drawing pipeline never requests extended output — ``review_max_tokens``'s
@@ -626,13 +693,15 @@ def thinking_config_for(*, model: str, phase: str) -> dict | None:
     ``thinking=null``.
 
     There is deliberately no "this phase opts out of thinking" escape hatch.
-    On Opus 5 and Sonnet 5, *omitting* ``thinking`` runs adaptive thinking
-    anyway (a behavior change from Opus 4.8/4.7, where omitting meant off), so
-    an opt-out list bought nothing but the illusion of one — and Anthropic
-    advises lowering ``effort`` over sending ``{"type": "disabled"}``, which
-    can leak reasoning tags into a response we parse as JSON. A phase that
-    wants cheap, shallow work registers ``EFFORT_LOW`` in
-    :data:`_PHASE_DEFAULT_EFFORT` instead.
+    On Opus 5.5 / Sonnet 5.5 (as on Opus 5 / Sonnet 5), *omitting* ``thinking``
+    runs adaptive thinking anyway (a behavior change from Opus 4.8/4.7, where
+    omitting meant off), so an opt-out list bought nothing but the illusion of
+    one — and Anthropic advises lowering ``effort`` over sending
+    ``{"type": "disabled"}``, which can leak reasoning tags into a response we
+    parse as JSON. On the 5.5 models ``{"type": "disabled"}`` is not even
+    accepted: it is a 400 at every effort level. A phase that wants cheap,
+    shallow work registers ``EFFORT_LOW`` in :data:`_PHASE_DEFAULT_EFFORT`
+    instead.
     """
     if not model_supports_adaptive_thinking(model):
         return None
@@ -669,8 +738,9 @@ def apply_thinking_config(kwargs: dict, *, model: str, phase: str) -> dict:
 # The level roster is per-model and does not follow family lines, so a coarse
 # "supports effort" boolean is not enough: sending an unsupported *level*
 # 400s just as surely as sending the field to a model with no effort support
-# ("This model does not support effort level 'xhigh'"). Opus 5, Opus 4.8, and
-# Sonnet 5 accept ``xhigh``; Sonnet 4.6 accepts ``max`` but not ``xhigh``.
+# ("This model does not support effort level 'xhigh'"). Opus 5.5, Opus 5,
+# Opus 4.8, Sonnet 5.5 and Sonnet 5 accept ``xhigh``; Sonnet 4.6 accepts ``max``
+# but not ``xhigh``.
 # :func:`effort_config_for` therefore clamps every level against the model's
 # registered ``supported_effort_levels`` via :func:`_clamp_effort_for_model`.
 #
@@ -685,8 +755,18 @@ def apply_thinking_config(kwargs: dict, *, model: str, phase: str) -> dict:
 # ``digest_cache.digest_cache_key`` / ``critique_cache_key``), so the entry
 # moved to the level the stages actually send. The request bytes are unchanged;
 # what changed is that there is now one source of truth to tune. Raising it is
-# a deliberate, separately-priced decision — and one worth an eval first, since
-# ``high`` is also what the API applies when the field is omitted.
+# a deliberate, separately-priced decision — and one worth an eval first.
+#
+# The 5.5 models make that eval more pressing, not less. Their levels do not
+# map 1:1 onto the 5 generation's: Anthropic reports Opus 5.5 thinking more per
+# turn than Opus 5 at the same level, and at ``medium`` beating Opus 5 at
+# ``high`` on its coding and knowledge-work evaluations; Sonnet 5.5's levels
+# are recalibrated outright. The registry keeps
+# the levels the stages ran at on Opus 5 / Sonnet 5 until an A/B run
+# (``scripts/ab_sweep_drawing_analyzer.py``) measures a better one. Opus 5.5
+# also changed the API's own default to ``medium`` (``high`` on every other
+# model here), so an omitted level would now run lower; every request states
+# its level, so nothing here depends on the default.
 #
 # PHASE_CROSS_CHECK keeps its ``xhigh`` and remains orphaned: it is inherited
 # from the spec-review lineage and still has no call site in the drawing
@@ -709,7 +789,7 @@ def apply_thinking_config(kwargs: dict, *, model: str, phase: str) -> dict:
 # - Sonnet verification (PHASE_VERIFICATION{,_RETRY,_CONTINUATION}): medium.
 # - Opus verification (i.e. escalation): high.
 # - Digest / critique (PHASE_REVIEW): high — the level both stages have always
-#   sent, and the level the API applies when the field is omitted.
+#   sent (the API's own default on every model here but Opus 5.5).
 # - Deep review (PHASE_CROSS_CHECK): xhigh, clamped to high on any model whose
 #   roster lacks it (Sonnet 4.6 and older).
 # - Harvest: low. Structuring one prose item into a Finding is formatting, not
@@ -735,10 +815,10 @@ _PHASE_DEFAULT_EFFORT: dict[str, str] = {
     PHASE_HARVEST: EFFORT_LOW,
     PHASE_CITATION: EFFORT_MEDIUM,
     # Cross-sheet QC: high — the same level its sibling stages (digest,
-    # critique, synthesis, focus, plan) pass explicitly, and the level the API
-    # already applies when the field is omitted. Registering it changes no
-    # request today; it makes the value explicit and tunable in one place,
-    # which is what §C asks for.
+    # critique, synthesis, focus, plan) pass explicitly. Registering it made the
+    # value explicit and tunable in one place, which is what §C asks for, and on
+    # Opus 5.5 it is what keeps the stage at ``high``: that model's API default
+    # is ``medium``.
     PHASE_CROSS_QC: EFFORT_HIGH,
 }
 
@@ -759,10 +839,10 @@ def _clamp_effort_for_model(level: str, model: str) -> str:
     default is filtered through the model's registered
     ``supported_effort_levels``. Anything the model accepts passes through
     unchanged; anything it does not degrades to ``high``, which every
-    effort-capable model in the registry supports and which the API also
-    treats as the default. That is what keeps a phase registered at
-    ``xhigh`` (review, cross-check) from failing on Sonnet 4.6, while
-    letting the same phase actually run at ``xhigh`` on Opus 5 / Sonnet 5.
+    effort-capable model in the registry supports. That is what keeps a phase
+    registered at ``xhigh`` (review, cross-check) from failing on Sonnet 4.6,
+    while letting the same phase actually run at ``xhigh`` on the Opus and
+    Sonnet 5 / 5.5 models.
 
     Callers reach this only after :func:`model_supports_effort` has confirmed
     a non-empty roster, so the fallback is never attached to a model that
@@ -814,7 +894,7 @@ def effort_config_for(*, model: str, phase: str) -> dict | None:
     default from :data:`_PHASE_DEFAULT_EFFORT`. Every level is filtered
     through :func:`_clamp_effort_for_model` so it is one the model actually
     accepts — on Sonnet 4.6 that still drops ``xhigh`` to ``high``, while on
-    Opus 5 / Sonnet 5 it passes through.
+    the Opus and Sonnet 5 / 5.5 models it passes through.
     """
     if not model_supports_effort(model):
         return None
@@ -1300,31 +1380,43 @@ def extract_cache_diagnostics(message) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
-# Refusal fallback (Opus 5 elevated safety classifiers)
+# Refusal fallback (safety classifiers on Opus 5.5 / Sonnet 5.5 / Opus 5)
 # ---------------------------------------------------------------------------
 #
 # Claude Opus 5 ships with elevated cybersecurity safeguards whose classifiers
 # can decline a request outright — HTTP 200, ``stop_reason="refusal"`` — rather
-# than erroring. A construction-drawing review is unlikely to trip them, but an
-# unrecovered false positive would silently drop that sheet/finding's coverage
-# (I-1) with no distinguishing signal from any other empty/garbled response.
-# Anthropic recommends every Opus 5 caller opt into ``fallbacks: "default"``,
-# which re-runs a declined request server-side on the recommended substitute
-# (cyber-category refusals route to Opus 4.8) inside the same call — sticky for
-# the rest of that turn, billed at the serving model's own rate. Opus 4.8 is
-# registered in ``_MODEL_CAPABILITIES`` with the exact same effort / thinking /
-# output-cap / hi-res-vision support and the exact same $5/$25-per-MTok pricing
-# as Opus 5, and nothing downstream branches on ``response.model`` — so a
-# fallback changes nothing about this app's request shape, capabilities, or
-# billing; it only recovers a call that would otherwise come back empty.
+# than erroring. Opus 5.5 widens the set (``bio`` and ``reasoning_extraction``
+# join ``cyber``) and Sonnet 5.5 declines in five categories. A
+# construction-drawing review is unlikely to trip them, but an unrecovered false
+# positive would silently drop that sheet/finding's coverage (I-1) with no
+# distinguishing signal from any other empty/garbled response. Anthropic
+# recommends that every caller of these models opt into ``fallbacks: "default"``,
+# which re-runs a declined request server-side on the substitute it recommends
+# for that refusal category, inside the same call — sticky for the rest of that
+# turn, billed at the serving model's own rate. The substitutes are all
+# registered: Opus 5 and Opus 4.8 for Opus 5.5, Opus 4.8 for Opus 5, and Sonnet
+# 5 for Sonnet 5.5 (which retries only its ``cyber`` and ``frontier_llm``
+# declines). Each has the same effort / thinking / output-cap / hi-res-vision
+# support as the model it stands in for, and nothing downstream branches on
+# ``response.model``, so a fallback changes nothing about this app's request
+# shape or capabilities; it only recovers a call that would otherwise come back
+# empty. It does not bring the declining model's thinking blocks with it: the
+# API drops the ones the substitute cannot read, unbilled, and the request
+# still succeeds.
+#
+# Billing is the one place a fallback shows. The ledger prices a call at the
+# model it requested (recorded limit, remediation WP-14.3), and the Opus
+# substitutes bill $5/$25 per MTok where Opus 5.5 bills $4/$20, so a
+# fallback-served Opus 5.5 call is under-stated by a fifth. Sonnet 5 costs what
+# Sonnet 5.5 does.
 #
 # Real-time (non-batch) calls only: the parameter is rejected outright on the
 # Message Batches API, which is how the standard review path submits its bulk
-# of Opus 5 traffic (Phase 23A) — so this only ever applies where a caller
-# already uses the synchronous/streaming transport: the inline Files-API-outage
-# fallback and the direct-call batch rescue (:mod:`drawing_analyzer.batch_digest`,
-# via :func:`drawing_analyzer.digest.stream_message`), verification escalation,
-# and the investigation loop.
+# of digest traffic (Phase 23A). Every real-time call goes through
+# :func:`call_with_refusal_fallback` (directly, or via
+# :func:`drawing_analyzer.digest.stream_message`), so the declaring model alone
+# decides: with the 5.5 defaults that is every real-time stage, the Sonnet ones
+# (identity, verification, citation, harvest) included.
 REFUSAL_FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 ENV_REFUSAL_FALLBACK = "DRAWING_ANALYZER_REFUSAL_FALLBACK"
@@ -1335,7 +1427,7 @@ ENV_REFUSAL_FALLBACK = "DRAWING_ANALYZER_REFUSAL_FALLBACK"
 # documented as unavailable on Bedrock/Vertex/Foundry), and unlike the
 # investigation loop's own task budgets, digest/critique/verification are not
 # optional QC add-ons — they are the core deliverable. A rejection must never
-# be allowed to turn every subsequent Opus 5 call into a permanent failure, so
+# be allowed to turn every subsequent call into a permanent failure, so
 # (mirroring investigate.py's ``_task_budget_available`` latch) the first
 # fallback-specific rejection turns the feature off for the rest of the
 # process and every call reverts to the plain (non-beta) transport.
@@ -1345,7 +1437,7 @@ _REFUSAL_FALLBACK_REJECTION_MARKERS = ("fallback", REFUSAL_FALLBACK_BETA)
 
 
 def refusal_fallback_enabled() -> bool:
-    """Whether to attach the Opus 5 refusal-fallback parameter. Default ON.
+    """Whether to attach the refusal-fallback parameter. Default ON.
 
     Opt out via ``DRAWING_ANALYZER_REFUSAL_FALLBACK`` set to a falsy value —
     an operator debugging a raw refusal (rather than its recovered fallback)
@@ -1415,8 +1507,8 @@ def messages_namespace(client: Any, kwargs: dict):
 
 
 def call_with_refusal_fallback(client: Any, kwargs: dict, *, model: str, method: str) -> Any:
-    """Issue one Messages request, opting Opus 5 into the refusal fallback and
-    self-healing if the platform rejects the beta/parameter itself.
+    """Issue one Messages request, opting a declaring model into the refusal
+    fallback and self-healing if the platform rejects the beta/parameter itself.
 
     ``method`` is ``"create"`` (returns the ``Message`` directly) or
     ``"stream"`` (the context manager is entered and exited here, so callers

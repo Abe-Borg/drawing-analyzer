@@ -197,7 +197,7 @@ were 0, every batch item `succeeded`, a stream that always reached
   SDK's union member for its type, `batch_errored_result` nested. A fake reply
   production echoes into its next request (the investigation's assistant turn)
   now serializes: with dataclass fakes 41 tests failed if every fake request was
-  built by the real SDK. `FakeMessage`'s model defaults to `claude-opus-5` but is
+  built by the real SDK. `FakeMessage`'s model defaults to `claude-opus-5-5` but is
   not recorded as given, which is how the stub tells it from a named model. The
   cache counters default to 0, the ordinary reply's; `None` is an explicit shape.
 - **`FinalMessageStream(message, cut=, end=)` fails as the SDK's stream does**
@@ -279,7 +279,11 @@ real-time record on the call count alone — the old `if X.api_calls or not
 X.cache_hits` fired exactly in the no-work case it meant to exclude, so a
 verification that verified nothing still reported two real-time calls.
 `core.pricing.usage_record_cost` prices one record by its rate class; costs carry a
-`PRICING_EFFECTIVE_DATE`. `RunUsage.is_billable_but_unpriced` is the single rule
+`PRICING_EFFECTIVE_DATE`. The cache-read rate is the price row's own
+(`ModelPrice.cache_read_multiplier`: 0.05x on Opus 5.5, 0.1x elsewhere); writes
+are 1.25x / 2x on every model. `price_for` resolves a dated or `-fast` variant
+by prefix, but never a short numeric segment: `claude-opus-5-5` is a different
+model from `claude-opus-5`, not a variant of it. `RunUsage.is_billable_but_unpriced` is the single rule
 for "this consumed billable usage the table cannot price", and it counts **cache
 read/write tokens** as usage: omitting them let a record carrying 180k cache
 tokens under an unpriceable model pass as "no usage", so a run with one $5.00
@@ -554,8 +558,9 @@ partial text with `stop_reason=None` and raises nothing; one that lacks only
 `tool_use` / `pause_turn` / the beta `compaction` are
 continuations the digest never takes; anything else is unknown, never finished.
 The table is pinned by test to the installed SDK's `StopReason` ∪
-`BetaStopReason`, since Opus 5 calls travel the beta namespace for the refusal
-fallback, so an SDK upgrade that adds a reason fails until it is classified.
+`BetaStopReason`, since calls to a model that declares the refusal fallback
+(Opus 5.5, Sonnet 5.5, Opus 5) travel the beta namespace, so an SDK upgrade
+that adds a reason fails until it is classified.
 Both transports (and the batch direct-call rescue, and the Files-API inline
 fallback) share **one ladder**, `digest.digest_terminal_error` (a refusal is
 named even when empty; the text stays on the sheet for the export), **one write
@@ -818,7 +823,7 @@ raise, after the paid digest and critique. Now:
   codes with evidence quotes; the regex edition harvest unions in as
   `origin="regex"` — the backstop the model can't argue away). **Advisory only**:
   consumers take `SetIdentity | None` and never gate a finding on it — which,
-  with the regex backstop, is why this stage runs on **Sonnet 5**.
+  with the regex backstop, is why this stage runs on **Sonnet 5.5**.
   Both sanitizers coerce every list-shaped field through
   `set_identity._as_list` (P8 item 9): they are documented as never raising and
   the stages treat an exception as stage FAILED, yet a dict raised `TypeError:
@@ -1018,7 +1023,7 @@ raise, after the paid digest and critique. Now:
   the text layer and the source binding), so `_HARVEST_CACHE_CONTRACT` stays 1.
   `prose_harvest.py` (mirrors prose Coordination/Conflict items,
   synthesis conflicts, and opted-in focus items into findings — match first,
-  one small structuring call for stragglers on **Sonnet 5** at `EFFORT_LOW`,
+  one small structuring call for stragglers on **Sonnet 5.5** at `EFFORT_LOW`,
   degraded sheet-level entry on failure. **The match is signature-vetoed**
   (remediation WP-09.2, N10; the owner's rules): `_match_entry` takes the
   candidates whose `_match_score` (token overlap with the entry's text or
@@ -1605,9 +1610,10 @@ unchanged (`auditors.arithmetic._UNICODE_DASHES` is pinned to its dash fold).
   and a warm hit
   deterministically REPLAYS the tool trace with sha-compare so evidence bytes
   are recreated and warm output stays byte-identical, no TTL) →
-  `citation_check.py` (**Sonnet 5**: server-side `web_search` + `web_fetch` per
-  unique code ref — web fetch is unavailable on Opus 5, so an Opus citation
-  check can only read search snippets rather than the section text; both tools
+  `citation_check.py` (**Sonnet 5.5**: server-side `web_search` + `web_fetch` per
+  unique code ref — web fetch is unavailable on Opus 5, so an Opus 5 citation
+  check can only read search snippets rather than the section text; Opus 5.5
+  has it again, and Sonnet 5.5 stays for half the price; both tools
   carry the shared source-quality blocklist, and the resolved tool set rides
   the verdict cache key because what the model was allowed to do is part of
   what its answer means. Its tool schemas carry a cache breakpoint, so after the
@@ -1727,6 +1733,15 @@ answered with a synthetic result, because the call never ran. And a turn's note
 is DOM-only unless that turn owns the last `displays` entry, since the catch's
 pops run first. `activeStream` is released **by identity**, so a stream
 settling after its thread was replaced cannot clear the new turn's handle.
+A transcript that cannot be replayed verbatim is resumed **without its thinking
+blocks** (`resumableTurns`): on the chat default, Sonnet 5.5 (as on Opus 5.5),
+a thinking block is bound to the system prompt, tools and every earlier message
+it was produced with, so one loaded from another report or trimmed to fit
+localStorage (its oldest turns gone) would make the next question a 400, and
+every one after it, on the accounts the API enforces the check for. All of them
+go, never some (a block may only be removed from the front of the run); a turn
+left empty is dropped (an empty assistant message is a 400) and the tail is
+rewound as usual. A whole transcript from this report replays its blocks as-is.
 The request shape is resolved host-side from the capability registry —
 `thinking`, `webSearch` and `webFetch` all ride `CFG` and the browser omits
 what the model will not take, because `DRAWING_ANALYZER_CHAT_MODEL` is
@@ -1888,9 +1903,10 @@ example is parked at `docs/examples/fire_protection.md`.
   exact visible label (`"r1c1"`); `tiling.parse_tile_label` converts it to the
   canonical **zero-based** internal `[row, col]`. A legacy `tile` array is accepted
   only as explicit zero-based, bounds-checked — never guessed to be 1-based.
-- **Thinking is always explicit; never omitted (§C).** On Opus 5 and Sonnet 5 an
-  *omitted* `thinking` key runs adaptive thinking — it does not disable it — and
-  thinking draws from the same `max_tokens` envelope as the answer. Three stages
+- **Thinking is always explicit; never omitted (§C).** On the Opus and Sonnet 5
+  and 5.5 models an *omitted* `thinking` key runs adaptive thinking — it does not
+  disable it — and thinking draws from the same `max_tokens` envelope as the
+  answer; on Opus 5.5 and Sonnet 5.5 `{"type": "disabled"}` is a 400. Three stages
   once relied on omission meaning "off" and starved their own output. Every
   request builder therefore states `thinking` and `effort` explicitly, resolved
   through the `core.api_config` phase registry (which also applies the
@@ -1906,7 +1922,12 @@ example is parked at `docs/examples/fire_protection.md`.
   it is a cost increase on the highest-volume calls in the pipeline AND a
   cache-wide invalidation (`effort` is a component of `digest_cache_key` /
   `critique_cache_key`), so it is a separately-priced decision and one worth an
-  eval — `high` is also what the API applies when the field is omitted.
+  eval. The 5.5 models make it more so: their levels do not map 1:1 onto the 5
+  generation's (Anthropic reports Opus 5.5 thinking more per turn at the same
+  level, and Sonnet 5.5's levels are recalibrated), and the registry keeps the
+  levels the stages ran at on Opus 5 / Sonnet 5 until an A/B run measures a
+  better one. Opus 5.5's own API default is `medium` (`high` everywhere else),
+  which an explicit level makes irrelevant.
   `PHASE_CROSS_CHECK` keeps its `xhigh` and stays orphaned. A phase that wants
   shallow work registers `EFFORT_LOW`;
   it does **not** send `{"type": "disabled"}`, which risks leaking reasoning tags
@@ -1933,28 +1954,37 @@ example is parked at `docs/examples/fire_protection.md`.
   each model's other request-shape decisions — never a test against one model
   id. The gate read `model != MODEL_OPUS_5`, so any other id (a newer Opus, a
   changed default) silently lost the protection with nothing raised and nothing
-  logged. Opus 5 is today's only declarer; Opus 4.8 is the fallback *target*,
-  not a source.
-  Opus 5's elevated safety classifiers can decline a request outright
-  (`stop_reason="refusal"`, HTTP 200); `core.api_config.call_with_refusal_fallback`
-  attaches `fallbacks: "default"` (beta `server-side-fallback-2026-07-01`) for
-  every Opus-5-routed real-time call — `digest.stream_message` (digest, critique,
-  the batch direct-call rescue), `verify.py`'s crop re-check calls, and the
-  investigation loop — and re-routes through `client.beta.messages`. (These are
-  not "escalation" calls: `verify.py` resolves one model,
-  `VERIFICATION_MODEL_DEFAULT`, and never escalates. The wrapper is applied
-  because a verification call *can* be Opus-routed via
-  `DRAWING_ANALYZER_VERIFICATION_MODEL`, not because a second tier exists.
+  logged. The declarers are the models Anthropic recommends the `"default"`
+  form for: Opus 5.5, Sonnet 5.5 and Opus 5. Opus 5 and Opus 4.8 (Opus 5.5's),
+  Opus 4.8 (Opus 5's) and Sonnet 5 (Sonnet 5.5's) are fallback *targets*, all
+  registered.
+  Their safety classifiers can decline a request outright
+  (`stop_reason="refusal"`, HTTP 200): `cyber` on Opus 5, plus `bio` and
+  `reasoning_extraction` on Opus 5.5 (the last is never retried), and five
+  categories on Sonnet 5.5, whose fallback retries only `cyber` and
+  `frontier_llm`. `core.api_config.call_with_refusal_fallback` attaches
+  `fallbacks: "default"` (beta `server-side-fallback-2026-07-01`) to every
+  real-time call to a declaring model and re-routes it through
+  `client.beta.messages`. Every real-time call site goes through it:
+  `digest.stream_message` (digest, critique, review plan, synthesis, focus, the
+  batch direct-call rescue), identity, cross-QC, the prose harvest, citation,
+  `verify.py`'s crop re-check calls, and the investigation loop, so with the 5.5
+  defaults the Sonnet stages carry it too. (Verification calls are not
+  "escalation" calls: `verify.py` resolves one model,
+  `VERIFICATION_MODEL_DEFAULT`, and never escalates.
   `VERIFICATION_ESCALATION_MODEL` belongs to `investigate.py`, WP-07 §12.13.) The
   parameter is rejected on the Batches API, so this never touches the bulk
-  batch-submitted review traffic. Opus 4.8, the documented cyber-refusal
-  fallback target, is registered in `_MODEL_CAPABILITIES` with identical
-  effort/thinking/output-cap/hi-res-vision support and identical $5/$25
-  pricing to Opus 5, so a fallback changes nothing about request shape or
-  billing. Self-healing, mirroring investigation's own `_task_budget_available`
-  latch: a 400 naming the fallback beta/parameter turns the feature off for the
-  rest of the process (`_refusal_fallback_available`) rather than permanently
-  breaking every subsequent Opus 5 call on a platform that doesn't support it.
+  batch-submitted review traffic. Each target has the same
+  effort/thinking/output-cap/hi-res-vision support as the model it stands in
+  for, so a fallback changes nothing about request shape. Billing is where it
+  shows: the ledger prices a call at the requested model (recorded limit,
+  WP-14.3), and Opus 5.5's targets bill $5/$25 against its $4/$20, so a
+  fallback-served Opus 5.5 call is under-stated by a fifth; Sonnet 5 costs what
+  Sonnet 5.5 does. Self-healing, mirroring investigation's own
+  `_task_budget_available` latch: a 400 naming the fallback beta/parameter turns
+  the feature off for the rest of the process (`_refusal_fallback_available`)
+  rather than permanently breaking every subsequent call on a platform that
+  doesn't support it.
 - **Additive serialization:** `Finding.to_dict`/`from_dict` must default new
   fields cleanly so cached payloads from older runs still load.
 - **Ledger coverage is artifact-backed (Phase 21, DA-007):** on markup runs every
