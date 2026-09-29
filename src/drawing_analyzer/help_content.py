@@ -1523,8 +1523,9 @@ _ABOUT = HelpDocument(
             ),
             _para(
                 "The full license text ships with the source as the LICENSE "
-                "file. This program comes with NO WARRANTY, to the extent "
-                "permitted by law."
+                "file. The Windows installer shows it for you to accept and "
+                "installs a copy as LICENSE.txt in the app's folder. This "
+                "program comes with NO WARRANTY, to the extent permitted by law."
             ),
             _bullet(
                 "Why AGPL: the PDF engine, PyMuPDF, is itself licensed "
