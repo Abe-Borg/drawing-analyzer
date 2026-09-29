@@ -726,6 +726,35 @@ a read the model did not finish is a failed read even when its findings object
 parsed. What that means for the critique's merge, its stage status and its
 cache is under [Self-consistency](#critique-pass-the-reviewer).
 
+**So do the set-level calls and verification.** The review plan, the set
+identity, the cross-sheet synthesis, the focus report and the prose harvest's
+structuring call are judged by their stop reason first too, with the same
+wording and the stage's name (`refused synthesis (stop_reason='refusal',
+category='cyber')`, `truncated review plan (stop_reason='max_tokens')`,
+`unfinished focus report (stop_reason=None)`). A reply the model did not finish
+is not used and not cached, even when it parsed: the plan and the identity
+stage fail (the critique then runs without the plan); the synthesis and the
+focus report fail and ship no text, so a refusal's explanation is never
+exported as the overview, and the reply's tokens still count as one failed
+attempt; a prose item whose structuring reply did not finish keeps its verbatim
+sheet-level entry. Before this, each of them used, and cached, whatever parsed.
+A crop verification whose reply did not finish, for any reason, is "no
+verdict" (`no verdict (context window exceeded)`, `no verdict (unfinished:
+stop_reason=None)`), counted with the truncated calls, and never cached as a
+verdict. The set identity no longer reads a failed sheet's text (a refusal's
+explanation, a cut-off read): that sheet contributes its failure line and its
+PDF text only.
+
+**A reply split by Anthropic's refusal fallback reads as one text.** When a
+streamed reply is declined part way and the fallback model takes over, it
+continues the text where it stopped, even mid-word, with a `fallback` marker in
+between. The app joins the two parts with nothing between them, so the prose
+digest, its findings block, the critique's JSON and every set-level reply read
+exactly as the two models wrote them. Before this, a line break was inserted at
+the boundary: a word split in two in the prose, and a boundary inside the
+findings JSON lost the sheet's findings. Replies without a fallback marker read
+exactly as before.
+
 A tolerant parser splits this block off and **strips it from the prose**, so the
 digest text — and the `combined_text` a downstream spec reviewer consumes — is
 byte-for-byte what it was before the block existed (the prose digest is sacred).

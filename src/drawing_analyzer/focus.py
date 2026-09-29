@@ -28,6 +28,7 @@ from .core.api_config import (
     model_supports_adaptive_thinking,
     model_supports_effort,
 )
+from .core.reply_text import reply_text
 from .core.tokenizer import CROSS_CHECK_RECOMMENDED_MAX
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
@@ -35,10 +36,10 @@ from .digest import (
     SheetDigest,
     _clean_error,
     _is_transient_error,
-    _message_text,
     _message_usage,
     _retry_backoff_seconds,
     stream_message,
+    unfinished_reply_error,
 )
 from .stage_cache import (
     get_stage_cache_entry,
@@ -54,7 +55,12 @@ DEFAULT_FOCUS_EFFORT = "high"
 # Unlike synthesis (which reconciles ACROSS sheets and needs >=2), a focus
 # question is answerable from a single readable sheet.
 MIN_SHEETS_FOR_FOCUS = 1
-_FOCUS_CACHE_CONTRACT = 1
+# The stage cache's host contract. 2 since remediation WP-01.6 (the owner's
+# decision): an entry now holds only a reply the model finished, and an entry
+# written under 1 (a refusal's explanation, a cut-off report) stores no stop
+# reason to reject it by, so every entry written under 1 misses once. Never
+# ``_SCHEMA_VERSION`` (D-4).
+_FOCUS_CACHE_CONTRACT = 2
 
 
 def default_focus_model() -> str:
@@ -197,6 +203,11 @@ class FocusReportResult:
     # user turn could not carry, and how many characters that cost.
     sheets_omitted: int = 0
     chars_omitted: int = 0
+    #: A reply came back from the API (billed), whether or not it was used.
+    #: The pipeline records a failed one as a FAILED usage attempt, as the
+    #: planner and identity already do (remediation WP-01.6). False for a
+    #: skip, a cache hit and a call that raised.
+    replied: bool = False
 
     @property
     def ok(self) -> bool:
@@ -295,17 +306,23 @@ def generate_focus_report(
                 chars_omitted=prompt.chars_omitted,
             )
 
-    text = _message_text(resp)
+    text = reply_text(resp)
     in_tok, out_tok = _message_usage(resp)
-    error = None if text else "empty focus report"
+    # The stop reason first (D-1, remediation WP-01.6): a reply the model did
+    # not finish is not kept (a refusal's explanation is not the report, and a
+    # cut-off one is not a whole one), not harvested and not cached.
+    error = unfinished_reply_error(resp, text, noun="focus report")
+    if error is None and not text:
+        error = "empty focus report"
     result = FocusReportResult(
-        text=text,
+        text=text if error is None else "",
         input_tokens=in_tok,
         output_tokens=out_tok,
         model_used=model,
         error=error,
         sheets_omitted=prompt.sheets_omitted,
         chars_omitted=prompt.chars_omitted,
+        replied=True,
     )
     if result.ok:
         put_stage_cache_entry(

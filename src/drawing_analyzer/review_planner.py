@@ -38,17 +38,18 @@ from .core.api_config import (
     model_supports_adaptive_thinking,
     model_supports_effort,
 )
+from .core.reply_text import reply_text
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
     SheetDigest,
     _clean_error,
     _is_transient_error,
-    _message_text,
     _message_usage,
     _retry_backoff_seconds,
     stream_message,
     _tolerant_json_object,
     scan_structured_blocks,
+    unfinished_reply_error,
 )
 from .models import ProfileSnapshot
 from .set_identity import _as_list
@@ -515,8 +516,16 @@ def author_review_plan(
                 continue
             return PlanResult(model_used=model, error=_clean_error(exc))
 
-    text = _message_text(resp)
+    text = reply_text(resp)
     in_tok, out_tok = _message_usage(resp)
+    # The stop reason first (D-1, remediation WP-01.6): a plan the model did
+    # not finish is not used, whatever parses, and is cached by nothing.
+    unfinished = unfinished_reply_error(resp, text, noun="review plan")
+    if unfinished is not None:
+        return PlanResult(
+            input_tokens=in_tok, output_tokens=out_tok, model_used=model,
+            error=unfinished,
+        )
     obj = parse_planner_text(text)
     if obj is None:
         return PlanResult(

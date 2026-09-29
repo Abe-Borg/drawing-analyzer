@@ -73,6 +73,7 @@ from .core.api_config import (
     model_supports_adaptive_thinking,
     phase_output_cap,
 )
+from .core.reply_text import reply_text
 from . import tiling
 from .anchor import _fold_text, source_words
 from .diagnostics import get_logger
@@ -85,7 +86,6 @@ from .digest import (
     _resolve_tile,
     _get,
     _is_transient_error,
-    _message_text,
     _message_usage,
     _retry_backoff_seconds,
     _tolerant_json_object,
@@ -1266,7 +1266,7 @@ def _call(
                 continue
             return None, 0, 0, _clean_error(exc)
 
-    raw = _message_text(resp)
+    raw = reply_text(resp)
     in_tok, out_tok = _message_usage(resp)
     if not raw:
         return None, in_tok, out_tok, f"empty cross-qc (stop_reason={_get(resp, 'stop_reason')!r})"

@@ -40,16 +40,17 @@ from .core.api_config import (
     model_supports_effort,
     output_cap_for_model,
 )
+from .core.reply_text import reply_text
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
     SheetDigest,
     _clean_error,
     _is_transient_error,
-    _message_text,
     _message_usage,
     _retry_backoff_seconds,
     _tolerant_json_object,
     scan_structured_blocks,
+    unfinished_reply_error,
 )
 from .models import AdoptedCode, SetIdentity, source_page_key
 
@@ -255,14 +256,24 @@ def _edition_windows(sheet_text: str) -> list[str]:
 def _sheet_block(
     index: int, total: int, sd: SheetDigest, geom: Any, *, deep: bool
 ) -> str:
-    """One sheet's corpus block. ``deep`` sheets carry digest + text-layer slices."""
+    """One sheet's corpus block. ``deep`` sheets carry digest + text-layer slices.
+
+    A sheet whose read the model did not finish (``sd.error``: refused,
+    truncated, unfinished) contributes its ``[digest failed: …]`` line and not
+    its text, as every other consumer skips it (remediation WP-01.6, the
+    owner's rule). The text was a refusal's explanation or a cut-off read's
+    prose, and it reached the identity call although no stage may treat it as
+    a read. The text-layer slice and edition windows below are the PDF's own
+    words, not the model's, so they stay. The corpus is a key input, so only a
+    set with such a sheet re-keys the identity cache.
+    """
     lines = [f"===== Sheet {index}/{total}: {sd.ref.display_label} ====="]
     digest_text = (sd.text or "").strip()
-    if digest_text:
+    if sd.error:
+        lines.append(f"[digest failed: {_one_line(sd.error)[:120]}]")
+    elif digest_text:
         cap = _FULL_DIGEST_SLICE if deep else _HEADER_SLICE
         lines.append(digest_text[:cap])
-    elif sd.error:
-        lines.append(f"[digest failed: {_one_line(sd.error)[:120]}]")
     else:
         lines.append("[no digest text]")
     sheet_text = (getattr(geom, "sheet_text", "") or "") if geom is not None else ""
@@ -566,8 +577,16 @@ def identify_set(
                 omitted_chars=budget.omitted_chars,
             )
 
-    text = _message_text(resp)
+    text = reply_text(resp)
     in_tok, out_tok = _message_usage(resp)
+    # The stop reason first (D-1, remediation WP-01.6): an identity the model
+    # did not finish is not used, whatever parses, and is cached by nothing.
+    unfinished = unfinished_reply_error(resp, text, noun="identity")
+    if unfinished is not None:
+        return IdentityResult(
+            input_tokens=in_tok, output_tokens=out_tok, model_used=model,
+            error=unfinished, omitted_chars=budget.omitted_chars,
+        )
     identity = parse_identity_text(text)
     if identity is None:
         return IdentityResult(

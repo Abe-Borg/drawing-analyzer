@@ -479,20 +479,26 @@ def test_a_refused_stage_is_not_complete_and_not_cached(tmp_path, stage):
 
 
 @pytest.mark.parametrize("stage", ["synthesis", "focus"], ids=["synthesis", "focus"])
-def test_recorded_limit_synthesis_and_focus_keep_and_cache_a_refusal(tmp_path, stage):
-    """Recorded limit (WP-01.6): neither stage reads the stop reason, so a
-    refusal's explanation is kept as the synthesis or the focus report (the
-    synthesis stage reads COMPLETE) and cached: the warm run asks nothing.
-    WP-01.6 moves them onto ``core.terminal_outcome``: the refusal fails the
-    stage, is not cached, and the warm run asks again."""
+def test_a_refused_synthesis_or_focus_report_is_not_kept_or_cached(tmp_path, stage):
+    """Remediation WP-01.6 (the owner's rules): the stop reason is read first,
+    so a refusal fails the stage, names the refusal and its category, keeps no
+    text (its explanation is not the overview) and is not cached: the warm run
+    asks again. Its billed tokens are one FAILED usage attempt. It was kept as
+    the synthesis or focus report, COMPLETE, and cached (WP-02.3's recorded
+    limit, flipped here)."""
     stub = AnthropicAPIStub(_shaped(_script(), _refusal, stages={stage}))
 
     ctx = _run(tmp_path, stub)
 
     kept = ctx.synthesis_text if stage == "synthesis" else ctx.focus_report_text
-    assert "I can't help with that request." in kept
-    assert _statuses(ctx)["synthesis"] == "COMPLETE"
-    assert _warm_calls(tmp_path).get(stage, 0) == 0
+    assert kept == ""
+    noun, prefix = (("synthesis", "Cross-sheet synthesis") if stage == "synthesis"
+                    else ("focus report", "Focus report"))
+    assert f"{prefix}: refused {noun} (stop_reason='refusal', category='cyber')" in ctx.errors
+    if stage == "synthesis":
+        assert _statuses(ctx)["synthesis"] == "FAILED"
+    assert [r.terminal_status for r in _records(ctx, stage)] == ["FAILED"]
+    assert _warm_calls(tmp_path).get(stage, 0) == 1
 
 
 def test_recorded_limit_cross_qc_names_only_an_empty_refusal(tmp_path):
@@ -601,22 +607,26 @@ def test_recorded_limit_an_interrupted_digest_stream_is_not_retried_and_its_usag
 @pytest.mark.parametrize("stage, cut", [("synthesis", "after_text"), ("focus", "after_text"),
                                         ("review_plan", "after_content")],
                          ids=["synthesis", "focus", "review_plan"])
-def test_recorded_limit_a_stream_cut_before_message_delta_is_kept_and_cached(tmp_path, stage, cut):
-    """Recorded limit (WP-01.6): the stream ended cleanly before its
-    ``message_delta``, so the reply has no stop reason (N27's shape) and only
-    ``message_start``'s usage (0 output tokens); the synthesis and focus keep
-    the half-written text and the planner the plan, and each is cached: the
-    warm run asks nothing. WP-01.6 treats a missing stop reason as
-    unfinished: none is kept or cached."""
+def test_a_stream_cut_before_message_delta_is_not_kept_or_cached(tmp_path, stage, cut):
+    """Remediation WP-01.6 (N27; the owner's rules): the stream ended cleanly
+    before its ``message_delta``, so the reply has no stop reason and only
+    ``message_start``'s usage (0 output tokens). It is unfinished: the stage
+    fails, nothing is kept (the half-written synthesis, the plan), nothing is
+    cached, and the warm run asks again. The attempt is still one usage record,
+    now FAILED. Each was kept and cached (WP-02.3's recorded limit, flipped
+    here)."""
     stub = AnthropicAPIStub(_script()._route, stream=_stream_once(stage, cut, "eof"))
 
     ctx = _run(tmp_path, stub)
 
-    assert _statuses(ctx).get(stage, "COMPLETE") == "COMPLETE"
-    assert [r.output_tokens for r in _records(ctx, stage)] == [0]     # the cut reply, kept
-    if stage == "synthesis":
-        assert ctx.synthesis_text and "consistent" not in ctx.synthesis_text   # the first half only
-    assert _warm_calls(tmp_path).get(stage, 0) == 0
+    if stage != "focus":                                   # the focus report has no StageResult
+        assert _statuses(ctx)[stage] == "FAILED"
+    assert [(r.output_tokens, r.terminal_status) for r in _records(ctx, stage)] == [(0, "FAILED")]
+    kept = {"synthesis": ctx.synthesis_text, "focus": ctx.focus_report_text,
+            "review_plan": ctx.review_plan_markdown}
+    assert kept[stage] == ""
+    assert any(e.endswith("(stop_reason=None)") for e in ctx.errors)
+    assert _warm_calls(tmp_path).get(stage, 0) == 1
 
 
 # stage -> the usage records a dropped stream leaves: none, or one of 0 tokens.
@@ -658,26 +668,27 @@ def _split_mid_word(where: str):
     return shape
 
 
-def test_recorded_limit_a_fallback_inside_the_findings_json_loses_the_finding_and_is_cached(tmp_path):
-    """Recorded limit (WP-01.6, U2): ``digest._message_text`` joins the text
-    blocks on either side of a ``fallback`` block with ``"\\n"``, so a boundary
-    inside the fenced findings JSON breaks it: M-101's one finding is lost (the
-    block is noted unparseable) and the read is cached as finished. WP-01.6's
-    fallback-aware join keeps the finding (1)."""
+def test_a_fallback_inside_the_findings_json_keeps_the_finding(tmp_path):
+    """Remediation WP-01.6 (U2; the owner's rules): the text blocks on either
+    side of a ``fallback`` block are one text the two models wrote
+    (``core.reply_text.reply_text``), so a boundary inside the fenced findings
+    JSON no longer breaks it: M-101 keeps its one finding, and the finished
+    read is cached. The ``"\\n"`` join lost the finding (WP-02.3's recorded
+    limit, flipped here)."""
     stub = AnthropicAPIStub(_shaped(_script(), _split_mid_word("json"), stages={"digest"}, when=_about_m101))
 
     ctx = _run(tmp_path, stub, full=False)
 
     sheet = _sheet(ctx, "M-101")
-    assert sheet.error is None and sheet.findings == []
-    assert "unparseable" in sheet.findings_note
+    assert sheet.error is None and len(sheet.findings) == 1
+    assert "unparseable" not in (sheet.findings_note or "")
     assert _warm_calls(tmp_path, full=False) == {}
 
 
-def test_recorded_limit_a_fallback_in_the_prose_splits_a_word_and_is_cached(tmp_path):
-    """Recorded limit (WP-01.6, U2): the same join puts a ``"\\n"`` inside a
-    word of the prose digest (I-2: the prose is sacred) and the read is cached.
-    WP-01.6's join keeps the prose byte-identical to the served text."""
+def test_a_fallback_in_the_prose_reads_as_the_served_text(tmp_path):
+    """Remediation WP-01.6 (U2, I-2): a boundary mid-word in the prose reads
+    as the served text, byte for byte. The ``"\\n"`` join put a newline inside
+    the word (WP-02.3's recorded limit, flipped here)."""
     stub = AnthropicAPIStub(_shaped(_script(), _split_mid_word("prose"), stages={"digest"}, when=_about_m101))
 
     ctx = _run(tmp_path, stub, full=False)
@@ -687,23 +698,21 @@ def test_recorded_limit_a_fallback_in_the_prose_splits_a_word_and_is_cached(tmp_
 
     sheet = _sheet(ctx, "M-101")
     assert sheet.error is None and len(sheet.findings) == 1
-    # The served prose with one "\n" inserted mid-word, nothing else.
-    assert sheet.text != served and len(sheet.text) == len(served) + 1
-    assert any(sheet.text[:i] + sheet.text[i + 1:] == served
-               for i, ch in enumerate(sheet.text) if ch == "\n"
-               and sheet.text[i - 1:i].isalpha() and sheet.text[i + 1:i + 2].isalpha())
+    assert sheet.text == served
     assert _warm_calls(tmp_path, full=False) == {}
 
 
-def test_recorded_limit_a_fallback_in_a_critique_fails_a_good_read(tmp_path):
-    """Recorded limit (WP-01.6, U2): the critique's reply is fenced JSON, so the
-    ``"\\n"`` join across the fallback boundary makes it unparseable and a
-    finished, correct read fails. WP-01.6's join: the reads are COMPLETE."""
+def test_a_fallback_in_a_critique_is_a_good_read(tmp_path):
+    """Remediation WP-01.6 (U2): the critique's fenced JSON split by a
+    ``fallback`` block reads whole, so the finished, correct reads count and
+    the stage is COMPLETE. It read FAILED (WP-02.3's recorded limit, flipped
+    here)."""
     stub = AnthropicAPIStub(_shaped(_script(), _split_mid_word("json"), stages={"critique"}))
 
     ctx = _run(tmp_path, stub)
 
-    assert _statuses(ctx)["critique"] == "FAILED"
+    assert _statuses(ctx)["critique"] == "COMPLETE"
+    assert _warm_calls(tmp_path).get("critique", 0) == 0
 
 
 def test_recorded_limit_the_investigation_executes_a_pre_fallback_tool_use(tmp_path):

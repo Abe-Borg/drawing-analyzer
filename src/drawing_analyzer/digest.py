@@ -28,6 +28,7 @@ from .core.api_config import (
     model_supports_effort,
     output_cap_for_model,
 )
+from .core.reply_text import reply_text
 from .core.terminal_outcome import REFUSED, TRUNCATED, classify_stop_reason
 from .core.tokenizer import estimate_image_tokens_total
 from .diagnostics import get_logger, redact_secrets
@@ -796,17 +797,6 @@ def _get(obj: Any, key: str, default: Any = None) -> Any:
     return getattr(obj, key, default)
 
 
-def _message_text(resp: Any) -> str:
-    content = _get(resp, "content", []) or []
-    parts: list[str] = []
-    for block in content:
-        if _get(block, "type") == "text":
-            text = _get(block, "text", "") or ""
-            if text:
-                parts.append(text)
-    return "\n".join(parts).strip()
-
-
 @dataclass(frozen=True)
 class RefusalDetails:
     """What a refusal's ``stop_details`` says (remediation WP-01.5, R2).
@@ -920,7 +910,7 @@ def stream_message(client: Any, kwargs: dict[str, Any]) -> Any:
     place that knows this and one place to change.
 
     ``get_final_message()`` returns the same ``Message`` shape ``create`` would
-    have, so callers — and the ``_message_text`` / ``_message_usage`` readers,
+    have, so callers — and the ``reply_text`` / ``_message_usage`` readers,
     which filter on block ``type`` and therefore skip the thinking blocks that
     now lead the content list — are unchanged. This mirrors the batch rescue
     path in :mod:`drawing_analyzer.batch_digest`, which has streamed for exactly
@@ -1658,6 +1648,41 @@ def digest_terminal_error(
     return f"unfinished {noun} (stop_reason={stop_reason!r})"
 
 
+def unfinished_reply_error(resp: Any, text: str, *, noun: str) -> str | None:
+    """The error for a reply the model did not finish, or ``None`` when it did.
+
+    For the stages that read one reply and keep what it says (remediation
+    WP-01.6, D-1; the owner's rules): the review plan, set identity,
+    synthesis, the focus report and the prose harvest's structuring call.
+    They read no stop reason before, so a cut-off, refused, unfinished (N27),
+    continued or unknown reply was used, and cached, whenever its content
+    parsed; synthesis and the focus report kept a refusal's explanation as
+    their text.
+
+    The stop reason decides first
+    (:func:`~drawing_analyzer.core.terminal_outcome.classify_stop_reason`).
+    A ``FINISHED`` reply returns ``None``, and the stage's own parse then
+    decides, in its own wording. Any other kind is an error from
+    :func:`digest_terminal_error` with the stage's ``noun`` (``refused
+    synthesis (stop_reason='refusal', category='cyber')``, ``truncated
+    identity (stop_reason='max_tokens')``, ``empty focus report (…)``,
+    ``unfinished review plan (stop_reason=None)``): one ladder, never a
+    second table. The stage then keeps nothing and caches nothing. A
+    refusal's ``stop_details`` also goes to the diagnostics log, as the
+    digest's does (:func:`describe_refusal`).
+    """
+    stop = _get(resp, "stop_reason")
+    outcome = classify_stop_reason(stop)
+    if outcome.finished:
+        return None
+    details = refusal_details(resp)
+    if outcome.kind == REFUSED:
+        _log.info("refused %s: %s", noun, describe_refusal(details))
+    return digest_terminal_error(
+        text, stop, noun=noun, category=details.category if details else None,
+    )
+
+
 def digest_cache_admits(*, error: str | None, text: str, stop_reason: Any) -> bool:
     """The admission predicate for every digest cache write, at both levels.
 
@@ -2034,7 +2059,7 @@ def digest_sheet(
         split off the prose, so ``combined_text`` never sees the JSON (I-2);
         a parse problem never marks the sheet failed.
         """
-        raw = _message_text(message)
+        raw = reply_text(message)
         stop = _get(message, "stop_reason")
         prose, found, note = parse_findings(raw, sheet.ref, sheet.rows, sheet.cols)
         details = refusal_details(message)

@@ -79,13 +79,13 @@ from .core.api_config import (
     thinking_config_for,
     tools_with_cache,
 )
+from .core.reply_text import reply_text
 from .diagnostics import get_logger
 from .digest import (
     _FENCE_RE,
     _clean_error,
     _get,
     _is_transient_error,
-    _message_text,
     _message_cache_usage,
     _message_usage,
     _retry_backoff_seconds,
@@ -914,7 +914,7 @@ def _check_one(
             messages = [*messages, {"role": "assistant", "content": _get(resp, "content")}]
             continue
         return _CheckOutcome(
-            raw_text=_message_text(resp),
+            raw_text=reply_text(resp),
             sources=tuple(_extract_web_sources(resp)),
             input_tokens=total_in, output_tokens=total_out,
             cache_read_tokens=total_cache_read,

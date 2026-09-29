@@ -359,6 +359,98 @@ failed read, and `stop_details` is still informational, never the verdict.
   ledger (one more attempt record, labelled with the requested model); the
   critique's failed-read errors (the type).
 
+Added by WP-01.6 ([PR #184](https://github.com/Abe-Borg/drawing-analyzer/pull/184)): **the remaining response consumers and one text join** (N4
+for the set-level stages, N27, U2, plan WP-09 step 6; the owner's rules,
+decided in two rounds with measured options and a case table per option). It
+conforms to the decision above and restates none of it.
+- **Measured first** (zero API calls, the real SDK over `AnthropicAPIStub`, SDK
+  1.7.0 and again 1.8.0 in a scratch venv, identical):
+  - **The five consumers** (the review planner, set identity, synthesis, the
+    focus report, the prose harvest's structuring call) read no stop reason.
+    Under `max_tokens`, `model_context_window_exceeded`, `None` (the planner,
+    synthesis and focus stream, so the real N27 shape, a stream cut before
+    `message_delta`), `tool_use`, `pause_turn`, `compaction` and an unknown
+    reason, every one kept its reply, read COMPLETE and cached it whenever its
+    content parsed. A refusal whose content parsed did too. A refusal with an
+    explanation failed the planner and identity (`no parseable … block`, not
+    cached) and degraded the harvest item, but synthesis and the focus report
+    kept the explanation as their text, COMPLETE, cached. A textless refusal
+    failed synthesis and focus (`empty … result`) and recorded no usage.
+  - **Verification** already failed `max_tokens` and `refusal`; the six other
+    shapes were parsed as verdicts, the stage read COMPLETE, and the verdict
+    was cached.
+  - **The fallback block.** A streamed reply declined part way is
+    `[text, fallback, text]`, and the second text *continues* the first
+    (Anthropic's refusals-and-fallback page: "The fallback model continues
+    from the partial output"); a non-streamed one omits the partial and starts
+    over, `[fallback, text]`. On both namespaces, create and stream, Opus 5.5
+    and Sonnet 5.5, the SDK keeps the order; the beta namespace parses the
+    block as `BetaFallbackBlock`, the plain one as a `TextBlock` (or
+    `ParsedTextBlock`) whose `type` is `"fallback"`. The `"\n"` join put a
+    newline inside a word, broke the digest's findings JSON (the finding lost,
+    the read cached as finished) and failed a good critique read.
+  - **Over the whole suite** (an instrumented run, 3,882 joins in 12 modules):
+    6 replies had more than one text block, all `[text, fallback, text]` from
+    WP-02.3's recorded limits; none had two ordinary text blocks. 7 of the 237
+    identity corpora carried an errored sheet's digest text.
+- **The join** (`core.reply_text.reply_text`, stdlib only, the one reader of a
+  reply's text blocks): two text blocks with a `fallback` block anywhere
+  between them join with nothing; any other two with `between`, default
+  `"\n"`, as before. A reply without a fallback block therefore reads
+  byte-identical, and no stored text changes except a fallback-split reply's.
+  A block is known by `type`, never class. `digest._message_text` is gone; its
+  11 importers and the digest read this. WP-12.1 passes `between=""` for
+  citation splits.
+- **The consumers** each ask `digest.unfinished_reply_error(resp, text, noun=)`
+  first: `None` for `FINISHED` (the stage's own parse then decides, in its own
+  wording: `planner reply carried no parseable plans block`, `empty synthesis
+  result`, …), else `digest_terminal_error` with the stage's noun (`review
+  plan`, `identity`, `synthesis`, `focus report`, `harvest structuring
+  reply`), a refusal naming its category, its `stop_details` logged. What each
+  does with a non-finished read (keep nothing, cache nothing):
+  - the planner and identity fail their stage (the critique runs without plan
+    profiles, as on any planner failure);
+  - synthesis and the focus report fail and ship no text (the export's "no
+    overview produced" path), so the harvest mirrors nothing from them; their
+    billed reply is recorded as one FAILED usage attempt
+    (`SynthesisResult.replied` / `FocusReportResult.replied`; a failed one
+    recorded nothing before, which the planner and identity already did);
+  - a harvest item takes its degraded verbatim entry (`call="live"`), under
+    either structured-outputs contract: a schema never overrides the stop
+    reason (plan WP-09 step 6).
+- **Verification** reads the classifier in `_verdict_from_response` and
+  `_degrade_kind`: every kind but `FINISHED` is "no verdict", UNCERTAIN, never
+  cached, counted under the existing `truncated` counter, whose meaning widens
+  to "did not finish" (no new field; WP-01.1's counters and D-2 unchanged).
+  The notes `no verdict (truncated at max_tokens)` and `no verdict (declined by
+  the model)` keep their wording; new: `no verdict (context window exceeded)`,
+  `no verdict (unfinished: stop_reason=…)`.
+- **The identity corpus** skips an errored sheet's digest text: the sheet
+  gives its `[digest failed: …]` line (what it gave with no text) and keeps its
+  text-layer slice and edition windows (the PDF's words, not the model's). It
+  re-keys the identity cache only for a set with such a sheet.
+- **Not in this note:** cross-QC's terminal handling (WP-06.3; its replies
+  already read through the join), the citation cache gate (WP-12.6), the
+  investigation (WP-13.4), interrupted-stream capture (WP-01.7).
+- **Rejected:** "" between every text block (widens into WP-12.1 and changes
+  multi-block replies); "" also between cited blocks (part of WP-12.1 here);
+  shipping a cut-off synthesis or focus report under an "incomplete" banner;
+  using a parseable non-finished reply for the run without caching it (D-1 and
+  N15 rule unfinished output out); a fourth verification counter; the ladder's
+  wording for verification (re-baselines two pinned notes); keeping the
+  identity corpus as it was; dropping the errored sheet's text-layer windows
+  too; a stage-neutral error sentence (a second wording).
+- **Version / cache changes:** D-4's WP-01.6 note and two migration-register
+  rows.
+- **Consumers affected:** the five stages' results, errors and stage statuses
+  (`ctx.errors`, `run.log`, the report's stage table), `ctx.synthesis_text` and
+  `ctx.focus_report_text` (empty on a non-finished reply) and through them the
+  exports and the prose harvest's synthesis channel; the planner's profiles and
+  so the critique's `profiles_key`; the usage ledger (a FAILED synthesis or
+  focus record); verification's counters, notes, stage status and cache; the
+  identity corpus and its key; every reply read through the join (the digest,
+  its batch transport, the critique, cross-QC, citation, investigation).
+
 ## D-2 Stage accounting — `decided` (WP-01.1, [PR #155](https://github.com/Abe-Borg/drawing-analyzer/pull/155))
 
 **Required decision:** define eligible, judged, failed, skipped,
@@ -902,6 +994,32 @@ never deleted (plan §2 rule 6, WP-10).
   change" (plan §2 rule 15): each mechanism covers its own change, and if the
   prompt edit were ever reverted the bump would still keep a warm entry from
   serving a finding set the host no longer produces. No key term was added.
+- **Added by WP-01.6 ([PR #184](https://github.com/Abe-Borg/drawing-analyzer/pull/184)): three stage terms for three admission changes** (the
+  owner's decision). Synthesis, the focus report and the prose harvest's
+  structuring call now store only a reply the model finished, and none of
+  their entries stores a stop reason, so an entry written before cannot be
+  checked on the way out: a 1.5.0-1.7.0 entry may hold a refusal's explanation
+  served as the overview or a finding from a cut-off structuring reply. Each
+  stage's existing term is bumped, 1 -> 2 (`_SYNTHESIS_CACHE_CONTRACT`,
+  `_FOCUS_CACHE_CONTRACT`, `_HARVEST_CACHE_CONTRACT`; the WP-01.4 precedent: a
+  change to what an entry admits bumps its term). No key term, no read-side
+  reject, never `_SCHEMA_VERSION`.
+  - **Left, recorded residuals.** The planner, identity and verification keys
+    have no host-contract term, and adding one would be the only mechanism: a
+    re-keyed planner or identity that comes back different re-keys the
+    critique (`profiles_key`), a full critique re-read. So an entry an earlier
+    version stored from a non-finished plan, identity or verdict keeps serving
+    until its inputs change. The plan and identity must still have parsed and
+    sanitized, and a verdict's non-finished shapes (context window, `None`, a
+    continuation, unknown) are rare on a non-streaming verify call.
+  - **The join moves no key.** A reply without a fallback block reads
+    byte-identical. A digest an earlier version cached from a fallback-split
+    reply (possible since the fallback shipped in 1.3.0, on real-time Opus 5
+    digests) keeps its `"\n"` and whatever findings it lost: no digest-only
+    term exists and `_SCHEMA_VERSION` is barred. A critique split that way
+    failed and was never cached.
+  - **The identity corpus** re-keys through the key's own input (the corpus
+    hash): only a set with an errored sheet that carried text.
 - **Rejected shortcuts.**
   - A `_SCHEMA_VERSION` bump: it discards every paid digest.
   - A new key term for the same change, and a bump and a term together.
@@ -1070,3 +1188,5 @@ migration.
 | Cross-QC cache (`_cross_qc_cache_key`), both paths | `_CROSS_QC_CACHE_CONTRACT=4` | `_CROSS_QC_CACHE_CONTRACT=5` | Every field; the entry shape is unchanged | None: every cross-QC entry written under contract 4 misses once, on the whole-set path too | Host-side grounding changed again (B4, N12; the owner's decisions): cross-QC now grounds through the anchor's own whole-word matcher (`anchor.SourceWords`), which folds the brackets and sentence punctuation off every word of the evidence and of the quote (`anchor.fold_word`; never `"` `'` `<` `>`). For byte-identical request inputs that admits legs and facts the old match dropped (`RATED 175 PSI TYP` against `RATED 175 PSI, TYP.`, a quote-side `P-1,` against `P-1`), and changes the counters and the `evidence_state` stored on each; the fact-tile join keys on the same folded form (the Codex review of this slice), so such a leg also inherits its fact's tile, and two facts spelled apart only by that punctuation in different tiles collide and give none; no key input covers any of it. The fold only adds matches, with one exception: a quote made only of brackets and sentence punctuation (`,`, `(`, `.`) folds to nothing and now matches nothing, where it used to ground on a lone punctuation word (measured over 20,057 pairs: 174 gained, and every one of the 1,146 lost was such a quote). One mechanism: the existing contract term, bumped; no key term, no `_SCHEMA_VERSION` bump. No release has shipped contract 4 (WP-05.1 is unreleased), so a user upgrading from 1.7.0 pays one miss for both bumps. The anchor stage is not cached; a finding whose anchor moved re-keys its verification and investigation entries through their own inputs (the anchor is one), which is new paid work by design, not a register row. Digest, critique, identity, review-plan and citation keys are byte-identical (`tests/test_drawing_cache_identity.py` and `tests/test_source_identity.py` pass unchanged), and the A/B `RECORD_CONTRACT_VERSION` stays 3. Old entries stay on disk | WP-05.2, [PR #166](https://github.com/Abe-Borg/drawing-analyzer/pull/166) |
 | Cross-QC cache (`_cross_qc_cache_key`), both paths | `_CROSS_QC_CACHE_CONTRACT=5`; the persona asked for severity `question` | `_CROSS_QC_CACHE_CONTRACT=6`; the persona asks for category `question` with severity `low` | Every field; one additive field, `invalid` (the refused-item counts), which an entry written without it reads back as "not recorded" | None: every cross-QC entry misses once, on both paths | Two changes, two mechanisms (D-4 note). **The prompt (B6):** the persona sentence changed, and the three prompts ride the key verbatim, so every entry re-keys through the key's own mechanism. **Host-side binding (N2 and the WP-05.1 note):** for byte-identical request inputs, `_drop_exact_repeats` keeps every finding that is not identical in every field, where `_dedup_findings` folded two different conflicts sharing a primary sheet, category, quote and legs; a fact whose quote is only whitespace is no longer admitted and sent to the reconciler; and the stored result carries its refused-item counts, which a warm run shows as the same stage warning. The existing term is bumped for it; no key term, no `_SCHEMA_VERSION` bump. No release shipped contract 4 or 5 (WP-05.1 and WP-05.2 are unreleased), so a user upgrading from 1.7.0 pays one miss for all three bumps: one paid cross-QC pass per set (one Opus call for 40 sheets or fewer; the map and reconcile calls above). A newly kept conflict is new paid work downstream (a dual-crop verification call, and an investigation if the crop cannot settle it), not a re-key: the verification and investigation keys are unchanged, and a conflict kept before keeps its entries. Digest, critique, identity, review-plan and citation keys are byte-identical (`tests/test_drawing_cache_identity.py` and `tests/test_source_identity.py` pass unchanged), and the A/B `RECORD_CONTRACT_VERSION` stays 3 (a record's shape and meaning are unchanged; more findings in an arm run after this is the behaviour change it is). Old entries stay on disk | WP-06.1, [PR #167](https://github.com/Abe-Borg/drawing-analyzer/pull/167) |
 | Critique cache, level 1 and level 2 (`critique_cache_key_level1`, `critique_cache_key`) | schema 10, `critique_contract=2` | schema 10, `critique_contract=3` | Every field; the entry shape is unchanged (no stop reasons are stored) | None: every critique entry written under contract 2 misses once | A critique read the model did not finish no longer counts as a completed read (N4, critique part; D-1's WP-01.4 note): before, a read cut off at `max_tokens` or the context window, a refusal, a stream that ended without a stop reason, a `tool_use`/`pause_turn`/`compaction` continuation or an unknown stop counted whenever its findings object parsed, was merged as corroboration and was stored at both levels on both transports. A critique entry stores no stop reason, so an entry written under 2 cannot be checked on the way out; the existing critique-only term is bumped (no read-side reject beside it, no key term, never `_SCHEMA_VERSION`). The merge rule is unchanged: its fingerprint is pinned under 3 as under 2 (`63dbfe17…`). Digest, identity, review-plan, citation and investigation keys are byte-identical (`tests/test_drawing_cache_identity.py::test_wp_01_4_moves_every_critique_key_and_no_other_key`, with the contract-2 keys pinned). Old entries stay on disk (`test_a_critique_entry_from_wp_04_2_misses_and_is_never_deleted`); the next exhaustive run re-critiques each sheet once. No release shipped contract 1 or 2 (WP-04.1 and WP-04.2 are unreleased), so a user upgrading from 1.7.0 pays one miss per sheet for all three bumps. The A/B `RECORD_CONTRACT_VERSION` stays 3 (a record stores signatures, which did not change) | WP-01.4, [PR #171](https://github.com/Abe-Borg/drawing-analyzer/pull/171) |
+| Synthesis, focus report and prose-harvest structuring stage caches (`stage_cache_key("synthesis" / "focus" / "prose_harvest_item")`) | `_SYNTHESIS_CACHE_CONTRACT=1`, `_FOCUS_CACHE_CONTRACT=1`, `_HARVEST_CACHE_CONTRACT=1` | each 2 | Every field; the payloads are unchanged (`text`, `text`, `finding`) | None: every entry written under 1 misses once | An entry is now written only for a reply the model finished (D-1's WP-01.6 note): before, a reply cut off at `max_tokens` or the context window, one with no stop reason, a continuation or an unknown reason was stored whenever it parsed, and synthesis and the focus report stored a refusal's explanation as their text (served as the overview on every warm run). None stores a stop reason, so no read-side reject is possible; each stage's existing term is bumped (the WP-01.4 precedent), no key term, never `_SCHEMA_VERSION`. The next run pays one synthesis call per set (Opus 5.5), one focus call per focus run, and each harvest straggler once (Sonnet 5.5, low effort). Recorded residuals, left by the owner's decision: the review-plan, identity and verification keys have no term, so an entry an earlier version stored from a non-finished plan, identity or verdict keeps serving until its inputs change (a new term there could re-key the critique through `profiles_key`). Digest, critique, cross-QC, citation and investigation keys are byte-identical (`tests/test_drawing_cache_identity.py` passes unchanged). Old entries stay on disk (`tests/test_consumer_terminal_outcomes.py::test_an_entry_written_under_contract_1_misses_and_stays_on_disk`) | WP-01.6, [PR #184](https://github.com/Abe-Borg/drawing-analyzer/pull/184) |
+| Identity cache (`identity_cache_key`, its corpus hash) and every reply's text (`core.reply_text.reply_text`) | corpus: an errored sheet's digest text; join: `"\n"` between every text block | corpus: its `[digest failed: …]` line; join: nothing across a `fallback` block | Every field | Identity: every entry for a set with no errored sheet carrying text. Every other namespace: every entry | Two changes, no term and no version. **The identity corpus** skips an errored sheet's digest text (a refusal's explanation, a cut-off read's prose); the corpus is a key input, so only a set with such a sheet re-keys (the key's own mechanism): one identity call, and the planner and critique re-key only if the new identity differs. **The join** moves no key: a reply without a fallback block reads byte-identical. Residual, recorded: a digest an earlier version cached from a fallback-split reply (possible since 1.3.0, real-time Opus 5) keeps its `"\n"` inside a word and any findings the broken JSON lost; no digest-only term exists and `_SCHEMA_VERSION` is barred. A critique split that way failed and was never cached | WP-01.6, [PR #184](https://github.com/Abe-Borg/drawing-analyzer/pull/184) |
