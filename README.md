@@ -79,7 +79,12 @@ own PC and talks only to the Anthropic API using your own API key.
    **"Windows protected your PC"** notice — click **More info → Run anyway**.
    This is expected for independent software; you'll see it on the first install
    and on each update.
-3. It installs per-user (no admin prompt), adds a Start-menu shortcut, and
+3. Read the **License Agreement** page: it summarizes the license and shows its
+   full text (the GNU AGPL, version 3 or later — see [Licensing](#licensing)).
+   The installer will not continue until you select **I accept the agreement**.
+   The page appears on every install and update, and a copy of the license is
+   installed alongside the app as `LICENSE.txt`.
+4. It installs per-user (no admin prompt), adds a Start-menu shortcut, and
    launches. Paste your Anthropic API key into the field at the top and you're
    ready.
 
