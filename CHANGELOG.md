@@ -6,6 +6,25 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **The Windows installer shows the license and asks the user to accept it.**
+  `DrawingAnalyzerSetup.exe` had no license page: it installed without saying
+  what license the software is under, and the license text was not installed
+  with the app. `packaging/windows/installer.iss` now sets `LicenseFile` to the
+  repo's `LICENSE`, so Inno Setup shows its License Agreement page with the full
+  AGPL-3.0 text, and **Next** stays disabled until the user chooses
+  **I accept the agreement**. The text above the box names the license
+  (AGPL-3.0-or-later), says there is no warranty and gives the source URL. The
+  license is installed beside the app as `LICENSE.txt` (AGPL section 4), and
+  `AppCopyright` stamps the copyright into the installer's version info. An
+  in-app update runs the installer interactively, so it shows the page again; a
+  `/SILENT` install skips it, as it skips every page.
+  `tests/test_installer_license.py` pins the page, the label, the installed
+  file, the copyright (equal to the README's) and that everything the page
+  displays is ASCII, since Inno Setup reads a text file without a BOM as ANSI.
+  Manual check: `docs/WINDOWS_ACCEPTANCE.md` 3A.7.
+
 ### Changed
 
 - **The test suite's hermeticity is enforced, not requested (remediation

@@ -5,10 +5,11 @@
 ; and expects the PyInstaller one-folder output at dist\DrawingAnalyzer\.
 ;
 ; Produces dist\installer\DrawingAnalyzerSetup.exe — a normal double-click
-; installer with a Start-menu shortcut, an optional desktop icon, and a clean
-; uninstaller. The app is NOT code-signed, so Windows SmartScreen shows a
-; "Windows protected your PC" notice on first run (More info -> Run anyway);
-; that is expected and documented in docs/RELEASE_WINDOWS.md and the README.
+; installer with a license page the user must accept, a Start-menu shortcut, an
+; optional desktop icon, and a clean uninstaller. The app is NOT code-signed, so
+; Windows SmartScreen shows a "Windows protected your PC" notice on first run
+; (More info -> Run anyway); that is expected and documented in
+; docs/RELEASE_WINDOWS.md and the README.
 
 #ifndef MyAppVersion
   #define MyAppVersion "0.0.0"
@@ -27,6 +28,9 @@ AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppVerName={#MyAppName} {#MyAppVersion}
 AppPublisher={#MyAppPublisher}
+; Also stamped into Setup.exe's version info (VersionInfoCopyright defaults to
+; it). Keep it equal to the README's Licensing section.
+AppCopyright=Copyright (C) 2026 {#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}/releases/latest
@@ -43,6 +47,15 @@ OutputBaseFilename=DrawingAnalyzerSetup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+; The License Agreement page: the repo's own LICENSE (AGPL-3.0), shown verbatim
+; in a scroll box with "I accept" / "I do not accept". Next stays disabled until
+; the user accepts. Every interactive run of the installer shows it, an in-app
+; update included (the updater launches it with no switches). A /SILENT or
+; /VERYSILENT install skips it, as it skips every wizard page. The file is
+; plain ASCII on purpose: Inno Setup reads a text file without a BOM as ANSI,
+; so any other character would print wrongly on the page
+; (tests/test_installer_license.py).
+LicenseFile=..\..\LICENSE
 UninstallDisplayName={#MyAppName}
 UninstallDisplayIcon={app}\{#MyAppExeName}
 ; Let an in-place update replace the running app: Inno detects a running
@@ -54,12 +67,20 @@ RestartApplications=yes
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
+[Messages]
+; The text above the license box. The default only says "Please read the
+; following License Agreement", which does not say what the license is.
+LicenseLabel3={#MyAppName} is free software, licensed under the GNU Affero General Public License, version 3 or later (AGPL-3.0-or-later). It comes with NO WARRANTY, and its source code is available at {#MyAppURL}. You must accept the license below to continue with the installation.
+
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
 ; The entire PyInstaller one-folder output.
 Source: "..\..\dist\DrawingAnalyzer\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
+; The license travels with the program (AGPL section 4: give every recipient a
+; copy of the License). Named .txt so a double-click opens it in Notepad.
+Source: "..\..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

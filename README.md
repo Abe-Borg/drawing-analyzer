@@ -79,7 +79,11 @@ own PC and talks only to the Anthropic API using your own API key.
    **"Windows protected your PC"** notice — click **More info → Run anyway**.
    This is expected for independent software; you'll see it on the first install
    and on each update.
-3. It installs per-user (no admin prompt), adds a Start-menu shortcut, and
+3. Read the license and choose **I accept the agreement**. The installer
+   shows the full license (the GNU AGPL, version 3 or later; see
+   [Licensing](#licensing)) and does not continue until you accept it. An
+   update shows the page again.
+4. It installs per-user (no admin prompt), adds a Start-menu shortcut, and
    launches. Paste your Anthropic API key into the field at the top and you're
    ready.
 
@@ -2574,6 +2578,8 @@ under the **GNU Affero General Public License, version 3 or later**
 and redistribute it, commercially or otherwise, under that license's terms; there
 are no restrictions on distribution beyond the AGPL's own conditions (share the
 source of modified versions, including when they are offered over a network).
+The Windows installer shows the full license and does not install until you
+accept it, and installs it beside the app as `LICENSE.txt`.
 
 The copyleft license is not optional here: the project depends on
 **[PyMuPDF](https://pymupdf.readthedocs.io/)**, which is dual-licensed
