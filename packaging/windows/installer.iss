@@ -69,8 +69,10 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Messages]
 ; The text above the license box. The default only says "Please read the
-; following License Agreement", which does not say what the license is.
-LicenseLabel3={#MyAppName} is free software, licensed under the GNU Affero General Public License, version 3 or later (AGPL-3.0-or-later). It comes with NO WARRANTY, and its source code is available at {#MyAppURL}. You must accept the license below to continue with the installation.
+; following License Agreement", which does not say what the license is. Keep it
+; no longer than that default (129 characters): the page sizes this label for
+; it, and longer text risks being clipped (tests/test_installer_license.py).
+LicenseLabel3={#MyAppName} is free software under the GNU AGPL-3.0-or-later, with NO WARRANTY. You must accept the license to continue.
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked

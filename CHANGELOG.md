@@ -15,14 +15,16 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   repo's `LICENSE`, so Inno Setup shows its License Agreement page with the full
   AGPL-3.0 text, and **Next** stays disabled until the user chooses
   **I accept the agreement**. The text above the box names the license
-  (AGPL-3.0-or-later), says there is no warranty and gives the source URL. The
-  license is installed beside the app as `LICENSE.txt` (AGPL section 4), and
-  `AppCopyright` stamps the copyright into the installer's version info. An
-  in-app update runs the installer interactively, so it shows the page again; a
-  `/SILENT` install skips it, as it skips every page.
-  `tests/test_installer_license.py` pins the page, the label, the installed
-  file, the copyright (equal to the README's) and that everything the page
-  displays is ASCII, since Inno Setup reads a text file without a BOM as ANSI.
+  (AGPL-3.0-or-later) and says there is no warranty, in no more characters than
+  Inno Setup's default label, the text the page lays that label out for (Codex
+  review: a longer one risks being clipped). The license is installed beside
+  the app as `LICENSE.txt` (AGPL section 4), and `AppCopyright` stamps the
+  copyright into the installer's version info. An in-app update runs the
+  installer interactively, so it shows the page again; a `/SILENT` install
+  skips it, as it skips every page. `tests/test_installer_license.py` pins the
+  page, the label and its length, the installed file, the copyright (equal to
+  the README's) and that everything the page displays is ASCII, since Inno
+  Setup reads a text file without a BOM as ANSI.
   Manual check: `docs/WINDOWS_ACCEPTANCE.md` 3A.7.
 
 ### Changed

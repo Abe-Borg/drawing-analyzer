@@ -7,7 +7,8 @@ installer must keep doing:
 - ``LicenseFile`` is the repo's own ``LICENSE`` (AGPL-3.0). That directive is
   what gives Inno Setup's License Agreement page, with "I accept" / "I do not
   accept" and Next disabled until the user accepts.
-- The text above the license box names this software's license.
+- The text above the license box names this software's license, in no more
+  room than Inno Setup's default text takes.
 - ``LICENSE`` is installed beside the app.
 - Everything the page displays is ASCII, because Inno Setup reads a text file
   without a BOM as ANSI.
@@ -86,18 +87,20 @@ def test_installer_shows_the_repo_license_for_acceptance():
     assert "wpLicense" not in _ISS.read_text(encoding="utf-8")
 
 
+# Inno Setup's own LicenseLabel3 (compiler:Default.isl). The page lays the
+# label out for this text, so a longer one risks being clipped (Codex review).
+_DEFAULT_LICENSE_LABEL = (
+    "Please read the following License Agreement. You must accept the terms "
+    "of this agreement before continuing with the installation."
+)
+
+
 def test_license_page_names_this_softwares_license():
     label = _expand(_directives("Messages").get("LicenseLabel3", ""))
     assert label, "the license page keeps Inno Setup's generic label"
-    for needle in (
-        "Drawing Analyzer",
-        "GNU Affero General Public License",
-        "AGPL-3.0-or-later",
-        "NO WARRANTY",
-        "https://github.com/abe-borg/drawing-analyzer",
-        "accept",
-    ):
+    for needle in ("Drawing Analyzer", "GNU AGPL-3.0-or-later", "NO WARRANTY", "accept"):
         assert needle in label, needle
+    assert len(label) <= len(_DEFAULT_LICENSE_LABEL), (len(label), label)
 
 
 def test_installer_installs_the_license_beside_the_app():
