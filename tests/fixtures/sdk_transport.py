@@ -46,13 +46,28 @@ from __future__ import annotations
 import dataclasses
 import itertools
 import json
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Iterator, Sequence
 
 import anthropic
 import httpx2
 import pydantic
 
 from tests.fixtures import sdk_responses as R
+
+
+def model_items(obj: pydantic.BaseModel) -> Iterator[tuple[str, Any]]:
+    """An SDK model's fields under the API's names, then its extra keys.
+
+    A field whose Python name differs from its wire name carries an alias (a
+    fallback block's ``from``, which is a Python keyword, is ``from_``), and
+    the API's JSON uses the alias. The walk reads ``__dict__`` rather than
+    ``model_dump``, because a fake built with ``model_construct`` may hold a
+    value no serializer expects (a dict, a namespace)."""
+    fields = type(obj).model_fields
+    for name, value in obj.__dict__.items():
+        info = fields.get(name)
+        yield (info.alias if info is not None and info.alias else name), value
+    yield from (obj.__pydantic_extra__ or {}).items()
 
 
 def api_json(obj: Any) -> Any:
@@ -64,9 +79,7 @@ def api_json(obj: Any) -> Any:
     if isinstance(obj, dict):
         return {k: api_json(v) for k, v in obj.items()}
     if isinstance(obj, pydantic.BaseModel):
-        out = {k: api_json(v) for k, v in obj.__dict__.items()}
-        out.update({k: api_json(v) for k, v in (obj.__pydantic_extra__ or {}).items()})
-        return out
+        return {k: api_json(v) for k, v in model_items(obj)}
     if dataclasses.is_dataclass(obj):
         return {f.name: api_json(getattr(obj, f.name)) for f in dataclasses.fields(obj)}
     if hasattr(obj, "__dict__"):

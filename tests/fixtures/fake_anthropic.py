@@ -47,10 +47,13 @@ from anthropic.types.messages import (
 from anthropic.resources.beta.messages.messages import Messages as _SdkBetaMessages
 from anthropic.resources.messages.batches import Batches as _SdkBatches
 from anthropic.resources.messages.messages import Messages as _SdkMessages
+from anthropic.types.beta.parsed_beta_message import ParsedBetaMessage as _ParsedBetaMessage
+from anthropic.types.parsed_message import ParsedMessage as _ParsedMessage
 
 from tests.fixtures import sdk_responses as _responses
 from tests.fixtures.sdk_transport import DROPPED as _DROPPED
 from tests.fixtures.sdk_transport import message_json as _message_json
+from tests.fixtures.sdk_transport import model_items as _model_items
 
 
 # ---------------------------------------------------------------------------
@@ -424,9 +427,7 @@ def _to_dict(obj: Any) -> Any:
     if isinstance(obj, dict):
         return {k: _to_dict(v) for k, v in obj.items()}
     if isinstance(obj, pydantic.BaseModel):
-        out = {k: _to_dict(v) for k, v in obj.__dict__.items()}
-        out.update({k: _to_dict(v) for k, v in (obj.__pydantic_extra__ or {}).items()})
-        return out
+        return {k: _to_dict(v) for k, v in _model_items(obj)}
     if hasattr(obj, "__dataclass_fields__"):
         out: dict[str, Any] = {}
         for field_name in obj.__dataclass_fields__:
@@ -567,8 +568,9 @@ def check_sdk_request(namespace: str, method: str, kwargs: dict[str, Any]) -> No
             raise ValueError(message)
 
 
-# The namespace a call was already checked as. A beta call that a fake forwards
-# to its shared ``create`` must not be checked again as a plain one.
+# The namespace a call was already checked as: the outermost entry's, the one
+# production called. A beta call that a fake forwards to its shared ``create``
+# must not be checked again as a plain one, and a stream it returns is beta.
 _CHECKED_AS: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "fake_anthropic_checked_as", default=None,
 )
@@ -588,15 +590,22 @@ def checked_entry(namespace: str, method: str, handler: Any, *, header: bool = F
     fake that records the betas it was sent keeps the default.
     """
     def entry(*args: Any, **kwargs: Any) -> Any:
-        if _CHECKED_AS.get() is None:
+        outer = _CHECKED_AS.get()
+        if outer is None:
             check_sdk_request(namespace, method, kwargs)
         if header:
             kwargs.pop("betas", None)
-        token = _CHECKED_AS.set(namespace)
+        called = outer or namespace
+        token = _CHECKED_AS.set(called)
         try:
-            return handler(*args, **kwargs)
+            result = handler(*args, **kwargs)
         finally:
             _CHECKED_AS.reset(token)
+        # A stream's read is the type of the namespace production called:
+        # the outermost entry, since a beta entry may forward to a plain one.
+        if isinstance(result, FinalMessageStream) and result.namespace is None:
+            result.namespace = called
+        return result
 
     entry.__wrapped__ = handler  # type: ignore[attr-defined]
     entry.sdk_checked = True  # type: ignore[attr-defined]
@@ -687,10 +696,19 @@ class FinalMessageStream:
     ``current_message_snapshot`` is the read the stream holds, as on the SDK:
     an ``AssertionError`` before anything was consumed or when no
     ``message_start`` arrived, else the partial (or complete) message.
+
+    A stopped stream's read is the SDK's own type for the namespace:
+    ``ParsedMessage`` on the plain one, ``ParsedBetaMessage`` on the beta one.
+    ``namespace`` (``PLAIN`` or ``BETA``) names it; left ``None``, the checked
+    entry point the stream is reached through sets it, and a stream reached
+    through none reads as the plain namespace. A complete stream returns the
+    message it was given.
     """
 
     def __init__(self, message: Any, *, cut: str | None = None, end: str = "eof",
-                 error: dict | None = None) -> None:
+                 error: dict | None = None, namespace: str | None = None) -> None:
+        if namespace not in (None, PLAIN, BETA):
+            raise ValueError(f"unknown namespace {namespace!r}; expected {PLAIN!r} or {BETA!r}")
         if end not in _responses.ENDS:
             raise ValueError(f"unknown end {end!r}; expected one of {_responses.ENDS}")
         if cut is not None and cut not in _responses.CUTS:
@@ -699,6 +717,7 @@ class FinalMessageStream:
         self._cut = cut
         self._end = end
         self._error = error
+        self.namespace = namespace
         self._snapshot: Any = _NOT_CONSUMED
 
     def __enter__(self) -> "FinalMessageStream":
@@ -713,9 +732,8 @@ class FinalMessageStream:
             return self._message
         body = _message_json(self._message, model=str(getattr(self._message, "model", "") or ""))
         partial = _responses.partial_message(body, self._cut)
-        # BetaMessage: the superset model (a fallback block, iterations), with
-        # the attributes a consumer reads on either namespace's reply.
-        self._snapshot = None if partial is None else anthropic.types.beta.BetaMessage.model_validate(partial)
+        read = _ParsedBetaMessage if self.namespace == BETA else _ParsedMessage
+        self._snapshot = None if partial is None else read.model_validate(partial)
         if self._end == "drop":
             raise httpx2.RemoteProtocolError(_DROPPED)
         if self._end == "error":

@@ -129,7 +129,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     a stream cut at any point and ended cleanly, by an SSE `error` event or by a
     dropped connection (`message_sse(cut=, end=)`, one emitter); a per-item
     batch envelope; the status each retrieve answers; the result order. The
-    stub now serves the requested model unless the reply names one.
+    stub now serves the requested model unless the reply names one, and sends
+    an SDK model under the API's field names (a fallback block's `from`, which
+    the SDK names `from_`).
   - **The fakes are the installed SDK's own models** (`model_construct`, same
     names, keywords and defaults), batch envelopes included, so every field the
     SDK carries is readable and a fake reply echoed into the next request
@@ -140,7 +142,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     end: a dropped connection raises `httpx2.RemoteProtocolError` (the SDK does
     not wrap it), an `error` event raises `APIStatusError` with status 200, and
     a clean end before `message_delta` returns the partial read with no stop
-    reason.
+    reason. The read is the namespace's own type (`ParsedMessage` or
+    `ParsedBetaMessage`), named by the entry point the stream is reached
+    through.
   - **What production does with each shape is pinned**
     (`tests/test_response_shapes.py`): what it gets right is asserted, and each
     defect found is a recorded-limit test naming the slice that fixes it (not

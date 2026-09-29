@@ -23,8 +23,9 @@ from pathlib import Path
 import anthropic
 import httpx2
 import pytest
-from anthropic.types import ErrorObject, Message, TextBlock, ToolUseBlock, Usage
+from anthropic.types import ErrorObject, Message, ParsedMessage, TextBlock, ToolUseBlock, Usage
 from anthropic.types.beta import BetaMessage, BetaUsage
+from anthropic.types.beta.parsed_beta_message import ParsedBetaMessage
 from anthropic.types.messages import (
     MessageBatchCanceledResult,
     MessageBatchErroredResult,
@@ -38,6 +39,7 @@ from tests.fixtures import sdk_responses as R
 from tests.fixtures.sdk_transport import (
     DROPPED,
     AnthropicAPIStub,
+    api_json,
     message_json,
     message_sse,
     sse_response,
@@ -188,6 +190,29 @@ def test_a_spliced_fallback_is_a_beta_message_whose_texts_rejoin_to_the_original
     assert parsed.content[0].text + parsed.content[2].text == original["content"][0]["text"]
 
 
+def test_a_parsed_model_serializes_under_the_apis_field_names():
+    # ``from`` is a Python keyword, so the SDK's fallback block names the
+    # field ``from_`` and aliases it to the wire name. A reply built as an SDK
+    # model must reach the SDK as the API would send it.
+    parsed = BetaMessage.model_validate(R.splice_fallback(_reply(), 17, to_model="claude-opus-4-8"))
+
+    for wire in (api_json(parsed), F._to_dict(parsed)):
+        block = wire["content"][1]
+        assert "from" in block and "from_" not in block
+        assert BetaMessage.model_validate(wire) == parsed
+
+
+def test_a_parsed_fallback_reply_reaches_the_sdk_through_the_stub():
+    parsed = BetaMessage.model_validate(R.splice_fallback(_reply(), 17, to_model="claude-opus-4-8"))
+    stub = AnthropicAPIStub(lambda _params: parsed)
+    reply = stub.client().beta.messages.create(
+        model=OPUS, max_tokens=1_000, messages=_MSG, betas=["server-side-fallback-2026-07-01"])
+
+    fallback = reply.content[1]
+    assert fallback.type == "fallback"
+    assert (fallback.from_.model, fallback.to.model) == (OPUS, "claude-opus-4-8")
+
+
 # --------------------------------------------------------------------------- #
 # Event streams through the real SDK: every cut, every end
 # --------------------------------------------------------------------------- #
@@ -276,25 +301,41 @@ def test_the_beta_accumulator_takes_the_serving_model_from_a_fallback_block():
 # --------------------------------------------------------------------------- #
 
 
-def _through_fake(body: dict, cut, end):
-    stream = F.FinalMessageStream(body, cut=cut, end=end)
+def _through_fake(body: dict, cut, end, *, beta: bool = False):
+    """``_through_sdk``'s twin over a fake: the stream is reached through the
+    namespace's checked entry point, as production reaches it."""
+    streams: list = []
+
+    def stream(**_kwargs):
+        streams.append(F.FinalMessageStream(body, cut=cut, end=end))
+        return streams[-1]
+
+    messages, beta_client = F.sdk_namespaces(stream=stream)
+    target = beta_client.messages if beta else messages
+    kwargs = dict(model=OPUS, max_tokens=64_000, messages=_MSG)
+    if beta:
+        kwargs["betas"] = ["server-side-fallback-2026-07-01"]
     try:
-        with stream as s:
+        with target.stream(**kwargs) as s:
             outcome = ("returned", s.get_final_message())
     except Exception as exc:  # noqa: BLE001 - the outcome under test
         outcome = ("raised", exc)
     try:
-        snapshot = stream.current_message_snapshot
+        snapshot = streams[0].current_message_snapshot
     except AssertionError as exc:
         snapshot = exc
     return outcome, snapshot
 
 
+_NAMESPACE_IDS = ["plain", "beta"]
+
+
+@pytest.mark.parametrize("beta", [False, True], ids=_NAMESPACE_IDS)
 @pytest.mark.parametrize("cut, end", _SHAPES, ids=_SHAPE_IDS)
-def test_final_message_stream_mirrors_the_sdk(cut, end):
+def test_final_message_stream_mirrors_the_sdk(cut, end, beta):
     body = _reply()
-    (real_kind, real), real_snap = _through_sdk(body, cut, end)
-    (fake_kind, fake), fake_snap = _through_fake(body, cut, end)
+    (real_kind, real), real_snap = _through_sdk(body, cut, end, beta=beta)
+    (fake_kind, fake), fake_snap = _through_fake(body, cut, end, beta=beta)
 
     assert fake_kind == real_kind
     if real_kind == "raised":
@@ -308,6 +349,45 @@ def test_final_message_stream_mirrors_the_sdk(cut, end):
         assert isinstance(fake_snap, AssertionError)
     else:
         assert _plain(fake_snap) == _plain(real_snap)
+    # A stopped stream's read is the namespace's own type, blocks included (a
+    # complete one returns the object it was given: the test below).
+    if cut is not None:
+        for fake_read, real_read in ((fake, real), (fake_snap, real_snap)):
+            if isinstance(real_read, (Exception, AssertionError)):
+                continue
+            assert type(fake_read) is type(real_read)
+            assert [type(b) for b in fake_read.content] == [type(b) for b in real_read.content]
+
+
+def test_a_stopped_stream_built_outside_an_entry_point_reads_as_the_plain_namespace():
+    body = _reply()
+    (_kind, real), _snap = _through_sdk(body, "after_content", "eof")
+    fake = F.FinalMessageStream(body, cut="after_content").get_final_message()
+
+    assert type(fake) is type(real) is ParsedMessage
+    assert _plain(fake) == _plain(real)
+
+
+@pytest.mark.parametrize("namespace", [F.PLAIN, F.BETA], ids=_NAMESPACE_IDS)
+def test_a_stream_names_its_namespace_or_takes_the_outermost_entrys(namespace):
+    body = _reply()
+    expected = ParsedBetaMessage if namespace == F.BETA else ParsedMessage
+    # Named when built: an entry point does not rename it.
+    named = F.FinalMessageStream(body, cut="after_content", namespace=namespace)
+    messages, _beta = F.sdk_namespaces(stream=lambda **_kw: named)
+    with messages.stream(model=OPUS, max_tokens=64_000, messages=_MSG) as s:
+        assert type(s.get_final_message()) is expected
+    # Unnamed and reached through a beta entry that forwards to the plain one:
+    # the namespace production called is the outer one.
+    plain, _unused = F.sdk_namespaces(
+        stream=lambda **_kw: F.FinalMessageStream(body, cut="after_content"))
+    entry = F.checked_entry(namespace, "stream", lambda **kw: plain.stream(**kw),
+                            header=namespace == F.BETA)
+    kwargs = dict(model=OPUS, max_tokens=64_000, messages=_MSG)
+    if namespace == F.BETA:
+        kwargs["betas"] = ["server-side-fallback-2026-07-01"]
+    with entry(**kwargs) as s:
+        assert type(s.get_final_message()) is expected
 
 
 def test_final_message_stream_before_consumption_has_no_snapshot_like_the_sdk():

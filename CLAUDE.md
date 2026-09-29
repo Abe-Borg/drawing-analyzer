@@ -207,7 +207,17 @@ were 0, every batch item `succeeded`, a stream that always reached
   raises `anthropic.APIStatusError` with `status_code` 200 and the event's type
   on `.type` (never `OverloadedError`: the status decides the class); a dropped
   connection raises `httpx2.RemoteProtocolError`, which the SDK does not wrap.
-  `current_message_snapshot` holds the partial read, as on the SDK.
+  `current_message_snapshot` holds the partial read, as on the SDK. A stopped
+  stream's read is the namespace's own type, `ParsedMessage` or
+  `ParsedBetaMessage` (Codex review): `namespace=` names it, else the
+  outermost `checked_entry` it is reached through sets it, and a stream
+  reached through none reads as plain. A complete stream returns the message
+  it was given.
+- **An SDK model is serialized under the API's field names**
+  (`sdk_transport.model_items`, read by `api_json` and `_to_dict`): a field
+  whose Python name differs carries an alias, and the wire uses the alias (a
+  fallback block's `from_` is `from`; Codex review: the stub had sent `from_`,
+  which the SDK read as no `from` at all).
 - **A mishandled shape is pinned, not fixed** (`tests/test_response_shapes.py`):
   what production gets right is asserted, and each defect is a
   `test_recorded_limit_*` that asserts today's behaviour and names the slice
