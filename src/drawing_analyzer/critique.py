@@ -56,6 +56,7 @@ from .core.api_config import (
     model_supports_effort,
 )
 from .core.structured_outputs import StructuredOutputsGate, attach_format
+from .core.terminal_outcome import REFUSED, classify_stop_reason
 from .diagnostics import get_logger
 from .digest import (
     DEFAULT_DIGEST_EFFORT,
@@ -71,10 +72,12 @@ from .digest import (
     stream_message,
     build_user_content,
     claims_from_cache,
+    describe_refusal,
     digest_terminal_error,
     findings_from_cache,
     parse_findings_detailed,
     parse_numeric_claims,
+    refusal_details,
 )
 from .digest_cache import critique_cache_key
 from .auditors.arithmetic import claim_content_key
@@ -1679,7 +1682,17 @@ def outcome_from_message(
     # model did not finish is a *failed* read, not merged, not cached, and read
     # again next time. The ladder also fails an empty body (e.g. adaptive
     # thinking consumed the whole token budget), still worded "empty critique".
-    terminal = digest_terminal_error(raw, _get(message, "stop_reason"), noun="critique")
+    stop = _get(message, "stop_reason")
+    details = refusal_details(message)
+    terminal = digest_terminal_error(
+        raw, stop, noun="critique", category=details.category if details else None,
+    )
+    if classify_stop_reason(stop).kind == REFUSED:
+        # The category is named in the read's error; the rest of stop_details
+        # goes to the diagnostics log (remediation WP-01.5, the owner's rule).
+        # A refused critique read is not retried here (WP-01.8's).
+        _log.info("refused critique read %s for %s: %s", run_id,
+                  getattr(ref, "display_label", ref), describe_refusal(details))
     if terminal is not None:
         return CritiqueRunOutcome(
             run_id=run_id, status="FAILED", input_tokens=in_tok, output_tokens=out_tok,

@@ -221,8 +221,9 @@ were 0, every batch item `succeeded`, a stream that always reached
 - **A mishandled shape is pinned, not fixed** (`tests/test_response_shapes.py`):
   what production gets right is asserted, and each defect is a
   `test_recorded_limit_*` that asserts today's behaviour and names the slice
-  that flips it (WP-01.5, WP-01.6, WP-01.7, WP-06.3, WP-13.4, WP-14.1,
-  WP-14.2, WP-14.3). A fix fails the test; the owner re-baselines it.
+  that flips it (WP-01.6, WP-01.7, WP-06.3, WP-13.4, WP-14.1, WP-14.2,
+  WP-14.3; WP-01.5 flipped its two). A fix fails the test; the owner
+  re-baselines it.
 - **A background upload release finishes inside its test**: the autouse
   `background_release_joined` (`tests/conftest.py`) joins, at teardown, every
   release thread a test starts on `batch_digest._run_in_background`
@@ -625,9 +626,13 @@ rescue, but its billed attempt is parked on the slot
 (`_park_usage_attempts`) so §15.6 keeps it. An item that did not finish but
 carries content (`digest.is_partial_read`) is instead **held** as the sheet's
 result through the replacement helper (N16), still unresolved, so the rescue
-can only improve on it; the stalled path builds its rescue list from
-`harvest.resolved`, not from an empty result, and a sheet the rescue never
-reaches keeps that read rather than "not collected". Its time is **additional**, added
+can only improve on it, and so is a refusal (remediation WP-01.5). The harvest
+asks the retry predicate about a refusal or an errored item it read: a
+permanent error, or a refusal with no fallback, is `final` (held, never
+resubmitted, never "not collected"); a routed refusal carries its fallback
+params in `retry`. Every caller builds its list with
+`_HarvestOutcome.rescue_params`, and a sheet the rescue never reaches keeps
+its held read rather than "not collected". Its time is **additional**, added
 back to each caller's start mark rather than deducted — it competes with the
 rescue for the same seconds exactly on the `detached` path, and charging it
 there turned a 3/3 recovery into 0/3, trading re-billing for lost sheets. A
@@ -658,6 +663,78 @@ and the progress line carries elapsed minutes. Every abandoned batch appends a
 — so §15.6 sees every attempt while the image-token estimate still counts only
 response-bearing ones. Each slot records `served_by`, so the collect log names
 both the submitted batch and the one that actually served the digests.
+
+**Batch refusal recovery (remediation WP-01.5, R2; the owner's rules).** The
+server-side refusal fallback cannot serve a batch item (the Batches API
+rejects `fallbacks`), so a refused batch digest used to fail and never be
+retried, and the harvest resubmitted it to the same model. Now:
+- **The gate is a registry route per category.**
+  `ModelCapabilities.refusal_fallback_routes` maps a refusal's
+  `stop_details.category` to a target (`api_config.refusal_fallback_target`).
+  Opus 5 declares `cyber` → Opus 4.8, the server-side route. No other
+  category, no category at all (`null`: the model's own decline; or no
+  `stop_details`), and no model without a route is retried. A named but
+  unrouted category says so in the error (`…; not retried: no fallback for
+  category 'bio' on claude-opus-5`). `supports_refusal_fallback` is a
+  separate capability and is unchanged. Opus 5 is the only model with a
+  route: the 5.5 defaults (registered after the owner's rules) declare none,
+  so a batch digest refused on one fails with its category named and is not
+  retried (pinned; declaring their routes is the owner's call).
+- **The target** is `stop_details.recommended_model` when it names a
+  registered model (`is_registered_model`) other than the refuser, else the
+  route's. The gate decides whether and the target decides where, so the hint
+  never opens an unrouted category. The API sets the hint only when a
+  server-side fallback attempt could not run, so a batch item carries none in
+  practice. The plain `RefusalStopDetails` keeps it as a pydantic extra
+  (measured on SDK 1.7.0 and 1.8.0). `digest.retarget_digest_request` rebuilds
+  the request by `build_digest_request_params`' rules (thinking, clamped
+  effort, `output_cap_for_model`); for Opus 4.8 only `model` moves.
+- **One site decides:** `batch_digest._refusal_retry_params`, reached from
+  `_item_retry_params`, so the refusal rides the same rounds, follow-up and
+  rescue as any retryable item, and the harvest. A refusal from an item
+  already sent to a fallback (its `last_params` model is not the requested
+  one) ends it: the chain refused.
+- **One per-sheet retry budget.** `_Slot.retries` counts every resubmission of
+  a sheet (a transient/expired item, a raised cap, a refusal fallback, an
+  abandoned batch) at every site. The sites are a fresh-batch round, the
+  follow-up batch and the direct rescue. The rescue counts once per sheet,
+  however many transient retries its call makes. Every site checks the count
+  first (`_within_retry_budget`) and counts after an accepted submit
+  (`_count_retry`, which also records `last_params`). The budget is
+  `_max_batch_resubmit_rounds()` (`DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS`,
+  default 4). It is the same value as the round ceiling, so the pipeline's
+  worst case is unchanged (5 submissions per sheet). It binds on its own under
+  `RECOVERY_DIRECT` with a lower override, where the follow-up batch can spend
+  the only retry and the rescue is skipped. The real-time digest keeps its own
+  retries (one raised cap, two transient per call); refusals there are the
+  server-side fallback's.
+- **The selected transport holds.** Under `RECOVERY_BATCH` (the pipeline) a
+  refused sheet is only ever a batch item. Under `RECOVERY_DIRECT` (a caller's
+  full-rate policy) it takes any failed item's path: a refusal from the primary
+  gets its fallback item in the follow-up batch, and the full-rate rescue takes
+  whatever still fails after that batch, on its fallback, including a refusal
+  the follow-up itself returned (and everything, when the follow-up cannot run
+  or stalls).
+- **The cache and the ledger.** A finished fallback read is admitted under the
+  requested model's key (`slot.cache_key`, and level 1), like the server-side
+  fallback's, so a warm run serves it free. No key or entry changed.
+  `SheetDigest.fallback_model` (runtime only) words the read's own error
+  (`refused digest on claude-opus-4-8 (…)`) and names it when it is discarded
+  (`; retry on claude-opus-4-8: …`, `note_failed_retry(model=)`). The ledger
+  still labels the attempt with the requested model (a recorded limit for
+  WP-14.3).
+- **Logged, no secrets.** `digest.refusal_details` reads `stop_details` on
+  either namespace or a dict. `digest_terminal_error(category=)` names the
+  category in the error on both digest transports and the critique; without
+  one the wording is unchanged. `describe_refusal` gives the diagnostics log
+  the category, the hint, the target and the explanation, which goes through
+  `redact_secrets`, one line, capped at `REFUSAL_EXPLANATION_MAX_CHARS` (200).
+- **Item errors.** `billing_error` is in `_PERMANENT_ITEM_ERROR_TYPES`.
+  `request_too_large`, the API's 413 type and not an SDK batch type, stays.
+  `_item_error_type` reads the nested type, and `_batch_item_error_text(noun=)`
+  is the one wording for both batch transports: the critique passes
+  `noun="item"` and now keeps an errored read's type. Retrying a failed batch
+  critique read is WP-01.8's.
 
 **CI gates (P9 item 42).** `pytest -m browser` writes a JUnit report and
 `scripts/check_browser_suite.py` fails the job below a floor of genuinely
@@ -1766,7 +1843,8 @@ author and left a rotated-key report dead.
 store with its `api_key_format.py` normalizer and shape check, pricing, tokenizer, the structured-outputs gate, and
 `terminal_outcome.py`, the one stop-reason classifier: D-1, adopted so far by the
 digest's two transports and, since remediation WP-01.4, the critique's (through
-the digest's ladder, `digest_terminal_error(..., noun="critique")`), with the
+the digest's ladder, `digest_terminal_error(..., noun="critique")`), and since
+WP-01.5 the batch refusal recovery (a `REFUSED` read is what it retries), with the
 other response consumers moving onto it in their WP-01 slices rather than
 growing a second copy). The tokenizer is
 estimate-only: `tiktoken` was removed — its only two callers had no callers,
@@ -1985,7 +2063,9 @@ example is parked at `docs/examples/fire_protection.md`.
   `VERIFICATION_MODEL_DEFAULT`, and never escalates.
   `VERIFICATION_ESCALATION_MODEL` belongs to `investigate.py`, WP-07 §12.13.) The
   parameter is rejected on the Batches API, so this never touches the bulk
-  batch-submitted review traffic. Each target has the same
+  batch-submitted review traffic: a refused batch item is recovered by the host
+  instead, on the route `ModelCapabilities.refusal_fallback_routes` declares
+  (remediation WP-01.5, above). Each target has the same
   effort/thinking/output-cap/hi-res-vision support as the model it stands in
   for, so a fallback changes nothing about request shape. Billing is where it
   shows: the ledger prices a call at the requested model (recorded limit,

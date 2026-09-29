@@ -57,15 +57,16 @@ def _about_m101(params: dict) -> bool:
 
 
 def _run(tmp_path: Path, stub: AnthropicAPIStub, transport: str = "fast", *,
-         full: bool = True, cache: DigestCache | None = None, work: str = "work"):
+         full: bool = True, cache: DigestCache | None = None, work: str = "work",
+         model: str | None = None):
     """The mini set through ``stub``: the whole exhaustive stack, or (``full``
-    False) the digest alone."""
+    False) the digest alone; on ``model`` when given, else the review default."""
     use_batch, critique_batch = _TRANSPORTS[transport]
-    extra = {}
+    extra = {} if model is None else {"model": model}
     if full:
         work_dir = tmp_path / work
         work_dir.mkdir()
-        extra = dict(synthesize=True, focus="equipment coordination", qc_markups=True,
+        extra.update(synthesize=True, focus="equipment coordination", qc_markups=True,
                      qc_work_dir=work_dir)
     return pl.extract_drawing_context(
         build_mini_set(tmp_path), client=stub.client(), rows=2, cols=2,
@@ -74,11 +75,13 @@ def _run(tmp_path: Path, stub: AnthropicAPIStub, transport: str = "fast", *,
     )
 
 
-def _warm_calls(tmp_path: Path, transport: str = "fast", *, full: bool = True) -> dict[str, int]:
+def _warm_calls(tmp_path: Path, transport: str = "fast", *, full: bool = True,
+                model: str | None = None) -> dict[str, int]:
     """Re-run over the same cache with ordinary replies: the requests each stage
     made, so a read that was cached made none."""
     stub = AnthropicAPIStub(_script()._route)
-    _run(tmp_path, stub, transport, full=full, cache=DigestCache(tmp_path / "cache.sqlite"), work="warm")
+    _run(tmp_path, stub, transport, full=full, cache=DigestCache(tmp_path / "cache.sqlite"), work="warm",
+         model=model)
     return _calls(stub)
 
 
@@ -170,8 +173,8 @@ def _item_once(envelope, stage: str = "digest"):
 
 
 def test_every_sdk_error_type_is_classified():
-    # The two tables above cover every type the SDK names, but billing_error
-    # (a recorded limit, below).
+    # The two tables above cover every type the SDK names, but billing_error,
+    # which is permanent since WP-01.5 (below).
     assert set(_PERMANENT) | set(_TRANSIENT) | {"billing_error"} == set(R.ERROR_TYPES)
 
 
@@ -225,19 +228,21 @@ def test_a_canceled_item_is_named_and_not_resubmitted(tmp_path):
     assert _warm_calls(tmp_path, "batch", full=False) == {"batch:digest": 1}   # never cached
 
 
-def test_recorded_limit_a_billing_error_is_resubmitted_like_a_transient_one(tmp_path):
-    """Recorded limit (WP-01.5, the batch retry policy): ``billing_error`` is a
-    rejection of the account, not a server blip, but ``_PERMANENT_ITEM_ERROR_TYPES``
-    does not name it, so the item is resubmitted in a follow-up batch. WP-01.5
-    decides it with the shared retry bound; classified as permanent, this
-    becomes one round."""
+def test_a_billing_error_is_named_and_not_resubmitted(tmp_path):
+    """``billing_error`` is a rejection of the account, not a server blip:
+    resubmitting the identical item fails the same way while the account is
+    out of credit. Remediation WP-01.5 (the owner's rule) made it permanent;
+    it was resubmitted in a follow-up batch like a transient error (WP-02.3's
+    recorded limit, flipped here)."""
     stub = AnthropicAPIStub(_script()._route,
                             batch_result=_item_once(R.errored("billing_error", "credit balance")))
 
     ctx = _run(tmp_path, stub, "batch", full=False)
 
-    assert [len(r) for r in _batch_items(stub, "digest")] == [2, 1]
-    assert _statuses(ctx)["digest"] == "COMPLETE"
+    assert [len(r) for r in _batch_items(stub, "digest")] == [2]      # no follow-up batch
+    assert _sheet(ctx, "M-101").error == "billing_error: credit balance"
+    assert _statuses(ctx)["digest"] == "PARTIAL"
+    assert "digest" not in _calls(stub)                                # and no real-time call
 
 
 def test_recorded_limit_a_recovered_item_keeps_no_record_of_its_failed_attempt(tmp_path):
@@ -444,7 +449,9 @@ def test_a_refused_digest_fails_its_sheet_and_is_read_again(tmp_path):
 
     ctx = _run(tmp_path, stub, full=False)
 
-    assert _sheet(ctx, "M-101").error == "refused digest (stop_reason='refusal')"
+    # The category from stop_details is named (remediation WP-01.5, the
+    # owner's rule; re-baselined from "refused digest (stop_reason='refusal')").
+    assert _sheet(ctx, "M-101").error == "refused digest (stop_reason='refusal', category='cyber')"
     assert _statuses(ctx)["digest"] == "PARTIAL"
     assert _warm_calls(tmp_path, full=False) == {"digest": 1}
 
@@ -501,18 +508,27 @@ def test_recorded_limit_cross_qc_names_only_an_empty_refusal(tmp_path):
     assert "no parseable findings object" in error and "refusal" not in error
 
 
-def test_recorded_limit_a_refused_batch_item_is_not_resubmitted(tmp_path):
-    """Recorded limit (WP-01.5, R2): a batch digest refused (with
-    ``stop_details`` naming a category and a recommended model) is failed, not
-    retried on the batch transport. WP-01.5 retries it within the shared
-    bound: this gains a follow-up round."""
+def test_a_refused_batch_item_is_resubmitted_on_the_fallback_model(tmp_path):
+    """R2 (remediation WP-01.5, the owner's rules): a batch digest refused with
+    ``stop_details`` naming the cyber category is resubmitted as a batch item on
+    the registry's fallback (``claude-opus-4-8``, also the recommended model
+    here), inside the shared per-sheet retry budget, never in real time; the
+    finished read is cached under the requested model's key, so the warm run
+    asks nothing. It was failed and never retried (WP-02.3's recorded limit,
+    flipped here). On Opus 5, the one model that declares a host route (the
+    5.5 defaults declare none: ``test_batch_refusal_recovery``)."""
     stub = AnthropicAPIStub(_shaped(_script(), _refusal, stages={"digest"},
                                     when=_first(lambda p: stage_of(p) == "digest" and _about_m101(p))))
 
-    ctx = _run(tmp_path, stub, "batch", full=False)
+    ctx = _run(tmp_path, stub, "batch", full=False, model="claude-opus-5")
 
-    assert _sheet(ctx, "M-101").error == "refused digest (stop_reason='refusal')"
-    assert [len(r) for r in _batch_items(stub, "digest")] == [2]
+    assert _sheet(ctx, "M-101").error is None
+    rounds = _batch_items(stub, "digest")
+    assert [len(r) for r in rounds] == [2, 1]
+    assert rounds[1][0]["params"]["model"] == "claude-opus-4-8"
+    assert _statuses(ctx)["digest"] == "COMPLETE"
+    assert "digest" not in _calls(stub)                                # never real time
+    assert _warm_calls(tmp_path, "batch", full=False, model="claude-opus-5") == {}
 
 
 # --------------------------------------------------------------------------- #

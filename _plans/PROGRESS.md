@@ -1,7 +1,7 @@
 # Remediation progress tracker
 
-**Next up:** Wave 1 is done. In queue order the next slice is Wave 2 `WP-01.5` (batch refusal recovery; available). WP-02.3 is done: the suite's responses are the shapes the API sends, through the real SDK (one response vocabulary, `tests/fixtures/sdk_responses.py`; transport knobs on the stub; the fakes are the installed SDK's own models; `FinalMessageStream` fails mid-stream as the SDK does), and what production does with each shape is pinned in `tests/test_response_shapes.py` (U26 in part). Once its PR merges, WP-01.6, WP-01.7, WP-13.4, WP-14.2, WP-14.3 and WP-02.4 are unblocked; each of the first five, and WP-01.5, WP-06.3 and WP-14.1, starts from `test_recorded_limit_*` tests to flip (named on its row). WP-02 is not done: WP-02.4 (the canaries are written there; running them is O-4) and WP-02.5 remain. WP-17.1 (Wave 4, cancel; decides D-5) is unblocked: its dependency WP-16.2 is done. WP-16.3 (Wave 4) is unblocked. WP-11.3 (Wave 2, revision on reopen) is available and is the last of R1. WP-10.4 (Wave 2) is available: its dependencies WP-01.2 and WP-01.4 are done. WP-01 is not done: WP-01.5 (Wave 2), WP-01.6 and WP-01.7 (Wave 2, waiting on WP-02.3's merge) remain. WP-09 is not done: WP-09.3 (N32, Wave 3) remains. WP-06 is not done: WP-06.2 and WP-06.3 (Wave 2) are available, and WP-06.4 still waits on WP-03.4; WP-06.2 completes D-8. WP-05 is not done: WP-05.3 remains (Wave 2, available). WP-07 is not done: WP-07.3 (Wave 2, available). WP-03 is not done: WP-03.4, WP-03.5 and WP-03.6 remain (Wave 2); WP-03.5 also carries the measured N30 exposure of cross-QC's same-pair conflicts. WP-04 is not done: its acceptance needs quantity roles, slice `WP-04.3` (Wave 2). WP-11 is not done: WP-11.3 remains. WP-16 is not done: WP-16.3 remains. First check the open PRs ([`README.md`](README.md), step 1); [#174](https://github.com/Abe-Borg/drawing-analyzer/pull/174) (dependabot) and [#175](https://github.com/Abe-Borg/drawing-analyzer/pull/175) (SDK 1.8.0 support) are open and not remediation slices, and every WP-02.2/02.3 fact was measured identical on SDK 1.8.0. Before the next stable tag, the owner should look at O-5.
-**Last updated:** 2026-09-29 by the WP-02.3 session ([PR #181](https://github.com/Abe-Borg/drawing-analyzer/pull/181)).
+**Next up:** Wave 1 is done. WP-01.5 is done ([PR #182](https://github.com/Abe-Borg/drawing-analyzer/pull/182), pending merge): a refused batch sheet is retried once, as a batch item, when the registry routes its refusal category (`ModelCapabilities.refusal_fallback_routes`; Opus 5 routes `cyber` to Opus 4.8), inside one per-sheet retry budget that every resubmission site counts; the harvest asks the same rule; `billing_error` is permanent; the category is named in every refused read's error (R2; D-1's WP-01.5 note). Merged with the 5.5 defaults: Opus 5.5 and Sonnet 5.5 declare no route, so on the new default a refused batch sheet is not retried; whether they get routes is open for the owner (the WP-01.5 handoff entry). In queue order the next slices are Wave 2 `WP-01.6` and `WP-01.7` (both available: WP-02.3 merged), then `WP-01.8` (new: batch critique recovery, split out of WP-01.5; available once WP-01.5 merges). Each of WP-01.6, WP-01.7, WP-06.3, WP-13.4, WP-14.1, WP-14.2 and WP-14.3 starts from its `test_recorded_limit_*` tests (named on its row; WP-14.3 gained one in `tests/test_batch_refusal_recovery.py`). WP-02 is not done: WP-02.4 (the canaries are written there; running them is O-4) and WP-02.5 remain. WP-17.1 (Wave 4, cancel; decides D-5) is unblocked: its dependency WP-16.2 is done. WP-16.3 (Wave 4) is unblocked. WP-11.3 (Wave 2, revision on reopen) is available and is the last of R1. WP-10.4 (Wave 2) is available: its dependencies WP-01.2 and WP-01.4 are done. WP-01 is not done: WP-01.6, WP-01.7 and WP-01.8 remain. WP-09 is not done: WP-09.3 (N32, Wave 3) remains. WP-06 is not done: WP-06.2 and WP-06.3 (Wave 2) are available, and WP-06.4 still waits on WP-03.4; WP-06.2 completes D-8. WP-05 is not done: WP-05.3 remains (Wave 2, available). WP-07 is not done: WP-07.3 (Wave 2, available). WP-03 is not done: WP-03.4, WP-03.5 and WP-03.6 remain (Wave 2); WP-03.5 also carries the measured N30 exposure of cross-QC's same-pair conflicts. WP-04 is not done: its acceptance needs quantity roles, slice `WP-04.3` (Wave 2). WP-11 is not done: WP-11.3 remains. WP-16 is not done: WP-16.3 remains. First check the open PRs ([`README.md`](README.md), step 1); [#174](https://github.com/Abe-Borg/drawing-analyzer/pull/174) (dependabot) and [#175](https://github.com/Abe-Borg/drawing-analyzer/pull/175) (SDK 1.8.0 support) are open and not remediation slices, and every WP-02.2/02.3/01.5 fact was measured identical on SDK 1.8.0. Before the next stable tag, the owner should look at O-5.
+**Last updated:** 2026-09-29 by the WP-01.5 session ([PR #182](https://github.com/Abe-Borg/drawing-analyzer/pull/182)).
 
 This file is authoritative for **status and order**. Requirements live in
 [`drawing-analyzer-remediation-plan.md`](drawing-analyzer-remediation-plan.md).
@@ -50,7 +50,7 @@ A package is `done` only when every slice is `done` or `n/a` **and** its
 
 | WP | Title | Priority | Slices | Status |
 |---|---|---|---|---|
-| WP-01 | Response terminal states and truthful stage completeness | P0 | 01.1–01.7 | todo |
+| WP-01 | Response terminal states and truthful stage completeness | P0 | 01.1–01.8 | todo |
 | WP-02 | Faithful SDK, streaming, batch and network test boundaries | P0 (enabling) | 02.1–02.5 | todo |
 | WP-03 | Durable finding identity and lossless, symmetric merging | P0 | 03.1–03.7 | todo |
 | WP-04 | Engineering quantity and tag comparison | P0 | 04.1–04.3 | todo |
@@ -126,9 +126,10 @@ starting.
 |---|---|---|---|---|---|
 | WP-02.2 | Real-SDK contract tests over `httpx2.MockTransport`; strict fakes that reject what the SDK rejects (betas or fallbacks on the plain namespace, non-streaming above the SDK-derived cap) (U26) | M | WP-02.1 | done | [PR #178](https://github.com/Abe-Borg/drawing-analyzer/pull/178), 2026-09-29. **Rules decided by the owner (eight choices, two rounds, measured first; the per-builder assertions delegated):** (1) a fake entry point accepts exactly the keywords the installed SDK method's signature lists and raises the SDK's own `TypeError` for any other (a missing required argument is not checked); (2) the non-streaming cap is derived from the SDK's public `create` once per model (`fake_anthropic.sdk_nonstreaming_limit`), never a literal or the private helper; (3) every fake production reaches routes through one shared check (`fake_anthropic.check_sdk_request`): the mixins and the beta proxy, the 13 batch-create fakes (`@checked_batch_create`, no `betas` parameter), and the 7 test-local fakes behind the 16 pop sites; (4) their plain and beta namespaces are separate entry points, each checked as its own (`sdk_namespaces`); (5) contract tests in `tests/test_sdk_contract.py` over a shared stub, `tests/fixtures/sdk_transport.py` (`AnthropicAPIStub`); (6) the per-request assertions: namespace and `anthropic-beta` header, `fallbacks` and the task budget with their betas, non-streaming within the SDK's cap, no beta on batches and uploads, and each latch flip plus structured outputs; (7) derive from the installed SDK, with one tripwire pinning the measured facts (the cap literal 21,333); (8) batch item params are checked by the contract tests only (the SDK does not check them). Measured: production sends no request the SDK refuses (2,370 production calls into fakes over the whole suite; 475 requests through the real SDK over 21 scenarios, identical on 1.7.0 and 1.8.0). No product code, cache, key, prompt or schema moved. Tests: `tests/test_strict_fakes.py` (125), `tests/test_sdk_contract.py` (56). No pinned test re-baselined; no existing test changed outcome (instrumented). Enforced: an autouse guard (`tests/conftest.py`, `sdk_checked_guard`) fails a test in which production reaches a Messages entry point that is neither `fake_anthropic.checked_entry`'s nor the real SDK's (Codex review round 1: 21 production calls in five `**kwargs` fakes had escaped the first version's scans; converted), and structural scans forbid a fake that pops `betas`/`fallbacks`, takes a `betas` parameter, or leaves a batch `create` undecorated |
 | WP-02.3 | Fidelity fixtures: nested batch errors; canceled/expired envelopes; `None` usage fields; `web_fetch_requests`; `iterations`; `cache_creation` split; `output_tokens_details`; `stop_details`; fallback blocks; serving model; SSE sequences incl. mid-stream failure and clean EOF (U26) | M | WP-02.2 | done | [PR #181](https://github.com/Abe-Borg/drawing-analyzer/pull/181), 2026-09-29. **Rules decided by the owner (seven choices, two rounds, measured first):** (1) one response vocabulary as API JSON, `tests/fixtures/sdk_responses.py`, which the stub serves and the fakes parse; the SDK's own sets (the nine batch error types) read from the installed SDK; (2) transport knobs on `tests/fixtures/sdk_transport.py`, defaults unchanged: `message_sse(cut=, end=)` (one emitter; `CUTS` x `ENDS`: a clean end, an SSE `error` event, a dropped connection), `AnthropicAPIStub(stream=, batch_result=, statuses=, order=)`, a `PENDING` item canceled after a cancel and expired otherwise, and the requested model served unless the reply names one; (3) the fakes are the installed SDK's own models (`model_construct`, same names, keywords and defaults; batch envelopes included; `batch_errored_result` nested), which closes the 41-test serialization gap; (4) `FinalMessageStream(message, cut=, end=)` fails as the SDK's stream does and exposes `current_message_snapshot`, held to the real SDK at every cut x end; (5) `FakeUsage`'s cache counters stay 0, `None` is an explicit shape; (6) a shape production mishandles is pinned by a `test_recorded_limit_*` test that asserts today's behaviour and names the slice that flips it; (7) the upload-release thread is joined at each test's teardown (autouse `background_release_joined`). Measured: none of `stop_details`, `iterations`, `fallback_credit`, `cache_creation`, `output_tokens_details`, `web_fetch_requests` or the serving model is read; every usage reader maps `None` to 0; 224 + 26 scenarios through the real SDK identical on 1.7.0 and 1.8.0. No product code, cache, key, prompt or schema moved; no existing test changed outcome; none re-baselined. Tests: `tests/test_sdk_responses.py` (99), `tests/test_response_shapes.py` (55; 21 of them recorded limits for WP-01.5, WP-01.6, WP-01.7, WP-06.3, WP-13.4, WP-14.1, WP-14.2 and WP-14.3, noted on each row). WP-02 acceptance clause this slice owns, measured by injection: see the handoff entry |
-| WP-01.5 | Batch refusal recovery under the selected transport policy, retry bound shared with truncation retries, `stop_details` logged (R2) | M | WP-01.2 | todo | Since WP-01.2 the abandoned-batch harvest resolves only finished reads, so a refused item it reads back is resubmitted with the unresolved sheets, within the existing bounded rounds (as an empty or truncated one already was). Decide whether that resubmission is allowed and count it against the shared retry bound. Classify with `core.terminal_outcome` (D-1) From WP-01.3: the harvest now holds an unfinished read that carries prose or findings as the sheet's result (still unresolved, still resubmitted), and parks every other harvested item for its usage as before, a refusal included (a refused read ranks below a partial read and above nothing in `digest._read_rank`). A refusal retry under R2 lands through `_replace_result_with_attempt_history`, so it can only replace a held read it outranks, and the kept read's error names it when it comes back worse. The stalled path's rescue list is built from `harvest.resolved` From WP-01.4 (recorded, not done): a critique read cut off at `max_tokens` now fails and is not retried. A raised-cap retry for it is possible (`critique.DEFAULT_CRITIQUE_MAX_TOKENS` is 64,000 and `digest.MAX_TOKENS_RETRY_CEILING` 128,000; the real-time critique already streams through `digest.stream_message`), but it is not in N4's row and would need this slice's shared retry bound (plan step 5), on both critique transports (a batch item would need a resubmission). Decide it here with the digest's, or give it its own row. Only `max_tokens` could qualify (`raised_cap_may_finish`); a refused critique read is R2's policy question too From WP-02.3 (found, not fixed; pinned as recorded limits in `tests/test_response_shapes.py`, `::test_recorded_limit_a_refused_batch_item_is_not_resubmitted` and `::test_recorded_limit_a_billing_error_is_resubmitted_like_a_transient_one`, which this slice flips): through the real SDK, a batch digest refused with `stop_details` (category and `recommended_model`) is failed and not resubmitted (R2), and nothing reads its `stop_details`. `billing_error`, one of the SDK's nine batch error types, is not in `batch_digest._PERMANENT_ITEM_ERROR_TYPES`, so it is resubmitted in a follow-up batch like a transient error. Also measured: a batch critique read that comes back errored, canceled or expired fails and is never retried; its error keeps the nested message but drops the type. The shapes: `sdk_responses.errored`/`CANCELED`/`EXPIRED`/`refusal_stop_details` and `AnthropicAPIStub(batch_result=)` |
+| WP-01.5 | Batch refusal recovery under the selected transport policy, retry bound shared with truncation retries, `stop_details` logged (R2) | M | WP-01.2 | done | [PR #182](https://github.com/Abe-Borg/drawing-analyzer/pull/182), 2026-09-29. Decided with the owner (D-1's WP-01.5 note): a refused batch item is retried once, as a batch item, when `ModelCapabilities.refusal_fallback_routes` routes its `stop_details.category` (Opus 5: `cyber` -> Opus 4.8; nothing else); the target is `recommended_model` when it names another registered model, else the route's; one per-sheet retry budget (`DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS`, default 4) counts every resubmission at every site; the harvest asks the same predicate (a refusal goes to its fallback or is final, a permanent error is final); under `RECOVERY_BATCH` a refusal never goes real time; a finished fallback read is cached under the requested model's key; `billing_error` is permanent; the category is named in every refused read's error and the diagnostics log carries the rest (redacted, one line, capped); an errored batch critique read keeps its type. Tests: `tests/test_batch_refusal_recovery.py` (69); the two recorded limits flipped and one approved re-baseline in `tests/test_response_shapes.py`. Critique retries moved to WP-01.8. Merged with the 5.5 defaults ([PR #183](https://github.com/Abe-Borg/drawing-analyzer/pull/183)): Opus 5.5 and Sonnet 5.5 declare no route, so a batch item refused on one is not retried; their routes are open for the owner. The notes below are the row's history. Since WP-01.2 the abandoned-batch harvest resolves only finished reads, so a refused item it reads back is resubmitted with the unresolved sheets, within the existing bounded rounds (as an empty or truncated one already was). Decide whether that resubmission is allowed and count it against the shared retry bound. Classify with `core.terminal_outcome` (D-1) From WP-01.3: the harvest now holds an unfinished read that carries prose or findings as the sheet's result (still unresolved, still resubmitted), and parks every other harvested item for its usage as before, a refusal included (a refused read ranks below a partial read and above nothing in `digest._read_rank`). A refusal retry under R2 lands through `_replace_result_with_attempt_history`, so it can only replace a held read it outranks, and the kept read's error names it when it comes back worse. The stalled path's rescue list is built from `harvest.resolved` From WP-01.4 (recorded, not done): a critique read cut off at `max_tokens` now fails and is not retried. A raised-cap retry for it is possible (`critique.DEFAULT_CRITIQUE_MAX_TOKENS` is 64,000 and `digest.MAX_TOKENS_RETRY_CEILING` 128,000; the real-time critique already streams through `digest.stream_message`), but it is not in N4's row and would need this slice's shared retry bound (plan step 5), on both critique transports (a batch item would need a resubmission). Decide it here with the digest's, or give it its own row. Only `max_tokens` could qualify (`raised_cap_may_finish`); a refused critique read is R2's policy question too From WP-02.3 (found, not fixed; pinned as recorded limits in `tests/test_response_shapes.py`, `::test_recorded_limit_a_refused_batch_item_is_not_resubmitted` and `::test_recorded_limit_a_billing_error_is_resubmitted_like_a_transient_one`, which this slice flips): through the real SDK, a batch digest refused with `stop_details` (category and `recommended_model`) is failed and not resubmitted (R2), and nothing reads its `stop_details`. `billing_error`, one of the SDK's nine batch error types, is not in `batch_digest._PERMANENT_ITEM_ERROR_TYPES`, so it is resubmitted in a follow-up batch like a transient error. Also measured: a batch critique read that comes back errored, canceled or expired fails and is never retried; its error keeps the nested message but drops the type. The shapes: `sdk_responses.errored`/`CANCELED`/`EXPIRED`/`refusal_stop_details` and `AnthropicAPIStub(batch_result=)` |
 | WP-01.6 | Remaining response consumers (planner, identity, synthesis, focus, prose harvest cache writes); fallback-aware shared text join (U2; WP-09 step 6) | M | WP-01.2, WP-02.3 | todo | Also move `verify._verdict_from_response` / `_degrade_kind` onto `core.terminal_outcome` (D-1). They test `max_tokens` and `refusal` only, so an unknown stop reason or `model_context_window_exceeded` is still parsed as a verdict (WP-01.2 left verification alone: not an N4 site) From WP-01.3 (found, not fixed): `set_identity._sheet_block` puts an errored sheet's digest text into the identity corpus whenever it has any (the error line only when it has none), so a refusal's explanation or a truncated read's prose reaches the advisory identity call, while every other consumer skips that sheet (`combined_text`, cross-QC, the prose harvest, synthesis, focus, the planner; and since WP-01.3 the ledger, N15). Decide whether the corpus should skip it too (it re-keys the identity cache for such a set: the corpus is a key input) From WP-02.3 (found, not fixed; pinned as recorded limits in `tests/test_response_shapes.py`, which this slice flips): (1) synthesis and the focus report keep a refusal's explanation as their text and cache it; synthesis reads COMPLETE (`::test_recorded_limit_synthesis_and_focus_keep_and_cache_a_refusal`). (2) A stream that ends cleanly before `message_delta` (no stop reason) is kept and cached by synthesis and focus (the half-written text) and by the planner (`::test_recorded_limit_a_stream_cut_before_message_delta_is_kept_and_cached`). (3) U2 through the real SDK: `_message_text` joins across a `fallback` block with `"\n"`. Mid-word inside the digest's findings JSON it loses the sheet's finding (the block reads unparseable) and the read is cached as finished; in the prose it puts a `"\n"` inside a word (I-2) and is cached; a critique read split that way fails although it was good (`::test_recorded_limit_a_fallback_*`). The planner and identity already fail a refusal and cache nothing, but their error reads 'no parseable ... block', not the refusal |
 | WP-01.7 | Interrupted-stream outcome and usage capture (`current_message_snapshot`), threaded through the digest retry loop (U1 partial-stream part; WP-14 step 7) | M | WP-01.2, WP-02.3 | todo | From WP-02.3 (found, not fixed; pinned by `tests/test_response_shapes.py::test_recorded_limit_an_interrupted_digest_stream_is_not_retried_and_its_usage_is_lost` and `::test_recorded_limit_an_interrupted_stream_loses_its_usage`, which this slice flips). The real SDK raises `httpx2.RemoteProtocolError` (not an `anthropic` error) for a dropped connection, and `APIStatusError` with `status_code` 200 for an SSE `error` event (`.type` is the event's, e.g. `overloaded_error`). `digest._is_transient_error` recognizes neither, so the digest retries neither, and the sheet's error for the event reads 'HTTP 200: {...}'. The attempt's usage is recorded 0/0 although `message_start` reported the input tokens. Synthesis and the focus report record no usage at all, the planner a 0-token record, the investigation 0/0. `current_message_snapshot` holds the partial read in every such case (the SDK's own `AssertionError` when no event arrived). The fixtures: `message_sse(cut=, end=)` and `AnthropicAPIStub(stream=)` through the real SDK, and `FinalMessageStream(cut=, end=)`, held to it |
+| WP-01.8 | Batch critique recovery: retry a failed batch critique read (transient errored, expired, a routed refusal on its fallback) and WP-01.4's raised-cap retry for a critique cut off at `max_tokens`, on both critique transports, inside WP-01.5's per-sheet retry budget and D-2's read tally | M | WP-01.5 | todo | Split out of WP-01.5 by the owner (2026-09-29). Measured by WP-01.5 on SDK 1.7.0 and 1.8.0: every failed batch critique read fails and is never retried (refused, the nine errored types, canceled, expired, `max_tokens`); `batch_critique` has no follow-up batch, harvest or rescue. WP-01.5 gave an errored read its type (`_batch_item_error_text(noun="item")`) and the refused read its category. The raised cap is possible (`critique.DEFAULT_CRITIQUE_MAX_TOKENS` 64,000, `digest.MAX_TOKENS_RETRY_CEILING` 128,000; the real-time critique streams through `digest.stream_message`). Two items WP-01.5 found and left, for this row or the owner: (1) the abandoned-batch harvest resubmits a truncated digest item at the cap it was submitted with, and the raised cap follows only on the next round (one round that can only truncate again; the owner's harvest rule covered refusals and permanent errors only); (2) a real-time refusal whose server-side fallback could not run carries `stop_details.recommended_model` (the API's hint to retry there directly); the digest logs it and does not retry (R2 is the batch transport's) |
 | WP-05.3 | Character-stream fallback tier with a quantity-aware numeric veto (B4: `6 "`, `INCHDRAIN`, `12' - 6"`, `2 %`). Matches only contiguous source words, never a "manufactured joined string" (plan §2 rule 15) | M | WP-05.2, WP-04.1 | todo | From WP-05.2: the four cases are pinned UNANCHORED in `tests/test_anchor_whole_words.py::test_recorded_limit_the_character_stream_cases_are_wp_05_3s`; flip them. Build on what WP-05.2 left: every tier matches whole source words through `anchor.SourceWords` (words folded by `anchor.fold_word`, each keeping its sheet word's `index`), and the window refuses a quote measurement inside part of a word (`_measurements_whole`). A new tier is its own method, so `numbers_grounded` fails closed for it until it carries the veto. Also pinned there as a recorded limit, present before for unbracketed text: the sub-phrase veto reads digit-bearing tokens only, so a sub-phrase can drop a unit printed as its own word (`150 GPM 568 L/S` anchors FUZZY on `150 GPM (568`); the quantity-aware veto should refuse it. Keep cross-QC and the anchor agreeing (the agreement table in that file) or record each difference with the owner |
 | WP-04.3 | Quantity roles for repeated same-kind values: the WP-04 matrix row "repeated values in different roles" (swapped: `6 in main, 4 in branch` / `4 in main, 6 in branch`; one value in two roles: `6 in supply, 6 in return` / `6 in supply, 8 in return`) | M | WP-04.2 | todo | Added by WP-04.2 (README 7.3): WP-04's acceptance does not hold without it. Nothing extracts a quantity's role, and the signature is a set, so both pairs carry compatible tokens and the same words. Do not settle it by keeping apart every pair that carries two or more values of one kind on both sides: that splits the commonest duplicate there is, the same "500 gpm shown, 550 gpm required" from both critique reads. It needs a role signal (for example the noun a quantity qualifies) with a negative corpus. Both pairs are pinned as recorded limits in `tests/test_quantity_signature.py::_RECORDED_LIMITS`; move them to `_CONFLICTS`. A role in the stored signature changes what an A/B record stores (`RECORD_CONTRACT_VERSION` 3 → 4) and what a critique entry holds (critique contract 2 → 3). Related, and under the same bump: `critique._TAG_RE` reads the `x12` of a tight `24"x12"` as a tag, and under WP-04.2's tag inclusion that stray tag beside a different extra reference on the other finding keeps apart two findings the old rule merged |
 | WP-06.2 | Whole-set cross-QC on host handles (label shown beside handle), grounded against **uncapped** evidence text like the sharded path, claims rebound through handles, framing hashed into the key; decides D-8 if not yet decided (N6, U8, K2) | L | WP-05.1 | todo | From WP-05.1: ground through `classify_quote_evidence` (a real, whole-word match at any length on the anchor's normalizer), not a second check. The gauntlet's whole-set `CROSS_CONFLICT` quotes (`VAV-7 COOLING 12 KW`, `PANEL LP-2 FED FROM MDP`) are printed as whole lines on their sheets, so they stay grounded. What the whole-set path admits is host-side binding: bump `_CROSS_QC_CACHE_CONTRACT` (4 since WP-05.1), not a key term From WP-06.1: the contract is 6. The refused-item counts are a separate record (`CrossQCResult.invalid`, both paths), so making `discards` non-None on the whole-set path touches nothing of it. That path still drops an item it cannot place on two sheets without a counter (an INFO line, now separate from the refused-item warning); count it with the grounding counters (the sharded path's `findings_dropped_under_two_legs`) when `discards` becomes non-None there. `_drop_exact_repeats` keys on the whole finding, so it is label-free; it needs nothing from D-8 From WP-11.1: D-8's page part is decided (`DECISIONS.md`): a sheet the run owes is one page `(source_id, page_index)` of an accepted inventory document, keyed by `models.source_page_key`, the pages a run owes are exactly the inventory's (`render.inventory_sheet_refs`), the inventory's `content_sha256` is the revision the run set out to read, and human sheet ids and the `page k/N` label are display metadata. This slice completes D-8: bind every evidence leg and the whole-set handles to that identity (N6's first-wins label maps, the colliding `stem-pN` fallback ids), amending D-8 there if the page part needs to move |
@@ -171,7 +172,7 @@ starting.
 |---|---|---|---|---|---|
 | WP-14.1 | Every non-succeeded batch envelope keeps a non-billable attempt record; the harvest counts only `succeeded` as responded (R3, incl. terminal path) | S | — | todo | From WP-02.3 (R3 confirmed through the real SDK; pinned by `tests/test_response_shapes.py::test_recorded_limit_a_recovered_item_keeps_no_record_of_its_failed_attempt`, which this slice flips): an item that comes back `errored` or `expired` and succeeds on resubmission has one ledger record, numbered attempt 2; the failed attempt left none. A permanent error or a `canceled` item keeps its one FAILED record |
 | WP-14.2 | TTL-split cache-write accounting from `usage.cache_creation`; per-TTL pricing; stale pricing comment fixed (C3) | S/M | WP-02.3 | todo | From WP-02.3 (C3 confirmed through the real SDK; pinned by `tests/test_response_shapes.py::test_recorded_limit_the_cache_write_ttl_split_is_priced_at_one_rate`, which this slice flips): with `cache_creation` split 300 (5-minute) and 700 (1-hour), a digest record is priced $0.011200 flat against $0.013825 by the split; the investigation's (1-hour breakpoint, two turns) $0.022000 flat against $0.019750. Identity, the planner, cross-QC, synthesis, focus, the prose harvest and verification read no cache counters at all (latent: none of them sends a cache breakpoint). On a stream the split is `message_start`'s: the SDK does not copy `cache_creation` from a `message_delta` |
-| WP-14.3 | One shared response-metadata reader: serving model, `iterations`, `stop_details`, `fallback_credit`, `output_tokens_details`, `web_fetch_requests` (U1) | M | WP-02.3 | todo | From WP-02.3 (confirmed through the real SDK; pinned by `tests/test_response_shapes.py::test_recorded_limit_web_fetch_requests_are_not_counted` and `::test_recorded_limit_the_serving_model_is_not_read`, which this slice flips): nothing reads `stop_details`, `iterations`, `fallback_credit`, `output_tokens_details`, `web_fetch_requests` or the serving model (after a fallback the ledger names the requested model). The beta stream accumulator sets the message's `model` from a `fallback` block's `to.model`. Not duplicated today: the totals are the top-level usage, never plus `iterations` (asserted by `::test_iterations_and_output_details_are_not_counted_twice`). `core.api_config.extract_cache_usage` has no caller left; the shared reader can replace it |
+| WP-14.3 | One shared response-metadata reader: serving model, `iterations`, `stop_details`, `fallback_credit`, `output_tokens_details`, `web_fetch_requests` (U1) | M | WP-02.3 | todo | From WP-02.3 (confirmed through the real SDK; pinned by `tests/test_response_shapes.py::test_recorded_limit_web_fetch_requests_are_not_counted` and `::test_recorded_limit_the_serving_model_is_not_read`, which this slice flips): nothing reads `stop_details`, `iterations`, `fallback_credit`, `output_tokens_details`, `web_fetch_requests` or the serving model (after a fallback the ledger names the requested model). The beta stream accumulator sets the message's `model` from a `fallback` block's `to.model`. Not duplicated today: the totals are the top-level usage, never plus `iterations` (asserted by `::test_iterations_and_output_details_are_not_counted_twice`). `core.api_config.extract_cache_usage` has no caller left; the shared reader can replace it From WP-01.5 (pinned by `tests/test_batch_refusal_recovery.py::test_recorded_limit_a_fallback_read_is_labelled_with_the_requested_model`, which this slice flips): a refused batch digest the host resubmits on Opus 4.8 is recorded in the ledger under the requested model (`DigestUsageAttempt` carries no model; the pipeline labels every digest attempt with the run's model). Same price today. `digest.refusal_details` now reads a refusal's `stop_details` (category, explanation, `recommended_model` on either namespace); the shared reader should adopt it rather than add a second |
 | WP-14.4 | `UsageRecord` known/unknown usage through the single `is_billable_but_unpriced` rule; `by_model` decision; pricing date on every surface; decides D-7 (WP-14 steps 4, 8) | M | WP-14.3 | todo | From WP-11.2 (found, not fixed): a real-time read whose `digest_sheet` raised after the API call returned (the paid read, then an error outside the call's own capture; its level-2 cache write is advisory since WP-11.2, so not that) leaves no usage record, since the exception carries no usage; the phase now stops and ships, so that spend is the one the run cannot report (D-7) |
 | WP-14.5 | Per-attempt usage records from every stage result type (WP-14 step 3) | L | WP-14.4, WP-01.2 | todo | From WP-01.3: the real-time digest's raised-cap retry is still one usage record carrying both attempts' summed tokens (batch keeps one record per attempt). Since WP-01.3 the discarded attempt is named in the sheet's error, but it has no attempt record of its own on real time From WP-01.4: the critique's per-sheet record aggregates its reads (both reads' tokens), and since WP-01.4 its `terminal_status` is COMPLETE only when every read counted, FAILED when none did, else PARTIAL (`parse_success` only for COMPLETE). A per-read record would carry each read's own outcome (a cut-off read beside a finished one is one PARTIAL record today) |
 | WP-14.6 | Serving model carried through cache payloads (additive field) and the manifest (U1 provenance) | M | WP-14.3, WP-14.4 | todo | From WP-02.3: the serving model is pinned as a recorded limit with WP-14.3 (`tests/test_response_shapes.py::test_recorded_limit_the_serving_model_is_not_read`); the stub now serves the requested model unless the reply names one |
@@ -288,7 +289,7 @@ report is built from it).
 | B11 | "No conflicts noted on this sheet." becomes a medium finding | P1 | 09.1 | implemented+validated | `tests/test_prose_filler_and_assurances.py` (WP-09.1, [PR #168](https://github.com/Abe-Borg/drawing-analyzer/pull/168)): the review's four strings and 21 equivalent wordings are filler (`test_b11_review_strings_are_filler`, `test_b11_equivalent_wording_is_filler`), counted in `filtered`, and make no structuring call and no ledger entry with a client, without one, or when the call fails (`test_b11_filler_*`); 45 real findings survive (`test_real_findings_survive_the_filter`), and everything the old filter dropped is still dropped (`test_the_new_filter_drops_everything_the_old_one_did`) |
 | B12 | `deg`/`°` sign differently; `90 deg F` vs `90 deg C` compatible | P0 | 04.1 | implemented+validated | `tests/test_quantity_signature.py` (the B12 token table; the `B12 …` pairs, incl. no inferred scale); `tests/test_ab_findings_diff.py::test_a_changed_temperature_scale_is_never_an_exact_match` (WP-04.1, [PR #157](https://github.com/Abe-Borg/drawing-analyzer/pull/157)) |
 | R1 | Source unreadable after inventory aborts the whole run | P0/P1 | 11.1, 11.2, 11.3 | open (core implemented+validated in 11.1; digest-phase containment implemented+validated in 11.2; the revision check on reopen (11.3) stays open) | `tests/test_source_page_isolation.py` (WP-11.1, [PR #172](https://github.com/Abe-Borg/drawing-analyzer/pull/172)), by the owner's rules: the second, the first and every source removed after the inventory, and one locked (`PermissionError`), on real time, batch and Hybrid, cold and cached: the run returns a context and a closed journal, the surviving sheets are digested and exportable, each lost page has an `UnreadPage` and one `PAGE_UNREAD` event, one source line in `ctx.errors` and the digest stage's errors, the stage counts the inventory's pages (PARTIAL; FAILED when nothing survived), no path anywhere; a paid digest before the loss is kept (usage, export, manifest); the zero-sheet exit only for a set with nothing accepted; a page failing in the prescan (identity, word count, geometry) is read, one failing in both (page load, text) or in the render only is unread with one page line; fewer and more pages (both transports, both cache paths); a 5-page source is one line; a page neither yielded nor reported still has an outcome; a cached source that vanishes after the prescan costs nothing; the critique over a source lost after the digest (COMPLETE from the spool or retained uploads; Hybrid names each page with its reason); an unchanged set's refs equal `list_sheets` and a cached re-run renders nothing. `tests/test_digest_phase_containment.py` (WP-11.2, [PR #173](https://github.com/Abe-Borg/drawing-analyzer/pull/173)), by the owner's rules: an unexpected exception from the digest, a progress callback, the prescan, the level-1 store, the accounting, a batch submit loop, poll or results read, on real time, batch, Hybrid and Economy, cold and cached: the run returns a closed context (`RUN_END` `stopped="digest"`) and exports it; every paid digest in hand is kept (usage, `SHEET_DIGESTED`, `findings.json`), a read in flight included; each page not reached is an `UnreadPage` naming the failure with one `PAGE_UNREAD` event; one path-free line (type name only) says what was not read and what was kept; the digest stage reads FAILED; no later stage makes a call; a cached re-run reads only what was not read; a submit failure before its batch deletes every upload; a collect failure reads back what finished, cancels a running batch and releases (a batch it cannot cancel keeps its files); the spool and retained uploads are released on every exit, `KeyboardInterrupt` and an exception after the phase included, and `KeyboardInterrupt` still ends the run. Remaining: WP-11.3 (revision on reopen) |
-| R2 | Refused batch item never retried or rescued | P1 | 01.5 | open | |
+| R2 | Refused batch item never retried or rescued | P1 | 01.5 | implemented+validated | `tests/test_batch_refusal_recovery.py` (routes, target, budget, transport, harvest, cache, logging; real SDK over the stub) and `tests/test_response_shapes.py::test_a_refused_batch_item_is_resubmitted_on_the_fallback_model` (the flipped recorded limit, through the pipeline) (WP-01.5, [PR #182](https://github.com/Abe-Borg/drawing-analyzer/pull/182)). Acceptance "Refusal recovery preserves selected transport and bounds": `test_the_pipelines_transport_never_rescues_a_refusal_in_real_time`, `test_no_sheet_is_resubmitted_more_than_the_budget`, `test_the_budget_covers_the_direct_rescue` |
 | R3 | Canceled/errored envelopes lose attempt records (harvest and terminal path) | P1 | 14.1 | open | |
 | R4 | Chat commits an unrun `server_tool_use`; history poisoned, persisted | P1 | 19.1, 19.2 | open | |
 | R5 | Process-pool markup plan disagrees with receipts | P1 | 21.1 | open | |
@@ -396,6 +397,298 @@ report is built from it).
 Each session adds one entry at the top: date, slices and IDs, PR, what changed,
 contracts decided, cache/schema effects, validation actually run (with counts),
 what could not be verified, risks, and next steps.
+
+### 2026-09-29 — WP-01.5: a refused batch sheet is retried on its fallback model, inside one per-sheet retry budget ([PR #182](https://github.com/Abe-Borg/drawing-analyzer/pull/182))
+
+- **Slice and IDs:** WP-01.5. R2 (implemented+validated). Inherited onto the
+  row and done here: `billing_error` classified; the batch critique's errored
+  read keeps its type. Split off to a new row, **WP-01.8** (the owner's
+  decision): retrying failed batch critique reads and WP-01.4's raised-cap
+  question. Contract: a WP-01.5 note under D-1 in `DECISIONS.md` (the owner's
+  rules). No migration-register row: no cache key, entry, prompt or schema
+  moved. **WP-01 is not done**: WP-01.6, WP-01.7 and WP-01.8 remain. The
+  plan's R2 acceptance, "Refusal recovery preserves selected transport and
+  bounds", holds (tests named below).
+- **Base.** `main` = `origin/main` = `77a3f03` (WP-02.3's merge). The local
+  `origin/main` ref was stale (`614951d`, [PR #161](https://github.com/Abe-Borg/drawing-analyzer/pull/161)) until fetched; the branch
+  was already at `77a3f03`. Open PRs: [#174](https://github.com/Abe-Borg/drawing-analyzer/pull/174) (dependabot) and [#175](https://github.com/Abe-Borg/drawing-analyzer/pull/175) (SDK
+  1.8.0 support), neither a remediation slice, neither merged; no pin changed.
+  Baseline **4,887 passed, 2 skipped, 10 deselected** (409 s), identical to
+  WP-02.3's final count; the two skips are IPv6 loopback and chmod as root.
+  Python 3.11.15, SDK 1.7.0, PyMuPDF 1.28.2.
+- **The request's facts, re-verified** (all held; corrections marked):
+  - `batch_digest._PERMANENT_ITEM_ERROR_TYPES` held invalid_request_error,
+    authentication_error, permission_error, not_found_error and
+    request_too_large. The SDK's `ErrorObject` has nine types (identical on
+    1.8.0); `billing_error` was missing and `request_too_large` is not one of
+    the nine.
+  - The seams exist as named (`RECOVERY_BATCH`/`RECOVERY_DIRECT`,
+    `DEFAULT_MAX_BATCH_RESUBMIT_ROUNDS = 4` with its env override,
+    `_replace_result_with_attempt_history`, `_batch_item_error_text`,
+    `_item_retry_params`, `_harvest_abandoned_batch`,
+    `_rescue_failed_items_sync`, `_recover_via_batch_resubmit`, `_parse_item`;
+    `digest.MAX_TOKENS_RETRY_CEILING`, `keep_digest_read`,
+    `digest_terminal_error`, `TerminalOutcome.raised_cap_may_finish`). The
+    batch critique's equivalents: `batch_critique._outcome_from_envelope` (the
+    per-read envelope) and `collect_critique_batch` (one terminal collect, no
+    follow-up batch, harvest or rescue; a non-terminal batch is canceled and
+    its sheets degrade).
+  - The registry: only Opus 5 declares `supports_refusal_fallback`; Opus 4.8
+    was named the target only in comments. **Confirmed: no named constant.**
+  - `fallbacks` is rejected on the Batches API (the code's own comment and
+    Anthropic's docs).
+  - **`recommended_model`, measured first (p0):** the plain
+    `RefusalStopDetails` declares `category`, `explanation`, `type` but has
+    `extra='allow'`, so a batch result keeps `recommended_model` as a pydantic
+    extra (`getattr` works, `model_extra` holds it), on SDK 1.7.0 and 1.8.0.
+    **Correction to the plan step:** per the SDK's own docstring and the API
+    docs, the field is set only when a server-side fallback attempt could not
+    run (the fallback model rate-limited or overloaded), i.e. only on a
+    request that carried `fallbacks`, which a batch item cannot. So on a batch
+    refusal it is absent in practice, and the registry route is the real
+    target. Batch results carry no `fallback_credit_token` either. Every
+    category (cyber, bio, frontier_llm, reasoning_extraction, general_harms,
+    `None`, and an unknown string) parses on the plain namespace.
+- **Measured before any code** (scratch probes, zero API calls, the real SDK
+  over `AnthropicAPIStub`, WP-02.3's shapes; a stub subclass stalls a named
+  batch until canceled; the fake sleep drives a fake monotonic clock):
+  - **m1, every shape at every site.** Digest, both recovery transports,
+    sites primary / rounds (the first resubmission) / harvest / direct rescue,
+    shapes: a refusal per category with and without `recommended_model`, no
+    `stop_details`, a refusal with text, the nine error types, canceled,
+    expired (164 cases). Today: every refusal fails with no retry at the
+    primary, the rounds, the follow-up and the rescue (1 item; the rescue's
+    refusal after server-side fallback likewise); nothing logs `stop_details`;
+    `billing_error` is resubmitted like the four transient types; canceled is
+    named and not resubmitted, expired is resubmitted; **the harvest
+    resubmits every unresolved item it read, a refusal and a permanent
+    `invalid_request_error` included, with identical params** (so a refusal
+    was resubmitted to the same model). Critique (one site, 27 shapes plus a
+    `max_tokens` read): every failed read fails and is never retried; an
+    errored read's error keeps the message and drops the type (`the detail`).
+  - **m2, every retry a sheet can get today.** `RECOVERY_BATCH` (the
+    pipeline): 5 submissions worst case (primary + 4 rounds), shared already
+    by transient, expired, raised-cap (64k -> 128k, once) and abandoned rounds;
+    11 with `DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS=10`; a refusal 1.
+    `RECOVERY_DIRECT`: 2 batch items + 3 real-time calls (the rescue's 1 + 2
+    transient retries); a lone sheet whose batch failed server-side skips the
+    follow-up (1 + 3). The real-time digest: 6 calls (2 attempts x (1 + 2
+    transient)). Production's client also keeps the SDK's `max_retries=2`
+    under every HTTP call.
+  - **m3, a swapped model** (a prototype patch resubmitting a refused item on
+    Opus 4.8): the finished read was stored under the requested model's key at
+    both levels (4 puts), a warm run served it free as the Opus 5 digest, the
+    ledger labelled the attempt `claude-opus-5` at $5/$25 (Opus 4.8's price
+    too). The server-side fallback already behaves this way
+    (`test_recorded_limit_the_serving_model_is_not_read`).
+  - **m4:** p0, m1 (digest and critique), m2 and m3 on SDK 1.8.0 in a scratch
+    venv (the project `--no-deps`, its other dependencies pinned as
+    installed): identical, line for line.
+- **The decision, made by the owner before any code** (AskUserQuestion, two
+  rounds, eight choices, a case table per option; every recommended option
+  taken):
+  - **Round 1.**
+    - **Which refusals:** a registry route per category. Not taken: any named
+      category on Opus 5; every refusal on Opus 5 (null included); Opus 5 and
+      Sonnet 5 (a guessed Sonnet route).
+    - **Target:** `recommended_model` if registered and not the refuser, else
+      the route's; with neither, no retry. Not taken: the registry target only;
+      `recommended_model` verbatim.
+    - **Shared bound:** a per-sheet budget equal to the rounds (default 4, the
+      existing env variable), counting every resubmission at every site; a
+      refusal once; the harvest asks the same predicate. Not taken: the same
+      plus the real-time digest; a refusal round outside the rounds.
+    - **Cache:** the requested model's key. Not taken: the same plus a stored
+      `served_model` field; the serving model's key; not cached.
+  - **Round 2.**
+    - **`billing_error`:** permanent; `request_too_large` kept. Not taken:
+      transient within the budget; permanent and `request_too_large` dropped.
+    - **Critique:** the error type here; retries on a new row. Not taken:
+      everything here; the type plus the real-time raised cap.
+    - **Logging:** the category in the error, the rest in the diagnostics log;
+      nothing in the manifest; one approved re-baseline. Not taken: the log
+      only; the log, the error and a `refusals` manifest key.
+    - **Direct rescue:** `RECOVERY_DIRECT` is the full-rate policy. Not taken:
+      only when passed explicitly (a sentinel default); never at full rate.
+  - **One reading recorded:** the gate decides whether, the target decides
+    where. The round-2 target table's "route target: any" row is read as
+    "whatever the route's target is", since the round-1 choice says everything
+    unrouted is not retried. It changes nothing measured (no batch refusal
+    carries the hint).
+- **What changed** (production):
+  - **`core/api_config.py`:** `ModelCapabilities.refusal_fallback_routes`
+    (pairs, hashable); Opus 5 declares `(("cyber", MODEL_OPUS_48),)`;
+    `refusal_fallback_target(model, category)`; `is_registered_model(model)`.
+  - **`digest.py`:** `retarget_digest_request(params, model)` (the builder's
+    rules: thinking kept only where taken, effort clamped, `max_tokens` capped;
+    the input untouched); `RefusalDetails`, `refusal_details(message)` (either
+    namespace or a dict), `describe_refusal` (redacted, one line, explanation
+    capped at `REFUSAL_EXPLANATION_MAX_CHARS` = 200);
+    `digest_terminal_error(category=)` (a refusal names its category; the
+    wording is unchanged without one); `SheetDigest.fallback_model` (runtime
+    only); `keep_digest_read` and `note_failed_retry(model=)` name a discarded
+    fallback read `; retry on <model>: …`; the real-time `_read_of` logs a
+    refusal.
+  - **`batch_digest.py`:** `_item_error_type` (the nested type, read once);
+    `_batch_item_error_text(noun=)`; `billing_error` permanent;
+    `_item_retry_params` sends a refusal to `_refusal_retry_params` (the gate,
+    the target, once per sheet, the not-retried note, the log);
+    `_Slot.retries` / `_Slot.last_params`, `_within_retry_budget`,
+    `_count_retry`, `_fallback_model_of`; the rounds, the follow-up batch and
+    the rescue check and count the budget; `_parse_item` / `_digest_from_message`
+    word a fallback read with its model and log a refusal; the harvest holds a
+    refusal, asks the predicate about a refusal or a permanent error
+    (`_HarvestOutcome.final`, `.retry`, `.rescue_params`), and every caller
+    builds its list through `rescue_params`.
+  - **`critique.py`:** `outcome_from_message` passes the category and logs a
+    refusal. **`batch_critique.py`:** `_outcome_from_envelope` uses
+    `_batch_item_error_text(noun="item")`.
+- **New tests: 67** (`tests/test_batch_refusal_recovery.py`), all passing: the
+  routes, the registry and the retargeted request (9); the error types (3);
+  the ladder, the reader and the log line (4); a routed refusal on both
+  transports, unrouted categories, no category, the target rules, the gate
+  over the hint, a fallback that refuses too, comes back worse, errors
+  transiently or truncates (18); the budget (6); the selected transport (4;
+  two added after the post-implementation probes, below);
+  the harvest (7); the cache (2) and the WP-14.3 recorded limit (1); the
+  critique's errored, canceled/expired and refused reads (12); real time (1).
+  - **Classified against `origin/main`** (a worktree at `77a3f03` with its own
+    `src` first on the path, then a shim giving the new names today's
+    behaviour): **53 fail on behaviour**, **5 fail only on a new name** (the
+    registry and retarget helpers where today's naive behaviour happens to
+    match: `test_is_registered_model`,
+    `test_route_categories_are_the_sdks_refusal_categories`, and the retarget
+    for Opus 4.8, Sonnet 5 and Sonnet 4.6), **9 pass** (controls: the
+    unchanged server-side capability, a refusal with no category, the gate
+    over the hint, the default direct rescue, a harvested canceled item, an
+    unfinished fallback not cached, canceled/expired critique wording).
+  - **`tests/test_response_shapes.py`:** the two recorded limits flipped, each
+    shown failing in its original form against the fix first:
+    `test_recorded_limit_a_billing_error_is_resubmitted_like_a_transient_one`
+    (`[2] == [2, 1]`) is now `test_a_billing_error_is_named_and_not_resubmitted`;
+    `test_recorded_limit_a_refused_batch_item_is_not_resubmitted` (`None ==
+    "refused digest …"`) is now
+    `test_a_refused_batch_item_is_resubmitted_on_the_fallback_model` (two
+    rounds, the second on `claude-opus-4-8`, never real time, the warm run asks
+    nothing). One approved re-baseline:
+    `test_a_refused_digest_fails_its_sheet_and_is_read_again`'s error now
+    names `category='cyber'`. `test_every_sdk_error_type_is_classified`'s
+    comment only. All three fail on behaviour against `origin/main`.
+- **Validation** (this container: Python 3.11.15, SDK 1.7.0, `httpx2` 2.13.1,
+  PyMuPDF 1.28.2):
+  - Baseline before any change: **4,887 passed, 2 skipped, 10 deselected**
+    (409 s).
+  - The new file and `test_response_shapes.py`: all pass; the batch,
+    partial-read, terminal-outcome, critique-batch, SDK-contract,
+    SDK-response and classifier files: 428 passed.
+  - Full suite with the first 65 new tests, and a JUnit diff against a JUnit
+    run of `origin/main` (the worktree): **4,952 passed, 2 skipped, 10
+    deselected** (394 s). Of the 4,887 tests in both runs, **0 changed
+    outcome**; the others are the 65 new tests and the two flipped ones
+    (renamed). Full suite on the final tree (67 new): **4,954 passed, 2 skipped, 10
+    deselected** (405 s), the baseline plus the 67, the same two
+    environment skips.
+  - **Instrumented diff** (a pytest plugin recording, per test, every
+    `_item_retry_params` decision, harvest outcome, direct rescue and
+    terminal-error wording; the whole suite on `origin/main` and on this
+    branch): outside the new and flipped tests only two tests' events differ,
+    both in wording alone (the category is named):
+    `test_a_refused_digest_fails_its_sheet_and_is_read_again` (the approved
+    re-baseline) and `test_a_refused_stage_is_not_complete_and_not_cached[critique]`
+    (it asserts the stage status, unchanged). Every one of the 201 retry
+    decisions, and every harvest and rescue, in the other tests is identical
+    (their 10 refusal decisions carry no `stop_details`, so no category, and
+    are not retried either way).
+  - **The probes again, on the final code** (SDK 1.7.0 and 1.8.0, identical):
+    m1's 164 digest cases: 116 unchanged; a cyber refusal is recovered on
+    Opus 4.8 at the primary, the rounds and the harvest on both transports; an
+    unrouted or category-less refusal and a permanent error the harvest reads
+    are final (no longer resubmitted, or rescued at full rate under
+    `RECOVERY_DIRECT`); `billing_error` is not resubmitted. One case the tests
+    did not pin yet: under `RECOVERY_DIRECT` a refusal first returned by the
+    follow-up batch gets its fallback in the full-rate rescue, as any item
+    still failing after that batch does. It is the owner's rule ("takes any
+    failed item's path"); the round-2 preview's "only if that batch cannot run
+    or stalls" described a refusal from the primary. Pinned by two tests (both
+    transports), and the CLAUDE.md and D-1 wording made exact. The critique:
+    an errored read names its type, a refused one its category; canceled and
+    expired unchanged. m2: every worst case unchanged, except a cyber refusal
+    (1 -> 2 submissions).
+  - `python -m compileall -q src`: clean. `python -m ruff check --select
+    E9,F63,F7,F82 src tests scripts` (0.14.5): clean; F401/F811/F841 on the
+    touched files: clean. (`ruff` on PATH here is 0.15.8; `python -m ruff`
+    is the pinned 0.14.5.) `python scripts/scan_secrets.py`: clean (223
+    files, the new file staged). Every key is built at runtime, every
+    parametrized case has an id, no invisible character was added.
+  - The browser suite was not run: no report or JavaScript changed.
+- **Docs:** CHANGELOG (Fixed, R2); CLAUDE.md (a *Batch refusal recovery*
+  passage after the batch recovery one; the harvest's hold rule; the
+  refusal-fallback invariant points to the host route; the classifier's
+  adopters; WP-01.5 removed from the recorded-limit owners); README (the
+  refusal wording, the batch fallback, the per-sheet budget, the harvest, the
+  env table); the plan (a WP-01.5 note under "New step: batch refusals (R2)",
+  with the correction); DECISIONS (D-1's WP-01.5 note); PROGRESS (this entry;
+  the WP-01.5, WP-01.8 (new), WP-14.3 rows; the package range; R2; Next up).
+  No dependency changed.
+- **Not verified:**
+  - Live API behaviour (no budget, O-4): that the API never sends
+    `recommended_model` on a batch refusal (documented, not observed); that
+    Opus 4.8 accepts the Opus 5 digest request unchanged (the registry says
+    identical shapes; WP-02.4's canary is the place); how often a real
+    drawing set trips a cyber refusal.
+  - Windows is covered by this PR's CI (`gates-windows`).
+- **Risks and residual gaps:**
+  - A cyber refusal now costs one more batch item on Opus 4.8. Its cost is
+    counted (one more attempt record) at the Opus 5 label, the same price.
+  - A refusal the harvest reads with no route (including `null`) is now final
+    where it used to be resubmitted to the same model (m1). That follows the
+    owner's gate, and it is the only place a same-model refusal retry existed.
+  - The per-sheet budget equals the round ceiling, so it binds on its own only
+    under `RECOVERY_DIRECT` with a low override (the follow-up batch spends the
+    only retry and the rescue is skipped); pinned.
+- **Found, not fixed** (noted on the owners' rows):
+  - WP-14.3: a host fallback read is labelled with the requested model in the
+    ledger (`test_recorded_limit_a_fallback_read_is_labelled_with_the_requested_model`).
+  - WP-01.8: the harvest resubmits a truncated item at the cap it was
+    submitted with (the raised cap follows only on the next round); a
+    real-time refusal whose server-side fallback could not run carries a
+    `recommended_model` nothing acts on.
+  - Pre-existing, not this slice's: `critique.py` imports
+    `DEFAULT_DIGEST_MAX_TOKENS` unused (ruff F401 outside the CI classes).
+- **Merged with the 5.5 defaults** (`main` moved to `0be9ae7` while the PR was
+  open: [PR #183](https://github.com/Abe-Borg/drawing-analyzer/pull/183) made
+  Opus 5.5 and Sonnet 5.5 the defaults and declared `supports_refusal_fallback`
+  on both). Merged, not rebased. Two text conflicts, both kept whole: the
+  refusal-fallback comment in `core/api_config.py` and the refusal-fallback
+  invariant in CLAUDE.md. What the merge changes for this slice:
+  - **The 5.5 models declare no host route**, so on the new default a batch
+    digest refused in any category fails with its category named and is not
+    retried (`…; not retried: no fallback for category 'cyber' on
+    claude-opus-5-5`), and the harvest holds it as final. Opus 5 keeps its
+    `cyber` route. No route was added: the owner's rules named Opus 5's, and
+    a route for a new model is a registry decision. **Open for the owner:**
+    whether the 5.5 models get routes, and which (Anthropic documents Sonnet
+    5.5's server-side fallback as `cyber` and `frontier_llm` on Sonnet 5, and
+    Opus 5.5's targets as Opus 5 and Opus 4.8 per category, with
+    `reasoning_extraction` never retried; the per-category split for Opus 5.5
+    is not stated).
+  - **Tests.** Three of this slice's failed on the merge, each from the new
+    default, none from a behaviour change: `test_supports_refusal_fallback_is_unchanged`
+    now names the three declaring models; the flipped
+    `test_response_shapes::test_a_refused_batch_item_is_resubmitted_on_the_fallback_model`
+    and the WP-14.3 recorded limit run on Opus 5 (`_run(model=)` and
+    `_warm_calls(model=)`, optional, added to the shared helpers). Two new:
+    `test_a_cyber_refusal_on_a_55_model_is_not_retried` (Opus 5.5 and Sonnet
+    5.5), and the registry pin now lists both 5.5 models as routeless. 69 in
+    the file.
+  - **Docs.** README, CHANGELOG, CLAUDE.md and D-1's WP-01.5 note say the 5.5
+    defaults have no route yet.
+  - **Validation after the merge:** **4,993 passed, 2 skipped, 10 deselected**
+    (421 s; the same two skips); compileall, ruff 0.14.5 on the CI classes
+    and `scan_secrets.py` clean.
+- **Next:** in queue order, WP-01.6 and WP-01.7 (Wave 2, available since
+  WP-02.3 merged), then WP-01.8 (Wave 2, depends on WP-01.5). WP-11.3, WP-10.4,
+  WP-06.2, WP-06.3, WP-05.3 and WP-07.3 (Wave 2) are available.
 
 ### 2026-09-29 — WP-02.3: the suite's responses are the shapes the API sends, through the real SDK ([PR #181](https://github.com/Abe-Borg/drawing-analyzer/pull/181))
 
