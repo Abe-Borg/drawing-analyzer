@@ -1,7 +1,7 @@
 # Remediation progress tracker
 
-**Next up:** Wave 1: `WP-16.2` (G2: a run-scoped client snapshot, the key entry disabled while busy, the key no longer written to `os.environ`; no dependency). WP-16.1 is done: a key file saved "UTF-8 with BOM" no longer breaks the saved key (one normalizer and one `sk-ant-` shape check for a key file, the keyring, `save_api_key` and the GUI field; a BOM value already in the keyring is repaired; a file that is not a key is kept and named; a migration deletes only the files that hold the key it verified; value-free notes in the GUI and diagnostics logs; G3). WP-16.3 (Wave 4) is now unblocked: its dependency WP-16.1 is done. WP-11.3 (Wave 2, revision on reopen) is available and is the last of R1. WP-10.4 (Wave 2) is available: its dependencies WP-01.2 and WP-01.4 are done. WP-01 is not done: WP-01.5 (Wave 2), WP-01.6 and WP-01.7 (Wave 2, waiting on WP-02.3) remain. WP-09 is not done: WP-09.3 (N32, Wave 3) remains. WP-06 is not done: WP-06.2 and WP-06.3 (Wave 2) are available, and WP-06.4 still waits on WP-03.4; WP-06.2 completes D-8. WP-05 is not done: WP-05.3 remains (Wave 2, available). WP-07 is not done: WP-07.3 (Wave 2, available). WP-03 is not done: WP-03.4, WP-03.5 and WP-03.6 remain (Wave 2); WP-03.5 also carries the measured N30 exposure of cross-QC's same-pair conflicts. WP-04 is not done: its acceptance needs quantity roles, slice `WP-04.3` (Wave 2). WP-11 is not done: WP-11.3 remains. First check the open PRs ([`README.md`](README.md), step 1). Before the next stable tag, the owner should look at O-5.
-**Last updated:** 2026-09-28 by the WP-16.1 session ([PR #176](https://github.com/Abe-Borg/drawing-analyzer/pull/176)).
+**Next up:** Wave 1 is done. In queue order the next available slice is Wave 2 `WP-02.2` (real-SDK contract tests and strict batch/stream fakes; depends on WP-02.1, done). WP-16.2 is done: a GUI run builds one client from the key snapshotted at Analyze and passes it to every stage, the GUI never writes `ANTHROPIC_API_KEY` (an inherited one fills the field at launch and is then removed, so no child inherits a key from the app), the key entry is locked while an analysis runs, and the exports embed the key in the field (G2). WP-17.1 (Wave 4, cancel; decides D-5) is now unblocked: its dependency WP-16.2 is done. WP-16.3 (Wave 4) is unblocked. WP-11.3 (Wave 2, revision on reopen) is available and is the last of R1. WP-10.4 (Wave 2) is available: its dependencies WP-01.2 and WP-01.4 are done. WP-01 is not done: WP-01.5 (Wave 2), WP-01.6 and WP-01.7 (Wave 2, waiting on WP-02.3) remain. WP-09 is not done: WP-09.3 (N32, Wave 3) remains. WP-06 is not done: WP-06.2 and WP-06.3 (Wave 2) are available, and WP-06.4 still waits on WP-03.4; WP-06.2 completes D-8. WP-05 is not done: WP-05.3 remains (Wave 2, available). WP-07 is not done: WP-07.3 (Wave 2, available). WP-03 is not done: WP-03.4, WP-03.5 and WP-03.6 remain (Wave 2); WP-03.5 also carries the measured N30 exposure of cross-QC's same-pair conflicts. WP-04 is not done: its acceptance needs quantity roles, slice `WP-04.3` (Wave 2). WP-11 is not done: WP-11.3 remains. WP-16 is not done: WP-16.3 remains. First check the open PRs ([`README.md`](README.md), step 1). Before the next stable tag, the owner should look at O-5.
+**Last updated:** 2026-09-29 by the WP-16.2 session ([PR #177](https://github.com/Abe-Borg/drawing-analyzer/pull/177)).
 
 This file is authoritative for **status and order**. Requirements live in
 [`drawing-analyzer-remediation-plan.md`](drawing-analyzer-remediation-plan.md).
@@ -118,7 +118,7 @@ starting.
 | WP-11.1 | Per-source and per-page fault isolation in the render and prescan iterators; the inventory is the page denominator; every expected page gets an outcome (R1 core) | M | — | done | [PR #172](https://github.com/Abe-Borg/drawing-analyzer/pull/172), 2026-09-24. **Rules decided by the owner (six choices, two rounds, measured first):** (1) the pages a run owes are the inventory's, built without reopening a file (`render.inventory_sheet_refs`, `InputInventory.expected_page_counts`), and D-8's page part is decided narrowly (a sheet the run owes is one page `(source_id, page_index)` of an accepted inventory document); (2) both iterators take `expected_pages`: a source that will not open again fails every expected page with one shared `render.SourceUnreadableError`, a page past the source's current end fails with `render.PageNotInSourceError`, and a source none of whose pages is wanted is never opened; (3) an unread page is a typed record (`models.UnreadPage`: `ctx.unread_pages`, `unread_pages` in `run_manifest.json`, a `NOT READ` line in run.log's Sheets section) plus one `PAGE_UNREAD` event, so every expected page ends with exactly one per-page event; a page neither yielded nor reported gets one too; (4) `ctx.errors` and the digest stage's errors say a source-level failure once per source, a page failure once per page; (5) the prescan is best effort: what it cannot scan goes to the render path (the one reporter), and `_GeometryOmissionSink(order=)` adds a routed page's geometry in page order; (6) a source with more pages is read for its inventoried pages and named in one run error (the stage stays COMPLETE, the run PARTIAL), fewer pages fail the missing ones; labels keep the inventory's count, the render identity the opened file's; (7) the critique takes the same refs (`list_sheets` only as a direct caller's fallback): a source lost after the digest is critiqued from the spooled renders or retained uploads, and on Hybrid each page it cannot obtain is named with the reason. No key, prompt or schema moved (`tests/test_drawing_cache_identity.py` unchanged); `run_manifest.json` gains `unread_pages`. Tests: `tests/test_source_page_isolation.py` (77). No pinned test re-baselined; outside the new file only the critique's degraded line in the 2 fixtures with an unrenderable page (it now names the reason) and 3 `PAGE_UNREAD` events moved (instrumented) |
 | WP-11.2 | Digest-phase containment: completed paid digests, journal and manifest always ship; uploads and spool released on every exit (R1) | M | WP-11.1 | done | [PR #173](https://github.com/Abe-Borg/drawing-analyzer/pull/173), 2026-09-25. **Rules decided by the owner (eight choices, two rounds, measured first):** (1) an unexpected `Exception` inside the digest phase stops the phase, not the run: the digests in hand ship (both transports fill a `collected` list; real time keeps each read in flight), every page not reached is an `UnreadPage` (`not read: the digest phase stopped early (<Type>)`), and `_stopped_run_context` ends the run after the phase: no later stage makes a call, reopens a source or writes a reviewed PDF, none is recorded, the read sheets' digest findings are ledgered offline (DA-012), `RUN_END` carries `stopped="digest"`, and the context goes to the normal exporter; (2) the digest stage reads FAILED whatever was read (D-2 note); (3) the collect side harvests what finished, then releases (`_abandon_after_collect_error`; a batch it cannot cancel keeps its files); (4) `Exception` only: `KeyboardInterrupt` and `SystemExit` still end the run (D-5 input note); (5) one run-level line after the inventory's, type name only, path-free (`_digest_phase_line`); (6) the phase's unreached pages carry that reason and no per-page line; (7) the reads in flight are kept; (8) the line says what was kept ("the N page(s) read are exported and cached, so a re-run does not pay for them again"). Also: the level-1 store runs over the digests in hand (a re-run renders and reads only the rest); `submit_drawing_batch` gains the DA-034 outer guard (`slots_out=`), `collect_drawing_batch` a guard over its whole body (`results_out=`); `@_with_run_release` releases the render spool and the retained uploads on every exit. Review round 1 (Codex): both level-2 cache writes are advisory (a raising `put` lost the paid read on real time and every billed item in the batch collect and harvest), the accounting is recorded page by page (one bad usage record dropped every later sheet's usage), and the line's cache promise needs a level-1 store that did not fail. No key, prompt, schema or manifest key moved. Tests: `tests/test_digest_phase_containment.py` (36). No pinned test re-baselined; outside the new file only one release of zero files moved (instrumented) |
 | WP-16.1 | Key store: BOM-safe load, repair of BOM values already in the keyring, shape check, migration that never deletes the only good copy (G3) | S/M | — | done | [PR #176](https://github.com/Abe-Borg/drawing-analyzer/pull/176), 2026-09-28. **Rules decided by the owner (eleven choices, three rounds, measured first):** (1) one normalizer, `core.api_key_format.normalize_api_key`: whitespace and Unicode format characters (Cf) stripped from both ends only; (2) one shape check, `looks_like_api_key`: a full match of the diagnostics redactor's `sk-ant-[A-Za-z0-9_-]+`, now one shared constant (`ANTHROPIC_KEY_RE`), no length floor; (3) it applies to migration, save and the keyring; (4) a key file that fails it is not used, not migrated and kept, and the next location is tried; (5) a keyring entry stored un-normalized is rewritten through the verified round-trip (if that fails, the entry is left and the clean key is used for the session); (6) a keyring entry that fails the check is not served and not deleted; (7) a migration deletes only the files that hold the key it verified (`_migrate_legacy_file_key` → `_remove_key_files_holding`), and save keeps its every-location rule (pinned); (8) a UTF-16 file is decoded, and an unreadable, non-UTF-8 or >64 KiB file is skipped and named; (9) every note (`KeyNote`, from `load_api_key_with_notes`; `load_api_key_from_file` unchanged) goes to the GUI activity log and the diagnostics log, and names the file, never the value; (10) the status stays "loaded"/"no key"; (11) the GUI field shows the normalized value (real Tk measured: no re-entry). No cache, key, prompt or schema moved. Tests: the WP-16.1 sections of `tests/test_api_key_store.py` (66) and `tests/test_gui_lifecycle.py` (8). No pinned test re-baselined; only the 12 store tests reach the store (instrumented), and their events are unchanged |
-| WP-16.2 | Run-scoped client snapshot passed from `gui._worker`; key entry disabled while busy; the key is no longer written to `os.environ` (G2) | M | — | todo | From WP-16.1: the env path is neither normalized nor checked (the hermetic guard's placeholder `test-key-not-real-do-not-use` is not a key): an exported `ANTHROPIC_API_KEY` with a BOM or a trailing CR is still sent as is, and it pre-fills the GUI field unnormalized (the field's trace is added after the `StringVar` is built). A value typed into the field that fails the shape check is still applied to the session (`_on_key_changed` sets the env for any non-empty normalized value; only `save_api_key` refuses it). Use `core.api_key_format` for whatever the snapshot decides, never a second rule |
+| WP-16.2 | Run-scoped client snapshot passed from `gui._worker`; key entry disabled while busy; the key is no longer written to `os.environ` (G2) | M | — | done | [PR #177](https://github.com/Abe-Borg/drawing-analyzer/pull/177), 2026-09-29. **Rules decided by the owner (eleven choices, three rounds, measured first):** (1) `_on_process` reads the applied key once, before the cost dialog; `_worker(api_key=)` builds one real `anthropic.Anthropic` with `client.new_client` (the construction `get_client` now uses too) and passes `client=`, off the UI thread (the first build imports the SDK: 0.6-0.7 s measured); (2) the applied key (`_applied_key`) is the normalized field value only, started from the launch key; (3) an inherited `ANTHROPIC_API_KEY` is read at launch, then removed from `os.environ`; the GUI never writes it; (4) the exports read the applied key (Export All at the click), store fallback unchanged; (5) the key entry only is disabled while an analysis runs (Show stays live); (6) no lock during Export All; (7) `<FocusOut>`/`<Return>` unchanged while locked (WP-16.3's); (8) the status reads "locked while analyzing" and is restored on unlock unless something reported since; (9) the launch value is normalized, and one that is not an `sk-ant-` key is used with a value-free warning; (10) a typed value that is not a key still runs (WP-16.1's accepted cost); (11) the four WP-16.1 env asserts re-baselined (380, 406, 442; 448 holds as written). `get_client()` and its environment read are unchanged. No cache, key, prompt or schema moved. Tests: the WP-16.2 section of `tests/test_gui_lifecycle.py` (23) and `tests/test_run_scoped_client.py` (10) |
 
 ### Wave 2 — P0 remainder, test fidelity, cache contracts, identity
 
@@ -132,7 +132,7 @@ starting.
 | WP-05.3 | Character-stream fallback tier with a quantity-aware numeric veto (B4: `6 "`, `INCHDRAIN`, `12' - 6"`, `2 %`). Matches only contiguous source words, never a "manufactured joined string" (plan §2 rule 15) | M | WP-05.2, WP-04.1 | todo | From WP-05.2: the four cases are pinned UNANCHORED in `tests/test_anchor_whole_words.py::test_recorded_limit_the_character_stream_cases_are_wp_05_3s`; flip them. Build on what WP-05.2 left: every tier matches whole source words through `anchor.SourceWords` (words folded by `anchor.fold_word`, each keeping its sheet word's `index`), and the window refuses a quote measurement inside part of a word (`_measurements_whole`). A new tier is its own method, so `numbers_grounded` fails closed for it until it carries the veto. Also pinned there as a recorded limit, present before for unbracketed text: the sub-phrase veto reads digit-bearing tokens only, so a sub-phrase can drop a unit printed as its own word (`150 GPM 568 L/S` anchors FUZZY on `150 GPM (568`); the quantity-aware veto should refuse it. Keep cross-QC and the anchor agreeing (the agreement table in that file) or record each difference with the owner |
 | WP-04.3 | Quantity roles for repeated same-kind values: the WP-04 matrix row "repeated values in different roles" (swapped: `6 in main, 4 in branch` / `4 in main, 6 in branch`; one value in two roles: `6 in supply, 6 in return` / `6 in supply, 8 in return`) | M | WP-04.2 | todo | Added by WP-04.2 (README 7.3): WP-04's acceptance does not hold without it. Nothing extracts a quantity's role, and the signature is a set, so both pairs carry compatible tokens and the same words. Do not settle it by keeping apart every pair that carries two or more values of one kind on both sides: that splits the commonest duplicate there is, the same "500 gpm shown, 550 gpm required" from both critique reads. It needs a role signal (for example the noun a quantity qualifies) with a negative corpus. Both pairs are pinned as recorded limits in `tests/test_quantity_signature.py::_RECORDED_LIMITS`; move them to `_CONFLICTS`. A role in the stored signature changes what an A/B record stores (`RECORD_CONTRACT_VERSION` 3 → 4) and what a critique entry holds (critique contract 2 → 3). Related, and under the same bump: `critique._TAG_RE` reads the `x12` of a tight `24"x12"` as a tag, and under WP-04.2's tag inclusion that stray tag beside a different extra reference on the other finding keeps apart two findings the old rule merged |
 | WP-06.2 | Whole-set cross-QC on host handles (label shown beside handle), grounded against **uncapped** evidence text like the sharded path, claims rebound through handles, framing hashed into the key; decides D-8 if not yet decided (N6, U8, K2) | L | WP-05.1 | todo | From WP-05.1: ground through `classify_quote_evidence` (a real, whole-word match at any length on the anchor's normalizer), not a second check. The gauntlet's whole-set `CROSS_CONFLICT` quotes (`VAV-7 COOLING 12 KW`, `PANEL LP-2 FED FROM MDP`) are printed as whole lines on their sheets, so they stay grounded. What the whole-set path admits is host-side binding: bump `_CROSS_QC_CACHE_CONTRACT` (4 since WP-05.1), not a key term From WP-06.1: the contract is 6. The refused-item counts are a separate record (`CrossQCResult.invalid`, both paths), so making `discards` non-None on the whole-set path touches nothing of it. That path still drops an item it cannot place on two sheets without a counter (an INFO line, now separate from the refused-item warning); count it with the grounding counters (the sharded path's `findings_dropped_under_two_legs`) when `discards` becomes non-None there. `_drop_exact_repeats` keys on the whole finding, so it is label-free; it needs nothing from D-8 From WP-11.1: D-8's page part is decided (`DECISIONS.md`): a sheet the run owes is one page `(source_id, page_index)` of an accepted inventory document, keyed by `models.source_page_key`, the pages a run owes are exactly the inventory's (`render.inventory_sheet_refs`), the inventory's `content_sha256` is the revision the run set out to read, and human sheet ids and the `page k/N` label are display metadata. This slice completes D-8: bind every evidence leg and the whole-set handles to that identity (N6's first-wins label maps, the colliding `stem-pN` fallback ids), amending D-8 there if the page part needs to move |
-| WP-06.3 | Cross-QC terminal honesty: `stop_reason` checked, streaming, bounded raised-cap retry, bounded partial-array salvage, fact-cap and omission counters; decision recorded for N14 (U6, U7 observability, N14) | M | WP-01.2 | todo | From WP-06.1 (found, not fixed): `_parse_facts` skips a fact that is not an object with no counter, on the same line as the 40-fact cap (`if not isinstance(item, dict) or len(out) >= DEFAULT_MAP_MAX_FACTS`); count both there. A leg in `also_on` that is not an object is skipped silently too (on the sharded path a finding it leaves under two legs is counted, `findings_dropped_under_two_legs`). WP-06.1 made refused findings observational and cached with their counts (the owner's decision, D-2 note); N14's decision (cache a degraded result with its status, or not) is still this slice's |
+| WP-06.3 | Cross-QC terminal honesty: `stop_reason` checked, streaming, bounded raised-cap retry, bounded partial-array salvage, fact-cap and omission counters; decision recorded for N14 (U6, U7 observability, N14) | M | WP-01.2 | todo | From WP-06.1 (found, not fixed): `_parse_facts` skips a fact that is not an object with no counter, on the same line as the 40-fact cap (`if not isinstance(item, dict) or len(out) >= DEFAULT_MAP_MAX_FACTS`); count both there. A leg in `also_on` that is not an object is skipped silently too (on the sharded path a finding it leaves under two legs is counted, `findings_dropped_under_two_legs`). WP-06.1 made refused findings observational and cached with their counts (the owner's decision, D-2 note); N14's decision (cache a degraded result with its status, or not) is still this slice's From WP-16.2 (found, not fixed): `cross_sheet_qc` returns `CrossQCResult(error=...)` when it cannot get a client, and `complete` defaults to True, so the pipeline records the stage COMPLETE beside its error line (measured with the environment removed mid-run on a library call: `Cross-sheet QC: ANTHROPIC_API_KEY environment variable not set` with the stage COMPLETE). The GUI no longer reaches it |
 | WP-10.1 | Tile-label and display-label contract folded into the keys without invalidating unchanged entries (K1) | S | — | todo | |
 | WP-10.2 | Critique contract resolved per transport at probe and store; batch runs log that the structured flag is ignored (K3) | S/M | — | todo | |
 | WP-10.3 | Planner loss metadata stored with the plan; legacy entries report loss as unknown (K4) | S/M | WP-01.1 | todo | |
@@ -175,8 +175,8 @@ starting.
 | WP-14.4 | `UsageRecord` known/unknown usage through the single `is_billable_but_unpriced` rule; `by_model` decision; pricing date on every surface; decides D-7 (WP-14 steps 4, 8) | M | WP-14.3 | todo | From WP-11.2 (found, not fixed): a real-time read whose `digest_sheet` raised after the API call returned (the paid read, then an error outside the call's own capture; its level-2 cache write is advisory since WP-11.2, so not that) leaves no usage record, since the exception carries no usage; the phase now stops and ships, so that spend is the one the run cannot report (D-7) |
 | WP-14.5 | Per-attempt usage records from every stage result type (WP-14 step 3) | L | WP-14.4, WP-01.2 | todo | From WP-01.3: the real-time digest's raised-cap retry is still one usage record carrying both attempts' summed tokens (batch keeps one record per attempt). Since WP-01.3 the discarded attempt is named in the sheet's error, but it has no attempt record of its own on real time From WP-01.4: the critique's per-sheet record aggregates its reads (both reads' tokens), and since WP-01.4 its `terminal_status` is COMPLETE only when every read counted, FAILED when none did, else PARTIAL (`parse_success` only for COMPLETE). A per-read record would carry each read's own outcome (a cut-off read beside a finished one is one PARTIAL record today) |
 | WP-14.6 | Serving model carried through cache payloads (additive field) and the manifest (U1 provenance) | M | WP-14.3, WP-14.4 | todo | |
-| WP-16.3 | `_persist_key` reentrancy guard; Forget saved key; export never reloads a cleared key (U20) | S/M | WP-16.1 | todo | From WP-16.1: `_persist_key` retries a refused save (a value that is not a key) on every `<FocusOut>`/`<Return>` and logs the refusal each time, since `_persisted_key` does not move. The export loads (`gui.py` `_on_save_html`, `_export_all_worker`) call `load_api_key_from_file`, which now normalizes, may repair the keyring or migrate a file, and writes its notes to the diagnostics log on every export. A refused key file is kept by rule and named at each launch while the keyring holds no key; Forget should cover it (plan step 6: "legacy files where authorized") |
-| WP-17.1 | Cancel: cancel event, Cancel button, batch cancel and harvest with no resubmit, honest quit wording, partial export; decides D-5 (G1 core) | M/L | WP-16.2 | todo | From WP-11.2: `KeyboardInterrupt` and `SystemExit` are deliberately not contained (D-5 input note): the spool and the retained uploads are released, but a batch in flight is neither cancelled nor harvested and its uploads stay, since the submit and collect guards catch `Exception` only. Found, not fixed: `collect_drawing_batch`'s error guards (the terminal branch's and WP-11.2's) release a batch's files while a follow-up or resubmission batch that reuses them may still run, and a resubmission in flight at the error is neither cancelled nor read back |
+| WP-16.3 | `_persist_key` reentrancy guard; Forget saved key; export never reloads a cleared key (U20) | S/M | WP-16.1 | todo | From WP-16.1: `_persist_key` retries a refused save (a value that is not a key) on every `<FocusOut>`/`<Return>` and logs the refusal each time, since `_persisted_key` does not move. The export loads (`gui.py` `_on_save_html`, `_export_all_worker`) call `load_api_key_from_file`, which now normalizes, may repair the keyring or migrate a file, and writes its notes to the diagnostics log on every export. A refused key file is kept by rule and named at each launch while the keyring holds no key; Forget should cover it (plan step 6: "legacy files where authorized") From WP-16.2: the exports now read `_applied_key` first (the key field; Export All takes it on the UI thread at the click) and `load_api_key_from_file()` second, unchanged, so a cleared field still reloads a saved key there (step 7 is this slice's). `<FocusOut>`/`<Return>` still fire on the locked entry (real Tk), so a key whose plaintext save was declined re-opens the consent dialog on each during a run, as when idle (the owner kept `_persist_key` unchanged for this slice). Forget should clear `_applied_key` and the field; since WP-16.2 there is no app-owned environment value to clear (an inherited one is removed at launch) |
+| WP-17.1 | Cancel: cancel event, Cancel button, batch cancel and harvest with no resubmit, honest quit wording, partial export; decides D-5 (G1 core) | M/L | WP-16.2 | todo | From WP-11.2: `KeyboardInterrupt` and `SystemExit` are deliberately not contained (D-5 input note): the spool and the retained uploads are released, but a batch in flight is neither cancelled nor harvested and its uploads stay, since the submit and collect guards catch `Exception` only. Found, not fixed: `collect_drawing_batch`'s error guards (the terminal branch's and WP-11.2's) release a batch's files while a follow-up or resubmission batch that reuses them may still run, and a resubmission in flight at the error is neither cancelled nor read back From WP-16.2: the run's client is built in `gui._worker` from the key `_on_process` snapshotted (`api_key=`); a cancel path should reuse that client (never `get_client()`, which reads an environment the GUI no longer writes). A worker that dies with `KeyboardInterrupt`/`SystemExit` never reaches `_on_done`/`_on_error`, so `_busy` and every control stay locked, the key entry included (pre-existing for the other controls; D-5's) |
 | WP-17.2 | Keyless atomic job record (batch ids, `custom_id` → source/page/cache key, upload ids); relaunch lists unresolved jobs and offers remote cancel (G1) | M | WP-17.1 | todo | |
 | WP-17.3 | Harvest recorded jobs' results into `DigestCache` after fingerprint validation (G1) | M | WP-17.2 | todo | |
 | WP-17.4 | Crash matrix, unresolved-submission reconciliation, instance lock/lease (G1) | L | WP-17.3 | todo | |
@@ -321,7 +321,7 @@ report is built from it).
 | H3 | Chat cost ignores final usage and web-search charges | P2 | 20.2 | open | |
 | H4 | ALL-CAPS notes fill the identity code windows | P1 | 12.4 | open | |
 | G1 | No Cancel; quitting leaves a batch billing, nothing resumable | P1 | 17.1–17.4 | open | |
-| G2 | Key entry live during a run; every stage re-reads the environment | P1 | 16.2 | open | |
+| G2 | Key entry live during a run; every stage re-reads the environment | P1 | 16.2 | implemented+validated | `tests/test_gui_lifecycle.py` WP-16.2 section (a field edit, an emptied field, the environment set to another key or removed after the digest: every later stage keeps the run's key; the run gets one real client built from the applied key; the entry locked while busy and unlocked on done and on a worker that raised; the launch key normalized and removed; no spawn or `subprocess` child inherits a key; the exports embed the applied key; no message carries the key) and `tests/test_run_scoped_client.py` (a passed real client serves every stage on Fast, Batch, Hybrid and Economy, investigation included, whatever the environment does; overlap kept) (WP-16.2, [PR #177](https://github.com/Abe-Borg/drawing-analyzer/pull/177)) |
 | G3 | BOM key migrated into the keyring, legacy file deleted | P1 | 16.1 | implemented+validated | `tests/test_api_key_store.py` WP-16.1 section (p1 BOM file migrates the clean key and the next launch serves it; p3 the wire never carries the BOM, through the real SDK over `httpx2.MockTransport`; p5 a migration keeps a file holding a different key; p6, p7, p11 a file that is not a key is refused and kept; p8 UTF-16 decoded; p9 format characters at the ends stripped; p10 a keyring entry stored with a BOM is repaired; p13; save normalizes and refuses a value that is not a key; no note, log record, exception or output carries the key) and `tests/test_gui_lifecycle.py` WP-16.1 section (the field shows, applies and saves the normalized key) (WP-16.1, [PR #176](https://github.com/Abe-Borg/drawing-analyzer/pull/176)) |
 | G4 | PyInstaller `collect_all` bundles stray files (key file) | P1 | 23.2 | open | |
 | G5 | Release gates test a different dependency set than ships | P1 | 23.3 | open | |
@@ -396,6 +396,358 @@ report is built from it).
 Each session adds one entry at the top: date, slices and IDs, PR, what changed,
 contracts decided, cache/schema effects, validation actually run (with counts),
 what could not be verified, risks, and next steps.
+
+### 2026-09-29 — WP-16.2: a GUI run keeps the key it started with, and the key never goes to `os.environ` ([PR #177](https://github.com/Abe-Borg/drawing-analyzer/pull/177))
+
+- **Slice and IDs:** WP-16.2. G2 (implemented+validated). No `DECISIONS.md`
+  contract covers credentials, and none was opened (as the request asked); the
+  owner's choices are recorded here as the owner's rules. D-5 (run lifecycle)
+  is WP-17.1's and was not touched. No migration-register row: no cache, key,
+  prompt or schema moved. **WP-16 is not done:** WP-16.3 remains, so there is
+  no package acceptance check. The acceptance clauses this slice owns hold:
+  "editing external environment state cannot break a run's later stages" (every
+  transport, the environment changed or removed after the digest; a field edit
+  through its handler too), and "no child command … unintentionally receives
+  the key" for the app's own environment (spawn and `subprocess.run` children
+  measured; `os.startfile` is Windows-only and not run). "No log" holds for this
+  slice's own messages; the rest of logging is WP-22.1's.
+- **Base.** `main` = `origin/main` = `93c6a99`; no drift at the start or before
+  the push. Baseline **4,512 passed, 2 skipped, 10 deselected** (325 s),
+  identical to the WP-16.1 handoff. The two skips are IPv6 loopback and chmod as
+  root. SDK 1.7.0, PyMuPDF 1.28.2, Python 3.11.15. #175 (SDK 1.8.0) and #174
+  (dependency bumps) are still open, so no probe was re-run for an SDK change.
+- **Reproduced first.** Scratch probes ran as `tests/test_probe_*.py` in a
+  `git archive` copy of `origin/main`, so the suite's fakes, conftest and
+  hermetic guard applied. `drawing_analyzer.client.Anthropic` was replaced by a
+  recording stand-in handing back the suite's fakes (the gauntlet's mini-set
+  script behind `_Pipe`, which answers every stage on every transport); keys
+  were built at runtime and recorded as classes only. Every fact in the request
+  held:
+  - **q1:** a GUI-shaped real-time exhaustive run (`client=None`, overlap off)
+    called `get_client()` 14 times (per sheet in the digest, per critique read)
+    with one key. The environment changed after the digest (to key B, or to a
+    truncated key) sent every later stage to the new value (12 calls).
+  - **q2:** removed instead: identity, review plan, critique, synthesis and
+    verification FAILED, citation PARTIAL, `qc_status` PARTIAL, seven
+    `…: ANTHROPIC_API_KEY environment variable not set` lines in `ctx.errors`
+    (the GUI logs each). Cross-QC read COMPLETE beside its error (found, below).
+  - **q1 through the GUI handler:** a Backspace (`_on_key_changed`) did the
+    same as q1; an emptied field the same as q2.
+  - **q3:** real time resolves a client per sheet, so the second sheet used key
+    B; batch resolves one client for submit and collect (key A throughout).
+  - **q4:** overlap on: one client is resolved at 4259 after the digest and
+    serves every later stage (it took key B).
+  - **q5:** a real `anthropic.Anthropic` passed in: 0 `get_client()` calls on
+    Fast, Batch, Hybrid and Economy, with or without a key in the environment;
+    with an UNCERTAIN verdict the investigation also ran on it (0 calls).
+  - **q6:** `_stage_overlap_enabled`: `client=None` with a key → True; a real
+    SDK client → True with or without the environment; a wrapper → False;
+    `object()` → False. So a real client keeps the GUI's overlap.
+  - **q7:** the busy block disables analyze, clear, HTML, reviewed, export and
+    specs, never `key_entry` or `key_show_btn`.
+  - **q9:** with the key in the environment (as the GUI writes it), a spawn-pool
+    child and a `subprocess.run` child both see `ANTHROPIC_API_KEY`; without it,
+    neither does. `os.startfile` was read, not run.
+  - **q10:** a session-only key (typed, plaintext declined, nothing saved) reached
+    both exports only through the environment; with the environment unwritten
+    they got none.
+  - **q11:** a library caller (`client=None`) reads the environment through
+    `get_client()` per sheet; with no key the digest phase stops (`ValueError`).
+- **Facts confirmed, not assumed.**
+  - **The instrumented suite.** A scratch copy of `origin/main` added
+    append-only blocks at the end of `__init__.py`, `client.py` and
+    `pipeline.py`, behind `WP162_LOG`, with the test name. They logged every
+    `get_client()` call (with a module-class `__setattr__` wrapping whatever a
+    test monkeypatched in), every SDK client construction, every
+    `os.environ` read, write and delete of the key from `drawing_analyzer`
+    code, every `extract_drawing_context` call and whether it got a client,
+    every overlap decision, and every child launch (spawn, `subprocess`,
+    `webbrowser`) with whether the key was in its environment. Value classes
+    only. Over the whole suite (4,512 passed, no outcome changed): 334 runs,
+    177 overlap decisions, 96 children, 34 `get_client` calls, 9,140 key reads
+    and 4,528 writes in all (nearly all the hermetic guard's own).
+  - **q8, who reaches what:** the GUI's env reads and writes (`_load_api_key`
+    393/398, `_on_key_changed` 1146/1153) are reached only by
+    `tests/test_gui_lifecycle.py`; `gui.py` 1829 and the exports (2319, 2394)
+    by no test; `client.get_client:25` 29 times, value absent, through
+    `prose_harvest._client_or_none` from three direct stage tests
+    (`test_drawing_ledger`, `test_prose_filler_and_assurances`,
+    `test_prose_match_signatures`); `pipeline.py` 527 by none (the one run with
+    `client=None` returns before the overlap decision).
+  - **The pinned list.** No `get_client()` call happened inside a run. Five went
+    to monkeypatched fakes: `test_drawing_batch_critique` (submit and collect),
+    `test_drawing_markup_rich` (twice) and `test_drawing_investigate`. The
+    patches in `test_ab_sweep`, `test_cost_confirmation_scan`,
+    `test_drawing_batch_critique:622` and `test_drawing_verify` assert it is
+    never called. No test passes a real SDK client to a run.
+  - **"24 stage sites".** Not reproducible without a definition: an AST walk of
+    `pipeline.py` finds 28 calls passing `client=` to 23 callees, 22 of them
+    stage calls. The plan note now cites q5 instead. The request's "19 fallbacks
+    in 15 modules" is 19 in 14 (`batch_critique` ×3, `pipeline` ×3, `verify` ×2,
+    one each in `citation_check`, `critique`, `cross_qc`, `digest`, `focus`,
+    `investigate`, `prose_harvest`, `review_planner`, `set_identity`,
+    `synthesis`, `core/tokenizer`).
+  - **Timing.** The GUI process has not imported `anthropic` when Analyze is
+    clicked (`drawing_analyzer.pipeline` does not import it). Three idle runs:
+    SDK import 552-624 ms, first construction 72-85 ms, later ones ~50 ms.
+  - **Real Tk** (a uv-installed standalone Python 3.11.13 with Tk 8.6.14,
+    threaded; the pinned customtkinter 6.0.0; Xvfb):
+    - a disabled `CTkEntry` refuses typing, Backspace, `<<Paste>>`, Ctrl+V and
+      `<<Cut>>`, and still shows its masked value;
+    - it looks identical to an enabled one (`foreground == disabledforeground`
+      = gray10; the backgrounds match);
+    - `<Return>` and `<FocusOut>` still fire on it, and a click still focuses it;
+    - Show still masks and unmasks it; a disabled Show button runs nothing;
+    - clicking a `CTkButton` takes focus, so clicking Analyze fires the entry's
+      `<FocusOut>` (the save) before the run starts;
+    - `CTkLabel.cget("text")` and `cget("text_color")` return what was set.
+- **The decision, made by the owner before any code** (AskUserQuestion, three
+  rounds, eleven choices, each as recommended). Measured first:
+  - a switchable scratch implementation, one environment knob per open choice,
+    on top of the instrumented copy;
+  - today, a recommended set R and 18 variants each varying one knob from R, run
+    over the 15 pinned files (880 tests) with the instrumentation and diffed
+    test by test against today;
+  - a 21-case table (the GUI driven through the real `_on_process` → `_worker`
+    → `_on_done`: edits mid-run through the field and the environment, no key, a
+    typed non-key, BOM and non-key launch values, a worker that raises,
+    children, the exports, a declined save during a run, a library caller, no
+    key in any message) through every variant.
+
+  **Pinned files:** every variant that stops the GUI writing the environment
+  moves exactly the 4 WP-16.1 env asserts (and the env events of 6 GUI tests);
+  nothing else moves in outcome or events under any variant. Turning the
+  snapshot off while the env is no longer written makes every GUI run FAILED at
+  the digest: the two go together. The rules, and what was not taken:
+  - **Round 1.** Key read on the UI thread, client built in the worker (not
+    taken: built on the UI thread, a 0.6-0.7 s freeze on the first Analyze; a
+    provider object, which turns the overlap off). The applied key is the
+    normalized field value only (not taken: fall back to the launch value when
+    the field is emptied, which keeps a key the user deleted). An inherited
+    `ANTHROPIC_API_KEY` is read at launch, then removed (not taken: left as
+    launched, which children inherit, C15; as today). The exports read the
+    applied key (not taken: the last run's key, C17 embeds A after the field
+    moved to B and C16 finds nothing before a run; leave to WP-16.3, which
+    loses a session-only key).
+  - **Round 2.** The entry only is disabled (not taken: Show too, so the run's
+    key cannot be checked). No lock during Export All (not taken: locked, which
+    buys nothing once the key is taken at the click). `<FocusOut>`/`<Return>`
+    unchanged while locked (not taken: ignored while locked, which removes C19's
+    two mid-run consent dialogs but edits `_persist_key`, WP-16.3's). A status
+    word (not taken: muted text; nothing).
+  - **Round 3.** The launch value normalized, and a non-key used with a warning
+    (not taken: normalize only, silent; refuse, which makes the saved key B
+    replace the env value, C11, and ignores a future key format; neither, C10's
+    BOM sent). A typed non-key still runs (not taken: refuse to start, which
+    makes a future key format unusable). Re-baseline the four env asserts (not
+    taken: keep them, which keeps G2).
+- **What changed:**
+  - **`client.py`:** `new_client(api_key)`, the one construction;
+    `get_client()` builds through it and keeps its environment read and its
+    message. The module docstring names the two callers.
+  - **`gui.py`:**
+    - `_load_api_key` pops `ANTHROPIC_API_KEY`, normalizes it
+      (`normalize_api_key`), and adds a value-free `KeyNote` when it fails
+      `looks_like_api_key`; it no longer writes the environment;
+    - `__init__` starts `_applied_key` from the launch key;
+    - `_on_key_changed` sets `_applied_key` and no longer writes or pops the
+      environment;
+    - `_on_process` reads `_applied_key` before the cost dialog (the "No API
+      key" check included), locks the entry in the busy block and passes
+      `api_key=` to the worker;
+    - `_worker(*, api_key)` imports `client` lazily (so GUI startup does not
+      import the SDK), builds the client and passes `client=`;
+    - `_set_key_editable`: the lock, the status "locked while analyzing"
+      (`_KEY_LOCKED_STATUS`), and the restore read from the label itself;
+      called first thing in `_on_done` and `_on_error`;
+    - the exports read `_applied_key`, then `load_api_key_from_file()` as
+      before; Export All takes it on the UI thread and hands it to
+      `_export_all_worker(applied_key=)`;
+    - the key-row comment.
+  - **`pipeline.py`:** one comment corrected (the GUI now passes a client).
+  - **`help_content.py`:** the key section says the env var fills the field at
+    launch, and that a run keeps its key, the field locks, and the app does not
+    pass the key on to programs it starts.
+- **Contracts decided:** none in `DECISIONS.md` (the owner's rules above).
+- **Cache/schema effects: none.** No key, prompt, schema or manifest key moved.
+- **Re-baselined tests (the owner's decision, round 3):**
+  `tests/test_gui_lifecycle.py`
+  `test_the_key_field_shows_applies_and_saves_the_normalized_key` (both
+  parameters; 380: the applied key holds the key and `os.environ` does not),
+  `test_a_field_holding_only_invisible_characters_is_no_key` (406: the applied
+  key is empty and the environment is untouched), and
+  `test_startup_loads_the_normalized_key_and_keeps_the_notes` (442: the load
+  returns the key and writes none; its `delenv` at 446 gains `raising=False`,
+  since nothing writes the value it cleared; 448 holds as written). Every other
+  assert in them is unchanged.
+- **New tests: 33.**
+  - **`tests/test_gui_lifecycle.py`, WP-16.2 section (23):** a stub
+    `DrawingAnalyzerApp` (`_App`) driven through the real handlers, mirroring
+    `__init__`'s key lines, with the worker thread captured and run in order:
+    - the run gets one real client built from the applied key;
+    - a field Backspace, an emptied field, the environment set to key B or
+      removed after the digest: every later stage keeps key A (the real
+      pipeline, the gauntlet's mini set, a recording SDK stand-in);
+    - the entry locked while busy (Show live, the status word) and unlocked,
+      status restored, on done and on a worker that raised;
+    - a keystroke while locked never reaches the field;
+    - a status set during the run survives the unlock;
+    - the launch key normalized and removed (BOM + CRLF, spaces + zero-width
+      space, not a key with its warning, only invisible characters);
+    - a launch value that is not a key is the one used (the saved key does not
+      replace it);
+    - no spawn-pool child and no `subprocess.run` child inherits a key, typed or
+      inherited at launch;
+    - both exports embed the applied key (session-only; launch env);
+    - Export All embeds the key applied at the click;
+    - an emptied field refuses Analyze; a typed non-key still runs;
+    - `__init__` starts `_applied_key` from the launch load (structural, like
+      the hooks test);
+    - no dialog, status, activity-log line, log record or captured output
+      carries the key or a non-key launch value, over launch, run, failure and
+      export; asserted non-vacuous.
+  - **`tests/test_run_scoped_client.py` (10):** a real `anthropic.Anthropic`
+    (fake resources) passed to `extract_drawing_context` serves every stage on
+    Fast, Batch, Hybrid and Economy, investigation included, with the
+    environment set to another key or removed after the digest, and
+    `get_client()` patched to fail (8); a real client keeps the overlap with no
+    key in the environment, a wrapper does not (1); `new_client` is
+    `get_client`'s construction and `get_client` keeps its contract (1).
+
+  Classified against the copy of `origin/main` from `--junitxml`, and again with
+  a shim putting today's behaviour behind the new names (`new_client`,
+  `_applied_key`, a no-op `_set_key_editable`, an ignored `_worker(api_key=)`):
+  - **17 fail on behaviour** (and so do the 4 re-baselined test ids);
+  - **2 fail only on a new name** (`new_client`; the `__init__` structure);
+  - **14 pass**, pinning what must not move: a passed client serves every
+    stage on every transport whatever the environment does (8) and keeps the
+    overlap (1); a session-only key and a launch key reach both exports (2);
+    an emptied field refuses Analyze (1); a status set during the run survives
+    (1); no message carries the key (1).
+- **Fixture effects, instrumented over the whole fixed suite**, diffed test by
+  test against the base run (sites compared by module and function):
+  - **Outcomes:** all 4,514 existing tests unchanged (4,512 passed, 2 skipped);
+    33 added.
+  - **Events:** only 6 existing tests moved, all in `test_gui_lifecycle.py`,
+    each losing a GUI env write, read or pop the fix removed. Runs, overlap
+    decisions, children, SDK constructions and `get_client` calls are identical
+    for every existing test.
+  - **The fix's own:** the GUI's only env operations are `_load_api_key`'s read
+    and pop; every GUI-driven run passes a client; no `get_client()` call
+    happens inside any run; the children launched by the new tests see no key.
+- **Case table on the fix:** identical to the decided variant R in every case
+  except the status label: the word is "locked while analyzing" (R's knob used
+  "in use by this run"), and the unlock restores what the label showed only
+  while it still shows the lock word, read from the label itself (C04: a status
+  written during the run stays). The first implementation read it from a record
+  the case table's stub label bypassed, and was changed before the push
+  (review, below).
+- **Probes on the fix:** q1-q6, q9 and q11 unchanged (the library path and the
+  pipeline, by design); q7 now shows `key_entry` disabled, Show untouched, and
+  `api_key` passed to the worker; q10 shows both exports keep a session-only
+  key with no environment. q1 through the GUI handler now shows the handler no
+  longer feeds the environment: a `client=None` run beside it has no key, which
+  is the library path the GUI no longer takes.
+- **The real app, end to end** (the real `DrawingAnalyzerApp` under Xvfb in the
+  uv Python, the update check patched out, `tkinterdnd2` removed from that venv
+  because its native library aborts under Xvfb in `__init__`, before any
+  WP-16.2 code; driven inside `mainloop()`):
+  - launched with a BOM + CRLF key in the environment: the environment no longer
+    holds it, and the field, the entry widget and the applied key hold the clean
+    key; status "loaded";
+  - control: with the entry focused and unlocked, a Backspace truncates the
+    applied key (the environment stays empty);
+  - locked: Backspace, typing, Paste and Cut leave the field and the applied key
+    unchanged; Show unmasks; the status reads "locked while analyzing"; unlocked,
+    the status shown before is restored;
+  - Analyze: `_on_process` returns in 17-22 ms; the worker thread passes a real
+    `anthropic` client built with the key; the environment holds no key during
+    the run; a `subprocess` child sees none; a Backspace during the run does not
+    reach the field; the entry is locked for the whole run and unlocked, status
+    restored, after `_on_done`.
+- **Review before push (own diff):**
+  - The status restore first depended on `_set_key_status` recording what it
+    showed; the case table's stub bypassed that and left the lock word after the
+    run. The restore now reads the label (`cget`, measured on a real `CTkLabel`),
+    so it holds whatever wrote the status.
+  - `client` is imported inside `_worker`: a module-level import would move the
+    SDK import (0.6 s) into GUI startup.
+  - `_worker(api_key=)` is keyword-only and required, so a caller that forgets it
+    fails loudly rather than falling back to the environment.
+  - The first help-text draft said the key is "never handed to other programs".
+    It now says the app keeps it out of its own environment, and that a key set
+    system-wide is visible to every program anyway: what `os.startfile` does on
+    Windows was not measured.
+- **Validation** (this container, Python 3.11.15, SDK 1.7.0, PyMuPDF 1.28.2):
+  - Baseline before any change: **4,512 passed, 2 skipped, 10 deselected**
+    (325 s) on `93c6a99`.
+  - The two touched test files: 53 passed (20 existing, 33 new).
+  - Full suite: **4,545 passed, 2 skipped, 10 deselected** (351 s), the
+    baseline plus the 33 new tests, the same two environment skips (IPv6
+    loopback, chmod as root). Instrumented run: the same counts (397 s). Re-run
+    on the final tree, after the review change to the status restore: the same
+    counts (348 s).
+  - `python -m compileall -q src`: clean.
+  - `ruff check --select E9,F63,F7,F82 src tests scripts` (0.14.5): clean.
+    F401/F811/F841 over the touched files: one pre-existing F401 in
+    `pipeline.py` (`normalize_specs_text`, present on `origin/main`; this
+    slice's `pipeline.py` change is a comment), none in the touched lines.
+  - `python scripts/scan_secrets.py`: clean (215 tracked files, the new test
+    file included). The fake keys are built at runtime, every parametrized case
+    has an id, and no assertion compares a key in a way that would print it.
+  - The browser suite was not run: no report or JavaScript changed.
+- **Docs:**
+  - **CHANGELOG** (Fixed): G2.
+  - **README:** the key paragraphs (the environment variable fills the field at
+    launch and is normalized; a non-key launch value is used with a warning), a
+    new paragraph on a run keeping its key, the lock and what children inherit,
+    and the `ANTHROPIC_API_KEY` row of the environment-variable table.
+  - **`help_content.py`:** the key section (above).
+  - **CLAUDE.md:** the key-store passage's "the env path is not checked"
+    corrected; a new passage after it (*A GUI run keeps the key it started
+    with*).
+  - **The plan:** a WP-16.2 note under WP-16's Step 1 / Step 2 notes, with the
+    "24 stage sites" count corrected.
+  - **PROGRESS:** this entry; the WP-16.2 row; the G2 row; notes on WP-16.3,
+    WP-17.1 and WP-06.3; the Next-up line.
+- **Not verified:**
+  - live API behaviour (no budget, O-4; this slice makes no call), including
+    what the API answers to a key that is not an `sk-ant-` key;
+  - Windows: `os.startfile` and the update installer's launch, WER crash dumps,
+    and the frozen build (O-8, WP-23.2). The claim is only that the app's own
+    environment no longer holds the key; a key the user set system-wide is
+    visible to every program regardless.
+
+  Windows is covered by this PR's CI (`ci.yml`'s Windows leg runs the hermetic
+  suite, the GUI tests included, on the fake toolkit).
+- **Risks and residual gaps:**
+  - **Visible changes, by design:**
+    - the key field is locked while an analysis runs, with the status "locked
+      while analyzing";
+    - an `ANTHROPIC_API_KEY` exported in the shell is no longer passed on by the
+      app to what it starts (a script run from the GUI's opener that relied on
+      it would not see it);
+    - a launch value that is not an `sk-ant-` key now gets a warning line.
+  - **A worker killed by `KeyboardInterrupt`/`SystemExit`** never reaches
+    `_on_done`/`_on_error`, so every control stays locked, the key entry
+    included (pre-existing for the others; D-5, WP-17.1 note).
+  - **`<FocusOut>`/`<Return>` still fire on the locked entry**, so a key whose
+    plaintext save was declined re-opens the consent dialog during a run, as
+    when idle (C19; WP-16.3 note).
+  - **The exports still fall back to the saved key** when the field is empty
+    (WP-16.3, step 7).
+- **Found, not fixed:**
+  - **Cross-QC reads COMPLETE when it could not get a client**:
+    `CrossQCResult(error=...)` defaults `complete=True` (q2; WP-06.3 note). The
+    GUI no longer reaches it.
+  - **Clicking Analyze fires the entry's `<FocusOut>`** before the run starts
+    (real Tk: a `CTkButton` takes focus), so an unsaved key is saved, or the
+    consent dialog opens, at that click. Pre-existing and harmless to the run
+    (the key cannot change), but it is the path WP-16.3's reentrancy guard must
+    cover.
+- **Next:** Wave 1 is done. WP-02.2 (Wave 2) is next in queue order. WP-17.1
+  (Wave 4) is unblocked by this slice; WP-16.3 (Wave 4) is unblocked. WP-11.3
+  and WP-10.4 (Wave 2) are available.
 
 ### 2026-09-28 — WP-16.1: a key file saved "UTF-8 with BOM" no longer breaks the saved key, and a migration keeps what it did not verify ([PR #176](https://github.com/Abe-Borg/drawing-analyzer/pull/176))
 

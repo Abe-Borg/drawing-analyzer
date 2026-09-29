@@ -1182,6 +1182,12 @@ Implementation:
 
 **Step 2.** `os.startfile` and the annotation spawn pool cannot take a scrubbed environment. So the key must stop being written to `os.environ` (`gui.py` ~388/1114/1121; the check at ~1797 also reads it).
 
+**WP-16.2 note (2026-09-29): steps 1 and 2 as the owner decided them.** Details and the options not taken are in the WP-16.2 handoff in `PROGRESS.md`.
+- **Step 1's count, corrected.** "All 24 stage sites" could not be reproduced without a definition: an AST walk of `pipeline.py` finds 28 calls passing `client=` to 23 callees, 22 of them stage calls. What the count cannot show was measured instead: with a real client passed, a full exhaustive run reaches 0 lazy `get_client()` fallbacks on Fast, Batch, Hybrid and Economy, investigation included (`tests/test_run_scoped_client.py`). So only `gui._worker` needed to pass it, as stated.
+- **The snapshot.** `_on_process` reads the applied key (the normalized field value, `_applied_key`) once, before the cost dialog. `_worker` builds one real `anthropic.Anthropic` from it with `client.new_client` (the construction `get_client` also uses) and passes `client=`. It is built on the worker because the GUI has not imported the SDK when Analyze is clicked: 0.6-0.7 s on the UI thread, measured. A wrapper was not taken: `_stage_overlap_enabled` answers False for one.
+- **Step 2.** The GUI never writes `ANTHROPIC_API_KEY`. An inherited one is read once at launch to fill the field, normalized (a value that is not an `sk-ant-` key is used with a value-free warning), then popped, so no child inherits a key from the app. The key entry (not Show) is disabled while an analysis runs, with the status "locked while analyzing", and re-enabled in `_on_done` and `_on_error`. The exports read `_applied_key` (Export All at the click). `get_client()` and its environment read are unchanged for library callers.
+- **Acceptance clauses this slice owns:** "editing external environment state cannot break a run's later stages" holds (every transport, env changed or removed mid-run; a field edit through the handler too). "No child command … unintentionally receives the key" holds for the app's own environment (spawn and `subprocess.run` children, measured; `os.startfile` on Windows is O-8's). "No log" holds for this slice's messages; the rest of logging is WP-22.1's.
+
 **Step 3.**
 - Also repair entries that are already corrupted. The legacy file is gone, and `_keyring_get` serves the BOM value first.
 - Normalize the GUI field and `save_api_key` too.

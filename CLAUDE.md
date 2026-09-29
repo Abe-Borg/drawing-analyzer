@@ -622,8 +622,9 @@ no trace while one of a variable's traces runs, measured, so the `set` does not
 re-enter). `_keyring_get` stays the backend seam (`.strip()` only): the verified
 round-trip compares against it and the pinned fixtures replace it; the served
 value is normalized on top, and an entry that normalizes differently is rewritten
-through `_keyring_store_verified`. The env path is not checked (WP-16.2; the
-hermetic guard's placeholder is not a key).
+through `_keyring_store_verified`. The launch env value is normalized too, and
+warned about but still used when it fails the check (WP-16.2, below; the hermetic
+guard's placeholder is not a key).
 
 The rules:
 - A key file that fails the check is **not used, not migrated and left in place**,
@@ -643,6 +644,45 @@ contract). Each note is logged to the diagnostics logger **by name**
 `_report_key_at_startup`. A note or an exception message names the file and the
 reason, never the value; `_persist_key` logs `{exc}` verbatim, so this is
 load-bearing.
+
+**A GUI run keeps the key it started with (remediation WP-16.2, G2; the owner's
+rules).** The GUI used to write the field's key into `ANTHROPIC_API_KEY` on every
+edit and call `extract_drawing_context` with no client, so every stage resolved
+one through `client.get_client()`, which reads the environment on each call (13-14
+calls per GUI run: per sheet in the digest, per critique read): a Backspace two
+hours in sent every later stage to a truncated key, and an emptied field made them
+raise, after the paid digest and critique. Now:
+- **The applied key** (`_applied_key`) is the normalized field value. It starts as
+  the launch key that pre-fills the field, `_on_key_changed` sets it, and nothing
+  else holds the key: Analyze's check and both exports read it.
+- **One client per run.** `_on_process` snapshots `_applied_key` before the cost
+  dialog and hands it to `_worker(api_key=)`, which builds one real
+  `anthropic.Anthropic` with `client.new_client` (the one construction; `get_client`
+  builds through it too) and passes `client=`. Built on the worker because the
+  GUI has not imported the SDK when Analyze is clicked (0.6-0.7 s on the UI thread,
+  measured). Never a wrapper: `_stage_overlap_enabled` answers False for one, and a
+  real client keeps the overlap a `client=None` run with a key had. With a client
+  passed no stage reaches a lazy fallback, measured on all four transports with the
+  investigation (`tests/test_run_scoped_client.py`); the pipeline was already
+  threading it (28 `client=` call sites).
+- **The environment.** The GUI never writes `ANTHROPIC_API_KEY`. `_load_api_key`
+  pops an inherited one once at launch (normalized; a value that is not an
+  `sk-ant-` key is still used, like a typed one, with a `KeyNote` that names the
+  variable, never the value), so children inherit no key from the app: the
+  annotation pool's spawn workers, `_open_in_os`, `webbrowser`, the update
+  installer. Measured for spawn and `subprocess.run`; `os.startfile` is Windows-only
+  and not run here.
+- **The lock.** `_set_key_editable` disables `key_entry` (not Show) in the busy
+  block and re-enables it first thing in `_on_done` and `_on_error` (a raising
+  worker goes through `_on_error`). A courtesy, not the correctness. A disabled
+  CTkEntry refuses typing, paste and cut but looks exactly like an enabled one
+  (real Tk 8.6 + customtkinter 6.0.0), so the status reads `locked while
+  analyzing` and is restored on unlock unless something reported since.
+  `<FocusOut>`/`<Return>` still fire on a disabled entry and `_persist_key` is
+  unchanged (WP-16.3's). No lock during Export All: it takes `_applied_key` on the
+  UI thread at the click.
+- **Library and script callers** keep `get_client()` and its environment read
+  (§2 rule 15), and a typed value that fails the shape check still runs.
 
 **QC stack** (each stage optional and independently cached):
 

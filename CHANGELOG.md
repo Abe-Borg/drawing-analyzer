@@ -48,6 +48,47 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **An edit to the API key field during a run no longer reaches the run's later
+  stages, and the key is no longer handed to child processes (remediation
+  WP-16.2; G2).** The GUI wrote the field's key into `ANTHROPIC_API_KEY` on every
+  edit and ran the pipeline with no client, so every stage built its own through
+  `client.get_client()`, which reads the environment on each call (13-14 times in
+  a GUI run: per sheet in the digest, per critique read). The key field stayed
+  editable while an analysis ran. Measured on `main`:
+  - a Backspace in the field after the digest sent every later call of a
+    two-sheet exhaustive run (11: identity, the review plan, four critique
+    reads, cross-sheet QC, synthesis, the prose harvest, verification, the
+    citation check) to the truncated key;
+  - an emptied field made identity, the review plan, the critique, synthesis and
+    verification FAILED and the citation check PARTIAL, after the paid digest,
+    with seven `…: ANTHROPIC_API_KEY environment variable not set` lines;
+  - a key typed into the field, or inherited from the shell, was visible to a
+    spawned reviewed-PDF worker and to any `subprocess.run` child.
+
+  Now (the owner's rules):
+  - **One client per run.** Analyze reads the key in the field once, before the
+    cost dialog; the worker builds one real SDK client from it
+    (`client.new_client`, the construction `get_client` also uses) and passes it
+    to `extract_drawing_context`, so no stage of a GUI run reads the environment.
+    A real client keeps the set-level stage overlap, and no lazy fallback is
+    reached on any transport (measured, investigation included).
+  - **The environment.** The GUI never writes `ANTHROPIC_API_KEY`. One inherited
+    from the shell is read once at launch to fill the field (with the same
+    normalizer as every other key source, so a `.env` BOM or CR is stripped;
+    a value that is not an `sk-ant-` key is still used, with a warning that names
+    the variable, never its value) and is then removed, so no child inherits a
+    key from the app.
+  - **The field is locked while an analysis runs** (Show still works), and the
+    status beside it reads *locked while analyzing*, since a disabled field looks
+    exactly like an editable one. It unlocks when the run ends or fails.
+  - **The exports** (Save HTML Report, Export All) embed the key in the field,
+    a session-only key included, where they read the environment before; Export
+    All takes it when clicked. The saved-key fallback is unchanged (WP-16.3).
+  - `client.get_client()` and its environment read are unchanged for library and
+    script callers.
+
+  No cache key, prompt or schema moved.
+
 - **A key file saved "UTF-8 with BOM" broke the saved key for good, and a
   migration could delete the only copy of a key (remediation WP-16.1; G3).**
   The key store read a legacy key file as UTF-8 and trimmed it with

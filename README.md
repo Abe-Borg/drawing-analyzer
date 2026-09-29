@@ -114,16 +114,36 @@ saved to your OS keyring (Windows Credential Manager, macOS Keychain, Secret
 Service) once you finish editing so it's remembered next launch. Where no
 secure keyring works, the app asks before writing a plain-text key file; decline
 and the key lasts for this session only. The env var still takes precedence when
-both are set.
+both are set: it fills the field at launch.
 
 Spaces and invisible characters around a key (a byte-order mark from Notepad's
-"UTF-8 with BOM", a zero-width space from a web page) are removed wherever a key
-enters: the field, a saved key, and a legacy `drawing_analyzer_api_key.txt` key
-file (UTF-8 or UTF-16). A key must start with `sk-ant-` to be saved, or to be
-loaded from the keyring or a key file (the environment variable is used as set).
+"UTF-8 with BOM", a zero-width space from a web page, a carriage return from a
+`.env` file) are removed wherever a key enters: the field, a saved key, the
+`ANTHROPIC_API_KEY` environment variable, and a legacy
+`drawing_analyzer_api_key.txt` key file (UTF-8 or UTF-16). A key must start with
+`sk-ant-` to be saved, or to be loaded from the keyring or a key file. An
+environment variable that does not is still used for the session (so is a value
+typed into the field), and the activity log warns about it by the variable's
+name, never its value.
 A legacy key file is moved into the keyring only when it holds such a key, and
 only the key files that hold that same key are then deleted; a file holding
 anything else is left in place and named in the activity log, never quoted.
+
+**A run keeps the key it started with.** When you click **Analyze**, the app
+reads the key in the field once and builds the run's one API client from it;
+every stage of that run (the digest, the critique, cross-sheet QC, verification,
+investigation, the citation check) uses that client, so nothing you do to the
+field or to the environment afterwards can reach a running analysis. The field
+is locked until the run ends or fails, and the label beside it reads *locked
+while analyzing* (**Show** still works, so you can check which key is in use).
+The app never writes the key into its process environment: an
+`ANTHROPIC_API_KEY` present when it launches fills the field and is then removed,
+so the programs the app starts (the reviewed-PDF worker processes, the file and
+folder opener, your browser, the update installer) do not inherit it from the
+app. **Save HTML Report** and **Export All** embed the key in the field, when you
+opt in, a session-only key included; Export All takes it when you click. Library
+and script callers are unchanged: with no `client=`, each stage still reads
+`ANTHROPIC_API_KEY` through `client.get_client()`.
 
 ## Usage
 
@@ -2029,7 +2049,7 @@ runs.
 
 | Variable | Default | Effect |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | — | Required (or paste the key into the GUI). |
+| `ANTHROPIC_API_KEY` | — | Required (or paste the key into the GUI). The GUI reads it once at launch to fill the key field, then removes it from its own environment; library callers that pass no `client=` read it on every call. |
 | `DRAWING_ANALYZER_MODEL` | Opus 5 | Vision model for per-sheet digests. |
 | `DRAWING_ANALYZER_SYNTHESIS_MODEL` | Opus 5 | Cross-sheet synthesis model (text-only). |
 | `DRAWING_ANALYZER_FOCUS_MODEL` | Opus 5 | Focus-report model (text-only). |
