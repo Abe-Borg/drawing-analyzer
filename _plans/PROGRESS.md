@@ -397,6 +397,336 @@ Each session adds one entry at the top: date, slices and IDs, PR, what changed,
 contracts decided, cache/schema effects, validation actually run (with counts),
 what could not be verified, risks, and next steps.
 
+### 2026-09-29 — WP-02.3: the suite's responses are the shapes the API sends, through the real SDK ([PR #PRNUM](https://github.com/Abe-Borg/drawing-analyzer/pull/PRNUM))
+
+- **Slice and IDs:** WP-02.3. U26 in part (the response side: nested batch
+  errors, canceled/expired envelopes, `None` usage, the TTL split, `iterations`,
+  `web_fetch_requests`, `output_tokens_details`, `stop_details`, fallback
+  blocks, the serving model, SSE sequences with a mid-stream failure and a
+  clean EOF). The batch canary stays WP-02.4's; strict release mode WP-02.5's.
+  No `DECISIONS.md` contract covers test fixtures and none was opened; the
+  owner's choices are recorded here as the owner's rules. No migration-register
+  row: no product code, cache, key, prompt or schema moved. **WP-02 is not
+  done** (02.4 and 02.5 remain). The acceptance clause this slice owns holds:
+  "tests fail for missed terminal guards, realistic canceled envelopes and
+  duplicated usage" (measured by injection, below).
+- **Base.** `main` = `origin/main` = `85ce3e3` (WP-02.2's merge); no drift.
+  Open PRs: #174 (dependabot) and #175 (SDK 1.8.0 support), neither a
+  remediation slice, neither merged; no pin was changed. Every SDK fact below
+  was measured on SDK 1.7.0 (installed; `httpx2` 2.13.1) and again in a scratch
+  venv with SDK 1.8.0. Baseline **4,726 passed, 2 skipped, 10 deselected**
+  (375 s), identical to WP-02.2's; the two skips are IPv6 loopback and chmod as
+  root. Python 3.11.15, PyMuPDF 1.28.2, pydantic 2.13.5.
+- **The request's facts, re-verified** (all held; the corrections and
+  additions are marked):
+  - `tests/fixtures/sdk_transport.py` served JSON and complete SSE, batches
+    with every item `succeeded`, `ended` at the first retrieve, results at a
+    `results_url`, `count_tokens`, uploads and deletes; no errored, canceled or
+    expired item, no partial stream, no `None` counter; `message_sse` always
+    ended with `message_stop`. *New:* `message_json` kept the fake's hardcoded
+    `claude-opus-5`, so the stub served Opus 5 as the model for every request,
+    Sonnet 5 ones included.
+  - The SDK's response models: `Usage` has `cache_creation`,
+    `cache_creation_input_tokens`, `cache_read_input_tokens`,
+    `output_tokens_details`, `server_tool_use` (`web_search_requests`,
+    `web_fetch_requests`), `service_tier`, `inference_geo`; `BetaUsage` adds
+    `iterations`, `fallback_credit` and `speed`; `Message` and `BetaMessage`
+    carry `stop_details` (`RefusalStopDetails`; the beta one adds
+    `recommended_model`, `fallback_credit_token`, `fallback_has_prefill_claim`);
+    `BetaFallbackBlock`; batch results `Succeeded`, `Errored`, `Canceled`,
+    `Expired`; `ErrorObject` has nine types. **1.8.0: identical** except that
+    it adds `BetaMCPToolListingBlock` to the beta content union and
+    `claude-opus-5-5` to the model literal.
+  - The fakes: `FakeUsage` cache fields defaulted to 0, no `iterations`,
+    `cache_creation` or `output_tokens_details`; `FakeMessage.model` hardcoded,
+    no `stop_details`; `FinalMessageStream` had `get_final_message()` only; the
+    blocks were dataclasses and a fake echoed into a request could not be
+    serialized (41 tests, reproduced exactly, below). *Also missing:*
+    `container`, `citations`, `caller`, `toolset_name`, `service_tier`,
+    `inference_geo`; on the stream, `current_message_snapshot`, `until_done`,
+    `text_stream`, `close`, `request_id`, `response`. Nothing the fakes had was
+    missing from the SDK's objects.
+  - Production readers: `_dispatch_messages` returns `get_final_message()` at
+    `core/api_config.py:1450`. **N27, made precise:** only a stream that ends
+    before its `message_delta` returns `stop_reason=None` with the partial text;
+    one missing only `message_stop` returns the complete reply, its stop reason
+    included. The batch readers read the nested `error.error` tolerantly
+    (`batch_critique` 456-461 keeps the message, not the type).
+    `digest._message_cache_usage` is dict-tolerant;
+    `core.api_config.extract_cache_usage` is attribute-only **and has no caller
+    left**. `digest._message_text` is imported by 11 modules (12 with `digest`).
+  - The background deletes: reproduced. The suite makes 80 upload releases (317
+    file ids); 25 run on the main thread (their tests stub the seam), 55 on the
+    release thread, and of those 2 (WP-02.2's idle run: 8 deletes) to 4 (this
+    session, under load: 16 deletes) made their calls inside the next test:
+    two batch cases in `test_digest_terminal_outcome.py`, two in
+    `test_source_page_isolation.py`.
+- **Measured before any code** (scratch probes and instrumented copies; nothing
+  sent anywhere, every key built at runtime):
+  - **s1, the readers.** Grep, then an instrumented run of the whole suite
+    (every call of the shared `digest._get` accessor logged by caller, field
+    and value kind; 4,726 passed with it in place):
+    - no production reader of `stop_details`, `iterations`,
+      `fallback_credit`, `cache_creation`, `output_tokens_details`,
+      `web_fetch_requests` or `model` ran, and none exists;
+    - every usage reader maps a `None` or absent counter to 0 (`int(x or 0)`:
+      `_message_usage`, `_message_cache_usage`, the inline pairs in the
+      digest, critique, batch digest and investigation);
+      `_server_web_search_requests` maps `None` to `None` (unknown), which the
+      citation check replaces with its one-per-request lower bound;
+    - the suite fed a `None` cache counter in 2 tests (the N27 real-SDK tests)
+      and an absent one in 8 dict-shape tests; the nested error shape and the
+      SDK's `Canceled`/`Expired` results in no test (the fake error was flat:
+      `FakeError` and `_Obj`, 28 reads).
+  - **s2, every stage on every shape** (the gauntlet's mini set through a
+    switchable shaped copy of the stub; 224 scenarios plus 14 fallback, 10
+    batch-message and one investigation probe; every scenario also re-run warm
+    over the same cache). What production does today is below (right) and in
+    "Found, not fixed" (wrong). Nothing crashed.
+    - Right: `None` counters on every stage (same totals); `iterations`,
+      `fallback_credit` and `output_tokens_details` (not added to the totals);
+      the nine nested error types (named `type: message`; four permanent types
+      not resubmitted, four transient ones resubmitted and recovered); an
+      expired item (resubmitted, recovered); a canceled item (named, not
+      resubmitted); a batch polled through `in_progress` and `canceling` with
+      its results reversed (COMPLETE on batch, hybrid, economy); a refusal at
+      the digest, critique, verification, citation, identity and planner (not
+      COMPLETE, not cached); a stream cut before `message_delta` at the digest
+      and the critique (failed, not cached); a stream missing only
+      `message_stop` (a complete read, as the SDK says).
+  - **s3, SDK object against fake, field by field:** above. Also: the SDK's
+    `Canceled`/`Expired` results have no `message` or `error` attribute at all
+    (the dataclass envelope had both, as `None`); the SDK's errored result's
+    `error.type` is `"error"` and the type is one level down (the fake's was
+    flat); on a beta stream the accumulator sets `model` from a fallback
+    block's `to.model`; neither accumulator copies `cache_creation` from a
+    `message_delta`.
+  - **The stream, on the real SDK** (every cut x end): a dropped connection
+    raises `httpx2.RemoteProtocolError` (not an `anthropic` error); an SSE
+    `error` event raises `APIStatusError`, `status_code` 200, `.type` the
+    event's (never `OverloadedError`: the class follows the HTTP status); a
+    clean end returns the partial read; an empty body raises the SDK's own
+    `AssertionError`. `current_message_snapshot` holds the partial read in every
+    raised case but the empty body.
+  - **s4, SDK 1.8.0:** s2's 224 + 14 + 10 scenarios, the investigation probe,
+    the control, the stream table and the field comparison: identical.
+  - **s5, the serialization gap, per option** (full suite, a scratch copy of
+    the fakes switched by environment variables; each fake request also built
+    by the real SDK over a transport that sends nothing):
+    - dataclass fakes (today): 48 fail, 41 of them "Object of type
+      FakeToolUseBlock/FakeTextBlock is not JSON serializable"
+      (`test_drawing_investigate.py` 18, `test_drawing_acceptance.py` 10,
+      `test_run_scoped_client.py` 8, `test_drawing_qc_pipeline.py` 4,
+      `test_drawing_markup_rich.py` 1); the other 7 are hand-built minimal
+      requests with no `max_tokens` (WP-02.2's rule: a missing required
+      argument is not checked);
+    - SDK-model fakes: 7 (those same 7), 0 serialization failures;
+    - without the echo check: SDK-model fakes, dataclass fakes with the missing
+      fields, a `None` cache default (on either kind of fake) and a `None`
+      model default each left all 4,726 unchanged.
+  - **The other options:** the realistic batch default (in_progress first,
+    reversed) passed all 56 contract tests, but the pipeline polls with a real
+    15 s sleep and they submit 21 batches in 13 tests (~5 min unless patched);
+    joining the release thread at teardown and running it inline each put all
+    80 releases in their own test with no outcome change (inline takes the
+    release thread out of every test).
+- **The decision, made by the owner before any code** (AskUserQuestion, two
+  rounds, seven choices, case tables per option):
+  - **Round 1.**
+    - **Location:** one shapes module (`tests/fixtures/sdk_responses.py`, API
+      JSON) plus transport knobs on `sdk_transport.py`. Not taken: everything
+      on `sdk_transport.py`; a second stub module (a second SSE emitter).
+    - **Fake types:** the installed SDK's own models (`model_construct`). Not
+      taken: dataclasses with the missing fields (the 41-test gap stays);
+      dataclasses plus an SDK builder for new tests only.
+    - **Mid-stream failure:** now, mirroring the SDK, with
+      `current_message_snapshot`. Not taken: leave it to WP-01.7.
+    - **Batch stub:** defaults unchanged, opt-in knobs. Not taken: a realistic
+      default.
+  - **Round 2.**
+    - **`FakeUsage` defaults:** keep 0; `None` is an explicit shape. Not taken:
+      `None` by default (0 outcomes changed either way; WP-14.4's known/unknown
+      decision stays free).
+    - **Pinning:** recorded-limit tests. Not taken: strict xfail; record only.
+    - **Background deletes:** joined at teardown. Not taken: run inline
+      everywhere; leave it.
+- **What changed** (test infrastructure only; no file under `src/` moved):
+  - **New `tests/fixtures/sdk_responses.py`:** `message`, `text`, `tool_use`,
+    `usage` (`None` counters, `cache_split`, `server_tools`,
+    `output_tokens_details`, `iterations`, `fallback_credit`), `iteration`,
+    `server_tool_use`, `refusal_stop_details`, `fallback_block`,
+    `splice_fallback`; `ERROR_TYPES` (from the SDK's `ErrorObject`),
+    `errored`, `CANCELED`, `EXPIRED`, `PENDING`, `succeeded`, `individual`;
+    `CUTS`, `ENDS`, `stream_error`, `sse_events`, `cut_events`,
+    `partial_message`.
+  - **`tests/fixtures/sdk_transport.py`:** `message_sse(message, cut=, end=,
+    error=)` (one emitter), `sse_response` (a dropped connection raises
+    `httpx2.RemoteProtocolError` after the bytes, `DROPPED`),
+    `AnthropicAPIStub(stream=, batch_result=, statuses=, order=)`, a `PENDING`
+    item read `canceled` after a cancel and `expired` otherwise, request counts
+    from the results, `cancel_initiated_at` set after a cancel; `api_json`
+    reads SDK models; `message_json` serves the requested model unless the
+    reply names one. Defaults unchanged.
+  - **`tests/fixtures/fake_anthropic.py`:** `FakeMessage`, `FakeUsage`,
+    `FakeTextBlock`, `FakeToolUseBlock`, `FakeServerToolUse`,
+    `FakeServerToolUseBlock`, `FakeWebSearchResultBlock` are constructors for
+    the SDK's own models (`_sdk_model`: same keywords, same defaults, the old
+    required keywords still required; `FakeServerToolUse` gains the SDK's
+    required `web_fetch_requests: 0`); `FakeMessage`'s default model is not
+    recorded as given. `FakeBatchResultEnvelope(type=)` returns the SDK's
+    member for its type, `FakeBatchResult` a `MessageBatchIndividualResponse`,
+    `batch_errored_result` the nested error. `FinalMessageStream(message,
+    cut=, end=, error=)` and `current_message_snapshot`. `_to_dict` reads SDK
+    models.
+  - **`tests/conftest.py`:** the autouse `background_release_joined`.
+- **New tests: 133**, all passing.
+  - **`tests/test_sdk_responses.py` (78):** the tripwire (the nine error
+    types; the fields the fixtures build; the four batch result types); every
+    shape parsed by the SDK's own model (9 errored, canceled, expired, usage,
+    `stop_details` on both namespaces, the fallback splice); the real SDK on
+    every cut x end (16) and `FinalMessageStream` against it (16); the snapshot
+    rules; the beta accumulator's serving model; every fake is the SDK's own
+    model (8) and every envelope its member (4); the nested fake error; a fake
+    reply echoed into a request is sent; value equality and assignment kept;
+    the stub's knobs (serving model, stream, envelopes, `PENDING`, statuses,
+    no results before the end, order x2, defaults unchanged); the release
+    thread joined (an inner pytest session).
+  - **`tests/test_response_shapes.py` (55):** the s2 matrix as tests: 34
+    assert what production gets right, 21 are recorded limits (below).
+  - **Classified against `origin/main`** (a worktree at `85ce3e3` with the
+    new files; then a shim giving the new names today's behaviour: the stub
+    ignoring its knobs, `message_sse`/`sse_response` complete,
+    `FinalMessageStream` ignoring `cut`/`end` with a snapshot of the message,
+    dataclass fakes, no join):
+    - **70 fail on behaviour:** every fixture behaviour (the SDK on each cut x
+      end 14, the fakes as SDK models 8, envelopes 4, the stub's knobs, the
+      nested fake error, the echo, the join), and every production test that
+      needs a shape the old stub could not serve (batch envelopes, streams, the
+      status sequence);
+    - **40 fail only on a new name:** the whole of `test_sdk_responses.py`
+      fails to import without the shim; with it these pass, because both sides
+      of the comparison fall back to today's complete stream
+      (`FinalMessageStream` against the SDK 16, the builder parses, the
+      tripwire), plus the stream missing only `message_stop`;
+    - **23 pass:** they pin production's current behaviour with shapes the old
+      stub could already serve as JSON (the refusals, the usage shapes, the
+      fallback splices and the recorded limits built on them). Three recorded
+      limits passed vacuously in the first version (a complete stream also
+      satisfied them); they now also assert the cut reply's 0 output tokens,
+      and fail on behaviour.
+- **The WP-02 acceptance clause this slice owns, measured by injection**
+  (production regressions switched by an environment variable in two scratch
+  worktrees: `origin/main`'s tests, and this branch's; the 56 test files that
+  exercise the pipeline, the batch path or the fakes, plus the two new ones;
+  each control passed everything):
+
+  | Injected regression | Clause | today | with WP-02.3 |
+  |---|---|---|---|
+  | J1: a stop reason of `None` read as finished (`classify_stop_reason`) | missed terminal guard | 36 | 39 (+3 new: the digest cut after text and after content, the critique cut after content, through the real SDK) |
+  | J2: a `canceled` or `expired` item parsed as succeeded (`_parse_item`) | missed terminal guard, realistic canceled envelope | 0 | 1 (the canceled item's test) |
+  | J3: the nested batch error read as if flat (the three batch readers) | realistic envelope | 0 | 8 (4 new: the permanent types are resubmitted; 4 existing `test_drawing_batch.py` tests, now that `batch_errored_result` is nested) |
+  | J4: a reader that assumes every envelope carries `error` (`_batch_item_error_text`, `batch_critique`) | realistic canceled envelope | 0 | 4 (canceled and expired, digest and critique; the SDK's own `Canceled`/`Expired` results have no such attribute) |
+  | J5: `usage.iterations` added to the top-level totals (`_message_usage`) | duplicated usage | 0 | 2 (fast and economy) |
+  | J6: a batch attempt recorded twice when a read is folded in | duplicated usage | 17 | 18 (+1: the recovered item's record) |
+
+  Each control (no injection) passed everything: 2,864 on `origin/main`'s
+  tests, 2,997 on this branch's. J2 is caught only through the error text (the
+  expired item is still resubmitted and recovers), and J1 mostly by WP-01.2's
+  and WP-01.4's own tests; the envelope readers (J3, J4) and the per-iteration
+  usage (J5) were caught by nothing before.
+
+- **Fixture effects:** the full suite on the fixtures alone (before the new
+  production tests): all 4,726 existing tests pass unchanged. No existing test
+  file was edited; no assertion moved.
+- **Validation** (this container: Python 3.11.15, SDK 1.7.0, `httpx2` 2.13.1,
+  PyMuPDF 1.28.2):
+
+  - Baseline before any change: **4,726 passed, 2 skipped, 10 deselected**
+    (375 s).
+  - The two new files: 133 passed. Every touched file passes.
+  - Full suite, final tree: **4,859 passed, 2 skipped, 10 deselected** (428 s),
+    the baseline plus the 133 new tests, the same two environment skips.
+    Diffed test by test against the baseline: all 4,728 existing results
+    identical.
+  - `python -m compileall -q src`: clean.
+  - `python -m ruff check --select E9,F63,F7,F82 src tests scripts` (0.14.5):
+    clean. F401/F811/F841 over the new and touched fixture and test files:
+    clean.
+  - `python scripts/scan_secrets.py`: clean (221 tracked files, the new files
+    staged). Every key is built at runtime, every parametrized case has an id,
+    and the new code has no non-ASCII character.
+  - The probes again, on the final tree: s3 finds no data field on the SDK's
+    objects that the fakes lack, and a fake reply echoed into a request is
+    sent; the stream fake still lacks `close`, `get_final_text`, `request_id`,
+    `response`, `text_stream`, `until_done` and `workspace_id` (production
+    uses none). s2's 224 scenarios: identical to the first run (production
+    did not change).
+  - The browser suite was not run: no report or JavaScript changed.
+
+- **Docs:**
+  - **CHANGELOG** (Changed, test infrastructure): U26 in part.
+  - **CLAUDE.md:** a *Response-side fidelity* passage after the strict-fakes
+    one; N27's wording made precise (before `message_delta`, not "without
+    `message_stop`"); `extract_cache_usage` noted as having no caller.
+  - **The plan:** a WP-02.3 note under WP-02 steps 3-5 and Step 5's N27 made
+    precise; WP-14 Step 1's accumulator claim made precise (beta vs plain,
+    `model` from a fallback block, no `cache_creation` from `message_delta`);
+    WP-14's "needs WP-02.3's fakes" list annotated with what is now available;
+    WP-01's interruption note likewise.
+  - **PROGRESS:** this entry; the WP-02.3 and U26 rows; notes on the WP-01.5,
+    WP-01.6, WP-01.7, WP-06.3, WP-13.4, WP-14.1, WP-14.2, WP-14.3 and WP-14.6
+    rows; the Next-up line.
+  - README: no user-visible change. No dependency changed (`pydantic`, which
+    the fixtures now import, is already pinned as the SDK's dependency).
+- **Not verified:**
+  - Live API behaviour (no budget, O-4). In particular: what the API sends for
+    the cache counters on an ordinary reply (0 or `null`; the fakes keep 0 by
+    the owner's rule); that a canceled batch's unfinished items read `canceled`
+    (the stub's `PENDING` rule follows the documented behaviour); whether the
+    API accepts a `fallback` block echoed in an assistant turn (the SDK
+    serializes it; WP-13.4 decides whether to echo it). WP-02.4's canary is the
+    place for the batch ones.
+  - Windows is covered by this PR's CI (`gates-windows`).
+- **Risks and residual gaps:**
+  - The fakes now follow the installed SDK's models: an SDK that renames a
+    field moves the fakes with it, and the tripwire (the error types, the
+    fields the fixtures build, the result types) fails for the facts pinned.
+  - The fakes are built without validation (the owner's rule), so a test can
+    still build a shape the API never sends; the new fidelity tests hold the
+    shared builders, not every hand-built fake, to the SDK.
+  - The production tests run the mini set (two sheets); the sharded cross-QC
+    path and the stalled-batch harvest are exercised by the older fakes.
+  - Suite time: +133 tests, about 60 s (the production tests run the whole
+    stack, about 1 s each).
+- **Found, not fixed** (each pinned by a recorded-limit test that the owner
+  flips, and noted on the owner's row):
+  - WP-01.6: synthesis and the focus report keep and cache a refusal (synthesis
+    COMPLETE) and a stream cut before `message_delta`; the planner caches a cut
+    plan; U2's `"\n"` join across a fallback block loses the digest's finding
+    or splits a word of its prose, and the read is cached; a split critique
+    read fails although good.
+  - WP-01.7: a mid-stream `error` event or dropped connection is not retried by
+    the digest (`_is_transient_error` knows neither class), and the attempt's
+    usage is lost (0/0; synthesis and focus leave no record; the planner a
+    0-token one).
+  - WP-14.2: the `cache_creation` split is priced at one TTL rate.
+  - WP-14.3 / WP-14.6: the serving model and `web_fetch_requests` are not read.
+  - WP-13.4: N20 confirmed (the pre-fallback `tool_use` executed and the
+    fallback block echoed).
+  - WP-06.3: cross-QC reads a refusal with text as "no parseable findings
+    object".
+  - WP-14.1: R3's terminal path (a recovered item's failed attempt has no
+    record).
+  - WP-01.5: R2 (a refused batch item is not retried; `stop_details` unread),
+    and `billing_error` is resubmitted like a transient error; a failed batch
+    critique read is never retried.
+  - The fixture defect found (the stub served `claude-opus-5` for every
+    request) is fixed here, since it is this slice's fixture.
+- **Next:** in queue order WP-01.5 (Wave 2, available). Once this PR merges,
+  WP-01.6, WP-01.7, WP-13.4, WP-14.2, WP-14.3 and WP-02.4 are unblocked; each
+  starts from its recorded-limit tests. WP-11.3, WP-10.4, WP-06.2, WP-06.3,
+  WP-05.3 and WP-07.3 (Wave 2) are available now.
+
 ### 2026-09-29 — WP-02.2: the fakes refuse what the SDK refuses, and production's requests go through the real SDK ([PR #178](https://github.com/Abe-Borg/drawing-analyzer/pull/178))
 
 - **Slice and IDs:** WP-02.2. U26 in part (the request side: strict fakes and
