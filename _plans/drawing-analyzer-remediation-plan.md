@@ -335,11 +335,28 @@ Implementation:
 
 **Step 1.** The SDK 1.7.0 transport is `httpx2`; plain `httpx` is not installed. `httpx2.MockTransport` works, including for SSE.
 
-**Step 2.** Derive the non-streaming threshold from the SDK, not from a literal. The SDK raises `ValueError` before sending anything; the limit bisects to 21,334 for Opus 5, Sonnet 5 and Opus 4.8.
+**Step 2.** Derive the non-streaming threshold from the SDK, not from a literal. The SDK raises `ValueError` before sending anything; 21,333 is the largest `max_tokens` it sends and 21,334 the first it refuses. *(Corrected by WP-02.2: this read "bisects to 21,334", the first refused value. Measured for all five registered models, Opus 5, Sonnet 5, Opus 4.8, Sonnet 4.6 and Haiku 4.5, on both namespaces, on SDK 1.7.0 and 1.8.0.)*
 
 **Step 3.** Production already tolerates both batch error shapes. The work is making the fakes strict:
-- the seven `_FakeBatches.create` copies and `_messages_stream(betas=)` in `tests/test_drawing_batch.py`;
-- `_BetaMessagesProxy`, which silently pops `betas`.
+- the `_FakeBatches.create` copies that accept `betas`: seven in `tests/test_drawing_batch.py` and six more in four other files, 13 in all *(corrected by WP-02.2; this read "the seven")*, and `_messages_stream(betas=)` in `tests/test_drawing_batch.py`;
+- `_BetaMessagesProxy`, which silently pops `betas`, and the 16 test-local sites in 7 files that pop `betas`/`fallbacks`.
+
+*WP-02.2 note (2026-09-29, the owner's rules; [PR #178](https://github.com/Abe-Borg/drawing-analyzer/pull/178)).* Steps 1-3 are done for requests; the response-side fixtures of step 3 (nested errors, canceled/expired envelopes) are WP-02.3's.
+- **Measured first:** production sends no request the SDK refuses.
+  - Over the whole suite: 2,370 production calls into fakes, 254 batch submits, 1,225 uploads.
+  - Through the real SDK: 475 requests over 21 scenarios, identical on SDK 1.7.0 and 1.8.0.
+  - The largest non-streaming `max_tokens` is cross-QC's 16,000.
+- **Strictness:** one shared check, `fake_anthropic.check_sdk_request`.
+  - The keyword rule is the installed SDK method's signature.
+  - The cap is derived from the SDK's public `create` once per model.
+- **Scope:** every fake production reaches goes through it. Plain and beta are separate, each checked as its own namespace. An autouse guard (`sdk_checked_guard`) fails a test in which production reaches an unchecked Messages entry; batch fakes are held by a scan.
+- **Contract tests:** `tests/test_sdk_contract.py` over `tests/fixtures/sdk_transport.py`, with a tripwire over the measured facts.
+- **Regressions, measured by injection over the 40 affected files:**
+  - critique to `create`: 115 tests fail (4 before);
+  - every streamed stage to `create`: 406 (42);
+  - `betas` on the plain namespace: 520 (11);
+  - an unknown keyword: 77 (0);
+  - `betas` on a plain batch submit: 169 (19).
 
 **Step 5.** Add a stream that ends without `message_stop`. The real SDK returns `stop_reason=None` with partial text and raises nothing, and the digest caches it (N27, fixed in WP-01.2).
 

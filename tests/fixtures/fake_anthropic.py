@@ -27,11 +27,19 @@ plain-dict code paths (batch retrieval can return either form).
 """
 from __future__ import annotations
 
-from types import SimpleNamespace
-
+import contextvars
+import functools
+import inspect
 import json
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
+
+import anthropic
+import httpx2
+from anthropic.resources.beta.messages.messages import Messages as _SdkBetaMessages
+from anthropic.resources.messages.batches import Batches as _SdkBatches
+from anthropic.resources.messages.messages import Messages as _SdkMessages
 
 
 # ---------------------------------------------------------------------------
@@ -371,14 +379,222 @@ def _to_dict(obj: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# The SDK's request contract (remediation WP-02.2, U26)
+# ---------------------------------------------------------------------------
+#
+# The fakes used to take any keyword on either namespace: every plain
+# ``create``/``stream`` accepted ``**kwargs``, ``_BetaMessagesProxy`` dropped
+# ``betas``, and test-local fakes popped ``betas``/``fallbacks`` or took a
+# ``betas`` parameter. So a request the installed SDK refuses before sending
+# anything was green here. Measured on SDK 1.7.0 and 1.8.0, over a transport
+# that sends nothing:
+#
+# - ``client.messages.create``/``.stream`` with ``betas`` or ``fallbacks``, and
+#   ``client.messages.batches.create`` with ``betas``, raise ``TypeError``;
+# - a non-streaming ``create`` above 21,333 ``max_tokens`` raises
+#   ``ValueError`` ("Streaming is required ...") for every registered model, on
+#   both namespaces (the SDK skips that check when the call passes its own
+#   ``timeout``).
+#
+# Every fake entry point asks :func:`check_sdk_request` first, so a fake refuses
+# exactly what the installed SDK refuses, with the SDK's own exception and
+# message (the owner's rules, WP-02.2):
+#
+# - the keyword rule is the SDK method's signature (``inspect``), so a keyword
+#   the SDK adds or drops moves the fakes with it;
+# - the cap is derived from the SDK's public ``create`` once per model
+#   (:func:`sdk_nonstreaming_limit`), never a literal or its private helper;
+# - a fake's plain and beta namespaces are separate entry points, each checked
+#   as its own namespace (:func:`sdk_namespaces` for a test-local fake; the
+#   mixins below for the rest).
+#
+# ``tests/test_strict_fakes.py`` holds the fakes to the real SDK case by case;
+# ``tests/test_sdk_contract.py`` sends production's own requests through it.
+
+PLAIN = "plain"
+BETA = "beta"
+
+
+def _sdk_keywords(method: Any) -> frozenset[str]:
+    return frozenset(inspect.signature(method).parameters) - {"self"}
+
+
+#: ``(namespace, method)`` -> the keywords the installed SDK method accepts.
+SDK_KEYWORDS: dict[tuple[str, str], frozenset[str]] = {
+    (PLAIN, "create"): _sdk_keywords(_SdkMessages.create),
+    (PLAIN, "stream"): _sdk_keywords(_SdkMessages.stream),
+    (BETA, "create"): _sdk_keywords(_SdkBetaMessages.create),
+    (BETA, "stream"): _sdk_keywords(_SdkBetaMessages.stream),
+    (PLAIN, "batches.create"): _sdk_keywords(_SdkBatches.create),
+}
+# The class the SDK's own TypeError names ("Messages.create() got ...").
+_SDK_OWNER = {"create": "Messages.create", "stream": "Messages.stream",
+              "batches.create": "Batches.create"}
+
+
+class _NotSent(Exception):
+    """Raised by the probe transport: the SDK accepted the request."""
+
+
+def _refuse_to_send(request: Any) -> Any:
+    raise _NotSent
+
+
+@functools.lru_cache(maxsize=None)
+def _probe_client() -> Any:
+    return anthropic.Anthropic(
+        api_key="sk-ant-" + "probe-" + "0" * 20,   # built at runtime: not a key
+        max_retries=0,
+        http_client=httpx2.Client(transport=httpx2.MockTransport(_refuse_to_send)),
+    )
+
+
+def _sdk_refusal(model: str, max_tokens: int) -> str | None:
+    """The SDK's refusal message for a non-streaming create, or ``None``."""
+    try:
+        _probe_client().messages.create(
+            model=model, max_tokens=max_tokens,
+            messages=[{"role": "user", "content": "x"}],
+        )
+    except ValueError as exc:
+        return str(exc)
+    except anthropic.APIConnectionError:
+        return None                      # it reached the transport: accepted
+    return None
+
+
+@functools.lru_cache(maxsize=None)
+def _sdk_cap(model: str) -> tuple[int, str]:
+    lo, hi = 1, 1 << 20
+    if _sdk_refusal(model, hi) is None:
+        return hi, ""
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if _sdk_refusal(model, mid) is None:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo, _sdk_refusal(model, lo + 1) or ""
+
+
+def sdk_nonstreaming_limit(model: str) -> int:
+    """The largest non-streaming ``max_tokens`` the installed SDK sends for
+    ``model``: found once per model by asking the SDK's public ``create``
+    (a bisection over a transport that sends nothing)."""
+    return _sdk_cap(model)[0]
+
+
+def check_sdk_request(namespace: str, method: str, kwargs: dict[str, Any]) -> None:
+    """Raise what the installed SDK raises for this call before sending it.
+
+    ``TypeError`` for a keyword the SDK method does not take (``betas`` and
+    ``fallbacks`` on the plain namespace among them); ``ValueError`` for a
+    non-streaming ``create`` above the SDK's cap for the model, unless the call
+    passes its own ``timeout`` (the SDK's own escape).
+    """
+    allowed = SDK_KEYWORDS[(namespace, method)]
+    for name in kwargs:
+        if name not in allowed:
+            raise TypeError(
+                f"{_SDK_OWNER[method]}() got an unexpected keyword argument '{name}'"
+            )
+    max_tokens = kwargs.get("max_tokens")
+    if (
+        method == "create"
+        and not kwargs.get("stream")
+        and "timeout" not in kwargs
+        and isinstance(max_tokens, int)
+    ):
+        limit, message = _sdk_cap(str(kwargs.get("model", "")))
+        if max_tokens > limit:
+            raise ValueError(message)
+
+
+# The namespace a call was already checked as. A beta call that a fake forwards
+# to its shared ``create`` must not be checked again as a plain one.
+_CHECKED_AS: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "fake_anthropic_checked_as", default=None,
+)
+
+
+def checked_entry(namespace: str, method: str, handler: Any, *, header: bool = False) -> Any:
+    """``handler`` behind an SDK-checked entry point for ``namespace``.
+
+    The one wrapper every fake entry point production reaches goes through
+    (the mixins, the beta proxy and :func:`sdk_namespaces` use it; a fake
+    assembled by hand wraps its own entries with it). ``tests/conftest.py``
+    fails a test in which production reaches a Messages entry point that is
+    neither this nor the real SDK's.
+
+    ``header``: drop ``betas`` before the handler sees the call. On the beta
+    namespace it is the ``anthropic-beta`` header, not part of the body. A
+    fake that records the betas it was sent keeps the default.
+    """
+    def entry(*args: Any, **kwargs: Any) -> Any:
+        if _CHECKED_AS.get() is None:
+            check_sdk_request(namespace, method, kwargs)
+        if header:
+            kwargs.pop("betas", None)
+        token = _CHECKED_AS.set(namespace)
+        try:
+            return handler(*args, **kwargs)
+        finally:
+            _CHECKED_AS.reset(token)
+
+    entry.__wrapped__ = handler  # type: ignore[attr-defined]
+    entry.sdk_checked = True  # type: ignore[attr-defined]
+    return entry
+
+
+def checked_batch_create(create: Any) -> Any:
+    """Decorate a fake ``messages.batches.create``: the SDK's check first.
+
+    ``client.messages.batches.create`` takes ``requests`` and the transport
+    options, never ``betas``. The fake keeps its own ``requests``-only body.
+    """
+    @functools.wraps(create)
+    def entry(*args: Any, **kwargs: Any) -> Any:
+        check_sdk_request(PLAIN, "batches.create", kwargs)
+        return create(*args, requests=kwargs["requests"])
+
+    entry.sdk_checked = True  # type: ignore[attr-defined]
+    return entry
+
+
+def sdk_namespaces(
+    *,
+    create: Any = None,
+    stream: Any = None,
+    batches: Any = None,
+    files: Any = None,
+) -> tuple[SimpleNamespace, SimpleNamespace]:
+    """``(messages, beta)`` for a test-local fake: each entry point checked as
+    its own namespace, both routed to the fake's own handlers.
+
+    ``stream`` returns the context manager the SDK's ``stream`` would
+    (:class:`FinalMessageStream` or the fake's own). ``batches`` (the fake's
+    object, shared by both, since production submits only on the plain
+    namespace) and ``files`` are set as given.
+    """
+    messages = SimpleNamespace(batches=batches)
+    beta_messages = SimpleNamespace(batches=batches)
+    for method, handler in (("create", create), ("stream", stream)):
+        if handler is None:
+            continue
+        setattr(messages, method, checked_entry(PLAIN, method, handler))
+        setattr(beta_messages, method, checked_entry(BETA, method, handler, header=True))
+    return messages, SimpleNamespace(messages=beta_messages, files=files)
+
+
+# ---------------------------------------------------------------------------
 # Streaming transport shim
 # ---------------------------------------------------------------------------
 #
 # The digest, critique, review-plan, synthesis and focus stages issue their
 # requests through ``client.messages.stream(...)`` rather than ``.create(...)``:
-# above roughly 21k ``max_tokens`` the SDK refuses a non-streaming call outright
-# (a client-side ValueError, before any HTTP request), and those stages now run
-# at 32k-64k. See ``drawing_analyzer.digest.stream_message``.
+# above 21,333 ``max_tokens`` the SDK refuses a non-streaming call outright
+# (a client-side ValueError, before any HTTP request), and those stages run at
+# 32k-64k. See ``drawing_analyzer.digest.stream_message``.
 #
 # A fake client therefore needs a ``messages.stream`` as well as a
 # ``messages.create``. Rather than hand-writing a context manager in every test
@@ -386,7 +602,8 @@ def _to_dict(obj: Any) -> Any:
 # and gets one that routes straight back through its own ``create`` — so the
 # recorded kwargs, the scripted responses and the raised exceptions are
 # identical on both transports, which is exactly the equivalence the streaming
-# conversion needs to hold.
+# conversion needs to hold. The mixin also puts the ``create`` a fake defines
+# behind the plain namespace's check.
 
 
 class FinalMessageStream:
@@ -420,7 +637,7 @@ class _StreamDescriptor:
         def stream(**kwargs: Any) -> FinalMessageStream:
             return FinalMessageStream(target.create(**kwargs))
 
-        return stream
+        return checked_entry(PLAIN, "stream", stream)
 
 
 class StreamingMessagesMixin:
@@ -434,40 +651,58 @@ class StreamingMessagesMixin:
         class messages(StreamingMessagesMixin):     # used unbound
             @staticmethod
             def create(**kwargs): ...
+
+    Both entry points are the plain namespace's, checked against the SDK
+    (:func:`check_sdk_request`); a subclass's own ``create`` is wrapped when
+    the class is defined.
     """
 
     stream = _StreamDescriptor()
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        raw = cls.__dict__.get("create")
+        if isinstance(raw, staticmethod):
+            cls.create = staticmethod(checked_entry(PLAIN, "create", raw.__func__))
+        elif callable(raw):
+            cls.create = checked_entry(PLAIN, "create", raw)
 
 
 def add_stream(messages_obj: Any) -> Any:
     """Attach a ``stream`` to an already-built fake ``messages`` object.
 
-    For fakes assembled from plain namespaces/lambdas rather than a class.
+    For fakes assembled from plain namespaces/lambdas rather than a class. Its
+    ``create`` and the new ``stream`` are the plain namespace's, checked.
     """
     create = messages_obj.create
-    messages_obj.stream = lambda **kwargs: FinalMessageStream(create(**kwargs))
+    messages_obj.create = checked_entry(PLAIN, "create", create)
+    messages_obj.stream = checked_entry(
+        PLAIN, "stream", lambda **kwargs: FinalMessageStream(create(**kwargs)),
+    )
     return messages_obj
 
 
 class _BetaMessagesProxy:
     """``client.beta.messages`` over an existing fake ``messages`` object.
 
-    The investigation loop reaches for ``client.beta.messages.stream(...)`` so it
-    can pass ``betas=[...]`` alongside an advisory ``output_config.task_budget``.
-    The beta namespace is a transport detail, not a different conversation, so
-    this routes straight back to the same ``create`` and records the same kwargs
-    — ``betas`` is dropped, exactly as the wire header it becomes.
+    Production reaches the beta namespace whenever a request carries
+    ``betas``: the Opus 5 refusal fallback (``fallbacks`` in the body, its beta
+    in the header) and the investigation's task budget. The beta namespace is
+    a transport detail, not a different conversation, so this routes to the
+    same ``create`` and records the same body: checked against the SDK's beta
+    signature first, then ``betas`` dropped, exactly as the wire header it
+    becomes.
     """
 
     def __init__(self, messages: Any) -> None:
         self._messages = messages
+        self.create = checked_entry(BETA, "create", self._create, header=True)
+        self.stream = checked_entry(BETA, "stream", self._stream, header=True)
 
-    def create(self, **kwargs: Any) -> Any:
-        kwargs.pop("betas", None)
+    def _create(self, **kwargs: Any) -> Any:
         return self._messages.create(**kwargs)
 
-    def stream(self, **kwargs: Any) -> FinalMessageStream:
-        kwargs.pop("betas", None)
+    def _stream(self, **kwargs: Any) -> FinalMessageStream:
         return FinalMessageStream(self._messages.create(**kwargs))
 
 

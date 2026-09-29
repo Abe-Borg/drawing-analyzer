@@ -31,6 +31,8 @@ from drawing_analyzer.models import (
     source_page_key,
 )
 from tests.fixtures.fake_anthropic import (
+    BETA,
+    checked_entry,
     BetaClientMixin,
     StreamingMessagesMixin,
     FakeMessage,
@@ -40,6 +42,15 @@ from tests.fixtures.fake_anthropic import (
 )
 
 PAGE_W, PAGE_H = 800.0, 600.0
+
+
+def _beta_entries(msgs):
+    """A hand-built beta ``messages`` namespace, checked as the SDK's beta one
+    (remediation WP-02.2). The handlers see ``betas``: they decide on them."""
+    return SimpleNamespace(
+        stream=checked_entry(BETA, "stream", msgs.stream),
+        create=checked_entry(BETA, "create", msgs.create),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -861,7 +872,7 @@ def test_task_budget_rejection_degrades_instead_of_killing_the_stage():
                 def create(self, **kw):
                     return base.messages.create(**kw)
 
-            return SimpleNamespace(messages=_Msgs())
+            return SimpleNamespace(messages=_beta_entries(_Msgs()))
 
     inv._task_budget_available = True
     try:
@@ -907,7 +918,7 @@ def test_fallback_verdict_is_not_cached_under_the_budgeted_key(tmp_path):
                 def create(self, **kw):
                     return base.messages.create(**kw)
 
-            return SimpleNamespace(messages=_Msgs())
+            return SimpleNamespace(messages=_beta_entries(_Msgs()))
 
     inv._task_budget_available = True
     try:

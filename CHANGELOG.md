@@ -45,6 +45,50 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     exported.
   - **CI** passes `-m "not network"` on every pytest command. A new test fails
     if a workflow pytest command drops it.
+- **The suite's fakes refuse what the installed SDK refuses, and production's
+  requests are checked against the real SDK (remediation WP-02.2; U26 in
+  part).** The fakes took any keyword on either namespace, so a request the SDK
+  refuses before sending anything passed CI. A stage regressed from
+  `digest.stream_message` to a plain `create` was green (the review's case).
+  Measured on SDK 1.7.0 and 1.8.0, over a transport that sends nothing:
+  `betas` or `fallbacks` on `client.messages.create`/`.stream`, and `betas` on
+  `client.messages.batches.create`, raise `TypeError`; a non-streaming `create`
+  above 21,333 `max_tokens` raises `ValueError` for every registered model, on
+  both namespaces. Production sends none of these today: over the whole suite,
+  2,370 production calls into fakes, 254 batch submits and 1,225 uploads, and
+  475 requests through the real SDK over 21 scenarios, nothing was refused.
+  Test infrastructure only; no product code changed. The owner's rules:
+  - **One shared check** in `tests/fixtures/fake_anthropic.py`
+    (`check_sdk_request`): a fake entry point accepts exactly the keywords the
+    installed SDK method's signature lists and raises the SDK's own `TypeError`
+    for any other; a non-streaming `create` above the SDK's cap raises the SDK's
+    own `ValueError`. The cap is derived from the SDK's public `create` once per
+    model (`sdk_nonstreaming_limit`), never a literal or a private helper.
+  - **Every fake production reaches** goes through it: the shared mixins and
+    the beta proxy, the 13 batch-create fakes (`checked_batch_create`, no
+    `betas` parameter), and the 7 test-local fakes behind the 16 sites that
+    popped `betas`/`fallbacks`. Their plain and beta namespaces are now separate
+    entry points, each checked as its own (`sdk_namespaces`); a fake built by
+    hand wraps its entries with `checked_entry`. An autouse guard
+    (`tests/conftest.py`, `sdk_checked_guard`) fails any test in which
+    production reaches a Messages entry point that is neither checked nor the
+    real SDK's, and structural tests keep a new fake from popping
+    `betas`/`fallbacks`, taking a `betas` parameter, or leaving a batch fake
+    undecorated.
+  - **Contract tests** (`tests/test_sdk_contract.py`, over the new in-process
+    API stub `tests/fixtures/sdk_transport.py`, `httpx2.MockTransport`) send
+    every stage's requests through the real SDK: every transport, every
+    registered model, the refusal fallback on and off, and each self-healing
+    latch (fallback, task budget, strict tools, structured outputs) after it
+    flips. Per request they assert the namespace, the `anthropic-beta` header,
+    `fallbacks`, the non-streaming cap, no beta header on batches and uploads,
+    and batch items within the SDK's own item type. A tripwire pins the measured
+    SDK facts, so an upgrade that changes one fails there.
+  - Measured with injected regressions over the 40 affected test files: a
+    critique regressed to `create` now fails 115 tests (4 before), every
+    streamed stage regressed to `create` fails 406 (42), `betas` on the plain
+    namespace fails 520 (11), an unknown keyword 77 (0), and `betas` on a plain
+    batch submit 169 (19).
 
 ### Fixed
 
