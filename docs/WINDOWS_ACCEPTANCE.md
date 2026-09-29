@@ -86,7 +86,7 @@ representative real/redacted set):
 
 | # | Case | Expected | Result / notes |
 |---|---|---|---|
-| 3A.1 | Install `DrawingAnalyzerSetup.exe` | Per-user install with no admin/UAC prompt; SmartScreen "Run anyway" path works; Start-menu shortcut launches the app | |
+| 3A.1 | Install `DrawingAnalyzerSetup.exe` | Per-user install with no admin/UAC prompt; SmartScreen "Run anyway" path works; the License Agreement page shows the AGPL summary above the full license text, "I do not accept the agreement" is preselected and Next stays disabled until "I accept the agreement" is selected; `LICENSE.txt` is in the install folder; Start-menu shortcut launches the app | |
 | 3A.2 | Version shown | Footer shows `v<version>` matching the release tag and `run.log` | |
 | 3A.3 | Manual "Check for Updates" (up to date) | On the newest version, clicking the footer button reports "You're up to date" | |
 | 3A.4 | Update available | With an older install (or `DRAWING_ANALYZER_UPDATE_URL` pointing at a test manifest), the dialog shows the new version + notes and offers Download / Skip / Later | |

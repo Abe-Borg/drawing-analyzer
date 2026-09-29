@@ -6,6 +6,29 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **The Windows installer shows the license and needs the user to accept it.**
+  `installer.iss` had no license page: nothing in the wizard named the AGPL,
+  and the installed app folder held no copy of it. It now sets `LicenseFile` to
+  the repository `LICENSE`, so the wizard opens on a License Agreement page. The
+  page shows a plain-words summary (AGPL-3.0-or-later, no warranty, what
+  modified versions owe) above the full text. "I do not accept the agreement" is
+  preselected and Next stays disabled until the user selects "I accept the
+  agreement". The page appears on every install and on every update the in-app
+  updater launches; only a `/SILENT` or `/VERYSILENT` command-line install skips
+  it. A copy of the license is installed with the app as `LICENSE.txt` (AGPL §4
+  and §6), and the uninstaller removes it. `tests/test_installer_license.py`
+  pins the page, its summary, and the installed copy. The README install steps,
+  `docs/RELEASE_WINDOWS.md`, row 3A.1 of `docs/WINDOWS_ACCEPTANCE.md` and the
+  About panel say so. `release.yml` also builds the installer on a PR that
+  changes `LICENSE`, since the installer now embeds it.
+- **The installer carries the copyright.** `installer.iss` sets `AppCopyright`
+  (`Copyright (C) 2026 Abraham Borg`), which Inno Setup also writes into
+  Setup.exe's version info. `tests/test_installer_license.py` pins it equal to
+  the README's Licensing section, and holds the license page's summary and the
+  copyright to the same plain-ASCII rule as `LICENSE`.
+
 ### Changed
 
 - **The test suite's hermeticity is enforced, not requested (remediation
