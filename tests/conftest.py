@@ -14,6 +14,10 @@ explicit opt-in. Read its docstring before changing any of that.
   ``-m network`` and a real key is exported.
 - ``fake_anthropic`` is exposed as a top-level fixture so request-shape and
   parser tests can build response objects without instantiating the real SDK.
+- Two autouse fixtures below keep per-test attribution honest:
+  ``sdk_checked_guard`` (WP-02.2) fails a test in which production reached an
+  unchecked fake Messages entry point, and ``background_release_joined``
+  (WP-02.3) joins the upload-release threads a test starts at its teardown.
 """
 from __future__ import annotations
 
@@ -121,4 +125,51 @@ def sdk_checked_guard(monkeypatch):
         "production reached a fake Messages entry point that is not SDK-checked "
         "(wrap it with tests.fixtures.fake_anthropic.checked_entry, or build the "
         f"fake on StreamingMessagesMixin / sdk_namespaces): {sorted(set(unchecked))}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# A background upload release finishes inside the test that started it (WP-02.3)
+# ---------------------------------------------------------------------------
+
+# How long a test's teardown waits for each release thread it started. A fake
+# client's delete returns at once, so a release still running after this is a
+# hang, and it fails the test rather than leaking into the next one.
+_RELEASE_JOIN_SECONDS = 60
+
+
+@pytest.fixture(autouse=True)
+def background_release_joined(monkeypatch):
+    """Join, at teardown, every upload release a test starts on a background thread.
+
+    Remediation WP-02.3 (the owner's rule). ``batch_digest._release_uploaded_files``
+    deletes a collected batch's uploaded files on a fire-and-forget daemon
+    thread (``_run_in_background``) so the digests return before the cleanup.
+    In a test that does not stub that seam, the thread could outlive its test
+    and make its ``files.delete`` calls inside the next one: measured, 2 to 4
+    of the suite's 80 releases (55 on the thread), depending on load, so
+    per-test attribution of those calls was wrong. Production is unchanged
+    (still a daemon thread, so the background path is still exercised); a
+    test that stubs the seam itself keeps its own stub. The list of threads
+    started is the fixture's value.
+    """
+    import threading
+
+    import drawing_analyzer.batch_digest as batch_digest
+
+    started: list[threading.Thread] = []
+
+    def run_in_background(fn):
+        thread = threading.Thread(target=fn, daemon=True)
+        started.append(thread)
+        thread.start()
+
+    monkeypatch.setattr(batch_digest, "_run_in_background", run_in_background)
+    yield started
+    for thread in started:
+        thread.join(timeout=_RELEASE_JOIN_SECONDS)
+    running = [t.name for t in started if t.is_alive()]
+    assert not running, (
+        f"an upload release started by this test was still running after "
+        f"{_RELEASE_JOIN_SECONDS}s: {running}"
     )

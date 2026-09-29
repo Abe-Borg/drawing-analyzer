@@ -31,82 +31,119 @@ import contextvars
 import functools
 import inspect
 import json
-from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any
 
 import anthropic
 import httpx2
+import pydantic
+from anthropic.types.messages import (
+    MessageBatchCanceledResult,
+    MessageBatchErroredResult,
+    MessageBatchExpiredResult,
+    MessageBatchIndividualResponse,
+    MessageBatchSucceededResult,
+)
 from anthropic.resources.beta.messages.messages import Messages as _SdkBetaMessages
 from anthropic.resources.messages.batches import Batches as _SdkBatches
 from anthropic.resources.messages.messages import Messages as _SdkMessages
 
+from tests.fixtures import sdk_responses as _responses
+from tests.fixtures.sdk_transport import DROPPED as _DROPPED
+from tests.fixtures.sdk_transport import message_json as _message_json
+
 
 # ---------------------------------------------------------------------------
-# Attribute-accessible stand-ins for SDK Pydantic models.
+# The installed SDK's own response models (remediation WP-02.3, U26).
 # ---------------------------------------------------------------------------
+#
+# These used to be dataclasses that looked like the SDK's models. A consumer
+# could read ``content``, ``usage`` and ``stop_reason`` on them, but not
+# ``stop_details``, ``container``, ``citations``, ``cache_creation``,
+# ``output_tokens_details``, ``service_tier`` or ``inference_geo``, which every
+# real response carries; and a fake response that production echoed into its
+# next request (the investigation's assistant turn) could not be serialized by
+# the real SDK ("Object of type FakeToolUseBlock is not JSON serializable"; 41
+# tests in five files, measured). Each fake is now a constructor for the
+# installed SDK's own model, built without validation (``model_construct``,
+# the owner's rule), with the same name, the same keywords and the same
+# defaults as before (plus ``web_fetch_requests: 0``, which the SDK requires of
+# ``server_tool_use``). So a field the SDK adds reaches the fakes with it, and a
+# fake reply serializes exactly as a real one. The cache counters still default
+# to 0, the ordinary reply's; ``None`` is an explicit shape (the owner's rule).
+# ``tests/test_sdk_responses.py`` holds each to its SDK type.
 
 
-@dataclass
-class FakeServerToolUse:
-    """Mimic ``usage.server_tool_use`` (server-reported tool telemetry)."""
+def _sdk_model(model_cls: Any, name: str, defaults: dict[str, Any], *,
+               required: tuple[str, ...] = (), implicit: tuple[str, ...] = ()) -> Any:
+    """A constructor for ``model_cls`` with the old fake's keywords and defaults.
 
-    web_search_requests: int = 0
+    A default that is callable is called per object (a fresh ``usage``, an
+    empty list). ``required`` keywords must be given, as the dataclass required
+    them. ``implicit`` defaults are applied but not recorded as given
+    (``model_fields_set``), so the stub can tell a fake that named its model
+    from one that took the default (``sdk_transport.message_json``).
+    """
+    def build(**values: Any) -> Any:
+        missing = [key for key in required if key not in values]
+        if missing:
+            raise TypeError(f"{name}() missing required keyword argument(s): {', '.join(missing)}")
+        merged = {key: (value() if callable(value) else value) for key, value in defaults.items()}
+        merged.update(values)
+        obj = model_cls.model_construct(**merged)
+        for key in implicit:
+            if key not in values:
+                obj.__pydantic_fields_set__.discard(key)
+        return obj
 
-
-@dataclass
-class FakeUsage:
-    input_tokens: int = 100
-    output_tokens: int = 50
-    cache_creation_input_tokens: int = 0
-    cache_read_input_tokens: int = 0
-    # Present only when the response carried server tool telemetry — ``None``
-    # mimics the SDK shapes that omit it (readers must treat that as unknown).
-    server_tool_use: Any = None
-
-
-@dataclass
-class FakeTextBlock:
-    text: str
-    type: str = "text"
-
-
-@dataclass
-class FakeToolUseBlock:
-    name: str
-    input: dict[str, Any]
-    id: str = "toolu_fake_1"
-    type: str = "tool_use"
+    build.__name__ = build.__qualname__ = name
+    build.__doc__ = f"The installed SDK's ``{model_cls.__name__}``, built without validation."
+    build.sdk_model = model_cls  # type: ignore[attr-defined]
+    return build
 
 
-@dataclass
-class FakeWebSearchResultBlock:
-    """Mimic the ``web_search_tool_result`` block shape used by the SDK."""
-    tool_use_id: str = "srvtoolu_fake_1"
-    content: list[dict[str, Any]] = field(default_factory=list)
-    type: str = "web_search_tool_result"
+#: ``usage.server_tool_use``: the server's own tool counters.
+FakeServerToolUse = _sdk_model(
+    anthropic.types.ServerToolUsage, "FakeServerToolUse",
+    {"web_search_requests": 0, "web_fetch_requests": 0},
+)
 
+#: ``usage``. ``server_tool_use`` is ``None`` unless the response carried
+#: server tool telemetry (readers must treat that as unknown).
+FakeUsage = _sdk_model(
+    anthropic.types.Usage, "FakeUsage",
+    {"input_tokens": 100, "output_tokens": 50, "cache_creation_input_tokens": 0,
+     "cache_read_input_tokens": 0, "server_tool_use": None},
+)
 
-@dataclass
-class FakeServerToolUseBlock:
-    """A server-side tool invocation (e.g. ``web_search``)."""
-    name: str
-    input: dict[str, Any]
-    id: str = "srvtoolu_fake_1"
-    type: str = "server_tool_use"
+FakeTextBlock = _sdk_model(anthropic.types.TextBlock, "FakeTextBlock", {"type": "text"},
+                           required=("text",))
 
+FakeToolUseBlock = _sdk_model(
+    anthropic.types.ToolUseBlock, "FakeToolUseBlock", {"id": "toolu_fake_1", "type": "tool_use"},
+    required=("name", "input"),
+)
 
-@dataclass
-class FakeMessage:
-    """SDK-ish Message: attribute access on ``content``, ``stop_reason``, ``usage``."""
-    content: list[Any]
-    stop_reason: str = "end_turn"
-    usage: FakeUsage = field(default_factory=FakeUsage)
-    model: str = "claude-opus-5"
-    id: str = "msg_fake_1"
-    role: str = "assistant"
-    type: str = "message"
-    stop_sequence: str | None = None
+#: A ``web_search_tool_result`` block.
+FakeWebSearchResultBlock = _sdk_model(
+    anthropic.types.WebSearchToolResultBlock, "FakeWebSearchResultBlock",
+    {"tool_use_id": "srvtoolu_fake_1", "content": list, "type": "web_search_tool_result"},
+)
+
+#: A server-side tool invocation (e.g. ``web_search``).
+FakeServerToolUseBlock = _sdk_model(
+    anthropic.types.ServerToolUseBlock, "FakeServerToolUseBlock",
+    {"id": "srvtoolu_fake_1", "type": "server_tool_use"}, required=("name", "input"),
+)
+
+#: A Messages API response. ``model`` defaults to ``claude-opus-5`` but is not
+#: recorded as given, so the stub serves the requested model for it.
+FakeMessage = _sdk_model(
+    anthropic.types.Message, "FakeMessage",
+    {"stop_reason": "end_turn", "usage": FakeUsage, "model": "claude-opus-5", "id": "msg_fake_1",
+     "role": "assistant", "type": "message", "stop_sequence": None},
+    required=("content",), implicit=("model",),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -178,7 +215,7 @@ def sample_verification_verdict_payload(
 # ---------------------------------------------------------------------------
 
 
-def _maybe_dict(message: FakeMessage, *, dict_shape: bool) -> Any:
+def _maybe_dict(message: Any, *, dict_shape: bool) -> Any:
     if not dict_shape:
         return message
     return _to_dict(message)
@@ -299,19 +336,31 @@ def max_tokens_incomplete_response(
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class FakeBatchResultEnvelope:
-    """Mimic the ``BatchResult.result`` inner type the SDK returns."""
-    type: str = "succeeded"  # or "errored" / "expired" / "canceled"
-    message: Any = None
-    error: Any = None
+_BATCH_RESULTS = {
+    "succeeded": MessageBatchSucceededResult,
+    "errored": MessageBatchErroredResult,
+    "canceled": MessageBatchCanceledResult,
+    "expired": MessageBatchExpiredResult,
+}
 
 
-@dataclass
-class FakeBatchResult:
-    """Mimic the outer batch result the SDK iterator yields."""
-    custom_id: str
-    result: FakeBatchResultEnvelope
+def FakeBatchResultEnvelope(type: str = "succeeded", **values: Any) -> Any:  # noqa: A002, N802
+    """A batch item's ``result``: the installed SDK's member for ``type``.
+
+    ``succeeded`` carries a ``message``, ``errored`` an ``error``; ``canceled``
+    and ``expired`` carry nothing else, as on the wire (a reader of ``message``
+    or ``error`` there gets no attribute, not ``None``). A keyword a test gives
+    is kept as given (``model_construct``)."""
+    try:
+        cls = _BATCH_RESULTS[type]
+    except KeyError:
+        raise ValueError(f"unknown batch result type {type!r}; expected one of {sorted(_BATCH_RESULTS)}") from None
+    return cls.model_construct(type=type, **values)
+
+
+def FakeBatchResult(custom_id: str, result: Any) -> Any:  # noqa: N802
+    """One line of a batch's results: the SDK's ``MessageBatchIndividualResponse``."""
+    return MessageBatchIndividualResponse.model_construct(custom_id=custom_id, result=result)
 
 
 def batch_review_result(
@@ -348,10 +397,14 @@ def batch_errored_result(
     error_message: str = "fake error",
 ) -> FakeBatchResult:
     """Errored-request envelope, for failure-path tests."""
-    error_obj = type("FakeError", (), {"message": error_message, "type": "api_error"})()
+    # Nested as the API nests it: ``result.error`` is an error *response*
+    # (``type: "error"``) whose own ``error`` carries the type and message.
+    error = anthropic.types.ErrorResponse.model_validate(
+        {"type": "error", "error": {"type": "api_error", "message": error_message}, "request_id": None}
+    )
     return FakeBatchResult(
         custom_id=custom_id,
-        result=FakeBatchResultEnvelope(type="errored", error=error_obj),
+        result=FakeBatchResultEnvelope(type="errored", error=error),
     )
 
 
@@ -370,6 +423,10 @@ def _to_dict(obj: Any) -> Any:
         return [_to_dict(x) for x in obj]
     if isinstance(obj, dict):
         return {k: _to_dict(v) for k, v in obj.items()}
+    if isinstance(obj, pydantic.BaseModel):
+        out = {k: _to_dict(v) for k, v in obj.__dict__.items()}
+        out.update({k: _to_dict(v) for k, v in (obj.__pydantic_extra__ or {}).items()})
+        return out
     if hasattr(obj, "__dataclass_fields__"):
         out: dict[str, Any] = {}
         for field_name in obj.__dataclass_fields__:
@@ -606,11 +663,43 @@ def sdk_namespaces(
 # behind the plain namespace's check.
 
 
-class FinalMessageStream:
-    """Context-manager stand-in for the SDK's streaming response object."""
+_NOT_CONSUMED = object()
 
-    def __init__(self, message: Any) -> None:
+
+class FinalMessageStream:
+    """Context-manager stand-in for the SDK's streaming response object.
+
+    By default the stream is complete: ``get_final_message()`` returns the
+    message it was given. ``cut`` and ``end`` (``sdk_responses.CUTS`` and
+    ``ENDS``, remediation WP-02.3) make it stop early exactly as the SDK's
+    stream does over the same event sequence (the owner's rule; held to the
+    real SDK at every cut x end in ``tests/test_sdk_responses.py``):
+
+    - a clean end returns the partial read (no stop reason before
+      ``message_delta``; ``message_start``'s usage), or raises the SDK's
+      ``AssertionError`` when no event arrived at all;
+    - an SSE ``error`` event raises ``anthropic.APIStatusError`` with
+      ``status_code`` 200 (the HTTP status of the stream) and the event's
+      error ``type``;
+    - a dropped connection raises ``httpx2.RemoteProtocolError``, which the
+      SDK does not wrap.
+
+    ``current_message_snapshot`` is the read the stream holds, as on the SDK:
+    an ``AssertionError`` before anything was consumed or when no
+    ``message_start`` arrived, else the partial (or complete) message.
+    """
+
+    def __init__(self, message: Any, *, cut: str | None = None, end: str = "eof",
+                 error: dict | None = None) -> None:
+        if end not in _responses.ENDS:
+            raise ValueError(f"unknown end {end!r}; expected one of {_responses.ENDS}")
+        if cut is not None and cut not in _responses.CUTS:
+            raise ValueError(f"unknown cut {cut!r}; expected one of {_responses.CUTS}")
         self._message = message
+        self._cut = cut
+        self._end = end
+        self._error = error
+        self._snapshot: Any = _NOT_CONSUMED
 
     def __enter__(self) -> "FinalMessageStream":
         return self
@@ -619,7 +708,34 @@ class FinalMessageStream:
         return False
 
     def get_final_message(self) -> Any:
-        return self._message
+        if self._cut is None and self._end == "eof":
+            self._snapshot = self._message
+            return self._message
+        body = _message_json(self._message, model=str(getattr(self._message, "model", "") or ""))
+        partial = _responses.partial_message(body, self._cut)
+        # BetaMessage: the superset model (a fallback block, iterations), with
+        # the attributes a consumer reads on either namespace's reply.
+        self._snapshot = None if partial is None else anthropic.types.beta.BetaMessage.model_validate(partial)
+        if self._end == "drop":
+            raise httpx2.RemoteProtocolError(_DROPPED)
+        if self._end == "error":
+            raise _stream_error(self._error or _responses.stream_error())
+        assert self._snapshot is not None      # the SDK's own check: no message_start
+        return self._snapshot
+
+    @property
+    def current_message_snapshot(self) -> Any:
+        assert self._snapshot is not _NOT_CONSUMED and self._snapshot is not None
+        return self._snapshot
+
+
+def _stream_error(body: dict) -> anthropic.APIStatusError:
+    """What the SDK raises for an SSE ``error`` event: the stream's HTTP status
+    was 200, so the class is the base ``APIStatusError`` whatever the event's
+    error type (``overloaded_error`` included), with that type on ``.type``."""
+    request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+    response = httpx2.Response(200, request=request, headers={"content-type": "text/event-stream"})
+    return anthropic.APIStatusError(f"{body}", response=response, body=body)
 
 
 class _StreamDescriptor:

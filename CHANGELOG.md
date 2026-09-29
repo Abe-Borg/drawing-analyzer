@@ -89,6 +89,53 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     streamed stage regressed to `create` fails 406 (42), `betas` on the plain
     namespace fails 520 (11), an unknown keyword 77 (0), and `betas` on a plain
     batch submit 169 (19).
+- **The suite's responses are the shapes the API sends, through the real SDK
+  (remediation WP-02.3; U26 in part).** On the way in the fakes were one shape:
+  a complete message whose cache counters were 0, every batch item
+  `succeeded`, a stream that always reached `message_stop`. Measured over the
+  real SDK (1.7.0 and 1.8.0, identical), production also meets `None` usage
+  counters, the `cache_creation` TTL split, `iterations`, `stop_details`, a
+  `fallback` block between two text blocks, a serving model that is not the
+  requested one, nested batch errors, `canceled` and `expired` items, and
+  streams that end early or fail midway. Test infrastructure only; no product
+  code changed. The owner's rules:
+  - **One vocabulary, as API JSON** (`tests/fixtures/sdk_responses.py`), which
+    the stub serves and the fakes parse. Where the SDK names a set (the nine
+    batch error types) it is read from the installed SDK; a tripwire pins it.
+  - **Knobs on the stub, defaults unchanged** (`tests/fixtures/sdk_transport.py`):
+    a stream cut at any point and ended cleanly, by an SSE `error` event or by a
+    dropped connection (`message_sse(cut=, end=)`, one emitter); a per-item
+    batch envelope; the status each retrieve answers; the result order. The
+    stub now serves the requested model unless the reply names one.
+  - **The fakes are the installed SDK's own models** (`model_construct`, same
+    names, keywords and defaults), batch envelopes included, so every field the
+    SDK carries is readable and a fake reply echoed into the next request
+    serializes (with the old dataclasses, 41 tests failed if every fake request
+    was built by the real SDK). No existing test changed outcome.
+  - **`FinalMessageStream` fails mid-stream as the SDK's stream does** and
+    exposes `current_message_snapshot`, held to the real SDK at every cut and
+    end: a dropped connection raises `httpx2.RemoteProtocolError` (the SDK does
+    not wrap it), an `error` event raises `APIStatusError` with status 200, and
+    a clean end before `message_delta` returns the partial read with no stop
+    reason.
+  - **What production does with each shape is pinned**
+    (`tests/test_response_shapes.py`): what it gets right is asserted, and each
+    defect found is a recorded-limit test naming the slice that fixes it (not
+    fixed here): synthesis and focus keep and cache a refusal and a cut stream,
+    the planner a cut plan (WP-01.6); the `"\n"` join across a fallback block
+    loses a digest's finding or splits a word of its prose, and the read is
+    cached (WP-01.6); a mid-stream error event or dropped connection is not
+    retried and its usage is lost (WP-01.7); the TTL split is priced at one
+    rate (WP-14.2); the serving model and `web_fetch_requests` are not read
+    (WP-14.3); the investigation executes a pre-fallback `tool_use` (WP-13.4);
+    cross-QC does not name a refusal with text (WP-06.3); a recovered batch
+    item keeps no record of its failed attempt (WP-14.1); a refused batch item
+    is not retried and `billing_error` is resubmitted (WP-01.5).
+  - **A background upload release now finishes inside the test that started
+    it** (an autouse fixture joins the release thread at teardown); 2 to 4 of
+    the suite's 80 releases used to make their `files.delete` calls inside the
+    next test.
+INJECTION_PLACEHOLDER
 
 ### Fixed
 

@@ -169,6 +169,56 @@ regressed from `digest.stream_message` to a plain `create` was green.
   literal is the cap, 21,333), so an upgrade that moves one fails there to be
   re-measured.
 
+**Response-side fidelity (remediation WP-02.3, U26; the owner's rules).** The
+fakes were one shape on the way in: a complete message whose cache counters
+were 0, every batch item `succeeded`, a stream that always reached
+`message_stop`. Measured over the real SDK (1.7.0 and 1.8.0, identical):
+- **One vocabulary, as API JSON:** `tests/fixtures/sdk_responses.py`. Usage
+  with `None` counters, the `cache_creation` TTL split, `server_tool_use`
+  (searches and fetches), `iterations`, `fallback_credit`,
+  `output_tokens_details`; `stop_details`; a `fallback` block spliced into the
+  text (`splice_fallback`, the model relabelled); batch envelopes nested as the
+  API nests them (`errored(type, message)`: `result.error.type` is `"error"`,
+  the type is one level down) for the SDK's own error types (`ERROR_TYPES`,
+  read from `ErrorObject`), `CANCELED`, `EXPIRED` (only a `type`: no `message`
+  or `error` attribute at all), `PENDING`; SSE events, their cut points
+  (`CUTS`) and ends (`ENDS`), and `partial_message(msg, cut)`, what the SDK's
+  accumulator holds at that cut (held to the SDK at every cut).
+- **The stub's transport knobs** (`sdk_transport.py`, defaults unchanged):
+  `message_sse(msg, cut=, end=)` (one emitter), and `AnthropicAPIStub(stream=,
+  batch_result=, statuses=, order=)`: a per-request cut and end, a per-item
+  envelope, the status each retrieve answers (the last repeats; the SDK's
+  `results()` retrieves once more before it reads), the result order. A
+  `PENDING` item reads `canceled` after a cancel and `expired` otherwise. The
+  stub serves the requested model unless the reply names its own.
+- **The fakes are the installed SDK's own models** (`model_construct`, same
+  names, keywords and defaults: 0 of 594 constructor calls is positional).
+  `FakeMessage` is an `anthropic.types.Message`, `FakeBatchResultEnvelope` the
+  SDK's union member for its type, `batch_errored_result` nested. A fake reply
+  production echoes into its next request (the investigation's assistant turn)
+  now serializes: with dataclass fakes 41 tests failed if every fake request was
+  built by the real SDK. `FakeMessage`'s model defaults to `claude-opus-5` but is
+  not recorded as given, which is how the stub tells it from a named model. The
+  cache counters default to 0, the ordinary reply's; `None` is an explicit shape.
+- **`FinalMessageStream(message, cut=, end=)` fails as the SDK's stream does**
+  (held to it at every cut x end): a clean end returns the partial read (no
+  stop reason before `message_delta`; `message_start`'s usage) or, with no
+  event at all, raises the SDK's own `AssertionError`; an SSE `error` event
+  raises `anthropic.APIStatusError` with `status_code` 200 and the event's type
+  on `.type` (never `OverloadedError`: the status decides the class); a dropped
+  connection raises `httpx2.RemoteProtocolError`, which the SDK does not wrap.
+  `current_message_snapshot` holds the partial read, as on the SDK.
+- **A mishandled shape is pinned, not fixed** (`tests/test_response_shapes.py`):
+  what production gets right is asserted, and each defect is a
+  `test_recorded_limit_*` that asserts today's behaviour and names the slice
+  that flips it (WP-01.5, WP-01.6, WP-01.7, WP-06.3, WP-13.4, WP-14.1,
+  WP-14.2, WP-14.3). A fix fails the test; the owner re-baselines it.
+- **A background upload release finishes inside its test**: the autouse
+  `background_release_joined` (`tests/conftest.py`) joins, at teardown, every
+  release thread a test starts on `batch_digest._run_in_background`
+  (production unchanged). Before, 2 to 4 of the suite's 80 releases made their
+  `files.delete` calls inside the next test.
+
 ## Architecture
 
 A vision pipeline (src layout, package `drawing_analyzer`): each PDF page is one
@@ -487,9 +537,11 @@ before the text is looked at, by the shared
 `core.terminal_outcome.classify_stop_reason`: only `end_turn` / `stop_sequence`
 are finished; `max_tokens` and `model_context_window_exceeded` are truncations;
 `refusal` is refused even when it carries explanatory text; `None` is unfinished
-(N27: for a stream that ends without `message_stop`, the real SDK's
-`get_final_message()` returns the partial text with `stop_reason=None` and
-raises nothing); `tool_use` / `pause_turn` / the beta `compaction` are
+(N27: for a stream that ends cleanly before its `message_delta`, the event
+that carries the stop reason, the real SDK's `get_final_message()` returns the
+partial text with `stop_reason=None` and raises nothing; one that lacks only
+`message_stop` returns the complete reply, measured in remediation WP-02.3);
+`tool_use` / `pause_turn` / the beta `compaction` are
 continuations the digest never takes; anything else is unknown, never finished.
 The table is pinned by test to the installed SDK's `StopReason` ∪
 `BetaStopReason`, since Opus 5 calls travel the beta namespace for the refusal
@@ -1554,8 +1606,9 @@ unchanged (`auditors.arithmetic._UNICODE_DASHES` is pinned to its dash fold).
   `_CheckOutcome` → `CitationCheckResult` → the ledger, summed across
   `pause_turn` resumes and carried on the error and still-paused exits too, since
   those attempts were billed. `digest._message_cache_usage` is the shared,
-  dict-tolerant reader — attribute-only `extract_cache_usage` silently zeroes a
-  dict-shaped usage, which undercounts rather than failing) →
+  dict-tolerant reader — attribute-only `extract_cache_usage` (which has no
+  caller left) silently zeroes a dict-shaped usage, which undercounts rather
+  than failing) →
   `annotate.py` (§18 gating + Phase 21 receipts: every entry gets ink except
   REJECTED/gated, which get reconciled index rows; rect-less entries become
   margin callouts **packed into visually-clear bands** — validated against words,
