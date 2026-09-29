@@ -66,6 +66,8 @@ from tests.fixtures.fake_anthropic import (  # noqa: E402
     FakeTextBlock,
     FakeUsage,
     FinalMessageStream,
+    checked_batch_create,
+    sdk_namespaces,
 )
 
 
@@ -126,10 +128,9 @@ class _Pipe:
             create=self._create, retrieve=self._retrieve, results=self._results,
             cancel=lambda batch_id: _Obj(id=batch_id, processing_status="canceling"),
         )
-        self.messages = _Obj(stream=self._stream, create=self._direct, batches=batches)
-        self.beta = _Obj(
-            messages=_Obj(stream=self._stream, create=self._direct, batches=batches),
-            files=self.files,
+        # One SDK-checked entry point per namespace (remediation WP-02.2).
+        self.messages, self.beta = sdk_namespaces(
+            create=self._direct, stream=self._stream, batches=batches, files=self.files,
         )
 
     def _reply(self, params):
@@ -154,13 +155,9 @@ class _Pipe:
         return _message("ok", in_tok=1, out_tok=1)
 
     def _stream(self, **kw):
-        kw.pop("betas", None)
-        kw.pop("fallbacks", None)
         return FinalMessageStream(self._reply(kw))
 
     def _direct(self, **kw):
-        kw.pop("betas", None)
-        kw.pop("fallbacks", None)
         return self._reply(kw)
 
     def _upload(self, *, file):
@@ -168,7 +165,8 @@ class _Pipe:
         self.uploads.append(fid)
         return _Obj(id=fid)
 
-    def _create(self, *, requests, betas=None):
+    @checked_batch_create
+    def _create(self, *, requests):
         self.batch_creates += 1
         self._submitted = [
             (r, FakeBatchResultEnvelope(type="succeeded", message=self._reply(r["params"])))

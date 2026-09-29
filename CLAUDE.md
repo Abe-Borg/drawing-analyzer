@@ -106,6 +106,53 @@ tests, and its finalizer — a canary's remote cleanup — ran under the guard a
 was refused. Child processes inherit the scrubbed environment, not the socket
 patch.
 
+**Strict fakes and the SDK contract (remediation WP-02.2, U26; the owner's
+rules).** A fake refuses what the installed SDK refuses, with the SDK's own
+exception and message, so a request the SDK would refuse before sending anything
+fails in CI. The fakes used to take any keyword on either namespace, and a stage
+regressed from `digest.stream_message` to a plain `create` was green.
+- **One check**, `fake_anthropic.check_sdk_request(namespace, method, kwargs)`.
+  The keyword rule is the SDK method's own signature (`SDK_KEYWORDS`, read with
+  `inspect` from the installed SDK), so `betas`/`fallbacks` on the plain
+  namespace and any unknown keyword raise `TypeError`. A non-streaming `create`
+  above the cap raises the SDK's `ValueError`, and the cap is derived from the
+  SDK's public `create` once per model (`sdk_nonstreaming_limit`): never a
+  literal, never the private helper. A missing required argument is not checked
+  (hand-built minimal requests in tests stay legal).
+- **Every fake production reaches goes through it.** `StreamingMessagesMixin`
+  checks its `stream` and wraps a subclass's own `create` at class definition;
+  `_BetaMessagesProxy` checks as the beta namespace, then drops `betas` (the
+  header) and keeps `fallbacks` (the body); `add_stream` checks both. A
+  test-local fake builds its namespaces with `sdk_namespaces(create=, stream=,
+  batches=, files=)`: plain and beta are separate entry points, each checked as
+  its own namespace, both routed to the fake's handlers. A batch fake's `create`
+  is decorated `@checked_batch_create` and takes `requests` only. A
+  `contextvars` marker keeps a beta call forwarded to a shared `create` from
+  being checked again as a plain one.
+- `tests/test_strict_fakes.py` holds every kind of fake entry point to the real
+  SDK case by case (computed live, over a transport that sends nothing, with its
+  own cap bisection as the oracle). Two structural tests fail if any test file
+  pops `betas`/`fallbacks` or defines a `betas` parameter.
+- `tests/test_sdk_contract.py` sends production's own requests through the real
+  SDK over `tests/fixtures/sdk_transport.py` (`AnthropicAPIStub`: an in-process
+  API behind `httpx2.MockTransport`, JSON or SSE for `/v1/messages`, batches with
+  a `results_url`, files, `count_tokens`; the route is any scripted fake's
+  `_route`; `reject=` answers a request with a 400 first). It covers every
+  transport, every registered model, the refusal fallback on and off, and each
+  self-healing latch after it flips. Per request (`assert_request_contract`):
+  - `?beta=true` exactly when an `anthropic-beta` header is sent, and only the
+    betas the request needs;
+  - `fallbacks` with its beta, only for a model that declares it;
+  - the task budget with its beta;
+  - a non-streaming `max_tokens` within the SDK's cap;
+  - no beta header on batch submits and uploads;
+  - batch item params within the SDK's own item type (the SDK does not check
+    items at runtime, so the fakes do not either).
+
+  Its first tests are a tripwire that pins the measured SDK facts (the one
+  literal is the cap, 21,333), so an upgrade that moves one fails there to be
+  re-measured.
+
 ## Architecture
 
 A vision pipeline (src layout, package `drawing_analyzer`): each PDF page is one
@@ -1785,13 +1832,22 @@ example is parked at `docs/examples/fire_protection.md`.
   shallow work registers `EFFORT_LOW`;
   it does **not** send `{"type": "disabled"}`, which risks leaking reasoning tags
   into a response the host parses as JSON.
-- **Above ~21k `max_tokens`, streaming is mandatory, not preferred.** The SDK
+- **Above 21,333 `max_tokens`, streaming is mandatory, not preferred.** The SDK
   refuses a non-streaming `create` whose cap implies >10 minutes of output with a
-  client-side `ValueError`, before any HTTP request. `digest.stream_message` is
+  client-side `ValueError`, before any HTTP request: measured (remediation
+  WP-02.2), 21,333 is sent and 21,334 refused for every registered model on both
+  namespaces, on SDK 1.7.0 and 1.8.0. The SDK skips that check when a call passes
+  its own `timeout` or the client's timeout is not its default; production's
+  client keeps the default (pinned). `digest.stream_message` is
   the single place that knows this; digest / critique / review-plan / synthesis /
-  focus all go through it. Batch items never stream and are unaffected. A cap
+  focus all go through it. The non-streaming sites (citation, cross-QC, the prose
+  harvest, identity, verification) ask for at most 16,000 on every model. Batch
+  items never stream and are unaffected. A cap
   raise without the matching streaming conversion is a hard failure, including
-  via the batch→real-time fallbacks in `batch_digest`/`batch_critique`.
+  via the batch→real-time fallbacks in `batch_digest`/`batch_critique`, and CI
+  now catches it: the fakes raise the SDK's own `ValueError`, and
+  `tests/test_sdk_contract.py` checks every non-streaming request against the
+  SDK's cap.
 - **Every real-time call whose model declares it opts into the server-side
   refusal fallback.** Which models is
   `ModelCapabilities.supports_refusal_fallback`, a registry capability beside

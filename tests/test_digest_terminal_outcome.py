@@ -41,6 +41,8 @@ from tests.fixtures.fake_anthropic import (
     FakeUsage,
     FinalMessageStream,
     StreamingMessagesMixin,
+    checked_batch_create,
+    sdk_namespaces,
 )
 
 OPUS = "claude-opus-5"
@@ -201,9 +203,9 @@ class _DualClient:
             results=self._results,
             cancel=lambda batch_id: _Obj(id=batch_id, processing_status="canceling"),
         )
-        self.messages = _Obj(stream=self._stream, batches=batches)
-        self.beta = _Obj(
-            messages=_Obj(stream=self._stream, batches=batches), files=self.files,
+        # One SDK-checked entry point per namespace (remediation WP-02.2).
+        self.messages, self.beta = sdk_namespaces(
+            stream=self._stream, batches=batches, files=self.files,
         )
 
     @property
@@ -219,10 +221,10 @@ class _DualClient:
         return _Obj(id=f"file_{self._uploads}")
 
     def _stream(self, **kwargs):
-        kwargs.pop("betas", None)
         self.stream_calls.append(kwargs)
         return FinalMessageStream(self._message(kwargs))
 
+    @checked_batch_create
     def _create_batch(self, *, requests):
         self.batches_created += 1
         self._submitted = list(requests)

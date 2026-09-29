@@ -71,6 +71,8 @@ from tests.fixtures.fake_anthropic import (
     FakeUsage,
     FinalMessageStream,
     StreamingMessagesMixin,
+    checked_batch_create,
+    sdk_namespaces,
 )
 
 _NOOP = lambda _s: None  # noqa: E731 - tests never wait
@@ -449,7 +451,8 @@ class _BatchClient:
         self._n += 1
         return _Obj(id=f"file_{self._n}")
 
-    def _create(self, *, requests, betas=None):
+    @checked_batch_create
+    def _create(self, *, requests):
         self.create_calls += 1
         self.submitted = list(requests)
         return _Obj(id="batch_1")
@@ -554,9 +557,10 @@ class _Pipe:
         self.files = _Obj(upload=self._upload, delete=lambda file_id: None)
         batches = _Obj(create=self._create, retrieve=self._retrieve, results=self._results,
                        cancel=lambda batch_id: _Obj(id=batch_id, processing_status="canceling"))
-        self.messages = _Obj(stream=self._stream, create=self._direct, batches=batches)
-        self.beta = _Obj(messages=_Obj(stream=self._stream, create=self._direct,
-                                       batches=batches), files=self.files)
+        # One SDK-checked entry point per namespace (remediation WP-02.2).
+        self.messages, self.beta = sdk_namespaces(
+            create=self._direct, stream=self._stream, batches=batches, files=self.files,
+        )
 
     def _critique_reply(self, params):
         text = _joined_text(params)
@@ -591,20 +595,17 @@ class _Pipe:
         return _message("ok", "end_turn", 1, 1)
 
     def _stream(self, **kw):
-        kw.pop("betas", None)
-        kw.pop("fallbacks", None)
         return FinalMessageStream(self._reply(kw))
 
     def _direct(self, **kw):
-        kw.pop("betas", None)
-        kw.pop("fallbacks", None)
         return self._reply(kw)
 
     def _upload(self, *, file):
         self._n += 1
         return _Obj(id=f"file_{self._n}")
 
-    def _create(self, *, requests, betas=None):
+    @checked_batch_create
+    def _create(self, *, requests):
         self._submitted = []
         for r in requests:
             try:

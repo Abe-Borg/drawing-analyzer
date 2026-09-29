@@ -30,6 +30,8 @@ from tests.fixtures.fake_anthropic import (
     FakeTextBlock,
     FakeUsage,
     batch_errored_result,
+    checked_batch_create,
+    sdk_namespaces,
 )
 
 OPUS = "claude-opus-5"
@@ -74,9 +76,11 @@ def _rescue_params(model: str) -> dict:
 
 
 def _without_fallback_keys(params: dict) -> dict:
-    """Drop the Opus 5 refusal-fallback keys ``stream_message`` attaches, so a
-    rescue call's params can be compared against the original request body."""
-    return {k: v for k, v in params.items() if k not in ("betas", "fallbacks")}
+    """Drop the Opus 5 refusal-fallback body parameter ``stream_message``
+    attaches, so a rescue call's params can be compared against the original
+    request body. (Its ``betas`` is the ``anthropic-beta`` header: the fake's
+    checked beta entry never hands it to the fake, as the wire never does.)"""
+    return {k: v for k, v in params.items() if k != "fallbacks"}
 
 
 def _references_file_id(kwargs: dict) -> bool:
@@ -147,7 +151,8 @@ class _FakeBatches:
     def __init__(self, client):
         self._c = client
 
-    def create(self, *, requests, betas=None):
+    @checked_batch_create
+    def create(self, *, requests):
         if getattr(self._c, "create_raises", None) is not None:
             raise self._c.create_raises
         self._c.create_calls.append({"requests": list(requests)})
@@ -203,25 +208,21 @@ class _FakeClient:
         self.rescue_calls: list[dict] = []
         self.files = _FakeFiles()
         batches = _FakeBatches(self)
-        # Files API + Message Batches are GA: production calls the stable
-        # ``.files`` / ``.messages.batches`` / ``.messages.stream`` namespace
-        # (no ``betas=``) for everything in this module. ``.beta.*`` is kept
-        # only as a back-compat mirror onto the same fakes.
-        self.beta = _Obj(
-            files=self.files,
-            messages=_Obj(batches=batches, stream=self._messages_stream),
-        )
-        self.messages = _Obj(
-            batches=batches,
-            create=self._messages_create,
-            stream=self._messages_stream,
+        # Files API + Message Batches are GA: production uploads and submits on
+        # the plain namespace (no ``betas``). The direct-call rescue and the
+        # inline fallback stream through ``digest.stream_message``, on the beta
+        # namespace when the model declares the refusal fallback. Each
+        # namespace is its own SDK-checked entry point (remediation WP-02.2).
+        self.messages, self.beta = sdk_namespaces(
+            create=self._messages_create, stream=self._messages_stream,
+            batches=batches, files=self.files,
         )
 
     def _messages_create(self, **kwargs):
         self.messages_create_calls.append(kwargs)
         return self.inline_responder(kwargs)
 
-    def _messages_stream(self, *, betas=None, **kwargs):
+    def _messages_stream(self, **kwargs):
         """Dispatch ``client.messages.stream(...)`` by what the call carries.
 
         Both the direct-call rescue (batch item params, ``file_id``-referenced
@@ -233,7 +234,7 @@ class _FakeClient:
         ``file_id``; an inline call embeds base64 image bytes instead.
         """
         if _references_file_id(kwargs):
-            self.rescue_calls.append({"betas": betas, "params": kwargs})
+            self.rescue_calls.append({"params": kwargs})
             return _FakeStreamManager(self.rescue_responder, kwargs)
         return FinalMessageStream(self._messages_create(**kwargs))
 
@@ -1259,8 +1260,9 @@ def test_collect_rescues_batch_backend_outage_via_direct_calls():
     # also watched a follow-up batch fail identically, wasting ~10 minutes).
     # A batch whose every item fails retryably server-side therefore skips
     # the doomed follow-up round entirely and digests via synchronous
-    # streamed beta.messages.stream calls carrying the byte-same params (and
-    # the Files-API beta, since they reference file_ids), with the uploaded
+    # streamed beta.messages.stream calls carrying the byte-same params (with
+    # the refusal-fallback beta for Opus 5; no Files-API beta: measured on the
+    # real SDK, a request referencing file_ids carries none), with the uploaded
     # files deleted only after the rescue.
     client = _FakeClient(_always_errored)
     batch = submit_drawing_batch(
@@ -1455,11 +1457,12 @@ def test_followup_submit_failure_falls_back_to_direct_calls():
             super().__init__(client)
             self.creates = 0
 
-        def create(self, *, requests, betas=None):
+        @checked_batch_create
+        def create(self, *, requests):
             self.creates += 1
             if self.creates >= 2:
                 raise RuntimeError("batch backend down")
-            return super().create(requests=requests, betas=betas)
+            return super().create(requests=requests)
 
     def responder(req):
         return _always_errored(req) if req["custom_id"] == "sheet__0" else _succeed(req)
@@ -1997,8 +2000,9 @@ class _StallFirstThenBatchOk(_FakeBatches):
         self._n = 0
         self._stalled_id: str | None = None
 
-    def create(self, *, requests, betas=None):
-        self._c.create_calls.append({"requests": list(requests), "betas": betas})
+    @checked_batch_create
+    def create(self, *, requests):
+        self._c.create_calls.append({"requests": list(requests)})
         self._c.submitted = list(requests)
         self._n += 1
         bid = f"batch_{self._n}"
@@ -2408,8 +2412,9 @@ class _TerminalPrimaryThenAlwaysStall(_FakeBatches):
         self._n = 0
         self._primary_id: str | None = None
 
-    def create(self, *, requests, betas=None):
-        self._c.create_calls.append({"requests": list(requests), "betas": betas})
+    @checked_batch_create
+    def create(self, *, requests):
+        self._c.create_calls.append({"requests": list(requests)})
         self._c.submitted = list(requests)
         self._n += 1
         bid = f"batch_{self._n}"
@@ -2550,8 +2555,9 @@ class _StallThenSettleWithCompletedItems(_FakeBatches):
         self._primary_reqs: list[dict] = []
         self._canceled: set[str] = set()
 
-    def create(self, *, requests, betas=None):
-        self._c.create_calls.append({"requests": list(requests), "betas": betas})
+    @checked_batch_create
+    def create(self, *, requests):
+        self._c.create_calls.append({"requests": list(requests)})
         self._c.submitted = list(requests)
         self._n += 1
         bid = f"batch_{self._n}"
@@ -2844,8 +2850,9 @@ class _PrimaryOkThenFollowUpStalls(_FakeBatches):
         self._follow_up: str | None = None
         self._canceled: set[str] = set()
 
-    def create(self, *, requests, betas=None):
-        self._c.create_calls.append({"requests": list(requests), "betas": betas})
+    @checked_batch_create
+    def create(self, *, requests):
+        self._c.create_calls.append({"requests": list(requests)})
         self._c.submitted = list(requests)
         self._n += 1
         bid = f"batch_{self._n}"
@@ -2982,8 +2989,9 @@ class _MovingButTooSlow(_FakeBatches):
         self._primary_reqs: list[dict] = []
         self._canceled: set[str] = set()
 
-    def create(self, *, requests, betas=None):
-        self._c.create_calls.append({"requests": list(requests), "betas": betas})
+    @checked_batch_create
+    def create(self, *, requests):
+        self._c.create_calls.append({"requests": list(requests)})
         self._c.submitted = list(requests)
         self._n += 1
         bid = f"batch_{self._n}"
