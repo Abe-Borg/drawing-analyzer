@@ -305,7 +305,7 @@ Regression cases:
 - One shared helper must handle fallback boundaries. WP-12.1's citation splits use it too.
 
 **Other notes**
-- The regression "stream interruption before output / after text / after complete JSON" needs WP-02.3's SSE fixtures.
+- The regression "stream interruption before output / after text / after complete JSON" needs WP-02.3's SSE fixtures. *(Available since WP-02.3: `message_sse(cut=, end=)` through the real SDK and `FinalMessageStream(cut=, end=)`; `tests/test_response_shapes.py` pins today's behaviour as recorded limits for WP-01.6 and WP-01.7.)*
   - `stream_message` uses `get_final_message()`, so today an interruption raises and the partial read is lost.
   - Capturing it is WP-01.7, together with WP-14 step 7.
 - Cross-QC terminal handling is implemented in WP-06.3, on this package's helper.
@@ -358,7 +358,22 @@ Implementation:
   - an unknown keyword: 77 (0);
   - `betas` on a plain batch submit: 169 (19).
 
-**Step 5.** Add a stream that ends without `message_stop`. The real SDK returns `stop_reason=None` with partial text and raises nothing, and the digest caches it (N27, fixed in WP-01.2).
+**Step 5.** Add a stream that ends without `message_stop`. The real SDK returns `stop_reason=None` with partial text and raises nothing, and the digest caches it (N27, fixed in WP-01.2). *(Made precise by WP-02.3: only a stream that ends before its `message_delta` returns `stop_reason=None`; one that lacks only `message_stop` returns the complete reply with its stop reason, indistinguishable from a complete stream. Measured on SDK 1.7.0 and 1.8.0.)*
+
+*WP-02.3 note (2026-09-29, the owner's rules; U26 in part).* Steps 3-5's response side is done.
+- **Measured first** (the real SDK over the stub, identical on 1.7.0 and 1.8.0): 224 scenarios plus 26 more, every stage, every transport.
+  - Nothing reads `stop_details`, `iterations`, `fallback_credit`, `cache_creation`, `output_tokens_details`, `web_fetch_requests` or the serving model.
+  - Every usage reader maps a `None` counter to 0. Before this slice the suite fed `None` only in 2 tests, and the nested error shape and real `canceled`/`expired` results in none.
+  - Stream facts: a dropped connection raises `httpx2.RemoteProtocolError`, unwrapped. An SSE `error` event raises `APIStatusError` with status 200, whatever its type. A body with no event raises the SDK's `AssertionError`. `current_message_snapshot` holds the partial read in every raised case but that one.
+- **The fixtures:**
+  - one response vocabulary as API JSON (`tests/fixtures/sdk_responses.py`);
+  - transport knobs on the stub, defaults unchanged: a stream's cut and end, a per-item envelope, the status sequence, the result order;
+  - the fakes as the installed SDK's own models (`model_construct`), which closes the 41-test serialization gap;
+  - `FinalMessageStream` failing as the SDK does, with a snapshot;
+  - cache counters still 0 by default, `None` an explicit shape;
+  - the upload-release thread joined at each test's teardown.
+- **Pinned, not fixed:** what production gets right is asserted. Each defect is a recorded-limit test that names its owner: WP-01.5, WP-01.6, WP-01.7, WP-06.3, WP-13.4, WP-14.1, WP-14.2, WP-14.3.
+- **The acceptance clause this slice owns** ("tests fail for missed terminal guards, realistic canceled envelopes and duplicated usage") was measured by injection: see the WP-02.3 handoff entry in `PROGRESS.md`.
 
 **Step 6: the network guard**
 - Guard `connect`, `connect_ex` and `getaddrinfo`, allowing `AF_UNIX` and loopback.
@@ -1084,7 +1099,7 @@ Regression matrix: no fallback; pre-output refusal; partial-output fallback; mul
 - Steps 3–4 therefore need per-attempt usage lists from `verify.py`, `cross_qc.py`, `citation_check.py`, `critique.py` and `prose_harvest.py`, and also from identity, planner, synthesis and focus.
 
 **Step 1: reading the metadata.**
-- The SDK 1.7.0 stream accumulator already copies `stop_details`, `iterations`, `fallback_credit` and `output_tokens_details` into `get_final_message()`.
+- The SDK 1.7.0 stream accumulator already copies `stop_details`, `iterations`, `fallback_credit` and `output_tokens_details` into `get_final_message()`. *(Made precise by WP-02.3, measured on 1.7.0 and 1.8.0: the beta accumulator copies all four and also takes the message's `model` from a `fallback` block's `to.model`; the plain one copies `stop_details` and `output_tokens_details` only, since GA usage has no `iterations` or `fallback_credit`. Neither copies `cache_creation` from a `message_delta`, whose usage has no such field, so on a stream the TTL split is `message_start`'s.)*
 - The GA `Usage` type has no `iterations`; only beta-namespace calls carry it.
 - Add one reader beside `digest._message_usage`, which has 13 callers.
 - Store the serving model in cache payloads as an additive field, where absent means unknown. Do **not** bump `_SCHEMA_VERSION` for it; record that decision.
@@ -1111,11 +1126,12 @@ Regression matrix: no fallback; pre-output refusal; partial-output fallback; mul
 
 **Step 8 is mostly done.** The manifest writes `pricing_effective_date`, and the exhaustive dialog shows it. It is still missing from the standard dialog, the report's usage table and `run.log`.
 
-**The regression matrix needs WP-02.3's fakes.**
-- `FakeUsage` cache fields default to 0, not `None`.
-- It has no `iterations`, `cache_creation` or `output_tokens_details`.
-- `FakeMessage.model` is hardcoded, and there is no `stop_details`.
-- `FinalMessageStream` cannot fail mid-stream.
+**The regression matrix needs WP-02.3's fakes.** *(Available since WP-02.3; this list described the fakes before it.)*
+- `FakeUsage` cache fields default to 0, not `None`. *(Still 0 by the owner's rule: `None` is an explicit shape, `FakeUsage(cache_read_input_tokens=None)` or `sdk_responses.usage(cache_read=None, cache_write=None)`.)*
+- It has no `iterations`, `cache_creation` or `output_tokens_details`. *(The fakes are now the SDK's own models: every field is readable, and `sdk_responses.usage(cache_split=, iterations=, output_tokens_details=, server_tools=)` builds each shape.)*
+- `FakeMessage.model` is hardcoded, and there is no `stop_details`. *(The default model is not recorded as given, so the stub serves the requested model; `stop_details` is readable and `sdk_responses.refusal_stop_details` builds it.)*
+- `FinalMessageStream` cannot fail mid-stream. *(It can: `FinalMessageStream(message, cut=, end=)`, held to the SDK; the stub's `message_sse(cut=, end=)` does the same through the real SDK.)*
+- `tests/test_response_shapes.py` already pins today's behaviour for the TTL split (WP-14.2), the serving model and `web_fetch_requests` (WP-14.3), a recovered item's missing attempt record (WP-14.1) and an interrupted stream's lost usage (WP-01.7) as recorded limits for these slices to flip.
 
 Slices: WP-14.1 … WP-14.6. Partial-stream capture is WP-01.7.
 
