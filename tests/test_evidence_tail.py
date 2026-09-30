@@ -518,8 +518,14 @@ def test_no_cross_qc_contract_bump_was_needed():
     strings are no longer folded into one), a whitespace-only fact quote is
     no longer sent to the reconciler, and the stored result carries its
     refused-item counts, for byte-identical inputs. Still nothing from WP-03A.
+
+    It reads 7 since **remediation WP-05.3** (B4): grounding also takes a
+    quote that differs from the sheet's words only by the named
+    character-stream joins (``6"`` against ``6 "``), and no quote or text with
+    a number split around a lone ``.`` grounds any longer, for byte-identical
+    inputs. Still nothing from WP-03A.
     """
-    assert X._CROSS_QC_CACHE_CONTRACT == 6
+    assert X._CROSS_QC_CACHE_CONTRACT == 7
 
 
 # --------------------------------------------------------------------------- #

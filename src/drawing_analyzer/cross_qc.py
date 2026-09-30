@@ -173,7 +173,16 @@ _TEXT_LAYER_BUDGET = 4_000
 # mechanism, not a bump and a key term for one change (plan §2 rule 15). If the
 # prompt edit were ever reverted, this bump still keeps a warm entry from
 # serving a finding set the host no longer produces.
-_CROSS_QC_CACHE_CONTRACT = 6
+#
+# Bumped to 7 (remediation WP-05.3; B4): grounding goes through the anchor's
+# character-stream tier too (the owner's decision: one matcher), so for
+# byte-identical request inputs a leg or fact whose quote differs from the
+# sheet's words only by the named joins (``6"`` against a printed ``6 "``,
+# ``2%`` against ``2 %``, ``12'-6"`` against ``12' - 6"``, ``INCH DRAIN``
+# against ``INCHDRAIN``) is now admitted, and a quote or text with a number
+# split around a lone ``.`` no longer grounds. The fact-tile join keeps its
+# folded key. One mechanism: no key term was added.
+_CROSS_QC_CACHE_CONTRACT = 7
 DEFAULT_CROSS_QC_WORKERS = 3
 _CROSS_QC_WORKERS_ENV = "DRAWING_ANALYZER_CROSS_QC_WORKERS"
 
@@ -652,11 +661,17 @@ def _grounded(quote: str, sheet_text: str) -> bool:
     (:class:`anchor.SourceWords`). It is the matcher the anchor's EXACT tier
     uses (remediation WP-05.2), so each word's brackets and sentence
     punctuation fold on both sides (``RATED 175 PSI TYP`` grounds in ``RATED
-    175 PSI, TYP.``) and the two agree on what is printed. An ungrounded quote
-    is a hallucination signal and must not become a trusted dual-anchor leg
-    (§16.1).
+    175 PSI, TYP.``) and the two agree on what is printed. It also takes the
+    anchor's character-stream tier (remediation WP-05.3, the owner's rules:
+    :meth:`anchor.SourceWords.joined_spans`), so a quote that differs from the
+    sheet's words only by the named joins grounds (``6"`` against a printed
+    ``6 "``, ``INCH DRAIN`` against ``INCHDRAIN``), and a number split around
+    a lone ``.`` is never matched in part (``5`` against ``. 5``). An
+    ungrounded quote is a hallucination signal and must not become a trusted
+    dual-anchor leg (§16.1).
     """
-    return source_words(sheet_text or "").contains(quote)
+    words = source_words(sheet_text or "")
+    return words.contains(quote) or bool(words.joined_spans(quote))
 
 
 def _tile_has_words(geom: Any, tile: "list[int] | None") -> bool:
