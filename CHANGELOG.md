@@ -246,6 +246,69 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A failed batch critique read was never retried, and a critique cut off at
+  `max_tokens` was never given more room (remediation WP-01.8; N4 critique
+  part, R2, WP-01 step 5).** On the Message Batches transport (Hybrid and
+  Economy), a critique read that came back `overloaded_error`, `api_error`,
+  `rate_limit_error`, `timeout_error` or `expired`, a refusal with a fallback
+  route, or a read stopped at `max_tokens` simply failed. The sheet's critique
+  read PARTIAL (3 of 4 requested reads judged), its surviving read's findings
+  were marked unconfirmed, nothing was cached, and every later run read and
+  paid for the sheet again. On real time (Fast), a read cut off at
+  `max_tokens` failed the same way. Measured on SDK 1.7.0 and 1.8.0, Opus 5.5,
+  Sonnet 5.5 and Opus 5.
+
+  Now, decided with the owner (see the WP-01.8 handoff in
+  `_plans/PROGRESS.md`):
+  - **The batch critique retries a failed read in follow-up critique
+    batches**, by the digest's own retry rule (one rule for both batch
+    transports): a transient error or an expired item is resubmitted as it
+    was, a refusal whose category has a route goes to its fallback model once
+    (today only Opus 5's `cyber` → Opus 4.8; the 5.5 defaults declare none), a
+    read stopped at `max_tokens` goes at twice the cap (64k → 128k). A
+    permanent error, a canceled item, an unrouted or category-less refusal, a
+    context-window stop, a read with no stop reason, a continuation, an
+    unknown stop and a malformed read are not. Retries stay on the batch
+    transport: never a full-rate real-time call.
+  - **One per-sheet budget**: `DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS`
+    (default 4), the digest's, counts every resubmitted read of the sheet, and
+    bounds the follow-up rounds too, inside the collection bound.
+  - **The real-time critique** gives a read cut off at `max_tokens` one retry
+    at twice the cap (64k → 128k, streamed), as the real-time digest does.
+  - **A recovered read is the read**: merged as any read (a finding both
+    reads report is corroborated again), counted as judged, and a sheet whose
+    every read finished is cached under the requested key, so a warm run does
+    not pay again. A read that still fails names its retries, in the digest's
+    words: `overloaded_error: busy; 4 retries, the last: overloaded_error:
+    busy`, `truncated critique (stop_reason='max_tokens'); retry: truncated
+    critique (stop_reason='max_tokens')`, `refused critique (…); retry on
+    claude-opus-4-8: refused critique on claude-opus-4-8 (…)`. A refused read
+    that is not retried says why: `…; not retried: no fallback for category
+    'cyber' on claude-opus-5-5`.
+  - **A follow-up batch that never ends** (out of time, or unpollable) is
+    canceled and ends the recovery; its reads say `…; retry: critique batch
+    not collected (<status>)`. The uploaded images are released only once
+    every batch that uses them is done with them.
+  - **Usage**: every attempt's tokens are on the sheet's one critique record,
+    at the batch rate for batch retries.
+  - **Cache**: no key, contract or `_SCHEMA_VERSION` change. Every stored
+    critique entry was written when both reads finished at once, which is
+    exactly what the new code stores for the same inputs.
+
+  Tests: `tests/test_batch_critique_recovery.py` (87). Re-baselined with the
+  owner's approval: the WP-01.5 critique tests in
+  `tests/test_batch_refusal_recovery.py` (a transient or expired read now
+  shows its type through its retries; a refused one also says why it is not
+  retried), `test_a_failed_critique_envelope_is_a_failed_read_that_is_read_again`
+  in `tests/test_response_shapes.py` (errored and expired now recovered;
+  canceled unchanged) and the `max_tokens` cases of
+  `tests/test_critique_terminal_outcome.py` (the retry in the error, calls and
+  tokens, or the read recovered).
+
+  **Visible effect:** a transient batch failure no longer costs a sheet its
+  critique; a cut-off critique read costs one more read at twice the cap; a
+  sheet whose read keeps failing costs up to four more batch reads.
+
 - **A stream that broke mid-read was never retried, lost the read it had
   delivered and was billed as nothing (remediation WP-01.7; U1, plan WP-14
   step 7).** Every large call streams (the digest, the critique, the review

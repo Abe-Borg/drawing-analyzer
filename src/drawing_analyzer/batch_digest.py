@@ -745,8 +745,62 @@ def _item_retry_params(
     these is actually resubmitted is also bounded by the sheet's one retry
     budget, which every site checks before it resubmits
     (:func:`_within_retry_budget`).
+
+    The decision itself is :func:`_retry_params_for`, which the batch
+    critique asks about each of its failed reads too (remediation WP-01.8,
+    the owner's rule: one predicate for both batch transports).
     """
     params = slot.params if params is None else params
+    return _retry_params_for(
+        result_obj,
+        params=params,
+        requested_model=str((slot.params or {}).get("model") or ""),
+        stop_reason=digest.stop_reason if digest is not None else None,
+        failed=bool(digest is not None and digest.error),
+        label=f"{slot.custom_id} ({slot.ref.display_label})",
+        noun="digest",
+        on_not_retried=(
+            (lambda reason: _note_not_retried(digest, reason)) if digest is not None else None
+        ),
+    )
+
+
+def _retry_params_for(
+    result_obj: Any,
+    *,
+    params: dict | None,
+    requested_model: str,
+    stop_reason: str | None,
+    failed: bool,
+    label: str,
+    noun: str,
+    on_not_retried: Callable[[str], None] | None = None,
+) -> dict | None:
+    """The request to resubmit one failed batch item with, or ``None``.
+
+    The one retry predicate of both batch transports (remediation WP-01.8,
+    the owner's rule): the digest asks it about a sheet's item
+    (:func:`_item_retry_params`) and the batch critique about each of a
+    sheet's reads (``batch_critique``). ``result_obj`` is the item's result
+    (``type`` ``succeeded`` / ``errored`` / ``expired`` / ``canceled``),
+    ``params`` the request the item was last submitted with,
+    ``requested_model`` the model the stage asked for (a refusal from any
+    other model came from a fallback, and ends the chain), ``stop_reason``
+    and ``failed`` the verdict on a ``succeeded`` item's reply, ``label`` and
+    ``noun`` the log's words for the item, and ``on_not_retried`` receives
+    the reason a refusal whose category has no route is not retried, for the
+    item's error.
+
+    * ``expired``: resubmitted as it was;
+    * ``errored``: resubmitted as it was, unless its type is a permanent
+      rejection (:data:`_PERMANENT_ITEM_ERROR_TYPES`);
+    * ``succeeded``, refused: on its registry fallback, once
+      (:func:`_refusal_retry_params`);
+    * ``succeeded``, stopped at ``max_tokens``: at twice the cap, up to
+      :data:`MAX_TOKENS_RETRY_CEILING`, clamped to what the item's model
+      serves; ``None`` once there is no headroom left;
+    * anything else (``canceled``, a finished reply, another stop): ``None``.
+    """
     if params is None:
         return None
     rtype = _get(result_obj, "type", None)
@@ -756,21 +810,22 @@ def _item_retry_params(
         return None if _item_error_type(result_obj) in _PERMANENT_ITEM_ERROR_TYPES else params
     if (
         rtype == "succeeded"
-        and digest is not None
-        and digest.error
-        and classify_stop_reason(digest.stop_reason).kind == REFUSED
+        and failed
+        and classify_stop_reason(stop_reason).kind == REFUSED
     ):
-        return _refusal_retry_params(slot, result_obj, digest, params)
+        return _refusal_retry_params(
+            result_obj, params, requested_model=requested_model, label=label,
+            noun=noun, on_not_retried=on_not_retried,
+        )
     if (
         rtype == "succeeded"
-        and digest is not None
-        and digest.error
-        # Deliberately NOT ``and not digest.text``: a partial body is exactly
+        and failed
+        # Deliberately NOT "and the reply is empty": a partial body is exactly
         # the case the raised cap exists to finish, and requiring emptiness let
         # every nonempty truncation through unretried. Only a ``max_tokens``
         # stop qualifies: a raised cap cannot finish a refusal, a read that
         # never reported a stop reason, or a full context window.
-        and classify_stop_reason(digest.stop_reason).raised_cap_may_finish
+        and classify_stop_reason(stop_reason).raised_cap_may_finish
     ):
         old = int(params.get("max_tokens") or DEFAULT_DIGEST_MAX_TOKENS)
         raised = min(old * 2, MAX_TOKENS_RETRY_CEILING)
@@ -819,12 +874,14 @@ def _fallback_model_of(slot: "_Slot") -> str | None:
     return None
 
 
-def _note_not_retried(digest: SheetDigest, reason: str) -> None:
+def _note_not_retried(digest: Any, reason: str) -> None:
     """Say in a refused read's error why it was not retried (WP-01.5).
 
     Only for a refusal that names a category with no route: the owner's rule
     words it ``…; not retried: no fallback for category 'bio' on <model>``.
-    Idempotent, so a read judged twice is not annotated twice.
+    Idempotent, so a read judged twice is not annotated twice. ``digest`` is a
+    digest item's :class:`SheetDigest` or a batch critique read's outcome
+    (remediation WP-01.8): anything with an ``error``.
     """
     note = f"; not retried: {reason}"
     if digest.error and note not in digest.error:
@@ -832,7 +889,13 @@ def _note_not_retried(digest: SheetDigest, reason: str) -> None:
 
 
 def _refusal_retry_params(
-    slot: "_Slot", result_obj: Any, digest: SheetDigest, params: dict,
+    result_obj: Any,
+    params: dict,
+    *,
+    requested_model: str,
+    label: str,
+    noun: str = "digest",
+    on_not_retried: Callable[[str], None] | None = None,
 ) -> dict | None:
     """The fallback request for a refused batch item, or ``None`` (R2).
 
@@ -858,26 +921,31 @@ def _refusal_retry_params(
     (:func:`~drawing_analyzer.digest.retarget_digest_request`), so it is one
     the target takes. The decision, the category, the hint, the target and
     the explanation go to the diagnostics log (:func:`~drawing_analyzer.digest.describe_refusal`);
-    the sheet's error already names the category.
+    the item's error already names the category, and ``on_not_retried``
+    receives the reason a named category is not retried.
+
+    Slot-agnostic since remediation WP-01.8: ``requested_model`` is the model
+    the stage asked for, ``label`` and ``noun`` word the log (``digest`` for a
+    digest item, ``critique`` for a batch critique read), so the one gate
+    serves both batch transports.
     """
     model = str(params.get("model") or "")
-    requested = str((slot.params or {}).get("model") or "")
-    label = f"{slot.custom_id} ({slot.ref.display_label})"
+    requested = requested_model
     details = refusal_details(_get(result_obj, "message"))
     category = details.category if details is not None else None
     if requested and model != requested:
         _log.info(
-            "refused digest for %s on the fallback %s too (%s); not retried",
-            label, model, describe_refusal(details),
+            "refused %s for %s on the fallback %s too (%s); not retried",
+            noun, label, model, describe_refusal(details),
         )
         return None
     route = refusal_fallback_target(model, category)
     if route is None:
-        if category:
-            _note_not_retried(digest, f"no fallback for category {category!r} on {model}")
+        if category and on_not_retried is not None:
+            on_not_retried(f"no fallback for category {category!r} on {model}")
         _log.info(
-            "refused digest for %s not retried: no fallback route on %s (%s)",
-            label, model, describe_refusal(details),
+            "refused %s for %s not retried: no fallback route on %s (%s)",
+            noun, label, model, describe_refusal(details),
         )
         return None
     target = route
@@ -886,43 +954,67 @@ def _refusal_retry_params(
         target = hint
     elif hint and hint != route:
         _log.info(
-            "refused digest for %s: recommended_model %r is not a registered "
+            "refused %s for %s: recommended_model %r is not a registered "
             "model other than %s; using the route's %s",
-            label, hint, model, route,
+            noun, label, hint, model, route,
         )
     _log.info(
-        "refused digest for %s (%s): retrying on %s",
-        label, describe_refusal(details), target,
+        "refused %s for %s (%s): retrying on %s",
+        noun, label, describe_refusal(details), target,
     )
     return retarget_digest_request(params, target)
 
 
+def _retry_budget_of(item: Any) -> Any:
+    """The object that counts ``item``'s sheet's retries (``.retries``).
+
+    A digest slot is one item per sheet and counts its own; a batch critique
+    read counts against its sheet (``retry_budget``, remediation WP-01.8, the
+    owner's rule: one per-sheet budget, every resubmitted read counts one).
+    """
+    return getattr(item, "retry_budget", item)
+
+
 def _within_retry_budget(items: list, *, where: str) -> list:
-    """The ``(slot, params)`` items whose sheet has a retry left (WP-01.5).
+    """The ``(item, params)`` items whose sheet has a retry left (WP-01.5).
 
     The one per-sheet retry budget (the owner's rule):
     :func:`_max_batch_resubmit_rounds`, default
     :data:`DEFAULT_MAX_BATCH_RESUBMIT_ROUNDS`, shared by every reason a sheet
     is resubmitted and checked at every site before it resubmits. A sheet
     whose budget is spent keeps the read it has.
+
+    An item is a digest slot or a batch critique read (remediation WP-01.8):
+    several reads of one sheet can be in ``items`` at once, so each one this
+    call keeps counts against its sheet before the next is judged, in order,
+    and a read the budget cannot cover keeps its read. A digest slot appears
+    once per call, so its answer is unchanged.
     """
     budget = _max_batch_resubmit_rounds()
+    taken: dict[int, int] = {}
     kept = []
-    for slot, params in items:
-        if slot.retries < budget:
-            kept.append((slot, params))
+    for item, params in items:
+        holder = _retry_budget_of(item)
+        spent = holder.retries + taken.get(id(holder), 0)
+        if spent < budget:
+            kept.append((item, params))
+            taken[id(holder)] = taken.get(id(holder), 0) + 1
         else:
             _log.warning(
                 "%s: %s (%s) keeps its read; its retry budget (%d) is spent",
-                where, slot.custom_id, slot.ref.display_label, budget,
+                where, item.custom_id, item.ref.display_label, budget,
             )
     return kept
 
 
-def _count_retry(slot: "_Slot", params: dict) -> None:
-    """Record one resubmission of ``slot`` with ``params`` (WP-01.5)."""
-    slot.retries += 1
-    slot.last_params = params
+def _count_retry(item: Any, params: dict) -> None:
+    """Record one resubmission of ``item`` with ``params`` (WP-01.5).
+
+    ``item`` is a digest slot or a batch critique read (WP-01.8): its sheet
+    spends one retry and ``item.last_params`` records what was sent.
+    """
+    _retry_budget_of(item).retries += 1
+    item.last_params = params
 
 
 def _rescue_reserve_seconds(max_elapsed_seconds: float) -> float:

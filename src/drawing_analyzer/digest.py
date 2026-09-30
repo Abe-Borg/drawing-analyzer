@@ -767,6 +767,11 @@ def build_digest_request_params(
 def retarget_digest_request(params: dict[str, Any], model: str) -> dict[str, Any]:
     """``params`` (a digest request) rebuilt for ``model``; the input is not changed.
 
+    A batch critique read's request is rebuilt by it too (remediation
+    WP-01.8): ``critique.build_critique_request_params`` follows the same
+    thinking, effort and output-cap rules, and batch critique items never
+    carry a structured-outputs format.
+
     The refusal recovery's request (remediation WP-01.5, R2): a refused batch
     item is resubmitted on another model, and the request must be one that
     model accepts. The same rules as :func:`build_digest_request_params`, so
@@ -1928,6 +1933,11 @@ def _name_discarded_retry(kept: SheetDigest, outcome: str) -> None:
     however many recovery rounds a batch runs). A finished read is never
     given a retry: a later attempt cannot outrank it, and a finished read is
     never retried, so nothing is discarded against one.
+
+    The one wording for both stages: ``kept`` is a :class:`SheetDigest` or a
+    critique read's outcome (``critique.keep_critique_read``, remediation
+    WP-01.8), anything with ``error``, ``read_error`` and
+    ``retries_discarded``.
     """
     if kept.error is None:
         return
