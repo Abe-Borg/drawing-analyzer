@@ -1688,7 +1688,8 @@ raise, after the paid digest and critique. Now:
   a slope (`3H:1V`), a compact `A` only beside a pole count, an overcurrent
   device, a rating label or (since WP-04.4) a voltage right after or before it
   (`20A 120V`, `120V 20A`), and a name word before the number still wins
-  (`Room 101A 120V`): a room `101A` read as a current would put a quantity
+  (`Room 101A 120V`, and with a number label between them, `Room No. 101A`,
+  in both guards: `_NUMBER_LABEL`, Codex review): a room `101A` read as a current would put a quantity
   nobody wrote into two findings' signatures (recorded misreading: a name-less
   label beside a voltage, `101A 120V receptacle`). The critique cache stores
   post-merge findings, so the tokenizer and

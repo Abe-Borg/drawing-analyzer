@@ -171,6 +171,16 @@ _RESIDUAL_NEGATIVE_CORPUS = [
     ("EF-1A 120V", ["120volt"]),
     ("AHU-2A 460V", ["460volt"]),
     ("Circuit LP-1-20A 120V", ["120volt"]),
+    # A name word with a number label between it and the identifier is still a
+    # name (Codex review): the qualifier is part of the one name guard.
+    ("Room No. 101A 120V receptacle", ["120volt"]),
+    ("Panel No. 2A 120/208V", ["120/208volt"]),
+    ("Room Number 101A 120V", ["120volt"]),
+    ("Rm. No. 101A 120V", ["120volt"]),
+    ("Room No 101A 120V", ["120volt"]),
+    ("Room No. 101A breaker", []),
+    ("Section No. 4 to 6 in", ["6in"]),
+    ("Notes Nos. 1 and 2 in plan", ["2in"]),
     ("3H:1V 2A", []),
     ("Provide 20A circuit", []),                         # no voltage, no device: a recorded limit
 ]

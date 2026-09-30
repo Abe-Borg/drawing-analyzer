@@ -927,6 +927,7 @@ _MERGE_RULE_CORPUS = (
     ("Provide 30A 120V circuit for exhaust fan EF-1 on panel LP-1", ""),
     ("Provide 120V 30A circuit for exhaust fan EF-1 on panel LP-1", ""),
     ("Room 101A 120V receptacle at the east wall of the mechanical room", ""),
+    ("Room No. 101A 120V receptacle at the east wall of the mechanical room", ""),
     ("See pages 4 to 6 in the manual for the pump P-1 base clearance", ""),
 )
 
@@ -990,8 +991,11 @@ _MERGE_RULE_BY_CRITIQUE_CONTRACT = {
     # signature's feet_inches pairs. The value under 4 was computed over the
     # corpus as WP-04.3 left it (the rows above "Added by WP-04.4"); over the
     # extended corpus that rule fingerprints as
-    # 849f6ecd5393c11f1daaac20f885629b0c863baab0c6402f94da2265bd9d59ac.
-    5: "5c0a126a9758afa57eb3d15e2753f8306dbe99cb9cfe7361a98bc14d4ddb7670",  # WP-04.4
+    # f6116986b76e0211f7274c26486bee8276cc7b5712c693d4dccd12f073b92507, and
+    # this PR's rule before its review follow-up (a number label after a name
+    # word, "Room No. 101A", read as a current beside a voltage) as
+    # fa0ae1342a1bbf227bb300bb5f3ab0710633634d93785f0044be6f09cb9bfd99.
+    5: "020b77897da5937f63c30a58cd29c458c9f67d80064ca901b10aaed8f8319681",  # WP-04.4
 }
 
 

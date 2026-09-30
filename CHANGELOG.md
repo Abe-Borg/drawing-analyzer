@@ -280,7 +280,8 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     manual`, `2, 4, 6 in plan`), or for `2 and 1/2 in`.
   - **A voltage beside a compact `A` makes it a current** (`20A 120V`,
     `20A, 120V`, `20A @ 480V`, `120V 20A`), unless a name word comes before the
-    number: `Room 101A 120V` and `Panel 2A 120/208V` stay names.
+    number: `Room 101A 120V`, `Room No. 101A 120V` and `Panel 2A 120/208V` stay
+    names.
 
   **Visible effect:** some findings that used to merge now appear as two. A
   list with spaces after its commas now merges with the same list written

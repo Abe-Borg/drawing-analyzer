@@ -1838,8 +1838,8 @@ current only beside a pole count (`20A/1P`), a breaker, fuse or disconnect, a
 rating label (`MOCP 25A`) or a voltage (`20A 120V`, `120V 20A`; remediation
 WP-04.4), because `room 101A`, `grid 2A` and `panel 2A` are names, and a name
 mistaken for a quantity would make two findings about the same room look as if
-they shared one. A name word still wins over a voltage (`Room 101A 120V` is a
-room), but a room or panel label with nothing before it (`101A 120V
+they shared one. A name word still wins over a voltage (`Room 101A 120V` and
+`Room No. 101A 120V` are rooms), but a room or panel label with nothing before it (`101A 120V
 receptacle`) is read as a current.
 
 One shared quantity or tag no longer excuses a conflict beside it. A `6 in` /

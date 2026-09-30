@@ -791,13 +791,18 @@ _AMP_RATING_BEFORE_RE = re.compile(
 )
 # The words that make the number after them a name (``panel 2A``, ``room 101A``,
 # ``grid 2A``), one list: the compact-A rule reads them and so does the spelled
-# range and list reader (``_REFERENCE_BEFORE_RE``).
+# range and list reader (``_REFERENCE_BEFORE_RE``). A number label may stand
+# between the word and the identifier (``Room No. 101A``, ``Panel Number 2A``;
+# remediation WP-04.4, Codex review), and the identifier is still a name.
 _NAME_WORDS = (
     r"panel|panelboard|pnl|room|rm|grid|gridline|line|col|column|level|lvl|floor|"
     r"flr|type|detail|dtl|keynote|note|sheet|unit|area|zone|suite|bay|space|circuit|"
     r"ckt"
 )
-_NAME_BEFORE_RE = re.compile(r"\b(?:" + _NAME_WORDS + r")\.?\s*[:#]?\s*$", re.IGNORECASE)
+_NUMBER_LABEL = r"(?:\s*(?:no|nos|num|number)\b\.?)?"
+_NAME_BEFORE_RE = re.compile(
+    r"\b(?:" + _NAME_WORDS + r")\.?" + _NUMBER_LABEL + r"\s*[:#]?\s*$", re.IGNORECASE
+)
 _AMP_POLE_OR_DEVICE_AFTER_RE = re.compile(
     r"\s?(?:[/-]\s?)?[1-4]\s?-?\s?p(?:ole)?\b"
     r"|\s?-?\s?(?:breakers?|bkr|cb|fuses?|fused|non-fused|disconnects?|mcb|mlo|ocpd)\b",
@@ -1069,7 +1074,7 @@ _SPELLED_WITHIN_RE = re.compile(r"\d\s*(?:,\s*|,?\s+(?:and|or|to)\s+)$", re.IGNO
 _REFERENCE_BEFORE_RE = re.compile(
     r"\b(?:" + _NAME_WORDS + r"|page|pg|section|sect|sec|step|item|paragraph|para|"
     r"chapter|table|figure|fig|phase|option|alternate|alt|drawing|dwg|revision|rev|"
-    r"addendum|bulletin|rfi)s?\.?\s*[:#]?\s*$",
+    r"addendum|bulletin|rfi)s?\.?" + _NUMBER_LABEL + r"\s*[:#]?\s*$",
     re.IGNORECASE,
 )
 _BETWEEN_BEFORE_RE = re.compile(r"\bbetween\s+$", re.IGNORECASE)
