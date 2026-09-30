@@ -455,6 +455,10 @@ class SourceWords:
           ``"`` ``'`` or ``%`` (either side spaced); the feet-inches hyphen
           (``12' - 6"``, either side); or letters merged by extraction, one
           sheet word for several quote words, each quote word letters only.
+          A number is a word with no letter, on the side that has the space:
+          an identifier's digits are not one (``ROOM12 %``, a tag's ``101``
+          in ``M-101 "``), and the reader reads nothing there to refuse them
+          (Codex review).
           Anything else refuses the match: a join between two digits, at a
           sign, a decimal point, a fraction slash or a comma (so every number
           is read whole, with its sign, as often as the quote states it), a
@@ -486,19 +490,21 @@ class SourceWords:
         if found is not None:
             return found
         letters = [folded.isalpha() for _, folded in words]
+        lettered = [any(ch.isalpha() for ch in folded) for _, folded in words]
         quote_breaks: dict[int, tuple[int, int]] = {}
         at = 0
         for t in range(len(tokens) - 1):
             at += len(tokens[t])
             quote_breaks[at] = (owner[t], owner[t + 1])
-        spans = tuple(self._joined_scan(tokens, query, quote_breaks, letters))
+        spans = tuple(self._joined_scan(tokens, query, quote_breaks, letters, lettered))
         self._joined_found[key] = spans
         return spans
 
     def _joined_index(self):
         """The sheet's tokens as one string with every space removed, built
         once: the string, each token's start in it, the folded word each token
-        belongs to, and each folded word's first token."""
+        belongs to, each folded word's first token, and whether each folded
+        word has a letter."""
         if self._joined is None:
             tokens: list[str] = []
             owner = array("l")
@@ -513,11 +519,12 @@ class SourceWords:
             for token in tokens:
                 starts.append(at)
                 at += len(token)
-            self._joined = ("".join(tokens), tokens, starts, owner, first)
+            lettered = [any(ch.isalpha() for ch in part) for part in self._parts]
+            self._joined = ("".join(tokens), tokens, starts, owner, first, lettered)
         return self._joined
 
-    def _joined_scan(self, qtokens, query, quote_breaks, letters):
-        text, tokens, starts, owner, first = self._joined_index()
+    def _joined_scan(self, qtokens, query, quote_breaks, letters, quote_lettered):
+        text, tokens, starts, owner, first, lettered = self._joined_index()
         n = len(tokens)
         found: list[tuple[int, int]] = []
         at = text.find(query)
@@ -534,8 +541,10 @@ class SourceWords:
                     t1 = -1
                 if t1 != -1:
                     w0, w1 = owner[t0], owner[t1 - 1]
+                    sheet_breaks = {starts[t] - at: (owner[t - 1], owner[t]) for t in range(t0 + 1, t1)}
                     if (not self.covers_split_number(w0, w1)
-                            and _joins_allowed(query, quote_breaks, starts, at, t0, t1, letters)
+                            and _joins_allowed(query, quote_breaks, sheet_breaks, letters,
+                                               quote_lettered, lettered)
                             and _same_quantities(qtokens, tokens[t0:t1])):
                         span = (self.index[w0], self.index[w1])
                         if not found or found[-1] != span:
@@ -554,22 +563,34 @@ class SourceWords:
 JOIN_MARKS = frozenset("\"'%")
 
 
-def _joins_allowed(query, quote_breaks, starts, at, t0, t1, letters) -> bool:
+def _joins_allowed(query, quote_breaks, sheet_breaks, letters, quote_lettered,
+                   sheet_lettered) -> bool:
     """Whether every place the quote and the sheet's run are spaced apart is a
     named join (see :meth:`SourceWords.joined_spans`).
 
-    ``query`` is the joined string both sides share; ``quote_breaks`` maps the
-    offsets where the quote has a space to the quote words on either side; the
-    sheet's run has a space at each of its tokens' starts after the first.
+    ``query`` is the joined string both sides share. ``quote_breaks`` and
+    ``sheet_breaks`` map each offset where that side has a space to the words
+    on either side of it: the quote's words (``letters``: letters only;
+    ``quote_lettered``: has a letter) and the sheet's folded words
+    (``sheet_lettered``).
     """
-    sheet_breaks = {starts[t] - at for t in range(t0 + 1, t1)}
     for p in sorted(set(quote_breaks).symmetric_difference(sheet_breaks)):
         left, right = query[p - 1], query[p]
-        if left.isdigit() and right in JOIN_MARKS:
+        # The side that has the space here, and the words on either side of it.
+        if p in quote_breaks:
+            before, after = quote_breaks[p]
+            number_words = not quote_lettered[before] and not quote_lettered[after]
+        else:
+            before, after = sheet_breaks[p]
+            number_words = not sheet_lettered[before] and not sheet_lettered[after]
+        # A mark and the feet-inches hyphen join only a number: a word with no
+        # letter (ROOM12 %, and M-101 " whose 101 the infix hyphen split off,
+        # are an identifier and a mark).
+        if left.isdigit() and right in JOIN_MARKS and number_words:
             continue                                    # 6 "  /  2 %
-        if left == "'" and right == "-" and query[p + 1:p + 2].isdigit():
+        if left == "'" and right == "-" and query[p + 1:p + 2].isdigit() and number_words:
             continue                                    # 12' - 6"
-        if left == "-" and right.isdigit() and query[p - 2:p - 1] == "'":
+        if left == "-" and right.isdigit() and query[p - 2:p - 1] == "'" and number_words:
             continue
         if left.isalpha() and right.isalpha() and p in quote_breaks:
             # Letters merged by extraction: one sheet word for two quote

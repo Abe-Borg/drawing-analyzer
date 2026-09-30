@@ -265,7 +265,9 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     every space removed, where each spacing difference must be one of three
     named joins: a number and a separated `"` `'` or `%`; the feet-inches
     hyphen; letters merged by extraction (one sheet word for several quote
-    words, each letters only). Anything else refuses the match: two numbers
+    words, each letters only). A mark joins only a number, a word with no
+    letter: an identifier's digits never take one (`ROOM12 %`, the `101` of
+    `M-101 "`). Anything else refuses the match: two numbers
     joined or one split (`ROOM 12` never matches `ROOM 1 2`, `VAV-21` never
     `VAV-2-1`), a sign, a decimal point, a fraction slash, a comma, a tag's
     letter and number (`P1` / `P-1`), a unit word (`6INCH`), a size's `x`, a
@@ -306,7 +308,7 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   shipped contracts 4 to 6, so a user upgrading from 1.7.0 pays one miss in
   all). No other key, prompt, schema or finding id changed.
 
-  Tests: `tests/test_anchor_character_stream.py` (197). The two WP-05.2
+  Tests: `tests/test_anchor_character_stream.py` (203). The two WP-05.2
   recorded limits in `tests/test_anchor_whole_words.py` are flipped (renamed
   `test_the_character_stream_cases_anchor_by_their_own_method` and
   `test_a_sub_phrase_cannot_drop_a_separated_unit`), and the four cross-QC

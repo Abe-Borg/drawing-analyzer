@@ -255,6 +255,28 @@ def test_negatives_never_anchor_or_ground(quote, text):
     assert _grounds(quote, text) == EVIDENCE_NOT_MATCHED
 
 
+_IDENTIFIER_AND_MARK = [
+    ("ROOM12% MIN", "ROOM12 % MIN"),
+    ("ROOM12 % MIN", "ROOM12% MIN"),                  # the quote spaced instead
+    ('SEE M-101" TYP', 'SEE M-101 " TYP'),            # a tag's digits, split by its hyphen
+    ('RATED AHU2" MAX', 'RATED AHU2 " MAX'),
+    ("CLG A12'-6\" AFF", "CLG A12' - 6\" AFF"),       # the feet-inches join
+    ("CLG 12'-6A\" AFF", "CLG 12' - 6A\" AFF"),
+]
+
+
+@pytest.mark.parametrize(("quote", "text"), _IDENTIFIER_AND_MARK,
+                         ids=[f"ident{i}" for i in range(len(_IDENTIFIER_AND_MARK))])
+def test_a_mark_is_joined_only_to_a_number(quote, text):
+    """A mark is joined across a space only to a number: a word of its own
+    with no letter, on the side that has the space. An identifier's digits
+    (``ROOM12``, a tag's ``101``) are not one, and the WP-04 reader reads
+    nothing on either side, so its veto cannot refuse them (Codex review)."""
+    anchor, matched = _place(quote, _line(text))
+    assert anchor.status == "UNANCHORED", (anchor, matched)
+    assert _grounds(quote, text) == EVIDENCE_NOT_MATCHED
+
+
 @pytest.mark.parametrize(("quote", "text"), [
     ("AHU-7", "SEE AHU 77 TYP"),
     ("AHU-7", "SEE AHU-7A TYP"),

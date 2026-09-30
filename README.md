@@ -1238,7 +1238,9 @@ call, using a tiered strategy that records which tier fired:
   6"`) and words merged by extraction (`PROVIDE INCH DRAIN` on `PROVIDE
   INCHDRAIN`) now anchor. Only those three kinds of spacing difference are
   allowed: a number and a separated `"`, `'` or `%`; the feet-inches hyphen;
-  and several quote words printed as one word, each of them letters only.
+  and several quote words printed as one word, each of them letters only. A
+  number here is a word with no letters, so an identifier's digits never take
+  a mark (`ROOM12 %`, or the `101` of `M-101 "`).
   Anything else refuses the match, so two numbers never join and one never
   splits (`ROOM 12` does not match `ROOM 1 2`, nor `VAV-21` match `VAV-2-1`),
   signs, decimal points and fraction slashes stay where they are, a tag's

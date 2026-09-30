@@ -1805,7 +1805,11 @@ unchanged (`auditors.arithmetic._UNICODE_DASHES` is pinned to its dash fold).
   `"` `'` or `%` (`JOIN_MARKS`, either side spaced: `6 "`, `2 %`); the
   feet-inches hyphen (`12' - 6"`, either side); or letters merged by
   extraction, one sheet word for several quote words, each quote word letters
-  only (`INCH DRAIN` on `INCHDRAIN`). Anything else refuses: a join between two
+  only (`INCH DRAIN` on `INCHDRAIN`). A mark and the feet-inches hyphen join
+  only a **number**, a word with no letter on the side that has the space, so
+  an identifier's digits never take a mark (`ROOM12 %`, and `M-101 "`, whose
+  `101` the infix hyphen split off; the reader reads nothing there to refuse
+  them; Codex review). Anything else refuses: a join between two
   digits, at a sign, a decimal point, a fraction slash or a comma (so every
   number is read whole, with its sign, as often as the quote states it:
   `ROOM 12` never matches `ROOM 1 2`, nor `VAV-21` `VAV-2-1`), a tag's letter
