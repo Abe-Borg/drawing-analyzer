@@ -901,8 +901,11 @@ is the rule that a read the model did not finish no longer counts (remediation
 WP-01.4): an entry written before it may hold such a read, merged as a complete
 one, so it is not served, and the first exhaustive run after upgrading re-runs
 the critique on every sheet once. So is reading a quantity's role (remediation
-WP-04.3). None of these four changes has shipped in a release yet, so a 1.7.0
-install pays that cold pass once for all four. Only a
+WP-04.3), and so is reading the spellings remediation WP-04.4 closed (a bare
+feet value against feet-inches, a spelled range or list, a compact `A` beside a
+voltage); WP-04.4 also re-runs the cross-sheet check once, since its grounding
+reuses the same quantity reader. None of these five changes has shipped in a
+release yet, so a 1.7.0 install pays that cold pass once for all five. Only a
 critique whose every read the model finished is stored, at either level, on
 either transport, so a sheet whose read keeps getting cut off is read again,
 and billed, on each run until one run finishes both reads. The digest's images are gone by the time the critique runs (the batch path
@@ -1807,10 +1810,14 @@ compared by its **value**, not by how it was typed, so `1/2"` is half an inch an
 never the denominator — *Provide 1/2" drain* and *Provide 2" drain* are two pipe
 sizes, not one finding twice — while `2 1/2"`, `2-1/2"` and `2.5"` are one
 quantity. Feet-inches keeps both halves (`12'-6"` signs as 12 ft **and** 6 in,
-neither negative), and a plural unit folds to its singular so `6 amps` and `6 amp`
-are not read as a conflict. `psig` is deliberately *not* folded into `psi`: gauge
-and absolute are different measurements, and collapsing them would hide a real
-conflict rather than a formatting one. The same holds for the other ways drawings
+neither negative), and each feet value is also compared with its inches
+(remediation WP-04.4): a bare `12'`, `12 ft` or `12'-0"` is 12 ft 0 in and
+`12'-6"`, `12' - 6"` or `12 ft 6 in` is 12 ft 6 in, so `12'` against `12'-6"`
+stays two findings while `12'` against `12 ft` is one. A plural unit folds to
+its singular so `6 amps` and `6 amp` are not read as a conflict. `psig` is
+deliberately *not* folded into `psi`: gauge and absolute are different
+measurements, and collapsing them would hide a real conflict rather than a
+formatting one. The same holds for the other ways drawings
 write a quantity. `6-inch`, `6-in.` and `6 in` are one size. `12,500 cfm` and
 `12500 cfm` are one flow, and a garbled grouping such as `1,2,500` is kept as
 written, never read as the `500` at its end. `45 deg` and `45°` are one angle, and
@@ -1819,11 +1826,21 @@ written, never read as the `500` at its end. `45 deg` and `45°` are one angle, 
 Fahrenheit. A duct size (`24x12`, `24"x12"`), a range (`4-6 in`), a list written
 without spaces (`2,4,6 in`) and a voltage system (`120/208V`, the same as
 `208Y/120V`) each count as one quantity, so `2,4,6 in` and `3,5,6 in` stay two
-findings instead of agreeing on `6 in`. `480V` and `208V` differ. `20A` counts as
-a current only beside a pole count (`20A/1P`), a breaker, fuse or disconnect, or
-a rating label (`MOCP 25A`), because `room 101A`, `grid 2A` and `panel 2A` are
-names, and a name mistaken for a quantity would make two findings about the same
-room look as if they shared one.
+findings instead of agreeing on `6 in`. A range or list spelled out counts the
+same way (remediation WP-04.4): `4 to 6 in` and `between 4 and 6 in` are the
+range `4-6 in`, and `4 and 6 in`, `4 or 6 in` and three or more numbers with
+spaces after their commas (`2, 4, 6 in`, `2, 4 and 6 in`) are the list. Where a
+name comes before the numbers (`grid 4 to 6 in`, `notes 1 and 2`) or `in` is a
+preposition (`pages 4 to 6 in the manual`, `2, 4, 6 in plan`), the app reads
+only what it read before, and two numbers joined by a comma alone (`at column 4,
+10 ft from the wall`) are prose. `480V` and `208V` differ. `20A` counts as a
+current only beside a pole count (`20A/1P`), a breaker, fuse or disconnect, a
+rating label (`MOCP 25A`) or a voltage (`20A 120V`, `120V 20A`; remediation
+WP-04.4), because `room 101A`, `grid 2A` and `panel 2A` are names, and a name
+mistaken for a quantity would make two findings about the same room look as if
+they shared one. A name word still wins over a voltage (`Room 101A 120V` is a
+room), but a room or panel label with nothing before it (`101A 120V
+receptacle`) is read as a current.
 
 One shared quantity or tag no longer excuses a conflict beside it. A `6 in` /
 `4 in` pipe size beside a shared `100 psi`, `12'-6"` against `12'-8"` (both
@@ -1873,11 +1890,12 @@ mark (`24"x12"`) is part of the size, not a tag named `X12`.
 A few pairs still merge, because nothing in the finding shows the conflict in a
 form the app reads: values swapped around a word that is not on the role list
 (`6 in floor drain and 4 in roof drain` against the reverse; two tags; `at the
-inlet`), a bare label (`MAIN 6" BRANCH 4"` against `MAIN 4" BRANCH 6"`); a bare
-`12'` against `12'-6"`; and three spellings the app reads only in part: a range
-written with `to` (`4 to 6 in`), a list with spaces after its commas (`2, 4, 6
-in`), and a bare `20A` with no breaker, fuse or rating beside it (the last four
-are a later remediation slice, WP-04.4). A merge keeps
+inlet`), a bare label (`MAIN 6" BRANCH 4"` against `MAIN 4" BRANCH 6"`); two
+numbers joined by a comma alone (`2, 4 in` against `3, 4 in`), which is prose as
+often as a list; and a compact `20A` with nothing electrical beside it (`20A
+circuit` against `30A circuit`). Kept apart, although each may be one issue:
+`increase from 4 to 6 in` against `increase to 6 in`, `4 in to 6 in` against
+`4 to 6 in`, and `12 ft, 6 in` (a comma) against `12'-6"`. A merge keeps
 **coherent grounding**: the survivor's text and quote come from one member as an
 atomic bundle — never one finding's text paired with another's quote — while the
 loser's quote is kept as a supporting quote. The **verdict rides that bundle**,
@@ -2682,8 +2700,10 @@ when the recorded acceptance evidence says so (Phase 27, §19.9). The pieces:
   its prompt fix also re-keys every entry, through the prompt text the key
   holds), and 7 because grounding also takes the anchor's character-stream
   tier (a quote that differs from the sheet only in spacing) and never matches
-  part of a number split around a lone `.` (remediation WP-05.3). Each is a
-  host-side change that no key input covers, so each one made
+  part of a number split around a lone `.` (remediation WP-05.3), and 8
+  because that tier's quantity check reuses the quantity reader, which now reads
+  spelled ranges and lists and a compact `A` beside a voltage (remediation
+  WP-04.4). Each is a host-side change that no key input covers, so each one made
   every stored cross-QC result miss once. None of them records the two evidence
   changes above.
 - **Evidence coverage (zero API calls):**

@@ -665,4 +665,8 @@ def test_contract_counter_is_not_bumped_by_this_package():
     # differs from the sheet's words only by the named character-stream joins,
     # and no quote or text with a number split around a lone `.` grounds any
     # longer, for byte-identical inputs. WP-03B still added nothing.
-    assert X._CROSS_QC_CACHE_CONTRACT == 7
+    #
+    # 8 since remediation WP-04.4: the quantity reader the character-stream
+    # veto reuses changed, so a grounding verdict can move for byte-identical
+    # inputs. WP-03B still added nothing.
+    assert X._CROSS_QC_CACHE_CONTRACT == 8

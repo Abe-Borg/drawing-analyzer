@@ -22,6 +22,13 @@ tables now also hold pairs whose conflict sits beside a shared value
 tables at the end. The rule itself, and the tag half of it, is pinned in
 ``tests/test_signature_compatibility.py``.
 
+Remediation WP-04.4 closed the four tokenizer residuals WP-04.1 read only in
+part (a bare ``12'`` against ``12'-6"``, a ``to`` range, a loose-comma list, a
+bare ``20A`` beside a voltage): their rows moved from the recorded limits to
+``_CONFLICTS``, the loose and tight list pair from retention to
+``_EQUIVALENTS``, and one negative-corpus row reads the whole list. Their own
+tables are in ``tests/test_quantity_residuals.py``.
+
 Hermetic (I-4): pure data, no client, no PDF.
 """
 from __future__ import annotations
@@ -260,10 +267,12 @@ _NEGATIVE_CORPUS = [
     ("Provide 4x25 gpm pumps", ["25gpm"]),
     ('Board 6"x12\' cut to length', ["12ft", "6in"]),
     ("at column 4, 10 ft from the wall", ["10ft"]),
-    # Loose commas are prose punctuation as often as list separators, so they
-    # never join numbers into a list ("column 4, 10 ft" above). Only a tight
-    # run is one token; a spaced list keeps what it always had.
-    ("Provide 2, 4, 6 in drains", ["6in"]),
+    # Loose commas are prose punctuation as often as list separators, so two
+    # numbers joined by a comma alone never make a list ("column 4, 10 ft"
+    # above). Three or more do (remediation WP-04.4, the owner's rule): this
+    # row read ["6in"], the last element only, until then. The rest of the
+    # WP-04.4 corpus is in tests/test_quantity_residuals.py.
+    ("Provide 2, 4, 6 in drains", ["2,4,6in"]),
 ]
 
 
@@ -497,6 +506,29 @@ _CONFLICTS = {
         "Provide 6 in supply and 6 in return at the riser serving the east data hall",
         "Provide 6 in supply and 8 in return at the riser serving the east data hall",
     ),
+    # The tokenizer residuals (WP-04.4), flipped from _RECORDED_LIMITS. The
+    # rest of their tables are in tests/test_quantity_residuals.py.
+    # A bare feet value is feet and zero inches: the signature's feet_inches
+    # pairs (12ft6in against 12ft0in) keep them apart; the tokens are unchanged.
+    "a bare feet value: 12'-6\" vs 12'": (
+        "Maintain 12'-6\" clear headroom under the main duct at the M-101 riser",
+        "Maintain 12' clear headroom under the main duct at the M-101 riser",
+    ),
+    # A spelled range is the dash range's token (4..6in).
+    "a to range signs its far end: 4 to 6 in vs 6 in": (
+        "Maintain 4 to 6 in clearance around the base of pump P-1 on the plan",
+        "Maintain 6 in clearance around the base of pump P-1 on the plan",
+    ),
+    # Three or more numbers are the tight list's token (2,4,6in / 3,5,6in).
+    "loose-comma lists sign their last element: 2, 4, 6 in vs 3, 5, 6 in": (
+        "Provide 2, 4, 6 in floor drains along the east wall of the main mechanical room",
+        "Provide 3, 5, 6 in floor drains along the east wall of the main mechanical room",
+    ),
+    # A voltage beside a compact A is electrical context (20amp / 30amp).
+    "a bare 20A needs electrical context: 20A vs 30A on a shared 120V": (
+        "Provide 20A 120V circuit for exhaust fan EF-1 on panel LP-1",
+        "Provide 30A 120V circuit for exhaust fan EF-1 on panel LP-1",
+    ),
 }
 
 
@@ -569,6 +601,12 @@ _EQUIVALENTS = {
     "N1 6-inch = 6 in beside a shared 100 psi": (
         "Pump P-1 discharge pipe is 6-inch at 100 psi per the pump schedule",
         "Pump P-1 discharge pipe is 6 in at 100 psi per the pump schedule",
+    ),
+    # Moved from _CONSERVATIVE_RETENTION by WP-04.4 (the owner's decision): a
+    # loose list of three or more numbers now signs as the tight list does.
+    "WP-04.4 a loose list = the tight list: 2, 4, 6 in = 2,4,6 in": (
+        "Provide 2, 4, 6 in floor drains at 100 psi test along the east wall of the mechanical room",
+        "Provide 2,4,6 in floor drains at 100 psi test along the east wall of the mechanical room",
     ),
 }
 
@@ -690,12 +728,10 @@ _CONSERVATIVE_RETENTION = {
         "The 6 in sprinkler main needs 3 ft clearance from the duct per the coordination plan",
         "The 6 in sprinkler main needs 36 in clearance from the duct per the coordination plan",
     ),
-    # A loose-comma list signs only its last element (WP-04.1, by decision),
-    # so it cannot be told from the tight list that names the same sizes.
-    "a partial list signature against a full one: 2, 4, 6 in vs 2,4,6 in": (
-        "Provide 2, 4, 6 in floor drains at 100 psi test along the east wall of the mechanical room",
-        "Provide 2,4,6 in floor drains at 100 psi test along the east wall of the mechanical room",
-    ),
+    # "a partial list signature against a full one: 2, 4, 6 in vs 2,4,6 in"
+    # was kept apart here until WP-04.4, which reads a loose list of three or
+    # more numbers whole; it is in _EQUIVALENTS now (the owner's decision).
+    # WP-04.4's own retention is in tests/test_quantity_residuals.py.
 }
 
 
@@ -709,29 +745,23 @@ def test_pairs_kept_apart_by_design(pair):
 
 
 # Recorded limits: pairs that still merge although they may be two issues.
-# Each pins today's outcome so that a change to it is deliberate: a slice that
-# closes one flips its row into _CONFLICTS (WP-04.3 flipped the two role rows;
-# the four left are WP-04.4's).
+# Each pins today's outcome so that a change to it is deliberate. WP-04.3
+# flipped the two role rows and WP-04.4 the four tokenizer residuals into
+# _CONFLICTS. The two left are shapes the owner chose not to read (WP-04.4;
+# their misreadings were measured first), not open defects.
 _RECORDED_LIMITS = {
-    # Feet-inches is two tokens (WP-04.1, by decision), so a bare 12' reads as
-    # the feet half with no inches given, not as 12'-0".
-    "a bare feet value: 12'-6\" vs 12'": (
-        "Maintain 12'-6\" clear headroom under the main duct at the M-101 riser",
-        "Maintain 12' clear headroom under the main duct at the M-101 riser",
+    # Two numbers joined by a comma alone stay prose ("at column 4, 10 ft from
+    # the wall"), so each side signs only its last number.
+    "a two-number comma list: 2, 4 in vs 3, 4 in": (
+        "Provide 2, 4 in floor drains along the east wall of the main mechanical room",
+        "Provide 3, 4 in floor drains along the east wall of the main mechanical room",
     ),
-    # WP-04.1's partial signatures, left by decision: each side signs only the
-    # quantity the tokenizer can read, and those agree.
-    "a to range signs its far end: 4 to 6 in vs 6 in": (
-        "Maintain 4 to 6 in clearance around the base of pump P-1 on the plan",
-        "Maintain 6 in clearance around the base of pump P-1 on the plan",
-    ),
-    "loose-comma lists sign their last element: 2, 4, 6 in vs 3, 5, 6 in": (
-        "Provide 2, 4, 6 in floor drains along the east wall of the main mechanical room",
-        "Provide 3, 5, 6 in floor drains along the east wall of the main mechanical room",
-    ),
-    "a bare 20A needs electrical context: 20A vs 30A on a shared 120V": (
-        "Provide 20A 120V circuit for exhaust fan EF-1 on panel LP-1",
-        "Provide 30A 120V circuit for exhaust fan EF-1 on panel LP-1",
+    # A compact A needs a rating label, a pole count, an overcurrent device or
+    # a voltage beside it; "circuit" after it is not read ("connect to 2A
+    # circuit 12" names a panel), so neither amp signs.
+    "a compact A beside neither a voltage nor a device: 20A circuit vs 30A circuit": (
+        "Provide 20A circuit for exhaust fan EF-1 on panel LP-1 per the electrical schedule",
+        "Provide 30A circuit for exhaust fan EF-1 on panel LP-1 per the electrical schedule",
     ),
 }
 

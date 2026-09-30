@@ -520,8 +520,10 @@ def test_the_cross_qc_contract_moved_for_the_character_stream():
     """Host-side binding for byte-identical request inputs: a leg or fact whose
     quote differs from the sheet only by the named joins is admitted, and a
     quote or text with a number split around a lone point no longer grounds.
-    One mechanism, the existing contract term (plan §2 rule 15)."""
-    assert X._CROSS_QC_CACHE_CONTRACT == 7
+    One mechanism, the existing contract term (plan §2 rule 15). 8 since
+    remediation WP-04.4 (the quantity reader the veto reuses changed); the key
+    still differs from contract 6's."""
+    assert X._CROSS_QC_CACHE_CONTRACT == 8
     entries = [("M-101", "digest", "text", _sheet(_line("SEE 6 \" DRAIN")))]
     current = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")
     with pytest.MonkeyPatch.context() as mp:

@@ -129,7 +129,17 @@ _SCHEMA_VERSION = 10
 #   is no longer a tag. An entry stored under 3 can hold a merge the new rule
 #   refuses (and, through a stray ``X12``, a pair it now makes), so it misses
 #   once and is re-critiqued. It is left on disk, never deleted.
-_CRITIQUE_CACHE_CONTRACT = 4
+# 5 (remediation WP-04.4): the tokenizer residuals WP-04.1 read only in part.
+#   The quantity reader reads a spelled range or list whole (``4 to 6 in`` and
+#   ``between 4 and 6 in`` are ``4..6in``; ``4 and 6 in``, ``4 or 6 in`` and a
+#   loose list of three or more numbers, ``2, 4, 6 in``, are lists) and a compact
+#   ``A`` beside a voltage (``20A 120V``); the signature compares each feet value
+#   with its inches (``feet_inches``: ``12'`` is ``12ft0in``, ``12'-6"`` is
+#   ``12ft6in``). An entry stored under 4 can hold a merge the new rule refuses
+#   (``4 to 6 in`` folded into ``6 in``), or a loose list kept apart from its
+#   tight twin, so it misses once and is re-critiqued. It is left on disk, never
+#   deleted.
+_CRITIQUE_CACHE_CONTRACT = 5
 
 # Storage format and concurrency settings are intentionally separate from the
 # content schema above.  ``_SCHEMA_VERSION`` invalidates cached model results;

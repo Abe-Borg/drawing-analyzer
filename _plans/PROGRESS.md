@@ -1,7 +1,7 @@
 # Remediation progress tracker
 
-**Next up:** WP-04.3 is done ([PR #188](https://github.com/Abe-Borg/drawing-analyzer/pull/188)): the critical signature reads quantity roles (`critique._quantity_roles`: a closed list of role words bound after a value, as a label or with a copula; compared per role and kind on the `measurements` axis; a role on one side only never blocks, so the 500/550 gpm duplicate from both reads still folds; an ambiguous role retains against a bound one), the `x12` of `24"x12"` is no longer a tag, critique contract 3 → 4 and A/B `RECORD_CONTRACT_VERSION` 3 → 4. Measured: 0 of 6,596 merge decisions, 389 prose vetoes, 1,072 anchors and 769 grounding verdicts in the suite moved outside the two flipped recorded limits. **WP-04 is not done** (the owner's decision, 2026-09-30): WP-04.4 (Wave 2, M, available) closes the four partial-spelling pairs still in `_RECORDED_LIMITS`. In queue order the next slices are Wave 2 `WP-04.4`, `WP-06.2` and `WP-06.3`; WP-10.1, WP-10.2, WP-10.3, WP-10.4, WP-03.4, WP-07.3 and WP-11.3 (Wave 2) are available too. **WP-01 stays open** (the owner's decision, 2026-09-30): its acceptance waits on WP-06.3 (cross-QC), WP-12.6 (the citation cache gate) and WP-13.4 (the investigation). Still open for the owner from WP-01.5: whether Opus 5.5 and Sonnet 5.5 get host refusal routes. Each of WP-06.3, WP-13.4, WP-14.1, WP-14.2 and WP-14.3 starts from its `test_recorded_limit_*` tests (named on its row; WP-14.3 also has one in `tests/test_batch_refusal_recovery.py`). WP-02 is not done: WP-02.4 (the canaries are written there; running them is O-4) and WP-02.5 remain. WP-17.1 (Wave 4, cancel; decides D-5), WP-16.3 and WP-18.6 (Wave 4) are unblocked. WP-09 is not done: WP-09.3 (N32, Wave 3) remains. WP-06 is not done: WP-06.2 and WP-06.3 (Wave 2) are available, and WP-06.4 still waits on WP-03.4; WP-06.2 completes D-8. WP-07 is not done: WP-07.3. WP-03 is not done: WP-03.4, WP-03.5 and WP-03.6 remain (Wave 2); WP-03.5 also carries the measured N30 exposure of cross-QC's same-pair conflicts, and WP-03.4 now has WP-04.3's D-3 input (roles). WP-11 is not done: WP-11.3 remains. WP-16 is not done: WP-16.3 remains. First check the open PRs ([`README.md`](README.md), step 1); [#174](https://github.com/Abe-Borg/drawing-analyzer/pull/174) (dependabot) and [#175](https://github.com/Abe-Borg/drawing-analyzer/pull/175) (SDK 1.8.0 support) are open and not remediation slices. Before the next stable tag, the owner should look at O-5.
-**Last updated:** 2026-09-30 by the WP-04.3 session ([PR #188](https://github.com/Abe-Borg/drawing-analyzer/pull/188)).
+**Next up:** WP-04.4 is done (PR pending): the four tokenizer residuals WP-04.1 read only in part stay two findings (the owner's rules, seven choices over two rounds, measured first). A feet value is compared with its inches beside the tokens (`critical_signature["feet_inches"]`: `12'-6"` and `12 ft 6 in` are `12ft6in`; `12'`, `12 ft` and `12'-0"` are `12ft0in`); a spelled range or list is read whole (`4 to 6 in`, `between 4 and 6 in`, `4 and 6 in`, `4 or 6 in`, and three or more numbers joined by commas); a compact `A` beside a voltage is a current. Critique contract 4 → 5, A/B `RECORD_CONTRACT_VERSION` 4 → 5, cross-QC contract 7 → 8. Measured: of 22,372 recorded merge decisions only the 10 of the five approved pairs moved; 0 of 491 prose vetoes, 1,268 anchors and 908 grounding verdicts. **WP-04 is done** (the owner's decision; the plan's WP-04 Acceptance check). In queue order the next slices are Wave 2 `WP-06.2` and `WP-06.3`; WP-10.1, WP-10.2, WP-10.3, WP-10.4, WP-03.4, WP-07.3 and WP-11.3 (Wave 2) are available too. **WP-01 stays open** (the owner's decision, 2026-09-30): its acceptance waits on WP-06.3 (cross-QC), WP-12.6 (the citation cache gate) and WP-13.4 (the investigation). Still open for the owner from WP-01.5: whether Opus 5.5 and Sonnet 5.5 get host refusal routes. Each of WP-06.3, WP-13.4, WP-14.1, WP-14.2 and WP-14.3 starts from its `test_recorded_limit_*` tests (named on its row; WP-14.3 also has one in `tests/test_batch_refusal_recovery.py`). WP-02 is not done: WP-02.4 (the canaries are written there; running them is O-4) and WP-02.5 remain. WP-17.1 (Wave 4, cancel; decides D-5), WP-16.3 and WP-18.6 (Wave 4) are unblocked. WP-09 is not done: WP-09.3 (N32, Wave 3) remains. WP-06 is not done: WP-06.2 and WP-06.3 (Wave 2) are available, and WP-06.4 still waits on WP-03.4; WP-06.2 completes D-8. WP-07 is not done: WP-07.3. WP-03 is not done: WP-03.4, WP-03.5 and WP-03.6 remain (Wave 2); WP-03.5 also carries the measured N30 exposure of cross-QC's same-pair conflicts, and WP-03.4 now has two WP-04 D-3 inputs (WP-04.3's roles, WP-04.4's spelled quantities and feet-inches pairs). WP-11 is not done: WP-11.3 remains. WP-16 is not done: WP-16.3 remains. First check the open PRs ([`README.md`](README.md), step 1); [#174](https://github.com/Abe-Borg/drawing-analyzer/pull/174) (dependabot) and [#175](https://github.com/Abe-Borg/drawing-analyzer/pull/175) (SDK 1.8.0 support) are open and not remediation slices. Before the next stable tag, the owner should look at O-5.
+**Last updated:** 2026-09-30 by the WP-04.4 session (PR pending).
 
 This file is authoritative for **status and order**. Requirements live in
 [`drawing-analyzer-remediation-plan.md`](drawing-analyzer-remediation-plan.md).
@@ -53,7 +53,7 @@ A package is `done` only when every slice is `done` or `n/a` **and** its
 | WP-01 | Response terminal states and truthful stage completeness | P0 | 01.1–01.8 | todo: all eight slices done; acceptance waits on WP-06.3, WP-12.6, WP-13.4 (the owner's decision, 2026-09-30; the plan's WP-01 Acceptance note) |
 | WP-02 | Faithful SDK, streaming, batch and network test boundaries | P0 (enabling) | 02.1–02.5 | todo |
 | WP-03 | Durable finding identity and lossless, symmetric merging | P0 | 03.1–03.7 | todo |
-| WP-04 | Engineering quantity and tag comparison | P0 | 04.1–04.4 | todo: 04.1–04.3 done; acceptance waits on WP-04.4 (the four partial-spelling pairs; the owner's decision, 2026-09-30; the plan's WP-04 acceptance check) |
+| WP-04 | Engineering quantity and tag comparison | P0 | 04.1–04.4 | done (2026-09-30: every slice done and the plan's WP-04 Acceptance holds, checked by WP-04.4; the owner's decision: done, with the two shapes left unread recorded as limits) |
 | WP-05 | Robust anchoring and consistent quote evidence | P0/P1 | 05.1–05.3 | done (2026-09-30: every slice done and the plan's WP-05 Acceptance holds, checked by WP-05.3) |
 | WP-06 | Source-safe cross-QC and claim-preserving deduplication | P0/P1 | 06.1–06.4 | todo |
 | WP-07 | Arithmetic operand trust and strict numeric parsing | P0 | 07.1–07.3 | todo |
@@ -132,7 +132,7 @@ starting.
 | WP-01.8 | Batch critique recovery: retry a failed batch critique read (transient errored, expired, a routed refusal on its fallback) and WP-01.4's raised-cap retry for a critique cut off at `max_tokens`, on both critique transports, inside WP-01.5's per-sheet retry budget and D-2's read tally | M | WP-01.5 | done | [PR #186](https://github.com/Abe-Borg/drawing-analyzer/pull/186), 2026-09-30. By the owner's rules (D-1's WP-01.8 note): the digest's one predicate, made slot-agnostic (`batch_digest._retry_params_for`; `_item_retry_params` is its digest wrapper, byte-identical decisions over the suite), decides each failed batch critique read: transient errored and expired items as sent, a routed refusal on its fallback once, `max_tokens` at twice the cap; follow-up critique batches (`batch_critique._recover_failed_reads`), never real time, no stall watch; WP-01.5's per-sheet budget (`_CSlot.retries`, every resubmitted read one); `critique.keep_critique_read` on both transports (a finished retry is the read; a failed chain named in the digest's words); the real-time critique's one raised-cap retry (`critique._critique_read`); cached under the requested key, no key or contract change. Tests: `tests/test_batch_critique_recovery.py` (87; 63 failed on `origin/main` on behaviour, 24 controls passed). 18 test IDs re-baselined with the owner's approval (the WP-01.8 handoff). Found, not fixed: the batch critique has no harvest (new row WP-18.6); the two WP-01.5 leftovers are noted on WP-14.1 and WP-14.3. Earlier notes: Split out of WP-01.5 by the owner (2026-09-29). Measured by WP-01.5 on SDK 1.7.0 and 1.8.0: every failed batch critique read fails and is never retried (refused, the nine errored types, canceled, expired, `max_tokens`); `batch_critique` has no follow-up batch, harvest or rescue. WP-01.5 gave an errored read its type (`_batch_item_error_text(noun="item")`) and the refused read its category. The raised cap is possible (`critique.DEFAULT_CRITIQUE_MAX_TOKENS` 64,000, `digest.MAX_TOKENS_RETRY_CEILING` 128,000; the real-time critique streams through `digest.stream_message`). Two items WP-01.5 found and left, for this row or the owner: (1) the abandoned-batch harvest resubmits a truncated digest item at the cap it was submitted with, and the raised cap follows only on the next round (one round that can only truncate again; the owner's harvest rule covered refusals and permanent errors only); (2) a real-time refusal whose server-side fallback could not run carries `stop_details.recommended_model` (the API's hint to retry there directly); the digest logs it and does not retry (R2 is the batch transport's) From WP-01.7: the batch critique's real-time fallback (`_serve_realtime`) reads through `critique._critique_read`, so an interrupted stream there is retried and its usage kept; a batch item never streams. |
 | WP-05.3 | Character-stream fallback tier with a quantity-aware numeric veto (B4: `6 "`, `INCHDRAIN`, `12' - 6"`, `2 %`). Matches only contiguous source words, never a "manufactured joined string" (plan §2 rule 15) | M | WP-05.2, WP-04.1 | done | [PR #187](https://github.com/Abe-Borg/drawing-analyzer/pull/187), 2026-09-30. **Rules decided by the owner (eight choices, three rounds, measured first):** (1) **named joins only**: a number and a separated `"` `'` `%` (either side spaced), the feet-inches hyphen (`12' - 6"`, either side), letters merged by extraction (one sheet word for several quote words, each letters only); anything else refuses (not taken: unit words; two sheet words for one quote word; sheet-side spacing only); (2) **the veto** is those join rules plus the WP-04 reader `critique._quantity_tokens` reused as it is (function-local import; no move, no sibling reader), and never across a lone `.`; (3) FUZZY / **`char_stream`**, the last quote tier, **not** in `numbers_grounded` (not taken: grounding numbers; placing it second); (4) ambiguity **as EXACT** (`char_stream_ambiguous`); (5) a **sub-phrase may not end on a number the quote continues from** (flips the second recorded limit; not taken: equal WP-04 quantities, which cannot refuse `L/S`); (6) a **number split around a lone `.`** stays whole in **every tier** and cross-QC (found here: WP-05.2's fold let `SET AT 5 IN` match `SET AT . 5 IN` EXACT); (7) the **same rule on the quote**; (8) **cross-QC adopts** the tier, `_CROSS_QC_CACHE_CONTRACT` 6 → 7 (one register row); the fact-tile join keeps its folded key (a recorded limit). Measured over the suite (instrumented, `origin/main` vs branch): 0 of 1,064 anchors in 601 tests and 0 of 738 grounding verdicts in 237 tests moved; only the two recorded limits moved. Tests: `tests/test_anchor_character_stream.py` (203, 6 of them from the Codex review: a mark joins only a number, never an identifier's digits). Flipped: `tests/test_anchor_whole_words.py`'s two recorded limits (renamed `test_the_character_stream_cases_anchor_by_their_own_method` ×4, `test_a_sub_phrase_cannot_drop_a_separated_unit`). Re-pinned 6 → 7: the four cross-QC contract tripwires. No other test moved |
 | WP-04.3 | Quantity roles for repeated same-kind values: the WP-04 matrix row "repeated values in different roles" (swapped: `6 in main, 4 in branch` / `4 in main, 6 in branch`; one value in two roles: `6 in supply, 6 in return` / `6 in supply, 8 in return`) | M | WP-04.2 | done | [PR #188](https://github.com/Abe-Borg/drawing-analyzer/pull/188), 2026-09-30. **Rules decided by the owner (eight choices, two rounds, measured first):** roles from a closed list (`critique._ROLE_WORDS`: main, branch, riser, drop, header, supply, return, suction, discharge, inlet, outlet, upstream, downstream, entering, leaving, primary, secondary, min/max, static, residual, cold, hot), bound right after the value, in parentheses, as a label (`main: 6 in`) or with a copula (`the main is 6 in`); a bare preceding label is not read (recorded limit); compared per role and kind by inclusion on the `measurements` axis; a role on one side only never blocks (the 500/550 gpm duplicate from both reads still folds, pinned); an ambiguous role (a value list with a role list and no `respectively`; a bare role word between two values) retains against a bound one; the `x12` of a tight `24"x12"` is no longer a tag (`_TAG_RE`); critique contract 3 → 4 (fingerprint pinned under 4); A/B `RECORD_CONTRACT_VERSION` 3 → 4 (the roles are stored); WP-04's acceptance waits on WP-04.4. `critique._quantity_tokens` is unchanged (now the tokens of `_quantity_readings`, the one scanner with spans). Measured over the whole suite: of 6,596 merge decisions in the 431 shared tests, 389 prose vetoes, 1,072 anchors and 769 grounding verdicts, **0 moved**; only the 4 decisions of the two flipped recorded limits did. Tests: `tests/test_quantity_roles.py` (118), the two rows moved to `_CONFLICTS`, `tests/test_signature_compatibility.py` (9, the separator), the WP-04.3 sections of `tests/test_ab_findings_diff.py` and `tests/test_drawing_cache_identity.py` |
-| WP-04.4 | Tokenizer residuals WP-04.1 reads only in part, each a demonstrated conflicting pair that still merges: a bare `12'` against `12'-6"`; `to`/`and`/`or` ranges and lists (`4 to 6 in` against `6 in`); loose-comma lists (`2, 4, 6 in` against `3, 5, 6 in`); a bare `20A` against `30A` on a shared `120V` (WP-04 acceptance) | M | WP-04.3 | todo | Added by WP-04.3 (README 7.3, the owner's decision): WP-04's first acceptance criterion ("demonstrated conflicting pairs never merge") does not hold while these four merge. Start from the four rows left in `tests/test_quantity_signature.py::_RECORDED_LIMITS` (flip each into `_CONFLICTS`), and keep each WP-04.1 reason in view: a comma and a space are prose punctuation as often as a list separator (`column 4, 10 ft`), and a bare `A` is a room or grid name as often as a current (`room 101A`). A tokenizer change is a merge-rule change: critique contract 4 → 5 with the fingerprint pinned under 5, and `RECORD_CONTRACT_VERSION` 4 → 5 if a stored token changes. `anchor._same_quantities` reuses `critique._quantity_tokens`, so re-measure the anchors (instrumented `_anchor_one` diff) |
+| WP-04.4 | Tokenizer residuals WP-04.1 reads only in part, each a demonstrated conflicting pair that still merges: a bare `12'` against `12'-6"`; `to`/`and`/`or` ranges and lists (`4 to 6 in` against `6 in`); loose-comma lists (`2, 4, 6 in` against `3, 5, 6 in`); a bare `20A` against `30A` on a shared `120V` (WP-04 acceptance) | M | WP-04.3 | done | PR pending, 2026-09-30. **Rules decided by the owner (seven choices, two rounds, measured first):** a bare feet value, a pair beside the tokens: `critical_signature` gains `feet_inches` (`critique._feet_inches`, read part by part), each feet value in any spelling with the inches joined to it by spaces and at most one hyphen or dash (`12'-6"`, `12 ft 6 in` are `12ft6in`) or `0in` when bare (`12'`, `12 ft`, `12'-0"` are `12ft0in`), compared by inclusion on the `measurements` axis; the tokens are unchanged, so every `_SAFEGUARDS` row stays; spelled ranges and lists read whole (`critique._read_spelled`): `4 to 6 in`, `between 4 and 6 in` → `4..6in`; `4 and 6 in`, `4 or 6 in`, three or more numbers joined by commas → the tight list's token; two numbers and a comma alone stay prose; today's reading stands after a name or reference word, before `in` + an article or a preposition's object, for `2 and 1/2 in`, and inside a longer run; a compact `A` beside a voltage (after or before) is a current unless a name word precedes; critique contract 4 → 5 (fingerprint pinned under 5); A/B `RECORD_CONTRACT_VERSION` 4 → 5; `_CROSS_QC_CACHE_CONTRACT` 7 → 8 (a letter-merge join can change what the new guards read, so a grounding verdict can move for byte-identical inputs; constructed and pinned); the WP-01.7 tripwire re-pinned to `(10, 5)`; WP-04 done with two shapes recorded as limits (two numbers joined by a comma alone; a compact `A` with nothing electrical beside it). Measured: of 22,372 recorded merge decisions only the 10 of the five approved pairs moved (the four flips and the loose/tight list pair moved from retention to equivalence); 0 of 491 prose vetoes, 0 of 1,268 anchors, 0 of 908 grounding verdicts. Tests: `tests/test_quantity_residuals.py` (219), the four rows moved to `_CONFLICTS`, the list pair moved to `_EQUIVALENTS` and two new `_RECORDED_LIMITS` rows in `tests/test_quantity_signature.py`, the WP-04.4 sections of `tests/test_ab_findings_diff.py` and `tests/test_drawing_cache_identity.py` |
 | WP-06.2 | Whole-set cross-QC on host handles (label shown beside handle), grounded against **uncapped** evidence text like the sharded path, claims rebound through handles, framing hashed into the key; decides D-8 if not yet decided (N6, U8, K2) | L | WP-05.1 | todo | From WP-05.1: ground through `classify_quote_evidence` (a real, whole-word match at any length on the anchor's normalizer), not a second check. The gauntlet's whole-set `CROSS_CONFLICT` quotes (`VAV-7 COOLING 12 KW`, `PANEL LP-2 FED FROM MDP`) are printed as whole lines on their sheets, so they stay grounded. What the whole-set path admits is host-side binding: bump `_CROSS_QC_CACHE_CONTRACT` (4 since WP-05.1), not a key term From WP-06.1: the contract is 6. The refused-item counts are a separate record (`CrossQCResult.invalid`, both paths), so making `discards` non-None on the whole-set path touches nothing of it. That path still drops an item it cannot place on two sheets without a counter (an INFO line, now separate from the refused-item warning); count it with the grounding counters (the sharded path's `findings_dropped_under_two_legs`) when `discards` becomes non-None there. `_drop_exact_repeats` keys on the whole finding, so it is label-free; it needs nothing from D-8 From WP-11.1: D-8's page part is decided (`DECISIONS.md`): a sheet the run owes is one page `(source_id, page_index)` of an accepted inventory document, keyed by `models.source_page_key`, the pages a run owes are exactly the inventory's (`render.inventory_sheet_refs`), the inventory's `content_sha256` is the revision the run set out to read, and human sheet ids and the `page k/N` label are display metadata. This slice completes D-8: bind every evidence leg and the whole-set handles to that identity (N6's first-wins label maps, the colliding `stem-pN` fallback ids), amending D-8 there if the page part needs to move |
 | WP-06.3 | Cross-QC terminal honesty: `stop_reason` checked, streaming, bounded raised-cap retry, bounded partial-array salvage, fact-cap and omission counters; decision recorded for N14 (U6, U7 observability, N14) | M | WP-01.2 | todo | From WP-06.1 (found, not fixed): `_parse_facts` skips a fact that is not an object with no counter, on the same line as the 40-fact cap (`if not isinstance(item, dict) or len(out) >= DEFAULT_MAP_MAX_FACTS`); count both there. A leg in `also_on` that is not an object is skipped silently too (on the sharded path a finding it leaves under two legs is counted, `findings_dropped_under_two_legs`). WP-06.1 made refused findings observational and cached with their counts (the owner's decision, D-2 note); N14's decision (cache a degraded result with its status, or not) is still this slice's From WP-02.2: cross-QC is the largest non-streaming request (16,000 `max_tokens`, `create`); a raised-cap retry that doubles it passes the SDK's cap (21,333) and must move it to `digest.stream_message` in the same change. `tests/test_sdk_contract.py::test_every_non_streaming_stage_is_within_the_sdk_cap` and `::test_the_cap_table_matches_what_the_stages_send` fail until the table's `cross_qc` row says it streams From WP-16.2 (found, not fixed): `cross_sheet_qc` returns `CrossQCResult(error=...)` when it cannot get a client, and `complete` defaults to True, so the pipeline records the stage COMPLETE beside its error line (measured with the environment removed mid-run on a library call: `Cross-sheet QC: ANTHROPIC_API_KEY environment variable not set` with the stage COMPLETE). The GUI no longer reaches it From WP-02.3 (found, not fixed; pinned by `tests/test_response_shapes.py::test_recorded_limit_cross_qc_names_only_an_empty_refusal`): a cross-QC reply refused with an explanation reads 'response contained no parseable findings object' (the stage PARTIAL, not cached); only an empty refusal is named. A `fallback` block splitting the reply breaks its JSON the same way (WP-01.6's join) From WP-01.6: the join half is done (`core.reply_text.reply_text` reads a fallback-split reply whole, cross-QC's included); the stop reason is still this slice's (`cross_qc._call` reads none), and `digest.unfinished_reply_error` is the helper the five set-level consumers use (the ladder with a noun). Note for tests: per Anthropic's docs a non-streamed reply declined part way is `[fallback, text]` (the partial omitted), while `sdk_responses.splice_fallback` builds the streamed `[text, fallback, text]` shape for any reply From WP-01.7: cross-QC does not stream (a plain `create`); if its raised-cap retry moves it onto `digest.stream_message`, an interrupted stream reaches it as `core.stream_interruption.StreamInterrupted` (retried by `_is_transient_error`, its partial read unfinished), and `digest.stream_reply` is the one loop for a single reply. From WP-01.8: measured by WP-01.8 (the real SDK over the stub, the mini set): a cross-QC reply stopped at `max_tokens`, refused, with no stop reason or at the context window reads COMPLETE and is cached (the warm run makes no cross-QC call); this slice closes that part of WP-01's acceptance (WP-01 stays open until it lands: the plan's WP-01 Acceptance note). |
 | WP-10.1 | Tile-label and display-label contract folded into the keys without invalidating unchanged entries (K1) | S | — | todo | |
@@ -329,7 +329,7 @@ report is built from it).
 | G4 | PyInstaller `collect_all` bundles stray files (key file) | P1 | 23.2 | open | |
 | G5 | Release gates test a different dependency set than ships | P1 | 23.3 | open | |
 | G6 | Installer hashed at download only, launched hours later | P1 | 24.1 | open | |
-| N1 | One shared value (`100 psi`, `12ft`) masks conflicting measurements | P0 | 04.2 | implemented+validated | `tests/test_quantity_signature.py` (the `N1 …` rows of `_CONFLICTS`, each asserted in the critique merge and the ledger; `_CORROBORATIONS`, `_NO_SHARED_QUANTITY`, `_CONSERVATIVE_RETENTION`, `_RECORDED_LIMITS`); `tests/test_signature_compatibility.py` (tags incl. sheet, grid and detail references; the per-kind table; complete-link in the critique merge, `Ledger.add` and Pass B; the rule never merges a pair the flat rule blocked); `tests/test_ab_findings_diff.py::test_a_conflict_beside_a_shared_value_is_never_an_exact_match` and `::test_a_second_tag_that_changed_is_never_an_exact_match` (WP-04.2, [PR #158](https://github.com/Abe-Borg/drawing-analyzer/pull/158)). Closes every conflict the signature can see. Quantity roles, the matrix row "repeated values in different roles" (plan WP-04 step 4): `tests/test_quantity_roles.py` and the two role rows of `_CONFLICTS` (WP-04.3, [PR #188](https://github.com/Abe-Borg/drawing-analyzer/pull/188)). Still merged, as recorded limits: a bare `12'` against `12'-6"`, and WP-04.1's partial signatures (WP-04.4) |
+| N1 | One shared value (`100 psi`, `12ft`) masks conflicting measurements | P0 | 04.2 | implemented+validated | `tests/test_quantity_signature.py` (the `N1 …` rows of `_CONFLICTS`, each asserted in the critique merge and the ledger; `_CORROBORATIONS`, `_NO_SHARED_QUANTITY`, `_CONSERVATIVE_RETENTION`, `_RECORDED_LIMITS`); `tests/test_signature_compatibility.py` (tags incl. sheet, grid and detail references; the per-kind table; complete-link in the critique merge, `Ledger.add` and Pass B; the rule never merges a pair the flat rule blocked); `tests/test_ab_findings_diff.py::test_a_conflict_beside_a_shared_value_is_never_an_exact_match` and `::test_a_second_tag_that_changed_is_never_an_exact_match` (WP-04.2, [PR #158](https://github.com/Abe-Borg/drawing-analyzer/pull/158)). Closes every conflict the signature can see. Quantity roles, the matrix row "repeated values in different roles" (plan WP-04 step 4): `tests/test_quantity_roles.py` and the two role rows of `_CONFLICTS` (WP-04.3, [PR #188](https://github.com/Abe-Borg/drawing-analyzer/pull/188)). A bare `12'` against `12'-6"` stays two findings since WP-04.4 (the signature's `feet_inches` pairs; `tests/test_quantity_residuals.py`, the row moved to `_CONFLICTS`), and so do WP-04.1's partial signatures (N19) (WP-04.4, PR pending) |
 | N2 | Cross-QC dedup destroys distinct claims sharing sheet/quote/legs | P0 | 06.1 | implemented+validated | `tests/test_cross_qc_validation_and_dedup.py` (WP-06.1, [PR #167](https://github.com/Abe-Borg/drawing-analyzer/pull/167)): the review's valve/horsepower pair (one primary, quote and legs) survives cross-QC on the whole-set and sharded paths, and the ledger keeps both (overlap 0.273, and 0.353 when both texts name the sheets); through the pipeline on both paths each is its own `QC-###`, dual-crop verified (a call each), investigated when the crop cannot settle it, inked on both sheets with every placement proven, and exported (`findings.json`, `findings.csv`, `markup_manifest.json`); a later copy that is more severe or carries the action keeps what it adds (the ledger's merge); identical copies from a shard and the reconciler, or from reconcile pair calls, collapse to one; `test_dedup_keeps_distinct_conflicts_sharing_a_primary_quote` unchanged. The ledger's half: it still folds two different conflicts whose terse texts both name the same two sheets (N30, WP-03.5; recorded limit), and it keeps a re-report phrased apart as two entries (the accepted cost, WP-06.4) |
 | N3 | Reused operand membership (and fabricated quotes) give false DETERMINISTIC | P0 | 07.1 | implemented+validated | `tests/test_arithmetic_operand_grounding.py` (WP-07.1, [PR #163](https://github.com/Abe-Borg/drawing-analyzer/pull/163)): the review's `sum [20,20,20] = 40` on `20 + 20 = 40` and on `20 20 TOTAL 40`; a fabricated (UNANCHORED) quote; a quote printed only on another sheet; an unresolved sheet (id not in the set, and no sheets); the stated result reusing a term's number; a FUZZY quote that dropped a printed operand; a quote that starts inside `2-1/2"`; verification eligibility and the trust note; the pipeline sending the N3 mismatch to the crop verifier while the grounded one stays DETERMINISTIC; failures while anchoring or deciding leave it UNCERTAIN. Kept: repeated printed values, equal values in two spellings, a result printed in its own right, `exact_ambiguous`, a vetoed FUZZY anchor. Role swap, sum versus product and A8 were closed by WP-07.2 (A8 row) |
 | N4 | Refused/truncated digests and critiques accepted and cached | P0 | 01.2, 01.4, 01.6, 01.8, 10.4 | open (digest part implemented+validated in 01.2; critique part implemented+validated in 01.4, its retries (a batch read's follow-up batches, the raised cap on both transports) in 01.8; the planner, identity, synthesis, focus, harvest structuring and verification implemented+validated in 01.6; the cache map (10.4) stays open) | `tests/test_digest_terminal_outcome.py` (both transports, both cache levels, the read-side reject, the warm re-run of a refusal the old code cached, the delivery contract) and `tests/test_drawing_acceptance.py::test_a_refused_or_unfinished_digest_holds_the_run_below_complete` (WP-01.2, [PR #156](https://github.com/Abe-Borg/drawing-analyzer/pull/156)). Critique (WP-01.4, by the owner's rules): `tests/test_critique_terminal_outcome.py` (128): every non-finished stop reason (`max_tokens`, `model_context_window_exceeded`, `refusal`, `None`, `tool_use`, `pause_turn`, `compaction`, an unknown value) over a closed, an explicit-empty and an unclosed-but-complete findings object, and a bare structured object, is a failed read that keeps nothing and bills its tokens, on both transports (`outcome_from_message`, `_outcome_from_envelope` incl. dict shapes and a missing `stop_reason`, `critique_sheet_self_consistent`, `collect_critique_batch`), and `end_turn`/`stop_sequence` are unchanged; never cached at either level; through the pipeline on both transports: one read cut off, refused, ended early or unknown is PARTIAL (items 2 -> 1, the coverage line, the sheet named with the read's error, usage PARTIAL, no finding or arithmetic claim from the cut read, warm re-read), both cut off FAILED, the 400 gap PARTIAL, every read raising FAILED, finished reads COMPLETE and served warm (items 2 -> 2), two sheets one cut (4 -> 3), a sheet with no input skipped, and an entry stored under contract 2 missing and left on disk; `tests/test_drawing_cache_identity.py::test_wp_01_4_moves_every_critique_key_and_no_other_key` and `::test_a_critique_entry_from_wp_04_2_misses_and_is_never_deleted` (WP-01.4, [PR #171](https://github.com/Abe-Borg/drawing-analyzer/pull/171)). Remaining: the cache map and the other writers' admission predicates (WP-10.4) Set-level consumers and verification: `tests/test_consumer_terminal_outcomes.py` (every non-finished kind per consumer, not cached; the pipeline statuses; the stage terms) and `tests/test_response_shapes.py::test_a_refused_synthesis_or_focus_report_is_not_kept_or_cached` (flipped) (WP-01.6, [PR #184](https://github.com/Abe-Borg/drawing-analyzer/pull/184)) Critique retries (WP-01.8, [PR #186](https://github.com/Abe-Borg/drawing-analyzer/pull/186), by the owner's rules): `tests/test_batch_critique_recovery.py` (a transient, expired, routed-refused or cut batch read recovered in a follow-up batch and cached under the requested key; not a permanent, canceled, unrouted, context-window, `None`, continuation, unknown or malformed read; the per-sheet budget; the kept read's wording; a stuck round; the file release; the real-time raised cap; the pipeline on Hybrid, Economy and Fast) |
@@ -347,7 +347,7 @@ report is built from it).
 | N16 | A raised-cap retry can lose the first (truncated) read | P1 | 01.3 | implemented+validated | `tests/test_digest_partial_reads.py` (WP-01.3, [PR #170](https://github.com/Abe-Borg/drawing-analyzer/pull/170)), by the owner's rule (one rank, later wins ties, the discarded attempt named): real time, a retry that comes back empty, refused (with and without text) or raises keeps the first read's prose, findings and stop reason, with both attempts' usage, and names the retry (`test_rt_worse_retry_keeps_first_read`, `test_rt_raising_retry_names_the_failure`), for a closed and a salvaged unclosed block; a partial or finished retry still wins (`test_rt_partial_retry_replaces_partial_first`, `test_rt_finished_retry_wins_and_is_cached`); an empty first read takes the retry (`test_rt_empty_first_read_takes_the_retry`); never spliced (`test_rt_never_splices_two_reads`); batch, on both recovery transports, the follow-up batch and the fresh-batch rounds (`test_batch_worse_retry_keeps_first_read`, incl. an errored envelope), the direct rescue landing worse or raising (`test_direct_rescue_*`), several discarded rounds counted (`test_several_discarded_retries_are_counted`), the best read kept across rounds (`test_multiround_keeps_the_best_read_so_far`), the harvest holding a partial read against a worse or unreached rescue (`test_harvested_partial_read_survives_*`), a content-free harvested read still parked; the one helper over a 20-case table (`test_keep_digest_read_table`); nothing new cached on either transport (`test_a_kept_partial_read_is_never_cached`) |
 | N17 | References to FM-numbered sheets are never reported as missing | P1 | 08.4 | open | |
 | N18 | Contradictory transcriptions of one quote counted as independent checks | P1 | 07.3 | open | |
-| N19 | W×H duct sizes, `20A`/`480V`, ranges and lists get no or partial signature | P0 | 04.1 | implemented+validated | `tests/test_quantity_signature.py` (the size, volt, amp, range and list tables; the negative corpus; the `N19 …` pairs; `test_a_shared_name_is_not_a_shared_quantity`) (WP-04.1, [PR #157](https://github.com/Abe-Borg/drawing-analyzer/pull/157)). Covers the named forms. By decision these still sign partially: loose-comma lists (`2, 4, 6 in`), `to` ranges and `and`/`or` lists, and a bare `20A` with no electrical context. **A conflict hidden by a shared value is N1, not N19:** a pair whose differing quantities sit beside a shared one (`6 in` / `4 in` beside `100 psi`; `12'-6"` / `12'-8"`, both `12ft`) merged until WP-04.2 fixed N1 |
+| N19 | W×H duct sizes, `20A`/`480V`, ranges and lists get no or partial signature | P0 | 04.1 | implemented+validated | `tests/test_quantity_signature.py` (the size, volt, amp, range and list tables; the negative corpus; the `N19 …` pairs; `test_a_shared_name_is_not_a_shared_quantity`) (WP-04.1, [PR #157](https://github.com/Abe-Borg/drawing-analyzer/pull/157)). Covers the named forms. The partial signatures WP-04.1 left by decision are read whole since WP-04.4 (the owner's rules): `to` ranges and `between ... and`, `and`/`or` lists, loose-comma lists of three or more numbers, and a compact `A` beside a voltage (`tests/test_quantity_residuals.py`; the three rows moved from `_RECORDED_LIMITS` to `_CONFLICTS` in `tests/test_quantity_signature.py`) (WP-04.4, PR pending). Still unread by the owner's decision, recorded limits: two numbers joined by a comma alone (`2, 4 in`), a compact `A` with nothing electrical beside it (`20A circuit`). **A conflict hidden by a shared value is N1, not N19:** a pair whose differing quantities sit beside a shared one (`6 in` / `4 in` beside `100 psi`; `12'-6"` / `12'-8"`, both `12ft`) merged until WP-04.2 fixed N1 |
 | N20 | Investigation executes and echoes pre-fallback `tool_use` blocks | P1 | 13.4 | open | |
 | N21 | Files-API failure fallbacks send full-rate requests under Economy; inline can exceed the size limit | P1 | 18.1, 18.2 | open | |
 | N22 | Code and help text claim uploads "expire server-side"; they persist until deleted | P1 | 18.4, 18.5 | open | |
@@ -399,6 +399,308 @@ report is built from it).
 Each session adds one entry at the top: date, slices and IDs, PR, what changed,
 contracts decided, cache/schema effects, validation actually run (with counts),
 what could not be verified, risks, and next steps.
+
+### 2026-09-30 — WP-04.4: the tokenizer residuals, and a feet value compared with its inches (PR pending)
+
+- **Slice and IDs:** WP-04.4, the four demonstrated conflicting pairs WP-04.1
+  read only in part (N1's bare `12'`; N19's `to`/`and`/`or` ranges and lists,
+  loose-comma lists and a bare `20A`), WP-04's last slice. No `DECISIONS.md`
+  contract is decided: D-3 gains an input ("as an input, not a decision", the
+  WP-03.3 / WP-03.7 / WP-04.3 precedent), D-4 a note, and the migration
+  register three rows (the critique contract, the cross-QC contract, the A/B
+  record contract). **WP-04 is done** (the owner's decision; the plan's WP-04
+  Acceptance check, below).
+- **Base.** `main` = `origin/main` = `317636d` (WP-04.3's merge,
+  [PR #188](https://github.com/Abe-Borg/drawing-analyzer/pull/188)). Open PRs:
+  [#174](https://github.com/Abe-Borg/drawing-analyzer/pull/174) (dependabot)
+  and [#175](https://github.com/Abe-Borg/drawing-analyzer/pull/175) (SDK 1.8.0
+  support), neither a remediation slice. Baseline **5,666 passed, 2 skipped,
+  10 deselected** (634 s), identical to WP-04.3's final count; the two skips
+  are IPv6 loopback and chmod as root. Python 3.11.15, SDK 1.7.0, PyMuPDF
+  1.28.2 (a fresh container: `pip install -e ".[dev,browsertest]"`, `cffi`,
+  `ruff==0.14.5`). No probe touched the SDK (no SDK 1.8.0 venv needed).
+- **The request's facts, re-verified** (all held, corrections marked):
+  - `_CRITIQUE_CACHE_CONTRACT` 4, `_SCHEMA_VERSION` 10,
+    `RECORD_CONTRACT_VERSION` 4 (two asserts), the WP-01.7 tripwire `(10, 4)`,
+    `_CROSS_QC_CACHE_CONTRACT` 7. **Correction:** five tests pin cross-QC's 7,
+    not four: the four the WP-05.3 handoff re-pinned plus WP-05.3's own
+    `tests/test_anchor_character_stream.py::test_the_cross_qc_contract_moved_for_the_character_stream`.
+  - `anchor._same_quantities` imports `critique._quantity_tokens`
+    function-locally; it serves the anchor's `char_stream` tier and cross-QC
+    grounding (`SourceWords.joined_spans`). It reads the anchor's folded words,
+    so a quote's loose commas are folded away before it reads them (only a
+    leading-comma spelling such as `2 ,4 ,6` keeps them).
+  - `critique._quantity_roles` reads `_quantity_readings` spans; a spelled
+    range or list is now one reading, so a role after it binds the whole
+    quantity, as after a tight list (`2, 4, 6 in main` → `main=2,4,6in`). No
+    role table moved.
+  - Every consumer of the one rule: `critique._is_duplicate` (the critique's
+    `_cluster`, `Ledger.add` over member snapshots, `reconcile_post_anchor`
+    over member histories), `prose_harvest._veto_axes`, the A/B harness
+    (`_compatible`, `_conflicting_axes` over stored records). **No other cache
+    key holds a merge outcome** (re-verified): the critique cache stores
+    post-merge findings; the prose harvest's structuring key hashes the item,
+    the sheet's text, the source binding and the request params, never the
+    match; cross-QC's `_drop_exact_repeats` is equality only.
+  - The 500/550 gpm duplicate folds on main and here (pinned in both files).
+  - **Correction (the measurement's scale):** this session's probe records
+    every call, not distinct decisions, so its counts are larger than
+    WP-04.3's (6,600 / 432 / 1,072 / 769): 22,372 merge decisions in 500
+    tests (`Ledger.add` 7,878, `reconcile_post_anchor` 6,118, the fingerprint
+    corpus 3,721, direct test callers 2,818, the critique's `_cluster` 1,837;
+    8,982 distinct per test, caller and pair), 491 prose-veto records in 113
+    tests, 1,268 anchors in 800 tests, 908 grounding verdicts in 406 tests.
+  - **Found while measuring:** the anchor's sub-phrase tier places a part of
+    a quote (`4 TO 6 IN`) before `char_stream` runs, on main and here, so for
+    a flipped join only cross-QC's verdict moves; WP-05.3's agreement ("EXACT
+    or `char_stream` exactly where cross-QC grounds") still holds (pinned).
+- **Measured before any code** (a scratch pytest plugin, never committed:
+  every `_is_duplicate` call with its caller, every `_veto_axes` call, pairs
+  serialized through `Finding.to_dict`, every `_anchor_one` result read with
+  `getattr`, every cross-QC `_grounded` verdict):
+  - On `origin/main` (instrumented full suite, 5,666 passed), **replayed
+    offline with 0 unexplained mismatches**: one anchor record differs
+    offline, from `test_the_veto_reuses_the_wp_04_quantity_reader`, which
+    monkeypatches the reader during the test.
+  - Each option prototyped behind a scratch switch and replayed over those
+    records (moved merge decisions; every option moved 0 of the 491 vetoes,
+    1,268 anchors and 908 grounding verdicts):
+
+    | Option | Decisions moved | Recorded texts whose tokens change (of 841) |
+    |---|---|---|
+    | Feet: a pair beside the tokens, marks only / every spelling | 2 (the pinned pair) | 0 (17 / 29 gain a pair) |
+    | Feet: `{12ft, 0in}` tokens | 2 | 10 |
+    | Feet: one token (`12ft6in`) | 2 | 8 |
+    | `to` ranges (incl. `between`) | 2 | 1 |
+    | `and`/`or` lists | 0 | 0 |
+    | Loose lists of three or more | 4 (the pinned pair and the retention pair) | 3 |
+    | Loose lists of two | 0 | 0 |
+    | A voltage beside / after a compact `A` | 2 | 2 |
+    | `circuit` after a compact `A` | 0 | 0 |
+
+    Over every string constant in `tests/`, `src/` and `scripts/` (4,866
+    texts) the token changes were: `to` 2, `and`/`or` 2, loose lists 6, two
+    loose 1, amps 2, zero-inches token 69, one token 35 (the pair options
+    change no tokens; 96 / 121 texts gain a pair).
+  - Pinned rows each option moves: the zero-inches token 4 negative/safeguard
+    token rows and WP-04.3's readings-equal test; one token every feet-inches
+    `_SAFEGUARDS` row and the token-grammar test; loose lists the
+    `_NEGATIVE_CORPUS` row and the `_CONSERVATIVE_RETENTION` pair; the pair
+    options the signature key-set assertion in `tests/test_quantity_roles.py`.
+  - Case tables shown to the owner per option (each residual's pinned pair,
+    other spellings and kinds, equivalences, the negative corpus, the
+    misreadings), and a constructed cross-QC flip per token-changing option.
+- **The decision, made by the owner before any code** (AskUserQuestion, two
+  rounds, seven choices, measured case tables; every recommended option
+  taken):
+  - **Round 1.**
+    - **Bare feet: a pair rule beside the tokens.** `critical_signature` gains
+      `feet_inches`; the token model is unchanged (every `_SAFEGUARDS`
+      feet-inches row stays), and the key-set assertion in
+      `tests/test_quantity_roles.py` gains the key (approved). Not taken:
+      `{12ft, 0in}` tokens (a `6 in` elsewhere still masked the conflict);
+      feet-inches as one token (it split `12 ft 6 in` from `12'-6"`); leave it.
+    - **Spelled ranges and lists: `to`, `and`, `or`.** Not taken: `to` only;
+      leave both.
+    - **Loose lists: three or more numbers.** The two pinned rows move
+      (approved): the `_NEGATIVE_CORPUS` row reads `["2,4,6in"]` in place, and
+      the retention pair `2, 4, 6 in` / `2,4,6 in` moves to `_EQUIVALENTS`.
+      Not taken: two or more (`Relocate valve 4, 10 ft` read as a list);
+      leave them.
+    - **Bare `20A`: a voltage beside it** (after or before), a name word
+      still winning. Not taken: after only; also `circuit` after (`connect to
+      2A circuit 12` read 2 A); leave it.
+  - **Round 2.**
+    - **Feet spellings: every spelling** (`12 ft`, `12 feet`, `12 ft 6 in`),
+      so `12'` and `12 ft`, one quantity, compare alike. Not taken: the foot
+      mark only.
+    - **Contracts: critique 4 → 5, A/B 4 → 5, cross-QC 7 → 8.** Not taken:
+      critique and A/B only, recording the cross-QC flips as a limit.
+    - **The WP-01.7 tripwire: re-pinned to `(10, 5)`.** Not taken: pin only
+      the schema version.
+    - **WP-04: done, the remaining shapes recorded as limits.** Not taken: a
+      WP-04.5.
+  - **Composition, decided in the implementation within those rules** (for
+    the next session): the guards keep *today's* reading, never a new one: a
+    name or reference word before the first number (`_REFERENCE_BEFORE_RE`,
+    built on the amp rule's `_NAME_WORDS`, one list, plus page, section,
+    step, item, note(s), ... with plurals), the word `in` followed by an
+    article or a preposition's object (`_IN_AS_PREPOSITION_RE`), `2 and 1/2
+    in`, and a run inside a longer one (`_SPELLED_WITHIN_RE`); only the first
+    number may be signed and only the last carries the unit; a list keeps its
+    written order (as a tight list); the feet-inches join is spaces and at
+    most one hyphen or Unicode dash (`auditors.arithmetic._UNICODE_DASHES`,
+    the one dash list), after an optional abbreviation period (`12 ft. 6 in.`,
+    one quantity with `12'-6"` in the tokens), never a comma or a sign; the
+    pairs are read part by
+    part (`_sig_parts`), as roles are, so a text's last feet value never
+    joins a quote's first inch value; the voltage-before check searches the
+    text between bounds, not a slice (WP-04.3's lesson), so a slope's
+    `3H:1V` is not a voltage.
+- **What changed** (production):
+  - **`critique.py`:** `_NAME_WORDS` (the name list, now shared);
+    `_AMP_VOLTAGE_AFTER_RE`, `_AMP_VOLTAGE_BEFORE_RE` and the amp branch of
+    `_unit_context_ok`; `_read_spelled` with `_SPELLED_JOIN_RE`,
+    `_SPELLED_ELEMENT_RE`, `_SPELLED_WITHIN_RE`, `_REFERENCE_BEFORE_RE`,
+    `_BETWEEN_BEFORE_RE`, `_IN_AS_PREPOSITION_RE`, called from `_read_one`
+    when no unit follows a plain number; `_feet_inches` and
+    `_feet_inches_of_parts` (memoized); `critical_signature` gains
+    `feet_inches`; `_feet_inches_conflict`, reported on `measurements` by
+    `signature_conflicts`; the tokenizer's header comment, `_quantity_tokens`'
+    and `signature_conflicts`' docstrings.
+  - **`digest_cache.py`:** `_CRITIQUE_CACHE_CONTRACT` 4 → 5 with its reason.
+  - **`cross_qc.py`:** `_CROSS_QC_CACHE_CONTRACT` 7 → 8 with its reason.
+  - **`scripts/ab_findings_diff.py`:** `RECORD_CONTRACT_VERSION` 4 → 5 with
+    its reason.
+- **Tests:** **240 new test IDs, 7 removed, 233 net** (counts from
+  `--collect-only`): `tests/test_quantity_residuals.py` 219 (spelled
+  quantities 29, the negative corpus 35, misreadings 3, the token identity 1,
+  feet-inches pairs 26 + 3 structure tests, residual conflicts 15,
+  equivalences 11, retention 4, the 500/550 duplicate 1, chains 4 + 72 (four
+  chains × six orders × `_cluster`, `Ledger.add`, Pass B), the rule 4, the
+  readings 1, a role after a spelled list 1, the prose veto 4, the anchor and
+  cross-QC flips 4, the cross-QC contract 1); `tests/test_quantity_signature.py`
+  11 (the four flipped rows × 2 tests, the moved equivalence, two new
+  recorded limits); `tests/test_ab_findings_diff.py` 8 (4 residual pairs, the
+  stored pairs, the v4 sidecar, two renamed); `tests/test_drawing_cache_identity.py`
+  2.
+  - **Classified against `origin/main`** (the worktree at `317636d` with its
+    own `src` first on `PYTHONPATH`; no shim was needed, the only new name is
+    a signature key): of the 249 new or changed IDs (240 new, 9 changed in
+    place), **171 fail on behaviour, 31 fail on the missing key**
+    (`KeyError: 'feet_inches'`), **47 pass** (controls: the 35 negative-corpus
+    rows, the 7 spellings already equal on main, the three structure tests
+    that pin what does not change, and the two new recorded limits). Every
+    existing test kept its outcome there.
+  - **Flipped, this slice's recorded limits** (each failing on `origin/main`
+    in its new form): `test_recorded_limits_still_merge[a bare feet value:
+    12'-6" vs 12']`, `[a to range signs its far end: 4 to 6 in vs 6 in]`,
+    `[loose-comma lists sign their last element: 2, 4, 6 in vs 3, 5, 6 in]`
+    and `[a bare 20A needs electrical context: 20A vs 30A on a shared 120V]` →
+    `test_conflicting_quantities_stay_two_findings[…]` and
+    `test_a_quantity_conflict_is_named_as_the_measurements_axis[…]`, same ids.
+  - **Moved (the owner's approved moves):** `test_pairs_kept_apart_by_design[a
+    partial list signature against a full one: 2, 4, 6 in vs 2,4,6 in]` →
+    `test_one_quantity_spelled_two_ways_is_one_finding[WP-04.4 a loose list =
+    the tight list: 2, 4, 6 in = 2,4,6 in]`;
+    `test_measurement_tokens[Provide 2, 4, 6 in drains-expected151]` re-pinned
+    in place to `["2,4,6in"]` (same id).
+  - **Re-pinned (the owner's approved bumps):**
+    `test_records_are_written_under_the_wp_04_3_contract` →
+    `..._wp_04_4_contract` (5, and it checks the stored readings and pairs);
+    `test_a_v4_record_is_compared_under_the_current_rule_without_a_bump` →
+    `test_a_v5_record_…` (5; its claim, that a rule-only change needs no bump,
+    kept); `tests/test_interrupted_streams.py::test_no_cache_term_moved`
+    (`(10, 5)`); the five cross-QC pins (8); the merge-rule fingerprint added
+    under 5 (`5c0a126a…`) over a corpus that gained 16 rows (over it the
+    contract-4 rule fingerprints as `849f6ecd…`, recorded in the test);
+    `test_the_signature_carries_roles_as_sorted_json_safe_lists` (the key set
+    gains `feet_inches`). Nothing else moved.
+- **Validation** (this container):
+  - **The instrumented diff, `origin/main` vs this branch** (the full suite
+    under the probe, 5,895 passed before the last two test-row edits): over
+    the tests both runs share, compared by content (cross-QC runs its shards
+    on worker threads, so call order varies), **0 of 22,338 merge decisions,
+    0 of 491 prose vetoes, 0 of 1,268 anchors and 0 of 908 grounding verdicts
+    moved**; the rest of main's decisions are the five renamed or moved tests
+    and the fingerprint corpus, whose pairs changed with it. And the replay of
+    all 22,372 of main's recorded decisions under the final code moves
+    exactly **10**: the five approved pairs × the critique's `_cluster` and
+    `Ledger.add`.
+  - **Speed** (a synthetic 1,800-finding, 40-sheet ledger ingest, best of 3,
+    five alternating runs each, on the final code; this session's own script,
+    so not comparable with WP-04.3's absolute times): plain wording 1.60–1.74 s
+    → 1.73–1.81 s; wording dense with the new forms 2.35–2.53 s → 2.53–2.61 s
+    (about 5 %). The new
+    readers are memoized on their whole input like the rest; the cost is
+    `_read_spelled` on every number with no unit after it and one more
+    part-by-part read per signature.
+  - Full suite on the final code, after the docs (uninstrumented): **5,899
+    passed, 2 skipped, 10 deselected** (592 s), the baseline plus the 233, the
+    same two environment skips. A JUnit diff against the baseline: of the 5,661
+    tests in both runs, **0 changed outcome**; 7 are only in the baseline (the
+    four flipped rows, the moved retention pair and the two renamed A/B tests)
+    and 240 only here, all passing.
+  - `python -m compileall -q src`: clean. `python -m ruff check --select
+    E9,F63,F7,F82 src tests scripts` (0.14.5): clean. F401/F811/F841 on the
+    touched files: 11 hits, all on `origin/main` too (the two the request
+    names, and nine in `tests/test_evidence_visual.py`, touched only for its
+    contract re-pin); none new. `python scripts/scan_secrets.py`: clean (the
+    new file staged). No key anywhere, every new parametrized case has
+    `ids=`, no invisible character added (the tests write the degree sign
+    and the en dash as `°` and `–`).
+  - The browser suite was not run separately: no report or JavaScript
+    changed, and its tests ran inside the full suite.
+- **Docs:** CHANGELOG (Fixed); CLAUDE.md (the signature paragraph: the
+  feet-inches pairs and the recorded limits; the tokenizer description: the
+  spelled forms, the guards, the voltage context; the critique- and cross-QC
+  contract histories; the character-stream veto's note); README (the ledger
+  section's measurement passage and its limits; the critique-cache paragraph;
+  the cross-QC contract history); `docs/PERFORMANCE_AND_COST_VALIDATION.md`
+  (the harness compares the new readings; v5); the plan (WP-04's "Tokenizer
+  residuals, done by WP-04.4" note and the Acceptance check); DECISIONS (the
+  D-3 input, the D-4 note, three register rows); PROGRESS (this entry; the
+  WP-04.4 row; WP-04's package row; the N1 and N19 rows; Next up). No
+  dependency changed.
+- **WP-04 Acceptance, checked:** demonstrated conflicting pairs never merge
+  (every matrix pair and addition, the two role rows and the four residual
+  pairs are in `_CONFLICTS`; each residual's other spellings and kinds in
+  `_RESIDUAL_CONFLICTS`); equivalent supported spellings compare
+  consistently (`_EQUIVALENTS`, with the loose and tight list;
+  `_RESIDUAL_EQUIVALENTS`); the fraction, sign and unit safeguards pass
+  unchanged (`_SAFEGUARDS`); conservative retention is recorded in the
+  fixtures (`_CONSERVATIVE_RETENTION`, `_TAG_RETENTION`, `_ROLE_RETENTION`,
+  `_RESIDUAL_RETENTION`). Two shapes the owner chose not to read stay pinned
+  in `_RECORDED_LIMITS` as limits, not open defects. **WP-04 is done** (the
+  owner's decision).
+- **Not verified:**
+  - Live API behaviour (no budget, O-4; this slice makes no call).
+  - Not measurable without real drawings (O-10): how often findings write a
+    bare feet value, a spelled range or list, or a compact `A` beside a
+    voltage; how often the guards keep a real range unread; how often a
+    name-less room label sits beside a voltage.
+  - Windows is covered by this PR's CI (`gates-windows`).
+- **Risks and residual gaps:**
+  - **A visible behaviour change, by design:** more findings can appear as
+    two; the prose harvest's veto refuses such a candidate (a paid
+    structuring call instead of a free match); a loose list now merges with
+    its tight twin.
+  - **One-time costs:** the first exhaustive run after upgrading re-critiques
+    every sheet once (contracts 1 to 5 are all unreleased, so a 1.7.0 user
+    pays it once), and the first cross-sheet check re-runs once (contract 8).
+  - **Retention costs, pinned:** `increase from 4 to 6 in` / `increase to
+    6 in`; `4 in to 6 in` / `4 to 6 in` and `4 in and 6 in` / `4 and 6 in` (a
+    unit on each element stays separate quantities, as before); `12 ft, 6 in`
+    / `12'-6"`.
+  - **Misreadings the owner accepted, pinned:** a name-less room or panel
+    label beside a voltage (`101A 120V receptacle` reads 101 A); a feet value
+    directly followed by a separate inch size (`10 ft 6 in pipe` reads as
+    10'-6"); a from-to change reads as a range.
+  - **Recorded limits (pinned in `_RECORDED_LIMITS`):** two numbers joined by
+    a comma alone; a compact `A` with nothing electrical beside it. Not
+    pinned: a Unicode dash as a range separator (`4–6 in`) and a number after
+    `/` (`30A/2P/240V`) are still WP-04.1's residuals, unchanged; `4 thru 6
+    in` is not read.
+  - **Growth at the critique boundary** (WP-03.5's): the pairs grow with a
+    survivor's supporting quotes like every axis; a representative whose
+    bundle came from a pair-less member carries none in its live signature
+    (the member-wise checks cover it; pinned by the chain tests).
+- **Found in self-review, fixed here:** a positive (`4 or 6 in` vs `4 in`)
+  already conflicted on main, so it proved nothing; it is `4 or 6 in` vs
+  `6 in` now (fails on main, passes here). The feet-inches join first
+  accepted only the ASCII hyphen, which split `12'–6"` (an en dash, which the
+  tokens already read as feet-inches) from `12'-6"`; it takes the one dash
+  list now (pinned). It also refused an abbreviation's period, which split
+  `12 ft. 6 in.` from `12'-6"` (one quantity in the tokens); it allows one
+  now (pinned; the replay was re-run on the final code and still moves only
+  the 10 approved decisions). The pairs were first read over the joined `_sig_text`,
+  which let a text ending in a feet value join a quote opening with an inch
+  value; they are read part by part now (pinned).
+- **Found, not fixed:** nothing new beyond this slice's scope.
+- **Next:** in queue order, Wave 2 WP-06.2 and WP-06.3 (WP-06.2 completes
+  D-8). WP-10.1 … WP-10.4, WP-03.4 (now with two WP-04 D-3 inputs), WP-07.3
+  and WP-11.3 are available too; WP-06.3, WP-12.6 and WP-13.4 close WP-01.
+  The owner question on 5.5 refusal routes (WP-01.5) is still open.
 
 ### 2026-09-30 — WP-04.3: quantity roles in the critical signature, and a size's `x12` is not a tag ([PR #188](https://github.com/Abe-Borg/drawing-analyzer/pull/188))
 
