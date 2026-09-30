@@ -1440,9 +1440,26 @@ raise, after the paid digest and critique. Now:
   collide and lose the tile. A quote that folds to nothing names no text and
   joins nothing. WP-05.2's first push kept the join on `_normalize` alone, so
   a leg that grounded only through the fold lost its fact's tile, which on a
-  scanned sheet is its only location (Codex review). Host-side binding, so
-  `_CROSS_QC_CACHE_CONTRACT` **3 → 4**, and **4 → 5** for the fold (WP-05.2)
-  (6 since remediation WP-06.1, below).
+  scanned sheet is its only location (Codex review). Since remediation
+  WP-05.3 (B4; the owner's rules) the one matcher also has the anchor's
+  **character-stream** tier, `SourceWords.joined_spans`, and `_grounded` asks
+  it when `contains` fails: a quote that differs from the text only by the
+  named spacing joins grounds (`6"` on a printed `6 "`, `2%` on `2 %`,
+  `12'-6"` on `12' - 6"`, `INCH DRAIN` on `INCHDRAIN`; the rules are in the
+  Disposition paragraph, below), so the anchor and cross-QC still agree
+  (`tests/test_anchor_character_stream.py`: EXACT or `char_stream` exactly
+  where cross-QC grounds). And a **number split around a lone `.`** (a
+  decimal point extracted as a word of its own, `. 5`, `5 . 25`) is never
+  matched in part, on the text and in the quote alike: `SourceWords` marks
+  those words (`split_number`) and no match may start on, end on or cover
+  one, while a quote with a lone `.` right before a digit word has no
+  matchable form (`anchor._folded_words`; `_fold_text` is `""`, so it joins no
+  fact either). WP-05.2's fold had dropped the lone `.`, so `SET AT 5 IN`
+  grounded on `SET AT . 5 IN`. The fact-tile join keeps its folded key, so a
+  leg quoted `6" DRAIN` does not take the tile of a fact recorded `6 " DRAIN`
+  (a recorded limit). Host-side binding, so `_CROSS_QC_CACHE_CONTRACT` **3 →
+  4**, **4 → 5** for the fold (WP-05.2), 6 since remediation WP-06.1 (below)
+  and **6 → 7** for the character stream and the split number (WP-05.3).
   Reduced trust must **reach verification**, so the location travels in three
   parts: the shard-map prompt requests `tile_label` per fact and leg
   (`CrossQCFact.tile`, resolved on that leg's own grid); `fact_tile_lookup`
@@ -1486,7 +1503,7 @@ raise, after the paid digest and critique. Now:
   matched **nothing**, and the claim resolved to no sheet at all. That
   canonicalization is host-side binding no key input covers, so it carries
   `_CROSS_QC_CACHE_CONTRACT` **2 → 3** (4 since remediation WP-05.1, 5
-  since WP-05.2, above, and 6 since WP-06.1, below).
+  since WP-05.2 and 7 since WP-05.3, above, and 6 since WP-06.1, below).
   Cross-QC also carries **count-only discard counters** on the sharded path
   (`CrossQCDiscardCounts`, WP-02 §7.2): how many legs/facts the host dropped and
   why — unresolved handle, quote absent, quote present but unmatched, split by
@@ -1753,7 +1770,10 @@ whole-source-word rule (`word_core`, `WORD_LEADING_PUNCTUATION`,
 `"` `'` `<` `>`, pinned). `SourceWords` is built from a string (cross-QC) or
 from a sheet's words (the anchor: each word's text split on whitespace, every
 piece keeping its word's index), and the anchor's tiers all apply the rule, so
-`VAV-2` no longer matches inside `VAV-2-1` anywhere. `_normalize` itself is
+`VAV-2` no longer matches inside `VAV-2-1` anywhere. Since remediation WP-05.3
+it also holds the one character-stream matcher (`joined_spans`, `JOIN_MARKS`)
+and the one split-number rule (`split_number`, `covers_split_number`; the
+quote's side is `_folded_words`). `_normalize` itself is
 unchanged (`auditors.arithmetic._UNICODE_DASHES` is pinned to its dash fold).
 
 - *Disposition:* `anchor.py` (quote → PDF rect, tiered
@@ -1776,8 +1796,42 @@ unchanged (`auditors.arithmetic._UNICODE_DASHES` is pinned to its dash fold).
   `exact` (the owner's decision): the fold never removes a digit, sign,
   decimal point, unit mark or `%`, so `numbers_grounded` holds and the
   arithmetic auditor reads the sheet's words as printed (`540.`, `(540)`).
-  What needs a character stream (`6 "`, `2 %`, `INCHDRAIN`, `12' - 6"`) is
-  remediation WP-05.3's. Both fuzzy
+  What needs a character stream is the **last quote tier**, `_try_char_stream`
+  (remediation WP-05.3, B4; the owner's rules), through
+  `SourceWords.joined_spans`, the matcher cross-QC grounds through too: the
+  whole quote on a **contiguous run of whole sheet words**, in reading order,
+  on one sheet, compared with every space removed, where each place one side
+  has a space the other lacks is a **named join**: a number and a separated
+  `"` `'` or `%` (`JOIN_MARKS`, either side spaced: `6 "`, `2 %`); the
+  feet-inches hyphen (`12' - 6"`, either side); or letters merged by
+  extraction, one sheet word for several quote words, each quote word letters
+  only (`INCH DRAIN` on `INCHDRAIN`). Anything else refuses: a join between two
+  digits, at a sign, a decimal point, a fraction slash or a comma (so every
+  number is read whole, with its sign, as often as the quote states it:
+  `ROOM 12` never matches `ROOM 1 2`, nor `VAV-21` `VAV-2-1`), a tag's letter
+  and number (`P1`/`P-1`), a unit word (`6INCH`), `x`, `°`, and two sheet words
+  for one quote word (`THERAPIST` on `THE RAPIST`, `XP-1` on `X P-1`). The
+  **quantity-aware veto** is those rules plus the one WP-04 reader,
+  `critique._quantity_tokens`, reused as it is through a function-local import
+  (`_same_quantities`): both sides must read the same quantities, so `12' -6"`
+  (a negative six inches) is not `12'-6"`. Its status is FUZZY and its method
+  `char_stream`, never EXACT, or `char_stream_ambiguous` when the reported
+  tile does not settle two occurrences (the `exact_ambiguous` precedent); it
+  runs after the sub-phrase and before the tile fallback, so no anchor an older
+  tier places can move (measured: 0 of 1,064 recorded anchors in the suite);
+  and it is **not** in `numbers_grounded` (the owner's decision), so an
+  arithmetic mismatch it anchors stays model-transcribed and crop-verified.
+  Two more rules came with it: a number split around a lone `.` is never
+  matched in part, in any tier (the window may not cover one either,
+  `_Stream.covers_split_number`; see the grounding paragraph above), and a
+  **sub-phrase may not end on a digit-bearing token the quote continues
+  from**, since the word it leaves behind may be that number's unit printed
+  as a word of its own (`150 GPM 568 L/S` no longer anchors on `150 GPM (568`,
+  which the WP-04 reader could not refuse: it reads neither `L/S` nor
+  `L/MIN`). That rule reads positions, not units: a quote whose number is
+  followed by any other word loses its sub-phrase too (the accepted cost). No
+  new mapping logic: a match maps to its words' rects as every tier's does,
+  so page-view rotation is untouched. Both fuzzy
   tiers carry the **numeric veto** (P7 item 30): token overlap is blind to a
   swapped digit, so on `PROVIDE 6 INCH DRAIN AT COLUMN LINE 4` every one-number
   substitution scored 6/7 = 0.857, cleared the 0.85 floor, and clouded a wrong
@@ -1793,7 +1847,8 @@ unchanged (`auditors.arithmetic._UNICODE_DASHES` is pinned to its dash fold).
   prohibition and is asserted unchanged. Because of the veto, an EXACT or
   numerically vetoed FUZZY match proves every number of the quote is printed on
   the sheet, once per mention: `numbers_grounded(anchor)` names those methods
-  (fail-closed: a new FUZZY method grounds nothing until it carries the veto),
+  (fail-closed: a new FUZZY method grounds nothing until it carries the veto;
+  `char_stream` carries one and is still left out, by the owner's decision),
   and `resolve_anchors(..., matched_text=)` hands back the sheet's own words
   under each matched span, whole words as printed. Both exist for the
   arithmetic auditor (remediation WP-07.1, N3); neither changes an anchor) →

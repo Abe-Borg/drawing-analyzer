@@ -1135,7 +1135,12 @@ a space, and the brackets and sentence punctuation around each word, so
 `RATED 175 PSI TYP` is found in `RATED 175 PSI, TYP.`), so a quote that
 differs from the sheet only in those is not thrown away. Since remediation
 WP-05.2 the check and the anchor resolver are one matcher, so a quote this
-check finds is one the anchor places on the same words. (Before remediation
+check finds is one the anchor places on the same words. Since remediation
+WP-05.3 that matcher also takes a quote that differs from the sheet only in
+its spacing, through the anchor's character-stream tier (`6"` against a
+printed `6 "`, `INCH DRAIN` against `INCHDRAIN`; see
+[Anchoring findings](#anchoring-findings)), and never matches part of a number
+split around a lone `.`. (Before remediation
 WP-05.1 a quote under six characters, which is most equipment tags, was
 accepted without any check.) Each sheet's text layer is budgeted with
 the omission **counted and surfaced** (never a silent truncation) — and so is the
@@ -1222,9 +1227,31 @@ call, using a tiered strategy that records which tier fired:
   unanchored, and so was drawn as the hallucination signal. Such a match still
   counts as EXACT. Quote marks (`"` and `'`, which are also inch and foot marks),
   `<`, `>`, `%`, `/` and a leading `.` never fold, so `6"` never matches `6'` and
-  `.5` never matches `5`. What folding cannot fix, and what still goes unanchored
-  for now: a mark extracted as its own word (`6 "`, `2 %`), words merged by
-  extraction (`INCHDRAIN`), and a split dimension (`12' - 6"`).
+  `.5` never matches `5`.
+
+  What folding cannot fix is **spacing**, which the last tier takes (remediation
+  WP-05.3, the **character stream**, recorded as FUZZY with its own method,
+  `char_stream`): the whole quote is compared with a run of whole sheet words,
+  in reading order, with every space removed, so a mark extracted as its own
+  word (`PROVIDE 6" DRAIN` on `PROVIDE 6 " DRAIN`, `SLOPE 2% MIN` on `SLOPE 2 %
+  MIN`), a feet-inches dimension split around its hyphen (`12'-6"` on `12' -
+  6"`) and words merged by extraction (`PROVIDE INCH DRAIN` on `PROVIDE
+  INCHDRAIN`) now anchor. Only those three kinds of spacing difference are
+  allowed: a number and a separated `"`, `'` or `%`; the feet-inches hyphen;
+  and several quote words printed as one word, each of them letters only.
+  Anything else refuses the match, so two numbers never join and one never
+  splits (`ROOM 12` does not match `ROOM 1 2`, nor `VAV-21` match `VAV-2-1`),
+  signs, decimal points and fraction slashes stay where they are, a tag's
+  letter and number stay together (`P1` does not match `P-1`), and one quote
+  word is never spread over two printed ones (`THERAPIST` does not match `THE
+  RAPIST`). Both sides must also read the same quantities (`12' -6"`, read as
+  a negative six inches, is not `12'-6"`). When the quote matches in two places
+  and the finding's tile does not settle it, the first is used and flagged
+  `char_stream_ambiguous`. The arithmetic auditor does not treat this tier as
+  proof that the numbers are printed: a mismatch it anchors is still
+  crop-verified. And a decimal point the extraction put in a word of its own
+  (`. 5`) stays with its number in every tier: `5` never matches `. 5`, nor
+  `SET AT 5 IN` match `SET AT . 5 IN`.
 
   A fuzzy match must additionally clear the **numeric veto**. Token overlap is
   blind to the substitution that matters most on a drawing: swap one digit and
@@ -1237,7 +1264,10 @@ call, using a tiered strategy that records which tier fired:
   appear at **its own position** in the matched span, within a drift budget
   derived from the overlap floor itself, and each position in the span counts
   once — a note reading `4 4-INCH DRAINS` cannot satisfy both mentions from a
-  sheet's single `4`. A sub-phrase match may not drop a measurement either. A
+  sheet's single `4`. A sub-phrase match may not drop a measurement either, nor
+  stop at a number the quote goes on from, since the next word may be that
+  number's unit printed on its own (`150 GPM 568 L/S` is not placed on `150 GPM
+  (568`, leaving `L/S` behind). A
   quote carrying no digits is unaffected, and ordinary transcription variance (an
   extra word on the sheet, an abbreviation, a paraphrase) still matches. The 85%
   threshold itself is unchanged: this is a veto, not a stricter score.
@@ -2624,7 +2654,10 @@ when the recorded acceptance evidence says so (Phase 27, §19.9). The pieces:
   fact whose quote is only whitespace is no longer sent to the reconciler, and
   a stored result now carries its count of refused items (remediation WP-06.1;
   its prompt fix also re-keys every entry, through the prompt text the key
-  holds). Each is a host-side change that no key input covers, so each one made
+  holds), and 7 because grounding also takes the anchor's character-stream
+  tier (a quote that differs from the sheet only in spacing) and never matches
+  part of a number split around a lone `.` (remediation WP-05.3). Each is a
+  host-side change that no key input covers, so each one made
   every stored cross-QC result miss once. None of them records the two evidence
   changes above.
 - **Evidence coverage (zero API calls):**

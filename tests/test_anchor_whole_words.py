@@ -324,19 +324,22 @@ def test_recorded_limit_a_letter_only_tag_inside_a_long_window():
     ("CLG 12'-6\" AFF", "CLG 12' - 6\" AFF"),             # split feet and inches
     ("SLOPE 2% MIN", "SLOPE 2 % MIN"),                    # a separated percent mark
 ], ids=["inch", "merged", "feet", "percent"])
-def test_recorded_limit_the_character_stream_cases_are_wp_05_3s(quote, text):
-    """B4's other four pairs need a character-stream tier with a quantity-aware
-    veto (remediation WP-05.3), which flips these."""
-    assert _place(quote, _line(text))[0].status == "UNANCHORED"
+def test_the_character_stream_cases_anchor_by_their_own_method(quote, text):
+    """B4's other four pairs anchor through the character-stream tier with its
+    quantity-aware veto, as FUZZY / ``char_stream`` on the whole run
+    (WP-05.2's recorded limit, flipped by remediation WP-05.3; more in
+    ``tests/test_anchor_character_stream.py``)."""
+    anchor, matched = _place(quote, _line(text))
+    assert (anchor.status, anchor.method, matched) == ("FUZZY", "char_stream", text)
 
 
-def test_recorded_limit_a_sub_phrase_can_drop_a_separated_unit():
-    """Present before this slice for unbracketed text; the fold extends it to a
-    bracketed number. The veto reads numbers, not their separated units
-    (WP-05.3's quantity-aware veto)."""
+def test_a_sub_phrase_cannot_drop_a_separated_unit():
+    """Remediation WP-05.3 (the owner's rule): a sub-phrase may not end on a
+    number the quote follows with another token, so ``568 L/S`` no longer
+    anchors on ``(568``, leaving its unit behind. It anchored FUZZY on ``150
+    GPM (568`` (WP-05.2's recorded limit, flipped by WP-05.3)."""
     anchor, matched = _place("150 GPM 568 L/S", _line("FLOW 150 GPM (568 L/MIN) AT"))
-    assert (anchor.status, anchor.method) == ("FUZZY", "fuzzy_subphrase")
-    assert matched == "150 GPM (568"
+    assert anchor.status == "UNANCHORED", (anchor, matched)
 
 
 # --------------------------------------------------------------------------- #

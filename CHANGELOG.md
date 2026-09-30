@@ -246,6 +246,72 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A quote that differs from the sheet only in its spacing now anchors, and
+  a decimal point extracted as a word of its own no longer turns `.5` into
+  `5` (remediation WP-05.3; B4's character-stream part).** Four kinds of
+  verbatim quote went UNANCHORED because the PDF extraction spaced the sheet's
+  words differently from the quote: an inch or foot mark or a percent sign
+  extracted as its own word (`PROVIDE 6" DRAIN` on a sheet reading `PROVIDE 6
+  " DRAIN`, `SLOPE 2% MIN` on `SLOPE 2 % MIN`), a feet-inches dimension split
+  around its hyphen (`12'-6"` on `12' - 6"`), and two words merged by
+  extraction (`PROVIDE INCH DRAIN` on `PROVIDE INCHDRAIN`). Each was inked as
+  the `[QUOTE NOT FOUND]` hallucination signal, no verifier ever looked at it,
+  and cross-sheet QC dropped such a leg as not found.
+
+  Now, decided with the owner (see the WP-05.3 handoff in
+  `_plans/PROGRESS.md`):
+  - **A character-stream tier**, the anchor's last quote tier: the whole quote
+    on a contiguous run of whole sheet words, in reading order, compared with
+    every space removed, where each spacing difference must be one of three
+    named joins: a number and a separated `"` `'` or `%`; the feet-inches
+    hyphen; letters merged by extraction (one sheet word for several quote
+    words, each letters only). Anything else refuses the match: two numbers
+    joined or one split (`ROOM 12` never matches `ROOM 1 2`, `VAV-21` never
+    `VAV-2-1`), a sign, a decimal point, a fraction slash, a comma, a tag's
+    letter and number (`P1` / `P-1`), a unit word (`6INCH`), a size's `x`, a
+    degree sign, and one quote word spread over two sheet words (`THERAPIST`
+    never matches `THE RAPIST`, nor `XP-1` `X P-1`). Both sides must also read
+    the same quantities through the existing quantity reader, so `12' -6"`
+    (read as a negative six inches) is not `12'-6"`. The anchor records it as
+    FUZZY with its own method, `char_stream` (`char_stream_ambiguous` when
+    the finding's tile does not settle two occurrences), never EXACT, and the
+    arithmetic auditor does not trust operands on it: a mismatch it anchors
+    stays model-transcribed and is crop-verified.
+  - **A number split around a lone `.`** (`. 5`, `5 . 25`) is never matched
+    in part, in any tier, on the sheet or in the quote: `SET AT 5 IN` used to
+    anchor EXACT on `SET AT . 5 IN`, and cross-sheet QC grounded it.
+  - **A sub-phrase keeps a number's unit**: the fuzzy sub-phrase tier may not
+    stop at a number the quote goes on from, so `150 GPM 568 L/S` no longer
+    anchors on `150 GPM (568` (leaving `L/S` behind). The rule reads
+    positions, not units, so a quote whose number is followed by any other
+    word loses that sub-phrase match too.
+  - **Cross-sheet QC grounds through the same matcher**, so a leg quoting
+    `6" DRAIN` on a sheet reading `6 " DRAIN` is kept, and the anchor and
+    cross-QC still agree on what is printed.
+
+  **Visible effect:** such a finding is clouded where it used to be a `[QUOTE
+  NOT FOUND]` callout, and on an exhaustive run it gets one crop verification
+  call (plus an investigation if the crop cannot settle it). `findings.csv`
+  and `findings.json` show `anchor_method` `char_stream`. Measured over the
+  whole test suite: no anchor any earlier tier placed moved (0 of 1,064), and
+  no cross-QC grounding verdict changed (0 of 738). Accepted limits, recorded
+  as tests: a fact-tile join does not join across spacing (a leg quoted `6"`
+  does not take the tile of a fact recorded `6 "`); `12' -6"` (spaced on one
+  side, read as a negative) does not anchor.
+
+  **Cache:** the anchor stage is not cached; a newly anchored finding gets
+  new verification and investigation entries (new paid work, by design).
+  Cross-sheet QC's admission changed, so `cross_qc._CROSS_QC_CACHE_CONTRACT`
+  goes 6 → 7 and every stored cross-QC result misses once (no release has
+  shipped contracts 4 to 6, so a user upgrading from 1.7.0 pays one miss in
+  all). No other key, prompt, schema or finding id changed.
+
+  Tests: `tests/test_anchor_character_stream.py` (197). The two WP-05.2
+  recorded limits in `tests/test_anchor_whole_words.py` are flipped (renamed
+  `test_the_character_stream_cases_anchor_by_their_own_method` and
+  `test_a_sub_phrase_cannot_drop_a_separated_unit`), and the four cross-QC
+  contract tripwires read 7.
+
 - **A failed batch critique read was never retried, and a critique cut off at
   `max_tokens` was never given more room (remediation WP-01.8; N4 critique
   part, R2, WP-01 step 5).** On the Message Batches transport (Hybrid and
