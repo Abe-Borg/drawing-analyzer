@@ -246,6 +246,75 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Two findings that gave the same sizes to different roles merged into one,
+  and a duct size's `x12` counted as a tag (remediation WP-04.3; WP-04 step 4,
+  the regression matrix's "repeated values in different roles").** A finding's
+  critical signature holds its quantities as a set, so `Provide 6 in main and
+  4 in branch` and `Provide 4 in main and 6 in branch` signed alike (`{4in,
+  6in}`), and so did `6 in supply and 6 in return` against `6 in supply and 8
+  in return` (`{6in}` is inside `{6in, 8in}`). With the same words around them,
+  each pair folded into one finding in the critique's two-read merge and in the
+  findings ledger, and one of the two claims was lost.
+
+  Now, decided with the owner (see the WP-04.3 handoff in
+  `_plans/PROGRESS.md`):
+  - **Roles are read from a closed list** of role words: main, branch, riser,
+    drop, header, supply, return, suction, discharge, inlet, outlet, upstream,
+    downstream, entering, leaving, primary, secondary, min/max, static,
+    residual, cold, hot. A role is read right after the value (`6 in main`,
+    `6 in (main)`, `6 in supply and return`), as a label (`main: 6 in`,
+    `main = 6 in`) or with `is`/`are` (`the main is 6 in`). Nothing else is a
+    role: a location, a tag, a word after `at`, `per`, `for` or `with`, an
+    ordinal, and status words (shown, required, scheduled...), which two reads
+    of one 500/550 gpm conflict can put on different values.
+  - **Compared per role**: where both findings give a role values of one kind,
+    one side's must include the other's (a pipe size, a pressure, a flow, a
+    voltage, a W×H size or a temperature alike). A role only one finding names
+    never keeps them apart, so the commonest duplicate there is, the same
+    "500 gpm shown, 550 gpm required" from both critique reads, still merges.
+  - **An ambiguous role is kept apart from a stated one**: a value list with
+    a role list after it and no `respectively` (`6 in and 4 in main and
+    branch`), or a role word between two values (`MAIN 6" BRANCH 4"`), does
+    not say which value is which, so such a finding stays separate from one
+    that names the roles for that kind. `respectively` pairs values and roles
+    in order.
+  - **A dimension separator is not a tag**: an `x` glued to a digit's inch or
+    foot mark (`24"x12"`, `10'x12'`) no longer reads as the tag `X12`, which
+    kept a `24"x12"` duct apart from the same duct described `at grid C-4`.
+
+  **Visible effect:** some findings that used to merge now appear as two, each
+  with its own markup, and a critique finding whose two reads disagreed on
+  which value is the main is reported as two single-read findings rather than
+  one corroborated one. Kept apart on purpose, although they may be one issue:
+  an ambiguous role against a stated one, which includes a role word before a
+  distance (`the 6 in main 10 ft from the wall`). **Still merged** (recorded as
+  tests): swapped values around a word off the list (`floor drain` / `roof
+  drain`, two tags, `at the inlet`), status words, two findings that are both
+  ambiguous, and a bare label (`MAIN 6"`, which is not read). The prose
+  harvest's veto reads the same rule, so a prose item with the roles swapped
+  no longer joins the finding it contradicts. Measured over the whole test
+  suite: no other merge decision moved (0 of 6,596), no prose-harvest veto
+  (0 of 389), no anchor (0 of 1,072) and no cross-QC grounding verdict (0 of
+  769).
+
+  **Cache:** a cached critique holds findings merged under the old rule, so
+  `digest_cache._CRITIQUE_CACHE_CONTRACT` goes 3 → 4 and **the first
+  exhaustive run after upgrading re-runs the critique on every sheet once** (no
+  release has shipped contracts 1 to 3, so a user upgrading from 1.7.0 pays it
+  once in all). Digests, the set identity, review plans, citation checks and
+  investigations stay cached, and the old entries are left on disk. An A/B arm
+  record now stores the roles (`critical_signature` gains `roles` and
+  `ambiguous_roles`), so `RECORD_CONTRACT_VERSION` goes 3 → 4 and an arm
+  recorded before this change is refused as a stale contract: re-run it. The
+  quantity reader's tokens, which the anchor reuses, are unchanged.
+
+  Tests: `tests/test_quantity_roles.py` (118), the two role rows moved from
+  `_RECORDED_LIMITS` to `_CONFLICTS` in `tests/test_quantity_signature.py`,
+  the dimension-separator tests in `tests/test_signature_compatibility.py`,
+  the WP-04.3 sections of `tests/test_ab_findings_diff.py` and
+  `tests/test_drawing_cache_identity.py` (the merge rule's fingerprint pinned
+  under contract 4).
+
 - **A quote that differs from the sheet only in its spacing now anchors, and
   a decimal point extracted as a word of its own no longer turns `.5` into
   `5` (remediation WP-05.3; B4's character-stream part).** Four kinds of

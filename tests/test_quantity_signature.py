@@ -483,6 +483,20 @@ _CONFLICTS = {
         "Duct 24x12 at 1,200 cfm conflicts with the steel beam at grid C near VAV-3",
         "Duct 24x10 in at 1,200 cfm conflicts with the steel beam at grid C near VAV-3",
     ),
+    # Quantity roles (WP-04.3), flipped from _RECORDED_LIMITS. Both findings
+    # carry the same tokens and the same words; only the role a value takes
+    # separates them (critique._quantity_roles). The rest of the role tables
+    # are in tests/test_quantity_roles.py.
+    "swapped roles: 6 in main, 4 in branch vs 4 in main, 6 in branch": (
+        "Provide 6 in main and 4 in branch at the riser serving the east data hall",
+        "Provide 4 in main and 6 in branch at the riser serving the east data hall",
+    ),
+    # A set holds a value once, so a value repeated in two roles read as one
+    # value, and {6in} is included in {6in, 8in}; the return's value differs.
+    "one value in two roles: 6 in supply and return vs 6 in supply, 8 in return": (
+        "Provide 6 in supply and 6 in return at the riser serving the east data hall",
+        "Provide 6 in supply and 8 in return at the riser serving the east data hall",
+    ),
 }
 
 
@@ -696,21 +710,9 @@ def test_pairs_kept_apart_by_design(pair):
 
 # Recorded limits: pairs that still merge although they may be two issues.
 # Each pins today's outcome so that a change to it is deliberate: a slice that
-# closes one flips its row into _CONFLICTS.
+# closes one flips its row into _CONFLICTS (WP-04.3 flipped the two role rows;
+# the four left are WP-04.4's).
 _RECORDED_LIMITS = {
-    # Quantity roles are not extracted anywhere. Both findings carry {4in, 6in}
-    # and the same words, so nothing in the signature or the prose separates
-    # them (WP-04.3).
-    "swapped roles: 6 in main, 4 in branch vs 4 in main, 6 in branch": (
-        "Provide 6 in main and 4 in branch at the riser serving the east data hall",
-        "Provide 4 in main and 6 in branch at the riser serving the east data hall",
-    ),
-    # A set holds a value once, so a value repeated in two roles reads as one
-    # value, and {6in} is included in {6in, 8in} (WP-04.3).
-    "one value in two roles: 6 in supply and return vs 6 in supply, 8 in return": (
-        "Provide 6 in supply and 6 in return at the riser serving the east data hall",
-        "Provide 6 in supply and 8 in return at the riser serving the east data hall",
-    ),
     # Feet-inches is two tokens (WP-04.1, by decision), so a bare 12' reads as
     # the feet half with no inches given, not as 12'-0".
     "a bare feet value: 12'-6\" vs 12'": (

@@ -89,7 +89,14 @@ COMPARISON_INCOMPLETE = "INCOMPLETE"
 #: exactly as a fresh one is: both arms of a comparison always share one rule.
 #: Bump this when what a record STORES changes shape or meaning, not when the
 #: rule that reads it does.
-RECORD_CONTRACT_VERSION = 3
+#:
+#: v4 (remediation WP-04.3): ``critical_signature`` stores quantity roles
+#: (``roles``, ``ambiguous_roles``), which the rule compares. A v3 record has no
+#: role keys, and the rule reads a missing key as "no role", which never
+#: conflicts, so a v3 baseline against a v4 variant would call a swapped
+#: ``6 in main, 4 in branch`` / ``4 in main, 6 in branch`` pair EXACT: the silent
+#: failure above. Refused, never deleted: re-run the arm.
+RECORD_CONTRACT_VERSION = 4
 
 _WS_RE = re.compile(r"\s+")
 

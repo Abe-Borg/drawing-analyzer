@@ -732,6 +732,53 @@ def test_a_critique_entry_from_wp_04_2_misses_and_is_never_deleted(tmp_path):
         reopened.close()
 
 
+# The critique keys WP-01.4 wrote (``critique_contract=3``) for the same inputs.
+# WP-04.3 changed the merge rule: quantity roles (``critique._quantity_roles``)
+# keep apart two findings that give the same values to different roles, and a
+# dimension separator (``24"x12"``) is no longer a tag. An entry stored under 3
+# can hold a merge the new rule refuses, so each must miss once, and no other
+# key may move.
+_CRITIQUE_KEYS_UNDER_CONTRACT_3 = {
+    "critique_l2": "6b3eacdd53840b0f307da8b3c62213759d89c82db04699097f5fe323f0ba8fd0",
+    "critique_l1": "7c21adde87d243918f32adfd7223470c0a1d6b24cefa45177a1396bb43459b1e",
+    "critique_l2_profiles_structured":
+        "d347190ab918996b18d0b69bdadf0cc9a99fb0181459fb8b6acf7d7a9af15686",
+    "critique_l1_profiles_structured":
+        "7b49c11df2ec732b92e896e62b4093befff564eed55a6041ffdb69342ace2706",
+}
+
+
+def test_wp_04_3_moves_every_critique_key_and_no_other_key():
+    now = _current_keys()
+    for name in _CRITIQUE_KEYS:
+        assert now[name] != _CRITIQUE_KEYS_UNDER_CONTRACT_3[name], (
+            f"{name}: an entry merged without quantity roles would still hit")
+    for name in _OTHER_KEYS:
+        assert now[name] == _KEYS_BEFORE_WP_04_1[name], f"{name}: a paid entry was orphaned"
+
+
+def test_a_critique_entry_from_wp_01_4_misses_and_is_never_deleted(tmp_path):
+    path = tmp_path / "digest_cache.json"
+    cache = DigestCache(path, persist=True)
+    stale = {"findings": [], "claims": [], "runs": 2, "requested_runs": 2,
+             "completed_runs": 2, "input_tokens": 1, "output_tokens": 1}
+    cache.put(_CRITIQUE_KEYS_UNDER_CONTRACT_3["critique_l1"], stale)
+    cache.put(_CRITIQUE_KEYS_UNDER_CONTRACT_3["critique_l2"], stale)
+    cache.put(_KEYS_BEFORE_WP_04_1["digest_l1"], {"text": "digest", "stop_reason": "end_turn"})
+    cache.close()
+
+    reopened = DigestCache(path, persist=True)
+    try:
+        now = _current_keys()
+        assert reopened.get(now["critique_l1"]) is None
+        assert reopened.get(now["critique_l2"]) is None
+        assert reopened.get(now["digest_l1"]) == {"text": "digest", "stop_reason": "end_turn"}
+        assert reopened.get(_CRITIQUE_KEYS_UNDER_CONTRACT_3["critique_l1"]) == stale
+        assert reopened.get(_CRITIQUE_KEYS_UNDER_CONTRACT_3["critique_l2"]) == stale
+    finally:
+        reopened.close()
+
+
 # The merge rule a stored critique was produced under, fingerprinted over a
 # fixed corpus: the critical signature of every finding, the pairwise duplicate
 # verdict, and the self-consistency merge of the corpus read as two reads. A
@@ -790,6 +837,28 @@ _MERGE_RULE_CORPUS = (
      "data hall chilled water loop", ""),
     ("Fan EF-2 motor is 5 hp at 480V per the fan schedule", ""),
     ("Fan EF-2 motor is 7.5 kW at 480V per the fan schedule", ""),
+    # Added by WP-04.3: quantity roles (swapped, one value in two roles, each
+    # binding form, respectively, ambiguity, a missing role), the 500/550
+    # duplicate that must still fold, and a dimension separator beside a
+    # different extra reference.
+    ("Provide 6 in main and 4 in branch at the riser serving the east data hall", ""),
+    ("Provide 4 in main and 6 in branch at the riser serving the east data hall", ""),
+    ("Provide 6 in and 4 in piping at the riser serving the east data hall", ""),
+    ("Provide 6 in and 4 in main and branch at the riser serving the east data hall", ""),
+    ("Provide 6 in and 4 in main and branch respectively at the riser serving the east "
+     "data hall", ""),
+    ("Provide 6 in supply and 6 in return at the riser serving the east data hall", ""),
+    ("Provide 6 in supply and 8 in return at the riser serving the east data hall", ""),
+    ("Riser sizes at the east data hall: main: 6 in, branch: 4 in", 'MAIN 6" BRANCH 4"'),
+    ("At the east data hall riser the main is 4 in and the branch is 6 in", ""),
+    ("PRV-1 is set at 100 psi inlet and 80 psi outlet per the valve schedule", ""),
+    ("PRV-1 is set at 80 psi inlet and 100 psi outlet per the valve schedule", ""),
+    ("Pump P-1 shows 500 gpm but the pump schedule requires 550 gpm at the design point",
+     "P-1 500 GPM"),
+    ("Pump P-1 shows 500 gpm but the pump schedule requires 550 gpm at the design point", ""),
+    ('Duct 24"x12" serving VAV-3 conflicts with the steel beam on the level 2 plan', ""),
+    ("Duct 24x12 in serving VAV-3 conflicts with the steel beam at grid C-4 on the level 2 "
+     "plan", ""),
 )
 
 
@@ -841,6 +910,12 @@ _MERGE_RULE_BY_CRITIQUE_CONTRACT = {
     # model finished), not for the merge rule, which is unchanged: the same
     # fingerprint as under 2.
     3: "63dbfe17b7cb08dc9eda2a098658dca89c9ca5432283ecad01dbf65783470dd8",  # WP-01.4
+    # WP-04.3: quantity roles, and a dimension separator is not a tag. The
+    # values under 2 and 3 were computed over the corpus as WP-04.2 left it
+    # (the rows above "Added by WP-04.3"); over the extended corpus that rule
+    # fingerprints as
+    # b3660a7ebac40bab2e2219aa893aac514c56dae6448ac19fb18c35c22bbd8c5c.
+    4: "b62e9526fd740d491b66f6ed6d32edef69c1782eea159e11889ed188f4e2f60f",  # WP-04.3
 }
 
 

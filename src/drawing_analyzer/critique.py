@@ -606,7 +606,17 @@ def _same_sheet(a: Finding, b: Finding) -> bool:
 # digits — VAV-3, M-101, FP101, RV-3, AHU-2, M1.01, E2.1. A space is *not* a
 # separator, so "SET 165" is a measurement, not a tag. A hyphen is normalized away
 # (M-101 == M101) but a DOT is kept (M1.01 != M10.1 — different sheets).
-_TAG_RE = re.compile(r"\b([A-Za-z]{1,4})-?(\d{1,4}(?:[.-]\d{1,3})?[A-Za-z]?)\b")
+#
+# An ``x`` or ``X`` glued to a digit's inch or foot mark is a dimension
+# separator, never a tag (remediation WP-04.3, the owner's rule): the ``x12`` of
+# ``24"x12"``, ``10'x12'`` or ``6"x12'`` read as a tag ``X12``, and under
+# WP-04.2's tag inclusion that stray tag, beside a different extra reference on
+# the other finding (``at grid C-4``), kept apart two findings about one duct. A
+# spaced ``24" x12"`` is not glued to the mark and still reads as a tag (a
+# recorded limit). Rides the critique contract, like every change here.
+_TAG_RE = re.compile(
+    r"\b(?!(?<=\d[\"'])[xX]\d)([A-Za-z]{1,4})-?(\d{1,4}(?:[.-]\d{1,3})?[A-Za-z]?)\b"
+)
 # --- Measurements: the quantity tokenizer (item 23; remediation WP-04.1) --------
 #
 # A measurement signs as ONE token, ``<value><unit>``, and the value is what the
@@ -993,8 +1003,38 @@ def _read_one(
 
 
 @functools.lru_cache(maxsize=4096)
+def _quantity_readings(text: str) -> tuple[tuple[str, int, int], ...]:
+    """Every measurement in ``text`` as ``(token, start, end)``, in text order.
+
+    The one scanner. ``start`` is where the number (with its sign) begins and
+    ``end`` where the quantity's last unit or dimension ends, so the text
+    around a quantity can be read (its role, remediation WP-04.3). A W×H
+    candidate that is not a size hands its next dimension back as its own
+    reading, as the tokens always did. Memoized on the text, the whole input.
+    """
+    out: list[tuple[str, int, int]] = []
+    pos, tail = 0, None
+    while True:
+        m = _NUMBER_AT_RE.match(text, tail) if tail is not None else None
+        if m is None:
+            m = _NUMBER_RE.search(text, pos)
+        if m is None:
+            return tuple(out)
+        token, end, tail = _read_quantity(text, m)
+        if token is not None:
+            out.append((token, m.start(), end))
+        pos = max(end, m.end())
+        if tail is not None and tail < pos:
+            tail = None
+
+
+@functools.lru_cache(maxsize=4096)
 def _quantity_tokens(text: str) -> frozenset[str]:
     """Every measurement token in ``text``, in the representation described above.
+
+    The tokens of :func:`_quantity_readings`, unchanged by WP-04.3, which reads
+    roles beside them rather than in them: the anchor's quantity-aware veto
+    (``anchor._same_quantities``, WP-05.3) reuses this reader as it is.
 
     Memoized on the text itself, which is the whole input, so a hit can never be
     stale. The ledger's complete-link dedup recomputes a finding's signature
@@ -1002,25 +1042,204 @@ def _quantity_tokens(text: str) -> frozenset[str]:
     was measured). Uncached, this scanner made that ingest slower than the single
     regex it replaced (1.9 s against 1.4 s); cached, it is faster (0.9 s).
     """
-    out: set[str] = set()
-    pos, tail = 0, None
-    while True:
-        m = _NUMBER_AT_RE.match(text, tail) if tail is not None else None
-        if m is None:
-            m = _NUMBER_RE.search(text, pos)
-        if m is None:
-            return frozenset(out)
-        token, end, tail = _read_quantity(text, m)
-        if token is not None:
-            out.add(token)
-        pos = max(end, m.end())
-        if tail is not None and tail < pos:
-            tail = None
+    return frozenset(token for token, _start, _end in _quantity_readings(text))
 
 
 def _measurements(f: Finding) -> set[str]:
     # The UNIT is part of the signature, so "6 in" != "6 ft".
     return set(_quantity_tokens(_sig_text(f)))
+
+
+# --- Quantity roles (remediation WP-04.3; the owner's rules) --------------------
+#
+# The measurements are a SET, so two findings that give the same values to
+# different roles sign alike: ``6 in main and 4 in branch`` and ``4 in main and
+# 6 in branch`` both sign ``{4in, 6in}``, and ``6 in supply and 6 in return``
+# signs ``{6in}``, which ``{6in, 8in}`` includes. A role is what a value is FOR,
+# read from the words beside it, and the rule compares it per role
+# (``_roles_conflict``). Keeping apart every pair that carries two values of one
+# kind would split the commonest duplicate there is, the same "500 gpm shown,
+# 550 gpm required" from both critique reads, which binds no role and folds.
+#
+# The signal is a closed list: a role word names which of several same-kind
+# values a finding means (a pipe's place in the system, a flow's direction, a
+# winding, a limit, a flow-test pressure). Nothing off the list is a role: a
+# location, a tag, an ordinal, a status word. Status words are left out on
+# purpose: two reads of one 500/550 conflict can each call a different value
+# "shown" (on the plan, on the schedule), so reading them would split it.
+_ROLE_WORDS = {
+    spelling: role
+    for role, spellings in {
+        "main": ("main", "mains"),
+        "branch": ("branch", "branches"),
+        "riser": ("riser", "risers"),
+        "drop": ("drop", "drops"),
+        "header": ("header", "headers"),
+        "supply": ("supply",),
+        "return": ("return",),
+        "suction": ("suction",),
+        "discharge": ("discharge",),
+        "inlet": ("inlet", "inlets"),
+        "outlet": ("outlet", "outlets"),
+        "upstream": ("upstream",),
+        "downstream": ("downstream",),
+        "entering": ("entering",),
+        "leaving": ("leaving",),
+        "primary": ("primary",),
+        "secondary": ("secondary",),
+        "min": ("min", "minimum"),
+        "max": ("max", "maximum"),
+        "static": ("static",),
+        "residual": ("residual",),
+        "cold": ("cold",),
+        "hot": ("hot",),
+    }.items()
+    for spelling in spellings
+}
+# How a role is bound (every form is case-insensitive):
+#
+# * right after the value, or in parentheses there: ``6 in main``, ``6 in
+#   (main)``; a run of roles joined like a list binds each (``6 in supply and
+#   return``, ``6 in supply/return``). A role word followed by ``:`` or ``=``
+#   labels what comes next, so it is not the preceding value's;
+# * as a label before the value: ``main: 6 in``, ``main = 6 in``;
+# * with a copula before the value: ``the main is 6 in``, ``mains are 6 in``.
+#
+# A bare word before the value (``MAIN 6"``) is not read (a recorded limit).
+# ``at``, ``per``, ``for``, ``with`` or ``to`` between a value and a role word
+# binds nothing: none of the forms allows a word in between.
+_ROLE_WORD_AFTER_RE = re.compile(
+    r"\s*(?:\(\s*(?P<paren>[A-Za-z]+)\s*\)|(?P<word>[A-Za-z]+)\b)"
+)
+_ROLE_WORD_NEXT_RE = re.compile(
+    r"\s*(?:,\s*(?:and|or)\b|,|\band\b|\bor\b|&|/)"
+    r"\s*(?:\(\s*(?P<paren>[A-Za-z]+)\s*\)|(?P<word>[A-Za-z]+)\b)",
+    re.IGNORECASE,
+)
+_LABEL_MARK_RE = re.compile(r"\s*[:=]")
+_ROLE_LABEL_BEFORE_RE = re.compile(r"\b(?P<word>[A-Za-z]+)\s*[:=]\s*$")
+_ROLE_COPULA_BEFORE_RE = re.compile(
+    r"\b(?P<word>[A-Za-z]+)\s+(?:is|are|was|were)\s+$", re.IGNORECASE
+)
+_BEFORE_WINDOW = 32
+# Two same-kind values joined like a list (``6 in and 4 in``, ``6 in, 4 in``,
+# ``6 in or 4 in``, ``6 in / 4 in``) are one list, and a role beside a list does
+# not say which value it belongs to.
+_VALUE_LIST_JOIN_RE = re.compile(
+    r"\s*,\s*(?:(?:and|or)\s+)?|\s+(?:and|or)\s+|\s*[&/]\s*", re.IGNORECASE
+)
+_RESPECTIVELY_RE = re.compile(r"\s*,?\s*respectively\b", re.IGNORECASE)
+
+
+def _role_run_after(text: str, end: int) -> tuple[list[str], int, bool]:
+    """The roles right after position ``end``, where the run ends, and whether
+    its last word was bare (not in parentheses)."""
+    m = _ROLE_WORD_AFTER_RE.match(text, end)
+    if m is None:
+        return [], end, False
+    word = m.group("paren") or m.group("word")
+    role = _ROLE_WORDS.get(word.lower())
+    if role is None or _LABEL_MARK_RE.match(text, m.end()):
+        return [], end, False
+    roles, pos, bare = [role], m.end(), m.group("word") is not None
+    while True:
+        m = _ROLE_WORD_NEXT_RE.match(text, pos)
+        if m is None:
+            return roles, pos, bare
+        word = m.group("paren") or m.group("word")
+        role = _ROLE_WORDS.get(word.lower())
+        if role is None or _LABEL_MARK_RE.match(text, m.end()):
+            return roles, pos, bare
+        roles.append(role)
+        pos, bare = m.end(), m.group("word") is not None
+
+
+def _roles_before(text: str, start: int) -> list[str]:
+    """The role a label or a copula gives the value starting at ``start``.
+
+    Searched between bounds in the text itself, never in a slice: at a slice's
+    first character ``\b`` would hold inside a longer word, so ``domain:`` cut
+    at the window's edge would read as ``main:``."""
+    for pattern in (_ROLE_LABEL_BEFORE_RE, _ROLE_COPULA_BEFORE_RE):
+        m = pattern.search(text, max(0, start - _BEFORE_WINDOW), start)
+        if m is not None and m.group("word").lower() in _ROLE_WORDS:
+            return [_ROLE_WORDS[m.group("word").lower()]]
+    return []
+
+
+@functools.lru_cache(maxsize=4096)
+def _quantity_roles(text: str) -> tuple[frozenset[str], frozenset[str]]:
+    """The roles ``text`` gives its quantities: ``(bound, ambiguous)``.
+
+    ``bound`` holds ``"<role>=<token>"`` for every value a role is read for
+    (``main=6in``); ``ambiguous`` holds the tokens whose role the text states
+    but does not settle (the owner's rule):
+
+    * a value list followed by a role list without ``respectively`` (``6 in
+      and 4 in main and branch``), or a list with a role before it; with
+      ``respectively`` and as many roles as values, they pair in order;
+    * a bare role word between two values with nothing joining them (``MAIN
+      6" BRANCH 4"``, ``6 in main 4 in branch``): it may be either value's.
+
+    A value with a label or copula role before it and a different role after
+    it takes both. Memoized on the text, the whole input.
+    """
+    readings = _quantity_readings(text)
+    bound: set[str] = set()
+    ambiguous: set[str] = set()
+    i = 0
+    while i < len(readings):
+        kind = _kind_of(readings[i][0])
+        j = i
+        while (
+            j + 1 < len(readings)
+            and _kind_of(readings[j + 1][0]) == kind
+            and _VALUE_LIST_JOIN_RE.fullmatch(text, readings[j][2], readings[j + 1][1])
+        ):
+            j += 1
+        values = readings[i:j + 1]
+        after, run_end, bare = _role_run_after(text, values[-1][2])
+        before = _roles_before(text, values[0][1])
+        if len(values) > 1:
+            if (after and not before and len(after) == len(values)
+                    and _RESPECTIVELY_RE.match(text, run_end)):
+                bound.update(f"{role}={token}" for role, (token, _s, _e) in zip(after, values))
+            elif after or before:
+                ambiguous.update(token for token, _s, _e in values)
+        else:
+            token = values[0][0]
+            if (after and bare and j + 1 < len(readings)
+                    and not text[run_end:readings[j + 1][1]].strip()):
+                ambiguous.add(token)
+                after = []
+            bound.update(f"{role}={token}" for role in (*after, *before))
+        i = j + 1
+    return frozenset(bound), frozenset(ambiguous)
+
+
+def _sig_parts(f: Finding) -> list[str]:
+    """What ``_sig_text`` joins, one part each: the text, the quote, and every
+    supporting quote. Roles are read part by part, so a role word that opens a
+    quote never binds to a value that ends the text."""
+    return [f.text or "", f.source_quote or "", *(getattr(f, "supporting_quotes", None) or [])]
+
+
+@functools.lru_cache(maxsize=4096)
+def _roles_of_parts(parts: tuple[str, ...]) -> tuple[frozenset[str], frozenset[str]]:
+    """The union of :func:`_quantity_roles` over a finding's parts. Memoized on
+    the parts, the whole input: the ledger signs a finding once per candidate."""
+    bound: set[str] = set()
+    ambiguous: set[str] = set()
+    for part in parts:
+        if part:
+            b, a = _quantity_roles(part)
+            bound |= b
+            ambiguous |= a
+    return frozenset(bound), frozenset(ambiguous)
+
+
+def _roles(f: Finding) -> tuple[frozenset[str], frozenset[str]]:
+    return _roles_of_parts(tuple(_sig_parts(f)))
 
 
 def _is_absence(f: Finding) -> bool:
@@ -1060,9 +1279,15 @@ def critical_signature(f: Finding) -> dict:
     byte-stable across runs (I-7). The rule that compares two of them is
     :func:`signature_conflicts`.
     """
+    bound, ambiguous = _roles(f)
     return {
         "tags": sorted(_tags(f)),
         "measurements": sorted(_measurements(f)),
+        # Remediation WP-04.3: the role each quantity takes (``main=6in``), and
+        # the quantities whose role the text leaves unsettled
+        # (:func:`_quantity_roles`).
+        "roles": sorted(bound),
+        "ambiguous_roles": sorted(ambiguous),
         "absence": _is_absence(f),
         "leg_targets": sorted(_leg_targets(f)),
     }
@@ -1103,11 +1328,16 @@ _QUANTITY_KIND = {
 }
 
 
+def _kind_of(token: str) -> str:
+    """A measurement token's kind: its unit's group, or the unit itself."""
+    unit = _TOKEN_UNIT_RE.fullmatch(str(token)).group(2)
+    return _QUANTITY_KIND.get(unit, unit)
+
+
 def _tokens_by_kind(tokens: set[str]) -> dict[str, set[str]]:
     kinds: dict[str, set[str]] = {}
     for token in tokens:
-        unit = _TOKEN_UNIT_RE.fullmatch(str(token)).group(2)
-        kinds.setdefault(_QUANTITY_KIND.get(unit, unit), set()).add(token)
+        kinds.setdefault(_kind_of(token), set()).add(token)
     return kinds
 
 
@@ -1123,6 +1353,39 @@ def _measurements_conflict(ma: set[str], mb: set[str]) -> bool:
         return True                  # nothing in common: the rule before WP-04.2
     ka, kb = _tokens_by_kind(ma), _tokens_by_kind(mb)
     return any(not _one_includes_the_other(ka[k], kb[k]) for k in ka.keys() & kb.keys())
+
+
+def _values_by_role(bound: set[str]) -> dict[tuple[str, str], set[str]]:
+    """``{(role, kind): tokens}`` from ``"<role>=<token>"`` bindings."""
+    by_role: dict[tuple[str, str], set[str]] = {}
+    for binding in bound:
+        role, _sep, token = str(binding).partition("=")
+        by_role.setdefault((role, _kind_of(token)), set()).add(token)
+    return by_role
+
+
+def _roles_conflict(a: dict, b: dict) -> bool:
+    """Whether two signatures' quantity roles conflict (remediation WP-04.3).
+
+    * For every role and kind both bind, one side's values must include the
+      other's (WP-04.2's inclusion, per role): ``main=6in`` against
+      ``main=4in`` conflicts, ``main=6in`` against ``main=6in`` and
+      ``main=8in`` does not. A role one side binds and the other does not
+      never conflicts, and neither does a missing role.
+    * A side whose only roles for a kind are ambiguous conflicts with a side
+      that binds a role in that kind (the owner's conservative retention).
+    """
+    bound_a, bound_b = a.get("roles") or (), b.get("roles") or ()
+    if not (bound_a or a.get("ambiguous_roles")) or not (bound_b or b.get("ambiguous_roles")):
+        return False                 # a role signal on one side only never conflicts
+    va, vb = _values_by_role(bound_a), _values_by_role(bound_b)
+    if any(not _one_includes_the_other(va[k], vb[k]) for k in va.keys() & vb.keys()):
+        return True
+    kinds_a = {kind for _role, kind in va}
+    kinds_b = {kind for _role, kind in vb}
+    only_ambiguous_a = {_kind_of(t) for t in a.get("ambiguous_roles") or ()} - kinds_a
+    only_ambiguous_b = {_kind_of(t) for t in b.get("ambiguous_roles") or ()} - kinds_b
+    return bool(only_ambiguous_a & kinds_b or only_ambiguous_b & kinds_a)
 
 
 def signature_conflicts(a: dict, b: dict) -> list[str]:
@@ -1148,6 +1411,13 @@ def signature_conflicts(a: dict, b: dict) -> list[str]:
       signatures that share no token at all conflict whatever their kinds, as
       before (``6 in`` / ``150 mm``, ``6 in`` / ``100 psi``). Tokens compare
       whole: no value is converted, and a composite is never split.
+      **Quantity roles** (remediation WP-04.3) report on this axis too: for
+      every role and kind both bind, one side's values must include the
+      other's, so ``6 in main, 4 in branch`` and ``4 in main, 6 in branch``
+      (one token set) conflict, and so do ``6 in supply and 6 in return`` and
+      ``6 in supply and 8 in return``; a side whose only roles for a kind are
+      ambiguous conflicts with one that binds a role in it
+      (:func:`_roles_conflict`). A role on one side only never conflicts.
     * **Tags**: one side's tags must include the other's. A finding may name a
       reference the other omits (corroboration), but ``P-1 + V-3`` and
       ``P-1 + V-4`` conflict. Tags are not grouped by prefix: a prefix is too weak
@@ -1168,19 +1438,19 @@ def signature_conflicts(a: dict, b: dict) -> list[str]:
     still see a grown signature: a critique representative entering the
     ledger, whose reads were merged upstream and whose signature holds their
     quotes but not their texts (WP-03.5); and the A/B harness, which compares
-    final findings.
-
-    **Not compared: quantity roles.** Nothing extracts them, so ``6 in main,
-    4 in branch`` and ``4 in main, 6 in branch`` carry the same tokens and are
-    compatible (a recorded limit, WP-04.3).
+    final findings. Roles grow the same way (they are read from the text, the
+    quote and every supporting quote), and the same member-wise checks cover
+    them: a survivor whose bundle passed to a finding that names no role
+    carries none in its live signature, and its members still refuse a
+    newcomer that swaps the roles another member named.
     """
     out: list[str] = []
     ta, tb = set(a.get("tags") or ()), set(b.get("tags") or ())
     if ta and tb and not _one_includes_the_other(ta, tb):
         out.append("tags")                 # a different equipment / drawing ref
     ma, mb = set(a.get("measurements") or ()), set(b.get("measurements") or ())
-    if _measurements_conflict(ma, mb):
-        out.append("measurements")         # a different quantity
+    if _measurements_conflict(ma, mb) or _roles_conflict(a, b):
+        out.append("measurements")         # a different quantity, or role
     if bool(a.get("absence")) != bool(b.get("absence")):
         out.append("absence_polarity")     # "shown" vs "not shown"
     la, lb = set(a.get("leg_targets") or ()), set(b.get("leg_targets") or ())
