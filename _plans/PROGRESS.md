@@ -598,7 +598,8 @@ what could not be verified, risks, and next steps.
     gains `feet_inches`). Nothing else moved.
 - **Validation** (this container):
   - **The instrumented diff, `origin/main` vs this branch** (the full suite
-    under the probe, 5,895 passed before the last two test-row edits): over
+    under the probe, 5,895 passed, on the code before the abbreviation-period
+    fix and the last test rows; the replay below covers the final code): over
     the tests both runs share, compared by content (cross-QC runs its shards
     on worker threads, so call order varies), **0 of 22,338 merge decisions,
     0 of 491 prose vetoes, 0 of 1,268 anchors and 0 of 908 grounding verdicts
@@ -628,7 +629,7 @@ what could not be verified, risks, and next steps.
     contract re-pin); none new. `python scripts/scan_secrets.py`: clean (the
     new file staged). No key anywhere, every new parametrized case has
     `ids=`, no invisible character added (the tests write the degree sign
-    and the en dash as `°` and `–`).
+    and the en dash as `\u00b0` and `\u2013`).
   - The browser suite was not run separately: no report or JavaScript
     changed, and its tests ran inside the full suite.
 - **Docs:** CHANGELOG (Fixed); CLAUDE.md (the signature paragraph: the
