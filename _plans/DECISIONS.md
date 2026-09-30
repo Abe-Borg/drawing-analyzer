@@ -454,8 +454,8 @@ conforms to the decision above and restates none of it.
   identity corpus and its key; every reply read through the join (the digest,
   its batch transport, the critique, cross-QC, citation, investigation).
 
-Added by WP-01.7: **an interrupted stream's partial read, its retry and its
-usage** (U1's partial-stream part, plan WP-14 step 7; the owner's rules,
+Added by WP-01.7 ([PR #185](https://github.com/Abe-Borg/drawing-analyzer/pull/185)): **an interrupted stream's partial read, its retry
+and its usage** (U1's partial-stream part, plan WP-14 step 7; the owner's rules,
 decided in two rounds and one follow-up with measured options and a case table
 per option). It amends the "interrupted stream" line above: a stream that
 raises is no longer a transport failure whose read is lost. It conforms to the
