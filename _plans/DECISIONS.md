@@ -565,7 +565,7 @@ classifier and restates none of it.
   the batch rescue's attempt records; the SDK-contract test's patch point
   (each set-level stage passes its own `stream_message` to `stream_reply`).
 
-Added by WP-01.8: **a failed batch critique read is retried, and a critique
+Added by WP-01.8 ([PR #186](https://github.com/Abe-Borg/drawing-analyzer/pull/186)): **a failed batch critique read is retried, and a critique
 cut off at `max_tokens` gets one raised-cap retry, on both transports** (N4's
 critique part, R2, WP-01 step 5; the owner's rules, decided in three rounds with
 measured options and a case table per option). It conforms to the classifier
