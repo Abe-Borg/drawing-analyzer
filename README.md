@@ -755,6 +755,31 @@ the boundary: a word split in two in the prose, and a boundary inside the
 findings JSON lost the sheet's findings. Replies without a fallback marker read
 exactly as before.
 
+**A stream that breaks mid-reply is retried, and what it delivered is kept and
+billed.** Every large call streams its reply (the digest, the critique, the
+review plan, the synthesis, the focus report, the batch rescue, and every
+investigation turn). If the connection drops part way, or the API sends an
+error event in the middle of the reply (an `overloaded_error` when it is busy,
+say), the call is retried like any other temporary failure, twice at most; an
+error event that says the request itself is wrong (`invalid_request_error`,
+`authentication_error`, …) is not. Once the retries are spent, the part of the
+reply that arrived is judged like any reply the model did not finish: a digest
+keeps its text under a *Failed* status with its findings held out
+(`unfinished digest (stop_reason=None, interrupted='overloaded_error')`), the
+other calls keep nothing, and nothing unfinished is cached. When nothing arrived
+at all, the error says so: `stream interrupted (connection dropped — try
+again)`, `stream interrupted (overloaded_error: Overloaded)`. A stream that
+broke after its last real event, when the reply was already complete, is used
+as it is. Before this, the call failed at once with `HTTP 200: {'type':
+'error', …}` or `peer closed connection without sending complete message
+body`, and was recorded as costing nothing.
+
+Each attempt's usage is recorded, including the input tokens an interrupted
+stream reported when it started. An interrupted stream never reports its output
+tokens, so the usage record counts such attempts (`interrupted_attempts` in
+`run_manifest.json`), and `run.log`'s usage section adds a line saying the
+output and cost totals are lower bounds when any attempt was interrupted.
+
 A tolerant parser splits this block off and **strips it from the prose**, so the
 digest text — and the `combined_text` a downstream spec reviewer consumes — is
 byte-for-byte what it was before the block existed (the prose digest is sacred).

@@ -73,7 +73,10 @@ and its `_refusal_fallback_available` latch; `verify._degrade_kind` and the
       (the digest's `call_error` path; verify's `DEGRADE_FAILED`);
     - *interrupted stream*: when the SDK returns, it is `UNFINISHED` (N27).
       When the stream raises, it is a transport failure, and the partial read
-      is lost today; capturing it is WP-01.7;
+      is lost today; capturing it is WP-01.7; *(amended by WP-01.7: the
+      stream's partial read is captured, `core.stream_interruption.StreamInterrupted`,
+      and once the transient retries are spent it is the reply, judged by this
+      classifier like any reply; see the WP-01.7 note below)*
     - *malformed result*: a finished reply the stage cannot parse (verify's
       `DEGRADE_MALFORMED`; the digest's findings-block `MALFORMED_*`
       telemetry, which never fails a sheet, because the prose is the
@@ -450,6 +453,113 @@ conforms to the decision above and restates none of it.
   focus record); verification's counters, notes, stage status and cache; the
   identity corpus and its key; every reply read through the join (the digest,
   its batch transport, the critique, cross-QC, citation, investigation).
+
+Added by WP-01.7 ([PR #185](https://github.com/Abe-Borg/drawing-analyzer/pull/185)): **an interrupted stream's partial read, its retry
+and its usage** (U1's partial-stream part, plan WP-14 step 7; the owner's rules,
+decided in two rounds and one follow-up with measured options and a case table
+per option). It amends the "interrupted stream" line above: a stream that
+raises is no longer a transport failure whose read is lost. It conforms to the
+classifier and restates none of it.
+- **Measured first** (zero API calls, the real SDK over `AnthropicAPIStub`,
+  every `CUTS` x `ENDS`, both namespaces, Opus 5.5 and Sonnet 5.5, SDK 1.7.0 and
+  again 1.8.0 in a scratch venv, identical):
+  - the SDK raises the transport's own `httpx2.RemoteProtocolError` for a
+    dropped connection (not wrapped), `APIStatusError` with `status_code` 200
+    and the event's type on `.type` for an SSE `error` event, and its own
+    `AssertionError` for a clean end with no event;
+    `digest._is_transient_error` recognised none, so every streamed stage failed
+    after one request (`HTTP 200: {'type': 'error', …}`, `peer closed
+    connection without sending complete message body`);
+  - the SDK's `max_retries` re-sends a request, never a started stream (1
+    request with `max_retries=2`), so a host retry doubles no layer;
+  - `current_message_snapshot` stays readable after the `with` exits: before
+    `message_delta`, no stop reason and `message_start`'s usage (input, cache
+    counters, the `cache_creation` split; output 0); after it, the complete
+    read (stop reason, final usage) even when the stream then drops; no
+    `message_start`, the SDK's `AssertionError`;
+  - the ladder and `unfinished_reply_error` read a snapshot as `unfinished …
+    (stop_reason=None)` (`empty …` with no text); `keep_digest_read` ranks one
+    with content a partial read, above an empty or raised retry;
+  - today, per consumer (m3, 66 cases, both SDKs): the digest failed with 0/0
+    recorded; the critique read failed and its tokens were dropped from the
+    sheet's record; the planner failed with a 0-token record; synthesis and
+    focus recorded nothing; the investigation's turn failed 0/0, the stage
+    PARTIAL. Nothing retried. Over the whole suite, 5 of 2,589 streamed calls
+    raised inside `get_final_message`, all in WP-02.3's recorded limits.
+  - **The investigation streams too** (every turn), a seventh streamed path
+    the request's list did not name.
+- **The capture site** is `core.api_config._dispatch_messages`: a failure
+  inside `get_final_message()` raises `StreamInterrupted(cause, partial)` from
+  its cause (the class in its own stdlib-only module,
+  `core/stream_interruption.py`, so a reload of `api_config`, which the
+  report-chat tests do, cannot make two classes: measured, it did in the full
+  suite before the move) (`kind`: `error_event`, `connection`, `timeout`, `no_event`,
+  `other`; `error_type` / `error_message` from the event). A failure before the
+  stream exists is not wrapped (the latches read it). **A snapshot that
+  already got `message_delta` is the reply at once** (the follow-up question:
+  the round-1 retry table said "any cut", the round-2 usage preview showed one
+  attempt; the owner chose one attempt): nothing retried, judged by its stop
+  reason, cached when finished, as its clean-end twin always was.
+- **Retry: transient ones, one predicate.** `_is_transient_error` learns the
+  interruption: `connection`, `no_event` (read as dropped) and `timeout` are
+  transient; an `error_event` is transient exactly when its type stands for a
+  status in `_TRANSIENT_STATUSES` (`digest._ERROR_TYPE_STATUS`, pinned to the
+  SDK's `ErrorObject` types plus `request_too_large`): `overloaded_error`,
+  `api_error`, `rate_limit_error`, `timeout_error`; `other` is judged as its
+  cause. Inside each stage's existing transient retries (2 per call; the batch
+  rescue also inside its per-sheet and collection budgets): no bound moved.
+  Not taken: every interruption (re-sends an `invalid_request_error` twice); a
+  dropped connection only (an `overloaded_error` mid-stream reported, not
+  retried); no retry.
+- **The partial read is the reply** once the retries are spent (or at once for
+  a permanent cause), judged by this classifier: no stop reason is
+  `UNFINISHED`, so each stage takes its N27 path. The digest keeps its text
+  under an error (the per-sheet export shows it), holds its findings out (N15),
+  caches nothing, and folds every attempt's read through `keep_digest_read`
+  (N16, the owner's second-round choice): a partial read with content
+  outranks a later empty or raised attempt, a finished retry wins with no
+  suffix, and a call that ended with nothing in hand is named once (`"; retry
+  failed: stream interrupted (…)"`), as a raised-cap retry that raised always
+  was. The critique fails the read and keeps nothing (WP-01.4). The review
+  plan, synthesis and the focus report keep nothing (WP-01.6), through one
+  loop, `digest.stream_reply`. The batch direct rescue folds the partial read
+  like any rescue read. The investigation retries its turn and never uses a
+  partial turn (no tool from it runs). Not taken: never finished even after
+  `message_delta` (a complete read failed and re-read); discarding the partial
+  (the digest's export loses billed text); the last attempt's read for the
+  digest (a drop mid-text then two with no event would lose the text).
+- **The wording** is the ladder's with the cause in its parentheses, as a
+  refusal carries `category=` (`digest_terminal_error(…, interrupted=)`):
+  `unfinished digest (stop_reason=None, interrupted='overloaded_error')`,
+  `empty synthesis (stop_reason=None, interrupted='connection dropped')`. With
+  nothing in hand (`_clean_error`): `stream interrupted (<type>: <message>)`,
+  `stream interrupted (connection dropped — try again)` (a stream with no
+  event reads the same), `stream interrupted (timed out — try again)`; an
+  `other` cause keeps its own wording. Unchanged without an interruption. Not
+  taken: the ladder alone (a partial read indistinguishable from a clean early
+  end); a new ladder word `interrupted`.
+- **The usage** (plan WP-14 step 7): every attempt's reported usage is the
+  stage's (`digest.StreamUsage`), an interrupted one's being `message_start`'s,
+  and `UsageRecord.interrupted_attempts` (additive, default 0) counts the
+  attempts whose final usage never arrived. `RunUsage.interrupted_attempts`
+  totals it (`usage.interrupted_attempts` in `run_manifest.json`, schema v1
+  additive), and run.log's usage section says the output and cost totals are
+  then lower bounds. Each record keeps its stage's terminal status; the cost
+  stays a number and `is_billable_but_unpriced` is unchanged: D-7 (WP-14.4)
+  decides whether unreported output makes a total unknown, WP-14.5 per-attempt
+  records. A synthesis or focus call that got nothing back but was interrupted
+  is one FAILED record. Not taken: a terminal status `INTERRUPTED` only (a
+  recovered interruption leaves no mark); the counter plus an unknown cost
+  (moves into D-7); input only, no mark.
+- **Version / cache changes:** none (D-4's WP-01.7 note); no migration-register
+  row.
+- **Consumers affected:** every streamed stage's retries, errors and usage
+  records (`ctx.errors`, the stage tables, `run.log`, `run_manifest.json`); the
+  digest's kept read, its export and its held-out count; the critique's read
+  tally (an interrupted read that was retried to a finish is judged; one that
+  was not is "returned no judgment"); the investigation's per-finding record;
+  the batch rescue's attempt records; the SDK-contract test's patch point
+  (each set-level stage passes its own `stream_message` to `stream_reply`).
 
 ## D-2 Stage accounting — `decided` (WP-01.1, [PR #155](https://github.com/Abe-Borg/drawing-analyzer/pull/155))
 
@@ -1020,6 +1130,20 @@ never deleted (plan §2 rule 6, WP-10).
     failed and was never cached.
   - **The identity corpus** re-keys through the key's own input (the corpus
     hash): only a set with an errored sheet that carried text.
+- **Added by WP-01.7 (D-1's WP-01.7 note): nothing moved.** An interrupted
+  stream's partial read has no stop reason, so `digest_cache_admits`, the
+  critique's all-reads-counted admission and the set-level stages'
+  `unfinished_reply_error` refuse it at every writer, and no loader changes. A
+  snapshot that already got `message_delta` is stored like any finished reply,
+  the same payload under the same key (the owner's choice; its clean-end twin
+  was always admitted). No stored entry ever held an interrupted read (the
+  stream raised and nothing was stored), so nothing needs to miss. No key,
+  contract or `_SCHEMA_VERSION` change, and no migration-register row. The new
+  `UsageRecord.interrupted_attempts` is a run artifact field (manifest schema
+  v1, additive), not a cache payload. The digest's level-2 entry's
+  `input_tokens` / `output_tokens` now sum an interrupted attempt too when a
+  retry finished; they are informational (a hit bills nothing) and every
+  previously possible read stores the same values.
 - **Rejected shortcuts.**
   - A `_SCHEMA_VERSION` bump: it discards every paid digest.
   - A new key term for the same change, and a bump and a term together.
@@ -1087,7 +1211,12 @@ TTLs. Missing usage is unknown, never zero, and nothing is counted twice
 `core.pricing.usage_record_cost`, `PRICING_EFFECTIVE_DATE`,
 `RunUsage.is_billable_but_unpriced` (the single rule; never restate it),
 `digest._message_cache_usage` (the dict-tolerant reader), `_record_usage`
-(drops zero tool-use counts).
+(drops zero tool-use counts). Since WP-01.7: `digest.StreamUsage` (every
+attempt's reported usage, an interrupted stream's `message_start` counters
+included) and `UsageRecord.interrupted_attempts` / `RunUsage.interrupted_attempts`
+(attempts whose output was never reported). WP-01.7 kept the cost a number
+and left `is_billable_but_unpriced` alone: whether an interrupted attempt's
+unreported output makes a total unknown is this decision's.
 
 - Decision: —
 - Rejected shortcuts: —

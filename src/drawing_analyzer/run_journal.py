@@ -802,6 +802,14 @@ def _usage_lines(ctx: Any) -> list[str]:
         f"output {_int(getattr(ctx, 'total_output_tokens', 0) or 0):,} tok · "
         f"est. cost {_fmt_cost(getattr(ctx, 'total_estimated_cost', None))}"
     )
+    # Remediation WP-01.7: an interrupted stream reported its input but never
+    # its output, so the totals above undercount; say so, once.
+    interrupted = _int(getattr(getattr(ctx, "run_usage", None), "interrupted_attempts", 0) or 0)
+    if interrupted:
+        lines.append(
+            f"  {interrupted} attempt(s) interrupted mid-stream: their output tokens were "
+            "not reported, so the output and cost totals are lower bounds"
+        )
     lines.append(
         "  (totals are derived sums over the append-only usage ledger, §15.6; "
         "costs are estimates)"

@@ -186,8 +186,9 @@ were 0, every batch item `succeeded`, a stream that always reached
   accumulator holds at that cut (held to the SDK at every cut).
 - **The stub's transport knobs** (`sdk_transport.py`, defaults unchanged):
   `message_sse(msg, cut=, end=)` (one emitter), and `AnthropicAPIStub(stream=,
-  batch_result=, statuses=, order=)`: a per-request cut and end, a per-item
-  envelope, the status each retrieve answers (the last repeats; the SDK's
+  batch_result=, statuses=, order=)`: a per-request cut and end (and, since
+  remediation WP-01.7, an optional `error` event body, so any SSE error type
+  can be sent), a per-item envelope, the status each retrieve answers (the last repeats; the SDK's
   `results()` retrieves once more before it reads), the result order. A
   `PENDING` item reads `canceled` after a cancel and `expired` otherwise. The
   stub serves the requested model unless the reply names its own.
@@ -221,8 +222,8 @@ were 0, every batch item `succeeded`, a stream that always reached
 - **A mishandled shape is pinned, not fixed** (`tests/test_response_shapes.py`):
   what production gets right is asserted, and each defect is a
   `test_recorded_limit_*` that asserts today's behaviour and names the slice
-  that flips it (WP-01.7, WP-06.3, WP-13.4, WP-14.1, WP-14.2, WP-14.3;
-  WP-01.5 flipped its two, WP-01.6 its five). A fix fails the test; the owner
+  that flips it (WP-06.3, WP-13.4, WP-14.1, WP-14.2, WP-14.3; WP-01.5
+  flipped its two, WP-01.6 its five, WP-01.7 its two). A fix fails the test; the owner
   re-baselines it.
 - **A background upload release finishes inside its test**: the autouse
   `background_release_joined` (`tests/conftest.py`) joins, at teardown, every
@@ -278,7 +279,11 @@ The ledger describes work that **happened**, not stages that were configured: a
 stage that placed no call and took no cache hit appends nothing. Guard the
 real-time record on the call count alone — the old `if X.api_calls or not
 X.cache_hits` fired exactly in the no-work case it meant to exclude, so a
-verification that verified nothing still reported two real-time calls.
+verification that verified nothing still reported two real-time calls. A stream
+interrupted mid-read was billed too: its record carries the usage its first
+event reported, and `UsageRecord.interrupted_attempts` counts the attempts whose
+output was never reported, so a nonzero `RunUsage.interrupted_attempts` makes
+the output and cost totals lower bounds (remediation WP-01.7, below).
 `core.pricing.usage_record_cost` prices one record by its rate class; costs carry a
 `PRICING_EFFECTIVE_DATE`. The cache-read rate is the price row's own
 (`ModelPrice.cache_read_multiplier`: 0.05x on Opus 5.5, 0.1x elsewhere); writes
@@ -555,7 +560,9 @@ are finished; `max_tokens` and `model_context_window_exceeded` are truncations;
 (N27: for a stream that ends cleanly before its `message_delta`, the event
 that carries the stop reason, the real SDK's `get_final_message()` returns the
 partial text with `stop_reason=None` and raises nothing; one that lacks only
-`message_stop` returns the complete reply, measured in remediation WP-02.3);
+`message_stop` returns the complete reply, measured in remediation WP-02.3;
+one that *raises* before its `message_delta` hands its partial read over the
+same way once its retries are spent, remediation WP-01.7, below);
 `tool_use` / `pause_turn` / the beta `compaction` are
 continuations the digest never takes; anything else is unknown, never finished.
 The table is pinned by test to the installed SDK's `StopReason` ∪
@@ -779,6 +786,89 @@ U2, D-1; the owner's rules).**
   a stop reason). The planner, identity and verification keys have no term and
   were left (recorded residuals, `_plans/DECISIONS.md`); the corpus rule
   re-keys identity only for a set with an errored sheet that carried text.
+
+**An interrupted stream (remediation WP-01.7, U1 and plan WP-14 step 7; D-1's
+WP-01.7 note; the owner's rules).** A stream that raised after it started was
+lost whole: the SDK raises the transport's own `httpx2.RemoteProtocolError` for
+a dropped connection (not wrapped), `APIStatusError` with `status_code` 200 and
+the event's type on `.type` for an SSE `error` event, and its own
+`AssertionError` for a stream with no event at all; `_is_transient_error` knew
+none of them, the SDK's `max_retries` never re-sends a started stream
+(measured), and the read the SDK had accumulated went with its usage. Measured
+on SDK 1.7.0 and 1.8.0, both namespaces, Opus 5.5 and Sonnet 5.5, identical.
+- **The capture site** is `core.api_config._dispatch_messages`, the one place
+  every stream is read (`digest.stream_message`: the digest, the critique, the
+  review plan, synthesis, the focus report, the batch direct rescue, batch's
+  Files-API inline fallback through `digest_sheet`; and every investigation
+  turn). A failure inside `get_final_message()` raises
+  `StreamInterrupted(cause, partial)` from the cause (`core/stream_interruption.py`,
+  stdlib only, re-exported by `api_config`: its own module keeps it one class
+  when a test reloads `api_config`, as the report-chat tests do; in the full
+  suite a reloaded class stopped `digest`'s `isinstance` matching): `partial` is
+  `current_message_snapshot` (still readable after the `with` exits; `None`
+  when no `message_start` arrived), `kind` is `error_event` (`error_type`,
+  `error_message` from the event body), `connection`, `timeout`, `no_event` or
+  `other`, matched by class name in the MRO (no SDK or `httpx2` import).
+  A failure before the stream exists (a 400, a 529 the SDK retried) propagates
+  unchanged: the self-healing latches read it. **A snapshot that already got
+  `message_delta`** (a stop reason, the final usage; only `message_stop`
+  missing) is returned as the reply at once, as its clean-end twin always was:
+  nothing retried, judged by its stop reason, cached when finished.
+- **The retry.** `_is_transient_error` learns it (`_is_transient_interruption`):
+  `connection`, `no_event` and `timeout` are transient; an `error_event` is
+  transient exactly when its type stands for a status in `_TRANSIENT_STATUSES`
+  (`digest._ERROR_TYPE_STATUS`, the API's error types to their HTTP statuses,
+  pinned to the SDK's `ErrorObject` types plus `request_too_large`):
+  `overloaded_error`, `api_error`, `rate_limit_error`, `timeout_error`. `other`
+  is judged as its cause. Every streamed stage retries it inside the transient
+  retries it already had (2 per call; the rescue inside its per-sheet and
+  collection budgets), so no bound moved.
+- **The partial read is the reply once the retries are spent**, judged by D-1's
+  classifier like any reply: no stop reason is UNFINISHED, so each stage takes
+  its N27 path. The digest (`digest_sheet`) folds every attempt's read through
+  `keep_digest_read` (N16): the sheet keeps the best, a partial read's text
+  stays for the export, its findings are held out (N15) and nothing unfinished
+  is cached; a call that ended with nothing in hand is named once (`"; retry
+  failed: stream interrupted (…)"`), as a raised-cap retry that raised always
+  was. The critique (`_critique_read`) fails the read and keeps nothing
+  (WP-01.4), its tokens on the sheet's record. The review plan, synthesis and
+  the focus report share one loop, `digest.stream_reply(…, send=stream_message)`
+  (each passes its own module's `stream_message`, the name
+  `tests/test_sdk_contract.py` regresses): a `StreamedReply` whose `message` is
+  the reply or the last attempt's partial read, judged by
+  `unfinished_reply_error(…, interrupted=)`. The batch direct rescue folds an
+  interrupted attempt's partial read like any rescue read
+  (`_record_interrupted_rescue`), and one that held nothing becomes a
+  non-billable REAL_TIME attempt parked on the slot. The investigation retries
+  an interrupted turn and never uses its partial (no tool from it runs; its
+  replay is WP-13.4's).
+- **The wording** is the ladder's with the cause in its parentheses
+  (`digest_terminal_error(…, interrupted=)`): `unfinished digest
+  (stop_reason=None, interrupted='overloaded_error')`, `empty synthesis
+  (stop_reason=None, interrupted='connection dropped')`; a stream with no event
+  reads `connection dropped`. With nothing in hand (`_clean_error`):
+  `stream interrupted (overloaded_error: Overloaded)`, `stream interrupted
+  (connection dropped — try again)`, `stream interrupted (timed out — try
+  again)`; an `other` cause keeps its own wording. Without an interruption the
+  ladder's wording is unchanged.
+- **The usage.** `digest.StreamUsage` sums every attempt's reported usage (an
+  interrupted one's is `message_start`'s input and cache counters) and counts
+  `interrupted_attempts`: attempts whose final usage never arrived, so their
+  output is unreported. It rides `SheetDigest`, `CritiqueRunOutcome` /
+  `CritiqueResult`, `PlanResult`, `SynthesisResult`, `FocusReportResult`, the
+  investigation's records and `DigestUsageAttempt` (all runtime-only) into
+  `UsageRecord.interrupted_attempts` (additive, default 0, in the manifest's
+  records); `RunUsage.interrupted_attempts` totals it (`usage.interrupted_attempts`
+  in `run_manifest.json`), and run.log's usage section says `N attempt(s)
+  interrupted mid-stream: their output tokens were not reported, so the output
+  and cost totals are lower bounds`. Each record keeps its stage's terminal
+  status; the cost stays a number and `is_billable_but_unpriced` is unchanged
+  (known/unknown usage is WP-14.4's, per-attempt records WP-14.5's). A synthesis
+  or focus call that got nothing back but was interrupted is one FAILED record.
+- **Cache:** nothing moved. An unfinished snapshot is refused by
+  `digest_cache_admits` and every consumer's existing rule; a finished one is
+  stored like any finished reply, same payload, same key. No key, contract or
+  `_SCHEMA_VERSION` change; no stored entry ever held an interrupted read.
 
 **CI gates (P9 item 42).** `pytest -m browser` writes a JUnit report and
 `scripts/check_browser_suite.py` fails the job below a floor of genuinely
@@ -1887,7 +1977,9 @@ widget a **reader-supplied key outranks the embedded one** — the key row rende
 in both modes, since hiding it billed every shared report's questions to its
 author and left a rotated-key report dead.
 
-`core/` is a shared kernel (model ids + env overrides in `api_config.py`, key
+`core/` is a shared kernel (model ids + env overrides in `api_config.py`, whose
+`_dispatch_messages` is the one capture of a stream that broke mid-read, above,
+raising `stream_interruption.StreamInterrupted`; key
 store with its `api_key_format.py` normalizer and shape check, pricing, tokenizer, the structured-outputs gate, and
 `terminal_outcome.py`, the one stop-reason classifier: D-1, adopted so far by the
 digest's two transports and, since remediation WP-01.4, the critique's (through

@@ -35,10 +35,8 @@ from .digest import (
     FOCUS_SECTION_HEADER,
     SheetDigest,
     _clean_error,
-    _is_transient_error,
-    _message_usage,
-    _retry_backoff_seconds,
     stream_message,
+    stream_reply,
     unfinished_reply_error,
 )
 from .stage_cache import (
@@ -206,8 +204,14 @@ class FocusReportResult:
     #: A reply came back from the API (billed), whether or not it was used.
     #: The pipeline records a failed one as a FAILED usage attempt, as the
     #: planner and identity already do (remediation WP-01.6). False for a
-    #: skip, a cache hit and a call that raised.
+    #: skip, a cache hit and a call that raised. An interrupted stream's
+    #: partial read is a reply (remediation WP-01.7).
     replied: bool = False
+    #: Remediation WP-01.7: attempts whose stream was interrupted before its
+    #: final usage arrived, so the token counts are lower bounds. Nonzero
+    #: with ``replied`` False when nothing came back at all; the pipeline
+    #: records either as a FAILED usage attempt.
+    interrupted_attempts: int = 0
 
     @property
     def ok(self) -> bool:
@@ -290,28 +294,29 @@ def generate_focus_report(
     if effective_effort:
         kwargs["output_config"] = {"effort": effective_effort}
 
-    attempt = 0
-    while True:
-        try:
-            resp = stream_message(client, kwargs)
-            break
-        except Exception as exc:  # noqa: BLE001 - report, ship the digests anyway
-            if _is_transient_error(exc) and attempt < max_retries:
-                sleep(_retry_backoff_seconds(attempt))
-                attempt += 1
-                continue
-            return FocusReportResult(
-                text="", model_used=model, error=_clean_error(exc),
-                sheets_omitted=prompt.sheets_omitted,
-                chars_omitted=prompt.chars_omitted,
-            )
-
+    # Transient retries, an interrupted stream's included; once they are
+    # spent its partial read is the reply (remediation WP-01.7).
+    call = stream_reply(client, kwargs, max_retries=max_retries, sleep=sleep,
+                        send=stream_message)
+    in_tok, out_tok = call.usage.input_tokens, call.usage.output_tokens
+    if call.message is None:
+        # Nothing came back. An interrupted attempt still reported its input
+        # (``interrupted_attempts``); the pipeline records it as FAILED.
+        return FocusReportResult(
+            text="", model_used=model, error=_clean_error(call.error),
+            input_tokens=in_tok, output_tokens=out_tok,
+            sheets_omitted=prompt.sheets_omitted,
+            chars_omitted=prompt.chars_omitted,
+            interrupted_attempts=call.usage.interrupted_attempts,
+        )
+    resp = call.message
     text = reply_text(resp)
-    in_tok, out_tok = _message_usage(resp)
     # The stop reason first (D-1, remediation WP-01.6): a reply the model did
     # not finish is not kept (a refusal's explanation is not the report, and a
     # cut-off one is not a whole one), not harvested and not cached.
-    error = unfinished_reply_error(resp, text, noun="focus report")
+    error = unfinished_reply_error(
+        resp, text, noun="focus report", interrupted=call.interrupted,
+    )
     if error is None and not text:
         error = "empty focus report"
     result = FocusReportResult(
@@ -323,6 +328,7 @@ def generate_focus_report(
         sheets_omitted=prompt.sheets_omitted,
         chars_omitted=prompt.chars_omitted,
         replied=True,
+        interrupted_attempts=call.usage.interrupted_attempts,
     )
     if result.ok:
         put_stage_cache_entry(

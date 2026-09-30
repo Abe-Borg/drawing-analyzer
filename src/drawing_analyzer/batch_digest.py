@@ -88,6 +88,7 @@ from .core.api_config import (
     refusal_fallback_target,
 )
 from .core.reply_text import reply_text
+from .core.stream_interruption import StreamInterrupted
 from .core.terminal_outcome import REFUSED, classify_stop_reason
 from .core.tokenizer import estimate_image_tokens_total
 from .diagnostics import get_logger, request_id_of, summarize_exc
@@ -353,6 +354,10 @@ class DigestUsageAttempt:
     # estimate is charged per *response-bearing* attempt and must not be
     # multiplied by attempts that never came back.
     billable: bool = True
+    # Remediation WP-01.7: 1 for a direct-rescue attempt whose stream was
+    # interrupted before its final usage arrived (its output was never
+    # reported, so its tokens are a lower bound), else 0.
+    interrupted_attempts: int = 0
 
 
 def _attach_usage_attempt(
@@ -361,6 +366,7 @@ def _attach_usage_attempt(
     transport: str,
     attempt_number: int,
     request_or_custom_id: str = "",
+    interrupted_attempts: int = 0,
 ) -> SheetDigest:
     """Attach this response's usage without changing cache serialization."""
     attempts = list(getattr(digest, "usage_attempts", ()) or ())
@@ -374,6 +380,7 @@ def _attach_usage_attempt(
         terminal_status="FAILED" if digest.error else "COMPLETE",
         attempt_number=max(1, int(attempt_number or 1)),
         request_or_custom_id=request_or_custom_id,
+        interrupted_attempts=int(interrupted_attempts or 0),
     ))
     # SheetDigest intentionally has no slots, so this stays a runtime-only
     # extension and cannot perturb existing cache/export schemas.
@@ -417,6 +424,45 @@ def _replace_result_with_attempt_history(
     if kept is digest and served_by:
         slot.served_by = served_by
     return kept
+
+
+def _record_interrupted_rescue(
+    results: list, slot: "_Slot", exc: StreamInterrupted, *, cache: Any,
+) -> None:
+    """Record a direct-rescue attempt whose stream was interrupted (WP-01.7).
+
+    It was billed, so it keeps an attempt record either way (the owner's
+    rule, plan WP-14 step 7). With a partial read, the read is folded into the
+    sheet's result like any rescue read (:func:`_replace_result_with_attempt_history`,
+    ``keep_digest_read``): a partial read with content outranks an errored
+    batch read, never a finished one, and is never cached. With nothing held
+    (no ``message_start``), a non-billable REAL_TIME attempt is parked on the
+    slot, counted as interrupted, and drained into the result like an
+    abandoned batch's.
+    """
+    if exc.partial is not None:
+        digest = _digest_from_message(
+            slot, exc.partial, cache=cache, transport="REAL_TIME",
+            attempt_number=slot.attempts_submitted,
+            request_or_custom_id=slot.custom_id or "",
+            interrupted=exc.label,
+        )
+        digest.rescued = True
+        _replace_result_with_attempt_history(
+            results, slot, digest, served_by="direct-call rescue",
+        )
+        return
+    slot.abandoned_attempts = list(getattr(slot, "abandoned_attempts", ()) or []) + [
+        DigestUsageAttempt(
+            transport="REAL_TIME",
+            parse_success=False,
+            terminal_status="FAILED",
+            attempt_number=max(1, int(slot.attempts_submitted or 1)),
+            request_or_custom_id=slot.custom_id or "",
+            billable=False,
+            interrupted_attempts=1,
+        )
+    ]
 
 
 def _drain_abandoned_attempts(slot: "_Slot") -> list[DigestUsageAttempt]:
@@ -1308,7 +1354,12 @@ def _rescue_failed_items_sync(
     or error, which then names the failed rescue (remediation WP-01.3, N16).
     A rescue that lands keeps the better of the two reads
     (:func:`_replace_result_with_attempt_history`), so a partial batch read
-    survives an empty or refused rescue. Returns the number of sheets recovered.
+    survives an empty or refused rescue. A rescue attempt whose stream is
+    interrupted (remediation WP-01.7) is retried when its cause is transient,
+    and keeps an attempt record either way: its partial read is folded like
+    any rescue read, and one that held nothing is a non-billable interrupted
+    record (:func:`_record_interrupted_rescue`). Returns the number of sheets
+    recovered.
 
     Each rescued sheet spends one of its retries (remediation WP-01.5, the
     owner's rule: one per-sheet budget at every site), however many transient
@@ -1355,6 +1406,10 @@ def _rescue_failed_items_sync(
                 break
             except Exception as exc:  # noqa: BLE001 - retried if transient; else the batch error stands
                 call_error = exc
+                if isinstance(exc, StreamInterrupted):
+                    # Billed: the attempt is recorded, and a partial read is
+                    # folded like any rescue read (remediation WP-01.7).
+                    _record_interrupted_rescue(results, slot, exc, cache=cache)
                 if _is_transient_error(exc) and attempt < DEFAULT_DIGEST_MAX_RETRIES:
                     backoff = _retry_backoff_seconds(attempt)
                     remaining = max_elapsed_seconds - (time.monotonic() - started)
@@ -1388,9 +1443,14 @@ def _rescue_failed_items_sync(
         if message is None:
             # The sheet keeps its batch-round read (or error), and that read's
             # error names the rescue that failed (N16), as a real-time
-            # raised-cap retry that raises is named.
+            # raised-cap retry that raises is named. A rescue whose last
+            # attempt was an interrupted stream holding a partial read was
+            # folded as a read already (remediation WP-01.7), so it is not
+            # named twice.
             held = results[slot.index]
-            if call_error is not None and held is not None:
+            if call_error is not None and held is not None and not (
+                isinstance(call_error, StreamInterrupted) and call_error.partial is not None
+            ):
                 note_failed_retry(
                     held, _clean_error(call_error), model=_fallback_model_of(slot),
                 )
@@ -2105,6 +2165,11 @@ def submit_drawing_batch(
             _attach_usage_attempt(
                 slot.digest, transport="REAL_TIME",
                 attempt_number=slot.attempts_submitted,
+                # The inline read is digest_sheet's, retries and all: its
+                # interrupted attempts ride its one record (remediation WP-01.7).
+                interrupted_attempts=int(
+                    getattr(slot.digest, "interrupted_attempts", 0) or 0
+                ),
             )
         slots.append(slot)
         verb = "Inlined" if slot.digest.ok else "Inline digest failed for"
@@ -2533,6 +2598,7 @@ def _digest_from_message(
     transport: str = "BATCH",
     attempt_number: int | None = None,
     request_or_custom_id: str = "",
+    interrupted: str | None = None,
 ) -> SheetDigest:
     """Parse one Messages-API response into the slot's :class:`SheetDigest`.
 
@@ -2544,6 +2610,11 @@ def _digest_from_message(
     it was sent to (``refused digest on claude-opus-4-8 (…)``) and carries it
     as ``fallback_model``; a finished one is cached under the slot's key, the
     requested model's (the owner's rule), like the server-side fallback's.
+
+    ``interrupted`` is set for a direct rescue's interrupted stream (remediation
+    WP-01.7): ``message`` is its partial read, worded by the ladder with the
+    cause, never cached (it did not finish), and its attempt record counts one
+    interrupted attempt.
     """
     raw_text = reply_text(message)
     in_tok, out_tok = _message_usage(message)
@@ -2562,6 +2633,7 @@ def _digest_from_message(
     # its stop_details category (WP-01.5).
     error = digest_terminal_error(
         raw_text, stop, noun=noun, category=details.category if details else None,
+        interrupted=interrupted,
     )
     if classify_stop_reason(stop).kind == REFUSED:
         _log.info(
@@ -2619,6 +2691,7 @@ def _digest_from_message(
         request_or_custom_id=(
             request_or_custom_id or (slot.custom_id or "") or request_id_of(message)
         ),
+        interrupted_attempts=1 if interrupted else 0,
     )
 
 

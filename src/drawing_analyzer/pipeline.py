@@ -410,6 +410,7 @@ def _record_usage(
     attempt: int = 1,
     request_id: str = "",
     cache_write_ttl: "str | None" = None,
+    interrupted_attempts: int = 0,
 ) -> UsageRecord:
     """Build a priced :class:`UsageRecord` and append it to the run's usage ledger.
 
@@ -423,6 +424,11 @@ def _record_usage(
     Stages that attach a plain ``{"type": "ephemeral"}`` breakpoint (digest,
     critique) leave it ``None``; stages that route through
     ``api_config``'s breakpoint helpers pass ``cache_write_ttl_for(phase)``.
+
+    ``interrupted_attempts`` counts the attempts behind the record whose
+    stream was interrupted before its final usage arrived (remediation
+    WP-01.7): their output was never reported, so the record's output and
+    cost are lower bounds. Pricing is unchanged.
     """
     from .core.pricing import usage_record_cost
     from .models import _positive as _positive_count
@@ -467,6 +473,7 @@ def _record_usage(
             request_or_custom_id=request_id,
             estimated_cost=cost,
             cache_write_ttl=cache_write_ttl,
+            interrupted_attempts=int(interrupted_attempts or 0),
         )
     )
 
@@ -2071,6 +2078,9 @@ def _run_critique_stage(
             # a first that shipped findings recorded COMPLETE.
             parse_success=(terminal == "COMPLETE"),
             terminal_status=terminal,
+            interrupted_attempts=0 if cached else int(
+                getattr(res, "interrupted_attempts", 0) or 0
+            ),
         )
 
     # Cached hits contribute findings/claims with no render and no token cost.
@@ -2878,6 +2888,9 @@ def _run_qc_stages(
                             cache_write_ttl=cache_write_ttl_for(PHASE_INVESTIGATION),
                             terminal_status=(
                                 "COMPLETE" if rec.outcome != "error" else "FAILED"
+                            ),
+                            interrupted_attempts=int(
+                                getattr(rec, "interrupted_attempts", 0) or 0
                             ),
                         )
                 investigate_stage.items_in = len(uncertain)
@@ -4104,6 +4117,9 @@ def extract_drawing_context(
                             request_id=getattr(
                                 usage_attempt, "request_or_custom_id", ""
                             ),
+                            interrupted_attempts=int(
+                                getattr(usage_attempt, "interrupted_attempts", 0) or 0
+                            ),
                         )
                 else:
                     if not cached:
@@ -4120,6 +4136,9 @@ def extract_drawing_context(
                         cache_hit=cached,
                         parse_success=(sd.error is None),
                         terminal_status="FAILED" if sd.error else "COMPLETE",
+                        interrupted_attempts=0 if cached else int(
+                            getattr(sd, "interrupted_attempts", 0) or 0
+                        ),
                     )
             except Exception as exc:  # noqa: BLE001 - this page's record only
                 accounting_errors.append(exc)
@@ -4413,6 +4432,7 @@ def extract_drawing_context(
                     cache_hit=pres.cached,
                     parse_success=pres.ok,
                     terminal_status="COMPLETE" if pres.ok else "FAILED",
+                    interrupted_attempts=int(getattr(pres, "interrupted_attempts", 0) or 0),
                 )
                 if pres.ok:
                     plan_profiles = list(pres.profiles)
@@ -4749,6 +4769,7 @@ def extract_drawing_context(
                         "CACHE" if getattr(result, "cached", False) else "REAL_TIME"
                     ),
                     cache_hit=bool(getattr(result, "cached", False)),
+                    interrupted_attempts=int(getattr(result, "interrupted_attempts", 0) or 0),
                 )
                 _log.info(
                     "synthesis: ok (input=%d output=%d tok)",
@@ -4763,18 +4784,21 @@ def extract_drawing_context(
                 synthesis_stage.status = "FAILED"
                 synthesis_stage.errors.append(str(result.error))
                 _log.warning("synthesis: failed: %s", result.error)
-                if getattr(result, "replied", False):
+                interrupted = int(getattr(result, "interrupted_attempts", 0) or 0)
+                if getattr(result, "replied", False) or interrupted:
                     # A reply that came back and was not used (refused, cut
                     # off, unfinished, empty) was still billed: one FAILED
                     # attempt, as the planner and identity record theirs
                     # (remediation WP-01.6). A refusal kept as the overview
-                    # used to be recorded COMPLETE.
+                    # used to be recorded COMPLETE. So was an interrupted
+                    # stream, whose usage was lost (remediation WP-01.7).
                     _record_usage(
                         run_usage, family="synthesis", instance="synthesis",
                         model=synthesis_model or default_synthesis_model(),
                         input_tokens=result.input_tokens,
                         output_tokens=result.output_tokens,
                         parse_success=False, terminal_status="FAILED",
+                        interrupted_attempts=interrupted,
                     )
             else:
                 # Fewer than two readable sheets — an applicable, valid skip (§3.3).
@@ -4839,6 +4863,7 @@ def extract_drawing_context(
                         "CACHE" if getattr(fresult, "cached", False) else "REAL_TIME"
                     ),
                     cache_hit=bool(getattr(fresult, "cached", False)),
+                    interrupted_attempts=int(getattr(fresult, "interrupted_attempts", 0) or 0),
                 )
                 _log.info(
                     "focus report: ok (input=%d output=%d tok)",
@@ -4850,15 +4875,17 @@ def extract_drawing_context(
             ):
                 errors.append(f"Focus report: {fresult.error}")
                 _log.warning("focus report: failed: %s", fresult.error)
-                if getattr(fresult, "replied", False):
+                f_interrupted = int(getattr(fresult, "interrupted_attempts", 0) or 0)
+                if getattr(fresult, "replied", False) or f_interrupted:
                     # Billed although not used: one FAILED attempt (as
-                    # synthesis above; remediation WP-01.6).
+                    # synthesis above; remediation WP-01.6, WP-01.7).
                     _record_usage(
                         run_usage, family="focus", instance="focus",
                         model=focus_model or default_focus_model(),
                         input_tokens=fresult.input_tokens,
                         output_tokens=fresult.output_tokens,
                         parse_success=False, terminal_status="FAILED",
+                        interrupted_attempts=f_interrupted,
                     )
             else:
                 focus_status = "SKIPPED_VALID"
