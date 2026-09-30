@@ -120,7 +120,16 @@ _SCHEMA_VERSION = 10
 #   stores no stop reason to check on the way out, so it misses once and is
 #   re-critiqued. It is left on disk, never deleted. The merge rule itself is
 #   unchanged (its fingerprint is pinned under 3 as it was under 2).
-_CRITIQUE_CACHE_CONTRACT = 3
+# 4 (remediation WP-04.3): the merge rule reads quantity roles
+#   (``critique._quantity_roles``): two findings that give the same values to
+#   different roles (``6 in main, 4 in branch`` / ``4 in main, 6 in branch``)
+#   or one value to two roles (``6 in supply and return`` / ``6 in supply, 8
+#   in return``) no longer merge, and an ambiguous role is kept apart from a
+#   bound one. And an ``x`` glued to a digit's inch or foot mark (``24"x12"``)
+#   is no longer a tag. An entry stored under 3 can hold a merge the new rule
+#   refuses (and, through a stray ``X12``, a pair it now makes), so it misses
+#   once and is re-critiqued. It is left on disk, never deleted.
+_CRITIQUE_CACHE_CONTRACT = 4
 
 # Storage format and concurrency settings are intentionally separate from the
 # content schema above.  ``_SCHEMA_VERSION`` invalidates cached model results;

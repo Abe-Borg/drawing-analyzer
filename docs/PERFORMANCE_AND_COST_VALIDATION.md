@@ -229,7 +229,11 @@ of which `signatures_compatible` is the negation; the harness kept its own copy
 of the axis test until remediation WP-04.2 changed the rule. A changed
 quantity, a changed equipment tag, or a flipped absence polarity therefore can
 never become an exact match — nor, since WP-04.2, can one that changed beside
-an unchanged one (`6 in` to `4 in` beside the same `100 psi`) — and geometry
+an unchanged one (`6 in` to `4 in` beside the same `100 psi`), nor, since
+WP-04.3, one whose values swapped roles (`6 in main, 4 in branch` to `4 in main,
+6 in branch`: a record stores each quantity's role in its `critical_signature`,
+so a record written before that is refused as a stale contract,
+`RECORD_CONTRACT_VERSION` 4) — and geometry
 never produces one at all: rect
 overlap only ever *suggests* a candidate. Nothing is deleted, no fuzzy score is
 promoted to an equivalence, and no second model is asked to adjudicate — that

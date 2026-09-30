@@ -900,8 +900,9 @@ run re-runs the critique on every sheet once more, while digests stay cached. So
 is the rule that a read the model did not finish no longer counts (remediation
 WP-01.4): an entry written before it may hold such a read, merged as a complete
 one, so it is not served, and the first exhaustive run after upgrading re-runs
-the critique on every sheet once (none of these three changes has shipped in a
-release yet, so a 1.7.0 install pays that cold pass once for all three). Only a
+the critique on every sheet once. So is reading a quantity's role (remediation
+WP-04.3). None of these four changes has shipped in a release yet, so a 1.7.0
+install pays that cold pass once for all four. Only a
 critique whose every read the model finished is stored, at either level, on
 either transport, so a sheet whose read keeps getting cut off is read again,
 and billed, on each run until one run finishes both reads. The digest's images are gone by the time the critique runs (the batch path
@@ -1847,13 +1848,36 @@ when they checked the same relationship (the same operation, the same numbers,
 the same stated result), however alike their wording and wherever they sit, so
 two mistakes on one table row stay two findings (see
 [the numeric-claims contract](#the-numeric-claims-contract-arithmetic-auditor)).
-A few pairs still merge, because
-nothing in the finding shows the conflict: two sizes with their roles swapped
-(`6 in main, 4 in branch` against `4 in main, 6 in branch`), because the app does
-not yet read which quantity belongs to what; a bare `12'` against `12'-6"`; and
-three spellings the app reads only in part: a range written with `to`
-(`4 to 6 in`), a list with spaces after its commas (`2, 4, 6 in`), and a bare
-`20A` with no breaker, fuse or rating beside it. A merge keeps
+
+A value's **role** is compared too (remediation WP-04.3). Two findings that give
+the same sizes to different roles, `6 in main and 4 in branch` against `4 in main
+and 6 in branch`, or one size to two roles, `6 in supply and 6 in return` against
+`6 in supply and 8 in return`, stay two findings. The app reads a role from a
+fixed list of role words (main, branch, riser, drop, header, supply, return,
+suction, discharge, inlet, outlet, upstream, downstream, entering, leaving,
+primary, secondary, min/max, static, residual, cold, hot), written right after the
+value (`6 in main`, `6 in (main)`, `6 in supply and return`), as a label (`main:
+6 in`) or with `is` (`the main is 6 in`). It works the same for any quantity:
+`100 psi inlet and 80 psi outlet`, `65 psi static and 45 psi residual`, `500 gpm
+primary`, `480V primary`, a `24x12 supply` duct, `44°F entering`. A role only one
+finding names never keeps two findings apart, so the same "500 gpm shown, 550 gpm
+required" from both critique reads (no role word) is still one finding. Where the
+wording does not say which value takes which role (`6 in and 4 in main and
+branch`, with no "respectively"; `MAIN 6" BRANCH 4"`), the finding stays apart
+from one that names the roles: keeping both is the safe error. Nothing off the
+list is a role: a location, a tag, a word after `at`, `per`, `for` or `with`, an
+ordinal, or a status word such as "shown" or "required" (two reads of one
+conflict can call different values "shown"). And an `x` glued to an inch or foot
+mark (`24"x12"`) is part of the size, not a tag named `X12`.
+
+A few pairs still merge, because nothing in the finding shows the conflict in a
+form the app reads: values swapped around a word that is not on the role list
+(`6 in floor drain and 4 in roof drain` against the reverse; two tags; `at the
+inlet`), a bare label (`MAIN 6" BRANCH 4"` against `MAIN 4" BRANCH 6"`); a bare
+`12'` against `12'-6"`; and three spellings the app reads only in part: a range
+written with `to` (`4 to 6 in`), a list with spaces after its commas (`2, 4, 6
+in`), and a bare `20A` with no breaker, fuse or rating beside it (the last four
+are a later remediation slice, WP-04.4). A merge keeps
 **coherent grounding**: the survivor's text and quote come from one member as an
 atomic bundle — never one finding's text paired with another's quote — while the
 loser's quote is kept as a supporting quote. The **verdict rides that bundle**,

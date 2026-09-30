@@ -1595,9 +1595,44 @@ raise, after the paid digest and critique. Now:
   both panels), so two findings that each name a different extra reference stay
   apart: deliberate retention, pinned in `tests/test_signature_compatibility.py`
   and `tests/test_quantity_signature.py` beside the recorded limits that still
-  merge (swapped roles, since nothing extracts quantity roles, WP-04.3; a bare
-  `12'` against `12'-6"`; WP-04.1's partial signatures). A survivor's signature
-  grows (it includes `supporting_quotes`), which is why every complete-link check
+  merge (a bare `12'` against `12'-6"`; WP-04.1's partial signatures: WP-04.4's).
+  An `x`/`X` glued to a digit's inch or foot mark is a dimension separator, never
+  a tag (`_TAG_RE`, remediation WP-04.3): the `x12` of `24"x12"` read as `X12`
+  and, beside a different extra reference on the other finding, kept one duct
+  apart; a spaced `24" x12"` still reads as one (a recorded limit).
+  **Quantity roles** (remediation WP-04.3, the owner's rules): the measurements
+  are a set, so `6 in main and 4 in branch` / `4 in main and 6 in branch` (both
+  `{4in, 6in}`) and `6 in supply and 6 in return` / `6 in supply and 8 in return`
+  (`{6in}` inside `{6in, 8in}`) merged. `critique._quantity_roles` reads, beside
+  the unchanged token reader (`_quantity_readings` is the one scanner with spans;
+  `_quantity_tokens`, which the anchor's veto reuses, is its tokens), the role a
+  value takes from a **closed list** (`_ROLE_WORDS`: main, branch, riser, drop,
+  header, supply, return, suction, discharge, inlet, outlet, upstream,
+  downstream, entering, leaving, primary, secondary, min/max, static, residual,
+  cold, hot; plurals fold), bound right after the value (`6 in main`, `6 in
+  (main)`, a list of roles binding each: `6 in supply and return`), as a label
+  (`main: 6 in`, `main = 6 in`) or with a copula (`the main is 6 in`); a word
+  followed by `:`/`=` labels what comes next. Never a role: a bare preceding word
+  (`MAIN 6"`, a recorded limit), anything off the list (a location, a tag, an
+  ordinal), anything after `at`/`per`/`for`/`with`, and status words (shown,
+  required, ...: two reads of one 500/550 conflict can call different values
+  "shown"). **Ambiguous** (the owner's rule), not bound: a value list with roles
+  after it and no `respectively` (with `respectively` and as many roles as
+  values they pair in order) or before it, and a bare role word between two
+  values with nothing joining them (`MAIN 6" BRANCH 4"`, `6 in main 4 in
+  branch`). Roles are read part by part (`_sig_parts`: the text, the quote, each
+  supporting quote), so a quote's first word never binds to the text's last
+  value. The signature stores `roles` (`"main=6in"`) and `ambiguous_roles`
+  (tokens), and `_roles_conflict` reports on the `measurements` axis: for every
+  role and kind both bind, one side's values must include the other's; a side
+  whose only roles for a kind are ambiguous conflicts with one that binds a role
+  in it (conservative retention, `tests/test_quantity_roles.py`); a role on one
+  side only never conflicts, which keeps the commonest duplicate, the same
+  "500 gpm shown, 550 gpm required" from both critique reads, one finding (no
+  role word, pinned). Recorded limits there: swaps around unlisted words or
+  tags, status words, both sides ambiguous, a bare label sequence, ordinals on
+  one role. A survivor's signature
+  grows (it includes `supporting_quotes`, roles too), which is why every complete-link check
   compares members as they arrived, on both sides, and never a grown signature
   (`_cluster`'s reads, `Ledger.add`'s snapshots, and Pass B's `member_history`
   for the incoming entry as well as the survivor since remediation WP-03.1) — and a
@@ -1621,7 +1656,9 @@ raise, after the paid digest and critique. Now:
   signatures. The critique cache stores post-merge findings, so the tokenizer and
   the rule ride `digest_cache._CRITIQUE_CACHE_CONTRACT` (2 since WP-04.2; 3
   since remediation WP-01.4, which changed which reads an entry may hold and
-  not the rule, so the same fingerprint is pinned under 3), a term
+  not the rule, so the same fingerprint is pinned under 3; 4 since remediation
+  WP-04.3, roles and the dimension-separator tag rule, whose fingerprint is
+  computed over a corpus that gained role rows), a term
   inside both critique key builders and nothing else, never `_SCHEMA_VERSION`;
   `tests/test_drawing_cache_identity.py` pins the rule's fingerprint to its
   value, so a rule change that forgets the bump fails). One more gate precedes

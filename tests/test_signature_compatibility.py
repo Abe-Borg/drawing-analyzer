@@ -450,3 +450,46 @@ def test_pass_b_does_not_fold_a_compatible_pair_on_position_alone():
     b = "Relocate the P-1 inlet strainer"
     assert signatures_compatible(critical_signature(_finding(a)), critical_signature(_finding(b)))
     assert _pass_b(a, b, "PUMP P-1 SUCTION") == (2, 2)
+
+
+# --------------------------------------------------------------------------- #
+# Remediation WP-04.3: a dimension separator is not a tag
+# --------------------------------------------------------------------------- #
+#
+# ``critique._TAG_RE`` read the ``x12`` of a tight ``24"x12"`` as a tag ``X12``
+# (known since the 2026-09-22 verification). Under WP-04.2's tag inclusion that
+# stray tag on one finding, beside a different extra reference on the other,
+# kept apart two findings that describe one duct. The owner's rule: an ``x`` or
+# ``X`` glued to a digit's inch or foot mark is a dimension separator, never a
+# tag. It rides WP-04.3's critique-contract bump.
+
+_DIMENSION_NOT_A_TAG = [
+    ("a tight W x H in inches", 'Duct 24"x12" serving VAV-3', ["VAV3"]),
+    ("a capital X", 'Duct 24"X12" serving VAV-3', ["VAV3"]),
+    ("feet", "Room is 10'x12' near VAV-3", ["VAV3"]),
+    ("mixed units", "Board 6\"x12' near VAV-3", ["VAV3"]),
+    ("a feet-inches W x H", "Room is 10'x12'-6\" near VAV-3", ["VAV3"]),
+    ("a real tag X12 stays a tag", "Provide detail X12 near VAV-3", ["VAV3", "X12"]),
+    ("a tag glued to a number without a mark stays", "See 2X12 near VAV-3", ["VAV3"]),
+    # Recorded limit: the spaced form is not glued to the mark.
+    ("recorded limit: a spaced x12", 'Duct 24" x12" serving VAV-3', ["VAV3", "X12"]),
+]
+
+
+@pytest.mark.parametrize(
+    "text, tags", [c[1:] for c in _DIMENSION_NOT_A_TAG], ids=[c[0] for c in _DIMENSION_NOT_A_TAG],
+)
+def test_a_dimension_separator_is_not_a_tag(text, tags):
+    assert critical_signature(_finding(text))["tags"] == tags
+
+
+def test_a_stray_x12_no_longer_keeps_one_duct_apart():
+    # Measured on main: the stray X12 against the grid reference C-4 conflicted
+    # on tags and kept these two apart; the quantities agree (24x12in).
+    a = ('Duct 24"x12" serving VAV-3 conflicts with the steel beam on the level 2 plan '
+         "near the east data hall")
+    b = ("Duct 24x12 in serving VAV-3 conflicts with the steel beam at grid C-4 on the level 2 "
+         "plan near the east data hall")
+    assert _token_overlap(a, b) >= _TEXT_DUP_THRESHOLD
+    assert _conflicts(a, b) == []
+    assert _surviving(a, b) == (1, 1)
