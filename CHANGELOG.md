@@ -246,6 +246,80 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Four quantity spellings the app read only in part let two different
+  findings merge (remediation WP-04.4; the residuals of N1 and N19, and WP-04's
+  acceptance).** A finding's critical signature signed only
+  the part of these it could read, and the parts agreed, so each pair folded
+  into one finding in the critique's two-read merge and in the findings ledger:
+  - `Maintain 12' clear` against `Maintain 12'-6" clear`: feet-inches is two
+    quantities (12 ft and 6 in), and a bare `12'` (12 ft) was read as part of
+    it;
+  - `4 to 6 in` against `6 in`: the `4` has no unit, so only the `6 in` was
+    read; `4 and 6 in` and `4 or 6 in` the same way;
+  - `2, 4, 6 in` against `3, 5, 6 in`: only the last size of a list with spaces
+    after its commas was read;
+  - `20A 120V circuit` against `30A 120V circuit`: a compact `A` needs something
+    electrical beside it, since `room 101A` and `grid 2A` are names, so neither
+    current was read and the shared `120V` made the two agree.
+
+  Now, decided with the owner (see the WP-04.4 handoff in
+  `_plans/PROGRESS.md`):
+  - **A feet value is compared with its inches.** The signature records each
+    feet value, in any spelling, with the inches written after it: `12'-6"`,
+    `12' 6"`, `12' - 6"`, `12 ft 6 in` and `12 feet 6 inches` are 12 ft 6 in; a
+    bare `12'`, `12 ft` or `10-foot`, and `12'-0"`, are 12 ft 0 in. So `12'`
+    against `12'-6"` stays two findings, and `12'` against `12'-0"` or `12 ft` is
+    still one. The quantities themselves are read as before.
+  - **Spelled ranges and lists are read whole.** `4 to 6 in`, `from 4 to 6 in`
+    and `between 4 and 6 in` are the range `4-6 in` is; `4 and 6 in`, `4 or
+    6 in`, and three or more numbers joined by commas (`2, 4, 6 in`, `2, 4 and
+    6 in`, `2, 4, and 6 in`) are the list `2,4,6 in` is. Two numbers joined by a
+    comma alone stay prose (`at column 4, 10 ft from the wall`). Nothing is
+    read that was not read before where a name precedes the numbers (`grid 4 to
+    6 in`, `notes 1 and 2`), where `in` is a preposition (`pages 4 to 6 in the
+    manual`, `2, 4, 6 in plan`), or for `2 and 1/2 in`.
+  - **A voltage beside a compact `A` makes it a current** (`20A 120V`,
+    `20A, 120V`, `20A @ 480V`, `120V 20A`), unless a name word comes before the
+    number: `Room 101A 120V`, `Room No. 101A 120V` and `Panel 2A 120/208V` stay
+    names.
+
+  **Visible effect:** some findings that used to merge now appear as two. A
+  list with spaces after its commas now merges with the same list written
+  without them (`2, 4, 6 in` and `2,4,6 in`, kept apart before). Kept apart on
+  purpose, although each may be one issue: `increase from 4 to 6 in` against
+  `increase to 6 in`, `4 in to 6 in` against `4 to 6 in`, and `12 ft, 6 in`
+  (with a comma) against `12'-6"`. Read wrongly on purpose (the cost the owner
+  accepted): a room or panel label with no name word before it, beside a
+  voltage (`101A 120V receptacle` reads 101 A), and a feet value directly
+  followed by a separate inch size (`10 ft 6 in pipe` reads as 10'-6"). **Still
+  merged** (recorded as tests): two numbers joined by a comma alone (`2, 4 in`
+  against `3, 4 in`), and a compact `A` with nothing electrical beside it
+  (`20A circuit` against `30A circuit`). The prose harvest's veto reads the
+  same rule. Measured over the whole test suite: no other merge decision
+  moved (0 of 22,372 outside the flipped pairs), no prose-harvest veto (0 of
+  491), no anchor (0 of 1,268) and no cross-QC grounding verdict (0 of 908).
+
+  **Cache:** a cached critique holds findings merged under the old reading, so
+  `digest_cache._CRITIQUE_CACHE_CONTRACT` goes 4 → 5 and **the first
+  exhaustive run after upgrading re-runs the critique on every sheet once** (no
+  release has shipped contracts 1 to 4, so a user upgrading from 1.7.0 pays it
+  once in all). Cross-QC's grounding reuses the quantity reader (its
+  character-stream tier's veto), and a grounding verdict can now differ for the
+  same inputs, so `cross_qc._CROSS_QC_CACHE_CONTRACT` goes 7 → 8: **the first
+  run after upgrading re-runs the cross-sheet check once** (text only). Digests,
+  the set identity, review plans, citation checks and investigations stay
+  cached, and the old entries are left on disk. An A/B arm record stores the
+  new readings and the feet-inches pairs (`critical_signature` gains
+  `feet_inches`), so `RECORD_CONTRACT_VERSION` goes 4 → 5 and an arm recorded
+  before this change is refused as a stale contract: re-run it.
+
+  Tests: `tests/test_quantity_residuals.py`, the four rows moved from
+  `_RECORDED_LIMITS` to `_CONFLICTS` and the loose/tight list pair moved from
+  `_CONSERVATIVE_RETENTION` to `_EQUIVALENTS` in
+  `tests/test_quantity_signature.py`, the WP-04.4 sections of
+  `tests/test_ab_findings_diff.py` and `tests/test_drawing_cache_identity.py`
+  (the merge rule's fingerprint pinned under contract 5).
+
 - **Two findings that gave the same sizes to different roles merged into one,
   and a duct size's `x12` counted as a tag (remediation WP-04.3; WP-04 step 4,
   the regression matrix's "repeated values in different roles").** A finding's

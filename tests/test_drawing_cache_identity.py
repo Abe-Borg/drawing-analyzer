@@ -779,6 +779,54 @@ def test_a_critique_entry_from_wp_01_4_misses_and_is_never_deleted(tmp_path):
         reopened.close()
 
 
+# The critique keys WP-04.3 wrote (``critique_contract=4``) for the same inputs.
+# WP-04.4 changed the merge rule again: the quantity reader reads a spelled
+# range or list (``4 to 6 in``, ``4 and 6 in``, ``2, 4, 6 in``) and a compact
+# ``A`` beside a voltage (``20A 120V``) whole, and the signature compares a
+# feet value with its inches (``12'`` against ``12'-6"``). An entry stored
+# under 4 can hold a merge the new rule refuses (and a loose list folded apart
+# from its tight twin), so each must miss once, and no other key may move.
+_CRITIQUE_KEYS_UNDER_CONTRACT_4 = {
+    "critique_l2": "548d976c979f9b0975501c4b281e1d14eb6fc85dbf89a989d85659a70679ad4a",
+    "critique_l1": "a442eb81bab5070969b511060e286de55b628d958cfeaa43948dbaa32a3d82af",
+    "critique_l2_profiles_structured":
+        "183aa8155c2372cee7c0c5596ddc316c793cacc4fcaf1bca4f56b604e5381b2e",
+    "critique_l1_profiles_structured":
+        "0780212a9f3bf00e03df08ba8b1ad967a0f353cedf7f02ee18ee392636ba1d0c",
+}
+
+
+def test_wp_04_4_moves_every_critique_key_and_no_other_key():
+    now = _current_keys()
+    for name in _CRITIQUE_KEYS:
+        assert now[name] != _CRITIQUE_KEYS_UNDER_CONTRACT_4[name], (
+            f"{name}: an entry merged under the partial quantity readings would still hit")
+    for name in _OTHER_KEYS:
+        assert now[name] == _KEYS_BEFORE_WP_04_1[name], f"{name}: a paid entry was orphaned"
+
+
+def test_a_critique_entry_from_wp_04_3_misses_and_is_never_deleted(tmp_path):
+    path = tmp_path / "digest_cache.json"
+    cache = DigestCache(path, persist=True)
+    stale = {"findings": [], "claims": [], "runs": 2, "requested_runs": 2,
+             "completed_runs": 2, "input_tokens": 1, "output_tokens": 1}
+    cache.put(_CRITIQUE_KEYS_UNDER_CONTRACT_4["critique_l1"], stale)
+    cache.put(_CRITIQUE_KEYS_UNDER_CONTRACT_4["critique_l2"], stale)
+    cache.put(_KEYS_BEFORE_WP_04_1["digest_l1"], {"text": "digest", "stop_reason": "end_turn"})
+    cache.close()
+
+    reopened = DigestCache(path, persist=True)
+    try:
+        now = _current_keys()
+        assert reopened.get(now["critique_l1"]) is None
+        assert reopened.get(now["critique_l2"]) is None
+        assert reopened.get(now["digest_l1"]) == {"text": "digest", "stop_reason": "end_turn"}
+        assert reopened.get(_CRITIQUE_KEYS_UNDER_CONTRACT_4["critique_l1"]) == stale
+        assert reopened.get(_CRITIQUE_KEYS_UNDER_CONTRACT_4["critique_l2"]) == stale
+    finally:
+        reopened.close()
+
+
 # The merge rule a stored critique was produced under, fingerprinted over a
 # fixed corpus: the critical signature of every finding, the pairwise duplicate
 # verdict, and the self-consistency merge of the corpus read as two reads. A
@@ -859,6 +907,28 @@ _MERGE_RULE_CORPUS = (
     ('Duct 24"x12" serving VAV-3 conflicts with the steel beam on the level 2 plan', ""),
     ("Duct 24x12 in serving VAV-3 conflicts with the steel beam at grid C-4 on the level 2 "
      "plan", ""),
+    # Added by WP-04.4: the tokenizer residuals (a bare feet value against
+    # feet-inches in both spellings, a spelled range and list, a loose-comma
+    # list against another and against its tight twin, a compact A beside a
+    # voltage), each with a spelling that must still merge, and the guards
+    # that keep today's reading.
+    ("Maintain 12' clear headroom under the main duct at the M-101 riser", ""),
+    ("Maintain 12'-0\" clear headroom under the main duct at the M-101 riser", ""),
+    ("Maintain 12 ft 6 in clear headroom under the main duct at the M-101 riser", ""),
+    ("Maintain 12 ft clear headroom under the main duct at the M-101 riser", ""),
+    ("Maintain 4 to 6 in clearance around the base of pump P-1 on the plan", ""),
+    ("Maintain 6 in clearance around the base of pump P-1 on the plan", ""),
+    ("Maintain between 4 and 6 in clearance around the base of pump P-1 on the plan", ""),
+    ("Maintain 4 and 6 in clearance around the base of pump P-1 on the plan", ""),
+    ("Provide 2, 4, 6 in floor drains in the mechanical room", ""),
+    ("Provide 3, 5, 6 in floor drains in the mechanical room", ""),
+    ("Provide 2, 4 and 6 in floor drains in the mechanical room", ""),
+    ("Provide 20A 120V circuit for exhaust fan EF-1 on panel LP-1", ""),
+    ("Provide 30A 120V circuit for exhaust fan EF-1 on panel LP-1", ""),
+    ("Provide 120V 30A circuit for exhaust fan EF-1 on panel LP-1", ""),
+    ("Room 101A 120V receptacle at the east wall of the mechanical room", ""),
+    ("Room No. 101A 120V receptacle at the east wall of the mechanical room", ""),
+    ("See pages 4 to 6 in the manual for the pump P-1 base clearance", ""),
 )
 
 
@@ -916,6 +986,16 @@ _MERGE_RULE_BY_CRITIQUE_CONTRACT = {
     # fingerprints as
     # b3660a7ebac40bab2e2219aa893aac514c56dae6448ac19fb18c35c22bbd8c5c.
     4: "b62e9526fd740d491b66f6ed6d32edef69c1782eea159e11889ed188f4e2f60f",  # WP-04.3
+    # WP-04.4: the tokenizer residuals (spelled ranges and lists, loose lists
+    # of three or more numbers, a compact A beside a voltage) and the
+    # signature's feet_inches pairs. The value under 4 was computed over the
+    # corpus as WP-04.3 left it (the rows above "Added by WP-04.4"); over the
+    # extended corpus that rule fingerprints as
+    # f6116986b76e0211f7274c26486bee8276cc7b5712c693d4dccd12f073b92507, and
+    # this PR's rule before its review follow-up (a number label after a name
+    # word, "Room No. 101A", read as a current beside a voltage) as
+    # fa0ae1342a1bbf227bb300bb5f3ab0710633634d93785f0044be6f09cb9bfd99.
+    5: "020b77897da5937f63c30a58cd29c458c9f67d80064ca901b10aaed8f8319681",  # WP-04.4
 }
 
 

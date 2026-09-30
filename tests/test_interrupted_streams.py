@@ -738,7 +738,9 @@ def test_no_cache_term_moved():
     # a finished snapshot is stored like any finished reply, under the same key.
     # WP-01.7 left the critique contract at 3; remediation WP-04.3 is the bump
     # after it (quantity roles in the merge rule), re-pinned here by the owner's
-    # decision. The keys WP-01.7 left are pinned in test_drawing_cache_identity.py.
+    # decision, and remediation WP-04.4 the next (the tokenizer residuals and
+    # the feet-inches pairs), re-pinned to (10, 5) by the owner's decision. The
+    # keys WP-01.7 left are pinned in test_drawing_cache_identity.py.
     from drawing_analyzer import digest_cache
 
-    assert (digest_cache._SCHEMA_VERSION, digest_cache._CRITIQUE_CACHE_CONTRACT) == (10, 4)
+    assert (digest_cache._SCHEMA_VERSION, digest_cache._CRITIQUE_CACHE_CONTRACT) == (10, 5)

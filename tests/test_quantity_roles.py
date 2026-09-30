@@ -602,7 +602,9 @@ def test_the_signature_carries_roles_as_sorted_json_safe_lists():
     assert sig["roles"] == ["branch=4in", "main=6in"]
     assert sig["ambiguous_roles"] == ["6in"]
     assert json.loads(json.dumps(sig)) == sig
-    assert set(sig) == {"tags", "measurements", "roles", "ambiguous_roles", "absence", "leg_targets"}
+    # Remediation WP-04.4 added ``feet_inches`` (the owner's approved re-pin).
+    assert set(sig) == {"tags", "measurements", "roles", "ambiguous_roles", "feet_inches",
+                        "absence", "leg_targets"}
 
 
 def test_roles_are_read_part_by_part():

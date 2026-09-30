@@ -182,7 +182,17 @@ _TEXT_LAYER_BUDGET = 4_000
 # against ``INCHDRAIN``) is now admitted, and a quote or text with a number
 # split around a lone ``.`` no longer grounds. The fact-tile join keeps its
 # folded key. One mechanism: no key term was added.
-_CROSS_QC_CACHE_CONTRACT = 7
+#
+# Bumped to 8 (remediation WP-04.4): the character-stream tier's quantity veto
+# reuses ``critique._quantity_tokens``, which now reads a spelled range or list
+# (``4 to 6 in``, ``2, 4, 6 in``) and a compact ``A`` beside a voltage whole,
+# through guards that read the word after ``in`` and the word before the number.
+# A named letter-merge join can change those words, so for byte-identical
+# request inputs a leg quoting ``4 TO 6 IN A CLEAR`` against a sheet printing
+# ``4 TO 6 IN ACLEAR``, or ``ELEC ROOM 101A 120V`` against ``ELECROOM 101A
+# 120V``, grounded before and does not now (the owner's decision; none of the
+# suite's grounding verdicts moved). One mechanism: no key term was added.
+_CROSS_QC_CACHE_CONTRACT = 8
 DEFAULT_CROSS_QC_WORKERS = 3
 _CROSS_QC_WORKERS_ENV = "DRAWING_ANALYZER_CROSS_QC_WORKERS"
 

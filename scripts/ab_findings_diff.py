@@ -96,7 +96,16 @@ COMPARISON_INCOMPLETE = "INCOMPLETE"
 #: conflicts, so a v3 baseline against a v4 variant would call a swapped
 #: ``6 in main, 4 in branch`` / ``4 in main, 6 in branch`` pair EXACT: the silent
 #: failure above. Refused, never deleted: re-run the arm.
-RECORD_CONTRACT_VERSION = 4
+#:
+#: v5 (remediation WP-04.4): the tokens a record stores changed (a spelled range
+#: or list, ``4 to 6 in`` or ``2, 4, 6 in``, and a compact ``A`` beside a
+#: voltage, ``20A 120V``, are read whole), and ``critical_signature`` stores each
+#: feet value with its inches (``feet_inches``). A v4 record holds the partial
+#: readings and no pairs, which the rule reads as agreeing, so a v4 baseline
+#: against a v5 variant would call ``12'`` / ``12'-6"`` or ``4 to 6 in`` /
+#: ``6 in`` EXACT: the silent failure above. Refused, never deleted: re-run the
+#: arm.
+RECORD_CONTRACT_VERSION = 5
 
 _WS_RE = re.compile(r"\s+")
 

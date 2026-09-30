@@ -649,9 +649,10 @@ def test_the_cross_qc_contract_moved_for_the_new_host_binding():
     # result carries its refused-item counts. The persona edit re-keys every
     # entry through the prompt text as well; that is a second change with its
     # own mechanism, not a bump and a key term for one change (plan §2 rule 15).
-    # 7 since remediation WP-05.3 (the character-stream grounding); the key
-    # still differs from contract 5's.
-    assert X._CROSS_QC_CACHE_CONTRACT == 7
+    # 7 since remediation WP-05.3 (the character-stream grounding) and 8 since
+    # remediation WP-04.4 (the quantity reader its veto reuses); the key still
+    # differs from contract 5's.
+    assert X._CROSS_QC_CACHE_CONTRACT == 8
     _sheets, geoms = _pair_set()
     entries = [("M-101", "digest", "text", geoms[0])]
     current = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")

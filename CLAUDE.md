@@ -1459,7 +1459,13 @@ raise, after the paid digest and critique. Now:
   leg quoted `6" DRAIN` does not take the tile of a fact recorded `6 " DRAIN`
   (a recorded limit). Host-side binding, so `_CROSS_QC_CACHE_CONTRACT` **3 →
   4**, **4 → 5** for the fold (WP-05.2), 6 since remediation WP-06.1 (below)
-  and **6 → 7** for the character stream and the split number (WP-05.3).
+  and **6 → 7** for the character stream and the split number (WP-05.3), and
+  **7 → 8** since remediation WP-04.4: the character-stream tier's quantity
+  veto reuses `critique._quantity_tokens`, whose new guards (the word after
+  `in`, the word before a number) a named letter-merge join can change, so a
+  verdict can move for byte-identical inputs (`4 TO 6 IN A CLEAR` grounded on
+  a sheet printing `4 TO 6 IN ACLEAR` and no longer does; the owner's
+  decision; none of the suite's 908 grounding verdicts moved).
   Reduced trust must **reach verification**, so the location travels in three
   parts: the shard-map prompt requests `tile_label` per fact and leg
   (`CrossQCFact.tile`, resolved on that leg's own grid); `fact_tile_lookup`
@@ -1503,7 +1509,8 @@ raise, after the paid digest and critique. Now:
   matched **nothing**, and the claim resolved to no sheet at all. That
   canonicalization is host-side binding no key input covers, so it carries
   `_CROSS_QC_CACHE_CONTRACT` **2 → 3** (4 since remediation WP-05.1, 5
-  since WP-05.2 and 7 since WP-05.3, above, and 6 since WP-06.1, below).
+  since WP-05.2, 7 since WP-05.3 and 8 since WP-04.4, above, and 6 since
+  WP-06.1, below).
   Cross-QC also carries **count-only discard counters** on the sharded path
   (`CrossQCDiscardCounts`, WP-02 §7.2): how many legs/facts the host dropped and
   why — unresolved handle, quote absent, quote present but unmatched, split by
@@ -1595,7 +1602,22 @@ raise, after the paid digest and critique. Now:
   both panels), so two findings that each name a different extra reference stay
   apart: deliberate retention, pinned in `tests/test_signature_compatibility.py`
   and `tests/test_quantity_signature.py` beside the recorded limits that still
-  merge (a bare `12'` against `12'-6"`; WP-04.1's partial signatures: WP-04.4's).
+  merge (since remediation WP-04.4, the shapes the owner chose not to read: two
+  numbers joined by a comma alone, `2, 4 in` / `3, 4 in`, and a compact `A`
+  with nothing electrical beside it, `20A circuit` / `30A circuit`).
+  **Feet and inches** (remediation WP-04.4, the owner's rules): feet-inches
+  stays two tokens, so a bare `12'` (`{12ft}`) was included in `12'-6"`
+  (`{12ft, 6in}`) and they merged. Beside the tokens, never in them, the
+  signature stores `feet_inches` (`critique._feet_inches`, read part by part
+  like roles): each feet value, in any spelling (`'`, `ft`, `feet`, `10-foot`),
+  with the inches reading joined to it by an optional abbreviation period,
+  spaces and at most one hyphen or Unicode dash (`12'-6"`, `12' - 6"`,
+  `12 ft 6 in`, `12 ft. 6 in.` are `12ft6in`), or `0in` when
+  there is none (`12'`, `12 ft` and `12'-0"` are `12ft0in`); never across a
+  comma, a sign (`12' -6"` is a negative six inches, WP-05.3) or a composite
+  (`10'x12'`). `_feet_inches_conflict` compares the pairs by inclusion on the
+  `measurements` axis, so they can only ever block. Recorded misreading: a feet
+  value directly followed by a separate inch size (`10 ft 6 in pipe`).
   An `x`/`X` glued to a digit's inch or foot mark is a dimension separator, never
   a tag (`_TAG_RE`, remediation WP-04.3): the `x12` of `24"x12"` read as `X12`
   and, beside a different extra reference on the other finding, kept one duct
@@ -1604,7 +1626,7 @@ raise, after the paid digest and critique. Now:
   are a set, so `6 in main and 4 in branch` / `4 in main and 6 in branch` (both
   `{4in, 6in}`) and `6 in supply and 6 in return` / `6 in supply and 8 in return`
   (`{6in}` inside `{6in, 8in}`) merged. `critique._quantity_roles` reads, beside
-  the unchanged token reader (`_quantity_readings` is the one scanner with spans;
+  the token reader (`_quantity_readings` is the one scanner with spans;
   `_quantity_tokens`, which the anchor's veto reuses, is its tokens), the role a
   value takes from a **closed list** (`_ROLE_WORDS`: main, branch, riser, drop,
   header, supply, return, suction, discharge, inlet, outlet, upstream,
@@ -1650,15 +1672,34 @@ raise, after the paid digest and critique. Now:
   blocks a merge), degrees (`deg` is `°`; `deg F`, `degF` and `°F` are `°f`; a
   scale is never inferred), and composites, each ONE token compared whole: a W×H
   size `24x12in`, a range `4..6in`, a tight list `2,4,6in`, a voltage pair
-  `120/208volt`. A compact `V` reads anywhere but a slope (`3H:1V`), a compact `A`
-  only beside a pole count, an overcurrent device or a rating label: a room
-  `101A` read as a current would put a quantity nobody wrote into two findings'
-  signatures. The critique cache stores post-merge findings, so the tokenizer and
+  `120/208volt`. Since remediation WP-04.4 (the owner's rules) a spelled range
+  or list is the same composite (`critique._read_spelled`): `4 to 6 in`,
+  `from 4 to 6 in` and `between 4 and 6 in` are `4..6in`; `4 and 6 in`,
+  `4 or 6 in` and three or more numbers joined by commas with an optional
+  `and`/`or` before the last (`2, 4, 6 in`, `2, 4, and 6 in`) are the list in
+  written order. Only the first number may be signed and only the last carries
+  the unit; two numbers joined by a comma alone stay prose (`at column 4, 10 ft`
+  is `10ft`). The new forms never widen a reading: today's stands when a name or
+  reference word precedes the first number (`_REFERENCE_BEFORE_RE`: the amp
+  rule's `_NAME_WORDS`, one list, plus page, section, step, note(s)...), when
+  the unit is the word `in` followed by an article or a preposition's object
+  (`_IN_AS_PREPOSITION_RE`: `pages 4 to 6 in the manual`), for `2 and 1/2 in`
+  (a mixed number), and inside a longer run. A compact `V` reads anywhere but
+  a slope (`3H:1V`), a compact `A` only beside a pole count, an overcurrent
+  device, a rating label or (since WP-04.4) a voltage right after or before it
+  (`20A 120V`, `120V 20A`), and a name word before the number still wins
+  (`Room 101A 120V`, and with a number label between them, `Room No. 101A`,
+  in both guards: `_NUMBER_LABEL`, Codex review): a room `101A` read as a current would put a quantity
+  nobody wrote into two findings' signatures (recorded misreading: a name-less
+  label beside a voltage, `101A 120V receptacle`). The critique cache stores
+  post-merge findings, so the tokenizer and
   the rule ride `digest_cache._CRITIQUE_CACHE_CONTRACT` (2 since WP-04.2; 3
   since remediation WP-01.4, which changed which reads an entry may hold and
   not the rule, so the same fingerprint is pinned under 3; 4 since remediation
   WP-04.3, roles and the dimension-separator tag rule, whose fingerprint is
-  computed over a corpus that gained role rows), a term
+  computed over a corpus that gained role rows; 5 since remediation WP-04.4,
+  the spelled forms, the voltage context and the feet-inches pairs, over a
+  corpus that gained residual rows), a term
   inside both critique key builders and nothing else, never `_SCHEMA_VERSION`;
   `tests/test_drawing_cache_identity.py` pins the rule's fingerprint to its
   value, so a rule change that forgets the bump fails). One more gate precedes
@@ -1855,7 +1896,9 @@ unchanged (`auditors.arithmetic._UNICODE_DASHES` is pinned to its dash fold).
   **quantity-aware veto** is those rules plus the one WP-04 reader,
   `critique._quantity_tokens`, reused as it is through a function-local import
   (`_same_quantities`): both sides must read the same quantities, so `12' -6"`
-  (a negative six inches) is not `12'-6"`. Its status is FUZZY and its method
+  (a negative six inches) is not `12'-6"`. A change to that reader is a change
+  here (remediation WP-04.4 moved `_CROSS_QC_CACHE_CONTRACT` for it; no anchor
+  in the suite moved). Its status is FUZZY and its method
   `char_stream`, never EXACT, or `char_stream_ambiguous` when the reported
   tile does not settle two occurrences (the `exact_ambiguous` precedent); it
   runs after the sub-phrase and before the tile fallback, so no anchor an older
