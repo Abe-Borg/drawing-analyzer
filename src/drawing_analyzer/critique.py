@@ -54,6 +54,7 @@ from .core.api_config import (
     clamp_effort_for_model,
     model_supports_adaptive_thinking,
     model_supports_effort,
+    output_cap_for_model,
 )
 from .core.reply_text import reply_text
 from .core.structured_outputs import StructuredOutputsGate, attach_format
@@ -63,11 +64,13 @@ from .digest import (
     DEFAULT_DIGEST_EFFORT,
     DEFAULT_DIGEST_MAX_RETRIES,
     DEFAULT_DIGEST_MAX_TOKENS,
+    MAX_TOKENS_RETRY_CEILING,
     SHARED_USER_FRAMING_STRINGS,
     _clean_error,
     _get,
     _is_transient_error,
     _message_usage,
+    _name_discarded_retry,
     _retry_backoff_seconds,
     StreamUsage,
     stream_message,
@@ -1515,10 +1518,64 @@ class CritiqueRunOutcome:
     # before its final usage arrived (``digest.StreamUsage``); its token counts
     # are then lower bounds. Runtime only.
     interrupted_attempts: int = 0
+    # Remediation WP-01.8 (runtime only, never cached): the reply's stop
+    # reason, which the retry predicate reads (``None`` for a call that raised
+    # or a batch item that did not succeed); and, once a retry of this read
+    # came back failed too, the read's own first error and how many retries
+    # its error names (``digest._name_discarded_retry``, the digest's words).
+    stop_reason: str | None = None
+    read_error: str | None = None
+    retries_discarded: int = 0
 
     @property
     def ok(self) -> bool:
         return self.status == "COMPLETE"
+
+
+def _add_attempt_usage(into: CritiqueRunOutcome, other: CritiqueRunOutcome) -> None:
+    """Add ``other``'s billed usage to ``into`` (every attempt was billed)."""
+    into.input_tokens += other.input_tokens
+    into.output_tokens += other.output_tokens
+    into.cache_read_tokens += other.cache_read_tokens
+    into.cache_write_tokens += other.cache_write_tokens
+    into.interrupted_attempts += other.interrupted_attempts
+
+
+def keep_critique_read(
+    kept: CritiqueRunOutcome, later: CritiqueRunOutcome, *, model: str | None = None,
+) -> CritiqueRunOutcome:
+    """Fold a retry of one critique read into the read (remediation WP-01.8).
+
+    The owner's rule, on both transports (the real-time raised-cap retry in
+    :func:`_critique_read`, every batch follow-up round in
+    ``batch_critique``): a failed read keeps nothing (WP-01.4), so a finished
+    retry **is** the read, its findings and claims stamped with the same
+    ``run_id``; a retry that failed too leaves the read failed and its error
+    names the retry, in the digest's words
+    (:func:`~drawing_analyzer.digest._name_discarded_retry`): ``"<own error>;
+    retry: <its error>"``, ``"; N retries, the last: …"`` for several, and
+    ``" on <model>"`` for a retry sent to a refusal fallback (``model``).
+    Every attempt's usage is the read's. Returns the read kept.
+    """
+    if later.ok:
+        _add_attempt_usage(later, kept)
+        return later
+    _add_attempt_usage(kept, later)
+    on = f" on {model}" if model else ""
+    _name_discarded_retry(kept, f"{on}: {later.error}")
+    return kept
+
+
+def note_failed_critique_retry(
+    kept: CritiqueRunOutcome, failure: str, *, model: str | None = None,
+) -> None:
+    """Name a retry of a critique read that ended with nothing in hand (WP-01.8).
+
+    ``"<own error>; retry failed: <failure>"``, as the digest names a
+    raised-cap retry that raised (:func:`~drawing_analyzer.digest.note_failed_retry`).
+    """
+    on = f" on {model}" if model else ""
+    _name_discarded_retry(kept, f"{on} failed: {failure}")
 
 
 @dataclass
@@ -1628,6 +1685,7 @@ def critique_cache_entry_from_result(res: CritiqueResult) -> dict:
 def outcome_from_message(
     message: Any, *, run_id: str, ref: Any, rows: int = 0, cols: int = 0,
     structured: bool = False, interrupted: str | None = None,
+    fallback_model: str | None = None,
 ) -> CritiqueRunOutcome:
     """Parse one critique Messages response into a :class:`CritiqueRunOutcome` (DA-008).
 
@@ -1676,6 +1734,12 @@ def outcome_from_message(
 
     ``interrupted`` is set when ``message`` is an interrupted stream's partial
     read (remediation WP-01.7) and names the cause in the read's error.
+
+    ``fallback_model`` names the model a batch critique read was resubmitted
+    to on its refusal fallback (remediation WP-01.8), so its error reads
+    ``refused critique on claude-opus-4-8 (...)``, as a digest fallback read's
+    does. Every outcome carries the reply's ``stop_reason``, which the retry
+    predicate reads.
     """
     raw = reply_text(message)
     in_tok, out_tok = _message_usage(message)
@@ -1695,21 +1759,24 @@ def outcome_from_message(
     # thinking consumed the whole token budget), still worded "empty critique".
     stop = _get(message, "stop_reason")
     details = refusal_details(message)
+    noun = f"critique on {fallback_model}" if fallback_model else "critique"
     terminal = digest_terminal_error(
-        raw, stop, noun="critique", category=details.category if details else None,
+        raw, stop, noun=noun, category=details.category if details else None,
         interrupted=interrupted,
     )
     if classify_stop_reason(stop).kind == REFUSED:
         # The category is named in the read's error; the rest of stop_details
         # goes to the diagnostics log (remediation WP-01.5, the owner's rule).
-        # A refused critique read is not retried here (WP-01.8's).
-        _log.info("refused critique read %s for %s: %s", run_id,
+        # A refused batch read is retried on its route by the batch critique's
+        # follow-up rounds (WP-01.8); a real-time one had the server-side
+        # fallback.
+        _log.info("refused %s read %s for %s: %s", noun, run_id,
                   getattr(ref, "display_label", ref), describe_refusal(details))
     if terminal is not None:
         return CritiqueRunOutcome(
             run_id=run_id, status="FAILED", input_tokens=in_tok, output_tokens=out_tok,
             cache_read_tokens=cr, cache_write_tokens=cw,
-            error=terminal,
+            error=terminal, stop_reason=stop,
         )
     # A critique read is successful ONLY if it parsed a valid findings schema. A
     # nonempty-prose / missing-object / truncated / malformed response is a failure,
@@ -1722,6 +1789,7 @@ def outcome_from_message(
             cache_read_tokens=cr, cache_write_tokens=cw,
             parse_status=parsed.status, parse_note=parsed.note,
             error=f"critique produced no valid findings schema ({parsed.status})",
+            stop_reason=stop,
         )
     if not parsed.findings and parsed.raw_item_count > 0:
         # The model DID report findings, but every one failed validation (e.g. a
@@ -1734,6 +1802,7 @@ def outcome_from_message(
             parse_status=parsed.status, parse_note=parsed.note,
             error=f"critique emitted {parsed.raw_item_count} finding(s), none valid "
                   f"({parsed.note})",
+            stop_reason=stop,
         )
     findings = parsed.findings
     for f in findings:                 # stamp provenance at production (§14.3)
@@ -1747,6 +1816,7 @@ def outcome_from_message(
         input_tokens=in_tok, output_tokens=out_tok,
         cache_read_tokens=cr, cache_write_tokens=cw,
         parse_status=parsed.status, parse_note=parsed.note,
+        stop_reason=stop,
     )
 
 
@@ -1770,6 +1840,19 @@ def _critique_read(
     retry + backoff; a permanent failure returns immediately), then hands the
     response to the shared :func:`outcome_from_message` parser (DA-008).
 
+    A read the model stopped at ``max_tokens`` gets **one** retry at a raised
+    cap (remediation WP-01.8, the owner's rule; WP-01.4's open question):
+    twice the cap, up to :data:`~drawing_analyzer.digest.MAX_TOKENS_RETRY_CEILING`,
+    clamped to what the model serves, and none when that leaves no headroom.
+    Only ``max_tokens`` qualifies (``raised_cap_may_finish``): a raised cap
+    cannot finish a refusal, a full context window or a read with no stop
+    reason. It is the read's own retry, as the real-time digest's is, outside
+    the batch transport's per-sheet budget, and it streams like every read.
+    The two attempts fold through :func:`keep_critique_read`: a finished
+    retry is the read; one that failed too is named in the read's error
+    (``"; retry: …"``, or ``"; retry failed: …"`` when the call raised with
+    nothing in hand); both attempts' usage is the read's.
+
     ``cache_prefix`` (L2) caches the shared image prefix so a byte-identical
     re-read of this sheet serves it at ~0.1x; set by
     :func:`critique_sheet_self_consistent` only when ``runs >= 2``.
@@ -1785,12 +1868,13 @@ def _critique_read(
     # have the response parsed under a contract the request never carried.
     structured = critique_structured_outputs_enabled(model)
     content = build_user_content(rendered, task_instruction=_CRITIQUE_TASK_INSTRUCTION)
+    cap = max_tokens
 
     def _params(structured_now: bool) -> dict:
         return build_critique_request_params(
             content,
             model=model,
-            max_tokens=max_tokens,
+            max_tokens=cap,
             use_thinking=use_thinking,
             effort=effort,
             checklist=checklist,
@@ -1798,63 +1882,85 @@ def _critique_read(
             structured=structured_now,
         )
 
-    kwargs = _params(structured)
+    def _call() -> tuple[CritiqueRunOutcome, bool]:
+        """One call at ``cap``: its outcome, and whether it ended with nothing
+        in hand (the call raised and no partial read was captured)."""
+        nonlocal structured
+        kwargs = _params(structured)
+        # Every attempt's reported usage, an interrupted stream's included
+        # (remediation WP-01.7): each was billed.
+        usage = StreamUsage()
+        interrupted: str | None = None
+        attempt = 0
+        while True:
+            try:
+                resp = stream_message(client, kwargs)
+                usage.add(resp)
+                break
+            except Exception as exc:  # noqa: BLE001 - report, don't sink the set
+                if structured and STRUCTURED_OUTPUTS.rejects(exc):
+                    # Latch off for the process and re-send this same read
+                    # unconstrained. Deliberately does NOT consume a transient
+                    # retry: this is a permanent capability answer, not a
+                    # blip, and a sheet must not lose its retry budget
+                    # learning it.
+                    STRUCTURED_OUTPUTS.latch_off()
+                    structured = False
+                    kwargs = _params(False)
+                    _log.warning(
+                        "critique: structured outputs rejected (%s); continuing with "
+                        "the fenced-block contract for the rest of this run.",
+                        _clean_error(exc),
+                    )
+                    continue
+                partial = usage.add_interrupted(exc)
+                if _is_transient_error(exc) and attempt < max_retries:
+                    sleep(_retry_backoff_seconds(attempt))
+                    attempt += 1
+                    continue
+                if partial is None:
+                    return CritiqueRunOutcome(
+                        run_id=run_id, status="FAILED", error=_clean_error(exc),
+                        input_tokens=usage.input_tokens, output_tokens=usage.output_tokens,
+                        cache_read_tokens=usage.cache_read_tokens,
+                        cache_write_tokens=usage.cache_write_tokens,
+                        interrupted_attempts=usage.interrupted_attempts,
+                    ), True
+                # Once the retries are spent, an interrupted stream's partial
+                # read is the reply (the owner's rule), judged like any read:
+                # with no stop reason it is unfinished, so it fails and keeps
+                # nothing (WP-01.4), its usage billed on the sheet's record.
+                resp, interrupted = partial, exc.label
+                break
 
-    # Every attempt's reported usage, an interrupted stream's included
-    # (remediation WP-01.7): each was billed.
-    usage = StreamUsage()
-    interrupted: str | None = None
-    attempt = 0
-    while True:
-        try:
-            resp = stream_message(client, kwargs)
-            usage.add(resp)
-            break
-        except Exception as exc:  # noqa: BLE001 - report, don't sink the set
-            if structured and STRUCTURED_OUTPUTS.rejects(exc):
-                # Latch off for the process and re-send this same read
-                # unconstrained. Deliberately does NOT consume a transient
-                # retry: this is a permanent capability answer, not a blip, and
-                # a sheet must not lose its retry budget learning it.
-                STRUCTURED_OUTPUTS.latch_off()
-                structured = False
-                kwargs = _params(False)
-                _log.warning(
-                    "critique: structured outputs rejected (%s); continuing with "
-                    "the fenced-block contract for the rest of this run.",
-                    _clean_error(exc),
-                )
-                continue
-            partial = usage.add_interrupted(exc)
-            if _is_transient_error(exc) and attempt < max_retries:
-                sleep(_retry_backoff_seconds(attempt))
-                attempt += 1
-                continue
-            if partial is None:
-                return CritiqueRunOutcome(
-                    run_id=run_id, status="FAILED", error=_clean_error(exc),
-                    input_tokens=usage.input_tokens, output_tokens=usage.output_tokens,
-                    cache_read_tokens=usage.cache_read_tokens,
-                    cache_write_tokens=usage.cache_write_tokens,
-                    interrupted_attempts=usage.interrupted_attempts,
-                )
-            # Once the retries are spent, an interrupted stream's partial read
-            # is the reply (the owner's rule), judged like any read: with no
-            # stop reason it is unfinished, so it fails and keeps nothing
-            # (WP-01.4), its usage billed on the sheet's record.
-            resp, interrupted = partial, exc.label
-            break
+        outcome = outcome_from_message(
+            resp, run_id=run_id, ref=rendered.ref,
+            rows=getattr(rendered, "rows", 0), cols=getattr(rendered, "cols", 0),
+            structured=structured, interrupted=interrupted,
+        )
+        outcome.input_tokens, outcome.output_tokens = usage.input_tokens, usage.output_tokens
+        outcome.cache_read_tokens = usage.cache_read_tokens
+        outcome.cache_write_tokens = usage.cache_write_tokens
+        outcome.interrupted_attempts = usage.interrupted_attempts
+        return outcome, False
 
-    outcome = outcome_from_message(
-        resp, run_id=run_id, ref=rendered.ref,
-        rows=getattr(rendered, "rows", 0), cols=getattr(rendered, "cols", 0),
-        structured=structured, interrupted=interrupted,
+    outcome, _raised = _call()
+    if outcome.ok or not classify_stop_reason(outcome.stop_reason).raised_cap_may_finish:
+        return outcome
+    raised = output_cap_for_model(model, requested=min(cap * 2, MAX_TOKENS_RETRY_CEILING))
+    if raised <= cap:
+        return outcome                 # no headroom left to grant; not a retry
+    _log.info(
+        "critique read %s for %s stopped at max_tokens=%d; retrying once at %d",
+        run_id, rendered.ref.display_label, cap, raised,
     )
-    outcome.input_tokens, outcome.output_tokens = usage.input_tokens, usage.output_tokens
-    outcome.cache_read_tokens = usage.cache_read_tokens
-    outcome.cache_write_tokens = usage.cache_write_tokens
-    outcome.interrupted_attempts = usage.interrupted_attempts
-    return outcome
+    cap = raised
+    retry, retry_raised = _call()
+    if retry_raised:
+        _add_attempt_usage(outcome, retry)
+        note_failed_critique_retry(outcome, retry.error or "")
+        return outcome
+    return keep_critique_read(outcome, retry)
 
 
 def critique_sheet(

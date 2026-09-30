@@ -694,7 +694,9 @@ The reasons are a server error or an expired item, a raised output cap, a
 refusal fallback, and a batch abandoned as stuck. The places are a fresh-batch
 round, the follow-up batch and a direct-call rescue.
 `DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS` sets it (default 4), so a sheet is
-submitted at most five times. A batch item that fails on the account itself
+submitted at most five times. The batch critique uses the same budget for its
+two reads together (every retried read counts one), so a sheet's critique is at
+most two reads plus four retries. A batch item that fails on the account itself
 (`billing_error`) is named and not resubmitted, like any other rejection of the
 request.
 
@@ -862,6 +864,29 @@ had failed outright, was never cached, and was critiqued (and billed) again on
 every warm run while still reading `COMPLETE`; and a critique in which no read
 counted read `PARTIAL`.
 
+**A failed critique read is retried before it counts as failed.** A read cut
+off at `max_tokens` gets one more try at twice the output cap (64k → 128k), on
+either transport, like the digest. On the batch transport (Hybrid and Economy)
+a read that came back with a server error (`overloaded_error`, `api_error`,
+`rate_limit_error`, `timeout_error`) or expired is sent again as it was, and a
+refused read goes to its fallback model when the model declares a route for the
+refusal's category (so far only Opus 5's `cyber` → Opus 4.8; the default
+Opus 5.5 and Sonnet 5.5 have none yet). These retries ride follow-up critique
+batches at the batch rate, never full-rate real-time calls, and share the digest's
+per-sheet budget (`DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS`, default 4: every
+retried read of a sheet counts one). A read that finishes on a retry is an
+ordinary read: merged, counted, and, once both reads of the sheet finished,
+cached, so a warm run does not pay for it again. A read that still fails says
+what its retries got: `overloaded_error: busy; 4 retries, the last:
+overloaded_error: busy`, `truncated critique (stop_reason='max_tokens'); retry:
+truncated critique (stop_reason='max_tokens')`. A rejected request, a canceled
+item, a refusal with no route, a full context window and a malformed reply are
+not retried; a refusal that is not retried says why (`…; not retried: no
+fallback for category 'cyber' on claude-opus-5-5`). A follow-up batch that does
+not finish within the collection time is canceled, and its reads say so. Before
+remediation WP-01.8 every failed batch read, and a real-time read cut off at the
+cap, simply failed, and the sheet was read again on every run.
+
 The merged critique is cached under its own key, so a re-run skips the extra
 calls. Because the entry holds findings already merged by the app's own
 deduplication rule, an update that changes that rule re-keys the critique cache,
@@ -889,7 +914,8 @@ time — is a deferred follow-up; today the reuse is within the critique's two r
 `critique=True` is still more expensive than a plain digest (see
 [Performance](#performance)), just no longer double-priced. It is additive and
 non-fatal: a failure is recorded and the standard deliverable ships — a critique
-batch that can't be collected degrades those sheets' critique, never the digest. The model defaults to Opus 5.5
+batch that can't be collected degrades those sheets' critique, never the digest
+(the reads such a batch had already finished are not read back yet). The model defaults to Opus 5.5
 (`DRAWING_ANALYZER_CRITIQUE_MODEL`); the run count is `DRAWING_ANALYZER_CRITIQUE_RUNS`
 (default 2; set 1 to disable self-consistency).
 
@@ -2183,7 +2209,7 @@ runs.
 | `DRAWING_ANALYZER_PROFILES_DIR` | `~/.drawing_analyzer/profiles` | User review-profile directory (wins over packaged profiles on name). |
 | `DRAWING_ANALYZER_USE_BATCH` | off | Opt every run into the Message Batches transport (~50% token-rate discount with the same model/prompt/review contract) without editing call sites. An explicit `use_batch=` argument still wins. |
 | `DRAWING_ANALYZER_BATCH_STALL_TIMEOUT_MIN` | `25` first watch, `60` after | Minutes of **completely frozen** batch request counts before the batch is abandoned and its sheets resubmitted. Setting this applies one value to every watch (see [Stuck batches](#stuck-batches-and-the-stall-watch)). |
-| `DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS` | `4` | Fresh batches the recovery transport will submit for the sheets a stuck batch left unresolved, before the run keeps a clean retriable batch error. Also each sheet's retry budget: how many times one sheet may be resubmitted, for any reason (a server error, a raised output cap, a refusal fallback, an abandoned batch), on either recovery path. |
+| `DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS` | `4` | Fresh batches the recovery transport will submit for the sheets a stuck batch left unresolved, before the run keeps a clean retriable batch error. Also each sheet's retry budget: how many times one sheet may be resubmitted, for any reason (a server error, a raised output cap, a refusal fallback, an abandoned batch), on either recovery path. The batch critique's follow-up batches use the same value, as a round ceiling and as the sheet's budget for its reads together. |
 | `DRAWING_ANALYZER_BATCH_MAX_ELAPSED_HOURS` | `24` | Hours a batch run will wait before detaching from the remote batch. The default is the Batches API's own SLA. Lower it to cap wall clock; a malformed or non-positive value falls back to the default, and any override is floored at one minute. The cost dialog quotes whatever this resolves to. |
 | `DRAWING_ANALYZER_MAX_WORKERS` | `4` | Real-time digest concurrency (`1` = sequential). |
 | `DRAWING_ANALYZER_STAGE_OVERLAP` | auto | Overlap independent set-level calls for the real SDK client; `0` disables it and `1` explicitly opts a thread-safe custom client in. `DRAWING_ANALYZER_MAX_WORKERS=1` remains fully sequential. |

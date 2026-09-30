@@ -740,8 +740,72 @@ retried, and the harvest resubmitted it to the same model. Now:
   `request_too_large`, the API's 413 type and not an SDK batch type, stays.
   `_item_error_type` reads the nested type, and `_batch_item_error_text(noun=)`
   is the one wording for both batch transports: the critique passes
-  `noun="item"` and now keeps an errored read's type. Retrying a failed batch
-  critique read is WP-01.8's.
+  `noun="item"` and now keeps an errored read's type. A failed batch critique
+  read is retried since remediation WP-01.8 (below).
+
+**Batch critique recovery, and the critique's raised cap (remediation WP-01.8;
+N4 critique part, R2; the owner's rules).** Every failed batch critique read
+used to fail and never be retried (refused, the nine errored types, canceled,
+expired, `max_tokens`; `batch_critique` had no follow-up batch, harvest or
+rescue), and a real-time critique read cut off at `max_tokens` failed too:
+the stage read PARTIAL, nothing was cached, and every warm run read the sheet
+again (measured on SDK 1.7.0 and 1.8.0, Opus 5.5, Sonnet 5.5 and Opus 5). Now:
+- **One predicate, both batch transports.** `batch_digest._retry_params_for`
+  is the digest's decision made slot-agnostic (`_item_retry_params` is its
+  digest wrapper, byte-identical decisions): an `expired` or a non-permanent
+  `errored` item as it was sent; a refusal on its registry route, once
+  (`_refusal_retry_params`, now `(result_obj, params, *, requested_model,
+  label, noun, on_not_retried)`); a `max_tokens` stop at twice the cap, up to
+  `MAX_TOKENS_RETRY_CEILING`, clamped to the model's cap. Not a permanent error,
+  `canceled`, an unrouted or category-less refusal (a named one says so:
+  `…; not retried: no fallback for category 'cyber' on claude-opus-5-5`,
+  `_note_not_retried`), a context-window stop, `None`, a continuation, an
+  unknown stop or a malformed read. `batch_critique._read_retry_params` asks
+  it for each read; `CritiqueRunOutcome.stop_reason` (runtime only) is what it
+  reads.
+- **Follow-up critique batches**, never full-rate real time:
+  `batch_critique._recover_failed_reads` runs between the primary collect and
+  the merge. Each round resubmits the reads still failing (same `custom_id`,
+  the sheet's `file_id` references), at most `_max_batch_resubmit_rounds()`
+  rounds (a rejected submit counts, spends no retry and backs off), inside the
+  remaining collection bound. No stall watch, like the primary critique poll:
+  a round that ends non-terminal is canceled best effort and ends the
+  recovery, its reads named `; retry: critique batch not collected (<status>);
+  remote batch id=… was canceled`. A read a round returned no envelope for
+  goes again as sent. The files are released only once every batch that
+  references them is terminal or canceled (`followups_safe`).
+- **WP-01.5's per-sheet budget.** `_CSlot.retries` counts every resubmitted
+  read of the sheet; `_CRead.retry_budget` points `_within_retry_budget` and
+  `_count_retry` at it (`_retry_budget_of`). The budget check counts the reads
+  it keeps within one call, so two reads of one sheet in one round spend two;
+  a digest slot appears once per call, so its answer is unchanged. Worst case
+  per sheet at the default 4: 2 + 4 items.
+- **The read kept** (`critique.keep_critique_read`, both transports): a failed
+  read keeps nothing (WP-01.4), so a finished retry is the read (same
+  `run_id`, so the merge's provenance is unchanged); a retry that fails too is
+  named in the read's error by the digest's one wording
+  (`digest._name_discarded_retry`: `; retry: …`, `; N retries, the last: …`,
+  `; retry on <model>: …`), and `note_failed_critique_retry` names a call
+  that raised (`; retry failed: …`). Every attempt's usage is the read's. A
+  fallback read is worded with its model (`outcome_from_message(...,
+  fallback_model=)`: `refused critique on claude-opus-4-8 (…)`).
+- **Real time.** `critique._critique_read` gives a `max_tokens` read one retry
+  at twice the cap (streamed, as every read is; the read's own retry, outside
+  the batch budget, as the real-time digest's), so batch's upload-failure
+  fallback (`_serve_realtime`) gets it too. The structured-outputs contract
+  and the prompt-cache prefix are unchanged by it.
+- **Merge, tally, cache, usage.** A recovered read merges as any read, is
+  judged in D-2's tally (eligible stays sheets × reads, never attempts), and a
+  sheet whose every read finished is stored at both levels under the
+  requested key (requested model, requested cap), as WP-01.5's digest
+  fallback read is. No key, `_CRITIQUE_CACHE_CONTRACT` or `_SCHEMA_VERSION`
+  change: a contract-3 entry was written only when both reads finished first
+  time, which is what the new code stores for the same inputs. The sheet's one
+  critique record sums every attempt (per-attempt records are WP-14.5's).
+- **Not here:** the batch critique still has no harvest (a critique batch
+  abandoned at the bound loses the reads it finished: a new row, WP-18.6);
+  the digest harvest's truncated item keeps its cap one round (WP-14.1); a
+  real-time refusal's `recommended_model` is logged, not retried (WP-14.3).
 
 **One text join, and the remaining response consumers (remediation WP-01.6,
 U2, D-1; the owner's rules).**
@@ -1076,7 +1140,11 @@ raise, after the paid digest and critique. Now:
   arithmetic auditor; its tokens stay billed. It used to count whenever the
   object parsed (`PARSED_UNCLOSED` included; `FINDINGS_PARSE_OK` is unchanged,
   the digest salvages that shape at `end_turn`), merge as corroboration and be
-  cached at both levels. `CritiqueResult.read_errors` (runtime-only) keeps
+  cached at both levels. Before a read counts as failed it may be retried
+  (remediation WP-01.8, below): a `max_tokens` stop once at a raised cap on
+  either transport, and on the batch transport a transient or expired item or
+  a routed refusal in follow-up critique batches; a recovered read is the read.
+  `CritiqueResult.read_errors` (runtime-only) keeps
   each failed read's error, and `critique.critique_shortfall` names a sheet
   short of its requested reads even when its surviving read shipped findings
   (`error` stays `None` there). The critique stage adopts **D-2's item rule**

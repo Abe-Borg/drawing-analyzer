@@ -260,20 +260,33 @@ def test_recorded_limit_a_recovered_item_keeps_no_record_of_its_failed_attempt(t
 
 
 # --------------------------------------------------------------------------- #
-# The critique's batch (hybrid): a failed envelope is a failed read
+# The critique's batch (hybrid): a failed envelope is a failed read, and a
+# transient or expired one is retried (remediation WP-01.8)
 # --------------------------------------------------------------------------- #
 
 
 @pytest.mark.parametrize("envelope", [R.errored("overloaded_error", "busy"), R.CANCELED, R.EXPIRED],
                          ids=["errored", "canceled", "expired"])
 def test_a_failed_critique_envelope_is_a_failed_read_that_is_read_again(tmp_path, envelope):
+    """A canceled critique read fails its sheet and is read again on the next
+    run. Re-baselined by WP-01.8 (the owner's approval): an errored
+    (transient) or expired read is now resubmitted in a follow-up critique
+    batch, so with the envelope answered once it is recovered, the stage is
+    COMPLETE, the result is cached and the warm run reads nothing; a canceled
+    one is not retried, as the digest's primary collect does not."""
     stub = AnthropicAPIStub(_script()._route, batch_result=_item_once(envelope, "critique"))
 
     ctx = _run(tmp_path, stub, "hybrid")
 
-    assert _statuses(ctx)["critique"] == "PARTIAL"
-    assert ctx.errors == ["Critique: 1 sheet(s) returned incomplete or malformed critique reads"]
-    assert _warm_calls(tmp_path, "hybrid").get("batch:critique") == 2      # M-101's two reads again
+    if envelope is R.CANCELED:
+        assert _statuses(ctx)["critique"] == "PARTIAL"
+        assert ctx.errors == ["Critique: 1 sheet(s) returned incomplete or malformed critique reads"]
+        assert _warm_calls(tmp_path, "hybrid").get("batch:critique") == 2      # M-101's two reads again
+    else:
+        assert _statuses(ctx)["critique"] == "COMPLETE"
+        assert not [e for e in ctx.errors if e.startswith("Critique")]
+        assert [len(r) for r in _batch_items(stub, "critique")] == [4, 1]      # the read alone again
+        assert "batch:critique" not in _warm_calls(tmp_path, "hybrid")        # cached
 
 
 # --------------------------------------------------------------------------- #

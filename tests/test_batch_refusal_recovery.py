@@ -646,13 +646,17 @@ def test_recorded_limit_a_fallback_read_is_labelled_with_the_requested_model(tmp
 # --------------------------------------------------------------------------- #
 
 _CRIT = "```json\n{\"findings\": []}\n```"
+_PERMANENT_TYPES = BD._PERMANENT_ITEM_ERROR_TYPES
 
 
-def _critique_first_read(envelope):
+def _critique_first_read(envelope, *, every_attempt: bool = False):
+    """Sheet 0's first critique read answered with ``envelope``: once, or
+    (``every_attempt``) on every attempt, so a read the follow-up batches
+    retry (remediation WP-01.8) still fails and shows its error."""
     first = {"done": False}
 
     def batch_result(custom_id, params):
-        if custom_id == "sheet__0__r1" and not first["done"]:
+        if custom_id == "sheet__0__r1" and (every_attempt or not first["done"]):
             first["done"] = True
             return envelope(params)
         return None
@@ -670,22 +674,39 @@ def _critique_first_read(envelope):
 
 @pytest.mark.parametrize("error_type", R.ERROR_TYPES, ids=list(R.ERROR_TYPES))
 def test_an_errored_critique_read_keeps_its_error_type(error_type):
-    res = _critique_first_read(lambda p: R.errored(error_type, "the detail"))
-    assert res.read_errors == [f"{error_type}: the detail"]
+    # Re-baselined by WP-01.8 (the owner's approval): a transient type is now
+    # retried in follow-up critique batches, so the read is answered with the
+    # error on every attempt and its error keeps the type through the per-
+    # sheet budget (4 retries). A permanent type is not retried, as before.
+    res = _critique_first_read(lambda p: R.errored(error_type, "the detail"),
+                               every_attempt=True)
+    own = f"{error_type}: the detail"
+    if error_type in _PERMANENT_TYPES:
+        assert res.read_errors == [own]
+    else:
+        assert res.read_errors == [f"{own}; 4 retries, the last: {own}"]
     assert res.completed_runs == 1
 
 
-@pytest.mark.parametrize("envelope, text", [(R.CANCELED, "batch item canceled"),
-                                            (R.EXPIRED, "batch item expired")],
+@pytest.mark.parametrize("envelope, text, retried", [(R.CANCELED, "batch item canceled", False),
+                                                     (R.EXPIRED, "batch item expired", True)],
                          ids=["canceled", "expired"])
-def test_a_canceled_or_expired_critique_read_keeps_its_text(envelope, text):
-    res = _critique_first_read(lambda p: envelope)
-    assert res.read_errors == [text]
+def test_a_canceled_or_expired_critique_read_keeps_its_text(envelope, text, retried):
+    # Re-baselined by WP-01.8: an expired read is retried (every attempt
+    # expires here), a canceled one is not (as the digest's primary collect).
+    res = _critique_first_read(lambda p: envelope, every_attempt=True)
+    assert res.read_errors == [f"{text}; 4 retries, the last: {text}" if retried else text]
 
 
 def test_a_refused_critique_read_names_its_category():
+    # Re-baselined by WP-01.8: the read now also says why it is not retried
+    # (the default critique model, Opus 5.5, declares no route), as a digest
+    # item's does.
     res = _critique_first_read(lambda p: _refusal_envelope(p, "cyber"))
-    assert res.read_errors == ["refused critique (stop_reason='refusal', category='cyber')"]
+    assert res.read_errors == [
+        "refused critique (stop_reason='refusal', category='cyber'); not retried: "
+        "no fallback for category 'cyber' on claude-opus-5-5"
+    ]
 
 
 # --------------------------------------------------------------------------- #

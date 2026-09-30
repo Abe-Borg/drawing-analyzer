@@ -219,7 +219,10 @@ above and restates none of it.
     is a failed read, DA-008);
   - `TRUNCATED`: failed, `truncated critique (stop_reason=…)`. Not retried at
     a raised cap: that is not in N4's row (a note on WP-01.5 records the
-    option and the shared retry bound it would need);
+    option and the shared retry bound it would need); *(amended by WP-01.8: a
+    `max_tokens` read gets one retry at twice the cap on both transports
+    first, and fails only if that retry fails too; see the WP-01.8 note
+    below)*
   - `REFUSED`: failed, `refused critique (stop_reason='refusal')`, named even
     when the reply is empty;
   - `UNFINISHED` (`None`, N27): failed, `unfinished critique (stop_reason=None)`;
@@ -348,6 +351,7 @@ failed read, and `stop_details` is still informational, never the verdict.
 - **The batch critique:** an errored read keeps its type through the digest's
   one helper (`_batch_item_error_text(noun="item")`). Retrying failed batch
   critique reads, and WP-01.4's raised-cap question, is a new row, WP-01.8.
+  *(Done by WP-01.8: the note below.)*
 - **Rejected:** retrying every refusal (a model's own decline re-read
   elsewhere); a guessed Sonnet 5 route; sending `recommended_model` verbatim
   (an unregistered id may 400); a refusal round outside the budget; storing
@@ -560,6 +564,102 @@ classifier and restates none of it.
   was not is "returned no judgment"); the investigation's per-finding record;
   the batch rescue's attempt records; the SDK-contract test's patch point
   (each set-level stage passes its own `stream_message` to `stream_reply`).
+
+Added by WP-01.8: **a failed batch critique read is retried, and a critique
+cut off at `max_tokens` gets one raised-cap retry, on both transports** (N4's
+critique part, R2, WP-01 step 5; the owner's rules, decided in three rounds with
+measured options and a case table per option). It conforms to the classifier
+and the WP-01.4 and WP-01.5 notes above, and restates none of them: a read that
+is not `FINISHED` is still a failed read that keeps nothing; a retry happens
+before the read is judged failed.
+- **Measured first** (zero API calls, the real SDK over `AnthropicAPIStub`,
+  Opus 5.5, Sonnet 5.5 and Opus 5, SDK 1.7.0 and again 1.8.0 in a scratch
+  venv, identical):
+  - every failed batch critique read failed in one batch and was never
+    retried: the nine SDK error types, `request_too_large`, canceled, expired,
+    a refusal of every category with and without `stop_details`, `max_tokens`
+    (empty, or with a complete-looking object), the context window, `None`,
+    `pause_turn`, an unknown stop, a malformed read;
+  - through the pipeline (Hybrid and Economy) the critique stage read PARTIAL,
+    3 of 4 reads judged, the sheet's usage record PARTIAL, and the warm run
+    read the sheet again (2 batch items); on Fast a real-time read cut at
+    64k failed in one call, and the warm run read it again;
+  - the digest's recovery could be reused, not copied: its retry decision read
+    only a slot's params and its `SheetDigest`'s verdict, and its budget
+    helpers only a slot's `retries`; its rounds loop is bound to its harvest,
+    abandonment records and rescue, so the critique keeps its own loop.
+- **Which reads** (round 1): **the digest's one predicate**,
+  `batch_digest._retry_params_for` (slot-agnostic; `_item_retry_params` is its
+  digest wrapper, byte-identical decisions): a transient errored item
+  (`api_error`, `overloaded_error`, `rate_limit_error`, `timeout_error`) and an
+  expired one as they were sent; a refusal on its registry route
+  (`refusal_fallback_routes`), once, the gate and target rules of the WP-01.5
+  note unchanged; a `max_tokens` stop at twice the cap, up to
+  `MAX_TOKENS_RETRY_CEILING`, clamped to the model's cap. Not retried: a
+  permanent error, `canceled` (as the digest's primary collect), an unrouted
+  or category-less refusal (a named category says so: `…; not retried: no
+  fallback for category 'cyber' on claude-opus-5-5`, the digest's words), the
+  context window, `None`, a continuation, an unknown stop, a malformed read.
+  `CritiqueRunOutcome.stop_reason` (runtime only) is what the predicate reads.
+  Not taken: the same with one follow-up batch only; the same plus canceled;
+  transient and expired only.
+- **Where:** fresh critique batches (`batch_critique._recover_failed_reads`),
+  between the primary collect and the merge, up to
+  `_max_batch_resubmit_rounds()` rounds (a rejected submit counts a round,
+  spends no retry, backs off), inside the remaining collection bound. Never
+  full-rate real time. No stall watch, like the primary critique poll.
+- **The budget** (round 1): **WP-01.5's per-sheet budget**, the same knob
+  (`DRAWING_ANALYZER_MAX_BATCH_RESUBMIT_ROUNDS`, default 4): `_CSlot.retries`
+  counts every resubmitted read of the sheet; `_within_retry_budget` and
+  `_count_retry` read it through `_CRead.retry_budget`, and the check counts
+  the reads it keeps within one call (two reads of one sheet in one round
+  spend two). Worst case per sheet: 2 + 4 items. Not taken: per read (2 + 8);
+  per sheet on its own knob; one count shared with the digest's.
+- **The read kept** (round 1): **a finished retry is the read; a failed chain is
+  named.** A failed read keeps nothing (WP-01.4), so `critique.keep_critique_read`
+  (both transports) makes a finished retry the read (same `run_id`, so the
+  merge's provenance is unchanged) and names a failed one in the read's error
+  with the digest's one wording (`digest._name_discarded_retry`): `; retry: …`,
+  `; N retries, the last: …`, `; retry on <model>: …`; `note_failed_critique_retry`
+  names a call that raised (`; retry failed: …`). A fallback read is worded
+  with its model (`refused critique on claude-opus-4-8 (…)`). Every attempt's
+  usage is the read's. Not taken: the latest attempt's error only (the
+  digest's equal-rank rule taken literally); every error joined.
+- **Real time** (round 1): **one raised-cap retry per read** in
+  `critique._critique_read` (so also batch's upload-failure fallback),
+  streamed, the read's own retry outside the batch budget, as the real-time
+  digest's. Not taken: batch only; neither.
+- **Merge, tally, cache** (round 2): **the recovered read is the read; no
+  bump.** It merges as any read, is judged in D-2's tally (the D-2 WP-01.8
+  note), and a sheet whose every read finished is stored at both levels
+  under the requested key (requested model, requested cap), as the WP-01.5
+  digest fallback read is. Not taken: the same with `_CRITIQUE_CACHE_CONTRACT`
+  3 -> 4; used this run and never cached.
+- **Usage** (round 2): **summed on the sheet's one critique record**, BATCH for
+  batch retries; per-attempt records stay WP-14.5's. Not taken: a record per
+  retried read.
+- **A follow-up batch that never ends** (round 3): **canceled, the recovery
+  stops, its reads named** `; retry: critique batch not collected (<status>);
+  remote batch id=… was canceled` (`may still be running` when the cancel
+  failed, and then the files are kept). A read a round returned no envelope
+  for goes again as it was sent. The files are released only once every
+  batch that references them is terminal or canceled. Not taken: cancel and
+  carry the reads to the next round (pays a canceled round's finished items
+  again, with no harvest to read them back).
+- **Left on other rows** (round 2 and 3): the digest harvest's truncated item
+  keeps its cap one round (WP-14.1); a real-time refusal's `recommended_model`
+  is logged, not retried (WP-14.3); the batch critique has no harvest of an
+  abandoned batch (a new row, WP-18.6). WP-01 stays open: its acceptance waits
+  on WP-06.3, WP-12.6 and WP-13.4 (the plan's WP-01 Acceptance note).
+- **Version / cache changes:** none (D-4's WP-01.8 note); no migration-register
+  row.
+- **Consumers affected:** the batch critique's reads, errors, merge and cache
+  (both levels, through the pipeline's `_ingest_miss`); the critique stage's
+  status, items, coverage line and errors (`critique_shortfall`), `ctx.errors`,
+  `run.log` and the report's stage table through them; the sheet's critique
+  usage record (tokens, terminal status); the real-time critique's calls; the
+  digest's retry decision and budget helpers (refactored, byte-identical); the
+  WP-01.5 and WP-01.4 tests re-baselined with the owner's approval.
 
 ## D-2 Stage accounting — `decided` (WP-01.1, [PR #155](https://github.com/Abe-Borg/drawing-analyzer/pull/155))
 
@@ -873,6 +973,21 @@ transport, a caller's callback, the cache, the level-1 store, the accounting.
   event type (`DIGEST_PHASE_STOPPED`) and a `stopped` field on `RUN_END`. No
   migration-register row.
 
+Added by WP-01.8: **a recovered critique read is judged; the items stay
+reads** (the owner's decision; D-1's WP-01.8 note). The critique's terms from
+WP-01.4's note are unchanged. A read the batch follow-up rounds or the
+real-time raised-cap retry recover is the read, so it is *judged* (it finished
+with a valid findings object) and the sheet's `completed_runs` counts it; a read
+still failing after its retries is *failed* ("returned no judgment"), its error
+naming the retries. *Eligible* stays `runs` x the sheets the run set out to
+read: a retry is an attempt, never an item, so it adds nothing to either side
+of the ratio. The coverage line, `items_in` / `items_out` and the usage record's
+terminal status read the final reads. Measured: under the chosen rules no
+pinned status moved outside the re-baselined tests; a transient or expired read
+answered once, a routed refusal and a `max_tokens` read whose retry finishes
+now read COMPLETE (4 of 4) where they read PARTIAL (3 of 4). No cache or key
+change.
+
 ## D-3 Finding identity — `open` (to be decided by WP-03.4)
 
 **Required decision:** keep four things separate: physical evidence identity,
@@ -1144,6 +1259,19 @@ never deleted (plan §2 rule 6, WP-10).
   `input_tokens` / `output_tokens` now sum an interrupted attempt too when a
   retry finished; they are informational (a hit bills nothing) and every
   previously possible read stores the same values.
+- **Added by WP-01.8 (D-1's WP-01.8 note): nothing moved, the owner's choice.** A
+  critique result whose every read finished, one of them on a retry (a raised
+  cap, a refusal fallback, a resubmitted transient or expired item), is stored
+  at both levels under the requested key (requested model, requested cap),
+  with the same payload shape and admission rule (`completed_runs ==
+  requested_runs`). No key, `_CRITIQUE_CACHE_CONTRACT` (3) or `_SCHEMA_VERSION`
+  change: a contract-3 entry was written only when both reads finished on
+  their first attempt, which is exactly what the new code stores for the same
+  inputs, so nothing needs to miss; a retry happens only where nothing was
+  stored. An entry may now hold a read served by a fallback model or produced
+  at 128k, and nothing marks it (the serving model in a payload is WP-14.6's).
+  `CritiqueRunOutcome.stop_reason`, `read_error` and `retries_discarded` are
+  runtime-only; no stored field changed. No migration-register row.
 - **Rejected shortcuts.**
   - A `_SCHEMA_VERSION` bump: it discards every paid digest.
   - A new key term for the same change, and a bump and a term together.
