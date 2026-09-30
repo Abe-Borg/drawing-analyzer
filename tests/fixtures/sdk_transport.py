@@ -25,9 +25,11 @@ The defaults are the ordinary shape: a complete stream, every batch item
 ``succeeded``, a batch ``ended`` at the first retrieve, results in submit
 order. Each is a knob (the owner's rules, WP-02.3):
 
-- ``stream(record) -> (cut, end) | None`` stops a streamed reply early
-  (``sdk_responses.CUTS`` x ``ENDS``: a clean end, an SSE ``error`` event, or a
-  dropped connection, raised by the transport as the SDK would see it);
+- ``stream(record) -> (cut, end) | (cut, end, error) | None`` stops a
+  streamed reply early (``sdk_responses.CUTS`` x ``ENDS``: a clean end, an SSE
+  ``error`` event, or a dropped connection, raised by the transport as the SDK
+  would see it); ``error`` is the ``error`` event's body
+  (``sdk_responses.stream_error``, default an ``overloaded_error``);
 - ``batch_result(custom_id, params) -> dict | None`` answers an item with its
   own envelope (``sdk_responses.errored(...)``, ``CANCELED``, ``EXPIRED``, or
   ``PENDING``: not finished when the batch ends, so ``canceled`` after a cancel
@@ -222,8 +224,8 @@ class AnthropicAPIStub:
             message = message_json(self.route(dict(body)), model=body.get("model", ""))
             if body.get("stream"):
                 shape = self.stream(record) if self.stream is not None else None
-                cut, end = shape if shape is not None else (None, "eof")
-                return sse_response(message, cut=cut, end=end)
+                cut, end, *error = shape if shape is not None else (None, "eof")
+                return sse_response(message, cut=cut, end=end, error=error[0] if error else None)
             return httpx2.Response(200, json=message)
         if path == "/v1/messages/count_tokens" and method == "POST":
             return httpx2.Response(200, json={"input_tokens": 1})

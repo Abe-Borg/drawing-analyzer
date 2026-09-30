@@ -71,6 +71,7 @@ from .digest import (
     _message_usage,
     _retry_backoff_seconds,
     _tolerant_json_object,
+    StreamUsage,
     stream_message,
 )
 from .models import Finding, Verification, source_page_key
@@ -804,6 +805,9 @@ class _InvestigationOutcome:
     fatal: bool = False
     note: str = ""
     tool_trace: list = field(default_factory=list)
+    # Remediation WP-01.7: turns whose stream was interrupted before its final
+    # usage arrived; the token counts are then lower bounds.
+    interrupted_attempts: int = 0
 
 
 def _build_initial_content(
@@ -990,6 +994,17 @@ def _investigate_one(
                 )
                 break
             except Exception as exc:  # noqa: BLE001 - degrade, never raise (I-3)
+                # An interrupted turn is retried like any transient failure,
+                # and its reported usage is the finding's; its partial read is
+                # never used, so no tool from it runs (remediation WP-01.7,
+                # the owner's rule; the turn's replay is WP-13.4's).
+                lost = StreamUsage()
+                lost.add_interrupted(exc)
+                out.input_tokens += lost.input_tokens
+                out.output_tokens += lost.output_tokens
+                out.cache_read_tokens += lost.cache_read_tokens
+                out.cache_write_tokens += lost.cache_write_tokens
+                out.interrupted_attempts += lost.interrupted_attempts
                 if _is_transient_error(exc) and attempt < max_retries:
                     sleep(_retry_backoff_seconds(attempt))
                     attempt += 1
@@ -1302,6 +1317,8 @@ class InvestigationRecord:
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
     cached: bool = False
+    # Remediation WP-01.7 (:attr:`_InvestigationOutcome.interrupted_attempts`).
+    interrupted_attempts: int = 0
 
 
 @dataclass
@@ -1467,6 +1484,7 @@ def investigate_findings(
             output_tokens=outcome.output_tokens,
             cache_read_tokens=outcome.cache_read_tokens,
             cache_write_tokens=outcome.cache_write_tokens,
+            interrupted_attempts=outcome.interrupted_attempts,
         )
         result.per_finding.append(record)
         if outcome.outcome == "concluded":

@@ -581,27 +581,38 @@ def test_a_critique_stream_that_ends_before_message_delta_is_a_failed_read(tmp_p
     assert _warm_calls(tmp_path).get("critique") == 2
 
 
+def _no_backoff(monkeypatch) -> None:
+    """The streamed stages' transient retries sleep 2 s, then 4 s: not here.
+    The digest, the planner, synthesis and focus all back off through
+    ``digest._retry_backoff_seconds`` (``digest.stream_reply``)."""
+    import drawing_analyzer.digest as D
+
+    monkeypatch.setattr(D, "_retry_backoff_seconds", lambda attempt: 0.0)
+
+
 @pytest.mark.parametrize("end", ["error", "drop"], ids=["error-event", "dropped"])
-def test_recorded_limit_an_interrupted_digest_stream_is_not_retried_and_its_usage_is_lost(tmp_path, end):
-    """Recorded limit (WP-01.7, U1): the stream fails mid-read, by an SSE
-    ``error`` event (the SDK raises ``APIStatusError`` with status 200) or a
-    dropped connection (``httpx2.RemoteProtocolError``, which the SDK does not
-    wrap). The digest's transient-error test knows neither, so the sheet fails
-    after one request; and the attempt is recorded with 0 tokens, though
-    ``message_start`` had reported 500 input tokens. WP-01.7 captures the
-    partial read and its usage (``current_message_snapshot``) and threads the
-    outcome through the retry loop: this becomes a retry and a record of the
-    attempt's usage."""
+def test_an_interrupted_digest_stream_is_retried_and_its_usage_kept(tmp_path, monkeypatch, end):
+    """Remediation WP-01.7 (U1; the owner's rules): the stream fails
+    mid-read, by an SSE ``error`` event (the SDK raises ``APIStatusError``
+    with status 200; its type, ``overloaded_error``, stands for 529) or a
+    dropped connection (``httpx2.RemoteProtocolError``, which the SDK does
+    not wrap). Both are transient now (``digest._is_transient_error``), so
+    the digest retries and the retry finishes; the interrupted attempt's
+    usage (``message_start``'s 500 input tokens) is on the sheet's record
+    beside the retry's, which counts the one interrupted attempt. The sheet
+    failed after one request and the attempt was recorded with 0 tokens
+    (WP-02.3's recorded limit, flipped here)."""
+    _no_backoff(monkeypatch)
     stub = AnthropicAPIStub(_script()._route, stream=_stream_once("digest", "after_text", end, _about_m101))
 
     ctx = _run(tmp_path, stub, full=False)
 
     digest_requests = [r for r in stub.messages() if stage_of(r["body"]) == "digest"]
-    assert sum(_about_m101(r["body"]) for r in digest_requests) == 1
+    assert sum(_about_m101(r["body"]) for r in digest_requests) == 2
     sheet = _sheet(ctx, "M-101")
-    assert sheet.error is not None and (sheet.input_tokens, sheet.output_tokens) == (0, 0)
+    assert sheet.error is None and (sheet.input_tokens, sheet.output_tokens) == (1000, 90)
     [m101] = [r for r in _records(ctx, "digest") if r.stage_instance == "digest:SRC-0001:p0"]
-    assert (m101.input_tokens, m101.output_tokens) == (0, 0)
+    assert (m101.input_tokens, m101.output_tokens, m101.interrupted_attempts) == (1000, 90, 1)
 
 
 @pytest.mark.parametrize("stage, cut", [("synthesis", "after_text"), ("focus", "after_text"),
@@ -629,24 +640,29 @@ def test_a_stream_cut_before_message_delta_is_not_kept_or_cached(tmp_path, stage
     assert _warm_calls(tmp_path).get(stage, 0) == 1
 
 
-# stage -> the usage records a dropped stream leaves: none, or one of 0 tokens.
-_DROPPED_USAGE = {"synthesis": [], "focus": [], "review_plan": [(0, 0)]}
+# stage -> its record once the dropped attempt is retried: both attempts'
+# input (``message_start`` reported the dropped one's), the retry's output.
+_RETRIED_USAGE = {"synthesis": (600, 60), "focus": (2, 1), "review_plan": (600, 80)}
 
 
-@pytest.mark.parametrize("stage", sorted(_DROPPED_USAGE), ids=sorted(_DROPPED_USAGE))
-def test_recorded_limit_an_interrupted_stream_loses_its_usage(tmp_path, stage):
-    """Recorded limit (WP-01.7, WP-14.5): a dropped connection mid-stream
-    leaves the stage with an error and its usage lost, though the request was
-    billed from ``message_start`` (300 input tokens for the planner, 300 for
-    synthesis, 1 for the focus report): synthesis and the focus report record
-    nothing, the planner a record of 0 tokens. WP-01.7 captures the partial
-    usage: each gains a record of what ``message_start`` reported."""
+@pytest.mark.parametrize("stage", sorted(_RETRIED_USAGE), ids=sorted(_RETRIED_USAGE))
+def test_an_interrupted_stream_is_retried_and_keeps_its_usage(tmp_path, monkeypatch, stage):
+    """Remediation WP-01.7 (U1, plan WP-14 step 7; the owner's rules): a
+    dropped connection mid-stream is retried (the retry finishes), and the
+    dropped attempt's usage is on the stage's record: ``message_start``'s
+    input (300 for the planner, 300 for synthesis, 1 for the focus report),
+    counted as one interrupted attempt. The stage errored with its usage
+    lost: synthesis and the focus report recorded nothing, the planner a
+    record of 0 tokens (WP-02.3's recorded limit, flipped here)."""
+    _no_backoff(monkeypatch)
     stub = AnthropicAPIStub(_script()._route, stream=_stream_once(stage, "after_text", "drop"))
 
     ctx = _run(tmp_path, stub)
 
-    assert [(r.input_tokens, r.output_tokens) for r in _records(ctx, stage)] == _DROPPED_USAGE[stage]
-    assert any("peer closed connection" in e for e in ctx.errors)
+    assert [(r.input_tokens, r.output_tokens, r.interrupted_attempts)
+            for r in _records(ctx, stage)] == [(*_RETRIED_USAGE[stage], 1)]
+    assert not any("peer closed connection" in e for e in ctx.errors)
+    assert _warm_calls(tmp_path).get(stage, 0) == 0                    # the finished reply was cached
 
 
 # --------------------------------------------------------------------------- #

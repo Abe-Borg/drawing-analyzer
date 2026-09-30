@@ -29,6 +29,7 @@ from .core.api_config import (
     output_cap_for_model,
 )
 from .core.reply_text import reply_text
+from .core.stream_interruption import StreamInterrupted
 from .core.terminal_outcome import REFUSED, TRUNCATED, classify_stop_reason
 from .core.tokenizer import estimate_image_tokens_total
 from .diagnostics import get_logger, redact_secrets
@@ -124,6 +125,25 @@ _STATUS_PHRASES = {
     529: "overloaded",
 }
 
+# The HTTP status each API error type stands for (Anthropic's errors page).
+# An SSE ``error`` event carries only the type, since the stream itself
+# answered 200, so the transient rule reads the type through this table
+# (remediation WP-01.7, the owner's rule): an ``overloaded_error`` mid-stream
+# is retried as a 529 is, an ``invalid_request_error`` is not. The SDK's own
+# error types plus the API's 413 type, pinned by test.
+_ERROR_TYPE_STATUS = {
+    "invalid_request_error": 400,
+    "authentication_error": 401,
+    "billing_error": 402,
+    "permission_error": 403,
+    "not_found_error": 404,
+    "request_too_large": 413,
+    "rate_limit_error": 429,
+    "api_error": 500,
+    "timeout_error": 504,
+    "overloaded_error": 529,
+}
+
 # Connection / timeout SDK error classes (matched by name so this module needs
 # no hard import of the anthropic exception types and stays trivially testable).
 _CONNECTION_ERROR_NAMES = frozenset({"APIConnectionError", "ConnectionError"})
@@ -164,10 +184,31 @@ def _is_transient_error(exc: Exception) -> bool:
     *not* transient, so the existing capture-without-retry behavior is preserved
     and tests never sleep.
     """
+    if isinstance(exc, StreamInterrupted):
+        return _is_transient_interruption(exc)
     if _is_transient_status_error(exc):
         return True
     name = type(exc).__name__
     return name in _CONNECTION_ERROR_NAMES or name in _TIMEOUT_ERROR_NAMES
+
+
+def _is_transient_interruption(exc: StreamInterrupted) -> bool:
+    """Whether a stream interrupted mid-read is retried (remediation WP-01.7).
+
+    The owner's rule: a dropped connection, a stream that ended with no event
+    (read as dropped) and a transport timeout are transient; an SSE ``error``
+    event is transient exactly when its type stands for a status in
+    :data:`_TRANSIENT_STATUSES` (:data:`_ERROR_TYPE_STATUS`), so an
+    ``overloaded_error`` is retried and an ``invalid_request_error`` is not;
+    any other cause is judged as itself. The SDK's own retries never re-send
+    a started stream (measured), so this doubles no layer, and each stage
+    retries inside the transient retries it already had.
+    """
+    if exc.kind == "error_event":
+        return _ERROR_TYPE_STATUS.get(exc.error_type or "") in _TRANSIENT_STATUSES
+    if exc.kind in ("connection", "no_event", "timeout"):
+        return True
+    return _is_transient_error(exc.cause) if isinstance(exc.cause, Exception) else False
 
 
 def _error_detail_text(exc: Exception) -> str:
@@ -196,6 +237,8 @@ def _clean_error(exc: Exception) -> str:
     is exactly what hid the 32 MB request-size failure). Connection / timeout
     errors get a fixed message; anything else is tag-stripped and truncated.
     """
+    if isinstance(exc, StreamInterrupted):
+        return _interruption_error(exc)
     status = _error_status(exc)
     if status is not None:
         phrase = _STATUS_PHRASES.get(status)
@@ -213,6 +256,27 @@ def _clean_error(exc: Exception) -> str:
         return "request timed out — try again"
     text = _error_detail_text(exc)
     return text[:200] if text else name
+
+
+def _interruption_error(exc: StreamInterrupted) -> str:
+    """The error for a stream interrupted with no read in hand (WP-01.7).
+
+    The owner's wording: ``stream interrupted (<type>: <message>)`` for an SSE
+    ``error`` event (it read ``HTTP 200: {'type': 'error', …}``),
+    ``stream interrupted (connection dropped — try again)`` for a dropped
+    connection or a stream with no event (it read the transport's ``peer
+    closed connection without sending complete message body``), ``stream
+    interrupted (timed out — try again)`` for a timeout. Any other cause keeps
+    its own wording. A read in hand is worded by the ladder instead
+    (:func:`digest_terminal_error`, ``interrupted=``).
+    """
+    if exc.kind == "error_event":
+        detail = " ".join(_HTML_TAG_RE.sub(" ", exc.error_message or "").split())[:300]
+        return f"stream interrupted ({exc.error_type}: {detail})" if detail else (
+            f"stream interrupted ({exc.error_type})")
+    if exc.kind in ("connection", "no_event", "timeout"):
+        return f"stream interrupted ({exc.label} — try again)"
+    return _clean_error(exc.cause) if isinstance(exc.cause, Exception) else exc.label
 
 
 def _retry_backoff_seconds(attempt: int) -> float:
@@ -779,6 +843,11 @@ class SheetDigest:
     # cached under the requested model's key and no entry stores the model
     # (the owner's rule; the serving model is WP-14.3's).
     fallback_model: str | None = None
+    # Remediation WP-01.7: the attempts behind this read whose stream was
+    # interrupted before its final usage arrived (:class:`StreamUsage`), so the
+    # token counts above are lower bounds. The usage record carries it.
+    # Runtime only: no cache entry stores it, and a cache hit made no attempt.
+    interrupted_attempts: int = 0
 
     @property
     def ok(self) -> bool:
@@ -926,6 +995,107 @@ def stream_message(client: Any, kwargs: dict[str, Any]) -> Any:
     return call_with_refusal_fallback(
         client, kwargs, model=str(kwargs.get("model", "")), method="stream"
     )
+
+
+@dataclass
+class StreamUsage:
+    """What every attempt of one streamed call reported, summed (remediation WP-01.7).
+
+    Each attempt was billed, including one whose stream was interrupted: its
+    partial read (:class:`~drawing_analyzer.core.stream_interruption.StreamInterrupted`)
+    holds ``message_start``'s input and cache counters, and its output tokens
+    are reported only by the ``message_delta`` that never came. So the stage
+    records every attempt's reported usage (the owner's rule, plan WP-14 step
+    7), and ``interrupted_attempts`` counts the attempts whose final usage
+    never arrived: their output is unreported, so the stage's output and cost
+    are lower bounds, which the usage record says (``UsageRecord.
+    interrupted_attempts``). An attempt interrupted after its
+    ``message_delta`` is not one: its stream returns the complete read.
+    """
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    interrupted_attempts: int = 0
+
+    def add(self, message: Any) -> None:
+        """Add one reply's (or partial read's) reported usage."""
+        att_in, att_out = _message_usage(message)
+        cache_read, cache_write = _message_cache_usage(message)
+        self.input_tokens += att_in
+        self.output_tokens += att_out
+        self.cache_read_tokens += cache_read
+        self.cache_write_tokens += cache_write
+
+    def add_interrupted(self, exc: BaseException) -> Any:
+        """Count an attempt that raised; return its partial read, if any.
+
+        ``None`` for any failure but an interrupted stream, and for an
+        interrupted stream that held nothing (no ``message_start``), which is
+        counted too: nothing of its usage was reported.
+        """
+        if not isinstance(exc, StreamInterrupted):
+            return None
+        self.interrupted_attempts += 1
+        if exc.partial is not None:
+            self.add(exc.partial)
+        return exc.partial
+
+
+@dataclass
+class StreamedReply:
+    """One streamed call after its transient retries (:func:`stream_reply`).
+
+    ``message`` is the reply, or the last attempt's partial read when its
+    stream was interrupted (``interrupted`` then names the cause, for the
+    ladder's wording), or ``None`` when nothing came back (``error`` is then
+    what ended the call). ``usage`` is every attempt's.
+    """
+
+    message: Any = None
+    error: Exception | None = None
+    interrupted: str | None = None
+    usage: StreamUsage = field(default_factory=StreamUsage)
+
+
+def stream_reply(
+    client: Any, kwargs: dict[str, Any], *, max_retries: int, sleep: Any,
+    send: Callable[[Any, dict[str, Any]], Any] | None = None,
+) -> StreamedReply:
+    """One streamed request with its transient retries (remediation WP-01.7).
+
+    The retry loop the review plan, synthesis and the focus report shared,
+    once: a transient failure (:func:`_is_transient_error`, an interrupted
+    stream included) is re-sent up to ``max_retries`` times with the usual
+    backoff. Once the retries are spent, an interrupted stream's partial read
+    is the reply (the owner's rule): the stage judges it by its stop reason
+    like any reply (:func:`unfinished_reply_error`), so a read with no stop
+    reason is unfinished and kept by none. Nothing else came back is an
+    ``error``. Every attempt's usage is summed.
+
+    ``send`` is the stage's own transport, its module's ``stream_message``
+    (the default is this one), so each stage keeps the one name its streaming
+    is pinned by (``tests/test_sdk_contract.py`` regresses a stage by
+    replacing it there).
+    """
+    send = send if send is not None else stream_message
+    usage = StreamUsage()
+    attempt = 0
+    while True:
+        try:
+            message = send(client, kwargs)
+        except Exception as exc:  # noqa: BLE001 - the caller reports it
+            partial = usage.add_interrupted(exc)
+            if _is_transient_error(exc) and attempt < max_retries:
+                sleep(_retry_backoff_seconds(attempt))
+                attempt += 1
+                continue
+            if partial is None:
+                return StreamedReply(error=exc, usage=usage)
+            return StreamedReply(message=partial, interrupted=exc.label, usage=usage)
+        usage.add(message)
+        return StreamedReply(message=message, usage=usage)
 
 
 def _server_web_search_requests(resp: Any) -> int | None:
@@ -1593,6 +1763,7 @@ def claims_from_cache(hit: dict, ref: SheetRef | None = None) -> list[NumericCla
 
 def digest_terminal_error(
     raw_text: str, stop_reason: Any, *, noun: str = "digest", category: Any = None,
+    interrupted: str | None = None,
 ) -> str | None:
     """The sheet's error for one digest reply, or ``None`` for a finished one.
 
@@ -1628,27 +1799,40 @@ def digest_terminal_error(
     (stop_reason='refusal', category='cyber')`` (remediation WP-01.5, the
     owner's rule), and the wording is unchanged when there is none. It is
     never consulted for any other stop reason.
+
+    ``interrupted`` names what interrupted the stream the read was captured
+    from (remediation WP-01.7, the owner's wording: an SSE ``error`` event's
+    type, ``connection dropped``, ``timed out``), in the same parentheses:
+    ``unfinished digest (stop_reason=None, interrupted='overloaded_error')``.
+    Without it the wording is unchanged, so a stream that ended cleanly
+    before its ``message_delta`` still reads ``unfinished digest
+    (stop_reason=None)``.
     """
     outcome = classify_stop_reason(stop_reason)
+    details = f"stop_reason={stop_reason!r}"
+    if outcome.kind == REFUSED and isinstance(category, str) and category:
+        details += f", category={category!r}"
+    if isinstance(interrupted, str) and interrupted:
+        details += f", interrupted={interrupted!r}"
     if outcome.kind == REFUSED:
         # Named even when the refusal came back empty. "Declined" is the fact
         # a reader can act on, and "empty digest" would hide it.
-        if isinstance(category, str) and category:
-            return f"refused {noun} (stop_reason={stop_reason!r}, category={category!r})"
-        return f"refused {noun} (stop_reason={stop_reason!r})"
+        return f"refused {noun} ({details})"
     if not raw_text:
-        return f"empty {noun} (stop_reason={stop_reason!r})"
+        return f"empty {noun} ({details})"
     if outcome.finished:
         return None
     if outcome.kind == TRUNCATED:
-        return f"truncated {noun} (stop_reason={stop_reason!r})"
+        return f"truncated {noun} ({details})"
     # UNFINISHED (no stop reason: a stream that ended early, N27), CONTINUATION
     # (neither the digest nor the critique declares tools or resumes a paused
     # turn) and UNKNOWN (never finished).
-    return f"unfinished {noun} (stop_reason={stop_reason!r})"
+    return f"unfinished {noun} ({details})"
 
 
-def unfinished_reply_error(resp: Any, text: str, *, noun: str) -> str | None:
+def unfinished_reply_error(
+    resp: Any, text: str, *, noun: str, interrupted: str | None = None,
+) -> str | None:
     """The error for a reply the model did not finish, or ``None`` when it did.
 
     For the stages that read one reply and keep what it says (remediation
@@ -1670,6 +1854,10 @@ def unfinished_reply_error(resp: Any, text: str, *, noun: str) -> str | None:
     second table. The stage then keeps nothing and caches nothing. A
     refusal's ``stop_details`` also goes to the diagnostics log, as the
     digest's does (:func:`describe_refusal`).
+
+    ``interrupted`` is set when ``resp`` is an interrupted stream's partial
+    read (:class:`StreamedReply`, remediation WP-01.7) and names the cause in
+    the error.
     """
     stop = _get(resp, "stop_reason")
     outcome = classify_stop_reason(stop)
@@ -1680,6 +1868,7 @@ def unfinished_reply_error(resp: Any, text: str, *, noun: str) -> str | None:
         _log.info("refused %s: %s", noun, describe_refusal(details))
     return digest_terminal_error(
         text, stop, noun=noun, category=details.category if details else None,
+        interrupted=interrupted,
     )
 
 
@@ -1912,6 +2101,16 @@ def digest_sheet(
     re-attempted up to ``max_retries`` times with exponential backoff (``sleep``
     is injectable so tests don't wait); a permanent failure returns immediately.
 
+    A stream interrupted mid-read (remediation WP-01.7, the owner's rules) is
+    retried the same way when its cause is transient (a dropped connection, an
+    ``overloaded_error`` event, ...), and its partial read is a read like any
+    other: every attempt's read is folded through :func:`keep_digest_read`, so
+    the sheet keeps the best of them (a partial read is unfinished, held out
+    and never cached), a call that ended with nothing in hand is named once
+    (``"; retry failed: stream interrupted (...)"``), and every attempt's
+    reported usage is summed, with ``interrupted_attempts`` counting those
+    whose output was never reported.
+
     A read cut off at ``max_tokens`` gets one retry at a raised cap. The retry
     never loses a better read (remediation WP-01.3, N16): the sheet keeps the
     better of the two by :func:`keep_digest_read` (finished, then a partial
@@ -1981,75 +2180,7 @@ def digest_sheet(
         specs_text=specs_text,
     )
 
-    # One raised-cap retry for a digest the model ran out of room to finish,
-    # mirroring the batch path's ``_item_retry_params``. The real-time path used
-    # to check only for EMPTY text, so a body cut off mid-sentence was accepted
-    # as a complete digest — and then cached, which served the truncation on
-    # every later run at zero cost and with nothing in the log to show for it.
-    # The digest runs adaptive thinking at effort "high" and thinking shares
-    # this envelope, so a dense sheet reaches the cap in the ordinary case.
-    raised_cap_used = False
-    first_resp = None                # the first read, once the retry is sent
-    retry_error: Exception | None = None   # the raised-cap retry raised
-    in_tok = out_tok = cache_read_tok = cache_write_tok = 0
-    while True:
-        attempt = 0
-        resp = None
-        call_error: Exception | None = None
-        while True:
-            try:
-                resp = stream_message(client, kwargs)
-                break
-            except Exception as exc:  # noqa: BLE001 - report, don't sink the whole set
-                if _is_transient_error(exc) and attempt < max_retries:
-                    sleep(_retry_backoff_seconds(attempt))
-                    attempt += 1
-                    continue
-                call_error = exc
-                break
-
-        if resp is None:
-            if first_resp is None:
-                return SheetDigest(
-                    ref=sheet.ref,
-                    text="",
-                    image_token_estimate=image_est,
-                    error=_clean_error(call_error),
-                    input_tokens=in_tok,
-                    output_tokens=out_tok,
-                )
-            # The RAISED-CAP retry failed, but the first read is still in hand.
-            # The sheet keeps it (I-3), and its error names the failure (N16).
-            retry_error = call_error
-            break
-
-        # Usage accumulates across attempts. Each response was billed, so
-        # reading only the last one would under-report every recovered
-        # truncation in the ledger, the run totals and the cost estimate.
-        # Whichever read the sheet keeps, it carries both attempts' usage.
-        att_in, att_out = _message_usage(resp)
-        in_tok += att_in
-        out_tok += att_out
-        _usage = _get(resp, "usage")
-        cache_read_tok += int(_get(_usage, "cache_read_input_tokens", 0) or 0)
-        cache_write_tok += int(_get(_usage, "cache_creation_input_tokens", 0) or 0)
-
-        # Only a ``max_tokens`` truncation qualifies: a raised cap cannot finish
-        # a refusal, a stream that ended early, or a full context window.
-        stop_outcome = classify_stop_reason(_get(resp, "stop_reason"))
-        if not stop_outcome.raised_cap_may_finish or raised_cap_used:
-            break
-        old_cap = int(kwargs.get("max_tokens") or max_tokens)
-        raised = output_cap_for_model(
-            model, requested=min(old_cap * 2, MAX_TOKENS_RETRY_CEILING)
-        )
-        if raised <= old_cap:
-            break                  # no headroom left to grant; not a retry
-        kwargs = {**kwargs, "max_tokens": raised}
-        raised_cap_used = True
-        first_resp = resp
-
-    def _read_of(message: Any) -> tuple[SheetDigest, str]:
+    def _read_of(message: Any, interrupted: str | None = None) -> tuple[SheetDigest, str]:
         """One reply as the sheet's read, and its raw text (for admission).
 
         A reply the model did not finish (truncated, refused, a stream that
@@ -2057,7 +2188,9 @@ def digest_sheet(
         ``stop_sequence``) carries an error. Its text is still kept: it is
         real output, and the per-sheet export shows it. The findings block is
         split off the prose, so ``combined_text`` never sees the JSON (I-2);
-        a parse problem never marks the sheet failed.
+        a parse problem never marks the sheet failed. ``interrupted`` names
+        what interrupted the stream a partial read was captured from
+        (remediation WP-01.7).
         """
         raw = reply_text(message)
         stop = _get(message, "stop_reason")
@@ -2078,28 +2211,107 @@ def digest_sheet(
             stop_reason=stop,
             error=digest_terminal_error(
                 raw, stop, category=details.category if details else None,
+                interrupted=interrupted,
             ),
             findings=found,
             findings_note=note,
         ), raw
 
-    if first_resp is None:
-        sd, raw_text = _read_of(resp)
-    elif retry_error is not None:
-        sd, raw_text = _read_of(first_resp)
-        note_failed_retry(sd, _clean_error(retry_error))
-    else:
-        # The retry landed: the sheet keeps the better of the two reads, never
-        # a mix of them (N16, :func:`keep_digest_read`). A retry that came back
-        # empty, refused or failed used to replace the first read wholesale.
-        first, first_raw = _read_of(first_resp)
-        later, later_raw = _read_of(resp)
-        sd = keep_digest_read(first, later)
-        raw_text = later_raw if sd is later else first_raw
-    sd.input_tokens = in_tok
-    sd.output_tokens = out_tok
-    sd.cache_read_tokens = cache_read_tok
-    sd.cache_write_tokens = cache_write_tok
+    # Every attempt's reported usage, interrupted ones included (remediation
+    # WP-01.7): each was billed. Reading only the last response would
+    # under-report every recovered truncation or interruption in the ledger,
+    # the run totals and the cost estimate. Whichever read the sheet keeps,
+    # it carries every attempt's usage.
+    usage = StreamUsage()
+    kept: SheetDigest | None = None      # the read the sheet keeps so far
+    kept_raw = ""                        # its raw reply, for cache admission
+    raised_cap_used = False
+
+    def _fold(read: SheetDigest, raw: str) -> SheetDigest:
+        """Keep the better of the held read and ``read`` (N16), never a mix
+        (I-2): a retry that came back empty, refused or unfinished used to
+        replace the first read wholesale. Returns ``read``."""
+        nonlocal kept, kept_raw
+        chosen = keep_digest_read(kept, read)
+        if chosen is read:
+            kept_raw = raw
+        kept = chosen
+        return read
+
+    # One raised-cap retry for a digest the model ran out of room to finish,
+    # mirroring the batch path's ``_item_retry_params``. The real-time path used
+    # to check only for EMPTY text, so a body cut off mid-sentence was accepted
+    # as a complete digest — and then cached, which served the truncation on
+    # every later run at zero cost and with nothing in the log to show for it.
+    # The digest runs adaptive thinking at effort "high" and thinking shares
+    # this envelope, so a dense sheet reaches the cap in the ordinary case.
+    while True:
+        attempt = 0
+        latest: SheetDigest | None = None     # this call's last read
+        failure: Exception | None = None      # what ended this call with no read
+        while True:
+            try:
+                resp = stream_message(client, kwargs)
+            except Exception as exc:  # noqa: BLE001 - report, don't sink the whole set
+                # An interrupted stream's partial read is a read like any
+                # other (remediation WP-01.7, the owner's rules): kept when it
+                # is the best so far, never cached unless it finished, and
+                # its usage counted.
+                partial = usage.add_interrupted(exc)
+                if partial is None:
+                    latest, failure = None, exc
+                else:
+                    latest, failure = _fold(*_read_of(partial, exc.label)), None
+                if _is_transient_error(exc) and attempt < max_retries:
+                    sleep(_retry_backoff_seconds(attempt))
+                    attempt += 1
+                    continue
+                break
+            usage.add(resp)
+            latest, failure = _fold(*_read_of(resp)), None
+            break
+
+        if latest is None:
+            if kept is None:
+                return SheetDigest(
+                    ref=sheet.ref,
+                    text="",
+                    image_token_estimate=image_est,
+                    error=_clean_error(failure),
+                    input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens,
+                    cache_read_tokens=usage.cache_read_tokens,
+                    cache_write_tokens=usage.cache_write_tokens,
+                    interrupted_attempts=usage.interrupted_attempts,
+                )
+            # A retry that raised with nothing in hand: the sheet keeps what it
+            # had (I-3), and its error names the call's failure once (N16),
+            # whatever transient retries the call spent first.
+            note_failed_retry(kept, _clean_error(failure))
+            break
+
+        # Only a ``max_tokens`` truncation qualifies: a raised cap cannot finish
+        # a refusal, a stream that ended early, or a full context window. The
+        # decision reads this call's latest read (N16).
+        stop_outcome = classify_stop_reason(latest.stop_reason)
+        if not stop_outcome.raised_cap_may_finish or raised_cap_used:
+            break
+        old_cap = int(kwargs.get("max_tokens") or max_tokens)
+        raised = output_cap_for_model(
+            model, requested=min(old_cap * 2, MAX_TOKENS_RETRY_CEILING)
+        )
+        if raised <= old_cap:
+            break                  # no headroom left to grant; not a retry
+        kwargs = {**kwargs, "max_tokens": raised}
+        raised_cap_used = True
+
+    sd = kept
+    raw_text = kept_raw
+    sd.input_tokens = usage.input_tokens
+    sd.output_tokens = usage.output_tokens
+    sd.cache_read_tokens = usage.cache_read_tokens
+    sd.cache_write_tokens = usage.cache_write_tokens
+    sd.interrupted_attempts = usage.interrupted_attempts
 
     # Cache only a finished, successful digest, never an empty or unfinished
     # one: a re-run should re-attempt those. A stored partial read is served
@@ -2117,8 +2329,8 @@ def digest_sheet(
                 cache_key,
                 {
                     "text": sd.text,
-                    "input_tokens": in_tok,
-                    "output_tokens": out_tok,
+                    "input_tokens": usage.input_tokens,
+                    "output_tokens": usage.output_tokens,
                     "stop_reason": sd.stop_reason,
                     "findings": [f.to_dict() for f in sd.findings],
                     "created_ts": time.time(),

@@ -2553,6 +2553,14 @@ class UsageRecord:
     # possible. Defaults to ``None``, which is both the common case and the
     # rate every pre-existing record was priced at.
     cache_write_ttl: "str | None" = None
+    # Remediation WP-01.7 (plan WP-14 step 7; the owner's rule): how many of
+    # the attempts behind this record were streams interrupted before their
+    # final usage arrived (``message_delta``). Their input and cache counters
+    # are ``message_start``'s and are counted above; their output was never
+    # reported, so this record's output and cost are lower bounds. 0 when
+    # every attempt reported its usage. Known/unknown usage in general, and
+    # per-attempt records, are WP-14.4's and WP-14.5's.
+    interrupted_attempts: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -2574,6 +2582,7 @@ class UsageRecord:
             "request_or_custom_id": self.request_or_custom_id,
             "estimated_cost": None if self.estimated_cost is None else str(self.estimated_cost),
             "cache_write_ttl": self.cache_write_ttl,
+            "interrupted_attempts": self.interrupted_attempts,
         }
 
 
@@ -2661,6 +2670,14 @@ class RunUsage:
         )
 
     @property
+    def interrupted_attempts(self) -> int:
+        """Attempts, over the whole run, whose stream was interrupted before its
+        final usage arrived (:attr:`UsageRecord.interrupted_attempts`). When
+        nonzero, the output and cost totals are lower bounds (remediation
+        WP-01.7); run.log's usage section and the manifest say so."""
+        return sum(int(r.interrupted_attempts or 0) for r in self.records)
+
+    @property
     def total_estimated_cost(self) -> "Decimal | None":
         # If ANY billable record could not be priced, the aggregate is unknowable —
         # return None rather than a partial sum that silently omits real cost.
@@ -2728,6 +2745,9 @@ class RunUsage:
             "total_cache_write_tokens": self.total_cache_write_tokens,
             "cache_hits": self.cache_hits,
             "total_estimated_cost": None if cost is None else str(cost),
+            # Remediation WP-01.7: nonzero means the output and cost totals are
+            # lower bounds (an interrupted stream reported no output).
+            "interrupted_attempts": self.interrupted_attempts,
             "by_family": {
                 fam: {**g, "estimated_cost": None if g["estimated_cost"] is None
                       else str(g["estimated_cost"])}

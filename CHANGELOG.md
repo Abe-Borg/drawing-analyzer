@@ -246,6 +246,60 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A stream that broke mid-read was never retried, lost the read it had
+  delivered and was billed as nothing (remediation WP-01.7; U1, plan WP-14
+  step 7).** Every large call streams (the digest, the critique, the review
+  plan, the synthesis, the focus report, the batch direct-call rescue, and
+  every investigation turn). When the connection dropped, or the API sent an
+  `error` event (an `overloaded_error` in the middle of a reply, say), the SDK
+  raised an exception no retry rule recognised: the connection drop is the
+  HTTP client's own error, which the SDK does not wrap, and the `error` event
+  is a status error whose status is the stream's 200. So the sheet or stage
+  failed after one request, with `HTTP 200: {'type': 'error', …}` or `peer
+  closed connection without sending complete message body` as its error, and
+  the attempt was recorded with 0 tokens (the digest, the plan, the
+  investigation) or not at all (the synthesis, the focus report, a critique
+  read's share), although the API had reported its input tokens and billed
+  them. The SDK's own retries re-send a request, never a stream that already
+  answered, so nothing else caught it (measured on SDK 1.7.0 and 1.8.0).
+
+  Now, decided with the owner (see the WP-01.7 handoff in
+  `_plans/PROGRESS.md`):
+  - **The interruption is captured where every stream is read**
+    (`core.api_config._dispatch_messages`): the stage gets a
+    `StreamInterrupted` carrying the SDK's exception and the read it had
+    accumulated (`current_message_snapshot`). A stream that dropped after its
+    final `message_delta` already holds the complete read, so it is used at
+    once, as a stream that ends cleanly there always was.
+  - **It is retried when its cause is transient**, inside each stage's
+    existing retries (2 per call): a dropped connection, a stream with no
+    event, and an `error` event whose type stands for a transient status
+    (`overloaded_error`, `api_error`, `rate_limit_error`, `timeout_error`). An
+    `invalid_request_error` or `authentication_error` event is not.
+  - **Once the retries are spent, the partial read is the reply**, judged
+    like any reply by its stop reason: it has none, so it is unfinished. The
+    digest keeps its text under an error (the per-sheet export shows it), holds
+    its findings out of the review and caches nothing; of several attempts the
+    sheet keeps the best read. The critique, the review plan, the synthesis
+    and the focus report keep nothing and cache nothing. The investigation
+    never uses a partial turn, so no tool from it runs.
+  - **Errors name what happened**: `unfinished digest (stop_reason=None,
+    interrupted='overloaded_error')`, `empty synthesis (stop_reason=None,
+    interrupted='connection dropped')`; with nothing read, `stream interrupted
+    (overloaded_error: Overloaded)` or `stream interrupted (connection dropped
+    — try again)`.
+  - **Every attempt's reported usage is recorded**, the input and cache
+    tokens an interrupted stream's first event reported included, and each
+    usage record counts its `interrupted_attempts`, whose output tokens were
+    never reported. The run totals them; `run.log` and `run_manifest.json`
+    say that the output and cost totals are then lower bounds.
+  - **Cache.** Nothing moved: a read with no stop reason is refused by the
+    existing admission rule, and a complete one is stored as before. No key,
+    contract or `_SCHEMA_VERSION` change.
+
+  Tests: `tests/test_interrupted_streams.py`, and two recorded limits flipped
+  in `tests/test_response_shapes.py`.
+
 - **The set-level calls kept and cached replies the model did not finish, and
   a reply split by the refusal fallback read with a line break inside a word
   (remediation WP-01.6; N4, N27, U2).** The review plan, the set identity, the

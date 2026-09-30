@@ -69,6 +69,7 @@ from .digest import (
     _is_transient_error,
     _message_usage,
     _retry_backoff_seconds,
+    StreamUsage,
     stream_message,
     build_user_content,
     claims_from_cache,
@@ -1510,6 +1511,10 @@ class CritiqueRunOutcome:
     parse_status: str = ""
     parse_note: str = ""
     error: str | None = None
+    # Remediation WP-01.7: this read's attempts whose stream was interrupted
+    # before its final usage arrived (``digest.StreamUsage``); its token counts
+    # are then lower bounds. Runtime only.
+    interrupted_attempts: int = 0
 
     @property
     def ok(self) -> bool:
@@ -1560,6 +1565,9 @@ class CritiqueResult:
     # The errors of the reads that did not count, in read order. Runtime-only:
     # never written to a cache entry (remediation WP-01.4).
     read_errors: list[str] = field(default_factory=list)
+    # Remediation WP-01.7: the reads' interrupted attempts, summed
+    # (:attr:`CritiqueRunOutcome.interrupted_attempts`). Runtime-only.
+    interrupted_attempts: int = 0
 
 
 def critique_result_from_entry(entry: dict, ref: Any) -> CritiqueResult:
@@ -1619,7 +1627,7 @@ def critique_cache_entry_from_result(res: CritiqueResult) -> dict:
 
 def outcome_from_message(
     message: Any, *, run_id: str, ref: Any, rows: int = 0, cols: int = 0,
-    structured: bool = False,
+    structured: bool = False, interrupted: str | None = None,
 ) -> CritiqueRunOutcome:
     """Parse one critique Messages response into a :class:`CritiqueRunOutcome` (DA-008).
 
@@ -1665,6 +1673,9 @@ def outcome_from_message(
     read is a *fallback* inside both parsers, tried only when no fenced block is
     present, so a structured request whose constraint did not take and came back
     fenced anyway still parses on the ordinary path.
+
+    ``interrupted`` is set when ``message`` is an interrupted stream's partial
+    read (remediation WP-01.7) and names the cause in the read's error.
     """
     raw = reply_text(message)
     in_tok, out_tok = _message_usage(message)
@@ -1686,6 +1697,7 @@ def outcome_from_message(
     details = refusal_details(message)
     terminal = digest_terminal_error(
         raw, stop, noun="critique", category=details.category if details else None,
+        interrupted=interrupted,
     )
     if classify_stop_reason(stop).kind == REFUSED:
         # The category is named in the read's error; the rest of stop_details
@@ -1788,10 +1800,15 @@ def _critique_read(
 
     kwargs = _params(structured)
 
+    # Every attempt's reported usage, an interrupted stream's included
+    # (remediation WP-01.7): each was billed.
+    usage = StreamUsage()
+    interrupted: str | None = None
     attempt = 0
     while True:
         try:
             resp = stream_message(client, kwargs)
+            usage.add(resp)
             break
         except Exception as exc:  # noqa: BLE001 - report, don't sink the set
             if structured and STRUCTURED_OUTPUTS.rejects(exc):
@@ -1808,17 +1825,36 @@ def _critique_read(
                     _clean_error(exc),
                 )
                 continue
+            partial = usage.add_interrupted(exc)
             if _is_transient_error(exc) and attempt < max_retries:
                 sleep(_retry_backoff_seconds(attempt))
                 attempt += 1
                 continue
-            return CritiqueRunOutcome(run_id=run_id, status="FAILED", error=_clean_error(exc))
+            if partial is None:
+                return CritiqueRunOutcome(
+                    run_id=run_id, status="FAILED", error=_clean_error(exc),
+                    input_tokens=usage.input_tokens, output_tokens=usage.output_tokens,
+                    cache_read_tokens=usage.cache_read_tokens,
+                    cache_write_tokens=usage.cache_write_tokens,
+                    interrupted_attempts=usage.interrupted_attempts,
+                )
+            # Once the retries are spent, an interrupted stream's partial read
+            # is the reply (the owner's rule), judged like any read: with no
+            # stop reason it is unfinished, so it fails and keeps nothing
+            # (WP-01.4), its usage billed on the sheet's record.
+            resp, interrupted = partial, exc.label
+            break
 
-    return outcome_from_message(
+    outcome = outcome_from_message(
         resp, run_id=run_id, ref=rendered.ref,
         rows=getattr(rendered, "rows", 0), cols=getattr(rendered, "cols", 0),
-        structured=structured,
+        structured=structured, interrupted=interrupted,
     )
+    outcome.input_tokens, outcome.output_tokens = usage.input_tokens, usage.output_tokens
+    outcome.cache_read_tokens = usage.cache_read_tokens
+    outcome.cache_write_tokens = usage.cache_write_tokens
+    outcome.interrupted_attempts = usage.interrupted_attempts
+    return outcome
 
 
 def critique_sheet(
@@ -1874,6 +1910,7 @@ def result_from_outcomes(
     total_out = sum(oc.output_tokens for oc in all_outcomes)
     total_cr = sum(oc.cache_read_tokens for oc in all_outcomes)
     total_cw = sum(oc.cache_write_tokens for oc in all_outcomes)
+    interrupted = sum(int(getattr(oc, "interrupted_attempts", 0) or 0) for oc in all_outcomes)
     ok = [oc for oc in all_outcomes if oc.ok]
     errors = [oc.error for oc in all_outcomes if not oc.ok and oc.error]
 
@@ -1890,6 +1927,7 @@ def result_from_outcomes(
             completed_runs=0,
             error="; ".join(errors) or "critique produced no result",
             read_errors=errors,
+            interrupted_attempts=interrupted,
         )
 
     # The findings of the SUCCESSFUL reads (each already stamped sources=[run_id]).
@@ -1926,6 +1964,7 @@ def result_from_outcomes(
             or f"critique partial: only {len(ok)}/{requested_runs} read(s) valid, no findings"
         ) if partial_empty else None,
         read_errors=errors,
+        interrupted_attempts=interrupted,
     )
 
 

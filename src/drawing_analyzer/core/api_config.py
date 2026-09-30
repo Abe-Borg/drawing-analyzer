@@ -38,6 +38,10 @@ import os
 from dataclasses import dataclass
 from typing import Any, Iterable
 
+# Re-exported: the capture site below raises it (remediation WP-01.7). Its own
+# module keeps it one class across a reload of this one.
+from .stream_interruption import StreamInterrupted, stream_snapshot
+
 _log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -1597,4 +1601,18 @@ def _dispatch_messages(client: Any, kwargs: dict, method: str) -> Any:
     if method == "create":
         return namespace.create(**kwargs)
     with namespace.stream(**kwargs) as stream:
-        return stream.get_final_message()
+        try:
+            return stream.get_final_message()
+        except Exception as exc:
+            partial = stream_snapshot(stream)
+            if partial is not None and getattr(partial, "stop_reason", None) is not None:
+                # ``message_delta`` arrived: the read is complete but for
+                # ``message_stop``, as its clean-end twin is, so it is the
+                # reply and nothing is retried (remediation WP-01.7, the
+                # owner's rule). Its stop reason judges it.
+                _log.warning(
+                    "stream ended after its final message_delta (%s); the "
+                    "complete read is used", type(exc).__name__,
+                )
+                return partial
+            raise StreamInterrupted(exc, partial) from exc
