@@ -690,8 +690,13 @@ def _input_lines(ctx: Any, roots: "tuple[str, ...]" = ()) -> list[str]:
 
 
 def _sheet_lines(ctx: Any, roots: "tuple[str, ...]" = ()) -> list[str]:
+    from .models import held_out_findings
+
     sheets = list(getattr(ctx, "sheets", None) or [])
-    if not sheets:
+    # Remediation WP-11.1 (R1): the pages the run owed and could not read have
+    # no SheetDigest; they are listed after the sheets, with their reason.
+    unread = list(getattr(ctx, "unread_pages", None) or [])
+    if not sheets and not unread:
         return ["  (no sheets)"]
     geoms: dict[Any, Any] = {}
     for g in getattr(ctx, "sheet_geometries", None) or []:
@@ -704,6 +709,7 @@ def _sheet_lines(ctx: Any, roots: "tuple[str, ...]" = ()) -> list[str]:
     drift = sum(1 for s in sheets if getattr(s, "findings_note", ""))
     lines = [
         f"  {len(sheets)} sheet(s): {ok} ok, {len(sheets) - ok} failed, {cached} from cache"
+        + (f"; {len(unread)} page(s) not read" if unread else "")
         + (f"; findings-parser drift on {drift} sheet(s)" if drift else "")
     ]
     for s in sheets:
@@ -734,9 +740,22 @@ def _sheet_lines(ctx: Any, roots: "tuple[str, ...]" = ()) -> list[str]:
             bits.append(
                 f"parser: {sanitize_text(note, max_chars=120, private_roots=roots)}"
             )
+        # Remediation WP-01.3 (N15): a read the model did not finish keeps its
+        # findings out of the review; say how many, beside the error.
+        held = held_out_findings(s)
+        if held:
+            bits.append(f"{len(held)} finding(s) held out of the review")
         if error:
             bits.append(sanitize_text(error, max_chars=160, private_roots=roots))
         lines.append(f"  {label:<40} {status:<9} " + " · ".join(bits))
+    for page in unread:
+        label = sanitize_text(
+            getattr(page, "display_label", "") or "page", max_chars=80, private_roots=roots
+        )
+        reason = sanitize_text(
+            getattr(page, "reason", "") or "not read", max_chars=160, private_roots=roots
+        )
+        lines.append(f"  {label:<40} {'NOT READ':<9} {reason}")
     return lines
 
 
@@ -783,6 +802,14 @@ def _usage_lines(ctx: Any) -> list[str]:
         f"output {_int(getattr(ctx, 'total_output_tokens', 0) or 0):,} tok · "
         f"est. cost {_fmt_cost(getattr(ctx, 'total_estimated_cost', None))}"
     )
+    # Remediation WP-01.7: an interrupted stream reported its input but never
+    # its output, so the totals above undercount; say so, once.
+    interrupted = _int(getattr(getattr(ctx, "run_usage", None), "interrupted_attempts", 0) or 0)
+    if interrupted:
+        lines.append(
+            f"  {interrupted} attempt(s) interrupted mid-stream: their output tokens were "
+            "not reported, so the output and cost totals are lower bounds"
+        )
     lines.append(
         "  (totals are derived sums over the append-only usage ledger, §15.6; "
         "costs are estimates)"
@@ -853,6 +880,19 @@ def _ledger_lines(ctx: Any, roots: "tuple[str, ...]" = ()) -> list[str]:
     return lines
 
 
+# The prose harvest's per-channel table (remediation WP-09.2): the channel
+# keys it uses, as a reader names them, and the columns in the order printed.
+_PROSE_CHANNEL_LABELS = {
+    "digest_prose_coordination": "digest coordination",
+    "digest_prose_conflict": "digest conflict",
+    "focus_prose": "focus",
+    "synthesis_prose": "synthesis",
+}
+_PROSE_CHANNEL_COLUMNS = (
+    "matched", "structured", "degraded", "set_level", "missing", "suppressed",
+)
+
+
 def _prose_lines(ctx: Any) -> list[str]:
     acc = dict(getattr(ctx, "prose_accounting", None) or {})
     if not acc:
@@ -862,12 +902,37 @@ def _prose_lines(ctx: Any) -> list[str]:
         "set_level", "excluded_focus", "skipped", "missing",
     )
     parts = [f"{k.replace('_', ' ')} {_int(acc[k])}" for k in order if k in acc]
-    extra = [k for k in acc if k not in order and k != "complete"]
+    extra = [k for k in acc if k not in order and k not in ("complete", "by_channel")]
     parts += [f"{k} {acc[k]}" for k in sorted(extra)]
     line = "  " + " · ".join(parts)
     if acc.get("missing"):
         line += "   << unaccounted items — exhaustive QC is incomplete (§14.9)"
-    return [line]
+    return [line, *_prose_channel_lines(acc.get("by_channel"))]
+
+
+def _prose_channel_lines(table: Any) -> list[str]:
+    """One readable line per harvest channel: what became of its items.
+
+    The table is a dict of dicts, so the generic ``extra`` rendering above would
+    print its repr. A malformed table (a duck-typed context) renders what it
+    can and never raises: a row that is not a dict is skipped, a count that is
+    not a number reads 0.
+    """
+    if not isinstance(table, dict):
+        return []
+    lines: list[str] = []
+    for channel in sorted(table, key=str):
+        row = table[channel]
+        if not isinstance(row, dict):
+            continue
+        parts = [
+            f"{column.replace('_', ' ')} {_int(row.get(column))}"
+            for column in _PROSE_CHANNEL_COLUMNS
+            if _int(row.get(column))
+        ]
+        label = _PROSE_CHANNEL_LABELS.get(channel, str(channel))
+        lines.append(f"    {label}: " + (" · ".join(parts) if parts else "none"))
+    return lines
 
 
 def render_run_log(

@@ -30,6 +30,8 @@ from tests.fixtures.fake_anthropic import (
     FakeTextBlock,
     FakeUsage,
     batch_errored_result,
+    checked_batch_create,
+    sdk_namespaces,
 )
 
 OPUS = "claude-opus-5"
@@ -74,9 +76,11 @@ def _rescue_params(model: str) -> dict:
 
 
 def _without_fallback_keys(params: dict) -> dict:
-    """Drop the Opus 5 refusal-fallback keys ``stream_message`` attaches, so a
-    rescue call's params can be compared against the original request body."""
-    return {k: v for k, v in params.items() if k not in ("betas", "fallbacks")}
+    """Drop the Opus 5 refusal-fallback body parameter ``stream_message``
+    attaches, so a rescue call's params can be compared against the original
+    request body. (Its ``betas`` is the ``anthropic-beta`` header: the fake's
+    checked beta entry never hands it to the fake, as the wire never does.)"""
+    return {k: v for k, v in params.items() if k != "fallbacks"}
 
 
 def _references_file_id(kwargs: dict) -> bool:
@@ -147,7 +151,8 @@ class _FakeBatches:
     def __init__(self, client):
         self._c = client
 
-    def create(self, *, requests, betas=None):
+    @checked_batch_create
+    def create(self, *, requests):
         if getattr(self._c, "create_raises", None) is not None:
             raise self._c.create_raises
         self._c.create_calls.append({"requests": list(requests)})
@@ -203,25 +208,21 @@ class _FakeClient:
         self.rescue_calls: list[dict] = []
         self.files = _FakeFiles()
         batches = _FakeBatches(self)
-        # Files API + Message Batches are GA: production calls the stable
-        # ``.files`` / ``.messages.batches`` / ``.messages.stream`` namespace
-        # (no ``betas=``) for everything in this module. ``.beta.*`` is kept
-        # only as a back-compat mirror onto the same fakes.
-        self.beta = _Obj(
-            files=self.files,
-            messages=_Obj(batches=batches, stream=self._messages_stream),
-        )
-        self.messages = _Obj(
-            batches=batches,
-            create=self._messages_create,
-            stream=self._messages_stream,
+        # Files API + Message Batches are GA: production uploads and submits on
+        # the plain namespace (no ``betas``). The direct-call rescue and the
+        # inline fallback stream through ``digest.stream_message``, on the beta
+        # namespace when the model declares the refusal fallback. Each
+        # namespace is its own SDK-checked entry point (remediation WP-02.2).
+        self.messages, self.beta = sdk_namespaces(
+            create=self._messages_create, stream=self._messages_stream,
+            batches=batches, files=self.files,
         )
 
     def _messages_create(self, **kwargs):
         self.messages_create_calls.append(kwargs)
         return self.inline_responder(kwargs)
 
-    def _messages_stream(self, *, betas=None, **kwargs):
+    def _messages_stream(self, **kwargs):
         """Dispatch ``client.messages.stream(...)`` by what the call carries.
 
         Both the direct-call rescue (batch item params, ``file_id``-referenced
@@ -233,7 +234,7 @@ class _FakeClient:
         ``file_id``; an inline call embeds base64 image bytes instead.
         """
         if _references_file_id(kwargs):
-            self.rescue_calls.append({"betas": betas, "params": kwargs})
+            self.rescue_calls.append({"params": kwargs})
             return _FakeStreamManager(self.rescue_responder, kwargs)
         return FinalMessageStream(self._messages_create(**kwargs))
 
@@ -868,13 +869,7 @@ def test_submit_upload_failure_captures_sheet_and_continues():
 
 
 class _RouteLevel404(Exception):
-    """A Files-API ``404 not_found_error`` lookalike (route-level).
-
-    Carries ``status_code`` like the SDK's ``NotFoundError``; permanent, so the
-    upload helper fails the sheet on the first image without retrying. A 404 is
-    the inline-fallback-eligible status: the upload route is down but the
-    Messages/Batches API still works.
-    """
+    """A permanent Files-API route rejection, shaped like SDK NotFoundError."""
 
     status_code = 404
 
@@ -884,12 +879,7 @@ class _RouteLevel404(Exception):
 
 
 class _Credential401(Exception):
-    """A Files-API ``401 authentication_error`` lookalike (credential-level).
-
-    Carries ``status_code`` like the SDK's ``AuthenticationError``. Unlike a
-    404, an inline request would hit the same rejection, so the breaker keeps
-    the stop-and-skip behavior for this status.
-    """
+    """A credential rejection, shaped like SDK AuthenticationError."""
 
     status_code = 401
 
@@ -911,12 +901,7 @@ class _CountingBrokenFiles(_FakeFiles):
         raise self.exc_type()
 
 
-def test_submit_inlines_sheets_after_consecutive_404_failures():
-    # A 404 on /v1/files means the upload route is unavailable while the
-    # Messages/Batches API is healthy, so every 404'd sheet is digested INLINE
-    # (base64, one synchronous vision call) instead of lost. After three
-    # consecutive 404s the doomed upload attempts stop and the remaining sheets
-    # go straight to the inline path — no sheet is dropped, only uploads stop.
+def test_submit_upload_outage_keeps_economy_transport_and_reports_every_sheet():
     client = _FakeClient(_succeed)
     client.files = _CountingBrokenFiles()  # every upload 404s
     client.beta.files = client.files
@@ -925,12 +910,11 @@ def test_submit_inlines_sheets_after_consecutive_404_failures():
 
     # Uploads stop after the breaker trips at 3; the rest skip the upload.
     assert client.files.attempts == 3
-    # Every sheet still produced a digest — inline, via the real-time path.
-    assert len(digests) == 6 and all(d.ok for d in digests)
-    assert len(client.messages_create_calls) == 6
-    # Each inline digest is a full-rate real-time call, so it is flagged rescued —
-    # the usage ledger must not give it the 50% batch discount (Phase 23B).
-    assert all(d.rescued for d in digests)
+    assert len(digests) == 6 and not any(d.ok or d.rescued for d in digests)
+    assert client.messages_create_calls == []
+    assert all(d.input_tokens == d.output_tokens == 0 for d in digests)
+    assert all("upload failed" in d.error for d in digests[:3])
+    assert all("3 consecutive HTTP 404" in d.error for d in digests[3:])
     # No batch was submitted and nothing was uploaded/left behind.
     assert client.submitted == [] and client.create_calls == []
     assert client.files.uploaded_ids == [] and client.files.deleted == []
@@ -978,10 +962,7 @@ def test_submit_payload_4xx_does_not_trip_the_breaker():
 
 
 def test_submit_breaker_resets_on_successful_upload():
-    # The breaker's contract is CONSECUTIVE failures. A successful upload in
-    # between proves the Files API is reachable, so 404 / ok / 404 / ok / 404
-    # must NOT trip the all-inline switch — each 404'd sheet is inlined
-    # individually while the reachable sheets keep uploading as batch items.
+    # Intermittent failures must leave reachable sheets eligible for the batch.
     class _IntermittentFiles(_FakeFiles):
         """404 on chosen attempt numbers (1-based); succeed otherwise."""
 
@@ -1004,17 +985,14 @@ def test_submit_breaker_resets_on_successful_upload():
 
     _, digests = _run_batch(client, [_make_sheet(i) for i in range(6)])
 
-    # Every sheet resolves OK: 0/2/4 inlined, 1/3/5 uploaded as batch items.
-    assert all(d.ok for d in digests)
-    assert len(client.messages_create_calls) == 3  # the three 404'd sheets
+    assert [d.ok for d in digests] == [False, True, False, True, False, True]
+    assert client.messages_create_calls == []
     assert len(client.submitted) == 3  # every reachable sheet became an item
     assert not any(d.error and "upload skipped" in d.error for d in digests)
 
 
 def test_submit_breaker_still_serves_cache_hits(tmp_path):
-    # A sheet whose digest is already cached must resolve from the cache even
-    # when the Files API is down — the cache check sits ahead of both the upload
-    # and the inline fallback, so a cached sheet costs nothing either way.
+    # Cached results remain available during a Files-API outage.
     cache = DigestCache(tmp_path / "cache.json")
     warm_client = _FakeClient(_succeed)
     _run_batch(warm_client, [_make_sheet(9)], cache=cache)  # seed sheet 9
@@ -1023,22 +1001,19 @@ def test_submit_breaker_still_serves_cache_hits(tmp_path):
     client.files = _CountingBrokenFiles()
     client.beta.files = client.files
 
-    # Three uncached sheets 404 and are inlined; the cached sheet is served free.
+    # Three uncached sheets fail; the cached sheet is served free.
     _, digests = _run_batch(
         client, [_make_sheet(0), _make_sheet(1), _make_sheet(2), _make_sheet(9)],
         cache=cache,
     )
 
     assert client.files.attempts == 3
-    assert all(d.ok for d in digests)
-    assert len(client.messages_create_calls) == 3  # the three uncached sheets
+    assert [d.ok for d in digests] == [False, False, False, True]
+    assert client.messages_create_calls == []
     assert digests[3].cached and not any(d.cached for d in digests[:3])
 
 
-def test_submit_inline_fallback_coexists_with_uploaded_sheets():
-    # The Files API works for the first sheet, then starts 404ing. The uploaded
-    # sheet rides the batch (file_id); the 404'd sheets are inlined. Both
-    # resolve, and only the uploaded sheet's files are cleaned up.
+def test_submit_upload_outage_preserves_successful_batch_items_and_cleanup():
     class _DiesAfterFirstSheet(_FakeFiles):
         """Upload OK for the first ``ok_uploads`` images, then 404 every upload."""
 
@@ -1060,37 +1035,31 @@ def test_submit_inline_fallback_coexists_with_uploaded_sheets():
 
     _, digests = _run_batch(client, [_make_sheet(i) for i in range(4)])
 
-    assert all(d.ok for d in digests)
+    assert [d.ok for d in digests] == [True, False, False, False]
     assert len(client.submitted) == 1  # only sheet 0 became a batch item
-    assert len(client.messages_create_calls) == 3  # sheets 1-3 inlined
+    assert client.messages_create_calls == []
     # Only the uploaded sheet's images exist and are cleaned up afterwards.
     assert len(client.files.uploaded_ids) == 5
     assert sorted(client.files.deleted) == sorted(client.files.uploaded_ids)
 
 
-def test_submit_inline_fallback_digest_is_cached(tmp_path):
-    # An inlined sheet's digest is written to the cache under the SAME key a
-    # batch digest would use, so a later run is served from cache — proving the
-    # fallback path stays cache-compatible with the Files-API path.
+def test_submit_upload_failure_is_not_cached(tmp_path):
     cache = DigestCache(tmp_path / "cache.json")
     client = _FakeClient(_succeed)
-    client.files = _CountingBrokenFiles()  # every upload 404s -> inline
+    client.files = _CountingBrokenFiles()
     client.beta.files = client.files
 
     _, first = _run_batch(client, [_make_sheet(7)], cache=cache)
-    assert first[0].ok and not first[0].cached
-    assert client.files.attempts == 1 and len(client.messages_create_calls) == 1
+    assert not first[0].ok and not first[0].cached
+    assert client.files.attempts == 1 and client.messages_create_calls == []
 
-    # Re-run against a still-broken Files API: the cache hit serves the sheet,
-    # so neither an upload nor an inline call is made.
+    # A later healthy run must actually read the previously failed sheet.
     client2 = _FakeClient(_succeed)
-    client2.files = _CountingBrokenFiles()
-    client2.beta.files = client2.files
     _, second = _run_batch(client2, [_make_sheet(7)], cache=cache)
 
-    assert second[0].ok and second[0].cached
-    assert client2.files.attempts == 0  # never even attempted an upload
-    assert len(client2.messages_create_calls) == 0  # served from cache
+    assert second[0].ok and not second[0].cached
+    assert len(client2.submitted) == 1
+    assert client2.messages_create_calls == []
 
 
 # --------------------------------------------------------------------------- #
@@ -1259,8 +1228,9 @@ def test_collect_rescues_batch_backend_outage_via_direct_calls():
     # also watched a follow-up batch fail identically, wasting ~10 minutes).
     # A batch whose every item fails retryably server-side therefore skips
     # the doomed follow-up round entirely and digests via synchronous
-    # streamed beta.messages.stream calls carrying the byte-same params (and
-    # the Files-API beta, since they reference file_ids), with the uploaded
+    # streamed beta.messages.stream calls carrying the byte-same params (with
+    # the refusal-fallback beta for Opus 5; no Files-API beta: measured on the
+    # real SDK, a request referencing file_ids carries none), with the uploaded
     # files deleted only after the rescue.
     client = _FakeClient(_always_errored)
     batch = submit_drawing_batch(
@@ -1455,11 +1425,12 @@ def test_followup_submit_failure_falls_back_to_direct_calls():
             super().__init__(client)
             self.creates = 0
 
-        def create(self, *, requests, betas=None):
+        @checked_batch_create
+        def create(self, *, requests):
             self.creates += 1
             if self.creates >= 2:
                 raise RuntimeError("batch backend down")
-            return super().create(requests=requests, betas=betas)
+            return super().create(requests=requests)
 
     def responder(req):
         return _always_errored(req) if req["custom_id"] == "sheet__0" else _succeed(req)
@@ -1997,8 +1968,9 @@ class _StallFirstThenBatchOk(_FakeBatches):
         self._n = 0
         self._stalled_id: str | None = None
 
-    def create(self, *, requests, betas=None):
-        self._c.create_calls.append({"requests": list(requests), "betas": betas})
+    @checked_batch_create
+    def create(self, *, requests):
+        self._c.create_calls.append({"requests": list(requests)})
         self._c.submitted = list(requests)
         self._n += 1
         bid = f"batch_{self._n}"
@@ -2408,8 +2380,9 @@ class _TerminalPrimaryThenAlwaysStall(_FakeBatches):
         self._n = 0
         self._primary_id: str | None = None
 
-    def create(self, *, requests, betas=None):
-        self._c.create_calls.append({"requests": list(requests), "betas": betas})
+    @checked_batch_create
+    def create(self, *, requests):
+        self._c.create_calls.append({"requests": list(requests)})
         self._c.submitted = list(requests)
         self._n += 1
         bid = f"batch_{self._n}"
@@ -2550,8 +2523,9 @@ class _StallThenSettleWithCompletedItems(_FakeBatches):
         self._primary_reqs: list[dict] = []
         self._canceled: set[str] = set()
 
-    def create(self, *, requests, betas=None):
-        self._c.create_calls.append({"requests": list(requests), "betas": betas})
+    @checked_batch_create
+    def create(self, *, requests):
+        self._c.create_calls.append({"requests": list(requests)})
         self._c.submitted = list(requests)
         self._n += 1
         bid = f"batch_{self._n}"
@@ -2844,8 +2818,9 @@ class _PrimaryOkThenFollowUpStalls(_FakeBatches):
         self._follow_up: str | None = None
         self._canceled: set[str] = set()
 
-    def create(self, *, requests, betas=None):
-        self._c.create_calls.append({"requests": list(requests), "betas": betas})
+    @checked_batch_create
+    def create(self, *, requests):
+        self._c.create_calls.append({"requests": list(requests)})
         self._c.submitted = list(requests)
         self._n += 1
         bid = f"batch_{self._n}"
@@ -2982,8 +2957,9 @@ class _MovingButTooSlow(_FakeBatches):
         self._primary_reqs: list[dict] = []
         self._canceled: set[str] = set()
 
-    def create(self, *, requests, betas=None):
-        self._c.create_calls.append({"requests": list(requests), "betas": betas})
+    @checked_batch_create
+    def create(self, *, requests):
+        self._c.create_calls.append({"requests": list(requests)})
         self._c.submitted = list(requests)
         self._n += 1
         bid = f"batch_{self._n}"

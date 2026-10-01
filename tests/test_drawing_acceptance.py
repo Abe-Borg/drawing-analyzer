@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 import pytest
 
@@ -749,6 +750,24 @@ def test_gauntlet_every_prose_item_accounted(oracle):
     assert oracle.client.harvest_calls == 2        # one per straggler, no more
 
 
+def test_gauntlet_prose_outcomes_are_exact(oracle):
+    # Remediation WP-09.2 (N10): the signature veto refuses nothing in the
+    # gauntlet, so its prose outcomes are exactly what they were, and each
+    # enumerated item has one outcome in the per-channel table.
+    acc = oracle.ctx.prose_accounting
+    assert (acc["items"], acc["matched"], acc["structured"], acc["degraded"],
+            acc["set_level"], acc["missing"]) == (4, 1, 1, 1, 1, 0)
+    assert (acc["vetoed"], acc["folded"], acc["filtered"], acc["filtered_focus"],
+            acc["assurances"]) == (0, 0, 0, 0, 0)
+    row = dict.fromkeys(("matched", "structured", "degraded", "set_level", "missing",
+                         "suppressed"), 0)
+    assert acc["by_channel"] == {
+        "digest_prose_coordination": {**row, "matched": 1, "structured": 1, "degraded": 1},
+        "synthesis_prose": {**row, "set_level": 1},
+    }
+    assert oracle.client.harvest_calls == 2
+
+
 # ---- assertion 8: the cross-sheet conflict lands on every leg ----------------
 
 
@@ -1017,8 +1036,10 @@ def test_gauntlet_exhaustive_status_complete(oracle):
         assert "PROJECT JURISDICTION/LOCALE: California, United States" in req
         assert "NFPA 13 2016" in req
     assert oracle.client.cross_request_texts
-    assert all(t.startswith("SET IDENTITY (model-detected):")
-               for t in oracle.client.cross_request_texts)
+    for text in oracle.client.cross_request_texts:
+        assert text.startswith("<set_identity>\n")
+        root = ET.fromstring(f"<request>{text}</request>")
+        assert root.find("set_identity").text[1:-1] == ctx.set_identity.context_block()
 
 
 # ---- the remaining §19.1 set contents: rejection, unanchored, set-level, ----
@@ -1280,6 +1301,51 @@ def test_an_empty_digest_sheet_is_reported_as_an_error(tmp_path, monkeypatch):
     assert any("empty digest" in e for e in ctx.errors), ctx.errors
 
 
+@pytest.mark.parametrize(
+    "stop, text, error",
+    [
+        pytest.param(
+            "refusal", "I can't help with reviewing this drawing sheet.",
+            "refused digest (stop_reason='refusal')", id="refusal-with-text",
+        ),
+        pytest.param(
+            None, "Sheet M-102 - Mechanical - Schedules\nEquipment sche",
+            "unfinished digest (stop_reason=None)",
+            id="stream-ended-without-a-stop-reason",
+        ),
+    ],
+)
+def test_a_refused_or_unfinished_digest_holds_the_run_below_complete(
+    tmp_path, stop, text, error,
+):
+    # N4 / N27 (WP-01.2). A refusal that carried explanatory text, or a stream
+    # that ended without a stop reason, used to count as a digested sheet: the
+    # digest stage read COMPLETE and so could the run, over a sheet the model
+    # never finished reading (I-1).
+    client = G.mini_client()
+    scripted_digest = client._digest
+
+    def _digest(request_text):
+        if "EQUIPMENT SCHEDULE" in request_text:        # sheet M-102
+            return FakeMessage(
+                content=[FakeTextBlock(text=text)], stop_reason=stop,
+                usage=FakeUsage(input_tokens=400, output_tokens=30),
+            )
+        return scripted_digest(request_text)
+
+    client._digest = _digest
+    ctx = _mini_run(tmp_path, client)
+
+    statuses = {s.stage: s.status for s in ctx.stage_results}
+    assert statuses["digest"] == "PARTIAL", statuses
+    assert ctx.qc_status != "COMPLETE"
+    assert ctx.ok_sheet_count == 1
+    assert any(error in e for e in ctx.errors), ctx.errors
+    # I-3: the sheet that did read still ships; the unfinished one does not.
+    assert "VAV-3 serves Room 120" in ctx.combined_text
+    assert text not in ctx.combined_text
+
+
 def test_a_cross_verifier_crash_is_not_a_valid_skip(tmp_path, monkeypatch):
     # ``counted == 0`` was tested before ``cross_failed``. A cross-verifier that
     # raised left its result None, contributing nothing to ``counted``, so the
@@ -1298,6 +1364,171 @@ def test_a_cross_verifier_crash_is_not_a_valid_skip(tmp_path, monkeypatch):
     assert statuses["verification"] == "PARTIAL", statuses
     assert ctx.qc_status != "COMPLETE"
     assert any("injected cross-verifier crash" in e for e in ctx.errors)
+
+
+# --------------------------------------------------------------------------- #
+# N5 (remediation WP-01.1, D-2): verification is COMPLETE only when every
+# eligible finding was judged. ``judged`` counted every UNCERTAIN, but a
+# malformed, truncated or failed call is also left UNCERTAIN and judged
+# nothing; and one verified finding beside four skipped ones read COMPLETE.
+# --------------------------------------------------------------------------- #
+
+
+def _verify_tally(**counts):
+    """A ``VerifyResult`` as a pass returns it. Every eligible item is tallied
+    exactly once, so the counts alone describe the pass."""
+    import drawing_analyzer.verify as verify
+
+    tally = verify.VerifyResult()
+    for name, value in counts.items():
+        setattr(tally, name, value)
+    return tally
+
+
+def _mini_run_with_tallies(tmp_path, monkeypatch, primary, cross=None):
+    import drawing_analyzer.verify as verify
+
+    monkeypatch.setattr(verify, "verify_findings", lambda *a, **k: primary)
+    monkeypatch.setattr(
+        verify, "verify_cross_findings",
+        lambda *a, **k: cross if cross is not None else verify.VerifyResult(),
+    )
+    return _mini_run(tmp_path, G.mini_client())
+
+
+@pytest.mark.parametrize(
+    "counts,status",
+    [
+        pytest.param({"uncertain": 3, "malformed": 3}, "FAILED", id="all-malformed"),
+        pytest.param({"uncertain": 3, "failed": 3}, "FAILED", id="all-http-failures"),
+        pytest.param({"uncertain": 3, "truncated": 3}, "FAILED", id="all-truncated-or-declined"),
+        pytest.param({"uncertain": 3}, "COMPLETE", id="all-valid-not-visible"),
+        pytest.param(
+            {"verified": 2, "uncertain": 1, "failed": 1}, "PARTIAL",
+            id="some-valid-some-failed",
+        ),
+        pytest.param({"verified": 1, "skipped": 4}, "PARTIAL", id="some-valid-some-skipped"),
+        pytest.param({"skipped": 5}, "FAILED", id="all-skipped"),
+        pytest.param({}, "SKIPPED_VALID", id="no-eligible-findings"),
+    ],
+)
+def test_verification_is_complete_only_when_every_eligible_finding_was_judged(
+    tmp_path, monkeypatch, counts, status,
+):
+    ctx = _mini_run_with_tallies(tmp_path, monkeypatch, _verify_tally(**counts))
+
+    stage = {s.stage: s for s in ctx.stage_results}["verification"]
+    assert stage.status == status, (counts, stage.status, stage.warnings)
+    if status in ("COMPLETE", "SKIPPED_VALID"):
+        # A valid NOT_VISIBLE is a judgment: an all-inconclusive pass is COMPLETE.
+        assert ctx.qc_status == "COMPLETE"
+        assert stage.warnings == []
+    else:
+        assert ctx.qc_status == "PARTIAL"
+        assert "eligible finding(s) judged" in stage.warnings[0]
+    # I-3: the standard deliverable ships whatever verification did.
+    assert "VAV-3 serves Room 120" in ctx.combined_text
+
+
+def test_verification_completeness_spans_both_passes(tmp_path, monkeypatch):
+    # The single-crop pass judged all it had; the cross-sheet pass skipped one
+    # of its two conflicts. One stage, one rule, over both tallies.
+    ctx = _mini_run_with_tallies(
+        tmp_path, monkeypatch,
+        _verify_tally(verified=2, rejected=1),
+        cross=_verify_tally(verified=1, skipped=1),
+    )
+    stage = {s.stage: s for s in ctx.stage_results}["verification"]
+    assert stage.status == "PARTIAL"
+    assert (stage.items_in, stage.items_out) == (5, 4)
+    assert ctx.qc_status == "PARTIAL"
+
+
+def test_verification_surfaces_skips_and_failures_separately(tmp_path, monkeypatch):
+    # Single pass: 1 verified, 1 valid NOT_VISIBLE, 1 malformed, 1 failed call,
+    # 2 skipped. Cross pass: 1 verified, 1 skipped. So 8 eligible, 3 judged,
+    # 3 skipped (no verdict obtained) and 2 calls that returned no judgment.
+    primary = _verify_tally(
+        verified=1, uncertain=3, malformed=1, failed=1, skipped=2, api_calls=4,
+    )
+    cross = _verify_tally(verified=1, skipped=1, api_calls=1)
+    ctx = _mini_run_with_tallies(tmp_path, monkeypatch, primary, cross=cross)
+
+    stage = {s.stage: s for s in ctx.stage_results}["verification"]
+    assert stage.status == "PARTIAL"
+    assert (stage.items_in, stage.items_out) == (8, 3)
+    assert stage.errors == []
+    # The coverage line leads (run.log, the report's stage table and the
+    # journal all show the first note); each pass's breakdown follows.
+    assert stage.warnings == [
+        "verification: 3 of 8 eligible finding(s) judged; "
+        "3 skipped, 2 returned no judgment",
+        "verification: 2 of 4 live verdict calls returned no judgment "
+        "(malformed=1, truncated=0, failed=1); each was left UNCERTAIN",
+    ]
+    end = [
+        e for e in ctx.run_journal.events
+        if e.event_code == "STAGE_END" and e.stage == "verification"
+    ]
+    assert len(end) == 1
+    assert end[0].fields["status"] == "PARTIAL"
+    assert end[0].fields["items"] == "8->3"
+    assert end[0].fields["warning"] == stage.warnings[0]
+
+
+def test_a_later_investigation_never_erases_the_verification_outcome(tmp_path):
+    # The one eligible finding's verdict call comes back malformed, so the
+    # verification stage judged nothing. Investigation then concludes it.
+    # The finding's verdict improves; the verification stage's record does
+    # not, and the recovery is reported by the stage that made it.
+    client = G.mini_client(verify_verdicts=(("VAV-3", "GARBLED"),))
+    ctx = _mini_run(tmp_path, client)
+
+    stages = {s.stage: s for s in ctx.stage_results}
+    verification, investigation = stages["verification"], stages["investigation"]
+    assert client.verify_calls == 1
+    assert verification.status == "FAILED"
+    assert (verification.items_in, verification.items_out) == (1, 0)
+    assert verification.warnings[0] == (
+        "verification: 0 of 1 eligible finding(s) judged; "
+        "0 skipped, 1 returned no judgment"
+    )
+
+    vav = next(f for f in ctx.findings if f.source_quote == "VAV-3")
+    assert vav.verification.status == "VERIFIED"
+    assert vav.verification.investigated is True
+    assert investigation.status == "COMPLETE"
+    assert investigation.warnings == [
+        "recovered 1 of 1 finding(s) whose verification call returned no "
+        "judgment; the verification stage keeps its FAILED status"
+    ]
+    # The roll-up does not recognise recovery: the run stays below COMPLETE.
+    assert ctx.qc_status == "PARTIAL"
+    # The journal recorded the verification outcome once, before investigation
+    # ran, and nothing rewrote it.
+    ends = [
+        (e.stage, e.fields.get("status")) for e in ctx.run_journal.events
+        if e.event_code == "STAGE_END" and e.stage in ("verification", "investigation")
+    ]
+    assert ends == [("verification", "FAILED"), ("investigation", "COMPLETE")]
+
+
+def test_a_valid_not_visible_verdict_is_judged_and_investigating_it_is_no_recovery(tmp_path):
+    # The same finding, answered NOT_VISIBLE: a real, inconclusive judgment.
+    # Verification is COMPLETE; investigation escalates the UNCERTAIN as it
+    # always has, and that is not a recovery of anything.
+    client = G.mini_client(verify_verdicts=(("VAV-3", "NOT_VISIBLE"),))
+    ctx = _mini_run(tmp_path, client)
+
+    stages = {s.stage: s for s in ctx.stage_results}
+    assert stages["verification"].status == "COMPLETE"
+    assert (stages["verification"].items_in, stages["verification"].items_out) == (1, 1)
+    assert stages["verification"].warnings == []
+    assert stages["investigation"].status == "COMPLETE"
+    assert stages["investigation"].warnings == []
+    vav = next(f for f in ctx.findings if f.source_quote == "VAV-3")
+    assert vav.verification.status == "VERIFIED"
+    assert ctx.qc_status == "COMPLETE"
 
 
 def test_gauntlet_plan_failure_leaves_critique_on_user_profiles(tmp_path, monkeypatch):

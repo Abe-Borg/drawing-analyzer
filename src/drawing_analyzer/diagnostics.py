@@ -46,6 +46,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
+from .core.api_key_format import ANTHROPIC_KEY_RE
 from .core.app_paths import app_config_dir
 
 LOGGER_NAME = "drawing_analyzer.diagnostics"
@@ -88,8 +89,9 @@ _NAMED_SECRET_FIELDS = (
 )
 
 _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
-    # Anthropic key material anywhere in the line, whatever surrounds it.
-    (re.compile(r"sk-ant-[A-Za-z0-9_\-]+"), "sk-ant-" + _REDACTED),
+    # Anthropic key material anywhere in the line, whatever surrounds it. The
+    # key store's shape check is a full match of this same pattern (WP-16.1).
+    (ANTHROPIC_KEY_RE, "sk-ant-" + _REDACTED),
     # Bearer credentials (must run before the named-field pass so the token
     # after "Authorization: Bearer" is caught even once the field pass has
     # consumed the word "Bearer" as the field value).

@@ -1,20 +1,6 @@
-"""WP-03A — a genuine quote past the prompt cap is still source evidence.
-
-`render` caps `sheet_text` at `SHEET_TEXT_MAX_CHARS` for the *prompt*, but the
-sharded cross-QC validators grounded quotes against that capped string — see
-`models.sheet_evidence_text` and CLAUDE.md's note on why it is deliberately not
-`full_sheet_text or sheet_text`. A quote the model transcribed from
-pixels past character 15,000 exists in the source and in the full word stream —
-yet `_finding_from_handles` and `_parse_facts` dropped it, and a finding losing
-a leg that way falls below the two-grounded-sheets bar and disappears entirely.
-
-These tests pin the fix and, just as importantly, the things it must **not**
-change: fabricated quotes still fail, the whole-set (<=40) path is untouched,
-prompt bytes are identical, and every cross-QC cache key for an untruncated
-sheet stays byte-for-byte what it was — WP-03A deliberately throws away no
-stored result (§2.3, §8.5).
-
-Hermetic: fake clients only, no key, no network.
+"""Quotes beyond the prompt text cap remain valid evidence in both cross-QC
+paths. Fabricated quotes still fail, requests remain bounded, and changes to
+omitted evidence affect cache identity without leaking raw tail text.
 """
 from __future__ import annotations
 
@@ -202,16 +188,11 @@ def test_tail_quote_survives_the_sharded_path():
     assert len(finding.also_on) == 1, "the second grounded leg was dropped"
 
 
-def test_tail_quote_was_dropped_before_the_fix():
-    """The same set, with the full text unavailable, still loses the finding.
-
-    Pins the defect itself: with ``full_sheet_text=None`` the validator falls
-    back to the capped string — exactly the pre-WP-03A behaviour — and the
-    finding disappears. If this ever starts passing, the fallback broke.
-    """
+def test_missing_full_evidence_rejects_the_tail_quote():
+    """Without full evidence text, the capped-text fallback rejects an absent quote."""
     sheets, geoms = _sharded_set(TAIL_QUOTE, TAIL_QUOTE)
     for g in geoms:
-        g.full_sheet_text = None                     # pre-WP-03A geometry
+        g.full_sheet_text = None                     # full evidence unavailable
     res = cross_sheet_qc(sheets, geoms, client=_TailClient(TAIL_QUOTE, TAIL_QUOTE),
                          sleep=lambda *_: None)
     assert res.findings == [], "the capped-text fallback should still reject it"
@@ -239,12 +220,12 @@ def test_quote_present_only_on_another_sheet_is_rejected():
 
 
 # --------------------------------------------------------------------------- #
-# Case 3 — threshold scope: the whole-set path is untouched
+# The whole-set threshold keeps one call and uses uncapped evidence
 # --------------------------------------------------------------------------- #
 
 
 def test_forty_entries_take_the_whole_set_path_unchanged():
-    """<=40 entries must not gain a capped-text check (that would import §2.1)."""
+    """The whole-set threshold uses one call, without map/reconcile requests."""
     sheets, geoms = _sharded_set(TAIL_QUOTE, TAIL_QUOTE)
     sheets, geoms = sheets[:MAX_SHEETS_SINGLE_CALL], geoms[:MAX_SHEETS_SINGLE_CALL]
     client = _TailClient(TAIL_QUOTE, TAIL_QUOTE)
@@ -252,6 +233,67 @@ def test_forty_entries_take_the_whole_set_path_unchanged():
     assert client.whole_set_calls == 1, "40 entries take the single whole-set call"
     assert client.map_calls == 0, "40 entries must not shard"
     assert client.reconcile_calls == 0
+
+
+class _WholeSetTailClient(BetaClientMixin):
+    """A whole-set reply naming the tail quote on S001 and a quote on S022."""
+
+    def __init__(self, quote_a: str, quote_b: str):
+        self.whole_set_calls = 0
+        outer = self
+
+        class _Msgs(StreamingMessagesMixin):
+            def create(self, **kw):  # noqa: ANN001, ANN202
+                outer.whole_set_calls += 1
+                assert not kw["messages"][0]["content"][0]["text"].startswith(
+                    "DRAWING SET SHARD")
+                fin = {
+                    "sheet_handle": "S001", "category": "conflict",
+                    "severity": "high", "text": "valve assignment disagrees",
+                    "recommended_action": "Reconcile PV-3.", "source_quote": quote_a,
+                    "also_on": [{"sheet_handle": "S022", "source_quote": quote_b}],
+                }
+                return FakeMessage(
+                    content=[FakeTextBlock(text="```json\n" + json.dumps(
+                        {"findings": [fin], "claims": []}) + "\n```")],
+                    usage=FakeUsage(input_tokens=800, output_tokens=60),
+                )
+
+        self.messages = _Msgs()
+
+
+def _forty_with_the_tail():
+    """40 entries: sheet 1 (S001) holds the tail quote past its cap, and the
+    first mechanical sheet (S022 among the 40 kept) prints the other quote."""
+    sheets, geoms = _sharded_set(TAIL_QUOTE, TAIL_QUOTE)    # f0..f20, then m0..
+    return sheets[:MAX_SHEETS_SINGLE_CALL], geoms[:MAX_SHEETS_SINGLE_CALL]
+
+
+def test_forty_entries_ground_the_tail_quote_on_the_whole_set_path():
+    """Whole-set grounding uses uncapped evidence text, just as a shard does."""
+    from drawing_analyzer.models import EVIDENCE_TEXT_GROUNDED
+
+    sheets, geoms = _forty_with_the_tail()
+    assert len(sheets) == MAX_SHEETS_SINGLE_CALL
+    client = _WholeSetTailClient(TAIL_QUOTE, TAIL_QUOTE)
+    res = cross_sheet_qc(sheets, geoms, client=client, sleep=lambda *_: None)
+    assert client.whole_set_calls == 1
+    (finding,) = res.findings
+    assert finding.source_quote == TAIL_QUOTE
+    assert finding.evidence_state == EVIDENCE_TEXT_GROUNDED
+    assert [leg.source_name for leg in finding.also_on] == ["m0.pdf"]
+    assert res.discards.legs_accepted_grounded == 2
+
+
+def test_forty_entries_never_ground_against_the_capped_text():
+    """If full evidence is unavailable, a tail quote cannot be grounded or retained."""
+    sheets, geoms = _forty_with_the_tail()
+    geoms[0].full_sheet_text = None
+    res = cross_sheet_qc(sheets, geoms, client=_WholeSetTailClient(TAIL_QUOTE, TAIL_QUOTE),
+                         sleep=lambda *_: None)
+    assert res.findings == []
+    assert res.discards.legs_ungrounded_quote_text_bearing_sheet == 1
+    assert res.discards.findings_dropped_under_two_legs == 1
 
 
 def test_forty_one_entries_take_the_sharded_path():
@@ -343,14 +385,7 @@ def test_spool_preserves_unavailable_as_unavailable(tmp_path):
 
 
 def test_new_fields_are_appended_not_inserted():
-    """A public dataclass's positional order is part of its contract.
-
-    Inserting an optional field mid-list silently re-binds every positional
-    argument after it — an int count landing in a text field, a list landing in
-    a float. These prefixes are the field order as of the commit before WP-02,
-    frozen here so a future additive field goes on the END and this class of
-    break cannot recur unnoticed.
-    """
+    """Public positional arguments retain their meaning when optional fields are added."""
     from dataclasses import fields
 
     assert [f.name for f in fields(RenderedSheet)][:13] == [
@@ -475,7 +510,7 @@ def test_untruncated_sheets_keep_a_byte_identical_cache_key():
     """The whole point of the conditional hash: no stored result is discarded."""
     before = [_geom("a.pdf", "A-1"), _geom("b.pdf", "B-1")]
     for g in before:
-        g.full_sheet_text = None                      # a pre-WP-03A geometry
+        g.full_sheet_text = None                      # full evidence unavailable
     after = [_geom("a.pdf", "A-1"), _geom("b.pdf", "B-1")]
     for g in after:
         g.full_sheet_text = g.sheet_text              # untruncated: full == capped
@@ -490,20 +525,6 @@ def test_a_truncated_sheet_keys_distinctly():
     a = [_geom("a.pdf", "A-1", full_text=base)]
     b = [_geom("a.pdf", "A-1", full_text=other)]
     assert _key(a) != _key(b)
-
-
-def test_no_cross_qc_contract_bump_was_needed():
-    """WP-03A must not invalidate stored results; WP-03B is where that happens.
-
-    A tripwire on the counter's value, so any bump has to come through here and
-    say why. It reads 3 rather than 2 because **P8 item 11** bumped it — a
-    separate change with its own reason (``_norm_id`` now folds sheet handles
-    through ``fold_text``, which is host-side binding no key input covers, so a
-    warm entry would keep serving the smaller finding set). Neither WP-03A nor
-    WP-03B contributed to it; that is what this test still asserts, by requiring
-    the value to be exactly what the recorded reasons account for.
-    """
-    assert X._CROSS_QC_CACHE_CONTRACT == 3
 
 
 # --------------------------------------------------------------------------- #

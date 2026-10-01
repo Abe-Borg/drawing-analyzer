@@ -1,15 +1,13 @@
-"""Level-1 cache identity and schema migration (DA-004, §11.5).
+"""Cache identity follows rendered page content, configuration and schema.
 
-The render identity conservatively hashes the transitive PDF dependencies that
-can affect one page's pixels, plus render configuration and environment. A local
-page edit rekeys that page while preserving unchanged siblings; any ambiguity
-falls back to the whole-source hash, so stale hits remain impossible. The same
-identity supports digest and critique pre-render cache hits.
+Page-local changes preserve unaffected siblings; changed critique contracts
+miss at both cache levels without invalidating unrelated paid stages.
 """
 from __future__ import annotations
 
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -20,7 +18,9 @@ from drawing_analyzer.digest_cache import (
     critique_cache_key_level1,
     digest_cache_key_level1,
 )
-from drawing_analyzer.models import COORDINATE_SPACE_VERSION, SheetRef
+from drawing_analyzer.models import (
+    COORDINATE_SPACE_VERSION, ImageTile, RenderedSheet, SheetGeometry, SheetRef,
+)
 
 pymupdf = pytest.importorskip("pymupdf")
 
@@ -291,7 +291,7 @@ def test_prescan_rehashes_a_source_changed_since_the_snapshot(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# Schema migration: a pre-v5 cache entry is discarded on load
+# Older cache schemas are not served as current results
 # --------------------------------------------------------------------------- #
 
 
@@ -336,98 +336,6 @@ def test_critique_level1_key_sensitive_to_runs_and_profiles():
     kp = critique_cache_key_level1(ri, runs=2, profiles_key="fp@1@hash", **base)
     assert k1 != k2                              # one-read vs two-read differ
     assert k2 != kp                              # a profile selection re-critiques
-
-
-def test_both_prompt_hashes_cover_every_shared_user_framing_string():
-    # The user-turn framing (how a sheet is introduced, how an omitted tile is
-    # disclosed, the overview label, the per-tile label) is model-visible text
-    # that sat OUTSIDE both prompt hashes. Editing it changed what was sent
-    # while every cache key stayed byte-identical, so warm runs replayed reads
-    # taken under the old wording.
-    #
-    # ``build_user_content_blocks`` is SHARED: the critique passes its own
-    # closing instruction and reuses this exact framing, so a string covered by
-    # only one hash re-keys that cache while silently replaying the other — the
-    # failure CRITIQUE_PROMPT_VERSION's own comment already records.
-    import hashlib
-
-    from drawing_analyzer import critique as critique_mod
-    from drawing_analyzer import digest as digest_mod
-
-    assert digest_mod.SHARED_USER_FRAMING_STRINGS, "shared framing tuple is empty"
-
-    def _digest_hash(strings):
-        return hashlib.sha256(
-            "\x00".join(
-                (
-                    digest_mod.DIGEST_SYSTEM_PROMPT,
-                    digest_mod._DIGEST_TASK_INSTRUCTION,
-                    *strings,
-                    digest_mod._FINDINGS_INSTRUCTION,
-                )
-            ).encode("utf-8")
-        ).hexdigest()[:16]
-
-    def _critique_hash(strings):
-        return hashlib.sha256(
-            "\x00".join(
-                (
-                    critique_mod.CRITIQUE_SYSTEM_PROMPT,
-                    critique_mod._CRITIQUE_TASK_INSTRUCTION,
-                    critique_mod._CRITIQUE_FINDINGS_INSTRUCTION,
-                    *strings,
-                )
-            ).encode("utf-8")
-        ).hexdigest()[:16]
-
-    shared = list(digest_mod.SHARED_USER_FRAMING_STRINGS)
-    assert _digest_hash(shared) == digest_mod.DIGEST_PROMPT_VERSION
-    assert _critique_hash(shared) == critique_mod.CRITIQUE_PROMPT_VERSION
-
-    # Editing any one of them must move BOTH versions, never just one.
-    for i in range(len(shared)):
-        edited = list(shared)
-        edited[i] = edited[i] + " EDITED"
-        assert _digest_hash(edited) != digest_mod.DIGEST_PROMPT_VERSION, shared[i]
-        assert _critique_hash(edited) != critique_mod.CRITIQUE_PROMPT_VERSION, shared[i]
-
-
-# --------------------------------------------------------------------------- #
-# The render-identity SCHEME bump is the invalidation mechanism (P7 item 28)
-# --------------------------------------------------------------------------- #
-
-
-def test_render_identity_scheme_is_v4_for_the_annotation_free_text_policy(tmp_path):
-    """Item 28 changed the text-extraction POLICY, not the document.
-
-    ``_page_dependency_sha256`` hashes the annotation bytes and those bytes did
-    not move, so without a scheme bump an already-cached annotated page still
-    hits level 1 and is served a digest built from annotation-contaminated
-    ``sheet_text`` **without re-extracting the text** — a false hit, which is the
-    one failure mode the identity exists to prevent.
-
-    Without this test the bump is invisible: reverting the literal to v3 changes
-    nothing else observable, so every other cache-identity test still passes.
-    """
-    import drawing_analyzer.render as R
-
-    assert R._RENDER_IDENTITY_SCHEME == "render-identity-v4"
-
-    path = tmp_path / "M-101.pdf"
-    doc = _base_doc()
-    annot = doc[0].add_freetext_annot(
-        pymupdf.Rect(200, 300, 500, 360), "QC-014 PRIOR REVIEW MARKUP", fontsize=9
-    )
-    annot.update()
-    doc.save(str(path))
-    doc.close()
-
-    current = _identity(path)
-    assert current.startswith("render-identity-v4|")
-    # The scheme rides the key: a pre-change entry cannot be served to the new
-    # extraction policy.
-    legacy = "render-identity-v3|" + current.split("|", 1)[1]
-    assert current != legacy
 
 
 # --------------------------------------------------------------------------- #
@@ -511,3 +419,174 @@ def test_annotation_content_on_the_page_itself_still_rekeys(tmp_path):
     doc.saveIncr()
     doc.close()
     assert _identity(plain) != _identity(marked)
+
+
+# --------------------------------------------------------------------------- #
+# A critique contract change must leave other paid stages reusable.
+# --------------------------------------------------------------------------- #
+
+from drawing_analyzer import digest_cache as DC  # noqa: E402
+
+_KEY_SHEET = RenderedSheet(
+    ref=SheetRef(Path("M-101.pdf"), 0, "M-101.pdf", 1),
+    overview=ImageTile(b"OVERVIEW", 100, 80, "overview"),
+    tiles=[ImageTile(b"TILE00", 50, 80, "tile", 0, 0, "left"),
+           ImageTile(b"TILE01", 50, 80, "tile", 0, 1, "right")],
+    page_width_pt=100, page_height_pt=80, rows=1, cols=2,
+)
+_KEY_RENDER_IDENTITY = "render-identity-v4|content_dependency=page:abc"
+_KEY_REQUEST = dict(
+    model="claude-opus-5", prompt_version="p-1", max_tokens=64000,
+    effort="high", use_thinking=True,
+)
+_KEY_SHEET_TEXT = "VAV-3 SERVES ROOM 120"
+
+
+def _current_keys() -> dict[str, str]:
+    """Representative keys for each independently cached stage."""
+    return {
+        "digest_l2": DC.digest_cache_key(
+            _KEY_SHEET, sheet_text=_KEY_SHEET_TEXT, **_KEY_REQUEST),
+        "digest_l1": DC.digest_cache_key_level1(_KEY_RENDER_IDENTITY, **_KEY_REQUEST),
+        "critique_l2": DC.critique_cache_key(
+            _KEY_SHEET, runs=2, sheet_text=_KEY_SHEET_TEXT, **_KEY_REQUEST),
+        "critique_l1": DC.critique_cache_key_level1(
+            _KEY_RENDER_IDENTITY, runs=2, **_KEY_REQUEST),
+        "critique_l2_profiles_structured": DC.critique_cache_key(
+            _KEY_SHEET, runs=2, sheet_text=_KEY_SHEET_TEXT, profiles_key="fp@1@h",
+            structured_key="s-1", **_KEY_REQUEST),
+        "critique_l1_profiles_structured": DC.critique_cache_key_level1(
+            _KEY_RENDER_IDENTITY, runs=2, profiles_key="fp@1@h",
+            structured_key="s-1", **_KEY_REQUEST),
+        "identity": DC.identity_cache_key("corpus-1", **_KEY_REQUEST),
+        "review_plan": DC.review_plan_cache_key(
+            "corpus-1", "identity-1", max_items=60, **_KEY_REQUEST),
+        "citation": DC.citation_cache_key(
+            "payload-1", model="claude-sonnet-5", prompt_version="p-1",
+            request_shape={"tools": ["web_search"], "max_tokens": 8000}),
+        "investigation": DC.investigation_cache_key(
+            "payload-1", model="claude-opus-5", prompt_version="p-1",
+            max_rounds=6, task_budget=0),
+    }
+
+
+_CRITIQUE_KEYS = (
+    "critique_l2", "critique_l1",
+    "critique_l2_profiles_structured", "critique_l1_profiles_structured",
+)
+_OTHER_KEYS = tuple(k for k in _current_keys() if k not in _CRITIQUE_KEYS)
+
+
+@pytest.mark.parametrize("change", [
+    lambda s: replace(s, ref=replace(s.ref, source_name="renamed.pdf")),
+    lambda s: replace(s, ref=replace(s.ref, page_count=2)),
+    lambda s: replace(s, tiles=[replace(s.tiles[0], label="upper-left"), s.tiles[1]]),
+    lambda s: replace(s, tiles=[replace(s.tiles[0], row=1), s.tiles[1]]),
+    lambda s: replace(s, cols=3),
+    lambda s: replace(s, omitted_tiles=[(0, 2)]),
+])
+def test_model_visible_labels_rekey_digest_and_critique(change):
+    from drawing_analyzer.digest import build_user_content
+
+    changed = change(_KEY_SHEET)
+    assert build_user_content(changed) != build_user_content(_KEY_SHEET)
+    for builder, extra in ((DC.digest_cache_key, {}), (DC.critique_cache_key, {"runs": 2})):
+        key = builder(_KEY_SHEET, **_KEY_REQUEST, **extra)
+        assert builder(replace(_KEY_SHEET), **_KEY_REQUEST, **extra) == key
+        assert builder(changed, **_KEY_REQUEST, **extra) != key
+
+
+def test_prerender_keys_include_display_and_generated_tile_labels(monkeypatch):
+    from drawing_analyzer import tiling
+
+    geometry = SheetGeometry.from_rendered(_KEY_SHEET)
+    labels = DC.prescan_request_labels(geometry)
+    renamed = replace(geometry, ref=replace(geometry.ref, source_name="renamed.pdf"))
+    renamed_labels = DC.prescan_request_labels(renamed)
+    monkeypatch.setattr(tiling, "position_label", lambda *_a: "new placement wording")
+    regenerated = DC.prescan_request_labels(geometry)
+    for builder, extra in ((DC.digest_cache_key_level1, {}),
+                           (DC.critique_cache_key_level1, {"runs": 2})):
+        def key(fragment):
+            return builder(_KEY_RENDER_IDENTITY, request_labels=fragment, **_KEY_REQUEST, **extra)
+        assert key(labels) != key(renamed_labels)
+        assert key(labels) != key(regenerated)
+        assert key(labels) != key("")
+
+
+def test_pipeline_prerender_probes_change_when_identical_pdf_is_renamed(tmp_path, monkeypatch):
+    import shutil
+    from drawing_analyzer import pipeline
+
+    original, renamed = tmp_path / "original.pdf", tmp_path / "renamed.pdf"
+    doc = _base_doc()
+    doc.save(str(original))
+    doc.close()
+    shutil.copyfile(original, renamed)
+    assert _identity(original) == _identity(renamed)
+    cache = DigestCache(None, persist=False)
+    seen = []
+    monkeypatch.setattr(cache, "get", lambda key: seen.append(key))
+    common = dict(rows=2, cols=2, overlap_frac=.08, cache=cache, model="m")
+    for partition, extra in (
+        (pipeline._level1_partition, dict(max_tokens=100, use_thinking=False,
+                                         effort=None, focus=None)),
+        (pipeline._critique_level1_partition, dict(runs=1, profiles_key=None)),
+    ):
+        seen.clear()
+        for path in (original, original, renamed):
+            partition([path], **common, **extra)
+        assert seen[0] == seen[1] != seen[2]
+
+
+@pytest.mark.parametrize("rotation", (0, 90, 180, 270))
+def test_prerender_labels_match_rendered_labels_on_cropped_rotated_pages(tmp_path, rotation):
+    from drawing_analyzer.render import iter_rendered_sheets, iter_sheet_prescan
+
+    path = tmp_path / "sheet.pdf"
+    doc = _base_doc()
+    doc[0].set_cropbox(pymupdf.Rect(20, 30, 600, 700))
+    doc[0].set_rotation(rotation)
+    doc.save(str(path))
+    doc.close()
+    (_, _, geometry), = iter_sheet_prescan([path], rows=2, cols=2)
+    sheet, = iter_rendered_sheets([path], rows=2, cols=2)
+    assert sheet.tiles
+    display, rows, cols, projected = json.loads(DC.prescan_request_labels(geometry))
+    assert (display, rows, cols) == (sheet.ref.display_label, sheet.rows, sheet.cols)
+    assert all([tile.row, tile.col, tile.label] in projected for tile in sheet.tiles)
+
+
+def test_the_critique_contract_rides_both_critique_builders_and_nothing_else(monkeypatch):
+    before = _current_keys()
+    monkeypatch.setattr(DC, "_CRITIQUE_CACHE_CONTRACT", DC._CRITIQUE_CACHE_CONTRACT + 1)
+    after = _current_keys()
+    for name in _CRITIQUE_KEYS:
+        assert after[name] != before[name], name
+    for name in _OTHER_KEYS:
+        assert after[name] == before[name], name
+
+
+def test_changed_critique_entries_miss_without_deleting_paid_results(tmp_path, monkeypatch):
+    path = tmp_path / "digest_cache.json"
+    before = _current_keys()
+    cache = DigestCache(path, persist=True)
+    stale = {"findings": [], "claims": [], "runs": 2, "requested_runs": 2,
+             "completed_runs": 2, "input_tokens": 1, "output_tokens": 1}
+    digest = {"text": "digest", "stop_reason": "end_turn"}
+    cache.put(before["critique_l1"], stale)
+    cache.put(before["critique_l2"], stale)
+    cache.put(before["digest_l1"], digest)
+    cache.close()
+
+    monkeypatch.setattr(DC, "_CRITIQUE_CACHE_CONTRACT", DC._CRITIQUE_CACHE_CONTRACT + 1)
+    reopened = DigestCache(path, persist=True)
+    try:
+        after = _current_keys()
+        assert reopened.get(after["critique_l1"]) is None
+        assert reopened.get(after["critique_l2"]) is None
+        assert reopened.get(after["digest_l1"]) == digest
+        assert reopened.get(before["critique_l1"]) == stale
+        assert reopened.get(before["critique_l2"]) == stale
+    finally:
+        reopened.close()

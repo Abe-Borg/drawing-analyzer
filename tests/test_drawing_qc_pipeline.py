@@ -1668,6 +1668,9 @@ def test_pipeline_reports_verify_parse_loss_on_the_stage_not_as_an_error(tmp_pat
     # A reply the verifier could not read is counted UNCERTAIN exactly like a
     # real NOT_VISIBLE; the stage carries the distinction so run.log and the
     # manifest can say how much of the UNCERTAIN share the parser produced.
+    # Since remediation WP-01.1 (N5) the distinction also decides the status.
+    # This pinned COMPLETE: the only eligible finding got no verdict, so the
+    # stage judged nothing at all, which is FAILED under the all-failed rule.
     src = _make_pdf(tmp_path / "M-101.pdf")
     client = _RoutingClient([_VAV_FINDING], verdict="MAYBE")     # not in the enum
     ctx = extract_drawing_context(
@@ -1677,14 +1680,18 @@ def test_pipeline_reports_verify_parse_loss_on_the_stage_not_as_an_error(tmp_pat
     )
     assert client.verify_calls == 1
     stage = {s.stage: s for s in ctx.stage_results}["verification"]
-    assert stage.status == "COMPLETE"                  # observational: status unmoved
-    assert stage.errors == []
+    assert stage.status == "FAILED"
+    assert (stage.items_in, stage.items_out) == (1, 0)
+    assert ctx.qc_status == "PARTIAL"
+    assert stage.errors == []                          # a warning, never an error
     assert stage.warnings == [
+        "verification: 0 of 1 eligible finding(s) judged; "
+        "0 skipped, 1 returned no judgment",
         "verification: 1 of 1 live verdict calls returned no judgment "
-        "(malformed=1, truncated=0, failed=0); each was left UNCERTAIN"
+        "(malformed=1, truncated=0, failed=0); each was left UNCERTAIN",
     ]
     assert ctx.findings[0].verification.status == "UNCERTAIN"
-    # The warning reaches the exported manifest through the stage record.
+    # The warnings reach the exported manifest through the stage record.
     assert stage.to_dict()["warnings"] == stage.warnings
 
 

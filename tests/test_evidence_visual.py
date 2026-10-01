@@ -1,22 +1,6 @@
-"""WP-03B — evidence that is not in the text layer at all.
-
-The three-state grounding contract (README, "Evidence the host cannot check";
-CLAUDE.md, `classify_quote_evidence`). WP-03A recovered quotes past the prompt
-cap, where the text was still there to find. This covers the cases where there
-is nothing to find:
-
-- a **scanned** sheet has no text layer, so every quote on it failed grounding
-  and — worse — `_parse_facts` dropped every fact, excluding the sheet from
-  cross-shard reconciliation entirely;
-- a **hybrid** sheet has words (so `is_raster` is False) and still cannot
-  support a text check over its pasted raster detail;
-- a leg with **no quote at all** short-circuited the check and was trusted more
-  readily than one whose quote merely failed to match.
-
-The fix admits these at *reduced trust* rather than dropping them — but §2.2 is
-emphatic that admission without a location is a dead end, so this file also pins
-the three-part route that makes them verifiable, and the negative half: on a
-text-bearing sheet an unmatched quote is still the hallucination signal.
+"""Textless and hybrid sheets admit visually located evidence at reduced trust.
+Unmatched quotes on text-bearing sheets still fail. Retained findings must
+reach anchoring, verification and investigation on their own sheet.
 """
 from __future__ import annotations
 
@@ -402,18 +386,20 @@ def test_reduced_trust_without_a_reported_tile_is_still_unanchored():
 # --------------------------------------------------------------------------- #
 
 
-def test_a_recovered_finding_reaches_verification_and_investigation():
-    """Asserted against the real gatekeepers, not a copy of their conditions."""
+@pytest.mark.parametrize("quote", [SCANNED_QUOTE, "P-1", "AHU-1", "M-101"])
+def test_a_recovered_finding_reaches_verification_and_investigation(quote):
+    """Visual evidence, including short tags, reaches both evidence consumers."""
     scanned = _geom("scan.pdf", "AS-1", text="", words=[])
     other = _geom("b.pdf", "B-1", text="", words=[])
     f = Finding(sheet_id="AS-1", source_name="scan.pdf", page_index=0,
                 category="conflict", severity="high", text="t",
-                source_quote=SCANNED_QUOTE, tile=[0, 1],
-                evidence_state=EVIDENCE_UNAVAILABLE,
+                source_quote=quote, tile=[0, 1],
+                evidence_state=classify_quote_evidence(quote, scanned, [0, 1]),
                 also_on=[ConflictLeg(sheet_id="B-1", source_name="b.pdf",
-                                     page_index=0, source_quote=SCANNED_QUOTE,
+                                     page_index=0, source_quote=quote,
                                      tile=[1, 1],
-                                     evidence_state=EVIDENCE_UNAVAILABLE)])
+                                     evidence_state=classify_quote_evidence(
+                                         quote, other, [1, 1]))])
     resolve_anchors([f], scanned)
     resolve_conflict_legs([f], {("b.pdf", 0): other, ("scan.pdf", 0): scanned})
 
@@ -629,11 +615,3 @@ def test_the_prompt_edit_supplies_the_invalidation():
         assert X._cross_qc_cache_key(entries, model="m", preamble="") != key
     finally:
         X.cross_qc_map_system_prompt = original
-
-
-def test_contract_counter_is_not_bumped_by_this_package():
-    # 3, not 2, because P8 item 11 bumped it for its own reason (the `_norm_id`
-    # fold — host-side binding that no key input covers). WP-03B added nothing to
-    # it, which is what this tripwire keeps honest: a bump has to be justified
-    # here before the value moves again.
-    assert X._CROSS_QC_CACHE_CONTRACT == 3

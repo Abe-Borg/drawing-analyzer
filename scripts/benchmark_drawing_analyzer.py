@@ -53,7 +53,7 @@ if str(REPO_ROOT / "tests") not in sys.path:
 
 from fixtures.fake_anthropic import (  # noqa: E402
     BetaClientMixin,
-    FinalMessageStream,
+    StreamingMessagesMixin,
 )
 
 _PAGE_W, _PAGE_H = 792.0, 612.0
@@ -122,7 +122,7 @@ class _Blocks:
 
     class Message:
         stop_reason = "end_turn"
-        model = "claude-opus-5"
+        model = "claude-opus-5-5"
 
         def __init__(self, text: str, i: int, o: int) -> None:
             self.content = [_Blocks.Text(text)]
@@ -147,7 +147,7 @@ class OfflineClient(BetaClientMixin):
       which I-3 caught per sheet — so the run "succeeded" with zero digests,
       zero tokens and every sheet in ``ctx.errors``.
 
-    :class:`BetaClientMixin` and :class:`FinalMessageStream` come from
+    :class:`BetaClientMixin` and :class:`StreamingMessagesMixin` come from
     ``tests/fixtures/fake_anthropic.py`` deliberately: a benchmark fake that
     reimplements the transport is a fake that drifts from it again, silently,
     and the failure mode is a green-looking gate measuring nothing.
@@ -158,10 +158,9 @@ class OfflineClient(BetaClientMixin):
         self.critique_calls = 0
         outer = self
 
-        class _Msgs:
-            def stream(_self, **kw):  # noqa: ANN001, ANN202
-                return FinalMessageStream(_self.create(**kw))
-
+        # ``stream`` comes from the mixin, and both entry points are checked
+        # against the installed SDK (remediation WP-02.2).
+        class _Msgs(StreamingMessagesMixin):
             def create(_self, **kw):  # noqa: ANN001, ANN202
                 from drawing_analyzer.citation_check import CITATION_SYSTEM_PROMPT
                 from drawing_analyzer.critique import CRITIQUE_SYSTEM_PROMPT

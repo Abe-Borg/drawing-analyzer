@@ -544,8 +544,9 @@ def test_a_global_model_variant_moves_every_fallback_dependent_stage():
     for stage in _FALLBACK_STAGES:
         assert stages[stage] == "claude-sonnet-5", stage
     # Stages with their own non-fallback default must NOT move — otherwise this
-    # would pass by resolving everything to the variant model.
-    assert stages["identity"] == "claude-sonnet-5"      # Sonnet by policy anyway
+    # would pass by resolving everything to the variant model. Identity keeps
+    # its own Sonnet default, which is not the variant's Sonnet.
+    assert stages["identity"] == "claude-sonnet-5-5"
     assert stages["investigation"] != "claude-sonnet-5"
 
 

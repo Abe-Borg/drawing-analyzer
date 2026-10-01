@@ -51,7 +51,9 @@ from .core.api_config import (
     call_with_refusal_fallback,
     phase_output_cap,
 )
+from .core.reply_text import reply_text
 from .core.structured_outputs import StructuredOutputsGate, attach_format, detach_format
+from .core.terminal_outcome import REFUSED, TRUNCATED, classify_stop_reason
 from .diagnostics import get_logger
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
@@ -60,7 +62,7 @@ from .digest import (
     _get,
     _image_block,
     _is_transient_error,
-    _message_text,
+    _message_cache_usage,
     _message_usage,
     _retry_backoff_seconds,
     _tolerant_json_object,
@@ -84,7 +86,7 @@ _log = get_logger()
 # One crop image + a short prompt, answered with a 1-2 sentence JSON verdict.
 #
 # The output itself is tiny, but adaptive thinking draws from the SAME
-# ``max_tokens`` envelope as the answer — and on Opus 5 / Sonnet 5 thinking runs
+# ``max_tokens`` envelope as the answer — and on the 5 / 5.5 models thinking runs
 # whether or not the request asks for it (omitting the key does not disable it).
 # The previous 1k cap therefore had to fit the reasoning *and* the verdict, and
 # frequently fit neither: an empty body parses as no verdict, which degrades to
@@ -270,15 +272,29 @@ def _verdict_from_response(resp: Any) -> tuple[str, str, bool]:
     Verification requests are the ones most likely to hit this: they run
     adaptive thinking, which draws from the same ``max_tokens`` envelope as the
     answer.
+
+    The stop reason is read through the one classifier
+    (:func:`~drawing_analyzer.core.terminal_outcome.classify_stop_reason`,
+    D-1; remediation WP-01.6), and only a ``FINISHED`` reply is parsed. This
+    used to test ``max_tokens`` and ``refusal`` alone, so a context-window
+    stop, a reply with no stop reason, a continuation (verification declares
+    no tools) or an unknown reason was parsed as a verdict and cached. Every
+    kind but ``FINISHED`` is "no verdict", and the note names it; the two
+    notes that existed keep their wording (the owner's table).
     """
     stop = _get(resp, "stop_reason")
-    if stop in ("max_tokens", "refusal"):
-        reason = (
-            "truncated at max_tokens" if stop == "max_tokens"
-            else "declined by the model"
-        )
+    outcome = classify_stop_reason(stop)
+    if not outcome.finished:
+        if outcome.kind == REFUSED:
+            reason = "declined by the model"
+        elif outcome.raised_cap_may_finish:
+            reason = "truncated at max_tokens"
+        elif outcome.kind == TRUNCATED:
+            reason = "context window exceeded"
+        else:
+            reason = f"unfinished: stop_reason={stop!r}"
         return "UNCERTAIN", f"no verdict ({reason})", False
-    return _parse_verdict_with_validity(_message_text(resp))
+    return _parse_verdict_with_validity(reply_text(resp))
 
 
 def parse_verdict(text: str) -> tuple[str, str]:
@@ -294,7 +310,10 @@ def parse_verdict(text: str) -> tuple[str, str]:
 
 #: Why a live reply produced no settled verdict. ``None`` means it did.
 DEGRADE_MALFORMED = "malformed"     # the model answered, but not as a verdict
-DEGRADE_TRUNCATED = "truncated"     # cut off at max_tokens, or declined
+# The reply did not finish: cut off (max_tokens or the context window),
+# declined, no stop reason, a continuation or an unknown reason (every kind but
+# FINISHED; its meaning widened by remediation WP-01.6, the owner's rule).
+DEGRADE_TRUNCATED = "truncated"
 DEGRADE_FAILED = "failed"           # the call itself failed (non-fatal error)
 
 
@@ -312,8 +331,12 @@ def _degrade_kind(resp: Any, valid_model_verdict: bool) -> str | None:
     """
     if valid_model_verdict:
         return None
-    stop = _get(resp, "stop_reason")
-    return DEGRADE_TRUNCATED if stop in ("max_tokens", "refusal") else DEGRADE_MALFORMED
+    # The same classifier as :func:`_verdict_from_response` (D-1): a reply the
+    # model did not finish is counted ``truncated``, a finished one that did
+    # not parse ``malformed``. Both are "no judgment" under D-2.
+    if not classify_stop_reason(_get(resp, "stop_reason")).finished:
+        return DEGRADE_TRUNCATED
+    return DEGRADE_MALFORMED
 
 
 def _build_request(
@@ -342,7 +365,7 @@ def _build_request(
         "system": VERIFY_SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": content}],
     }
-    # Explicit, never implicit: on Opus 5 / Sonnet 5 an omitted ``thinking`` key
+    # Explicit, never implicit: on the 5 / 5.5 models an omitted ``thinking`` key
     # runs adaptive anyway, so saying nothing is not the same as saying no.
     apply_thinking_config(kwargs, model=model, phase=PHASE_VERIFICATION)
     apply_effort_config(kwargs, model=model, phase=PHASE_VERIFICATION)
@@ -672,6 +695,9 @@ class _CallResult(NamedTuple):
     structured: bool
     #: One of the ``DEGRADE_*`` kinds when no verdict was settled, else None.
     degrade: str | None
+    #: The API's prompt-cache split, separate from ordinary input tokens.
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
 
 def _verify_one(
@@ -742,6 +768,7 @@ def _verify_one(
 
     status, note, valid_model_verdict = _verdict_from_response(resp)
     in_tok, out_tok = _message_usage(resp)
+    cache_read, cache_write = _message_cache_usage(resp)
     if note == "unparseable verdict" or note.startswith("unrecognized verdict"):
         _log.info("verify finding %s: %s", finding.id, note)
     return _CallResult(
@@ -751,6 +778,8 @@ def _verify_one(
         valid_model_verdict,
         send_structured,
         _degrade_kind(resp, valid_model_verdict),
+        cache_read,
+        cache_write,
     )
 
 
@@ -760,21 +789,36 @@ class VerifyResult:
     ``malformed`` / ``truncated`` / ``failed`` count the live calls that
     produced **no settled verdict** and were left UNCERTAIN — a garbled reply,
     a reply cut off by the envelope or declined, a call that failed outright.
-    They are a breakdown of ``uncertain``, not additional to it, and they are
-    observational: nothing here changes a status or the stage's completeness.
-    They exist because ``_parse_verdict_with_validity`` always knew which
-    UNCERTAINs were judgments and which were not, and threw that away at the
-    call site, so no run could say whether its UNCERTAIN share came from the
-    drawings or from the parser.
+    They are a breakdown of ``uncertain``, not additional to it. They exist
+    because ``_parse_verdict_with_validity`` always knew which UNCERTAINs were
+    judgments and which were not, and threw that away at the call site, so no
+    run could say whether its UNCERTAIN share came from the drawings or from
+    the parser.
+
+    The pipeline passes :attr:`eligible` and :attr:`judged` to
+    :func:`~drawing_analyzer.models.item_coverage_status`,
+    so a pass is COMPLETE only when every eligible finding got a settled
+    verdict. Counting every UNCERTAIN as judged had let a pass whose every
+    call came back malformed read COMPLETE (N5).
     """
 
     __slots__ = (
+        "_eligible", "verified", "rejected", "uncertain", "skipped",
+        "malformed", "truncated", "failed", "not_judged_ids",
+        "input_tokens", "output_tokens", "cache_hits", "cache_misses", "api_calls",
+        "cache_read_tokens", "cache_write_tokens",
+    )
+
+    #: The additive counters :meth:`combined` sums across passes.
+    _COUNTERS = (
         "verified", "rejected", "uncertain", "skipped",
         "malformed", "truncated", "failed",
         "input_tokens", "output_tokens", "cache_hits", "cache_misses", "api_calls",
+        "cache_read_tokens", "cache_write_tokens",
     )
 
     def __init__(self) -> None:
+        self._eligible = 0
         self.verified = 0
         self.rejected = 0
         self.uncertain = 0
@@ -782,8 +826,13 @@ class VerifyResult:
         self.malformed = 0
         self.truncated = 0
         self.failed = 0
+        #: ``qc_id`` of each finding whose live call returned no verdict, in
+        #: tally order, so a later stage can report which of them it recovered.
+        self.not_judged_ids: list[str] = []
         self.input_tokens = 0
         self.output_tokens = 0
+        self.cache_read_tokens = 0
+        self.cache_write_tokens = 0
         self.cache_hits = 0
         self.cache_misses = 0
         self.api_calls = 0
@@ -796,7 +845,7 @@ class VerifyResult:
         if attr:
             setattr(self, attr, getattr(self, attr) + 1)
 
-    def _count_degrade(self, kind: str | None) -> None:
+    def _count_degrade(self, kind: str | None, finding: Finding | None = None) -> None:
         attr = {
             DEGRADE_MALFORMED: "malformed",
             DEGRADE_TRUNCATED: "truncated",
@@ -804,11 +853,84 @@ class VerifyResult:
         }.get(kind or "")
         if attr:
             setattr(self, attr, getattr(self, attr) + 1)
+            qc_id = getattr(finding, "qc_id", "") or ""
+            if qc_id:
+                self.not_judged_ids.append(qc_id)
+
+    @property
+    def eligible(self) -> int:
+        """Findings this pass was required to judge: D-2's denominator.
+
+        A pass sets it from its eligibility filter before making any call, so
+        a finding that escapes the tally (an unexpected error between being
+        picked up and being counted, which the pass swallows under I-3) still
+        counts against completeness. A missed count can therefore only make a
+        pass read less complete, never more. It is never less than what was
+        tallied, so a tally built without it (a test double, an older caller)
+        reads as its own count rather than as having had nothing to do.
+        """
+        tallied = self.verified + self.rejected + self.uncertain + self.skipped
+        return max(self._eligible, tallied)
+
+    @eligible.setter
+    def eligible(self, value: int) -> None:
+        self._eligible = int(value)
 
     @property
     def not_judged(self) -> int:
         """Live calls that returned no verdict (all left UNCERTAIN)."""
         return self.malformed + self.truncated + self.failed
+
+    @property
+    def judged(self) -> int:
+        """Eligible findings that obtained a settled verdict, live or cached.
+
+        VERIFIED, REJECTED and a valid NOT_VISIBLE (UNCERTAIN) are judgments.
+        The :attr:`not_judged` calls are tallied UNCERTAIN but are not, and a
+        skipped finding never reached a verdict. A cache hit is always a
+        judgment, because only settled verdicts are stored.
+        """
+        return max(0, self.verified + self.rejected + self.uncertain - self.not_judged)
+
+    @classmethod
+    def combined(cls, *results: "VerifyResult | None") -> "VerifyResult":
+        """One tally over a stage's passes (the single-crop and cross-sheet ones).
+
+        ``None``, a pass that raised, contributes nothing: the caller tests
+        that failure flag before any count (D-2).
+        """
+        out = cls()
+        for r in results:
+            if r is None:
+                continue
+            for name in cls._COUNTERS:
+                setattr(out, name, getattr(out, name) + getattr(r, name))
+            out._eligible += r.eligible
+            out.not_judged_ids.extend(r.not_judged_ids)
+        return out
+
+    def coverage_note(self, label: str = "verification") -> str | None:
+        """The stage's leading warning when an eligible finding got no verdict.
+
+        ``None`` when every eligible finding was judged, or none was eligible.
+        Skips and failed calls are counted separately. A skip obtained no
+        verdict at all (no sheet or crop, no client, a pass stopped by an auth
+        failure). A call that returned nothing usable is broken down further by
+        :meth:`degradation_note`. The line leads the stage's warnings because
+        ``run.log``, the report's stage table and the journal show only the
+        first one.
+        """
+        missing = self.eligible - self.judged
+        if missing <= 0:
+            return None
+        parts = [f"{self.skipped} skipped", f"{self.not_judged} returned no judgment"]
+        unaccounted = missing - self.skipped - self.not_judged
+        if unaccounted > 0:
+            parts.append(f"{unaccounted} not accounted for")
+        return (
+            f"{label}: {self.judged} of {self.eligible} eligible finding(s) judged; "
+            + ", ".join(parts)
+        )
 
     def degradation_note(self, label: str = "verification") -> str | None:
         """One line for the stage's warnings when any live call was not a judgment.
@@ -923,6 +1045,9 @@ def verify_findings(
     result = VerifyResult()
 
     verifiable = [f for f in findings if _is_verifiable(f)]
+    # Fixed here, before any call: completeness is judged against the filter,
+    # not against whatever the loop below managed to tally (D-2).
+    result.eligible = len(verifiable)
     if not verifiable:
         return result
     restore_provenance = _provenance_restorer(verifiable)
@@ -978,7 +1103,7 @@ def verify_findings(
                 finding, dir_name, cache_keys = in_flight.pop(fut)
                 res: _CallResult = fut.result()
                 finding.verification = res.verification
-                result._count_degrade(res.degrade)
+                result._count_degrade(res.degrade, finding)
                 if res.cacheable and cache_keys:
                     # Under the key of the contract the worker actually sent —
                     # the structured key only for a schema-bound verdict.
@@ -993,6 +1118,8 @@ def verify_findings(
                 result._count(res.verification.status)
                 result.input_tokens += res.input_tokens
                 result.output_tokens += res.output_tokens
+                result.cache_read_tokens += res.cache_read_tokens
+                result.cache_write_tokens += res.cache_write_tokens
                 done += 1
                 if progress is not None:
                     progress(done, total, f"Verifying finding {done}/{total}")
@@ -1426,10 +1553,12 @@ def _call_prepared_cross(
 
     status, note, valid_model_verdict = _verdict_from_response(resp)
     in_tok, out_tok = _message_usage(resp)
+    cache_read, cache_write = _message_cache_usage(resp)
     v = Verification(status=status, note=note, evidence=prepared.artifacts)
     return _CallResult(
         v, in_tok, out_tok, valid_model_verdict, send_structured,
         _degrade_kind(resp, valid_model_verdict),
+        cache_read, cache_write,
     )
 
 
@@ -1480,6 +1609,7 @@ def verify_cross_findings(
     raises (I-3)."""
     result = VerifyResult()
     dual = [f for f in findings if _has_anchored_legs(f)]
+    result.eligible = len(dual)
     if not dual:
         return result
     restore_provenance = _provenance_restorer(dual)
@@ -1561,7 +1691,9 @@ def verify_cross_findings(
                 try:
                     res: _CallResult = future.result()
                     outcomes[index] = (res.verification, res.input_tokens, res.output_tokens)
-                    result._count_degrade(res.degrade)
+                    result.cache_read_tokens += res.cache_read_tokens
+                    result.cache_write_tokens += res.cache_write_tokens
+                    result._count_degrade(res.degrade, prepared.finding)
                     if res.cacheable:
                         # Under the key of the contract actually sent.
                         _cache_verification(
@@ -1576,6 +1708,9 @@ def verify_cross_findings(
                         "cross-verify finding %s worker failed: %s",
                         prepared.finding.id, note,
                     )
+                    # Left UNCERTAIN like any failed call, and counted as one:
+                    # uncounted, it read as a judgment (D-2).
+                    result._count_degrade(DEGRADE_FAILED, prepared.finding)
                     outcomes[index] = (
                         Verification(
                             status="UNCERTAIN", note=note,

@@ -1,38 +1,20 @@
-"""The critique pass — "the reviewer" (Phase 11).
+"""Independent full-sheet vision reads that produce QC findings.
 
-The digest *describes* a sheet; the critique *attacks* it. This is a second
-full-coverage vision read of the same sheet (the identical overview + tile grid +
-verbatim text layer the digest saw — full coverage is inviolable here too), but
-under a different persona and with a single job: find everything a senior
-engineer back-checking a check print before issue would mark up — errors, code
-concerns, RFI-worthy ambiguities, internal inconsistencies, stale/copy-paste
-text, and *absences* (content that should be on the sheet but isn't).
+Each read receives the same overview, complete tile grid and text layer as the
+digest. Critique adds findings without changing ``combined_text``. With default
+self-consistency enabled, two reads are merged conservatively: reproduced
+findings are labeled, and singletons remain available. Reproduction is not
+proof that a finding is correct.
 
-It emits only the machine-readable findings block (the §4.1 contract, extended
-with an optional ``anchor_hint`` of ``"SHEET"`` for sheet-level / absence
-findings) — no prose digest. The prose digest stays the digest pass's job, so
-``combined_text`` is untouched (I-2).
+Only completed, parseable reads count. Failed or unfinished reads leave surviving
+findings marked NOT_ASSESSED_PARTIAL. Cache the merged outcome only when every
+requested read completed successfully; individual reads are not cached.
 
-Self-consistency (default ON): the critique runs **twice**. Two independent
-reads of the same sheet disagree at the margins, and that disagreement is signal
-— a finding both runs surface is corroborated (``reproduced=True``); a singleton
-one run raised is kept (more markups is better) but flagged ``reproduced=False``.
-The merge (:func:`merge_self_consistency`) deduplicates by position and text; the
-downstream verification pass and the report *surface* the ``reproduced`` flag but
-it never suppresses a finding.
-
-Caching: the *merged* critique result is cached under its own
-(:func:`drawing_analyzer.digest_cache.critique_cache_key`, a distinct namespace
-from the digest) so a re-run skips the model calls. The run-to-run sampling
-variance the merge feeds on is not reproducible, so only the merged outcome is
-stored — never an individual run.
-
-Isolation (I-5): this module imports no PDF engine. It consumes already-rendered
-:class:`~drawing_analyzer.models.RenderedSheet` objects and reuses the digest's
-request/parse helpers; the pipeline owns rendering.
-"""
+Consume already-rendered sheets and shared request/parse helpers. Rendering and
+PDF-engine imports belong elsewhere."""
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
@@ -47,28 +29,37 @@ from .core.api_config import (
     clamp_effort_for_model,
     model_supports_adaptive_thinking,
     model_supports_effort,
+    output_cap_for_model,
 )
+from .core.reply_text import reply_text
 from .core.structured_outputs import StructuredOutputsGate, attach_format
+from .core.terminal_outcome import REFUSED, classify_stop_reason
 from .diagnostics import get_logger
 from .digest import (
     DEFAULT_DIGEST_EFFORT,
     DEFAULT_DIGEST_MAX_RETRIES,
     DEFAULT_DIGEST_MAX_TOKENS,
+    MAX_TOKENS_RETRY_CEILING,
     SHARED_USER_FRAMING_STRINGS,
     _clean_error,
     _get,
     _is_transient_error,
-    _message_text,
     _message_usage,
+    _name_discarded_retry,
     _retry_backoff_seconds,
+    StreamUsage,
     stream_message,
     build_user_content,
     claims_from_cache,
+    describe_refusal,
+    digest_terminal_error,
     findings_from_cache,
     parse_findings_detailed,
     parse_numeric_claims,
+    refusal_details,
 )
 from .digest_cache import critique_cache_key
+from .auditors.arithmetic import _UNICODE_DASHES, claim_content_key
 from .auditors.sheet_ids import normalize_sheet_id
 from .models import (
     CLAIM_KINDS,
@@ -114,7 +105,7 @@ def run_checklists(profiles: list[Profile] | None, runs: int) -> list[str]:
 # Back-compat alias for the private spelling used before Phase 23C made it public.
 _run_checklists = run_checklists
 
-# Critique shares the digest's output-shaping defaults: Opus 5, adaptive
+# Critique shares the digest's output-shaping defaults: Opus 5.5, adaptive
 # thinking, effort high, 16k max_tokens (full coverage, deliberate reasoning).
 # Decoupled from the digest cap: the critique is a second full-coverage read of
 # the same images and deserves its own envelope, not whatever the digest is set
@@ -363,8 +354,8 @@ CRITIQUE_FINDINGS_SCHEMA: dict = {
 # the schema into the main version would re-key — and so discard — every critique
 # ever cached, including those of users who never turn this on, for a request
 # shape they never sent. Instead this rides ``critique_cache_key`` only when
-# structured mode is actually used, so: structured off, keys stay byte-identical
-# to today; structured on, the instruction AND the schema are both covered, and
+# structured mode is actually used, so: structured off, it adds nothing to the
+# key; structured on, the instruction AND the schema are both covered, and
 # editing either re-critiques only the structured entries (I-6).
 CRITIQUE_STRUCTURED_PROMPT_VERSION = hashlib.sha256(
     "\x00".join(
@@ -498,11 +489,11 @@ def build_critique_request_params(
 # Two findings on the same sheet are duplicates only when they are *semantically*
 # the same issue and their **critical signatures are compatible** (Phase 20, §12.1).
 # A tile is a search hint, never identity — same-tile alone never merges — and
-# geometric overlap alone is not enough either: two unrelated issues can share a
-# table cell or a note. Thresholds:
-_IOU_DUP_THRESHOLD = 0.5          # rect overlap needed for the geometry branch
+# position is no evidence either: an anchor rectangle is resolved FROM the
+# finding's quote, so two findings quoting one string share one by construction
+# (remediation WP-03.7, N28; see ``_is_duplicate``). Thresholds:
 _TEXT_DUP_THRESHOLD = 0.7         # strong topical overlap → duplicate
-_MODERATE_TEXT_THRESHOLD = 0.4    # moderate overlap that only *supports* geometry
+_MODERATE_TEXT_THRESHOLD = 0.4    # moderate overlap that, with an equal quote, merges
 
 _SEVERITY_RANK = {"high": 3, "medium": 2, "low": 1}
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
@@ -557,7 +548,11 @@ def _token_overlap(a: str, b: str) -> float:
 
 
 def _rect_iou(a: list[float], b: list[float]) -> float:
-    """Intersection-over-union of two ``[x0, y0, x1, y1]`` rectangles (0..1)."""
+    """Intersection-over-union of two ``[x0, y0, x1, y1]`` rectangles (0..1).
+
+    No merge rule reads it since remediation WP-03.7 removed the geometry branch
+    of :func:`_is_duplicate` (N28).
+    """
     ax0, ay0, ax1, ay1 = a
     bx0, by0, bx1, by1 = b
     iw = max(0.0, min(ax1, bx1) - max(ax0, bx0))
@@ -586,61 +581,219 @@ def _same_sheet(a: Finding, b: Finding) -> bool:
 # digits — VAV-3, M-101, FP101, RV-3, AHU-2, M1.01, E2.1. A space is *not* a
 # separator, so "SET 165" is a measurement, not a tag. A hyphen is normalized away
 # (M-101 == M101) but a DOT is kept (M1.01 != M10.1 — different sheets).
-_TAG_RE = re.compile(r"\b([A-Za-z]{1,4})-?(\d{1,4}(?:[.-]\d{1,3})?[A-Za-z]?)\b")
-# A number (signed / decimal / fraction) immediately followed by a unit — a
-# measurement whose value AND unit discriminate the finding. Alpha units require a
-# trailing word boundary (so "voltage" isn't read as "volt", "into" as "in"); the
-# number can't start mid-token (so the "-1" in "P-1" or the "101" in "M-101" is not
-# a measurement).
-_ALPHA_UNIT = (
-    r"gpm|gpd|gph|psig|psi|cfm|fpm|inch(?:es)?|in|ft|feet|mm|cm|kva|kw|hp|hz|"
-    r"amps?|volts?|kv|va|gal|deg"
+#
+# An ``x`` or ``X`` glued to a digit's inch or foot mark is a dimension
+# separator, never a tag (remediation WP-04.3, the owner's rule): the ``x12`` of
+# ``24"x12"``, ``10'x12'`` or ``6"x12'`` read as a tag ``X12``, and under
+# WP-04.2's tag inclusion that stray tag, beside a different extra reference on
+# the other finding (``at grid C-4``), kept apart two findings about one duct. A
+# spaced ``24" x12"`` is not glued to the mark and still reads as a tag (a
+# recorded limit). Rides the critique contract, like every change here.
+_TAG_RE = re.compile(
+    r"\b(?!(?<=\d[\"'])[xX]\d)([A-Za-z]{1,4})-?(\d{1,4}(?:[.-]\d{1,3})?[A-Za-z]?)\b"
 )
-_SYM_UNIT = r"°[fc]?|%|\"|'"
-# The number, in three parts (item 23):
+# --- Measurements: the quantity tokenizer (item 23; remediation WP-04.1) --------
 #
-# * The lookbehind now excludes ``/`` as well. Without it, ``1/2"`` matched at the
-#   DENOMINATOR — the ``2`` — and signed as ``2in``, byte-identical to a real
-#   ``2"``. So *Provide 1/2" drain* and *Provide 2" drain* had the same critical
-#   signature and merged as duplicates: two different pipe sizes collapsing into
-#   one finding, which is precisely what the signature exists to prevent.
-# * A **bare fraction** alternative, tried first so it beats the plain-integer
-#   read of the same characters. ``2 1/2`` still wins as a mixed number, because
-#   the mixed alternative consumes further.
-# * The sign is refused after a foot or inch mark. The old lookbehind sat one
-#   character before the SIGN, and the character before the ``-`` in ``12'-6"`` is
-#   ``'`` — not excluded — so ``[-+]?`` swallowed the feet-inches separator and
-#   emitted a spurious NEGATIVE ``-6in``. Only the sign is guarded, not the whole
-#   number: excluding a preceding quote outright would drop the ``6`` in ordinary
-#   prose like ``the note says "6 in clear"``.
+# A measurement signs as ONE token, ``<value><unit>``, and the value is what the
+# number MEANS, not how it was written: ``12,500 cfm`` and ``12500 cfm`` are both
+# ``12500cfm``, ``2 1/2"`` and ``2.5"`` both ``2.5in``, ``6-inch`` and ``6 in``
+# both ``6in``. A spelling the tokenizer cannot read is not a neutral miss. A
+# signal present on only one side never blocks a merge (``signatures_compatible``),
+# so every quantity left unread is a merge nobody asked for (B2, B3, B12, N19).
 #
-# The "not mid-token" guard is TWO lookbehinds rather than one class, and the
-# split is load-bearing. A single ``[A-Za-z0-9.\-]`` class blocks any number
-# preceded by a hyphen — which stops the ``101`` in ``M-101`` (right) and the
-# ``6`` in ``12'-6"`` (wrong, and unsafe: with the inches half dropped, ``12'-6"``
-# and ``12'-8"`` both signed as just ``{12ft}`` and could merge). Asking instead
-# whether the hyphen is itself preceded by an alphanumeric separates them: ``M-``
-# is a tag, ``'-`` is a feet-inches join.
+# ``<unit>`` is canonical and lowercase: ``in``, ``ft``, ``gpm``, ``psig``, ``°``,
+# ``°f``, ``amp``, ``volt``, ``vac``, ``%`` and so on, or empty for a unitless W×H
+# size. ``<value>`` is one number, as its canonical decimal (``12500``, ``0.5``,
+# ``-6``), or ONE composite quantity:
 #
-# Feet-inches deliberately stays TWO tokens (``12ft`` and ``6in``). ``_SYM_UNIT``
-# carries both marks by design, and joining them would change the token model for
-# every dimension in the corpus, not just this one.
-_MEAS_RE = re.compile(
-    r"(?<![A-Za-z0-9./])(?<![A-Za-z0-9]-)"
-    r"((?:(?<![\'\"])[-+])?"
-    r"(?:\d+\s*/\s*\d+|\d+(?:\.\d+)?(?:[-\s]*\d+\s*/\s*\d+)?))\s*"
-    r"((?:" + _ALPHA_UNIT + r")\b|(?:" + _SYM_UNIT + r"))",
+# * a list: its elements joined by ``,`` in written order (``2,4,6 in`` is
+#   ``2,4,6in``). Every tight comma run that is not a valid thousands grouping is
+#   kept whole this way (``1,2,500 cfm`` is ``1,2,500cfm``), and so, since
+#   remediation WP-04.4, is a spelled list (``4 and 6 in``, ``4 or 6 in``, and
+#   three or more numbers joined by commas: ``2, 4, 6 in``; see
+#   ``_read_spelled``);
+# * a range: low end first, joined by ``..`` (``4-6 in`` is ``4..6in``, and since
+#   WP-04.4 so are ``4 to 6 in`` and ``between 4 and 6 in``);
+# * a W×H size: its dimensions joined by ``x`` in written order (``24"x12"`` is
+#   ``24x12in``);
+# * a voltage pair: low first, joined by ``/`` (``208Y/120V`` is ``120/208volt``).
+#
+# A composite is one quantity and never shares a token with its parts: that is
+# what makes ``2,4,6 in`` conflict with ``3,5,6 in`` rather than agree on
+# ``6in``. A consumer must compare it whole (``signature_conflicts`` does):
+# splitting ``1,2,500`` would recreate the trailing fragment ``500`` that a
+# malformed grouping must never yield (plan WP-04 step 2).
+#
+# Cached critiques contain merged findings. Invalidate the affected processing
+# contract when a merge change makes stored results incompatible.
+
+# Where a number may start (item 23, extended). The "not mid-token" guard is TWO
+# lookbehinds rather than one class, and the split is load-bearing:
+#
+# * never after a letter, digit, ``.``, ``,`` or ``/``. The ``/`` is item 23's:
+#   without it ``1/2"`` matched at the DENOMINATOR and signed as ``2in``,
+#   byte-identical to a real ``2"``, so *Provide 1/2" drain* and *Provide 2"
+#   drain* merged as duplicates. The ``,`` is B3's: without it ``12,500`` signed
+#   as its trailing ``500``, and ``15,000`` as the value zero.
+# * never after an alphanumeric-then-hyphen: the ``101`` in ``M-101`` is a tag,
+#   and the ``6`` in ``4-6`` is a range's far end. A single ``[A-Za-z0-9.\-]``
+#   class would also block the ``6`` in ``12'-6"`` (wrong, and unsafe: with the
+#   inches half dropped, ``12'-6"`` and ``12'-8"`` both signed as just
+#   ``{12ft}``). Asking whether the hyphen is itself preceded by an alphanumeric
+#   separates them: ``M-`` is a tag, ``'-`` is a feet-inches join.
+#
+# The sign is refused right after a unit mark (``'`` ``"`` ``°`` ``%``), where a
+# hyphen is a join and not a minus: the ``-`` in ``12'-6"`` would otherwise emit
+# a spurious NEGATIVE ``-6in``, and the one in ``90°-95°F`` a ``-95°f``. Only the
+# sign is guarded, not the number: excluding a preceding quote outright would drop
+# the ``6`` in ordinary prose like ``the note says "6 in clear"``.
+#
+# Feet-inches deliberately stays TWO tokens (``12ft`` and ``6in``): joining them
+# would change the token model for every dimension in the corpus. What a bare
+# ``12'`` against ``12'-6"`` needs is compared beside the tokens instead (the
+# signature's ``feet_inches``, remediation WP-04.4: ``_feet_inches``).
+_NUMBER_START = r"(?<![A-Za-z0-9.,/])(?<![A-Za-z0-9]-)"
+_SIGN = r"(?:(?<![\'\"°%])[-+])?"
+# The number shapes, most specific first so each beats a shorter read of the same
+# characters: a voltage pair (``480Y/277``); a tight comma run (``12,500``,
+# ``1,500.5``, ``2,4,6``, ``1,2,500``); a bare fraction, which must beat the plain
+# integer or ``1/2`` reads as ``1`` (item 23); a mixed number (``2 1/2``,
+# ``2-1/2``); then an integer or decimal.
+_DEC = r"\d+(?:\.\d+)?"
+_FRACTION = r"\d+\s*/\s*\d+"
+_MIXED = r"\d+(?:\.\d+)?[-\s]*\d+\s*/\s*\d+"
+_THOUSANDS = r"\d{1,3}(?:,\d{3})+(?:\.\d+)?"
+_COMMA_RUN = r"(?:\d+/\d+|\d+(?:\.\d+)?)(?:,(?:\d+/\d+|\d+(?:\.\d+)?))+"
+_VOLTAGE_PAIR = r"\d+\s*[Yy]\s*/\s*\d+"
+_PLAIN_NUMBER = r"(?:" + _THOUSANDS + r"|" + _FRACTION + r"|" + _MIXED + r"|" + _DEC + r")"
+_THOUSANDS_RE = re.compile(_THOUSANDS)
+_NUMBER_KINDS = ("vpair", "run", "frac", "mixed", "dec")
+_NUMBER_BODY = (
+    r"(?P<sign>" + _SIGN + r")(?:"
+    r"(?P<vpair>" + _VOLTAGE_PAIR + r")|(?P<run>" + _COMMA_RUN + r")"
+    r"|(?P<frac>" + _FRACTION + r")|(?P<mixed>" + _MIXED + r")|(?P<dec>" + _DEC + r"))"
+)
+_NUMBER_RE = re.compile(_NUMBER_START + _NUMBER_BODY)
+# The next dimension of a W×H candidate that turned out not to be a size is a
+# number of its own, but it follows an "x" that _NUMBER_START refuses, so it is
+# matched in place (see _read_quantity).
+_NUMBER_AT_RE = re.compile(_NUMBER_BODY)
+# Alpha units need a trailing word boundary (so "voltage" is not "volt", "into"
+# not "in"), and may be joined to the number by a hyphen: ``6-inch``, ``6-in.``,
+# ``a 10-foot clearance`` (B2).
+_ALPHA_UNIT = (
+    r"gpm|gpd|gph|psig|psi|cfm|fpm|inch(?:es)?|in|ft|feet|foot|mm|cm|kva|kw|hp|hz|"
+    r"amps?|volts?|kv|va|gal(?:lons?)?"
+)
+# Degrees (B12). ``°`` and ``deg`` / ``degree(s)`` are one unit, an angle ``°``,
+# unless a scale follows, and a scale is only ever READ, never inferred: ``90 deg
+# F`` and ``90°F`` are ``90°f``, ``90 deg C`` is ``90°c``, and a bare ``90°`` stays
+# ``90°``. A scale letter tight against ``°`` counts whatever follows it
+# (``80°FDB``, as it always did). A spaced or word-form scale needs a word
+# boundary, so ``45° Flange`` and ``90 deg flange`` stay angles, and a tag
+# (``90 deg F-1``) is not a scale.
+_DEG_SCALE = r"f(?:ahrenheit)?|c(?:elsius)?"
+_UNIT_RE = re.compile(
+    r"\s*(?P<deg>°)(?:(?P<tight>[fc])"
+    r"|\s(?P<spaced>" + _DEG_SCALE + r")(?![A-Za-z0-9]|-\d))?"
+    r"|\s*-?\s*(?P<deg_word>deg(?:ree)?s?(?![A-Za-z])\.?|deg(?=[fc](?![A-Za-z0-9])))"
+    r"(?:\s?(?P<scale>" + _DEG_SCALE + r")(?![A-Za-z0-9]|-\d))?"
+    r"|\s*-?\s*(?P<alpha>" + _ALPHA_UNIT + r")\b"
+    r"|\s*(?P<sym>[%\"'])"
+    # Compact electrical units, written against the number (N19). Each must also
+    # pass _unit_context_ok.
+    r"|(?P<volt>v(?:ac|dc)?)(?![A-Za-z0-9])"
+    r"|(?P<amp>a)(?![A-Za-z0-9])",
     re.IGNORECASE,
 )
-# Plural folding only. ``6 amps`` and ``6 amp`` are one quantity, and treating
-# them as two conflicting ones SPLIT a single issue into two findings — the safe
-# direction, but still wrong. Deliberately NOT folded: ``psig`` into ``psi``.
-# Gauge and absolute pressure are different measurements, and collapsing them
-# would hide a real conflict rather than a formatting one.
+# One spelling per unit, and plural folding (item 23). ``6 amps`` and ``6 amp``
+# are one quantity, and treating them as two conflicting ones SPLIT a single issue
+# into two findings: the safe direction, but still wrong. Deliberately NOT folded:
+# ``psig`` into ``psi``. Gauge and absolute pressure are different measurements,
+# and collapsing them would hide a real conflict rather than a formatting one. The
+# same holds for ``vac`` / ``vdc`` against ``volt``, and for a temperature scale
+# against a bare degree.
 _UNIT_SYNONYM = {
-    "inches": "in", "inch": "in", "feet": "ft", '"': "in", "'": "ft",
-    "amps": "amp", "volts": "volt",
+    "inches": "in", "inch": "in", "feet": "ft", "foot": "ft", '"': "in", "'": "ft",
+    "amps": "amp", "volts": "volt", "gallon": "gal", "gallons": "gal",
 }
+_VOLT_UNITS = frozenset({"volt", "vac", "vdc"})
+# W×H sizes (N19): ``24x12``, ``24 x 12``, ``24×12``, ``24"x12"``, ``24x12 in``,
+# and a third dimension (``24x12x6``). Each dimension may carry a length unit;
+# when several do they must agree, and the size takes it. What is not a size
+# falls back to the single tokens: dimensions in different units (``6" x 12'``),
+# multiplication (``4 x 25 gpm``, a unit after the last dimension), and a
+# feet-inches W×H (``10'-6" x 12'-0"``), whose inches half can neither start nor
+# end a size. The fallback keeps every dimension, tight or spaced: ``6"x12'`` is
+# ``6in`` and ``12ft``, ``4x25 gpm`` is ``25gpm`` (see _read_quantity).
+_SIZE_UNIT = r"(?:\"|'|in(?:ch(?:es)?)?\b|ft\b|feet\b|foot\b|mm\b|cm\b)"
+_SIZE_TAIL_RE = re.compile(
+    r"(?P<u1>\s*-?\s*" + _SIZE_UNIT + r")?"
+    r"\s*[x\u00d7]\s*(?P<d2>" + _PLAIN_NUMBER + r")(?P<u2>\s*-?\s*" + _SIZE_UNIT + r")?"
+    r"(?:\s*[x\u00d7]\s*(?P<d3>" + _PLAIN_NUMBER + r")(?P<u3>\s*-?\s*" + _SIZE_UNIT + r")?)?",
+    re.IGNORECASE,
+)
+_INCHES_HALF_RE = re.compile(r"'\s*-?\s*$")
+_INCH_CONTINUATION_RE = re.compile(r"\s*-?\s*\d")
+# Ranges (N19): ``4-6 in``, ``4 - 6 in``, ``65-75°F``. The hyphen is tight or
+# spaced on both sides: a lopsided ``4 -6 in`` is a sign on the 6. A mixed number
+# is read first (``2-1/2`` is two and a half, never 2 to 0.5), and a unit on the
+# first end (``12'-6"``) makes a feet-inches join, not a range.
+_RANGE_TAIL_RE = re.compile(r"(?:-|\s+-\s+)(?P<hi>" + _PLAIN_NUMBER + r")")
+# Compact electrical units (N19). ``480V`` is a voltage in every set, so a
+# compact ``V`` (``VAC`` and ``VDC`` kept apart) reads wherever it stands against
+# a number, except in a slope ratio (``3H:1V``). ``A`` is different: ``20A`` is a
+# breaker rating, but ``room 101A``, ``grid 2A``, ``keynote 3A`` and ``panel 2A``
+# are names. Reading a room number as a current puts a quantity nobody wrote into
+# the signature: two findings about room 101A would share ``101amp``, which under
+# the disjoint-set rule WP-04.1 shipped with was enough to merge a 6 in / 4 in
+# conflict between them (N1), and under any rule makes a name part of what is
+# compared. So a compact ``A`` needs electrical context:
+# a rating label right before it (``MCA 18.2A``, ``MOCP: 25A``), or, unless a name
+# precedes the number (``panel 2A breaker``), a pole count or an overcurrent
+# device right after it (``20A/1P``, ``20A-2P``, ``20A breaker``, ``30A fused
+# disconnect``, ``200A MLO``), or a voltage beside it (remediation WP-04.4, the
+# owner's rule): right after (``20A 120V``, ``20A, 120V``, ``20A @ 480V``,
+# ``20A 120/208V``) or right before (``120V 20A``). A name still wins, so
+# ``Room 101A 120V`` and ``Panel 2A 120/208V`` stay names; a room or panel label
+# with no name word before it, beside a voltage (``101A 120V receptacle``), reads
+# as a current (a recorded misreading). The word ``circuit`` after it is not
+# context (``connect to 2A circuit 12`` names a panel). The spelled-out
+# ``20 amp`` / ``20-amp`` needs none.
+_AMP_RATING_BEFORE_RE = re.compile(
+    r"\b(?:mca|mocp|mop|fla|rla|ocpd|breaker|bkr|cb|fuses?)\s*[:=]?\s*$", re.IGNORECASE,
+)
+# The words that make the number after them a name (``panel 2A``, ``room 101A``,
+# ``grid 2A``), one list: the compact-A rule reads them and so does the spelled
+# range and list reader (``_REFERENCE_BEFORE_RE``). A number label may stand
+# between the word and the identifier (``Room No. 101A``, ``Panel Number 2A``;
+# remediation WP-04.4, Codex review), and the identifier is still a name.
+_NAME_WORDS = (
+    r"panel|panelboard|pnl|room|rm|grid|gridline|line|col|column|level|lvl|floor|"
+    r"flr|type|detail|dtl|keynote|note|sheet|unit|area|zone|suite|bay|space|circuit|"
+    r"ckt"
+)
+_NUMBER_LABEL = r"(?:\s*(?:no|nos|num|number)\b\.?)?"
+_NAME_BEFORE_RE = re.compile(
+    r"\b(?:" + _NAME_WORDS + r")\.?" + _NUMBER_LABEL + r"\s*[:#]?\s*$", re.IGNORECASE
+)
+_AMP_POLE_OR_DEVICE_AFTER_RE = re.compile(
+    r"\s?(?:[/-]\s?)?[1-4]\s?-?\s?p(?:ole)?\b"
+    r"|\s?-?\s?(?:breakers?|bkr|cb|fuses?|fused|non-fused|disconnects?|mcb|mlo|ocpd)\b",
+    re.IGNORECASE,
+)
+_AMP_VOLTAGE_AFTER_RE = re.compile(
+    r"\s?[,@]?\s?\d+(?:\.\d+)?(?:\s*[Yy]?\s*/\s*\d+)?\s?(?:v(?:ac|dc)?|volts?)(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+# Searched in the text between bounds, never in a slice, so the lookbehind sees
+# the character before the voltage (a slope's ``3H:1V`` is not a voltage).
+_AMP_VOLTAGE_BEFORE_RE = re.compile(
+    r"(?<![A-Za-z0-9.,/:\-])\d+(?:\.\d+)?(?:\s*[Yy]?\s*/\s*\d+)?\s?(?:v(?:ac|dc)?|volts?)"
+    r"\s?[,@]?\s?$",
+    re.IGNORECASE,
+)
+_CONTEXT_WINDOW = 16
 # Strong "absence / not-present" phrasing — an absence finding contradicts a finding
 # about the same thing being present. Symmetric across channels: the digest's
 # "should be provided" and the critique's "not found" both read as an absence.
@@ -657,8 +810,11 @@ _ABSENCE_RE = re.compile(
 def _sig_text(f: Finding) -> str:
     # Include ``supporting_quotes`` so a merge that switches the representative
     # bundle can't hide a folded member's discriminating tag/measurement: the
-    # survivor's signature retains every member's critical tokens, so a later
+    # survivor's signature retains every member's quoted tokens, so a later
     # conflicting finding ("550 gpm" after "500 gpm" folded in) is still blocked.
+    #
+    # Growing evidence cannot establish pairwise agreement. Clustering and
+    # Ledger.add compare the member snapshots captured before merging.
     extra = " ".join(getattr(f, "supporting_quotes", None) or [])
     return f"{f.text or ''} {f.source_quote or ''} {extra}"
 
@@ -719,15 +875,531 @@ def _meas_value(raw: str) -> str:
         return re.sub(r"\s+", "", s)
 
 
-def _measurements(f: Finding) -> set[str]:
+def _canonical_unit(unit: re.Match) -> str:
+    if unit.group("deg") is not None or unit.group("deg_word") is not None:
+        scale = unit.group("tight") or unit.group("spaced") or unit.group("scale") or ""
+        return "°" + scale[:1].lower()
+    if unit.group("volt") is not None:
+        volt = unit.group("volt").lower()
+        return "volt" if volt == "v" else volt
+    if unit.group("amp") is not None:
+        return "amp"
+    raw = (unit.group("alpha") or unit.group("sym")).lower()
+    return _UNIT_SYNONYM.get(raw, raw)
+
+
+def _unit_context_ok(text: str, start: int, unit: re.Match) -> bool:
+    """Whether a compact ``A`` / ``V`` against the number at ``start`` is a unit."""
+    if unit.group("amp") is not None:
+        before = text[max(0, start - _CONTEXT_WINDOW):start]
+        if _AMP_RATING_BEFORE_RE.search(before):
+            return True
+        if _NAME_BEFORE_RE.search(before):
+            return False
+        return (
+            _AMP_POLE_OR_DEVICE_AFTER_RE.match(text, unit.end()) is not None
+            or _AMP_VOLTAGE_AFTER_RE.match(text, unit.end()) is not None
+            or _AMP_VOLTAGE_BEFORE_RE.search(text, max(0, start - _CONTEXT_WINDOW), start)
+            is not None
+        )
+    if unit.group("volt") is not None:
+        return not (text[start - 1:start] == ":" or text[unit.end():unit.end() + 1] == ":")
+    return True
+
+
+def _plain_value(raw: str) -> str:
+    """One number's VALUE, with a valid thousands grouping read as one number (B3)."""
+    return _meas_value(raw.replace(",", "") if _THOUSANDS_RE.fullmatch(raw) else raw)
+
+
+def _size_token(text: str, start: int, first: str, size: re.Match) -> str | None:
+    """The W×H token, or ``None`` when the shape is not a size (see ``_SIZE_UNIT``)."""
+    if _INCHES_HALF_RE.search(text[max(0, start - _CONTEXT_WINDOW):start]):
+        return None
+    if _UNIT_RE.match(text, size.end()) is not None:
+        return None
+    units = set()
+    for group in ("u1", "u2", "u3"):
+        raw = re.sub(r"[\s-]+", "", size.group(group) or "").lower()
+        if raw:
+            units.add(_UNIT_SYNONYM.get(raw, raw))
+    if len(units) > 1:
+        return None
+    unit = units.pop() if units else ""
+    if unit == "ft" and _INCH_CONTINUATION_RE.match(text, size.end()):
+        return None
+    dims = [first, size.group("d2")] + ([size.group("d3")] if size.group("d3") else [])
+    return "x".join(_plain_value(d) for d in dims) + unit
+
+
+def _range_value(lo_raw: str, hi_raw: str) -> str:
+    """A range's value, low end first; an unreadable end keeps the written order."""
+    lo, hi = _meas_value(lo_raw), _plain_value(hi_raw)
+    try:
+        if Decimal(hi) < Decimal(lo):
+            lo, hi = hi, lo
+    except (InvalidOperation, ValueError):
+        pass
+    return f"{lo}..{hi}"
+
+
+def _read_quantity(text: str, m: re.Match) -> tuple[str | None, int, int | None]:
+    """The token for the number ``m`` found (or ``None``), where to resume, and
+    where a rejected W×H candidate's next dimension starts (or ``None``).
+
+    Scanning resumes past the whole quantity, never inside it, so its parts are
+    never read again on their own: the ``500`` in ``12,500``, the ``12`` in
+    ``24x12``, the ``6`` in ``4-6``. The exception is a W×H candidate that is
+    not a size (``6"x12'``, ``4x25 gpm``). Its next dimension is a quantity of
+    its own, and it follows an ``x`` a number may not start after, so it is
+    handed back to be read where it stands; otherwise ``12ft`` and ``25gpm``
+    would be lost.
+    """
+    start, end, sign = m.start(), m.end(), m.group("sign")
+    kind = next(k for k in _NUMBER_KINDS if m.group(k) is not None)
+    raw = m.group(kind)
+    if kind == "run" and _THOUSANDS_RE.fullmatch(raw):
+        kind, raw = "dec", raw.replace(",", "")
+    tail = None
+    if kind in ("dec", "mixed", "frac") and not sign:
+        size = _SIZE_TAIL_RE.match(text, end)
+        if size is not None:
+            token = _size_token(text, start, raw, size)
+            if token is not None:
+                return token, size.end(), None
+            tail = size.start("d2")
+    token, resume = _read_one(text, start, end, sign, kind, raw)
+    return token, resume, tail
+
+
+def _read_one(
+    text: str, start: int, end: int, sign: str, kind: str, raw: str
+) -> tuple[str | None, int]:
+    """One number's token, a range or a value with its unit, and where it ends."""
+    if kind in ("dec", "mixed", "frac"):
+        rng = _RANGE_TAIL_RE.match(text, end)
+        if rng is not None:
+            unit = _UNIT_RE.match(text, rng.end())
+            if unit is None:
+                return None, rng.end()
+            if not _unit_context_ok(text, start, unit):
+                return None, unit.end()
+            value = _range_value(sign + raw, rng.group("hi"))
+            return value + _canonical_unit(unit), unit.end()
+    unit = _UNIT_RE.match(text, end)
+    if unit is None:
+        if kind in ("dec", "mixed", "frac"):
+            spelled = _read_spelled(text, start, end, sign, raw)
+            if spelled is not None:
+                return spelled
+        return None, end
+    if not _unit_context_ok(text, start, unit):
+        return None, unit.end()
+    canonical = _canonical_unit(unit)
+    if kind == "vpair" or (kind == "frac" and canonical in _VOLT_UNITS):
+        # A slash between two voltages is a system (``120/208V``), not the
+        # fraction 120/208; ``480Y/277V`` names the same kind of pair.
+        if canonical not in _VOLT_UNITS:
+            return None, unit.end()
+        lo, hi = sorted(int(v) for v in re.split(r"\s*[Yy]?\s*/\s*", raw))
+        return f"{lo}/{hi}{canonical}", unit.end()
+    if kind == "run":
+        # Not one number (``2,4,6``, ``1,2,500``): kept whole, never its
+        # trailing fragment and never a guess at the grouping it missed.
+        value = ",".join(_meas_value(g) for g in (sign + raw).split(","))
+    else:
+        # The VALUE, not the digits as written, so "2 1/2" == "2-1/2" == "2.5".
+        value = _meas_value(sign + raw)
+    return value + canonical, unit.end()
+
+
+# Spelled ranges and lists (remediation WP-04.4; the owner's rules). A range or
+# list whose numbers are joined by words or by a comma and a space signed only
+# its last number, the one the unit follows, so ``4 to 6 in`` merged with
+# ``6 in`` and ``2, 4, 6 in`` with ``3, 5, 6 in``. Each is read whole, as the
+# composite its tight spelling already is:
+#
+# * ``4 to 6 in``, ``from 4 to 6 in`` and ``between 4 and 6 in`` are the range
+#   ``4..6in`` (the token ``4-6 in`` signs);
+# * ``4 and 6 in`` and ``4 or 6 in`` are the list ``4,6in`` (the tight
+#   ``4,6 in``'s token), in written order;
+# * three or more numbers joined by commas, with an optional ``and`` / ``or``
+#   (Oxford comma or not) before the last, are the list ``2,4,6in``. Two numbers
+#   joined by a comma alone stay prose (``at column 4, 10 ft`` is ``10ft``).
+#
+# Only the first number may be signed and only the last carries the unit; a
+# number with its own unit is a quantity of its own (``4 in to 6 in`` is
+# ``{4in, 6in}``). Today's reading stands (nothing is widened) when a name or
+# reference word precedes the first number (``grid 4 to 6 in``, ``notes 1 and
+# 2``, ``pages 4 to 6``), when the unit is the word ``in`` followed by an article
+# or a preposition's object (``4 to 6 in the manual``, ``2, 4, 6 in plan``: the
+# ``in`` preposition, the tokenizer's oldest false positive), for ``2 and 1/2
+# in`` (a mixed number), and for a run that is part of a longer one (``2 and 4
+# and 6 in``, ``2,4, 6 in``): each of them signs what it signed before.
+_SPELLED_JOIN_RE = re.compile(
+    r"(?P<to>\s+to\s+)|(?P<conj>\s*,?\s+(?:and|or)\s+)|(?P<comma>\s*,\s*)", re.IGNORECASE
+)
+_SPELLED_ELEMENT_RE = re.compile(r"(?:" + _PLAIN_NUMBER + r")(?![\d/]|[.,]\d)")
+_SPELLED_WITHIN_RE = re.compile(r"\d\s*(?:,\s*|,?\s+(?:and|or|to)\s+)$", re.IGNORECASE)
+_REFERENCE_BEFORE_RE = re.compile(
+    r"\b(?:" + _NAME_WORDS + r"|page|pg|section|sect|sec|step|item|paragraph|para|"
+    r"chapter|table|figure|fig|phase|option|alternate|alt|drawing|dwg|revision|rev|"
+    r"addendum|bulletin|rfi)s?\.?" + _NUMBER_LABEL + r"\s*[:#]?\s*$",
+    re.IGNORECASE,
+)
+_BETWEEN_BEFORE_RE = re.compile(r"\bbetween\s+$", re.IGNORECASE)
+_IN_AS_PREPOSITION_RE = re.compile(
+    r"\s+(?:the|a|an|this|that|these|those|each|every|all|any|our|your|their|its|"
+    r"plan|plans|section|sections|elevation|elevations|detail|details|accordance|"
+    r"lieu|place|order|addition|front|general)\b",
+    re.IGNORECASE,
+)
+_INTEGER_RE = re.compile(r"[-+]?\d+")
+
+
+def _read_spelled(
+    text: str, start: int, end: int, sign: str, raw: str
+) -> tuple[str, int] | None:
+    """The spelled range or list the bare number at ``start`` opens, and where
+    it ends, or ``None``: then today's reading stands (see above)."""
+    lo = max(0, start - _CONTEXT_WINDOW)
+    if _SPELLED_WITHIN_RE.search(text, lo, start) or _REFERENCE_BEFORE_RE.search(text, lo, start):
+        return None
+    values, joins, pos = [sign + raw], [], end
+    while True:
+        join = _SPELLED_JOIN_RE.match(text, pos)
+        element = _SPELLED_ELEMENT_RE.match(text, join.end()) if join is not None else None
+        if element is None:
+            return None
+        joins.append(join.lastgroup)
+        values.append(element.group())
+        pos = element.end()
+        unit = _UNIT_RE.match(text, pos)
+        if unit is not None:
+            break
+        if joins[-1] != "comma":
+            return None              # a range has two ends; a conjunction joins the last
+    if joins == ["to"]:
+        is_range = True
+    elif "to" in joins or joins.count("conj") > 1 or ("conj" in joins and joins[-1] != "conj"):
+        return None
+    elif joins[-1] == "conj":
+        is_range = len(values) == 2 and _BETWEEN_BEFORE_RE.search(text, lo, start) is not None
+    elif len(values) >= 3:
+        is_range = False
+    else:
+        return None                  # two numbers and a comma: prose
+    if (unit.group("alpha") or "").lower() == "in" and _IN_AS_PREPOSITION_RE.match(text, unit.end()):
+        return None
+    if (not is_range and joins[-1] == "conj" and _FRACTION_MEAS_RE.match(values[-1])
+            and _INTEGER_RE.fullmatch(values[-2])):
+        return None                  # "2 and 1/2 in" spells a mixed number
+    if not _unit_context_ok(text, start, unit):
+        return None
+    canonical = _canonical_unit(unit)
+    if canonical in _VOLT_UNITS and any("/" in value for value in values):
+        return None
+    if is_range:
+        return _range_value(values[0], values[1]) + canonical, unit.end()
+    return ",".join(_plain_value(value) for value in values) + canonical, unit.end()
+
+
+@functools.lru_cache(maxsize=4096)
+def _quantity_readings(text: str) -> tuple[tuple[str, int, int], ...]:
+    """Every measurement in ``text`` as ``(token, start, end)``, in text order.
+
+    The one scanner. ``start`` is where the number (with its sign) begins and
+    ``end`` where the quantity's last unit or dimension ends, so the text
+    around a quantity can be read (its role, remediation WP-04.3). A W×H
+    candidate that is not a size hands its next dimension back as its own
+    reading, as the tokens always did. Memoized on the text, the whole input.
+    """
+    out: list[tuple[str, int, int]] = []
+    pos, tail = 0, None
+    while True:
+        m = _NUMBER_AT_RE.match(text, tail) if tail is not None else None
+        if m is None:
+            m = _NUMBER_RE.search(text, pos)
+        if m is None:
+            return tuple(out)
+        token, end, tail = _read_quantity(text, m)
+        if token is not None:
+            out.append((token, m.start(), end))
+        pos = max(end, m.end())
+        if tail is not None and tail < pos:
+            tail = None
+
+
+@functools.lru_cache(maxsize=4096)
+def _quantity_tokens(text: str) -> frozenset[str]:
+    """Every measurement token in ``text``, in the representation described above.
+
+    The tokens of :func:`_quantity_readings`. WP-04.3 read roles beside them
+    and WP-04.4 feet-inches pairs (:func:`_feet_inches`), never in them; WP-04.4
+    did change the reader itself (spelled ranges and lists, a compact ``A``
+    beside a voltage). The anchor's quantity-aware veto
+    (``anchor._same_quantities``, WP-05.3) reuses this reader as it is, which
+    is why that change moved ``cross_qc._CROSS_QC_CACHE_CONTRACT`` too.
+
+    Memoized on the text itself, which is the whole input, so a hit can never be
+    stale. The ledger's complete-link dedup recomputes a finding's signature
+    against every candidate (about 44 times per finding when a 1,800-finding set
+    was measured). Uncached, this scanner made that ingest slower than the single
+    regex it replaced (1.9 s against 1.4 s); cached, it is faster (0.9 s).
+    """
+    return frozenset(token for token, _start, _end in _quantity_readings(text))
+
+
+# --- Feet and inches (remediation WP-04.4; the owner's rules) ------------------
+#
+# Feet-inches is two tokens (``12'-6"`` is ``{12ft, 6in}``), so a bare ``12'``
+# (``{12ft}``) was included in it and the two merged: a 12'-0" clearance and a
+# 12'-6" one read as corroboration. The token model is left alone (every
+# dimension in the corpus signs as it did, and the anchor's veto reads the same
+# tokens). Beside the tokens, the signature records each feet value with its
+# inches: the inches half joined to it (``12'-6"``, ``12' 6"``, ``12' - 6"``,
+# ``12'`` + a Unicode dash + ``6"``, ``12 ft 6 in``, ``12 feet 6 inches`` are all
+# ``12ft6in``) or zero inches when there is none (``12'``, ``12 ft``, ``10-foot``
+# and ``12'-0"`` are all ``12ft0in``). Every spelling of feet counts (the owner's
+# rule), so ``12'`` and ``12 ft``, one quantity, compare alike. The join is the
+# one the tokens already treat as feet-inches: an abbreviation's period
+# (``12 ft. 6 in.``), spaces and at most one hyphen or dash, never a comma
+# (``12 ft, 6 in``) and never a sign (``12' -6"`` is a negative six inches,
+# WP-05.3). A composite (``10'x12'``, ``4-6 ft``) is one
+# quantity and gets no pair. The cost: a feet value directly followed by a
+# separate inch quantity reads as feet-inches (``10 ft 6 in pipe``), which can
+# only keep two findings apart.
+_PLAIN_FEET_RE = re.compile(r"[-+]?\d+(?:\.\d+)?ft")
+_PLAIN_INCHES_RE = re.compile(r"\d+(?:\.\d+)?in")
+_FEET_INCHES_JOIN_RE = re.compile(r"\.?\s*[-" + "".join(sorted(_UNICODE_DASHES)) + r"]?\s*")
+
+
+@functools.lru_cache(maxsize=4096)
+def _feet_inches(text: str) -> frozenset[str]:
+    """Each feet value in ``text`` with its inches: ``"12ft6in"``, or
+    ``"12ft0in"`` for a bare feet value. Memoized on the text, the whole input."""
+    readings = _quantity_readings(text)
     out: set[str] = set()
-    for m in _MEAS_RE.finditer(_sig_text(f)):
-        # The VALUE, not the digits as written, so "2 1/2" == "2-1/2" == "2.5";
-        # the UNIT is part of the signature so "6 in" != "6 ft".
-        num = _meas_value(m.group(1))
-        unit = re.sub(r"\s+", "", m.group(2)).lower()
-        out.add(num + _UNIT_SYNONYM.get(unit, unit))
-    return out
+    for i, (token, _start, end) in enumerate(readings):
+        if not _PLAIN_FEET_RE.fullmatch(token):
+            continue
+        inches = "0in"
+        if i + 1 < len(readings):
+            following, following_start, _end = readings[i + 1]
+            if (_PLAIN_INCHES_RE.fullmatch(following)
+                    and _FEET_INCHES_JOIN_RE.fullmatch(text, end, following_start)):
+                inches = following
+        out.add(token + inches)
+    return frozenset(out)
+
+
+def _measurements(f: Finding) -> set[str]:
+    # The UNIT is part of the signature, so "6 in" != "6 ft".
+    return set(_quantity_tokens(_sig_text(f)))
+
+
+# --- Quantity roles (remediation WP-04.3; the owner's rules) --------------------
+#
+# The measurements are a SET, so two findings that give the same values to
+# different roles sign alike: ``6 in main and 4 in branch`` and ``4 in main and
+# 6 in branch`` both sign ``{4in, 6in}``, and ``6 in supply and 6 in return``
+# signs ``{6in}``, which ``{6in, 8in}`` includes. A role is what a value is FOR,
+# read from the words beside it, and the rule compares it per role
+# (``_roles_conflict``). Keeping apart every pair that carries two values of one
+# kind would split the commonest duplicate there is, the same "500 gpm shown,
+# 550 gpm required" from both critique reads, which binds no role and folds.
+#
+# The signal is a closed list: a role word names which of several same-kind
+# values a finding means (a pipe's place in the system, a flow's direction, a
+# winding, a limit, a flow-test pressure). Nothing off the list is a role: a
+# location, a tag, an ordinal, a status word. Status words are left out on
+# purpose: two reads of one 500/550 conflict can each call a different value
+# "shown" (on the plan, on the schedule), so reading them would split it.
+_ROLE_WORDS = {
+    spelling: role
+    for role, spellings in {
+        "main": ("main", "mains"),
+        "branch": ("branch", "branches"),
+        "riser": ("riser", "risers"),
+        "drop": ("drop", "drops"),
+        "header": ("header", "headers"),
+        "supply": ("supply",),
+        "return": ("return",),
+        "suction": ("suction",),
+        "discharge": ("discharge",),
+        "inlet": ("inlet", "inlets"),
+        "outlet": ("outlet", "outlets"),
+        "upstream": ("upstream",),
+        "downstream": ("downstream",),
+        "entering": ("entering",),
+        "leaving": ("leaving",),
+        "primary": ("primary",),
+        "secondary": ("secondary",),
+        "min": ("min", "minimum"),
+        "max": ("max", "maximum"),
+        "static": ("static",),
+        "residual": ("residual",),
+        "cold": ("cold",),
+        "hot": ("hot",),
+    }.items()
+    for spelling in spellings
+}
+# How a role is bound (every form is case-insensitive):
+#
+# * right after the value, or in parentheses there: ``6 in main``, ``6 in
+#   (main)``; a run of roles joined like a list binds each (``6 in supply and
+#   return``, ``6 in supply/return``). A role word followed by ``:`` or ``=``
+#   labels what comes next, so it is not the preceding value's;
+# * as a label before the value: ``main: 6 in``, ``main = 6 in``;
+# * with a copula before the value: ``the main is 6 in``, ``mains are 6 in``.
+#
+# A bare word before the value (``MAIN 6"``) is not read (a recorded limit).
+# ``at``, ``per``, ``for``, ``with`` or ``to`` between a value and a role word
+# binds nothing: none of the forms allows a word in between.
+_ROLE_WORD_AFTER_RE = re.compile(
+    r"\s*(?:\(\s*(?P<paren>[A-Za-z]+)\s*\)|(?P<word>[A-Za-z]+)\b)"
+)
+_ROLE_WORD_NEXT_RE = re.compile(
+    r"\s*(?:,\s*(?:and|or)\b|,|\band\b|\bor\b|&|/)"
+    r"\s*(?:\(\s*(?P<paren>[A-Za-z]+)\s*\)|(?P<word>[A-Za-z]+)\b)",
+    re.IGNORECASE,
+)
+_LABEL_MARK_RE = re.compile(r"\s*[:=]")
+_ROLE_LABEL_BEFORE_RE = re.compile(r"\b(?P<word>[A-Za-z]+)\s*[:=]\s*$")
+_ROLE_COPULA_BEFORE_RE = re.compile(
+    r"\b(?P<word>[A-Za-z]+)\s+(?:is|are|was|were)\s+$", re.IGNORECASE
+)
+_BEFORE_WINDOW = 32
+# Two same-kind values joined like a list (``6 in and 4 in``, ``6 in, 4 in``,
+# ``6 in or 4 in``, ``6 in / 4 in``) are one list, and a role beside a list does
+# not say which value it belongs to.
+_VALUE_LIST_JOIN_RE = re.compile(
+    r"\s*,\s*(?:(?:and|or)\s+)?|\s+(?:and|or)\s+|\s*[&/]\s*", re.IGNORECASE
+)
+_RESPECTIVELY_RE = re.compile(r"\s*,?\s*respectively\b", re.IGNORECASE)
+
+
+def _role_run_after(text: str, end: int) -> tuple[list[str], int, bool]:
+    """The roles right after position ``end``, where the run ends, and whether
+    its last word was bare (not in parentheses)."""
+    m = _ROLE_WORD_AFTER_RE.match(text, end)
+    if m is None:
+        return [], end, False
+    word = m.group("paren") or m.group("word")
+    role = _ROLE_WORDS.get(word.lower())
+    if role is None or _LABEL_MARK_RE.match(text, m.end()):
+        return [], end, False
+    roles, pos, bare = [role], m.end(), m.group("word") is not None
+    while True:
+        m = _ROLE_WORD_NEXT_RE.match(text, pos)
+        if m is None:
+            return roles, pos, bare
+        word = m.group("paren") or m.group("word")
+        role = _ROLE_WORDS.get(word.lower())
+        if role is None or _LABEL_MARK_RE.match(text, m.end()):
+            return roles, pos, bare
+        roles.append(role)
+        pos, bare = m.end(), m.group("word") is not None
+
+
+def _roles_before(text: str, start: int) -> list[str]:
+    """The role a label or a copula gives the value starting at ``start``.
+
+    Searched between bounds in the text itself, never in a slice: at a slice's
+    first character ``\b`` would hold inside a longer word, so ``domain:`` cut
+    at the window's edge would read as ``main:``."""
+    for pattern in (_ROLE_LABEL_BEFORE_RE, _ROLE_COPULA_BEFORE_RE):
+        m = pattern.search(text, max(0, start - _BEFORE_WINDOW), start)
+        if m is not None and m.group("word").lower() in _ROLE_WORDS:
+            return [_ROLE_WORDS[m.group("word").lower()]]
+    return []
+
+
+@functools.lru_cache(maxsize=4096)
+def _quantity_roles(text: str) -> tuple[frozenset[str], frozenset[str]]:
+    """The roles ``text`` gives its quantities: ``(bound, ambiguous)``.
+
+    ``bound`` holds ``"<role>=<token>"`` for every value a role is read for
+    (``main=6in``); ``ambiguous`` holds the tokens whose role the text states
+    but does not settle (the owner's rule):
+
+    * a value list followed by a role list without ``respectively`` (``6 in
+      and 4 in main and branch``), or a list with a role before it; with
+      ``respectively`` and as many roles as values, they pair in order;
+    * a bare role word between two values with nothing joining them (``MAIN
+      6" BRANCH 4"``, ``6 in main 4 in branch``): it may be either value's.
+
+    A value with a label or copula role before it and a different role after
+    it takes both. Memoized on the text, the whole input.
+    """
+    readings = _quantity_readings(text)
+    bound: set[str] = set()
+    ambiguous: set[str] = set()
+    i = 0
+    while i < len(readings):
+        kind = _kind_of(readings[i][0])
+        j = i
+        while (
+            j + 1 < len(readings)
+            and _kind_of(readings[j + 1][0]) == kind
+            and _VALUE_LIST_JOIN_RE.fullmatch(text, readings[j][2], readings[j + 1][1])
+        ):
+            j += 1
+        values = readings[i:j + 1]
+        after, run_end, bare = _role_run_after(text, values[-1][2])
+        before = _roles_before(text, values[0][1])
+        if len(values) > 1:
+            if (after and not before and len(after) == len(values)
+                    and _RESPECTIVELY_RE.match(text, run_end)):
+                bound.update(f"{role}={token}" for role, (token, _s, _e) in zip(after, values))
+            elif after or before:
+                ambiguous.update(token for token, _s, _e in values)
+        else:
+            token = values[0][0]
+            if (after and bare and j + 1 < len(readings)
+                    and not text[run_end:readings[j + 1][1]].strip()):
+                ambiguous.add(token)
+                after = []
+            bound.update(f"{role}={token}" for role in (*after, *before))
+        i = j + 1
+    return frozenset(bound), frozenset(ambiguous)
+
+
+def _sig_parts(f: Finding) -> list[str]:
+    """What ``_sig_text`` joins, one part each: the text, the quote, and every
+    supporting quote. Roles are read part by part, so a role word that opens a
+    quote never binds to a value that ends the text."""
+    return [f.text or "", f.source_quote or "", *(getattr(f, "supporting_quotes", None) or [])]
+
+
+@functools.lru_cache(maxsize=4096)
+def _roles_of_parts(parts: tuple[str, ...]) -> tuple[frozenset[str], frozenset[str]]:
+    """The union of :func:`_quantity_roles` over a finding's parts. Memoized on
+    the parts, the whole input: the ledger signs a finding once per candidate."""
+    bound: set[str] = set()
+    ambiguous: set[str] = set()
+    for part in parts:
+        if part:
+            b, a = _quantity_roles(part)
+            bound |= b
+            ambiguous |= a
+    return frozenset(bound), frozenset(ambiguous)
+
+
+def _roles(f: Finding) -> tuple[frozenset[str], frozenset[str]]:
+    return _roles_of_parts(tuple(_sig_parts(f)))
+
+
+@functools.lru_cache(maxsize=4096)
+def _feet_inches_of_parts(parts: tuple[str, ...]) -> frozenset[str]:
+    """The union of :func:`_feet_inches` over a finding's parts, read apart as
+    roles are, so a text that ends in a feet value and a quote that opens with
+    an inch value do not read as feet-inches. Memoized on the parts."""
+    out: set[str] = set()
+    for part in parts:
+        if part:
+            out |= _feet_inches(part)
+    return frozenset(out)
 
 
 def _is_absence(f: Finding) -> bool:
@@ -737,21 +1409,31 @@ def _is_absence(f: Finding) -> bool:
 
 
 def _leg_targets(f: Finding) -> frozenset:
-    """The set of sheets a cross-sheet finding also touches (its ``also_on`` legs).
+    """The set of pages a cross-sheet finding also touches (its ``also_on`` legs).
 
-    Canonicalized through :func:`auditors.sheet_ids.normalize_sheet_id` for the
-    same reason ``cross_qc._norm_id`` is (P8 item 11), and it has to be the
-    **same** canonicalization: this set feeds
-    ``critical_signature["leg_targets"]``, which decides whether two findings may
-    merge. If the two disagree, cross-QC resolves a leg that the ledger then
-    refuses to recognise as the same leg — one sheet id meaning two different
-    things inside one run.
+    A leg's target is its **page**, ``"<source>#p<page_index>"`` (remediation
+    WP-06.2, N6; D-8, the owner's rule): the leg's ``source_id`` (its
+    ``source_name`` when none was assigned) and page. It used to be the leg's
+    sheet id, so two conflicts that point at two different PDFs carrying one
+    id (``M-101`` twice) read as one target and could merge, losing one leg;
+    the sheet id is display metadata. The string is portable and
+    JSON-safe (it rides ``critical_signature["leg_targets"]`` into the A/B
+    harness's records).
+
+    A leg with no source at all (a hand-built leg) keeps its sheet id as its
+    target, canonicalized through :func:`auditors.sheet_ids.normalize_sheet_id`
+    for the same reason ``cross_qc._norm_id`` is (P8 item 11), and it has to be
+    the **same** canonicalization, or one id would mean two targets.
     """
-    return frozenset(
-        normalize_sheet_id(leg.sheet_id)
-        for leg in (getattr(f, "also_on", None) or [])
-        if (leg.sheet_id or "").strip()
-    )
+    targets = set()
+    for leg in (getattr(f, "also_on", None) or []):
+        source = str(getattr(leg, "source_id", "") or getattr(leg, "source_name", "")
+                     or "").strip()
+        if source:
+            targets.add(f"{source}#p{int(getattr(leg, 'page_index', 0) or 0)}")
+        elif (leg.sheet_id or "").strip():
+            targets.add(normalize_sheet_id(leg.sheet_id))
+    return frozenset(targets)
 
 
 def critical_signature(f: Finding) -> dict:
@@ -764,40 +1446,170 @@ def critical_signature(f: Finding) -> dict:
     ``RunUsage.is_billable_but_unpriced`` and the two drifted within a commit.
 
     Values are sorted lists, not sets, so the record is JSON-serializable and
-    byte-stable across runs (I-7).
+    byte-stable across runs (I-7). The rule that compares two of them is
+    :func:`signature_conflicts`.
     """
+    bound, ambiguous = _roles(f)
     return {
         "tags": sorted(_tags(f)),
         "measurements": sorted(_measurements(f)),
+        # Remediation WP-04.3: the role each quantity takes (``main=6in``), and
+        # the quantities whose role the text leaves unsettled
+        # (:func:`_quantity_roles`).
+        "roles": sorted(bound),
+        "ambiguous_roles": sorted(ambiguous),
+        # Remediation WP-04.4: each feet value with its inches (``12ft6in``;
+        # ``12ft0in`` when bare), beside the tokens (:func:`_feet_inches`).
+        "feet_inches": sorted(_feet_inches_of_parts(tuple(_sig_parts(f)))),
         "absence": _is_absence(f),
         "leg_targets": sorted(_leg_targets(f)),
     }
 
 
+# --- The compatibility rule (remediation WP-04.2, N1) --------------------------
+#
+# A measurement token's unit is what follows its value's last digit: every value
+# ends in a digit and no unit contains one (the representation above), so the
+# split is exact and a composite value (``2,4,6``, ``4..6``, ``24x12``,
+# ``120/208``) stays whole.
+_TOKEN_UNIT_RE = re.compile(r"(.*\d)?(\D*)", re.DOTALL)
+# Units the tokenizer keeps apart on purpose but that measure ONE kind of
+# quantity. A kind groups them so that a value shared in another kind cannot hide
+# their conflict: ``90°F`` / ``90°C`` beside a shared ``6 in`` is as much N1 as
+# ``6 in`` / ``4 in`` beside a shared ``100 psi``. This relates units without
+# converting any value -- ``12 in`` never equals ``1 ft``, ``psig`` is never
+# ``psi``, a scale is never inferred -- so it can only ever block a merge, never
+# allow one (plan WP-04 step 3: no conversion without explicit semantics). The
+# empty unit is a W×H size written without one (``24x12``), which is a length.
+#
+# Every group of units the tokenizer emits for one quantity is listed, because
+# a unit left out is a kind of its own and a value shared elsewhere hides it
+# again: ``500 gpm`` / ``12,000 gph`` beside a shared ``100 psi`` merged until
+# liquid flow was a kind (Codex review of WP-04.2). Deliberately NOT grouped,
+# because they are different quantities rather than two spellings of one:
+# ``cfm`` (air flow; a coil's water flow and its air flow are both on its
+# schedule) and real against apparent power (a transformer's kVA rating and a
+# load's kW). ``fpm``, ``hz``, ``amp``, ``gal`` and ``%`` are single units.
+_QUANTITY_KIND = {
+    "": "length", "in": "length", "ft": "length", "mm": "length", "cm": "length",
+    "°": "degree", "°f": "degree", "°c": "degree",
+    "psi": "pressure", "psig": "pressure",
+    "volt": "voltage", "vac": "voltage", "vdc": "voltage", "kv": "voltage",
+    "gpm": "liquid_flow", "gph": "liquid_flow", "gpd": "liquid_flow",
+    "hp": "real_power", "kw": "real_power",
+    "va": "apparent_power", "kva": "apparent_power",
+}
+
+
+def _kind_of(token: str) -> str:
+    """A measurement token's kind: its unit's group, or the unit itself."""
+    unit = _TOKEN_UNIT_RE.fullmatch(str(token)).group(2)
+    return _QUANTITY_KIND.get(unit, unit)
+
+
+def _tokens_by_kind(tokens: set[str]) -> dict[str, set[str]]:
+    kinds: dict[str, set[str]] = {}
+    for token in tokens:
+        kinds.setdefault(_kind_of(token), set()).add(token)
+    return kinds
+
+
+def _one_includes_the_other(a: set, b: set) -> bool:
+    """Whether neither set holds a member the other lacks."""
+    return a <= b or b <= a
+
+
+def _measurements_conflict(ma: set[str], mb: set[str]) -> bool:
+    if not ma or not mb or _one_includes_the_other(ma, mb):
+        return False                 # then every kind includes the other's too
+    if ma.isdisjoint(mb):
+        return True                  # nothing in common: the rule before WP-04.2
+    ka, kb = _tokens_by_kind(ma), _tokens_by_kind(mb)
+    return any(not _one_includes_the_other(ka[k], kb[k]) for k in ka.keys() & kb.keys())
+
+
+def _values_by_role(bound: set[str]) -> dict[tuple[str, str], set[str]]:
+    """``{(role, kind): tokens}`` from ``"<role>=<token>"`` bindings."""
+    by_role: dict[tuple[str, str], set[str]] = {}
+    for binding in bound:
+        role, _sep, token = str(binding).partition("=")
+        by_role.setdefault((role, _kind_of(token)), set()).add(token)
+    return by_role
+
+
+def _roles_conflict(a: dict, b: dict) -> bool:
+    """Whether two signatures' quantity roles conflict (remediation WP-04.3).
+
+    * For every role and kind both bind, one side's values must include the
+      other's (WP-04.2's inclusion, per role): ``main=6in`` against
+      ``main=4in`` conflicts, ``main=6in`` against ``main=6in`` and
+      ``main=8in`` does not. A role one side binds and the other does not
+      never conflicts, and neither does a missing role.
+    * A side whose only roles for a kind are ambiguous conflicts with a side
+      that binds a role in that kind (the owner's conservative retention).
+    """
+    bound_a, bound_b = a.get("roles") or (), b.get("roles") or ()
+    if not (bound_a or a.get("ambiguous_roles")) or not (bound_b or b.get("ambiguous_roles")):
+        return False                 # a role signal on one side only never conflicts
+    va, vb = _values_by_role(bound_a), _values_by_role(bound_b)
+    if any(not _one_includes_the_other(va[k], vb[k]) for k in va.keys() & vb.keys()):
+        return True
+    kinds_a = {kind for _role, kind in va}
+    kinds_b = {kind for _role, kind in vb}
+    only_ambiguous_a = {_kind_of(t) for t in a.get("ambiguous_roles") or ()} - kinds_a
+    only_ambiguous_b = {_kind_of(t) for t in b.get("ambiguous_roles") or ()} - kinds_b
+    return bool(only_ambiguous_a & kinds_b or only_ambiguous_b & kinds_a)
+
+
+def _feet_inches_conflict(a: dict, b: dict) -> bool:
+    """Whether two signatures' feet-inches pairs conflict (remediation WP-04.4):
+    both carry some and neither side's include the other's, as WP-04.2's rule
+    compares tokens. ``12ft6in`` against ``12ft0in`` conflicts; ``12ft6in``
+    against ``12ft6in`` and ``10ft0in`` does not. A pair on one side only never
+    conflicts, so the pairs can only ever block a merge."""
+    fa, fb = set(a.get("feet_inches") or ()), set(b.get("feet_inches") or ())
+    return bool(fa and fb) and not _one_includes_the_other(fa, fb)
+
+
+def signature_conflicts(a: dict, b: dict) -> list[str]:
+    """Return conflicting axes in tags, measurements, absence and legs order.
+
+    A signal present on only one side never conflicts. Tags must form an inclusion
+    relationship. For each quantity kind carried by both sides, one token set must
+    include the other; disjoint measurements conflict even across kinds. Compare
+    whole tokens without unit conversion. Bound quantity roles and feet/inches pairs
+    apply their own inclusion checks on the measurements axis. Ambiguous roles can
+    conflict with explicit bindings. Absence polarity must agree, and cross-sheet
+    legs must be equal when both signatures carry them.
+
+    ``signatures_compatible`` and stored-signature consumers use this same rule.
+    Growing representatives can accumulate evidence, so clustering and ledger
+    checks compare incoming member snapshots rather than treating the accumulated
+    signature as evidence that every pair agrees."""
+    out: list[str] = []
+    ta, tb = set(a.get("tags") or ()), set(b.get("tags") or ())
+    if ta and tb and not _one_includes_the_other(ta, tb):
+        out.append("tags")                 # a different equipment / drawing ref
+    ma, mb = set(a.get("measurements") or ()), set(b.get("measurements") or ())
+    if _measurements_conflict(ma, mb) or _roles_conflict(a, b) or _feet_inches_conflict(a, b):
+        out.append("measurements")         # a different quantity, role, or feet-inches
+    if bool(a.get("absence")) != bool(b.get("absence")):
+        out.append("absence_polarity")     # "shown" vs "not shown"
+    la, lb = set(a.get("leg_targets") or ()), set(b.get("leg_targets") or ())
+    if la and lb and la != lb:
+        out.append("cross_sheet_legs")     # same quote, different cross-sheet legs
+    return out
+
+
 def signatures_compatible(a: dict, b: dict) -> bool:
     """False when a critical signature conflicts — the merge is then blocked (§12.1).
 
-    Conservative: a conflict needs both findings to carry the signal and disagree
-    on it (disjoint tag sets, disjoint measurement sets, or opposite absence
-    polarity). A signal present in only one finding never blocks — "keep both" is
-    the safe error, but so is "don't over-block a real duplicate".
-
-    Takes two :func:`critical_signature` records rather than two findings, so a
-    consumer that only has stored signatures (a finished arm's JSON, a cached
-    payload) applies the same rule the live merge does.
+    The negation of :func:`signature_conflicts`, which holds the rule.
+    Conservative: a conflict needs both findings to carry the signal and
+    disagree on it. "Keep both" is the safe error, but so is "don't over-block a
+    real duplicate".
     """
-    ta, tb = set(a.get("tags") or ()), set(b.get("tags") or ())
-    if ta and tb and ta.isdisjoint(tb):
-        return False                       # different equipment / drawing refs
-    ma, mb = set(a.get("measurements") or ()), set(b.get("measurements") or ())
-    if ma and mb and ma.isdisjoint(mb):
-        return False                       # different quantities
-    if bool(a.get("absence")) != bool(b.get("absence")):
-        return False                       # "shown" vs "not shown"
-    la, lb = set(a.get("leg_targets") or ()), set(b.get("leg_targets") or ())
-    if la and lb and la != lb:
-        return False                       # same quote, different cross-sheet legs
-    return True
+    return not signature_conflicts(a, b)
 
 
 def _signatures_compatible(a: Finding, b: Finding) -> bool:
@@ -818,17 +1630,33 @@ def _quotes_equal(a: Finding, b: Finding) -> bool:
     return bool(qa) and qa == qb
 
 
-def _is_duplicate(a: Finding, b: Finding) -> bool:
-    """Whether two findings describe the same issue (Phase 20, §12.1).
+def _claims_differ(a: Finding, b: Finding) -> bool:
+    """Whether both findings state exactly what they claim, and disagree.
 
-    Requires the same source+page and **compatible critical signatures** — a tile
-    is never sufficient, and geometric overlap alone is never sufficient. A merge
-    fires only when the two are semantically the same: identical non-empty quote
-    (same category), strong topical overlap, or — once both are anchored —
-    heavily-overlapping rectangles *backed by* at least moderate text/quote
-    agreement. When uncertain, keep both (more separate findings is the safe error).
+    ``Finding.claim_discriminator`` is set only by a producer that can state its
+    claim exactly (the arithmetic auditor, remediation WP-03.3). Two arithmetic
+    mismatches on one table row quote the same string, their unitless numbers
+    give no measurement signature, and their texts share the auditor's wording,
+    so every accepting branch below could fold them, and did (review B7). A
+    discriminator on ONE side never blocks: a model finding has none, and it
+    must still merge with the auditor finding that states the same mismatch.
+    No model finding carries one, so the critique's own merges are unchanged.
     """
+    da = getattr(a, "claim_discriminator", "") or ""
+    db = getattr(b, "claim_discriminator", "") or ""
+    return bool(da) and bool(db) and da != db
+
+
+def _is_duplicate(a: Finding, b: Finding) -> bool:
+    """Whether two findings describe the same issue on the same source page.
+
+    Require compatible claims, critical signatures and categories, plus strong text
+    overlap or an identical nonempty quote with moderate text agreement. Position
+    and a shared quote alone never establish identity. Keep separate findings when
+    uncertain; disagreeing explicit claim discriminators always prevent a merge."""
     if not _same_sheet(a, b):
+        return False
+    if _claims_differ(a, b):
         return False
     if not _signatures_compatible(a, b):
         return False
@@ -842,14 +1670,9 @@ def _is_duplicate(a: Finding, b: Finding) -> bool:
     # grounded issue. The quote alone is NOT enough: quoting a tag / schedule title
     # verbatim ("PUMP P-1") is the norm, so two *different* issues about one
     # component share a quote — a text check keeps them apart (§12.1, no data loss).
+    # That holds after anchoring too: a rectangle resolved from the quote adds
+    # nothing to it (WP-03.7, N28).
     if _quotes_equal(a, b) and tov >= _MODERATE_TEXT_THRESHOLD:
-        return True
-    # Geometry (post-anchor) is only *supporting* evidence: heavily-overlapping
-    # rectangles merge only when the two also share the same verbatim quote — two
-    # unrelated issues can share a table cell, so IoU + weak text is not enough.
-    ra = a.anchor.rect_pdf if a.anchor else None
-    rb = b.anchor.rect_pdf if b.anchor else None
-    if ra and rb and _rect_iou(ra, rb) > _IOU_DUP_THRESHOLD and _quotes_equal(a, b):
         return True
     return False
 
@@ -944,6 +1767,9 @@ def _representative(
         reproduced=reproduced,
         confidence=confidence if confidence is not None else base.confidence,
         id=base.id,
+        # A statement about ``text``: it rides the bundle with the id it is
+        # folded into (the critique's own findings carry none).
+        claim_discriminator=base.claim_discriminator,
     )
 
 
@@ -1044,11 +1870,16 @@ def merge_finding_groups(groups: list[list[Finding]]) -> list[Finding]:
 class CritiqueRunOutcome:
     """One critique READ's outcome, stamped with its provenance at production (§6.5).
 
-    A read is a **success** (``status == "COMPLETE"``) only when it returned a
+    A read is a **success** (``status == "COMPLETE"``) only when the model
+    finished it (``end_turn`` / ``stop_sequence``, D-1) **and** it returned a
     valid findings schema — a genuine ``{"findings": …}``, including an explicit
-    ``{"findings": []}`` clean result. Nonempty prose, a missing findings object, a
-    truncated body, or malformed JSON is a **failure** (``status == "FAILED"``),
-    never an empty success (DA-008). ``run_id`` (``critique_1`` / ``critique_2``) is
+    ``{"findings": []}`` clean result. A read cut off at ``max_tokens`` or the
+    context window, refused, ended without a stop reason, stopped for a
+    continuation or an unknown reason is a **failure** even when its findings
+    object parsed (remediation WP-01.4, N4), and so are nonempty prose, a
+    missing findings object, a truncated body and malformed JSON
+    (``status == "FAILED"``, never an empty success, DA-008). A failed read
+    keeps nothing: no findings and no claims. ``run_id`` (``critique_1`` / ``critique_2``) is
     the read's provenance; each of its findings is stamped ``sources=[run_id]`` at
     production so the ``critique×N`` corroboration is read from real provenance, not
     re-inferred downstream. ``input_tokens`` / ``output_tokens`` are the read's
@@ -1073,10 +1904,68 @@ class CritiqueRunOutcome:
     parse_status: str = ""
     parse_note: str = ""
     error: str | None = None
+    # Remediation WP-01.7: this read's attempts whose stream was interrupted
+    # before its final usage arrived (``digest.StreamUsage``); its token counts
+    # are then lower bounds. Runtime only.
+    interrupted_attempts: int = 0
+    # Remediation WP-01.8 (runtime only, never cached): the reply's stop
+    # reason, which the retry predicate reads (``None`` for a call that raised
+    # or a batch item that did not succeed); and, once a retry of this read
+    # came back failed too, the read's own first error and how many retries
+    # its error names (``digest._name_discarded_retry``, the digest's words).
+    stop_reason: str | None = None
+    read_error: str | None = None
+    retries_discarded: int = 0
 
     @property
     def ok(self) -> bool:
         return self.status == "COMPLETE"
+
+
+def _add_attempt_usage(into: CritiqueRunOutcome, other: CritiqueRunOutcome) -> None:
+    """Add ``other``'s billed usage to ``into`` (every attempt was billed)."""
+    into.input_tokens += other.input_tokens
+    into.output_tokens += other.output_tokens
+    into.cache_read_tokens += other.cache_read_tokens
+    into.cache_write_tokens += other.cache_write_tokens
+    into.interrupted_attempts += other.interrupted_attempts
+
+
+def keep_critique_read(
+    kept: CritiqueRunOutcome, later: CritiqueRunOutcome, *, model: str | None = None,
+) -> CritiqueRunOutcome:
+    """Fold a retry of one critique read into the read (remediation WP-01.8).
+
+    The owner's rule, on both transports (the real-time raised-cap retry in
+    :func:`_critique_read`, every batch follow-up round in
+    ``batch_critique``): a failed read keeps nothing (WP-01.4), so a finished
+    retry **is** the read, its findings and claims stamped with the same
+    ``run_id``; a retry that failed too leaves the read failed and its error
+    names the retry, in the digest's words
+    (:func:`~drawing_analyzer.digest._name_discarded_retry`): ``"<own error>;
+    retry: <its error>"``, ``"; N retries, the last: …"`` for several, and
+    ``" on <model>"`` for a retry sent to a refusal fallback (``model``).
+    Every attempt's usage is the read's. Returns the read kept.
+    """
+    if later.ok:
+        _add_attempt_usage(later, kept)
+        return later
+    _add_attempt_usage(kept, later)
+    on = f" on {model}" if model else ""
+    _name_discarded_retry(kept, f"{on}: {later.error}")
+    return kept
+
+
+def note_failed_critique_retry(
+    kept: CritiqueRunOutcome, failure: str, *, model: str | None = None,
+) -> None:
+    """Name a retry of a critique read that ended with nothing in hand (WP-01.8).
+
+    ``"<own error>; retry failed: <failure>"``, as the digest names a
+    raised-cap retry that raised (:func:`~drawing_analyzer.digest.note_failed_retry`).
+    """
+    on = f" on {model}" if model else ""
+    _name_discarded_retry(kept, f"{on} failed: {failure}")
 
 
 @dataclass
@@ -1088,9 +1977,17 @@ class CritiqueResult:
     same cache entry as the merged findings.
 
     ``requested_runs`` is how many reads were asked for; ``completed_runs`` how many
-    returned a valid parse. A result is only cached (and only labeled a complete
-    self-consistency read) when ``completed_runs == requested_runs`` (§14.4).
-    ``runs`` is retained as an alias of ``completed_runs`` for back-compat.
+    the model finished with a valid parse (remediation WP-01.4, N4: a read it
+    did not finish never counts, D-1). A result is only cached (and only
+    labeled a complete self-consistency read) when ``completed_runs ==
+    requested_runs`` (§14.4). ``runs`` is retained as an alias of
+    ``completed_runs`` for back-compat.
+
+    ``read_errors`` is the error of every read that did not count, in read
+    order: runtime-only, never cached (a stored result has none). ``error`` is
+    set only when no read counted, or when the reads that did produced no
+    finding (see :func:`result_from_outcomes`); a sheet short of its requested
+    reads is told apart by :func:`critique_shortfall`.
     """
 
     findings: list[Finding] = field(default_factory=list)
@@ -1112,6 +2009,12 @@ class CritiqueResult:
     # the usage ledger prices it REAL_TIME rather than at the batch rate — the
     # critique analogue of ``SheetDigest.rescued`` (Phase 23C).
     rescued: bool = False
+    # The errors of the reads that did not count, in read order. Runtime-only:
+    # never written to a cache entry (remediation WP-01.4).
+    read_errors: list[str] = field(default_factory=list)
+    # Remediation WP-01.7: the reads' interrupted attempts, summed
+    # (:attr:`CritiqueRunOutcome.interrupted_attempts`). Runtime-only.
+    interrupted_attempts: int = 0
 
 
 def critique_result_from_entry(entry: dict, ref: Any) -> CritiqueResult:
@@ -1142,11 +2045,20 @@ def critique_cache_entry_from_result(res: CritiqueResult) -> dict:
     """The cache-entry dict for a **complete** critique result (every tier shares it).
 
     Only ever called for a full self-consistency result — every requested read
-    returned a valid parse (``completed_runs == requested_runs``). A partial result
-    (a read failed, or produced a malformed/truncated/prose body) is returned to the
-    caller but **never** cached (§14.4): freezing it under the full-runs key would
-    permanently deny the requested self-consistency or, worse, cache a malformed read
-    as a clean/corroborated sheet. Mirrors ``cache_entry_from_digest``.
+    was finished by the model and returned a valid parse (``completed_runs ==
+    requested_runs``). A partial result (a read failed, did not finish, or
+    produced a malformed/truncated/prose body) is returned to the caller but
+    **never** cached (§14.4): freezing it under the full-runs key would
+    permanently deny the requested self-consistency or, worse, cache a malformed
+    or cut-off read as a clean/corroborated sheet. Mirrors
+    ``cache_entry_from_digest``.
+
+    The entry records no stop reason (the owner's decision, remediation
+    WP-01.4): every read an entry holds finished, which the admission above
+    guarantees, so a per-read stop reason would carry nothing. Which reads an
+    entry may hold is versioned by ``digest_cache._CRITIQUE_CACHE_CONTRACT``
+    (3 since WP-01.4), folded into both critique keys, so an entry written when
+    a cut-off read still counted misses instead of being checked on the way out.
     """
     return {
         "findings": [f.to_dict() for f in res.findings],
@@ -1162,20 +2074,43 @@ def critique_cache_entry_from_result(res: CritiqueResult) -> dict:
 
 def outcome_from_message(
     message: Any, *, run_id: str, ref: Any, rows: int = 0, cols: int = 0,
-    structured: bool = False,
+    structured: bool = False, interrupted: str | None = None,
+    fallback_model: str | None = None,
 ) -> CritiqueRunOutcome:
     """Parse one critique Messages response into a :class:`CritiqueRunOutcome` (DA-008).
 
     The transport-agnostic heart of a critique read, shared by the real-time
     :func:`_critique_read` and the Message-Batches collector
     (:mod:`drawing_analyzer.batch_critique`, Phase 23C) so a batched read is judged,
-    provenance-stamped, and billed **identically** to a real-time one. A read is a
-    **success** only when the response carried a valid findings schema (an explicit
-    ``{"findings": []}`` counts). An empty body, nonempty prose with no block, a
-    missing findings object, a truncated body, or malformed JSON is a **failure** —
-    never an empty success (so it is neither merged as a clean read nor cached as
-    corroborated). Every success stamps its findings ``sources=[run_id]`` at
-    production; billed tokens are recorded even on a parse failure (§14.4).
+    provenance-stamped, and billed **identically** to a real-time one. It is the
+    single place a critique read is judged, so both transports and both cache
+    levels follow from it.
+
+    The stop reason decides **first** (D-1; remediation WP-01.4, N4), through
+    the digest's one ladder with the noun ``critique``
+    (:func:`~drawing_analyzer.digest.digest_terminal_error`): only
+    ``end_turn`` and ``stop_sequence`` finish a read. A read cut off at
+    ``max_tokens`` or the context window, refused (named even when empty), a
+    stream that ended without a stop reason (N27), a continuation
+    (``tool_use``, ``pause_turn``, ``compaction``: the critique declares no
+    tools and never resumes a paused turn) or an unknown stop is a **failure**,
+    however complete its findings object looks. Before WP-01.4 the stop reason
+    was read only to word an empty body, so such a read counted whenever its
+    object parsed (a closed block, an explicit ``{"findings": []}``, or an
+    unclosed block whose JSON was complete, ``PARSED_UNCLOSED``), was merged
+    as corroboration and was cached at both levels. A failed read keeps
+    nothing, like a malformed one (the owner's decision): no findings and no
+    claims, so nothing of it reaches the merge or the arithmetic auditor.
+    ``models.FINDINGS_PARSE_OK`` is unchanged: the digest legitimately salvages
+    ``PARSED_UNCLOSED`` at ``end_turn``, and so does a finished critique read.
+
+    A finished read is a **success** only when the response carried a valid
+    findings schema (an explicit ``{"findings": []}`` counts). An empty body,
+    nonempty prose with no block, a missing findings object, a truncated body,
+    or malformed JSON is a **failure** — never an empty success (so it is
+    neither merged as a clean read nor cached as corroborated). Every success
+    stamps its findings ``sources=[run_id]`` at production; billed tokens are
+    recorded on every outcome, failed ones included (§14.4, plan §2 rule 8).
 
     ``structured`` says the read was taken under ``output_config.format``, whose
     response carries no fence. It is threaded in rather than sniffed from the
@@ -1186,8 +2121,17 @@ def outcome_from_message(
     read is a *fallback* inside both parsers, tried only when no fenced block is
     present, so a structured request whose constraint did not take and came back
     fenced anyway still parses on the ordinary path.
+
+    ``interrupted`` is set when ``message`` is an interrupted stream's partial
+    read (remediation WP-01.7) and names the cause in the read's error.
+
+    ``fallback_model`` names the model a batch critique read was resubmitted
+    to on its refusal fallback (remediation WP-01.8), so its error reads
+    ``refused critique on claude-opus-4-8 (...)``, as a digest fallback read's
+    does. Every outcome carries the reply's ``stop_reason``, which the retry
+    predicate reads.
     """
-    raw = _message_text(message)
+    raw = reply_text(message)
     in_tok, out_tok = _message_usage(message)
     # Prompt-cache split (L2): on a cache hit/write the API reports the cached
     # image prefix in these separate counters and ``input_tokens`` is only the
@@ -1199,15 +2143,30 @@ def outcome_from_message(
     _usage = _get(message, "usage")
     cr = int(_get(_usage, "cache_read_input_tokens", 0) or 0)
     cw = int(_get(_usage, "cache_creation_input_tokens", 0) or 0)
-    if not raw:
-        # An empty body (e.g. adaptive thinking consumed the whole token budget)
-        # is a *failed* read, not a clean sheet — so the run counts as failed (not
-        # merged, not cached) and is re-attempted next time.
-        stop = _get(message, "stop_reason")
+    # The stop reason first, before the text is looked at (D-1): a read the
+    # model did not finish is a *failed* read, not merged, not cached, and read
+    # again next time. The ladder also fails an empty body (e.g. adaptive
+    # thinking consumed the whole token budget), still worded "empty critique".
+    stop = _get(message, "stop_reason")
+    details = refusal_details(message)
+    noun = f"critique on {fallback_model}" if fallback_model else "critique"
+    terminal = digest_terminal_error(
+        raw, stop, noun=noun, category=details.category if details else None,
+        interrupted=interrupted,
+    )
+    if classify_stop_reason(stop).kind == REFUSED:
+        # The category is named in the read's error; the rest of stop_details
+        # goes to the diagnostics log (remediation WP-01.5, the owner's rule).
+        # A refused batch read is retried on its route by the batch critique's
+        # follow-up rounds (WP-01.8); a real-time one had the server-side
+        # fallback.
+        _log.info("refused %s read %s for %s: %s", noun, run_id,
+                  getattr(ref, "display_label", ref), describe_refusal(details))
+    if terminal is not None:
         return CritiqueRunOutcome(
             run_id=run_id, status="FAILED", input_tokens=in_tok, output_tokens=out_tok,
             cache_read_tokens=cr, cache_write_tokens=cw,
-            error=f"empty critique (stop_reason={stop!r})",
+            error=terminal, stop_reason=stop,
         )
     # A critique read is successful ONLY if it parsed a valid findings schema. A
     # nonempty-prose / missing-object / truncated / malformed response is a failure,
@@ -1220,6 +2179,7 @@ def outcome_from_message(
             cache_read_tokens=cr, cache_write_tokens=cw,
             parse_status=parsed.status, parse_note=parsed.note,
             error=f"critique produced no valid findings schema ({parsed.status})",
+            stop_reason=stop,
         )
     if not parsed.findings and parsed.raw_item_count > 0:
         # The model DID report findings, but every one failed validation (e.g. a
@@ -1232,6 +2192,7 @@ def outcome_from_message(
             parse_status=parsed.status, parse_note=parsed.note,
             error=f"critique emitted {parsed.raw_item_count} finding(s), none valid "
                   f"({parsed.note})",
+            stop_reason=stop,
         )
     findings = parsed.findings
     for f in findings:                 # stamp provenance at production (§14.3)
@@ -1245,6 +2206,7 @@ def outcome_from_message(
         input_tokens=in_tok, output_tokens=out_tok,
         cache_read_tokens=cr, cache_write_tokens=cw,
         parse_status=parsed.status, parse_note=parsed.note,
+        stop_reason=stop,
     )
 
 
@@ -1268,6 +2230,19 @@ def _critique_read(
     retry + backoff; a permanent failure returns immediately), then hands the
     response to the shared :func:`outcome_from_message` parser (DA-008).
 
+    A read the model stopped at ``max_tokens`` gets **one** retry at a raised
+    cap (remediation WP-01.8, the owner's rule; WP-01.4's open question):
+    twice the cap, up to :data:`~drawing_analyzer.digest.MAX_TOKENS_RETRY_CEILING`,
+    clamped to what the model serves, and none when that leaves no headroom.
+    Only ``max_tokens`` qualifies (``raised_cap_may_finish``): a raised cap
+    cannot finish a refusal, a full context window or a read with no stop
+    reason. It is the read's own retry, as the real-time digest's is, outside
+    the batch transport's per-sheet budget, and it streams like every read.
+    The two attempts fold through :func:`keep_critique_read`: a finished
+    retry is the read; one that failed too is named in the read's error
+    (``"; retry: …"``, or ``"; retry failed: …"`` when the call raised with
+    nothing in hand); both attempts' usage is the read's.
+
     ``cache_prefix`` (L2) caches the shared image prefix so a byte-identical
     re-read of this sheet serves it at ~0.1x; set by
     :func:`critique_sheet_self_consistent` only when ``runs >= 2``.
@@ -1283,12 +2258,13 @@ def _critique_read(
     # have the response parsed under a contract the request never carried.
     structured = critique_structured_outputs_enabled(model)
     content = build_user_content(rendered, task_instruction=_CRITIQUE_TASK_INSTRUCTION)
+    cap = max_tokens
 
     def _params(structured_now: bool) -> dict:
         return build_critique_request_params(
             content,
             model=model,
-            max_tokens=max_tokens,
+            max_tokens=cap,
             use_thinking=use_thinking,
             effort=effort,
             checklist=checklist,
@@ -1296,39 +2272,85 @@ def _critique_read(
             structured=structured_now,
         )
 
-    kwargs = _params(structured)
+    def _call() -> tuple[CritiqueRunOutcome, bool]:
+        """One call at ``cap``: its outcome, and whether it ended with nothing
+        in hand (the call raised and no partial read was captured)."""
+        nonlocal structured
+        kwargs = _params(structured)
+        # Every attempt's reported usage, an interrupted stream's included
+        # (remediation WP-01.7): each was billed.
+        usage = StreamUsage()
+        interrupted: str | None = None
+        attempt = 0
+        while True:
+            try:
+                resp = stream_message(client, kwargs)
+                usage.add(resp)
+                break
+            except Exception as exc:  # noqa: BLE001 - report, don't sink the set
+                if structured and STRUCTURED_OUTPUTS.rejects(exc):
+                    # Latch off for the process and re-send this same read
+                    # unconstrained. Deliberately does NOT consume a transient
+                    # retry: this is a permanent capability answer, not a
+                    # blip, and a sheet must not lose its retry budget
+                    # learning it.
+                    STRUCTURED_OUTPUTS.latch_off()
+                    structured = False
+                    kwargs = _params(False)
+                    _log.warning(
+                        "critique: structured outputs rejected (%s); continuing with "
+                        "the fenced-block contract for the rest of this run.",
+                        _clean_error(exc),
+                    )
+                    continue
+                partial = usage.add_interrupted(exc)
+                if _is_transient_error(exc) and attempt < max_retries:
+                    sleep(_retry_backoff_seconds(attempt))
+                    attempt += 1
+                    continue
+                if partial is None:
+                    return CritiqueRunOutcome(
+                        run_id=run_id, status="FAILED", error=_clean_error(exc),
+                        input_tokens=usage.input_tokens, output_tokens=usage.output_tokens,
+                        cache_read_tokens=usage.cache_read_tokens,
+                        cache_write_tokens=usage.cache_write_tokens,
+                        interrupted_attempts=usage.interrupted_attempts,
+                    ), True
+                # Once the retries are spent, an interrupted stream's partial
+                # read is the reply (the owner's rule), judged like any read:
+                # with no stop reason it is unfinished, so it fails and keeps
+                # nothing (WP-01.4), its usage billed on the sheet's record.
+                resp, interrupted = partial, exc.label
+                break
 
-    attempt = 0
-    while True:
-        try:
-            resp = stream_message(client, kwargs)
-            break
-        except Exception as exc:  # noqa: BLE001 - report, don't sink the set
-            if structured and STRUCTURED_OUTPUTS.rejects(exc):
-                # Latch off for the process and re-send this same read
-                # unconstrained. Deliberately does NOT consume a transient
-                # retry: this is a permanent capability answer, not a blip, and
-                # a sheet must not lose its retry budget learning it.
-                STRUCTURED_OUTPUTS.latch_off()
-                structured = False
-                kwargs = _params(False)
-                _log.warning(
-                    "critique: structured outputs rejected (%s); continuing with "
-                    "the fenced-block contract for the rest of this run.",
-                    _clean_error(exc),
-                )
-                continue
-            if _is_transient_error(exc) and attempt < max_retries:
-                sleep(_retry_backoff_seconds(attempt))
-                attempt += 1
-                continue
-            return CritiqueRunOutcome(run_id=run_id, status="FAILED", error=_clean_error(exc))
+        outcome = outcome_from_message(
+            resp, run_id=run_id, ref=rendered.ref,
+            rows=getattr(rendered, "rows", 0), cols=getattr(rendered, "cols", 0),
+            structured=structured, interrupted=interrupted,
+        )
+        outcome.input_tokens, outcome.output_tokens = usage.input_tokens, usage.output_tokens
+        outcome.cache_read_tokens = usage.cache_read_tokens
+        outcome.cache_write_tokens = usage.cache_write_tokens
+        outcome.interrupted_attempts = usage.interrupted_attempts
+        return outcome, False
 
-    return outcome_from_message(
-        resp, run_id=run_id, ref=rendered.ref,
-        rows=getattr(rendered, "rows", 0), cols=getattr(rendered, "cols", 0),
-        structured=structured,
+    outcome, _raised = _call()
+    if outcome.ok or not classify_stop_reason(outcome.stop_reason).raised_cap_may_finish:
+        return outcome
+    raised = output_cap_for_model(model, requested=min(cap * 2, MAX_TOKENS_RETRY_CEILING))
+    if raised <= cap:
+        return outcome                 # no headroom left to grant; not a retry
+    _log.info(
+        "critique read %s for %s stopped at max_tokens=%d; retrying once at %d",
+        run_id, rendered.ref.display_label, cap, raised,
     )
+    cap = raised
+    retry, retry_raised = _call()
+    if retry_raised:
+        _add_attempt_usage(outcome, retry)
+        note_failed_critique_retry(outcome, retry.error or "")
+        return outcome
+    return keep_critique_read(outcome, retry)
 
 
 def critique_sheet(
@@ -1368,17 +2390,23 @@ def result_from_outcomes(
 
     ``all_outcomes`` is **every** requested read's outcome — successes and failures
     alike — so billed tokens are summed across all of them (a response that billed
-    tokens but failed to parse still counts, §14.4) while only the successful reads
-    are merged. Shared by the real-time :func:`critique_sheet_self_consistent` and
-    the Message-Batches collector (Phase 23C) so a batched sheet is merged, billed,
-    and marked partial byte-for-byte the same way. Caching is left to the caller
-    (it owns the cache key); a result is complete only when every requested read
+    tokens but failed to parse, or that the model did not finish, still counts,
+    §14.4) while only the successful reads are merged. Shared by the real-time
+    :func:`critique_sheet_self_consistent` and the Message-Batches collector
+    (Phase 23C) so a batched sheet is merged, billed, and marked partial
+    byte-for-byte the same way. Caching is left to the caller (it owns the cache
+    key); a result is complete only when every requested read finished and
     parsed (``completed_runs == requested_runs``).
+
+    Every failed read's error is kept on ``read_errors`` (remediation WP-01.4),
+    so a sheet whose surviving read shipped findings, and which therefore keeps
+    ``error=None``, can still say why it is short (:func:`critique_shortfall`).
     """
     total_in = sum(oc.input_tokens for oc in all_outcomes)
     total_out = sum(oc.output_tokens for oc in all_outcomes)
     total_cr = sum(oc.cache_read_tokens for oc in all_outcomes)
     total_cw = sum(oc.cache_write_tokens for oc in all_outcomes)
+    interrupted = sum(int(getattr(oc, "interrupted_attempts", 0) or 0) for oc in all_outcomes)
     ok = [oc for oc in all_outcomes if oc.ok]
     errors = [oc.error for oc in all_outcomes if not oc.ok and oc.error]
 
@@ -1394,6 +2422,8 @@ def result_from_outcomes(
             requested_runs=requested_runs,
             completed_runs=0,
             error="; ".join(errors) or "critique produced no result",
+            read_errors=errors,
+            interrupted_attempts=interrupted,
         )
 
     # The findings of the SUCCESSFUL reads (each already stamped sources=[run_id]).
@@ -1429,7 +2459,33 @@ def result_from_outcomes(
             "; ".join(errors)
             or f"critique partial: only {len(ok)}/{requested_runs} read(s) valid, no findings"
         ) if partial_empty else None,
+        read_errors=errors,
+        interrupted_attempts=interrupted,
     )
+
+
+def critique_shortfall(res: Any) -> str | None:
+    """Why one sheet's critique fell short of its requested reads, or ``None``.
+
+    ``None`` when every requested read counted. Otherwise the result's own
+    ``error`` when it carries one (no read counted, or the reads that did found
+    nothing: the wording the stage has always shown), else ``"<n> of <m>
+    critique read(s) finished: <each failed read's error>"``. That last shape
+    is the one the stage used to miss (remediation WP-01.4, the owner's D-2
+    rule): a sheet whose surviving read shipped findings keeps ``error=None``
+    (its findings are marked ``NOT_ASSESSED_PARTIAL``), so a stage that read
+    only ``error`` called a sheet with one of two reads COMPLETE, cached
+    nothing, and critiqued it again on every warm run.
+    """
+    completed = int(getattr(res, "completed_runs", 0) or 0)
+    requested = int(getattr(res, "requested_runs", 0) or 0)
+    error = getattr(res, "error", None)
+    if error:
+        return error
+    if completed >= requested:
+        return None
+    reasons = "; ".join(getattr(res, "read_errors", None) or []) or "no reason recorded"
+    return f"{completed} of {requested} critique read(s) finished: {reasons}"
 
 
 def critique_sheet_self_consistent(
@@ -1481,8 +2537,8 @@ def critique_sheet_self_consistent(
             runs=runs,
             sheet_text=rendered.sheet_text,
             profiles_key=profiles_cache_fragment(profiles or []),
-            # Only set when the read actually carried the schema, so a fenced
-            # run's key stays byte-identical to every key written before F-01.
+            # Only set when the read actually carried the schema, so the
+            # feature adds nothing to a fenced run's key.
             structured_key=CRITIQUE_STRUCTURED_PROMPT_VERSION if structured else None,
         )
 
@@ -1522,12 +2578,13 @@ def critique_sheet_self_consistent(
         return result
 
     # Cache only a *complete* self-consistency result — every requested read
-    # returned a VALID parse. A partial result (a read failed or produced a
-    # malformed/truncated body) is returned to the caller (so this run still
-    # produces findings) but never cached: freezing it under the full-runs key would
-    # permanently deny the requested self-consistency, or cache a malformed read as
-    # a clean/corroborated sheet (DA-008). Mirrors digest_sheet refusing to cache
-    # transient/degraded reads.
+    # finished and returned a VALID parse. A partial result (a read failed, was
+    # not finished by the model, or produced a malformed/truncated body) is
+    # returned to the caller (so this run still produces findings) but never
+    # cached: freezing it under the full-runs key would permanently deny the
+    # requested self-consistency, or cache a malformed or cut-off read as a
+    # clean/corroborated sheet (DA-008; remediation WP-01.4, N4). Mirrors
+    # digest_sheet refusing to cache transient/degraded reads.
     if cache is not None and cache_key is not None and result.completed_runs == runs:
         # Re-read the latch: a rejection during the reads above means these
         # outcomes came back under the fenced contract, whatever this run set out
@@ -1543,6 +2600,10 @@ def critique_sheet_self_consistent(
 def _dedup_claims(claims: list[NumericClaim]) -> list[NumericClaim]:
     """Collapse identical claims (the self-consistency runs transcribe the same
     relationship twice) so the arithmetic tally isn't double-counted. Order-stable.
+
+    Called with ONE sheet's reads, so the source part of the key is constant
+    here; the arithmetic auditor's dedup, which sees every sheet's claims, keys
+    on ``source_page_key`` (DA-001).
     """
     seen: set[tuple] = set()
     out: list[NumericClaim] = []
@@ -1555,10 +2616,10 @@ def _dedup_claims(claims: list[NumericClaim]) -> list[NumericClaim]:
             # relationship twice, and if one copy writes a Unicode dash the two
             # keys differ and the arithmetic tally double-counts the claim.
             normalize_sheet_id(c.sheet_id),
-            (c.kind or "").strip().lower(),
             (c.quote or "").strip(),
-            tuple(str(t) for t in c.terms),
-            str(c.expected),
+            # Exact decimals, terms as a multiset (remediation WP-03.3): one
+            # read writing 20 and the other "20.0" is still one claim.
+            *claim_content_key(c.kind, c.terms, c.expected),
         )
         if key in seen:
             continue

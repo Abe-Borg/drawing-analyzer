@@ -125,19 +125,124 @@ def _cap_sheet_text(text: str) -> str:
     return text[:SHEET_TEXT_MAX_CHARS] + _SHEET_TEXT_TRUNCATION_MARKER
 
 
+# --------------------------------------------------------------------------- #
+# The inventory's pages are the workload (remediation WP-11.1, R1; D-8).
+#
+# ``inspect_inputs`` opens every selected file once and records, for each
+# ACCEPTED document, its page count and its revision. Everything after it used
+# to reopen the files to count again (``list_sheets``, which skips a file it
+# cannot open), and both page iterators opened their sources unguarded. So a
+# source that vanished or locked after the inventory aborted the whole run, one
+# page the prescan could not read did the same, and a page the run owed could
+# drop out of every account without a word: a source rewritten with fewer pages
+# read COMPLETE over the pages that were left.
+#
+# The pages a run owes are now exactly the inventory's, built without reopening
+# anything (:func:`inventory_sheet_refs`). Both iterators take the inventory's
+# counts (``expected_pages``) and read exactly those pages; a source that will
+# not open again fails every expected page with one ``SourceUnreadableError``,
+# and a page past the source's current end fails with ``PageNotInSourceError``.
+# Their ``str()`` is path-free by construction (type names and counts only),
+# like every other page line the pipeline writes.
+# --------------------------------------------------------------------------- #
+
+
+class SourceUnreadableError(Exception):
+    """An accepted source that could not be opened again after the inventory.
+
+    Passed to ``on_page_error`` once for every expected page of the source, the
+    same instance each time, so a consumer can report one line for the source
+    while every page still gets an outcome. ``cause_type`` names the original
+    exception (``FileNotFoundError``, ``PermissionError``, ...), never its text,
+    which routinely carries the absolute path.
+    """
+
+    def __init__(self, cause: BaseException, expected: int) -> None:
+        self.cause_type = type(cause).__name__
+        self.expected = int(expected)
+        super().__init__(f"the source could not be opened again ({self.cause_type})")
+
+
+class PageNotInSourceError(IndexError):
+    """An inventoried page past the end of the source as it is now.
+
+    The source was rewritten with fewer pages after the inventory counted it.
+    ``page_index`` is zero-based; ``expected`` is the inventory's count and
+    ``actual`` the opened file's.
+    """
+
+    def __init__(self, page_index: int, expected: int, actual: int) -> None:
+        self.page_index = int(page_index)
+        self.expected = int(expected)
+        self.actual = int(actual)
+        super().__init__(
+            f"page {self.page_index + 1} is not in the source now: it has "
+            f"{self.actual} page(s), the inventory counted {self.expected}"
+        )
+
+
+def inventory_sheet_refs(inventory: InputInventory) -> list[SheetRef]:
+    """The pages a run owes: one :class:`SheetRef` per page of every ACCEPTED document.
+
+    Built from the inventory's own records, **without reopening any file**
+    (remediation WP-11.1; D-8's page part): a sheet the run owes is one page
+    ``(source_id, page_index)`` of an accepted document, in input order, and
+    ``page_count`` is the inventory's count, so the ``page k/N`` label follows
+    the revision the run set out to read. For a set that did not change after
+    the inventory the refs equal :func:`list_sheets` over the accepted paths,
+    field for field.
+    """
+    refs: list[SheetRef] = []
+    for doc in inventory.accepted_documents:
+        path = Path(doc.pdf_path)
+        count = int(doc.page_count)
+        for i in range(count):
+            refs.append(
+                SheetRef(
+                    pdf_path=path,
+                    page_index=i,
+                    source_name=path.name,
+                    page_count=count,
+                    source_id=doc.source_id,
+                )
+            )
+    return refs
+
+
+def _expected_count(
+    expected_pages: "dict[str, int] | None", path: Path
+) -> "int | None":
+    """The inventory's page count for ``path``, or ``None`` when the caller gave none."""
+    if expected_pages is None:
+        return None
+    count = expected_pages.get(str(path))
+    return None if count is None else int(count)
+
+
+def _open_source(path: Path) -> "tuple[pymupdf.Document, int]":
+    """Open ``path`` and read its page count; a failure of either closes it and raises."""
+    doc = pymupdf.open(str(path))
+    try:
+        return doc, int(doc.page_count)
+    except Exception:
+        doc.close()
+        raise
+
+
 def list_sheets(pdf_paths: list[Path]) -> list[SheetRef]:
     """Flatten ``pdf_paths`` into an ordered list of sheets (one per page).
 
     Cheap: opens each PDF only to read its page count. A PDF that cannot be
-    opened is skipped (its error surfaces when rendering is attempted), so a
-    bad file in a drop never blocks listing the rest.
+    opened is skipped **silently**, which is why the pipeline no longer uses
+    this for its workload (remediation WP-11.1): it builds the pages a run owes
+    from the inventory with :func:`inventory_sheet_refs`, so a source that
+    fails after the inventory stays in the denominator and every one of its
+    pages gets an outcome.
 
-    Back-compat wrapper: the Phase 18B pipeline classifies inputs up front with
-    :func:`inspect_inputs` and enumerates only accepted documents; this keeps
-    the old ``paths → refs`` shape for existing callers/tests. The ``paths`` are
-    treated as the accepted, deduped set (source ids are assigned over them in
-    order), so pass an already-filtered list to keep ids aligned with the
-    inventory.
+    Back-compat wrapper for callers that have no inventory (scripts, tests, the
+    critique stage when it is given no pages). The ``paths`` are treated as the
+    accepted, deduped set (source ids are assigned over them in order), so pass
+    an already-filtered list to keep ids aligned with the inventory.
     """
     source_ids = assign_source_ids(pdf_paths)
     seen_canon: set[str] = set()
@@ -179,7 +284,10 @@ def _classify_input(path: Path) -> tuple[str, int, str]:
     pathological page does **not** reject the whole file — that is handled
     per-page in :func:`iter_rendered_sheets` (§10.5), which also dimension-checks
     each page *before* rasterizing it so a pathological box fails visibly
-    without exhausting memory (§10.7).
+    without exhausting memory (§10.7). The page count it reports is the run's
+    workload (:func:`inventory_sheet_refs`): a file that cannot be opened again
+    later, or that lost pages since, fails those pages in the iterators instead
+    of dropping out of the count (remediation WP-11.1).
     """
     try:
         doc = pymupdf.open(str(path))
@@ -906,20 +1014,41 @@ def iter_rendered_sheets(
     overlap_frac: float = tiling.DEFAULT_OVERLAP_FRAC,
     only: "set[tuple[str, int]] | None" = None,
     on_page_error: "Callable[[SheetRef, Exception], None] | None" = None,
+    expected_pages: "dict[str, int] | None" = None,
+    on_page_count_changed: "Callable[[Path, int, int], None] | None" = None,
 ) -> Iterator[RenderedSheet]:
     """Yield a :class:`RenderedSheet` for every page across all ``pdf_paths``.
 
     Each PDF is opened once and its pages rendered in order, so the dominant
     cost (rasterization) streams sheet-by-sheet — the caller can digest each
     sheet as it arrives and report progress without holding the whole set in
-    memory. Pass the inventory's accepted paths (see :func:`inspect_inputs`);
-    a PDF that fails to open still raises, since a rejected file should never
-    reach here.
+    memory. Pass the inventory's accepted paths (see :func:`inspect_inputs`).
 
     Page-level resilience (§10.5): if a single page fails to load/render, the
     remaining pages of that PDF — and every other PDF — still stream. The failed
     page is reported via ``on_page_error(ref, exc)`` (so the caller can record a
     failed sheet and count it) and skipped, rather than aborting the run.
+
+    ``expected_pages`` (remediation WP-11.1, R1) — ``str(path) -> page count``
+    from the inventory (:meth:`InputInventory.expected_page_counts`). With it,
+    the inventory's pages are the workload and every one gets an outcome:
+
+    - exactly the expected pages are read, and each ref carries the expected
+      count, so its ``page k/N`` label is the inventory's;
+    - a source that will not open again reports every expected page (within
+      ``only``) through ``on_page_error`` with one shared
+      :class:`SourceUnreadableError`, and the next source streams;
+    - a page past the source's current end reports
+      :class:`PageNotInSourceError`;
+    - a source whose count differs from the inventory's is reported once
+      through ``on_page_count_changed(path, expected, actual)``; extra pages
+      are not read;
+    - a source none of whose expected pages is in ``only`` is never opened, so
+      a source whose pages were all served from the cache costs nothing here.
+
+    Without ``expected_pages`` (a caller with no inventory) the file's own count
+    is read, and a PDF that fails to open still raises: there is no page count
+    to attribute the failure to.
 
     ``only`` — when given, a set of ``(str(pdf_path), page_index)`` identities;
     pages not in it are skipped **without rendering**. The pipeline's level-1
@@ -929,10 +1058,46 @@ def iter_rendered_sheets(
     source_ids = assign_source_ids(pdf_paths)
     for path in pdf_paths:
         path = Path(path)
-        doc = pymupdf.open(str(path))
+        source_id = source_ids.get(str(path), "")
+        expected = _expected_count(expected_pages, path)
+        if expected is not None and only is not None and not any(
+            (str(path), i) in only for i in range(expected)
+        ):
+            continue                     # nothing is asked of this source
         try:
-            count = doc.page_count
-            source_id = source_ids.get(str(path), "")
+            doc, actual = _open_source(path)
+        except Exception as exc:  # noqa: BLE001 - one source never ends the set (R1)
+            if expected is None:
+                raise
+            failure = SourceUnreadableError(exc, expected)
+            _log.warning(
+                "render: %s could not be opened again (%s); %d expected page(s) not read",
+                path.name, failure.cause_type, expected,
+            )
+            if on_page_error is not None:
+                for i in range(expected):
+                    if only is not None and (str(path), i) not in only:
+                        continue
+                    on_page_error(
+                        SheetRef(
+                            pdf_path=path,
+                            page_index=i,
+                            source_name=path.name,
+                            page_count=expected,
+                            source_id=source_id,
+                        ),
+                        failure,
+                    )
+            continue
+        try:
+            count = actual if expected is None else expected
+            if expected is not None and actual != expected:
+                _log.warning(
+                    "render: %s has %d page(s) now, %d at the inventory",
+                    path.name, actual, expected,
+                )
+                if on_page_count_changed is not None:
+                    on_page_count_changed(path, expected, actual)
             for i in range(count):
                 if only is not None and (str(path), i) not in only:
                     continue
@@ -944,6 +1109,8 @@ def iter_rendered_sheets(
                     source_id=source_id,
                 )
                 try:
+                    if i >= actual:
+                        raise PageNotInSourceError(i, count, actual)
                     page = doc[i]
                     rect = page.rect
                     # Dimension preflight BEFORE get_pixmap: a pathological box
@@ -1087,6 +1254,7 @@ def iter_sheet_prescan(
     cols: int = tiling.DEFAULT_GRID_COLS,
     overlap_frac: float = tiling.DEFAULT_OVERLAP_FRAC,
     snapshot_by_path: "dict[str, tuple[str, int, int]] | None" = None,
+    expected_pages: "dict[str, int] | None" = None,
 ) -> "Iterator[tuple[SheetRef, str, SheetGeometry]]":
     """Yield ``(ref, render_identity, geometry)`` per page **without rendering**.
 
@@ -1109,20 +1277,42 @@ def iter_sheet_prescan(
     hashed (unreadable / mid-rewrite), the identity falls back to the source's
     **canonical path** — so two different unhashable sources can never collide on one
     cache entry, and the sheet simply always renders.
+
+    ``expected_pages`` (remediation WP-11.1, R1; the owner's rule) makes the
+    prescan **best effort**: it scans exactly the inventory's pages, labels each
+    ref with the inventory's count, and simply does not yield a page it cannot
+    scan (page load, text or word count, the render identity, geometry) or any
+    page of a source it cannot open. The caller treats every expected page it
+    did not get as a cache miss, so the render path reads it and decides its
+    outcome: one reporter, never two, and a page whose only problem was the
+    prescan's own step is still read. The render identity keeps the opened
+    file's own page count, so every level-1 key is what it was. Without
+    ``expected_pages`` a failure raises, as before (callers without an
+    inventory wrap it).
     """
     source_ids = assign_source_ids(pdf_paths)
     snapshot_by_path = snapshot_by_path or {}
     for path in pdf_paths:
         path = Path(path)
+        source_id = source_ids.get(str(path), "")
+        expected = _expected_count(expected_pages, path)
         sha = current_content_sha256(path, snapshot_by_path.get(str(path)))
         if not sha:
             # No usable content hash: disambiguate by source so a false cross-source
             # hit is impossible, and (not being a real content hash) it always misses.
             sha = f"unhashed:{canonical_path(path)}"
-        doc = pymupdf.open(str(path))
         try:
-            count = doc.page_count
-            source_id = source_ids.get(str(path), "")
+            doc, actual = _open_source(path)
+        except Exception as exc:  # noqa: BLE001 - the render path reports it (R1)
+            if expected is None:
+                raise
+            _log.warning(
+                "prescan: %s could not be opened (%s); its pages go to the render path",
+                path.name, type(exc).__name__,
+            )
+            continue
+        try:
+            count = actual if expected is None else expected
             dependency_cache: dict[int, tuple[bytes, tuple[int, ...]]] = {}
             for i in range(count):
                 ref = SheetRef(
@@ -1132,15 +1322,26 @@ def iter_sheet_prescan(
                     page_count=count,
                     source_id=source_id,
                 )
-                page = doc[i]
-                identity = sheet_render_identity(
-                    page, content_sha256=sha, page_index=i, page_count=count,
-                    rows=rows, cols=cols, overlap_frac=overlap_frac,
-                    dependency_cache=dependency_cache,
-                )
-                geometry = _sheet_geometry_no_render(
-                    page, ref, rows=rows, cols=cols, overlap_frac=overlap_frac
-                )
+                try:
+                    if i >= actual:
+                        raise PageNotInSourceError(i, count, actual)
+                    page = doc[i]
+                    identity = sheet_render_identity(
+                        page, content_sha256=sha, page_index=i, page_count=actual,
+                        rows=rows, cols=cols, overlap_frac=overlap_frac,
+                        dependency_cache=dependency_cache,
+                    )
+                    geometry = _sheet_geometry_no_render(
+                        page, ref, rows=rows, cols=cols, overlap_frac=overlap_frac
+                    )
+                except Exception as exc:  # noqa: BLE001 - routed to render (R1)
+                    if expected is None:
+                        raise
+                    _log.warning(
+                        "prescan: %s could not be scanned (%s); it goes to the render path",
+                        ref.display_label, type(exc).__name__,
+                    )
+                    continue
                 yield ref, identity, geometry
         finally:
             doc.close()

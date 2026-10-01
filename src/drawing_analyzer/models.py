@@ -7,8 +7,10 @@ Only :mod:`render` produces these; everything else just consumes them.
 from __future__ import annotations
 
 import hashlib
+import itertools
+import json
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable
@@ -19,12 +21,19 @@ class SheetRef:
     """Identifies one sheet: a single page within a source PDF.
 
     ``source_id`` is the **host-owned** identity of the input this page belongs
-    to (``"SRC-0001"`` …), assigned once per accepted input by
-    :func:`render.list_sheets` (DA-001). It is what disambiguates two inputs
+    to (``"SRC-0001"`` …), assigned once per accepted input by the inventory
+    (:func:`render.inspect_inputs`; :func:`render.list_sheets` derives the same
+    ids from the accepted paths, DA-001). It is what disambiguates two inputs
     that share a basename: ``source_name`` is display-only and *not* authority.
     It defaults to ``""`` so hand-built refs (older callers, tests that don't
     care about isolation) keep working; every collision-safe lookup falls back
     to ``source_name`` when ``source_id`` is blank (see :func:`source_page_key`).
+
+    The pages a run owes are the inventory's (remediation WP-11.1; D-8):
+    :func:`render.inventory_sheet_refs` builds one ref per page of every
+    accepted document without reopening a file, and ``page_count`` is the
+    inventory's count. The model-visible ``display_label`` reads ``page k/N``
+    against that revision and participates in request cache identity.
     """
 
     pdf_path: Path
@@ -85,6 +94,41 @@ def source_page_key(obj: Any) -> tuple[str, int]:
     name = getattr(obj, "source_name", "") or ""
     page = int(getattr(obj, "page_index", 0) or 0)
     return (sid or name, page)
+
+
+@dataclass(frozen=True)
+class UnreadPage:
+    """An expected page the digest could not read, and why (remediation WP-11.1, R1).
+
+    The owner's rule: a page the run owes (one page of an accepted inventory
+    document, D-8) that produced no digest is not a failed read (there was no
+    read, and a :class:`~drawing_analyzer.digest.SheetDigest` claims one), so it
+    is this typed record instead: ``DrawingContext.unread_pages``, exported as
+    ``unread_pages`` in ``run_manifest.json`` and listed in run.log's Sheets
+    section, beside one ``PAGE_UNREAD`` journal event. ``reason`` is path-free by
+    construction (exception type names and page counts only), and the record
+    holds no path, so :meth:`to_dict` is portable.
+    """
+
+    source_id: str
+    source_name: str
+    page_index: int          # zero-based
+    page_count: int          # the inventory's count
+    reason: str
+
+    @property
+    def display_label(self) -> str:
+        """The same ``name (page k/N)`` label a :class:`SheetRef` shows."""
+        return f"{self.source_name} (page {self.page_index + 1}/{self.page_count})"
+
+    def to_dict(self) -> dict:
+        return {
+            "source_id": self.source_id,
+            "sheet": self.display_label,
+            "page_index": int(self.page_index),
+            "page_count": int(self.page_count),
+            "reason": self.reason,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -671,6 +715,37 @@ def reduced_trust_reason(obj: Any) -> str:
     return TRUST_REASON_NO_TEXT
 
 
+def review_findings(sd: Any) -> list["Finding"]:
+    """The findings a sheet's digest hands to the review (remediation WP-01.3, N15).
+
+    All of them when the sheet's read finished; none when its digest carries
+    an error (a read the model did not finish: truncated, refused, a stream
+    that ended early, an unknown stop). Those are :func:`held_out_findings`.
+    The one rule behind the ledger ingest and every count and listing of what
+    was held out, so they cannot disagree. Duck-typed, like the export.
+    """
+    if getattr(sd, "error", None) is not None:
+        return []
+    return list(getattr(sd, "findings", None) or [])
+
+
+def held_out_findings(sd: Any) -> list["Finding"]:
+    """The findings of a read the model did not finish, held out of the review (N15).
+
+    The owner's rule: they are never ingested into the ledger, so never
+    numbered, anchored, verified, marked up or exported as findings, which is
+    how every other consumer already treats an errored sheet (``combined_text``,
+    cross-QC, the prose harvest, synthesis, focus, the review planner). The
+    sheet's own export file and its report card list them under its FAILED
+    status, as they keep its prose, and the run counts them
+    (``DrawingContext.digest_findings_held_out``). The complement of
+    :func:`review_findings`.
+    """
+    if getattr(sd, "error", None) is None:
+        return []
+    return list(getattr(sd, "findings", None) or [])
+
+
 def sheet_evidence_text(sheet: Any) -> str:
     """The text a **host-side** check may treat as this sheet's source evidence.
 
@@ -818,7 +893,11 @@ FINDINGS_PARSE_OK = frozenset({FINDINGS_PARSED_CLOSED, FINDINGS_PARSED_UNCLOSED}
 
 
 def compute_finding_id(
-    sheet_id: str, category: str, quote_or_text: str, source_id: str = ""
+    sheet_id: str,
+    category: str,
+    quote_or_text: str,
+    source_id: str = "",
+    claim_discriminator: str = "",
 ) -> str:
     """Stable short id for a finding: ``sha1(sheet_id + category + quote/text)``.
 
@@ -832,6 +911,14 @@ def compute_finding_id(
     and quote can never collide on one artifact/evidence id. It is appended (not
     interleaved) and only when non-empty, so a legacy/single-source finding with
     no ``source_id`` keeps its historical id exactly.
+
+    ``claim_discriminator`` — :attr:`Finding.claim_discriminator`, when the
+    producer can state exactly what the finding asserts (remediation WP-03.3,
+    review B7: two arithmetic mismatches on one table row quote the same string
+    and used to share an id). The same precedent: appended last, only when
+    non-empty, so every finding without one keeps its id exactly. Its separator
+    is ``\\x01``, not ``\\x00``, so a discriminator can never hash like a
+    ``source_id``.
     """
     h = hashlib.sha1()
     h.update(sheet_id.encode("utf-8"))
@@ -842,6 +929,9 @@ def compute_finding_id(
     if source_id:
         h.update(b"\x00")
         h.update(source_id.encode("utf-8"))
+    if claim_discriminator:
+        h.update(b"\x01")
+        h.update(claim_discriminator.encode("utf-8"))
     return h.hexdigest()[:12]
 
 
@@ -1254,12 +1344,22 @@ class Finding:
     # "" = not assessed (older payload, or a channel that does not classify).
     # Appended last — see the positional-order note on RenderedSheet.
     evidence_state: str = ""
+    # Remediation WP-03.3 (review B7): what exactly this finding asserts, in a
+    # canonical form, set only by a producer that can state it exactly. Today
+    # that is the arithmetic auditor (``auditors.arithmetic.
+    # arithmetic_claim_discriminator``: the host operation, the terms as a
+    # multiset of exact decimals, the stated value). Two findings that BOTH carry
+    # one and disagree are never duplicates (``critique._is_duplicate``), and it
+    # is folded into ``id``. It is a statement about ``text``, so it rides the
+    # representative's bundle in a merge. "" (every model finding, every older
+    # payload) never blocks anything. Appended last, like ``evidence_state``.
+    claim_discriminator: str = ""
 
     def __post_init__(self) -> None:
         if not self.id:
             self.id = compute_finding_id(
                 self.sheet_id, self.category, self.source_quote or self.text,
-                self.source_id,
+                self.source_id, self.claim_discriminator,
             )
 
     @property
@@ -1303,6 +1403,10 @@ class Finding:
         }
         if self.citation is not None:
             out["citation"] = self.citation.to_dict()
+        # Only when set, like ``citation``: every finding without one (every
+        # model finding) serializes byte-identically to the payloads before it.
+        if self.claim_discriminator:
+            out["claim_discriminator"] = self.claim_discriminator
         return out
 
     @classmethod
@@ -1343,6 +1447,7 @@ class Finding:
                 if isinstance(a, dict)
             ],
             id=d.get("id", ""),
+            claim_discriminator=str(d.get("claim_discriminator", "") or ""),
         )
 
 
@@ -1406,6 +1511,62 @@ class ProseItem:
     mentioned_sheet_ids: list[str] = field(default_factory=list)
 
 
+# ``Finding`` fields whose ORDER records only the order things arrived in, not
+# anything the finding says. The ledger unions the first four member by member
+# as findings merge (``ledger._merge_into``), and the citation stage writes
+# ``citations`` in ``refs`` order. QC numbering compares them as sorted
+# collections, so one claim ranks the same whatever order its members arrived
+# in. Every other list keeps its order: ``tile`` is ``[row, col]``, and
+# ``also_on`` is one producer's legs, numbered in that order on the evidence.
+_ARRIVAL_ORDERED_FIELDS = frozenset(
+    {"sources", "refs", "supporting_quotes", "prose_item_ids", "citations"}
+)
+
+
+def _plain(value: Any) -> Any:
+    """``value`` as JSON-ready data: a dataclass by every field, a sequence as a list."""
+    if is_dataclass(value) and not isinstance(value, type):
+        return {fld.name: _plain(getattr(value, fld.name, None)) for fld in fields(value)}
+    if isinstance(value, (list, tuple)):
+        return [_plain(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _plain(item) for key, item in value.items()}
+    return value
+
+
+def _canonical_json(value: Any) -> str:
+    # ``default=str`` only ever meets a value no stage stores (a hand-built test
+    # double). The key must not raise: the pipeline numbers without a guard.
+    return json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
+
+
+def _qc_order_key(f: "Finding") -> tuple:
+    """Where ``f`` sits, then the two tie-breaks every finding carries cheaply
+    (its content ``id``, then its text). See :func:`assign_qc_ids`."""
+    set_level = (f.anchor_hint or "").upper() in {"SET", "SET_INDEX"} and not f.source_id
+    rect = f.anchor.rect_pdf if f.anchor is not None else None
+    # Rect-less findings sort after the anchored ones on their sheet.
+    pos = (0, float(rect[1]), float(rect[0])) if rect else (1, 0.0, 0.0)
+    return (1 if set_level else 0, source_page_key(f), pos, str(f.id or ""), str(f.text or ""))
+
+
+def _qc_content_key(f: "Finding") -> str:
+    """Everything ``f`` carries except its number, as one comparable string.
+
+    Every dataclass field, so a field added to :class:`Finding` later is covered
+    without being listed here. The :data:`_ARRIVAL_ORDERED_FIELDS` are sorted.
+    Never raises.
+    """
+    content = _plain(f)
+    if isinstance(content, dict):
+        content.pop("qc_id", None)
+        for name in _ARRIVAL_ORDERED_FIELDS:
+            items = content.get(name)
+            if isinstance(items, list):
+                content[name] = sorted(items, key=_canonical_json)
+    return _canonical_json(content)
+
+
 def assign_qc_ids(findings: list["Finding"]) -> list["Finding"]:
     """Assign sequential review numbers (``QC-001`` …) across a run's findings.
 
@@ -1414,28 +1575,53 @@ def assign_qc_ids(findings: list["Finding"]) -> list["Finding"]:
     Findings with no rectangle (sheet-level / unanchored) sort after the anchored
     ones on their sheet. **Set-level** findings (a synthesis conflict belonging to no
     source sheet, §12.4/§14.8) sort after *every* source-scoped finding, in a final
-    section of their own. The sort is deterministic — tie-broken by the stable
-    content ``id`` — so the same findings get the same numbers regardless of the
-    order they arrive in (I-7). Assigns in place and returns the same list; ids
-    are assigned exactly once per run (numbering everything, not only the inked
-    findings, so the CSV/report/index all share one namespace).
+    section of their own.
+
+    **Ties** (remediation WP-03.2, review K5). Position leaves some: two findings
+    on one sheet with no rectangle, two anchored to one rectangle, two set-level
+    findings. They are broken by each finding's own content, never by the order
+    the findings arrive in, so the same findings get the same numbers whatever
+    that order (I-7). Ranked, most significant first:
+
+    1. The content ``id``, the only tie-break before WP-03.2. It stays first,
+       so every pair whose ids differ keeps the number it had.
+    2. The text. ``compute_finding_id`` hashes the quote, not the text, when
+       there is one, so two different issues that quote one tag (``PUMP P-1``)
+       share an id (review B8), and the stable sort numbered them in arrival
+       order. The text tells them apart, as it does in
+       ``ledger._grounding_quality``, the representative's total order.
+    3. Everything else the finding carries except its number
+       (:func:`_qc_content_key`). Text and quote are not always enough: Pass A
+       keeps two entries apart when members they absorbed conflict, and the two
+       can still share text, quote, category and id. What they absorbed reaches
+       the live entries (supporting quotes, legs, provenance), so the whole
+       content orders them, with the lists whose order records only arrival
+       (:data:`_ARRIVAL_ORDERED_FIELDS`) compared as sorted collections.
+
+    The order is total over what a finding says. Two findings that tie on all
+    three are equal in every field except ``qc_id`` and the order of those
+    lists: the same claim with the same evidence, so which of them gets the
+    lower number says nothing about either. Two ledger entries can also differ
+    only in the members behind them, since a merge keeps only the
+    representative's text (review B9); nothing after numbering reads the
+    members, and ordering by them needs the observations WP-03.5 serializes.
+
+    Element 3 is computed only for the findings 1 and 2 leave tied: it
+    serializes the whole finding, about 25 times the cost of the rest of the
+    numbering.
+
+    Assigns in place and returns the same list; ids are assigned exactly once
+    per run (numbering everything, not only the inked findings, so the
+    CSV/report/index all share one namespace).
     """
-
-    def _is_set_level(f: "Finding") -> bool:
-        return (f.anchor_hint or "").upper() in {"SET", "SET_INDEX"} and not f.source_id
-
-    def _pos(f: "Finding") -> tuple:
-        rect = f.anchor.rect_pdf if f.anchor is not None else None
-        if rect:
-            return (0, float(rect[1]), float(rect[0]))
-        return (1, 0.0, 0.0)            # rect-less findings sort after anchored ones
-
-    ordered = sorted(
-        findings,
-        # Set-level findings sort last (a separate final section); within each group
-        # the usual source → page → position → id order holds.
-        key=lambda f: (1 if _is_set_level(f) else 0, source_page_key(f), _pos(f), f.id),
-    )
+    ordered: list[Finding] = []
+    for _key, run in itertools.groupby(
+        sorted(findings, key=_qc_order_key), key=_qc_order_key
+    ):
+        tied = list(run)
+        if len(tied) > 1:
+            tied.sort(key=_qc_content_key)
+        ordered.extend(tied)
     width = max(3, len(str(len(ordered))))
     for n, finding in enumerate(ordered, start=1):
         finding.qc_id = f"QC-{n:0{width}d}"
@@ -2282,6 +2468,35 @@ def roll_up_qc_status(
     return "FAILED"
 
 
+def item_coverage_status(eligible: int, judged: int) -> str:
+    """A stage's status from its required-item coverage.
+
+    ``eligible`` is what the stage was required to judge, fixed by its
+    eligibility rule before any call is made; ``judged`` is how many of those
+    obtained a real judgment. A valid inconclusive result is a judgment; an
+    attempt that returned nothing usable, or no attempt at all, is not.
+
+    - nothing eligible: ``SKIPPED_VALID``;
+    - every eligible item judged: ``COMPLETE``;
+    - none judged: ``FAILED``. This is the all-failed rule: whatever the mix of
+      skipped items and failed attempts, the stage obtained no judgment;
+    - otherwise ``PARTIAL``.
+
+    The caller tests the stage's own failure flags **first**: a pass that raised
+    leaves no counts to judge, so a crash read from counts alone looks like
+    having had nothing to do. Remediation WP-01.1 applies this to verification,
+    which reported COMPLETE with every call malformed, and with one verified
+    finding beside four skipped ones (N5).
+    """
+    if eligible <= 0:
+        return "SKIPPED_VALID"
+    if judged >= eligible:
+        return "COMPLETE"
+    if judged <= 0:
+        return "FAILED"
+    return "PARTIAL"
+
+
 # --------------------------------------------------------------------------- #
 # Usage accounting (Phase 23B — §6.3 / §15.6)
 # --------------------------------------------------------------------------- #
@@ -2338,6 +2553,14 @@ class UsageRecord:
     # possible. Defaults to ``None``, which is both the common case and the
     # rate every pre-existing record was priced at.
     cache_write_ttl: "str | None" = None
+    # Remediation WP-01.7 (plan WP-14 step 7; the owner's rule): how many of
+    # the attempts behind this record were streams interrupted before their
+    # final usage arrived (``message_delta``). Their input and cache counters
+    # are ``message_start``'s and are counted above; their output was never
+    # reported, so this record's output and cost are lower bounds. 0 when
+    # every attempt reported its usage. Known/unknown usage in general, and
+    # per-attempt records, are WP-14.4's and WP-14.5's.
+    interrupted_attempts: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -2359,6 +2582,7 @@ class UsageRecord:
             "request_or_custom_id": self.request_or_custom_id,
             "estimated_cost": None if self.estimated_cost is None else str(self.estimated_cost),
             "cache_write_ttl": self.cache_write_ttl,
+            "interrupted_attempts": self.interrupted_attempts,
         }
 
 
@@ -2446,6 +2670,14 @@ class RunUsage:
         )
 
     @property
+    def interrupted_attempts(self) -> int:
+        """Attempts, over the whole run, whose stream was interrupted before its
+        final usage arrived (:attr:`UsageRecord.interrupted_attempts`). When
+        nonzero, the output and cost totals are lower bounds (remediation
+        WP-01.7); run.log's usage section and the manifest say so."""
+        return sum(int(r.interrupted_attempts or 0) for r in self.records)
+
+    @property
     def total_estimated_cost(self) -> "Decimal | None":
         # If ANY billable record could not be priced, the aggregate is unknowable —
         # return None rather than a partial sum that silently omits real cost.
@@ -2513,6 +2745,9 @@ class RunUsage:
             "total_cache_write_tokens": self.total_cache_write_tokens,
             "cache_hits": self.cache_hits,
             "total_estimated_cost": None if cost is None else str(cost),
+            # Remediation WP-01.7: nonzero means the output and cost totals are
+            # lower bounds (an interrupted stream reported no output).
+            "interrupted_attempts": self.interrupted_attempts,
             "by_family": {
                 fam: {**g, "estimated_cost": None if g["estimated_cost"] is None
                       else str(g["estimated_cost"])}

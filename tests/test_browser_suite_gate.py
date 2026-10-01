@@ -246,7 +246,9 @@ def test_release_publish_needs_every_release_gate():
     ``build`` meant a release was gated on the installer *compiling*. And a
     second workflow triggered by the same tag is not a dependency of this one
     (Codex review), so every release-critical check has to be in the chain:
-    the Linux gate set and the Windows suite both.
+    the Linux gate set and the Windows suite both — and, since remediation
+    WP-23.1 (N8), the acceptance record, which ``tests/test_release_acceptance_gate.py``
+    pins in detail.
 
     Text, not PyYAML, for the reason given on :func:`_ci_text`.
     """
@@ -255,7 +257,8 @@ def test_release_publish_needs_every_release_gate():
     )
     assert "\n  gates:\n" in text, "the tag-gated release-gates job is gone"
     assert "\n  gates-windows:\n" in text, "the Windows release-gates job is gone"
-    assert "needs: [build, gates, gates-windows]" in text, (
+    assert "\n  acceptance:\n" in text, "the acceptance-record job is gone"
+    assert "needs: [build, gates, gates-windows, acceptance]" in text, (
         "publish no longer requires every release gate"
     )
     # The full gate set, not --fast: the browser suite and the wheel build are

@@ -155,6 +155,16 @@ class InputInventory:
     def accepted_paths(self) -> list[Path]:
         return [d.pdf_path for d in self.accepted_documents]
 
+    def expected_page_counts(self) -> dict[str, int]:
+        """``str(path) -> page count`` for every accepted document: the pages a run owes.
+
+        What the page iterators take as ``expected_pages`` (remediation
+        WP-11.1, R1): the inventory's count is the workload, so a file that
+        cannot be opened again, or that lost pages since, fails those pages
+        instead of dropping out of the count.
+        """
+        return {str(d.pdf_path): int(d.page_count) for d in self.accepted_documents}
+
     def error_lines(self) -> list[str]:
         """Sanitized one-liners for every rejected input (for ctx.errors / GUI)."""
         return [d.summary_line() for d in self.rejected_documents]

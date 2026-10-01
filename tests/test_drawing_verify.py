@@ -919,7 +919,8 @@ def test_cross_verify_carries_arithmetic_provenance():
 # ``_parse_verdict_with_validity`` always knew whether a reply was a verdict
 # and threw that away at the call site, so no run could say whether its
 # UNCERTAIN share came from the drawings or from the parser. The tally now
-# carries it, observationally: nothing here changes a status.
+# carries it, and since remediation WP-01.1 it also decides the stage's
+# completeness (the next section).
 
 from drawing_analyzer import verify as V  # noqa: E402
 
@@ -999,6 +1000,176 @@ def test_cross_verification_tallies_malformed_replies_too(monkeypatch):
     assert result.api_calls == 1
     assert (result.uncertain, result.malformed) == (1, 1)
     assert result.degradation_note("cross-verification").startswith("cross-verification: 1 of 1")
+
+
+# --------------------------------------------------------------------------- #
+# Completeness — every eligible item judged (N5, remediation WP-01.1, D-2)
+# --------------------------------------------------------------------------- #
+#
+# ``eligible`` is what a pass was required to judge, fixed by its eligibility
+# filter before any call. ``judged`` is what obtained a settled verdict, live
+# or cached; a valid NOT_VISIBLE counts, a call that returned no verdict does
+# not. The stage is COMPLETE only when the two are equal.
+
+def item_coverage_status(eligible: int, judged: int) -> str:
+    # Imported at call time so a checkout without the rule fails these tests
+    # one by one instead of failing collection for the whole module.
+    from drawing_analyzer.models import item_coverage_status as rule
+
+    return rule(eligible, judged)
+
+
+@pytest.mark.parametrize(
+    "eligible,judged,status",
+    [
+        (0, 0, "SKIPPED_VALID"),     # nothing to judge is a valid skip
+        (3, 3, "COMPLETE"),
+        (5, 1, "PARTIAL"),           # one judged beside four that were not
+        (3, 0, "FAILED"),            # the all-failed rule: nothing judged at all
+        (1, 0, "FAILED"),
+    ],
+)
+def test_item_coverage_status_is_the_one_completeness_rule(eligible, judged, status):
+    assert item_coverage_status(eligible, judged) == status
+
+
+def test_eligible_is_fixed_by_the_eligibility_filter():
+    # A deterministic finding and an unanchored one are not eligible; neither
+    # is counted anywhere. The two anchored model findings are, whatever
+    # becomes of them.
+    trusted = _finding("det", verif=Verification(status="DETERMINISTIC"))
+    unanchored = _finding("loose", status="UNANCHORED", rect=None)
+    client = _FakeClient({"ok": '{"verdict":"CONFIRMED"}'}, default="not json")
+    result = _run([_finding("ok"), trusted, unanchored, _finding("garbled")], client=client)
+
+    assert result.eligible == 2
+    assert (result.verified, result.uncertain, result.malformed) == (1, 1, 1)
+    assert result.judged == 1
+    assert item_coverage_status(result.eligible, result.judged) == "PARTIAL"
+
+
+def test_a_valid_not_visible_and_a_cache_hit_are_both_judgments():
+    cache = DigestCache(None, persist=False)
+    client = _FakeClient({"hit": '{"verdict":"CONFIRMED"}'})   # default NOT_VISIBLE
+    _run([_finding("hit")], client=client, cache=cache)          # stores the verdict
+
+    result = _run([_finding("hit"), _finding("nv")], client=client, cache=cache)
+    assert result.cache_hits == 1
+    assert (result.eligible, result.judged) == (2, 2)
+    assert result.coverage_note() is None
+    assert item_coverage_status(result.eligible, result.judged) == "COMPLETE"
+
+
+def test_a_skipped_finding_is_eligible_but_not_judged():
+    # No sheet to crop it from: no verdict could be requested.
+    result = _run([_finding("orphan", source="missing.pdf")])
+    assert (result.eligible, result.skipped, result.judged) == (1, 1, 0)
+    assert result.coverage_note() == (
+        "verification: 0 of 1 eligible finding(s) judged; 1 skipped, 0 returned no judgment"
+    )
+    assert item_coverage_status(result.eligible, result.judged) == "FAILED"
+
+
+def test_an_item_that_escapes_the_tally_still_counts_against_completeness(monkeypatch):
+    # One finding is judged; the next raises before any outcome is recorded,
+    # and the pass swallows the error (I-3). Counting only what was tallied,
+    # that pass had one eligible item and judged it: COMPLETE. The eligible
+    # count is taken from the filter first, so the escaped item still counts.
+    from drawing_analyzer import verify
+
+    real_reserve = verify._reserve_evidence_dir
+
+    def _reserve(finding, used):
+        if finding.text == "escapes":
+            raise RuntimeError("injected failure before any outcome")
+        return real_reserve(finding, used)
+
+    monkeypatch.setattr(verify, "_reserve_evidence_dir", _reserve)
+    client = _FakeClient({}, default='{"verdict":"CONFIRMED"}')
+    result = _run([_finding("judged"), _finding("escapes")], client=client)
+
+    assert result.verified == 1
+    assert (result.eligible, result.judged) == (2, 1)
+    assert item_coverage_status(result.eligible, result.judged) == "PARTIAL"
+    assert result.coverage_note() == (
+        "verification: 1 of 2 eligible finding(s) judged; 0 skipped, "
+        "0 returned no judgment, 1 not accounted for"
+    )
+
+
+def test_the_tally_records_which_findings_returned_no_judgment():
+    # A later stage (investigation) can say which of these it recovered.
+    ok, garbled = _finding("ok"), _finding("garbled")
+    ok.qc_id, garbled.qc_id = "QC-001", "QC-002"
+    client = _FakeClient({"ok": '{"verdict":"CONFIRMED"}'}, default="not json")
+    result = _run([ok, garbled], client=client)
+    assert result.not_judged_ids == ["QC-002"]
+
+
+def test_cross_eligible_is_every_dual_anchored_finding(monkeypatch):
+    monkeypatch.setattr("drawing_analyzer.verify._render_leg_crops",
+                        lambda reqs, dpi: [b"crop-a", b"crop-b"])
+    client = _FakeClient({"x-1": '{"verdict":"CONTRADICTED"}'})
+    result = verify_cross_findings(
+        [_cross_finding("x-1"), _cross_finding("x-2"), _finding("single")],
+        [_sheet("primary.pdf"), _sheet("other.pdf")],
+        client=client, model=OPUS, sleep=lambda _s: None,
+    )
+    assert result.eligible == 2                   # the single-crop finding is not
+    assert (result.rejected, result.uncertain, result.judged) == (1, 1, 2)
+
+
+def test_a_cross_worker_that_raised_is_a_failed_call_not_a_judgment(monkeypatch):
+    # The defensive branch left the finding UNCERTAIN without counting it as
+    # a call that returned no judgment, so it read as a judgment.
+    monkeypatch.setattr("drawing_analyzer.verify._render_leg_crops",
+                        lambda reqs, dpi: [b"crop-a", b"crop-b"])
+
+    def _raises(*_a, **_k):
+        raise RuntimeError("injected worker failure")
+
+    monkeypatch.setattr("drawing_analyzer.verify._call_prepared_cross", _raises)
+    finding = _cross_finding("boom")
+    finding.qc_id = "QC-007"
+    result = verify_cross_findings(
+        [finding], [_sheet("primary.pdf"), _sheet("other.pdf")],
+        client=_FakeClient({}), model=OPUS, sleep=lambda _s: None,
+    )
+    assert finding.verification.status == "UNCERTAIN"
+    assert (result.uncertain, result.failed, result.not_judged) == (1, 1, 1)
+    assert (result.eligible, result.judged) == (1, 0)
+    assert result.not_judged_ids == ["QC-007"]
+
+
+def test_combined_sums_both_passes_and_ignores_a_pass_that_raised():
+    from drawing_analyzer.verify import VerifyResult
+
+    single = VerifyResult()
+    single.eligible = 4
+    single.verified, single.uncertain, single.malformed, single.skipped = 2, 1, 1, 1
+    single.not_judged_ids = ["QC-003"]
+    cross = VerifyResult()
+    cross.eligible = 2
+    cross.rejected, cross.skipped = 1, 1
+
+    both = VerifyResult.combined(single, None, cross)
+    assert (both.eligible, both.judged, both.skipped, both.not_judged) == (6, 3, 2, 1)
+    assert both.not_judged_ids == ["QC-003"]
+    assert both.coverage_note() == (
+        "verification: 3 of 6 eligible finding(s) judged; 2 skipped, 1 returned no judgment"
+    )
+    assert VerifyResult.combined(None, None).eligible == 0
+
+
+def test_a_hand_built_tally_reads_its_own_count_as_eligible():
+    # ``eligible`` is never less than what was tallied: a tally built without
+    # it (a test double, an older caller) cannot read as having nothing to do.
+    from drawing_analyzer.verify import VerifyResult
+
+    tally = VerifyResult()
+    tally.verified, tally.skipped = 1, 4
+    assert (tally.eligible, tally.judged) == (5, 1)
+    assert item_coverage_status(tally.eligible, tally.judged) == "PARTIAL"
 
 
 # --------------------------------------------------------------------------- #

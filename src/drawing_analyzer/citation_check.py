@@ -28,12 +28,13 @@ The set's **adopted editions** are harvested offline from the sheet text layers
 (general-notes sheets state them: "NFPA 13, 2016 EDITION") and included in the
 prompt so the model can judge both the adopted and the current edition.
 
-Tool type: ``web_search_20260209`` — the current server-side web-search variant
-for Opus 5 (verified against the API docs at implementation time; the basic
-``web_search_20250305`` serves older models). Overridable via
-``DRAWING_ANALYZER_WEB_SEARCH_TOOL_TYPE`` so an API rename never needs a code
-change. Server-tool turns can stop with ``pause_turn`` (the server-side loop hit
-its iteration cap); the call is resumed a bounded number of times.
+Tool type: ``web_search_20260209`` — the dynamic-filtering server-side
+web-search variant for the 4.6-and-later models (verified against the API docs
+at implementation time; the basic ``web_search_20250305`` serves older models).
+Overridable via ``DRAWING_ANALYZER_WEB_SEARCH_TOOL_TYPE`` so an API rename never
+needs a code change. Server-tool turns can stop with ``pause_turn`` (the
+server-side loop hit its iteration cap); the call is resumed a bounded number of
+times.
 
 PDF-engine-free (I-5); real-time only (citation checks are few and interactive —
 they don't batch).
@@ -63,7 +64,7 @@ from typing import Any, Iterable
 
 from .core.api_config import (
     CITATION_OUTPUT_CAP,
-    MODEL_SONNET_5,
+    MODEL_SONNET_55,
     PHASE_CITATION,
     WEB_SEARCH_TOOL_TYPE,
     apply_effort_config,
@@ -78,13 +79,13 @@ from .core.api_config import (
     thinking_config_for,
     tools_with_cache,
 )
+from .core.reply_text import reply_text
 from .diagnostics import get_logger
 from .digest import (
     _FENCE_RE,
     _clean_error,
     _get,
     _is_transient_error,
-    _message_text,
     _message_cache_usage,
     _message_usage,
     _retry_backoff_seconds,
@@ -132,16 +133,17 @@ _VALID_VERDICTS = frozenset({"CHECKED_SUPPORTS", "CHECKED_MISMATCH"})
 
 
 def citation_model() -> str:
-    """The citation-check model (``DRAWING_ANALYZER_CITATION_MODEL``, else Sonnet 5).
+    """The citation-check model (``DRAWING_ANALYZER_CITATION_MODEL``, else Sonnet 5.5).
 
-    Sonnet 5 rather than the review flagship, and this is a capability choice
-    before it is a cost one: ``web_fetch`` is **not available on Opus 5**, so an
-    Opus citation check can only ever read search *snippets*. Sonnet 5 can open
-    the cited section and read it. For "does this code section say what the
-    drawing claims", that is the difference between a plausible verdict and a
-    defensible one — and it costs less.
+    Sonnet rather than the review flagship. It began as a capability choice:
+    ``web_fetch`` is **not available on Opus 5**, so an Opus 5 citation check can
+    only ever read search *snippets*, while Sonnet opens the cited section and
+    reads it. For "does this code section say what the drawing claims", that is
+    the difference between a plausible verdict and a defensible one. Opus 5.5
+    has web fetch again, so on the 5.5 generation the choice is about cost:
+    Sonnet 5.5 does the same fetch-and-compare at half Opus 5.5's price.
     """
-    return os.environ.get("DRAWING_ANALYZER_CITATION_MODEL") or MODEL_SONNET_5
+    return os.environ.get("DRAWING_ANALYZER_CITATION_MODEL") or MODEL_SONNET_55
 
 
 def web_search_max_uses() -> int:
@@ -532,8 +534,10 @@ def reconcile_cited_editions(
                         rec["rep"] = f
                     # The divergence anchors to the stale-edition text ITSELF —
                     # its own matched span, never the citing finding's whole
-                    # quote (a copied quote would anchor to the identical rect
-                    # and Pass B would fold the two findings into one).
+                    # quote (a copied quote would anchor to the identical rect,
+                    # and until remediation WP-03.7 Pass B folded two findings
+                    # on that alone; an equal quote still lets moderate text
+                    # agreement fold them in Pass A).
                     if not rec["sheet_span"]:
                         rec["sheet_span"] = _cited_span(rx, year, sheet_text)
                     if not rec["quote_span"]:
@@ -910,7 +914,7 @@ def _check_one(
             messages = [*messages, {"role": "assistant", "content": _get(resp, "content")}]
             continue
         return _CheckOutcome(
-            raw_text=_message_text(resp),
+            raw_text=reply_text(resp),
             sources=tuple(_extract_web_sources(resp)),
             input_tokens=total_in, output_tokens=total_out,
             cache_read_tokens=total_cache_read,

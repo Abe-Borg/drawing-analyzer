@@ -1,165 +1,80 @@
 # Security & Privacy
 
-This document describes the security boundary of Drawing Analyzer's outputs and
-how it handles your Anthropic API key and project data. The boundary was
-established in Phase 17A of the remediation plan and is enforced per release by
-the Phase 27 gates: the headless-Chromium exploit suite, a repo secret scan
-(`scripts/scan_secrets.py`), a dependency vulnerability + license audit in CI,
-and the recorded acceptance checklist (`docs/RELEASE_ACCEPTANCE_TEMPLATE.md`).
+Drawing Analyzer processes private project information. Its output is review
+material, not professional approval. Check your project restrictions and provider
+agreement before sending drawings or specifications.
 
-## Threat model: all model output is untrusted
+## What leaves your computer
 
-Drawing content is untrusted input. It is rendered into the images and text
-layers that are sent to the model as prompts, so **the model's output can be
-attacker-influenced** — a malicious or malformed drawing can steer what the
-model writes back. Every string that reaches a generated artifact is therefore
-treated as hostile: model findings and prose, the Ask-AI assistant's answers,
-source filenames, sheet IDs, titles, quotes, citation notes/URLs, evidence
-paths, parser errors, run errors, and serialized configuration.
+Approved analysis sends sheet images, extracted text, supplied specifications,
+focus and review context to Anthropic by default. QC may send evidence crops and
+citation claims. Report Ask AI sends the report, question, conversation and tool
+results from your browser. Provider web tools can research project-derived text;
+a source-quality filter is not a confidentiality boundary.
 
-## The HTML report (`report.html`)
+The app also checks GitHub for updates; disable checks with
+`DRAWING_ANALYZER_DISABLE_UPDATE_CHECK=1`. Installer URLs and redirects come from
+the update manifest. Batch-result URLs come from the provider. Desktop endpoint
+and proxy overrides, and links you click, can change destinations. The application
+cannot prove the provider's retention, training or erasure policies.
 
-The report is a single self-contained file. Its security rests on four layers:
+## Keys
 
-1. **Escaping on the Python side.** Every untrusted value is HTML-escaped into
-   element content, or attribute-escaped into attributes. Dynamic values never
-   form tag or attribute syntax. The one machine-readable data island (the
-   Ask-AI config) is emitted as an inert `type="application/json"` script,
-   serialized so that every `<` (and the U+2028/U+2029 line separators) becomes
-   a JSON string escape — no value can close the script element or inject
-   markup, and `JSON.parse` still round-trips it byte-for-byte.
+The GUI prefers a credential store whose save/read round-trip succeeds. When no
+secure store works, it asks before saving a plaintext fallback; declining keeps
+a session-only key. Verified legacy keys may migrate to the store; unverified or
+different file contents are preserved. The run captures its key and the GUI does
+not place it in the process environment for child programs to inherit.
 
-2. **Safe DOM construction on the browser side.** The Ask-AI assistant renders
-   the model's streamed Markdown by building DOM nodes with `createElement` and
-   filling them via `textContent` — never `innerHTML`, `outerHTML`,
-   `insertAdjacentHTML`, or `document.write` with model data. Attack strings in
-   answers, code spans, tables, or thinking summaries appear as inert text.
+HTML omits the key by default. Explicit **Embed API key in HTML report** writes
+it into the file. Never share such a report: runtime **Forget key** cannot erase
+an embedded credential. Regenerate without the key and rotate a disclosed key.
 
-3. **One URL policy for every link.** Markdown links in answers and the
-   citation chips both go through a single validator that accepts **only
-   absolute `https:` URLs**. It rejects `javascript:`, `data:`, `file:`,
-   `blob:`, protocol-relative, malformed, credential-bearing (`user:pass@`), and
-   control-character URLs (raw or percent-encoded). A rejected URL degrades to
-   inert visible text — never a live link. Every emitted link carries
-   `rel="noopener noreferrer"`.
+A prompted chat key uses memory and tab `sessionStorage`. Browser recovery and
+disk behavior are outside the app's control. Local `file://` pages can share
+storage origins; an untrusted local HTML file opened in the same tab can expose
+a retained key. Use **Forget key** before opening untrusted files. Do not treat
+browser storage as a credential vault.
 
-4. **Content-Security-Policy (defense in depth).** The report ships a CSP
-   `<meta>` tag that:
-   - allows only the exact inline scripts this build emits, pinned by SHA-256
-     hash (`script-src 'sha256-…'`) — there is no `'unsafe-inline'` for scripts
-     and there are no inline event-handler attributes;
-   - restricts `connect-src` to `https://api.anthropic.com` (the Ask-AI target)
-     when the assistant is present, and `'none'` when it is omitted;
-   - forbids objects (`object-src 'none'`), base-URI rewriting
-     (`base-uri 'none'`), and form submission (`form-action 'none'`);
-   - restricts images to the report's own relative evidence crops.
+## Local copies and retention
 
-   The exact policy is exercised against `file://` in Chromium in the Phase 17B
-   headless-browser test suite; the safe DOM boundary above is mandatory
-   regardless of CSP support.
+Reports, reviewed PDFs, findings, sheet text, evidence crops, caches and run
+records contain project data. Cache entries have no general expiry; temporary
+evidence is pruned on later runs, and remote upload deletion is best effort.
+**Clear** or closing the app is not erasure of all local/provider copies.
 
-## The Ask-AI assistant and your API key
+Chat conversations auto-save to browser local storage. **New chat** clears that
+report's stored conversation; separately saved JSON files remain. Transcripts
+exclude the key field and redact recognized `sk-ant-` patterns, but other secrets
+and project text can remain. Inspect before sharing. Loading is local; sending
+a follow-up uploads the loaded conversation and report. Preserve original
+specifications yourself; Export All does not archive their original files.
 
-- The assistant is present **by default**, whether or not the report was built
-  with a key. It calls the Anthropic Messages API directly from your browser
-  (no server).
-- **By default the key is never written into the file.** The assistant prompts
-  for a key on first use and keeps it only in the browser tab's
-  `sessionStorage`. A **Forget key** control clears both the in-memory copy and
-  `sessionStorage`. A `401` clears the stored prompted key before retry.
-- **On a `file://` report, `sessionStorage` is not isolated per file.** Local
-  files do not get distinct origins the way `https://` pages do, so **another
-  local HTML file opened later in the same tab can read the stored key.**
-  Measured, not assumed: in headless Chromium a second local page navigated to
-  in the same tab read the key back verbatim; a page in a *new* tab read
-  `null`. The scope is therefore one tab, and the remedies are the ones the
-  widget names — **Forget key**, or close the tab — plus the ordinary one of
-  not opening untrusted HTML in a tab that has held a key. Serving the report
-  over `http(s)://` gives it a real origin and removes the exposure.
-- **Embedded-key mode is an explicit opt-in** (GUI checkbox / `embed_api_key=
-  True`). The key is then baked into the HTML; the report shows a red warning,
-  and the file must be treated as a credential. A runtime "forget" **cannot**
-  remove an embedded key — only regenerating or deleting the file can, and the
-  widget says exactly that.
-- Pass `include_chat=False` to omit the assistant (and every network reference)
-  entirely.
-- The key literal never appears in the default HTML, in rendered chat text, or
-  in logs. Request headers are never logged.
+Logs redact recognized key/authorization/secret patterns and portable run records
+reduce private paths to display names. Redaction is not general secret detection;
+review diagnostics before sharing. Keys do not belong in source or test fixtures.
 
-### Saved conversations
+## HTML and spending boundaries
 
-- The conversation **auto-saves to your browser's local storage**, under a key
-  scoped to that report, so a refresh or reopen no longer loses it. **New chat**
-  erases the stored copy. Nothing is uploaded — this is the same machine, in the
-  browser's own profile directory.
-- **A transcript never contains an API key.** The serializer scrubs `sk-ant-…`
-  from the entire document before it is written, and the schema has no key field
-  at any depth — so a key you paste into the chat box, or one the model echoes
-  back, is redacted in both the stored copy and any saved file.
-- **Know this about `file://`:** a double-clicked report shares one local-storage
-  origin with *every other local HTML file* you open in that browser. Scoping the
-  key per report stops reports from overwriting each other, but it is not an
-  isolation boundary — another local page you open could read a stored
-  transcript. Use **New chat** when that matters, or serve the report over
-  `https://` where each origin is genuinely separate.
-- **Save** writes the conversation to a JSON file you choose (the file picker
-  lets you place it next to `report.html`); **Load** reads one back. A saved
-  transcript holds the full conversation — your questions, the model's answers,
-  the report excerpts quoted into them, and any web-search results — so treat it
-  like the report itself.
-- A **loaded transcript is treated as hostile input**, exactly like streamed
-  model output: it is rendered through the same text-node-only path with the
-  same https-only link policy, and any tool call recorded in it is drawn as a
-  label, never executed.
+Drawing/model text, filenames and loaded transcripts are untrusted. Reports use
+HTML escaping, safe DOM construction, validated HTTPS model/citation links,
+inert JSON configuration and a hash-pinned Content-Security-Policy. These protect
+against executing injected content; they do not make model claims or linked
+websites trustworthy. A saved transcript's recorded tool calls are not executed
+just by loading it.
 
-## Persistent API-key storage (GUI)
+Approved work can start retries, tools and cleanup automatically. There is no
+desktop analysis Stop or global dollar ceiling. Closing/aborting does not refund
+or necessarily cancel accepted provider work. Costs are estimates; incomplete
+usage, fallback pricing and chat tool charges can be absent. Chat spending is
+separate from the analysis run ledger. Check provider usage.
 
-Saving a key for future sessions uses an **OS-secured credential store** —
-Windows Credential Manager, macOS Keychain, or Secret Service / kwallet on Linux
-— via the optional `keyring` package. A backend is trusted only after a verified
-round-trip (store, then read the value back).
+The updater's HTTPS and manifest-supplied SHA-256 protect transfer integrity, not
+independent publisher identity. Installers are unsigned; download host redirects,
+size and total duration are not comprehensively constrained. Verify release
+sources before executing a downloaded installer.
 
-If no secure backend is available, the key is **not** silently written to disk.
-The GUI asks for explicit consent before writing a plaintext fallback file;
-declining keeps the key for the current session only. Any consented plaintext
-file is created owner-only (`0600`) on POSIX. Legacy plaintext key files are
-migrated into the credential store (and deleted) the next time the key is loaded
-or saved on a machine with a working backend.
+## Report a vulnerability
 
-## Diagnostics logs
-
-The optional diagnostics file passes every line through a shared redaction
-filter before writing: `sk-ant-…` key material, `Authorization` / `Bearer`
-values, and named secret fields (`x-api-key`, `api_key`, `token`, `secret`,
-`password`, …) are replaced with `[REDACTED]`. This applies to our own log
-lines, the optional SDK wire-capture (`DRAWING_ANALYZER_DEBUG`), and formatted
-tracebacks. Token *counts* are preserved.
-
-## What project data the artifacts contain
-
-The generated artifacts contain information about your drawings. Treat them
-accordingly:
-
-- `report.html` — the full digest, findings, and (when embedded) your API key.
-- `sheet_text/` — each sheet's extracted text layer.
-- `evidence/` — the image crops the verifier saw for each finding.
-- `findings.json` / `findings.csv` — the structured findings.
-- `*_reviewed.pdf` / `Drawing_Set_Review_Notes.pdf` — the marked-up drawings.
-- `run.log` / `run_manifest.json` / `markup_manifest.json` — the run record:
-  display filenames, configuration, stage statuses, usage, and artifact hashes.
-  Sanitized at emit time (keys redacted, absolute paths reduced to basenames)
-  but still descriptive of the project — treat like the rest of the export.
-- `chat_history.json` — only if you save one from the report's assistant. It is
-  written by your browser, not by the export, so it is **not** listed or hashed
-  in `run_manifest.json`: the manifest inventories what the export itself wrote
-  and is sealed before any conversation happens. A transcript sitting in an
-  export folder is expected to exceed the manifest, not evidence of tampering.
-
-The Ask-AI assistant sends the report context and your question to Anthropic.
-The verification, citation, and QC stages send their described crops and claims
-to Anthropic. An embedded-key report is a credential and must not be shared.
-
-## Reporting a vulnerability
-
-Please report suspected security issues privately to the repository owner rather
-than opening a public issue.
+Report suspected security issues privately to the repository owner, rather than
+publishing a key, private drawing or exploit details in a public issue.
