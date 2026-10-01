@@ -686,8 +686,9 @@ def build_run_manifest(
         },
         "prose_accounting": dict(getattr(ctx, "prose_accounting", None) or {}),
         # WP-02 §7.2. Counts and portable sheet keys only — no quote text, no
-        # path. Absent/empty means the measurement was not taken (cross-QC did
-        # not run, or ran on the whole-set path, which does no host grounding).
+        # path. Recorded on both cross-QC paths since remediation WP-06.2 (U8).
+        # Absent/empty means the measurement was not taken (cross-QC made no
+        # call, or served a result cached before the record existed).
         "cross_qc_discards": dict(getattr(ctx, "cross_qc_discards", None) or {}),
         # Remediation WP-06.1 (B6): the cross-QC items refused for an invalid
         # field, per reason, on both paths. Counts only. Empty means nothing
