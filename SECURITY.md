@@ -92,10 +92,11 @@ The report is a single self-contained file. Its security rests on four layers:
   scoped to that report, so a refresh or reopen no longer loses it. **New chat**
   erases the stored copy. Nothing is uploaded — this is the same machine, in the
   browser's own profile directory.
-- **A transcript never contains an API key.** The serializer scrubs `sk-ant-…`
-  from the entire document before it is written, and the schema has no key field
-  at any depth — so a key you paste into the chat box, or one the model echoes
-  back, is redacted in both the stored copy and any saved file.
+- **Transcripts scrub recognized Anthropic key patterns.** The serializer
+  scrubs `sk-ant-…` from the entire document before writing it, and the schema
+  has no credential field. This is pattern redaction, not general secret
+  detection: a differently formatted credential or private project text can
+  remain in a stored or saved transcript. Inspect it before sharing.
 - **Know this about `file://`:** a double-clicked report shares one local-storage
   origin with *every other local HTML file* you open in that browser. Scoping the
   key per report stops reports from overwriting each other, but it is not an

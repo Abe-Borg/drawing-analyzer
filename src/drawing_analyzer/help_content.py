@@ -14,9 +14,9 @@ header button: :data:`GET_API_KEY` (from the key field) and
 **Why trust it?**). Both render through the same machinery and are resolvable
 via :func:`help_document`.
 
-Keep the prose faithful to the README and ``CLAUDE.md``: these panels are the
+Keep the prose faithful to the implementation; reconcile README and ``CLAUDE.md``: these panels are the
 in-app version of that documentation, so a claim here (verification, gating,
-artifact-backed coverage, "the model never calculates", the licensing story)
+artifact-backed coverage, host arithmetic, the licensing story)
 must match what the pipeline actually does and what LICENSE actually says.
 """
 from __future__ import annotations
@@ -41,7 +41,7 @@ class HelpBlock:
                 **verbatim and never re-wrapped**, so every line has to stay
                 inside :data:`PRE_MAX_WIDTH` or it will run off the panel at
                 the modal's minimum width.
-    ``modal``   a clickable label that opens *another* help document, named by
+    ``modal``   a keyboard-accessible button that opens *another* help document, named by
                 ``doc_key``. This is what lets one panel hand off to a deeper
                 one without ``gui.py`` hard-coding the relationship.
     """
@@ -176,7 +176,7 @@ def _pre(text: str) -> HelpBlock:
 
 
 def _modal(text: str, doc_key: str) -> HelpBlock:
-    """A clickable label that opens another :class:`HelpDocument` by key."""
+    """A button that opens another :class:`HelpDocument` by key."""
     return HelpBlock(kind="modal", text=text, doc_key=doc_key)
 
 
@@ -429,7 +429,7 @@ _HOW_IT_WORKS = HelpDocument(
     key="how_it_works",
     button_label="How it works",
     title="How Drawing Analyzer works",
-    intro="A vision pipeline: every sheet is read whole, grounded in its own text layer.",
+    intro="A vision pipeline that supplies page images and extracted text for a model review you must check.",
     sections=(
         _section(
             "The pipeline",
@@ -440,23 +440,22 @@ _HOW_IT_WORKS = HelpDocument(
                 "→ optional QC (auditors + anchor → verify → markup)."
             ),
             _para(
-                "Each PDF page is one sheet. Every sheet is read whole — the overview plus "
-                "all 36 tiles — so the model sees the entire drawing at once, never a "
-                "cropped fragment."
+                "Each accepted PDF page is one sheet. Uncached digest reads receive the "
+                "overview plus all 36 tiles. Smaller crops are used by later verification "
+                "and investigation; supplied pixels do not prove the model noticed everything."
             ),
         ),
         _section(
             "Text-layer grounding",
             _para(
-                "Before rasterizing, each sheet's vector text layer is lifted losslessly "
-                "and spliced into the prompt ahead of the images, as the source of truth "
-                "for exact strings — tags, schedule values, note numbers, sheet "
-                "references. Vector text can't misread a digit the way OCR of a "
-                "low-resolution embedded raster can."
+                "Before rasterizing, selectable PDF text is extracted and placed ahead "
+                "of the images. It helps check strings such as tags and schedule values, "
+                "but extraction order and the PDF's text layer can be wrong. Raster-only "
+                "pages need the model to read the pixels."
             ),
             _bullet(
-                "It is sent as-is up to 15,000 characters per sheet — ample for a dense "
-                "E-size sheet. A sheet that exceeds it is clipped and explicitly marked "
+                "It is sent as-is up to 15,000 characters per sheet. A longer sheet is "
+                "clipped and explicitly marked "
                 "[TRUNCATED] rather than silently shortened, and its images are still sent "
                 "whole."
             ),
@@ -510,9 +509,9 @@ _HOW_IT_WORKS = HelpDocument(
             "Caching",
             _para(
                 "Caching is content-keyed per sheet, so re-running a set after editing one "
-                "sheet only re-pays for the changed sheet. A two-level key recognizes an "
-                "unchanged sheet before rasterizing, so a fully cached re-run skips "
-                "rendering entirely."
+                "sheet can reuse unchanged sheet digests. Changed set-level inputs can "
+                "still need new calls. A two-level key can avoid digest rasterizing on "
+                "a warm run; verification, markups or saved tiles may still render."
             ),
             _para(
                 "Successful set-level and QC model stages are cached too, but only against "
@@ -568,7 +567,7 @@ _HOW_IT_WORKS = HelpDocument(
             _bullet("Cross-sheet QC — a text-only hunt for conflicts that span sheets."),
             _bullet(
                 "Prose harvest — coordination and conflict items the digest wrote in prose "
-                "are mirrored into the findings so nothing the model raised is left behind."
+                "are parsed and matched into findings. Filtering and parsing can omit items."
             ),
             _bullet(
                 "Edition audit — a zero-API check that turns a note citing one edition of a "
@@ -592,8 +591,9 @@ _HOW_IT_WORKS = HelpDocument(
         _section(
             "The marked-up PDF",
             _para(
-                "Your original files are never modified. A reviewed copy is written beside "
-                "them, and every mark is a real PDF annotation authored “Drawing Analyzer "
+                "Analysis reads your originals and writes reviewed copies in temporary "
+                "work. Save Reviewed PDF(s) copies them to your chosen folder; existing "
+                "destinations can be overwritten. Marks are PDF annotations authored “Drawing Analyzer "
                 "(AI review)”, so it opens as a normal markup list in Bluebeam, Acrobat, or "
                 "any other reviewer."
             ),
@@ -603,8 +603,8 @@ _HOW_IT_WORKS = HelpDocument(
             ),
             _bullet(
                 "A finding with no location on the page becomes a margin callout, placed "
-                "in a band checked against the drawing's own content so it never covers "
-                "the work. One that will not fit overflows to an appended AI Review Notes "
+                "in a band checked against detected drawing content. That heuristic is "
+                "not a proof of empty space. One that will not fit overflows to an appended AI Review Notes "
                 "page with a link back."
             ),
         ),
@@ -626,878 +626,69 @@ _HOW_IT_WORKS = HelpDocument(
 # Why trust it?
 # --------------------------------------------------------------------------
 
+# Ledger sources for each short claim; titles and paragraphs are a contract.
+TRUST_SHORT_SOURCES = {
+    "S01": ("A06", "A11", "A12"), "S02": ("A10", "A11"),
+    "S03": ("A13", "A16"), "S04": ("A16",),
+    "S05": ("A01", "A02", "A05", "A07", "A17", "A18"),
+    "S06": ("U02", "U14", "U32", "U33"),
+    "S07": ("N01", "N02", "N03", "N04", "N05", "N06"),
+    "S08": ("U19", "U20", "A11", "A13", "A18"),
+}
+
 _WHY_TRUST_IT = HelpDocument(
-    key="why_trust_it",
-    button_label="Why trust it?",
-    title="Why you can trust the review",
-    intro="The whole design assumes the model can be wrong — and checks its work.",
+    key="why_trust_it", button_label="Why trust it?",
+    title="Why trust it?",
+    intro="The design assumes you check the review, so it records origins, uncertainty and evidence instead of treating a model's answer as approval.",
     sections=(
-        _section(
-            "Grounded in the drawing's own text",
-            _para(
-                "Exact strings come from each sheet's vector text layer, sent verbatim — "
-                "not from OCR. A tag or schedule value the model reports is grounded in "
-                "text lifted losslessly from the PDF, so it can't quietly misread a digit."
-            ),
-        ),
-        _section(
-            "The model never calculates",
-            _para(
-                "Models transcribe numbers; the host does the math with exact Decimal "
-                "arithmetic — never the model's own arithmetic, never eval. A column that "
-                "doesn't total or a density×area that doesn't match is caught by code, "
-                "not by opinion."
-            ),
-        ),
-        _section(
-            "Deterministic auditors",
-            _para(
-                "A battery of zero-API auditors runs over the text layers, catching the "
-                "class of defect a vision model is unreliable at but code is exact at: a "
-                "stale cross-reference, a column that doesn't add up, a tag spelled two "
-                "ways, a drifted title-block field, an index that disagrees with the set. "
-                "Their findings are marked DETERMINISTIC — trusted without a model re-check."
-            ),
-        ),
-        _section(
-            "Hallucinations are flagged, never hidden",
-            _para(
-                "Every finding's quote is anchored back to a rectangle on its page. A "
-                "non-empty quote that matches nothing anywhere is the hallucination signal: "
-                "it is labeled [UNANCHORED], flagged loudly as a margin callout, and never "
-                "drawn as if it had a real location."
-            ),
-        ),
-        _section(
-            "Findings are verified against the pixels",
-            _para(
-                "Before a finding is clouded onto an issued drawing, the verification pass "
-                "renders a high-DPI crop around it and asks a focused model call whether it "
-                "actually holds in that crop. Every crop is saved and hashed before it is "
-                "sent, so no verdict rests on an image absent from the trail."
-            ),
-            _bullet(
-                "CONFIRMED → VERIFIED (solid cloud). CONTRADICTED → REJECTED "
-                "(pulled from the ink, but kept in an index row). NOT_VISIBLE → "
-                "UNCERTAIN (drawn dashed with an [UNVERIFIED] prefix)."
-            ),
-            _bullet(
-                "A budget cap or a garbled reply can never mark a finding wrong — it stays "
-                "UNCERTAIN, never REJECTED."
-            ),
-        ),
-        _section(
-            "Nothing is silently dropped",
-            _para(
-                "On an exhaustive run every ledger entry gets ink except the ones the "
-                "verifier proved wrong — and even those get a reconciled index row with "
-                "page links. A finding is either on the paper or accounted for in the "
-                "index; it is never simply invisible."
-            ),
-        ),
-        _section(
-            "Coverage is proven, not claimed",
-            _para(
-                "After each reviewed PDF is saved it is reopened and reconciled against the "
-                "plan: every cloud, callout, and index row is stamped with a private id, "
-                "and a placement counts only when its stamp is found again in the saved "
-                "file. If any planned markup is missing, the run is marked INCOMPLETE — the "
-                "PDF is renamed, the report shows a red banner, and it is never presented "
-                "as a clean success."
-            ),
-            _bullet(
-                "Stamps carry a per-run id, so pre-existing annotations and markups from an "
-                "earlier review run can neither satisfy nor break the accounting."
-            ),
-        ),
-        _section(
-            "Your drawings are never edited",
-            _para(
-                "The analyzer reads your PDFs and writes new files beside them. The files "
-                "you loaded are opened read-only and are never modified, moved, or "
-                "overwritten — the markups land on a separate reviewed copy."
-            ),
-        ),
-        _section(
-            "Even the AI's own checklist is checked",
-            _para(
-                "On a QC run the model writes the review plan for this particular set, and "
-                "every code-based item on it has to name its code, section, and edition. "
-                "Those references are then put through the citation check like any other — "
-                "a section the model invented comes back as a mismatch instead of quietly "
-                "becoming the standard you were reviewed against."
-            ),
-        ),
-        _section(
-            "One honest, guarded status",
-            _para(
-                "An exhaustive run carries a single rolled-up QC status — NOT_REQUESTED, "
-                "COMPLETE, PARTIAL, or FAILED. A failed reconciliation, an unchecked cited "
-                "claim, a missing verification crop, or a source that changed mid-run holds "
-                "the run below COMPLETE. A clean review is a guarded claim, not an assumption."
-            ),
-        ),
-        _section(
-            "The run audits itself, in writing",
-            _para(
-                "Every export carries run.log and run_manifest.json: the run id, the exact "
-                "software and model versions, every input accepted or rejected, the "
-                "settings actually used, a per-stage table with statuses and call counts, "
-                "the token and dollar usage, and the SHA-256 hash of every file produced. "
-                "They are written even when the run fails, so a bad run leaves the same "
-                "trail as a good one."
-            ),
-            _bullet(
-                "Both are scrubbed as they are written — API keys redacted, absolute paths "
-                "reduced to file names — so the record can be filed with the project "
-                "without carrying your credentials or your folder layout."
-            ),
-        ),
-        _section(
-            "Model output is treated as hostile",
-            _para(
-                "A drawing is untrusted input: its text and images become the prompt, so "
-                "what the model writes back can be influenced by what is on the page. "
-                "Everything it returns is therefore handled as data that can never execute "
-                "— in the reviewed PDF, the exports, and the HTML report's Ask-AI assistant."
-            ),
-            _link("The full trust boundary — SECURITY.md", SECURITY_DOC_URL),
-        ),
-        _section(
-            "Still not convinced?",
-            _para(
-                "Good. None of the above should be taken on faith. The panel below is the "
-                "long version: every model call the app can make, exactly what leaves your "
-                "computer and what never does, what the AI is allowed to touch, and how to "
-                "check each claim for yourself."
-            ),
-            _modal(
-                "I'm not convinced — show me exactly what the AI does at runtime",
-                "runtime_transparency",
-            ),
-        ),
+        _section("You can separate findings from their origins", _para(
+            "Prose is model-authored. Findings keep origin tags, quotes, locations and check results in the ledger — the exported list you can inspect. An origin tag is not proof.")),
+        _section("Local checks support specific claims with evidence", _para(
+            "Text checks and quote matching run locally. Decimal (base-ten) arithmetic checks transcribed equations; DETERMINISTIC status requires matching the numbers and relationship to the drawing. Models can still misread or miss content.")),
+        _section("Uncertainty and rejected findings have separate labels", _para(
+            "Model crop checks label findings VERIFIED, REJECTED or UNCERTAIN; missing locations are UNANCHORED. An inconclusive check does not prove a finding false. Rejected findings remain in the ledger/index.")),
+        _section("Saved annotations are checked against the plan", _para(
+            "The writer stamps required marks, reopens the PDFs and compares receipts with the plan. Missing required marks make coverage INCOMPLETE; this checks saved marks, not whether every defect was found.")),
+        _section("Approved work can continue without another click", _para(
+            "Launch loads keys/profiles/logs and may check GitHub for updates; that check can be disabled. Selection helpers and chat autosave also run automatically. Approved reviews and sent questions start automatic calls, retries, tools and cleanup; analysis has no Stop button.")),
+        _section("You control the key and export choices", _para(
+            "Keys prefer your operating system's tested credential store; a readable-file fallback needs consent. HTML omits the key by default; embedding puts it in the file. Browser storage and private project files need your care.")),
+        _section("Project data and automatic connections are described", _para(
+            "Approved review and sent chat context go to Anthropic by default; web tools may research project-derived claims. The dossier names endpoint/proxy overrides, update redirects, installer URLs and clicked links.")),
+        _section("You can inspect evidence and estimated spending", _para(
+            "Export All writes findings, source text, evidence, receipts and file fingerprints. Costs are estimates: interrupted usage, fallback pricing and chat search charges can be missing. Check claims against drawings and spending against your provider.")),
+        _section("Not convinced?", _para(
+            "Fair. The points above are claims — here is the mechanism behind each one, action by action, plus how to audit any of it yourself."),
+            _modal("I'm not convinced — show me exactly what runs →", "runtime_transparency")),
     ),
 )
 
 
 # --------------------------------------------------------------------------
-# Runtime transparency — "I'm not convinced"
-#
-# Reached from the link at the foot of "Why trust it?", for the reader who
-# wants the mechanism rather than the reassurance. It is NOT a header modal.
-#
-# Audience: competent AEC professionals who are not software developers. So:
-# name the real mechanism (model ids, tool names, file names, env vars) but
-# always say what it *means* in the same breath. Where a claim is Anthropic's
-# policy rather than something this app enforces, say so — the whole point of
-# this panel is that it does not ask to be believed.
-#
-# The ASCII diagrams are `pre` blocks rendered verbatim; keep every line inside
-# PRE_MAX_WIDTH or it will be clipped at the modal's minimum width.
+# Runtime dossier: the native view and this compatibility data share one source.
 # --------------------------------------------------------------------------
 
-_TRUST_BOUNDARY_DIAGRAM = """
-+-- YOUR COMPUTER ----------------------------+
-|  drawing PDFs    spec docs    your API key  |
-|                                             |
-|  render tiles + lift the vector text layer  |
-|  deterministic auditors, exact-decimal math |
-|  anchor quotes, draw markups, write exports |
-+---------------------+-----------------------+
-                      |  HTTPS + your API key
-                      v
-         +-- api.anthropic.com -------------+
-         |  Claude reads the images + text  |
-         |  and writes the findings back    |
-         |  web_search runs HERE, not on    |
-         |  your machine (citation check)   |
-         +----------------------------------+
-"""
+def _runtime_document() -> HelpDocument:
+    from .trust_dossier import Links, plain_blocks, sections
 
-_STAGE_TABLE = """
-WHAT HAPPENS                    WHO       PAID?
-------------------------------- --------- -----
-list sheets, render tiles       your PC   free
-lift the vector text layer      your PC   free
-sheet digest   (1 call/sheet)   Anthropic paid
-focus report   (1 call/set)     Anthropic paid
-set identity + review plan      Anthropic paid
-critique       (2 calls/sheet)  Anthropic paid
-cross-sheet QC (1 call/set)     Anthropic paid
-deterministic auditors          your PC   free
-arithmetic re-check (Decimal)   your PC   free
-edition audit                   your PC   free
-anchor quotes -> rectangles     your PC   free
-verify         (1 call/finding) Anthropic paid
-investigate    (<=10 per run)   Anthropic paid
-citation check (per code ref)   Anthropic paid
-draw markups, reopen, reconcile your PC   free
-report, exports, run manifest   your PC   free
-"""
-
-_INVESTIGATION_DIAGRAM = """
-   an UNCERTAIN finding
-           |
-           v
-   Claude asks for ONE piece of evidence  <---+
-           |                                  |
-           v                                  |
-   your PC runs it and saves the image        |  up to 6
-   BEFORE sending it:                         |  rounds,
-      crop_region - a region of a sheet       |  then the
-      find_text   - text search (free)        |  host ends
-      view_sheet  - another sheet overview    |  the loop
-           |                                  |
-           +----------------------------------+
-           |
-           v
-   CONFIRMED / CONTRADICTED / still UNCERTAIN
-   (running out of budget NEVER means "wrong")
-"""
+    result = []
+    for section in sections():
+        blocks = []
+        for block in section.blocks:
+            if isinstance(block, Links):
+                blocks.extend(_link(label, url) for label, url in block.items)
+            else:
+                blocks.extend(_para(text) for text in plain_blocks(block))
+        result.append(HelpSection(section.title, tuple(blocks)))
+    return HelpDocument(
+        key="runtime_transparency", button_label="I'm not convinced",
+        title="I'm not convinced — exactly what runs",
+        intro="For the professional responsible for checking and signing the review: mechanisms, limits, automatic work and ways to audit it.",
+        sections=tuple(result),
+    )
 
 
-RUNTIME_TRANSPARENCY = HelpDocument(
-    key="runtime_transparency",
-    button_label="I'm not convinced",
-    title="What the AI actually does at runtime",
-    intro=(
-        "Every model call this app can make, what leaves your computer, what the "
-        "AI is allowed to touch — and how to check all of it yourself."
-    ),
-    sections=(
-        _section(
-            "Why this panel exists",
-            _para(
-                "“Why trust it?” describes the safeguards. This one describes the "
-                "machinery, because a safeguard you can't inspect is just a promise. "
-                "Nothing here needs to be taken on faith: every claim below names a file, "
-                "a setting, or an artifact you can open yourself, and the last section "
-                "tells you where to look."
-            ),
-            _para(
-                "The short version: this is a desktop program that reads your drawings "
-                "and writes a report. It sends page images and page text to Anthropic and "
-                "gets words back. It never edits your drawings, never runs code the model "
-                "wrote, and never talks to a server belonging to whoever made this app — "
-                "because there isn't one."
-            ),
-        ),
-        _section(
-            "The trust boundary, in one picture",
-            _pre(_TRUST_BOUNDARY_DIAGRAM),
-            _para(
-                "There is exactly one place your project data goes: Anthropic's API, "
-                "authenticated with the key you supplied and billed to your own account. "
-                "There is no account to create here, no cloud workspace, no upload step, "
-                "and no analytics, telemetry, or crash reporting of any kind."
-            ),
-            _bullet(
-                "The one other outbound connection is the update check, which reads a "
-                "small version file from github.com. It carries no project data, and it "
-                "can be switched off."
-            ),
-            _bullet(
-                "Web searching during the citation check runs on Anthropic's servers, not "
-                "from your machine, and only ever searches for the code section named in a "
-                "finding — never your drawing content."
-            ),
-        ),
-        _section(
-            "Exactly what leaves your computer",
-            _para("On a paid stage, the request body contains:"),
-            _bullet(
-                "Rendered images of the sheet — one overview plus a 6×6 grid of tiles. "
-                "These are pictures of your drawing, so treat them as you would treat "
-                "emailing the PDF."
-            ),
-            _bullet(
-                "The sheet's text layer — the PDF's own selectable text, sent as-is, up to "
-                "15,000 characters per sheet. That comfortably holds a dense E-size sheet; "
-                "a pathological one (a huge embedded schedule) is cut at the limit and "
-                "marked [TRUNCATED], so the model knows it is reading a clipped text layer "
-                "rather than a complete one. The images are never truncated — the sheet is "
-                "still read whole either way."
-            ),
-            _bullet(
-                "The file name of each PDF and which page this sheet is — every request is "
-                "framed with something like “M-101.pdf (page 3/12)”, and the batch path "
-                "names its uploads from the same label. Only the bare name travels, never "
-                "the folder it came from. If your file names carry a client or a project "
-                "you would rather not send, rename the copies before loading them."
-            ),
-            _bullet(
-                "The text of any spec documents you attached, and the focus sentence you "
-                "typed."
-            ),
-            _bullet(
-                "In later stages, much smaller things: a cropped image around one finding, "
-                "the sentence being checked, and a code section number."
-            ),
-            _bullet(
-                "Your API key, in the authorization header. That is what a key is for; it "
-                "is what tells Anthropic whose account to bill."
-            ),
-            _para(
-                "What is NOT in the request: the path to your files (only the bare file "
-                "name travels, never the folder structure around it), your machine name, "
-                "your identity, your other projects, or anything from any drawing you did "
-                "not load into this run."
-            ),
-        ),
-        _section(
-            "What Anthropic does with it — and what this app can promise",
-            _para(
-                "This app can promise where it sends data. It cannot promise what happens "
-                "after that, so here is the honest split."
-            ),
-            _bullet(
-                "Anthropic's commercial terms for the API state that inputs and outputs "
-                "are not used to train its models. That is Anthropic's policy and your "
-                "contract with them — not something this software enforces. Read it "
-                "yourself; the links are below."
-            ),
-            _bullet(
-                "Retention, regional processing, zero-data-retention arrangements, and "
-                "enterprise controls are all settings on YOUR Anthropic account, not on "
-                "this app. If your firm needs a particular arrangement, it is negotiated "
-                "there and this app inherits it automatically."
-            ),
-            _bullet(
-                "If your project genuinely cannot leave your premises, this is not the "
-                "right tool. There is no offline mode: reading a sheet means sending it. "
-                "Say so before a set goes in, not after."
-            ),
-            _link("Anthropic Privacy Center", ANTHROPIC_PRIVACY_URL),
-            _link("Anthropic Trust Center (security, compliance, subprocessors)", ANTHROPIC_TRUST_URL),
-            _link("Anthropic commercial terms of service", ANTHROPIC_TERMS_URL),
-        ),
-        _section(
-            "Which model does what",
-            _para(
-                "Different jobs go to different models, chosen for the job rather than for "
-                "the price tag. Every one of these can be overridden with an environment "
-                "variable if your firm standardizes on something else."
-            ),
-            _bullet(
-                "Claude Opus 5.5 — reading the sheets, the critique, writing the review "
-                "plan, the set-level synthesis and focus report, the cross-sheet conflict "
-                "hunt, and the investigation loop. The deep-reasoning work."
-            ),
-            _bullet(
-                "Claude Sonnet 5.5 — the first verification look at each finding. Smaller, "
-                "faster and cheaper, because the question is narrow: does this one thing "
-                "hold in this one crop? It also runs the report's Ask-AI assistant, which "
-                "searches and fetches web pages on the reader's own key, where half the "
-                "price matters."
-            ),
-            _bullet(
-                "Sonnet 5.5 also runs three stages outright: the set-identity read "
-                "(advisory only, with a deterministic regex backstop), the prose "
-                "harvest's structuring call (the item is already found — all that "
-                "is left is restating one sentence in the findings format), and "
-                "the citation check, which fetches the cited code section and reads "
-                "it — narrow work that does not need the flagship."
-            ),
-            _bullet(
-                "Escalation is one-way and upward. A finding the smaller model could not "
-                "settle does not get left at the cheap answer — worst severity first, it "
-                "goes to the Opus-driven investigation loop below."
-            ),
-        ),
-        _section(
-            "One run, stage by stage — who does it and who pays",
-            _pre(_STAGE_TABLE),
-            _para(
-                "Everything marked “your PC” is ordinary Python running locally: geometry, "
-                "string matching, exact decimal arithmetic, PDF drawing. It costs nothing, "
-                "works with no network, and produces the same answer every time."
-            ),
-            _para(
-                "A standard run without QC pays for exactly one thing: the per-sheet "
-                "digest — plus the focus report, and only if you typed a focus. Set "
-                "identity and the review plan belong to the QC stack and do not run "
-                "otherwise, and ticking Deterministic audit only adds no paid rows at all."
-            ),
-        ),
-        _section(
-            "Loading drawings and estimating the cost — zero API calls",
-            _para(
-                "Dropping in PDFs opens them locally to count pages and check whether each "
-                "has a real text layer. The cost estimate is computed on your machine from "
-                "sheet count, image sizes, and a local token estimator, then priced from a "
-                "built-in rate table. Nothing is transmitted, and no money is spent, until "
-                "you press Confirm on the estimate dialog."
-            ),
-        ),
-        _section(
-            "Standard analysis — the per-sheet digest",
-            _para(
-                "One paid request per uncached sheet. It carries the sheet's images and "
-                "its text layer, and asks for a structured description plus a "
-                "machine-readable findings block."
-            ),
-            _bullet(
-                "The text layer is sent ahead of the images and named as the source of "
-                "truth for exact strings, so tags and schedule numbers come from the PDF's "
-                "own text rather than from the model reading pixels."
-            ),
-            _bullet(
-                "The reply is parsed by ordinary code, not interpreted. The findings block "
-                "is cut out byte-exactly; the prose is stored untouched. Malformed output "
-                "fails the sheet loudly instead of being patched up."
-            ),
-            _bullet(
-                "Sheets are never split, summarized, or sampled — every sheet is read "
-                "whole, every time."
-            ),
-        ),
-        _section(
-            "Per-run focus and spec documents",
-            _para(
-                "The focus text you type is added to the prompt for each sheet and drives "
-                "an extra Focus Report. It never replaces the standard digest."
-            ),
-            _para(
-                "Spec documents are read locally (PDF, Word, text, Markdown), converted to "
-                "plain text, budgeted, and folded into the review prompts as reference "
-                "material. They are treated as ground truth to check the drawings against; "
-                "the app does not modify them and does not produce a separate spec report."
-            ),
-            _para(
-                "Attaching specs costs money on every sheet, and how much depends on the "
-                "processing mode. Real-time modes put the spec text behind a prompt-cache "
-                "breakpoint: the first sheet pays a write premium (1.25x an ordinary copy) "
-                "and each sheet after it reads the block back at about a tenth of a copy. "
-                "That is cheap per sheet but it is not free and it is not a one-time "
-                "charge - across 100 sheets it comes to roughly 11 copies of the spec "
-                "text, and more when several sheets go out together before the first "
-                "response lands, since each of those pays a write."
-            ),
-            _para(
-                "Economy (batch) mode sets no breakpoint - sheets are submitted in "
-                "parallel, so a breakpoint would buy the write premium with nothing yet "
-                "written to read - so every sheet bills the whole block as ordinary input "
-                "at the batch discount: half a copy per sheet, about 50 copies across 100 "
-                "sheets. So the spec block alone runs roughly 4 to 5 times more in Economy "
-                "mode on a large set, even though Economy is cheaper overall for the "
-                "drawings themselves. The cost preview prices whichever path you picked "
-                "and says which one it used. If the estimate surprises you, the lever is "
-                "the size of the spec text, not the mode."
-            ),
-        ),
-        _section(
-            "Processing mode — the same review, sent differently",
-            _para(
-                "Economy, Hybrid, and Fast change only how requests are transported. Same "
-                "models, same prompts, same inputs, same output contract."
-            ),
-            _bullet(
-                "Economy and Hybrid use Anthropic's Message Batches API: images are "
-                "uploaded once through the Files API, the job joins a shared queue, and "
-                "results come back when it reaches the front — hours, sometimes overnight, "
-                "at roughly half the price."
-            ),
-            _bullet(
-                "Uploaded files are released when a batch finishes, when it is "
-                "cancelled, and when sending or collecting it stops on an error (a batch "
-                "still running is cancelled first). A batch that can't be cancelled "
-                "leaves its files to expire on Anthropic's side."
-            ),
-            _bullet(
-                "If a batch stalls, the app resubmits the unfinished sheets as fresh "
-                "batches. It deliberately does NOT fall back to full-price real-time calls "
-                "behind your back — a run cannot silently cost double."
-            ),
-            _bullet(
-                "Fast sends everything immediately. On the two critique reads it reuses "
-                "the identical image prefix so the second read bills those image tokens at "
-                "about a tenth — same tokens in, so the findings are unchanged."
-            ),
-        ),
-        _section(
-            "Deterministic audit only — the checks with no AI in them",
-            _para(
-                "The auditor battery itself makes zero API calls. It is plain Python "
-                "reading the text layers: stale sheet cross-references, columns that don't "
-                "total, a tag spelled two ways, title-block fields that drifted across the "
-                "set, an index that disagrees with the sheets present. Its findings are "
-                "marked DETERMINISTIC and are trusted without asking a model."
-            ),
-            _para(
-                "Be clear about what the checkbox does, though: it adds these checks on "
-                "top of a normal run, and a normal run still reads every sheet with the "
-                "API. It costs nothing extra — it does not make the run offline. There is "
-                "no fully offline mode."
-            ),
-            _bullet(
-                "Reference checking first learns the set's own numbering convention from "
-                "the sheets themselves, then judges each reference against it — with a "
-                "negative list so a voltage, an RFI number, a dimension, or a code section "
-                "is never mistaken for a missing sheet."
-            ),
-            _bullet(
-                "Arithmetic is done with exact decimal arithmetic, never floating point "
-                "and never by evaluating text as code."
-            ),
-        ),
-        _section(
-            "QC Markups — what each stage actually sends",
-            _bullet(
-                "Set identity — one text-only call over the digest summaries, the early "
-                "sheets' text, and the text around every code-edition mention. Returns "
-                "disciplines, jurisdiction, units, and adopted codes with quotes."
-            ),
-            _bullet(
-                "Review plan — one text-only call that writes this set's checklist. Capped "
-                "at 60 items; an over-long item is dropped rather than truncated; every "
-                "code item must name code, section, and edition."
-            ),
-            _bullet(
-                "Critique — the sheet's images and text again, under a hostile persona "
-                "whose only job is to find problems, including things that should be on "
-                "the sheet and aren't. Run twice; agreement is recorded, disagreement is "
-                "kept rather than resolved by discarding."
-            ),
-            _bullet(
-                "Cross-sheet QC — text only, no images: the sheet summaries together, "
-                "hunting for conflicts that only appear when sheets are compared."
-            ),
-            _bullet(
-                "Verification — for each finding, a high-DPI crop around its location plus "
-                "a short question: does this hold in this crop? The crop is written to "
-                "disk and hashed BEFORE it is sent, so no verdict can rest on an image "
-                "that isn't in the evidence folder."
-            ),
-            _bullet(
-                "Citation check — for each unique code reference, a web-search-backed call "
-                "asking whether that section, in the edition this set adopts, supports the "
-                "claim citing it."
-            ),
-            _para(
-                "Between and after these, everything else is local: merging findings into "
-                "one ledger, mapping quotes to rectangles, numbering, drawing, and "
-                "reconciling."
-            ),
-        ),
-        _section(
-            "The investigation loop — the only agentic part of the app",
-            _para(
-                "When the verifier honestly answers “I can't see that in this crop”, the "
-                "app can let the model ask for more evidence. This is the one place the "
-                "model drives a loop instead of answering a single question, so it is "
-                "worth understanding precisely."
-            ),
-            _pre(_INVESTIGATION_DIAGRAM),
-            _bullet(
-                "The model does not execute anything. It names a tool and its arguments; "
-                "YOUR machine decides whether that is legal, runs it, and hands back the "
-                "result."
-            ),
-            _bullet(
-                "There are exactly three tools, all read-only, all confined to the sheets "
-                "in this run: crop a region of a sheet, search a sheet's text, or view "
-                "another sheet's overview. No file system access, no shell, no network, no "
-                "writing, no reaching outside the loaded set."
-            ),
-            _bullet(
-                "Every image it requests is saved to the finding's evidence folder before "
-                "being sent, alongside investigation.json recording the whole exchange in "
-                "order. You can replay what it looked at."
-            ),
-            _bullet(
-                "Hard budgets: 6 evidence requests per finding, 10 findings per run, worst "
-                "severity first. At the cap the host forces a final text answer. A finding "
-                "it could not settle stays UNCERTAIN — a spent budget or a garbled reply "
-                "can never mark a finding wrong."
-            ),
-            _bullet(
-                "The loop runs strictly one finding at a time, and its conclusions are "
-                "cached against the content of the whole set — so a warm re-run replays "
-                "the same evidence with no API calls, and any edit to a drawing throws the "
-                "cached answer away."
-            ),
-        ),
-        _section(
-            "The citation check — the only time anything is searched online",
-            _para(
-                "Code citations are the one thing a drawing set genuinely cannot validate "
-                "about itself, so this stage asks the internet. The search runs as a "
-                "server-side tool inside Anthropic's API, not from your machine."
-            ),
-            _bullet(
-                "The query is the code reference and the claim — a section number and a "
-                "sentence. Your sheets, images, and file names are not searched for."
-            ),
-            _bullet(
-                "Sources are filtered by a built-in blocklist: forums, Q&A aggregators, "
-                "DIY content farms, social media, general encyclopedias, and other AI "
-                "assistants' output. Another model's answer is not a citable source."
-            ),
-            _bullet(
-                "The companion fetch tool can only open a page that already appeared in a "
-                "search result in the same conversation, so the model cannot fetch a URL "
-                "it invented — and it is capped in both page count and page size."
-            ),
-            _bullet(
-                "A mismatch never silently downgrades a finding. It is surfaced with which "
-                "edition the verdict was checked against, what the current edition is, and "
-                "a link — because sometimes the stale citation IS the finding."
-            ),
-            _bullet(
-                "Verdicts are cached for 30 days by default; a partial or failed check is "
-                "never cached, so a cache hit can never hide an unchecked claim."
-            ),
-        ),
-        _section(
-            "Marking up the PDFs — and what is not touched",
-            _para(
-                "The markup stage is entirely local. Your original files are opened "
-                "read-only; a separate reviewed copy is written."
-            ),
-            _bullet(
-                "Every mark is a standard PDF annotation authored “Drawing Analyzer (AI "
-                "review)”. Provenance is unmistakable in Bluebeam, Acrobat, or any other "
-                "reviewer, and any recipient can delete the whole layer."
-            ),
-            _bullet(
-                "After saving, the app reopens the file it just wrote and looks for every "
-                "mark it intended to place, matched by a private per-run stamp. If "
-                "anything is missing the file is renamed to say INCOMPLETE. Markups from "
-                "an earlier run can neither satisfy nor break that count."
-            ),
-        ),
-        _section(
-            "The HTML report's Ask-AI assistant",
-            _para(
-                "The report is a single self-contained file. Its chat panel calls "
-                "Anthropic directly from your browser — there is no server in between, and "
-                "nothing about your question reaches anyone else."
-            ),
-            _bullet(
-                "By default your key is NOT written into the file. The panel asks for one "
-                "on first use and keeps it only in that browser tab's sessionStorage, "
-                "cleared when the tab closes or when you press Forget key. The file is "
-                "safe to send to a colleague."
-            ),
-            _bullet(
-                "Embed API key in HTML report is an explicit opt-in that bakes the key "
-                "into the file. The report then shows a red warning, and the file must be "
-                "treated as a credential — deleting or regenerating it is the only way to "
-                "remove the key."
-            ),
-            _bullet(
-                "The box you type in is expandable. It grows as you type, the small bar "
-                "above it drags to any height, and the arrow at its right jumps it to "
-                "full height and back -- so a long question or a pasted spec paragraph "
-                "does not have to be written through a two-line slot. The size you pick "
-                "is remembered; double-click the bar to go back to growing on its own."
-            ),
-            _bullet(
-                "Because the panel runs on your key, its spend never appears in the "
-                "run's cost figures — so the footer keeps a running token count for the "
-                "conversation and an estimated dollar cost beside it. The estimate is a "
-                "range, not a bill: cached input is billed at a fraction of the normal "
-                "rate and the API does not report which cache tier a given write used."
-            ),
-            _bullet(
-                "The report text is sent once and then re-read from Anthropic's prompt "
-                "cache for an hour, so a long question-and-answer session costs a small "
-                "fraction of asking the same questions in separate sessions."
-            ),
-            _bullet(
-                "The conversation is kept for you. It saves into that browser's local "
-                "storage for that report, so a refresh or reopening the file does not "
-                "lose it, and New chat erases it. Save writes it to a JSON file you "
-                "choose and Load reads one back, so a conversation can live beside the "
-                "report or go to a colleague. None of that is uploaded anywhere."
-            ),
-            _bullet(
-                "A saved conversation never contains your API key: anything shaped like "
-                "a key is redacted from the whole document before it is written, and the "
-                "file format has no field for one. A conversation you load back in is "
-                "treated as untrusted -- rendered as text like any model output, and any "
-                "tool call recorded in it is shown as a label, never re-run."
-            ),
-            _bullet(
-                "The model's answers are inserted as text nodes, never as markup, and "
-                "every link is validated to be an absolute https URL before it becomes "
-                "clickable. The page also carries a content-security policy that pins the "
-                "scripts by hash and permits network access to nowhere except Anthropic's "
-                "API."
-            ),
-        ),
-        _section(
-            "Updates, logs, and what is kept on your disk",
-            _bullet(
-                "Update check — once a day at launch, plus the button in the corner. It "
-                "reads a version file from github.com (redirected to GitHub's asset host) "
-                "and sends nothing about you or your project. Any download is verified "
-                "against the SHA-256 hash in that same release before it is allowed to "
-                "run, and you choose when to install."
-            ),
-            _bullet(
-                "Diagnostics log — a rotating local file, never uploaded. Every line runs "
-                "through a redaction filter first, so keys, authorization headers, and "
-                "named secret fields are replaced before they are written."
-            ),
-            _bullet(
-                "Cache — analysis results are cached in a file under your home folder, "
-                "keyed by the content of each sheet. Editing a sheet re-analyzes only that "
-                "sheet. Deleting the file loses nothing but money."
-            ),
-            _bullet(
-                "Chat transcripts — the report's assistant keeps your conversation in "
-                "that browser's local storage for that report, and Save writes a JSON "
-                "copy wherever you choose. Both stay on this machine; New chat erases "
-                "the stored one. Note that a report opened straight off disk shares one "
-                "local-storage area with every other local page in that browser, so the "
-                "per-report key separates conversations but does not wall them off."
-            ),
-            _bullet(
-                "API key — stored in your operating system's credential manager (Windows "
-                "Credential Manager, macOS Keychain, Secret Service on Linux). If none is "
-                "available it is NOT quietly written to disk: the app asks first, and "
-                "declining keeps it for the session only. A key file from an older "
-                "setup is moved into the credential manager only when it holds a key, "
-                "and a file holding anything else is left in place and named in the "
-                "activity log."
-            ),
-            _bullet(
-                "Exports — the report, the reviewed PDFs, the evidence crops, the "
-                "structured findings, and the run record all land in the folder you "
-                "choose. They describe your project; file them like drawings."
-            ),
-        ),
-        _section(
-            "What the model is structurally not allowed to do",
-            _para(
-                "These are not instructions in a prompt asking the model to behave. They "
-                "are things the surrounding program does not offer it."
-            ),
-            _bullet(
-                "It cannot run code. Nothing it returns is ever evaluated, executed, or "
-                "used to build a command."
-            ),
-            _bullet(
-                "It cannot read or write files. The three investigation tools are the only "
-                "way it can reach anything, they are read-only, and they are scoped to the "
-                "sheets in the current run."
-            ),
-            _bullet(
-                "It cannot do the arithmetic. It transcribes the numbers it sees; the "
-                "program does the maths exactly. A number it merely transcribed is not "
-                "trusted as ground truth until a crop confirms it."
-            ),
-            _bullet(
-                "It cannot number, order, or assemble the output. Numbering happens after "
-                "everything is anchored, positionally, in code — the same inputs produce "
-                "the same report every time."
-            ),
-            _bullet(
-                "It cannot declare the run complete. Coverage is counted from marks found "
-                "in the saved PDF, and a stage that failed holds the status down no matter "
-                "what any model said."
-            ),
-            _bullet(
-                "It cannot delete or hide a finding. Merging duplicates requires semantic "
-                "sameness AND compatible details; overlapping on the page is never enough "
-                "on its own."
-            ),
-        ),
-        _section(
-            "The attack you should actually worry about",
-            _para(
-                "The realistic threat is not the model going rogue. It is a drawing "
-                "containing text crafted to steer it — a note that reads like an "
-                "instruction. Because the drawing becomes the prompt, the model's reply can "
-                "be influenced by whatever is on the page."
-            ),
-            _para("So every reply is treated as hostile text, and that is contained three ways:"),
-            _bullet(
-                "It is never executed anywhere — not in the PDF, not in the exports, not "
-                "in the report, which escapes every value and pins its scripts by hash."
-            ),
-            _bullet(
-                "It is anchored. A quote that matches nothing anywhere in the set is the "
-                "hallucination signal: it is labelled UNANCHORED, shown loudly in the "
-                "margin, and never drawn as though it had a real location."
-            ),
-            _bullet(
-                "It is bounded. Fabricated code sections come back from the citation check "
-                "as mismatches; invented arithmetic loses to the exact calculation; a "
-                "claimed finding that a crop contradicts is pulled from the ink."
-            ),
-        ),
-        _section(
-            "What this is not",
-            _para(
-                "Stated plainly, because the honest limits matter as much as the "
-                "safeguards."
-            ),
-            _bullet(
-                "It is not a stamped review and carries no professional liability. It is a "
-                "back-check that produces markups for a qualified person to adjudicate. "
-                "The engineer of record is still the engineer of record."
-            ),
-            _bullet(
-                "It is not exhaustive. It will miss things a good reviewer catches — "
-                "particularly anything that depends on project history, a conversation, or "
-                "a document you didn't give it."
-            ),
-            _bullet(
-                "It produces false positives on purpose. The design keeps a doubtful "
-                "finding and labels it rather than dropping it, because a wrong markup "
-                "costs you a minute and a missed conflict costs you a change order."
-            ),
-            _bullet(
-                "Models are probabilistic. Two runs of the same set can differ in what "
-                "they raise. The assembly around them is deterministic; the reading is not."
-            ),
-            _bullet(
-                "It comes with no warranty. It is free software under the AGPL, offered "
-                "as-is."
-            ),
-        ),
-        _section(
-            "Don't take our word for it — check",
-            _bullet(
-                "Watch it work: Open Diagnostics Log during a run shows every request as "
-                "it happens, with the key redacted."
-            ),
-            _bullet(
-                "Read the receipts: run.log and run_manifest.json in any export list every "
-                "stage, every call, every token, and the SHA-256 of every file produced."
-            ),
-            _bullet(
-                "Look at the evidence: the evidence/ folder holds the exact image crop the "
-                "verifier saw for each finding, plus the tool trace for anything "
-                "investigated. Judge the verdicts yourself."
-            ),
-            _bullet(
-                "Check the bill: your Anthropic console shows spend independently of "
-                "anything this app reports."
-            ),
-            _bullet(
-                "Watch the wire: point any network monitor at it. Analysis traffic goes "
-                "to api.anthropic.com and nowhere else. The once-a-day update check adds "
-                "github.com, which redirects the version file to "
-                "release-assets.githubusercontent.com (GitHub's own asset host) — so "
-                "three names in total, and any of them can be silenced by turning "
-                "update checks off. If you see a fourth, something is wrong: measured, "
-                "not asserted."
-            ),
-            _bullet(
-                "Read the source: all of it, including everything described in this panel. "
-                "The licence requires it to stay open, which is why this claim is "
-                "checkable rather than promotional."
-            ),
-            _link("Source code on GitHub", REPO_URL),
-            _link("SECURITY.md — the full trust boundary", SECURITY_DOC_URL),
-            _link("README — the complete technical description", README_URL),
-            _link("Your Anthropic usage and spend", ANTHROPIC_USAGE_URL),
-        ),
-    ),
-)
+RUNTIME_TRANSPARENCY = _runtime_document()
 
 
 # --------------------------------------------------------------------------

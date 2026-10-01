@@ -2,6 +2,19 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Trust surface contract
+
+The trust surfaces are a contract. Any change to a behavior they describe updates
+them in the same change. A new user action, a new network call, a new automatic
+behavior, a model or setting change, or a new limit triggers an update to
+`help_content.py` (Why trust it?), `trust_dossier.py`, and `docs/TRUST_CLAIMS.md`.
+Keep `trust_ui.py` aligned with the native dialog requirements. Read implementation
+before editing claims; record contradictions without silently changing behavior.
+Run `python scripts/write_trust_docs.py` in a clean/default configuration, then
+`python -m pytest tests/test_trust_contract.py tests/test_help_content.py -m "not network"`.
+Run native keyboard tests with a display and the report browser suite with
+Chromium. `docs/TRUST.html` is the same dossier as a local, asset-free reading page.
+
 ## Remediation program (active)
 
 A multi-session remediation program is under way. Its files are in `_plans/`:

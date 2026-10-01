@@ -119,7 +119,7 @@ def test_documents_are_frozen(doc: HelpDocument) -> None:
 
 
 def test_help_document_lookup() -> None:
-    assert help_document("why_trust_it").title == "Why you can trust the review"
+    assert help_document("why_trust_it").title == "Why trust it?"
     with pytest.raises(KeyError):
         help_document("does_not_exist")
 
@@ -232,20 +232,20 @@ def test_runtime_transparency_covers_the_runtime_surface() -> None:
         # Where data goes, and where it doesn't.
         "api.anthropic.com",
         "github.com",
-        "telemetry",
-        "authorization header",
+        "analytics",
+        "request headers",
         # The model line-up. Opus does the deep reads (including cross-sheet
         # QC, which routes through the review model, NOT the Sonnet
         # cross-check default in core.api_config); Sonnet takes the first
         # verification look. No Haiku triage stage runs in this pipeline.
-        "opus 5",
-        "sonnet 5",
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
         # The agentic surface and its bounds.
         "crop_region",
         "find_text",
         "view_sheet",
-        "read-only",
-        "cannot run code",
+        "loaded-sheet lookup",
+        "cannot run a shell",
         # Stage mechanics.
         "message batches",
         "web_search",
@@ -266,8 +266,8 @@ def test_runtime_transparency_covers_the_runtime_surface() -> None:
 def test_runtime_transparency_has_diagrams_and_outbound_links() -> None:
     """It ships the promised visuals and a way out to the primary sources."""
     blocks = [b for s in RUNTIME_TRANSPARENCY.sections for b in s.blocks]
-    pres = [b for b in blocks if b.kind == "pre"]
-    assert len(pres) >= 3, "the briefing's visuals are part of the deliverable"
+    from drawing_analyzer.trust_dossier import BOUNDARY_SVG
+    assert '<svg ' in BOUNDARY_SVG and 'aria-label=' in BOUNDARY_SVG
     hrefs = [b.href for b in blocks if b.kind == "link"]
     assert any("github.com/abe-borg/drawing-analyzer" in h for h in hrefs)
     assert any("anthropic.com" in h or "anthropic.com/" in h for h in hrefs)
@@ -277,9 +277,9 @@ def test_runtime_transparency_has_diagrams_and_outbound_links() -> None:
 def test_runtime_transparency_states_the_limits() -> None:
     """It must not read as marketing: the 'what this is not' section is required."""
     headings = [s.heading.lower() for s in RUNTIME_TRANSPARENCY.sections]
-    assert any("what this is not" in h for h in headings)
+    assert "what this does not do" in headings
     text = _all_text(RUNTIME_TRANSPARENCY).lower()
-    assert "engineer of record" in text
+    assert "professional sign-off" in text
 
 
 def test_runtime_transparency_discloses_the_full_outbound_inventory() -> None:
@@ -296,10 +296,10 @@ def test_runtime_transparency_discloses_the_full_outbound_inventory() -> None:
 
     text = _all_text(RUNTIME_TRANSPARENCY)
     assert f"{SHEET_TEXT_MAX_CHARS:,}" in text
-    assert "[TRUNCATED]" in text
-    assert "file name" in text.lower()
-    # The precise distinction: the name travels, the path does not.
-    assert "never the folder" in text.lower()
+    assert "truncation disclosure" in text
+    assert "filenames" in text.lower()
+    # Paths are not deliberately framed metadata; private content can contain them.
+    assert "not deliberately added as api metadata" in text.lower()
 
 
 def test_runtime_transparency_prices_a_standard_run_correctly() -> None:
@@ -310,8 +310,9 @@ def test_runtime_transparency_prices_a_standard_run_correctly() -> None:
     bills the digest alone (plus the focus report when a focus is supplied).
     """
     text = _all_text(RUNTIME_TRANSPARENCY).lower()
-    assert "pays for exactly one thing" in text
-    assert "do not run otherwise" in text
+    assert "qc markups starts its identity/planning stages" in text
+    assert "synthesis requires" in text
+    assert "focus requires" in text
 
 
 def test_runtime_transparency_never_promises_an_offline_mode() -> None:
@@ -324,7 +325,7 @@ def test_runtime_transparency_never_promises_an_offline_mode() -> None:
     """
     text = _all_text(RUNTIME_TRANSPARENCY).lower()
     assert "no fully offline mode" in text
-    assert "there is no offline mode" in text
+    assert "reference audit inside analyze still accompanies a digest" in text
 
 
 # --------------------------------------------------------------------------
@@ -355,7 +356,7 @@ def doc_blocks(section: HelpSection):
         (
             "why_trust_it",
             [
-                "never calculates",
+                "Decimal (base-ten) arithmetic",
                 "DETERMINISTIC",
                 "UNANCHORED",
                 "verif",
@@ -621,6 +622,10 @@ class _FakeWidget:
         return self
 
     def configure(self, *a, **k):
+        self.kw.update(k)
+        return self
+
+    def focus_set(self):
         return self
 
     def bind(self, sequence=None, func=None, *a, **k):
@@ -705,7 +710,7 @@ def test_render_help_body_visits_every_block(doc: HelpDocument) -> None:
         _FakeWidget.created = []
         gui_module.DrawingAnalyzerApp._render_help_body(body, doc)
 
-    labels = [kw.get("text", "") for name, kw in _FakeWidget.created if name == "CTkLabel"]
+    labels = [kw.get("text", "") for name, kw in _FakeWidget.created if name in {"CTkLabel", "CTkButton"}]
     for section in doc.sections:
         assert section.heading in labels
         for block in section.blocks:
@@ -716,6 +721,18 @@ def test_render_help_body_visits_every_block(doc: HelpDocument) -> None:
         1 for s in doc.sections for b in s.blocks if b.kind == "bullet"
     )
     assert bullet_marks == expected_bullets
+    # Every text block that wraps must participate in viewport resizing;
+    # bullet and external-link text used to keep their wide fixed lengths.
+    tracked = [label.kw["text"] for label in body._help_labels]
+    expected = [
+        text
+        for section in doc.sections
+        for text in (
+            section.heading,
+            *(block.text for block in section.blocks if block.kind not in {"pre", "modal"}),
+        )
+    ]
+    assert tracked == expected
 
 
 def test_render_help_body_keeps_pre_blocks_unwrapped() -> None:
@@ -747,7 +764,7 @@ def test_render_help_body_wires_the_modal_hand_off() -> None:
         gui_module.DrawingAnalyzerApp._render_help_body(
             body, help_document("why_trust_it"), on_modal_link=opened.append
         )
-        # The modal block is the only bound Button-1 label that isn't a web link.
+        # The modal block is a button, with mouse command and keyboard activation.
         link_texts = {
             b.text
             for s in help_document("why_trust_it").sections
@@ -759,8 +776,9 @@ def test_render_help_body_wires_the_modal_hand_off() -> None:
             if getattr(w, "kw", {}).get("text") in link_texts
         ]
         assert len(widgets) == 1
-        assert "<Button-1>" in widgets[0].bound
-        widgets[0].fire("<Button-1>")
+        assert type(widgets[0]).__name__ == "CTkButton"
+        assert "<Return>" in widgets[0].bound
+        widgets[0].kw["command"]()
 
     assert opened == ["runtime_transparency"]
 
