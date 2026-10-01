@@ -284,6 +284,15 @@ interrupted mid-read was billed too: its record carries the usage its first
 event reported, and `UsageRecord.interrupted_attempts` counts the attempts whose
 output was never reported, so a nonzero `RunUsage.interrupted_attempts` makes
 the output and cost totals lower bounds (remediation WP-01.7, below).
+Cross-QC and both verifier paths (PO-04) retain the API's separate prompt-cache
+read/write counters, using `digest.StreamUsage` / `_message_cache_usage` rather
+than another reader. Worker-local counters fold on the collector thread, including
+replies whose findings/verdict cannot be parsed. The ledger prices these counters
+with each stage's model; a local verdict-cache replay reports zero usage. These
+are runtime counters, not new verdict-cache fields, so no key/schema bump is
+needed. These three requests currently send plain system prompts with no cache
+breakpoint; cache eligibility/enabling is PO-05's measurement work. If a future
+request attaches a one-hour breakpoint, its ledger must carry that requested TTL.
 `core.pricing.usage_record_cost` prices one record by its rate class; costs carry a
 `PRICING_EFFECTIVE_DATE`. The cache-read rate is the price row's own
 (`ModelPrice.cache_read_multiplier`: 0.05x on Opus 5.5, 0.1x elsewhere); writes
@@ -1137,6 +1146,31 @@ raise, after the paid digest and critique. Now:
   escaped. The system rule rides both prompt hashes, and both keys already hash
   the exact assembled corpus: no global schema bump. Other stages retain their
   own framing until the follow-up chunks in `_plans/prompt-optimization.md`.
+  **Set reports (PO-02):** synthesis and focus use the same helper/rule for
+  complete digest and sheet-label blocks. Their existing digest corpus caps
+  count escaping, wrappers and separators; overflow still drops a contiguous
+  tail, with loss counters and a prompt disclosure. The first sheet is kept
+  whole even if it alone exceeds the cap (the existing exception). Focus escapes
+  its `<operator_focus>` text separately and explicitly treats that block as
+  the operator's task. The stage keys already hash each entire system prompt
+  and assembled user turn, so old synthesis/focus framing misses without a
+  global schema or stage-contract bump. Retained prose and reply handling stay
+  unchanged; these are offline request checks, not a live model-quality eval.
+  **Cross-QC and investigation (PO-03):** the same rule/helper frames source
+  digests, OCR text, identity context, handle/label metadata and model-derived
+  reconciliation facts on all three cross-QC requests. Host tasks and truncation
+  notices stay outside. The text-layer cap and counters still measure original
+  source characters (4,000 per sheet); slice first, then escape/wrap, so markup
+  adds bounded wire overhead without removing additional source characters.
+  Cross-QC keys retain K2's named host strings and include rendered source-block
+  signatures for delimiters/escaping alongside the changed system prompts;
+  host binding/grounding contract 9 was unchanged by PO-03 (10 since
+  remediation WP-06.3, below, its own mechanism). Investigation frames its
+  initial finding/prior-note/index and tool-result text only when sending it;
+  raw executor results, images and saved evidence/traces remain unchanged.
+  Its existing manual `INVESTIGATE_PROMPT_VERSION` moves v3 → v4. No global
+  schema bump or unrelated prompt change; host quote checks still use original
+  evidence, without decoding model replies to make a quote match.
 - *Finders:* the digest's findings block; `critique.py` (a second full-coverage
   vision read, run twice — self-consistency merge sets `reproduced`. **Only a
   read the model finished counts** (remediation WP-01.4, N4; the owner's
@@ -1633,8 +1667,9 @@ raise, after the paid digest and critique. Now:
     A refusal (even with parseable JSON), a continuation or an unknown stop
     keeps nothing, claims included. `CrossQCSalvage` (runtime only) counts
     what was kept; its `note()` is one observational stage warning.
-  - **Status** (`CrossQCResult.stage_status`, the one rule the pipeline
-    records, its usage record too): `failed` first (D-2's failure flag before
+  - **Status** (`cross_qc_stage_status`, which `CrossQCResult.stage_status`
+    reads: the one rule the pipeline records, its usage record too, read with
+    defaults as the pipeline reads every cross-QC field): `failed` first (D-2's failure flag before
     counts; the all-failed rule at the call level) → FAILED when the stage
     obtained nothing (the whole-set call failed and retained no finding — a
     cut-off call counts only when it retained a finding or, on a shard, a
@@ -1653,8 +1688,13 @@ raise, after the paid digest and critique. Now:
     warning (`N finding(s) past the per-response cap were dropped`; it read
     "text budget degraded: 0 char(s) omitted").
   - **Usage:** `CrossQCResult.interrupted_attempts` reaches the cross-QC
-    `UsageRecord` (WP-01.7's lower-bound mark). Cache-token records stay
-    PO-04's.
+    `UsageRecord` (WP-01.7's lower-bound mark). PO-04's cache-read and
+    cache-write tokens ride `_Reply` from `stream_reply`'s `StreamUsage`, so
+    every billed attempt's are counted (a transient retry, the raised-cap retry
+    whichever read is kept, an interrupted stream's `message_start`), and
+    `_call` adds them to the caller's `usage=` (`_add_usage`), which the
+    shard and pair workers fold on the collector, as PO-04 built it. Merged
+    from main after PO-04; `tests/test_cross_qc_terminal_outcomes.py` pins it.
   - `_CROSS_QC_CACHE_CONTRACT` **9 → 10** (what is admitted, and what an
     admitted entry may be, changed for byte-identical inputs). The SDK cap
     table's `cross_qc` row streams, beside a `cross_qc raised-cap retry` row.

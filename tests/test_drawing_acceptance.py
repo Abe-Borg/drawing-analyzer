@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 import pytest
 
@@ -1035,8 +1036,10 @@ def test_gauntlet_exhaustive_status_complete(oracle):
         assert "PROJECT JURISDICTION/LOCALE: California, United States" in req
         assert "NFPA 13 2016" in req
     assert oracle.client.cross_request_texts
-    assert all(t.startswith("SET IDENTITY (model-detected):")
-               for t in oracle.client.cross_request_texts)
+    for text in oracle.client.cross_request_texts:
+        assert text.startswith("<set_identity>\n")
+        root = ET.fromstring(f"<request>{text}</request>")
+        assert root.find("set_identity").text[1:-1] == ctx.set_identity.context_block()
 
 
 # ---- the remaining §19.1 set contents: rejection, unanchored, set-level, ----

@@ -31,6 +31,37 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Cross-sheet QC and both verification passes retain API prompt-cache usage.**
+  Cache-read/write tokens now reach the append-only usage ledger and its existing
+  pricing rules, including billed replies that fail to produce a verdict or
+  findings. Shard/reconcile and verifier workers sum their counters in the
+  collector; local result-cache hits add no billed usage. Model requests,
+  caching policy, verdict-cache payloads and keys stay unchanged. This is prompt
+  optimization chunk PO-04, verified with offline usage and pricing regressions.
+
+- **Cross-sheet QC and investigation distinguish source text from instructions.**
+  All cross-QC requests frame sheet digests, text layers, labels/handles,
+  detected identity and reconciliation facts with the shared escaped source
+  blocks and rule. Source slices/counters, page binding and quote validation
+  stay unchanged; truncation notices remain outside the source blocks.
+  Investigation frames initial finding context, the sheet index and tool text
+  when sending it, preserving raw tool results, images and evidence traces.
+  Cross-QC's request hash covers the new source framing; investigation's manual
+  prompt version moves to v4. Older results in these two stages miss on the next
+  eligible run; the global cache schema and other prompts are unchanged. This
+  is prompt optimization chunk PO-03, verified with offline regressions.
+
+- **Synthesis and focus reports distinguish source content from the task.**
+  Both wrap complete sheet digests and labels with the shared escaped source
+  blocks and system rule. Focus also escapes its operator question, explicitly
+  preserving it as the task. Existing corpus caps include wrappers, escaping and
+  separators; overflow still drops a counted, disclosed tail of whole sheets,
+  and the first sheet remains whole even if oversized. Retained prose and reply
+  handling are unchanged. Existing request hashes invalidate synthesis/focus
+  entries under the old framing without changing the global cache schema or
+  model/effort defaults. This is prompt optimization chunk PO-02, covered by
+  offline source-boundary, budget and cache regressions.
+
 - **Identity and review planning distinguish source content from instructions.**
   Both prompts wrap digest text and sheet labels in typed source blocks; identity
   also wraps OCR slices, code-edition windows and failed-read diagnostics, and
@@ -312,10 +343,13 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - a run with no client reads FAILED (it read COMPLETE beside its error).
 
   `_CROSS_QC_CACHE_CONTRACT` 9 → 10 (one migration-register row). Tests:
-  `tests/test_cross_qc_terminal_outcomes.py` (117, 8 of them from the Codex
+  `tests/test_cross_qc_terminal_outcomes.py` (129, 8 of them from the Codex
   review: a finished retry with no findings object never loses a cut-off
   read's items; a cut-off call that retained nothing reads FAILED; the salvage
-  count is taken after the findings cap); the recorded limit in
+  count is taken after the findings cap; 12 more from merging PO-04: every
+  billed attempt's prompt-cache tokens, the retry's and an interrupted
+  stream's included, reach the result and the usage record, and the status
+  rule reads a result without the new fields as before); the recorded limit in
   `tests/test_response_shapes.py` flipped
   (`test_a_refused_cross_qc_reply_names_its_refusal`); the SDK cap table's
   `cross_qc` row streams and gains its retry row, with two new contract tests;

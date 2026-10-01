@@ -108,9 +108,11 @@ from .core.terminal_outcome import (
 from . import tiling
 from .anchor import _fold_text, source_words
 from .diagnostics import get_logger
+from .core.prompt_content import SOURCE_CONTENT_RULE, source_content_block
 from .digest import (
     DEFAULT_DIGEST_MAX_RETRIES,
     MAX_TOKENS_RETRY_CEILING,
+    StreamUsage,
     _FINDING_SEVERITIES,
     _MODEL_FINDING_CATEGORIES,
     _clean_error,
@@ -299,7 +301,7 @@ Ground every conflict in the actual text: quote the exact conflicting string fro
 EACH sheet involved. Report only conflicts you can substantiate from the provided \
 text; when you are not certain two sheets truly conflict, report it with category \
 `question` and severity `low`. Judge across sheets only — a single-sheet issue is \
-out of scope."""
+out of scope.""" + "\n\n" + SOURCE_CONTENT_RULE
 
 _CROSS_QC_TASK = (
     "Now report the cross-sheet conflicts in this set, following the FINDINGS "
@@ -392,7 +394,7 @@ sheet's handle); category (code, conflict, coordination, question); severity \
 the exact_quote of the primary fact); also_on (array of {"sheet_handle", \
 "source_quote" = the other fact's exact_quote}); refs (optional). Every finding \
 lists >= 1 also_on and both quotes must come verbatim from the facts. Emit \
-"findings": [] if you find no cross-sheet conflict; "claims": [] likewise."""
+"findings": [] if you find no cross-sheet conflict; "claims": [] likewise.""" + "\n\n" + SOURCE_CONTENT_RULE
 
 
 def cross_qc_system_prompt() -> str:
@@ -773,6 +775,9 @@ class CrossQCResult:
     # both paths. ``None`` = not recorded (a result cached before it existed),
     # never "nothing was refused". Observational: it feeds no status.
     invalid: "CrossQCInvalidCounts | None" = None
+    # Usage from this run's API replies only; verdict-cache replays stay zero.
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
     # Remediation WP-06.3. ``failed``: the stage obtained nothing (every call
     # failed with nothing kept, or no call could be made); the pipeline records
     # it FAILED. ``salvage``: items kept from replies the model did not finish.
@@ -790,11 +795,23 @@ class CrossQCResult:
         owner's rule: every call failed and kept nothing, or no call could be
         made); else ``COMPLETE`` when every call finished and nothing was left
         out, else ``PARTIAL`` (a failed or cut-off call, a reconcile shortfall,
-        a budget-only shortfall).
+        a budget-only shortfall). The rule is :func:`cross_qc_stage_status`.
         """
-        if self.failed:
-            return "FAILED"
-        return "COMPLETE" if self.complete else "PARTIAL"
+        return cross_qc_stage_status(self)
+
+
+def cross_qc_stage_status(result: Any) -> str:
+    """The cross-QC stage's status for ``result`` (remediation WP-06.3, D-2).
+
+    The one rule, read by :attr:`CrossQCResult.stage_status` and the pipeline.
+    It reads its fields as the pipeline reads every other cross-QC field (with
+    ``getattr`` and a default), so a result without ``failed`` reads as before:
+    ``COMPLETE`` when complete (no error, if it does not say), else ``PARTIAL``.
+    """
+    if getattr(result, "failed", False):
+        return "FAILED"
+    complete = getattr(result, "complete", not getattr(result, "error", None))
+    return "COMPLETE" if complete else "PARTIAL"
 
 
 # --------------------------------------------------------------------------- #
@@ -1533,23 +1550,38 @@ def _identity_preamble(identity: Any) -> str:
     Prepended identically to the whole-set, shard-map, and reconcile inputs so
     every cross-QC read shares the same locale facts — the units/language
     context in particular kills metric-vs-imperial false conflicts. Advisory
-    text only; ``None`` keeps every input byte-identical to pre-Phase-A.
+    text only; ``None`` adds no preamble.
     """
     if identity is None or not getattr(identity, "has_content", False):
         return ""
-    return identity.context_block() + "\n\n"
+    return source_content_block(identity.context_block(), tag="set_identity") + "\n\n"
 
 
-def _sheet_block(handle: str, sheet_id: str, digest_text: str, text_layer: str) -> str:
+def _sheet_block(
+    handle: str, sheet_id: str, digest_text: str, text_layer: str, budget: _Budget,
+) -> str:
     """One sheet of a whole-set or shard request: its handle with its id beside it.
 
     One helper for both paths (remediation WP-06.2, the owner's rule): the
     handle is the address, the sheet id beside it is display metadata the model
     needs to read a cross-reference ("see M-501") and to name the sheet in text.
     """
+    # The cap/counters measure original source characters, as before. Slice
+    # before escaping; the existing host truncation notice stays outside data.
+    capped = _budgeted_text_layer(text_layer, budget)
+    notice = ""
+    if len(text_layer or "") > _TEXT_LAYER_BUDGET:
+        notice = capped[_TEXT_LAYER_BUDGET:]
+        capped = capped[:_TEXT_LAYER_BUDGET]
     return (
-        _SHEET_TITLE_TEMPLATE.format(handle=handle, sheet_id=sheet_id)
-        + _SHEET_BODY_TEMPLATE.format(digest=(digest_text or "").strip(), text=text_layer)
+        source_content_block(
+            _SHEET_TITLE_TEMPLATE.format(handle=handle, sheet_id=sheet_id),
+            tag="sheet_metadata",
+        ) + "\n"
+        + _SHEET_BODY_TEMPLATE.format(
+            digest=source_content_block((digest_text or "").strip(), tag="sheet_digest"),
+            text=source_content_block(capped, tag="sheet_text_layer"),
+        ) + notice
     )
 
 
@@ -1559,9 +1591,8 @@ def _build_whole_set_input(
     """The whole-set user text: each sheet's handle and id, digest, and budgeted text layer."""
     parts = [preamble + _WHOLE_SET_HEADER_TEMPLATE.format(count=len(entries))]
     for sheet_id, digest_text, text_layer, geom in entries:
-        tl = _budgeted_text_layer(text_layer, budget)
         handle = handles.handle_by_key[source_page_key(geom.ref)]
-        parts.append(_sheet_block(handle, sheet_id, digest_text, tl))
+        parts.append(_sheet_block(handle, sheet_id, digest_text, text_layer, budget))
     parts.append("\n" + _CROSS_QC_TASK)
     return "\n".join(parts)
 
@@ -1573,8 +1604,7 @@ def _build_map_input(
     parts = [preamble + _MAP_HEADER_TEMPLATE.format(count=len(shard))]
     for sheet_id, digest_text, text_layer, geom in shard:
         handle = handle_by_key[source_page_key(geom.ref)]
-        tl = _budgeted_text_layer(text_layer, budget)
-        parts.append(_sheet_block(handle, sheet_id, digest_text, tl))
+        parts.append(_sheet_block(handle, sheet_id, digest_text, text_layer, budget))
     parts.append(_MAP_TASK)
     return "\n".join(parts)
 
@@ -1585,14 +1615,20 @@ def _build_reconcile_input(
     """The reconciliation user text: the full handle manifest + every collected fact."""
     lines = [preamble + _RECONCILE_MANIFEST_HEADER]
     for handle, sheet_id, discipline in manifest:
-        lines.append(_RECONCILE_MANIFEST_LINE_TEMPLATE.format(
-            handle=handle, sheet_id=sheet_id,
-            discipline=discipline or _UNKNOWN_DISCIPLINE))
+        lines.append(source_content_block(
+            _RECONCILE_MANIFEST_LINE_TEMPLATE.format(
+                handle=handle, sheet_id=sheet_id,
+                discipline=discipline or _UNKNOWN_DISCIPLINE),
+            tag="sheet_metadata",
+        ))
     lines.append(_RECONCILE_FACTS_HEADER)
     for f in facts:
-        lines.append(_RECONCILE_FACT_LINE_TEMPLATE.format(
-            handle=f.sheet_handle, entity=f.entity_or_tag, attribute=f.attribute,
-            value=f.value, quote=f.exact_quote))
+        lines.append(source_content_block(
+            _RECONCILE_FACT_LINE_TEMPLATE.format(
+                handle=f.sheet_handle, entity=f.entity_or_tag, attribute=f.attribute,
+                value=f.value, quote=f.exact_quote),
+            tag="cross_qc_fact",
+        ))
     lines.append(_RECONCILE_TASK)
     return "\n".join(lines)
 
@@ -1635,6 +1671,8 @@ class _Reply:
     raised: bool = False
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
     interrupted_attempts: int = 0
     findings: list = field(default_factory=list)
     read_error: str | None = None
@@ -1703,18 +1741,18 @@ def _send(client: Any, kwargs: dict[str, Any], *, noun: str, max_retries: int,
     sent = stream_reply(client, kwargs, max_retries=max_retries, sleep=sleep,
                         send=stream_message)
     usage = sent.usage
+    billed = dict(input_tokens=usage.input_tokens, output_tokens=usage.output_tokens,
+                  cache_read_tokens=usage.cache_read_tokens,
+                  cache_write_tokens=usage.cache_write_tokens,
+                  interrupted_attempts=usage.interrupted_attempts)
     if sent.message is None:
-        return _Reply(error=_clean_error(sent.error), raised=True,
-                      input_tokens=usage.input_tokens, output_tokens=usage.output_tokens,
-                      interrupted_attempts=usage.interrupted_attempts)
+        return _Reply(error=_clean_error(sent.error), raised=True, **billed)
     text = reply_text(sent.message)
     stop = _get(sent.message, "stop_reason")
     error = unfinished_reply_error(sent.message, text, noun=noun, interrupted=sent.interrupted)
     if error is None and not text:
         error = digest_terminal_error(text, stop, noun=noun)
-    return _Reply(text=text, stop_reason=stop, error=error,
-                  input_tokens=usage.input_tokens, output_tokens=usage.output_tokens,
-                  interrupted_attempts=usage.interrupted_attempts)
+    return _Reply(text=text, stop_reason=stop, error=error, **billed)
 
 
 def _keep_reply(first: _Reply, retry: _Reply) -> _Reply:
@@ -1739,13 +1777,28 @@ def _keep_reply(first: _Reply, retry: _Reply) -> _Reply:
         _name_discarded_retry(kept, (" failed: " if retry.raised else ": ") + why)
     kept.input_tokens += other.input_tokens
     kept.output_tokens += other.output_tokens
+    kept.cache_read_tokens += other.cache_read_tokens
+    kept.cache_write_tokens += other.cache_write_tokens
     kept.interrupted_attempts += other.interrupted_attempts
     return kept
+
+
+def _add_usage(usage: StreamUsage | None, reply: _Reply) -> _Reply:
+    """Add every attempt ``reply`` was billed for to ``usage`` (prompt
+    optimization PO-04: cache read and write tokens included); return it."""
+    if usage is not None:
+        usage.input_tokens += reply.input_tokens
+        usage.output_tokens += reply.output_tokens
+        usage.cache_read_tokens += reply.cache_read_tokens
+        usage.cache_write_tokens += reply.cache_write_tokens
+        usage.interrupted_attempts += reply.interrupted_attempts
+    return reply
 
 
 def _call(
     *, client: Any, model: str, system: str, user_text: str,
     max_retries: int, sleep: Any, noun: str = _NOUN_WHOLE_SET,
+    usage: StreamUsage | None = None,
 ) -> _Reply:
     """One cross-QC model call → a :class:`_Reply`. Never raises.
 
@@ -1755,19 +1808,21 @@ def _call(
     off at ``max_tokens`` gets one retry at twice the cap, up to
     :data:`~drawing_analyzer.digest.MAX_TOKENS_RETRY_CEILING`, clamped to what
     the model serves; only ``max_tokens`` qualifies (``raised_cap_may_finish``).
+    Every attempt's usage, cache tokens included, is the reply's and is added
+    to ``usage`` (prompt optimization PO-04), whichever read is kept.
     """
     cap = phase_output_cap(PHASE_CROSS_QC, model=model)
     reply = _send(client, _request(model, system, user_text, cap), noun=noun,
                   max_retries=max_retries, sleep=sleep)
     if reply.error is None or not classify_stop_reason(reply.stop_reason).raised_cap_may_finish:
-        return reply
+        return _add_usage(usage, reply)
     raised = output_cap_for_model(model, requested=min(cap * 2, MAX_TOKENS_RETRY_CEILING))
     if raised <= cap:
-        return reply                   # no headroom left to grant; not a retry
+        return _add_usage(usage, reply)   # no headroom left to grant; not a retry
     _log.info("%s stopped at max_tokens=%d; retrying once at %d", noun, cap, raised)
     retry = _send(client, _request(model, system, user_text, raised), noun=noun,
                   max_retries=max_retries, sleep=sleep)
-    return _keep_reply(reply, retry)
+    return _add_usage(usage, _keep_reply(reply, retry))
 
 
 _DECODER = json.JSONDecoder()
@@ -1902,6 +1957,7 @@ def _one_cross_qc_call(
     client: Any, model: str, max_retries: int, sleep: Any, budget: _Budget,
     preamble: str = "", invalid: "CrossQCInvalidCounts | None" = None,
     counts: "CrossQCDiscardCounts | None" = None, log: "_CallLog | None" = None,
+    usage: StreamUsage | None = None,
 ) -> tuple[list[Finding], list[NumericClaim], int, int, str | None]:
     """Whole-set cross-QC call over ``entries`` → ``(findings, claims, in, out, err)``.
 
@@ -1917,7 +1973,7 @@ def _one_cross_qc_call(
     reply = _call(
         client=client, model=model, system=cross_qc_system_prompt(),
         user_text=_build_whole_set_input(entries, handles, budget, preamble),
-        max_retries=max_retries, sleep=sleep, noun=_NOUN_WHOLE_SET,
+        max_retries=max_retries, sleep=sleep, noun=_NOUN_WHOLE_SET, usage=usage,
     )
     _note_reply(log, reply)
     in_tok, out_tok = reply.input_tokens, reply.output_tokens
@@ -1953,7 +2009,7 @@ def _map_call(
     client: Any, model: str, max_retries: int, sleep: Any, budget: _Budget,
     preamble: str = "", counts: "CrossQCDiscardCounts | None" = None,
     invalid: "CrossQCInvalidCounts | None" = None, by_label: "dict | None" = None,
-    log: "_CallLog | None" = None,
+    log: "_CallLog | None" = None, usage: StreamUsage | None = None,
 ) -> tuple[list[Finding], list[NumericClaim], list[CrossQCFact], int, int, str | None]:
     """One shard-map call → local findings + claims + grounded facts (handle-keyed).
 
@@ -1965,7 +2021,7 @@ def _map_call(
     reply = _call(
         client=client, model=model, system=cross_qc_map_system_prompt(),
         user_text=_build_map_input(shard, handle_by_key, budget, preamble),
-        max_retries=max_retries, sleep=sleep, noun=_NOUN_MAP,
+        max_retries=max_retries, sleep=sleep, noun=_NOUN_MAP, usage=usage,
     )
     _note_reply(log, reply)
     in_tok, out_tok = reply.input_tokens, reply.output_tokens
@@ -2075,7 +2131,7 @@ def _reconcile_call(
     client: Any, model: str, max_retries: int, sleep: Any, budget: _Budget,
     preamble: str = "", counts: "CrossQCDiscardCounts | None" = None,
     invalid: "CrossQCInvalidCounts | None" = None, by_label: "dict | None" = None,
-    log: "_CallLog | None" = None,
+    log: "_CallLog | None" = None, usage: StreamUsage | None = None,
 ) -> tuple[list[Finding], list[NumericClaim], int, int, str | None]:
     """One reconciliation call comparing ``facts`` across the whole manifest.
 
@@ -2085,7 +2141,7 @@ def _reconcile_call(
     reply = _call(
         client=client, model=model, system=CROSS_QC_RECONCILE_SYSTEM_PROMPT,
         user_text=_build_reconcile_input(manifest, facts, preamble),
-        max_retries=max_retries, sleep=sleep, noun=_NOUN_RECONCILE,
+        max_retries=max_retries, sleep=sleep, noun=_NOUN_RECONCILE, usage=usage,
     )
     _note_reply(log, reply)
     in_tok, out_tok = reply.input_tokens, reply.output_tokens
@@ -2124,6 +2180,7 @@ def _reconcile_facts(
     preamble: str = "", counts: "CrossQCDiscardCounts | None" = None,
     max_workers: int | None = None, invalid: "CrossQCInvalidCounts | None" = None,
     by_label: "dict | None" = None, log: "_CallLog | None" = None,
+    usage: StreamUsage | None = None,
 ) -> tuple[list[Finding], list[NumericClaim], int, int, bool]:
     """Reconcile all facts, comparing across groups when they overflow one call.
 
@@ -2147,7 +2204,7 @@ def _reconcile_facts(
             manifest, facts, entry_by_handle,
             client=client, model=model, max_retries=max_retries, sleep=sleep,
             budget=budget, preamble=preamble, counts=counts, invalid=invalid,
-            by_label=by_label, log=log,
+            by_label=by_label, log=log, usage=usage,
         )
         return f, c, i, o, err is None
 
@@ -2175,17 +2232,19 @@ def _reconcile_facts(
         local_counts = CrossQCDiscardCounts()
         local_invalid = CrossQCInvalidCounts()
         local_log = _CallLog()
+        local_usage = StreamUsage()
         try:
             return (*_reconcile_call(
                 manifest, union, entry_by_handle,
                 client=client, model=model, max_retries=max_retries, sleep=sleep,
                 budget=budget, preamble=preamble, counts=local_counts,
                 invalid=local_invalid, by_label=by_label, log=local_log,
-            ), local_counts, local_invalid, local_log)
+                usage=local_usage,
+            ), local_counts, local_invalid, local_log, local_usage)
         except Exception as exc:  # noqa: BLE001 - preserve additive semantics
             local_log.errors.append(_clean_error(exc))
             return ([], [], 0, 0, _clean_error(exc), local_counts, local_invalid,
-                    local_log)
+                    local_log, local_usage)
 
     workers = _resolve_cross_qc_workers(max_workers, len(pair_inputs))
     if workers == 1:
@@ -2199,9 +2258,13 @@ def _reconcile_facts(
     all_f: list[Finding] = []
     all_c: list[NumericClaim] = []
     tot_in = tot_out = 0
-    for f, c, in_t, out_t, err, local_counts, local_invalid, local_log in pair_results:
+    for (f, c, in_t, out_t, err, local_counts, local_invalid, local_log,
+         local_usage) in pair_results:
         tot_in += in_t
         tot_out += out_t
+        if usage is not None:
+            usage.cache_read_tokens += local_usage.cache_read_tokens
+            usage.cache_write_tokens += local_usage.cache_write_tokens
         if counts is not None:
             counts.merge(local_counts)
         if invalid is not None:
@@ -2341,6 +2404,14 @@ def _cross_qc_cache_key(entries: list[tuple], *, model: str, preamble: str) -> s
             # K2 (remediation WP-06.2, the owner's rule): the user-turn framing
             # rides the key verbatim, as the system prompts do.
             "user_framing": cross_qc_user_framing(),
+            # Use the same renderer at key-build time to cover source-block
+            # delimiters and XML-special-character encoding, beside K2's
+            # named host strings. The source rule rides the system prompts.
+            "source_framing": {
+                tag: source_content_block("SOURCE & < > \" '", tag=tag)
+                for tag in ("sheet_metadata", "sheet_digest", "sheet_text_layer",
+                            "set_identity", "cross_qc_fact")
+            },
         },
         inputs={"identity_preamble": preamble, "sheets": cache_inputs},
         params={
@@ -2560,6 +2631,7 @@ def cross_sheet_qc(
             return CrossQCResult(error=_clean_error(exc), complete=False, failed=True)
 
     budget = _Budget()
+    usage = StreamUsage()
     # Remediation WP-06.1 (B6): refused items are counted on both paths.
     invalid = CrossQCInvalidCounts()
     # WP-02 §7.2: run-level discard counters, on both paths since remediation
@@ -2573,6 +2645,7 @@ def cross_sheet_qc(
             entries, handles, client=client, model=model,
             max_retries=max_retries, sleep=sleep, budget=budget,
             preamble=preamble, invalid=invalid, counts=discards, log=log,
+            usage=usage,
         )
         kept = _drop_exact_repeats(findings)
         _log.info(
@@ -2584,6 +2657,8 @@ def cross_sheet_qc(
         result = CrossQCResult(
             findings=kept, claims=_dedup_claims(claims),
             input_tokens=in_tok, output_tokens=out_tok, error=err,
+            cache_read_tokens=usage.cache_read_tokens,
+            cache_write_tokens=usage.cache_write_tokens,
             shards_planned=1, shards_completed=0 if err else 1,
             complete=err is None and not budget.degraded,
             text_chars_total=budget.total, text_chars_included=budget.included,
@@ -2628,16 +2703,18 @@ def cross_sheet_qc(
         local_counts = CrossQCDiscardCounts()
         local_invalid = CrossQCInvalidCounts()
         local_log = _CallLog()
+        local_usage = StreamUsage()
         try:
             return (*_map_call(
                 shard, entry_by_handle, handle_by_key, discipline_by_handle,
                 client=client, model=model, max_retries=max_retries, sleep=sleep,
                 budget=local_budget, preamble=preamble, counts=local_counts,
                 invalid=local_invalid, by_label=by_label, log=local_log,
-            ), local_budget, local_counts, local_invalid, local_log)
+                usage=local_usage,
+            ), local_budget, local_counts, local_invalid, local_log, local_usage)
         except Exception as exc:  # noqa: BLE001 - one shard never sinks the pass
             return ([], [], [], 0, 0, _clean_error(exc), local_budget, local_counts,
-                    local_invalid, local_log)
+                    local_invalid, local_log, local_usage)
 
     workers = _resolve_cross_qc_workers(max_workers, len(shards))
     if workers == 1:
@@ -2648,7 +2725,7 @@ def cross_sheet_qc(
             map_results = list(pool.map(_run_map, shards))
 
     for (f, c, facts, in_tok, out_tok, err, local_budget, local_counts,
-         local_invalid, local_log) in map_results:
+         local_invalid, local_log, local_usage) in map_results:
         _fold_budget(budget, local_budget)
         discards.merge(local_counts)
         invalid.merge(local_invalid)
@@ -2656,6 +2733,8 @@ def cross_sheet_qc(
         log.interrupted_attempts += local_log.interrupted_attempts
         total_in += in_tok
         total_out += out_tok
+        usage.cache_read_tokens += local_usage.cache_read_tokens
+        usage.cache_write_tokens += local_usage.cache_write_tokens
         if err is not None:
             errors.append(err)
             # A degraded shard still surrenders its parseable numeric claims —
@@ -2687,7 +2766,7 @@ def cross_sheet_qc(
             client=client, model=model, max_retries=max_retries, sleep=sleep,
             budget=budget, preamble=preamble, counts=discards,
             max_workers=max_workers, invalid=invalid, by_label=by_label,
-            log=reconcile_log,
+            log=reconcile_log, usage=usage,
         )
         log.salvage.merge(reconcile_log.salvage)
         log.interrupted_attempts += reconcile_log.interrupted_attempts
@@ -2728,6 +2807,8 @@ def cross_sheet_qc(
         claims=_dedup_claims(all_claims),
         input_tokens=total_in,
         output_tokens=total_out,
+        cache_read_tokens=usage.cache_read_tokens,
+        cache_write_tokens=usage.cache_write_tokens,
         error="; ".join(errors) or None,
         shards_planned=len(shards),
         shards_completed=shards_completed,

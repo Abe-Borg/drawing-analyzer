@@ -62,6 +62,7 @@ from .digest import (
     _get,
     _image_block,
     _is_transient_error,
+    _message_cache_usage,
     _message_usage,
     _retry_backoff_seconds,
     _tolerant_json_object,
@@ -694,6 +695,9 @@ class _CallResult(NamedTuple):
     structured: bool
     #: One of the ``DEGRADE_*`` kinds when no verdict was settled, else None.
     degrade: str | None
+    #: The API's prompt-cache split, separate from ordinary input tokens.
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
 
 def _verify_one(
@@ -764,6 +768,7 @@ def _verify_one(
 
     status, note, valid_model_verdict = _verdict_from_response(resp)
     in_tok, out_tok = _message_usage(resp)
+    cache_read, cache_write = _message_cache_usage(resp)
     if note == "unparseable verdict" or note.startswith("unrecognized verdict"):
         _log.info("verify finding %s: %s", finding.id, note)
     return _CallResult(
@@ -773,6 +778,8 @@ def _verify_one(
         valid_model_verdict,
         send_structured,
         _degrade_kind(resp, valid_model_verdict),
+        cache_read,
+        cache_write,
     )
 
 
@@ -800,6 +807,7 @@ class VerifyResult:
         "_eligible", "verified", "rejected", "uncertain", "skipped",
         "malformed", "truncated", "failed", "not_judged_ids",
         "input_tokens", "output_tokens", "cache_hits", "cache_misses", "api_calls",
+        "cache_read_tokens", "cache_write_tokens",
     )
 
     #: The additive counters :meth:`combined` sums across passes.
@@ -807,6 +815,7 @@ class VerifyResult:
         "verified", "rejected", "uncertain", "skipped",
         "malformed", "truncated", "failed",
         "input_tokens", "output_tokens", "cache_hits", "cache_misses", "api_calls",
+        "cache_read_tokens", "cache_write_tokens",
     )
 
     def __init__(self) -> None:
@@ -823,6 +832,8 @@ class VerifyResult:
         self.not_judged_ids: list[str] = []
         self.input_tokens = 0
         self.output_tokens = 0
+        self.cache_read_tokens = 0
+        self.cache_write_tokens = 0
         self.cache_hits = 0
         self.cache_misses = 0
         self.api_calls = 0
@@ -1108,6 +1119,8 @@ def verify_findings(
                 result._count(res.verification.status)
                 result.input_tokens += res.input_tokens
                 result.output_tokens += res.output_tokens
+                result.cache_read_tokens += res.cache_read_tokens
+                result.cache_write_tokens += res.cache_write_tokens
                 done += 1
                 if progress is not None:
                     progress(done, total, f"Verifying finding {done}/{total}")
@@ -1541,10 +1554,12 @@ def _call_prepared_cross(
 
     status, note, valid_model_verdict = _verdict_from_response(resp)
     in_tok, out_tok = _message_usage(resp)
+    cache_read, cache_write = _message_cache_usage(resp)
     v = Verification(status=status, note=note, evidence=prepared.artifacts)
     return _CallResult(
         v, in_tok, out_tok, valid_model_verdict, send_structured,
         _degrade_kind(resp, valid_model_verdict),
+        cache_read, cache_write,
     )
 
 
@@ -1677,6 +1692,8 @@ def verify_cross_findings(
                 try:
                     res: _CallResult = future.result()
                     outcomes[index] = (res.verification, res.input_tokens, res.output_tokens)
+                    result.cache_read_tokens += res.cache_read_tokens
+                    result.cache_write_tokens += res.cache_write_tokens
                     result._count_degrade(res.degrade, prepared.finding)
                     if res.cacheable:
                         # Under the key of the contract actually sent.

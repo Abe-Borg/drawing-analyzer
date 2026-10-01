@@ -215,6 +215,10 @@ def _compares_type_to_text(node: ast.Compare) -> bool:
 
 # Request builders (they build content, not read a reply).
 _REQUEST_SIDE = {"file_upload.py"}
+# This formatter handles outgoing host tool results, preserving separate
+# images/text. Exclude only that function; investigation's reply-reading code
+# must remain covered by the structural pin below.
+_REQUEST_SIDE_FUNCTIONS = {"investigate.py": {"_tool_source_content"}}
 
 
 def test_no_module_reads_reply_text_blocks_itself():
@@ -227,8 +231,12 @@ def test_no_module_reads_reply_text_blocks_itself():
         if rel == "core/reply_text.py" or path.name in _REQUEST_SIDE:
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        offenders += [f"{rel}:{n.lineno}" for n in ast.walk(tree)
-                      if isinstance(n, ast.Compare) and _compares_type_to_text(n)]
+        for node in tree.body:
+            if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and node.name in _REQUEST_SIDE_FUNCTIONS.get(rel, set())):
+                continue
+            offenders += [f"{rel}:{n.lineno}" for n in ast.walk(node)
+                          if isinstance(n, ast.Compare) and _compares_type_to_text(n)]
 
     assert offenders == []
 

@@ -601,9 +601,10 @@ what could not be verified, risks, and next steps.
   - **Recorded limits:** a cut-off reply's kept items are judged against the
     sheets but the call they came from did not finish, so a conflict the model
     would have written later is lost (the stage reads PARTIAL and says how
-    many items were cut); the cache-token split of a cross-QC call is still
-    not recorded (PO-04); a cross-QC usage record still prices a
-    fallback-served call at the requested model (WP-14.3).
+    many items were cut); a cross-QC usage record still prices a
+    fallback-served call at the requested model (WP-14.3). (The cache-token
+    split, listed here first, is recorded since PO-04 merged; see the
+    integration note below.)
 - **Review follow-up (Codex, three P2 findings on `eecbc95`, all verified
   and fixed in one push):** (1) a finished raised-cap retry with no findings
   object (prose, malformed JSON) outranked a cut-off first read and lost the
@@ -620,6 +621,31 @@ what could not be verified, risks, and next steps.
   117 in the file, 120 new IDs in the slice, 6,035 → 6,154 collected). Full
   suite after the fix: **6,142 passed, 2 skipped, 10 deselected**; compileall,
   ruff (correctness classes) and the secret scan clean.
+- **Integration with main (PO-02, PO-03, PO-04 merged while the PR was in
+  review; PR #197 conflicted in `cross_qc.py`):** main merged into the branch
+  (the repository's convention for a slice branch; no history rewritten), as
+  the PO-04 handoff asked (`_plans/prompt-optimization.md`). PO-03's source
+  framing is kept as main has it. PO-04's cache-read and cache-write tokens
+  ride `_Reply` from `stream_reply`'s `StreamUsage`, so every billed attempt's
+  are counted (a transient retry, the raised-cap retry whichever read is kept,
+  an interrupted stream's `message_start`); `_call` adds them to the caller's
+  `usage=` (`_add_usage`) and the shard and pair workers fold them on the
+  collector as PO-04 built it. PO-04's pipeline test passes a stand-in result
+  without `stage_status`, so the status rule became one module function,
+  `cross_qc.cross_qc_stage_status`, read with defaults as the pipeline reads
+  every cross-QC field; the property delegates to it. `_CROSS_QC_CACHE_CONTRACT`
+  stays 10 (PO-03 changed the key's inputs, its own mechanism; the register
+  row notes the one shared miss). `tests/test_prompt_cache_usage.py` passes
+  unchanged; 12 new test IDs in `tests/test_cross_qc_terminal_outcomes.py`
+  (129 in the file): the raised-cap retry sums both attempts' cache tokens
+  whichever read is kept, an interrupted attempt keeps its reported cache
+  tokens on each path, shards and a shard retry fold on the collector, the
+  pipeline records them and none on a warm hit, and the status rule reads a
+  result without the new fields as before. A mutation that drops the retry's
+  cache tokens or the pair fold fails them. Full suite after the merge:
+  **6,229 passed, 2 skipped, 10 deselected**; compileall, ruff (correctness
+  classes; the pipeline's `normalize_specs_text` F401 is main's) and the
+  secret scan clean.
 - **Found, not fixed:** none outside the slice.
 - **Next:** in queue order, Wave 2 WP-10.1 … WP-10.4, WP-03.4, WP-07.3 and
   WP-11.3 (all available). WP-01 closes when WP-12.6 and WP-13.4 land. The

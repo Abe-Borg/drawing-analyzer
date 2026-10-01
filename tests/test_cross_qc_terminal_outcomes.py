@@ -633,6 +633,22 @@ def test_the_stage_status_reads_the_failure_flag_first(fields, status):
     assert X.CrossQCResult(**fields).stage_status == status
 
 
+@pytest.mark.parametrize("fields,status", [
+    ({"complete": True, "error": None}, "COMPLETE"),
+    ({"complete": False, "error": "x"}, "PARTIAL"),
+    ({"error": None}, "COMPLETE"),                 # no ``complete``: no error reads complete
+    ({"error": "x"}, "PARTIAL"),
+    ({"complete": True, "failed": True}, "FAILED"),
+], ids=["complete", "partial", "no_complete_no_error", "no_complete_error", "failed"])
+def test_the_pipeline_reads_the_status_of_a_result_without_the_new_fields(fields, status):
+    # The pipeline reads every cross-QC field with a default (a stand-in result,
+    # as PO-04's ledger test passes, has no ``stage_status``): the one rule,
+    # ``cross_qc_stage_status``, reads the same way.
+    from types import SimpleNamespace
+
+    assert X.cross_qc_stage_status(SimpleNamespace(**fields)) == status
+
+
 def test_a_whole_set_reply_with_no_findings_object_is_failed(tmp_path):
     def prose(body, obj):
         body["content"] = [R.text("I compared the sheets and found nothing structured to report.")]
@@ -1077,3 +1093,90 @@ def test_codex_the_salvage_count_is_taken_after_the_findings_cap(tmp_path):
 
     assert len(res.findings) == cap and res.findings_omitted == 5
     assert (res.salvage.findings, res.salvage.items_cut) == (cap, 1)
+
+
+# --------------------------------------------------------------------------- #
+# Prompt-cache usage (prompt optimization PO-04) on every billed attempt
+# --------------------------------------------------------------------------- #
+# PO-04 and this slice meet in ``_call``: PO-04 retains the API's cache-read and
+# cache-write counters, and this slice made every call a stream with transient
+# retries, one raised-cap retry and an interrupted stream's partial read. Each
+# attempt was billed, so each one's cache tokens are the stage's, whichever
+# read is kept.
+
+
+def _cached(route):
+    def wrapped(params: dict) -> dict:
+        body = route(params)
+        if _path(params):
+            body["usage"] = R.usage(800, 60, cache_read=700, cache_write=900)
+        return body
+
+    return wrapped
+
+
+@pytest.mark.parametrize("retry", ["finished", "refused"], ids=["retry_kept", "first_kept"])
+def test_the_raised_cap_retry_sums_both_attempts_cache_usage(tmp_path, retry):
+    seen = {"n": 0}
+
+    def route(params):
+        body = _body(params)
+        if _path(params) == "whole_set":
+            seen["n"] += 1
+            if seen["n"] == 1:
+                body = _cut(body, _reply_object(params))
+            elif retry == "refused":
+                body = _refused(text=True, category="cyber")(body, _reply_object(params))
+        return body
+
+    res = _run(AnthropicAPIStub(_cached(route)), cache=DigestCache(tmp_path / "c"))
+
+    assert len(res.findings) == (2 if retry == "finished" else 1)
+    assert (res.input_tokens, res.output_tokens) == (1600, 120)
+    assert (res.cache_read_tokens, res.cache_write_tokens) == (1400, 1800)
+
+
+@pytest.mark.parametrize("target", ["whole_set", "map", "reconcile"],
+                         ids=["whole_set", "map", "reconcile"])
+def test_an_interrupted_attempt_keeps_its_reported_cache_usage(tmp_path, monkeypatch, target):
+    # The interrupted attempt's ``message_start`` reported its input and cache
+    # counters; its output was never reported (the lower bound WP-01.7 records).
+    monkeypatch.setattr(D, "_retry_backoff_seconds", lambda attempt: 0.0)
+    stub = AnthropicAPIStub(_cached(_route()), stream=_interrupt(target, 1))
+
+    res = _run(stub, cache=DigestCache(tmp_path / "c"), sharded=target != "whole_set",
+               monkeypatch=monkeypatch)
+
+    attempts = len(_cross_requests(stub))       # every call, the interrupted one too
+    assert res.stage_status == "COMPLETE" and res.interrupted_attempts == 1
+    assert attempts == (2 if target == "whole_set" else 4)
+    assert (res.input_tokens, res.cache_read_tokens, res.cache_write_tokens) == \
+        (800 * attempts, 700 * attempts, 900 * attempts)
+    assert res.output_tokens == 60 * (attempts - 1)
+
+
+def test_sharded_calls_and_a_shard_retry_sum_cache_usage_in_the_collector(tmp_path, monkeypatch):
+    # Two map calls (the first cut off and retried at the raised cap) and the
+    # reconcile call: worker-local counters fold on the collector, in order.
+    stub = AnthropicAPIStub(_cached(_route(_stop("max_tokens"), "map", 1)))
+
+    res = _run(stub, cache=DigestCache(tmp_path / "c"), sharded=True, monkeypatch=monkeypatch)
+
+    assert [b["max_tokens"] for b in _requests_on(stub, "map")] == [CAP, RAISED, CAP]
+    assert res.stage_status == "COMPLETE"
+    assert (res.cache_read_tokens, res.cache_write_tokens) == (700 * 4, 900 * 4)
+
+
+def test_pipeline_records_every_attempts_cache_usage_and_none_on_a_warm_hit(tmp_path):
+    cache = DigestCache(tmp_path / "cache.sqlite")
+    ctx, _stub = _pipeline(tmp_path, _cached(_pipeline_route(_stop("max_tokens"), "whole_set", 1)),
+                           cache=cache)
+
+    record = _usage(ctx)
+    assert record.terminal_status == "COMPLETE"
+    assert (record.cache_read_tokens, record.cache_write_tokens) == (1400, 1800)
+
+    warm, _stub = _pipeline(tmp_path, _cached(_pipeline_route()), cache=cache, work="warm")
+    record = _usage(warm)
+    assert record.transport == "CACHE"
+    assert (record.cache_read_tokens, record.cache_write_tokens) == (0, 0)

@@ -24,6 +24,7 @@ from .core.api_config import (
     model_supports_adaptive_thinking,
     model_supports_effort,
 )
+from .core.prompt_content import SOURCE_CONTENT_RULE, source_content_block
 from .core.reply_text import reply_text
 from .core.tokenizer import CROSS_CHECK_RECOMMENDED_MAX
 from .digest import (
@@ -92,7 +93,7 @@ so rather than guessing.
 - Be concise — this is an overview, not a transcription. Don't repeat every \
 schedule row; point to the sheet that carries it.
 - Output Markdown. Do NOT emit a top-level title or heading — the caller adds the \
-section header. Use short subsections / bullets."""
+section header. Use short subsections / bullets.""" + "\n\n" + SOURCE_CONTENT_RULE
 
 
 # Corpus budget (chars) for the per-sheet digests in the user turn.
@@ -137,7 +138,8 @@ def build_synthesis_user_text(ok_sheets: list[SheetDigest]) -> SynthesisPrompt:
     counts what it dropped — loss-aware, never a silent slice (cf. DA-028), and
     the same discipline set_identity / review_planner / cross_qc already apply.
     A sheet is kept or dropped whole: half a digest would invite conflicts
-    against text the model cannot see.
+    against text the model cannot see. Budget complete escaped source blocks,
+    including their separators; the first sheet is always kept whole.
     """
     parts: list[str] = [
         "Per-sheet digests for the set follow (one block per sheet):",
@@ -149,11 +151,17 @@ def build_synthesis_user_text(ok_sheets: list[SheetDigest]) -> SynthesisPrompt:
     chars_omitted = 0
 
     def _block(index: int, sd: SheetDigest) -> tuple[str, str]:
-        return f"===== Sheet {index}/{total}: {sd.ref.display_label} =====", sd.text.strip()
+        return (
+            source_content_block(
+                f"===== Sheet {index}/{total}: {sd.ref.display_label} =====",
+                tag="sheet_metadata",
+            ),
+            source_content_block(sd.text.strip(), tag="sheet_digest"),
+        )
 
     for i, sd in enumerate(ok_sheets, start=1):
         header, body = _block(i, sd)
-        cost = len(header) + len(body)
+        cost = len(header) + len(body) + 3  # joined fields and blank line
         if used + cost > _TOTAL_BUDGET and used > 0:
             # Stop at the first sheet that does not fit, and drop everything
             # after it. Skipping this one to squeeze in a later, smaller sheet
@@ -162,7 +170,7 @@ def build_synthesis_user_text(ok_sheets: list[SheetDigest]) -> SynthesisPrompt:
             for j, dropped in enumerate(ok_sheets[i - 1:], start=i):
                 d_header, d_body = _block(j, dropped)
                 sheets_omitted += 1
-                chars_omitted += len(d_header) + len(d_body)
+                chars_omitted += len(d_header) + len(d_body) + 3
             break
         used += cost
         parts.append(header)

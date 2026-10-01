@@ -367,7 +367,11 @@ run status: `qc_status` (`NOT_REQUESTED` / `COMPLETE` / `PARTIAL` / `FAILED`), t
 typed `stage_results`, and the resolved `run_configuration` (§3.3 / §15.1); the
 append-only usage ledger `run_usage` backs the derived `total_input_tokens` /
 `total_output_tokens` / `total_estimated_cost` and the `usage_by_family` breakdown
-(§15.6). Even a standard run carries the QC record — `findings` are retained and
+(§15.6). When the API reports prompt-cache reads/writes, cross-QC and both
+verification passes retain those tokens separately from ordinary input and price
+them at cache rates. Local result-cache hits add no billed tokens.
+
+Even a standard run carries the QC record — `findings` are retained and
 offline-anchored (DA-012). When exhaustive QC or the free audit ran it fills the rest:
 `findings` (the model's, anchored + verified),
 `reference_findings` (the deterministic auditors', anchored + `DETERMINISTIC`),

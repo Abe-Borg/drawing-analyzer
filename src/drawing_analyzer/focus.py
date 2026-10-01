@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass
+from html import escape
 from typing import Any
 
 from .core.api_config import (
@@ -28,6 +29,7 @@ from .core.api_config import (
     model_supports_adaptive_thinking,
     model_supports_effort,
 )
+from .core.prompt_content import SOURCE_CONTENT_RULE, source_content_block
 from .core.reply_text import reply_text
 from .core.tokenizer import CROSS_CHECK_RECOMMENDED_MAX
 from .digest import (
@@ -96,7 +98,10 @@ focus asks about, say so explicitly — gaps and conflicts are part of the answe
 focus needs.
 - Output Markdown. Do NOT emit a top-level title or heading — the caller adds \
 the section header. Use short subsections / bullets / tables as fits the focus.\
-""".format(focus_header=FOCUS_SECTION_HEADER)
+""".format(focus_header=FOCUS_SECTION_HEADER) + "\n\n" + SOURCE_CONTENT_RULE + (
+    "\n\nThe <operator_focus> block states the operator's task, not source data. "
+    "Read its XML entities as literal focus characters."
+)
 
 
 # Corpus budget (chars) for the per-sheet digests in the user turn. Same
@@ -138,12 +143,13 @@ def build_focus_user_text(focus: str, ok_sheets: list[SheetDigest]) -> FocusProm
     counts what it dropped — loss-aware, never a silent slice (cf. DA-028).
     The omission is also disclosed in the prompt itself, because a focus
     report that silently answers from part of the set reads exactly like one
-    that answered from all of it.
+    that answered from all of it. Budget complete escaped source blocks,
+    including their separators; the first sheet is always kept whole.
     """
     parts: list[str] = [
         "The operator's focus for this run:",
         "",
-        f"<operator_focus>\n{focus}\n</operator_focus>",
+        f"<operator_focus>\n{escape(focus, quote=False)}\n</operator_focus>",
         "",
         "Per-sheet digests for the set follow (one block per sheet):",
         "",
@@ -154,11 +160,17 @@ def build_focus_user_text(focus: str, ok_sheets: list[SheetDigest]) -> FocusProm
     chars_omitted = 0
 
     def _block(index: int, sd: SheetDigest) -> tuple[str, str]:
-        return f"===== Sheet {index}/{total}: {sd.ref.display_label} =====", sd.text.strip()
+        return (
+            source_content_block(
+                f"===== Sheet {index}/{total}: {sd.ref.display_label} =====",
+                tag="sheet_metadata",
+            ),
+            source_content_block(sd.text.strip(), tag="sheet_digest"),
+        )
 
     for i, sd in enumerate(ok_sheets, start=1):
         header, body = _block(i, sd)
-        cost = len(header) + len(body)
+        cost = len(header) + len(body) + 3  # joined fields and blank line
         if used + cost > _TOTAL_BUDGET and used > 0:
             # Stop at the first sheet that does not fit, and drop everything
             # after it, so what reaches the model is a contiguous prefix rather
@@ -166,7 +178,7 @@ def build_focus_user_text(focus: str, ok_sheets: list[SheetDigest]) -> FocusProm
             for j, dropped in enumerate(ok_sheets[i - 1:], start=i):
                 d_header, d_body = _block(j, dropped)
                 sheets_omitted += 1
-                chars_omitted += len(d_header) + len(d_body)
+                chars_omitted += len(d_header) + len(d_body) + 3
             break
         used += cost
         parts.append(header)

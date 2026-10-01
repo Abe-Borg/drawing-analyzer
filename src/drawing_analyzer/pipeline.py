@@ -2724,6 +2724,8 @@ def _run_qc_stages(
                     run_usage, family="verify", instance="verify",
                     model=verify_model,
                     input_tokens=vres.input_tokens, output_tokens=vres.output_tokens,
+                    cache_read_tokens=getattr(vres, "cache_read_tokens", 0),
+                    cache_write_tokens=getattr(vres, "cache_write_tokens", 0),
                 )
             if vres.cache_hits:
                 _record_usage(
@@ -2757,6 +2759,8 @@ def _run_qc_stages(
                     run_usage, family="verify", instance="verify_cross",
                     model=verify_model, parent="verify",
                     input_tokens=cres.input_tokens, output_tokens=cres.output_tokens,
+                    cache_read_tokens=getattr(cres, "cache_read_tokens", 0),
+                    cache_write_tokens=getattr(cres, "cache_write_tokens", 0),
                 )
             if cres.cache_hits:
                 _record_usage(
@@ -4646,7 +4650,7 @@ def extract_drawing_context(
                 progress(total, total, "Cross-sheet QC")
             journal.emit("STAGE_START", stage="cross_qc", sheets=total)
         try:
-            from .cross_qc import cross_qc_model, cross_sheet_qc
+            from .cross_qc import cross_qc_model, cross_qc_stage_status, cross_sheet_qc
 
             cross_res = (
                 cross_future.result()
@@ -4675,12 +4679,16 @@ def extract_drawing_context(
             # Remediation WP-06.3: the failure flag before any count (D-2). A
             # stage that obtained nothing (every call failed with nothing kept,
             # or no call could be made) is FAILED, not PARTIAL; one rule,
-            # ``CrossQCResult.stage_status``.
-            cross_status = cross_res.stage_status
+            # ``cross_qc_stage_status`` (``CrossQCResult.stage_status``).
+            cross_status = cross_qc_stage_status(cross_res)
             _record_usage(
                 run_usage, family="cross_qc", instance="cross_qc",
                 model=cross_qc_model(),
                 input_tokens=cross_res.input_tokens, output_tokens=cross_res.output_tokens,
+                cache_read_tokens=(0 if getattr(cross_res, "cached", False)
+                                   else getattr(cross_res, "cache_read_tokens", 0)),
+                cache_write_tokens=(0 if getattr(cross_res, "cached", False)
+                                    else getattr(cross_res, "cache_write_tokens", 0)),
                 transport="CACHE" if getattr(cross_res, "cached", False) else "REAL_TIME",
                 cache_hit=bool(getattr(cross_res, "cached", False)),
                 terminal_status=cross_status,
