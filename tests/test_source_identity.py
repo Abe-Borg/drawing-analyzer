@@ -317,7 +317,7 @@ def test_leg_targets_follow_the_leg_page_not_its_label():
         critical_signature(a), critical_signature(b))
 
 
-@pytest.mark.parametrize("spelling", ["M-101", "m‑101", "(M-101)", "MECH"],
+@pytest.mark.parametrize("spelling", ["M-101", "m\u2011101", "(M-101)", "MECH"],
                          ids=["plain", "non-breaking hyphen", "bracketed", "another label"])
 def test_one_page_is_one_leg_target_however_its_label_reads(spelling):
     plain = _conflict(_leg("SRC-0001", sheet_id="M-101"))
@@ -332,7 +332,7 @@ def test_two_pages_of_one_pdf_are_two_leg_targets():
 
 
 def test_a_leg_with_no_source_keeps_its_label_target():
-    f = _conflict(ConflictLeg(sheet_id="m‑101.", source_quote="q"))
+    f = _conflict(ConflictLeg(sheet_id="m\u2011101.", source_quote="q"))
     assert _leg_targets(f) == frozenset({"M-101"})
 
 
