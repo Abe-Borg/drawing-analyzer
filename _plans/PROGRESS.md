@@ -1,7 +1,7 @@
 # Remediation progress tracker
 
-**Next up:** WP-06.2 is done ([PR #191](https://github.com/Abe-Borg/drawing-analyzer/pull/191)): both cross-QC paths address sheets by the same host handles (`S001` …, in source order) with each sheet's id beside its handle, and one resolver binds every reply (a handle, else an id exactly one sheet carries); an id more than one sheet carries is refused and counted (`legs_ambiguous_label` / `facts_ambiguous_label`, an observational stage warning), never bound to the first. The whole-set path grounds against the uncapped text through the sharded validator (U8; plan Step 6 reverses WP-03A's scope), its claims are rebound through the handles, the arithmetic auditor refuses an id two sheets carry (`arithmetic_ambiguous_sheet`), the prose synthesis map sends one to the set-level path, `critique._leg_targets` names pages, and the user-turn framing rides the cross-QC key (K2). **D-8 is decided.** Cross-QC contract 8 → 9, A/B `RECORD_CONTRACT_VERSION` 5 → 6; the critique contract and its fingerprint are unchanged (the owner's rules, eight choices over two rounds, measured first). Measured: 0 of 43 whole-set bindings, 177 arithmetic lookups and 50 leg-bearing merge decisions moved; the whole-set grounding dropped 0 suite items for a paraphrase. In queue order the next slice is Wave 2 `WP-06.3` (cross-QC terminal honesty); WP-10.1, WP-10.2, WP-10.3, WP-10.4, WP-03.4, WP-07.3 and WP-11.3 (Wave 2) are available too. **WP-01 stays open** (the owner's decision, 2026-09-30): its acceptance waits on WP-06.3 (cross-QC), WP-12.6 (the citation cache gate) and WP-13.4 (the investigation). Still open for the owner from WP-01.5: whether Opus 5.5 and Sonnet 5.5 get host refusal routes. Each of WP-06.3, WP-13.4, WP-14.1, WP-14.2 and WP-14.3 starts from its `test_recorded_limit_*` tests (named on its row; WP-14.3 also has one in `tests/test_batch_refusal_recovery.py`). WP-02 is not done: WP-02.4 (the canaries are written there; running them is O-4) and WP-02.5 remain. WP-17.1 (Wave 4, cancel; decides D-5), WP-16.3 and WP-18.6 (Wave 4) are unblocked. WP-09 is not done: WP-09.3 (N32, Wave 3) remains. WP-06 is not done: WP-06.3 (Wave 2) is available, and WP-06.4 still waits on WP-03.4. WP-13.1 now carries the investigation tools' id map (D-8 names it). WP-07 is not done: WP-07.3. WP-03 is not done: WP-03.4, WP-03.5 and WP-03.6 remain (Wave 2); WP-03.5 also carries the measured N30 exposure of cross-QC's same-pair conflicts, and WP-03.4 has two WP-04 D-3 inputs. WP-11 is not done: WP-11.3 remains. WP-16 is not done: WP-16.3 remains. First check the open PRs ([`README.md`](README.md), step 1); [#174](https://github.com/Abe-Borg/drawing-analyzer/pull/174) (dependabot) and [#175](https://github.com/Abe-Borg/drawing-analyzer/pull/175) (SDK 1.8.0 support) are open and not remediation slices. Before the next stable tag, the owner should look at O-5.
-**Last updated:** 2026-10-01 by the WP-06.2 session ([PR #191](https://github.com/Abe-Borg/drawing-analyzer/pull/191)).
+**Next up:** WP-06.3 is done ([PR #197](https://github.com/Abe-Borg/drawing-analyzer/pull/197)): every cross-QC call (whole-set, shard map, reconcile) streams through `digest.stream_reply` and reads its stop reason first through the digest's ladder, with a noun per call; a `max_tokens` stop gets one retry at 32,000; a cut-off reply keeps only its complete items (validated and grounded) and is never cached; a refusal names itself and keeps nothing; the stage is FAILED when it obtained nothing (`CrossQCResult.stage_status`), and a reconcile failure says why; N14 is decided (a budget-only shortfall is cached with its PARTIAL status); facts past the cap and items that are not objects are counted (U7); no client reads FAILED. Cross-QC contract 9 → 10 (the owner's rules, seven choices over two rounds, measured first). **WP-01 stays open** on WP-12.6 (the citation cache gate) and WP-13.4 (the investigation); its cross-QC part now holds (re-checked in the plan's WP-01 Acceptance note). In queue order the next slices are Wave 2 WP-10.1, WP-10.2, WP-10.3, WP-10.4, WP-03.4, WP-07.3 and WP-11.3 (all available). WP-06 is not done: WP-06.4 waits on WP-03.4. Still open for the owner from WP-01.5: whether Opus 5.5 and Sonnet 5.5 get host refusal routes. Each of WP-13.4, WP-14.1, WP-14.2 and WP-14.3 starts from its `test_recorded_limit_*` tests (named on its row; WP-14.3 also has one in `tests/test_batch_refusal_recovery.py`). WP-02 is not done: WP-02.4 (the canaries are written there; running them is O-4) and WP-02.5 remain. WP-17.1 (Wave 4, cancel; decides D-5), WP-16.3 and WP-18.6 (Wave 4) are unblocked. WP-09 is not done: WP-09.3 (N32, Wave 3) remains. WP-13.1 carries the investigation tools' id map (D-8 names it). WP-07 is not done: WP-07.3. WP-03 is not done: WP-03.4, WP-03.5 and WP-03.6 remain (Wave 2); WP-03.5 also carries the measured N30 exposure of cross-QC's same-pair conflicts, and WP-03.4 has two WP-04 D-3 inputs. WP-11 is not done: WP-11.3 remains. WP-16 is not done: WP-16.3 remains. First check the open PRs ([`README.md`](README.md), step 1): at this handoff [#190](https://github.com/Abe-Borg/drawing-analyzer/pull/190) (dependabot) and [#193](https://github.com/Abe-Borg/drawing-analyzer/pull/193) (prompt optimization PO-02: synthesis and focus framing; it touches `CLAUDE.md`, `CHANGELOG.md` and `DECISIONS.md` too, so whichever merges second resolves those) are open and not remediation slices. Before the next stable tag, the owner should look at O-5.
+**Last updated:** 2026-10-01 by the WP-06.3 session ([PR #197](https://github.com/Abe-Borg/drawing-analyzer/pull/197)).
 
 This file is authoritative for **status and order**. Requirements live in
 [`drawing-analyzer-remediation-plan.md`](drawing-analyzer-remediation-plan.md).
@@ -50,12 +50,12 @@ A package is `done` only when every slice is `done` or `n/a` **and** its
 
 | WP | Title | Priority | Slices | Status |
 |---|---|---|---|---|
-| WP-01 | Response terminal states and truthful stage completeness | P0 | 01.1–01.8 | todo: all eight slices done; acceptance waits on WP-06.3, WP-12.6, WP-13.4 (the owner's decision, 2026-09-30; the plan's WP-01 Acceptance note) |
+| WP-01 | Response terminal states and truthful stage completeness | P0 | 01.1–01.8 | todo: all eight slices done; acceptance waits on WP-12.6 and WP-13.4 (the owner's decision, 2026-09-30; the cross-QC part holds since WP-06.3, re-checked in the plan's WP-01 Acceptance note) |
 | WP-02 | Faithful SDK, streaming, batch and network test boundaries | P0 (enabling) | 02.1–02.5 | todo |
 | WP-03 | Durable finding identity and lossless, symmetric merging | P0 | 03.1–03.7 | todo |
 | WP-04 | Engineering quantity and tag comparison | P0 | 04.1–04.4 | done (2026-09-30: every slice done and the plan's WP-04 Acceptance holds, checked by WP-04.4; the owner's decision: done, with the two shapes left unread recorded as limits) |
 | WP-05 | Robust anchoring and consistent quote evidence | P0/P1 | 05.1–05.3 | done (2026-09-30: every slice done and the plan's WP-05 Acceptance holds, checked by WP-05.3) |
-| WP-06 | Source-safe cross-QC and claim-preserving deduplication | P0/P1 | 06.1–06.4 | todo: 06.1 and 06.2 done; WP-06.3 and WP-06.4 remain (WP-06.4 waits on WP-03.4), and the N30 note stays WP-03.5's |
+| WP-06 | Source-safe cross-QC and claim-preserving deduplication | P0/P1 | 06.1–06.4 | todo: 06.1, 06.2 and 06.3 done; WP-06.4 remains (waits on WP-03.4), and the N30 note stays WP-03.5's |
 | WP-07 | Arithmetic operand trust and strict numeric parsing | P0 | 07.1–07.3 | todo |
 | WP-08 | Reference, naming, sheet-ID and drawing-index auditors | P1 | 08.1–08.5 | todo |
 | WP-09 | Prose harvesting without empty findings or unnecessary duplication | P1 (N10 is P0) | 09.1–09.3 | todo |
@@ -134,7 +134,7 @@ starting.
 | WP-04.3 | Quantity roles for repeated same-kind values: the WP-04 matrix row "repeated values in different roles" (swapped: `6 in main, 4 in branch` / `4 in main, 6 in branch`; one value in two roles: `6 in supply, 6 in return` / `6 in supply, 8 in return`) | M | WP-04.2 | done | [PR #188](https://github.com/Abe-Borg/drawing-analyzer/pull/188), 2026-09-30. **Rules decided by the owner (eight choices, two rounds, measured first):** roles from a closed list (`critique._ROLE_WORDS`: main, branch, riser, drop, header, supply, return, suction, discharge, inlet, outlet, upstream, downstream, entering, leaving, primary, secondary, min/max, static, residual, cold, hot), bound right after the value, in parentheses, as a label (`main: 6 in`) or with a copula (`the main is 6 in`); a bare preceding label is not read (recorded limit); compared per role and kind by inclusion on the `measurements` axis; a role on one side only never blocks (the 500/550 gpm duplicate from both reads still folds, pinned); an ambiguous role (a value list with a role list and no `respectively`; a bare role word between two values) retains against a bound one; the `x12` of a tight `24"x12"` is no longer a tag (`_TAG_RE`); critique contract 3 → 4 (fingerprint pinned under 4); A/B `RECORD_CONTRACT_VERSION` 3 → 4 (the roles are stored); WP-04's acceptance waits on WP-04.4. `critique._quantity_tokens` is unchanged (now the tokens of `_quantity_readings`, the one scanner with spans). Measured over the whole suite: of 6,596 merge decisions in the 431 shared tests, 389 prose vetoes, 1,072 anchors and 769 grounding verdicts, **0 moved**; only the 4 decisions of the two flipped recorded limits did. Tests: `tests/test_quantity_roles.py` (118), the two rows moved to `_CONFLICTS`, `tests/test_signature_compatibility.py` (9, the separator), the WP-04.3 sections of `tests/test_ab_findings_diff.py` and `tests/test_drawing_cache_identity.py` |
 | WP-04.4 | Tokenizer residuals WP-04.1 reads only in part, each a demonstrated conflicting pair that still merges: a bare `12'` against `12'-6"`; `to`/`and`/`or` ranges and lists (`4 to 6 in` against `6 in`); loose-comma lists (`2, 4, 6 in` against `3, 5, 6 in`); a bare `20A` against `30A` on a shared `120V` (WP-04 acceptance) | M | WP-04.3 | done | [PR #189](https://github.com/Abe-Borg/drawing-analyzer/pull/189), 2026-09-30. **Rules decided by the owner (seven choices, two rounds, measured first):** a bare feet value, a pair beside the tokens: `critical_signature` gains `feet_inches` (`critique._feet_inches`, read part by part), each feet value in any spelling with the inches joined to it by spaces and at most one hyphen or dash (`12'-6"`, `12 ft 6 in` are `12ft6in`) or `0in` when bare (`12'`, `12 ft`, `12'-0"` are `12ft0in`), compared by inclusion on the `measurements` axis; the tokens are unchanged, so every `_SAFEGUARDS` row stays; spelled ranges and lists read whole (`critique._read_spelled`): `4 to 6 in`, `between 4 and 6 in` → `4..6in`; `4 and 6 in`, `4 or 6 in`, three or more numbers joined by commas → the tight list's token; two numbers and a comma alone stay prose; today's reading stands after a name or reference word, before `in` + an article or a preposition's object, for `2 and 1/2 in`, and inside a longer run; a compact `A` beside a voltage (after or before) is a current unless a name word precedes; critique contract 4 → 5 (fingerprint pinned under 5); A/B `RECORD_CONTRACT_VERSION` 4 → 5; `_CROSS_QC_CACHE_CONTRACT` 7 → 8 (a letter-merge join can change what the new guards read, so a grounding verdict can move for byte-identical inputs; constructed and pinned); the WP-01.7 tripwire re-pinned to `(10, 5)`; WP-04 done with two shapes recorded as limits (two numbers joined by a comma alone; a compact `A` with nothing electrical beside it). Measured: of 22,372 recorded merge decisions only the 10 of the five approved pairs moved (the four flips and the loose/tight list pair moved from retention to equivalence); 0 of 491 prose vetoes, 0 of 1,268 anchors, 0 of 908 grounding verdicts. Tests: `tests/test_quantity_residuals.py` (227), the four rows moved to `_CONFLICTS`, the list pair moved to `_EQUIVALENTS` and two new `_RECORDED_LIMITS` rows in `tests/test_quantity_signature.py`, the WP-04.4 sections of `tests/test_ab_findings_diff.py` and `tests/test_drawing_cache_identity.py` |
 | WP-06.2 | Whole-set cross-QC on host handles (label shown beside handle), grounded against **uncapped** evidence text like the sharded path, claims rebound through handles, framing hashed into the key; decides D-8 if not yet decided (N6, U8, K2) | L | WP-05.1 | done | [PR #191](https://github.com/Abe-Borg/drawing-analyzer/pull/191), 2026-10-01. **Rules decided by the owner (eight choices, two rounds, measured first; every recommended option taken):** (1) both paths address sheets by the same `S###` host handles with the sheet id beside each (`===== SHEET S001 = M-101 =====`, one header helper, whole-set and map requests), the whole-set and map instructions say handles in the json and sheet ids in text (`_HANDLE_RULE`), and one resolver binds every reference on both paths (`_resolve_sheet_ref`: a handle, else an id exactly one sheet carries); (2) the whole-set path grounds through the sharded validator against the uncapped text (plan Step 6 reverses WP-03A's scope), the WP-03A scope test keeps its assertions and id, its docstrings record the reversal, and two tests beside it pin the whole-set tail grounding and that the cap is never read; (3) an id more than one sheet carries is refused and counted (`legs_ambiguous_label`, `facts_ambiguous_label` in `CrossQCDiscardCounts`), observational, one stage warning (`ambiguity_note()`), the stage keeps its status, cached with its counts (D-2 note); (4) entries sort by `(source_id, page_index)` when every entry has a source id (`_canonical_order`, natural order), so a reordered input gets the same handles, request, bindings and key; (5) the arithmetic auditor refuses a sourceless claim whose id two pages carry, before checking it (`arithmetic_ambiguous_sheet`); (6) `critique._leg_targets` names each leg's page (`SRC-0002#p1`), a sourceless leg keeps its canonical id, A/B `RECORD_CONTRACT_VERSION` 5 → 6 (merge-rule fingerprint unchanged: its corpus has no legs); (7) the prose harvest's synthesis id map sends an id two sheets carry to the set-level path, and `investigate._sheet_id_map` is noted on WP-13.1; (8) `_CROSS_QC_CACHE_CONTRACT` 8 → 9 for the binding, and the user-turn framing (K2) rides the key verbatim beside the system prompts (`CROSS_QC_USER_FRAMING_NAMES`, `cross_qc_user_framing()`): two changes, two mechanisms, two register rows (plus the A/B row). D-8 is decided. Tests: `tests/test_cross_qc_source_binding.py`, `tests/test_source_identity.py` (N6 section), `tests/test_evidence_tail.py` (Case 3), `tests/test_ab_findings_diff.py` (leg targets). Re-baselined (approved): the six contract pins, `test_cross_qc_returns_numeric_claims`, the two B6 parser-level tests (re-pointed from the removed `_validate_cross_item` to the one validator), the two WP-06.1 whole-set discards pins, two whole-set fixtures made to print their quotes, the map fake's header regex in `tests/test_cross_qc_grounding.py`, the A/B fixture's leg pages and its two contract pins. Review follow-up (Codex): no handle is a sheet id of the set (`_handle_prefix`: `S`, else `H`, `K`, …), so a sheet numbered `S001` is reached by its id and never shadowed by another sheet's handle. Recorded limit: a reply that echoes `S001 = M-101` as a reference is unknown |
-| WP-06.3 | Cross-QC terminal honesty: `stop_reason` checked, streaming, bounded raised-cap retry, bounded partial-array salvage, fact-cap and omission counters; decision recorded for N14 (U6, U7 observability, N14) | M | WP-01.2 | todo | From WP-06.1 (found, not fixed): `_parse_facts` skips a fact that is not an object with no counter, on the same line as the 40-fact cap (`if not isinstance(item, dict) or len(out) >= DEFAULT_MAP_MAX_FACTS`); count both there. A leg in `also_on` that is not an object is skipped silently too (on the sharded path a finding it leaves under two legs is counted, `findings_dropped_under_two_legs`). WP-06.1 made refused findings observational and cached with their counts (the owner's decision, D-2 note); N14's decision (cache a degraded result with its status, or not) is still this slice's From WP-02.2: cross-QC is the largest non-streaming request (16,000 `max_tokens`, `create`); a raised-cap retry that doubles it passes the SDK's cap (21,333) and must move it to `digest.stream_message` in the same change. `tests/test_sdk_contract.py::test_every_non_streaming_stage_is_within_the_sdk_cap` and `::test_the_cap_table_matches_what_the_stages_send` fail until the table's `cross_qc` row says it streams From WP-16.2 (found, not fixed): `cross_sheet_qc` returns `CrossQCResult(error=...)` when it cannot get a client, and `complete` defaults to True, so the pipeline records the stage COMPLETE beside its error line (measured with the environment removed mid-run on a library call: `Cross-sheet QC: ANTHROPIC_API_KEY environment variable not set` with the stage COMPLETE). The GUI no longer reaches it From WP-02.3 (found, not fixed; pinned by `tests/test_response_shapes.py::test_recorded_limit_cross_qc_names_only_an_empty_refusal`): a cross-QC reply refused with an explanation reads 'response contained no parseable findings object' (the stage PARTIAL, not cached); only an empty refusal is named. A `fallback` block splitting the reply breaks its JSON the same way (WP-01.6's join) From WP-01.6: the join half is done (`core.reply_text.reply_text` reads a fallback-split reply whole, cross-QC's included); the stop reason is still this slice's (`cross_qc._call` reads none), and `digest.unfinished_reply_error` is the helper the five set-level consumers use (the ladder with a noun). Note for tests: per Anthropic's docs a non-streamed reply declined part way is `[fallback, text]` (the partial omitted), while `sdk_responses.splice_fallback` builds the streamed `[text, fallback, text]` shape for any reply From WP-01.7: cross-QC does not stream (a plain `create`); if its raised-cap retry moves it onto `digest.stream_message`, an interrupted stream reaches it as `core.stream_interruption.StreamInterrupted` (retried by `_is_transient_error`, its partial read unfinished), and `digest.stream_reply` is the one loop for a single reply. From WP-01.8: measured by WP-01.8 (the real SDK over the stub, the mini set): a cross-QC reply stopped at `max_tokens`, refused, with no stop reason or at the context window reads COMPLETE and is cached (the warm run makes no cross-QC call); this slice closes that part of WP-01's acceptance (WP-01 stays open until it lands: the plan's WP-01 Acceptance note). From WP-06.2: the whole-set path now goes through the sharded validator and records `discards` (the `findings_dropped_under_two_legs` count replaces its INFO-only line, which is kept), so an omission or salvage counter added here applies to both paths through `_one_cross_qc_call` and `_map_call`. The `[TRUNCATED N chars]` marker is in the key already (`_TRUNCATION_MARKER_TEMPLATE`, K2), so caching a degraded result (N14) needs no key change for it |
+| WP-06.3 | Cross-QC terminal honesty: `stop_reason` checked, streaming, bounded raised-cap retry, bounded partial-array salvage, fact-cap and omission counters; decision recorded for N14 (U6, U7 observability, N14) | M | WP-01.2 | done | [PR #197](https://github.com/Abe-Borg/drawing-analyzer/pull/197), 2026-10-01. **Rules decided by the owner (seven choices, two rounds, measured first; every recommended option taken):** (1) every cross-QC call streams (whole-set, shard map, reconcile) through `digest.stream_reply` with `cross_qc.stream_message`, so a transient failure or an interrupted stream is retried and a partial read judged; (2) a `max_tokens` stop gets one retry at twice the cap (`min(2 x 16,000, MAX_TOKENS_RETRY_CEILING)` clamped by the model: 32,000) on every path, the digest's N16 rank keeping the better read (`_keep_reply` over `digest._read_rank` / `_name_discarded_retry`), both attempts' usage summed; (3) a cut-off reply (`max_tokens`, the context window, no stop reason) keeps the complete items of its `findings` / `facts` / `claims` arrays (`_salvage_object`, one linear `raw_decode` pass), each validated and grounded as usual, the item it was cut in dropped and counted (`CrossQCSalvage`, one observational warning); the call stays failed and is never cached; a refusal (even with JSON), a continuation or an unknown stop keeps nothing; (4) the stage is FAILED when it obtained nothing (`CrossQCResult.stage_status`, `failed` first: D-2's all-failed rule at the call level), PARTIAL when any call failed or was cut; the error is the ladder's (`digest.unfinished_reply_error`) with a noun per call (`cross-qc`, `cross-qc shard`, `cross-qc reconciliation`), and a reconcile failure says why; the usage record agrees and carries `interrupted_attempts`; (5) N14: a result short only by its budget (text omitted, the findings cap) is cached with its PARTIAL status and replays warm (the read side refuses an entry claiming both or neither); (6) U7: `CrossQCDiscardCounts` gains `facts_over_cap`, `facts_not_object`, `legs_not_object` (a non-list `facts` / `also_on` holds nothing), one observational warning (`omission_note()`), the manifest's `cross_qc_discards`; the findings cap names its own loss; (7) no client reads FAILED (`complete=False`, `failed=True`). `_CROSS_QC_CACHE_CONTRACT` 9 -> 10 (one register row); `digest.numeric_claims_from_items` is `parse_numeric_claims`' one loop. Tests: `tests/test_cross_qc_terminal_outcomes.py` (117: of the first 109, 77 fail on `main` on behaviour, 22 on a missing name, 10 controls pass; 8 more from the Codex review, each failing on `eecbc95`); re-baselined (approved): the recorded limit in `tests/test_response_shapes.py` (flipped and renamed `test_a_refused_cross_qc_reply_names_its_refusal`), the SDK cap table's `cross_qc` row (streams; a `cross_qc raised-cap retry` row added) with two new contract tests, and the seven contract pins (9 -> 10). The notes below are the row's history. From WP-06.1 (found, not fixed): `_parse_facts` skips a fact that is not an object with no counter, on the same line as the 40-fact cap (`if not isinstance(item, dict) or len(out) >= DEFAULT_MAP_MAX_FACTS`); count both there. A leg in `also_on` that is not an object is skipped silently too (on the sharded path a finding it leaves under two legs is counted, `findings_dropped_under_two_legs`). WP-06.1 made refused findings observational and cached with their counts (the owner's decision, D-2 note); N14's decision (cache a degraded result with its status, or not) is still this slice's From WP-02.2: cross-QC is the largest non-streaming request (16,000 `max_tokens`, `create`); a raised-cap retry that doubles it passes the SDK's cap (21,333) and must move it to `digest.stream_message` in the same change. `tests/test_sdk_contract.py::test_every_non_streaming_stage_is_within_the_sdk_cap` and `::test_the_cap_table_matches_what_the_stages_send` fail until the table's `cross_qc` row says it streams From WP-16.2 (found, not fixed): `cross_sheet_qc` returns `CrossQCResult(error=...)` when it cannot get a client, and `complete` defaults to True, so the pipeline records the stage COMPLETE beside its error line (measured with the environment removed mid-run on a library call: `Cross-sheet QC: ANTHROPIC_API_KEY environment variable not set` with the stage COMPLETE). The GUI no longer reaches it From WP-02.3 (found, not fixed; pinned by `tests/test_response_shapes.py::test_recorded_limit_cross_qc_names_only_an_empty_refusal`): a cross-QC reply refused with an explanation reads 'response contained no parseable findings object' (the stage PARTIAL, not cached); only an empty refusal is named. A `fallback` block splitting the reply breaks its JSON the same way (WP-01.6's join) From WP-01.6: the join half is done (`core.reply_text.reply_text` reads a fallback-split reply whole, cross-QC's included); the stop reason is still this slice's (`cross_qc._call` reads none), and `digest.unfinished_reply_error` is the helper the five set-level consumers use (the ladder with a noun). Note for tests: per Anthropic's docs a non-streamed reply declined part way is `[fallback, text]` (the partial omitted), while `sdk_responses.splice_fallback` builds the streamed `[text, fallback, text]` shape for any reply From WP-01.7: cross-QC does not stream (a plain `create`); if its raised-cap retry moves it onto `digest.stream_message`, an interrupted stream reaches it as `core.stream_interruption.StreamInterrupted` (retried by `_is_transient_error`, its partial read unfinished), and `digest.stream_reply` is the one loop for a single reply. From WP-01.8: measured by WP-01.8 (the real SDK over the stub, the mini set): a cross-QC reply stopped at `max_tokens`, refused, with no stop reason or at the context window reads COMPLETE and is cached (the warm run makes no cross-QC call); this slice closes that part of WP-01's acceptance (WP-01 stays open until it lands: the plan's WP-01 Acceptance note). From WP-06.2: the whole-set path now goes through the sharded validator and records `discards` (the `findings_dropped_under_two_legs` count replaces its INFO-only line, which is kept), so an omission or salvage counter added here applies to both paths through `_one_cross_qc_call` and `_map_call`. The `[TRUNCATED N chars]` marker is in the key already (`_TRUNCATION_MARKER_TEMPLATE`, K2), so caching a degraded result (N14) needs no key change for it |
 | WP-10.1 | Tile-label and display-label contract folded into the keys without invalidating unchanged entries (K1) | S | — | todo | |
 | WP-10.2 | Critique contract resolved per transport at probe and store; batch runs log that the structured flag is ignored (K3) | S/M | — | todo | |
 | WP-10.3 | Planner loss metadata stored with the plan; legacy entries report loss as unknown (K4) | S/M | WP-01.1 | todo | |
@@ -235,7 +235,7 @@ starting.
 | WP-25.1 | Experiment: shared digest/critique vision prefix and per-sheet scheduling | — | Waves 0–2 | blocked: O-4 | |
 | WP-25.2 | Experiment: batch prompt caching | — | — | blocked: O-4 | |
 | WP-25.3 | Experiment: critique cache TTL from measured inter-read timing | — | WP-14.2 | blocked: O-4 | |
-| WP-25.4 | Experiment: cross-QC text allocation and cross-shard recall (incl. N14) | — | WP-06.3 | blocked: O-4 | |
+| WP-25.4 | Experiment: cross-QC text allocation and cross-shard recall (incl. N14) | — | WP-06.3 | blocked: O-4 | N14's caching decision was taken by WP-06.3 (a budget-only shortfall is cached with its PARTIAL status); the 4,000-character text budget, the 40-fact cap and the grouping (U7's redesign half) stay here, and every shortfall is now counted and warned (the findings cap, facts past the cap) |
 | WP-25.5 | Experiment: structured outputs for identity, planner and cross-QC | — | WP-01.6 | blocked: O-4 | |
 | WP-25.6 | Experiment: diverse second critique model or reduced read count | — | WP-22.2 | blocked: O-4 | |
 | WP-25.7 | Experiment: smaller overlap, adaptive tile resolution, smaller overview | — | — | blocked: O-4 | |
@@ -342,7 +342,7 @@ report is built from it).
 | N11 | Synthesis conflict extraction is negation-blind | P1 | 09.1 | implemented+validated | `tests/test_prose_filler_and_assurances.py` (WP-09.1, [PR #168](https://github.com/Abe-Borg/drawing-analyzer/pull/168)): the two review sentences and 14 equivalents are not conflicts (`test_n11_*`), make no call and no entry, and are counted in `assurances` (`test_a_dropped_assurance_is_counted_observationally`); 30 real conflicts that carry a "no", a negated verb, a contrast or a value beside an assurance survive (`test_real_synthesis_conflicts_survive`), with their anchors, and the gauntlet's set-level conflict is unchanged; through the pipeline: `test_pipeline_filler_and_assurances_cost_nothing` |
 | N12 | Matches ignore word boundaries (`VAV-2` inside `VAV-2-1`; `AHU-10` inside `AHU-101`) | P0 | 05.1, 05.2 | implemented+validated | Cross-QC part: `tests/test_cross_qc_grounding.py` (WP-05.1, [PR #165](https://github.com/Abe-Borg/drawing-analyzer/pull/165)): `AHU-10`/`AHU-101`, `VAV-2-1`/`VAV-2-10`, `VAV-2`/`VAV-2-1`, `AHU-1`/`AHU-1-2`, `P-1`/`P-10`, `P-1`/`XP-1`, `M-101`/`M-101A`, two long quotes ending inside a tag, a quote starting inside a word, and a tag inside a list written without spaces never ground; `P-1,`, `(P-1)`, `P-1.`, `P-1:`, `NOTE 3:`, `568 L/MIN` in `(568 L/MIN)` and a tag printed both alone and inside a longer one still do; the leg is dropped. Anchor part: `tests/test_anchor_whole_words.py` (WP-05.2, [PR #166](https://github.com/Abe-Borg/drawing-analyzer/pull/166)): `VAV-2` on `VAV-2-1 SERVES ROOM 12`, `AHU-1` on `SEE AHU-1-2 SCHEDULE`, `ACCESS PANEL AT VAV-2` on `…VAV-2-1 TYP` and `2-1 SERVES` on `VAV-2-1 SERVES ROOM` (EXACT before) and the 17-token note quoting `VAV-2` or `AHU-1` against one printing `VAV-2-1` or `AHU-1-2` (FUZZY before) never anchor, nor `1/2" PIPE` on `2-1/2" PIPE` or a sub-phrase starting inside a word; a tag printed both alone and inside a longer one anchors `exact` on the one alone, in both orders; WP-05.1's cut-word and whole-word tables run through the anchor; verification and investigation no longer see the N12 finding; the pipeline makes it a `[QUOTE NOT FOUND]` callout with no verification call. Recorded limit: a letter-only tag (`VAV-A` in `VAV-A-1`) inside a long window |
 | N13 | Cross-QC and anchor normalizers disagree (curly quotes, `½`, `×`, `Ø`) | P1 | 05.1 | implemented+validated | `tests/test_cross_qc_grounding.py` (WP-05.1, [PR #165](https://github.com/Abe-Borg/drawing-analyzer/pull/165)): `PROVIDE 6” DRAIN`, `2½"`↔`2-1/2"` (both ways, and `2 1/2"`), `O6`↔`Ø6`, `300×200`↔`300x200`, primes, curly quotes, a fraction slash, a non-breaking hyphen, a hyphen written as a space and a zero-width space all ground; `.5`/`5`, `5`/`0.5`, `5`/`-5`, `1`/`1.5`, `12`/`12,500`, `2"`/`1/2"`, `2`/`2½"`, `12`/`12'-6"`, `30`/`30%`, a changed number and a changed unit never do; `cross_qc._norm_for_match` is `anchor._normalize`; the per-word normalization equals the whole-string one over a Unicode corpus; a reconciled leg joins its fact across a curly inch mark, and two facts spelled that way with different tiles collide and give no tile |
-| N14 | Degraded cross-QC never cached: re-billed every warm run, run stays PARTIAL | P1 | 06.3, 25.4 | open | |
+| N14 | Degraded cross-QC never cached: re-billed every warm run, run stays PARTIAL | P1 | 06.3, 25.4 | implemented+validated (the decision, WP-06.3; the budget redesign stays WP-25.4's) | WP-06.3 ([PR #197](https://github.com/Abe-Borg/drawing-analyzer/pull/197)), the owner's decision: a result short only by its budget is cached with its PARTIAL status. `tests/test_cross_qc_terminal_outcomes.py::test_a_text_budget_shortfall_is_cached_partial_and_replayed`, `::test_a_findings_cap_shortfall_is_cached_partial_and_replayed`, `::test_a_sharded_budget_shortfall_is_cached_partial`, `::test_pipeline_a_budget_only_shortfall_replays_partial_warm` (0 cross-QC calls warm, PARTIAL, the same warnings, a CACHE usage record), never with a failed or cut-off call (`::test_a_budget_shortfall_with_a_failed_call_is_never_cached`), the read side (`::test_the_read_side_serves_only_a_complete_or_budget_only_entry`) |
 | N15 | Findings from errored/refused/truncated digests ingested unlabelled | P1 | 01.3 | implemented+validated | `tests/test_digest_partial_reads.py` (WP-01.3, [PR #170](https://github.com/Abe-Borg/drawing-analyzer/pull/170)), by the owner's rule (held out, listed, counted): through the pipeline, an exhaustive run with one sheet's read truncated, refused, ended early or out of context window holds its findings out of the ledger (no QC number, anchor, verification, placement; not in `findings.json`, `findings.csv` or `markup_manifest.json`; not a report finding row) while the finished sheet's finding is numbered as before (`test_n15_exhaustive_run_holds_the_findings_out`), the same on a standard run (`test_n15_standard_run_holds_the_findings_out`); the sheet's own export file lists them under FAILED and its report card lists them escaped (`test_sheet_file_lists_held_out_findings_under_failed`, `test_report_card_lists_held_out_findings_escaped`); counted in `ctx.digest_findings_held_out`, a digest-stage warning, `findings_held_out` in run.log and `digest_findings_held_out` in `run_manifest.json` (`test_run_log_sheet_line_counts_held_out_findings`, `test_manifest_held_out_summary`); a finished run holds nothing out (`test_n15_a_finished_run_holds_nothing_out`); with N16, the kept first read's findings are held out (`test_n15_and_n16_the_kept_first_read_is_held_out`) |
 | N16 | A raised-cap retry can lose the first (truncated) read | P1 | 01.3 | implemented+validated | `tests/test_digest_partial_reads.py` (WP-01.3, [PR #170](https://github.com/Abe-Borg/drawing-analyzer/pull/170)), by the owner's rule (one rank, later wins ties, the discarded attempt named): real time, a retry that comes back empty, refused (with and without text) or raises keeps the first read's prose, findings and stop reason, with both attempts' usage, and names the retry (`test_rt_worse_retry_keeps_first_read`, `test_rt_raising_retry_names_the_failure`), for a closed and a salvaged unclosed block; a partial or finished retry still wins (`test_rt_partial_retry_replaces_partial_first`, `test_rt_finished_retry_wins_and_is_cached`); an empty first read takes the retry (`test_rt_empty_first_read_takes_the_retry`); never spliced (`test_rt_never_splices_two_reads`); batch, on both recovery transports, the follow-up batch and the fresh-batch rounds (`test_batch_worse_retry_keeps_first_read`, incl. an errored envelope), the direct rescue landing worse or raising (`test_direct_rescue_*`), several discarded rounds counted (`test_several_discarded_retries_are_counted`), the best read kept across rounds (`test_multiround_keeps_the_best_read_so_far`), the harvest holding a partial read against a worse or unreached rescue (`test_harvested_partial_read_survives_*`), a content-free harvested read still parked; the one helper over a 20-case table (`test_keep_digest_read_table`); nothing new cached on either transport (`test_a_kept_partial_read_is_never_cached`) |
 | N17 | References to FM-numbered sheets are never reported as missing | P1 | 08.4 | open | |
@@ -366,8 +366,8 @@ report is built from it).
 | U3 | Generic `output_config` 400 disables task budgets process-wide | P1 | 13.1 | open | |
 | U4 | Oversized inline fallback; upload quota failures (see N21) | P1 | 18.1, 18.2, 18.4 | open | |
 | U5 | Remote orphan files; daemon-only cleanup (see N22) | P1 | 18.5, 17.2 | open | |
-| U6 | Cross-QC output cap shared with thinking; no truncation recovery | P1 | 06.3 | open | |
-| U7 | Cross-QC 4k text budget and 40-fact bottleneck | P1 | 06.3, 25.4 | open | |
+| U6 | Cross-QC output cap shared with thinking; no truncation recovery | P1 | 06.3 | implemented+validated | WP-06.3 ([PR #197](https://github.com/Abe-Borg/drawing-analyzer/pull/197)), the owner's rules: every call streams and reads its stop reason first; one raised-cap retry at 32,000; a cut-off reply keeps its complete items, PARTIAL, never cached. `tests/test_cross_qc_terminal_outcomes.py` (`::test_whole_set_terminal_shape`, `::test_map_terminal_shape`, `::test_reconcile_terminal_shape`: 17 + 12 + 12 shapes through the real SDK, status, kept items, the error's wording, cache admission and warm-run calls; the retry, salvage and interrupted-stream sections), `tests/test_response_shapes.py::test_a_refused_cross_qc_reply_names_its_refusal` (flipped), `tests/test_sdk_contract.py::test_the_cross_qc_raised_cap_retry_is_a_request_the_sdk_sends`, `::test_cross_qc_regressed_to_create_has_its_retry_refused_by_the_real_sdk` |
+| U7 | Cross-QC 4k text budget and 40-fact bottleneck | P1 | 06.3, 25.4 | open (observability implemented+validated in 06.3; the budget and fact-cap redesign (25.4) stays open) | WP-06.3 ([PR #197](https://github.com/Abe-Borg/drawing-analyzer/pull/197)): facts past the 40-per-shard cap and facts or legs that are not objects are counted (`facts_over_cap`, `facts_not_object`, `legs_not_object`) and named in one observational warning; the findings cap names its own loss. `tests/test_cross_qc_terminal_outcomes.py::test_facts_past_the_cap_and_non_objects_are_counted`, `::test_a_leg_that_is_not_an_object_is_counted`, `::test_the_omission_note`, `::test_the_counters_are_observational`, `::test_pipeline_the_omission_counters_reach_the_warnings_and_the_manifest`, `::test_pipeline_the_findings_cap_names_its_own_loss` |
 | U8 | Whole-set cross-QC path does no grounding | P0/P1 | 06.2 | implemented+validated | WP-06.2: whole-set items go through the sharded validator, grounded against the uncapped text, losses counted. `tests/test_cross_qc_source_binding.py::test_a_quote_past_the_prompt_cap_grounds_on_the_whole_set_path`, `::test_short_tags_get_no_exemption`, `::test_the_same_item_binds_alike_on_the_whole_set_and_sharded_parsers`, `tests/test_evidence_tail.py::test_forty_entries_ground_the_tail_quote_on_the_whole_set_path` |
 | U9 | Pruning can reap a live-but-idle run's work dir | P1 | 18.3 | open | |
 | U10 | Mentioned vs adopted codes; missing edition families | P1 | 12.3, 12.5 | open | |
@@ -399,6 +399,257 @@ report is built from it).
 Each session adds one entry at the top: date, slices and IDs, PR, what changed,
 contracts decided, cache/schema effects, validation actually run (with counts),
 what could not be verified, risks, and next steps.
+
+### 2026-10-01 — WP-06.3: cross-QC reads every reply's stop reason, streams, retries a cut reply once and keeps only what it finished ([PR #197](https://github.com/Abe-Borg/drawing-analyzer/pull/197))
+
+- **Slice and IDs:** WP-06.3. U6 implemented+validated; N14 decided and
+  implemented (the budget redesign stays WP-25.4's); U7's observability
+  implemented+validated (its redesign stays WP-25.4's). WP-01's acceptance for
+  cross-QC now holds (re-checked in the plan's WP-01 Acceptance note); WP-01
+  stays open on WP-12.6 and WP-13.4. WP-06 is not done: WP-06.4 waits on
+  WP-03.4. D-1, D-2 and D-4 gain a WP-06.3 note each; the migration register
+  gains one row.
+- **Base.** `main` = `origin/main` = `aa0bfe1` (WP-06.2, PO-01 and SDK 1.8.0
+  support). Open PRs at the start: [#190](https://github.com/Abe-Borg/drawing-analyzer/pull/190)
+  (dependabot) and [#193](https://github.com/Abe-Borg/drawing-analyzer/pull/193)
+  (prompt optimization PO-02: synthesis and focus framing, opened after the
+  request was written). Neither is a remediation slice and neither touches
+  `cross_qc.py`, so this slice went ahead; #193 does touch `CLAUDE.md`,
+  `CHANGELOG.md` and `DECISIONS.md` (the register's first row), so whichever
+  PR merges second resolves those three files. Baseline **6,023 passed, 2
+  skipped, 10 deselected** (521 s), as the request expected; the two skips are
+  IPv6 loopback and chmod as root. Python 3.11.15, SDK **1.8.0** (the range is
+  `>=1.7,<1.9`), PyMuPDF 1.28.2 (`pip install -e ".[dev,browsertest]"`,
+  `cffi`, `ruff==0.14.5`).
+- **The request's facts, re-verified** (all held; additions marked):
+  - `cross_qc._call` was `call_with_refusal_fallback(..., method="create")` at
+    `phase_output_cap(PHASE_CROSS_QC)` = 16,000 with adaptive thinking, and read
+    `stop_reason` only for an empty reply (`empty cross-qc (…)`).
+  - Through the real SDK over `AnthropicAPIStub` (the mini set, Opus 5.5, on
+    the whole-set call, the first shard call and the reconcile call): a reply
+    stopped at `max_tokens` with its object closed (fenced or not), a refusal
+    carrying a findings block, `stop_reason=None`, the context window,
+    `tool_use` and `pause_turn` read **COMPLETE and were cached** (warm: 0
+    cross-QC calls); a refusal with text read "no parseable findings object"
+    (PARTIAL); a cut findings array lost every item; a non-streamed
+    `[fallback, text]` reply read correctly (control).
+  - **Added:** a reconcile failure lost its own error: the run's error read
+    only `cross-qc reconciliation incomplete` (`_reconcile_facts` returned a
+    bool), so a refused reconcile call did not name itself.
+  - **Added:** the findings cap's loss was warned as `text budget degraded: 0
+    char(s) omitted`.
+  - The fact cap and the non-object skips (`_parse_facts`, `also_on`) had no
+    counter; the missing-client result defaulted `complete=True` (stage
+    COMPLETE beside its error); a degraded result was never cached (N14).
+- **Measured before any code** (a scratch pytest plugin, never committed, that
+  records every cross-QC request at `_dispatch_messages` (path, method, cap,
+  stop reason, text, whether the findings object parsed), every
+  `cross_sheet_qc` result (complete, error, degraded, cache admission, findings
+  as serialized) and every pipeline cross-QC stage (status, errors, warnings,
+  usage)):
+  - **On `main`** (instrumented full suite, 6,023 passed): 418 cross-QC calls
+    (275 whole-set, 77 map, 66 reconcile), **all `create`**, none raised;
+    **one unfinished** (the recorded limit's refusal); 451 results (35
+    incomplete: 20 with an error, 15 short only by their budget, the N14
+    population); 346 stages (327 COMPLETE, 19 PARTIAL). **Replayed offline
+    with 0 mismatches** (every call's parse; 228 whole-set results' `complete`
+    and admission).
+  - **Every option prototyped behind a scratch switch** (a worktree of
+    `aa0bfe1`) and run over the 52 cross-QC-related test files (3,589 tests):
+    the recommended set moved 9 (the 7 contract pins, the recorded limit, the
+    SDK cap table's row); each alternative (stream only the retry, no retry, no
+    retry on reconcile, keep nothing, also salvage continuations, PARTIAL for
+    every failure, N14 not cached, the old client result) moved **0 more**
+    (stream-only-the-retry un-moves the cap table). The suite cannot tell the
+    options apart, so the choice rested on the real-SDK case tables (each
+    shape on each path under every option).
+- **The decision, made by the owner before any code** (AskUserQuestion, two
+  rounds, seven choices, measured case tables; every recommended option taken):
+  - **Round 1.** (1) **Stream every call** through `digest.stream_reply`. Not
+    taken: stream only the retry. (2) **One raised-cap retry, twice the cap,
+    every path.** Not taken: not on reconcile; none. (3) **Keep the complete
+    items of a cut-off reply** (`max_tokens`, the context window, no stop
+    reason), each validated and grounded; never cached; a refusal, a
+    continuation or an unknown stop keeps nothing. Not taken: keep nothing;
+    also salvage continuations and unknown stops. (4) **FAILED when nothing
+    was obtained**, PARTIAL when any call failed or was cut; the ladder's
+    wording with a noun per call; a reconcile failure says why. Not taken:
+    PARTIAL for every failed call.
+  - **Round 2.** (5) **N14: cache a budget-only shortfall with its PARTIAL
+    status** (warm replays it). Not taken: leave it to WP-25.4. (6) **The
+    counters in `CrossQCDiscardCounts` with one warning**, the findings cap's
+    own warning, the salvage counts as one warning. Not taken: a new record;
+    counters only. (7) **No client: FAILED, `complete=False`.** Not taken:
+    PARTIAL.
+  - **Composition, decided in the implementation within those rules** (for
+    the next session): a finished empty reply keeps the ladder's `empty
+    cross-qc (…)`; a finished reply with no findings object keeps
+    `_NO_FINDINGS_OBJECT` and its claims (unchanged) and, having obtained no
+    judgment, reads FAILED on the whole-set path; a cut-off call counts as
+    obtained (PARTIAL) only when it retained a finding or a fact after
+    validation and the cap (`CrossQCSalvage.kept`; Codex review, below); a
+    raised-cap retry that raises keeps the first read and names it (`; retry
+    failed: …`), as the digest's does; a reply that yields a findings object
+    outranks one that does not, then the digest's rank decides (Codex review),
+    so of two partial reads the retry's wins, with no suffix; `facts` /
+    `also_on` values that are not lists hold nothing and count nothing (the
+    `_findings_array` rule); a reconcile failure joins its distinct errors in
+    call order.
+- **What changed** (production):
+  - **`cross_qc.py`:** `_call` → `_request`, `_send` (`stream_reply` with this
+    module's `stream_message`, then `unfinished_reply_error`), `_keep_reply`
+    (`digest._read_rank`, `_name_discarded_retry` read off `_Reply`), the
+    raised-cap retry; `_Reply`, `_CallLog`, `_SALVAGE_KINDS`, the three
+    nouns; `_salvage_object`, `_reply_object`, `_reply_claims`, `_note_reply`,
+    `_note_salvage`; the three path functions return a cut-off reply's items
+    beside its error (tuple shapes unchanged; a `log=` sink); `_reconcile_facts`
+    threads the sink; `cross_sheet_qc` keeps a cut-off shard's findings and
+    facts, says why reconciliation is incomplete, sets `failed`, `salvage`,
+    `interrupted_attempts`, and returns `failed=True` with no client;
+    `CrossQCSalvage`; `CrossQCDiscardCounts` gains `facts_over_cap`,
+    `facts_not_object`, `legs_not_object` and `omission_note()`;
+    `CrossQCResult` gains `failed`, `salvage`, `interrupted_attempts` and
+    `stage_status`; `_put_cross_qc_cache` / `_cross_qc_from_cache` (N14);
+    `_CROSS_QC_CACHE_CONTRACT` 9 → 10 with its reason; the module docstring,
+    the marker and `evidence_sha256` comments (the latter is load-bearing now).
+  - **`digest.py`:** `numeric_claims_from_items`, `parse_numeric_claims`' one
+    loop (byte-identical for every caller).
+  - **`pipeline.py`:** the stage and its usage record read
+    `CrossQCResult.stage_status`; the usage record carries
+    `interrupted_attempts`; the findings cap's own warning; the salvage and
+    omission warnings.
+- **Tests:** **112 new test IDs, 1 renamed away** (counts from
+  `--collect-only`: 6,035 → 6,146 collected, 10 deselected):
+  `tests/test_cross_qc_terminal_outcomes.py` 109 (the whole-set, map and
+  reconcile shape matrices 17 + 12 + 12 through the real SDK; the retry 7;
+  salvage 15; interrupted streams 9; status 9; N14 and the contract pin 9;
+  U7 counters 12; through the pipeline 7), `tests/test_sdk_contract.py` 2 (the retry is a
+  streamed request the SDK sends; regressed to `create`, its retry is refused
+  by the real SDK), and the flipped recorded limit.
+  - **Classified against `main`** (a worktree at `aa0bfe1`; a scratch shim
+    gives the new result fields their old behaviour so each test reaches its
+    assertion): of the 109, **77 fail on behaviour, 22 on a missing name**
+    (`_salvage_object`, the three counters, `omission_note`, `failed`), **10
+    pass** (controls: the stage rule where old and new agree, the read side's
+    two refusals, a non-list `facts`, a budget shortfall with a failed call
+    never cached). The two new contract tests and the flipped limit fail on
+    `main`.
+  - **Re-baselined (the owner's approved re-pins), each failing on `main` in
+    its new form:** the seven contract pins (9 → 10:
+    `test_anchor_character_stream`, `test_cross_qc_source_binding`,
+    `test_cross_qc_validation_and_dedup`, `test_drawing_cross_qc`,
+    `test_evidence_tail`, `test_evidence_visual`, `test_quantity_residuals`);
+    `tests/test_response_shapes.py::test_recorded_limit_cross_qc_names_only_an_empty_refusal`
+    flipped and renamed `test_a_refused_cross_qc_reply_names_its_refusal`
+    (FAILED, the refusal named with its category, the warm run asks again);
+    `tests/test_sdk_contract.py`'s `_stage_caps` (`cross_qc` streams; a
+    `cross_qc raised-cap retry` row).
+- **Validation** (this container):
+  - Full suite on the code: **6,134 passed, 2 skipped, 10 deselected** (487 s,
+    under the probe). A JUnit diff against the baseline: of the 6,024 tests in
+    both runs, **0 changed outcome**; 1 only in the baseline (the renamed
+    limit) and 112 only here, all passing.
+  - **The instrumented diff, `main` vs this branch, by content:** in every
+    existing test the cross-QC requests are the same (path, cap, stop reason,
+    text, parse), now streamed (662 streamed requests and the 2 of the
+    regressed-to-create test). Outside the new tests: **15 results** differ
+    only in cache admission (the budget-only shortfalls, now stored: N14), and
+    **18 pipeline stages** read FAILED instead of PARTIAL with a FAILED usage
+    record (a finished whole-set reply with no findings object: the gauntlet's
+    cross-QC sabotage, two set-level-notes tests, two prose-filler tests and
+    13 source-isolation tests whose cross-QC fake answers prose); every one of
+    those tests accepts FAILED. 0 unexplained.
+  - **Speed** (a 40-sheet whole-set pass and an 80-sheet sharded pass, 60
+    conflicts per reply, about 5k characters per text layer, best of 3, three
+    alternations): whole-set `main` 85–95 ms, branch 86–92 ms; sharded `main`
+    170–196 ms, branch 173–191 ms. No measurable difference.
+  - `python -m compileall -q src`: clean. `ruff check --select E9,F63,F7,F82
+    src tests scripts` (0.14.5): clean. F401/F811/F841 on the touched files:
+    13 hits on both `main` and here, none new. `python scripts/scan_secrets.py`:
+    clean. No key anywhere; every new parametrized case has `ids=`.
+  - `python scripts/run_acceptance.py` after the docs, with `build` installed so
+    the build gate runs: **every automated gate PASS**: byte-compile, import
+    isolation (I-5), the hermetic suite and trust gauntlet (**6,134 passed, 2
+    skipped, 10 deselected**, the full suite again after the docs; the
+    gauntlet's cross-QC sabotage reads FAILED, which its test accepts), the
+    secret scan, the browser security suite (105 collected, 105 executed) and
+    the build and clean-install smoke.
+- **Docs:** CHANGELOG (Fixed); CLAUDE.md (the cross-QC terminal-honesty
+  paragraph, the discard counters, the streaming invariant's list, the capture
+  site's list, the `core/` classifier adopters, the recorded-limits list, the
+  contract history); README (the cross-sheet QC section: replies the model did
+  not finish, the budget-only cache, the counters); the plan (the WP-06 Step 7
+  and Step 8 notes, the WP-01 Acceptance re-check); DECISIONS (D-1, D-2, D-4
+  notes, one register row); PROGRESS (this entry; the WP-06.3 row; the WP-01
+  and WP-06 package rows; the WP-25.4 row's note; the N14, U6, U7 rows; Next
+  up). No dependency changed.
+- **Not verified:**
+  - Live API behaviour (no budget, O-4; this slice makes no call): how often a
+    real cross-QC reply hits 16,000 (adaptive thinking shares the envelope),
+    whether 32,000 is enough, and how a real refusal of a cross-QC request
+    reads.
+  - Windows is covered by this PR's CI (`gates-windows`).
+- **Risks and residual gaps:**
+  - **Visible behaviour changes, by design:** a cut-off reply now costs one
+    more Opus call (at most one per cut-off call); a run whose whole-set call
+    returns no usable reply now reads FAILED (it read PARTIAL); a refused
+    cross-QC call names its refusal; a budget-only shortfall is served warm
+    (no second bill) and still reads PARTIAL.
+  - **One-time cost:** the first cross-sheet QC run after upgrading re-runs
+    once (contract 10; contracts 4 to 9 are unreleased, so a 1.7.0 user pays
+    once).
+  - **Recorded limits:** a cut-off reply's kept items are judged against the
+    sheets but the call they came from did not finish, so a conflict the model
+    would have written later is lost (the stage reads PARTIAL and says how
+    many items were cut); a cross-QC usage record still prices a
+    fallback-served call at the requested model (WP-14.3). (The cache-token
+    split, listed here first, is recorded since PO-04 merged; see the
+    integration note below.)
+- **Review follow-up (Codex, three P2 findings on `eecbc95`, all verified
+  and fixed in one push):** (1) a finished raised-cap retry with no findings
+  object (prose, malformed JSON) outranked a cut-off first read and lost the
+  items it had finished: `_keep_reply` now ranks a reply that yields a
+  findings object first, then by the digest's rank, and names the discarded
+  retry (`; retry: response contained no parseable findings object …`); (2) a
+  cut-off call that retained nothing (an empty array closed before the cut,
+  or every complete item refused or ungrounded) counted as obtained and read
+  PARTIAL: a call now counts only when it retained a finding or a fact
+  (`CrossQCSalvage.kept`), on the whole-set path and per shard, so such a run
+  reads FAILED; (3) the whole-set salvage count was taken before the findings
+  cap: it is now taken after. 8 new test IDs, each failing on `eecbc95` on
+  behaviour (`tests/test_cross_qc_terminal_outcomes.py`, the Codex section:
+  117 in the file, 120 new IDs in the slice, 6,035 → 6,154 collected). Full
+  suite after the fix: **6,142 passed, 2 skipped, 10 deselected**; compileall,
+  ruff (correctness classes) and the secret scan clean.
+- **Integration with main (PO-02, PO-03, PO-04 merged while the PR was in
+  review; PR #197 conflicted in `cross_qc.py`):** main merged into the branch
+  (the repository's convention for a slice branch; no history rewritten), as
+  the PO-04 handoff asked (`_plans/prompt-optimization.md`). PO-03's source
+  framing is kept as main has it. PO-04's cache-read and cache-write tokens
+  ride `_Reply` from `stream_reply`'s `StreamUsage`, so every billed attempt's
+  are counted (a transient retry, the raised-cap retry whichever read is kept,
+  an interrupted stream's `message_start`); `_call` adds them to the caller's
+  `usage=` (`_add_usage`) and the shard and pair workers fold them on the
+  collector as PO-04 built it. PO-04's pipeline test passes a stand-in result
+  without `stage_status`, so the status rule became one module function,
+  `cross_qc.cross_qc_stage_status`, read with defaults as the pipeline reads
+  every cross-QC field; the property delegates to it. `_CROSS_QC_CACHE_CONTRACT`
+  stays 10 (PO-03 changed the key's inputs, its own mechanism; the register
+  row notes the one shared miss). `tests/test_prompt_cache_usage.py` passes
+  unchanged; 12 new test IDs in `tests/test_cross_qc_terminal_outcomes.py`
+  (129 in the file): the raised-cap retry sums both attempts' cache tokens
+  whichever read is kept, an interrupted attempt keeps its reported cache
+  tokens on each path, shards and a shard retry fold on the collector, the
+  pipeline records them and none on a warm hit, and the status rule reads a
+  result without the new fields as before. A mutation that drops the retry's
+  cache tokens or the pair fold fails them. Full suite after the merge:
+  **6,229 passed, 2 skipped, 10 deselected**; compileall, ruff (correctness
+  classes; the pipeline's `normalize_specs_text` F401 is main's) and the
+  secret scan clean.
+- **Found, not fixed:** none outside the slice.
+- **Next:** in queue order, Wave 2 WP-10.1 … WP-10.4, WP-03.4, WP-07.3 and
+  WP-11.3 (all available). WP-01 closes when WP-12.6 and WP-13.4 land. The
+  owner question on 5.5 refusal routes (WP-01.5) is still open.
 
 ### 2026-10-01 — WP-06.2: whole-set cross-QC on host handles, grounded, claims rebound, framing keyed ([PR #191](https://github.com/Abe-Borg/drawing-analyzer/pull/191))
 

@@ -522,9 +522,11 @@ def test_the_cross_qc_contract_moved_for_the_character_stream():
     quote or text with a number split around a lone point no longer grounds.
     One mechanism, the existing contract term (plan §2 rule 15). 8 since
     remediation WP-04.4 (the quantity reader the veto reuses changed) and 9
-    since remediation WP-06.2 (whole-set binding through handles, grounded);
-    the key still differs from contract 6's."""
-    assert X._CROSS_QC_CACHE_CONTRACT == 9
+    since remediation WP-06.2 (whole-set binding through handles, grounded)
+    and 10 since remediation WP-06.3 (a reply the model did not finish is never
+    stored; a budget-only shortfall is stored with its status); the key still
+    differs from contract 6's."""
+    assert X._CROSS_QC_CACHE_CONTRACT == 10
     entries = [("M-101", "digest", "text", _sheet(_line("SEE 6 \" DRAIN")))]
     current = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")
     with pytest.MonkeyPatch.context() as mp:

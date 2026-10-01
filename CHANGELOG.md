@@ -305,6 +305,55 @@ adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Cross-sheet QC read a reply the model did not finish as finished, and
+  cached it (remediation WP-06.3; U6, U7, N14, and WP-01's acceptance for
+  cross-QC).** `cross_qc._call` was a plain `create` that read the stop reason
+  only when the reply was empty. Measured through the real SDK on the
+  whole-set, shard and reconcile calls: a reply stopped at `max_tokens` with
+  its findings object closed (fence or not), a refusal that still carried a
+  findings block, a reply with no stop reason, one stopped at the context
+  window, and one stopped at `tool_use` or `pause_turn` read COMPLETE and were
+  cached, so a warm run made no call; a refusal with text read "no parseable
+  findings object"; a findings array cut part way lost every item; a reconcile
+  failure said only "reconciliation incomplete". The owner's rules:
+  - every cross-QC call now streams (`digest.stream_reply` with the module's
+    own `stream_message`), so a transient failure or an interrupted stream is
+    retried and a partial read judged like any reply;
+  - the stop reason decides first, through the digest's ladder with a noun per
+    call (`refused cross-qc (stop_reason='refusal', category='cyber')`,
+    `truncated cross-qc shard (…)`, `unfinished cross-qc reconciliation (…)`),
+    and a reconcile failure says why;
+  - a reply stopped at `max_tokens` gets one retry at twice the cap (32,000),
+    on every path; the digest's rank keeps the better read (N16) and names a
+    discarded one;
+  - a reply cut off (`max_tokens`, the context window, no stop reason) keeps
+    the complete items of its findings, facts and claims, each validated and
+    grounded as usual (`_salvage_object`, one linear pass); the item it was cut
+    in is dropped and counted; the call stays failed and is never cached; a
+    refusal, a continuation or an unknown stop keeps nothing;
+  - the stage reads FAILED when it obtained nothing (D-2's failure flag before
+    counts: `CrossQCResult.stage_status`), PARTIAL when any call failed or was
+    cut, and the usage record agrees and carries interrupted attempts;
+  - a result short only by its budget (text omitted, the findings cap) is
+    cached with its PARTIAL status and replays warm (N14; it re-billed every
+    warm run); the findings cap names its own loss;
+  - facts past the 40-per-shard cap, and facts or legs that are not objects,
+    are counted (`facts_over_cap`, `facts_not_object`, `legs_not_object`) and
+    named in one observational warning (U7);
+  - a run with no client reads FAILED (it read COMPLETE beside its error).
+
+  `_CROSS_QC_CACHE_CONTRACT` 9 → 10 (one migration-register row). Tests:
+  `tests/test_cross_qc_terminal_outcomes.py` (129, 8 of them from the Codex
+  review: a finished retry with no findings object never loses a cut-off
+  read's items; a cut-off call that retained nothing reads FAILED; the salvage
+  count is taken after the findings cap; 12 more from merging PO-04: every
+  billed attempt's prompt-cache tokens, the retry's and an interrupted
+  stream's included, reach the result and the usage record, and the status
+  rule reads a result without the new fields as before); the recorded limit in
+  `tests/test_response_shapes.py` flipped
+  (`test_a_refused_cross_qc_reply_names_its_refusal`); the SDK cap table's
+  `cross_qc` row streams and gains its retry row, with two new contract tests;
+  the seven contract pins re-pinned to 10.
 - **Cross-sheet QC on a set of 40 sheets or fewer bound answers by sheet id,
   first match wins, and checked no quote (remediation WP-06.2; N6, U8, K2).**
   The whole-set pass labelled each sheet by its printed sheet id and bound the

@@ -994,7 +994,11 @@ def test_cross_qc_contract_bumped_for_the_norm_id_fold():
     # through host handles and the one resolver (an id two sheets carry is
     # refused where the first detection won), grounds what it keeps, rebinds
     # its claims; the claim dedup keys on the source; entries sort by source.
-    assert X._CROSS_QC_CACHE_CONTRACT == 9
+    #
+    # 10 since remediation WP-06.3 (U6, N14): a reply the model did not finish
+    # is never stored as complete, and a result short only by its budget is
+    # stored with its PARTIAL status.
+    assert X._CROSS_QC_CACHE_CONTRACT == 10
     geom = _geom("a.pdf", "M-101")
     entries = [("M-101", "digest", "text", geom)]
     current = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")

@@ -1194,7 +1194,50 @@ to be truncated with no counter and still report itself complete, which on a
 large set (exactly where coordination conflicts matter most) is
 indistinguishable from a set that simply had fewer. A failed shard, a failed
 reconciliation, or a degraded budget holds the stage at `PARTIAL` while its
-findings stay usable.
+findings stay usable; a pass that obtained nothing at all reads `FAILED` (below).
+
+**Replies the model did not finish (remediation WP-06.3).** Every cross-sheet
+QC call (the whole-set call, each shard call and each reconciliation call) now
+streams, and each reply is judged by how it ended before anything in it is
+read, the same rule the digest, the critique and the set-level reports follow:
+
+- A reply the model **finished** is read as before.
+- A reply **cut off at its output limit** is sent once more at twice the limit
+  (16,000 → 32,000 tokens). If that one finishes, it is the answer, and it is
+  cached like any other. If it is cut off too, the better of the two is kept.
+- A reply that was **cut off and not recovered** (the output limit, the context
+  window, or a connection that dropped part way, after the usual two retries)
+  keeps the conflicts, facts and numeric claims it had **finished writing**:
+  each one is checked against the sheets as usual, and the one it was cut in
+  is dropped and counted. The stage reads `PARTIAL`, with a warning such as
+  *"1 call(s) did not finish; kept the 1 finding(s), 0 fact(s) and 0 claim(s)
+  they completed; 1 item(s) cut off were dropped"*, and nothing is cached, so a
+  later run asks again.
+- A reply the model **declined** names itself, its category included
+  (`refused cross-qc (stop_reason='refusal', category='cyber')`), and keeps
+  nothing, even when it carried a findings block. On a set of 40 sheets or
+  fewer that is the whole pass, so the stage reads `FAILED`; a declined shard
+  or reconciliation call holds a larger set at `PARTIAL`, and the reconciliation
+  error now says why it is incomplete.
+- When no call could be made at all (no API key on a library call), the stage
+  reads `FAILED`. It used to read `COMPLETE` beside its error line.
+
+Before this, cross-sheet QC read only whether a reply was empty: a reply cut
+off with its findings block closed, a refusal that still carried a findings
+block, or a reply that never said how it ended read `COMPLETE` and was cached,
+so every later run served it without asking again.
+
+A pass that is short only because of its **budget** (a text layer over the
+4,000-character slice, or more than 60 conflicts in one reply) is now cached
+**with its `PARTIAL` status**: a warm run replays the same result and the same
+warning instead of paying for the same Opus call again, which it did on every
+warm run before. The findings cap names its own loss (*"5 finding(s) past the
+per-response cap were dropped"*). Facts past the 40-per-shard cap, and a fact
+or a leg that is not an object, are counted too (*"45 fact(s) past the per-shard
+cap of 40 were not compared across shards"*), in a warning and in
+`run_manifest.json`'s `cross_qc_discards`; none of these warnings changes the
+stage's status. The first cross-sheet QC run after upgrading re-runs once (the
+cache contract moved).
 
 **Uncertain conflicts, refused items and repeats.** When the model is not sure
 two sheets truly conflict, it reports the conflict as a low-severity

@@ -671,9 +671,10 @@ def test_the_cross_qc_contract_moved_for_the_new_host_binding():
     # own mechanism, not a bump and a key term for one change (plan §2 rule 15).
     # 7 since remediation WP-05.3 (the character-stream grounding), 8 since
     # remediation WP-04.4 (the quantity reader its veto reuses) and 9 since
-    # remediation WP-06.2 (whole-set binding through handles, grounded); the
+    # remediation WP-06.2 (whole-set binding through handles, grounded) and 10
+    # since remediation WP-06.3 (terminal honesty: what is admitted changed); the
     # key still differs from contract 5's.
-    assert X._CROSS_QC_CACHE_CONTRACT == 9
+    assert X._CROSS_QC_CACHE_CONTRACT == 10
     _sheets, geoms = _pair_set()
     entries = [("M-101", "digest", "text", geoms[0])]
     current = X._cross_qc_cache_key(entries, model="claude-opus-5", preamble="")

@@ -673,4 +673,7 @@ def test_contract_counter_is_not_bumped_by_this_package():
     # 9 since remediation WP-06.2: the whole-set path binds through host
     # handles and grounds what it keeps, for byte-identical inputs. WP-03B
     # still added nothing.
-    assert X._CROSS_QC_CACHE_CONTRACT == 9
+    #
+    # 10 since remediation WP-06.3: what is admitted changed (terminal
+    # honesty, N14). WP-03B still added nothing.
+    assert X._CROSS_QC_CACHE_CONTRACT == 10

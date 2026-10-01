@@ -613,8 +613,13 @@ def test_no_cross_qc_contract_bump_was_needed():
     It reads 9 since **remediation WP-06.2** (N6, U8): the whole-set path binds
     through host handles and grounds against the uncapped text, as this file's
     sharded path does, for byte-identical inputs. Still nothing from WP-03A.
+
+    It reads 10 since **remediation WP-06.3** (U6, N14): a reply the model did
+    not finish is never stored, and a result short only by its text budget is
+    now stored with its PARTIAL status (this file's degraded sets among them).
+    Still nothing from WP-03A.
     """
-    assert X._CROSS_QC_CACHE_CONTRACT == 9
+    assert X._CROSS_QC_CACHE_CONTRACT == 10
 
 
 # --------------------------------------------------------------------------- #

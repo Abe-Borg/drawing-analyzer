@@ -254,6 +254,14 @@ provider's cache minimum. Reuse existing benchmark/A/B tools and pricing policy.
   in `src/drawing_analyzer/cross_qc.py`. Merge one PR first, then rebase and
   validate the other, preserving PO-03 source framing, PO-04 cache usage and
   #197's terminal/retry accounting. No integration merge was made here.
+  Integrated on #197's branch by merging main (the repository's convention for
+  a slice branch; no history rewritten): PO-03's framing is unchanged, and
+  PO-04's counters now come from `digest.stream_reply`'s `StreamUsage` on
+  every billed attempt (a transient retry, #197's raised-cap retry, an
+  interrupted stream's `message_start`) and are added to the caller's
+  `usage=` by `cross_qc._add_usage`; the worker folds are PO-04's.
+  `tests/test_prompt_cache_usage.py` passes unchanged; #197's tests pin the
+  retry and interruption cases.
 - Base: `9e23361`, main after PO-03 PR #194 merged. Open-PR check found only
   dependency PR #190. This owner-selected queue continues independently of
   remediation slices; no WP-14 slice or D-7 decision is marked complete.

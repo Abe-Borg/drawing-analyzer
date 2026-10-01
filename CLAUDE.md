@@ -235,9 +235,9 @@ were 0, every batch item `succeeded`, a stream that always reached
 - **A mishandled shape is pinned, not fixed** (`tests/test_response_shapes.py`):
   what production gets right is asserted, and each defect is a
   `test_recorded_limit_*` that asserts today's behaviour and names the slice
-  that flips it (WP-06.3, WP-13.4, WP-14.1, WP-14.2, WP-14.3; WP-01.5
-  flipped its two, WP-01.6 its five, WP-01.7 its two). A fix fails the test; the owner
-  re-baselines it.
+  that flips it (WP-13.4, WP-14.1, WP-14.2, WP-14.3; WP-01.5
+  flipped its two, WP-01.6 its five, WP-01.7 its two, WP-06.3 its one). A fix
+  fails the test; the owner re-baselines it.
 - **A background upload release finishes inside its test**: the autouse
   `background_release_joined` (`tests/conftest.py`) joins, at teardown, every
   release thread a test starts on `batch_digest._run_in_background`
@@ -885,8 +885,8 @@ on SDK 1.7.0 and 1.8.0, both namespaces, Opus 5.5 and Sonnet 5.5, identical.
 - **The capture site** is `core.api_config._dispatch_messages`, the one place
   every stream is read (`digest.stream_message`: the digest, the critique, the
   review plan, synthesis, the focus report, the batch direct rescue, batch's
-  Files-API inline fallback through `digest_sheet`; and every investigation
-  turn). A failure inside `get_final_message()` raises
+  Files-API inline fallback through `digest_sheet`, every cross-QC call since
+  remediation WP-06.3; and every investigation turn). A failure inside `get_final_message()` raises
   `StreamInterrupted(cause, partial)` from the cause (`core/stream_interruption.py`,
   stdlib only, re-exported by `api_config`: its own module keeps it one class
   when a test reloads `api_config`, as the report-chat tests do; in the full
@@ -1177,7 +1177,8 @@ raise, after the paid digest and critique. Now:
   adds bounded wire overhead without removing additional source characters.
   Cross-QC keys retain K2's named host strings and include rendered source-block
   signatures for delimiters/escaping alongside the changed system prompts;
-  host binding/grounding contract 9 is unchanged. Investigation frames its
+  host binding/grounding contract 9 was unchanged by PO-03 (10 since
+  remediation WP-06.3, below, its own mechanism). Investigation frames its
   initial finding/prior-note/index and tool-result text only when sending it;
   raw executor results, images and saved evidence/traces remain unchanged.
   Its existing manual `INVESTIGATE_PROMPT_VERSION` moves v3 → v4. No global
@@ -1574,7 +1575,7 @@ raise, after the paid digest and critique. Now:
   canonicalization is host-side binding no key input covers, so it carries
   `_CROSS_QC_CACHE_CONTRACT` **2 → 3** (4 since remediation WP-05.1, 5
   since WP-05.2, 7 since WP-05.3 and 8 since WP-04.4, above, 6 since
-  WP-06.1 and 9 since WP-06.2, below).
+  WP-06.1, 9 since WP-06.2 and 10 since WP-06.3, below).
   **Both paths bind through host handles** (remediation WP-06.2; N6, U8, D-8;
   the owner's rules). The whole-set path (40 sheets or fewer) labelled each
   sheet by its human id and bound every reply through a map keyed by that id in
@@ -1635,6 +1636,81 @@ raise, after the paid digest and critique. Now:
     model-visible string added to a builder belongs there, or it is outside the
     key again. Its own mechanism (the key's inputs), beside the binding change's
     bump: `_CROSS_QC_CACHE_CONTRACT` **8 → 9**.
+  **Every cross-QC reply is judged by its stop reason first** (remediation
+  WP-06.3; U6, U7, N14; the owner's rules, measured through the real SDK on
+  every path). Before, `_call` was a plain `create` that read the stop reason
+  only for an empty reply, so a reply stopped at `max_tokens` (a closed object
+  with or without its fence), refused with parseable JSON, with no stop reason,
+  at the context window or at `tool_use`/`pause_turn` read COMPLETE and was
+  cached; a refusal with text read "no parseable findings object"; a cut-off
+  array lost every item; a reconcile failure said only "reconciliation
+  incomplete". Now:
+  - **Streamed, every call** (whole-set, shard map, reconcile):
+    `_send` is `digest.stream_reply(..., send=stream_message)` (the module's
+    own `stream_message`, the name `tests/test_sdk_contract.py` regresses), so
+    a transient failure or an interrupted stream is retried (2 per call) and
+    an interrupted stream's partial read is judged like any reply.
+  - **One ladder:** `digest.unfinished_reply_error` with a noun per call
+    (`cross-qc`, `cross-qc shard`, `cross-qc reconciliation`): `refused cross-qc
+    (stop_reason='refusal', category='cyber')`, `truncated cross-qc shard (…)`,
+    `unfinished cross-qc (stop_reason=None, interrupted='connection dropped')`;
+    a finished empty reply keeps `empty cross-qc (…)`. A reconcile failure says
+    why: `cross-qc reconciliation incomplete (<each distinct error>)` (the
+    `_CallLog` sink; `_reconcile_facts` still returns a bool).
+  - **One raised-cap retry** (`_call`): a `max_tokens` stop only
+    (`raised_cap_may_finish`), at `min(2 × 16,000, MAX_TOKENS_RETRY_CEILING)`
+    clamped by `output_cap_for_model` (32,000; none when that leaves no
+    headroom), on every path. `_keep_reply` is the digest's N16 rule through
+    its own pieces (`digest._read_rank`, `_name_discarded_retry`, duck-typed on
+    `_Reply`), after one cross-QC test: a reply that yields a findings object
+    (`_reply_object`) outranks one that does not (Codex review: a finished
+    retry with no object lost a cut-off read's items). Then the retry wins
+    when it ranks at least as high, else the first read is kept and names it
+    (`; retry: …`, `; retry failed: …`). Both attempts' usage is summed.
+  - **Salvage of a cut-off reply** (`_reply_object`, `_salvage_object`):
+    only `TRUNCATED` (`max_tokens`, the context window) and `UNFINISHED` (no
+    stop reason: an interrupted stream's partial read) with text
+    (`_SALVAGE_KINDS`). Its closed object, or else its complete members in one
+    linear pass (`json.JSONDecoder.raw_decode` per item; only `findings`,
+    `facts`, `claims` are walked item by item) — every finding and fact still
+    goes through `_finding_from_handles` / `_parse_facts`, claims through
+    `digest.numeric_claims_from_items` (`parse_numeric_claims`' one loop); the
+    item it was cut in is dropped and counted. The call stays failed (its
+    error), the stage is never COMPLETE on it and the result is never cached.
+    A refusal (even with parseable JSON), a continuation or an unknown stop
+    keeps nothing, claims included. `CrossQCSalvage` (runtime only) counts
+    what was kept; its `note()` is one observational stage warning.
+  - **Status** (`cross_qc_stage_status`, which `CrossQCResult.stage_status`
+    reads: the one rule the pipeline records, its usage record too, read with
+    defaults as the pipeline reads every cross-QC field): `failed` first (D-2's failure flag before
+    counts; the all-failed rule at the call level) → FAILED when the stage
+    obtained nothing (the whole-set call failed and retained no finding — a
+    cut-off call counts only when it retained a finding or, on a shard, a
+    fact: `CrossQCSalvage.kept`, Codex review — a refusal,
+    an empty or raised call, a finished reply with no findings object, a
+    continuation or unknown stop — every shard failed and kept nothing, or no
+    client could be made: it read COMPLETE beside its error, WP-16.2's
+    finding); else COMPLETE when `complete`, else PARTIAL.
+  - **N14** (`_put_cross_qc_cache`): a result every call of which finished
+    and parsed is stored when complete **or short only by its budget** (text
+    omitted, the per-response findings cap: deterministic for the keyed
+    inputs, the `[TRUNCATED N chars]` marker included), with `complete=False`,
+    and replays PARTIAL with the same warnings; anything with an error, a
+    salvage or `failed` never is. `_cross_qc_from_cache` refuses an entry
+    claiming both or neither. The findings cap names its own loss as a
+    warning (`N finding(s) past the per-response cap were dropped`; it read
+    "text budget degraded: 0 char(s) omitted").
+  - **Usage:** `CrossQCResult.interrupted_attempts` reaches the cross-QC
+    `UsageRecord` (WP-01.7's lower-bound mark). PO-04's cache-read and
+    cache-write tokens ride `_Reply` from `stream_reply`'s `StreamUsage`, so
+    every billed attempt's are counted (a transient retry, the raised-cap retry
+    whichever read is kept, an interrupted stream's `message_start`), and
+    `_call` adds them to the caller's `usage=` (`_add_usage`), which the
+    shard and pair workers fold on the collector, as PO-04 built it. Merged
+    from main after PO-04; `tests/test_cross_qc_terminal_outcomes.py` pins it.
+  - `_CROSS_QC_CACHE_CONTRACT` **9 → 10** (what is admitted, and what an
+    admitted entry may be, changed for byte-identical inputs). The SDK cap
+    table's `cross_qc` row streams, beside a `cross_qc raised-cap retry` row.
   Cross-QC also carries **count-only discard counters** on both paths
   (`CrossQCDiscardCounts`, WP-02 §7.2; the whole-set path since remediation
   WP-06.2): how many legs/facts the host dropped and
@@ -1650,6 +1726,14 @@ raise, after the paid digest and critique. Now:
   ungrounded legs were previously indistinguishable. A fact whose quote is only
   whitespace is `facts_no_quote` and dropped, like an empty one (remediation
   WP-06.1; it was admitted as a no-text fact and sent to the reconciler).
+  Since remediation WP-06.3 (U7) three more run-level counters record items
+  skipped unexamined: `facts_over_cap` (a fact past `DEFAULT_MAP_MAX_FACTS`,
+  40 per shard; it used to drop with no counter), `facts_not_object`,
+  `legs_not_object`; a `facts` or `also_on` value that is not a list holds no
+  items (`_findings_array`'s rule). Observational (the owner's rule):
+  `omission_note()` is one stage warning, after the status-deciding ones, and
+  the counts ride `run_manifest.json`'s `cross_qc_discards` and the cached
+  entry.
   **Refused items are counted on both paths** (remediation WP-06.1, B6;
   `CrossQCInvalidCounts`, `CrossQCResult.invalid`): `_invalid_field` is the one
   field check the validator applies (one validator for both paths since
@@ -2325,9 +2409,10 @@ digest's two transports and, since remediation WP-01.4, the critique's (through
 the digest's ladder, `digest_terminal_error(..., noun="critique")`), since
 WP-01.5 the batch refusal recovery (a `REFUSED` read is what it retries), and
 since WP-01.6 the review planner, set identity, synthesis, the focus report, the
-prose harvest's structuring call and verification (below), with cross-QC
-(WP-06.3), the citation cache gate (WP-12.6) and the investigation (WP-13.4)
-moving onto it in their own slices rather than growing a second copy), and
+prose harvest's structuring call and verification (below), since WP-06.3
+cross-QC (every call, through the same ladder), with the citation cache gate
+(WP-12.6) and the investigation (WP-13.4) moving onto it in their own slices
+rather than growing a second copy), and
 `reply_text.py`, the one text join (below). The tokenizer is
 estimate-only: `tiktoken` was removed — its only two callers had no callers,
 and it fetched its encoding from a third-party host on first use, which a
@@ -2517,8 +2602,9 @@ example is parked at `docs/examples/fire_protection.md`.
   its own `timeout` or the client's timeout is not its default; production's
   client keeps the default (pinned). `digest.stream_message` is
   the single place that knows this; digest / critique / review-plan / synthesis /
-  focus all go through it. The non-streaming sites (citation, cross-QC, the prose
-  harvest, identity, verification) ask for at most 16,000 on every model. Batch
+  focus / cross-QC (since remediation WP-06.3, for its 32,000 raised-cap retry)
+  all go through it. The non-streaming sites (citation, the prose harvest,
+  identity, verification) ask for at most 16,000 on every model. Batch
   items never stream and are unaffected. A cap
   raise without the matching streaming conversion is a hard failure, including
   via the batch→real-time fallbacks in `batch_digest`/`batch_critique`, and CI

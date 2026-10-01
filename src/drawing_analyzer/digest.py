@@ -1722,8 +1722,18 @@ def parse_numeric_claims(
             last_obj = obj
     if last_obj is None:
         return []
+    return numeric_claims_from_items(last_obj.get("claims"), ref)
+
+
+def numeric_claims_from_items(items: Any, ref: SheetRef | None = None) -> list[NumericClaim]:
+    """Validate a ``claims`` array's items, capped at :data:`MAX_CLAIMS_PER_SHEET`.
+
+    The one loop behind :func:`parse_numeric_claims`, also used by a caller
+    that already holds the array (cross-QC's salvage of a reply the model did
+    not finish, remediation WP-06.3). Anything but a list holds no claims.
+    """
     claims: list[NumericClaim] = []
-    for item in last_obj.get("claims") or []:
+    for item in items if isinstance(items, list) else []:
         if len(claims) >= MAX_CLAIMS_PER_SHEET:
             break
         claim = _validate_claim_item(item, ref)
